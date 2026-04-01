@@ -1,9 +1,12 @@
 __pycache__/
 *.pyc
+.*_cache/
 .pytest_cache/
 *.egg-info/
 dist/
 build/
 .env
+.venv/
 .claude/
+plans/
 CLAUDE.local.md

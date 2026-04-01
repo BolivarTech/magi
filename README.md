@@ -42,6 +42,12 @@ For trivial questions with one clear answer, the complexity gate skips the full 
 
 ---
 
+## Documentation
+
+For the full technical reference, see [`docs/MAGI-System-Documentation.md`](docs/MAGI-System-Documentation.md).
+
+---
+
 ## Agents
 
 | Agent | Codename | Lens | Personality |
