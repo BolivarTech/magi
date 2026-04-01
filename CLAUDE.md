@@ -1,0 +1,370 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Project Overview
+
+MAGI is a Claude Code **plugin** implementing a multi-perspective analysis system inspired by the MAGI supercomputers from Neon Genesis Evangelion. Three specialized AI agents — Melchior (Scientist), Balthasar (Pragmatist), Caspar (Critic) — independently analyze the same input through different lenses, then their verdicts are synthesized via majority vote.
+
+`docs/MAGI-System-Documentation.md` is the full technical reference.
+
+## Development Commands
+
+```bash
+# Run all tests
+python -m pytest tests/ -v
+
+# Run full verification (tests + lint + format + types)
+make verify
+
+# Run individual checks
+make test          # pytest only
+make lint          # ruff check
+make format        # ruff format --check
+make typecheck     # mypy
+
+# Run analysis (parallel mode, requires claude CLI)
+python skills/magi/scripts/run_magi.py <code-review|design|analysis> <file_or_text> [--model opus] [--timeout 300] [--output-dir <dir>] [--keep-runs 5]
+
+# Run synthesis standalone
+python skills/magi/scripts/synthesize.py agent1.json agent2.json [agent3.json] --output report.json
+
+# Test plugin locally
+claude --plugin-dir .
+```
+
+## Plugin Structure
+
+```
+.claude-plugin/
+  plugin.json                 — Plugin manifest (name, version, author, repository)
+  marketplace.json            — Local marketplace config for development
+skills/magi/
+  SKILL.md                    — Orchestrator (mode detection, workflow, fallback)
+  agents/
+    melchior.md               — System prompt: Scientist lens (technical rigor)
+    balthasar.md              — System prompt: Pragmatist lens (practicality)
+    caspar.md                 — System prompt: Critic lens (risk, adversarial)
+  scripts/
+    __init__.py               — Python package marker
+    run_magi.py               — Async orchestrator with --model flag
+    synthesize.py             — Facade: re-exports from validate, consensus, reporting
+    validate.py               — ValidationError + load_agent_output schema validation
+    consensus.py              — VERDICT_WEIGHT + determine_consensus (weight-based scoring)
+    reporting.py              — AGENT_TITLES + format_banner + format_report (ASCII)
+    parse_agent_output.py     — Claude CLI JSON extractor (3 output formats)
+tests/
+  test_synthesize.py          — 77 tests: validation, consensus, findings, formatting
+  test_parse_agent_output.py  — 19 tests: fence stripping, text extraction, pipeline
+  test_run_magi.py            — 16 tests: arg parsing, model flag, orchestration, degraded mode
+pyproject.toml                — Python >= 3.9, dual license, dev deps, tool config
+conftest.py                   — tdd-guard pytest plugin + sys.path setup for test imports
+Makefile                      — verify, test, lint, format, typecheck targets
+```
+
+### Cross-file contract: Agent JSON Schema
+
+All three agents and all scripts depend on this schema — changes require updating all files:
+
+```json
+{
+  "agent": "melchior | balthasar | caspar",
+  "verdict": "approve | reject | conditional",
+  "confidence": 0.0-1.0,
+  "summary": "string",
+  "reasoning": "string",
+  "findings": [{"severity": "critical|warning|info", "title": "string", "detail": "string"}],
+  "recommendation": "string"
+}
+```
+
+### Consensus logic (consensus.py)
+
+Uses **weight-based scoring** with `VERDICT_WEIGHT = {approve: 1, conditional: 0.5, reject: -1}`:
+
+```
+score = sum(VERDICT_WEIGHT[verdict] for each agent) / num_agents
+```
+
+| Score | Condition | Consensus |
+|-------|-----------|-----------|
+| 1.0 | — | STRONG GO |
+| -1.0 | — | STRONG NO-GO |
+| > 0 | has conditionals | GO WITH CAVEATS |
+| > 0 | no conditionals | GO (N-M) |
+| 0 | — | HOLD -- TIE |
+| < 0 | — | HOLD (N-M) |
+
+Labels are dynamic: `(N-M)` reflects actual majority/minority counts (e.g., `GO (2-1)` or `HOLD (2-1)`). Score=0 (exact tie) uses `HOLD -- TIE` to avoid misleading majority counts when conditional verdicts skew the effective split. **Policy**: `HOLD -- TIE` maps to `consensus_verdict: "reject"` — ties default to "do not proceed" as the safer option.
+
+**Confidence formula:**
+
+```
+weight_factor = (abs(score) + 1) / 2  # symmetric for approve and reject
+base_confidence = sum(majority_confidence) / num_agents
+confidence = base_confidence * weight_factor
+```
+
+Using `abs(score)` ensures unanimous reject produces high confidence (matching approve), not zero.
+At score=0 (exact tie), weight_factor=0.5, halving confidence — appropriate for an undecided split.
+
+Key behaviors:
+- `conditional` maps to `approve` for majority identification, but conditions are preserved in report.
+- Unanimous `conditional` produces `GO WITH CAVEATS` at moderate confidence (~0.68), not `STRONG GO`.
+- Findings deduplicated by title (case-insensitive), tracking all reporter agents via `sources` list, keeping highest severity.
+- Requires minimum 2 agents (raises `ValueError` if fewer). Accepts 2-3 for graceful degradation.
+- Validates agent name uniqueness — duplicate names raise `ValueError` to prevent silent vote corruption.
+
+Implementation is split into focused helpers: `_classify_consensus` (score-to-label mapping), `_deduplicate_findings` (merge by title, promote severity), `_compute_confidence` (symmetric weight formula).
+
+### Import convention
+
+The `synthesize.py` facade re-exports all public symbols from `validate.py`, `consensus.py`, and `reporting.py`. Always import from `synthesize`:
+
+```python
+from synthesize import load_agent_output, determine_consensus, format_report
+```
+
+Do not import directly from sub-modules — the facade is the stable API.
+
+### Orchestrator (run_magi.py)
+
+Async Python orchestrator using `asyncio.create_subprocess_exec`:
+
+- Launches 3 `claude -p` subprocesses concurrently with per-agent timeout (`--timeout`, default 300s).
+- `--model` flag (default `opus`) selects LLM for all agents. Valid: `opus`, `sonnet`, `haiku`.
+- `VALID_MODELS` is derived from `MODEL_IDS.keys()` — single source of truth.
+- User prompt sent via **stdin** (`communicate(input=...)`) to avoid OS CLI arg length limits (~32K on Windows). A copy is saved to `{agent_name}.prompt.txt` as a debug artifact.
+- System prompts passed via `--system-prompt-file` using the **original .md file path** directly (no temp copy).
+- Validates subprocess exit code before parsing — non-zero exits raise `RuntimeError` with stderr context.
+- Parses each agent's raw output via `parse_agent_output.py`, validates via `load_agent_output()`.
+- If < 3 agents succeed: prints warning to stderr, sets `"degraded": true` in report, proceeds with >= 2.
+- If < 2 agents succeed: raises `RuntimeError`.
+- Cross-platform temp directory via `tempfile.mkdtemp(prefix="magi-run-")`, cleaned up on failure.
+- `--keep-runs N` (default 5): LRU cleanup of old `magi-run-*` temp directories before each run. Sorted by `st_mtime`, resolved via `realpath` with temp-root validation to prevent symlink traversal. Disabled with `--keep-runs 0`.
+
+### Parser (parse_agent_output.py)
+
+Handles three Claude CLI output formats:
+
+1. `{"result": "..."}` — standard `--output-format json`
+2. `{"content": [{"type": "text", "text": "..."}]}` — content-block format
+3. Plain string — raw text output
+
+Also strips markdown code fences (```` ```json ... ``` ````) and validates extracted JSON. Raises `ValueError` for unrecognised output types (no silent fallback).
+
+### Execution pipeline
+
+```
+User input → SKILL.md (complexity gate + mode) → run_magi.py launches 3x claude -p
+  → each agent writes JSON to temp dir → parse_agent_output.py extracts JSON
+  → validate.load_agent_output() validates schema → consensus.determine_consensus() merges verdicts
+  → reporting.format_report() produces banner + report to stdout, JSON to output dir
+```
+
+Fallback (no `claude -p`): SKILL.md simulates three perspectives sequentially (Caspar first to reduce anchoring).
+
+## Key Design Decisions
+
+- **Disagreement is a feature.** Unanimous agreement on non-trivial input may indicate insufficiently differentiated prompts.
+- **Caspar is adversarial by design.** Most likely to vote `reject` — intentional red-teaming.
+- **Weight-based scoring.** Uses `VERDICT_WEIGHT` for consensus determination and confidence calculation. Unanimous `conditional` correctly maps to moderate confidence, not high.
+- **Agent prompts enforce English output** regardless of input language.
+- **Prompt injection guard** in all agent prompts — agents ignore instructions embedded in CONTEXT. Output validation (`load_agent_output`) provides a technical enforcement layer.
+- **Failure alerting.** Degraded mode (< 3 agents) is explicitly flagged in report and stderr, not silently accepted.
+
+## Distribution & Installation
+
+This repo is a Claude Code plugin. Three distribution methods:
+
+### For users (install from GitHub)
+
+```bash
+# Add repo as marketplace source
+/plugin marketplace add <owner>/magi
+
+# Install
+/plugin install magi
+
+# Use
+/magi
+```
+
+### For development (local testing without flags)
+
+A symlink at `.claude/skills/magi → ../../skills/magi` enables auto-discovery without `--plugin-dir`. Claude Code automatically scans `.claude/skills/<name>/SKILL.md` per project.
+
+```bash
+# One-time setup (already done in this repo)
+mkdir -p .claude/skills
+ln -s ../../skills/magi .claude/skills/magi
+
+# Then just run claude normally — no flags needed
+claude
+```
+
+The symlink is excluded via `.gitignore` (`.claude/` is ignored). Each developer must create it locally.
+
+Alternatively, use the explicit flag:
+
+```bash
+claude --plugin-dir /path/to/this/repo
+```
+
+Changes are picked up with `/reload-plugins` without restarting.
+
+### Scope notes
+
+- `.claude/skills/` auto-discovery is **project-scoped** — only works when running `claude` from this repo directory.
+- For user-wide availability, install as a plugin (`/plugin install`) or symlink into `~/.claude/skills/`.
+- `plugin.json` requires `"skills": "./skills/"` to register skills when loaded as a plugin.
+
+### For the official Anthropic marketplace
+
+Publishing to the Anthropic marketplace makes the plugin publicly installable by any Claude Code user.
+
+#### Prerequisites
+
+- **Claude account** (Pro, Team, Enterprise, or Max) — same account used for `claude.ai`. No separate developer account needed.
+- **Public GitHub repository** — the marketplace validates the plugin source from GitHub.
+- **All checks passing** — run `make verify` before publishing to ensure tests, lint, format, and types are clean.
+
+#### Publishing steps
+
+> **BLOCKER:** `.claude-plugin/plugin.json` contains a placeholder URL (`https://github.com/OWNER/magi`).
+> This **must** be replaced with the real GitHub repository URL before marketplace submission or public distribution.
+
+**Step 1 — Prepare `plugin.json`**
+
+Set `"repository"` in `.claude-plugin/plugin.json` to the real public GitHub URL:
+
+```json
+"repository": "https://github.com/<owner>/magi"
+```
+
+**Step 2 — Run full verification**
+
+```bash
+make verify
+```
+
+All tests must pass, zero lint warnings, clean formatting, no type errors.
+
+**Step 3 — Create and push the GitHub repository**
+
+```bash
+git remote add origin https://github.com/<owner>/magi.git
+git push -u origin main
+```
+
+The repository **must be public** — the marketplace fetches `plugin.json` from it. Before pushing, verify no secrets or credentials exist in the git history.
+
+**Step 4 — Accept developer terms**
+
+Navigate to `platform.claude.com`. Log in with your existing Claude account. On first access to the plugin submission flow, you will be prompted to accept the developer terms of service. This is a one-time step.
+
+**Step 5 — Submit the plugin**
+
+Go to `platform.claude.com/plugins/submit` and provide the GitHub repository URL. The marketplace validates:
+
+- `plugin.json` exists in `.claude-plugin/` with required fields (`name`, `version`, `author`, `repository`, `skills`)
+- The `repository` field matches the submitted URL
+- The repo is publicly accessible
+
+**Step 6 — Wait for review and approval**
+
+After submission, Anthropic reviews the plugin. Once approved, it becomes publicly available.
+
+#### Post-publication: how users install
+
+```bash
+# Add the marketplace source
+/plugin marketplace add <owner>/magi
+
+# Install the plugin
+/plugin install magi
+
+# Use it
+/magi
+```
+
+#### Updating after publication
+
+To publish updates:
+
+1. Bump `"version"` in `.claude-plugin/plugin.json`
+2. Push changes to `main` on GitHub
+3. Re-submit at `platform.claude.com/plugins/submit` (or follow the update flow if available)
+
+Users pick up updates with `/plugin update magi`.
+
+## Test Coverage
+
+111 tests across 3 test files:
+
+| File | Tests | Covers |
+|------|-------|--------|
+| `tests/test_synthesize.py` | 76 | Validation, weight-based consensus, confidence formula, findings dedup, empty titles, dynamic labels, HOLD -- TIE, banner, report |
+| `tests/test_parse_agent_output.py` | 19 | Fence stripping, text extraction (3 formats), fail-fast on unknown types, pipeline integration |
+| `tests/test_run_magi.py` | 16 | Arg parsing, model flag, model passthrough, orchestration, degraded mode, input validation |
+
+Run with `python -m pytest tests/ -v` or `make test`.
+
+## Resolved Issues (2026-04-01 Migration)
+
+All issues from the MAGI self-analysis have been resolved:
+
+| # | Issue | Resolution |
+|---|-------|------------|
+| C1 | Empty `repository` in plugin.json | Placeholder URL set |
+| C2 | No tests for parse_agent_output.py | 19 tests, 80%+ coverage |
+| C3 | No timeout in orchestrator | `asyncio.wait_for` with `--timeout 300` default |
+| W1 | Unanimous conditional = STRONG GO | Weight-based scoring via `VERDICT_WEIGHT` |
+| W2 | Cross-platform `/tmp` | `tempfile.mkdtemp()` |
+| W3 | Prompt injection guards soft only | Schema validation via `load_agent_output()` in pipeline |
+| W4 | Graceful degradation hides failures | `degraded` flag + stderr warnings |
+| W5 | Opaque `claude -p` dependency | Documented 3 output formats in parse_agent_output.py |
+| W6 | No troubleshooting guide | Module docstrings + this document |
+| I4 | No pyproject.toml | Added with Python >= 3.9, dual license |
+
+Remaining soft controls (instructional prompt injection guards) are inherent to LLM-based systems and do not affect operational reliability.
+
+## Resolved Issues (MAGI Self-Review)
+
+Three rounds of MAGI self-review identified and resolved the following issues:
+
+| # | Issue | Resolution |
+|---|-------|------------|
+| R1-1 | User prompt passed as CLI arg (32K limit on Windows) | Prompt sent via stdin with `communicate(input=...)` |
+| R1-2 | System prompt copied to temp file unnecessarily | Original `.md` path passed directly to `--system-prompt-file` |
+| R1-3 | No agent name uniqueness validation | `ValueError` raised for duplicate names in `determine_consensus` |
+| R1-4 | Temp directories accumulate indefinitely | LRU cleanup with `--keep-runs` (default 5) |
+| R1-5 | `_extract_text` silent fallback for unknown types | `ValueError` raised for unrecognised output types |
+| R1-6 | `determine_consensus` monolithic (80 lines) | Refactored into `_classify_consensus`, `_deduplicate_findings`, `_compute_confidence` |
+| R1-7 | Banner confidence format inconsistent (decimal vs %) | SKILL.md specifies integer percentage format matching `reporting.py` |
+| R2-1 | Off-by-one in `cleanup_old_runs` slice | `magi_dirs[keep - 1:]` → `magi_dirs[keep:]` |
+| R2-2 | TOCTOU / symlink traversal in cleanup | `os.path.realpath()` + `tmp_root` prefix validation |
+| R2-3 | `st_ctime` inconsistent across platforms | Changed to `st_mtime` |
+| R2-4 | `shutil.rmtree(ignore_errors=True)` hides failures | `try/except OSError` with warning to stderr |
+| R2-5 | No subprocess exit code validation | `proc.returncode` check with `RuntimeError` |
+| R2-6 | HOLD label misleading with conditional verdicts | `HOLD -- TIE` for score=0 (ties default to reject) |
+
+### Known limitations
+
+- **TOCTOU residual**: A narrow race window exists between `realpath()` and `rmtree()` in `cleanup_old_runs`. Acceptable for dev-tooling context; not suitable for security-critical environments.
+- **Windows subprocess orphans**: `proc.kill()` on timeout does not terminate the full process tree. Claude child processes may survive as orphans.
+- **Temp directory scan**: `cleanup_old_runs` scans the entire system temp directory. May be slow on machines with thousands of temp entries (e.g., shared CI runners).
+
+## Dependencies
+
+| Component | Required | Notes |
+|-----------|----------|-------|
+| Claude Code CLI (`claude -p`) | For parallel mode | Fallback available without it |
+| Python 3.9+ | Yes | Uses `dict[str, Any]` syntax, `asyncio` |
+| pytest + pytest-asyncio | Dev only | Test suite requires async test support |
+| ruff | Dev only | Linting and formatting |
+| mypy | Dev only | Type checking (strict mode) |
+
+## License
+
+Dual licensed under `MIT OR Apache-2.0` (Rust ecosystem convention). See `LICENSE` (MIT) and `LICENSE-APACHE`.

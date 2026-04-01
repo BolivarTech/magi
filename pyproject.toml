@@ -1,0 +1,36 @@
+[project]
+name = "magi"
+version = "1.0.0"
+requires-python = ">= 3.9"
+description = "MAGI multi-perspective analysis plugin for Claude Code"
+license = "MIT OR Apache-2.0"
+authors = [{name = "Julian Bolivar"}]
+
+[project.optional-dependencies]
+dev = ["pytest", "pytest-asyncio", "ruff", "mypy"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 100
+
+[tool.mypy]
+python_version = "3.9"
+strict = true
+mypy_path = "skills/magi/scripts"
+explicit_package_bases = true
+
+[[tool.mypy.overrides]]
+module = "_pytest.*"
+follow_imports = "skip"
+
+[[tool.mypy.overrides]]
+module = ["tests.*", "conftest"]
+disallow_untyped_defs = false
+disallow_untyped_decorators = false
+disallow_incomplete_defs = false
+check_untyped_defs = false
+warn_return_any = false
+disable_error_code = ["type-arg", "misc", "unused-ignore"]

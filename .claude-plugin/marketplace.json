@@ -1,0 +1,14 @@
+{
+  "name": "magi-local",
+  "description": "Local MAGI plugin marketplace",
+  "plugins": [
+    {
+      "name": "magi",
+      "description": "Multi-perspective analysis system inspired by Evangelion's MAGI",
+      "source": {
+        "source": "directory",
+        "path": "."
+      }
+    }
+  ]
+}
