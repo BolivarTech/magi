@@ -4,12 +4,12 @@ test:
 	python -m pytest tests/ -v
 
 lint:
-	ruff check .
+	python -m ruff check .
 
 format:
-	ruff format --check .
+	python -m ruff format --check .
 
 typecheck:
-	mypy .
+	python -m mypy .
 
 verify: test lint format typecheck
