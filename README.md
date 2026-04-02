@@ -63,11 +63,20 @@ For the full technical reference, see [`docs/MAGI-System-Documentation.md`](docs
 ### From GitHub (for users)
 
 ```bash
-# Add this repo as a marketplace source
-/plugin marketplace add your-username/magi
+# 1. Add this repo as a marketplace source
+/plugin marketplace add BolivarTech/magi
 
-# Install the plugin
-/plugin install magi
+# 2. Install the plugin
+/plugin install magi@bolivartech-plugins
+
+# 3. Use it
+/magi
+```
+
+To update after new versions are published:
+
+```bash
+/plugin marketplace update
 ```
 
 ### Local Development

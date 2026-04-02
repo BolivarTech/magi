@@ -175,43 +175,47 @@ Fallback (no `claude -p`): SKILL.md simulates three perspectives sequentially (C
 
 ## Distribution & Installation
 
-This repo is a Claude Code plugin. Three distribution methods:
+This repo is a Claude Code plugin distributed via the decentralized marketplace system. There is no centralized Anthropic registry — a "marketplace" is simply a public GitHub repository containing a `.claude-plugin/marketplace.json` that catalogs available plugins.
 
 ### For users (install from GitHub)
 
 ```bash
-# Add repo as marketplace source
-/plugin marketplace add <owner>/magi
+# 1. Add this repo as a marketplace source
+/plugin marketplace add BolivarTech/magi
 
-# Install
-/plugin install magi
+# 2. Install the plugin
+/plugin install magi@bolivartech-plugins
 
-# Use
+# 3. Use it
 /magi
 ```
 
-### For development (local testing without flags)
-
-A symlink at `.claude/skills/magi → ../../skills/magi` enables auto-discovery without `--plugin-dir`. Claude Code automatically scans `.claude/skills/<name>/SKILL.md` per project.
+To update after new versions are published:
 
 ```bash
-# One-time setup (already done in this repo)
+/plugin marketplace update
+```
+
+### For development (local testing)
+
+**Option A — Plugin flag:**
+
+```bash
+claude --plugin-dir /path/to/magi
+```
+
+**Option B — Symlink for auto-discovery (no flags needed):**
+
+```bash
+# One-time setup
 mkdir -p .claude/skills
 ln -s ../../skills/magi .claude/skills/magi
 
-# Then just run claude normally — no flags needed
+# Then run claude normally
 claude
 ```
 
-The symlink is excluded via `.gitignore` (`.claude/` is ignored). Each developer must create it locally.
-
-Alternatively, use the explicit flag:
-
-```bash
-claude --plugin-dir /path/to/this/repo
-```
-
-Changes are picked up with `/reload-plugins` without restarting.
+The symlink is excluded via `.gitignore` (`.claude/` is ignored). Each developer must create it locally. Changes are picked up with `/reload-plugins` without restarting.
 
 ### Scope notes
 
@@ -219,84 +223,23 @@ Changes are picked up with `/reload-plugins` without restarting.
 - For user-wide availability, install as a plugin (`/plugin install`) or symlink into `~/.claude/skills/`.
 - `plugin.json` requires `"skills": "./skills/"` to register skills when loaded as a plugin.
 
-### For the official Anthropic marketplace
+### Publishing updates
 
-Publishing to the Anthropic marketplace makes the plugin publicly installable by any Claude Code user.
+1. Bump `"version"` in both `.claude-plugin/plugin.json` and `.claude-plugin/marketplace.json`
+2. Run `make verify` — all tests must pass, zero lint warnings, clean formatting, no type errors
+3. Commit and push to `main` on GitHub
+4. Users pick up updates with `/plugin marketplace update`
 
-#### Prerequisites
+### Marketplace structure
 
-- **Claude account** (Pro, Team, Enterprise, or Max) — same account used for `claude.ai`. No separate developer account needed.
-- **Public GitHub repository** — the marketplace validates the plugin source from GitHub.
-- **All checks passing** — run `make verify` before publishing to ensure tests, lint, format, and types are clean.
+The plugin system relies on two manifest files in `.claude-plugin/`:
 
-#### Publishing steps
+| File | Purpose |
+|------|---------|
+| `plugin.json` | Plugin identity: name, version, author, repository, license, skills path |
+| `marketplace.json` | Marketplace catalog: owner, plugin list with sources, categories, tags |
 
-> **BLOCKER:** `.claude-plugin/plugin.json` contains a placeholder URL (`https://github.com/OWNER/magi`).
-> This **must** be replaced with the real GitHub repository URL before marketplace submission or public distribution.
-
-**Step 1 — Prepare `plugin.json`**
-
-Set `"repository"` in `.claude-plugin/plugin.json` to the real public GitHub URL:
-
-```json
-"repository": "https://github.com/<owner>/magi"
-```
-
-**Step 2 — Run full verification**
-
-```bash
-make verify
-```
-
-All tests must pass, zero lint warnings, clean formatting, no type errors.
-
-**Step 3 — Create and push the GitHub repository**
-
-```bash
-git remote add origin https://github.com/<owner>/magi.git
-git push -u origin main
-```
-
-The repository **must be public** — the marketplace fetches `plugin.json` from it. Before pushing, verify no secrets or credentials exist in the git history.
-
-**Step 4 — Accept developer terms**
-
-Navigate to `platform.claude.com`. Log in with your existing Claude account. On first access to the plugin submission flow, you will be prompted to accept the developer terms of service. This is a one-time step.
-
-**Step 5 — Submit the plugin**
-
-Go to `platform.claude.com/plugins/submit` and provide the GitHub repository URL. The marketplace validates:
-
-- `plugin.json` exists in `.claude-plugin/` with required fields (`name`, `version`, `author`, `repository`, `skills`)
-- The `repository` field matches the submitted URL
-- The repo is publicly accessible
-
-**Step 6 — Wait for review and approval**
-
-After submission, Anthropic reviews the plugin. Once approved, it becomes publicly available.
-
-#### Post-publication: how users install
-
-```bash
-# Add the marketplace source
-/plugin marketplace add <owner>/magi
-
-# Install the plugin
-/plugin install magi
-
-# Use it
-/magi
-```
-
-#### Updating after publication
-
-To publish updates:
-
-1. Bump `"version"` in `.claude-plugin/plugin.json`
-2. Push changes to `main` on GitHub
-3. Re-submit at `platform.claude.com/plugins/submit` (or follow the update flow if available)
-
-Users pick up updates with `/plugin update magi`.
+A single marketplace repo can host multiple plugins by pointing `source` to other GitHub repos. This repo hosts only the `magi` plugin with `source: "./"` (self-contained).
 
 ## Test Coverage
 
