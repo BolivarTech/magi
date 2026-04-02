@@ -936,6 +936,68 @@ class TestEmptyFindingTitle:
             os.unlink(path)
 
 
+class TestDuplicateAgentNameRejection:
+    """Verify that duplicate agent names are rejected."""
+
+    def test_duplicate_names_raises_value_error(self):
+        agents = [_valid_agent("melchior"), _valid_agent("melchior")]
+        with pytest.raises(ValueError, match="Duplicate agent names"):
+            determine_consensus(agents)
+
+    def test_three_agents_with_duplicate_raises(self):
+        agents = [
+            _valid_agent("melchior"),
+            _valid_agent("balthasar"),
+            _valid_agent("melchior"),
+        ]
+        with pytest.raises(ValueError, match="Duplicate agent names"):
+            determine_consensus(agents)
+
+
+class TestStringFieldValidation:
+    """Verify that top-level string fields are type-checked."""
+
+    def test_numeric_summary_rejected(self):
+        data = _valid_agent_data()
+        data["summary"] = 42
+        path = _write_json(data)
+        try:
+            with pytest.raises(ValidationError, match="must be a string"):
+                load_agent_output(path)
+        finally:
+            os.unlink(path)
+
+    def test_numeric_reasoning_rejected(self):
+        data = _valid_agent_data()
+        data["reasoning"] = 123
+        path = _write_json(data)
+        try:
+            with pytest.raises(ValidationError, match="must be a string"):
+                load_agent_output(path)
+        finally:
+            os.unlink(path)
+
+    def test_none_recommendation_rejected(self):
+        data = _valid_agent_data()
+        data["recommendation"] = None
+        path = _write_json(data)
+        try:
+            with pytest.raises(ValidationError, match="must be a string"):
+                load_agent_output(path)
+        finally:
+            os.unlink(path)
+
+    def test_oversized_field_rejected(self):
+        data = _valid_agent_data()
+        data["reasoning"] = "x" * 60_000
+        path = _write_json(data)
+        try:
+            with pytest.raises(ValidationError, match="exceeds maximum length"):
+                load_agent_output(path)
+        finally:
+            os.unlink(path)
+
+
 class TestDynamicConsensusLabels:
     """Verify labels reflect actual agent count, not hardcoded (2-1)."""
 

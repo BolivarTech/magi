@@ -105,8 +105,8 @@ def cleanup_old_runs(keep: int) -> None:
 
     magi_dirs.sort(reverse=True)
     for _, path in magi_dirs[keep:]:
-        resolved = os.path.realpath(path)
-        if not resolved.startswith(tmp_root):
+        resolved = os.path.normcase(os.path.realpath(path))
+        if not resolved.startswith(os.path.normcase(tmp_root)):
             print(
                 f"WARNING: Skipping cleanup of {path} (resolves outside temp root: {resolved})",
                 file=sys.stderr,
@@ -338,9 +338,15 @@ def main() -> None:
         report = asyncio.run(
             run_orchestrator(agents_dir, prompt, output_dir, args.timeout, args.model)
         )
-    except BaseException:
+    except Exception:
         if is_temp_dir:
-            shutil.rmtree(output_dir, ignore_errors=True)
+            try:
+                shutil.rmtree(output_dir)
+            except OSError as cleanup_exc:
+                print(
+                    f"WARNING: Failed to clean up {output_dir}: {cleanup_exc}",
+                    file=sys.stderr,
+                )
         raise
 
     print(format_report(report["agents"], report["consensus"]))

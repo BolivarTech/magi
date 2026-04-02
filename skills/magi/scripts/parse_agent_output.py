@@ -19,6 +19,7 @@ Exit codes:
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 
@@ -81,6 +82,9 @@ def _extract_text(data: object) -> str:
     )
 
 
+_MAX_INPUT_SIZE: int = 10 * 1024 * 1024  # 10 MB
+
+
 def parse_agent_output(input_path: str, output_path: str) -> None:
     """Read raw Claude CLI output, extract and validate JSON, write result.
 
@@ -91,8 +95,15 @@ def parse_agent_output(input_path: str, output_path: str) -> None:
     Raises:
         FileNotFoundError: If *input_path* does not exist.
         json.JSONDecodeError: If the extracted text is not valid JSON.
-        ValueError: If content extraction fails.
+        ValueError: If content extraction fails or file exceeds size limit.
     """
+    file_size = os.path.getsize(input_path)
+    if file_size > _MAX_INPUT_SIZE:
+        raise ValueError(
+            f"Input file {input_path} is {file_size} bytes, "
+            f"exceeding maximum of {_MAX_INPUT_SIZE} bytes."
+        )
+
     with open(input_path, encoding="utf-8") as fh:
         data = json.load(fh)
 

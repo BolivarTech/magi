@@ -21,6 +21,7 @@ VERDICT_WEIGHT: dict[str, float] = {
 }
 
 _SEVERITY_ORDER: dict[str, int] = {"critical": 0, "warning": 1, "info": 2}
+_EPSILON: float = 1e-9
 
 
 def _classify_consensus(
@@ -42,19 +43,19 @@ def _classify_consensus(
     Returns:
         Tuple of (consensus label, short verdict).
     """
-    if score == 1.0:
+    if abs(score - 1.0) < _EPSILON:
         return "STRONG GO", "approve"
-    if score == -1.0:
+    if abs(score - (-1.0)) < _EPSILON:
         return "STRONG NO-GO", "reject"
-    if score > 0 and has_conditions:
+    if score > _EPSILON and has_conditions:
         return "GO WITH CAVEATS", "conditional"
 
     majority_count = sum(1 for v in effective_verdicts if v == majority_verdict)
     minority_count = num_agents - majority_count
 
-    if score > 0:
+    if score > _EPSILON:
         return f"GO ({majority_count}-{minority_count})", "approve"
-    if score == 0:
+    if abs(score) < _EPSILON:
         return "HOLD -- TIE", "reject"
     return f"HOLD ({majority_count}-{minority_count})", "reject"
 
@@ -152,7 +153,10 @@ def determine_consensus(agents: list[dict[str, Any]]) -> dict[str, Any]:
     has_conditions = "conditional" in verdicts
 
     effective_verdicts = ["approve" if v == "conditional" else v for v in verdicts]
-    majority_verdict = Counter(effective_verdicts).most_common(1)[0][0]
+    # Sort by count descending, then by verdict name ascending for deterministic
+    # tie-breaking when counts are equal (e.g., 1 approve + 1 reject).
+    verdict_counts = Counter(effective_verdicts)
+    majority_verdict = sorted(verdict_counts.keys(), key=lambda v: (-verdict_counts[v], v))[0]
 
     consensus, consensus_short = _classify_consensus(
         score, has_conditions, effective_verdicts, majority_verdict, num_agents

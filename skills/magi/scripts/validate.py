@@ -106,6 +106,21 @@ def load_agent_output(filepath: str) -> dict[str, Any]:
             filepath,
         )
 
+    # --- string fields ---
+    _MAX_FIELD_LENGTH = 50_000  # 50 KB per field
+    for field in ("summary", "reasoning", "recommendation"):
+        value = data[field]
+        if not isinstance(value, str):
+            raise ValidationError(
+                f"Field '{field}' must be a string, got {type(value).__name__}.",
+                filepath,
+            )
+        if len(value) > _MAX_FIELD_LENGTH:
+            raise ValidationError(
+                f"Field '{field}' exceeds maximum length of {_MAX_FIELD_LENGTH} characters.",
+                filepath,
+            )
+
     # --- findings ---
     findings = data["findings"]
     if not isinstance(findings, list):

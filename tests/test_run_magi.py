@@ -219,6 +219,65 @@ class TestRunOrchestrator:
                 )
 
 
+class TestCleanupOldRuns:
+    """Verify LRU cleanup of old MAGI temp directories."""
+
+    def test_keep_zero_disables_cleanup(self, tmp_path):
+        """keep <= 0 should not scan or delete anything."""
+        from run_magi import cleanup_old_runs
+
+        with patch("run_magi.tempfile.gettempdir", return_value=str(tmp_path)):
+            magi_dir = tmp_path / "magi-run-abc123"
+            magi_dir.mkdir()
+            cleanup_old_runs(0)
+            assert magi_dir.exists()
+
+    def test_keeps_most_recent(self, tmp_path):
+        """Should keep the N most recent and remove the rest."""
+        from run_magi import cleanup_old_runs
+
+        dirs = []
+        for i in range(4):
+            d = tmp_path / f"magi-run-{i:04d}"
+            d.mkdir()
+            # Set different mtimes
+            os.utime(d, (1000 + i, 1000 + i))
+            dirs.append(d)
+
+        with patch("run_magi.tempfile.gettempdir", return_value=str(tmp_path)):
+            cleanup_old_runs(2)
+
+        # Most recent (dirs[2], dirs[3]) should remain
+        assert dirs[3].exists()
+        assert dirs[2].exists()
+        assert not dirs[0].exists()
+        assert not dirs[1].exists()
+
+    def test_symlink_outside_temp_root_skipped(self, tmp_path):
+        """Symlinks resolving outside temp root should be skipped."""
+        from run_magi import cleanup_old_runs
+
+        outside_dir = tmp_path / "outside"
+        outside_dir.mkdir()
+        symlink_path = tmp_path / "magi-run-evil"
+        try:
+            symlink_path.symlink_to(outside_dir, target_is_directory=True)
+        except OSError:
+            pytest.skip("Symlinks not supported on this platform")
+
+        with patch("run_magi.tempfile.gettempdir", return_value=str(tmp_path)):
+            cleanup_old_runs(0)
+            # keep=0 disables, use keep=1 with 2 dirs to trigger cleanup
+            real_dir = tmp_path / "magi-run-real"
+            real_dir.mkdir()
+            os.utime(real_dir, (2000, 2000))
+            os.utime(symlink_path, (1000, 1000))
+            cleanup_old_runs(1)
+
+        # Outside dir should not be deleted
+        assert outside_dir.exists()
+
+
 class TestLaunchAgentValidation:
     """Verify launch_agent input validation."""
 

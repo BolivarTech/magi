@@ -35,7 +35,8 @@ _SCRIPTS_DIR = str(Path(__file__).parent / "skills" / "magi" / "scripts")
 if _SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, _SCRIPTS_DIR)
 
-DATA_DIR = Path(".claude", "tdd-guard", "data")
+_PROJECT_ROOT = Path(__file__).parent
+DATA_DIR = _PROJECT_ROOT / ".claude" / "tdd-guard" / "data"
 TEST_RESULTS_FILE = DATA_DIR / "test.json"
 
 

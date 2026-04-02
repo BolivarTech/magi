@@ -19,6 +19,18 @@ AGENT_TITLES: dict[str, tuple[str, str]] = {
 }
 
 
+def _agent_title(agent_name: str) -> tuple[str, str]:
+    """Look up agent display name and role, with fallback for unknown agents.
+
+    Args:
+        agent_name: Agent identifier (e.g., 'melchior').
+
+    Returns:
+        Tuple of (display name, role title).
+    """
+    return AGENT_TITLES.get(agent_name, (agent_name.capitalize(), "Agent"))
+
+
 def format_banner(agents: list[dict[str, Any]], consensus: dict[str, Any]) -> str:
     """Generate the MAGI verdict banner with consistent alignment.
 
@@ -43,7 +55,7 @@ def format_banner(agents: list[dict[str, Any]], consensus: dict[str, Any]) -> st
     lines.append("+" + "=" * inner + "+")
 
     for a in agents:
-        name, title = AGENT_TITLES[a["agent"]]
+        name, title = _agent_title(a["agent"])
         verdict_display = a["verdict"].upper()
         conf = f"{a['confidence']:.0%}"
         content = f"  {name} ({title}):  {verdict_display} ({conf})"
@@ -93,7 +105,7 @@ def format_report(agents: list[dict[str, Any]], consensus: dict[str, Any]) -> st
     if consensus["dissent"]:
         sections.append("## Dissenting Opinion")
         for d in consensus["dissent"]:
-            name, title = AGENT_TITLES[d["agent"]]
+            name, title = _agent_title(d["agent"])
             sections.append(f"**{name} ({title})**: {d['summary']}")
             sections.append(d["reasoning"])
             sections.append("")
@@ -102,14 +114,14 @@ def format_report(agents: list[dict[str, Any]], consensus: dict[str, Any]) -> st
     if consensus["conditions"]:
         sections.append("## Conditions for Approval")
         for c in consensus["conditions"]:
-            name, _ = AGENT_TITLES[c["agent"]]
+            name, _ = _agent_title(c["agent"])
             sections.append(f"- **{name}**: {c['condition']}")
         sections.append("")
 
     # Recommended action
     sections.append("## Recommended Actions")
     for agent_name, rec in consensus["recommendations"].items():
-        name, title = AGENT_TITLES[agent_name]
+        name, title = _agent_title(agent_name)
         sections.append(f"- **{name}** ({title}): {rec}")
 
     return "\n".join(sections)
