@@ -48,6 +48,7 @@ _REQUIRED_KEYS = frozenset(
 _REQUIRED_FINDING_KEYS = frozenset({"severity", "title", "detail"})
 _MAX_INPUT_FILE_SIZE: int = 10 * 1024 * 1024  # 10 MB
 _MAX_FINDINGS_PER_AGENT: int = 100
+_MAX_FIELD_LENGTH: int = 50_000  # 50,000 characters per top-level string field
 _MAX_TITLE_LENGTH: int = 500
 _MAX_DETAIL_LENGTH: int = 10_000
 # Regex to strip zero-width and format Unicode characters (category Cf).
@@ -120,6 +121,11 @@ def load_agent_output(filepath: str) -> dict[str, Any]:
 
     # --- confidence ---
     confidence = data["confidence"]
+    if isinstance(confidence, bool):
+        raise ValidationError(
+            "Confidence must be a number, got bool.",
+            filepath,
+        )
     if not isinstance(confidence, (int, float)):
         raise ValidationError(
             f"Confidence must be a number, got {type(confidence).__name__}.",
@@ -132,7 +138,6 @@ def load_agent_output(filepath: str) -> dict[str, Any]:
         )
 
     # --- string fields ---
-    _MAX_FIELD_LENGTH = 50_000  # 50,000 characters per field
     for field in ("summary", "reasoning", "recommendation"):
         value = data[field]
         if not isinstance(value, str):

@@ -243,11 +243,11 @@ A single marketplace repo can host multiple plugins by pointing `source` to othe
 
 ## Test Coverage
 
-127 tests across 3 test files:
+129 tests across 3 test files (128 passed, 1 skipped on Windows):
 
 | File | Tests | Covers |
 |------|-------|--------|
-| `tests/test_synthesize.py` | 89 | Validation, string type/length checks, agent/verdict type guards, zero-width Unicode, finding sub-field limits, findings count cap, weight-based consensus, confidence formula, findings dedup, empty titles, dynamic labels, HOLD -- TIE, duplicate agents, banner, report |
+| `tests/test_synthesize.py` | 91 | Validation, string type/length checks, bool confidence rejection, agent/verdict type guards, zero-width Unicode, finding sub-field limits, findings count cap, weight-based consensus, confidence formula, findings dedup, empty titles, dynamic labels, HOLD -- TIE, duplicate agents, banner, report |
 | `tests/test_parse_agent_output.py` | 19 | Fence stripping, text extraction (3 formats), fail-fast on unknown types, pipeline integration |
 | `tests/test_run_magi.py` | 19 | Arg parsing, model flag, model passthrough, orchestration, degraded mode, input validation, cleanup_old_runs LRU/symlink |
 

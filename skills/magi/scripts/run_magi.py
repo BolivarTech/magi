@@ -106,7 +106,10 @@ def cleanup_old_runs(keep: int) -> None:
     magi_dirs.sort(reverse=True)
     for _, path in magi_dirs[keep:]:
         resolved = os.path.normcase(os.path.realpath(path))
-        if not resolved.startswith(os.path.normcase(tmp_root)):
+        safe_prefix = os.path.normcase(tmp_root)
+        if not safe_prefix.endswith(os.sep):
+            safe_prefix += os.sep
+        if not resolved.startswith(safe_prefix):
             print(
                 f"WARNING: Skipping cleanup of {path} (resolves outside temp root: {resolved})",
                 file=sys.stderr,
@@ -304,7 +307,16 @@ def main() -> None:
     """CLI entry point for MAGI orchestrator."""
     args = parse_args()
 
+    _MAX_INPUT_FILE_SIZE = 10 * 1024 * 1024  # 10 MB
     if os.path.isfile(args.input):
+        file_size = os.path.getsize(args.input)
+        if file_size > _MAX_INPUT_FILE_SIZE:
+            print(
+                f"ERROR: Input file {args.input} is {file_size} bytes, "
+                f"exceeding maximum of {_MAX_INPUT_FILE_SIZE} bytes.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
         with open(args.input, encoding="utf-8") as f:
             input_content = f.read()
         input_label = f"File: {args.input}"

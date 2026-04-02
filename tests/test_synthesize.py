@@ -998,6 +998,30 @@ class TestStringFieldValidation:
             os.unlink(path)
 
 
+class TestBoolConfidenceRejected:
+    """Verify that boolean values are not accepted as confidence."""
+
+    def test_true_confidence_rejected(self):
+        data = _valid_agent_data()
+        data["confidence"] = True
+        path = _write_json(data)
+        try:
+            with pytest.raises(ValidationError, match="must be a number, got bool"):
+                load_agent_output(path)
+        finally:
+            os.unlink(path)
+
+    def test_false_confidence_rejected(self):
+        data = _valid_agent_data()
+        data["confidence"] = False
+        path = _write_json(data)
+        try:
+            with pytest.raises(ValidationError, match="must be a number, got bool"):
+                load_agent_output(path)
+        finally:
+            os.unlink(path)
+
+
 class TestAgentVerdictTypeGuard:
     """Verify that non-string agent/verdict fields are rejected."""
 
