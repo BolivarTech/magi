@@ -263,6 +263,8 @@ async def run_orchestrator(
 
     for name, result in zip(tasks.keys(), results):
         if isinstance(result, BaseException):
+            if not isinstance(result, Exception):
+                raise result  # Re-raise KeyboardInterrupt, SystemExit, etc.
             print(
                 f"\u26a0 WARNING: Agent '{name}' failed ({result}) \u2014 excluded from synthesis",
                 file=sys.stderr,

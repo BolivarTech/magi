@@ -11,6 +11,8 @@ Loads and validates JSON output files produced by the three MAGI agents
 from __future__ import annotations
 
 import json
+import os
+import re
 from typing import Any
 
 
@@ -44,6 +46,12 @@ _REQUIRED_KEYS = frozenset(
 )
 
 _REQUIRED_FINDING_KEYS = frozenset({"severity", "title", "detail"})
+_MAX_INPUT_FILE_SIZE: int = 10 * 1024 * 1024  # 10 MB
+_MAX_FINDINGS_PER_AGENT: int = 100
+_MAX_TITLE_LENGTH: int = 500
+_MAX_DETAIL_LENGTH: int = 10_000
+# Regex to strip zero-width and format Unicode characters (category Cf).
+_ZERO_WIDTH_RE = re.compile(r"[\u200b-\u200f\u2028-\u202f\ufeff\u00ad]")
 
 
 def load_agent_output(filepath: str) -> dict[str, Any]:
@@ -65,6 +73,13 @@ def load_agent_output(filepath: str) -> dict[str, Any]:
             or its content fails any structural / value check.
     """
     try:
+        file_size = os.path.getsize(filepath)
+        if file_size > _MAX_INPUT_FILE_SIZE:
+            raise ValidationError(
+                f"File exceeds maximum size of {_MAX_INPUT_FILE_SIZE} bytes "
+                f"(got {file_size} bytes).",
+                filepath,
+            )
         with open(filepath, encoding="utf-8") as f:
             data = json.load(f)
     except json.JSONDecodeError as exc:
@@ -79,6 +94,11 @@ def load_agent_output(filepath: str) -> dict[str, Any]:
 
     # --- agent name ---
     agent = data["agent"]
+    if not isinstance(agent, str):
+        raise ValidationError(
+            f"Field 'agent' must be a string, got {type(agent).__name__}.",
+            filepath,
+        )
     if agent not in VALID_AGENTS:
         raise ValidationError(
             f"Unknown agent '{agent}'. Must be one of {sorted(VALID_AGENTS)}.",
@@ -87,6 +107,11 @@ def load_agent_output(filepath: str) -> dict[str, Any]:
 
     # --- verdict ---
     verdict = data["verdict"]
+    if not isinstance(verdict, str):
+        raise ValidationError(
+            f"Field 'verdict' must be a string, got {type(verdict).__name__}.",
+            filepath,
+        )
     if verdict not in VALID_VERDICTS:
         raise ValidationError(
             f"Invalid verdict '{verdict}'. Must be one of {sorted(VALID_VERDICTS)}.",
@@ -107,7 +132,7 @@ def load_agent_output(filepath: str) -> dict[str, Any]:
         )
 
     # --- string fields ---
-    _MAX_FIELD_LENGTH = 50_000  # 50 KB per field
+    _MAX_FIELD_LENGTH = 50_000  # 50,000 characters per field
     for field in ("summary", "reasoning", "recommendation"):
         value = data[field]
         if not isinstance(value, str):
@@ -126,6 +151,12 @@ def load_agent_output(filepath: str) -> dict[str, Any]:
     if not isinstance(findings, list):
         raise ValidationError(
             f"Findings must be a list, got {type(findings).__name__}.",
+            filepath,
+        )
+    if len(findings) > _MAX_FINDINGS_PER_AGENT:
+        raise ValidationError(
+            f"Findings list has {len(findings)} items, "
+            f"exceeding maximum of {_MAX_FINDINGS_PER_AGENT}.",
             filepath,
         )
     for idx, finding in enumerate(findings):
@@ -154,9 +185,22 @@ def load_agent_output(filepath: str) -> dict[str, Any]:
                 f"Must be one of {sorted(VALID_SEVERITIES)}.",
                 filepath,
             )
-        if not finding["title"].strip():
+        clean_title = _ZERO_WIDTH_RE.sub("", finding["title"]).strip()
+        if not clean_title:
             raise ValidationError(
                 f"Finding at index {idx} has empty or whitespace-only title.",
+                filepath,
+            )
+        if len(finding["title"]) > _MAX_TITLE_LENGTH:
+            raise ValidationError(
+                f"Finding at index {idx} title exceeds maximum length "
+                f"of {_MAX_TITLE_LENGTH} characters.",
+                filepath,
+            )
+        if len(finding["detail"]) > _MAX_DETAIL_LENGTH:
+            raise ValidationError(
+                f"Finding at index {idx} detail exceeds maximum length "
+                f"of {_MAX_DETAIL_LENGTH} characters.",
                 filepath,
             )
 

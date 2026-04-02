@@ -998,6 +998,98 @@ class TestStringFieldValidation:
             os.unlink(path)
 
 
+class TestAgentVerdictTypeGuard:
+    """Verify that non-string agent/verdict fields are rejected."""
+
+    def test_list_agent_rejected(self):
+        data = _valid_agent_data()
+        data["agent"] = ["melchior"]
+        path = _write_json(data)
+        try:
+            with pytest.raises(ValidationError, match="must be a string"):
+                load_agent_output(path)
+        finally:
+            os.unlink(path)
+
+    def test_int_verdict_rejected(self):
+        data = _valid_agent_data()
+        data["verdict"] = 1
+        path = _write_json(data)
+        try:
+            with pytest.raises(ValidationError, match="must be a string"):
+                load_agent_output(path)
+        finally:
+            os.unlink(path)
+
+
+class TestZeroWidthUnicodeTitle:
+    """Verify that zero-width Unicode characters in titles are rejected."""
+
+    def test_zero_width_space_title_rejected(self):
+        data = _valid_agent_data()
+        data["findings"] = [
+            {"severity": "info", "title": "\u200b", "detail": "Invisible title."},
+        ]
+        path = _write_json(data)
+        try:
+            with pytest.raises(ValidationError, match="empty or whitespace"):
+                load_agent_output(path)
+        finally:
+            os.unlink(path)
+
+    def test_bom_only_title_rejected(self):
+        data = _valid_agent_data()
+        data["findings"] = [
+            {"severity": "info", "title": "\ufeff", "detail": "BOM only."},
+        ]
+        path = _write_json(data)
+        try:
+            with pytest.raises(ValidationError, match="empty or whitespace"):
+                load_agent_output(path)
+        finally:
+            os.unlink(path)
+
+
+class TestFindingSubFieldLimits:
+    """Verify length limits on finding title and detail."""
+
+    def test_oversized_title_rejected(self):
+        data = _valid_agent_data()
+        data["findings"] = [
+            {"severity": "info", "title": "x" * 600, "detail": "OK."},
+        ]
+        path = _write_json(data)
+        try:
+            with pytest.raises(ValidationError, match="title exceeds maximum"):
+                load_agent_output(path)
+        finally:
+            os.unlink(path)
+
+    def test_oversized_detail_rejected(self):
+        data = _valid_agent_data()
+        data["findings"] = [
+            {"severity": "info", "title": "OK", "detail": "x" * 15_000},
+        ]
+        path = _write_json(data)
+        try:
+            with pytest.raises(ValidationError, match="detail exceeds maximum"):
+                load_agent_output(path)
+        finally:
+            os.unlink(path)
+
+    def test_too_many_findings_rejected(self):
+        data = _valid_agent_data()
+        data["findings"] = [
+            {"severity": "info", "title": f"Finding {i}", "detail": "Detail."} for i in range(101)
+        ]
+        path = _write_json(data)
+        try:
+            with pytest.raises(ValidationError, match="exceeding maximum"):
+                load_agent_output(path)
+        finally:
+            os.unlink(path)
+
+
 class TestDynamicConsensusLabels:
     """Verify labels reflect actual agent count, not hardcoded (2-1)."""
 
