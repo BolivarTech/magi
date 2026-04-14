@@ -351,6 +351,55 @@ class TestCleanupOldRuns:
         assert outside_dir.exists()
 
 
+class TestStderrShimModule:
+    """C-2: the stderr-buffering machinery lives in its own module.
+
+    ``_StderrBufferShim``, ``_BinaryStderrBufferShim``, and the
+    ``_buffered_stderr_while`` context manager were embedded in
+    run_magi.py, bloating the orchestrator. Extracting them to
+    stderr_shim.py keeps run_magi focused on orchestration and makes
+    the shim machinery independently testable.
+    """
+
+    def test_stderr_shim_module_importable(self):
+        """The stderr_shim module must be importable by its short name."""
+        import importlib
+
+        module = importlib.import_module("stderr_shim")
+        assert module is not None
+
+    def test_stderr_shim_exposes_expected_symbols(self):
+        """stderr_shim must export the three shim primitives."""
+        import stderr_shim
+
+        assert hasattr(stderr_shim, "_StderrBufferShim")
+        assert hasattr(stderr_shim, "_BinaryStderrBufferShim")
+        assert hasattr(stderr_shim, "_buffered_stderr_while")
+
+    def test_run_magi_reexports_stderr_buffer_shim_by_identity(self):
+        """``run_magi._StderrBufferShim is stderr_shim._StderrBufferShim``.
+
+        Identity — not equality — rules out accidental re-definition in
+        run_magi after the extraction.
+        """
+        import run_magi
+        import stderr_shim
+
+        assert run_magi._StderrBufferShim is stderr_shim._StderrBufferShim
+
+    def test_run_magi_reexports_binary_stderr_buffer_shim_by_identity(self):
+        import run_magi
+        import stderr_shim
+
+        assert run_magi._BinaryStderrBufferShim is stderr_shim._BinaryStderrBufferShim
+
+    def test_run_magi_reexports_buffered_stderr_while_by_identity(self):
+        import run_magi
+        import stderr_shim
+
+        assert run_magi._buffered_stderr_while is stderr_shim._buffered_stderr_while
+
+
 class TestModelsModule:
     """C-1: MODEL_IDS and VALID_MODELS live in a dedicated models module.
 

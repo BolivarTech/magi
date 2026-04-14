@@ -25,19 +25,30 @@ import os
 import shutil
 import sys
 import tempfile
-from collections.abc import Iterator
 from typing import Any
 
 from models import MODEL_IDS, VALID_MODELS, resolve_model
 from parse_agent_output import parse_agent_output as parse_raw_output
 from status_display import StatusDisplay
+from stderr_shim import (
+    _BinaryStderrBufferShim,
+    _buffered_stderr_while,
+    _StderrBufferShim,
+)
 from synthesize import (
     determine_consensus,
     format_report,
     load_agent_output,
 )
 
-__all__ = ["MODEL_IDS", "VALID_MODELS", "resolve_model"]
+__all__ = [
+    "MODEL_IDS",
+    "VALID_MODELS",
+    "_BinaryStderrBufferShim",
+    "_StderrBufferShim",
+    "_buffered_stderr_while",
+    "resolve_model",
+]
 
 AGENTS = ("melchior", "balthasar", "caspar")
 MAX_HISTORY_RUNS = 5
@@ -323,80 +334,6 @@ async def launch_agent(
     return load_agent_output(parsed_file)
 
 
-class _BinaryStderrBufferShim:
-    """Binary write-buffering proxy for ``sys.stderr.buffer``.
-
-    Callers that do ``sys.stderr.buffer.write(b"...")`` would otherwise
-    bypass the text-mode :class:`_StderrBufferShim` and write directly
-    to the real stream, breaking the display-active-stderr-quiet
-    invariant. This shim catches binary writes, decodes them into the
-    shared text buffer (UTF-8 with replacement for any undecodable
-    bytes), and proxies every non-write attribute to the real binary
-    buffer so operations like ``fileno`` continue to work.
-    """
-
-    def __init__(self, text_buffer: list[str], real_binary: Any) -> None:
-        self._text_buffer = text_buffer
-        self._real = real_binary
-
-    def write(self, data: bytes) -> int:
-        self._text_buffer.append(data.decode("utf-8", errors="replace"))
-        return len(data)
-
-    def flush(self) -> None:  # buffered until context exit
-        return None
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._real, name)
-
-
-class _StderrBufferShim:
-    """Write-buffering proxy for :data:`sys.stderr`.
-
-    Forwards ``write`` / ``flush`` to an internal list and proxies every
-    other attribute (``encoding``, ``fileno``, ``isatty``, ...) to the
-    original stderr. Exposes a ``.buffer`` attribute backed by
-    :class:`_BinaryStderrBufferShim` so binary writes through
-    ``sys.stderr.buffer`` are also intercepted.
-
-    Used by :func:`_buffered_stderr_while` to structurally enforce the
-    display-active-stderr-quiet invariant.
-
-    **Uncovered paths (documented in ``CLAUDE.md`` Known limitations):**
-    - ``os.write(sys.stderr.fileno(), ...)`` bypasses Python-level proxies
-      and writes directly to fd 2.
-    - Hard process death (``SIGKILL``, segfault) skips the buffer flush
-      in ``_buffered_stderr_while``'s ``finally`` clause.
-    """
-
-    def __init__(self, real_stderr: Any, buffer: list[str]) -> None:
-        self._real = real_stderr
-        self._buffer = buffer
-        # Expose a binary shim when the real stream has a binary buffer.
-        # ``io.StringIO`` and pytest's capture streams may not, so fall
-        # back to proxying via ``__getattr__`` when absent.
-        real_binary = getattr(real_stderr, "buffer", None)
-        self.buffer: _BinaryStderrBufferShim | None = (
-            _BinaryStderrBufferShim(buffer, real_binary) if real_binary is not None else None
-        )
-
-    def write(self, data: str) -> int:
-        self._buffer.append(data)
-        return len(data)
-
-    def flush(self) -> None:
-        """Intentional no-op: content stays buffered until context exit.
-
-        The ``_buffered_stderr_while`` context manager replays the full
-        buffer to the real stderr on ``__exit__``; flushing the shim
-        mid-context would defeat the display-active invariant.
-        """
-        return None
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._real, name)
-
-
 def _safe_display_update(display: StatusDisplay | None, name: str, state: str) -> None:
     """Update a status display, swallowing any exception on failure.
 
@@ -418,43 +355,6 @@ def _safe_display_update(display: StatusDisplay | None, name: str, state: str) -
         display.update(name, state)
     except Exception:  # noqa: BLE001 — best-effort update during shutdown
         pass
-
-
-@contextlib.contextmanager
-def _buffered_stderr_while(active: bool) -> Iterator[None]:
-    """Buffer ``sys.stderr`` writes while ``active`` is True.
-
-    When the status display is rendering live to ``sys.stderr``, any
-    concurrent diagnostic write lands inside the in-place redraw region
-    and is wiped on the next refresh tick. This context manager
-    structurally enforces the display-active-stderr-quiet invariant:
-    while the body runs, ``sys.stderr`` is replaced with a write-only
-    buffer, and on exit the buffered content is replayed to the real
-    stderr after the display has been stopped.
-
-    When ``active`` is False, this is a no-op.
-
-    Args:
-        active: True when a live status display is running against
-            ``sys.stderr``.
-
-    Yields:
-        Control to the caller.
-    """
-    if not active:
-        yield
-        return
-
-    saved = sys.stderr
-    buffer: list[str] = []
-    sys.stderr = _StderrBufferShim(saved, buffer)
-    try:
-        yield
-    finally:
-        sys.stderr = saved
-        if buffer:
-            saved.write("".join(buffer))
-            saved.flush()
 
 
 async def run_orchestrator(
