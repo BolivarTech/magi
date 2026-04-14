@@ -18,7 +18,7 @@ class TestParseArgs:
         args = parse_args(["code-review", "input.py"])
         assert args.mode == "code-review"
         assert args.input == "input.py"
-        assert args.timeout == 300
+        assert args.timeout == 900
         assert args.output_dir is None
 
     def test_custom_timeout(self):

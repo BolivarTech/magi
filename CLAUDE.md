@@ -24,7 +24,7 @@ make format        # ruff format --check
 make typecheck     # mypy
 
 # Run analysis (parallel mode, requires claude CLI)
-python skills/magi/scripts/run_magi.py <code-review|design|analysis> <file_or_text> [--model opus] [--timeout 300] [--output-dir <dir>] [--keep-runs 5]
+python skills/magi/scripts/run_magi.py <code-review|design|analysis> <file_or_text> [--model opus] [--timeout 900] [--output-dir <dir>] [--keep-runs 5]
 
 # Run synthesis standalone
 python skills/magi/scripts/synthesize.py agent1.json agent2.json [agent3.json] --output report.json
@@ -131,7 +131,7 @@ Do not import directly from sub-modules — the facade is the stable API.
 
 Async Python orchestrator using `asyncio.create_subprocess_exec`:
 
-- Launches 3 `claude -p` subprocesses concurrently with per-agent timeout (`--timeout`, default 300s).
+- Launches 3 `claude -p` subprocesses concurrently with per-agent timeout (`--timeout`, default 900s).
 - `--model` flag (default `opus`) selects LLM for all agents. Valid: `opus`, `sonnet`, `haiku`.
 - `VALID_MODELS` is derived from `MODEL_IDS.keys()` — single source of truth.
 - User prompt sent via **stdin** (`communicate(input=...)`) to avoid OS CLI arg length limits (~32K on Windows). A copy is saved to `{agent_name}.prompt.txt` as a debug artifact.

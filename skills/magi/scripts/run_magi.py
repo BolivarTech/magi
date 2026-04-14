@@ -8,7 +8,7 @@ Launches Melchior, Balthasar, and Caspar in parallel using asyncio,
 collects their JSON outputs, validates them, and runs synthesis.
 
 Usage:
-    python run_magi.py <mode> <input> [--model opus] [--timeout 300] [--output-dir <dir>]
+    python run_magi.py <mode> <input> [--model opus] [--timeout 900] [--output-dir <dir>]
 
 Exit codes:
     0 - Success: synthesis completed and report saved.
@@ -59,8 +59,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--timeout",
         type=int,
-        default=300,
-        help="Per-agent timeout in seconds (default: 300)",
+        default=900,
+        help="Per-agent timeout in seconds (default: 900)",
     )
     parser.add_argument("--output-dir", help="Directory for agent outputs")
     parser.add_argument(

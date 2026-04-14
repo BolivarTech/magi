@@ -66,7 +66,7 @@ Valid models: `opus`, `sonnet`, `haiku`. If the user requests an unsupported mod
 The orchestrator launches all three agents in parallel, applies timeouts, validates
 outputs, and runs synthesis automatically:
 
-    python skills/magi/scripts/run_magi.py <mode> <input_file_or_text> [--model opus] [--timeout 300] [--output-dir <dir>]
+    python skills/magi/scripts/run_magi.py <mode> <input_file_or_text> [--model opus] [--timeout 900] [--output-dir <dir>]
 
 Pass `--model sonnet` or `--model haiku` to override the default.
 
