@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Author: Julian Bolivar
-# Version: 2.0.0
-# Date: 2026-04-13
+# Version: 2.0.1
+# Date: 2026-04-14
 """MAGI consensus engine.
 
 Applies weight-based scoring to agent verdicts and produces a unified
@@ -15,7 +15,7 @@ import unicodedata
 from collections import Counter
 from typing import Any
 
-from validate import _clean_title
+from validate import clean_title
 
 VERDICT_WEIGHT: dict[str, float] = {
     "approve": 1,
@@ -38,7 +38,7 @@ def _dedup_key(title: str) -> str:
 
     Applies, in order:
 
-    1. :func:`validate._clean_title` — strips invisible characters (zero-width,
+    1. :func:`validate.clean_title` — strips invisible characters (zero-width,
        bidi marks, BOM, soft hyphen) and surrounding whitespace.
     2. ``unicodedata.normalize("NFKC", ...)`` — collapses compatibility forms
        (fullwidth/halfwidth, ligatures) and combines canonically equivalent
@@ -49,7 +49,7 @@ def _dedup_key(title: str) -> str:
     The result is an internal lookup key; the displayed title preserves the
     original form of the first finding seen under each key.
     """
-    return unicodedata.normalize("NFKC", _clean_title(title)).casefold()
+    return unicodedata.normalize("NFKC", clean_title(title)).casefold()
 
 
 def _classify_consensus(
@@ -197,8 +197,12 @@ def determine_consensus(agents: list[dict[str, Any]]) -> dict[str, Any]:
 
     all_findings = _deduplicate_findings(agents)
 
+    # Conditions are sourced from ``summary`` (short one-liner stating the
+    # blocking condition) so they render distinctly from the
+    # ``recommendations`` section, which uses ``recommendation`` (full
+    # next-step action).
     conditions = [
-        {"agent": a["agent"], "condition": a["recommendation"]}
+        {"agent": a["agent"], "condition": a["summary"]}
         for a in agents
         if a["verdict"] == "conditional"
     ]

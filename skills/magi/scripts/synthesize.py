@@ -22,6 +22,7 @@ from validate import (
     VALID_SEVERITIES,
     VALID_VERDICTS,
     ValidationError,
+    clean_title,
     load_agent_output,
 )
 from consensus import (
@@ -41,6 +42,7 @@ __all__ = [
     "VALID_VERDICTS",
     "VERDICT_WEIGHT",
     "ValidationError",
+    "clean_title",
     "determine_consensus",
     "format_banner",
     "format_report",

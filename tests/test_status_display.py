@@ -254,9 +254,14 @@ class TestAsciiFallback:
 class TestWritePathInvariantTripwire:
     """Guard against mixing plain-mode and ANSI refresh writes."""
 
-    def test_plain_write_asserts_when_ansi_mode_is_active(self):
-        """Calling _write_plain_event while use_ansi=True must raise AssertionError."""
+    def test_plain_write_raises_when_ansi_mode_is_active(self):
+        """Calling _write_plain_event while use_ansi=True must raise RuntimeError.
+
+        ``RuntimeError`` survives ``python -O`` (assert statements are
+        stripped under optimize mode) so the invariant is enforced in
+        production-style runs, not just during development.
+        """
         buf = io.StringIO()
         d = StatusDisplay(["m"], stream=buf, use_ansi=True)
-        with pytest.raises(AssertionError, match="mutually exclusive"):
+        with pytest.raises(RuntimeError, match="mutually exclusive"):
             d._write_plain_event("m")

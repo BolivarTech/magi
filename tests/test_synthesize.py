@@ -425,6 +425,31 @@ class TestDetermineConsensus:
         assert len(result["conditions"]) == 1
         assert result["conditions"][0]["agent"] == "melchior"
 
+    def test_conditions_use_summary_not_recommendation(self):
+        """Conditions text is sourced from agent.summary, recommendations from agent.recommendation.
+
+        The two fields must be distinct strings in the output so that
+        ``## Conditions for Approval`` and ``## Recommended Actions``
+        sections do not render the same text twice.
+        """
+        agents = [
+            _valid_agent(
+                "melchior",
+                verdict="conditional",
+                confidence=0.8,
+                summary="Add integration tests before merge",
+                recommendation="Ship after adding integration tests",
+            ),
+            _valid_agent("balthasar", verdict="approve", confidence=0.9),
+            _valid_agent("caspar", verdict="approve", confidence=0.7),
+        ]
+        result = determine_consensus(agents)
+        assert len(result["conditions"]) == 1
+        assert result["conditions"][0]["agent"] == "melchior"
+        assert result["conditions"][0]["condition"] == "Add integration tests before merge"
+        assert result["recommendations"]["melchior"] == "Ship after adding integration tests"
+        assert result["conditions"][0]["condition"] != result["recommendations"]["melchior"]
+
     def test_two_reject_one_approve_is_hold(self):
         """Two reject, one approve produces HOLD (2-1)."""
         agents = [
@@ -1407,6 +1432,27 @@ class TestZeroWidthUnicodeTitle:
                 load_agent_output(path)
         finally:
             os.unlink(path)
+
+
+class TestCleanTitlePublicAPI:
+    """``clean_title`` must be exposed as a public symbol on ``validate``.
+
+    ``consensus.py`` builds its dedup key from the same normalization
+    source as :func:`load_agent_output`. Importing a private underscored
+    symbol across modules is a code smell and hides the contract from
+    third-party consumers, so the helper must be public.
+    """
+
+    def test_clean_title_is_importable_from_validate(self):
+        from validate import clean_title  # must not raise
+
+        assert callable(clean_title)
+        assert clean_title("  hello\u200bworld  ") == "helloworld"
+
+    def test_clean_title_is_reexported_from_synthesize(self):
+        from synthesize import clean_title  # must not raise
+
+        assert callable(clean_title)
 
 
 class TestTitleNormalization:

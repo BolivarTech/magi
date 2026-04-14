@@ -92,12 +92,12 @@ score = sum(VERDICT_WEIGHT[verdict] for each agent) / num_agents
 |-------|-----------|-----------|
 | 1.0 | — | STRONG GO |
 | -1.0 | — | STRONG NO-GO |
-| > 0 | has conditionals | GO WITH CAVEATS |
+| > 0 | has conditionals | GO WITH CAVEATS (N-M) |
 | > 0 | no conditionals | GO (N-M) |
 | 0 | — | HOLD -- TIE |
 | < 0 | — | HOLD (N-M) |
 
-Labels are dynamic: `(N-M)` reflects actual majority/minority counts (e.g., `GO (2-1)` or `HOLD (2-1)`). Score=0 (exact tie) uses `HOLD -- TIE` to avoid misleading majority counts when conditional verdicts skew the effective split. **Policy**: `HOLD -- TIE` maps to `consensus_verdict: "reject"` — ties default to "do not proceed" as the safer option.
+Labels are dynamic: `(N-M)` reflects actual majority/minority counts (e.g., `GO (2-1)`, `GO WITH CAVEATS (3-0)`, or `HOLD (2-1)`). All non-unanimous and non-tie outcomes carry the split suffix so operators can read the effective verdict split directly off the banner. Score=0 (exact tie) uses `HOLD -- TIE` to avoid misleading majority counts when conditional verdicts skew the effective split. **Policy**: `HOLD -- TIE` maps to `consensus_verdict: "reject"` — ties default to "do not proceed" as the safer option.
 
 **Confidence formula:**
 
@@ -112,7 +112,8 @@ At score=0 (exact tie), weight_factor=0.5, halving confidence — appropriate fo
 
 Key behaviors:
 - `conditional` maps to `approve` for majority identification, but conditions are preserved in report.
-- Unanimous `conditional` produces `GO WITH CAVEATS` at moderate confidence (~0.68), not `STRONG GO`.
+- Unanimous `conditional` produces `GO WITH CAVEATS (3-0)` at moderate confidence (~0.68), not `STRONG GO`.
+- Conditions (`consensus.conditions`) are sourced from each conditional agent's `summary` field, while `consensus.recommendations` uses each agent's `recommendation` field. The two fields must render distinct text so the report's `## Conditions for Approval` and `## Recommended Actions` sections are not duplicates.
 - Findings deduplicated by title (case-insensitive), tracking all reporter agents via `sources` list, keeping highest severity.
 - Requires minimum 2 agents (raises `ValueError` if fewer). Accepts 2-3 for graceful degradation.
 - Validates agent name uniqueness — duplicate names raise `ValueError` to prevent silent vote corruption.
@@ -317,6 +318,13 @@ Three rounds of MAGI self-review identified and resolved the following issues:
   - Subprocesses inheriting fd 2 (MAGI itself uses `stderr=PIPE` so this doesn't apply to `launch_agent`, but third-party code invoked from user-level hooks could).
   - **Pre-cached stderr references**: modules that capture `err = sys.stderr` at import time and later call `err.write(...)` hold a reference to the real stream, not to the swapped-in shim. The shim replaces `sys.stderr` only for the duration of `_buffered_stderr_while`; a reference captured before that context manager enters is unaffected. If MAGI ever imports a library that does this, its writes will appear directly in the display's redraw region.
 - **Buffered diagnostics on hard process death**: `_buffered_stderr_while` flushes its buffer in a `finally` clause, so diagnostics survive ordinary exceptions, `CancelledError`, `KeyboardInterrupt`, and `SystemExit`. They are lost only on `SIGKILL`, segfault, or `os._exit()` — all out of scope for Python-level cleanup.
+
+## Breaking changes (2.0.0)
+
+- **`GO WITH CAVEATS` now renders with an `(N-M)` split suffix** (e.g., `GO WITH CAVEATS (3-0)`, `GO WITH CAVEATS (2-1)`). The flat form from 1.x is no longer produced. Downstream parsers that grep the banner for an exact `GO WITH CAVEATS` string must tolerate the trailing split.
+- **`consensus.conditions[*].condition` is now sourced from each conditional agent's `summary`**, not from `recommendation`. Consumers that rendered the `condition` field and the `recommendations` map side-by-side will stop seeing duplicated text; any consumer that relied on the duplication must switch to reading `recommendations[agent]` explicitly.
+- **`validate.clean_title` is a public symbol** (previously `_clean_title`). Existing imports of the private form must be updated. The same helper is re-exported through `synthesize.clean_title`.
+- **`StatusDisplay._write_plain_event` raises `RuntimeError`** (previously `AssertionError`) when invoked under ANSI mode. The invariant now survives `python -O`.
 
 ## Breaking changes (1.1.0)
 

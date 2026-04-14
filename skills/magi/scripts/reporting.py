@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Author: Julian Bolivar
-# Version: 1.1.0
-# Date: 2026-04-13
+# Version: 2.0.1
+# Date: 2026-04-14
 """MAGI report formatting.
 
 Generates the ASCII verdict banner and the full human-readable

@@ -1031,6 +1031,31 @@ class TestSafeDisplayUpdate:
 
         _safe_display_update(_Broken(), "melchior", "running")  # must not raise
 
+    def test_first_exception_logged_subsequent_silent(self, capsys):
+        """A broken display must surface its first error to stderr so the
+        operator knows the live tree is blind, but subsequent errors stay
+        silent to prevent the redraw path from flooding the log on every
+        tick. The real shutdown signal from the caller is still preserved
+        because ``_safe_display_update`` never re-raises."""
+        from run_magi import _safe_display_update, _reset_display_log_state
+
+        _reset_display_log_state()
+
+        class _Broken:
+            def update(self, agent: str, state: str) -> None:
+                raise RuntimeError("boom")
+
+        broken = _Broken()
+        _safe_display_update(broken, "melchior", "running")
+        _safe_display_update(broken, "balthasar", "running")
+        _safe_display_update(broken, "caspar", "running")
+
+        captured = capsys.readouterr()
+        assert captured.err.count("status display") == 1, (
+            "First failure must be logged exactly once; subsequent failures must stay silent."
+        )
+        assert "boom" in captured.err
+
     def test_successful_update_propagates(self):
         from run_magi import _safe_display_update
 
@@ -1044,6 +1069,87 @@ class TestSafeDisplayUpdate:
         rec = _Recorder()
         _safe_display_update(rec, "melchior", "running")
         assert rec.calls == [("melchior", "running")]
+
+    def test_base_exception_is_swallowed(self):
+        """The helper's contract explicitly names ``CancelledError`` and
+        ``KeyboardInterrupt`` (both ``BaseException`` subclasses) as
+        shutdown-path failures it must not propagate. ``tracked_launch``
+        is wrapped in ``except BaseException`` and relies on this helper
+        returning normally so the outer ``raise`` re-raises the *original*
+        signal instead of whatever the display raised on the way down.
+        """
+        import asyncio
+
+        from run_magi import _reset_display_log_state, _safe_display_update
+
+        _reset_display_log_state()
+
+        class _CancelledRaiser:
+            def update(self, agent: str, state: str) -> None:
+                raise asyncio.CancelledError("display cancelled mid-shutdown")
+
+        class _SystemExitRaiser:
+            def update(self, agent: str, state: str) -> None:
+                raise SystemExit(2)
+
+        # Neither call may propagate — the documented contract says the
+        # helper swallows shutdown-path failures so the caller's own
+        # ``raise`` preserves the original exception.
+        _safe_display_update(_CancelledRaiser(), "melchior", "failed")
+        _safe_display_update(_SystemExitRaiser(), "caspar", "failed")
+
+
+class TestReapAndDrainStderr:
+    """Verify timeout warning when a killed subprocess fails to exit."""
+
+    def test_warns_when_proc_wait_times_out(self, capsys, monkeypatch):
+        """If ``proc.wait()`` still hasn't returned within
+        ``_PROC_WAIT_REAP_TIMEOUT`` seconds after ``kill()``, the caller
+        must emit a warning to stderr so an operator can notice an
+        orphaned subprocess (Windows child-process-tree case). The
+        function must still return the best-effort stderr buffer and
+        must not raise."""
+        import asyncio
+
+        from run_magi import _PROC_WAIT_REAP_TIMEOUT, _reap_and_drain_stderr
+
+        class _FakeStderr:
+            async def read(self) -> bytes:
+                return b""
+
+        class _FakeProc:
+            pid = 9999
+            stderr = _FakeStderr()
+            kill_called = False
+
+            def kill(self) -> None:
+                type(self).kill_called = True
+
+            async def wait(self) -> int:
+                await asyncio.sleep(10)  # simulate hang
+                return 0
+
+        async def _fake_wait_for(awaitable, timeout):
+            # Consume the coroutine so asyncio doesn't warn about it,
+            # then raise to simulate the reap timeout on the wait() call.
+            if timeout == _PROC_WAIT_REAP_TIMEOUT:
+                if asyncio.iscoroutine(awaitable):
+                    awaitable.close()
+                raise asyncio.TimeoutError
+            return await awaitable
+
+        monkeypatch.setattr("run_magi.asyncio.wait_for", _fake_wait_for)
+
+        proc = _FakeProc()
+        result = asyncio.run(_reap_and_drain_stderr(proc))  # type: ignore[arg-type]
+
+        assert result == b""
+        assert _FakeProc.kill_called is True
+        captured = capsys.readouterr()
+        assert "9999" in captured.err, (
+            "Warning must name the unreaped subprocess so operators can identify the orphan."
+        )
+        assert "did not exit" in captured.err or "orphan" in captured.err.lower()
 
 
 class TestBufferedStderrWhile:

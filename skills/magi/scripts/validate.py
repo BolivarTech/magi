@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Author: Julian Bolivar
-# Version: 2.0.0
-# Date: 2026-04-13
+# Version: 2.0.1
+# Date: 2026-04-14
 """MAGI agent output validation.
 
 Loads and validates JSON output files produced by the three MAGI agents
@@ -60,12 +60,12 @@ _MAX_DETAIL_LENGTH: int = 10_000
 _ZERO_WIDTH_RE = re.compile(r"[\u200b-\u200f\u2028-\u202f\ufeff\u00ad]")
 
 
-def _clean_title(raw: str) -> str:
+def clean_title(raw: str) -> str:
     """Return *raw* with invisible characters and edge whitespace removed.
 
     Used by :func:`load_agent_output` to produce the canonical title form
     that is both length-capped and stored on the finding. Exposed as a
-    module-level helper so that downstream consumers (notably the finding
+    public helper so that downstream consumers (notably the finding
     dedup in ``consensus.py``) can derive a normalization key from the
     same source of truth.
     """
@@ -207,13 +207,13 @@ def load_agent_output(filepath: str) -> dict[str, Any]:
                 f"Must be one of {sorted(VALID_SEVERITIES)}.",
                 filepath,
             )
-        clean_title = _clean_title(finding["title"])
-        if not clean_title:
+        cleaned = clean_title(finding["title"])
+        if not cleaned:
             raise ValidationError(
                 f"Finding at index {idx} has empty or whitespace-only title.",
                 filepath,
             )
-        if len(clean_title) > _MAX_TITLE_LENGTH:
+        if len(cleaned) > _MAX_TITLE_LENGTH:
             raise ValidationError(
                 f"Finding at index {idx} title exceeds maximum length "
                 f"of {_MAX_TITLE_LENGTH} characters.",
@@ -221,7 +221,7 @@ def load_agent_output(filepath: str) -> dict[str, Any]:
             )
         # Replace the raw title with the cleaned form so downstream consumers
         # (dedup, rendering) never see smuggled zero-width characters.
-        finding["title"] = clean_title
+        finding["title"] = cleaned
         if len(finding["detail"]) > _MAX_DETAIL_LENGTH:
             raise ValidationError(
                 f"Finding at index {idx} detail exceeds maximum length "

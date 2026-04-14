@@ -266,15 +266,17 @@ class StatusDisplay:
 
         This method is the plain-mode write path. The ANSI refresh loop
         writes through :meth:`_redraw` instead. The two paths are mutually
-        exclusive: an ``AssertionError`` is raised if this method is ever
+        exclusive: a ``RuntimeError`` is raised if this method is ever
         reached while ANSI mode is active, so a future edit cannot
         accidentally introduce a race between the two write paths within
-        a single asyncio tick.
+        a single asyncio tick. ``RuntimeError`` (not ``assert``) is used
+        so the invariant survives ``python -O``.
         """
-        assert not self._use_ansi, (
-            "_write_plain_event must never run while ANSI mode is active — "
-            "plain-mode and ANSI refresh writes are mutually exclusive"
-        )
+        if self._use_ansi:
+            raise RuntimeError(
+                "_write_plain_event must never run while ANSI mode is active — "
+                "plain-mode and ANSI refresh writes are mutually exclusive"
+            )
         icon = self._icon_for(agent)
         state = self._states[agent]
         elapsed = self._elapsed_for(agent)

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Author: Julian Bolivar
-# Version: 2.0.0
-# Date: 2026-04-13
+# Version: 2.0.1
+# Date: 2026-04-14
 """MAGI Orchestrator — async Python replacement for run_magi.sh.
 
 Launches Melchior, Balthasar, and Caspar in parallel using asyncio,
@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import contextlib
 import json
 import os
 import shutil
@@ -97,12 +96,24 @@ async def _reap_and_drain_stderr(proc: asyncio.subprocess.Process) -> bytes:
 
     Both the ``wait()`` and the ``stderr.read()`` are bounded by short
     timeouts so a misbehaving subprocess cannot stall the orchestrator.
-    All failures are swallowed — the caller is already on an error path
-    and only needs best-effort diagnostics.
+    Non-timeout failures are swallowed — the caller is already on an
+    error path and only needs best-effort diagnostics. A ``wait()``
+    timeout, however, means the killed subprocess never reaped: on
+    Windows this typically indicates an orphaned child-process tree,
+    so we emit a warning naming the pid so operators can notice it.
     """
     proc.kill()
-    with contextlib.suppress(Exception):
+    try:
         await asyncio.wait_for(proc.wait(), timeout=_PROC_WAIT_REAP_TIMEOUT)
+    except asyncio.TimeoutError:
+        print(
+            f"\u26a0 WARNING: subprocess pid={proc.pid} did not exit within "
+            f"{_PROC_WAIT_REAP_TIMEOUT}s after kill() \u2014 may be orphaned "
+            f"(common on Windows with child-process trees)",
+            file=sys.stderr,
+        )
+    except Exception:  # noqa: BLE001 — best-effort reap
+        pass
 
     if proc.stderr is None:
         return b""
@@ -359,6 +370,25 @@ async def launch_agent(
     return load_agent_output(parsed_file)
 
 
+# Once-per-run log flag for ``_safe_display_update``. Safe as module-level
+# mutable state because ``run_orchestrator`` calls ``_reset_display_log_state``
+# at the start of every invocation, so a host that reuses the module across
+# multiple runs still sees the first display failure of each run. A dict is
+# used instead of a plain ``bool`` to avoid the ``global`` keyword in helpers
+# that mutate the flag.
+_display_log_state: dict[str, bool] = {"first_failure_logged": False}
+
+
+def _reset_display_log_state() -> None:
+    """Reset the once-per-run log flag for :func:`_safe_display_update`.
+
+    Exposed so tests (and long-lived hosts that reuse the module across
+    multiple orchestrator runs) can re-arm the first-failure log. The
+    orchestrator itself resets the flag at the start of every run.
+    """
+    _display_log_state["first_failure_logged"] = False
+
+
 def _safe_display_update(display: StatusDisplay | None, name: str, state: str) -> None:
     """Update a status display, swallowing any exception on failure.
 
@@ -369,6 +399,10 @@ def _safe_display_update(display: StatusDisplay | None, name: str, state: str) -
     signal. This helper isolates the display update so that the caller's
     ``raise`` statement always preserves the real cause.
 
+    The first exception per run is logged to stderr so the operator knows
+    the live tree is blind; subsequent exceptions stay silent to prevent
+    the redraw path from flooding the log on every tick.
+
     Args:
         display: The status display, or ``None`` to skip the update.
         name: Agent name to update.
@@ -378,8 +412,23 @@ def _safe_display_update(display: StatusDisplay | None, name: str, state: str) -
         return
     try:
         display.update(name, state)
-    except Exception:  # noqa: BLE001 — best-effort update during shutdown
-        pass
+    except BaseException as exc:  # noqa: BLE001 — see docstring shutdown-path contract
+        # Catches ``Exception`` subclasses plus ``CancelledError``,
+        # ``KeyboardInterrupt``, and ``SystemExit``. The helper is invoked
+        # from ``tracked_launch``'s ``except BaseException`` clause which
+        # then re-raises the *original* signal — if we let the display's
+        # own BaseException escape here, that outer ``raise`` never runs
+        # and the real shutdown reason is lost.
+        if not _display_log_state["first_failure_logged"]:
+            _display_log_state["first_failure_logged"] = True
+            try:
+                print(
+                    f"\u26a0 WARNING: status display update failed ({exc!r}) "
+                    f"\u2014 live tree may be stale for the rest of this run",
+                    file=sys.stderr,
+                )
+            except BaseException:  # noqa: BLE001 — never let logging shadow shutdown
+                pass
 
 
 async def run_orchestrator(
@@ -415,6 +464,11 @@ async def run_orchestrator(
     """
     successful: list[dict[str, Any]] = []
     failed: list[str] = []
+
+    # Re-arm the once-per-run log flag so a host that reuses the module
+    # across multiple orchestrator invocations (tests, long-lived service)
+    # still sees the first display failure on every run.
+    _reset_display_log_state()
 
     # Display lifecycle invariant (structurally enforced by the
     # ``_buffered_stderr_while`` context manager below): while the status
