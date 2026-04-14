@@ -55,10 +55,10 @@ skills/magi/
     reporting.py              — AGENT_TITLES + format_banner + format_report (ASCII)
     parse_agent_output.py     — Claude CLI JSON extractor (3 output formats)
 tests/
-  test_synthesize.py          — 77 tests: validation, consensus, findings, formatting
+  test_synthesize.py          — 107 tests: validation, consensus, findings, formatting, SKILL.md template parity
   test_parse_agent_output.py  — 19 tests: fence stripping, text extraction, pipeline
-  test_run_magi.py            — 24 tests: arg parsing, --no-status, orchestration, degraded mode, tracked_launch states
-  test_status_display.py      — 30 tests: init, update, render, ASCII fallback, async lifecycle, stop idempotency
+  test_run_magi.py            — 27 tests: arg parsing, --no-status, orchestration, tracked_launch states, start() failure
+  test_status_display.py      — 32 tests: init, update, render, ASCII fallback, async lifecycle, stop idempotency, tripwire
 pyproject.toml                — Python >= 3.9, dual license, dev deps, tool config
 conftest.py                   — tdd-guard pytest plugin + sys.path setup for test imports
 Makefile                      — verify, test, lint, format, typecheck targets
@@ -256,13 +256,14 @@ A single marketplace repo can host multiple plugins by pointing `source` to othe
 
 ## Test Coverage
 
-129 tests across 3 test files (128 passed, 1 skipped on Windows):
+186 tests across 4 test files (185 passed, 1 skipped on Windows):
 
 | File | Tests | Covers |
 |------|-------|--------|
-| `tests/test_synthesize.py` | 91 | Validation, string type/length checks, bool confidence rejection, agent/verdict type guards, zero-width Unicode, finding sub-field limits, findings count cap, weight-based consensus, confidence formula, findings dedup, empty titles, dynamic labels, HOLD -- TIE, duplicate agents, banner, report |
+| `tests/test_synthesize.py` | 107 | Validation, string type/length checks, bool confidence rejection, agent/verdict type guards, zero-width Unicode, finding sub-field limits, weight-based consensus, confidence formula, findings dedup, dynamic labels, HOLD -- TIE, duplicate agents, banner width + alignment + integer percent, report sections + ordering, dissent summary-only, SKILL.md template parity |
 | `tests/test_parse_agent_output.py` | 19 | Fence stripping, text extraction (3 formats), fail-fast on unknown types, pipeline integration |
-| `tests/test_run_magi.py` | 19 | Arg parsing, model flag, model passthrough, orchestration, degraded mode, input validation, cleanup_old_runs LRU/symlink |
+| `tests/test_run_magi.py` | 27 | Arg parsing, --no-status flag, model passthrough, orchestration, degraded mode, input validation, cleanup_old_runs LRU/symlink, tracked_launch states (success/timeout/failed), display start() failure fallback |
+| `tests/test_status_display.py` | 32 | Init, update, render, ASCII fallback, async lifecycle, stop idempotency, write-path invariant tripwire |
 
 Run with `python -m pytest tests/ -v` or `make test`.
 
@@ -310,6 +311,17 @@ Three rounds of MAGI self-review identified and resolved the following issues:
 - **TOCTOU residual**: A narrow race window exists between `realpath()` and `rmtree()` in `cleanup_old_runs`. Acceptable for dev-tooling context; not suitable for security-critical environments.
 - **Windows subprocess orphans**: `proc.kill()` on timeout does not terminate the full process tree. Claude child processes may survive as orphans.
 - **Temp directory scan**: `cleanup_old_runs` scans the entire system temp directory. May be slow on machines with thousands of temp entries (e.g., shared CI runners).
+- **Windows non-VT TTY**: On legacy Windows consoles where `ENABLE_VIRTUAL_TERMINAL_PROCESSING` cannot be enabled, the status display falls through to plain mode and emits one append-only line per agent state change (no in-place redraw). Modern Windows Terminal, ConEmu, and WSL terminals are unaffected. Disable the display with `--no-status` if the append output is undesirable.
+- **`_StderrBufferShim` coverage gap**: the shim intercepts `sys.stderr.write`, `sys.stderr.flush`, and `sys.stderr.buffer.write`. The following paths bypass it:
+  - `os.write(sys.stderr.fileno(), b"...")` — direct OS-level writes to fd 2.
+  - Subprocesses inheriting fd 2 (MAGI itself uses `stderr=PIPE` so this doesn't apply to `launch_agent`, but third-party code invoked from user-level hooks could).
+  - **Pre-cached stderr references**: modules that capture `err = sys.stderr` at import time and later call `err.write(...)` hold a reference to the real stream, not to the swapped-in shim. The shim replaces `sys.stderr` only for the duration of `_buffered_stderr_while`; a reference captured before that context manager enters is unaffected. If MAGI ever imports a library that does this, its writes will appear directly in the display's redraw region.
+- **Buffered diagnostics on hard process death**: `_buffered_stderr_while` flushes its buffer in a `finally` clause, so diagnostics survive ordinary exceptions, `CancelledError`, `KeyboardInterrupt`, and `SystemExit`. They are lost only on `SIGKILL`, segfault, or `os._exit()` — all out of scope for Python-level cleanup.
+
+## Breaking changes (1.1.0)
+
+- **`## Consensus Summary` section removed** from `format_report` output. The rendered report now goes straight from the banner to `## Key Findings`. The `consensus.majority_summary` field remains available in the JSON report for downstream consumers — parse that instead of grepping the rendered markdown.
+- **`## Dissenting Opinion` shows `summary` only**, not the full `reasoning` field. The full reasoning is preserved in the JSON report and in each agent's raw output file under the run's temp directory.
 
 ## Dependencies
 

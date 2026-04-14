@@ -191,7 +191,12 @@ sub-agent modes, you MUST reproduce it exactly.
 **Dissenting Opinion** (section omitted if no dissent):
 - Header: `## Dissenting Opinion`
 - One line per dissenting agent: `**Name (Title)**: <summary>`
-- Summary only — do **not** include the full reasoning.
+- Summary only — do **not** include the full `reasoning` field.
+- **Why summary-only**: the Dissenting Opinion section is for at-a-glance
+  awareness of the minority position, not the full argument. The complete
+  `reasoning` text is preserved in the JSON report on disk and in each agent's
+  raw output file under the run's temp directory, so nothing is lost — only
+  the console view is truncated. This is intentional.
 
 **Conditions for Approval** (section omitted if no conditionals):
 - Header: `## Conditions for Approval`
@@ -203,7 +208,10 @@ sub-agent modes, you MUST reproduce it exactly.
 
 **Consensus Summary is NOT a section.** Do not emit `## Consensus Summary` — the
 banner already encodes the verdict and the key findings/dissent sections carry the
-substantive content.
+substantive content. This is a **breaking change from MAGI 1.0.x**, which had a
+`## Consensus Summary` block between the banner and `## Key Findings`. Downstream
+consumers that parsed that header must now read `consensus.majority_summary` from
+the JSON report instead of grepping the rendered markdown.
 
 ## Fallback (no sub-agents available)
 

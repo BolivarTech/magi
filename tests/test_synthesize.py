@@ -924,6 +924,95 @@ class TestFormatReport:
 
 
 # ---------------------------------------------------------------------------
+# TestSkillMdTemplateParity
+# ---------------------------------------------------------------------------
+
+
+class TestSkillMdTemplateParity:
+    """Verify that the canonical template in SKILL.md matches reporting.py.
+
+    The MAGI system runs in three modes (Python orchestrator, native
+    sub-agents, fallback) and each must produce identical output. These
+    tests guard against drift between the hand-written template in
+    ``skills/magi/SKILL.md`` and the output of ``format_report``.
+    """
+
+    @staticmethod
+    def _read_skill_template() -> str:
+        """Return the first fenced code block after the canonical header."""
+        from pathlib import Path
+
+        skill_md = Path(__file__).resolve().parent.parent / "skills" / "magi" / "SKILL.md"
+        content = skill_md.read_text(encoding="utf-8")
+        marker = "#### Canonical output template"
+        header_idx = content.index(marker)
+        fence_open = content.index("```", header_idx)
+        body_start = content.index("\n", fence_open) + 1
+        fence_close = content.index("```", body_start)
+        return content[body_start:fence_close].rstrip("\n")
+
+    def test_template_banner_width_matches_reporting(self):
+        """Banner border in SKILL.md must match reporting.py width."""
+        template = self._read_skill_template()
+        template_border = template.split("\n")[0]
+
+        agents = [_valid_agent(n) for n in ["melchior", "balthasar", "caspar"]]
+        consensus = determine_consensus(agents)
+        banner = format_banner(agents, consensus)
+        generated_border = banner.split("\n")[0]
+
+        assert len(template_border) == len(generated_border)
+        assert template_border == generated_border
+
+    def test_template_verdict_column_matches_reporting(self):
+        """Melchior's verdict must start at the same column in both."""
+        template = self._read_skill_template()
+        template_lines = template.split("\n")
+        tmpl_line = next(line for line in template_lines if "Melchior" in line)
+
+        agents = [
+            _valid_agent("melchior", verdict="approve", confidence=0.90),
+            _valid_agent("balthasar", verdict="conditional", confidence=0.85),
+            _valid_agent("caspar", verdict="reject", confidence=0.78),
+        ]
+        consensus = determine_consensus(agents)
+        banner = format_banner(agents, consensus)
+        gen_line = next(line for line in banner.split("\n") if "Melchior" in line)
+
+        assert tmpl_line.index("APPROVE") == gen_line.index("APPROVE")
+
+    def test_template_excludes_consensus_summary_section(self):
+        """The SKILL.md template must never add ## Consensus Summary."""
+        template = self._read_skill_template()
+        assert "## Consensus Summary" not in template
+
+    def test_template_has_required_sections_in_order(self):
+        """Required section headers must appear in the canonical order."""
+        template = self._read_skill_template()
+        expected_order = [
+            "## Key Findings",
+            "## Dissenting Opinion",
+            "## Conditions for Approval",
+            "## Recommended Actions",
+        ]
+        positions = [template.index(section) for section in expected_order]
+        assert positions == sorted(positions), (
+            f"Sections are not in canonical order: {dict(zip(expected_order, positions))}"
+        )
+
+    def test_template_finding_rows_align_to_column_22(self):
+        """Finding rows in the template must put titles at column 22."""
+        template = self._read_skill_template()
+        finding_lines = [
+            line for line in template.split("\n") if line.startswith(("[!!!]", "[!!]", "[i]"))
+        ]
+        assert len(finding_lines) >= 3
+        for line in finding_lines:
+            assert line[20] == " ", f"Column 21 must be a separator space: {line!r}"
+            assert line[21] != " ", f"Column 22 must start the title: {line!r}"
+
+
+# ---------------------------------------------------------------------------
 # TestFlexibleMain
 # ---------------------------------------------------------------------------
 

@@ -5,6 +5,7 @@
 
 import asyncio
 import os
+import sys
 from unittest.mock import patch
 
 import pytest
@@ -483,3 +484,302 @@ class TestTrackedLaunchStatusUpdates:
         )
 
         assert created == []
+
+    @pytest.mark.asyncio
+    async def test_cancelled_error_marks_display_failed(self, tmp_path, monkeypatch):
+        """W4: CancelledError in an agent must mark its display row as failed."""
+        import run_magi
+
+        instances: list[_FakeDisplay] = []
+        monkeypatch.setattr(
+            run_magi,
+            "StatusDisplay",
+            lambda *a, **kw: instances.append(_FakeDisplay()) or instances[-1],
+        )
+
+        async def mock_launch(agent_name, *args, **kwargs):
+            if agent_name == "caspar":
+                raise asyncio.CancelledError()
+            return _ok_result(agent_name)
+
+        monkeypatch.setattr(run_magi, "launch_agent", mock_launch)
+
+        result = await run_magi.run_orchestrator(
+            agents_dir=str(tmp_path),
+            prompt="test",
+            output_dir=str(tmp_path),
+            timeout=300,
+        )
+
+        assert ("caspar", "running") in instances[0].calls
+        assert ("caspar", "failed") in instances[0].calls
+        # caspar's row must not be left in "running" state and must not
+        # be marked as "success".
+        assert ("caspar", "success") not in instances[0].calls
+        assert result.get("degraded") is True
+
+    @pytest.mark.asyncio
+    async def test_display_start_failure_falls_through_gracefully(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """A raised ``display.start()`` must not block the analysis."""
+        import run_magi
+
+        class _FailingStartDisplay:
+            def __init__(self, *args, **kwargs):
+                self.updates: list[tuple[str, str]] = []
+                self.stop_called = False
+
+            def update(self, agent: str, state: str) -> None:
+                self.updates.append((agent, state))
+
+            async def start(self) -> None:
+                raise RuntimeError("simulated start failure")
+
+            async def stop(self) -> None:
+                self.stop_called = True
+
+        instances: list[_FailingStartDisplay] = []
+
+        def factory(*args, **kwargs):
+            inst = _FailingStartDisplay()
+            instances.append(inst)
+            return inst
+
+        monkeypatch.setattr(run_magi, "StatusDisplay", factory)
+
+        async def mock_launch(agent_name, *args, **kwargs):
+            return _ok_result(agent_name)
+
+        monkeypatch.setattr(run_magi, "launch_agent", mock_launch)
+
+        result = await run_magi.run_orchestrator(
+            agents_dir=str(tmp_path),
+            prompt="test",
+            output_dir=str(tmp_path),
+            timeout=300,
+        )
+
+        assert result["consensus"]["consensus"] == "STRONG GO"
+        assert len(instances) == 1
+        # Display was dropped, so stop() is never called and no further
+        # ``update()`` calls reach it after the start() failure — the
+        # tracked_launch closure must see ``display is None``.
+        assert instances[0].stop_called is False
+        assert instances[0].updates == [], (
+            f"No updates must reach a failed-start display, got {instances[0].updates}"
+        )
+
+        captured = capsys.readouterr()
+        assert "status display failed to start" in captured.err
+
+    @pytest.mark.asyncio
+    async def test_display_update_errors_do_not_mask_original_exception(
+        self, tmp_path, monkeypatch
+    ):
+        """If display.update() raises during shutdown, the real error must win."""
+        import run_magi
+
+        class _BrokenDisplay:
+            def __init__(self, *args, **kwargs):
+                self.stop_called = False
+
+            def update(self, agent: str, state: str) -> None:
+                raise RuntimeError("display is broken")
+
+            async def start(self) -> None:
+                pass
+
+            async def stop(self) -> None:
+                self.stop_called = True
+
+        monkeypatch.setattr(run_magi, "StatusDisplay", _BrokenDisplay)
+
+        async def mock_launch(agent_name, *args, **kwargs):
+            if agent_name == "caspar":
+                raise ValueError("original failure")
+            return _ok_result(agent_name)
+
+        monkeypatch.setattr(run_magi, "launch_agent", mock_launch)
+
+        # The orchestrator must still return (degraded) — the BrokenDisplay
+        # update call must not propagate and mask caspar's ValueError.
+        result = await run_magi.run_orchestrator(
+            agents_dir=str(tmp_path),
+            prompt="test",
+            output_dir=str(tmp_path),
+            timeout=300,
+        )
+        assert result.get("degraded") is True
+        assert "caspar" in result.get("failed_agents", [])
+
+
+class TestSafeDisplayUpdate:
+    """Verify ``_safe_display_update`` swallows display errors during shutdown."""
+
+    def test_none_display_is_noop(self):
+        from run_magi import _safe_display_update
+
+        _safe_display_update(None, "melchior", "running")  # must not raise
+
+    def test_exception_is_swallowed(self):
+        from run_magi import _safe_display_update
+
+        class _Broken:
+            def update(self, agent: str, state: str) -> None:
+                raise RuntimeError("broken")
+
+        _safe_display_update(_Broken(), "melchior", "running")  # must not raise
+
+    def test_successful_update_propagates(self):
+        from run_magi import _safe_display_update
+
+        class _Recorder:
+            def __init__(self):
+                self.calls: list[tuple[str, str]] = []
+
+            def update(self, agent: str, state: str) -> None:
+                self.calls.append((agent, state))
+
+        rec = _Recorder()
+        _safe_display_update(rec, "melchior", "running")
+        assert rec.calls == [("melchior", "running")]
+
+
+class TestBufferedStderrWhile:
+    """Structural enforcement of the display-active stderr-quiet invariant (W3)."""
+
+    def test_noop_when_inactive(self):
+        """When active=False, sys.stderr is untouched and writes pass through."""
+        from run_magi import _buffered_stderr_while
+
+        original = sys.stderr
+        with _buffered_stderr_while(active=False):
+            assert sys.stderr is original
+
+    def test_buffers_writes_when_active(self, capsys):
+        """When active=True, writes are buffered and replayed on context exit."""
+        from run_magi import _buffered_stderr_while
+
+        with _buffered_stderr_while(active=True):
+            print("line 1", file=sys.stderr)
+            print("line 2", file=sys.stderr)
+            # Nothing should have reached real stderr yet.
+            captured_mid = capsys.readouterr()
+            assert captured_mid.err == ""
+
+        # After context exit, buffered content is replayed.
+        captured_after = capsys.readouterr()
+        assert "line 1" in captured_after.err
+        assert "line 2" in captured_after.err
+
+    def test_restores_original_stderr_on_exit(self):
+        """The original sys.stderr reference must be restored after the context."""
+        from run_magi import _buffered_stderr_while
+
+        original = sys.stderr
+        with _buffered_stderr_while(active=True):
+            assert sys.stderr is not original
+        assert sys.stderr is original
+
+    def test_proxies_non_write_attributes(self):
+        """The shim must proxy encoding/isatty/fileno to the real stderr."""
+        from run_magi import _buffered_stderr_while
+
+        real_encoding = getattr(sys.stderr, "encoding", None)
+        with _buffered_stderr_while(active=True):
+            # isatty() and encoding come from the real stderr via __getattr__.
+            assert sys.stderr.encoding == real_encoding
+            # The shim is not the real stream.
+            assert sys.stderr is not sys.__stderr__
+
+    def test_restores_stderr_even_on_exception(self):
+        """Context manager must restore stderr when the body raises."""
+        from run_magi import _buffered_stderr_while
+
+        original = sys.stderr
+        with pytest.raises(RuntimeError):
+            with _buffered_stderr_while(active=True):
+                raise RuntimeError("boom")
+        assert sys.stderr is original
+
+    def test_binary_buffer_writes_are_intercepted(self, capsys):
+        """Writes through ``sys.stderr.buffer.write`` must also be buffered."""
+        from run_magi import _buffered_stderr_while
+
+        with _buffered_stderr_while(active=True):
+            shim_buffer = getattr(sys.stderr, "buffer", None)
+            if shim_buffer is None:
+                pytest.skip("pytest capture stream has no .buffer attribute")
+            shim_buffer.write(b"binary diag line\n")
+            captured_mid = capsys.readouterr()
+            assert captured_mid.err == ""
+
+        captured_after = capsys.readouterr()
+        assert "binary diag line" in captured_after.err
+
+    def test_shim_buffer_attribute_exists_when_real_has_buffer(self):
+        """The shim must expose a ``.buffer`` shim when the real stderr has one."""
+        from run_magi import _BinaryStderrBufferShim, _StderrBufferShim
+
+        class _FakeBinary:
+            def write(self, data: bytes) -> int:
+                return len(data)
+
+            def flush(self) -> None:
+                pass
+
+        class _FakeStderr:
+            def __init__(self):
+                self.buffer = _FakeBinary()
+
+            def write(self, data: str) -> int:
+                return len(data)
+
+            def flush(self) -> None:
+                pass
+
+        text_buffer: list[str] = []
+        shim = _StderrBufferShim(_FakeStderr(), text_buffer)
+        assert shim.buffer is not None
+        assert isinstance(shim.buffer, _BinaryStderrBufferShim)
+
+        shim.buffer.write(b"hello\n")
+        assert text_buffer == ["hello\n"]
+
+    def test_shim_buffer_none_when_real_has_no_buffer(self):
+        """When the real stderr lacks ``.buffer``, the shim's ``.buffer`` is None."""
+        import io
+
+        from run_magi import _StderrBufferShim
+
+        text_buffer: list[str] = []
+        shim = _StderrBufferShim(io.StringIO(), text_buffer)
+        assert shim.buffer is None
+
+    @pytest.mark.asyncio
+    async def test_orchestrator_buffers_stderr_during_gather(self, tmp_path, monkeypatch, capsys):
+        """End-to-end: writes from tracked tasks are buffered, then flushed."""
+        import run_magi
+
+        monkeypatch.setattr(run_magi, "StatusDisplay", lambda *a, **kw: _FakeDisplay())
+
+        async def mock_launch(agent_name, *args, **kwargs):
+            # Simulate a task that writes to stderr mid-run.
+            print(f"diag from {agent_name}", file=sys.stderr)
+            return _ok_result(agent_name)
+
+        monkeypatch.setattr(run_magi, "launch_agent", mock_launch)
+
+        await run_magi.run_orchestrator(
+            agents_dir=str(tmp_path),
+            prompt="test",
+            output_dir=str(tmp_path),
+            timeout=300,
+        )
+
+        captured = capsys.readouterr()
+        # Diagnostic writes must have been replayed after the display stopped.
+        assert "diag from melchior" in captured.err
+        assert "diag from balthasar" in captured.err
+        assert "diag from caspar" in captured.err

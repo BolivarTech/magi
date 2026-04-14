@@ -226,3 +226,37 @@ class TestAsciiFallback:
         d.update("m", "success")
         d.update("m", "failed")
         d.update("m", "timeout")
+
+    def test_ascii_timeout_glyph_is_not_a_letter(self):
+        """Regression: earlier versions used 'T' which collides visually
+        with the letter T in agent names and state words."""
+        from status_display import _ASCII_GLYPHS
+
+        timeout_glyph = _ASCII_GLYPHS.icons["timeout"]
+        assert not timeout_glyph.isalpha(), (
+            f"ASCII timeout glyph must not be a letter, got {timeout_glyph!r}"
+        )
+        assert timeout_glyph != "T"
+
+    def test_ascii_glyphs_are_all_ascii(self):
+        """All glyphs in the ASCII fallback set must be pure ASCII."""
+        from status_display import _ASCII_GLYPHS
+
+        assert all(ord(c) < 128 for c in _ASCII_GLYPHS.root)
+        assert all(ord(c) < 128 for c in _ASCII_GLYPHS.branch_mid)
+        assert all(ord(c) < 128 for c in _ASCII_GLYPHS.branch_end)
+        for frame in _ASCII_GLYPHS.spinner:
+            assert all(ord(c) < 128 for c in frame)
+        for icon in _ASCII_GLYPHS.icons.values():
+            assert all(ord(c) < 128 for c in icon)
+
+
+class TestWritePathInvariantTripwire:
+    """Guard against mixing plain-mode and ANSI refresh writes."""
+
+    def test_plain_write_asserts_when_ansi_mode_is_active(self):
+        """Calling _write_plain_event while use_ansi=True must raise AssertionError."""
+        buf = io.StringIO()
+        d = StatusDisplay(["m"], stream=buf, use_ansi=True)
+        with pytest.raises(AssertionError, match="mutually exclusive"):
+            d._write_plain_event("m")

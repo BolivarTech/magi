@@ -28,6 +28,7 @@ from __future__ import annotations
 import asyncio
 import sys
 import time
+from dataclasses import dataclass
 from typing import TextIO
 
 VALID_STATES: frozenset[str] = frozenset({"pending", "running", "success", "failed", "timeout"})
@@ -52,34 +53,55 @@ SPINNER_FRAMES: tuple[str, ...] = (
     "⠏",
 )
 
-# Glyph sets keyed by capability ("utf8" | "ascii"). Selected at init
-# time based on the output stream's encoding.
-_GLYPHS: dict[str, dict[str, object]] = {
-    "utf8": {
-        "root": "●",
-        "branch_mid": "├─",
-        "branch_end": "└─",
-        "spinner": SPINNER_FRAMES,
-        "icons": {
-            "pending": "○",
-            "success": "✓",
-            "failed": "✗",
-            "timeout": "⏱",
-        },
+
+@dataclass
+class GlyphSet:
+    """Glyph bundle for one rendering capability (UTF-8 or ASCII).
+
+    Attributes:
+        root: Character used for the root node of the tree.
+        branch_mid: Connector for non-last agent rows.
+        branch_end: Connector for the last agent row.
+        spinner: Ordered frames cycled while an agent is ``running``.
+        icons: Mapping from non-running state names to a single glyph.
+    """
+
+    root: str
+    branch_mid: str
+    branch_end: str
+    spinner: tuple[str, ...]
+    icons: dict[str, str]
+
+
+_UTF8_GLYPHS: GlyphSet = GlyphSet(
+    root="●",
+    branch_mid="├─",
+    branch_end="└─",
+    spinner=SPINNER_FRAMES,
+    icons={
+        "pending": "○",
+        "success": "✓",
+        "failed": "✗",
+        "timeout": "⏱",
     },
-    "ascii": {
-        "root": "*",
-        "branch_mid": "|-",
-        "branch_end": "\\-",
-        "spinner": ("|", "/", "-", "\\"),
-        "icons": {
-            "pending": ".",
-            "success": "v",
-            "failed": "x",
-            "timeout": "T",
-        },
+)
+
+_ASCII_GLYPHS: GlyphSet = GlyphSet(
+    root="*",
+    branch_mid="|-",
+    branch_end="\\-",
+    spinner=("|", "/", "-", "\\"),
+    icons={
+        "pending": ".",
+        "success": "v",
+        "failed": "x",
+        # ``~`` (tilde) is used instead of ``T`` to avoid visual collision
+        # with the letter T in agent names and state words. The glyph is
+        # cosmetic — the ``timeout`` state word in the same row carries
+        # the authoritative meaning.
+        "timeout": "~",
     },
-}
+)
 
 # Characters used to probe whether the stream encoding supports UTF-8.
 _UNICODE_PROBE: str = "●○✓✗⏱├─└─⠋"
@@ -170,13 +192,12 @@ class StatusDisplay:
         self._stopped: bool = False
         self._use_ansi: bool = self._detect_ansi_support() if use_ansi is None else use_ansi
 
-        glyph_key = "utf8" if _stream_supports_unicode(self._stream) else "ascii"
-        glyphs = _GLYPHS[glyph_key]
-        self._root_glyph: str = glyphs["root"]  # type: ignore[assignment]
-        self._branch_mid: str = glyphs["branch_mid"]  # type: ignore[assignment]
-        self._branch_end: str = glyphs["branch_end"]  # type: ignore[assignment]
-        self._spinner: tuple[str, ...] = glyphs["spinner"]  # type: ignore[assignment]
-        self._icons: dict[str, str] = glyphs["icons"]  # type: ignore[assignment]
+        glyphs: GlyphSet = _UTF8_GLYPHS if _stream_supports_unicode(self._stream) else _ASCII_GLYPHS
+        self._root_glyph: str = glyphs.root
+        self._branch_mid: str = glyphs.branch_mid
+        self._branch_end: str = glyphs.branch_end
+        self._spinner: tuple[str, ...] = glyphs.spinner
+        self._icons: dict[str, str] = glyphs.icons
 
     def _detect_ansi_support(self) -> bool:
         """Return True if the output stream likely supports ANSI escapes."""
@@ -241,7 +262,19 @@ class StatusDisplay:
             self._write_plain_event(agent)
 
     def _write_plain_event(self, agent: str) -> None:
-        """Write a single status line for ``agent`` in plain mode."""
+        """Write a single status line for ``agent`` in plain mode.
+
+        This method is the plain-mode write path. The ANSI refresh loop
+        writes through :meth:`_redraw` instead. The two paths are mutually
+        exclusive: an ``AssertionError`` is raised if this method is ever
+        reached while ANSI mode is active, so a future edit cannot
+        accidentally introduce a race between the two write paths within
+        a single asyncio tick.
+        """
+        assert not self._use_ansi, (
+            "_write_plain_event must never run while ANSI mode is active — "
+            "plain-mode and ANSI refresh writes are mutually exclusive"
+        )
         icon = self._icon_for(agent)
         state = self._states[agent]
         elapsed = self._elapsed_for(agent)

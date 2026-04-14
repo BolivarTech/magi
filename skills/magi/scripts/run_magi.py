@@ -19,11 +19,13 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import json
 import os
 import shutil
 import sys
 import tempfile
+from collections.abc import Iterator
 from typing import Any
 
 from parse_agent_output import parse_agent_output as parse_raw_output
@@ -237,6 +239,140 @@ async def launch_agent(
     return load_agent_output(parsed_file)
 
 
+class _BinaryStderrBufferShim:
+    """Binary write-buffering proxy for ``sys.stderr.buffer``.
+
+    Callers that do ``sys.stderr.buffer.write(b"...")`` would otherwise
+    bypass the text-mode :class:`_StderrBufferShim` and write directly
+    to the real stream, breaking the display-active-stderr-quiet
+    invariant. This shim catches binary writes, decodes them into the
+    shared text buffer (UTF-8 with replacement for any undecodable
+    bytes), and proxies every non-write attribute to the real binary
+    buffer so operations like ``fileno`` continue to work.
+    """
+
+    def __init__(self, text_buffer: list[str], real_binary: Any) -> None:
+        self._text_buffer = text_buffer
+        self._real = real_binary
+
+    def write(self, data: bytes) -> int:
+        self._text_buffer.append(data.decode("utf-8", errors="replace"))
+        return len(data)
+
+    def flush(self) -> None:  # buffered until context exit
+        return None
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._real, name)
+
+
+class _StderrBufferShim:
+    """Write-buffering proxy for :data:`sys.stderr`.
+
+    Forwards ``write`` / ``flush`` to an internal list and proxies every
+    other attribute (``encoding``, ``fileno``, ``isatty``, ...) to the
+    original stderr. Exposes a ``.buffer`` attribute backed by
+    :class:`_BinaryStderrBufferShim` so binary writes through
+    ``sys.stderr.buffer`` are also intercepted.
+
+    Used by :func:`_buffered_stderr_while` to structurally enforce the
+    display-active-stderr-quiet invariant.
+
+    **Uncovered paths (documented in ``CLAUDE.md`` Known limitations):**
+    - ``os.write(sys.stderr.fileno(), ...)`` bypasses Python-level proxies
+      and writes directly to fd 2.
+    - Hard process death (``SIGKILL``, segfault) skips the buffer flush
+      in ``_buffered_stderr_while``'s ``finally`` clause.
+    """
+
+    def __init__(self, real_stderr: Any, buffer: list[str]) -> None:
+        self._real = real_stderr
+        self._buffer = buffer
+        # Expose a binary shim when the real stream has a binary buffer.
+        # ``io.StringIO`` and pytest's capture streams may not, so fall
+        # back to proxying via ``__getattr__`` when absent.
+        real_binary = getattr(real_stderr, "buffer", None)
+        self.buffer: _BinaryStderrBufferShim | None = (
+            _BinaryStderrBufferShim(buffer, real_binary) if real_binary is not None else None
+        )
+
+    def write(self, data: str) -> int:
+        self._buffer.append(data)
+        return len(data)
+
+    def flush(self) -> None:
+        """Intentional no-op: content stays buffered until context exit.
+
+        The ``_buffered_stderr_while`` context manager replays the full
+        buffer to the real stderr on ``__exit__``; flushing the shim
+        mid-context would defeat the display-active invariant.
+        """
+        return None
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._real, name)
+
+
+def _safe_display_update(display: StatusDisplay | None, name: str, state: str) -> None:
+    """Update a status display, swallowing any exception on failure.
+
+    During shutdown paths (``KeyboardInterrupt``, ``CancelledError``, event
+    loop closing) the display's underlying stream may already be closed or
+    in a broken state. In that case a ``display.update`` call can raise,
+    and propagating that new exception would mask the original shutdown
+    signal. This helper isolates the display update so that the caller's
+    ``raise`` statement always preserves the real cause.
+
+    Args:
+        display: The status display, or ``None`` to skip the update.
+        name: Agent name to update.
+        state: New state for the agent row.
+    """
+    if display is None:
+        return
+    try:
+        display.update(name, state)
+    except Exception:  # noqa: BLE001 — best-effort update during shutdown
+        pass
+
+
+@contextlib.contextmanager
+def _buffered_stderr_while(active: bool) -> Iterator[None]:
+    """Buffer ``sys.stderr`` writes while ``active`` is True.
+
+    When the status display is rendering live to ``sys.stderr``, any
+    concurrent diagnostic write lands inside the in-place redraw region
+    and is wiped on the next refresh tick. This context manager
+    structurally enforces the display-active-stderr-quiet invariant:
+    while the body runs, ``sys.stderr`` is replaced with a write-only
+    buffer, and on exit the buffered content is replayed to the real
+    stderr after the display has been stopped.
+
+    When ``active`` is False, this is a no-op.
+
+    Args:
+        active: True when a live status display is running against
+            ``sys.stderr``.
+
+    Yields:
+        Control to the caller.
+    """
+    if not active:
+        yield
+        return
+
+    saved = sys.stderr
+    buffer: list[str] = []
+    sys.stderr = _StderrBufferShim(saved, buffer)
+    try:
+        yield
+    finally:
+        sys.stderr = saved
+        if buffer:
+            saved.write("".join(buffer))
+            saved.flush()
+
+
 async def run_orchestrator(
     agents_dir: str,
     prompt: str,
@@ -271,41 +407,68 @@ async def run_orchestrator(
     successful: list[dict[str, Any]] = []
     failed: list[str] = []
 
+    # Display lifecycle invariant (structurally enforced by the
+    # ``_buffered_stderr_while`` context manager below): while the status
+    # display is rendering, ``sys.stderr`` is replaced with a write-buffer, so
+    # any diagnostic print that would otherwise collide with the in-place
+    # redraw is deferred until after ``display.stop()`` returns.
+    #
+    # The display itself captures the *real* ``sys.stderr`` reference at
+    # construction time (below), so its own writes go straight to the
+    # terminal, not through the buffer.
     display: StatusDisplay | None = (
         StatusDisplay(list(AGENTS), stream=sys.stderr) if show_status else None
     )
 
     async def tracked_launch(name: str) -> dict[str, Any]:
-        if display is not None:
-            display.update(name, "running")
+        _safe_display_update(display, name, "running")
         try:
             result = await launch_agent(name, agents_dir, prompt, output_dir, timeout, model)
         except (asyncio.TimeoutError, TimeoutError):
-            if display is not None:
-                display.update(name, "timeout")
+            _safe_display_update(display, name, "timeout")
             raise
-        except Exception:
-            if display is not None:
-                display.update(name, "failed")
+        except BaseException:
+            # Catches asyncio.CancelledError (which is BaseException in 3.8+),
+            # generic Exception subclasses, KeyboardInterrupt, and SystemExit.
+            # We always re-raise — the display update is a best-effort side
+            # effect (see ``_safe_display_update``) so a stream already closed
+            # during shutdown can never mask the real shutdown signal.
+            _safe_display_update(display, name, "failed")
             raise
-        if display is not None:
-            display.update(name, "success")
+        _safe_display_update(display, name, "success")
         return result
 
     tasks = {name: tracked_launch(name) for name in AGENTS}
 
     if display is not None:
-        await display.start()
-    try:
-        results = await asyncio.gather(*tasks.values(), return_exceptions=True)
-    finally:
-        if display is not None:
-            await display.stop()
+        try:
+            await display.start()
+        except Exception as exc:
+            # A display-start failure (event-loop issue, terminal problem) must
+            # never block the actual analysis. Drop the display and fall
+            # through — tracked_launch closures will see ``display is None``.
+            print(
+                f"\u26a0 WARNING: status display failed to start ({exc}) "
+                f"\u2014 continuing without live status",
+                file=sys.stderr,
+            )
+            display = None
+
+    with _buffered_stderr_while(active=display is not None):
+        try:
+            results = await asyncio.gather(*tasks.values(), return_exceptions=True)
+        finally:
+            if display is not None:
+                await display.stop()
 
     for name, result in zip(tasks.keys(), results):
         if isinstance(result, BaseException):
-            if not isinstance(result, Exception):
-                raise result  # Re-raise KeyboardInterrupt, SystemExit, etc.
+            # CancelledError is BaseException in 3.8+ but we treat a cancelled
+            # child task as a normal agent failure — the orchestrator itself is
+            # not being cancelled, only one sub-agent was. Truly fatal signals
+            # (KeyboardInterrupt, SystemExit) still propagate.
+            if not isinstance(result, (Exception, asyncio.CancelledError)):
+                raise result
             print(
                 f"\u26a0 WARNING: Agent '{name}' failed ({result}) \u2014 excluded from synthesis",
                 file=sys.stderr,
