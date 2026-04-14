@@ -775,6 +775,14 @@ class TestFormatBanner:
         widths = {len(line) for line in lines}
         assert len(widths) == 1, f"Inconsistent widths: {widths}"
 
+    def test_banner_width_is_52(self):
+        """Banner must be exactly 52 characters wide on every row."""
+        agents = [_valid_agent(n) for n in ["melchior", "balthasar", "caspar"]]
+        consensus = determine_consensus(agents)
+        banner = format_banner(agents, consensus)
+        for line in banner.split("\n"):
+            assert len(line) == 52
+
     def test_banner_contains_agent_verdicts(self):
         """Banner should display each agent's name and verdict."""
         agents = [_valid_agent(n) for n in ["melchior", "balthasar", "caspar"]]
@@ -782,6 +790,48 @@ class TestFormatBanner:
         banner = format_banner(agents, consensus)
         assert "Melchior" in banner
         assert "APPROVE" in banner
+
+    def test_banner_verdicts_aligned_to_same_column(self):
+        """Each agent's verdict word must start at the same column."""
+        agents = [_valid_agent(n) for n in ["melchior", "balthasar", "caspar"]]
+        # Give each a different verdict to exercise each word length.
+        agents[0]["verdict"] = "approve"
+        agents[1]["verdict"] = "conditional"
+        agents[2]["verdict"] = "reject"
+        consensus = determine_consensus(agents)
+        banner = format_banner(agents, consensus)
+        lines = banner.split("\n")
+        # Agent rows are lines 3, 4, 5 (0-indexed) of the banner.
+        columns = [
+            lines[3].index("APPROVE"),
+            lines[4].index("CONDITIONAL"),
+            lines[5].index("REJECT"),
+        ]
+        assert len(set(columns)) == 1, f"Verdicts not column-aligned: {columns}"
+
+    def test_banner_uses_integer_percentage(self):
+        """Confidence must render as integer percentage, not float."""
+        agents = [_valid_agent(n) for n in ["melchior", "balthasar", "caspar"]]
+        for agent in agents:
+            agent["confidence"] = 0.9
+        consensus = determine_consensus(agents)
+        banner = format_banner(agents, consensus)
+        assert "(90%)" in banner
+        assert "(0.9)" not in banner
+
+    def test_banner_title_line_present(self):
+        """Banner must contain the canonical title line."""
+        agents = [_valid_agent(n) for n in ["melchior", "balthasar", "caspar"]]
+        consensus = determine_consensus(agents)
+        banner = format_banner(agents, consensus)
+        assert "MAGI SYSTEM -- VERDICT" in banner
+
+    def test_banner_consensus_line_present(self):
+        """Banner must contain the CONSENSUS row."""
+        agents = [_valid_agent(n) for n in ["melchior", "balthasar", "caspar"]]
+        consensus = determine_consensus(agents)
+        banner = format_banner(agents, consensus)
+        assert "CONSENSUS:" in banner
 
 
 # ---------------------------------------------------------------------------
@@ -804,6 +854,73 @@ class TestFormatReport:
         consensus = determine_consensus(agents)
         report = format_report(agents, consensus)
         assert "melchior, caspar" in report
+
+    def test_finding_titles_aligned_to_column_22(self):
+        """All finding rows must place the title at the same column (1-indexed 22)."""
+        agents = [_valid_agent(n) for n in ["melchior", "balthasar", "caspar"]]
+        agents[0]["findings"] = [
+            {"severity": "critical", "title": "Crit item", "detail": "x"},
+            {"severity": "warning", "title": "Warn item", "detail": "y"},
+            {"severity": "info", "title": "Info item", "detail": "z"},
+        ]
+        consensus = determine_consensus(agents)
+        report = format_report(agents, consensus)
+        finding_rows = [
+            line for line in report.split("\n") if line.startswith(("[!!!]", "[!!]", "[i]"))
+        ]
+        assert len(finding_rows) == 3
+        # Title starts at 1-indexed column 22 → 0-indexed position 21.
+        for row in finding_rows:
+            assert row[20] == " ", f"Column 21 must be a space separator: {row!r}"
+            assert row[21] != " ", f"Column 22 must start the title: {row!r}"
+
+    def test_finding_rows_use_bold_severity_label(self):
+        agents = [_valid_agent(n) for n in ["melchior", "balthasar", "caspar"]]
+        agents[0]["findings"] = [
+            {"severity": "critical", "title": "Crit", "detail": "x"},
+            {"severity": "warning", "title": "Warn", "detail": "y"},
+            {"severity": "info", "title": "Info", "detail": "z"},
+        ]
+        consensus = determine_consensus(agents)
+        report = format_report(agents, consensus)
+        assert "**[CRITICAL]**" in report
+        assert "**[WARNING]**" in report
+        assert "**[INFO]**" in report
+
+    def test_report_has_no_consensus_summary_section(self):
+        """The Consensus Summary section was removed from the canonical format."""
+        agents = [_valid_agent(n) for n in ["melchior", "balthasar", "caspar"]]
+        consensus = determine_consensus(agents)
+        report = format_report(agents, consensus)
+        assert "## Consensus Summary" not in report
+
+    def test_report_sections_present_when_applicable(self):
+        agents = [_valid_agent(n) for n in ["melchior", "balthasar", "caspar"]]
+        agents[0]["findings"] = [{"severity": "critical", "title": "X", "detail": "D"}]
+        agents[2]["verdict"] = "reject"
+        consensus = determine_consensus(agents)
+        report = format_report(agents, consensus)
+        assert "## Key Findings" in report
+        assert "## Dissenting Opinion" in report
+        assert "## Recommended Actions" in report
+
+    def test_dissent_shows_summary_only(self):
+        """Dissenting Opinion section prints the one-line summary, not reasoning."""
+        agents = [_valid_agent(n) for n in ["melchior", "balthasar", "caspar"]]
+        agents[2]["verdict"] = "reject"
+        agents[2]["summary"] = "Unsafe to merge."
+        agents[2]["reasoning"] = "Very long reasoning text that must not appear."
+        consensus = determine_consensus(agents)
+        report = format_report(agents, consensus)
+        assert "Unsafe to merge." in report
+        assert "Very long reasoning text" not in report
+
+    def test_recommended_actions_section_always_present(self):
+        agents = [_valid_agent(n) for n in ["melchior", "balthasar", "caspar"]]
+        consensus = determine_consensus(agents)
+        report = format_report(agents, consensus)
+        assert "## Recommended Actions" in report
+        assert "- **Melchior** (Scientist):" in report
 
 
 # ---------------------------------------------------------------------------

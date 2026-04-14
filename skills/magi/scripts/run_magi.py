@@ -27,6 +27,7 @@ import tempfile
 from typing import Any
 
 from parse_agent_output import parse_agent_output as parse_raw_output
+from status_display import StatusDisplay
 from synthesize import (
     determine_consensus,
     format_report,
@@ -75,6 +76,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=MAX_HISTORY_RUNS,
         help=f"Number of recent temp runs to keep (default: {MAX_HISTORY_RUNS})",
     )
+    parser.add_argument(
+        "--no-status",
+        dest="show_status",
+        action="store_false",
+        help="Disable the live status tree display",
+    )
+    parser.set_defaults(show_status=True)
     return parser.parse_args(argv)
 
 
@@ -235,6 +243,8 @@ async def run_orchestrator(
     output_dir: str,
     timeout: int,
     model: str = "opus",
+    *,
+    show_status: bool = True,
 ) -> dict[str, Any]:
     """Run all three agents concurrently and synthesize results.
 
@@ -247,6 +257,9 @@ async def run_orchestrator(
         output_dir: Directory for output files.
         timeout: Per-agent timeout in seconds.
         model: Model short name ('opus', 'sonnet', 'haiku').
+        show_status: Render a live status tree while agents run. When the
+            stream is not a TTY, plain one-line-per-event output is emitted
+            instead.
 
     Returns:
         Report dict with 'agents', 'consensus', and optionally
@@ -258,11 +271,36 @@ async def run_orchestrator(
     successful: list[dict[str, Any]] = []
     failed: list[str] = []
 
-    tasks = {
-        name: launch_agent(name, agents_dir, prompt, output_dir, timeout, model) for name in AGENTS
-    }
+    display: StatusDisplay | None = (
+        StatusDisplay(list(AGENTS), stream=sys.stderr) if show_status else None
+    )
 
-    results = await asyncio.gather(*tasks.values(), return_exceptions=True)
+    async def tracked_launch(name: str) -> dict[str, Any]:
+        if display is not None:
+            display.update(name, "running")
+        try:
+            result = await launch_agent(name, agents_dir, prompt, output_dir, timeout, model)
+        except (asyncio.TimeoutError, TimeoutError):
+            if display is not None:
+                display.update(name, "timeout")
+            raise
+        except Exception:
+            if display is not None:
+                display.update(name, "failed")
+            raise
+        if display is not None:
+            display.update(name, "success")
+        return result
+
+    tasks = {name: tracked_launch(name) for name in AGENTS}
+
+    if display is not None:
+        await display.start()
+    try:
+        results = await asyncio.gather(*tasks.values(), return_exceptions=True)
+    finally:
+        if display is not None:
+            await display.stop()
 
     for name, result in zip(tasks.keys(), results):
         if isinstance(result, BaseException):
@@ -350,7 +388,14 @@ def main() -> None:
 
     try:
         report = asyncio.run(
-            run_orchestrator(agents_dir, prompt, output_dir, args.timeout, args.model)
+            run_orchestrator(
+                agents_dir,
+                prompt,
+                output_dir,
+                args.timeout,
+                args.model,
+                show_status=args.show_status,
+            )
         )
     except Exception:
         if is_temp_dir:

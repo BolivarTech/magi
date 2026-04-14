@@ -128,29 +128,82 @@ The synthesis uses weight-based scoring with `approve=1, conditional=0.5, reject
 
 ### Step 5: Present the results
 
-Format the output as:
+The output format is **strictly enforced** and identical across parallel mode,
+native sub-agent mode, and fallback mode. The Python orchestrator produces this
+format automatically via `reporting.format_report()`; in fallback and native
+sub-agent modes, you MUST reproduce it exactly.
+
+#### Canonical output template
 
 ```
 +==================================================+
-|          MAGI SYSTEM -- VERDICT                   |
+|          MAGI SYSTEM -- VERDICT                  |
 +==================================================+
-|  Melchior (Scientist):    [VERDICT] ([CONF]%)      |
-|  Balthasar (Pragmatist):  [VERDICT] ([CONF]%)      |
-|  Caspar (Critic):         [VERDICT] ([CONF]%)      |
+|  Melchior (Scientist):   APPROVE (90%)           |
+|  Balthasar (Pragmatist): CONDITIONAL (85%)       |
+|  Caspar (Critic):        REJECT (78%)            |
 +==================================================+
-|  CONSENSUS: [FINAL VERDICT]                       |
+|  CONSENSUS: GO WITH CAVEATS                      |
 +==================================================+
+
+## Key Findings
+[!!!] **[CRITICAL]** SQL injection in query builder _(from melchior, caspar)_
+[!!]  **[WARNING]**  Missing retry logic for API calls _(from balthasar)_
+[i]   **[INFO]**     Consider adding request timeout _(from caspar)_
+
+## Dissenting Opinion
+**Caspar (Critic)**: Risk of data loss outweighs shipping speed...
+
+## Conditions for Approval
+- **Balthasar**: Add integration tests before merge
+
+## Recommended Actions
+- **Melchior** (Scientist): Fix SQL injection, add parameterized queries
+- **Balthasar** (Pragmatist): Ship after adding integration tests
+- **Caspar** (Critic): Rework query layer before proceeding
 ```
 
-Where `[CONF]` is the confidence as an integer percentage (e.g., `88%`, not `0.88`).
-This matches the format used by `reporting.py` (`:.0%`).
+#### Format rules (normative)
 
-Then present:
-1. **Consensus summary** — 2-3 sentences synthesizing the majority position.
-2. **Key findings** — Merged and deduplicated from all three agents, sorted by severity.
-3. **Dissent** (if any) — The minority agent's core argument, fairly represented.
-4. **Conditions** (if any) — What must be addressed before proceeding.
-5. **Recommended action** — A single, actionable next step.
+**Banner:**
+- Total width: 52 columns. Border lines: `+` + 50 `=` + `+`.
+- Title centered: `|` + `"MAGI SYSTEM -- VERDICT".center(50)` + `|`.
+- Agent rows: `|  <label> <VERDICT> (<conf>%)` padded with spaces to 50 inner chars, then `|`.
+- Agent labels pad to the longest label so all verdict words start at the same column.
+  With the three standard agents, the longest label is `Balthasar (Pragmatist):` (23 chars),
+  so padding produces the column alignment shown above.
+- `<conf>` is an integer percentage (e.g., `85%`, never `0.85`).
+- `<VERDICT>` is uppercase: `APPROVE`, `CONDITIONAL`, or `REJECT`.
+- Consensus row: `|  CONSENSUS: <label>` ljust 50, then `|`.
+
+**Key Findings** (section omitted if there are no findings):
+- Header: `## Key Findings`
+- One line per deduplicated finding. No blank lines between findings. No indented detail line.
+- Fixed-width columns:
+  - Marker field, width 5, left-justified: `[!!!]`, `[!!] `, `[i]  ` (space-padded).
+  - One space separator.
+  - Severity label field, width 14, left-justified: `**[CRITICAL]**`, `**[WARNING]** `, `**[INFO]**    `.
+  - One space separator.
+  - Title starts at column 22.
+  - Suffix: ` _(from <agent1>, <agent2>)_` listing every reporting agent.
+- Findings are sorted by severity (critical → warning → info).
+
+**Dissenting Opinion** (section omitted if no dissent):
+- Header: `## Dissenting Opinion`
+- One line per dissenting agent: `**Name (Title)**: <summary>`
+- Summary only — do **not** include the full reasoning.
+
+**Conditions for Approval** (section omitted if no conditionals):
+- Header: `## Conditions for Approval`
+- Bullet list: `- **Name**: <condition>`  (name only, no role in parentheses).
+
+**Recommended Actions** (always present):
+- Header: `## Recommended Actions`
+- Bullet list: `- **Name** (Title): <recommendation>` — one per agent, in stable order.
+
+**Consensus Summary is NOT a section.** Do not emit `## Consensus Summary` — the
+banner already encodes the verdict and the key findings/dissent sections carry the
+substantive content.
 
 ## Fallback (no sub-agents available)
 
@@ -181,7 +234,11 @@ Example structure:
     {balthasar JSON}
 
     ## Synthesis
-    [Apply voting rules, present banner and report]
+    [Apply voting rules, then emit the canonical banner + report from Step 5.
+    The banner, Key Findings, Dissenting Opinion, Conditions for Approval,
+    and Recommended Actions sections MUST follow the format rules in Step 5
+    exactly — same column alignment, same section order, same widths.
+    Do not add a Consensus Summary section.]
 
 ## Notes
 

@@ -3,6 +3,7 @@
 # Date: 2026-04-01
 """Tests for run_magi.py — async Python orchestrator."""
 
+import asyncio
 import os
 from unittest.mock import patch
 
@@ -64,6 +65,18 @@ class TestParseArgs:
 
         with pytest.raises(SystemExit):
             parse_args(["code-review", "input.py", "--model", "gpt4"])
+
+    def test_default_show_status_true(self):
+        from run_magi import parse_args
+
+        args = parse_args(["code-review", "input.py"])
+        assert args.show_status is True
+
+    def test_no_status_flag_sets_false(self):
+        from run_magi import parse_args
+
+        args = parse_args(["code-review", "input.py", "--no-status"])
+        assert args.show_status is False
 
 
 class TestCreateOutputDir:
@@ -294,3 +307,179 @@ class TestLaunchAgentValidation:
                 timeout=300,
                 model="gpt4",
             )
+
+
+class _FakeDisplay:
+    """Test double that records update() calls without writing to any stream."""
+
+    def __init__(self, *args, **kwargs):
+        self.calls: list[tuple[str, str]] = []
+
+    def update(self, agent: str, state: str) -> None:
+        self.calls.append((agent, state))
+
+    async def start(self) -> None:
+        pass
+
+    async def stop(self) -> None:
+        pass
+
+
+def _ok_result(name: str) -> dict:
+    return {
+        "agent": name,
+        "verdict": "approve",
+        "confidence": 0.9,
+        "summary": f"{name} OK",
+        "reasoning": "Fine",
+        "findings": [],
+        "recommendation": "Merge",
+    }
+
+
+class TestTrackedLaunchStatusUpdates:
+    """Verify tracked_launch wiring between run_orchestrator and StatusDisplay."""
+
+    @pytest.mark.asyncio
+    async def test_success_path_emits_running_then_success(self, tmp_path, monkeypatch):
+        import run_magi
+
+        instances: list[_FakeDisplay] = []
+
+        def factory(*args, **kwargs):
+            inst = _FakeDisplay()
+            instances.append(inst)
+            return inst
+
+        monkeypatch.setattr(run_magi, "StatusDisplay", factory)
+
+        async def mock_launch(agent_name, *args, **kwargs):
+            return _ok_result(agent_name)
+
+        monkeypatch.setattr(run_magi, "launch_agent", mock_launch)
+
+        await run_magi.run_orchestrator(
+            agents_dir=str(tmp_path),
+            prompt="test",
+            output_dir=str(tmp_path),
+            timeout=300,
+        )
+
+        assert len(instances) == 1
+        calls = instances[0].calls
+        for name in ("melchior", "balthasar", "caspar"):
+            assert (name, "running") in calls
+            assert (name, "success") in calls
+            assert (name, "failed") not in calls
+            assert (name, "timeout") not in calls
+
+    @pytest.mark.asyncio
+    async def test_builtin_timeout_error_emits_timeout(self, tmp_path, monkeypatch):
+        import run_magi
+
+        instances: list[_FakeDisplay] = []
+        monkeypatch.setattr(
+            run_magi,
+            "StatusDisplay",
+            lambda *a, **kw: instances.append(_FakeDisplay()) or instances[-1],
+        )
+
+        async def mock_launch(agent_name, *args, **kwargs):
+            if agent_name == "caspar":
+                raise TimeoutError("builtin timeout")
+            return _ok_result(agent_name)
+
+        monkeypatch.setattr(run_magi, "launch_agent", mock_launch)
+
+        await run_magi.run_orchestrator(
+            agents_dir=str(tmp_path),
+            prompt="test",
+            output_dir=str(tmp_path),
+            timeout=300,
+        )
+
+        assert ("caspar", "timeout") in instances[0].calls
+        assert ("caspar", "failed") not in instances[0].calls
+
+    @pytest.mark.asyncio
+    async def test_asyncio_timeout_error_emits_timeout(self, tmp_path, monkeypatch):
+        """Python 3.9/3.10: asyncio.TimeoutError must be treated as timeout too."""
+        import run_magi
+
+        instances: list[_FakeDisplay] = []
+        monkeypatch.setattr(
+            run_magi,
+            "StatusDisplay",
+            lambda *a, **kw: instances.append(_FakeDisplay()) or instances[-1],
+        )
+
+        async def mock_launch(agent_name, *args, **kwargs):
+            if agent_name == "caspar":
+                raise asyncio.TimeoutError("asyncio timeout")
+            return _ok_result(agent_name)
+
+        monkeypatch.setattr(run_magi, "launch_agent", mock_launch)
+
+        await run_magi.run_orchestrator(
+            agents_dir=str(tmp_path),
+            prompt="test",
+            output_dir=str(tmp_path),
+            timeout=300,
+        )
+
+        assert ("caspar", "timeout") in instances[0].calls
+        assert ("caspar", "failed") not in instances[0].calls
+
+    @pytest.mark.asyncio
+    async def test_generic_exception_emits_failed(self, tmp_path, monkeypatch):
+        import run_magi
+
+        instances: list[_FakeDisplay] = []
+        monkeypatch.setattr(
+            run_magi,
+            "StatusDisplay",
+            lambda *a, **kw: instances.append(_FakeDisplay()) or instances[-1],
+        )
+
+        async def mock_launch(agent_name, *args, **kwargs):
+            if agent_name == "caspar":
+                raise RuntimeError("boom")
+            return _ok_result(agent_name)
+
+        monkeypatch.setattr(run_magi, "launch_agent", mock_launch)
+
+        await run_magi.run_orchestrator(
+            agents_dir=str(tmp_path),
+            prompt="test",
+            output_dir=str(tmp_path),
+            timeout=300,
+        )
+
+        assert ("caspar", "failed") in instances[0].calls
+        assert ("caspar", "timeout") not in instances[0].calls
+
+    @pytest.mark.asyncio
+    async def test_show_status_false_skips_display(self, tmp_path, monkeypatch):
+        import run_magi
+
+        created: list[int] = []
+        monkeypatch.setattr(
+            run_magi,
+            "StatusDisplay",
+            lambda *a, **kw: created.append(1) or _FakeDisplay(),
+        )
+
+        async def mock_launch(agent_name, *args, **kwargs):
+            return _ok_result(agent_name)
+
+        monkeypatch.setattr(run_magi, "launch_agent", mock_launch)
+
+        await run_magi.run_orchestrator(
+            agents_dir=str(tmp_path),
+            prompt="test",
+            output_dir=str(tmp_path),
+            timeout=300,
+            show_status=False,
+        )
+
+        assert created == []

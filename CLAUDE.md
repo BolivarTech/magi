@@ -24,7 +24,7 @@ make format        # ruff format --check
 make typecheck     # mypy
 
 # Run analysis (parallel mode, requires claude CLI)
-python skills/magi/scripts/run_magi.py <code-review|design|analysis> <file_or_text> [--model opus] [--timeout 900] [--output-dir <dir>] [--keep-runs 5]
+python skills/magi/scripts/run_magi.py <code-review|design|analysis> <file_or_text> [--model opus] [--timeout 900] [--output-dir <dir>] [--keep-runs 5] [--no-status]
 
 # Run synthesis standalone
 python skills/magi/scripts/synthesize.py agent1.json agent2.json [agent3.json] --output report.json
@@ -47,7 +47,8 @@ skills/magi/
     caspar.md                 — System prompt: Critic lens (risk, adversarial)
   scripts/
     __init__.py               — Python package marker
-    run_magi.py               — Async orchestrator with --model flag
+    run_magi.py               — Async orchestrator with --model / --no-status flags
+    status_display.py         — Live tree renderer (ANSI + plain, UTF-8 + ASCII fallback)
     synthesize.py             — Facade: re-exports from validate, consensus, reporting
     validate.py               — ValidationError + load_agent_output schema validation
     consensus.py              — VERDICT_WEIGHT + determine_consensus (weight-based scoring)
@@ -56,7 +57,8 @@ skills/magi/
 tests/
   test_synthesize.py          — 77 tests: validation, consensus, findings, formatting
   test_parse_agent_output.py  — 19 tests: fence stripping, text extraction, pipeline
-  test_run_magi.py            — 16 tests: arg parsing, model flag, orchestration, degraded mode
+  test_run_magi.py            — 24 tests: arg parsing, --no-status, orchestration, degraded mode, tracked_launch states
+  test_status_display.py      — 30 tests: init, update, render, ASCII fallback, async lifecycle, stop idempotency
 pyproject.toml                — Python >= 3.9, dual license, dev deps, tool config
 conftest.py                   — tdd-guard pytest plugin + sys.path setup for test imports
 Makefile                      — verify, test, lint, format, typecheck targets
@@ -142,6 +144,17 @@ Async Python orchestrator using `asyncio.create_subprocess_exec`:
 - If < 2 agents succeed: raises `RuntimeError`.
 - Cross-platform temp directory via `tempfile.mkdtemp(prefix="magi-run-")`, cleaned up on failure.
 - `--keep-runs N` (default 5): LRU cleanup of old `magi-run-*` temp directories before each run. Sorted by `st_mtime`, resolved via `realpath` with temp-root validation to prevent symlink traversal. Disabled with `--keep-runs 0`.
+- Live status tree (`StatusDisplay`) wired around `asyncio.gather` via a `tracked_launch` wrapper that maps `launch_agent` exit paths to `running → success/failed/timeout` events. Disabled with `--no-status`. Catches both `asyncio.TimeoutError` and built-in `TimeoutError` for Python 3.9/3.10 compatibility.
+
+### Status display (status_display.py)
+
+Live tree-style progress renderer. Stdlib-only, no external dependencies:
+
+- **ANSI mode** (TTY): in-place redraw every 200ms using `\033[NA` cursor movement and per-line `\033[2K` erase. Background async task drives the spinner. On Windows, `ENABLE_VIRTUAL_TERMINAL_PROCESSING` is enabled via `ctypes` with narrow exception handling.
+- **Plain mode** (pipe/captured stream): one line per `update()` call, no escape codes.
+- **Glyph fallback**: probes `stream.encoding` against `"●○✓✗⏱├─└─⠋"`; falls back to an ASCII-only glyph set (`* . v x T |- \-`) on cp1252 and other non-UTF-8 encodings. Streams without bound encoding (e.g., `io.StringIO`) are treated as unicode-capable.
+- **Invariant**: plain-mode and ANSI refresh writes are mutually exclusive — `_use_ansi` selects exactly one write path. Never mix both on the same stream.
+- `stop()` is idempotent and safe to call without a prior `start()`.
 
 ### Parser (parse_agent_output.py)
 
