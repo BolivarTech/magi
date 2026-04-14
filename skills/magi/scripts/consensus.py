@@ -55,18 +55,17 @@ def _dedup_key(title: str) -> str:
 def _classify_consensus(
     score: float,
     has_conditions: bool,
-    effective_verdicts: list[str],
-    majority_verdict: str,
-    num_agents: int,
+    split: tuple[int, int],
 ) -> tuple[str, str]:
     """Map weighted score to a consensus label and short verdict.
 
     Args:
         score: Normalized weighted score in [-1.0, 1.0].
         has_conditions: Whether any agent voted 'conditional'.
-        effective_verdicts: Verdicts with 'conditional' mapped to 'approve'.
-        majority_verdict: The most common effective verdict.
-        num_agents: Total number of agents.
+        split: ``(majority_count, minority_count)`` over the effective
+            verdicts, where ``conditional`` has already been merged into
+            ``approve``. Both counts are non-negative and their sum equals
+            the total number of agents.
 
     Returns:
         Tuple of (consensus label, short verdict).
@@ -75,17 +74,18 @@ def _classify_consensus(
         return "STRONG GO", "approve"
     if abs(score - (-1.0)) < _EPSILON:
         return "STRONG NO-GO", "reject"
-    if score > _EPSILON and has_conditions:
-        return "GO WITH CAVEATS", "conditional"
 
-    majority_count = sum(1 for v in effective_verdicts if v == majority_verdict)
-    minority_count = num_agents - majority_count
+    is_positive = score > _EPSILON
+    is_tie = abs(score) < _EPSILON
+    split_label = f"({split[0]}-{split[1]})"
 
-    if score > _EPSILON:
-        return f"GO ({majority_count}-{minority_count})", "approve"
-    if abs(score) < _EPSILON:
+    if is_positive and has_conditions:
+        return f"GO WITH CAVEATS {split_label}", "conditional"
+    if is_positive:
+        return f"GO {split_label}", "approve"
+    if is_tie:
         return "HOLD -- TIE", "reject"
-    return f"HOLD ({majority_count}-{minority_count})", "reject"
+    return f"HOLD {split_label}", "reject"
 
 
 def _deduplicate_findings(agents: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -181,10 +181,10 @@ def determine_consensus(agents: list[dict[str, Any]]) -> dict[str, Any]:
     # tie-breaking when counts are equal (e.g., 1 approve + 1 reject).
     verdict_counts = Counter(effective_verdicts)
     majority_verdict = sorted(verdict_counts.keys(), key=lambda v: (-verdict_counts[v], v))[0]
+    majority_count = verdict_counts[majority_verdict]
+    split = (majority_count, num_agents - majority_count)
 
-    consensus, consensus_short = _classify_consensus(
-        score, has_conditions, effective_verdicts, majority_verdict, num_agents
-    )
+    consensus, consensus_short = _classify_consensus(score, has_conditions, split)
 
     majority_agents = []
     dissent_agents = []

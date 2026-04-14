@@ -413,14 +413,14 @@ class TestDetermineConsensus:
         assert result["dissent"][0]["agent"] == "caspar"
 
     def test_conditional_approve_reject_is_go_with_caveats(self):
-        """Conditional + approve + reject produces GO WITH CAVEATS."""
+        """Conditional + approve + reject produces GO WITH CAVEATS (2-1)."""
         agents = [
             _valid_agent("melchior", verdict="conditional", confidence=0.8),
             _valid_agent("balthasar", verdict="approve", confidence=0.9),
             _valid_agent("caspar", verdict="reject", confidence=0.7),
         ]
         result = determine_consensus(agents)
-        assert result["consensus"] == "GO WITH CAVEATS"
+        assert result["consensus"] == "GO WITH CAVEATS (2-1)"
         assert result["consensus_verdict"] == "conditional"
         assert len(result["conditions"]) == 1
         assert result["conditions"][0]["agent"] == "melchior"
@@ -515,7 +515,8 @@ class TestDetermineConsensus:
         """Three conditional votes should NOT be STRONG GO (bug W1).
 
         With weight-based scoring: score = (0.5+0.5+0.5)/3 = 0.5.
-        Has conditions, score > 0 -> GO WITH CAVEATS.
+        Has conditions, score > 0 -> GO WITH CAVEATS (3-0): no dissent,
+        just unanimous caveats.
         """
         agents = [
             _valid_agent("melchior", verdict="conditional", confidence=0.8),
@@ -523,7 +524,7 @@ class TestDetermineConsensus:
             _valid_agent("caspar", verdict="conditional", confidence=0.9),
         ]
         result = determine_consensus(agents)
-        assert result["consensus"] == "GO WITH CAVEATS"
+        assert result["consensus"] == "GO WITH CAVEATS (3-0)"
         assert result["consensus_verdict"] == "conditional"
         assert len(result["conditions"]) == 3
 
@@ -537,23 +538,49 @@ class TestDetermineConsensus:
         assert result["consensus"] == "HOLD -- TIE"
 
     def test_two_agent_approve_conditional_is_caveats(self):
-        """1 approve + 1 conditional: score = (1+0.5)/2 = 0.75 -> GO WITH CAVEATS."""
+        """1 approve + 1 conditional: score = 0.75 -> GO WITH CAVEATS (2-0)."""
         agents = [
             _valid_agent("melchior", verdict="approve", confidence=0.9),
             _valid_agent("balthasar", verdict="conditional", confidence=0.8),
         ]
         result = determine_consensus(agents)
-        assert result["consensus"] == "GO WITH CAVEATS"
+        assert result["consensus"] == "GO WITH CAVEATS (2-0)"
 
     def test_two_agent_both_conditional(self):
-        """2x conditional: score = (0.5+0.5)/2 = 0.5 -> GO WITH CAVEATS."""
+        """2x conditional: score = (0.5+0.5)/2 = 0.5 -> GO WITH CAVEATS (2-0)."""
         agents = [
             _valid_agent("melchior", verdict="conditional", confidence=0.8),
             _valid_agent("balthasar", verdict="conditional", confidence=0.85),
         ]
         result = determine_consensus(agents)
-        assert result["consensus"] == "GO WITH CAVEATS"
+        assert result["consensus"] == "GO WITH CAVEATS (2-0)"
         assert len(result["conditions"]) == 2
+
+    def test_two_approve_one_conditional_is_caveats_3_0(self):
+        """B-1: 2 approve + 1 conditional -> GO WITH CAVEATS (3-0).
+
+        All three agents effectively vote ``approve``; the caveat comes
+        from the single conditional. The label must surface 3-0 so the
+        reader distinguishes this from a split mix like (2-1).
+        """
+        agents = [
+            _valid_agent("melchior", verdict="approve", confidence=0.9),
+            _valid_agent("balthasar", verdict="approve", confidence=0.85),
+            _valid_agent("caspar", verdict="conditional", confidence=0.8),
+        ]
+        result = determine_consensus(agents)
+        assert result["consensus"] == "GO WITH CAVEATS (3-0)"
+        assert result["consensus_verdict"] == "conditional"
+
+    def test_one_approve_two_conditional_is_caveats_3_0(self):
+        """B-1: 1 approve + 2 conditional -> GO WITH CAVEATS (3-0)."""
+        agents = [
+            _valid_agent("melchior", verdict="approve", confidence=0.9),
+            _valid_agent("balthasar", verdict="conditional", confidence=0.85),
+            _valid_agent("caspar", verdict="conditional", confidence=0.8),
+        ]
+        result = determine_consensus(agents)
+        assert result["consensus"] == "GO WITH CAVEATS (3-0)"
 
     def test_two_agent_both_reject(self):
         """2x reject: score = (-1-1)/2 = -1.0 -> STRONG NO-GO."""

@@ -121,10 +121,15 @@ The synthesis uses weight-based scoring with `approve=1, conditional=0.5, reject
 |-------|-----------|-----------|
 | 1.0 | unanimous approve | **STRONG GO** |
 | -1.0 | unanimous reject | **STRONG NO-GO** |
-| > 0 | has conditionals | **GO WITH CAVEATS** |
-| > 0 | no conditionals | **GO (2-1)** |
+| > 0 | has conditionals | **GO WITH CAVEATS (N-M)** |
+| > 0 | no conditionals | **GO (N-M)** |
 | 0 | — | **HOLD -- TIE** |
-| < 0 | — | **HOLD (2-1)** |
+| < 0 | — | **HOLD (N-M)** |
+
+The `(N-M)` suffix reflects the effective majority-minority split: approves
+and conditionals count together on the "go" side, rejects on the "no" side.
+A unanimous caveats result renders as `GO WITH CAVEATS (3-0)` and a
+caveats-with-dissent as `GO WITH CAVEATS (2-1)`.
 
 ### Step 5: Present the results
 
@@ -143,7 +148,7 @@ sub-agent modes, you MUST reproduce it exactly.
 |  Balthasar (Pragmatist): CONDITIONAL (85%)       |
 |  Caspar (Critic):        REJECT (78%)            |
 +==================================================+
-|  CONSENSUS: GO WITH CAVEATS                      |
+|  CONSENSUS: GO WITH CAVEATS (2-1)                |
 +==================================================+
 
 ## Key Findings
