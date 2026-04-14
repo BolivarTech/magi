@@ -741,6 +741,108 @@ class TestFindingsDedup:
         sql_findings = [f for f in result["findings"] if "sql" in f["title"].lower()]
         assert len(sql_findings) == 1
 
+    def test_dedup_merges_nfc_and_nfd_equivalents(self):
+        """A-3: titles that differ only in Unicode normalization must merge.
+
+        ``Café`` written as NFC (precomposed U+00E9) and NFD (``e`` + U+0301)
+        are canonically equivalent and must be treated as the same finding.
+        """
+        agents = [
+            _valid_agent(
+                "melchior",
+                findings=[
+                    {
+                        "severity": "warning",
+                        "title": "Caf\u00e9 de-sync",  # NFC
+                        "detail": "Precomposed.",
+                    },
+                ],
+            ),
+            _valid_agent(
+                "balthasar",
+                findings=[
+                    {
+                        "severity": "warning",
+                        "title": "Cafe\u0301 de-sync",  # NFD
+                        "detail": "Decomposed.",
+                    },
+                ],
+            ),
+            _valid_agent("caspar", findings=[]),
+        ]
+        result = determine_consensus(agents)
+        cafe_findings = [f for f in result["findings"] if "caf" in f["title"].lower()]
+        assert len(cafe_findings) == 1, (
+            f"NFC and NFD equivalents must merge, got {len(cafe_findings)}: "
+            f"{[f['title'] for f in cafe_findings]}"
+        )
+        assert sorted(cafe_findings[0]["sources"]) == ["balthasar", "melchior"]
+
+    def test_dedup_uses_full_unicode_casefold(self):
+        """A-3: German eszett ``ß`` must casefold to ``ss``.
+
+        ``str.lower()`` leaves ``ß`` as-is, so ``STRASSE`` and ``straße``
+        are distinct under ``lower()``. Under ``str.casefold()`` both
+        become ``strasse`` and the findings must merge.
+        """
+        agents = [
+            _valid_agent(
+                "melchior",
+                findings=[
+                    {
+                        "severity": "warning",
+                        "title": "STRASSE parser",
+                        "detail": "Upper.",
+                    },
+                ],
+            ),
+            _valid_agent(
+                "balthasar",
+                findings=[
+                    {
+                        "severity": "warning",
+                        "title": "stra\u00dfe parser",  # straße
+                        "detail": "With eszett.",
+                    },
+                ],
+            ),
+            _valid_agent("caspar", findings=[]),
+        ]
+        result = determine_consensus(agents)
+        strasse_findings = [f for f in result["findings"] if "parser" in f["title"].lower()]
+        assert len(strasse_findings) == 1, "STRASSE and straße must merge under full casefold"
+        assert sorted(strasse_findings[0]["sources"]) == ["balthasar", "melchior"]
+
+    def test_dedup_merges_nfkc_compatibility_forms(self):
+        """A-3: NFKC compatibility forms (fullwidth vs halfwidth) must merge."""
+        agents = [
+            _valid_agent(
+                "melchior",
+                findings=[
+                    {
+                        "severity": "warning",
+                        "title": "\uff33\uff31\uff2c Injection",  # ＳＱＬ
+                        "detail": "Fullwidth.",
+                    },
+                ],
+            ),
+            _valid_agent(
+                "balthasar",
+                findings=[
+                    {
+                        "severity": "warning",
+                        "title": "SQL Injection",
+                        "detail": "Halfwidth.",
+                    },
+                ],
+            ),
+            _valid_agent("caspar", findings=[]),
+        ]
+        result = determine_consensus(agents)
+        sql_findings = [f for f in result["findings"] if "injection" in f["title"].lower()]
+        assert len(sql_findings) == 1, "Fullwidth and halfwidth variants must merge under NFKC"
+        assert sorted(sql_findings[0]["sources"]) == ["balthasar", "melchior"]
+
     def test_sources_key_tracks_all_reporters(self):
         """Each finding has a 'sources' list, no legacy 'source' key."""
         agents = [

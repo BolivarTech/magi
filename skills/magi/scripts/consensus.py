@@ -11,8 +11,11 @@ dissent tracking.
 
 from __future__ import annotations
 
+import unicodedata
 from collections import Counter
 from typing import Any
+
+from validate import _clean_title
 
 VERDICT_WEIGHT: dict[str, float] = {
     "approve": 1,
@@ -21,7 +24,32 @@ VERDICT_WEIGHT: dict[str, float] = {
 }
 
 _SEVERITY_ORDER: dict[str, int] = {"critical": 0, "warning": 1, "info": 2}
+_UNKNOWN_SEVERITY_RANK = 99
 _EPSILON: float = 1e-9
+
+
+def _severity_rank(severity: str) -> int:
+    """Return the sort rank of *severity* (0=critical, 2=info, 99=unknown)."""
+    return _SEVERITY_ORDER.get(severity, _UNKNOWN_SEVERITY_RANK)
+
+
+def _dedup_key(title: str) -> str:
+    """Return the canonical key used to merge findings with the same title.
+
+    Applies, in order:
+
+    1. :func:`validate._clean_title` — strips invisible characters (zero-width,
+       bidi marks, BOM, soft hyphen) and surrounding whitespace.
+    2. ``unicodedata.normalize("NFKC", ...)`` — collapses compatibility forms
+       (fullwidth/halfwidth, ligatures) and combines canonically equivalent
+       sequences (precomposed vs combining accents).
+    3. :meth:`str.casefold` — full Unicode case folding, strictly stronger
+       than ``str.lower`` (e.g. ``ß`` → ``ss``).
+
+    The result is an internal lookup key; the displayed title preserves the
+    original form of the first finding seen under each key.
+    """
+    return unicodedata.normalize("NFKC", _clean_title(title)).casefold()
 
 
 def _classify_consensus(
@@ -61,11 +89,15 @@ def _classify_consensus(
 
 
 def _deduplicate_findings(agents: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Merge findings across agents, deduplicating by title.
+    """Merge findings across agents, deduplicating by normalized title.
 
-    Findings with the same title (case-insensitive) are merged: the
-    highest severity is kept, and all reporting agents are tracked in
-    a ``sources`` list.
+    Two findings are considered the same when their titles collapse to the
+    same :func:`_dedup_key` — i.e. they are equivalent under NFKC
+    normalization and full Unicode case folding after invisible-character
+    stripping. When a collision occurs, the displayed title preserves the
+    form first seen in agent iteration order; the highest severity among
+    the colliding findings wins and each reporting agent is recorded in a
+    ``sources`` list.
 
     Args:
         agents: List of validated agent output dictionaries.
@@ -76,25 +108,17 @@ def _deduplicate_findings(agents: list[dict[str, Any]]) -> list[dict[str, Any]]:
     findings_by_title: dict[str, dict[str, Any]] = {}
     for a in agents:
         for f in a.get("findings", []):
-            title_key = f["title"].lower().strip()
-            if title_key in findings_by_title:
-                existing = findings_by_title[title_key]
-                existing["sources"].append(a["agent"])
-                if _SEVERITY_ORDER.get(f["severity"], 99) < _SEVERITY_ORDER.get(
-                    existing["severity"], 99
-                ):
-                    existing["severity"] = f["severity"]
-                    existing["detail"] = f["detail"]
-            else:
-                findings_by_title[title_key] = {
-                    **f,
-                    "sources": [a["agent"]],
-                }
+            title_key = _dedup_key(f["title"])
+            existing = findings_by_title.get(title_key)
+            if existing is None:
+                findings_by_title[title_key] = {**f, "sources": [a["agent"]]}
+                continue
+            existing["sources"].append(a["agent"])
+            if _severity_rank(f["severity"]) < _severity_rank(existing["severity"]):
+                existing["severity"] = f["severity"]
+                existing["detail"] = f["detail"]
 
-    return sorted(
-        findings_by_title.values(),
-        key=lambda f: _SEVERITY_ORDER.get(f["severity"], 99),
-    )
+    return sorted(findings_by_title.values(), key=lambda f: _severity_rank(f["severity"]))
 
 
 def _compute_confidence(
