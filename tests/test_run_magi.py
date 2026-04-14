@@ -326,6 +326,68 @@ class TestCleanupOldRuns:
         assert (tmp_path / "other-dir").exists()
         assert (tmp_path / "readme.txt").exists()
 
+    def test_cleanup_works_when_tmpdir_itself_is_symlink(self, tmp_path, monkeypatch):
+        """D-1a: a symlinked TMPDIR must not disable cleanup entirely.
+
+        On macOS ``/tmp`` is a symlink to ``/private/tmp``; ``gettempdir()``
+        returns ``/tmp`` but ``os.path.realpath(entry.path)`` resolves
+        through the root symlink, so every candidate appears to live
+        outside the ``/tmp/`` prefix and the traversal guard skips
+        everything. The fix is to resolve the temp root the same way
+        before building the safe prefix.
+
+        This test simulates the scenario by monkeypatching ``realpath``
+        so it runs identically on platforms without symlink support
+        (e.g. Windows under a non-admin pytest run).
+        """
+        import run_magi
+        from run_magi import cleanup_old_runs
+
+        older = tmp_path / "magi-run-0001"
+        older.mkdir()
+        os.utime(older, (1000, 1000))
+        newer = tmp_path / "magi-run-0002"
+        newer.mkdir()
+        os.utime(newer, (2000, 2000))
+
+        advertised_root = str(tmp_path).replace(os.sep + "tmp", os.sep + "resolved_tmp", 1)
+        if advertised_root == str(tmp_path):
+            # Fallback: prepend a fake segment so realpath differs from the advertised path.
+            advertised_root = str(tmp_path) + "_advertised"
+        real_root_str = str(tmp_path)
+
+        real_realpath = os.path.realpath
+
+        def fake_realpath(path: str) -> str:
+            # Rewrite the advertised (symlinked) root to the real one so
+            # both the candidate entries and — crucially — the temp
+            # root itself resolve to the same physical directory.
+            if path == advertised_root or path.startswith(advertised_root + os.sep):
+                return real_realpath(real_root_str + path[len(advertised_root) :])
+            return real_realpath(path)
+
+        monkeypatch.setattr(run_magi.os.path, "realpath", fake_realpath)
+        monkeypatch.setattr(run_magi.tempfile, "gettempdir", lambda: advertised_root)
+
+        # Rewrite scandir so it iterates the real tmp_path when asked
+        # for the advertised symlinked root. This mirrors the OS-level
+        # behavior on macOS: scandir follows the symlink transparently.
+        real_scandir = os.scandir
+
+        def fake_scandir(path):
+            if path == advertised_root:
+                return real_scandir(real_root_str)
+            return real_scandir(path)
+
+        monkeypatch.setattr(run_magi.os, "scandir", fake_scandir)
+
+        cleanup_old_runs(1)
+
+        assert newer.exists(), "Newest magi-run dir must be retained"
+        assert not older.exists(), (
+            "Oldest magi-run dir must be deleted even when TMPDIR is a symlink to its realpath"
+        )
+
     def test_symlink_outside_temp_root_skipped(self, tmp_path):
         """Symlinks resolving outside temp root should be skipped."""
         from run_magi import cleanup_old_runs
@@ -886,6 +948,39 @@ class TestLaunchAgentTimeoutReaping:
         (tmp_path / "melchior.md").write_text("sys prompt", encoding="utf-8")
 
         with pytest.raises(TimeoutError, match="Connection refused"):
+            await run_magi.launch_agent(
+                agent_name="melchior",
+                agents_dir=str(tmp_path),
+                prompt="test",
+                output_dir=str(tmp_path),
+                timeout=1,
+            )
+
+    @pytest.mark.asyncio
+    async def test_write_stderr_log_oserror_does_not_mask_timeout(self, tmp_path, monkeypatch):
+        """D-1b: OSError from the stderr-log write must not shadow TimeoutError.
+
+        If the disk is full or read-only when we try to persist buffered
+        diagnostics on the timeout path, the caller must still see the
+        original ``TimeoutError`` — swallowing it behind an ``OSError``
+        hides the real cause from the orchestrator's failure summary.
+        """
+        import run_magi
+
+        fake = _FakeTimeoutProc(stderr_bytes=b"partial diagnostics before hang")
+
+        async def fake_create(*args, **kwargs):
+            return fake
+
+        monkeypatch.setattr(run_magi.asyncio, "create_subprocess_exec", fake_create)
+        (tmp_path / "melchior.md").write_text("sys prompt", encoding="utf-8")
+
+        def failing_write(output_dir, agent_name, data):
+            raise OSError(28, "No space left on device")
+
+        monkeypatch.setattr(run_magi, "_write_stderr_log", failing_write)
+
+        with pytest.raises(TimeoutError, match="timed out after"):
             await run_magi.launch_agent(
                 agent_name="melchior",
                 agents_dir=str(tmp_path),

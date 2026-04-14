@@ -61,7 +61,15 @@ _PROC_STDERR_DRAIN_TIMEOUT = 2.0
 
 
 def _write_stderr_log(output_dir: str, agent_name: str, data: bytes) -> None:
-    """Persist captured stderr to ``{agent_name}.stderr.log`` if non-empty."""
+    """Persist captured stderr to ``{agent_name}.stderr.log`` if non-empty.
+
+    Raises:
+        OSError: If the destination cannot be opened or written. Callers
+            on an already-failing path (e.g. the timeout handler in
+            :func:`launch_agent`) must wrap this call in ``try/except
+            OSError`` so a disk error cannot shadow the root-cause
+            exception they are about to raise.
+    """
     if not data:
         return
     stderr_file = os.path.join(output_dir, f"{agent_name}.stderr.log")
@@ -163,8 +171,16 @@ def _scan_magi_dirs(tmp_root: str) -> list[tuple[float, str]]:
 
 
 def _safe_temp_prefix(tmp_root: str) -> str:
-    """Return the normalized temp-root prefix used for traversal checks."""
-    prefix = os.path.normcase(tmp_root)
+    """Return the normalized temp-root prefix used for traversal checks.
+
+    Resolves symlinks in *tmp_root* before building the prefix so that
+    ``os.path.realpath(entry.path).startswith(prefix)`` stays consistent
+    when the temp root itself is a symlink (e.g. ``/tmp`` →
+    ``/private/tmp`` on macOS). Without this, every scanned entry
+    resolves outside the advertised prefix and cleanup becomes a
+    silent no-op.
+    """
+    prefix = os.path.normcase(os.path.realpath(tmp_root))
     if not prefix.endswith(os.sep):
         prefix += os.sep
     return prefix
@@ -313,7 +329,16 @@ async def launch_agent(
         )
     except asyncio.TimeoutError:
         stderr_buffered = await _reap_and_drain_stderr(proc)
-        _write_stderr_log(output_dir, agent_name, stderr_buffered)
+        # Persisting the log is best-effort. If it fails (disk full,
+        # permission denied), surface a warning but do not let the
+        # OSError shadow the TimeoutError the caller actually needs.
+        try:
+            _write_stderr_log(output_dir, agent_name, stderr_buffered)
+        except OSError as log_exc:
+            print(
+                f"WARNING: Failed to persist {agent_name}.stderr.log on timeout: {log_exc}",
+                file=sys.stderr,
+            )
         raise TimeoutError(
             f"Agent '{agent_name}' timed out after {timeout}s"
             f"{_format_stderr_excerpt(stderr_buffered)}"
