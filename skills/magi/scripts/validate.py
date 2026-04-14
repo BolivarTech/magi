@@ -51,8 +51,25 @@ _MAX_FINDINGS_PER_AGENT: int = 100
 _MAX_FIELD_LENGTH: int = 50_000  # 50,000 characters per top-level string field
 _MAX_TITLE_LENGTH: int = 500
 _MAX_DETAIL_LENGTH: int = 10_000
-# Regex to strip zero-width and format Unicode characters (category Cf).
+# Invisible characters that can smuggle hidden content into a finding
+# title: zero-width spaces/joiners (U+200B-U+200D), bidi marks and embeds
+# (U+200E-U+200F, U+202A-U+202E), line/paragraph separators (U+2028-U+2029),
+# narrow no-break space (U+202F), the byte-order mark (U+FEFF), and the
+# soft hyphen (U+00AD). These span categories Cf, Zl, Zp, and Zs rather
+# than Cf alone.
 _ZERO_WIDTH_RE = re.compile(r"[\u200b-\u200f\u2028-\u202f\ufeff\u00ad]")
+
+
+def _clean_title(raw: str) -> str:
+    """Return *raw* with invisible characters and edge whitespace removed.
+
+    Used by :func:`load_agent_output` to produce the canonical title form
+    that is both length-capped and stored on the finding. Exposed as a
+    module-level helper so that downstream consumers (notably the finding
+    dedup in ``consensus.py``) can derive a normalization key from the
+    same source of truth.
+    """
+    return _ZERO_WIDTH_RE.sub("", raw).strip()
 
 
 def load_agent_output(filepath: str) -> dict[str, Any]:
@@ -190,18 +207,21 @@ def load_agent_output(filepath: str) -> dict[str, Any]:
                 f"Must be one of {sorted(VALID_SEVERITIES)}.",
                 filepath,
             )
-        clean_title = _ZERO_WIDTH_RE.sub("", finding["title"]).strip()
+        clean_title = _clean_title(finding["title"])
         if not clean_title:
             raise ValidationError(
                 f"Finding at index {idx} has empty or whitespace-only title.",
                 filepath,
             )
-        if len(finding["title"]) > _MAX_TITLE_LENGTH:
+        if len(clean_title) > _MAX_TITLE_LENGTH:
             raise ValidationError(
                 f"Finding at index {idx} title exceeds maximum length "
                 f"of {_MAX_TITLE_LENGTH} characters.",
                 filepath,
             )
+        # Replace the raw title with the cleaned form so downstream consumers
+        # (dedup, rendering) never see smuggled zero-width characters.
+        finding["title"] = clean_title
         if len(finding["detail"]) > _MAX_DETAIL_LENGTH:
             raise ValidationError(
                 f"Finding at index {idx} detail exceeds maximum length "

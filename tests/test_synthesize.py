@@ -1280,6 +1280,73 @@ class TestZeroWidthUnicodeTitle:
             os.unlink(path)
 
 
+class TestTitleNormalization:
+    """A-2: zero-width characters are stripped before length cap + storage."""
+
+    def test_zero_width_stripped_from_returned_title(self):
+        """Returned dict must contain the cleaned title, not the raw form."""
+        data = _valid_agent_data()
+        data["findings"] = [
+            {
+                "severity": "info",
+                "title": "Hel\u200blo\u200cWo\ufeffrld",
+                "detail": "Valid detail.",
+            },
+        ]
+        path = _write_json(data)
+        try:
+            result = load_agent_output(path)
+            assert result["findings"][0]["title"] == "HelloWorld", (
+                "Zero-width chars must be stripped from the stored title "
+                "to prevent smuggling via invisible Unicode."
+            )
+        finally:
+            os.unlink(path)
+
+    def test_length_cap_applies_to_cleaned_title(self):
+        """A title whose cleaned form fits the cap must be accepted even if
+        the raw form with zero-width padding exceeds it."""
+        # 400 visible + 200 zero-width = raw 600 (> 500), clean 400 (<= 500)
+        padded = ("a" * 400) + ("\u200b" * 200)
+        data = _valid_agent_data()
+        data["findings"] = [
+            {"severity": "info", "title": padded, "detail": "OK."},
+        ]
+        path = _write_json(data)
+        try:
+            result = load_agent_output(path)
+            assert result["findings"][0]["title"] == "a" * 400
+        finally:
+            os.unlink(path)
+
+    def test_clean_title_over_cap_rejected(self):
+        """A cleaned title exceeding the cap must still be rejected."""
+        # 501 visible chars, no zero-width — clean length 501 > 500.
+        data = _valid_agent_data()
+        data["findings"] = [
+            {"severity": "info", "title": "a" * 501, "detail": "OK."},
+        ]
+        path = _write_json(data)
+        try:
+            with pytest.raises(ValidationError, match="title exceeds maximum"):
+                load_agent_output(path)
+        finally:
+            os.unlink(path)
+
+    def test_title_is_trimmed_of_surrounding_whitespace(self):
+        """The stored title must also have its surrounding whitespace stripped."""
+        data = _valid_agent_data()
+        data["findings"] = [
+            {"severity": "info", "title": "  Real title  ", "detail": "OK."},
+        ]
+        path = _write_json(data)
+        try:
+            result = load_agent_output(path)
+            assert result["findings"][0]["title"] == "Real title"
+        finally:
+            os.unlink(path)
+
+
 class TestFindingSubFieldLimits:
     """Verify length limits on finding title and detail."""
 
