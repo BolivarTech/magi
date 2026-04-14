@@ -269,6 +269,63 @@ class TestCleanupOldRuns:
         assert not dirs[0].exists()
         assert not dirs[1].exists()
 
+    def test_mtime_tie_uses_path_ascending_tiebreaker(self, tmp_path):
+        """B-2: on mtime ties, cleanup must keep the lex-smallest path.
+
+        Two or more ``magi-run-*`` dirs with identical ``st_mtime`` must
+        produce a deterministic survivor. The contract is: sort by mtime
+        descending, then by path ascending. The lex-smallest path is
+        treated as the canonical survivor — not whatever ``os.scandir``
+        happened to yield first.
+        """
+        from run_magi import cleanup_old_runs
+
+        names = ["magi-run-0003", "magi-run-0001", "magi-run-0002"]
+        for name in names:
+            d = tmp_path / name
+            d.mkdir()
+            os.utime(d, (1000, 1000))  # identical mtime across all three
+
+        with patch("run_magi.tempfile.gettempdir", return_value=str(tmp_path)):
+            cleanup_old_runs(1)
+
+        survivors = sorted(p.name for p in tmp_path.iterdir() if p.name.startswith("magi-run-"))
+        assert survivors == ["magi-run-0001"], (
+            f"Under mtime ties, the lex-smallest path must be kept, got {survivors}"
+        )
+
+    def test_mtime_tie_tiebreaker_keeps_top_n(self, tmp_path):
+        """B-2: with keep=2 and all mtimes tied, the two lex-smallest survive."""
+        from run_magi import cleanup_old_runs
+
+        for name in ("magi-run-b", "magi-run-d", "magi-run-a", "magi-run-c"):
+            d = tmp_path / name
+            d.mkdir()
+            os.utime(d, (2000, 2000))
+
+        with patch("run_magi.tempfile.gettempdir", return_value=str(tmp_path)):
+            cleanup_old_runs(2)
+
+        survivors = sorted(p.name for p in tmp_path.iterdir() if p.name.startswith("magi-run-"))
+        assert survivors == ["magi-run-a", "magi-run-b"]
+
+    def test_cleanup_noop_when_no_magi_dirs(self, tmp_path):
+        """B-2: with no magi-run-* entries, cleanup is a no-op.
+
+        Unrelated files and directories in the temp root must survive
+        and no exception must escape.
+        """
+        from run_magi import cleanup_old_runs
+
+        (tmp_path / "other-dir").mkdir()
+        (tmp_path / "readme.txt").write_text("keep me")
+
+        with patch("run_magi.tempfile.gettempdir", return_value=str(tmp_path)):
+            cleanup_old_runs(1)
+
+        assert (tmp_path / "other-dir").exists()
+        assert (tmp_path / "readme.txt").exists()
+
     def test_symlink_outside_temp_root_skipped(self, tmp_path):
         """Symlinks resolving outside temp root should be skipped."""
         from run_magi import cleanup_old_runs

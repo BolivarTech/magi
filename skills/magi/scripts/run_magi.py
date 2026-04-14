@@ -39,6 +39,7 @@ from synthesize import (
 AGENTS = ("melchior", "balthasar", "caspar")
 MAX_HISTORY_RUNS = 5
 VALID_MODES = ("code-review", "design", "analysis")
+MAGI_DIR_PREFIX = "magi-run-"
 MODEL_IDS: dict[str, str] = {
     "opus": "claude-opus-4-6",
     "sonnet": "claude-sonnet-4-6",
@@ -136,14 +137,63 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def _scan_magi_dirs(tmp_root: str) -> list[tuple[float, str]]:
+    """Return ``(mtime, path)`` tuples for every ``magi-run-*`` dir under *tmp_root*.
+
+    Entries that disappear between scan and stat are silently skipped.
+    """
+    results: list[tuple[float, str]] = []
+    for entry in os.scandir(tmp_root):
+        if not (entry.is_dir() and entry.name.startswith(MAGI_DIR_PREFIX)):
+            continue
+        try:
+            mtime = entry.stat().st_mtime
+        except OSError:
+            continue
+        results.append((mtime, entry.path))
+    return results
+
+
+def _safe_temp_prefix(tmp_root: str) -> str:
+    """Return the normalized temp-root prefix used for traversal checks."""
+    prefix = os.path.normcase(tmp_root)
+    if not prefix.endswith(os.sep):
+        prefix += os.sep
+    return prefix
+
+
+def _safe_rmtree_under(path: str, safe_prefix: str) -> None:
+    """Remove *path* only if it resolves strictly inside *safe_prefix*.
+
+    The realpath check prevents symlink traversal attacks on shared
+    systems. Failures are logged to stderr — cleanup must never raise.
+    """
+    resolved = os.path.normcase(os.path.realpath(path))
+    if not resolved.startswith(safe_prefix):
+        print(
+            f"WARNING: Skipping cleanup of {path} (resolves outside temp root: {resolved})",
+            file=sys.stderr,
+        )
+        return
+    try:
+        shutil.rmtree(resolved)
+    except OSError as exc:
+        print(
+            f"WARNING: Failed to remove old run {resolved}: {exc}",
+            file=sys.stderr,
+        )
+
+
 def cleanup_old_runs(keep: int) -> None:
     """Remove oldest MAGI temp directories, keeping the most recent ones.
 
     Scans the system temp directory for directories matching the
-    ``magi-run-`` prefix, sorted by modification time, and removes the
-    oldest ones so that at most ``keep`` remain.  Symlinks are resolved
-    and validated against the temp root before deletion to prevent
-    traversal attacks on shared systems.
+    :data:`MAGI_DIR_PREFIX` and removes the oldest so that at most
+    ``keep`` remain. Entries are sorted by ``st_mtime`` descending and,
+    for deterministic LRU under mtime ties, by path ascending — the
+    lexicographically smallest path is treated as the canonical
+    survivor. Symlinks are resolved and validated against the temp root
+    before deletion to prevent traversal attacks on shared systems.
 
     Args:
         keep: Maximum number of recent runs to retain.
@@ -151,35 +201,22 @@ def cleanup_old_runs(keep: int) -> None:
     """
     if keep <= 0:
         return
-    tmp_root = tempfile.gettempdir()
-    magi_dirs: list[tuple[float, str]] = []
-    for entry in os.scandir(tmp_root):
-        if entry.is_dir() and entry.name.startswith("magi-run-"):
-            try:
-                mtime = entry.stat().st_mtime
-            except OSError:
-                continue
-            magi_dirs.append((mtime, entry.path))
 
-    magi_dirs.sort(reverse=True)
+    tmp_root = tempfile.gettempdir()
+    magi_dirs = _scan_magi_dirs(tmp_root)
+
+    # Fast path: nothing to prune — skip the sort and the per-entry loop.
+    if len(magi_dirs) <= keep:
+        return
+
+    # Explicit key so the tie-breaking direction is documented and cannot
+    # drift if someone later replaces the list of tuples with a different
+    # container.
+    magi_dirs.sort(key=lambda entry: (-entry[0], entry[1]))
+
+    safe_prefix = _safe_temp_prefix(tmp_root)
     for _, path in magi_dirs[keep:]:
-        resolved = os.path.normcase(os.path.realpath(path))
-        safe_prefix = os.path.normcase(tmp_root)
-        if not safe_prefix.endswith(os.sep):
-            safe_prefix += os.sep
-        if not resolved.startswith(safe_prefix):
-            print(
-                f"WARNING: Skipping cleanup of {path} (resolves outside temp root: {resolved})",
-                file=sys.stderr,
-            )
-            continue
-        try:
-            shutil.rmtree(resolved)
-        except OSError as exc:
-            print(
-                f"WARNING: Failed to remove old run {resolved}: {exc}",
-                file=sys.stderr,
-            )
+        _safe_rmtree_under(path, safe_prefix)
 
 
 def create_output_dir(output_dir: str | None) -> str:
@@ -194,7 +231,7 @@ def create_output_dir(output_dir: str | None) -> str:
         Path to the created output directory.
     """
     if output_dir is None:
-        return tempfile.mkdtemp(prefix="magi-run-")
+        return tempfile.mkdtemp(prefix=MAGI_DIR_PREFIX)
     os.makedirs(output_dir, exist_ok=True)
     return output_dir
 
