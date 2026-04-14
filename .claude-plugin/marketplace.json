@@ -2,7 +2,7 @@
   "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
   "name": "bolivartech-plugins",
   "description": "Claude Code plugins by BolivarTech",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "owner": {
     "name": "BolivarTech",
     "url": "https://github.com/BolivarTech"
@@ -11,7 +11,7 @@
     {
       "name": "magi",
       "description": "Multi-perspective analysis system inspired by Evangelion's MAGI supercomputers",
-      "version": "1.1.0",
+      "version": "2.0.0",
       "author": {
         "name": "Julian Bolivar",
         "url": "https://github.com/BolivarTech"

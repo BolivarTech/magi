@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Author: Julian Bolivar
-# Version: 1.1.0
-# Date: 2026-04-01
+# Version: 2.0.0
+# Date: 2026-04-13
 """MAGI consensus engine.
 
 Applies weight-based scoring to agent verdicts and produces a unified

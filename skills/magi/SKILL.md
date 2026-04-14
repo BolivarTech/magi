@@ -109,11 +109,16 @@ Each agent must respond with **only** a JSON object matching this schema:
 ### Step 4: Synthesize the consensus (only for native sub-agent mode)
 
 **Skip this step if you used the Python orchestrator in Step 3** — it runs synthesis
-automatically and outputs the full report.
+automatically and outputs the full canonical report to stdout.
 
 If you used native sub-agent mode, run synthesis manually:
 
     python skills/magi/scripts/synthesize.py <agent1.json> <agent2.json> [agent3.json] --output report.json
+
+**This JSON report is not the final user-facing output.** It is the structured
+input you will use in Step 5 to render the canonical banner + sections.
+Never display `report.json` to the user as the final answer — always render
+the canonical format first.
 
 The synthesis uses weight-based scoring with `approve=1, conditional=0.5, reject=-1`:
 
@@ -133,10 +138,41 @@ caveats-with-dissent as `GO WITH CAVEATS (2-1)`.
 
 ### Step 5: Present the results
 
-The output format is **strictly enforced** and identical across parallel mode,
-native sub-agent mode, and fallback mode. The Python orchestrator produces this
-format automatically via `reporting.format_report()`; in fallback and native
-sub-agent modes, you MUST reproduce it exactly.
+> ## ⚠ MANDATORY FINAL OUTPUT CONTRACT
+>
+> **Every MAGI invocation, regardless of execution mode, MUST end with the
+> canonical output below — byte-for-byte structurally identical.**
+>
+> - **Parallel mode** (Python orchestrator): copy the stdout of `run_magi.py`
+>   verbatim into your reply. Do **not** paraphrase, summarize, reorder, or
+>   strip sections. Do **not** prepend a "here are the results" preamble that
+>   displaces the banner. Do **not** append additional analysis after
+>   `## Recommended Actions` unless the user explicitly asks a follow-up
+>   question.
+> - **Native sub-agent mode**: after running `synthesize.py`, the JSON report
+>   alone is **not** an acceptable final answer. You MUST render the canonical
+>   banner + sections from the JSON and emit them to the user with the same
+>   alignment, section order, and widths produced by
+>   `reporting.format_report()`.
+> - **Fallback mode** (no sub-agents, single-model simulation): after the three
+>   per-agent JSON blocks and the `## Synthesis` heading, you MUST emit the
+>   canonical banner + sections exactly as specified below. The three agent
+>   JSON blocks are intermediate scaffolding; the banner + sections are the
+>   final deliverable.
+>
+> **Verification before responding:** re-read your draft reply against the
+> template below. If any of the following is missing or misaligned, fix it
+> before sending:
+>
+> 1. Banner border lines match `+` + 50 `=` + `+`.
+> 2. Agent verdict rows are column-aligned (all verdicts start at the same
+>    column).
+> 3. Consensus row uses the `(N-M)` suffix when applicable.
+> 4. `## Key Findings` rows have the marker/severity/title column layout.
+> 5. Section order is: banner → Key Findings → Dissenting Opinion → Conditions
+>    for Approval → Recommended Actions. Optional sections are omitted when
+>    empty; never reordered.
+> 6. There is **no** `## Consensus Summary` section.
 
 #### Canonical output template
 
@@ -229,10 +265,17 @@ perspectives sequentially within a single response.
    risks before the other agents can anchor toward approval.
 2. **Independence:** Write each perspective as if it has NOT seen the others.
    Do not reference previous agents' findings in later sections.
-3. **Output format:** Present three clearly labeled sections, each containing
-   the full JSON object for that agent. Then add a "## Synthesis" section
-   applying the same voting rules.
-4. **Acknowledge limitation:** Note in the report that fallback mode was used,
+3. **Intermediate output:** Present three clearly labeled sections, each
+   containing the full JSON object for that agent. These three blocks are
+   **intermediate scaffolding**, not the final answer.
+4. **Final output is non-negotiable:** After the three per-agent JSON blocks
+   and the `## Synthesis` heading, you MUST emit the canonical banner and
+   sections from Step 5 — byte-for-byte identical to the format produced by
+   `reporting.format_report()` in parallel mode. The same banner width,
+   column alignment, section order, finding-row layout, and
+   no-`## Consensus Summary` rule apply. See the MANDATORY FINAL OUTPUT
+   CONTRACT callout at the top of Step 5.
+5. **Acknowledge limitation:** Note in the report that fallback mode was used,
    as a single model generating all three perspectives has inherent anchoring bias.
 
 Example structure:
@@ -247,11 +290,27 @@ Example structure:
     {balthasar JSON}
 
     ## Synthesis
-    [Apply voting rules, then emit the canonical banner + report from Step 5.
-    The banner, Key Findings, Dissenting Opinion, Conditions for Approval,
-    and Recommended Actions sections MUST follow the format rules in Step 5
-    exactly — same column alignment, same section order, same widths.
-    Do not add a Consensus Summary section.]
+
+    +==================================================+
+    |          MAGI SYSTEM -- VERDICT                  |
+    +==================================================+
+    |  Melchior (Scientist):   ...
+    ...
+    +==================================================+
+    |  CONSENSUS: ...                                  |
+    +==================================================+
+
+    ## Key Findings
+    ...
+    ## Dissenting Opinion
+    ...
+    ## Conditions for Approval
+    ...
+    ## Recommended Actions
+    ...
+
+The banner and five sections here are **the** user-facing answer. The three
+agent JSON blocks above are diagnostic scaffolding only.
 
 ## Notes
 
