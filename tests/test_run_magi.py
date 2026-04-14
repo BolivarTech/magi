@@ -3,6 +3,8 @@
 # Date: 2026-04-01
 """Tests for run_magi.py — async Python orchestrator."""
 
+from __future__ import annotations
+
 import asyncio
 import os
 import sys
@@ -612,6 +614,156 @@ class TestTrackedLaunchStatusUpdates:
         )
         assert result.get("degraded") is True
         assert "caspar" in result.get("failed_agents", [])
+
+
+class _FakeTimeoutProc:
+    """Fake asyncio subprocess for timeout-path testing.
+
+    ``communicate()`` hangs indefinitely so ``asyncio.wait_for`` fires a
+    ``TimeoutError``. ``kill()`` and ``wait()`` record call order so tests
+    can verify zombie reaping. ``proc.stderr`` is a prefilled
+    :class:`asyncio.StreamReader` so the production code can drain buffered
+    diagnostics after killing the process.
+    """
+
+    def __init__(
+        self,
+        stdout_bytes: bytes = b"",
+        stderr_bytes: bytes = b"",
+    ) -> None:
+        self.returncode: int | None = None
+        self.kill_called = False
+        self.wait_called = False
+        self.call_order: list[str] = []
+        self.stdout = asyncio.StreamReader()
+        self.stdout.feed_data(stdout_bytes)
+        self.stdout.feed_eof()
+        self.stderr = asyncio.StreamReader()
+        self.stderr.feed_data(stderr_bytes)
+        self.stderr.feed_eof()
+        self.stdin = None
+
+    async def communicate(self, input: bytes | None = None) -> tuple[bytes, bytes]:
+        # Hang so wait_for raises TimeoutError.
+        await asyncio.sleep(3600)
+        return b"", b""
+
+    def kill(self) -> None:
+        self.kill_called = True
+        self.call_order.append("kill")
+        self.returncode = -9
+
+    async def wait(self) -> int | None:
+        self.wait_called = True
+        self.call_order.append("wait")
+        return self.returncode
+
+
+class TestLaunchAgentTimeoutReaping:
+    """A-1: zombie reaping and stderr capture on agent timeout."""
+
+    @pytest.mark.asyncio
+    async def test_wait_awaited_after_kill_on_timeout(self, tmp_path, monkeypatch):
+        """``proc.kill()`` must be followed by ``await proc.wait()`` to reap."""
+        import run_magi
+
+        fake = _FakeTimeoutProc(stderr_bytes=b"")
+
+        async def fake_create(*args, **kwargs):
+            return fake
+
+        monkeypatch.setattr(run_magi.asyncio, "create_subprocess_exec", fake_create)
+        (tmp_path / "melchior.md").write_text("sys prompt", encoding="utf-8")
+
+        with pytest.raises(TimeoutError):
+            await run_magi.launch_agent(
+                agent_name="melchior",
+                agents_dir=str(tmp_path),
+                prompt="test",
+                output_dir=str(tmp_path),
+                timeout=1,
+            )
+
+        assert fake.kill_called, "kill() must be called on timeout"
+        assert fake.wait_called, "wait() must be awaited after kill() to reap zombie"
+        assert fake.call_order == ["kill", "wait"], (
+            f"Order must be kill→wait, got {fake.call_order}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_stderr_persisted_to_log_on_timeout(self, tmp_path, monkeypatch):
+        """Buffered stderr must be written to ``{agent}.stderr.log`` on timeout."""
+        import run_magi
+
+        stderr_payload = b"agent started thinking\nmid-computation diag\n"
+        fake = _FakeTimeoutProc(stderr_bytes=stderr_payload)
+
+        async def fake_create(*args, **kwargs):
+            return fake
+
+        monkeypatch.setattr(run_magi.asyncio, "create_subprocess_exec", fake_create)
+        (tmp_path / "melchior.md").write_text("sys prompt", encoding="utf-8")
+
+        with pytest.raises(TimeoutError):
+            await run_magi.launch_agent(
+                agent_name="melchior",
+                agents_dir=str(tmp_path),
+                prompt="test",
+                output_dir=str(tmp_path),
+                timeout=1,
+            )
+
+        stderr_log = tmp_path / "melchior.stderr.log"
+        assert stderr_log.exists(), (
+            "Stderr log must be persisted on timeout for post-mortem diagnosis"
+        )
+        assert stderr_log.read_bytes() == stderr_payload
+
+    @pytest.mark.asyncio
+    async def test_timeout_error_surfaces_stderr_excerpt(self, tmp_path, monkeypatch):
+        """TimeoutError message must include stderr excerpt so operators see why."""
+        import run_magi
+
+        fake = _FakeTimeoutProc(stderr_bytes=b"Connection refused to upstream API")
+
+        async def fake_create(*args, **kwargs):
+            return fake
+
+        monkeypatch.setattr(run_magi.asyncio, "create_subprocess_exec", fake_create)
+        (tmp_path / "melchior.md").write_text("sys prompt", encoding="utf-8")
+
+        with pytest.raises(TimeoutError, match="Connection refused"):
+            await run_magi.launch_agent(
+                agent_name="melchior",
+                agents_dir=str(tmp_path),
+                prompt="test",
+                output_dir=str(tmp_path),
+                timeout=1,
+            )
+
+    @pytest.mark.asyncio
+    async def test_empty_stderr_on_timeout_does_not_create_log(self, tmp_path, monkeypatch):
+        """No stderr data ⇒ no empty .stderr.log file should be written."""
+        import run_magi
+
+        fake = _FakeTimeoutProc(stderr_bytes=b"")
+
+        async def fake_create(*args, **kwargs):
+            return fake
+
+        monkeypatch.setattr(run_magi.asyncio, "create_subprocess_exec", fake_create)
+        (tmp_path / "melchior.md").write_text("sys prompt", encoding="utf-8")
+
+        with pytest.raises(TimeoutError):
+            await run_magi.launch_agent(
+                agent_name="melchior",
+                agents_dir=str(tmp_path),
+                prompt="test",
+                output_dir=str(tmp_path),
+                timeout=1,
+            )
+
+        assert not (tmp_path / "melchior.stderr.log").exists()
 
 
 class TestSafeDisplayUpdate:

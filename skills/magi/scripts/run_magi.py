@@ -46,6 +46,54 @@ MODEL_IDS: dict[str, str] = {
 }
 VALID_MODELS = tuple(MODEL_IDS.keys())
 
+_STDERR_EXCERPT_MAX_CHARS = 500
+_PROC_WAIT_REAP_TIMEOUT = 5.0
+_PROC_STDERR_DRAIN_TIMEOUT = 2.0
+
+
+def _write_stderr_log(output_dir: str, agent_name: str, data: bytes) -> None:
+    """Persist captured stderr to ``{agent_name}.stderr.log`` if non-empty."""
+    if not data:
+        return
+    stderr_file = os.path.join(output_dir, f"{agent_name}.stderr.log")
+    with open(stderr_file, "wb") as f:
+        f.write(data)
+
+
+def _format_stderr_excerpt(data: bytes) -> str:
+    """Return a ``: <tail>`` suffix for error messages, empty if no data.
+
+    The excerpt is decoded as UTF-8 with replacement, stripped, and
+    truncated to the last :data:`_STDERR_EXCERPT_MAX_CHARS` characters so
+    diagnostics stay readable in exception strings.
+    """
+    if not data:
+        return ""
+    decoded = data.decode("utf-8", errors="replace").strip()
+    if len(decoded) > _STDERR_EXCERPT_MAX_CHARS:
+        decoded = "..." + decoded[-_STDERR_EXCERPT_MAX_CHARS:]
+    return f": {decoded}"
+
+
+async def _reap_and_drain_stderr(proc: asyncio.subprocess.Process) -> bytes:
+    """Kill *proc*, await its exit, and drain any buffered stderr.
+
+    Both the ``wait()`` and the ``stderr.read()`` are bounded by short
+    timeouts so a misbehaving subprocess cannot stall the orchestrator.
+    All failures are swallowed — the caller is already on an error path
+    and only needs best-effort diagnostics.
+    """
+    proc.kill()
+    with contextlib.suppress(Exception):
+        await asyncio.wait_for(proc.wait(), timeout=_PROC_WAIT_REAP_TIMEOUT)
+
+    if proc.stderr is None:
+        return b""
+    try:
+        return await asyncio.wait_for(proc.stderr.read(), timeout=_PROC_STDERR_DRAIN_TIMEOUT)
+    except Exception:  # noqa: BLE001 — best-effort drain
+        return b""
+
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """Parse CLI arguments.
@@ -179,10 +227,13 @@ async def launch_agent(
         Validated agent output dictionary.
 
     Raises:
-        TimeoutError: If the agent does not respond within timeout.
+        TimeoutError: If the agent does not respond within timeout. On this
+            path the subprocess is killed and reaped (``wait()``) and any
+            buffered stderr is persisted to ``{agent_name}.stderr.log`` and
+            included in the error message for post-mortem diagnosis.
         RuntimeError: If the subprocess exits with a non-zero code.
         ValidationError: If the agent output fails schema validation.
-        FileNotFoundError: If the agent prompt file is missing.
+        ValueError: If *model* is not a recognised short name.
     """
     if model not in MODEL_IDS:
         raise ValueError(f"Unknown model '{model}'. Must be one of {sorted(MODEL_IDS.keys())}.")
@@ -218,16 +269,17 @@ async def launch_agent(
             proc.communicate(input=prompt.encode("utf-8")), timeout=timeout
         )
     except asyncio.TimeoutError:
-        proc.kill()
-        raise TimeoutError(f"Agent '{agent_name}' timed out after {timeout}s") from None
+        stderr_buffered = await _reap_and_drain_stderr(proc)
+        _write_stderr_log(output_dir, agent_name, stderr_buffered)
+        raise TimeoutError(
+            f"Agent '{agent_name}' timed out after {timeout}s"
+            f"{_format_stderr_excerpt(stderr_buffered)}"
+        ) from None
 
     with open(raw_file, "wb") as f:
         f.write(stdout)
 
-    if stderr:
-        stderr_file = os.path.join(output_dir, f"{agent_name}.stderr.log")
-        with open(stderr_file, "wb") as f:
-            f.write(stderr)
+    _write_stderr_log(output_dir, agent_name, stderr)
 
     if proc.returncode != 0:
         stderr_text = stderr.decode("utf-8", errors="replace").strip() if stderr else "no stderr"
