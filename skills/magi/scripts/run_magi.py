@@ -28,6 +28,7 @@ import tempfile
 from collections.abc import Iterator
 from typing import Any
 
+from models import MODEL_IDS, VALID_MODELS, resolve_model
 from parse_agent_output import parse_agent_output as parse_raw_output
 from status_display import StatusDisplay
 from synthesize import (
@@ -36,16 +37,12 @@ from synthesize import (
     load_agent_output,
 )
 
+__all__ = ["MODEL_IDS", "VALID_MODELS", "resolve_model"]
+
 AGENTS = ("melchior", "balthasar", "caspar")
 MAX_HISTORY_RUNS = 5
 VALID_MODES = ("code-review", "design", "analysis")
 MAGI_DIR_PREFIX = "magi-run-"
-MODEL_IDS: dict[str, str] = {
-    "opus": "claude-opus-4-6",
-    "sonnet": "claude-sonnet-4-6",
-    "haiku": "claude-haiku-4-5-20251001",
-}
-VALID_MODELS = tuple(MODEL_IDS.keys())
 
 _STDERR_EXCERPT_MAX_CHARS = 500
 _PROC_WAIT_REAP_TIMEOUT = 5.0
@@ -272,13 +269,11 @@ async def launch_agent(
         ValidationError: If the agent output fails schema validation.
         ValueError: If *model* is not a recognised short name.
     """
-    if model not in MODEL_IDS:
-        raise ValueError(f"Unknown model '{model}'. Must be one of {sorted(MODEL_IDS.keys())}.")
+    model_id = resolve_model(model)
 
     system_prompt_file = os.path.join(agents_dir, f"{agent_name}.md")
     raw_file = os.path.join(output_dir, f"{agent_name}.raw.json")
     parsed_file = os.path.join(output_dir, f"{agent_name}.json")
-    model_id = MODEL_IDS[model]
 
     # Write user prompt to a temp file and pass via stdin to avoid
     # OS CLI argument length limits (~32K on Windows).

@@ -351,6 +351,53 @@ class TestCleanupOldRuns:
         assert outside_dir.exists()
 
 
+class TestModelsModule:
+    """C-1: MODEL_IDS and VALID_MODELS live in a dedicated models module.
+
+    Bumping a model ID must be a one-line change to a data module, not
+    an edit to the orchestration code in run_magi.py.
+    """
+
+    def test_models_module_importable(self):
+        """The models module must be importable by its short name."""
+        import importlib
+
+        module = importlib.import_module("models")
+        assert module is not None
+
+    def test_model_ids_contains_expected_keys(self):
+        """MODEL_IDS must map the three short names to Anthropic model IDs."""
+        from models import MODEL_IDS
+
+        assert set(MODEL_IDS.keys()) == {"opus", "sonnet", "haiku"}
+        assert all(isinstance(v, str) and v for v in MODEL_IDS.values())
+
+    def test_valid_models_derived_from_model_ids(self):
+        """VALID_MODELS must stay in lockstep with MODEL_IDS.keys()."""
+        from models import MODEL_IDS, VALID_MODELS
+
+        assert set(VALID_MODELS) == set(MODEL_IDS.keys())
+
+    def test_run_magi_reexports_model_ids_from_models_module(self):
+        """run_magi.MODEL_IDS must be the same object as models.MODEL_IDS.
+
+        Reference identity (``is``) — not merely equality — rules out
+        accidental shadowing where run_magi keeps its own local copy
+        that could drift from the canonical source.
+        """
+        import models
+        import run_magi
+
+        assert run_magi.MODEL_IDS is models.MODEL_IDS
+
+    def test_run_magi_reexports_valid_models_from_models_module(self):
+        """Same identity guarantee for VALID_MODELS."""
+        import models
+        import run_magi
+
+        assert run_magi.VALID_MODELS is models.VALID_MODELS
+
+
 class TestLaunchAgentValidation:
     """Verify launch_agent input validation."""
 
