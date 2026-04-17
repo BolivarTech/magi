@@ -1,6 +1,6 @@
 {
   "name": "magi",
-  "version": "2.0.3",
+  "version": "2.1.0",
   "description": "Multi-perspective analysis system inspired by Evangelion's MAGI supercomputers. Spawns three sub-agents (Melchior, Balthasar, Caspar) that evaluate code, designs, and decisions from complementary perspectives, then synthesize verdicts via majority vote.",
   "author": {
     "name": "Julian Bolivar",
