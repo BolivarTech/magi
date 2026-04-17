@@ -1,5 +1,5 @@
 # Author: Julian Bolivar
-# Version: 1.1.1
+# Version: 1.1.2
 # Date: 2026-04-17
 """Live tree-style status display for the MAGI orchestrator.
 
@@ -362,10 +362,23 @@ class StatusDisplay:
         self._spinner_idx += 1
 
     async def _refresh_loop(self) -> None:
-        """Periodically redraw while :attr:`_running` is True."""
+        """Periodically redraw while :attr:`_running` is True.
+
+        ``OSError`` from ``_redraw`` (the stream pipe died, the terminal
+        was closed mid-run, the fd was revoked) stops the loop silently
+        instead of bubbling out of the background task. ``stop()`` would
+        otherwise re-raise the failure and crash the orchestrator after
+        all agent results had already been gathered — losing them to a
+        UI-only failure. After the loop exits the process simply
+        continues without the live display.
+        """
         try:
             while self._running:
-                self._redraw()
+                try:
+                    self._redraw()
+                except OSError:
+                    self._running = False
+                    return
                 await asyncio.sleep(self._refresh_interval)
         except asyncio.CancelledError:
             pass
@@ -396,4 +409,10 @@ class StatusDisplay:
                 pass
             self._refresh_task = None
         if self._use_ansi:
-            self._redraw()
+            try:
+                self._redraw()
+            except OSError:
+                # Same rationale as ``_refresh_loop``: a UI-only failure
+                # during the final redraw must not crash ``stop`` and
+                # discard the gathered agent results.
+                pass

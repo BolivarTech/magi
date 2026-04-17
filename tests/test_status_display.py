@@ -195,6 +195,45 @@ class TestAsyncLifecycle:
         await d.stop()
         assert buf.getvalue() == snapshot
 
+    @pytest.mark.asyncio
+    async def test_refresh_loop_survives_oserror_from_redraw(self):
+        """Regression (v2.1.2): if ``_redraw`` raises ``OSError`` /
+        ``BrokenPipeError`` (stream pipe died, terminal closed mid-run),
+        the refresh loop must stop silently. Pre-2.1.2 the unhandled
+        exception killed the background task; the next ``await
+        self._refresh_task`` in :meth:`stop` then re-raised it and
+        crashed the orchestrator on the way out, swallowing the agent
+        results that had already been gathered.
+
+        ``stop()`` must not raise, and the loop must have actually
+        attempted at least one post-``start`` redraw so the test is
+        not trivially satisfied by an empty loop body.
+        """
+        buf = io.StringIO()
+        d = StatusDisplay(["m"], stream=buf, use_ansi=True, refresh_interval=0.01)
+
+        original_redraw = d._redraw
+        redraw_calls = {"count": 0}
+
+        def broken_after_first() -> None:
+            redraw_calls["count"] += 1
+            if redraw_calls["count"] >= 2:
+                raise BrokenPipeError("terminal pipe closed mid-redraw")
+            original_redraw()
+
+        d._redraw = broken_after_first  # type: ignore[method-assign]
+
+        await d.start()
+        # Give the background loop time to fire the broken redraw.
+        await asyncio.sleep(0.1)
+        # stop() must complete without re-raising the BrokenPipeError.
+        await d.stop()
+
+        assert redraw_calls["count"] >= 2, (
+            "refresh loop must have attempted at least one post-start redraw "
+            f"to exercise the OSError path; got {redraw_calls['count']} calls."
+        )
+
 
 class TestAsciiFallback:
     def test_ascii_glyphs_when_encoding_is_cp1252(self):

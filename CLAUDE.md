@@ -261,14 +261,14 @@ A single marketplace repo can host multiple plugins by pointing `source` to othe
 
 ## Test Coverage
 
-186 tests across 4 test files (185 passed, 1 skipped on Windows):
+270 tests across 4 test files (269 passed, 1 skipped on Windows):
 
 | File | Tests | Covers |
 |------|-------|--------|
-| `tests/test_synthesize.py` | 107 | Validation, string type/length checks, bool confidence rejection, agent/verdict type guards, zero-width Unicode, finding sub-field limits, weight-based consensus, confidence formula, findings dedup, dynamic labels, HOLD -- TIE, duplicate agents, banner width + alignment + integer percent, report sections + ordering, dissent summary-only, SKILL.md template parity |
-| `tests/test_parse_agent_output.py` | 19 | Fence stripping, text extraction (3 formats), fail-fast on unknown types, pipeline integration |
-| `tests/test_run_magi.py` | 27 | Arg parsing, --no-status flag, model passthrough, orchestration, degraded mode, input validation, cleanup_old_runs LRU/symlink, tracked_launch states (success/timeout/failed), display start() failure fallback |
-| `tests/test_status_display.py` | 32 | Init, update, render, ASCII fallback, async lifecycle, stop idempotency, write-path invariant tripwire |
+| `tests/test_synthesize.py` | 133 | Validation, string type/length checks, bool confidence rejection, agent/verdict type guards, zero-width Unicode (incl. U+2060-U+206F word joiner / invisible math operators / tag controls), finding sub-field limits, weight-based consensus, confidence formula, findings dedup, dynamic labels, HOLD -- TIE, duplicate agents, banner width + alignment + integer percent, report sections + ordering, dissent summary-only, SKILL.md template parity |
+| `tests/test_parse_agent_output.py` | 21 | Fence stripping, text extraction (3 formats), fail-fast on unknown types, pipeline integration |
+| `tests/test_run_magi.py` | 76 | Arg parsing, --no-status flag, model passthrough, orchestration, degraded mode, input validation, cleanup_old_runs LRU/symlink, tracked_launch states (success/timeout/failed), display start() failure fallback, Windows kill-tree order (taskkill before proc.kill), stderr replay OSError safety |
+| `tests/test_status_display.py` | 40 | Init, update, render, ASCII fallback, async lifecycle, stop idempotency, write-path invariant tripwire, refresh-loop OSError resilience |
 
 Run with `python -m pytest tests/ -v` or `make test`.
 
@@ -310,11 +310,15 @@ Three rounds of MAGI self-review identified and resolved the following issues:
 | R2-4 | `shutil.rmtree(ignore_errors=True)` hides failures | `try/except OSError` with warning to stderr |
 | R2-5 | No subprocess exit code validation | `proc.returncode` check with `RuntimeError` |
 | R2-6 | HOLD label misleading with conditional verdicts | `HOLD -- TIE` for score=0 (ties default to reject) |
+| R3-1 | Windows kill-tree ran *after* `proc.kill()` — parent torn down before `taskkill /T` could enumerate descendants | `_windows_kill_tree(pid)` now runs **before** `proc.kill()`; `proc.kill()` stays as belt-and-suspenders so the asyncio wrapper still observes the exit |
+| R3-2 | `_ZERO_WIDTH_RE` skipped `U+2060-U+206F` (word joiner, invisible math operators, deprecated tag controls) — Cf-category invisibles could smuggle dedup-key collisions | Regex widened to `[\u200b-\u200f\u2028-\u202f\u2060-\u206f\ufeff\u00ad]`; covers every Cf-category invisible in the BMP that prior tests touched |
+| R3-3 | `_buffered_stderr_while` replay re-raised `OSError` from `saved.write` / `saved.flush`, masking the body's in-flight exception (root cause hidden by a cleanup-only failure) | `finally` wraps the replay in `try/except OSError`; clean-body runs no longer crash on broken pipes, and an in-flight exception always propagates unchanged |
+| R3-4 | `StatusDisplay._refresh_loop` and the final `stop()` redraw bubbled `OSError` (e.g. `BrokenPipeError`) out of the background task; `stop()` then re-raised it and discarded gathered agent results | Both call sites wrap `_redraw()` in `try/except OSError`; refresh loop sets `_running = False` and returns silently when the stream dies |
 
 ### Known limitations
 
 - **TOCTOU residual**: A narrow race window exists between `realpath()` and `rmtree()` in `cleanup_old_runs`. Acceptable for dev-tooling context; not suitable for security-critical environments.
-- **Windows subprocess orphans**: `proc.kill()` on timeout does not terminate the full process tree. Claude child processes may survive as orphans.
+- **Windows subprocess orphans (residual)**: the reap path now invokes `taskkill /F /T /PID` *before* `proc.kill()` so the tree is collapsed while the parent-child mapping is still intact. Orphans only survive when `taskkill` is missing from PATH or its `_TASKKILL_TIMEOUT` budget is exceeded — both already emit a "may be orphaned" warning naming the pid so operators can clean up manually.
 - **Temp directory scan**: `cleanup_old_runs` scans the entire system temp directory. May be slow on machines with thousands of temp entries (e.g., shared CI runners).
 - **Windows non-VT TTY**: On legacy Windows consoles where `ENABLE_VIRTUAL_TERMINAL_PROCESSING` cannot be enabled, the status display falls through to plain mode and emits one append-only line per agent state change (no in-place redraw). Modern Windows Terminal, ConEmu, and WSL terminals are unaffected. Disable the display with `--no-status` if the append output is undesirable.
 - **`_StderrBufferShim` coverage gap**: the shim intercepts `sys.stderr.write`, `sys.stderr.flush`, and `sys.stderr.buffer.write`. The following paths bypass it:

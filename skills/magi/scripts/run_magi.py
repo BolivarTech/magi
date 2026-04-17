@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # Author: Julian Bolivar
-# Version: 2.1.1
+# Version: 2.1.2
 # Date: 2026-04-17
 """MAGI Orchestrator — async Python replacement for run_magi.sh.
 
@@ -141,15 +141,21 @@ async def _reap_and_drain_stderr(proc: asyncio.subprocess.Process) -> bytes:
     so we emit a warning naming the pid so operators can notice it.
 
     On Windows, ``proc.kill()`` only terminates the top-level process;
-    any children the ``claude`` CLI spawned stay alive. We follow the
-    kill with a best-effort ``taskkill /F /T`` to collapse the tree.
-    Non-Windows platforms send ``SIGKILL`` directly to the top process
-    and rely on ``claude`` not to fork independent sub-agents there —
-    if it ever did, that would need its own platform-specific handling.
+    any children the ``claude`` CLI spawned stay alive. We collapse the
+    tree first with a best-effort ``taskkill /F /T`` while the parent
+    PID is still alive — once ``proc.kill()`` issues
+    ``TerminateProcess``, the kernel may have torn down the parent-child
+    mapping that ``taskkill /T`` walks, leaving descendants orphaned
+    despite the call. ``proc.kill()`` then runs as a fallback so the
+    asyncio.subprocess wrapper observes the exit cleanly even when
+    ``taskkill`` is missing or times out. Non-Windows platforms send
+    ``SIGKILL`` directly to the top process and rely on ``claude`` not
+    to fork independent sub-agents there — if it ever did, that would
+    need its own platform-specific handling.
     """
-    proc.kill()
     if sys.platform == "win32":
         _windows_kill_tree(proc.pid)
+    proc.kill()
     try:
         await asyncio.wait_for(proc.wait(), timeout=_PROC_WAIT_REAP_TIMEOUT)
     except asyncio.TimeoutError:

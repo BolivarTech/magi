@@ -1458,6 +1458,62 @@ class TestReapAndDrainStderr:
             for argv in recorded_argv
         ), f"Expected taskkill invocation for pid 12345, recorded: {recorded_argv!r}"
 
+    def test_windows_taskkill_runs_before_proc_kill(self, monkeypatch):
+        """On Windows, ``taskkill /F /T /PID`` must be invoked BEFORE
+        ``proc.kill()``. Calling ``proc.kill()`` first issues
+        ``TerminateProcess`` against the parent, after which the
+        kernel may have torn down the parent-child relationship that
+        ``taskkill /T`` walks to enumerate descendants — leaving the
+        orphan window the function exists to close still open.
+
+        This is a regression guard: pre-2.1.2 the order was inverted
+        and the tree-kill was effectively a no-op for child processes
+        the ``claude`` CLI had spawned.
+        """
+        import sys as _sys
+
+        if _sys.platform != "win32":
+            pytest.skip("Windows-only path")
+
+        import run_magi
+
+        call_order: list[str] = []
+
+        def fake_run(argv, **kwargs):
+            call_order.append("taskkill")
+
+            class _Completed:
+                returncode = 0
+
+            return _Completed()
+
+        monkeypatch.setattr(run_magi.subprocess, "run", fake_run)
+
+        class _FakeStderr:
+            async def read(self) -> bytes:
+                return b""
+
+        class _FakeProc:
+            pid = 99999
+            stderr = _FakeStderr()
+
+            def kill(self) -> None:
+                call_order.append("proc_kill")
+
+            async def wait(self) -> int:
+                return 0
+
+        asyncio.run(run_magi._reap_and_drain_stderr(_FakeProc()))  # type: ignore[arg-type]
+
+        assert call_order, "expected at least one of taskkill / proc_kill to fire"
+        assert call_order[0] == "taskkill", (
+            f"taskkill must run before proc.kill(); recorded order: {call_order!r}"
+        )
+        assert "proc_kill" in call_order, (
+            "proc.kill() must still be invoked after the tree-kill so the "
+            "asyncio.subprocess wrapper observes the exit cleanly."
+        )
+
 
 class TestBufferedStderrWhile:
     """Structural enforcement of the display-active stderr-quiet invariant (W3)."""
@@ -1596,3 +1652,70 @@ class TestBufferedStderrWhile:
         assert "diag from melchior" in captured.err
         assert "diag from balthasar" in captured.err
         assert "diag from caspar" in captured.err
+
+    def test_replay_oserror_does_not_mask_body_exception(self):
+        """If the buffered-stderr replay raises ``OSError`` (the real
+        stderr is closed, the parent pipe is dead, the file descriptor
+        is gone), the original exception in flight from the body must
+        propagate — the write failure during cleanup must not shadow
+        the root cause.
+
+        Pre-2.1.2 the ``finally`` clause did ``saved.write(...);
+        saved.flush()`` unguarded. A ``BrokenPipeError`` during replay
+        would raise out of the context manager and overwrite the body's
+        exception, hiding the real failure from the operator.
+        """
+        from stderr_shim import _buffered_stderr_while
+
+        class _BrokenStderr:
+            encoding = "utf-8"
+            buffer = None
+
+            def write(self, data: str) -> int:
+                raise BrokenPipeError("pipe closed during replay")
+
+            def flush(self) -> None:
+                pass
+
+            def isatty(self) -> bool:
+                return False
+
+        saved = sys.stderr
+        sys.stderr = _BrokenStderr()  # type: ignore[assignment]
+        try:
+            with pytest.raises(RuntimeError, match="root cause"):
+                with _buffered_stderr_while(active=True):
+                    print("buffered diagnostic", file=sys.stderr)
+                    raise RuntimeError("root cause")
+        finally:
+            sys.stderr = saved
+
+    def test_replay_oserror_alone_is_swallowed(self):
+        """When the body succeeds but the replay raises ``OSError``,
+        the context manager must exit cleanly. Re-raising the write
+        failure from a cleanup-only path would crash the orchestrator
+        on the way out for what is purely a diagnostics-delivery
+        problem.
+        """
+        from stderr_shim import _buffered_stderr_while
+
+        class _BrokenStderr:
+            encoding = "utf-8"
+            buffer = None
+
+            def write(self, data: str) -> int:
+                raise OSError(32, "Broken pipe")
+
+            def flush(self) -> None:
+                pass
+
+            def isatty(self) -> bool:
+                return False
+
+        saved = sys.stderr
+        sys.stderr = _BrokenStderr()  # type: ignore[assignment]
+        try:
+            with _buffered_stderr_while(active=True):
+                print("diag that will fail to replay", file=sys.stderr)
+        finally:
+            sys.stderr = saved

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Author: Julian Bolivar
-# Version: 1.0.0
-# Date: 2026-04-13
+# Version: 1.0.1
+# Date: 2026-04-17
 """Stderr write-buffering shim for MAGI's live status display.
 
 When the status display renders live to ``sys.stderr``, any concurrent
@@ -139,5 +139,16 @@ def _buffered_stderr_while(active: bool) -> Iterator[None]:
     finally:
         sys.stderr = saved
         if buffer:
-            saved.write("".join(buffer))
-            saved.flush()
+            try:
+                saved.write("".join(buffer))
+                saved.flush()
+            except OSError:
+                # Replay is best-effort delivery of buffered diagnostics.
+                # If the real stderr has died (closed pipe, dead reader,
+                # revoked fd), swallow the write failure here so it
+                # cannot shadow an in-flight body exception, nor crash
+                # a clean-body run on what is purely a UI/diagnostics
+                # problem. The buffered content is lost — the same
+                # outcome as if the real stderr had failed mid-run
+                # without the shim in place.
+                pass

@@ -1768,6 +1768,46 @@ class TestTitleNormalization:
         finally:
             os.unlink(path)
 
+    def test_word_joiner_stripped(self):
+        """Regression (v2.1.2): ``U+2060`` (WORD JOINER) is invisible
+        and must be stripped. Without this, two titles that look
+        identical in the rendered report can still produce different
+        dedup keys, smuggling a duplicate finding past
+        :func:`consensus._dedup_key`.
+        """
+        from validate import clean_title
+
+        assert clean_title("Hel\u2060lo") == "Hello"
+
+    def test_invisible_math_operators_stripped(self):
+        """Regression (v2.1.2): ``U+2061`` (FUNCTION APPLICATION),
+        ``U+2062`` (INVISIBLE TIMES), ``U+2063`` (INVISIBLE
+        SEPARATOR), and ``U+2064`` (INVISIBLE PLUS) must all be
+        stripped. Each is Cf-category invisible and exposes the
+        same dedup-key smuggling surface as the zero-width spaces
+        already covered.
+        """
+        from validate import clean_title
+
+        raw = "a\u2061b\u2062c\u2063d\u2064e"
+        assert clean_title(raw) == "abcde"
+
+    def test_full_2060_to_206f_block_stripped(self):
+        """Regression (v2.1.2): every character in ``U+2060-U+206F``
+        must be stripped. The block contains the word joiner, the
+        four invisible mathematical operators, the deprecated
+        formatting characters (``U+2065-U+2069``), and the four
+        deprecated language-tag controls (``U+206A-U+206F``). All
+        are Cf-category invisible and share the same smuggling
+        surface — testing the boundary catches a partial regex
+        regression that would otherwise let only the unmentioned
+        codepoints leak through.
+        """
+        from validate import clean_title
+
+        block = "".join(chr(cp) for cp in range(0x2060, 0x2070))
+        assert clean_title(f"x{block}y") == "xy"
+
     def test_title_with_newline_stored_in_cleaned_form(self):
         """The stored title must be the cleaned form, not the raw one —
         consumers writing ``_format_finding_line`` must never see the

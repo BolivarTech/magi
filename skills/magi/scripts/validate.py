@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # Author: Julian Bolivar
-# Version: 2.1.1
+# Version: 2.1.2
 # Date: 2026-04-17
 """MAGI agent output validation.
 
@@ -58,10 +58,14 @@ _MAX_DETAIL_LENGTH: int = 10_000
 # Invisible characters that can smuggle hidden content into a finding
 # title: zero-width spaces/joiners (U+200B-U+200D), bidi marks and embeds
 # (U+200E-U+200F, U+202A-U+202E), line/paragraph separators (U+2028-U+2029),
-# narrow no-break space (U+202F), the byte-order mark (U+FEFF), and the
-# soft hyphen (U+00AD). These span categories Cf, Zl, Zp, and Zs rather
-# than Cf alone.
-_ZERO_WIDTH_RE = re.compile(r"[\u200b-\u200f\u2028-\u202f\ufeff\u00ad]")
+# narrow no-break space (U+202F), the word joiner and four invisible
+# mathematical operators (U+2060-U+2064), the deprecated formatting
+# characters (U+2065-U+2069), and the deprecated language-tag controls
+# (U+206A-U+206F) — every codepoint in U+2060-U+206F is Cf-category and
+# shares the same dedup-key smuggling surface. Plus the byte-order mark
+# (U+FEFF) and the soft hyphen (U+00AD). These span categories Cf, Zl,
+# Zp, and Zs rather than Cf alone.
+_ZERO_WIDTH_RE = re.compile(r"[\u200b-\u200f\u2028-\u202f\u2060-\u206f\ufeff\u00ad]")
 # ASCII control whitespace (``\t``, ``\n``, ``\r``, vertical tab, form feed)
 # plus the NEL (U+0085) that terminals treat as a line break. These are not
 # "invisible" in the Cf/Zl/Zp sense — they render as column breaks — so they
