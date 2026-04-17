@@ -238,15 +238,31 @@ class TestRunOrchestrator:
 class TestCleanupOldRuns:
     """Verify LRU cleanup of old MAGI temp directories."""
 
-    def test_keep_zero_disables_cleanup(self, tmp_path):
-        """keep <= 0 should not scan or delete anything."""
+    def test_negative_keep_disables_cleanup(self, tmp_path):
+        """keep < 0 should not scan or delete anything."""
         from run_magi import cleanup_old_runs
 
         with patch("run_magi.tempfile.gettempdir", return_value=str(tmp_path)):
             magi_dir = tmp_path / "magi-run-abc123"
             magi_dir.mkdir()
-            cleanup_old_runs(0)
+            cleanup_old_runs(-1)
             assert magi_dir.exists()
+
+    def test_keep_zero_deletes_all_magi_dirs(self, tmp_path):
+        """keep == 0 should remove every magi-run-* dir (reserves slot for new run)."""
+        from run_magi import cleanup_old_runs
+
+        magi_dirs = []
+        for i in range(3):
+            d = tmp_path / f"magi-run-{i:04d}"
+            d.mkdir()
+            magi_dirs.append(d)
+
+        with patch("run_magi.tempfile.gettempdir", return_value=str(tmp_path)):
+            cleanup_old_runs(0)
+
+        for d in magi_dirs:
+            assert not d.exists(), f"{d} should have been deleted"
 
     def test_keeps_most_recent(self, tmp_path):
         """Should keep the N most recent and remove the rest."""
@@ -857,6 +873,10 @@ class _FakeTimeoutProc:
         self.stderr.feed_data(stderr_bytes)
         self.stderr.feed_eof()
         self.stdin = None
+        # Fake pid so the Windows tree-kill path in ``_reap_and_drain_stderr``
+        # has something to pass to ``taskkill``. Test fixtures monkeypatch
+        # ``subprocess.run`` so the call is inert.
+        self.pid = 999_000
 
     async def communicate(self, input: bytes | None = None) -> tuple[bytes, bytes]:
         # Hang so wait_for raises TimeoutError.
@@ -876,6 +896,22 @@ class _FakeTimeoutProc:
 
 class TestLaunchAgentTimeoutReaping:
     """A-1: zombie reaping and stderr capture on agent timeout."""
+
+    @pytest.fixture(autouse=True)
+    def _stub_taskkill(self, monkeypatch):
+        """Stub ``subprocess.run`` so the Windows tree-kill path in
+        ``_reap_and_drain_stderr`` does not invoke the real ``taskkill``
+        against a fake pid and slow each test down by several seconds.
+        """
+        import run_magi
+
+        def _noop_run(*args, **kwargs):
+            class _Completed:
+                returncode = 0
+
+            return _Completed()
+
+        monkeypatch.setattr(run_magi.subprocess, "run", _noop_run)
 
     @pytest.mark.asyncio
     async def test_wait_awaited_after_kill_on_timeout(self, tmp_path, monkeypatch):
@@ -1018,18 +1054,18 @@ class TestSafeDisplayUpdate:
     """Verify ``_safe_display_update`` swallows display errors during shutdown."""
 
     def test_none_display_is_noop(self):
-        from run_magi import _safe_display_update
+        from run_magi import _DisplayLogGate, _safe_display_update
 
-        _safe_display_update(None, "melchior", "running")  # must not raise
+        _safe_display_update(None, "melchior", "running", _DisplayLogGate())  # must not raise
 
     def test_exception_is_swallowed(self):
-        from run_magi import _safe_display_update
+        from run_magi import _DisplayLogGate, _safe_display_update
 
         class _Broken:
             def update(self, agent: str, state: str) -> None:
                 raise RuntimeError("broken")
 
-        _safe_display_update(_Broken(), "melchior", "running")  # must not raise
+        _safe_display_update(_Broken(), "melchior", "running", _DisplayLogGate())
 
     def test_first_exception_logged_subsequent_silent(self, capsys):
         """A broken display must surface its first error to stderr so the
@@ -1037,18 +1073,18 @@ class TestSafeDisplayUpdate:
         silent to prevent the redraw path from flooding the log on every
         tick. The real shutdown signal from the caller is still preserved
         because ``_safe_display_update`` never re-raises."""
-        from run_magi import _safe_display_update, _reset_display_log_state
+        from run_magi import _DisplayLogGate, _safe_display_update
 
-        _reset_display_log_state()
+        gate = _DisplayLogGate()
 
         class _Broken:
             def update(self, agent: str, state: str) -> None:
                 raise RuntimeError("boom")
 
         broken = _Broken()
-        _safe_display_update(broken, "melchior", "running")
-        _safe_display_update(broken, "balthasar", "running")
-        _safe_display_update(broken, "caspar", "running")
+        _safe_display_update(broken, "melchior", "running", gate)
+        _safe_display_update(broken, "balthasar", "running", gate)
+        _safe_display_update(broken, "caspar", "running", gate)
 
         captured = capsys.readouterr()
         assert captured.err.count("status display") == 1, (
@@ -1056,8 +1092,31 @@ class TestSafeDisplayUpdate:
         )
         assert "boom" in captured.err
 
+    def test_fresh_gate_per_run_rearms_log(self, capsys):
+        """Each run gets a new ``_DisplayLogGate``, so the first failure of
+        every run surfaces to stderr. Without per-run isolation a long-lived
+        host that reuses the module would never see display failures after
+        the first run.
+        """
+        from run_magi import _DisplayLogGate, _safe_display_update
+
+        class _Broken:
+            def update(self, agent: str, state: str) -> None:
+                raise RuntimeError("boom")
+
+        broken = _Broken()
+        # Run 1.
+        _safe_display_update(broken, "melchior", "running", _DisplayLogGate())
+        # Run 2 (separate gate).
+        _safe_display_update(broken, "melchior", "running", _DisplayLogGate())
+
+        captured = capsys.readouterr()
+        assert captured.err.count("status display") == 2, (
+            "A fresh gate per run must re-arm the first-failure log."
+        )
+
     def test_successful_update_propagates(self):
-        from run_magi import _safe_display_update
+        from run_magi import _DisplayLogGate, _safe_display_update
 
         class _Recorder:
             def __init__(self):
@@ -1067,7 +1126,7 @@ class TestSafeDisplayUpdate:
                 self.calls.append((agent, state))
 
         rec = _Recorder()
-        _safe_display_update(rec, "melchior", "running")
+        _safe_display_update(rec, "melchior", "running", _DisplayLogGate())
         assert rec.calls == [("melchior", "running")]
 
     def test_base_exception_is_swallowed(self):
@@ -1080,9 +1139,9 @@ class TestSafeDisplayUpdate:
         """
         import asyncio
 
-        from run_magi import _reset_display_log_state, _safe_display_update
+        from run_magi import _DisplayLogGate, _safe_display_update
 
-        _reset_display_log_state()
+        gate = _DisplayLogGate()
 
         class _CancelledRaiser:
             def update(self, agent: str, state: str) -> None:
@@ -1095,8 +1154,8 @@ class TestSafeDisplayUpdate:
         # Neither call may propagate — the documented contract says the
         # helper swallows shutdown-path failures so the caller's own
         # ``raise`` preserves the original exception.
-        _safe_display_update(_CancelledRaiser(), "melchior", "failed")
-        _safe_display_update(_SystemExitRaiser(), "caspar", "failed")
+        _safe_display_update(_CancelledRaiser(), "melchior", "failed", gate)
+        _safe_display_update(_SystemExitRaiser(), "caspar", "failed", gate)
 
 
 class TestReapAndDrainStderr:
@@ -1150,6 +1209,58 @@ class TestReapAndDrainStderr:
             "Warning must name the unreaped subprocess so operators can identify the orphan."
         )
         assert "did not exit" in captured.err or "orphan" in captured.err.lower()
+
+    def test_windows_invokes_taskkill_tree(self, monkeypatch):
+        """On Windows, the reap path must also issue ``taskkill /F /T /PID``
+        so orphan child processes (a real hazard when ``claude`` spawns
+        its own helpers) do not survive a MAGI timeout.
+
+        The existing ``proc.kill()`` is kept for signalling, and
+        ``taskkill`` is invoked in addition to it — not as a replacement
+        — because ``taskkill`` may fail if the binary is missing or a
+        timeout cuts it off. Calling both makes the reap more robust
+        without regressing the single-process case.
+        """
+        import asyncio
+        import sys as _sys
+
+        if _sys.platform != "win32":
+            pytest.skip("Windows-only path")
+
+        import run_magi
+
+        recorded_argv: list[list[str]] = []
+
+        def fake_run(argv, **kwargs):
+            recorded_argv.append(list(argv))
+
+            class _Completed:
+                returncode = 0
+
+            return _Completed()
+
+        monkeypatch.setattr(run_magi.subprocess, "run", fake_run)
+
+        class _FakeStderr:
+            async def read(self) -> bytes:
+                return b""
+
+        class _FakeProc:
+            pid = 12345
+            stderr = _FakeStderr()
+
+            def kill(self) -> None:
+                pass
+
+            async def wait(self) -> int:
+                return 0
+
+        asyncio.run(run_magi._reap_and_drain_stderr(_FakeProc()))  # type: ignore[arg-type]
+
+        assert any(
+            argv[:4] == ["taskkill", "/F", "/T", "/PID"] and argv[4] == "12345"
+            for argv in recorded_argv
+        ), f"Expected taskkill invocation for pid 12345, recorded: {recorded_argv!r}"
 
 
 class TestBufferedStderrWhile:

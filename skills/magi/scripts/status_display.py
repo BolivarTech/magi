@@ -205,24 +205,50 @@ class StatusDisplay:
         if not is_tty:
             return False
         if sys.platform == "win32":
-            return self._enable_windows_vt_mode()
+            return self._enable_windows_vt_mode(self._stream)
         return True
 
     @staticmethod
-    def _enable_windows_vt_mode() -> bool:
-        """Enable ANSI VT processing on Windows consoles.
+    def _enable_windows_vt_mode(stream: TextIO) -> bool:
+        """Enable ANSI VT processing on the Windows console handle backing *stream*.
+
+        The handle is derived from ``stream.fileno()`` so the VT flag is
+        applied to whichever standard stream the display is actually
+        writing to — stdout *or* stderr. MAGI renders to stderr, and an
+        earlier version unconditionally enabled VT on ``STD_OUTPUT_HANDLE``
+        (-11), leaving stderr-based redraws garbled on legacy Windows
+        consoles. Now:
+
+        * ``fd == 1`` resolves to ``STD_OUTPUT_HANDLE`` (-11)
+        * ``fd == 2`` resolves to ``STD_ERROR_HANDLE`` (-12)
+        * any other fd (wrapper streams, pipes, ``io.StringIO``) returns
+          ``False`` so the caller falls through to plain mode.
+
+        Args:
+            stream: The output stream whose underlying console handle
+                should receive VT processing.
 
         Returns:
-            True on success, False if the console mode cannot be set
-            or the required ``ctypes`` symbols are unavailable.
+            True on success, False if the fd is unknown, the stream has
+            no fileno, or the console mode cannot be set.
         """
+        try:
+            fd = stream.fileno()
+        except (AttributeError, OSError, ValueError):
+            return False
+        if fd == 1:
+            std_handle = -11  # STD_OUTPUT_HANDLE
+        elif fd == 2:
+            std_handle = -12  # STD_ERROR_HANDLE
+        else:
+            return False
+
         try:
             import ctypes
 
             kernel32 = ctypes.windll.kernel32
-            std_output_handle = -11
             enable_vt = 0x0004
-            handle = kernel32.GetStdHandle(std_output_handle)
+            handle = kernel32.GetStdHandle(std_handle)
             mode = ctypes.c_ulong()
             if not kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
                 return False

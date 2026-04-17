@@ -265,3 +265,106 @@ class TestWritePathInvariantTripwire:
         d = StatusDisplay(["m"], stream=buf, use_ansi=True)
         with pytest.raises(RuntimeError, match="mutually exclusive"):
             d._write_plain_event("m")
+
+
+class TestWindowsVtModeStreamHandle:
+    """Verify ``_enable_windows_vt_mode`` selects the handle matching *stream*.
+
+    Earlier versions unconditionally enabled VT on ``STD_OUTPUT_HANDLE``
+    even when the display wrote to ``stderr``, leaving the live tree
+    unreadable on legacy Windows consoles. The fix is to pick the
+    handle from the stream's ``fileno()``: 1 -> STD_OUTPUT_HANDLE (-11),
+    2 -> STD_ERROR_HANDLE (-12), anything else -> False (plain mode).
+    """
+
+    def _make_stream_with_fd(self, fd: int):
+        class _FakeStream:
+            def fileno(self_inner) -> int:
+                return fd
+
+        return _FakeStream()
+
+    def test_unknown_fd_returns_false(self):
+        """A stream whose fd is not 1 or 2 (e.g. a pipe) must not enable VT."""
+        stream = self._make_stream_with_fd(7)
+        assert StatusDisplay._enable_windows_vt_mode(stream) is False
+
+    def test_stream_without_fileno_returns_false(self):
+        """A stream that cannot produce a fd (e.g. ``io.StringIO``) returns False."""
+        assert StatusDisplay._enable_windows_vt_mode(io.StringIO()) is False
+
+    def test_fd_two_targets_stderr_handle(self, monkeypatch):
+        """fd == 2 must call GetStdHandle with STD_ERROR_HANDLE (-12), not -11.
+
+        This is the regression: the display is instantiated against
+        ``sys.stderr``, so VT must be enabled on the stderr console
+        handle. Enabling it on stdout leaves stderr-rendered escape
+        codes uninterpreted.
+        """
+        import sys as _sys
+
+        if _sys.platform != "win32":
+            pytest.skip("Windows-only path")
+
+        import ctypes
+
+        handles_requested: list[int] = []
+
+        class _FakeKernel32:
+            def GetStdHandle(self_inner, handle_id: int) -> int:
+                handles_requested.append(handle_id)
+                return 42
+
+            def GetConsoleMode(self_inner, handle, mode_ref) -> int:
+                mode_ref._obj.value = 0
+                return 1
+
+            def SetConsoleMode(self_inner, handle, new_mode) -> int:
+                return 1
+
+        class _FakeWindll:
+            kernel32 = _FakeKernel32()
+
+        monkeypatch.setattr(ctypes, "windll", _FakeWindll(), raising=False)
+
+        stream = self._make_stream_with_fd(2)
+        result = StatusDisplay._enable_windows_vt_mode(stream)
+
+        assert result is True
+        assert handles_requested == [-12], (
+            f"fd == 2 must resolve to STD_ERROR_HANDLE (-12), got {handles_requested!r}"
+        )
+
+    def test_fd_one_targets_stdout_handle(self, monkeypatch):
+        """fd == 1 must call GetStdHandle with STD_OUTPUT_HANDLE (-11)."""
+        import sys as _sys
+
+        if _sys.platform != "win32":
+            pytest.skip("Windows-only path")
+
+        import ctypes
+
+        handles_requested: list[int] = []
+
+        class _FakeKernel32:
+            def GetStdHandle(self_inner, handle_id: int) -> int:
+                handles_requested.append(handle_id)
+                return 42
+
+            def GetConsoleMode(self_inner, handle, mode_ref) -> int:
+                mode_ref._obj.value = 0
+                return 1
+
+            def SetConsoleMode(self_inner, handle, new_mode) -> int:
+                return 1
+
+        class _FakeWindll:
+            kernel32 = _FakeKernel32()
+
+        monkeypatch.setattr(ctypes, "windll", _FakeWindll(), raising=False)
+
+        stream = self._make_stream_with_fd(1)
+        result = StatusDisplay._enable_windows_vt_mode(stream)
+
+        assert result is True
+        assert handles_requested == [-11]

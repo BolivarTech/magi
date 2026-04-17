@@ -67,6 +67,19 @@ class TestExtractText:
         with pytest.raises(ValueError, match="No text block"):
             _extract_text(data)
 
+    def test_content_must_be_a_list(self):
+        """A non-list ``content`` value must be rejected, not silently
+        iterated character-by-character."""
+        data = {"content": "not-a-list"}
+        with pytest.raises(ValueError, match="'content' must be a list"):
+            _extract_text(data)
+
+    def test_content_dict_not_accepted(self):
+        """A dict under ``content`` would silently iterate its keys; reject it."""
+        data = {"content": {"type": "text", "text": "inline"}}
+        with pytest.raises(ValueError, match="'content' must be a list"):
+            _extract_text(data)
+
     def test_plain_string(self):
         assert _extract_text("hello world") == "hello world"
 

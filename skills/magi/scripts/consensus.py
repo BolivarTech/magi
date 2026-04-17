@@ -186,11 +186,22 @@ def determine_consensus(agents: list[dict[str, Any]]) -> dict[str, Any]:
 
     consensus, consensus_short = _classify_consensus(score, has_conditions, split)
 
+    # Align the majority/dissent split with the **consensus verdict**, not the
+    # raw count of effective verdicts. The two can diverge on ties where
+    # alphabetical tie-breaking picks ``approve`` but the score (or tie policy)
+    # drives the consensus to ``reject`` — e.g., 2-agent ``[conditional,
+    # reject]`` scores -0.25 yet the count-based majority would point at the
+    # conditional agent, leaving confidence computed on the losing side. The
+    # fix: select the side that matches ``consensus_short``. ``approve`` and
+    # ``conditional`` both resolve to the approve side; ``reject`` to the
+    # reject side.
+    consensus_side = "reject" if consensus_short == "reject" else "approve"
+
     majority_agents = []
     dissent_agents = []
     for a in agents:
         eff = "approve" if a["verdict"] == "conditional" else a["verdict"]
-        if eff == majority_verdict:
+        if eff == consensus_side:
             majority_agents.append(a)
         else:
             dissent_agents.append(a)

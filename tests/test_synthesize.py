@@ -626,6 +626,54 @@ class TestDetermineConsensus:
         result = determine_consensus(agents)
         assert result["confidence"] == 0.68
 
+    def test_two_agent_conditional_reject_confidence_uses_reject_side(self):
+        """Regression: 2-agent ``conditional + reject`` must derive confidence
+        from the reject side, not the conditional.
+
+        Pre-fix, the count-based majority picked ``approve`` via alphabetical
+        tiebreaking (both sides count 1), so ``majority_agents`` held the
+        conditional agent while ``consensus_verdict`` was ``reject``. The
+        reported confidence came from the losing side. With the
+        consensus-aligned selection, the reject agent's confidence drives
+        the number.
+
+        Math: ``score = (0.5 - 1) / 2 = -0.25``; ``weight_factor =
+        (0.25 + 1) / 2 = 0.625``; ``base = 0.9 / 2 = 0.45``;
+        ``confidence = 0.45 * 0.625 = 0.28125 -> 0.28``.
+        """
+        agents = [
+            _valid_agent("melchior", verdict="conditional", confidence=0.2),
+            _valid_agent("balthasar", verdict="reject", confidence=0.9),
+        ]
+        result = determine_consensus(agents)
+        assert result["consensus"] == "HOLD (1-1)"
+        assert result["consensus_verdict"] == "reject"
+        assert result["confidence"] == 0.28, (
+            "Confidence must be computed from the reject agent (0.9), "
+            "not the conditional one (0.2), so it matches the "
+            "consensus_verdict."
+        )
+        # Dissent should surface the conditional (non-consensus) agent.
+        assert [d["agent"] for d in result["dissent"]] == ["melchior"]
+
+    def test_two_agent_approve_reject_confidence_uses_reject_side(self):
+        """Regression: 2-agent ``approve + reject`` tie (score=0) resolves
+        to ``reject`` via tie-policy; confidence must follow the reject
+        agent, not the approve one picked by alphabetical tiebreaking.
+
+        Math: ``score = 0``; ``weight_factor = 0.5``; ``base = 0.9 / 2
+        = 0.45``; ``confidence = 0.45 * 0.5 = 0.225 -> 0.23``.
+        """
+        agents = [
+            _valid_agent("melchior", verdict="approve", confidence=0.2),
+            _valid_agent("balthasar", verdict="reject", confidence=0.9),
+        ]
+        result = determine_consensus(agents)
+        assert result["consensus"] == "HOLD -- TIE"
+        assert result["consensus_verdict"] == "reject"
+        assert result["confidence"] == 0.23
+        assert [d["agent"] for d in result["dissent"]] == ["melchior"]
+
     def test_weight_confidence_hold_is_moderate(self):
         """2 reject + 1 approve: score=-0.33, confidence is moderate.
 

@@ -22,6 +22,7 @@ import asyncio
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 from typing import Any
@@ -39,6 +40,7 @@ from synthesize import (
     format_report,
     load_agent_output,
 )
+from validate import MAX_INPUT_FILE_SIZE
 
 __all__ = [
     "MODEL_IDS",
@@ -91,18 +93,53 @@ def _format_stderr_excerpt(data: bytes) -> str:
     return f": {decoded}"
 
 
+def _windows_kill_tree(pid: int) -> None:
+    """Force-terminate a Windows process tree rooted at *pid*.
+
+    ``proc.kill()`` on Windows issues ``TerminateProcess`` against the
+    top-level process only, leaving any children the ``claude`` CLI may
+    have spawned as orphans under the original parent. ``taskkill /F /T
+    /PID`` walks the tree and force-terminates every descendant,
+    collapsing the orphan window that used to survive a MAGI timeout.
+
+    Best-effort: if ``taskkill`` is missing from PATH, the spawn fails,
+    or the subprocess itself hangs, we return normally. The caller's
+    existing ``proc.wait()`` with ``_PROC_WAIT_REAP_TIMEOUT`` still fires
+    and emits the "may be orphaned" warning so operators can notice.
+    """
+    try:
+        subprocess.run(
+            ["taskkill", "/F", "/T", "/PID", str(pid)],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=_PROC_WAIT_REAP_TIMEOUT,
+        )
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
 async def _reap_and_drain_stderr(proc: asyncio.subprocess.Process) -> bytes:
-    """Kill *proc*, await its exit, and drain any buffered stderr.
+    """Kill *proc* (and its children on Windows), await exit, drain stderr.
 
     Both the ``wait()`` and the ``stderr.read()`` are bounded by short
     timeouts so a misbehaving subprocess cannot stall the orchestrator.
     Non-timeout failures are swallowed — the caller is already on an
     error path and only needs best-effort diagnostics. A ``wait()``
-    timeout, however, means the killed subprocess never reaped: on
+    timeout, however, means the reaped subprocess never exited: on
     Windows this typically indicates an orphaned child-process tree,
     so we emit a warning naming the pid so operators can notice it.
+
+    On Windows, ``proc.kill()`` only terminates the top-level process;
+    any children the ``claude`` CLI spawned stay alive. We follow the
+    kill with a best-effort ``taskkill /F /T`` to collapse the tree.
+    Non-Windows platforms send ``SIGKILL`` directly to the top process
+    and rely on ``claude`` not to fork independent sub-agents there —
+    if it ever did, that would need its own platform-specific handling.
     """
     proc.kill()
+    if sys.platform == "win32":
+        _windows_kill_tree(proc.pid)
     try:
         await asyncio.wait_for(proc.wait(), timeout=_PROC_WAIT_REAP_TIMEOUT)
     except asyncio.TimeoutError:
@@ -230,17 +267,27 @@ def cleanup_old_runs(keep: int) -> None:
     survivor. Symlinks are resolved and validated against the temp root
     before deletion to prevent traversal attacks on shared systems.
 
+    Intended to be called **before** the current run's temp dir is
+    created, so the caller should pass ``keep_runs - 1`` when they want
+    a final on-disk count of ``keep_runs`` after :func:`create_output_dir`
+    adds the new dir. Without the off-by-one adjustment the final count
+    is always ``keep_runs + 1``.
+
     Args:
-        keep: Maximum number of recent runs to retain.
-            A value <= 0 disables cleanup.
+        keep: Maximum number of existing runs to retain.
+            ``keep >= 0``: valid; ``keep == 0`` removes every matching
+            dir (the caller is reserving the only slot for the run it
+            is about to create). ``keep < 0`` disables cleanup entirely.
     """
-    if keep <= 0:
+    if keep < 0:
         return
 
     tmp_root = tempfile.gettempdir()
     magi_dirs = _scan_magi_dirs(tmp_root)
 
     # Fast path: nothing to prune — skip the sort and the per-entry loop.
+    # Never triggered when keep == 0 and at least one dir exists, so the
+    # "wipe everything" case falls through to the slice below.
     if len(magi_dirs) <= keep:
         return
 
@@ -370,26 +417,50 @@ async def launch_agent(
     return load_agent_output(parsed_file)
 
 
-# Once-per-run log flag for ``_safe_display_update``. Safe as module-level
-# mutable state because ``run_orchestrator`` calls ``_reset_display_log_state``
-# at the start of every invocation, so a host that reuses the module across
-# multiple runs still sees the first display failure of each run. A dict is
-# used instead of a plain ``bool`` to avoid the ``global`` keyword in helpers
-# that mutate the flag.
-_display_log_state: dict[str, bool] = {"first_failure_logged": False}
+class _DisplayLogGate:
+    """Once-per-run gate that logs the first display-update failure.
 
-
-def _reset_display_log_state() -> None:
-    """Reset the once-per-run log flag for :func:`_safe_display_update`.
-
-    Exposed so tests (and long-lived hosts that reuse the module across
-    multiple orchestrator runs) can re-arm the first-failure log. The
-    orchestrator itself resets the flag at the start of every run.
+    Owns the "has the first failure already been logged" flag that used
+    to live as module-level mutable state. A fresh instance is created
+    by :func:`run_orchestrator` for every run, so there is no residual
+    state across runs and no ``global`` plumbing for tests to reset.
+    Each :func:`_safe_display_update` call is threaded through the gate
+    belonging to the enclosing orchestrator invocation.
     """
-    _display_log_state["first_failure_logged"] = False
+
+    __slots__ = ("_logged",)
+
+    def __init__(self) -> None:
+        self._logged: bool = False
+
+    def emit_once(self, exc: BaseException) -> None:
+        """Log *exc* to stderr exactly once for this gate's lifetime.
+
+        Subsequent calls are no-ops. The helper must never propagate a
+        new exception — doing so would mask the original shutdown signal
+        the caller is already re-raising. Failures inside the ``print``
+        itself (stream closed, etc.) are swallowed silently for the same
+        reason.
+        """
+        if self._logged:
+            return
+        self._logged = True
+        try:
+            print(
+                f"\u26a0 WARNING: status display update failed ({exc!r}) "
+                f"\u2014 live tree may be stale for the rest of this run",
+                file=sys.stderr,
+            )
+        except BaseException:  # noqa: BLE001 — never let logging shadow shutdown
+            pass
 
 
-def _safe_display_update(display: StatusDisplay | None, name: str, state: str) -> None:
+def _safe_display_update(
+    display: StatusDisplay | None,
+    name: str,
+    state: str,
+    log_gate: _DisplayLogGate,
+) -> None:
     """Update a status display, swallowing any exception on failure.
 
     During shutdown paths (``KeyboardInterrupt``, ``CancelledError``, event
@@ -399,14 +470,15 @@ def _safe_display_update(display: StatusDisplay | None, name: str, state: str) -
     signal. This helper isolates the display update so that the caller's
     ``raise`` statement always preserves the real cause.
 
-    The first exception per run is logged to stderr so the operator knows
-    the live tree is blind; subsequent exceptions stay silent to prevent
-    the redraw path from flooding the log on every tick.
+    The first exception per run is logged to stderr through *log_gate* so
+    the operator knows the live tree is blind; subsequent exceptions stay
+    silent to prevent the redraw path from flooding the log on every tick.
 
     Args:
         display: The status display, or ``None`` to skip the update.
         name: Agent name to update.
         state: New state for the agent row.
+        log_gate: Run-scoped gate that enforces the once-per-run log rule.
     """
     if display is None:
         return
@@ -419,16 +491,7 @@ def _safe_display_update(display: StatusDisplay | None, name: str, state: str) -
         # then re-raises the *original* signal — if we let the display's
         # own BaseException escape here, that outer ``raise`` never runs
         # and the real shutdown reason is lost.
-        if not _display_log_state["first_failure_logged"]:
-            _display_log_state["first_failure_logged"] = True
-            try:
-                print(
-                    f"\u26a0 WARNING: status display update failed ({exc!r}) "
-                    f"\u2014 live tree may be stale for the rest of this run",
-                    file=sys.stderr,
-                )
-            except BaseException:  # noqa: BLE001 — never let logging shadow shutdown
-                pass
+        log_gate.emit_once(exc)
 
 
 async def run_orchestrator(
@@ -465,10 +528,10 @@ async def run_orchestrator(
     successful: list[dict[str, Any]] = []
     failed: list[str] = []
 
-    # Re-arm the once-per-run log flag so a host that reuses the module
-    # across multiple orchestrator invocations (tests, long-lived service)
-    # still sees the first display failure on every run.
-    _reset_display_log_state()
+    # Fresh log gate per run so the first display failure is always
+    # surfaced, even in hosts that reuse the module across orchestrator
+    # invocations (tests, long-lived services).
+    log_gate = _DisplayLogGate()
 
     # Display lifecycle invariant (structurally enforced by the
     # ``_buffered_stderr_while`` context manager below): while the status
@@ -484,11 +547,11 @@ async def run_orchestrator(
     )
 
     async def tracked_launch(name: str) -> dict[str, Any]:
-        _safe_display_update(display, name, "running")
+        _safe_display_update(display, name, "running", log_gate)
         try:
             result = await launch_agent(name, agents_dir, prompt, output_dir, timeout, model)
         except (asyncio.TimeoutError, TimeoutError):
-            _safe_display_update(display, name, "timeout")
+            _safe_display_update(display, name, "timeout", log_gate)
             raise
         except BaseException:
             # Catches asyncio.CancelledError (which is BaseException in 3.8+),
@@ -496,9 +559,9 @@ async def run_orchestrator(
             # We always re-raise — the display update is a best-effort side
             # effect (see ``_safe_display_update``) so a stream already closed
             # during shutdown can never mask the real shutdown signal.
-            _safe_display_update(display, name, "failed")
+            _safe_display_update(display, name, "failed", log_gate)
             raise
-        _safe_display_update(display, name, "success")
+        _safe_display_update(display, name, "success", log_gate)
         return result
 
     tasks = {name: tracked_launch(name) for name in AGENTS}
@@ -571,13 +634,12 @@ def main() -> None:
     """CLI entry point for MAGI orchestrator."""
     args = parse_args()
 
-    _MAX_INPUT_FILE_SIZE = 10 * 1024 * 1024  # 10 MB
     if os.path.isfile(args.input):
         file_size = os.path.getsize(args.input)
-        if file_size > _MAX_INPUT_FILE_SIZE:
+        if file_size > MAX_INPUT_FILE_SIZE:
             print(
                 f"ERROR: Input file {args.input} is {file_size} bytes, "
-                f"exceeding maximum of {_MAX_INPUT_FILE_SIZE} bytes.",
+                f"exceeding maximum of {MAX_INPUT_FILE_SIZE} bytes.",
                 file=sys.stderr,
             )
             sys.exit(1)
@@ -593,14 +655,20 @@ def main() -> None:
     script_dir = os.path.dirname(os.path.abspath(__file__))
     skill_dir = os.path.dirname(script_dir)
     agents_dir = os.path.join(skill_dir, "agents")
-    is_temp_dir = args.output_dir is None
-    if is_temp_dir:
-        cleanup_old_runs(args.keep_runs)
-    output_dir = create_output_dir(args.output_dir)
 
+    # Hard prerequisite check runs **before** any filesystem setup so a
+    # missing CLI cannot leak a half-initialised temp directory on disk.
     if not shutil.which("claude"):
         print("ERROR: 'claude' CLI not found in PATH", file=sys.stderr)
         sys.exit(1)
+
+    is_temp_dir = args.output_dir is None
+    if is_temp_dir:
+        # Prune to ``keep_runs - 1`` existing dirs so the run about to be
+        # created below brings the total to exactly ``keep_runs``. Without
+        # the ``- 1`` the final count is always ``keep_runs + 1``.
+        cleanup_old_runs(args.keep_runs - 1)
+    output_dir = create_output_dir(args.output_dir)
 
     print("+==================================================+")
     print("|          MAGI SYSTEM -- INITIALIZING              |")
@@ -612,6 +680,11 @@ def main() -> None:
     print("+==================================================+")
     print(flush=True)
 
+    # ``BaseException`` rather than ``Exception`` so KeyboardInterrupt and
+    # SystemExit also trigger the temp-dir cleanup — otherwise Ctrl-C mid
+    # run leaves orphaned ``magi-run-*`` dirs that ``cleanup_old_runs``
+    # only prunes opportunistically on the *next* run.
+    report: dict[str, Any] | None = None
     try:
         report = asyncio.run(
             run_orchestrator(
@@ -623,7 +696,7 @@ def main() -> None:
                 show_status=args.show_status,
             )
         )
-    except Exception:
+    except BaseException:
         if is_temp_dir:
             try:
                 shutil.rmtree(output_dir)

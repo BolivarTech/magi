@@ -23,6 +23,8 @@ import os
 import re
 import sys
 
+from validate import MAX_INPUT_FILE_SIZE
+
 
 # Regex to strip leading ```json (case-insensitive, optional whitespace) or bare ```
 _FENCE_START = re.compile(r"^```(?:json)?\s*\n?", re.IGNORECASE)
@@ -68,7 +70,15 @@ def _extract_text(data: object) -> str:
         return str(data["result"])
 
     if isinstance(data, dict) and "content" in data:
-        for block in data["content"]:
+        content = data["content"]
+        if not isinstance(content, list):
+            # A malformed ``content`` (e.g. a bare string or a dict) would
+            # otherwise iterate character-by-character or by dict key and
+            # quietly miss every text block. Reject the shape up front so
+            # the caller gets a clear signal instead of a silent "No text
+            # block found".
+            raise ValueError(f"'content' must be a list, got {type(content).__name__}.")
+        for block in content:
             if isinstance(block, dict) and block.get("type") == "text":
                 return str(block["text"])
         raise ValueError("No text block found in 'content' array")
@@ -80,9 +90,6 @@ def _extract_text(data: object) -> str:
         f"Unexpected Claude CLI output type: {type(data).__name__}. "
         f"Expected dict with 'result' or 'content' key, or plain string."
     )
-
-
-_MAX_INPUT_SIZE: int = 10 * 1024 * 1024  # 10 MB
 
 
 def parse_agent_output(input_path: str, output_path: str) -> None:
@@ -98,10 +105,10 @@ def parse_agent_output(input_path: str, output_path: str) -> None:
         ValueError: If content extraction fails or file exceeds size limit.
     """
     file_size = os.path.getsize(input_path)
-    if file_size > _MAX_INPUT_SIZE:
+    if file_size > MAX_INPUT_FILE_SIZE:
         raise ValueError(
             f"Input file {input_path} is {file_size} bytes, "
-            f"exceeding maximum of {_MAX_INPUT_SIZE} bytes."
+            f"exceeding maximum of {MAX_INPUT_FILE_SIZE} bytes."
         )
 
     with open(input_path, encoding="utf-8") as fh:

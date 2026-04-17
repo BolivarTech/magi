@@ -46,7 +46,11 @@ _REQUIRED_KEYS = frozenset(
 )
 
 _REQUIRED_FINDING_KEYS = frozenset({"severity", "title", "detail"})
-_MAX_INPUT_FILE_SIZE: int = 10 * 1024 * 1024  # 10 MB
+#: Upper bound (bytes) for any on-disk input MAGI will ingest — user prompts,
+#: Claude CLI outputs, and agent JSON files. Centralised here so every module
+#: enforces the same ceiling; bump it in one place and the whole pipeline
+#: follows.
+MAX_INPUT_FILE_SIZE: int = 10 * 1024 * 1024  # 10 MB
 _MAX_FINDINGS_PER_AGENT: int = 100
 _MAX_FIELD_LENGTH: int = 50_000  # 50,000 characters per top-level string field
 _MAX_TITLE_LENGTH: int = 500
@@ -92,9 +96,9 @@ def load_agent_output(filepath: str) -> dict[str, Any]:
     """
     try:
         file_size = os.path.getsize(filepath)
-        if file_size > _MAX_INPUT_FILE_SIZE:
+        if file_size > MAX_INPUT_FILE_SIZE:
             raise ValidationError(
-                f"File exceeds maximum size of {_MAX_INPUT_FILE_SIZE} bytes "
+                f"File exceeds maximum size of {MAX_INPUT_FILE_SIZE} bytes "
                 f"(got {file_size} bytes).",
                 filepath,
             )
