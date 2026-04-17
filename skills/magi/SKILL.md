@@ -55,12 +55,15 @@ If the user provided files, include their contents (or relevant excerpts) in the
 
 ### Step 3: Launch the three agents
 
-**Model selection:** The default model for all agents is **opus** (Claude Opus 4.6).
-If the user explicitly requests a different model in their prompt (e.g., "usa sonnet",
-"with haiku", "use sonnet model"), use that model instead.
+**Model selection:** The default model for all agents is the **opus** short name.
+The Anthropic model ID it resolves to (e.g. `claude-opus-4-7`) is owned by
+`skills/magi/scripts/models.py`, so future model bumps are a one-line edit in that
+registry — never hardcode the resolved ID here. If the user explicitly requests
+a different model in their prompt (e.g., "usa sonnet", "with haiku",
+"use sonnet model"), use that short name instead.
 
-Valid models: `opus`, `sonnet`, `haiku`. If the user requests an unsupported model
-(e.g., "use gpt-4"), inform them of the valid options and default to `opus`.
+Valid short names: `opus`, `sonnet`, `haiku`. If the user requests an unsupported
+model (e.g., "use gpt-4"), inform them of the valid options and default to `opus`.
 
 **Parallel mode (preferred):** Use the Bash tool to execute the Python orchestrator.
 The orchestrator launches all three agents in parallel, applies timeouts, validates

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Author: Julian Bolivar
-# Version: 2.0.2
-# Date: 2026-04-14
+# Version: 2.1.1
+# Date: 2026-04-17
 """MAGI Orchestrator — async Python replacement for run_magi.sh.
 
 Launches Melchior, Balthasar, and Caspar in parallel using asyncio,
@@ -30,11 +30,7 @@ from typing import Any
 from models import MODEL_IDS, VALID_MODELS, resolve_model
 from parse_agent_output import parse_agent_output as parse_raw_output
 from status_display import StatusDisplay
-from stderr_shim import (
-    _BinaryStderrBufferShim,
-    _buffered_stderr_while,
-    _StderrBufferShim,
-)
+from stderr_shim import _buffered_stderr_while
 from synthesize import (
     determine_consensus,
     format_report,
@@ -42,12 +38,15 @@ from synthesize import (
 )
 from validate import MAX_INPUT_FILE_SIZE
 
+# Public star-import contract. Underscore-prefixed symbols from
+# ``stderr_shim`` (``_StderrBufferShim``, ``_BinaryStderrBufferShim``,
+# ``_buffered_stderr_while``) are intentionally excluded — they are
+# private helpers of that module, and tests that need them import from
+# ``stderr_shim`` directly. ``_buffered_stderr_while`` is still imported
+# here for internal use inside ``run_orchestrator``.
 __all__ = [
     "MODEL_IDS",
     "VALID_MODELS",
-    "_BinaryStderrBufferShim",
-    "_StderrBufferShim",
-    "_buffered_stderr_while",
     "resolve_model",
 ]
 
@@ -59,6 +58,12 @@ MAGI_DIR_PREFIX = "magi-run-"
 _STDERR_EXCERPT_MAX_CHARS = 500
 _PROC_WAIT_REAP_TIMEOUT = 5.0
 _PROC_STDERR_DRAIN_TIMEOUT = 2.0
+# ``taskkill /F /T`` gets its own budget so a slow invocation on a busy
+# Windows host cannot consume the whole ``_PROC_WAIT_REAP_TIMEOUT`` and
+# leave ``proc.wait()`` with zero headroom. When this separation is
+# collapsed, the "may be orphaned" warning fires even after a successful
+# tree kill, producing misleading diagnostics.
+_TASKKILL_TIMEOUT = 5.0
 
 
 def _write_stderr_log(output_dir: str, agent_name: str, data: bytes) -> None:
@@ -102,6 +107,11 @@ def _windows_kill_tree(pid: int) -> None:
     /PID`` walks the tree and force-terminates every descendant,
     collapsing the orphan window that used to survive a MAGI timeout.
 
+    Uses its own ``_TASKKILL_TIMEOUT`` (separate from
+    ``_PROC_WAIT_REAP_TIMEOUT``) so a slow invocation on a busy host does
+    not consume the caller's wait budget and produce a misleading "may
+    be orphaned" warning even when the tree was successfully killed.
+
     Best-effort: if ``taskkill`` is missing from PATH, the spawn fails,
     or the subprocess itself hangs, we return normally. The caller's
     existing ``proc.wait()`` with ``_PROC_WAIT_REAP_TIMEOUT`` still fires
@@ -113,7 +123,7 @@ def _windows_kill_tree(pid: int) -> None:
             check=False,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            timeout=_PROC_WAIT_REAP_TIMEOUT,
+            timeout=_TASKKILL_TIMEOUT,
         )
     except (OSError, subprocess.SubprocessError):
         pass
@@ -189,7 +199,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--keep-runs",
         type=int,
         default=MAX_HISTORY_RUNS,
-        help=f"Number of recent temp runs to keep (default: {MAX_HISTORY_RUNS})",
+        help=(
+            f"Final on-disk count of magi-run-* temp dirs, including the run "
+            f"about to be created (default: {MAX_HISTORY_RUNS}). "
+            f"``--keep-runs 1`` keeps only the current run and wipes all "
+            f"prior ones. ``--keep-runs 0`` is rejected. ``--keep-runs -1`` "
+            f"disables cleanup entirely."
+        ),
     )
     parser.add_argument(
         "--no-status",
@@ -198,7 +214,20 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Disable the live status tree display",
     )
     parser.set_defaults(show_status=True)
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    # ``--keep-runs 0`` is ambiguous: a naive reading is "keep nothing"
+    # (wipe), but the legacy contract for ``cleanup_old_runs(keep)`` treats
+    # a negative result as "disabled". Rather than bake a surprise into the
+    # CLI, we reject 0 explicitly so operators pick the side they mean:
+    # ``--keep-runs 1`` to wipe everything except the current run, or
+    # ``--keep-runs -1`` to disable cleanup entirely.
+    if args.keep_runs == 0:
+        parser.error(
+            "--keep-runs 0 is ambiguous: use --keep-runs 1 to wipe all prior "
+            "runs (keeping only the one about to be created), or --keep-runs "
+            "-1 to disable cleanup entirely."
+        )
+    return args
 
 
 def _scan_magi_dirs(tmp_root: str) -> list[tuple[float, str]]:
@@ -405,7 +434,17 @@ async def launch_agent(
     with open(raw_file, "wb") as f:
         f.write(stdout)
 
-    _write_stderr_log(output_dir, agent_name, stderr)
+    # The stderr log is a diagnostic artefact, not load-bearing. A disk
+    # error here (disk full, permission drop, antivirus lock on Windows)
+    # must not turn an otherwise-successful agent into a reported
+    # failure. Mirror the timeout-path pattern: warn and continue.
+    try:
+        _write_stderr_log(output_dir, agent_name, stderr)
+    except OSError as log_exc:
+        print(
+            f"WARNING: Failed to persist {agent_name}.stderr.log: {log_exc}",
+            file=sys.stderr,
+        )
 
     if proc.returncode != 0:
         stderr_text = stderr.decode("utf-8", errors="replace").strip() if stderr else "no stderr"

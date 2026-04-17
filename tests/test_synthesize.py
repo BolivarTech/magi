@@ -690,6 +690,108 @@ class TestDetermineConsensus:
         assert 0.0 <= result["confidence"] <= 1.0
         assert result["confidence"] == 0.38
 
+    def test_three_agent_two_conditional_one_reject_is_hold_tie(self):
+        """Regression (v2.1.1): 2 conditional + 1 reject tie.
+
+        Math: ``score = (0.5 + 0.5 - 1) / 3 = 0`` — exact tie, so the
+        banner is ``HOLD -- TIE`` with ``consensus_verdict="reject"``.
+
+        Pre-fix, the count-based majority picked ``approve`` (2 effective
+        approve votes vs 1 reject), so ``majority_agents`` held the two
+        conditional agents while ``consensus_verdict`` was ``reject``.
+        The confidence basis diverged from the verdict basis. This test
+        locks the single-source-of-truth invariant: when
+        ``consensus_verdict="reject"``, ``majority_agents`` must be the
+        agents on the reject side.
+        """
+        agents = [
+            _valid_agent("melchior", verdict="conditional", confidence=0.2),
+            _valid_agent("balthasar", verdict="conditional", confidence=0.2),
+            _valid_agent("caspar", verdict="reject", confidence=0.9),
+        ]
+        result = determine_consensus(agents)
+        assert result["consensus"] == "HOLD -- TIE"
+        assert result["consensus_verdict"] == "reject"
+        # Dissent surfaces the two conditionals (the minority side).
+        assert sorted(d["agent"] for d in result["dissent"]) == ["balthasar", "melchior"]
+        # Confidence derives from the single reject agent (0.9), diluted
+        # by the two dissenters and halved by weight_factor=0.5 at tie:
+        # base = 0.9 / 3 = 0.3, conf = 0.3 * 0.5 = 0.15.
+        assert result["confidence"] == 0.15, (
+            "Confidence must come from the reject side (consensus_verdict), "
+            "not the conditional side the count-based majority would pick."
+        )
+
+    def test_three_agent_two_reject_one_conditional_is_hold_2_1(self):
+        """Regression (v2.1.1): 2 reject + 1 conditional.
+
+        Math: ``score = (-1 - 1 + 0.5) / 3 = -0.5`` — negative, not a
+        tie. Banner renders ``HOLD (2-1)`` with the split derived from
+        the reject side (2) vs the conditional side (1). Confidence uses
+        the two reject agents.
+        """
+        agents = [
+            _valid_agent("melchior", verdict="reject", confidence=0.8),
+            _valid_agent("balthasar", verdict="reject", confidence=0.9),
+            _valid_agent("caspar", verdict="conditional", confidence=0.2),
+        ]
+        result = determine_consensus(agents)
+        assert result["consensus"] == "HOLD (2-1)"
+        assert result["consensus_verdict"] == "reject"
+        # Majority_agents invariant: on reject consensus, majority is the
+        # reject side. Conditions from the conditional agent still appear
+        # in ``conditions`` for the operator.
+        assert sorted(d["agent"] for d in result["dissent"]) == ["caspar"]
+        assert [c["agent"] for c in result["conditions"]] == ["caspar"]
+
+    def test_consensus_side_invariant_across_vectors(self):
+        """Banner split, consensus_verdict, majority_agents, and confidence
+        basis must all agree with each other on every vector tested.
+
+        This locks the single-source-of-truth fix at the contract level:
+        whatever logic decides ``consensus_verdict`` must also drive the
+        agents that appear in ``majority_agents`` and the counts that
+        appear in the rendered split label.
+        """
+        vectors = [
+            # [verdicts], expected consensus label, expected verdict
+            (["conditional", "reject"], "HOLD (1-1)", "reject"),
+            (["conditional", "conditional", "reject"], "HOLD -- TIE", "reject"),
+            (["reject", "reject", "conditional"], "HOLD (2-1)", "reject"),
+            (["approve", "approve", "reject"], "GO (2-1)", "approve"),
+            (["approve", "conditional", "reject"], "GO WITH CAVEATS (2-1)", "conditional"),
+        ]
+        for verdicts, expected_label, expected_short in vectors:
+            agents = [
+                _valid_agent(f"agent{i}", verdict=v)
+                # agent0/1/2 are not valid agent names, so remap to real ones.
+                for i, v in enumerate(verdicts)
+            ]
+            real_names = ["melchior", "balthasar", "caspar"][: len(verdicts)]
+            for agent, name in zip(agents, real_names):
+                agent["agent"] = name
+            result = determine_consensus(agents)
+            assert result["consensus"] == expected_label, (
+                f"Vector {verdicts}: expected {expected_label}, got {result['consensus']}"
+            )
+            assert result["consensus_verdict"] == expected_short
+            # Partition invariant: every agent is in exactly one bucket.
+            majority_names = set(result["votes"].keys()) - {d["agent"] for d in result["dissent"]}
+            dissent_names = {d["agent"] for d in result["dissent"]}
+            assert majority_names.isdisjoint(dissent_names)
+            assert majority_names | dissent_names == set(result["votes"].keys())
+            # Side invariant: majority names have verdicts consistent with
+            # consensus_verdict ("conditional" effectively maps to approve).
+            side = "reject" if expected_short == "reject" else "approve"
+            for agent in agents:
+                eff = "approve" if agent["verdict"] == "conditional" else agent["verdict"]
+                is_majority = agent["agent"] in majority_names
+                assert (eff == side) == is_majority, (
+                    f"Vector {verdicts}: agent {agent['agent']} "
+                    f"(verdict={agent['verdict']}) partition disagrees with "
+                    f"consensus_side={side}"
+                )
+
 
 # ---------------------------------------------------------------------------
 # TestFindingsDedup
@@ -1034,6 +1136,61 @@ class TestFormatBanner:
         consensus = determine_consensus(agents)
         banner = format_banner(agents, consensus)
         assert "CONSENSUS:" in banner
+
+    def test_banner_width_guard_truncates_overlong_label(self):
+        """Regression (v2.1.1): a label that exceeds ``_BANNER_INNER``
+        must be truncated with ``...`` so the border column does not
+        slide.
+
+        Before the fix, ``str.ljust`` never truncated, so a long custom
+        agent role name produced a row wider than the ``+===+`` borders
+        and silently violated the MANDATORY FINAL OUTPUT CONTRACT.
+        """
+        from reporting import AGENT_TITLES
+
+        # Patch the title dict for one agent to a pathologically long
+        # role, run the banner, then undo the patch.
+        original = AGENT_TITLES.get("melchior")
+        try:
+            AGENT_TITLES["melchior"] = (
+                "VeryLongMelchior",
+                "AnExtremelyDescriptiveAndExcessivelyLongRoleName",
+            )
+            agents = [_valid_agent(n) for n in ["melchior", "balthasar", "caspar"]]
+            consensus = determine_consensus(agents)
+            banner = format_banner(agents, consensus)
+            lines = banner.split("\n")
+            # Every row must still be exactly 52 characters — the width
+            # invariant the rest of the banner tests assert on.
+            for line in lines:
+                assert len(line) == 52, (
+                    f"Overlong label broke banner width invariant: "
+                    f"got len={len(line)} line={line!r}"
+                )
+            # The overlong row must end with the ellipsis marker just
+            # inside the closing ``|``.
+            assert "..." in lines[3]
+        finally:
+            if original is None:
+                AGENT_TITLES.pop("melchior", None)
+            else:
+                AGENT_TITLES["melchior"] = original
+
+    def test_banner_width_guard_truncates_overlong_consensus_label(self):
+        """Regression (v2.1.1): a consensus label longer than the budget
+        must also be truncated so the CONSENSUS row stays inside the
+        border column.
+        """
+        agents = [_valid_agent(n) for n in ["melchior", "balthasar", "caspar"]]
+        consensus = determine_consensus(agents)
+        # Simulate a pathologically long consensus label (future custom
+        # formats, operator-supplied overrides, etc.).
+        consensus["consensus"] = "SOME_EXTREMELY_LONG_CONSENSUS_LABEL_" * 3
+        banner = format_banner(agents, consensus)
+        for line in banner.split("\n"):
+            assert len(line) == 52
+        cons_line = [ln for ln in banner.split("\n") if "CONSENSUS:" in ln][0]
+        assert cons_line.endswith("...|")
 
 
 # ---------------------------------------------------------------------------
@@ -1566,6 +1723,70 @@ class TestTitleNormalization:
         try:
             result = load_agent_output(path)
             assert result["findings"][0]["title"] == "Real title"
+        finally:
+            os.unlink(path)
+
+    def test_newline_in_title_collapsed_to_space(self):
+        """Regression (v2.1.1): a newline in a finding title must never
+        reach the rendered output — otherwise it corrupts the fixed-column
+        marker/severity/title layout of ``_format_finding_line`` and can
+        smuggle content that reads as an extra finding row.
+        """
+        from validate import clean_title
+
+        assert clean_title("Broken line\ninjected second row") == (
+            "Broken line injected second row"
+        )
+
+    def test_all_control_whitespace_stripped_from_title(self):
+        """``\\t``, ``\\n``, ``\\r``, ``\\v``, ``\\f``, and NEL (U+0085)
+        must all be removed/collapsed by :func:`clean_title`.
+        """
+        from validate import clean_title
+
+        # Each control character separately would otherwise land in the
+        # rendered row and break alignment.
+        raw = "a\tb\nc\rd\ve\ff\u0085g"
+        cleaned = clean_title(raw)
+        assert "\t" not in cleaned and "\n" not in cleaned and "\r" not in cleaned
+        assert "\v" not in cleaned and "\f" not in cleaned and "\u0085" not in cleaned
+        # All the visible letters survive in order.
+        assert cleaned.replace(" ", "") == "abcdefg"
+
+    def test_title_with_only_control_whitespace_rejected(self):
+        """A title that is purely control whitespace must fail validation
+        (empty after cleaning), not pass through as a malformed row.
+        """
+        data = _valid_agent_data()
+        data["findings"] = [
+            {"severity": "info", "title": "\t\n\r", "detail": "Invisible title."},
+        ]
+        path = _write_json(data)
+        try:
+            with pytest.raises(ValidationError, match="empty or whitespace"):
+                load_agent_output(path)
+        finally:
+            os.unlink(path)
+
+    def test_title_with_newline_stored_in_cleaned_form(self):
+        """The stored title must be the cleaned form, not the raw one —
+        consumers writing ``_format_finding_line`` must never see the
+        control whitespace.
+        """
+        data = _valid_agent_data()
+        data["findings"] = [
+            {
+                "severity": "info",
+                "title": "Row\nwith\tinjection",
+                "detail": "OK.",
+            },
+        ]
+        path = _write_json(data)
+        try:
+            result = load_agent_output(path)
+            assert "\n" not in result["findings"][0]["title"]
+            assert "\t" not in result["findings"][0]["title"]
+            assert result["findings"][0]["title"] == "Row with injection"
         finally:
             os.unlink(path)
 

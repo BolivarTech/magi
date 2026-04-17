@@ -81,6 +81,43 @@ class TestParseArgs:
         args = parse_args(["code-review", "input.py", "--no-status"])
         assert args.show_status is False
 
+    def test_keep_runs_default(self):
+        """Default --keep-runs value lines up with MAX_HISTORY_RUNS."""
+        from run_magi import MAX_HISTORY_RUNS, parse_args
+
+        args = parse_args(["code-review", "input.py"])
+        assert args.keep_runs == MAX_HISTORY_RUNS
+
+    def test_keep_runs_zero_rejected(self):
+        """``--keep-runs 0`` is ambiguous and must be rejected at argparse.
+
+        Regression for the v2.1.1 fix: previously, ``--keep-runs 0`` was
+        silently interpreted as ``cleanup_old_runs(-1)`` ("disable
+        cleanup"), producing unbounded accumulation — the opposite of
+        what a user passing 0 would reasonably expect. The CLI now
+        rejects 0 with an error that points to ``--keep-runs 1``
+        (wipe-all) or ``--keep-runs -1`` (disable) as the disambiguating
+        replacements.
+        """
+        from run_magi import parse_args
+
+        with pytest.raises(SystemExit):
+            parse_args(["code-review", "input.py", "--keep-runs", "0"])
+
+    def test_keep_runs_negative_accepted(self):
+        """``--keep-runs -1`` is the explicit "disable cleanup" value."""
+        from run_magi import parse_args
+
+        args = parse_args(["code-review", "input.py", "--keep-runs", "-1"])
+        assert args.keep_runs == -1
+
+    def test_keep_runs_one_accepted(self):
+        """``--keep-runs 1`` is the explicit "wipe all prior" value."""
+        from run_magi import parse_args
+
+        args = parse_args(["code-review", "input.py", "--keep-runs", "1"])
+        assert args.keep_runs == 1
+
 
 class TestCreateOutputDir:
     """Verify cross-platform temp directory creation."""
@@ -454,28 +491,26 @@ class TestStderrShimModule:
         assert hasattr(stderr_shim, "_BinaryStderrBufferShim")
         assert hasattr(stderr_shim, "_buffered_stderr_while")
 
-    def test_run_magi_reexports_stderr_buffer_shim_by_identity(self):
-        """``run_magi._StderrBufferShim is stderr_shim._StderrBufferShim``.
+    def test_run_magi_does_not_reexport_private_shim_names(self):
+        """Regression (v2.1.1): ``run_magi`` must not re-export the
+        underscored shim names.
 
-        Identity — not equality — rules out accidental re-definition in
-        run_magi after the extraction.
+        The earlier pattern ``__all__ = [..., "_StderrBufferShim", ...]``
+        was contradictory: an underscore says "private", yet ``__all__``
+        says "part of the star-import contract". Tests that need the
+        shims import them from ``stderr_shim`` directly — the single
+        owner of that API.
         """
         import run_magi
-        import stderr_shim
 
-        assert run_magi._StderrBufferShim is stderr_shim._StderrBufferShim
-
-    def test_run_magi_reexports_binary_stderr_buffer_shim_by_identity(self):
-        import run_magi
-        import stderr_shim
-
-        assert run_magi._BinaryStderrBufferShim is stderr_shim._BinaryStderrBufferShim
-
-    def test_run_magi_reexports_buffered_stderr_while_by_identity(self):
-        import run_magi
-        import stderr_shim
-
-        assert run_magi._buffered_stderr_while is stderr_shim._buffered_stderr_while
+        for private in ("_StderrBufferShim", "_BinaryStderrBufferShim"):
+            assert not hasattr(run_magi, private), (
+                f"run_magi must not re-export {private}; import from stderr_shim instead."
+            )
+        # ``_buffered_stderr_while`` is still imported for internal use,
+        # so it is reachable as an attribute, but it must not appear in
+        # ``__all__`` — asserted separately in
+        # ``TestAllDoesNotExportPrivateShimNames``.
 
 
 class TestModelsModule:
@@ -1050,6 +1085,167 @@ class TestLaunchAgentTimeoutReaping:
         assert not (tmp_path / "melchior.stderr.log").exists()
 
 
+_FAKE_AGENT_JSON = (
+    '{"agent": "melchior", "verdict": "approve", "confidence": 0.8, '
+    '"summary": "ok", "reasoning": "looks fine", "findings": [], '
+    '"recommendation": "merge"}'
+)
+# The ``claude -p --output-format json`` envelope wraps the agent JSON
+# as a string under ``result`` — match that shape so the real
+# ``parse_agent_output`` pipeline accepts the mock.
+_FAKE_CLAUDE_ENVELOPE = (
+    '{"result": "{\\"agent\\": \\"melchior\\", \\"verdict\\": \\"approve\\", '
+    '\\"confidence\\": 0.8, \\"summary\\": \\"ok\\", \\"reasoning\\": '
+    '\\"looks fine\\", \\"findings\\": [], \\"recommendation\\": \\"merge\\"}"}'
+).encode("utf-8")
+
+
+class _FakeSuccessProc:
+    """Fake asyncio subprocess that simulates a successful agent run.
+
+    Used by regression tests that need the full happy path through
+    ``launch_agent`` without spawning the real ``claude`` CLI.
+    """
+
+    def __init__(
+        self,
+        stdout_bytes: bytes = _FAKE_CLAUDE_ENVELOPE,
+        stderr_bytes: bytes = b"some stderr",
+    ) -> None:
+        self._stdout = stdout_bytes
+        self._stderr = stderr_bytes
+        self.returncode: int | None = None
+        self.stdin = None
+
+    async def communicate(self, input: bytes | None = None) -> tuple[bytes, bytes]:
+        self.returncode = 0
+        return self._stdout, self._stderr
+
+    def kill(self) -> None:  # pragma: no cover — never called on success path
+        pass
+
+    async def wait(self) -> int | None:  # pragma: no cover
+        return self.returncode
+
+
+class TestLaunchAgentSuccessStderrLog:
+    """Regression (v2.1.1): success-path stderr log write must not mask
+    an otherwise-successful agent when disk/permission errors occur.
+    """
+
+    @pytest.mark.asyncio
+    async def test_success_path_oserror_does_not_mask_result(self, tmp_path, monkeypatch, capsys):
+        """D-1c: OSError from the stderr-log write on the success path
+        must be caught and logged, not propagated — the agent's parsed
+        JSON is already valid at that point.
+
+        Pre-2.1.1, the success-path ``_write_stderr_log`` call was bare;
+        a disk-full or antivirus-lock error on Windows would bubble up
+        from ``launch_agent`` and be reported as an agent failure in
+        ``tracked_launch`` even though the agent itself succeeded. The
+        fix mirrors the timeout-path ``try/except OSError`` pattern and
+        is covered by this test.
+        """
+        import run_magi
+
+        fake = _FakeSuccessProc(stderr_bytes=b"diagnostic line")
+
+        async def fake_create(*args, **kwargs):
+            return fake
+
+        def failing_write(output_dir, agent_name, data):
+            raise OSError(13, "Permission denied")
+
+        monkeypatch.setattr(run_magi.asyncio, "create_subprocess_exec", fake_create)
+        monkeypatch.setattr(run_magi, "_write_stderr_log", failing_write)
+        (tmp_path / "melchior.md").write_text("sys prompt", encoding="utf-8")
+
+        result = await run_magi.launch_agent(
+            agent_name="melchior",
+            agents_dir=str(tmp_path),
+            prompt="test",
+            output_dir=str(tmp_path),
+            timeout=5,
+        )
+        assert result["agent"] == "melchior"
+        assert result["verdict"] == "approve"
+        captured = capsys.readouterr()
+        assert "Failed to persist" in captured.err
+        assert "melchior.stderr.log" in captured.err
+
+
+class TestTaskkillTimeoutBudget:
+    """Regression (v2.1.1): ``_TASKKILL_TIMEOUT`` must be independent of
+    ``_PROC_WAIT_REAP_TIMEOUT`` so a slow ``taskkill`` does not consume
+    the ``proc.wait()`` budget and fire a misleading orphan warning.
+    """
+
+    def test_taskkill_timeout_is_separate_constant(self):
+        """The two timeouts are distinct module-level constants and the
+        orchestrator exports both so operators can tune them without
+        conflating the budgets.
+        """
+        from run_magi import _PROC_WAIT_REAP_TIMEOUT, _TASKKILL_TIMEOUT
+
+        # Both are floats > 0 — the exact values may change over time,
+        # but they must live in separate constants so one slow call does
+        # not poison the other's observability.
+        assert isinstance(_TASKKILL_TIMEOUT, float)
+        assert isinstance(_PROC_WAIT_REAP_TIMEOUT, float)
+        assert _TASKKILL_TIMEOUT > 0
+        assert _PROC_WAIT_REAP_TIMEOUT > 0
+
+    def test_windows_kill_tree_uses_taskkill_timeout(self, monkeypatch):
+        """``_windows_kill_tree`` must pass ``_TASKKILL_TIMEOUT`` to
+        ``subprocess.run``, not ``_PROC_WAIT_REAP_TIMEOUT`` — otherwise
+        collapsing the two constants back into one would pass silently.
+        """
+        import sys as _sys
+
+        if _sys.platform != "win32":
+            pytest.skip("Windows-only path")
+
+        import run_magi
+
+        captured: dict = {}
+
+        def fake_run(argv, **kwargs):
+            captured.update(kwargs)
+
+            class _Completed:
+                returncode = 0
+
+            return _Completed()
+
+        monkeypatch.setattr(run_magi.subprocess, "run", fake_run)
+        run_magi._windows_kill_tree(54321)
+        assert captured.get("timeout") == run_magi._TASKKILL_TIMEOUT
+
+
+class TestAllDoesNotExportPrivateShimNames:
+    """Regression (v2.1.1): ``__all__`` must not expose underscore-prefixed
+    names from ``stderr_shim`` — the shims are private to that module
+    and tests should import them from ``stderr_shim`` directly.
+    """
+
+    def test_all_has_no_underscore_entries(self):
+        from run_magi import __all__
+
+        underscored = [name for name in __all__ if name.startswith("_")]
+        assert not underscored, (
+            f"__all__ must not expose private names: {underscored!r}. "
+            "Tests needing the shims should import from stderr_shim."
+        )
+
+    def test_all_exposes_public_api(self):
+        """The public API kept in __all__ must still be reachable."""
+        from run_magi import __all__
+
+        assert "MODEL_IDS" in __all__
+        assert "VALID_MODELS" in __all__
+        assert "resolve_model" in __all__
+
+
 class TestSafeDisplayUpdate:
     """Verify ``_safe_display_update`` swallows display errors during shutdown."""
 
@@ -1337,7 +1533,7 @@ class TestBufferedStderrWhile:
 
     def test_shim_buffer_attribute_exists_when_real_has_buffer(self):
         """The shim must expose a ``.buffer`` shim when the real stderr has one."""
-        from run_magi import _BinaryStderrBufferShim, _StderrBufferShim
+        from stderr_shim import _BinaryStderrBufferShim, _StderrBufferShim
 
         class _FakeBinary:
             def write(self, data: bytes) -> int:
@@ -1368,7 +1564,7 @@ class TestBufferedStderrWhile:
         """When the real stderr lacks ``.buffer``, the shim's ``.buffer`` is None."""
         import io
 
-        from run_magi import _StderrBufferShim
+        from stderr_shim import _StderrBufferShim
 
         text_buffer: list[str] = []
         shim = _StderrBufferShim(io.StringIO(), text_buffer)

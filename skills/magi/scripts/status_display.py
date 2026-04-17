@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
-# Version: 1.1.0
-# Date: 2026-04-13
+# Version: 1.1.1
+# Date: 2026-04-17
 """Live tree-style status display for the MAGI orchestrator.
 
 Renders a multi-line status tree showing the state of each agent

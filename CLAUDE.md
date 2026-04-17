@@ -99,16 +99,20 @@ score = sum(VERDICT_WEIGHT[verdict] for each agent) / num_agents
 
 Labels are dynamic: `(N-M)` reflects actual majority/minority counts (e.g., `GO (2-1)`, `GO WITH CAVEATS (3-0)`, or `HOLD (2-1)`). All non-unanimous and non-tie outcomes carry the split suffix so operators can read the effective verdict split directly off the banner. Score=0 (exact tie) uses `HOLD -- TIE` to avoid misleading majority counts when conditional verdicts skew the effective split. **Policy**: `HOLD -- TIE` maps to `consensus_verdict: "reject"` — ties default to "do not proceed" as the safer option.
 
+**Single-source-of-truth invariant (2.1.1):** `consensus_verdict` is derived from `score` alone. The agent partition (`majority_agents` vs `dissent_agents`) is then taken from whichever side matches the verdict — approve and conditional both resolve to the approve side, reject to the reject side. Only then is the `(N-M)` split derived from the partition. This makes the rendered label, `majority_agents`, and the input to `_compute_confidence` all reference the same side on every vector — earlier releases could diverge on `[conditional, reject]` and `[conditional, conditional, reject]`.
+
 **Confidence formula:**
 
 ```
-weight_factor = (abs(score) + 1) / 2  # symmetric for approve and reject
-base_confidence = sum(majority_confidence) / num_agents
-confidence = base_confidence * weight_factor
+base_confidence = sum(majority_confidence) / num_agents   # denominator is num_agents, not |majority|
+weight_factor   = (abs(score) + 1) / 2                    # symmetric for approve and reject
+confidence      = clamp(base_confidence * weight_factor, 0.0, 1.0)
 ```
 
-Using `abs(score)` ensures unanimous reject produces high confidence (matching approve), not zero.
-At score=0 (exact tie), weight_factor=0.5, halving confidence — appropriate for an undecided split.
+Two things the formula does on purpose:
+
+- **Dissent dilution.** The denominator is `num_agents`, not `len(majority_agents)`. A minority that disagrees dilutes the numerator, so a unanimous win yields a higher confidence than a bare-majority one even when the surviving side's own confidence is identical. Read a moderate confidence on a narrow win as "the split itself reduces certainty", not as "the majority is individually uncertain".
+- **Symmetric weighting.** `abs(score)` ensures unanimous reject produces high confidence (matching approve), not zero. At score=0 (exact tie), `weight_factor=0.5`, halving confidence — appropriate for an undecided split.
 
 Key behaviors:
 - `conditional` maps to `approve` for majority identification, but conditions are preserved in report.
@@ -118,7 +122,7 @@ Key behaviors:
 - Requires minimum 2 agents (raises `ValueError` if fewer). Accepts 2-3 for graceful degradation.
 - Validates agent name uniqueness — duplicate names raise `ValueError` to prevent silent vote corruption.
 
-Implementation is split into focused helpers: `_classify_consensus` (score-to-label mapping), `_deduplicate_findings` (merge by title, promote severity), `_compute_confidence` (symmetric weight formula).
+Implementation is split into focused helpers: `_consensus_short_verdict` (score-to-verdict, split-independent), `_format_consensus_label` (verdict + split → rendered label), `_deduplicate_findings` (merge by title, promote severity), `_compute_confidence` (symmetric weight formula).
 
 ### Import convention
 
@@ -153,7 +157,7 @@ Live tree-style progress renderer. Stdlib-only, no external dependencies:
 
 - **ANSI mode** (TTY): in-place redraw every 200ms using `\033[NA` cursor movement and per-line `\033[2K` erase. Background async task drives the spinner. On Windows, `ENABLE_VIRTUAL_TERMINAL_PROCESSING` is enabled via `ctypes` with narrow exception handling.
 - **Plain mode** (pipe/captured stream): one line per `update()` call, no escape codes.
-- **Glyph fallback**: probes `stream.encoding` against `"●○✓✗⏱├─└─⠋"`; falls back to an ASCII-only glyph set (`* . v x T |- \-`) on cp1252 and other non-UTF-8 encodings. Streams without bound encoding (e.g., `io.StringIO`) are treated as unicode-capable.
+- **Glyph fallback**: probes `stream.encoding` against `"●○✓✗⏱├─└─⠋"`; falls back to an ASCII-only glyph set (`* . v x ~ |- \-`) on cp1252 and other non-UTF-8 encodings. Streams without bound encoding (e.g., `io.StringIO`) are treated as unicode-capable. The timeout glyph is `~` (tilde) rather than `T` to avoid visual collision with the letter `T` inside state words and agent names.
 - **Invariant**: plain-mode and ANSI refresh writes are mutually exclusive — `_use_ansi` selects exactly one write path. Never mix both on the same stream.
 - `stop()` is idempotent and safe to call without a prior `start()`.
 

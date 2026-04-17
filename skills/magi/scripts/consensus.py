@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Author: Julian Bolivar
-# Version: 2.0.2
-# Date: 2026-04-14
+# Version: 2.1.1
+# Date: 2026-04-17
 """MAGI consensus engine.
 
 Applies weight-based scoring to agent verdicts and produces a unified
@@ -12,7 +12,6 @@ dissent tracking.
 from __future__ import annotations
 
 import unicodedata
-from collections import Counter
 from typing import Any
 
 from validate import clean_title
@@ -52,40 +51,68 @@ def _dedup_key(title: str) -> str:
     return unicodedata.normalize("NFKC", clean_title(title)).casefold()
 
 
-def _classify_consensus(
-    score: float,
-    has_conditions: bool,
-    split: tuple[int, int],
-) -> tuple[str, str]:
-    """Map weighted score to a consensus label and short verdict.
+def _consensus_short_verdict(score: float, has_conditions: bool) -> str:
+    """Derive the consensus short verdict from *score* alone.
+
+    This is split-independent by design. The caller uses it to pick the
+    consensus side (approve/reject), partitions agents based on that
+    side, and only then derives the ``(N-M)`` split — guaranteeing that
+    the rendered label, ``majority_agents``, and ``_compute_confidence``
+    all reference the same side.
+
+    Tie policy: ``score == 0`` maps to ``reject`` (safer default).
 
     Args:
         score: Normalized weighted score in [-1.0, 1.0].
         has_conditions: Whether any agent voted 'conditional'.
-        split: ``(majority_count, minority_count)`` over the effective
-            verdicts, where ``conditional`` has already been merged into
-            ``approve``. Both counts are non-negative and their sum equals
-            the total number of agents.
 
     Returns:
-        Tuple of (consensus label, short verdict).
+        One of ``"approve"``, ``"reject"``, or ``"conditional"``.
     """
     if abs(score - 1.0) < _EPSILON:
-        return "STRONG GO", "approve"
+        return "approve"
     if abs(score - (-1.0)) < _EPSILON:
-        return "STRONG NO-GO", "reject"
-
+        return "reject"
     is_positive = score > _EPSILON
-    is_tie = abs(score) < _EPSILON
-    split_label = f"({split[0]}-{split[1]})"
-
     if is_positive and has_conditions:
-        return f"GO WITH CAVEATS {split_label}", "conditional"
+        return "conditional"
     if is_positive:
-        return f"GO {split_label}", "approve"
+        return "approve"
+    # Tie (abs(score) < eps) and negative both default to reject.
+    return "reject"
+
+
+def _format_consensus_label(
+    score: float,
+    consensus_short: str,
+    split: tuple[int, int],
+) -> str:
+    """Render the consensus label shown on the banner.
+
+    Args:
+        score: Normalized weighted score in [-1.0, 1.0].
+        consensus_short: Short verdict from :func:`_consensus_short_verdict`.
+        split: ``(majority_count, minority_count)`` derived from the
+            agents partitioned by ``consensus_side`` — i.e., the counts
+            are always taken from the same side as ``consensus_short``.
+
+    Returns:
+        The rendered consensus label (e.g., ``"GO (2-1)"``,
+        ``"HOLD -- TIE"``, ``"STRONG NO-GO"``).
+    """
+    if abs(score - 1.0) < _EPSILON:
+        return "STRONG GO"
+    if abs(score - (-1.0)) < _EPSILON:
+        return "STRONG NO-GO"
+    is_tie = abs(score) < _EPSILON
     if is_tie:
-        return "HOLD -- TIE", "reject"
-    return f"HOLD {split_label}", "reject"
+        return "HOLD -- TIE"
+    split_label = f"({split[0]}-{split[1]})"
+    if consensus_short == "conditional":
+        return f"GO WITH CAVEATS {split_label}"
+    if consensus_short == "approve":
+        return f"GO {split_label}"
+    return f"HOLD {split_label}"
 
 
 def _deduplicate_findings(agents: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -128,13 +155,28 @@ def _compute_confidence(
 ) -> float:
     """Calculate consensus confidence from majority agent confidences.
 
-    Uses ``abs(score)`` so both unanimous approve and unanimous reject
-    produce high confidence.  At score=0 (exact tie), weight_factor=0.5,
-    halving confidence — appropriate for an undecided split.
+    Formula::
+
+        base_confidence = sum(majority_agent.confidence) / num_agents
+        weight_factor   = (abs(score) + 1) / 2
+        confidence      = clamp(base_confidence * weight_factor, 0.0, 1.0)
+
+    The denominator is ``num_agents`` (not ``len(majority_agents)``) by
+    design: a minority that disagrees dilutes the numerator, so a
+    unanimous win yields a higher confidence than a bare-majority one
+    even when the surviving side's own confidence is identical. This
+    is the "dissent dilution" term — operators reading a moderate
+    confidence on a narrow win should treat it as "the split itself
+    reduces certainty", not as "the majority is individually uncertain".
+    ``weight_factor`` then independently scales by how far the score is
+    from zero, so a unanimous approve (score=1) and unanimous reject
+    (score=-1) both land at the same high confidence, while an exact
+    tie (score=0) halves confidence regardless of individual votes.
 
     Args:
-        majority_agents: Agents on the majority side.
-        num_agents: Total number of agents.
+        majority_agents: Agents on the majority side (as determined by
+            the consensus-aligned partition in :func:`determine_consensus`).
+        num_agents: Total number of agents, including dissenters.
         score: Normalized weighted score in [-1.0, 1.0].
 
     Returns:
@@ -176,25 +218,15 @@ def determine_consensus(agents: list[dict[str, Any]]) -> dict[str, Any]:
     score = sum(VERDICT_WEIGHT[v] for v in verdicts) / num_agents
     has_conditions = "conditional" in verdicts
 
-    effective_verdicts = ["approve" if v == "conditional" else v for v in verdicts]
-    # Sort by count descending, then by verdict name ascending for deterministic
-    # tie-breaking when counts are equal (e.g., 1 approve + 1 reject).
-    verdict_counts = Counter(effective_verdicts)
-    majority_verdict = sorted(verdict_counts.keys(), key=lambda v: (-verdict_counts[v], v))[0]
-    majority_count = verdict_counts[majority_verdict]
-    split = (majority_count, num_agents - majority_count)
-
-    consensus, consensus_short = _classify_consensus(score, has_conditions, split)
-
-    # Align the majority/dissent split with the **consensus verdict**, not the
-    # raw count of effective verdicts. The two can diverge on ties where
-    # alphabetical tie-breaking picks ``approve`` but the score (or tie policy)
-    # drives the consensus to ``reject`` — e.g., 2-agent ``[conditional,
-    # reject]`` scores -0.25 yet the count-based majority would point at the
-    # conditional agent, leaving confidence computed on the losing side. The
-    # fix: select the side that matches ``consensus_short``. ``approve`` and
-    # ``conditional`` both resolve to the approve side; ``reject`` to the
-    # reject side.
+    # Invariant: ``consensus_short`` is derived from ``score`` alone, then
+    # ``consensus_side`` selects the agents, and ``split`` is derived from
+    # that partition. All three — rendered label, ``majority_agents``, and
+    # the input to ``_compute_confidence`` — reference the same side. This
+    # replaces the pre-2.1.1 flow where ``split`` came from a count-based
+    # majority with alphabetical tie-break, which could point at the
+    # opposite side from ``consensus_verdict`` on vectors like
+    # ``[conditional, reject]`` or ``[conditional, conditional, reject]``.
+    consensus_short = _consensus_short_verdict(score, has_conditions)
     consensus_side = "reject" if consensus_short == "reject" else "approve"
 
     majority_agents = []
@@ -205,6 +237,9 @@ def determine_consensus(agents: list[dict[str, Any]]) -> dict[str, Any]:
             majority_agents.append(a)
         else:
             dissent_agents.append(a)
+
+    split = (len(majority_agents), len(dissent_agents))
+    consensus = _format_consensus_label(score, consensus_short, split)
 
     all_findings = _deduplicate_findings(agents)
 

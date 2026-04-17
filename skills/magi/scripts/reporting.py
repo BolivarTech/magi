@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Author: Julian Bolivar
-# Version: 2.0.2
-# Date: 2026-04-14
+# Version: 2.1.1
+# Date: 2026-04-17
 """MAGI report formatting.
 
 Generates the ASCII verdict banner and the full human-readable
@@ -57,6 +57,39 @@ def _agent_label(agent_name: str) -> str:
     return f"{name} ({title}):"
 
 
+_ELLIPSIS: str = "..."
+
+
+def _fit_content(content: str, width: int) -> str:
+    """Truncate *content* to fit inside the ``_BANNER_INNER`` column budget.
+
+    ``str.ljust`` never truncates, so without this guard a label that
+    exceeds the inner width produces a row that overruns the border
+    column and breaks the MANDATORY FINAL OUTPUT CONTRACT (``+===+``
+    borders must align with ``|...|`` rows). When the content is too
+    wide, we replace the tail with ``...`` so the row still fits.
+
+    ``content`` shorter than or equal to ``width`` is returned verbatim
+    — the caller is responsible for the final ``ljust`` so the output
+    is always exactly ``width`` characters before ``"|" + ... + "|"``
+    wrapping.
+
+    Args:
+        content: Pre-formatted row content (label + verdict + conf).
+        width: Column budget (``_BANNER_INNER``).
+
+    Returns:
+        ``content`` if it fits, otherwise a truncated version ending in
+        ``"..."`` whose length is exactly ``width``.
+    """
+    if len(content) <= width:
+        return content
+    # Keep at least one leading char so a degenerate narrow budget does
+    # not produce an all-ellipsis row.
+    cutoff = max(1, width - len(_ELLIPSIS))
+    return content[:cutoff] + _ELLIPSIS
+
+
 def format_banner(agents: list[dict[str, Any]], consensus: dict[str, Any]) -> str:
     """Generate the MAGI verdict banner with consistent alignment.
 
@@ -64,6 +97,11 @@ def format_banner(agents: list[dict[str, Any]], consensus: dict[str, Any]) -> st
     verdicts and the consensus result. Verdicts are column-aligned by
     padding each agent label to the longest label width so that the
     verdict column starts at the same position on every row.
+
+    Any row content that would exceed ``_BANNER_INNER`` (50 characters)
+    is truncated with a trailing ``...`` so the ``|`` border column
+    never slides — a future longer agent role name or a long consensus
+    label cannot silently produce a malformed box.
 
     Args:
         agents: List of validated agent output dictionaries.
@@ -86,11 +124,13 @@ def format_banner(agents: list[dict[str, Any]], consensus: dict[str, Any]) -> st
         verdict_display = agent["verdict"].upper()
         conf_pct = f"{agent['confidence']:.0%}"
         content = f"  {label:<{max_label_len}} {verdict_display} ({conf_pct})"
-        lines.append("|" + content.ljust(_BANNER_INNER) + "|")
+        fitted = _fit_content(content, _BANNER_INNER)
+        lines.append("|" + fitted.ljust(_BANNER_INNER) + "|")
 
     lines.append(border)
     cons_content = f"  CONSENSUS: {consensus['consensus']}"
-    lines.append("|" + cons_content.ljust(_BANNER_INNER) + "|")
+    fitted_cons = _fit_content(cons_content, _BANNER_INNER)
+    lines.append("|" + fitted_cons.ljust(_BANNER_INNER) + "|")
     lines.append(border)
 
     return "\n".join(lines)

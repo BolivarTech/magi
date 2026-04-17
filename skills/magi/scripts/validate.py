@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Author: Julian Bolivar
-# Version: 2.0.2
-# Date: 2026-04-14
+# Version: 2.1.1
+# Date: 2026-04-17
 """MAGI agent output validation.
 
 Loads and validates JSON output files produced by the three MAGI agents
@@ -62,10 +62,30 @@ _MAX_DETAIL_LENGTH: int = 10_000
 # soft hyphen (U+00AD). These span categories Cf, Zl, Zp, and Zs rather
 # than Cf alone.
 _ZERO_WIDTH_RE = re.compile(r"[\u200b-\u200f\u2028-\u202f\ufeff\u00ad]")
+# ASCII control whitespace (``\t``, ``\n``, ``\r``, vertical tab, form feed)
+# plus the NEL (U+0085) that terminals treat as a line break. These are not
+# "invisible" in the Cf/Zl/Zp sense — they render as column breaks — so they
+# are stripped by a separate pass. Left in place, they would corrupt the
+# fixed-column marker/severity/title layout of ``_format_finding_line`` and
+# the banner row width contract.
+_CONTROL_WHITESPACE_RE = re.compile(r"[\t\n\v\f\r\x85]")
 
 
 def clean_title(raw: str) -> str:
     """Return *raw* with invisible characters and edge whitespace removed.
+
+    Applies, in order:
+
+    1. :data:`_ZERO_WIDTH_RE` — strips Cf/Zl/Zp-category invisibles and
+       bidi marks that would otherwise let a title smuggle content
+       through length checks without rendering.
+    2. :data:`_CONTROL_WHITESPACE_RE` — strips ASCII control whitespace
+       (``\\t``, ``\\n``, ``\\v``, ``\\f``, ``\\r``) and the NEL
+       (``U+0085``). Without this, a title like
+       ``"Broken\\ninjected row"`` passes validation (non-empty, under
+       the length cap) and then corrupts the fixed-column layout in
+       :func:`reporting._format_finding_line` and the banner.
+    3. :meth:`str.strip` — trims surrounding whitespace.
 
     Used by :func:`load_agent_output` to produce the canonical title form
     that is both length-capped and stored on the finding. Exposed as a
@@ -73,7 +93,9 @@ def clean_title(raw: str) -> str:
     dedup in ``consensus.py``) can derive a normalization key from the
     same source of truth.
     """
-    return _ZERO_WIDTH_RE.sub("", raw).strip()
+    stripped_invisibles = _ZERO_WIDTH_RE.sub("", raw)
+    without_breaks = _CONTROL_WHITESPACE_RE.sub(" ", stripped_invisibles)
+    return without_breaks.strip()
 
 
 def load_agent_output(filepath: str) -> dict[str, Any]:
