@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # Author: Julian Bolivar
-# Version: 2.1.2
+# Version: 2.1.3
 # Date: 2026-04-17
 """MAGI agent output validation.
 
@@ -134,6 +134,21 @@ def load_agent_output(filepath: str) -> dict[str, Any]:
         raise ValidationError(f"Invalid JSON: {exc}", filepath) from exc
     except OSError as exc:
         raise ValidationError(f"Cannot read file: {exc}", filepath) from exc
+
+    # --- top-level shape ---
+    # The ``_REQUIRED_KEYS - set(data.keys())`` line below assumes *data*
+    # is a mapping. A misbehaving agent that emits ``[...]``, ``"..."``,
+    # a number, a boolean, or ``null`` produces legal JSON whose parsed
+    # form has no ``.keys()`` method; without this guard it raises
+    # ``AttributeError`` and bypasses the ``ValidationError`` contract
+    # promised by the docstring, leaving ``asyncio.gather`` to log an
+    # opaque ``'list' object has no attribute 'keys'`` trace instead of
+    # a schema error an operator can act on.
+    if not isinstance(data, dict):
+        raise ValidationError(
+            f"Top-level JSON must be an object, got {type(data).__name__}.",
+            filepath,
+        )
 
     # --- top-level key check ---
     missing = _REQUIRED_KEYS - set(data.keys())

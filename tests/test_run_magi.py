@@ -279,7 +279,7 @@ class TestCleanupOldRuns:
         """keep < 0 should not scan or delete anything."""
         from run_magi import cleanup_old_runs
 
-        with patch("run_magi.tempfile.gettempdir", return_value=str(tmp_path)):
+        with patch("temp_dirs.tempfile.gettempdir", return_value=str(tmp_path)):
             magi_dir = tmp_path / "magi-run-abc123"
             magi_dir.mkdir()
             cleanup_old_runs(-1)
@@ -295,7 +295,7 @@ class TestCleanupOldRuns:
             d.mkdir()
             magi_dirs.append(d)
 
-        with patch("run_magi.tempfile.gettempdir", return_value=str(tmp_path)):
+        with patch("temp_dirs.tempfile.gettempdir", return_value=str(tmp_path)):
             cleanup_old_runs(0)
 
         for d in magi_dirs:
@@ -313,7 +313,7 @@ class TestCleanupOldRuns:
             os.utime(d, (1000 + i, 1000 + i))
             dirs.append(d)
 
-        with patch("run_magi.tempfile.gettempdir", return_value=str(tmp_path)):
+        with patch("temp_dirs.tempfile.gettempdir", return_value=str(tmp_path)):
             cleanup_old_runs(2)
 
         # Most recent (dirs[2], dirs[3]) should remain
@@ -339,7 +339,7 @@ class TestCleanupOldRuns:
             d.mkdir()
             os.utime(d, (1000, 1000))  # identical mtime across all three
 
-        with patch("run_magi.tempfile.gettempdir", return_value=str(tmp_path)):
+        with patch("temp_dirs.tempfile.gettempdir", return_value=str(tmp_path)):
             cleanup_old_runs(1)
 
         survivors = sorted(p.name for p in tmp_path.iterdir() if p.name.startswith("magi-run-"))
@@ -356,7 +356,7 @@ class TestCleanupOldRuns:
             d.mkdir()
             os.utime(d, (2000, 2000))
 
-        with patch("run_magi.tempfile.gettempdir", return_value=str(tmp_path)):
+        with patch("temp_dirs.tempfile.gettempdir", return_value=str(tmp_path)):
             cleanup_old_runs(2)
 
         survivors = sorted(p.name for p in tmp_path.iterdir() if p.name.startswith("magi-run-"))
@@ -373,7 +373,7 @@ class TestCleanupOldRuns:
         (tmp_path / "other-dir").mkdir()
         (tmp_path / "readme.txt").write_text("keep me")
 
-        with patch("run_magi.tempfile.gettempdir", return_value=str(tmp_path)):
+        with patch("temp_dirs.tempfile.gettempdir", return_value=str(tmp_path)):
             cleanup_old_runs(1)
 
         assert (tmp_path / "other-dir").exists()
@@ -393,7 +393,7 @@ class TestCleanupOldRuns:
         so it runs identically on platforms without symlink support
         (e.g. Windows under a non-admin pytest run).
         """
-        import run_magi
+        import temp_dirs
         from run_magi import cleanup_old_runs
 
         older = tmp_path / "magi-run-0001"
@@ -419,8 +419,8 @@ class TestCleanupOldRuns:
                 return real_realpath(real_root_str + path[len(advertised_root) :])
             return real_realpath(path)
 
-        monkeypatch.setattr(run_magi.os.path, "realpath", fake_realpath)
-        monkeypatch.setattr(run_magi.tempfile, "gettempdir", lambda: advertised_root)
+        monkeypatch.setattr(temp_dirs.os.path, "realpath", fake_realpath)
+        monkeypatch.setattr(temp_dirs.tempfile, "gettempdir", lambda: advertised_root)
 
         # Rewrite scandir so it iterates the real tmp_path when asked
         # for the advertised symlinked root. This mirrors the OS-level
@@ -432,7 +432,7 @@ class TestCleanupOldRuns:
                 return real_scandir(real_root_str)
             return real_scandir(path)
 
-        monkeypatch.setattr(run_magi.os, "scandir", fake_scandir)
+        monkeypatch.setattr(temp_dirs.os, "scandir", fake_scandir)
 
         cleanup_old_runs(1)
 
@@ -453,7 +453,7 @@ class TestCleanupOldRuns:
         except OSError:
             pytest.skip("Symlinks not supported on this platform")
 
-        with patch("run_magi.tempfile.gettempdir", return_value=str(tmp_path)):
+        with patch("temp_dirs.tempfile.gettempdir", return_value=str(tmp_path)):
             cleanup_old_runs(0)
             # keep=0 disables, use keep=1 with 2 dirs to trigger cleanup
             real_dir = tmp_path / "magi-run-real"
@@ -935,10 +935,10 @@ class TestLaunchAgentTimeoutReaping:
     @pytest.fixture(autouse=True)
     def _stub_taskkill(self, monkeypatch):
         """Stub ``subprocess.run`` so the Windows tree-kill path in
-        ``_reap_and_drain_stderr`` does not invoke the real ``taskkill``
+        ``reap_and_drain_stderr`` does not invoke the real ``taskkill``
         against a fake pid and slow each test down by several seconds.
         """
-        import run_magi
+        import subprocess_utils
 
         def _noop_run(*args, **kwargs):
             class _Completed:
@@ -946,7 +946,7 @@ class TestLaunchAgentTimeoutReaping:
 
             return _Completed()
 
-        monkeypatch.setattr(run_magi.subprocess, "run", _noop_run)
+        monkeypatch.setattr(subprocess_utils.subprocess, "run", _noop_run)
 
     @pytest.mark.asyncio
     async def test_wait_awaited_after_kill_on_timeout(self, tmp_path, monkeypatch):
@@ -1181,23 +1181,22 @@ class TestTaskkillTimeoutBudget:
     """
 
     def test_taskkill_timeout_is_separate_constant(self):
-        """The two timeouts are distinct module-level constants and the
-        orchestrator exports both so operators can tune them without
-        conflating the budgets.
+        """The two timeouts are distinct module-level constants and
+        operators can tune them without conflating the budgets.
         """
-        from run_magi import _PROC_WAIT_REAP_TIMEOUT, _TASKKILL_TIMEOUT
+        from subprocess_utils import PROC_WAIT_REAP_TIMEOUT, TASKKILL_TIMEOUT
 
         # Both are floats > 0 — the exact values may change over time,
         # but they must live in separate constants so one slow call does
         # not poison the other's observability.
-        assert isinstance(_TASKKILL_TIMEOUT, float)
-        assert isinstance(_PROC_WAIT_REAP_TIMEOUT, float)
-        assert _TASKKILL_TIMEOUT > 0
-        assert _PROC_WAIT_REAP_TIMEOUT > 0
+        assert isinstance(TASKKILL_TIMEOUT, float)
+        assert isinstance(PROC_WAIT_REAP_TIMEOUT, float)
+        assert TASKKILL_TIMEOUT > 0
+        assert PROC_WAIT_REAP_TIMEOUT > 0
 
     def test_windows_kill_tree_uses_taskkill_timeout(self, monkeypatch):
-        """``_windows_kill_tree`` must pass ``_TASKKILL_TIMEOUT`` to
-        ``subprocess.run``, not ``_PROC_WAIT_REAP_TIMEOUT`` — otherwise
+        """``windows_kill_tree`` must pass ``TASKKILL_TIMEOUT`` to
+        ``subprocess.run``, not ``PROC_WAIT_REAP_TIMEOUT`` — otherwise
         collapsing the two constants back into one would pass silently.
         """
         import sys as _sys
@@ -1205,7 +1204,7 @@ class TestTaskkillTimeoutBudget:
         if _sys.platform != "win32":
             pytest.skip("Windows-only path")
 
-        import run_magi
+        import subprocess_utils
 
         captured: dict = {}
 
@@ -1217,9 +1216,9 @@ class TestTaskkillTimeoutBudget:
 
             return _Completed()
 
-        monkeypatch.setattr(run_magi.subprocess, "run", fake_run)
-        run_magi._windows_kill_tree(54321)
-        assert captured.get("timeout") == run_magi._TASKKILL_TIMEOUT
+        monkeypatch.setattr(subprocess_utils.subprocess, "run", fake_run)
+        subprocess_utils.windows_kill_tree(54321)
+        assert captured.get("timeout") == subprocess_utils.TASKKILL_TIMEOUT
 
 
 class TestAllDoesNotExportPrivateShimNames:
@@ -1366,7 +1365,7 @@ class TestReapAndDrainStderr:
         must not raise."""
         import asyncio
 
-        from run_magi import _PROC_WAIT_REAP_TIMEOUT, _reap_and_drain_stderr
+        from subprocess_utils import PROC_WAIT_REAP_TIMEOUT, reap_and_drain_stderr
 
         class _FakeStderr:
             async def read(self) -> bytes:
@@ -1387,16 +1386,16 @@ class TestReapAndDrainStderr:
         async def _fake_wait_for(awaitable, timeout):
             # Consume the coroutine so asyncio doesn't warn about it,
             # then raise to simulate the reap timeout on the wait() call.
-            if timeout == _PROC_WAIT_REAP_TIMEOUT:
+            if timeout == PROC_WAIT_REAP_TIMEOUT:
                 if asyncio.iscoroutine(awaitable):
                     awaitable.close()
                 raise asyncio.TimeoutError
             return await awaitable
 
-        monkeypatch.setattr("run_magi.asyncio.wait_for", _fake_wait_for)
+        monkeypatch.setattr("subprocess_utils.asyncio.wait_for", _fake_wait_for)
 
         proc = _FakeProc()
-        result = asyncio.run(_reap_and_drain_stderr(proc))  # type: ignore[arg-type]
+        result = asyncio.run(reap_and_drain_stderr(proc))  # type: ignore[arg-type]
 
         assert result == b""
         assert _FakeProc.kill_called is True
@@ -1423,7 +1422,7 @@ class TestReapAndDrainStderr:
         if _sys.platform != "win32":
             pytest.skip("Windows-only path")
 
-        import run_magi
+        import subprocess_utils
 
         recorded_argv: list[list[str]] = []
 
@@ -1435,7 +1434,7 @@ class TestReapAndDrainStderr:
 
             return _Completed()
 
-        monkeypatch.setattr(run_magi.subprocess, "run", fake_run)
+        monkeypatch.setattr(subprocess_utils.subprocess, "run", fake_run)
 
         class _FakeStderr:
             async def read(self) -> bytes:
@@ -1451,7 +1450,7 @@ class TestReapAndDrainStderr:
             async def wait(self) -> int:
                 return 0
 
-        asyncio.run(run_magi._reap_and_drain_stderr(_FakeProc()))  # type: ignore[arg-type]
+        asyncio.run(subprocess_utils.reap_and_drain_stderr(_FakeProc()))  # type: ignore[arg-type]
 
         assert any(
             argv[:4] == ["taskkill", "/F", "/T", "/PID"] and argv[4] == "12345"
@@ -1475,7 +1474,7 @@ class TestReapAndDrainStderr:
         if _sys.platform != "win32":
             pytest.skip("Windows-only path")
 
-        import run_magi
+        import subprocess_utils
 
         call_order: list[str] = []
 
@@ -1487,7 +1486,7 @@ class TestReapAndDrainStderr:
 
             return _Completed()
 
-        monkeypatch.setattr(run_magi.subprocess, "run", fake_run)
+        monkeypatch.setattr(subprocess_utils.subprocess, "run", fake_run)
 
         class _FakeStderr:
             async def read(self) -> bytes:
@@ -1503,7 +1502,7 @@ class TestReapAndDrainStderr:
             async def wait(self) -> int:
                 return 0
 
-        asyncio.run(run_magi._reap_and_drain_stderr(_FakeProc()))  # type: ignore[arg-type]
+        asyncio.run(subprocess_utils.reap_and_drain_stderr(_FakeProc()))  # type: ignore[arg-type]
 
         assert call_order, "expected at least one of taskkill / proc_kill to fire"
         assert call_order[0] == "taskkill", (

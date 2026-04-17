@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # Author: Julian Bolivar
-# Version: 2.1.2
+# Version: 2.1.3
 # Date: 2026-04-17
 """MAGI Orchestrator — async Python replacement for run_magi.sh.
 
@@ -22,9 +22,7 @@ import asyncio
 import json
 import os
 import shutil
-import subprocess
 import sys
-import tempfile
 from typing import Any
 
 from models import MODEL_IDS, VALID_MODELS, resolve_model
@@ -36,6 +34,16 @@ from synthesize import (
     format_report,
     load_agent_output,
 )
+from subprocess_utils import (
+    format_stderr_excerpt as _format_stderr_excerpt,
+    reap_and_drain_stderr as _reap_and_drain_stderr,
+    write_stderr_log as _write_stderr_log,
+)
+from temp_dirs import (
+    MAGI_DIR_PREFIX,
+    cleanup_old_runs,
+    create_output_dir,
+)
 from validate import MAX_INPUT_FILE_SIZE
 
 # Public star-import contract. Underscore-prefixed symbols from
@@ -44,136 +52,24 @@ from validate import MAX_INPUT_FILE_SIZE
 # private helpers of that module, and tests that need them import from
 # ``stderr_shim`` directly. ``_buffered_stderr_while`` is still imported
 # here for internal use inside ``run_orchestrator``.
+#
+# The ``temp_dirs`` symbols (``cleanup_old_runs``, ``create_output_dir``,
+# ``MAGI_DIR_PREFIX`` and the underscore-prefixed traversal helpers) are
+# re-exported from here so the longstanding ``from run_magi import
+# cleanup_old_runs`` pattern in callers and tests continues to work after
+# the 2.1.3 split. Future code should import from ``temp_dirs`` directly.
 __all__ = [
+    "MAGI_DIR_PREFIX",
     "MODEL_IDS",
     "VALID_MODELS",
+    "cleanup_old_runs",
+    "create_output_dir",
     "resolve_model",
 ]
 
 AGENTS = ("melchior", "balthasar", "caspar")
 MAX_HISTORY_RUNS = 5
 VALID_MODES = ("code-review", "design", "analysis")
-MAGI_DIR_PREFIX = "magi-run-"
-
-_STDERR_EXCERPT_MAX_CHARS = 500
-_PROC_WAIT_REAP_TIMEOUT = 5.0
-_PROC_STDERR_DRAIN_TIMEOUT = 2.0
-# ``taskkill /F /T`` gets its own budget so a slow invocation on a busy
-# Windows host cannot consume the whole ``_PROC_WAIT_REAP_TIMEOUT`` and
-# leave ``proc.wait()`` with zero headroom. When this separation is
-# collapsed, the "may be orphaned" warning fires even after a successful
-# tree kill, producing misleading diagnostics.
-_TASKKILL_TIMEOUT = 5.0
-
-
-def _write_stderr_log(output_dir: str, agent_name: str, data: bytes) -> None:
-    """Persist captured stderr to ``{agent_name}.stderr.log`` if non-empty.
-
-    Raises:
-        OSError: If the destination cannot be opened or written. Callers
-            on an already-failing path (e.g. the timeout handler in
-            :func:`launch_agent`) must wrap this call in ``try/except
-            OSError`` so a disk error cannot shadow the root-cause
-            exception they are about to raise.
-    """
-    if not data:
-        return
-    stderr_file = os.path.join(output_dir, f"{agent_name}.stderr.log")
-    with open(stderr_file, "wb") as f:
-        f.write(data)
-
-
-def _format_stderr_excerpt(data: bytes) -> str:
-    """Return a ``: <tail>`` suffix for error messages, empty if no data.
-
-    The excerpt is decoded as UTF-8 with replacement, stripped, and
-    truncated to the last :data:`_STDERR_EXCERPT_MAX_CHARS` characters so
-    diagnostics stay readable in exception strings.
-    """
-    if not data:
-        return ""
-    decoded = data.decode("utf-8", errors="replace").strip()
-    if len(decoded) > _STDERR_EXCERPT_MAX_CHARS:
-        decoded = "..." + decoded[-_STDERR_EXCERPT_MAX_CHARS:]
-    return f": {decoded}"
-
-
-def _windows_kill_tree(pid: int) -> None:
-    """Force-terminate a Windows process tree rooted at *pid*.
-
-    ``proc.kill()`` on Windows issues ``TerminateProcess`` against the
-    top-level process only, leaving any children the ``claude`` CLI may
-    have spawned as orphans under the original parent. ``taskkill /F /T
-    /PID`` walks the tree and force-terminates every descendant,
-    collapsing the orphan window that used to survive a MAGI timeout.
-
-    Uses its own ``_TASKKILL_TIMEOUT`` (separate from
-    ``_PROC_WAIT_REAP_TIMEOUT``) so a slow invocation on a busy host does
-    not consume the caller's wait budget and produce a misleading "may
-    be orphaned" warning even when the tree was successfully killed.
-
-    Best-effort: if ``taskkill`` is missing from PATH, the spawn fails,
-    or the subprocess itself hangs, we return normally. The caller's
-    existing ``proc.wait()`` with ``_PROC_WAIT_REAP_TIMEOUT`` still fires
-    and emits the "may be orphaned" warning so operators can notice.
-    """
-    try:
-        subprocess.run(
-            ["taskkill", "/F", "/T", "/PID", str(pid)],
-            check=False,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=_TASKKILL_TIMEOUT,
-        )
-    except (OSError, subprocess.SubprocessError):
-        pass
-
-
-async def _reap_and_drain_stderr(proc: asyncio.subprocess.Process) -> bytes:
-    """Kill *proc* (and its children on Windows), await exit, drain stderr.
-
-    Both the ``wait()`` and the ``stderr.read()`` are bounded by short
-    timeouts so a misbehaving subprocess cannot stall the orchestrator.
-    Non-timeout failures are swallowed — the caller is already on an
-    error path and only needs best-effort diagnostics. A ``wait()``
-    timeout, however, means the reaped subprocess never exited: on
-    Windows this typically indicates an orphaned child-process tree,
-    so we emit a warning naming the pid so operators can notice it.
-
-    On Windows, ``proc.kill()`` only terminates the top-level process;
-    any children the ``claude`` CLI spawned stay alive. We collapse the
-    tree first with a best-effort ``taskkill /F /T`` while the parent
-    PID is still alive — once ``proc.kill()`` issues
-    ``TerminateProcess``, the kernel may have torn down the parent-child
-    mapping that ``taskkill /T`` walks, leaving descendants orphaned
-    despite the call. ``proc.kill()`` then runs as a fallback so the
-    asyncio.subprocess wrapper observes the exit cleanly even when
-    ``taskkill`` is missing or times out. Non-Windows platforms send
-    ``SIGKILL`` directly to the top process and rely on ``claude`` not
-    to fork independent sub-agents there — if it ever did, that would
-    need its own platform-specific handling.
-    """
-    if sys.platform == "win32":
-        _windows_kill_tree(proc.pid)
-    proc.kill()
-    try:
-        await asyncio.wait_for(proc.wait(), timeout=_PROC_WAIT_REAP_TIMEOUT)
-    except asyncio.TimeoutError:
-        print(
-            f"\u26a0 WARNING: subprocess pid={proc.pid} did not exit within "
-            f"{_PROC_WAIT_REAP_TIMEOUT}s after kill() \u2014 may be orphaned "
-            f"(common on Windows with child-process trees)",
-            file=sys.stderr,
-        )
-    except Exception:  # noqa: BLE001 — best-effort reap
-        pass
-
-    if proc.stderr is None:
-        return b""
-    try:
-        return await asyncio.wait_for(proc.stderr.read(), timeout=_PROC_STDERR_DRAIN_TIMEOUT)
-    except Exception:  # noqa: BLE001 — best-effort drain
-        return b""
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -234,123 +130,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "-1 to disable cleanup entirely."
         )
     return args
-
-
-def _scan_magi_dirs(tmp_root: str) -> list[tuple[float, str]]:
-    """Return ``(mtime, path)`` tuples for every ``magi-run-*`` dir under *tmp_root*.
-
-    Entries that disappear between scan and stat are silently skipped.
-    """
-    results: list[tuple[float, str]] = []
-    for entry in os.scandir(tmp_root):
-        if not (entry.is_dir() and entry.name.startswith(MAGI_DIR_PREFIX)):
-            continue
-        try:
-            mtime = entry.stat().st_mtime
-        except OSError:
-            continue
-        results.append((mtime, entry.path))
-    return results
-
-
-def _safe_temp_prefix(tmp_root: str) -> str:
-    """Return the normalized temp-root prefix used for traversal checks.
-
-    Resolves symlinks in *tmp_root* before building the prefix so that
-    ``os.path.realpath(entry.path).startswith(prefix)`` stays consistent
-    when the temp root itself is a symlink (e.g. ``/tmp`` →
-    ``/private/tmp`` on macOS). Without this, every scanned entry
-    resolves outside the advertised prefix and cleanup becomes a
-    silent no-op.
-    """
-    prefix = os.path.normcase(os.path.realpath(tmp_root))
-    if not prefix.endswith(os.sep):
-        prefix += os.sep
-    return prefix
-
-
-def _safe_rmtree_under(path: str, safe_prefix: str) -> None:
-    """Remove *path* only if it resolves strictly inside *safe_prefix*.
-
-    The realpath check prevents symlink traversal attacks on shared
-    systems. Failures are logged to stderr — cleanup must never raise.
-    """
-    resolved = os.path.normcase(os.path.realpath(path))
-    if not resolved.startswith(safe_prefix):
-        print(
-            f"WARNING: Skipping cleanup of {path} (resolves outside temp root: {resolved})",
-            file=sys.stderr,
-        )
-        return
-    try:
-        shutil.rmtree(resolved)
-    except OSError as exc:
-        print(
-            f"WARNING: Failed to remove old run {resolved}: {exc}",
-            file=sys.stderr,
-        )
-
-
-def cleanup_old_runs(keep: int) -> None:
-    """Remove oldest MAGI temp directories, keeping the most recent ones.
-
-    Scans the system temp directory for directories matching the
-    :data:`MAGI_DIR_PREFIX` and removes the oldest so that at most
-    ``keep`` remain. Entries are sorted by ``st_mtime`` descending and,
-    for deterministic LRU under mtime ties, by path ascending — the
-    lexicographically smallest path is treated as the canonical
-    survivor. Symlinks are resolved and validated against the temp root
-    before deletion to prevent traversal attacks on shared systems.
-
-    Intended to be called **before** the current run's temp dir is
-    created, so the caller should pass ``keep_runs - 1`` when they want
-    a final on-disk count of ``keep_runs`` after :func:`create_output_dir`
-    adds the new dir. Without the off-by-one adjustment the final count
-    is always ``keep_runs + 1``.
-
-    Args:
-        keep: Maximum number of existing runs to retain.
-            ``keep >= 0``: valid; ``keep == 0`` removes every matching
-            dir (the caller is reserving the only slot for the run it
-            is about to create). ``keep < 0`` disables cleanup entirely.
-    """
-    if keep < 0:
-        return
-
-    tmp_root = tempfile.gettempdir()
-    magi_dirs = _scan_magi_dirs(tmp_root)
-
-    # Fast path: nothing to prune — skip the sort and the per-entry loop.
-    # Never triggered when keep == 0 and at least one dir exists, so the
-    # "wipe everything" case falls through to the slice below.
-    if len(magi_dirs) <= keep:
-        return
-
-    # Explicit key so the tie-breaking direction is documented and cannot
-    # drift if someone later replaces the list of tuples with a different
-    # container.
-    magi_dirs.sort(key=lambda entry: (-entry[0], entry[1]))
-
-    safe_prefix = _safe_temp_prefix(tmp_root)
-    for _, path in magi_dirs[keep:]:
-        _safe_rmtree_under(path, safe_prefix)
-
-
-def create_output_dir(output_dir: str | None) -> str:
-    """Create and return the output directory.
-
-    Uses tempfile.mkdtemp for cross-platform compatibility (fixes W2).
-
-    Args:
-        output_dir: Explicit path, or None to create a temp dir.
-
-    Returns:
-        Path to the created output directory.
-    """
-    if output_dir is None:
-        return tempfile.mkdtemp(prefix=MAGI_DIR_PREFIX)
-    os.makedirs(output_dir, exist_ok=True)
-    return output_dir
 
 
 async def launch_agent(

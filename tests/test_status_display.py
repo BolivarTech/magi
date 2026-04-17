@@ -234,6 +234,47 @@ class TestAsyncLifecycle:
             f"to exercise the OSError path; got {redraw_calls['count']} calls."
         )
 
+    @pytest.mark.asyncio
+    async def test_refresh_loop_survives_non_oserror_from_redraw(self):
+        """Regression (v2.1.3): if ``_redraw`` raises anything other than
+        ``OSError`` (``ValueError`` from a closed ``io.StringIO``, a
+        ``UnicodeEncodeError`` if the glyph probe misidentifies the
+        stream, a ``ZeroDivisionError`` introduced by a future edit),
+        the refresh loop must stop silently.
+
+        Pre-2.1.3 the handler was narrowed to ``except OSError`` only, so
+        a non-OSError failure propagated out of the background task,
+        ``stop()`` re-raised it on ``await self._refresh_task``, and the
+        orchestrator crashed after all agent results had been gathered —
+        the exact regression ``test_refresh_loop_survives_oserror_from_redraw``
+        was written to prevent, just via a different exception type.
+
+        The loop must cover ``Exception`` broadly, not only ``OSError``.
+        """
+        buf = io.StringIO()
+        d = StatusDisplay(["m"], stream=buf, use_ansi=True, refresh_interval=0.01)
+
+        original_redraw = d._redraw
+        redraw_calls = {"count": 0}
+
+        def broken_after_first() -> None:
+            redraw_calls["count"] += 1
+            if redraw_calls["count"] >= 2:
+                raise ValueError("simulated non-OSError failure mid-redraw")
+            original_redraw()
+
+        d._redraw = broken_after_first  # type: ignore[method-assign]
+
+        await d.start()
+        await asyncio.sleep(0.1)
+        # stop() must complete without re-raising the ValueError.
+        await d.stop()
+
+        assert redraw_calls["count"] >= 2, (
+            "refresh loop must have attempted at least one post-start redraw "
+            f"to exercise the non-OSError path; got {redraw_calls['count']} calls."
+        )
+
 
 class TestAsciiFallback:
     def test_ascii_glyphs_when_encoding_is_cp1252(self):

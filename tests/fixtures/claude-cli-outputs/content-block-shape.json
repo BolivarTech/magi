@@ -1,0 +1,8 @@
+{
+  "content": [
+    {
+      "type": "text",
+      "text": "{\n  \"agent\": \"melchior\",\n  \"verdict\": \"approve\",\n  \"confidence\": 0.9,\n  \"summary\": \"Pinned fixture payload.\",\n  \"reasoning\": \"This is a pinned fixture used to verify the Claude CLI output contract.\",\n  \"findings\": [\n    {\n      \"severity\": \"info\",\n      \"title\": \"Fixture note\",\n      \"detail\": \"Regenerate when the CLI wrapper shape changes.\"\n    }\n  ],\n  \"recommendation\": \"Keep the fixture suite up to date.\"\n}"
+    }
+  ]
+}

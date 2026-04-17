@@ -1,5 +1,5 @@
 # Author: Julian Bolivar
-# Version: 1.1.2
+# Version: 1.1.3
 # Date: 2026-04-17
 """Live tree-style status display for the MAGI orchestrator.
 
@@ -364,19 +364,27 @@ class StatusDisplay:
     async def _refresh_loop(self) -> None:
         """Periodically redraw while :attr:`_running` is True.
 
-        ``OSError`` from ``_redraw`` (the stream pipe died, the terminal
-        was closed mid-run, the fd was revoked) stops the loop silently
-        instead of bubbling out of the background task. ``stop()`` would
-        otherwise re-raise the failure and crash the orchestrator after
-        all agent results had already been gathered — losing them to a
-        UI-only failure. After the loop exits the process simply
-        continues without the live display.
+        Any ``Exception`` from ``_redraw`` (``OSError`` from a dead pipe
+        or closed terminal; ``ValueError`` from a closed ``io.StringIO``;
+        ``UnicodeEncodeError`` from a mis-probed encoding; any logic bug
+        introduced by a future edit) stops the loop silently instead of
+        bubbling out of the background task. ``stop()`` would otherwise
+        re-raise the failure on ``await self._refresh_task`` and crash
+        the orchestrator after all agent results had already been
+        gathered — losing them to a UI-only failure. The contract here
+        is: *the live display is never allowed to fail the run*.
+
+        ``BaseException`` subclasses (``KeyboardInterrupt``,
+        ``SystemExit``, ``GeneratorExit``) deliberately fall through —
+        those are shutdown signals the loop must respect, not display
+        errors to suppress. ``CancelledError`` is handled separately
+        below because it is the expected ``stop()`` path.
         """
         try:
             while self._running:
                 try:
                     self._redraw()
-                except OSError:
+                except Exception:  # noqa: BLE001 — display failures must never fail the run
                     self._running = False
                     return
                 await asyncio.sleep(self._refresh_interval)
@@ -411,8 +419,14 @@ class StatusDisplay:
         if self._use_ansi:
             try:
                 self._redraw()
-            except OSError:
+            except Exception:  # noqa: BLE001 — see _refresh_loop rationale
                 # Same rationale as ``_refresh_loop``: a UI-only failure
                 # during the final redraw must not crash ``stop`` and
-                # discard the gathered agent results.
+                # discard the gathered agent results. Covers the same
+                # full ``Exception`` surface for the same reason —
+                # ``OSError`` (dead pipe), ``ValueError`` (closed
+                # StringIO), ``UnicodeEncodeError`` (mis-probed
+                # encoding), and any future bug in ``_redraw`` must all
+                # degrade to "no final redraw" rather than losing the
+                # agent results.
                 pass

@@ -47,18 +47,23 @@ skills/magi/
     caspar.md                 — System prompt: Critic lens (risk, adversarial)
   scripts/
     __init__.py               — Python package marker
-    run_magi.py               — Async orchestrator with --model / --no-status flags
+    run_magi.py               — Async orchestrator (launch_agent, run_orchestrator, _DisplayLogGate)
+    temp_dirs.py              — magi-run-* LRU cleanup + create_output_dir + realpath traversal guard
+    subprocess_utils.py       — windows_kill_tree + reap_and_drain_stderr + write_stderr_log + timeouts
     status_display.py         — Live tree renderer (ANSI + plain, UTF-8 + ASCII fallback)
+    stderr_shim.py            — _buffered_stderr_while context + stderr shims for display-active runs
+    models.py                 — MODEL_IDS + resolve_model + VALID_MODELS
     synthesize.py             — Facade: re-exports from validate, consensus, reporting
     validate.py               — ValidationError + load_agent_output schema validation
     consensus.py              — VERDICT_WEIGHT + determine_consensus (weight-based scoring)
     reporting.py              — AGENT_TITLES + format_banner + format_report (ASCII)
     parse_agent_output.py     — Claude CLI JSON extractor (3 output formats)
 tests/
-  test_synthesize.py          — 107 tests: validation, consensus, findings, formatting, SKILL.md template parity
-  test_parse_agent_output.py  — 19 tests: fence stripping, text extraction, pipeline
-  test_run_magi.py            — 27 tests: arg parsing, --no-status, orchestration, tracked_launch states, start() failure
-  test_status_display.py      — 32 tests: init, update, render, ASCII fallback, async lifecycle, stop idempotency, tripwire
+  fixtures/claude-cli-outputs/  — Pinned claude -p output samples auto-discovered by the contract test
+  test_synthesize.py          — 142 tests: validation, non-dict top-level guard, consensus, findings, banner verdict-preservation, SKILL.md template parity
+  test_parse_agent_output.py  — 27 tests: fence stripping, text extraction, pipeline, claude -p fixture contract
+  test_run_magi.py            — 76 tests: arg parsing, --no-status, orchestration, tracked_launch states, temp_dirs LRU, subprocess_utils taskkill order
+  test_status_display.py      — 41 tests: init, update, render, ASCII fallback, async lifecycle, stop idempotency, tripwire, refresh-loop Exception resilience
 pyproject.toml                — Python >= 3.9, dual license, dev deps, tool config
 conftest.py                   — tdd-guard pytest plugin + sys.path setup for test imports
 Makefile                      — verify, test, lint, format, typecheck targets
@@ -261,14 +266,14 @@ A single marketplace repo can host multiple plugins by pointing `source` to othe
 
 ## Test Coverage
 
-270 tests across 4 test files (269 passed, 1 skipped on Windows):
+286 tests across 4 test files (285 passed, 1 skipped on Windows):
 
 | File | Tests | Covers |
 |------|-------|--------|
-| `tests/test_synthesize.py` | 133 | Validation, string type/length checks, bool confidence rejection, agent/verdict type guards, zero-width Unicode (incl. U+2060-U+206F word joiner / invisible math operators / tag controls), finding sub-field limits, weight-based consensus, confidence formula, findings dedup, dynamic labels, HOLD -- TIE, duplicate agents, banner width + alignment + integer percent, report sections + ordering, dissent summary-only, SKILL.md template parity |
-| `tests/test_parse_agent_output.py` | 21 | Fence stripping, text extraction (3 formats), fail-fast on unknown types, pipeline integration |
-| `tests/test_run_magi.py` | 76 | Arg parsing, --no-status flag, model passthrough, orchestration, degraded mode, input validation, cleanup_old_runs LRU/symlink, tracked_launch states (success/timeout/failed), display start() failure fallback, Windows kill-tree order (taskkill before proc.kill), stderr replay OSError safety |
-| `tests/test_status_display.py` | 40 | Init, update, render, ASCII fallback, async lifecycle, stop idempotency, write-path invariant tripwire, refresh-loop OSError resilience |
+| `tests/test_synthesize.py` | 142 | Validation, string type/length checks, bool confidence rejection, agent/verdict type guards, non-dict top-level JSON (R4-1), zero-width Unicode (incl. U+2060-U+206F word joiner / invisible math operators / tag controls), finding sub-field limits, weight-based consensus, confidence formula, findings dedup, dynamic labels, HOLD -- TIE, duplicate agents, banner width + alignment + integer percent, verdict-suffix preservation under overlong labels (R4-3), report sections + ordering, dissent summary-only, SKILL.md template parity |
+| `tests/test_parse_agent_output.py` | 27 | Fence stripping, text extraction (3 formats), fail-fast on unknown types, pipeline integration, pinned claude -p output contract via auto-discovered fixtures (R4-5) |
+| `tests/test_run_magi.py` | 76 | Arg parsing, --no-status flag, model passthrough, orchestration, degraded mode, input validation, cleanup_old_runs LRU/symlink (via `temp_dirs` module — R4-4), tracked_launch states (success/timeout/failed), display start() failure fallback, Windows kill-tree order (taskkill before proc.kill, via `subprocess_utils` — R4-4), stderr replay OSError safety |
+| `tests/test_status_display.py` | 41 | Init, update, render, ASCII fallback, async lifecycle, stop idempotency, write-path invariant tripwire, refresh-loop OSError resilience, refresh-loop non-OSError resilience (R4-2) |
 
 Run with `python -m pytest tests/ -v` or `make test`.
 
@@ -314,6 +319,11 @@ Three rounds of MAGI self-review identified and resolved the following issues:
 | R3-2 | `_ZERO_WIDTH_RE` skipped `U+2060-U+206F` (word joiner, invisible math operators, deprecated tag controls) — Cf-category invisibles could smuggle dedup-key collisions | Regex widened to `[\u200b-\u200f\u2028-\u202f\u2060-\u206f\ufeff\u00ad]`; covers every Cf-category invisible in the BMP that prior tests touched |
 | R3-3 | `_buffered_stderr_while` replay re-raised `OSError` from `saved.write` / `saved.flush`, masking the body's in-flight exception (root cause hidden by a cleanup-only failure) | `finally` wraps the replay in `try/except OSError`; clean-body runs no longer crash on broken pipes, and an in-flight exception always propagates unchanged |
 | R3-4 | `StatusDisplay._refresh_loop` and the final `stop()` redraw bubbled `OSError` (e.g. `BrokenPipeError`) out of the background task; `stop()` then re-raised it and discarded gathered agent results | Both call sites wrap `_redraw()` in `try/except OSError`; refresh loop sets `_running = False` and returns silently when the stream dies |
+| R4-1 | `validate.load_agent_output` ran `set(data.keys())` without checking `isinstance(data, dict)` — non-object top-level JSON (list, string, null, number) raised `AttributeError` and bypassed the `ValidationError` contract, producing opaque `'list' object has no attribute 'keys'` traces in `asyncio.gather` | Explicit `isinstance(data, dict)` guard after `json.load`; non-dict top-level JSON now raises `ValidationError("Top-level JSON must be an object, got <type>.")` with the filepath preserved |
+| R4-2 | `_refresh_loop` and the final `stop()` redraw caught only `OSError` — a `ValueError` (closed `io.StringIO`), `UnicodeEncodeError` (mis-probed encoding), or any future bug in `_redraw` would bubble out of the background task and make `stop()` re-raise on `await self._refresh_task`, discarding gathered agent results the same way R3-4 had for `OSError` | Both handlers widened to `except Exception` with `# noqa: BLE001` and a pointer to `_refresh_loop`'s docstring: *the live display is never allowed to fail the run*. `BaseException` subclasses (`KeyboardInterrupt`, `SystemExit`) still propagate |
+| R4-3 | `_fit_content` tail-truncated the banner row; on a pathologically long agent label the verdict+confidence suffix (`APPROVE (85%)`) was erased even though the row stayed width-valid, leaving operators with a structurally correct banner that had lost the one token it exists to communicate | `_fit_content` accepts a `preserve_suffix` keyword; when the suffix fits, truncation eats the label prefix instead. `format_banner` threads `verdict_display (conf_pct)` through as the preserved suffix, falling back to the original tail-cut when no suffix is requested |
+| R4-4 | `run_magi.py` had grown to hold arg parsing, LRU cleanup, Windows kill-tree, stderr-shim coordination, display lifecycle, subprocess orchestration, consensus call-out, and report writing — a new maintainer needed four invariants in their head to touch `run_orchestrator` safely | Extracted two pure-filesystem/pure-subprocess modules: `temp_dirs.py` (`MAGI_DIR_PREFIX`, `cleanup_old_runs`, `create_output_dir`, plus TOCTOU/symlink helpers) and `subprocess_utils.py` (`windows_kill_tree`, `reap_and_drain_stderr`, `write_stderr_log`, `format_stderr_excerpt`, plus `TASKKILL_TIMEOUT`/`PROC_WAIT_REAP_TIMEOUT`). `run_magi.py` keeps the orchestration flow and re-exports `cleanup_old_runs`/`create_output_dir`/`MAGI_DIR_PREFIX` for longstanding test imports |
+| R4-5 | Nothing in the suite exercised the three `claude -p` output shapes end-to-end because the CLI requires a paid API key; a silent wrapper change at Anthropic would surface only as a production parse failure | Added `tests/fixtures/claude-cli-outputs/` with five pinned captures (`result-shape`, `content-block-shape`, `plain-string-shape`, `result-with-markdown-fences`, `content-block-not-first`) and a parametrized contract test in `test_parse_agent_output.py` that auto-discovers new `.json` files. A guard test asserts the fixture directory is non-empty so a future rename cannot degrade the contract to a vacuous pass |
 
 ### Known limitations
 

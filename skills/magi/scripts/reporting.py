@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # Author: Julian Bolivar
-# Version: 2.1.1
+# Version: 2.1.3
 # Date: 2026-04-17
 """MAGI report formatting.
 
@@ -60,14 +60,25 @@ def _agent_label(agent_name: str) -> str:
 _ELLIPSIS: str = "..."
 
 
-def _fit_content(content: str, width: int) -> str:
+def _fit_content(content: str, width: int, *, preserve_suffix: str = "") -> str:
     """Truncate *content* to fit inside the ``_BANNER_INNER`` column budget.
 
     ``str.ljust`` never truncates, so without this guard a label that
     exceeds the inner width produces a row that overruns the border
     column and breaks the MANDATORY FINAL OUTPUT CONTRACT (``+===+``
-    borders must align with ``|...|`` rows). When the content is too
-    wide, we replace the tail with ``...`` so the row still fits.
+    borders must align with ``|...|`` rows).
+
+    When ``preserve_suffix`` is provided and there is room for it
+    alongside the ellipsis, truncation drops characters from the
+    **prefix** (the label half), preserving the suffix (the verdict +
+    confidence tokens) verbatim. Pre-2.1.3 the truncation unconditionally
+    ate the tail, which could silently erase the verdict itself on a
+    pathologically long label — the operator saw a structurally valid
+    row that had lost the one token the banner exists to communicate.
+
+    When no suffix is provided, or the suffix is wider than the budget
+    allows, truncation falls back to the original tail-cut behaviour so
+    no caller that predates ``preserve_suffix`` changes semantics.
 
     ``content`` shorter than or equal to ``width`` is returned verbatim
     — the caller is responsible for the final ``ljust`` so the output
@@ -77,17 +88,29 @@ def _fit_content(content: str, width: int) -> str:
     Args:
         content: Pre-formatted row content (label + verdict + conf).
         width: Column budget (``_BANNER_INNER``).
+        preserve_suffix: Trailing slice of ``content`` that must survive
+            truncation intact (e.g. `` APPROVE (85%)`` including the
+            leading separator). Pass ``""`` to opt out.
 
     Returns:
-        ``content`` if it fits, otherwise a truncated version ending in
-        ``"..."`` whose length is exactly ``width``.
+        ``content`` if it fits, otherwise a truncated version whose
+        length is exactly ``width``.
     """
     if len(content) <= width:
         return content
-    # Keep at least one leading char so a degenerate narrow budget does
-    # not produce an all-ellipsis row.
-    cutoff = max(1, width - len(_ELLIPSIS))
-    return content[:cutoff] + _ELLIPSIS
+    # Fallback path: either no suffix contract, or the suffix alone is
+    # already at or over the budget (so there is no room for prefix +
+    # ellipsis + suffix). Truncate the tail to stay width-valid.
+    if not preserve_suffix or len(preserve_suffix) + len(_ELLIPSIS) >= width:
+        cutoff = max(1, width - len(_ELLIPSIS))
+        return content[:cutoff] + _ELLIPSIS
+    # Suffix-preserving path. Budget for the prefix half:
+    # total width - ellipsis - suffix. The resulting length is exactly
+    # ``width`` (prefix_budget + len(_ELLIPSIS) + len(preserve_suffix)).
+    prefix_budget = width - len(_ELLIPSIS) - len(preserve_suffix)
+    assert prefix_budget >= 1, "covered by the fallback guard above"
+    prefix_source = content[: -len(preserve_suffix)]
+    return prefix_source[:prefix_budget] + _ELLIPSIS + preserve_suffix
 
 
 def format_banner(agents: list[dict[str, Any]], consensus: dict[str, Any]) -> str:
@@ -123,8 +146,14 @@ def format_banner(agents: list[dict[str, Any]], consensus: dict[str, Any]) -> st
     for agent, label in zip(agents, labels):
         verdict_display = agent["verdict"].upper()
         conf_pct = f"{agent['confidence']:.0%}"
-        content = f"  {label:<{max_label_len}} {verdict_display} ({conf_pct})"
-        fitted = _fit_content(content, _BANNER_INNER)
+        # The suffix starts at the space between the label column and
+        # the verdict, so truncation that eats the label cannot also eat
+        # the separator that keeps the verdict legible. On a normal-
+        # width label the preserve_suffix is a strict suffix of content,
+        # so this is a no-op for the common case.
+        verdict_suffix = f" {verdict_display} ({conf_pct})"
+        content = f"  {label:<{max_label_len}}{verdict_suffix}"
+        fitted = _fit_content(content, _BANNER_INNER, preserve_suffix=verdict_suffix)
         lines.append("|" + fitted.ljust(_BANNER_INNER) + "|")
 
     lines.append(border)

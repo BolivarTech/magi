@@ -224,3 +224,101 @@ class TestParseAgentOutput:
         finally:
             os.unlink(input_path)
             os.unlink(output_path)
+
+
+# ---------------------------------------------------------------------------
+# TestClaudeCliFixtureContract — pinned contract with the Claude CLI output.
+# ---------------------------------------------------------------------------
+
+_FIXTURE_DIR = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "fixtures",
+    "claude-cli-outputs",
+)
+
+
+def _discovered_fixtures() -> list[str]:
+    """Return every ``*.json`` file under the fixtures directory.
+
+    Auto-discovery keeps the contract test cheap to extend: drop a new
+    captured ``claude -p`` output into the fixtures dir and the suite
+    will validate it on the next run without a test edit. See
+    ``tests/fixtures/claude-cli-outputs/README.md`` for the capture
+    procedure.
+    """
+    if not os.path.isdir(_FIXTURE_DIR):
+        return []
+    return sorted(
+        os.path.join(_FIXTURE_DIR, name)
+        for name in os.listdir(_FIXTURE_DIR)
+        if name.endswith(".json")
+    )
+
+
+class TestClaudeCliFixtureContract:
+    """Pin the contract between ``parse_agent_output`` and ``claude -p``.
+
+    ``parse_agent_output._extract_text`` documents three accepted output
+    shapes (``{"result": ...}``, ``{"content": [...]}``, plain string)
+    but nothing else in the suite actually exercises them end-to-end
+    because ``claude -p`` needs the CLI and a paid API key. Without a
+    pinned fixture set, a silent CLI wrapper change would surface only
+    as a parse failure in production.
+
+    Each fixture below is a captured sample of what the CLI produces.
+    The parametrized test auto-discovers every ``.json`` file in the
+    fixtures directory and asserts that it round-trips through the
+    parser to a valid agent payload. Adding a new shape is a fixture
+    drop; no test edit required.
+    """
+
+    def test_fixture_directory_is_populated(self):
+        """Regression guard: the directory must exist and be non-empty.
+
+        Without this, a rename that silently empties the fixtures
+        directory would turn the parametrized contract below into a
+        zero-case test that passes vacuously.
+        """
+        fixtures = _discovered_fixtures()
+        assert fixtures, (
+            f"Fixtures directory {_FIXTURE_DIR!r} is empty or missing — "
+            "the Claude CLI contract test has no cases to run."
+        )
+
+    @pytest.mark.parametrize(
+        "fixture_path",
+        _discovered_fixtures(),
+        ids=lambda p: os.path.basename(p),
+    )
+    def test_fixture_round_trips_to_valid_agent_output(self, fixture_path):
+        """Each captured ``claude -p`` output must parse to valid agent JSON.
+
+        Parses the fixture with ``parse_agent_output``, then re-loads
+        the cleaned output and verifies every top-level key required
+        by the agent schema is present. A schema mismatch here means
+        either the fixture was captured wrong (fix the fixture) or
+        ``parse_agent_output`` no longer understands a previously-
+        working CLI shape (fix the parser).
+        """
+        fd, out_path = tempfile.mkstemp(suffix=".json")
+        os.close(fd)
+        try:
+            parse_agent_output(fixture_path, out_path)
+            with open(out_path, encoding="utf-8") as f:
+                parsed = json.load(f)
+            required_keys = {
+                "agent",
+                "verdict",
+                "confidence",
+                "summary",
+                "reasoning",
+                "findings",
+                "recommendation",
+            }
+            missing = required_keys - set(parsed.keys())
+            assert not missing, (
+                f"Fixture {os.path.basename(fixture_path)!r} did not round-trip "
+                f"to a valid agent payload — missing keys: {sorted(missing)}"
+            )
+        finally:
+            os.unlink(out_path)

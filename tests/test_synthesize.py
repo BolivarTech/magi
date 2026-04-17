@@ -123,6 +123,46 @@ class TestFileErrors:
         assert exc_info.value.filepath == "/nonexistent/path/agent.json"
 
 
+class TestTopLevelShape:
+    """Top-level JSON must be an object; other JSON shapes must surface as ValidationError.
+
+    Without an explicit ``isinstance(data, dict)`` guard, a malformed agent
+    output (list, string, null, number) reaches ``set(data.keys())`` and
+    raises ``AttributeError`` — bypassing the ``ValidationError`` contract
+    the docstring promises and producing an opaque agent failure in
+    ``run_orchestrator``.
+    """
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            [],
+            [1, 2, 3],
+            "just a string",
+            42,
+            3.14,
+            True,
+            None,
+        ],
+    )
+    def test_non_dict_top_level_raises_validation_error(self, payload):
+        path = _write_json(payload)
+        try:
+            with pytest.raises(ValidationError, match="Top-level JSON must be an object"):
+                load_agent_output(path)
+        finally:
+            os.unlink(path)
+
+    def test_non_dict_top_level_preserves_filepath(self):
+        path = _write_json([])
+        try:
+            with pytest.raises(ValidationError) as exc_info:
+                load_agent_output(path)
+            assert exc_info.value.filepath == path
+        finally:
+            os.unlink(path)
+
+
 class TestMissingKeys:
     """Verify detection of missing top-level keys."""
 
@@ -1170,6 +1210,52 @@ class TestFormatBanner:
             # The overlong row must end with the ellipsis marker just
             # inside the closing ``|``.
             assert "..." in lines[3]
+        finally:
+            if original is None:
+                AGENT_TITLES.pop("melchior", None)
+            else:
+                AGENT_TITLES["melchior"] = original
+
+    def test_banner_overlong_label_preserves_verdict_and_confidence(self):
+        """Regression (v2.1.3): when a label overflows ``_BANNER_INNER``
+        the truncation must eat the label, not the verdict.
+
+        Pre-2.1.3 the ``_fit_content`` tail-truncation erased the
+        verdict/confidence suffix, producing rows like ``| Long (Long
+        Role): APPRO...|`` where the operator could no longer read the
+        agent's decision. The new contract: the ``{VERDICT} ({NN%})``
+        suffix is always preserved; the label is truncated with ``...``
+        instead.
+        """
+        from reporting import AGENT_TITLES
+
+        original = AGENT_TITLES.get("melchior")
+        try:
+            AGENT_TITLES["melchior"] = (
+                "VeryLongMelchior",
+                "AnExtremelyDescriptiveAndExcessivelyLongRoleName",
+            )
+            agents = [_valid_agent(n) for n in ["melchior", "balthasar", "caspar"]]
+            agents[0]["verdict"] = "approve"
+            agents[0]["confidence"] = 0.85
+            consensus = determine_consensus(agents)
+            banner = format_banner(agents, consensus)
+            lines = banner.split("\n")
+            # Width invariant: every line must remain exactly 52 chars.
+            for line in lines:
+                assert len(line) == 52, (
+                    f"Overlong label broke width invariant: len={len(line)} line={line!r}"
+                )
+            melchior_row = lines[3]
+            # Verdict and confidence tokens must both survive intact.
+            assert "APPROVE" in melchior_row, f"Verdict token was truncated away: {melchior_row!r}"
+            assert "(85%)" in melchior_row, f"Confidence token was truncated away: {melchior_row!r}"
+            # Truncation marker must sit inside the label half, not at
+            # the row tail.
+            assert "..." in melchior_row
+            assert not melchior_row.rstrip(" |").endswith("..."), (
+                f"Ellipsis landed on the tail, erasing the verdict: {melchior_row!r}"
+            )
         finally:
             if original is None:
                 AGENT_TITLES.pop("melchior", None)
