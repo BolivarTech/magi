@@ -1,4 +1,4 @@
-.PHONY: test lint format typecheck verify
+.PHONY: test lint format typecheck lockcheck verify
 
 test:
 	python -m pytest tests/ -v
@@ -12,4 +12,7 @@ format:
 typecheck:
 	python -m mypy .
 
-verify: test lint format typecheck
+lockcheck:
+	uv lock --check
+
+verify: lockcheck test lint format typecheck

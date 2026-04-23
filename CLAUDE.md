@@ -14,10 +14,11 @@ MAGI is a Claude Code **plugin** implementing a multi-perspective analysis syste
 # Run all tests
 python -m pytest tests/ -v
 
-# Run full verification (tests + lint + format + types)
+# Run full verification (lock sync + tests + lint + format + types)
 make verify
 
 # Run individual checks
+make lockcheck     # uv lock --check (fails if uv.lock drifts from pyproject.toml)
 make test          # pytest only
 make lint          # ruff check
 make format        # ruff format --check
