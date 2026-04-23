@@ -70,4 +70,4 @@ Valid values:
 - confidence: number between 0.0 and 1.0
 - findings[].severity: "critical", "warning", or "info"
 
-IMPORTANT: Your entire response must be parseable by json.loads(). Output nothing else.
+IMPORTANT: Your entire response must be parseable by json.loads() AND must contain all seven top-level keys exactly — `agent`, `verdict`, `confidence`, `summary`, `reasoning`, `findings`, `recommendation`. Any missing key causes the output to be rejected by the schema validator and drops you from the consensus. Output nothing else.

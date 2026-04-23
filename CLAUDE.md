@@ -337,6 +337,28 @@ Three rounds of MAGI self-review identified and resolved the following issues:
   - **Pre-cached stderr references**: modules that capture `err = sys.stderr` at import time and later call `err.write(...)` hold a reference to the real stream, not to the swapped-in shim. The shim replaces `sys.stderr` only for the duration of `_buffered_stderr_while`; a reference captured before that context manager enters is unaffected. If MAGI ever imports a library that does this, its writes will appear directly in the display's redraw region.
 - **Buffered diagnostics on hard process death**: `_buffered_stderr_while` flushes its buffer in a `finally` clause, so diagnostics survive ordinary exceptions, `CancelledError`, `KeyboardInterrupt`, and `SystemExit`. They are lost only on `SIGKILL`, segfault, or `os._exit()` — all out of scope for Python-level cleanup.
 
+## Post-release hardening
+
+### Agent prompt contract reinforcement (all three agents)
+
+**Context**: A production-log scan across 10 runs × 3 agents (30 extracted outputs, versions 2.0.3 / 2.1.0 / 2.1.1 / 2.1.2 / 2.1.3) found one schema violation: in `magi-run-d48ls1lm` (19-Apr-2026, under 2.1.3), Caspar emitted a well-formed JSON that parsed cleanly with `json.loads` but omitted the required top-level `recommendation` key. The validator correctly raised `ValidationError("Agent output missing keys: ['recommendation']")`, the orchestrator dropped Caspar and set `degraded=true`, and the run completed on Melchior + Balthasar. No downstream corruption; the degraded-mode path worked as designed. Incidence in the sampled corpus: 1/30 ≈ 3.3%, exclusively on Caspar (the most opinionated agent by design, highest output-token pressure).
+
+**Fix**: The single-line `IMPORTANT:` closer in every agent system prompt (`melchior.md`, `balthasar.md`, `caspar.md`) now enumerates all seven required top-level keys and states explicitly that any omission causes the output to be rejected and the agent dropped from consensus. The reinforcement is applied to all three agents — not just Caspar — because the failure mode is LLM-schema-drift rather than agent-specific and the identical closer across prompts is easier to audit than a per-agent divergence. This is a probabilistic mitigation: it raises the cost of omission in the prompt, it does not prove omission impossible.
+
+## Deferred hardening (for future evaluation)
+
+### Single-shot agent retry on ValidationError
+
+**Proposal**: When `load_agent_output` raises `ValidationError` for one of the three agents inside `run_orchestrator`, `run_magi.py` could re-launch that specific agent once, injecting the exact validation error message into the retry prompt as explicit corrective feedback. If the retry also fails, fall back to the existing degraded-mode path (drop the agent, set `degraded=true`, continue with the survivors).
+
+**Motivation**: Prompt reinforcement (see "Post-release hardening") reduces the fault rate but cannot drive it to zero — LLM outputs are probabilistic. A targeted retry preserves full 3-agent consensus without weakening the schema contract and without paying the latency cost on the success path (the retry only fires for the ~3% of agent invocations that fail validation).
+
+**Estimated cost**: +1 subprocess launch on the failure path. Under the current observed fault rate (1/30 ≈ 3.3%), expected wall-time overhead is ~1% (every 30 runs, one agent is retried once). Retry also needs a per-retry timeout budget that does not double the `--timeout` ceiling operators configured.
+
+**Complexity**: Non-trivial. Modifies the `asyncio.gather` orchestration in `run_orchestrator`; needs a new `tracked_launch` state (`retrying`) for the status display; requires TDD cycle with new tests for retry-succeeds, retry-also-fails, retry-plus-other-agent-also-fails (double degradation), and retry-interacts-with-per-agent-timeout. Touches the hottest code path in the orchestrator, so any regression is high-blast-radius.
+
+**Decision criterion**: evaluate if post-reinforcement production logs show the fault rate remaining above ~1% across the next 30-50 runs, or if a single incident ever produces a consensus outcome that silently differs from what the dropped agent would have contributed (currently prevented by `degraded=true` + the 2-agent minimum, but worth re-checking the invariant before implementing).
+
 ## Breaking changes (2.0.0)
 
 - **`GO WITH CAVEATS` now renders with an `(N-M)` split suffix** (e.g., `GO WITH CAVEATS (3-0)`, `GO WITH CAVEATS (2-1)`). The flat form from 1.x is no longer produced. Downstream parsers that grep the banner for an exact `GO WITH CAVEATS` string must tolerate the trailing split.
