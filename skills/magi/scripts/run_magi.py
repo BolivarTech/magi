@@ -405,33 +405,53 @@ async def run_orchestrator(
     )
 
     async def tracked_launch(name: str) -> dict[str, Any]:
+        """Launch an agent with live status updates and one retry on schema fail.
+
+        State machine emitted to the live display:
+
+        * ``running`` once at entry.
+        * ``retrying`` iff the first attempt raised :class:`ValidationError`.
+          The retry receives the full ``timeout`` budget and a corrective
+          feedback block appended by :func:`_build_retry_prompt`.
+        * Terminal state (``success`` | ``timeout`` | ``failed``) emitted
+          exactly once by the outer handler, regardless of which attempt
+          reached the terminal condition. This is why the retry branch
+          does **not** install its own terminal handlers — they would
+          duplicate the outer ones and risk drifting out of sync.
+
+        Scope of retry: :class:`ValidationError` only. ``TimeoutError``,
+        subprocess exit errors, ``asyncio.CancelledError``, and
+        ``BaseException`` subclasses (``KeyboardInterrupt``,
+        ``SystemExit``) flow through the outer handler unchanged so the
+        degraded-mode and signal paths keep the 2.1.x semantics.
+        """
         _safe_display_update(display, name, "running", log_gate)
         try:
-            result = await launch_agent(name, agents_dir, prompt, output_dir, timeout, model)
-        except ValidationError as first_err:
-            # Single-shot retry (2.2.0): only triggers on schema violations,
-            # not on timeout / subprocess failure / cancellation. The retry
-            # gets a fresh ``timeout`` budget (not a double-timeout sum) and
-            # carries the ValidationError text as corrective feedback so the
-            # model can target the specific missing/invalid field.
-            _safe_display_update(display, name, "retrying", log_gate)
-            retry_prompt = _build_retry_prompt(prompt, first_err)
             try:
+                result = await launch_agent(name, agents_dir, prompt, output_dir, timeout, model)
+            except ValidationError as err:
+                # Single-shot retry (2.2.0): only fires on schema drift,
+                # never on timeout / subprocess failure / cancellation.
+                # The retry gets a fresh ``timeout`` budget (not the
+                # residual of the first attempt) and carries the
+                # ValidationError text so the model can target the
+                # specific missing / mistyped field.
+                _safe_display_update(display, name, "retrying", log_gate)
                 result = await launch_agent(
-                    name, agents_dir, retry_prompt, output_dir, timeout, model
+                    name,
+                    agents_dir,
+                    _build_retry_prompt(prompt, err),
+                    output_dir,
+                    timeout,
+                    model,
                 )
-            except (asyncio.TimeoutError, TimeoutError):
-                _safe_display_update(display, name, "timeout", log_gate)
-                raise
-            except BaseException:
-                _safe_display_update(display, name, "failed", log_gate)
-                raise
         except (asyncio.TimeoutError, TimeoutError):
             _safe_display_update(display, name, "timeout", log_gate)
             raise
         except BaseException:
             # Catches asyncio.CancelledError (which is BaseException in 3.8+),
-            # generic Exception subclasses, KeyboardInterrupt, and SystemExit.
+            # generic Exception subclasses (including a retry that itself
+            # raised ValidationError), KeyboardInterrupt, and SystemExit.
             # We always re-raise — the display update is a best-effort side
             # effect (see ``_safe_display_update``) so a stream already closed
             # during shutdown can never mask the real shutdown signal.
