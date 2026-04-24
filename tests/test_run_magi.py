@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+from typing import Any
 from unittest.mock import patch
 
 import pytest
@@ -1718,3 +1719,315 @@ class TestBufferedStderrWhile:
                 print("diag that will fail to replay", file=sys.stderr)
         finally:
             sys.stderr = saved
+
+
+class TestSingleShotRetry:
+    """2.2.0: single-shot retry when an agent fails schema validation.
+
+    Contract driven by these tests:
+
+    * When :func:`launch_agent` raises :class:`ValidationError`,
+      :func:`run_orchestrator` retries that specific agent **once** with
+      corrective feedback appended to the prompt.
+    * Retry fires **only** on :class:`ValidationError`. ``TimeoutError``,
+      ``RuntimeError``, ``ValueError``, ``asyncio.CancelledError``, and any
+      other exception flow through the existing degraded-mode path
+      unchanged.
+    * Each attempt receives the full ``--timeout`` budget. The retry is
+      not given a reduced ceiling, so operators never see a doubled wall
+      clock but always see the full configured per-attempt budget.
+    * A ``retrying`` display state is emitted between ``running`` and the
+      terminal state (``success`` / ``failed``) for the retried agent.
+    * If the retry succeeds, the run completes with full 3-agent
+      consensus and ``degraded`` is **not** set.
+    * If the retry also raises ``ValidationError`` (or any other
+      exception), the agent is dropped and the run continues on the
+      surviving agents under the pre-existing 2-agent minimum rule.
+    """
+
+    @staticmethod
+    def _valid(agent: str) -> dict[str, Any]:
+        """Helper: build a schema-valid agent output dict."""
+        return {
+            "agent": agent,
+            "verdict": "approve",
+            "confidence": 0.85,
+            "summary": f"{agent} OK",
+            "reasoning": "Fine",
+            "findings": [],
+            "recommendation": "Merge",
+        }
+
+    @pytest.mark.asyncio
+    async def test_schema_failure_triggers_retry_success(self, tmp_path):
+        """First call raises ValidationError, second call succeeds.
+
+        The orchestrator must retry the single failing agent and emerge
+        with a full 3-agent consensus, no ``degraded`` flag set.
+        """
+        from run_magi import run_orchestrator
+        from validate import ValidationError
+
+        call_counts = {"melchior": 0, "balthasar": 0, "caspar": 0}
+
+        async def mock_launch(agent_name, agents_dir, prompt, output_dir, timeout, model="opus"):
+            call_counts[agent_name] += 1
+            if agent_name == "caspar" and call_counts[agent_name] == 1:
+                raise ValidationError("missing keys: ['recommendation']")
+            return TestSingleShotRetry._valid(agent_name)
+
+        with patch("run_magi.launch_agent", side_effect=mock_launch):
+            result = await run_orchestrator(
+                agents_dir=str(tmp_path),
+                prompt="test",
+                output_dir=str(tmp_path),
+                timeout=300,
+            )
+            assert result.get("degraded") is not True, (
+                "retry that succeeds must not leave degraded flag set"
+            )
+            assert len(result["agents"]) == 3
+            assert call_counts["caspar"] == 2, "caspar must be retried exactly once"
+            assert call_counts["melchior"] == 1, "melchior must not be retried"
+            assert call_counts["balthasar"] == 1, "balthasar must not be retried"
+
+    @pytest.mark.asyncio
+    async def test_retry_also_fails_degraded_mode(self, tmp_path):
+        """Both attempts raise ValidationError → agent dropped, degraded=True."""
+        from run_magi import run_orchestrator
+        from validate import ValidationError
+
+        call_counts = {"melchior": 0, "balthasar": 0, "caspar": 0}
+
+        async def mock_launch(agent_name, agents_dir, prompt, output_dir, timeout, model="opus"):
+            call_counts[agent_name] += 1
+            if agent_name == "caspar":
+                raise ValidationError("missing keys: ['recommendation']")
+            return TestSingleShotRetry._valid(agent_name)
+
+        with patch("run_magi.launch_agent", side_effect=mock_launch):
+            result = await run_orchestrator(
+                agents_dir=str(tmp_path),
+                prompt="test",
+                output_dir=str(tmp_path),
+                timeout=300,
+            )
+            assert result["degraded"] is True
+            assert "caspar" in result["failed_agents"]
+            assert len(result["agents"]) == 2
+            assert call_counts["caspar"] == 2, (
+                "caspar must be attempted exactly twice (initial + one retry)"
+            )
+
+    @pytest.mark.asyncio
+    async def test_two_agents_both_exhaust_retries_raises(self, tmp_path):
+        """Two agents fail both attempts → only one survivor → RuntimeError.
+
+        The 2-agent minimum is unchanged by retry. If two agents burn
+        through their retry budget, the run must raise the same
+        ``RuntimeError`` it raises today — retry does not lower the
+        consensus floor.
+        """
+        from run_magi import run_orchestrator
+        from validate import ValidationError
+
+        async def mock_launch(agent_name, agents_dir, prompt, output_dir, timeout, model="opus"):
+            if agent_name in ("caspar", "melchior"):
+                raise ValidationError(f"missing keys for {agent_name}")
+            return TestSingleShotRetry._valid(agent_name)
+
+        with patch("run_magi.launch_agent", side_effect=mock_launch):
+            with pytest.raises(RuntimeError, match="fewer than 2"):
+                await run_orchestrator(
+                    agents_dir=str(tmp_path),
+                    prompt="test",
+                    output_dir=str(tmp_path),
+                    timeout=300,
+                )
+
+    @pytest.mark.asyncio
+    async def test_timeout_does_not_trigger_retry(self, tmp_path):
+        """``TimeoutError`` must not trigger retry (non-goal for 2.2.0)."""
+        from run_magi import run_orchestrator
+
+        call_counts = {"melchior": 0, "balthasar": 0, "caspar": 0}
+
+        async def mock_launch(agent_name, agents_dir, prompt, output_dir, timeout, model="opus"):
+            call_counts[agent_name] += 1
+            if agent_name == "caspar":
+                raise TimeoutError(f"agent {agent_name} timed out")
+            return TestSingleShotRetry._valid(agent_name)
+
+        with patch("run_magi.launch_agent", side_effect=mock_launch):
+            result = await run_orchestrator(
+                agents_dir=str(tmp_path),
+                prompt="test",
+                output_dir=str(tmp_path),
+                timeout=300,
+            )
+            assert result["degraded"] is True
+            assert "caspar" in result["failed_agents"]
+            assert call_counts["caspar"] == 1, (
+                "timeout must not be retried — retry scope is schema only"
+            )
+
+    @pytest.mark.asyncio
+    async def test_runtime_error_does_not_trigger_retry(self, tmp_path):
+        """``RuntimeError`` (non-zero exit) must not trigger retry."""
+        from run_magi import run_orchestrator
+
+        call_counts = {"melchior": 0, "balthasar": 0, "caspar": 0}
+
+        async def mock_launch(agent_name, agents_dir, prompt, output_dir, timeout, model="opus"):
+            call_counts[agent_name] += 1
+            if agent_name == "caspar":
+                raise RuntimeError(f"agent {agent_name} exited non-zero")
+            return TestSingleShotRetry._valid(agent_name)
+
+        with patch("run_magi.launch_agent", side_effect=mock_launch):
+            result = await run_orchestrator(
+                agents_dir=str(tmp_path),
+                prompt="test",
+                output_dir=str(tmp_path),
+                timeout=300,
+            )
+            assert result["degraded"] is True
+            assert call_counts["caspar"] == 1, "subprocess exit errors must not be retried"
+
+    @pytest.mark.asyncio
+    async def test_retry_uses_full_timeout_budget(self, tmp_path):
+        """Each attempt receives the full ``timeout`` kwarg, not a reduced one.
+
+        Operators configure ``--timeout`` as a per-attempt ceiling. The
+        retry must honor the same ceiling; halving it (or consuming the
+        first attempt's remaining budget) would introduce silent behavior
+        the docs do not promise.
+        """
+        from run_magi import run_orchestrator
+        from validate import ValidationError
+
+        captured_timeouts: dict[str, list[int]] = {
+            "melchior": [],
+            "balthasar": [],
+            "caspar": [],
+        }
+        call_counts = {"melchior": 0, "balthasar": 0, "caspar": 0}
+
+        async def mock_launch(agent_name, agents_dir, prompt, output_dir, timeout, model="opus"):
+            captured_timeouts[agent_name].append(timeout)
+            call_counts[agent_name] += 1
+            if agent_name == "caspar" and call_counts[agent_name] == 1:
+                raise ValidationError("schema fail, retry please")
+            return TestSingleShotRetry._valid(agent_name)
+
+        with patch("run_magi.launch_agent", side_effect=mock_launch):
+            await run_orchestrator(
+                agents_dir=str(tmp_path),
+                prompt="test",
+                output_dir=str(tmp_path),
+                timeout=300,
+            )
+        assert captured_timeouts["caspar"] == [300, 300], (
+            "retry must be launched with the full per-agent timeout budget"
+        )
+
+    @pytest.mark.asyncio
+    async def test_retry_injects_validation_error_feedback(self, tmp_path):
+        """The retry prompt must carry corrective feedback from the error.
+
+        Contract: the second call to ``launch_agent`` receives a prompt
+        that (a) contains the original user prompt and (b) contains the
+        ValidationError message so the model can self-correct. The
+        feedback block format is implementation-defined but the error
+        text must be substring-present.
+        """
+        from run_magi import run_orchestrator
+        from validate import ValidationError
+
+        error_msg = "Agent output missing keys: ['recommendation']"
+        captured_prompts: dict[str, list[str]] = {
+            "melchior": [],
+            "balthasar": [],
+            "caspar": [],
+        }
+        call_counts = {"melchior": 0, "balthasar": 0, "caspar": 0}
+
+        async def mock_launch(agent_name, agents_dir, prompt, output_dir, timeout, model="opus"):
+            captured_prompts[agent_name].append(prompt)
+            call_counts[agent_name] += 1
+            if agent_name == "caspar" and call_counts[agent_name] == 1:
+                raise ValidationError(error_msg)
+            return TestSingleShotRetry._valid(agent_name)
+
+        with patch("run_magi.launch_agent", side_effect=mock_launch):
+            await run_orchestrator(
+                agents_dir=str(tmp_path),
+                prompt="ORIGINAL-USER-PROMPT-TOKEN",
+                output_dir=str(tmp_path),
+                timeout=300,
+            )
+
+        assert len(captured_prompts["caspar"]) == 2
+        first_prompt, retry_prompt = captured_prompts["caspar"]
+        assert first_prompt == "ORIGINAL-USER-PROMPT-TOKEN", (
+            "first call must receive the untouched user prompt"
+        )
+        assert "ORIGINAL-USER-PROMPT-TOKEN" in retry_prompt, (
+            "retry prompt must preserve the original user prompt"
+        )
+        assert "recommendation" in retry_prompt, (
+            "retry prompt must surface the ValidationError message so the "
+            "model can self-correct the specific missing field"
+        )
+
+    @pytest.mark.asyncio
+    async def test_retry_emits_retrying_display_state(self, tmp_path):
+        """A ``retrying`` display state must appear between running and the
+        terminal state for the agent that hit ValidationError.
+
+        Other agents must not see a ``retrying`` update.
+        """
+        from run_magi import run_orchestrator
+        from validate import ValidationError
+
+        call_counts = {"melchior": 0, "balthasar": 0, "caspar": 0}
+        display_events: list[tuple[str, str]] = []
+
+        async def mock_launch(agent_name, agents_dir, prompt, output_dir, timeout, model="opus"):
+            call_counts[agent_name] += 1
+            if agent_name == "caspar" and call_counts[agent_name] == 1:
+                raise ValidationError("schema fail")
+            return TestSingleShotRetry._valid(agent_name)
+
+        def capture_update(display, name, state, log_gate):
+            display_events.append((name, state))
+
+        with (
+            patch("run_magi.launch_agent", side_effect=mock_launch),
+            patch("run_magi._safe_display_update", side_effect=capture_update),
+        ):
+            await run_orchestrator(
+                agents_dir=str(tmp_path),
+                prompt="test",
+                output_dir=str(tmp_path),
+                timeout=300,
+                show_status=True,
+            )
+
+        caspar_states = [state for name, state in display_events if name == "caspar"]
+        assert "retrying" in caspar_states, (
+            "caspar must transition through a 'retrying' state before success"
+        )
+        # Order: running → retrying → success
+        running_idx = caspar_states.index("running")
+        retrying_idx = caspar_states.index("retrying")
+        success_idx = caspar_states.index("success")
+        assert running_idx < retrying_idx < success_idx, (
+            f"caspar state order violated: {caspar_states}"
+        )
+
+        for other in ("melchior", "balthasar"):
+            other_states = [state for name, state in display_events if name == other]
+            assert "retrying" not in other_states, (
+                f"{other} must not emit 'retrying' — only the failing agent retries"
+            )
