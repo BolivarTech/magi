@@ -249,10 +249,11 @@ The symlink is excluded via `.gitignore` (`.claude/` is ignored). Each developer
 
 ### Publishing updates
 
-1. Bump `"version"` in both `.claude-plugin/plugin.json` and `.claude-plugin/marketplace.json`
-2. Run `make verify` — all tests must pass, zero lint warnings, clean formatting, no type errors
-3. Commit and push to `main` on GitHub
-4. Users pick up updates with `/plugin marketplace update`
+1. Bump `"version"` in `.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json` (both occurrences), `pyproject.toml`, and `uv.lock` (the `[[package]] name = "magi"` entry).
+2. Run `make verify` — lock sync must pass, all tests must pass, zero lint warnings, clean formatting, no type errors.
+3. Commit with message `fix|feat|chore: <short summary> and release <version>` and push to `main` on GitHub.
+4. Tag the release commit: `git tag -a v<version> -m "Release <version>: <short summary>"` then `git push origin v<version>`. Every release from 2.1.4 onward carries an annotated tag in `v<MAJOR>.<MINOR>.<PATCH>` form; the tag is non-optional because it is the durable anchor for rollback, changelogs, and GitHub's release UI. Lightweight tags are not acceptable — the annotated form carries tagger identity and a dated message.
+5. Users pick up updates with `/plugin marketplace update`.
 
 ### Marketplace structure
 
@@ -346,19 +347,24 @@ Three rounds of MAGI self-review identified and resolved the following issues:
 
 **Fix**: The single-line `IMPORTANT:` closer in every agent system prompt (`melchior.md`, `balthasar.md`, `caspar.md`) now enumerates all seven required top-level keys and states explicitly that any omission causes the output to be rejected and the agent dropped from consensus. The reinforcement is applied to all three agents — not just Caspar — because the failure mode is LLM-schema-drift rather than agent-specific and the identical closer across prompts is easier to audit than a per-agent divergence. This is a probabilistic mitigation: it raises the cost of omission in the prompt, it does not prove omission impossible.
 
-## Deferred hardening (for future evaluation)
+## Planned for 2.2.0
 
 ### Single-shot agent retry on ValidationError
 
-**Proposal**: When `load_agent_output` raises `ValidationError` for one of the three agents inside `run_orchestrator`, `run_magi.py` could re-launch that specific agent once, injecting the exact validation error message into the retry prompt as explicit corrective feedback. If the retry also fails, fall back to the existing degraded-mode path (drop the agent, set `degraded=true`, continue with the survivors).
+**Scope**: When `load_agent_output` raises `ValidationError` for one of the three agents inside `run_orchestrator`, `run_magi.py` re-launches that specific agent once, injecting the exact validation error message into the retry prompt as explicit corrective feedback. If the retry also fails, fall back to the existing degraded-mode path (drop the agent, set `degraded=true`, continue with the survivors). First failure path where the retry succeeds closes the gap without widening the schema contract; failure on both attempts is indistinguishable from today's behavior so no regression is possible for callers that already tolerate `degraded=true`.
 
-**Motivation**: Prompt reinforcement (see "Post-release hardening") reduces the fault rate but cannot drive it to zero — LLM outputs are probabilistic. A targeted retry preserves full 3-agent consensus without weakening the schema contract and without paying the latency cost on the success path (the retry only fires for the ~3% of agent invocations that fail validation).
+**Why a minor bump (2.1.x → 2.2.0) and not a patch**: the retry changes observable orchestrator timing (one additional `claude -p` subprocess on the failure path) and introduces a new status-display state (`retrying`). Downstream consumers that time MAGI runs or parse the live display will see new output, so the change is user-visible even though no schema field changes.
 
-**Estimated cost**: +1 subprocess launch on the failure path. Under the current observed fault rate (1/30 ≈ 3.3%), expected wall-time overhead is ~1% (every 30 runs, one agent is retried once). Retry also needs a per-retry timeout budget that does not double the `--timeout` ceiling operators configured.
+**Implementation plan (TDD cycle)**:
+1. **Red**: tests for retry-succeeds-after-schema-miss, retry-also-fails (falls through to degraded), retry-plus-other-agent-also-fails (double degradation → run continues on 1 agent only if the 2-agent minimum still holds, else raises as today), retry-interacts-with-per-agent-timeout (retry gets its own budget, not a double-timeout).
+2. **Green**: add a `tracked_launch` retry branch around `load_agent_output`; propagate the validation-error feedback into a second `claude -p` invocation reusing the same agent prompt + appended corrective block.
+3. **Refactor**: extract retry logic behind a helper so `run_orchestrator` stays readable.
 
-**Complexity**: Non-trivial. Modifies the `asyncio.gather` orchestration in `run_orchestrator`; needs a new `tracked_launch` state (`retrying`) for the status display; requires TDD cycle with new tests for retry-succeeds, retry-also-fails, retry-plus-other-agent-also-fails (double degradation), and retry-interacts-with-per-agent-timeout. Touches the hottest code path in the orchestrator, so any regression is high-blast-radius.
+**Cost envelope**: +1 subprocess launch on the failure path only. Under the current observed fault rate (1/30 ≈ 3.3%), expected wall-time overhead is ~1% (every 30 runs, one agent is retried once). Retry uses a fresh per-agent timeout budget equal to `--timeout`, not a sum, so operators do not see doubled ceilings.
 
-**Decision criterion**: evaluate if post-reinforcement production logs show the fault rate remaining above ~1% across the next 30-50 runs, or if a single incident ever produces a consensus outcome that silently differs from what the dropped agent would have contributed (currently prevented by `degraded=true` + the 2-agent minimum, but worth re-checking the invariant before implementing).
+**Blast radius**: high. Touches `run_orchestrator` (hottest code path), `tracked_launch` state machine (new `retrying` state), and `StatusDisplay` (new glyph). Every new test must also verify the happy path is byte-identical to 2.1.x so the retry branch is gated purely on schema failure.
+
+**Non-goals for 2.2.0**: retry on subprocess timeout, retry on non-schema exceptions, retry count > 1. Those are separate decisions if the single-shot proves insufficient.
 
 ## Breaking changes (2.0.0)
 
