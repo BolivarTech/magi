@@ -2031,3 +2031,155 @@ class TestSingleShotRetry:
             assert "retrying" not in other_states, (
                 f"{other} must not emit 'retrying' — only the failing agent retries"
             )
+
+
+class TestRetryTelemetry:
+    """2.2.1: report exposes ``retried_agents`` for downstream telemetry.
+
+    Until 2.2.0 the only auditable signal of retry activity was
+    ``degraded=true`` + ``failed_agents`` — i.e. the worst-case where
+    the retry also failed. A successful retry was indistinguishable
+    from a clean first-attempt run, which is exactly the case
+    operators need to size to evaluate the retry budget and count.
+
+    Contract for the new ``retried_agents`` report field:
+
+    * Lists every agent name that hit the retry path, regardless of
+      whether the retry recovered or also failed.
+    * Sorted alphabetically so the JSON serialisation is byte-stable
+      across runs and platforms (cleanly diff-able in audit logs).
+    * Conditionally present, mirroring the existing ``degraded`` and
+      ``failed_agents`` keys: omitted entirely when no retry fired,
+      so 2.2.0 consumers that ignore unknown keys are unaffected.
+    * Composes with ``failed_agents`` to give two derived sets:
+      ``set(retried_agents) - set(failed_agents)`` is "retry recovered",
+      ``set(retried_agents) & set(failed_agents)`` is "retry also failed".
+    """
+
+    @staticmethod
+    def _valid(agent: str) -> dict[str, Any]:
+        return {
+            "agent": agent,
+            "verdict": "approve",
+            "confidence": 0.85,
+            "summary": f"{agent} OK",
+            "reasoning": "Fine",
+            "findings": [],
+            "recommendation": "Merge",
+        }
+
+    @pytest.mark.asyncio
+    async def test_report_lists_retried_agent_when_retry_succeeds(self, tmp_path):
+        """Retry-recovered: agent in ``agents`` and in ``retried_agents``."""
+        from run_magi import run_orchestrator
+        from validate import ValidationError
+
+        call_counts = {"melchior": 0, "balthasar": 0, "caspar": 0}
+
+        async def mock_launch(agent_name, agents_dir, prompt, output_dir, timeout, model="opus"):
+            call_counts[agent_name] += 1
+            if agent_name == "caspar" and call_counts[agent_name] == 1:
+                raise ValidationError("missing keys: ['recommendation']")
+            return TestRetryTelemetry._valid(agent_name)
+
+        with patch("run_magi.launch_agent", side_effect=mock_launch):
+            result = await run_orchestrator(
+                agents_dir=str(tmp_path),
+                prompt="test",
+                output_dir=str(tmp_path),
+                timeout=300,
+            )
+        assert result.get("retried_agents") == ["caspar"], (
+            "successful retry must still be recorded in retried_agents"
+        )
+        assert result.get("degraded") is not True
+        assert "failed_agents" not in result, (
+            "no failures => failed_agents must be omitted (2.1.x contract preserved)"
+        )
+
+    @pytest.mark.asyncio
+    async def test_report_lists_retried_agent_when_retry_also_fails(self, tmp_path):
+        """Retry-also-failed: agent in retried_agents AND failed_agents."""
+        from run_magi import run_orchestrator
+        from validate import ValidationError
+
+        async def mock_launch(agent_name, agents_dir, prompt, output_dir, timeout, model="opus"):
+            if agent_name == "caspar":
+                raise ValidationError("missing keys: ['recommendation']")
+            return TestRetryTelemetry._valid(agent_name)
+
+        with patch("run_magi.launch_agent", side_effect=mock_launch):
+            result = await run_orchestrator(
+                agents_dir=str(tmp_path),
+                prompt="test",
+                output_dir=str(tmp_path),
+                timeout=300,
+            )
+        assert result.get("retried_agents") == ["caspar"]
+        assert result.get("degraded") is True
+        assert result.get("failed_agents") == ["caspar"]
+        # Composability check: the intersection identifies retry-also-failed
+        retried = set(result["retried_agents"])
+        failed = set(result["failed_agents"])
+        assert retried & failed == {"caspar"}
+
+    @pytest.mark.asyncio
+    async def test_report_omits_retried_agents_field_when_no_retry(self, tmp_path):
+        """Field absent (not empty list) on a clean run.
+
+        Mirrors the conditional-presence convention used by ``degraded``
+        and ``failed_agents``: keys are introduced only when their value
+        is informative, so 2.2.0 consumers reading these reports never
+        see a meaningless ``"retried_agents": []`` they have to filter.
+        """
+        from run_magi import run_orchestrator
+
+        async def mock_launch(agent_name, agents_dir, prompt, output_dir, timeout, model="opus"):
+            return TestRetryTelemetry._valid(agent_name)
+
+        with patch("run_magi.launch_agent", side_effect=mock_launch):
+            result = await run_orchestrator(
+                agents_dir=str(tmp_path),
+                prompt="test",
+                output_dir=str(tmp_path),
+                timeout=300,
+            )
+        assert "retried_agents" not in result, (
+            "retried_agents must be omitted entirely when no agent retried "
+            "(do not emit an empty list)"
+        )
+
+    @pytest.mark.asyncio
+    async def test_report_lists_multiple_retried_agents_sorted(self, tmp_path):
+        """Two retries (one recovers, one fails) → both listed, sorted."""
+        from run_magi import run_orchestrator
+        from validate import ValidationError
+
+        call_counts = {"melchior": 0, "balthasar": 0, "caspar": 0}
+
+        async def mock_launch(agent_name, agents_dir, prompt, output_dir, timeout, model="opus"):
+            call_counts[agent_name] += 1
+            # melchior recovers on retry; caspar fails twice.
+            if agent_name == "melchior" and call_counts[agent_name] == 1:
+                raise ValidationError("missing keys for melchior")
+            if agent_name == "caspar":
+                raise ValidationError("missing keys for caspar")
+            return TestRetryTelemetry._valid(agent_name)
+
+        with patch("run_magi.launch_agent", side_effect=mock_launch):
+            result = await run_orchestrator(
+                agents_dir=str(tmp_path),
+                prompt="test",
+                output_dir=str(tmp_path),
+                timeout=300,
+            )
+        assert result.get("retried_agents") == ["caspar", "melchior"], (
+            "retried_agents must list every agent that took the retry path, "
+            "sorted alphabetically for byte-stable JSON"
+        )
+        # caspar failed both attempts; melchior recovered on retry.
+        assert result.get("failed_agents") == ["caspar"]
+        retried = set(result["retried_agents"])
+        failed = set(result["failed_agents"])
+        assert retried - failed == {"melchior"}, "retry-recovered set"
+        assert retried & failed == {"caspar"}, "retry-also-failed set"
