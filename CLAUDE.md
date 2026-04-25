@@ -268,13 +268,13 @@ A single marketplace repo can host multiple plugins by pointing `source` to othe
 
 ## Test Coverage
 
-286 tests across 4 test files (285 passed, 1 skipped on Windows):
+294 tests across 4 test files (293 passed, 1 skipped on Windows):
 
 | File | Tests | Covers |
 |------|-------|--------|
 | `tests/test_synthesize.py` | 142 | Validation, string type/length checks, bool confidence rejection, agent/verdict type guards, non-dict top-level JSON (R4-1), zero-width Unicode (incl. U+2060-U+206F word joiner / invisible math operators / tag controls), finding sub-field limits, weight-based consensus, confidence formula, findings dedup, dynamic labels, HOLD -- TIE, duplicate agents, banner width + alignment + integer percent, verdict-suffix preservation under overlong labels (R4-3), report sections + ordering, dissent summary-only, SKILL.md template parity |
 | `tests/test_parse_agent_output.py` | 27 | Fence stripping, text extraction (3 formats), fail-fast on unknown types, pipeline integration, pinned claude -p output contract via auto-discovered fixtures (R4-5) |
-| `tests/test_run_magi.py` | 76 | Arg parsing, --no-status flag, model passthrough, orchestration, degraded mode, input validation, cleanup_old_runs LRU/symlink (via `temp_dirs` module — R4-4), tracked_launch states (success/timeout/failed), display start() failure fallback, Windows kill-tree order (taskkill before proc.kill, via `subprocess_utils` — R4-4), stderr replay OSError safety |
+| `tests/test_run_magi.py` | 84 | Arg parsing, --no-status flag, model passthrough, orchestration, degraded mode, input validation, cleanup_old_runs LRU/symlink (via `temp_dirs` module — R4-4), tracked_launch states (success/timeout/failed), display start() failure fallback, Windows kill-tree order (taskkill before proc.kill, via `subprocess_utils` — R4-4), stderr replay OSError safety, single-shot retry on ValidationError with feedback injection and `retrying` display state (2.2.0) |
 | `tests/test_status_display.py` | 41 | Init, update, render, ASCII fallback, async lifecycle, stop idempotency, write-path invariant tripwire, refresh-loop OSError resilience, refresh-loop non-OSError resilience (R4-2) |
 
 Run with `python -m pytest tests/ -v` or `make test`.
@@ -347,24 +347,19 @@ Three rounds of MAGI self-review identified and resolved the following issues:
 
 **Fix**: The single-line `IMPORTANT:` closer in every agent system prompt (`melchior.md`, `balthasar.md`, `caspar.md`) now enumerates all seven required top-level keys and states explicitly that any omission causes the output to be rejected and the agent dropped from consensus. The reinforcement is applied to all three agents — not just Caspar — because the failure mode is LLM-schema-drift rather than agent-specific and the identical closer across prompts is easier to audit than a per-agent divergence. This is a probabilistic mitigation: it raises the cost of omission in the prompt, it does not prove omission impossible.
 
-## Planned for 2.2.0
+### Single-shot agent retry on ValidationError (2.2.0)
 
-### Single-shot agent retry on ValidationError
+**Context**: Prompt reinforcement (above) is probabilistic and cannot drive the schema-drift rate to zero. A targeted retry closes the last gap without widening the schema contract and without paying latency cost on the success path — the retry only fires when `load_agent_output` raises.
 
-**Scope**: When `load_agent_output` raises `ValidationError` for one of the three agents inside `run_orchestrator`, `run_magi.py` re-launches that specific agent once, injecting the exact validation error message into the retry prompt as explicit corrective feedback. If the retry also fails, fall back to the existing degraded-mode path (drop the agent, set `degraded=true`, continue with the survivors). First failure path where the retry succeeds closes the gap without widening the schema contract; failure on both attempts is indistinguishable from today's behavior so no regression is possible for callers that already tolerate `degraded=true`.
+**Implementation**: `run_orchestrator.tracked_launch` now wraps `launch_agent` in a nested `try` that catches `ValidationError` only. On catch, the closure (a) emits a new `retrying` display state, (b) rebuilds the prompt via `_build_retry_prompt(original_prompt, error)` — original prompt verbatim + `---RETRY-FEEDBACK---` delimiter + the ValidationError message + a restatement of the 7-key schema — and (c) re-invokes `launch_agent` with the rebuilt prompt and the same per-agent `timeout`. Terminal-state emission (`success` / `timeout` / `failed`) remains on the outer handler pair, so the display invariant "exactly one terminal state per agent" survives the retry branch. If the retry raises anything (`ValidationError` again, `TimeoutError`, `RuntimeError`, `CancelledError`), it flows through the outer handler and the agent is dropped into the pre-existing degraded path.
 
-**Why a minor bump (2.1.x → 2.2.0) and not a patch**: the retry changes observable orchestrator timing (one additional `claude -p` subprocess on the failure path) and introduces a new status-display state (`retrying`). Downstream consumers that time MAGI runs or parse the live display will see new output, so the change is user-visible even though no schema field changes.
+**Scope**: retry triggers **only** on `ValidationError`. `TimeoutError`, subprocess exit errors, cancellation, and signals pass through unchanged so the 2.1.x degraded semantics are preserved verbatim. Retry count is fixed at 1 — a second retry is a separate decision.
 
-**Implementation plan (TDD cycle)**:
-1. **Red**: tests for retry-succeeds-after-schema-miss, retry-also-fails (falls through to degraded), retry-plus-other-agent-also-fails (double degradation → run continues on 1 agent only if the 2-agent minimum still holds, else raises as today), retry-interacts-with-per-agent-timeout (retry gets its own budget, not a double-timeout).
-2. **Green**: add a `tracked_launch` retry branch around `load_agent_output`; propagate the validation-error feedback into a second `claude -p` invocation reusing the same agent prompt + appended corrective block.
-3. **Refactor**: extract retry logic behind a helper so `run_orchestrator` stays readable.
+**Display**: `StatusDisplay.VALID_STATES` gains `"retrying"`; `_UTF8_GLYPHS.icons` renders it as `↻` and `_ASCII_GLYPHS.icons` as lowercase `r` (lowercase avoids collision with capital `R` in agent/state words — same cosmetic rule the `~`-for-timeout glyph already follows). `_UNICODE_PROBE` was widened to include `↻` so streams that cannot render the retry glyph fall back to the ASCII glyph set **before** the first retry, not on it.
 
-**Cost envelope**: +1 subprocess launch on the failure path only. Under the current observed fault rate (1/30 ≈ 3.3%), expected wall-time overhead is ~1% (every 30 runs, one agent is retried once). Retry uses a fresh per-agent timeout budget equal to `--timeout`, not a sum, so operators do not see doubled ceilings.
+**Budget**: each attempt receives the full `--timeout` ceiling. The retry is not given a reduced budget, and the first attempt's residual time is not carried over. Worst-case wall time per retried agent is therefore `2 × --timeout`; the orchestrator's overall wall time is unchanged for the ~97% of runs where no agent retries.
 
-**Blast radius**: high. Touches `run_orchestrator` (hottest code path), `tracked_launch` state machine (new `retrying` state), and `StatusDisplay` (new glyph). Every new test must also verify the happy path is byte-identical to 2.1.x so the retry branch is gated purely on schema failure.
-
-**Non-goals for 2.2.0**: retry on subprocess timeout, retry on non-schema exceptions, retry count > 1. Those are separate decisions if the single-shot proves insufficient.
+**Non-goals (2.2.0)**: retry on subprocess timeout, retry on non-schema exceptions, retry count > 1. Tests guard each non-goal so these behaviors cannot regress silently into scope.
 
 ## Breaking changes (2.0.0)
 
