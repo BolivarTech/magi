@@ -268,13 +268,13 @@ A single marketplace repo can host multiple plugins by pointing `source` to othe
 
 ## Test Coverage
 
-294 tests across 4 test files (293 passed, 1 skipped on Windows):
+298 tests across 4 test files (297 passed, 1 skipped on Windows):
 
 | File | Tests | Covers |
 |------|-------|--------|
 | `tests/test_synthesize.py` | 142 | Validation, string type/length checks, bool confidence rejection, agent/verdict type guards, non-dict top-level JSON (R4-1), zero-width Unicode (incl. U+2060-U+206F word joiner / invisible math operators / tag controls), finding sub-field limits, weight-based consensus, confidence formula, findings dedup, dynamic labels, HOLD -- TIE, duplicate agents, banner width + alignment + integer percent, verdict-suffix preservation under overlong labels (R4-3), report sections + ordering, dissent summary-only, SKILL.md template parity |
 | `tests/test_parse_agent_output.py` | 27 | Fence stripping, text extraction (3 formats), fail-fast on unknown types, pipeline integration, pinned claude -p output contract via auto-discovered fixtures (R4-5) |
-| `tests/test_run_magi.py` | 84 | Arg parsing, --no-status flag, model passthrough, orchestration, degraded mode, input validation, cleanup_old_runs LRU/symlink (via `temp_dirs` module — R4-4), tracked_launch states (success/timeout/failed), display start() failure fallback, Windows kill-tree order (taskkill before proc.kill, via `subprocess_utils` — R4-4), stderr replay OSError safety, single-shot retry on ValidationError with feedback injection and `retrying` display state (2.2.0) |
+| `tests/test_run_magi.py` | 88 | Arg parsing, --no-status flag, model passthrough, orchestration, degraded mode, input validation, cleanup_old_runs LRU/symlink (via `temp_dirs` module — R4-4), tracked_launch states (success/timeout/failed), display start() failure fallback, Windows kill-tree order (taskkill before proc.kill, via `subprocess_utils` — R4-4), stderr replay OSError safety, single-shot retry on ValidationError with feedback injection and `retrying` display state (2.2.0), `retried_agents` telemetry field with conditional presence and sorted serialisation (2.2.1) |
 | `tests/test_status_display.py` | 41 | Init, update, render, ASCII fallback, async lifecycle, stop idempotency, write-path invariant tripwire, refresh-loop OSError resilience, refresh-loop non-OSError resilience (R4-2) |
 
 Run with `python -m pytest tests/ -v` or `make test`.
@@ -360,6 +360,8 @@ Three rounds of MAGI self-review identified and resolved the following issues:
 **Budget**: each attempt receives the full `--timeout` ceiling. The retry is not given a reduced budget, and the first attempt's residual time is not carried over. Worst-case wall time per retried agent is therefore `2 × --timeout`; the orchestrator's overall wall time is unchanged for the ~97% of runs where no agent retries.
 
 **Non-goals (2.2.0)**: retry on subprocess timeout, retry on non-schema exceptions, retry count > 1. Tests guard each non-goal so these behaviors cannot regress silently into scope.
+
+**Telemetry follow-up (2.2.1)**: ``run_orchestrator`` now records every agent that hit the retry path in a closure-captured set and serialises it to the report under the new ``retried_agents`` key. The key follows the same conditional-presence convention as ``degraded`` and ``failed_agents``: omitted entirely on clean runs, sorted alphabetically when present so the JSON is byte-stable. Downstream consumers can compose ``retried_agents - failed_agents`` for the retry-recovered cohort and ``retried_agents & failed_agents`` for retry-also-failed. This closes the 2.2.0 blind spot where successful retries were indistinguishable from clean first-attempt runs and is what makes the post-release fault-rate decision criterion measurable.
 
 ## Breaking changes (2.0.0)
 
