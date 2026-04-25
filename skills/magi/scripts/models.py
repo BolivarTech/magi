@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Author: Julian Bolivar
-# Version: 1.0.0
-# Date: 2026-04-13
+# Version: 1.1.0
+# Date: 2026-04-25
 """MAGI model registry.
 
 Single source of truth for the Claude model short names accepted on the
