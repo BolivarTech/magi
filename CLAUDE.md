@@ -270,6 +270,29 @@ The symlink is excluded via `.gitignore` (`.claude/` is ignored). Each developer
 4. Tag the release commit: `git tag -a v<version> -m "Release <version>: <short summary>"` then `git push origin v<version>`. Every release from 2.1.4 onward carries an annotated tag in `v<MAJOR>.<MINOR>.<PATCH>` form; the tag is non-optional because it is the durable anchor for rollback, changelogs, and GitHub's release UI. Lightweight tags are not acceptable — the annotated form carries tagger identity and a dated message.
 5. Users pick up updates with `/plugin marketplace update`.
 
+### Pre-merge MAGI self-review (standard procedure)
+
+For any release that ships behaviour-affecting code — `feat:` commits, `fix:` of medium severity or higher, or any change that touches `tracked_launch` / `launch_agent` / the schema — run MAGI on the branch's diff before merging. This turns the plugin into a self-auditing system and consistently catches gaps that grep + manual review miss (the 2.2.3 lockstep-test gap, the 2.2.4 docstring drift, etc.).
+
+The procedure is fixed so the cadence is repeatable across releases:
+
+1. **Build the diff bundle**. From the feature branch, write a single context file (e.g., `magi-review-<version>-context.md`) containing:
+   - One paragraph describing what changed and why.
+   - The full `git diff main feature/<branch>` inside a fenced ``diff`` block.
+   - 4-6 specific "hot review questions" that direct the agents at the parts of the diff you most want challenged. Avoid leading questions; phrase as "Is X correct?", "Could Y break Z?", "Does the help text leak internal symbols?".
+2. **Invoke MAGI** on the bundle: `python skills/magi/scripts/run_magi.py code-review magi-review-<version>-context.md --timeout 900 --no-status`. Wall time is typically 1-3 minutes; cost on opus is ~$0.75 per review.
+3. **Read the raw `.json` per agent** in the run's temp directory rather than only the rendered banner. Per-finding `detail` fields carry the reasoning the rendered table truncates to titles.
+4. **Run the findings through `superpowers:receiving-code-review`** *before* implementing anything. The skill enforces verify-before-act:
+   - Each finding gets a verdict — `valid` (implement), `wrong` (push back with code reference), `style` (push back as preference), `out-of-scope` (already-debated decision), or `YAGNI` (no real consumer).
+   - Push-backs require a concrete proof — a file:line reference, a test, or a counter-example. Performative agreement is forbidden by the skill.
+5. **Address valid findings** in a follow-up `fix:` commit on the same branch. Push-backs go in the commit message body so the rationale survives later bisects. If the review surfaces an architectural problem (≥ 3 valid findings of the same shape), stop and re-plan before merging.
+6. **Delete the context bundle** before merging so it does not enter `main`. The MAGI run's `magi-report.json` on disk is the audit artifact; the bundle is a transient input.
+7. **Merge to `main` with `--no-ff`**, tag, push.
+
+**When to skip**: pure documentation commits, pure version bumps, gitignore changes, reformatting, dependency updates with no behaviour change. The cost (~$0.75) is real; do not run MAGI on commits where the diff is mechanical.
+
+**When to escalate beyond MAGI**: if MAGI returns `STRONG NO-GO` or two consecutive iterations of `GO WITH CAVEATS` whose conditions overlap, treat the feature as architecturally suspect and pull in a second human reviewer before merging.
+
 ### Marketplace structure
 
 The plugin system relies on two manifest files in `.claude-plugin/`:
@@ -283,13 +306,13 @@ A single marketplace repo can host multiple plugins by pointing `source` to othe
 
 ## Test Coverage
 
-308 tests across 4 test files (307 passed, 1 skipped on Windows):
+311 tests across 4 test files (310 passed, 1 skipped on Windows):
 
 | File | Tests | Covers |
 |------|-------|--------|
 | `tests/test_synthesize.py` | 142 | Validation, string type/length checks, bool confidence rejection, agent/verdict type guards, non-dict top-level JSON (R4-1), zero-width Unicode (incl. U+2060-U+206F word joiner / invisible math operators / tag controls), finding sub-field limits, weight-based consensus, confidence formula, findings dedup, dynamic labels, HOLD -- TIE, duplicate agents, banner width + alignment + integer percent, verdict-suffix preservation under overlong labels (R4-3), report sections + ordering, dissent summary-only, SKILL.md template parity |
 | `tests/test_parse_agent_output.py` | 27 | Fence stripping, text extraction (3 formats), fail-fast on unknown types, pipeline integration, pinned claude -p output contract via auto-discovered fixtures (R4-5) |
-| `tests/test_run_magi.py` | 93 | Arg parsing, --no-status flag, model passthrough, orchestration, degraded mode, input validation, cleanup_old_runs LRU/symlink (via `temp_dirs` module — R4-4), tracked_launch states (success/timeout/failed), display start() failure fallback, Windows kill-tree order (taskkill before proc.kill, via `subprocess_utils` — R4-4), stderr replay OSError safety, single-shot retry on ValidationError with feedback injection and `retrying` display state (2.2.0), `retried_agents` telemetry field with conditional presence and sorted serialisation (2.2.1), per-mode default model resolution with explicit `--model` override + `MODE_DEFAULT_MODELS` ↔ `VALID_MODES` lockstep invariant (2.2.3) |
+| `tests/test_run_magi.py` | 96 | Arg parsing, --no-status flag, model passthrough, orchestration, degraded mode, input validation, cleanup_old_runs LRU/symlink (via `temp_dirs` module — R4-4), tracked_launch states (success/timeout/failed), display start() failure fallback, Windows kill-tree order (taskkill before proc.kill, via `subprocess_utils` — R4-4), stderr replay OSError safety, single-shot retry on ValidationError with feedback injection and `retrying` display state (2.2.0), `retried_agents` telemetry field with conditional presence and sorted serialisation (2.2.1), per-mode default model resolution with explicit `--model` override + `MODE_DEFAULT_MODELS` ↔ `VALID_MODES` lockstep invariant (2.2.3), single-shot retry extended to `json.JSONDecodeError` from parse stage with `ValueError` boundary guard (2.2.4) |
 | `tests/test_status_display.py` | 46 | Init, update, render, ASCII fallback, async lifecycle, stop idempotency, write-path invariant tripwire, refresh-loop OSError resilience, refresh-loop non-OSError resilience (R4-2), retrying-state glyphs (UTF-8 ↻, ASCII lowercase r), retrying not terminal, unicode probe includes retry glyph, cp1252 fallback safe (2.2.2) |
 
 Run with `python -m pytest tests/ -v` or `make test`.
@@ -410,6 +433,16 @@ These items are real (not "accepted residuals" like the section above) and have 
 **Budget**: each attempt receives the full `--timeout` ceiling. The retry is not given a reduced budget, and the first attempt's residual time is not carried over. Worst-case wall time per retried agent is therefore `2 × --timeout`; the orchestrator's overall wall time is unchanged for the ~97% of runs where no agent retries.
 
 **Non-goals (2.2.0)**: retry on subprocess timeout, retry on non-schema exceptions, retry count > 1. Tests guard each non-goal so these behaviors cannot regress silently into scope.
+
+### Single-shot retry — JSON parse extension (2.2.4)
+
+**Trigger**: An iter-2 sbtdd Loop 2 catastrophic failure (post-2.2.3) lost two of three agents to ``json.JSONDecodeError`` raised inside ``parse_agent_output`` BEFORE ``load_agent_output`` could wrap the failure into ``ValidationError``. The 2.2.0 retry only caught ``ValidationError``, so both agents were dropped without a second attempt and synthesis aborted on the 2-agent minimum.
+
+**Fix**: ``tracked_launch`` now catches ``(ValidationError, json.JSONDecodeError)`` instead of ``(ValidationError,)``. Both flow through the identical retry path (emit ``retrying``, rebuild prompt with the parser/validator error message, re-launch with a fresh ``--timeout`` budget, fall back to degraded mode if the retry also fails). ``_build_retry_prompt`` was reworded from "failed schema validation" to "rejected by the parsing pipeline" so the corrective message is accurate for both failure classes; the seven-key schema reminder stays because it is useful context regardless of which layer rejected the output.
+
+**Still out of scope** (each pinned by a regression test): ``ValueError`` from ``resolve_model`` (invalid short name — retry would re-fail identically), ``ValueError`` from ``parse_agent_output._extract_text`` (unrecognised CLI shape — needs a parser update, not a retry), ``TimeoutError``, ``RuntimeError``, ``OSError``, ``asyncio.CancelledError``. The retry net is now wide enough to recover from typical LLM output drift (truncation, malformed braces, schema violations) and narrow enough that configuration/structural errors still surface immediately.
+
+**Telemetry**: the 2.2.1 ``retried_agents`` field records every agent that took the retry path, regardless of whether the trigger was ``ValidationError`` or ``JSONDecodeError``. Downstream tooling does not need to know which class triggered the retry — only that one fired.
 
 **Telemetry follow-up (2.2.1)**: ``run_orchestrator`` now records every agent that hit the retry path in a closure-captured set and serialises it to the report under the new ``retried_agents`` key. The key follows the same conditional-presence convention as ``degraded`` and ``failed_agents``: omitted entirely on clean runs, sorted alphabetically when present so the JSON is byte-stable. Downstream consumers can compose ``retried_agents - failed_agents`` for the retry-recovered cohort and ``retried_agents & failed_agents`` for retry-also-failed. This closes the 2.2.0 blind spot where successful retries were indistinguishable from clean first-attempt runs and is what makes the post-release fault-rate decision criterion measurable.
 
