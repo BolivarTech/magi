@@ -293,6 +293,8 @@ The procedure is fixed so the cadence is repeatable across releases:
 
 **When to escalate beyond MAGI**: if MAGI returns `STRONG NO-GO` or two consecutive iterations of `GO WITH CAVEATS` whose conditions overlap, treat the feature as architecturally suspect and pull in a second human reviewer before merging.
 
+**Yes, this procedure applies to the release that introduces it.** 2.2.4 — the release that ships this section — was itself reviewed under the procedure. The "skip when mechanical" exemption is for diffs that contain no behaviour-affecting code; a release that *introduces* this procedure as a new behavioural commitment for future reviews is not mechanical.
+
 ### Marketplace structure
 
 The plugin system relies on two manifest files in `.claude-plugin/`:
@@ -409,6 +411,25 @@ These items are real (not "accepted residuals" like the section above) and have 
 3. `run_orchestrator` shrinks to: build display, build trackers for each agent, gather, build report. Probably ~80 LOC instead of ~150.
 
 **Acceptance**: `wc -l skills/magi/scripts/*.py | sort -n` shows no module above ~300 LOC; `tracked_launch` no longer exists as a closure; the tracker class has unit tests independent of the orchestrator.
+
+### `ValueError` boundary conflates parser-shape and config errors
+
+**What**: ``tracked_launch`` (post-2.2.4) does **not** retry on ``ValueError``. The decision is correct in aggregate but lumps two qualitatively different failure modes:
+
+* ``resolve_model("gpt4")`` → ``ValueError("Unknown model 'gpt4'…")``. A configuration error. Retry would re-fail identically; not retrying is correct.
+* ``parse_agent_output._extract_text({"weird_shape": …})`` → ``ValueError("Unexpected Claude CLI output type…")``. A structural change in the upstream Anthropic CLI output. Retry *might* recover (the model could roll a recognised shape on the second attempt), but it could also be a sustained CLI change that needs a parser update.
+
+**Why it is debt**: today the wrong-side decision has zero observed cost — there are no production reports of ``_extract_text`` ``ValueError``. But a future Anthropic CLI shape change would surface as a non-recoverable agent loss exactly where 2.2.4 just closed the equivalent gap for ``JSONDecodeError``. The right fix is a custom exception class — e.g., ``ParseShapeError`` — raised by ``_extract_text`` and added to the retry catch alongside ``ValidationError`` and ``json.JSONDecodeError``. The ``resolve_model`` ``ValueError`` keeps its current semantics (no retry).
+
+**Fix path** (estimated 1-2 hours):
+1. Introduce ``class ParseShapeError(ValueError)`` in ``parse_agent_output.py``. Subclassing ``ValueError`` preserves backward compatibility for any caller already doing ``except ValueError``.
+2. Replace the two ``raise ValueError`` sites in ``_extract_text`` with ``raise ParseShapeError`` (file-too-large stays as ``ValueError``; size limit is a structural failure that retry cannot fix).
+3. Extend ``tracked_launch`` retry catch to ``(ValidationError, json.JSONDecodeError, ParseShapeError)``.
+4. Add a regression test exercising the shape-fail → retry path; keep the existing ``test_value_error_from_parse_does_not_retry`` test renamed to target ``resolve_model``-style ``ValueError`` (to keep that boundary explicit).
+
+**Acceptance**: a future Anthropic CLI shape change produces a single recoverable failure per agent rather than a 2-of-3 catastrophic loss. The test suite still pins the ``ValueError``-from-config boundary so configuration errors do not silently retry.
+
+**Why deferred**: zero observed cost today. Caspar flagged it during the 2.2.4 self-review (W3) as a known asymmetry; if a production incident surfaces, this becomes the 2.2.5 patch with the same TDD shape as 2.2.4.
 
 **Why deferred**: this is the kind of refactor that warrants a minor release (2.3.0) and a brainstorm session because it touches the hottest async path. Doing it inside a patch would conflate behaviour-preserving work with behaviour-defining work and make any future bisect harder. Telemetry from the 2026-05-15 routine should also land first — it may suggest specific tracker responsibilities (per-agent budget, retry-count) that the refactor should accommodate from day one.
 

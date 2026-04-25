@@ -185,9 +185,16 @@ async def launch_agent(
             (2.2.4).
         ValueError: From ``resolve_model`` for unknown model short names,
             from ``parse_agent_output`` for unrecognised CLI output shapes,
-            or for input files exceeding ``MAX_INPUT_FILE_SIZE``. NOT
-            retried — these are configuration / structural failures that a
-            re-roll cannot fix.
+            or when the agent's raw stdout (``{agent_name}.raw.json``)
+            exceeds :data:`validate.MAX_INPUT_FILE_SIZE`. NOT retried —
+            these are configuration / structural failures that a re-roll
+            cannot fix.
+        asyncio.CancelledError: If the orchestrating task is cancelled
+            while ``launch_agent`` is awaiting the subprocess. Propagated
+            unchanged so the cancel reaches the surrounding
+            ``asyncio.gather`` in ``run_orchestrator``; ``tracked_launch``
+            treats this as a non-retryable failure (the run as a whole is
+            shutting down).
     """
     model_id = resolve_model(model)
 
