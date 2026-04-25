@@ -31,7 +31,9 @@ import time
 from dataclasses import dataclass
 from typing import TextIO
 
-VALID_STATES: frozenset[str] = frozenset({"pending", "running", "success", "failed", "timeout"})
+VALID_STATES: frozenset[str] = frozenset(
+    {"pending", "running", "retrying", "success", "failed", "timeout"}
+)
 
 _TERMINAL_STATES: frozenset[str] = frozenset({"success", "failed", "timeout"})
 
@@ -80,6 +82,7 @@ _UTF8_GLYPHS: GlyphSet = GlyphSet(
     spinner=SPINNER_FRAMES,
     icons={
         "pending": "○",
+        "retrying": "↻",
         "success": "✓",
         "failed": "✗",
         "timeout": "⏱",
@@ -93,6 +96,11 @@ _ASCII_GLYPHS: GlyphSet = GlyphSet(
     spinner=("|", "/", "-", "\\"),
     icons={
         "pending": ".",
+        # ``r`` (lowercase) is the retrying glyph; lowercase avoids visual
+        # collision with the capital ``R`` that could appear in agent
+        # names or state words. The ``retrying`` state word in the same
+        # row carries the authoritative meaning.
+        "retrying": "r",
         "success": "v",
         "failed": "x",
         # ``~`` (tilde) is used instead of ``T`` to avoid visual collision
@@ -104,7 +112,10 @@ _ASCII_GLYPHS: GlyphSet = GlyphSet(
 )
 
 # Characters used to probe whether the stream encoding supports UTF-8.
-_UNICODE_PROBE: str = "●○✓✗⏱├─└─⠋"
+# ``↻`` must be included so the probe fails fast on encodings that cannot
+# render the retrying glyph — otherwise the probe would say "unicode OK"
+# and the render would blow up on the first retry.
+_UNICODE_PROBE: str = "●○↻✓✗⏱├─└─⠋"
 
 
 def _stream_supports_unicode(stream: TextIO) -> bool:
