@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Author: Julian Bolivar
-# Version: 1.0.0
-# Date: 2026-04-13
+# Version: 1.1.0
+# Date: 2026-04-25
 """MAGI model registry.
 
 Single source of truth for the Claude model short names accepted on the
@@ -29,6 +29,29 @@ MODEL_IDS: Mapping[str, str] = MappingProxyType(_MODEL_IDS_MUTABLE)
 
 #: Tuple of accepted short names, kept in lockstep with :data:`MODEL_IDS`.
 VALID_MODELS: tuple[str, ...] = tuple(MODEL_IDS.keys())
+
+#: Per-mode default short name (2.2.3). When ``--model`` is not given on
+#: the CLI, :func:`run_magi.parse_args` looks the analysis mode up here
+#: to pick the default. Explicit ``--model X`` always wins. Rationale:
+#:
+#: * ``code-review`` and ``design`` keep the historical opus default
+#:   because their outputs typically drive PR-blocking decisions where
+#:   the marginal $0.50/run cost over sonnet is justified.
+#: * ``analysis`` ships a sonnet default because sonnet typically
+#:   matches opus quality on exploratory questions at roughly 4× lower
+#:   cost. Operators who need opus for a specific analysis run can opt
+#:   back in via ``--model opus``; the 2026-05-15 telemetry routine
+#:   will surface any cohort that needs the higher-tier model by
+#:   default and inform a 2.3.0 revisit if the assumption breaks.
+#:
+#: Every key MUST be in :data:`run_magi.VALID_MODES` and every value
+#: MUST be in :data:`MODEL_IDS`; the test suite enforces both invariants.
+_MODE_DEFAULTS_MUTABLE: dict[str, str] = {
+    "code-review": "opus",
+    "design": "opus",
+    "analysis": "sonnet",
+}
+MODE_DEFAULT_MODELS: Mapping[str, str] = MappingProxyType(_MODE_DEFAULTS_MUTABLE)
 
 
 def resolve_model(short_name: str) -> str:

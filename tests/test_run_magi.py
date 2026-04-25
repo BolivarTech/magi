@@ -51,11 +51,53 @@ class TestParseArgs:
             args = parse_args([mode, "input.py"])
             assert args.mode == mode
 
-    def test_default_model_is_opus(self):
+    def test_default_model_for_code_review_is_opus(self):
+        """code-review keeps opus as the default — dense technical reasoning
+        warrants the cost. Backward-compatible with the 2.0.x-2.2.x default.
+        """
         from run_magi import parse_args
 
         args = parse_args(["code-review", "input.py"])
         assert args.model == "opus"
+
+    def test_default_model_for_design_is_opus(self):
+        """design defaults to opus — multi-level abstraction (architecture,
+        scaling, hidden coupling) where smaller models drop confidence sharply.
+        """
+        from run_magi import parse_args
+
+        args = parse_args(["design", "spec.md"])
+        assert args.model == "opus"
+
+    def test_default_model_for_analysis_is_sonnet(self):
+        """analysis defaults to sonnet — exploratory work and trade-off framing
+        where sonnet matches opus quality at ~4× lower cost. The change in
+        2.2.3 from a uniform opus default to per-mode defaults is the headline
+        of this release.
+        """
+        from run_magi import parse_args
+
+        args = parse_args(["analysis", "input.txt"])
+        assert args.model == "sonnet"
+
+    def test_explicit_model_overrides_mode_default(self):
+        """``--model X`` always wins over any per-mode default. Without this,
+        operators who want to force opus for analysis (or haiku for code-review)
+        would have no way to do it.
+        """
+        from run_magi import parse_args
+
+        # opus for analysis (override the new sonnet default)
+        args = parse_args(["analysis", "input.txt", "--model", "opus"])
+        assert args.model == "opus"
+
+        # haiku for code-review (override the opus default)
+        args = parse_args(["code-review", "input.py", "--model", "haiku"])
+        assert args.model == "haiku"
+
+        # sonnet for design (override the opus default)
+        args = parse_args(["design", "spec.md", "--model", "sonnet"])
+        assert args.model == "sonnet"
 
     def test_custom_model(self):
         from run_magi import parse_args
@@ -118,6 +160,46 @@ class TestParseArgs:
 
         args = parse_args(["code-review", "input.py", "--keep-runs", "1"])
         assert args.keep_runs == 1
+
+
+class TestModeModelLockstepInvariant:
+    """Pin the lockstep invariant claimed by the 2.2.3 docstrings.
+
+    `MODE_DEFAULT_MODELS` (in models.py) and the inline comment in
+    `run_magi.parse_args` both promise the test suite enforces:
+
+      * Every key of MODE_DEFAULT_MODELS is a valid analysis mode.
+      * Every value of MODE_DEFAULT_MODELS is a registered model.
+
+    Without these tests, a future contributor adding a fourth mode to
+    VALID_MODES (or removing one from MODE_DEFAULT_MODELS) would slip
+    past CI and surface as a runtime KeyError on the
+    `MODE_DEFAULT_MODELS[args.mode]` lookup. These tests convert the
+    docstring promise into a regression-blocking guarantee.
+    """
+
+    def test_every_mode_has_a_default_model(self):
+        from models import MODE_DEFAULT_MODELS
+        from run_magi import VALID_MODES
+
+        assert set(MODE_DEFAULT_MODELS.keys()) == set(VALID_MODES), (
+            f"MODE_DEFAULT_MODELS keys {sorted(MODE_DEFAULT_MODELS.keys())} "
+            f"must equal VALID_MODES {sorted(VALID_MODES)} — adding a mode "
+            f"requires adding its default; removing a mode requires removing "
+            f"its default. The post-parse resolution at run_magi.parse_args "
+            f"depends on this set equality holding."
+        )
+
+    def test_every_mode_default_is_a_registered_model(self):
+        from models import MODE_DEFAULT_MODELS, MODEL_IDS
+
+        unknown = set(MODE_DEFAULT_MODELS.values()) - set(MODEL_IDS.keys())
+        assert not unknown, (
+            f"MODE_DEFAULT_MODELS contains short names not in MODEL_IDS: "
+            f"{sorted(unknown)}. Every default must resolve through "
+            f"resolve_model() at orchestrator startup, so the set of "
+            f"values must be a subset of MODEL_IDS keys."
+        )
 
 
 class TestCreateOutputDir:

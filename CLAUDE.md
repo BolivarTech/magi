@@ -170,7 +170,7 @@ The default short name is `opus`, applied uniformly to all three agents — ther
 | `analysis` | `sonnet` | Exploratory questions and trade-off framing; sonnet matches opus quality at ~4× lower cost (~$0.20/run total). Reserve opus for cases where the answer drives a hard decision. |
 | Smoke / fixtures / contract testing | `haiku` | ~10× cheaper (~$0.07/run); validates the schema and parsing pipeline without burning opus budget on inputs whose verdict you do not act on. |
 
-**Current behaviour (≤ 2.2.x)**: the default is unconditionally `opus` regardless of mode. Operators get to opt down via `--model sonnet` / `--model haiku`. A planned 2.3.0 enhancement would make the default per-mode (`opus` for code-review/design, `sonnet` for analysis); explicit `--model` always wins.
+**Default resolution (2.2.3+)**: when `--model` is omitted, `parse_args` looks the mode up in `MODE_DEFAULT_MODELS` (`models.py`) and resolves to that short name. Explicit `--model X` always wins over the mode default. The 2.0.x-2.2.2 behaviour was a uniform `opus` default for every mode; the only operator-visible delta in 2.2.3 is that `analysis` without `--model` now gets `sonnet` instead of `opus`. To preserve the pre-2.2.3 behaviour for `analysis`, pass `--model opus` explicitly.
 
 ### Status display (status_display.py)
 
@@ -283,13 +283,13 @@ A single marketplace repo can host multiple plugins by pointing `source` to othe
 
 ## Test Coverage
 
-303 tests across 4 test files (302 passed, 1 skipped on Windows):
+308 tests across 4 test files (307 passed, 1 skipped on Windows):
 
 | File | Tests | Covers |
 |------|-------|--------|
 | `tests/test_synthesize.py` | 142 | Validation, string type/length checks, bool confidence rejection, agent/verdict type guards, non-dict top-level JSON (R4-1), zero-width Unicode (incl. U+2060-U+206F word joiner / invisible math operators / tag controls), finding sub-field limits, weight-based consensus, confidence formula, findings dedup, dynamic labels, HOLD -- TIE, duplicate agents, banner width + alignment + integer percent, verdict-suffix preservation under overlong labels (R4-3), report sections + ordering, dissent summary-only, SKILL.md template parity |
 | `tests/test_parse_agent_output.py` | 27 | Fence stripping, text extraction (3 formats), fail-fast on unknown types, pipeline integration, pinned claude -p output contract via auto-discovered fixtures (R4-5) |
-| `tests/test_run_magi.py` | 88 | Arg parsing, --no-status flag, model passthrough, orchestration, degraded mode, input validation, cleanup_old_runs LRU/symlink (via `temp_dirs` module — R4-4), tracked_launch states (success/timeout/failed), display start() failure fallback, Windows kill-tree order (taskkill before proc.kill, via `subprocess_utils` — R4-4), stderr replay OSError safety, single-shot retry on ValidationError with feedback injection and `retrying` display state (2.2.0), `retried_agents` telemetry field with conditional presence and sorted serialisation (2.2.1) |
+| `tests/test_run_magi.py` | 93 | Arg parsing, --no-status flag, model passthrough, orchestration, degraded mode, input validation, cleanup_old_runs LRU/symlink (via `temp_dirs` module — R4-4), tracked_launch states (success/timeout/failed), display start() failure fallback, Windows kill-tree order (taskkill before proc.kill, via `subprocess_utils` — R4-4), stderr replay OSError safety, single-shot retry on ValidationError with feedback injection and `retrying` display state (2.2.0), `retried_agents` telemetry field with conditional presence and sorted serialisation (2.2.1), per-mode default model resolution with explicit `--model` override + `MODE_DEFAULT_MODELS` ↔ `VALID_MODES` lockstep invariant (2.2.3) |
 | `tests/test_status_display.py` | 46 | Init, update, render, ASCII fallback, async lifecycle, stop idempotency, write-path invariant tripwire, refresh-loop OSError resilience, refresh-loop non-OSError resilience (R4-2), retrying-state glyphs (UTF-8 ↻, ASCII lowercase r), retrying not terminal, unicode probe includes retry glyph, cp1252 fallback safe (2.2.2) |
 
 Run with `python -m pytest tests/ -v` or `make test`.

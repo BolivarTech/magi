@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # Author: Julian Bolivar
-# Version: 2.2.2
+# Version: 2.2.3
 # Date: 2026-04-25
 """MAGI Orchestrator — async Python replacement for run_magi.sh.
 
@@ -25,7 +25,7 @@ import shutil
 import sys
 from typing import Any
 
-from models import MODEL_IDS, VALID_MODELS, resolve_model
+from models import MODE_DEFAULT_MODELS, MODEL_IDS, VALID_MODELS, resolve_model
 from parse_agent_output import parse_agent_output as parse_raw_output
 from status_display import StatusDisplay
 from stderr_shim import _buffered_stderr_while
@@ -94,8 +94,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--model",
         choices=VALID_MODELS,
-        default="opus",
-        help="LLM model for all agents (default: opus)",
+        default=None,
+        help=(
+            "LLM model for all agents. When omitted, the default depends "
+            "on the mode: opus for code-review and design, sonnet for "
+            "analysis. Pass --model explicitly to override."
+        ),
     )
     parser.add_argument(
         "--keep-runs",
@@ -129,6 +133,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "runs (keeping only the one about to be created), or --keep-runs "
             "-1 to disable cleanup entirely."
         )
+    # Per-mode default model resolution (2.2.3). ``argparse`` cannot express
+    # "default depends on another arg" cleanly, so we resolve here. The mode
+    # has already been validated by ``choices=VALID_MODES`` above, so the
+    # ``MODE_DEFAULT_MODELS`` lookup is total — no KeyError path is reachable
+    # while VALID_MODES and MODE_DEFAULT_MODELS stay in lockstep (a guarantee
+    # the test suite pins).
+    if args.model is None:
+        args.model = MODE_DEFAULT_MODELS[args.mode]
     return args
 
 
