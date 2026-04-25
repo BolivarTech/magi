@@ -2171,9 +2171,7 @@ class TestJsonDecodeRetry:
                 # Simulate the exact failure mode reported in production:
                 # parse_agent_output called json.loads on truncated text
                 # and json raised JSONDecodeError.
-                raise _json.JSONDecodeError(
-                    "Expecting value", "truncated output...", 142
-                )
+                raise _json.JSONDecodeError("Expecting value", "truncated output...", 142)
             return TestJsonDecodeRetry._valid(agent_name)
 
         with patch("run_magi.launch_agent", side_effect=mock_launch):
