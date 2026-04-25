@@ -1,5 +1,5 @@
 # Author: Julian Bolivar
-# Version: 1.1.3
+# Version: 1.2.0
 # Date: 2026-04-17
 """Live tree-style status display for the MAGI orchestrator.
 
