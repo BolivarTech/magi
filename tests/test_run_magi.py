@@ -51,11 +51,53 @@ class TestParseArgs:
             args = parse_args([mode, "input.py"])
             assert args.mode == mode
 
-    def test_default_model_is_opus(self):
+    def test_default_model_for_code_review_is_opus(self):
+        """code-review keeps opus as the default — dense technical reasoning
+        warrants the cost. Backward-compatible with the 2.0.x-2.2.x default.
+        """
         from run_magi import parse_args
 
         args = parse_args(["code-review", "input.py"])
         assert args.model == "opus"
+
+    def test_default_model_for_design_is_opus(self):
+        """design defaults to opus — multi-level abstraction (architecture,
+        scaling, hidden coupling) where smaller models drop confidence sharply.
+        """
+        from run_magi import parse_args
+
+        args = parse_args(["design", "spec.md"])
+        assert args.model == "opus"
+
+    def test_default_model_for_analysis_is_sonnet(self):
+        """analysis defaults to sonnet — exploratory work and trade-off framing
+        where sonnet matches opus quality at ~4× lower cost. The change in
+        2.2.3 from a uniform opus default to per-mode defaults is the headline
+        of this release.
+        """
+        from run_magi import parse_args
+
+        args = parse_args(["analysis", "input.txt"])
+        assert args.model == "sonnet"
+
+    def test_explicit_model_overrides_mode_default(self):
+        """``--model X`` always wins over any per-mode default. Without this,
+        operators who want to force opus for analysis (or haiku for code-review)
+        would have no way to do it.
+        """
+        from run_magi import parse_args
+
+        # opus for analysis (override the new sonnet default)
+        args = parse_args(["analysis", "input.txt", "--model", "opus"])
+        assert args.model == "opus"
+
+        # haiku for code-review (override the opus default)
+        args = parse_args(["code-review", "input.py", "--model", "haiku"])
+        assert args.model == "haiku"
+
+        # sonnet for design (override the opus default)
+        args = parse_args(["design", "spec.md", "--model", "sonnet"])
+        assert args.model == "sonnet"
 
     def test_custom_model(self):
         from run_magi import parse_args
