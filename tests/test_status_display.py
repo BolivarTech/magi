@@ -448,3 +448,80 @@ class TestWindowsVtModeStreamHandle:
 
         assert result is True
         assert handles_requested == [-11]
+
+
+class TestRetryingState:
+    """Cover the ``retrying`` state shipped with 2.2.0.
+
+    ``test_all_valid_states_accepted`` (above) already verifies that
+    ``display.update(name, "retrying")`` does not raise. These tests
+    cover the bits that the orchestrator-level e2e test in
+    ``test_run_magi.py::TestSingleShotRetry`` patches over: glyph
+    rendering, terminal-state semantics, and probe coverage.
+    """
+
+    def test_utf8_retrying_glyph_is_anticlockwise_arrow(self):
+        """UTF-8 mode renders retrying as ``↻`` (U+21BB)."""
+        from status_display import _UTF8_GLYPHS
+
+        assert _UTF8_GLYPHS.icons["retrying"] == "↻"
+
+    def test_ascii_retrying_glyph_is_lowercase_r(self):
+        """ASCII fallback uses lowercase ``r`` to avoid visual collision
+        with capital ``R`` that may appear in agent names or state words.
+
+        Mirrors the rationale documented for the ASCII timeout glyph
+        (``~`` instead of ``T``) — the cosmetic icon is non-load-bearing,
+        the state word in the same row carries the meaning.
+        """
+        from status_display import _ASCII_GLYPHS
+
+        glyph = _ASCII_GLYPHS.icons["retrying"]
+        assert glyph == "r"
+        assert glyph.islower()
+
+    def test_retrying_does_not_mark_agent_terminal(self):
+        """``retrying`` is transitional, not terminal.
+
+        Going from ``running`` to ``retrying`` must NOT populate
+        ``_end_times`` for the agent. The elapsed timer keeps counting
+        across the retry attempt so the eventual ``success`` /
+        ``failed`` line shows total wall time (first attempt + retry),
+        which is the operator-friendly aggregate.
+        """
+        d = StatusDisplay(["m"], stream=io.StringIO(), use_ansi=False)
+        d.update("m", "running")
+        d.update("m", "retrying")
+        assert "m" not in d._end_times, (
+            "retrying must not stop the elapsed timer — it is a "
+            "transitional state, not a terminal one"
+        )
+        # Sanity: a true terminal state still records end time.
+        d.update("m", "success")
+        assert "m" in d._end_times
+
+    def test_unicode_probe_includes_retrying_glyph(self):
+        """The probe string MUST contain ``↻``.
+
+        Without this, a cp1252 (or other narrow) encoding could pass
+        the probe (because the probe doesn't carry the retry glyph) and
+        then crash on the FIRST retry when ``↻`` cannot be encoded.
+        Including ``↻`` in the probe forces the fallback to ASCII glyphs
+        before any retry happens.
+        """
+        from status_display import _UNICODE_PROBE
+
+        assert "↻" in _UNICODE_PROBE
+
+    def test_cp1252_stream_does_not_raise_on_retrying(self):
+        """A narrow-encoding stream must accept the retrying state.
+
+        Regression guard: the ASCII fallback path is engaged for cp1252
+        streams precisely so updates with ``retrying`` go through ``r``
+        instead of ``↻`` and never hit ``UnicodeEncodeError``.
+        """
+        buf = io.TextIOWrapper(io.BytesIO(), encoding="cp1252", newline="")
+        d = StatusDisplay(["m"], stream=buf, use_ansi=False)
+        d.update("m", "running")
+        d.update("m", "retrying")
+        d.update("m", "success")

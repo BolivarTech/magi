@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Author: Julian Bolivar
-# Version: 2.1.3
-# Date: 2026-04-17
+# Version: 2.2.2
+# Date: 2026-04-25
 """MAGI Orchestrator — async Python replacement for run_magi.sh.
 
 Launches Melchior, Balthasar, and Caspar in parallel using asyncio,

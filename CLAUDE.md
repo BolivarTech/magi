@@ -268,14 +268,14 @@ A single marketplace repo can host multiple plugins by pointing `source` to othe
 
 ## Test Coverage
 
-298 tests across 4 test files (297 passed, 1 skipped on Windows):
+303 tests across 4 test files (302 passed, 1 skipped on Windows):
 
 | File | Tests | Covers |
 |------|-------|--------|
 | `tests/test_synthesize.py` | 142 | Validation, string type/length checks, bool confidence rejection, agent/verdict type guards, non-dict top-level JSON (R4-1), zero-width Unicode (incl. U+2060-U+206F word joiner / invisible math operators / tag controls), finding sub-field limits, weight-based consensus, confidence formula, findings dedup, dynamic labels, HOLD -- TIE, duplicate agents, banner width + alignment + integer percent, verdict-suffix preservation under overlong labels (R4-3), report sections + ordering, dissent summary-only, SKILL.md template parity |
 | `tests/test_parse_agent_output.py` | 27 | Fence stripping, text extraction (3 formats), fail-fast on unknown types, pipeline integration, pinned claude -p output contract via auto-discovered fixtures (R4-5) |
 | `tests/test_run_magi.py` | 88 | Arg parsing, --no-status flag, model passthrough, orchestration, degraded mode, input validation, cleanup_old_runs LRU/symlink (via `temp_dirs` module — R4-4), tracked_launch states (success/timeout/failed), display start() failure fallback, Windows kill-tree order (taskkill before proc.kill, via `subprocess_utils` — R4-4), stderr replay OSError safety, single-shot retry on ValidationError with feedback injection and `retrying` display state (2.2.0), `retried_agents` telemetry field with conditional presence and sorted serialisation (2.2.1) |
-| `tests/test_status_display.py` | 41 | Init, update, render, ASCII fallback, async lifecycle, stop idempotency, write-path invariant tripwire, refresh-loop OSError resilience, refresh-loop non-OSError resilience (R4-2) |
+| `tests/test_status_display.py` | 46 | Init, update, render, ASCII fallback, async lifecycle, stop idempotency, write-path invariant tripwire, refresh-loop OSError resilience, refresh-loop non-OSError resilience (R4-2), retrying-state glyphs (UTF-8 ↻, ASCII lowercase r), retrying not terminal, unicode probe includes retry glyph, cp1252 fallback safe (2.2.2) |
 
 Run with `python -m pytest tests/ -v` or `make test`.
 
@@ -338,6 +338,41 @@ Three rounds of MAGI self-review identified and resolved the following issues:
   - Subprocesses inheriting fd 2 (MAGI itself uses `stderr=PIPE` so this doesn't apply to `launch_agent`, but third-party code invoked from user-level hooks could).
   - **Pre-cached stderr references**: modules that capture `err = sys.stderr` at import time and later call `err.write(...)` hold a reference to the real stream, not to the swapped-in shim. The shim replaces `sys.stderr` only for the duration of `_buffered_stderr_while`; a reference captured before that context manager enters is unaffected. If MAGI ever imports a library that does this, its writes will appear directly in the display's redraw region.
 - **Buffered diagnostics on hard process death**: `_buffered_stderr_while` flushes its buffer in a `finally` clause, so diagnostics survive ordinary exceptions, `CancelledError`, `KeyboardInterrupt`, and `SystemExit`. They are lost only on `SIGKILL`, segfault, or `os._exit()` — all out of scope for Python-level cleanup.
+
+## Open technical debt
+
+These items are real (not "accepted residuals" like the section above) and have a concrete fix path, but were de-prioritised to avoid bloating an unrelated release. They are documented here so they do not silently age into a third "known limitation" disguised as architecture.
+
+### Backwards-compatibility re-exports in `run_magi.py`
+
+**What**: Lines 56-67 of `run_magi.py` keep `cleanup_old_runs`, `create_output_dir`, and `MAGI_DIR_PREFIX` re-exported from the module's `__all__` so the legacy `from run_magi import cleanup_old_runs` import path continues to work for tests that pre-date the R4-4 split. The accompanying comment explicitly says *"Future code should import from `temp_dirs` directly"* — the re-exports are a transition aid, not a stable API.
+
+**Why it is debt**: every grep for `temp_dirs` symbols has to touch two modules, and the `__all__` of `run_magi.py` carries names that have nothing to do with orchestration. New contributors learn the shortcut and the convention erodes.
+
+**Fix path** (~1-2 hours):
+1. `grep -rn "from run_magi import \(cleanup_old_runs\|create_output_dir\|MAGI_DIR_PREFIX\)"` to enumerate the call sites — primarily inside `tests/test_run_magi.py`.
+2. Rewrite each import to `from temp_dirs import ...`.
+3. Delete the three names from `run_magi.__all__` and the explanatory comment block.
+4. Run `make verify`; mypy will flag any miss because the names will no longer be importable from `run_magi`.
+
+**Acceptance**: `git grep "from run_magi import cleanup_old_runs"` returns zero matches. The orchestration symbols (`MODEL_IDS`, `VALID_MODELS`, `resolve_model`) stay re-exported because they straddle modules legitimately — only the `temp_dirs` triple is targeted.
+
+**Why deferred**: pure cleanup, zero behaviour change, zero user impact. Bundle into the next refactor-flavoured release (e.g., 2.3.0) rather than a patch.
+
+### `run_magi.py` size and orchestrator layering
+
+**What**: `run_magi.py` is 628 LOC, the largest module in the project (next is `status_display.py` at 443; the orchestration tier average is ~250). It carries arg parsing, `launch_agent`, the `_DisplayLogGate` class, `_safe_display_update`, `_build_retry_prompt`, `run_orchestrator`, the `tracked_launch` closure (with seven captured variables), and `main`. The R4-4 extraction (`temp_dirs`, `subprocess_utils`) already pulled the pure-filesystem and pure-subprocess pieces out; what remains is the genuinely entangled orchestration core, but it is still bigger than any one reader needs to hold in their head.
+
+**Why it is debt**: every retry-related change so far (2.2.0 retry, 2.2.1 telemetry) had to thread state through the closure rather than through an explicit object. The closure is correct, just not introspectable. A future operator-visible feature like "retry count > 1" would benefit from a real state object instead of a sixth captured variable.
+
+**Fix path** (estimated 3-5 hours, not patch material):
+1. Extract `launch_agent` and its timeout / stderr handling into a new `agent_runner.py` module exposing one async function. The function should be a pure I/O operation: subprocess + parse + validate. No display, no retry.
+2. Extract the per-agent state machine (running → retrying → terminal) into a `LaunchTracker` class in a new `tracking.py` module. Class instance owns the display-update calls, the retry decision, and the retried/failed sets that today live as closure variables.
+3. `run_orchestrator` shrinks to: build display, build trackers for each agent, gather, build report. Probably ~80 LOC instead of ~150.
+
+**Acceptance**: `wc -l skills/magi/scripts/*.py | sort -n` shows no module above ~300 LOC; `tracked_launch` no longer exists as a closure; the tracker class has unit tests independent of the orchestrator.
+
+**Why deferred**: this is the kind of refactor that warrants a minor release (2.3.0) and a brainstorm session because it touches the hottest async path. Doing it inside a patch would conflate behaviour-preserving work with behaviour-defining work and make any future bisect harder. Telemetry from the 2026-05-15 routine should also land first — it may suggest specific tracker responsibilities (per-agent budget, retry-count) that the refactor should accommodate from day one.
 
 ## Post-release hardening
 
