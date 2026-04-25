@@ -157,6 +157,21 @@ Async Python orchestrator using `asyncio.create_subprocess_exec`:
 - `--keep-runs N` (default 5): LRU cleanup of old `magi-run-*` temp directories before each run. Sorted by `st_mtime`, resolved via `realpath` with temp-root validation to prevent symlink traversal. Disabled with `--keep-runs 0`.
 - Live status tree (`StatusDisplay`) wired around `asyncio.gather` via a `tracked_launch` wrapper that maps `launch_agent` exit paths to `running → success/failed/timeout` events. Disabled with `--no-status`. Catches both `asyncio.TimeoutError` and built-in `TimeoutError` for Python 3.9/3.10 compatibility.
 
+### Model selection guidance
+
+The default short name is `opus`, applied uniformly to all three agents — there is no per-agent model assignment, the differentiation comes entirely from each agent's system prompt. Operators can override with `--model sonnet` or `--model haiku`. The registry in `models.py` is the only place where short names map to Anthropic IDs (`claude-opus-4-7`, `claude-sonnet-4-6`, `claude-haiku-4-5-20251001`); bumping a model is a one-line edit there.
+
+**Recommended model per mode** (cost / quality trade-off observed across the captured `magi-report.json` corpus, opus runs ~$0.25/agent ≈ $0.75/run total):
+
+| Mode | Recommended | Rationale |
+|------|-------------|-----------|
+| `code-review` | `opus` | Dense technical reasoning; correctness depends on subtle interaction tracing where opus pulls ahead. ~$0.75/run is acceptable for PR-blocking decisions. |
+| `design` | `opus` | Multi-level abstraction (architecture, scaling cliffs, hidden coupling). The cohort confidence on `design` outputs in the audit corpus drops sharply on smaller models. |
+| `analysis` | `sonnet` | Exploratory questions and trade-off framing; sonnet matches opus quality at ~4× lower cost (~$0.20/run total). Reserve opus for cases where the answer drives a hard decision. |
+| Smoke / fixtures / contract testing | `haiku` | ~10× cheaper (~$0.07/run); validates the schema and parsing pipeline without burning opus budget on inputs whose verdict you do not act on. |
+
+**Current behaviour (≤ 2.2.x)**: the default is unconditionally `opus` regardless of mode. Operators get to opt down via `--model sonnet` / `--model haiku`. A planned 2.3.0 enhancement would make the default per-mode (`opus` for code-review/design, `sonnet` for analysis); explicit `--model` always wins.
+
 ### Status display (status_display.py)
 
 Live tree-style progress renderer. Stdlib-only, no external dependencies:
