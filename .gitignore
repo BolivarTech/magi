@@ -10,3 +10,14 @@ build/
 .claude/
 plans/
 CLAUDE.local.md
+
+# Local audit / handoff workspaces — produced during development, not part
+# of the shipped plugin. Each release leaves bundles under magi-audit-*/
+# from local self-review runs; .remember/ is a per-session handoff buffer.
+# Future telemetry snapshots that should ship (e.g. for the 2026-05-15
+# review routine) must live in a path that does not match these entries
+# or be force-added with `git add -f`.
+.remember/
+magi-audit-2.1.1/
+magi-audit-2.1.2/
+magi-audit-postfix/
