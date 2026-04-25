@@ -385,6 +385,12 @@ async def run_orchestrator(
     """
     successful: list[dict[str, Any]] = []
     failed: list[str] = []
+    # Telemetry (2.2.1): names of agents whose first attempt raised
+    # ValidationError, regardless of whether the retry recovered.
+    # Composes with ``failed`` to give downstream consumers two derived
+    # cohorts: ``retried - failed`` is "retry recovered",
+    # ``retried & failed`` is "retry also failed".
+    retried: set[str] = set()
 
     # Fresh log gate per run so the first display failure is always
     # surfaced, even in hosts that reuse the module across orchestrator
@@ -436,6 +442,7 @@ async def run_orchestrator(
                 # residual of the first attempt) and carries the
                 # ValidationError text so the model can target the
                 # specific missing / mistyped field.
+                retried.add(name)
                 _safe_display_update(display, name, "retrying", log_gate)
                 result = await launch_agent(
                     name,
@@ -522,6 +529,12 @@ async def run_orchestrator(
     if failed:
         report["degraded"] = True
         report["failed_agents"] = failed
+
+    # Conditional presence mirrors degraded/failed_agents: the field is
+    # introduced only when there is something to report so 2.2.0 consumers
+    # that ignore unknown keys keep working unchanged.
+    if retried:
+        report["retried_agents"] = sorted(retried)
 
     return report
 
