@@ -96,10 +96,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         choices=VALID_MODELS,
         default=None,
         help=(
-            "LLM model for all agents. When omitted, the default is "
-            "per-mode (see MODE_DEFAULT_MODELS in models.py): opus for "
-            "code-review/design, sonnet for analysis. Explicit --model "
-            "always wins."
+            "LLM model for all agents. When omitted, the default depends "
+            "on the mode: opus for code-review and design, sonnet for "
+            "analysis. Pass --model explicitly to override."
         ),
     )
     parser.add_argument(

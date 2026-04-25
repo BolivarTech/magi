@@ -37,10 +37,12 @@ VALID_MODELS: tuple[str, ...] = tuple(MODEL_IDS.keys())
 #: * ``code-review`` and ``design`` keep the historical opus default
 #:   because their outputs typically drive PR-blocking decisions where
 #:   the marginal $0.50/run cost over sonnet is justified.
-#: * ``analysis`` ships a sonnet default because sonnet matches opus
-#:   quality on exploratory questions at roughly 4× lower cost. The
-#:   captured ``magi-report.json`` corpus showed no measurable consensus
-#:   delta between models on analysis-mode runs.
+#: * ``analysis`` ships a sonnet default because sonnet typically
+#:   matches opus quality on exploratory questions at roughly 4× lower
+#:   cost. Operators who need opus for a specific analysis run can opt
+#:   back in via ``--model opus``; the 2026-05-15 telemetry routine
+#:   will surface any cohort that needs the higher-tier model by
+#:   default and inform a 2.3.0 revisit if the assumption breaks.
 #:
 #: Every key MUST be in :data:`run_magi.VALID_MODES` and every value
 #: MUST be in :data:`MODEL_IDS`; the test suite enforces both invariants.

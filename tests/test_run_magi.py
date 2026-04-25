@@ -162,6 +162,46 @@ class TestParseArgs:
         assert args.keep_runs == 1
 
 
+class TestModeModelLockstepInvariant:
+    """Pin the lockstep invariant claimed by the 2.2.3 docstrings.
+
+    `MODE_DEFAULT_MODELS` (in models.py) and the inline comment in
+    `run_magi.parse_args` both promise the test suite enforces:
+
+      * Every key of MODE_DEFAULT_MODELS is a valid analysis mode.
+      * Every value of MODE_DEFAULT_MODELS is a registered model.
+
+    Without these tests, a future contributor adding a fourth mode to
+    VALID_MODES (or removing one from MODE_DEFAULT_MODELS) would slip
+    past CI and surface as a runtime KeyError on the
+    `MODE_DEFAULT_MODELS[args.mode]` lookup. These tests convert the
+    docstring promise into a regression-blocking guarantee.
+    """
+
+    def test_every_mode_has_a_default_model(self):
+        from models import MODE_DEFAULT_MODELS
+        from run_magi import VALID_MODES
+
+        assert set(MODE_DEFAULT_MODELS.keys()) == set(VALID_MODES), (
+            f"MODE_DEFAULT_MODELS keys {sorted(MODE_DEFAULT_MODELS.keys())} "
+            f"must equal VALID_MODES {sorted(VALID_MODES)} — adding a mode "
+            f"requires adding its default; removing a mode requires removing "
+            f"its default. The post-parse resolution at run_magi.parse_args "
+            f"depends on this set equality holding."
+        )
+
+    def test_every_mode_default_is_a_registered_model(self):
+        from models import MODE_DEFAULT_MODELS, MODEL_IDS
+
+        unknown = set(MODE_DEFAULT_MODELS.values()) - set(MODEL_IDS.keys())
+        assert not unknown, (
+            f"MODE_DEFAULT_MODELS contains short names not in MODEL_IDS: "
+            f"{sorted(unknown)}. Every default must resolve through "
+            f"resolve_model() at orchestrator startup, so the set of "
+            f"values must be a subset of MODEL_IDS keys."
+        )
+
+
 class TestCreateOutputDir:
     """Verify cross-platform temp directory creation."""
 
