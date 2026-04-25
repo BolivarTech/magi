@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # Author: Julian Bolivar
-# Version: 2.2.3
+# Version: 2.2.4
 # Date: 2026-04-25
 """MAGI Orchestrator — async Python replacement for run_magi.sh.
 
@@ -177,8 +177,24 @@ async def launch_agent(
             buffered stderr is persisted to ``{agent_name}.stderr.log`` and
             included in the error message for post-mortem diagnosis.
         RuntimeError: If the subprocess exits with a non-zero code.
-        ValidationError: If the agent output fails schema validation.
-        ValueError: If *model* is not a recognised short name.
+        ValidationError: If the agent output fails schema validation. Caught
+            and retried by ``run_orchestrator.tracked_launch`` (2.2.0).
+        json.JSONDecodeError: If the parsed text is not valid JSON. Raised
+            by ``parse_agent_output``, propagated through ``launch_agent``,
+            and caught + retried by ``run_orchestrator.tracked_launch``
+            (2.2.4).
+        ValueError: From ``resolve_model`` for unknown model short names,
+            from ``parse_agent_output`` for unrecognised CLI output shapes,
+            or when the agent's raw stdout (``{agent_name}.raw.json``)
+            exceeds :data:`validate.MAX_INPUT_FILE_SIZE`. NOT retried —
+            these are configuration / structural failures that a re-roll
+            cannot fix.
+        asyncio.CancelledError: If the orchestrating task is cancelled
+            while ``launch_agent`` is awaiting the subprocess. Propagated
+            unchanged so the cancel reaches the surrounding
+            ``asyncio.gather`` in ``run_orchestrator``; ``tracked_launch``
+            treats this as a non-retryable failure (the run as a whole is
+            shutting down).
     """
     model_id = resolve_model(model)
 
@@ -330,37 +346,42 @@ def _safe_display_update(
         log_gate.emit_once(exc)
 
 
-def _build_retry_prompt(original_prompt: str, error: ValidationError) -> str:
+def _build_retry_prompt(original_prompt: str, error: ValidationError | json.JSONDecodeError) -> str:
     """Return the retry prompt with corrective feedback appended.
 
-    When :func:`launch_agent` raises :class:`ValidationError` on the
-    first attempt, :func:`run_orchestrator` calls this helper to build
-    the replacement prompt for the single retry. The original user
-    prompt is preserved verbatim so the agent's task is unchanged; the
-    validator's error message is appended so the model can self-correct
-    the specific schema defect (missing key, wrong type, out-of-range
-    confidence, over-long field, etc.). The envelope delimiter
+    When :func:`launch_agent` raises :class:`ValidationError` (schema
+    fail) or :class:`json.JSONDecodeError` (output is not parseable JSON)
+    on the first attempt, :func:`run_orchestrator` calls this helper to
+    build the replacement prompt for the single retry. The original
+    user prompt is preserved verbatim so the agent's task is unchanged;
+    the parser/validator error message is appended so the model can
+    self-correct the specific defect — a missing key, a stray comma, a
+    truncated output, an unbalanced brace, etc. The envelope delimiter
     ``---RETRY-FEEDBACK---`` is intentionally distinct from user input
     so the model can identify the corrective block even if the original
     prompt already contains arbitrary markdown.
 
     Args:
         original_prompt: The exact prompt sent on the first attempt.
-        error: The ``ValidationError`` that triggered the retry.
+        error: The exception that triggered the retry. Currently either
+            :class:`ValidationError` (schema mismatch) or
+            :class:`json.JSONDecodeError` (output not parseable as JSON).
 
     Returns:
         A new prompt string that concatenates the original prompt with a
-        feedback block describing the validation failure and restating
-        the schema contract.
+        feedback block describing the failure and restating the schema
+        contract.
     """
     return (
         f"{original_prompt}\n\n"
         f"---RETRY-FEEDBACK---\n"
-        f"Your previous response failed schema validation:\n"
+        f"Your previous response was rejected by the parsing pipeline:\n"
         f"{error}\n\n"
-        f"Re-emit your response as a JSON object containing ALL seven "
-        f"required top-level keys: agent, verdict, confidence, summary, "
-        f"reasoning, findings, recommendation. Do not omit any key."
+        f"Re-emit your response as a complete, syntactically valid JSON "
+        f"object containing ALL seven required top-level keys: agent, "
+        f"verdict, confidence, summary, reasoning, findings, "
+        f"recommendation. Do not omit any key, do not truncate, do not "
+        f"emit anything outside the JSON object."
     )
 
 
@@ -447,13 +468,16 @@ async def run_orchestrator(
         try:
             try:
                 result = await launch_agent(name, agents_dir, prompt, output_dir, timeout, model)
-            except ValidationError as err:
-                # Single-shot retry (2.2.0): only fires on schema drift,
-                # never on timeout / subprocess failure / cancellation.
-                # The retry gets a fresh ``timeout`` budget (not the
-                # residual of the first attempt) and carries the
-                # ValidationError text so the model can target the
-                # specific missing / mistyped field.
+            except (ValidationError, json.JSONDecodeError) as err:
+                # Single-shot retry (2.2.0 + 2.2.4): fires on schema
+                # drift (ValidationError, 2.2.0 scope) AND on JSON parse
+                # failures (json.JSONDecodeError, 2.2.4 scope expansion).
+                # Never on timeout / subprocess failure / cancellation /
+                # ValueError (config or parser-shape errors). The retry
+                # gets a fresh ``timeout`` budget (not the residual of
+                # the first attempt) and carries the parser/validator
+                # text so the model can target the specific defect —
+                # missing key, truncated output, unbalanced brace, etc.
                 retried.add(name)
                 _safe_display_update(display, name, "retrying", log_gate)
                 result = await launch_agent(

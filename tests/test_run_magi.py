@@ -2115,6 +2115,161 @@ class TestSingleShotRetry:
             )
 
 
+class TestJsonDecodeRetry:
+    """2.2.4: retry also fires on ``json.JSONDecodeError`` from parse_agent_output.
+
+    Background: 2.2.0 scoped retry to :class:`ValidationError` only. A
+    production ``iter 2 catastrophic failure`` (post-2.2.3) lost two of
+    three agents to ``json.JSONDecodeError`` raised inside
+    :func:`parse_agent_output.parse_agent_output` BEFORE
+    :func:`validate.load_agent_output` could wrap the failure into
+    ``ValidationError``. Without retry, both agents were dropped and
+    synthesis aborted on the 2-agent minimum.
+
+    2.2.4 widens the retry trigger to ``(ValidationError,
+    json.JSONDecodeError)``. ``ValueError`` is **not** added to the
+    trigger set: ``ValueError`` is also raised by ``resolve_model`` for
+    invalid model short names (where retry is pointless — same input
+    yields the same error) and by ``parse_agent_output._extract_text``
+    for unrecognized Anthropic CLI output shapes (a structural change
+    that needs a parser update, not a retry).
+
+    Telemetry contract is unchanged: the `retried_agents` field
+    introduced in 2.2.1 records the agent regardless of whether the
+    triggering exception was ValidationError or JSONDecodeError.
+    """
+
+    @staticmethod
+    def _valid(agent: str) -> dict[str, Any]:
+        return {
+            "agent": agent,
+            "verdict": "approve",
+            "confidence": 0.85,
+            "summary": f"{agent} OK",
+            "reasoning": "Fine",
+            "findings": [],
+            "recommendation": "Merge",
+        }
+
+    @pytest.mark.asyncio
+    async def test_json_decode_error_triggers_retry_success(self, tmp_path):
+        """First attempt raises json.JSONDecodeError, retry succeeds.
+
+        The orchestrator must retry the agent and emerge with a full
+        3-agent consensus, no `degraded` flag, and the agent listed in
+        `retried_agents` so downstream telemetry sees the recovery.
+        """
+        import json as _json
+
+        from run_magi import run_orchestrator
+
+        call_counts = {"melchior": 0, "balthasar": 0, "caspar": 0}
+
+        async def mock_launch(agent_name, agents_dir, prompt, output_dir, timeout, model="opus"):
+            call_counts[agent_name] += 1
+            if agent_name == "melchior" and call_counts[agent_name] == 1:
+                # Simulate the exact failure mode reported in production:
+                # parse_agent_output called json.loads on truncated text
+                # and json raised JSONDecodeError.
+                raise _json.JSONDecodeError("Expecting value", "truncated output...", 142)
+            return TestJsonDecodeRetry._valid(agent_name)
+
+        with patch("run_magi.launch_agent", side_effect=mock_launch):
+            result = await run_orchestrator(
+                agents_dir=str(tmp_path),
+                prompt="test",
+                output_dir=str(tmp_path),
+                timeout=300,
+            )
+        assert result.get("degraded") is not True, (
+            "JSONDecodeError that recovered on retry must not leave "
+            "degraded set — full 3-agent consensus is restored"
+        )
+        assert len(result["agents"]) == 3
+        assert result.get("retried_agents") == ["melchior"], (
+            "retried_agents must record the recovery regardless of "
+            "whether the triggering exception was ValidationError or "
+            "JSONDecodeError"
+        )
+        assert call_counts["melchior"] == 2
+
+    @pytest.mark.asyncio
+    async def test_json_decode_error_retry_also_fails_degrades(self, tmp_path):
+        """Both attempts raise json.JSONDecodeError → agent dropped.
+
+        Mirrors the ValidationError "retry-also-fails" path: the agent
+        appears in BOTH `retried_agents` (it took the retry path) AND
+        `failed_agents` (it ultimately failed). The intersection
+        identifies the retry-also-failed cohort downstream tooling
+        cares about.
+        """
+        import json as _json
+
+        from run_magi import run_orchestrator
+
+        async def mock_launch(agent_name, agents_dir, prompt, output_dir, timeout, model="opus"):
+            if agent_name == "balthasar":
+                raise _json.JSONDecodeError("Unterminated string", "broken", 50)
+            return TestJsonDecodeRetry._valid(agent_name)
+
+        with patch("run_magi.launch_agent", side_effect=mock_launch):
+            result = await run_orchestrator(
+                agents_dir=str(tmp_path),
+                prompt="test",
+                output_dir=str(tmp_path),
+                timeout=300,
+            )
+        assert result["degraded"] is True
+        assert "balthasar" in result["failed_agents"]
+        assert result.get("retried_agents") == ["balthasar"], (
+            "retried_agents records every agent that took the retry "
+            "path, including those whose retry also failed"
+        )
+
+    @pytest.mark.asyncio
+    async def test_value_error_from_parse_does_not_retry(self, tmp_path):
+        """``ValueError`` is **out of scope** for retry — explicit boundary.
+
+        ``ValueError`` is raised by both ``parse_agent_output`` (for
+        unrecognized output shapes) and ``resolve_model`` (for invalid
+        model short names). The latter is a configuration error where
+        retry is pointless; the former is a structural change that
+        needs a parser fix, not a retry. Catching ValueError would
+        retry on both paths, masking the configuration bug and wasting
+        a subprocess on a structural one.
+
+        This test pins the boundary so a future ``except (ValidationError,
+        JSONDecodeError, ValueError)`` change cannot slip past CI.
+        """
+        from run_magi import run_orchestrator
+
+        call_counts = {"melchior": 0, "balthasar": 0, "caspar": 0}
+
+        async def mock_launch(agent_name, agents_dir, prompt, output_dir, timeout, model="opus"):
+            call_counts[agent_name] += 1
+            if agent_name == "caspar":
+                raise ValueError("Unexpected Claude CLI output type: int")
+            return TestJsonDecodeRetry._valid(agent_name)
+
+        with patch("run_magi.launch_agent", side_effect=mock_launch):
+            result = await run_orchestrator(
+                agents_dir=str(tmp_path),
+                prompt="test",
+                output_dir=str(tmp_path),
+                timeout=300,
+            )
+        assert result["degraded"] is True
+        assert "caspar" in result["failed_agents"]
+        assert call_counts["caspar"] == 1, (
+            "ValueError must not trigger retry — that path is reserved "
+            "for JSON parse failures, not parser-shape or config errors"
+        )
+        assert "retried_agents" not in result, (
+            "no agent took the retry path, so the field must be omitted "
+            "(conditional-presence convention)"
+        )
+
+
 class TestRetryTelemetry:
     """2.2.1: report exposes ``retried_agents`` for downstream telemetry.
 
