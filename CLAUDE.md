@@ -170,7 +170,13 @@ The default short name is `opus`, applied uniformly to all three agents — ther
 | `analysis` | `sonnet` | Exploratory questions and trade-off framing; sonnet matches opus quality at ~4× lower cost (~$0.20/run total). Reserve opus for cases where the answer drives a hard decision. |
 | Smoke / fixtures / contract testing | `haiku` | ~10× cheaper (~$0.07/run); validates the schema and parsing pipeline without burning opus budget on inputs whose verdict you do not act on. |
 
-**Default resolution (2.2.3+)**: when `--model` is omitted, `parse_args` looks the mode up in `MODE_DEFAULT_MODELS` (`models.py`) and resolves to that short name. Explicit `--model X` always wins over the mode default. The 2.0.x-2.2.2 behaviour was a uniform `opus` default for every mode; the only operator-visible delta in 2.2.3 is that `analysis` without `--model` now gets `sonnet` instead of `opus`. To preserve the pre-2.2.3 behaviour for `analysis`, pass `--model opus` explicitly.
+**Default resolution (2.2.5+)**: when `--model` is omitted, `parse_args` looks the mode up in `MODE_DEFAULT_MODELS` (`models.py`) and resolves to that short name. Explicit `--model X` always wins over the mode default.
+
+**Resolution history**:
+
+* 2.0.x-2.2.2: uniform `opus` default for every mode.
+* 2.2.3 (2026-04-25): switched `analysis` default to `sonnet` for cost relief on the assumption that sonnet matched opus quality on exploratory work at ~4× lower cost.
+* 2.2.5 (2026-04-26): reverted `analysis` default to `opus`. Production data showed Caspar (most-output agent by design, 4-7K output tokens vs 2-3K for Mel/Bal) failed in ≥33% of sbtdd Loop verifications under sonnet — an order of magnitude above the 3.3% design assumption. Sonnet's ~8K max-output ceiling pressed against Caspar's adversarial-by-design verbosity; 2.2.4 retry could not recover because the failure was structural, not stochastic. The `MODE_DEFAULT_MODELS` plumbing is preserved for future per-mode differentiation; only the `analysis` value flipped back. Operators who want sonnet for analysis can still pass `--model sonnet` explicitly.
 
 ### Status display (status_display.py)
 
@@ -464,6 +470,26 @@ These items are real (not "accepted residuals" like the section above) and have 
 **Still out of scope** (each pinned by a regression test): ``ValueError`` from ``resolve_model`` (invalid short name — retry would re-fail identically), ``ValueError`` from ``parse_agent_output._extract_text`` (unrecognised CLI shape — needs a parser update, not a retry), ``TimeoutError``, ``RuntimeError``, ``OSError``, ``asyncio.CancelledError``. The retry net is now wide enough to recover from typical LLM output drift (truncation, malformed braces, schema violations) and narrow enough that configuration/structural errors still surface immediately.
 
 **Telemetry**: the 2.2.1 ``retried_agents`` field records every agent that took the retry path, regardless of whether the trigger was ``ValidationError`` or ``JSONDecodeError``. Downstream tooling does not need to know which class triggered the retry — only that one fired.
+
+### Analysis-mode default reverted to opus (2.2.5)
+
+**Trigger**: After 2.2.4 shipped, the user reported a recurring Caspar-drop pattern in sbtdd Loop verifications: each verification runs MAGI three times, and **at least one of the three drops Caspar to a degraded(2,0)** result. The 2.2.0 retry + 2.2.4 JSON-parse extension fired correctly but could not recover Caspar because the failure was structural, not stochastic — the second attempt under the same model hit the same output-token ceiling.
+
+**Why Caspar specifically**: Caspar is adversarial by design (longest reasoning, most findings, densest critique). Across the captured ``magi-report.json`` corpus, Caspar's output token count ranged 3620-6691 — 2-3× larger than Melchior's or Balthasar's. Under the 2.2.3 sonnet default, that put Caspar at 50-87% of the ~8K max-output ceiling for analysis-mode runs. Variance under sbtdd's larger inputs was enough to push Caspar over the cliff while Mel/Bal completed comfortably.
+
+**Why this is not just a degraded-result issue**: losing Caspar specifically biases consensus toward false-positive approval. ``GO_WITH_CAVEATS (2-0)`` from Mel+Bal is structurally different from ``GO_WITH_CAVEATS (2-0)`` with Caspar dissent — the surviving two are the constructive lenses, the missing one is the adversarial one. sbtdd's "F's auto-recovery is for N=1 only" cannot save this because synthesis succeeds with two agents; the only fix that restores quality is preventing the drop in the first place.
+
+**Fix**: ``MODE_DEFAULT_MODELS["analysis"]`` flipped from ``"sonnet"`` back to ``"opus"``. Restores the 32K max-output budget and gives Caspar the room it needs. Cost reverts from ~$0.20/run to ~$0.75/run for bare-``analysis`` invocations; the cost-saving rationale of 2.2.3 was empirically refuted by the failure rate observed in production.
+
+**Tripwire activation**: this revert fired the policy documented in ``memory/routine_telemetry_post_2.2.1.md`` ("Observation policy in effect") by sustained evidence rather than the literal "n=2 iter-2-style" letter. The observed pattern (≥33% Caspar drop per verification, structural cause) was decisive enough to act ahead of the 2026-05-15 telemetry routine.
+
+**MAGI self-review skipped on this commit by design** (precedent for similar reverts): the change restores a configuration that ran successfully through the 0.x.x → 2.2.2 release range, is mechanical from the behaviour-history standpoint, and the decision criteria are baked into the test docstring + the ``models.py`` rationale comment so a future bisector reconstructs the reasoning without the MAGI artifact. The standard "Pre-merge MAGI self-review" procedure exists to catch architectural surprise on forward-going behaviour changes; running it on a documented revert to a known-stable state would be ceremony.
+
+**Still open after 2.2.5**: the cost-saving question for ``analysis``. Sonnet 4.6 may match opus on quality but it cannot fit Caspar's full output today. Two paths the 2026-05-15 telemetry routine should inform:
+1. **Per-agent model differentiation**: Caspar on opus, Mel/Bal on sonnet. Saves ~$0.30/run vs full opus while preserving Caspar's output budget. Requires per-agent model plumbing (currently the orchestrator passes one model for all three).
+2. **Output-budget plumbing**: a ``--max-tokens`` flag in ``launch_agent`` that overrides the model default. Lets operators raise the sonnet budget on Caspar specifically without changing models. Requires a parser for the Anthropic CLI's ``--max-tokens`` option.
+
+Both are deferred until the routine surfaces enough data to choose between them.
 
 **Telemetry follow-up (2.2.1)**: ``run_orchestrator`` now records every agent that hit the retry path in a closure-captured set and serialises it to the report under the new ``retried_agents`` key. The key follows the same conditional-presence convention as ``degraded`` and ``failed_agents``: omitted entirely on clean runs, sorted alphabetically when present so the JSON is byte-stable. Downstream consumers can compose ``retried_agents - failed_agents`` for the retry-recovered cohort and ``retried_agents & failed_agents`` for retry-also-failed. This closes the 2.2.0 blind spot where successful retries were indistinguishable from clean first-attempt runs and is what makes the post-release fault-rate decision criterion measurable.
 
