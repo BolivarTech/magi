@@ -69,16 +69,31 @@ class TestParseArgs:
         args = parse_args(["design", "spec.md"])
         assert args.model == "opus"
 
-    def test_default_model_for_analysis_is_sonnet(self):
-        """analysis defaults to sonnet — exploratory work and trade-off framing
-        where sonnet matches opus quality at ~4× lower cost. The change in
-        2.2.3 from a uniform opus default to per-mode defaults is the headline
-        of this release.
+    def test_default_model_for_analysis_is_opus(self):
+        """analysis defaults to opus.
+
+        2.2.3 (released 2026-04-25) switched analysis to sonnet for cost
+        relief. 2.2.5 (this release, 2026-04-26) reverts based on
+        production evidence: Caspar (the most-output agent by design,
+        consistently producing 4-7K output tokens vs Mel/Bal at 2-3K)
+        failed in ≥33% of sbtdd Loop verifications under the sonnet
+        default. That is an order of magnitude above the 3.3% design
+        assumption documented in CLAUDE.md "Post-release hardening".
+
+        The 2.2.4 retry could not recover Caspar consistently because
+        the failure was structural (output-ceiling pressure on sonnet's
+        ~8K max), not stochastic. The second attempt with the same
+        model hit the same ceiling. Reverting analysis to opus restores
+        the 32K max-output budget and gives Caspar headroom.
+
+        The 2.2.4 retry path remains active for all three modes; only
+        the per-mode default for analysis flips back to opus.
+        ``code-review`` and ``design`` were never on sonnet.
         """
         from run_magi import parse_args
 
         args = parse_args(["analysis", "input.txt"])
-        assert args.model == "sonnet"
+        assert args.model == "opus"
 
     def test_explicit_model_overrides_mode_default(self):
         """``--model X`` always wins over any per-mode default. Without this,
@@ -87,9 +102,9 @@ class TestParseArgs:
         """
         from run_magi import parse_args
 
-        # opus for analysis (override the new sonnet default)
-        args = parse_args(["analysis", "input.txt", "--model", "opus"])
-        assert args.model == "opus"
+        # sonnet for analysis (override the opus default re-established in 2.2.5)
+        args = parse_args(["analysis", "input.txt", "--model", "sonnet"])
+        assert args.model == "sonnet"
 
         # haiku for code-review (override the opus default)
         args = parse_args(["code-review", "input.py", "--model", "haiku"])
