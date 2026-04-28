@@ -2462,9 +2462,7 @@ class TestCp1252Resilience:
     """
 
     @pytest.mark.asyncio
-    async def test_warning_print_does_not_crash_on_cp1252_stderr(
-        self, tmp_path, monkeypatch
-    ):
+    async def test_warning_print_does_not_crash_on_cp1252_stderr(self, tmp_path, monkeypatch):
         """Repro for crash site 1: WARNING about a failed agent must not
         encode-fail when ``sys.stderr`` is a cp1252-strict text stream.
 
