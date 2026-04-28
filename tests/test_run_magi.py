@@ -2563,3 +2563,202 @@ class TestCp1252Resilience:
         content, label = _load_input_content("inline analysis text — not a path")
         assert content == "inline analysis text — not a path"
         assert label == "Inline input"
+
+
+class TestUtf8ConsoleReconfigure:
+    """2.2.7: structural fix for the Windows encode-side cp1252 problem.
+
+    The 2.2.6 hotfix removed the four ``\\u26a0`` warning signs that
+    were the immediate crash trigger, but ``sys.stdout`` /
+    ``sys.stderr`` themselves were left bound to the cp1252 locale
+    wrapper Python gives child processes on Windows. Any **future**
+    non-cp1252 codepoint emitted through ``print`` — a finding title
+    that the LLM rolls with ``→``, ``≥``, curly quotes, or
+    any character outside cp1252's 256-codepoint range — would
+    re-introduce the same ``UnicodeEncodeError`` crash.
+
+    The fix is a single helper, ``_enable_utf8_console_io()``, called
+    at the top of ``main()``. On Windows it switches both standard
+    streams to UTF-8 with ``errors="backslashreplace"``. On every
+    other platform it is a no-op so POSIX shells (which already
+    default to UTF-8) keep their existing byte contract.
+
+    These tests pin:
+
+    * the helper exists and is exported from ``run_magi``,
+    * win32 reconfigures both streams to ``utf-8`` /
+      ``backslashreplace``,
+    * non-win32 platforms are untouched,
+    * streams lacking ``reconfigure`` (e.g., a logger that wrapped
+      stderr) are skipped silently rather than crashing,
+    * after the helper runs, a print of a non-cp1252 codepoint
+      survives without raising — the end-to-end guarantee the
+      structural fix exists to provide.
+    """
+
+    def test_helper_is_exported(self):
+        """The helper must be importable from run_magi — call sites
+        live in main() and tests both depend on the public name.
+        """
+        from run_magi import _enable_utf8_console_io
+
+        assert callable(_enable_utf8_console_io)
+
+    def test_reconfigures_streams_on_win32(self, monkeypatch):
+        """On win32, both stdout and stderr are reconfigured to utf-8
+        with the backslashreplace error policy. ``backslashreplace``
+        is non-negotiable: ``strict`` would re-introduce the crash,
+        ``ignore`` would silently drop diagnostic content, and
+        ``replace`` substitutes U+FFFD which is itself non-ASCII and
+        thus pointless under cp1252. ``backslashreplace`` always
+        produces ASCII output (``\\u26a0``) so the printed bytes are
+        guaranteed encodable in any codepage.
+        """
+        import io
+
+        from run_magi import _enable_utf8_console_io
+
+        monkeypatch.setattr(sys, "platform", "win32")
+        fake_stdout = io.TextIOWrapper(io.BytesIO(), encoding="cp1252", errors="strict")
+        fake_stderr = io.TextIOWrapper(io.BytesIO(), encoding="cp1252", errors="strict")
+        monkeypatch.setattr(sys, "stdout", fake_stdout)
+        monkeypatch.setattr(sys, "stderr", fake_stderr)
+
+        _enable_utf8_console_io()
+
+        assert sys.stdout.encoding.lower() == "utf-8"
+        assert sys.stdout.errors == "backslashreplace"
+        assert sys.stderr.encoding.lower() == "utf-8"
+        assert sys.stderr.errors == "backslashreplace"
+
+    def test_noop_on_non_win32(self, monkeypatch):
+        """On Linux / macOS the function is a no-op. POSIX shells
+        already default to UTF-8 and changing the encoding could
+        break downstream tooling that captured stdout assuming the
+        locale-derived bytes contract.
+
+        Compares via :func:`codecs.lookup` rather than raw string
+        equality so the test is stable across Python versions
+        (Python <=3.13 reports ``iso8859-1``, 3.14+ reports
+        ``latin-1`` — both are aliases of the same codec).
+        """
+        import codecs
+        import io
+
+        from run_magi import _enable_utf8_console_io
+
+        canonical_latin1 = codecs.lookup("latin-1").name
+
+        monkeypatch.setattr(sys, "platform", "linux")
+        fake_stdout = io.TextIOWrapper(io.BytesIO(), encoding="latin-1", errors="strict")
+        fake_stderr = io.TextIOWrapper(io.BytesIO(), encoding="latin-1", errors="strict")
+        monkeypatch.setattr(sys, "stdout", fake_stdout)
+        monkeypatch.setattr(sys, "stderr", fake_stderr)
+
+        _enable_utf8_console_io()
+
+        # Untouched: encoding and errors policy still match the
+        # pre-call values.
+        assert codecs.lookup(sys.stdout.encoding).name == canonical_latin1
+        assert sys.stdout.errors == "strict"
+        assert codecs.lookup(sys.stderr.encoding).name == canonical_latin1
+        assert sys.stderr.errors == "strict"
+
+    def test_streams_without_reconfigure_method_are_skipped(self, monkeypatch):
+        """If a parent process replaced ``sys.stderr`` with a custom
+        object that lacks ``reconfigure`` — a logger sink, a buffer
+        proxy, a pytest capture wrapper — the helper must not crash.
+
+        The reconfigure method is a TextIOWrapper feature; nothing in
+        Python's standard library guarantees every stdout-like object
+        has it. Skipping silently is the right behavior because
+        custom streams have already chosen their encoding contract;
+        forcing UTF-8 would either fail or violate that contract.
+        """
+
+        class FakeStreamWithoutReconfigure:
+            encoding = "ascii"
+            errors = "strict"
+
+            def write(self, _data):
+                pass
+
+            def flush(self):
+                pass
+
+        from run_magi import _enable_utf8_console_io
+
+        monkeypatch.setattr(sys, "platform", "win32")
+        monkeypatch.setattr(sys, "stdout", FakeStreamWithoutReconfigure())
+        monkeypatch.setattr(sys, "stderr", FakeStreamWithoutReconfigure())
+
+        # Must not raise AttributeError or any other exception.
+        _enable_utf8_console_io()
+
+    def test_print_of_non_cp1252_codepoint_survives_after_reconfigure(self, monkeypatch):
+        """End-to-end guarantee: after the helper runs, ``print`` of a
+        codepoint that is **not** in cp1252 (e.g., U+2192 right arrow,
+        U+2265 greater-or-equal, U+2018 left single quote) does not
+        raise UnicodeEncodeError, even though the underlying byte
+        buffer was originally created as cp1252-strict.
+
+        This is the test that would have caught the entire 2.2.6
+        whack-a-mole pattern: it does not care which specific
+        codepoint the LLM emits, only that the output path tolerates
+        anything Unicode permits.
+        """
+        import io
+
+        from run_magi import _enable_utf8_console_io
+
+        monkeypatch.setattr(sys, "platform", "win32")
+        stderr_buffer = io.BytesIO()
+        fake_stderr = io.TextIOWrapper(stderr_buffer, encoding="cp1252", errors="strict")
+        monkeypatch.setattr(sys, "stderr", fake_stderr)
+
+        _enable_utf8_console_io()
+
+        # All three are codepoints outside cp1252's range — pre-fix
+        # any one of these would crash a strict cp1252 stream.
+        for codepoint in ("→", "≥", "‘"):
+            print(f"finding title: {codepoint}", file=sys.stderr)
+        sys.stderr.flush()
+
+        emitted = stderr_buffer.getvalue().decode("utf-8", errors="replace")
+        assert "→" in emitted
+        assert "≥" in emitted
+        assert "‘" in emitted
+
+    def test_main_invokes_reconfigure_before_any_print(self, monkeypatch):
+        """``main()`` must call ``_enable_utf8_console_io`` *before*
+        any ``print``, ``sys.exit``, or other output operation. If the
+        call moved later (e.g., after the input-file load or after the
+        ``claude`` PATH check), a crash on those code paths would
+        re-introduce the original failure mode.
+
+        Verified by stubbing the helper to raise a sentinel exception
+        and a second function (``parse_args``) to raise a different
+        sentinel. Whichever exception escapes ``main()`` was called
+        first. We expect the helper's exception, proving ``main()``
+        invoked the helper before any other output-bearing code.
+        """
+
+        class HelperCalledFirst(RuntimeError):
+            pass
+
+        class ParseArgsCalledFirst(RuntimeError):
+            pass
+
+        def fake_enable():
+            raise HelperCalledFirst("helper ran first")
+
+        def fake_parse_args():
+            raise ParseArgsCalledFirst("parse_args ran first")
+
+        monkeypatch.setattr("run_magi._enable_utf8_console_io", fake_enable)
+        monkeypatch.setattr("run_magi.parse_args", fake_parse_args)
+
+        from run_magi import main
+
+        with pytest.raises(HelperCalledFirst):
+            main()
