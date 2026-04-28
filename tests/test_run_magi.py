@@ -2435,3 +2435,131 @@ class TestRetryTelemetry:
         failed = set(result["failed_agents"])
         assert retried - failed == {"melchior"}, "retry-recovered set"
         assert retried & failed == {"caspar"}, "retry-also-failed set"
+
+
+class TestCp1252Resilience:
+    """2.2.6: orchestrator must not crash on Windows cp1252 environments.
+
+    Two reproducible crash sites existed under cp1252:
+
+    1. ``print(f"\\u26a0 WARNING: ...", file=sys.stderr)``: the warning sign
+       ``\\u26a0`` (⚠) is not in cp1252's codepage (cp1252 covers
+       U+0000-U+00FF plus a 0x80-0x9F extension; U+26A0 is outside).
+       When MAGI runs as a subprocess (sbtdd's ``subprocess.run`` with
+       ``capture_output=True``), ``sys.stderr`` is the locale-encoding
+       text wrapper, which on Windows is cp1252. The print encodes
+       with ``errors='strict'`` and raises ``UnicodeEncodeError``,
+       crashing the orchestrator before the report is written.
+
+    2. ``open(args.input, encoding='utf-8')``: any user input file
+       written by Windows tooling with the default cp1252 encoding
+       (Notepad, VS Code without explicit BOM, Python ``open()`` on
+       Windows without ``encoding=``) raises ``UnicodeDecodeError`` on
+       the first byte ≥0x80 that is not a valid UTF-8 start byte.
+
+    These tests pin the contract that both sites stay non-crashing
+    after 2.2.6 even when the environment locale is cp1252.
+    """
+
+    @pytest.mark.asyncio
+    async def test_warning_print_does_not_crash_on_cp1252_stderr(self, tmp_path, monkeypatch):
+        """Repro for crash site 1: WARNING about a failed agent must not
+        encode-fail when ``sys.stderr`` is a cp1252-strict text stream.
+
+        Pre-fix: the ``\\u26a0`` warning sign in run_orchestrator's
+        WARNING messages crashes Python's ``print`` with
+        ``UnicodeEncodeError`` on cp1252 locales.
+
+        Post-fix: the message uses ASCII-only markers (``[!]`` instead
+        of ``⚠``) so the print survives any encoding the parent process
+        chooses for the captured stderr.
+        """
+        import codecs
+        import io
+
+        from run_magi import run_orchestrator
+
+        async def mock_launch(agent_name, agents_dir, prompt, output_dir, timeout, model="opus"):
+            if agent_name == "caspar":
+                # Use a non-retryable error class so retry does not fire
+                # and we go straight to the WARNING-then-degraded path.
+                raise RuntimeError("subprocess died for the test")
+            return {
+                "agent": agent_name,
+                "verdict": "approve",
+                "confidence": 0.85,
+                "summary": f"{agent_name} OK",
+                "reasoning": "Fine",
+                "findings": [],
+                "recommendation": "Merge",
+            }
+
+        # Cp1252-strict stream: bytes that fall outside cp1252 will raise
+        # UnicodeEncodeError on write. This mirrors what Python gives the
+        # orchestrator when it runs as a subprocess on Windows.
+        cp1252_buffer = io.BytesIO()
+        cp1252_stderr = codecs.getwriter("cp1252")(cp1252_buffer, errors="strict")
+
+        monkeypatch.setattr(sys, "stderr", cp1252_stderr)
+
+        with patch("run_magi.launch_agent", side_effect=mock_launch):
+            # Must not raise UnicodeEncodeError. Pre-fix: it does.
+            result = await run_orchestrator(
+                agents_dir=str(tmp_path),
+                prompt="test",
+                output_dir=str(tmp_path),
+                timeout=300,
+                show_status=False,  # keep stderr writes direct, no buffer shim
+            )
+
+        assert result["degraded"] is True
+        assert "caspar" in result["failed_agents"]
+
+        # Sanity: the WARNING actually made it through to the cp1252 stream.
+        cp1252_stderr.flush()
+        emitted = cp1252_buffer.getvalue().decode("cp1252", errors="replace")
+        assert "WARNING" in emitted, (
+            "the test must actually exercise the WARNING-emitting path; "
+            "if this assert fails the mock arrangement is wrong"
+        )
+        assert "⚠" not in emitted, (
+            "the warning sign \\u26a0 must not be emitted to stderr — "
+            "it is the exact codepoint that breaks cp1252 environments"
+        )
+
+    def test_input_file_read_handles_cp1252_bytes(self, tmp_path):
+        """Repro for crash site 2: a cp1252-encoded input file must not
+        crash MAGI's input loader.
+
+        Pre-fix: the ``open(args.input, encoding='utf-8')`` at the top of
+        ``main()`` raises ``UnicodeDecodeError`` on any byte ≥0x80 that
+        is not a valid UTF-8 start byte (e.g., the cp1252 em dash 0x97).
+
+        Post-fix: the read uses ``errors='replace'`` so the file content
+        is decoded with replacement characters in place of invalid bytes,
+        and MAGI continues with whatever readable content remains.
+        """
+        from run_magi import _load_input_content
+
+        cp1252_file = tmp_path / "cp1252-input.txt"
+        # b'Hello \x97 world' — \x97 is the cp1252 em dash, NOT a valid
+        # UTF-8 start byte. Reading this with strict UTF-8 raises.
+        cp1252_file.write_bytes("Hello — world".encode("cp1252"))
+
+        # Must not raise UnicodeDecodeError. Pre-fix: it does.
+        content, label = _load_input_content(str(cp1252_file))
+
+        assert "Hello" in content, "ASCII portions of the file must survive"
+        assert "world" in content, "ASCII portions on either side of the bad byte"
+        assert label == f"File: {cp1252_file}"
+
+    def test_load_input_content_treats_inline_text_as_string(self):
+        """``_load_input_content`` returns inline text untouched when the
+        argument is not a file path. This pins the boundary between
+        file-read (cp1252-tolerant) and inline-text (no decode) paths.
+        """
+        from run_magi import _load_input_content
+
+        content, label = _load_input_content("inline analysis text — not a path")
+        assert content == "inline analysis text — not a path"
+        assert label == "Inline input"

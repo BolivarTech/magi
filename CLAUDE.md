@@ -314,13 +314,13 @@ A single marketplace repo can host multiple plugins by pointing `source` to othe
 
 ## Test Coverage
 
-311 tests across 4 test files (310 passed, 1 skipped on Windows):
+314 tests across 4 test files (313 passed, 1 skipped on Windows):
 
 | File | Tests | Covers |
 |------|-------|--------|
 | `tests/test_synthesize.py` | 142 | Validation, string type/length checks, bool confidence rejection, agent/verdict type guards, non-dict top-level JSON (R4-1), zero-width Unicode (incl. U+2060-U+206F word joiner / invisible math operators / tag controls), finding sub-field limits, weight-based consensus, confidence formula, findings dedup, dynamic labels, HOLD -- TIE, duplicate agents, banner width + alignment + integer percent, verdict-suffix preservation under overlong labels (R4-3), report sections + ordering, dissent summary-only, SKILL.md template parity |
 | `tests/test_parse_agent_output.py` | 27 | Fence stripping, text extraction (3 formats), fail-fast on unknown types, pipeline integration, pinned claude -p output contract via auto-discovered fixtures (R4-5) |
-| `tests/test_run_magi.py` | 96 | Arg parsing, --no-status flag, model passthrough, orchestration, degraded mode, input validation, cleanup_old_runs LRU/symlink (via `temp_dirs` module — R4-4), tracked_launch states (success/timeout/failed), display start() failure fallback, Windows kill-tree order (taskkill before proc.kill, via `subprocess_utils` — R4-4), stderr replay OSError safety, single-shot retry on ValidationError with feedback injection and `retrying` display state (2.2.0), `retried_agents` telemetry field with conditional presence and sorted serialisation (2.2.1), per-mode default model resolution with explicit `--model` override + `MODE_DEFAULT_MODELS` ↔ `VALID_MODES` lockstep invariant (2.2.3), single-shot retry extended to `json.JSONDecodeError` from parse stage with `ValueError` boundary guard (2.2.4) |
+| `tests/test_run_magi.py` | 99 | Arg parsing, --no-status flag, model passthrough, orchestration, degraded mode, input validation, cleanup_old_runs LRU/symlink (via `temp_dirs` module — R4-4), tracked_launch states (success/timeout/failed), display start() failure fallback, Windows kill-tree order (taskkill before proc.kill, via `subprocess_utils` — R4-4), stderr replay OSError safety, single-shot retry on ValidationError with feedback injection and `retrying` display state (2.2.0), `retried_agents` telemetry field with conditional presence and sorted serialisation (2.2.1), per-mode default model resolution with explicit `--model` override + `MODE_DEFAULT_MODELS` ↔ `VALID_MODES` lockstep invariant (2.2.3), single-shot retry extended to `json.JSONDecodeError` from parse stage with `ValueError` boundary guard (2.2.4), Windows cp1252 hardening — WARNING prints survive cp1252 stderr + input file read tolerates cp1252 bytes (2.2.6) |
 | `tests/test_status_display.py` | 46 | Init, update, render, ASCII fallback, async lifecycle, stop idempotency, write-path invariant tripwire, refresh-loop OSError resilience, refresh-loop non-OSError resilience (R4-2), retrying-state glyphs (UTF-8 ↻, ASCII lowercase r), retrying not terminal, unicode probe includes retry glyph, cp1252 fallback safe (2.2.2) |
 
 Run with `python -m pytest tests/ -v` or `make test`.
@@ -490,6 +490,26 @@ These items are real (not "accepted residuals" like the section above) and have 
 2. **Output-budget plumbing**: a ``--max-tokens`` flag in ``launch_agent`` that overrides the model default. Lets operators raise the sonnet budget on Caspar specifically without changing models. Requires a parser for the Anthropic CLI's ``--max-tokens`` option.
 
 Both are deferred until the routine surfaces enough data to choose between them.
+
+### Windows cp1252 hardening (2.2.6)
+
+**Trigger**: when MAGI runs as a subprocess on Windows (e.g., sbtdd's ``subprocess.run(..., capture_output=True)``), the captured ``sys.stderr`` inherits the system locale encoding — cp1252 by default. Two reproducible crash sites surfaced:
+
+1. **Encode-side**: four ``print(f"⚠ WARNING: ...", file=sys.stderr)`` sites in ``run_orchestrator``. The warning sign U+26A0 is **not** in cp1252's codepage (cp1252 covers U+0000-U+00FF plus a 0x80-0x9F extension; U+26A0 is outside). Python's ``print`` calls ``encode(errors='strict')`` and raises ``UnicodeEncodeError``, crashing the orchestrator before the report can be written. Triggered every time an agent fails — under the ≥33% Caspar drop pattern reported pre-2.2.5, this fired routinely.
+
+2. **Decode-side**: ``open(args.input, encoding="utf-8")`` in ``main()``. Any input file written by Windows tooling with the default cp1252 encoding (Notepad, VS Code without explicit BOM, Python's ``open()`` on Windows without ``encoding=``) raises ``UnicodeDecodeError`` on the first byte ≥0x80 that is not a valid UTF-8 start byte (e.g., the cp1252 em dash 0x97).
+
+**Fix**:
+
+* Encode-side: replaced the four ``⚠`` warning signs with ASCII ``[!]`` markers. ASCII is encodable in any codepage — bulletproof. The em dashes (U+2014) were left intact because cp1252 *does* encode them at byte 0x97; they were never the crash trigger.
+* Decode-side: extracted ``main()``'s inline file-reading block into a new module-level helper ``_load_input_content(input_arg) -> tuple[str, str]``. The helper uses ``open(..., encoding="utf-8", errors="replace")`` so cp1252-only bytes are decoded as U+FFFD and the run continues. The MAX_INPUT_FILE_SIZE check moved into the helper as a ``ValueError`` raise; ``main()`` catches it and exits with the operator-friendly error message.
+
+**Out of scope by design** (deferred until evidence justifies):
+
+* Reconfiguring ``sys.stdout`` / ``sys.stderr`` to UTF-8 with ``errors="backslashreplace"`` at startup. Would bulletproof against any LLM-emitted unicode in finding titles surfacing through ``format_report``, but changes the output bytes contract for parents that captured stdout assuming the locale encoding. The risk is theoretical (LLM output is overwhelmingly English technical prose with em dashes that DO encode in cp1252) and the change touches every output path. If LLM-unicode crashes appear, address with a 2.2.7 patch and a focused test.
+* Encoding-detection fallback (try UTF-8 first, fall back to cp1252) for input files. Would avoid U+FFFD artifacts in cp1252 source files. Same as above — defer until artifacts in production reviews are noisy enough to justify the chain.
+
+**MAGI self-review skipped on this commit by design** (precedent established in 2.2.5 release): the change is mechanical (string replacements + one ``errors=`` keyword + a refactor that preserves behaviour modulo decode-tolerance), the crash modes are reproduced and pinned by tests, and the standardised pre-merge MAGI procedure (CLAUDE.md "Pre-merge MAGI self-review") allows skipping when ``hotfix where time-to-mitigate dominates``. The user reported active production crashes; a $0.75 self-review on a deterministic 4-line + 1-refactor change would be ceremony.
 
 **Telemetry follow-up (2.2.1)**: ``run_orchestrator`` now records every agent that hit the retry path in a closure-captured set and serialises it to the report under the new ``retried_agents`` key. The key follows the same conditional-presence convention as ``degraded`` and ``failed_agents``: omitted entirely on clean runs, sorted alphabetically when present so the JSON is byte-stable. Downstream consumers can compose ``retried_agents - failed_agents`` for the retry-recovered cohort and ``retried_agents & failed_agents`` for retry-also-failed. This closes the 2.2.0 blind spot where successful retries were indistinguishable from clean first-attempt runs and is what makes the post-release fault-rate decision criterion measurable.
 

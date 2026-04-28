@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Author: Julian Bolivar
-# Version: 2.2.4
-# Date: 2026-04-25
+# Version: 2.2.6
+# Date: 2026-04-27
 """MAGI Orchestrator — async Python replacement for run_magi.sh.
 
 Launches Melchior, Balthasar, and Caspar in parallel using asyncio,
@@ -299,7 +299,7 @@ class _DisplayLogGate:
         self._logged = True
         try:
             print(
-                f"\u26a0 WARNING: status display update failed ({exc!r}) "
+                f"[!] WARNING: status display update failed ({exc!r}) "
                 f"\u2014 live tree may be stale for the rest of this run",
                 file=sys.stderr,
             )
@@ -383,6 +383,54 @@ def _build_retry_prompt(original_prompt: str, error: ValidationError | json.JSON
         f"recommendation. Do not omit any key, do not truncate, do not "
         f"emit anything outside the JSON object."
     )
+
+
+def _load_input_content(input_arg: str) -> tuple[str, str]:
+    """Resolve the CLI ``input`` argument to (content, label).
+
+    If *input_arg* is a path to an existing file, the file is read
+    with ``encoding="utf-8"`` and ``errors="replace"`` so that a
+    cp1252-encoded source (default for Windows tooling that does not
+    set an explicit encoding) does not crash MAGI on the first byte
+    that is not a valid UTF-8 start byte. Invalid bytes are replaced
+    with U+FFFD and the run continues; readable portions of the file
+    survive verbatim. The size check still applies.
+
+    If *input_arg* is not a file path, it is returned as inline text
+    unchanged — Python str values cannot have an encoding mismatch.
+
+    Args:
+        input_arg: The raw value from ``argparse`` for the positional
+            ``input`` argument. Either a path to a file or inline
+            text.
+
+    Returns:
+        Tuple ``(content, label)`` where ``content`` is the prompt
+        body and ``label`` is the source description used in the
+        eventual prompt envelope (``"File: <path>"`` or
+        ``"Inline input"``).
+
+    Raises:
+        ValueError: If *input_arg* is a path to a file that exceeds
+            :data:`validate.MAX_INPUT_FILE_SIZE`.
+    """
+    if os.path.isfile(input_arg):
+        file_size = os.path.getsize(input_arg)
+        if file_size > MAX_INPUT_FILE_SIZE:
+            raise ValueError(
+                f"Input file {input_arg} is {file_size} bytes, "
+                f"exceeding maximum of {MAX_INPUT_FILE_SIZE} bytes."
+            )
+        # ``errors="replace"`` is the cp1252 hardening shipped in
+        # 2.2.6. Windows tooling that writes input files without an
+        # explicit encoding produces cp1252 bytes; reading those with
+        # strict UTF-8 raises ``UnicodeDecodeError`` on the first
+        # byte ≥0x80 that is not a valid UTF-8 start byte. The
+        # replacement character (U+FFFD) is preferable to crashing
+        # the orchestrator before synthesis.
+        with open(input_arg, encoding="utf-8", errors="replace") as f:
+            return f.read(), f"File: {input_arg}"
+    return input_arg, "Inline input"
 
 
 async def run_orchestrator(
@@ -513,7 +561,7 @@ async def run_orchestrator(
             # never block the actual analysis. Drop the display and fall
             # through — tracked_launch closures will see ``display is None``.
             print(
-                f"\u26a0 WARNING: status display failed to start ({exc}) "
+                f"[!] WARNING: status display failed to start ({exc}) "
                 f"\u2014 continuing without live status",
                 file=sys.stderr,
             )
@@ -535,7 +583,7 @@ async def run_orchestrator(
             if not isinstance(result, (Exception, asyncio.CancelledError)):
                 raise result
             print(
-                f"\u26a0 WARNING: Agent '{name}' failed ({result}) \u2014 excluded from synthesis",
+                f"[!] WARNING: Agent '{name}' failed ({result}) \u2014 excluded from synthesis",
                 file=sys.stderr,
             )
             failed.append(name)
@@ -549,7 +597,7 @@ async def run_orchestrator(
 
     if failed:
         print(
-            f"\u26a0 WARNING: Running synthesis with "
+            f"[!] WARNING: Running synthesis with "
             f"{len(successful)}/{len(AGENTS)} agents "
             f"\u2014 results may be biased",
             file=sys.stderr,
@@ -579,21 +627,11 @@ def main() -> None:
     """CLI entry point for MAGI orchestrator."""
     args = parse_args()
 
-    if os.path.isfile(args.input):
-        file_size = os.path.getsize(args.input)
-        if file_size > MAX_INPUT_FILE_SIZE:
-            print(
-                f"ERROR: Input file {args.input} is {file_size} bytes, "
-                f"exceeding maximum of {MAX_INPUT_FILE_SIZE} bytes.",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-        with open(args.input, encoding="utf-8") as f:
-            input_content = f.read()
-        input_label = f"File: {args.input}"
-    else:
-        input_content = args.input
-        input_label = "Inline input"
+    try:
+        input_content, input_label = _load_input_content(args.input)
+    except ValueError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        sys.exit(1)
 
     prompt = f"MODE: {args.mode}\nCONTEXT ({input_label}):\n\n{input_content}"
 
