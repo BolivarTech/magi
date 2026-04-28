@@ -623,8 +623,55 @@ async def run_orchestrator(
     return report
 
 
+def _enable_utf8_console_io() -> None:
+    """Switch ``sys.stdout`` / ``sys.stderr`` to UTF-8 with
+    ``errors="backslashreplace"`` on Windows.
+
+    The 2.2.6 hotfix removed the four ``\\u26a0`` warning signs that
+    were the immediate trigger for ``UnicodeEncodeError`` crashes on
+    cp1252 locales, but the underlying streams were still bound to the
+    locale-derived wrapper Python gives child processes on Windows.
+    Any future non-cp1252 codepoint emitted through ``print`` — a
+    finding title that the LLM rolls with ``→``, ``≥``, or
+    any character outside cp1252's 256-codepoint range — would
+    re-introduce the same crash mode. This helper is the structural
+    fix: it switches the encoding at startup so every output path
+    (warnings, ERROR finals, banner, report-to-stdout) tolerates any
+    Unicode the LLM emits.
+
+    The ``backslashreplace`` error policy is non-negotiable. ``strict``
+    is what crashed in the first place; ``ignore`` would silently drop
+    diagnostic content; ``replace`` substitutes U+FFFD which is itself
+    non-ASCII and thus pointless under cp1252. ``backslashreplace``
+    always produces ASCII output (``\\u26a0``) so the printed bytes
+    are guaranteed encodable in any codepage.
+
+    No-op on non-Windows platforms — POSIX shells default to UTF-8 and
+    forcing the encoding would change the byte contract for parents
+    that captured stdout assuming the locale-derived encoding.
+
+    Streams that lack ``reconfigure`` (custom logger sinks, buffer
+    proxies, pytest capture wrappers) are skipped silently rather than
+    crashed. Custom streams have already chosen their encoding
+    contract; forcing UTF-8 would either fail or violate that
+    contract.
+    """
+    if sys.platform != "win32":
+        return
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        reconfigure(encoding="utf-8", errors="backslashreplace")
+
+
 def main() -> None:
     """CLI entry point for MAGI orchestrator."""
+    # Must run BEFORE any ``print`` or ``sys.exit`` — every output
+    # path past this line assumes UTF-8 + backslashreplace on
+    # Windows. A later call site cannot fix a crash that already
+    # happened on an earlier print.
+    _enable_utf8_console_io()
     args = parse_args()
 
     try:
