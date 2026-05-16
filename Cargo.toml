@@ -2,6 +2,14 @@
 name = "magi-rs"
 version = "0.1.0"
 edition = "2021"
+authors = ["Julian Bolivar <jbolivarg@gmail.com>"]
+description = "Magi Agent: a terminal AI assistant in Rust with sandboxed tool execution, OAuth login, and encrypted local memory (Argon2 + AES-256-GCM-SIV + Reed-Solomon FEC)."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/BolivarTech/magi"
+readme = "README.md"
+keywords = ["terminal", "ai", "assistant", "tui", "llm"]
+categories = ["command-line-utilities"]
+exclude = ["docs/AUDIT_*.md", "key.txt*", ".claude/", ".remember/", "target/"]
 
 [dependencies]
 # Async runtime
@@ -39,6 +47,9 @@ reed-solomon = "0.2"
 zeroize = "1.8"
 rusqlite = { version = "0.31", features = ["bundled"] }
 uuid = { version = "1.8", features = ["v4"] }
+
+# MAGI ecosystem
+magi-core = "0.4"
 
 [dev-dependencies]
 # Mocking for tests
