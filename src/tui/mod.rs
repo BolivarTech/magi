@@ -1,0 +1,556 @@
+//! This module implements the Terminal User Interface using Ratatui.
+
+use std::io;
+use crossterm::{
+    event::{self, DisableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers},
+    execute,
+    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+};
+use ratatui::{
+    backend::{Backend, CrosstermBackend},
+    layout::{Constraint, Direction, Layout},
+    style::{Color, Modifier, Style},
+    text::{Line, Span, Text},
+    widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
+    Frame, Terminal,
+};
+use crate::agent::{Agent, ApprovalRequest};
+use crate::system::secrets::SecretStore;
+use tokio::sync::mpsc;
+
+/// Different interaction modes for the TUI.
+#[derive(Debug, PartialEq, Clone, Copy)]
+pub enum AppMode {
+    Normal,
+    Selection,
+    Visual, // Mode for selecting text within a message
+}
+
+/// Events that can happen in the UI.
+pub enum UiEvent {
+    Input(String),
+    Clear,
+    Login,
+    Logout,
+    Quit,
+}
+
+/// Messages from the Agent to the UI.
+pub enum AgentResponse {
+    Text(String),
+    Error(String),
+    Info(String),
+}
+
+/// Represents the state of the TUI application.
+pub struct App {
+    /// The input string currently being typed.
+    pub input: String,
+    /// Current cursor position in the input string (byte index).
+    pub cursor_position: usize,
+    /// Selection start position (if any)
+    pub selection_start: Option<usize>,
+    /// History of messages to display.
+    pub messages: Vec<String>,
+    /// Channel to send events to the agent runner.
+    pub event_tx: mpsc::Sender<UiEvent>,
+    /// Channel to receive responses from the agent.
+    pub response_rx: mpsc::Receiver<AgentResponse>,
+    /// Channel to receive approval requests from the agent.
+    pub approval_rx: mpsc::Receiver<ApprovalRequest>,
+    /// Pending approval request
+    pub pending_approval: Option<ApprovalRequest>,
+    /// Current UI mode
+    pub mode: AppMode,
+    /// Index of the selected message in Selection mode
+    pub selected_index: usize,
+    /// Cursor position within the selected message (Visual mode)
+    pub visual_cursor: usize,
+    /// Selection start within the selected message (Visual mode)
+    pub visual_selection_start: Option<usize>,
+}
+
+impl App {
+    pub fn new(
+        event_tx: mpsc::Sender<UiEvent>, 
+        response_rx: mpsc::Receiver<AgentResponse>,
+        approval_rx: mpsc::Receiver<ApprovalRequest>,
+    ) -> Self {
+        Self {
+            input: String::new(),
+            cursor_position: 0,
+            selection_start: None,
+            messages: Vec::new(),
+            event_tx,
+            response_rx,
+            approval_rx,
+            pending_approval: None,
+            mode: AppMode::Normal,
+            selected_index: 0,
+            visual_cursor: 0,
+            visual_selection_start: None,
+        }
+    }
+
+    /// Moves the cursor to the left, respecting Unicode character boundaries.
+    pub fn move_cursor_left(&mut self, select: bool) {
+        if select && self.selection_start.is_none() {
+            self.selection_start = Some(self.cursor_position);
+        } else if !select {
+            self.selection_start = None;
+        }
+
+        if self.cursor_position > 0 {
+            let mut indices = self.input.char_indices().rev();
+            while let Some((idx, _)) = indices.next() {
+                if idx < self.cursor_position {
+                    self.cursor_position = idx;
+                    return;
+                }
+            }
+            self.cursor_position = 0;
+        }
+    }
+
+    /// Moves the cursor to the right, respecting Unicode character boundaries.
+    pub fn move_cursor_right(&mut self, select: bool) {
+        if select && self.selection_start.is_none() {
+            self.selection_start = Some(self.cursor_position);
+        } else if !select {
+            self.selection_start = None;
+        }
+
+        if self.cursor_position < self.input.len() {
+            let mut indices = self.input.char_indices();
+            while let Some((idx, _)) = indices.next() {
+                if idx > self.cursor_position {
+                    self.cursor_position = idx;
+                    return;
+                }
+            }
+            self.cursor_position = self.input.len();
+        }
+    }
+
+    /// Inserts a character at the current cursor position.
+    pub fn insert_char(&mut self, c: char) {
+        self.delete_selection();
+        // Ensure cursor is at char boundary before insert
+        if !self.input.is_char_boundary(self.cursor_position) {
+            self.cursor_position = 0; // Emergency fallback
+        }
+        self.input.insert(self.cursor_position, c);
+        self.cursor_position += c.len_utf8();
+    }
+
+    /// Deletes the character before the current cursor position.
+    pub fn delete_char(&mut self) {
+        if self.selection_start.is_some() {
+            self.delete_selection();
+            return;
+        }
+
+        if self.cursor_position > 0 {
+            self.move_cursor_left(false);
+            let prev_pos = self.cursor_position;
+            if self.input.is_char_boundary(prev_pos) {
+                self.input.remove(prev_pos);
+            }
+        }
+    }
+
+    /// Deletes the currently selected text.
+    pub fn delete_selection(&mut self) {
+        if let Some(start) = self.selection_start {
+            let end = self.cursor_position;
+            let (from, to) = if start < end { (start, end) } else { (end, start) };
+            if self.input.is_char_boundary(from) && self.input.is_char_boundary(to) {
+                self.input.drain(from..to);
+                self.cursor_position = from;
+            }
+            self.selection_start = None;
+        }
+    }
+
+    /// Returns the selected text if any.
+    pub fn get_selected_text(&self) -> Option<String> {
+        self.selection_start.and_then(|start| {
+            let end = self.cursor_position;
+            let (from, to) = if start < end { (start, end) } else { (end, start) };
+            if self.input.is_char_boundary(from) && self.input.is_char_boundary(to) {
+                Some(self.input[from..to].to_string())
+            } else {
+                None
+            }
+        })
+    }
+
+    /// Appends a message to the UI history.
+    pub fn push_message(&mut self, message: String) {
+        self.messages.push(message);
+    }
+}
+
+pub async fn run_tui(agent: Agent) -> anyhow::Result<()> {
+    run_tui_ext(agent, None).await
+}
+
+pub async fn run_tui_ext(agent: Agent, initial_info: Option<String>) -> anyhow::Result<()> {
+    let original_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |panic_info| {
+        let _ = disable_raw_mode();
+        let mut stdout = io::stdout();
+        let _ = execute!(stdout, LeaveAlternateScreen, DisableMouseCapture);
+        let _ = Terminal::new(CrosstermBackend::new(io::stdout())).and_then(|mut t| t.show_cursor());
+        original_hook(panic_info);
+    }));
+
+    enable_raw_mode()?;
+    let mut stdout = io::stdout();
+    execute!(stdout, EnterAlternateScreen)?;
+    let backend = CrosstermBackend::new(stdout);
+    let mut terminal = Terminal::new(backend)?;
+
+    let (event_tx, mut event_rx) = mpsc::channel(100);
+    let (response_tx, response_rx) = mpsc::channel(100);
+    let (approval_tx, approval_rx) = mpsc::channel(100);
+
+    if let Some(info) = initial_info {
+        let _ = response_tx.send(AgentResponse::Info(info)).await;
+    }
+
+    let mut runner_agent = agent;
+    runner_agent.set_approval_channel(approval_tx);
+    
+    tokio::spawn(async move {
+        while let Some(event) = event_rx.recv().await {
+            match event {
+                UiEvent::Input(text) => {
+                    match runner_agent.query(&text).await {
+                        Ok(response) => { let _ = response_tx.send(AgentResponse::Text(response)).await; }
+                        Err(e) => { let _ = response_tx.send(AgentResponse::Error(e.to_string())).await; }
+                    }
+                }
+                UiEvent::Clear => { runner_agent.clear_history(); }
+                UiEvent::Login => {
+                    let oauth = crate::services::oauth::OAuthService::new();
+                    let url = oauth.get_authorize_url();
+                    let _ = response_tx.send(AgentResponse::Info(url)).await;
+                    
+                    match oauth.start_callback_server().await {
+                        Ok(code) => {
+                            let _ = response_tx.send(AgentResponse::Info("Authenticating...".to_string())).await;
+                            match oauth.exchange_code_for_token(&code).await {
+                                Ok(token) => {
+                                    match oauth.create_raw_api_key(&token).await {
+                                        Ok(api_key) => {
+                                            let store = crate::system::secrets::KeyringStore::new("magi-rust");
+                                            if let Err(e) = store.set_secret("ANTHROPIC_API_KEY", &api_key).await {
+                                                let _ = response_tx.send(AgentResponse::Error(format!("Failed to store key: {}", e))).await;
+                                            } else {
+                                                let _ = response_tx.send(AgentResponse::Info("Successfully logged in!".to_string())).await;
+                                            }
+                                        }
+                                        Err(e) => { let _ = response_tx.send(AgentResponse::Error(format!("Failed to create API key: {}", e))).await; }
+                                    }
+                                }
+                                Err(e) => { let _ = response_tx.send(AgentResponse::Error(format!("OAuth exchange failed: {}", e))).await; }
+                            }
+                        }
+                        Err(e) => { let _ = response_tx.send(AgentResponse::Error(format!("Callback server error: {}", e))).await; }
+                    }
+                }
+                UiEvent::Logout => {
+                    let store = crate::system::secrets::KeyringStore::new("magi-rust");
+                    if let Err(e) = store.delete_secret("ANTHROPIC_API_KEY").await {
+                        let _ = response_tx.send(AgentResponse::Error(format!("Logout failed: {}", e))).await;
+                    } else {
+                        let _ = response_tx.send(AgentResponse::Info("Logged out successfully.".to_string())).await;
+                    }
+                }
+                UiEvent::Quit => break,
+            }
+        }
+    });
+
+    let app = App::new(event_tx, response_rx, approval_rx);
+    let res = run_app(&mut terminal, app).await;
+
+    let _ = disable_raw_mode();
+    let _ = execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture);
+    let _ = terminal.show_cursor();
+
+    if let Err(err) = res { eprintln!("TUI Error: {:?}", err) }
+    Ok(())
+}
+
+async fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Result<()> {
+    loop {
+        terminal.draw(|f| ui(f, &app))?;
+
+        while let Ok(response) = app.response_rx.try_recv() {
+            match response {
+                AgentResponse::Text(t) => app.push_message(format!("Magi Agent: {}", t)),
+                AgentResponse::Error(e) => app.push_message(format!("Error: {}", e)),
+                AgentResponse::Info(i) => app.push_message(format!("System: {}", i)),
+            }
+        }
+
+        while let Ok(req) = app.approval_rx.try_recv() {
+            app.push_message(format!("APPROVAL REQUIRED: Execute {}?", req.tool_name));
+            app.push_message("Press 'y' to approve, 'c' or 'Esc' to deny.".to_string());
+            app.pending_approval = Some(req);
+        }
+
+        if event::poll(std::time::Duration::from_millis(50))? {
+            if let Event::Key(key) = event::read()? {
+                if key.kind != KeyEventKind::Press { continue; }
+
+                match app.mode {
+                    AppMode::Selection => {
+                        match key.code {
+                            KeyCode::Up => { if app.selected_index > 0 { app.selected_index -= 1; } }
+                            KeyCode::Down => { if app.selected_index < app.messages.len().saturating_sub(1) { app.selected_index += 1; } }
+                            KeyCode::Enter => { 
+                                app.mode = AppMode::Visual; 
+                                app.visual_cursor = 0; 
+                                app.visual_selection_start = None; 
+                            }
+                            KeyCode::Char('y') => {
+                                if let Some(msg) = app.messages.get(app.selected_index) {
+                                    if let Ok(mut clipboard) = arboard::Clipboard::new() {
+                                        let _ = clipboard.set_text(msg.clone());
+                                        app.push_message("System: Message copied".to_string());
+                                    }
+                                }
+                                app.mode = AppMode::Normal;
+                            }
+                            KeyCode::Esc | KeyCode::Char('q') => { app.mode = AppMode::Normal; }
+                            _ => {}
+                        }
+                        continue;
+                    }
+                    AppMode::Visual => {
+                        let msg = app.messages.get(app.selected_index).cloned().unwrap_or_default();
+                        match key.code {
+                            KeyCode::Left => { 
+                                if key.modifiers.contains(KeyModifiers::SHIFT) && app.visual_selection_start.is_none() {
+                                    app.visual_selection_start = Some(app.visual_cursor);
+                                } else if !key.modifiers.contains(KeyModifiers::SHIFT) {
+                                    app.visual_selection_start = None;
+                                }
+                                if app.visual_cursor > 0 {
+                                    let mut indices = msg.char_indices().rev();
+                                    while let Some((idx, _)) = indices.next() {
+                                        if idx < app.visual_cursor { app.visual_cursor = idx; break; }
+                                    }
+                                } 
+                            }
+                            KeyCode::Right => { 
+                                if key.modifiers.contains(KeyModifiers::SHIFT) && app.visual_selection_start.is_none() {
+                                    app.visual_selection_start = Some(app.visual_cursor);
+                                } else if !key.modifiers.contains(KeyModifiers::SHIFT) {
+                                    app.visual_selection_start = None;
+                                }
+                                if app.visual_cursor < msg.len() {
+                                    let mut indices = msg.char_indices();
+                                    while let Some((idx, _)) = indices.next() {
+                                        if idx > app.visual_cursor { app.visual_cursor = idx; break; }
+                                    }
+                                } 
+                            }
+                            KeyCode::Enter => {
+                                if let (Some(msg_ref), Some(start)) = (app.messages.get(app.selected_index), app.visual_selection_start) {
+                                    let (from, to) = if start < app.visual_cursor { (start, app.visual_cursor) } else { (app.visual_cursor, start) };
+                                    if msg_ref.is_char_boundary(from) && msg_ref.is_char_boundary(to) {
+                                        if let Ok(mut clipboard) = arboard::Clipboard::new() {
+                                            let _ = clipboard.set_text(msg_ref[from..to].to_string());
+                                            app.push_message("System: Fragment copied".to_string());
+                                        }
+                                    }
+                                }
+                                app.mode = AppMode::Normal;
+                            }
+                            KeyCode::Esc | KeyCode::Char('q') => { app.mode = AppMode::Selection; }
+                            _ => {}
+                        }
+                        continue;
+                    }
+                    AppMode::Normal => {
+                        match (key.code, key.modifiers) {
+                            (KeyCode::Char('v'), KeyModifiers::CONTROL) => {
+                                if let Ok(mut clipboard) = arboard::Clipboard::new() {
+                                    if let Ok(text) = clipboard.get_text() {
+                                        for c in text.chars() { app.insert_char(c); }
+                                    }
+                                }
+                                continue;
+                            }
+                            (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
+                                if let Some(selected) = app.get_selected_text() {
+                                    if let Ok(mut clipboard) = arboard::Clipboard::new() {
+                                        let _ = clipboard.set_text(selected);
+                                        app.push_message("System: Selection copied".to_string());
+                                    }
+                                    continue;
+                                } else {
+                                    let _ = app.event_tx.send(UiEvent::Quit).await;
+                                    return Ok(());
+                                }
+                            }
+                            (KeyCode::Char('s'), KeyModifiers::CONTROL) => {
+                                if !app.messages.is_empty() {
+                                    app.mode = AppMode::Selection;
+                                    app.selected_index = app.messages.len().saturating_sub(1);
+                                }
+                                continue;
+                            }
+                            (KeyCode::Left, m) => { app.move_cursor_left(m.contains(KeyModifiers::SHIFT)); continue; }
+                            (KeyCode::Right, m) => { app.move_cursor_right(m.contains(KeyModifiers::SHIFT)); continue; }
+                            _ => {}
+                        }
+
+                        if let Some(req) = app.pending_approval.take() {
+                            match key.code {
+                                KeyCode::Char('y') | KeyCode::Char('Y') => { let _ = req.tx.send(true); app.push_message("User: Approved".to_string()); }
+                                KeyCode::Char('c') | KeyCode::Char('C') | KeyCode::Esc => { let _ = req.tx.send(false); app.push_message("User: Denied".to_string()); }
+                                _ => { app.pending_approval = Some(req); }
+                            }
+                            continue;
+                        }
+
+                        match key.code {
+                            KeyCode::Enter => {
+                                let input = app.input.drain(..).collect::<String>();
+                                app.cursor_position = 0;
+                                let trimmed = input.trim();
+                                if !trimmed.is_empty() {
+                                    match trimmed {
+                                        "/exit" | "/quit" => { let _ = app.event_tx.send(UiEvent::Quit).await; return Ok(()); }
+                                        "/clear" => { app.messages.clear(); let _ = app.event_tx.send(UiEvent::Clear).await; continue; }
+                                        "/login" => { let _ = app.event_tx.send(UiEvent::Login).await; continue; }
+                                        "/logout" => { let _ = app.event_tx.send(UiEvent::Logout).await; continue; }
+                                        "/help" => {
+                                            app.push_message("Available commands:".to_string());
+                                            app.push_message("  /login, /logout - Identity management".to_string());
+                                            app.push_message("  /exit, /quit    - Exit the application".to_string());
+                                            app.push_message("  /clear          - Clear session history".to_string());
+                                            app.push_message("  /help           - Show this help message".to_string());
+                                            continue;
+                                        }
+                                        _ => {}
+                                    }
+                                    app.push_message(format!("User: {}", trimmed));
+                                    let _ = app.event_tx.send(UiEvent::Input(trimmed.to_string())).await;
+                                }
+                            }
+                            KeyCode::Char(c) => { app.insert_char(c); }
+                            KeyCode::Backspace => { app.delete_char(); }
+                            KeyCode::Esc => { let _ = app.event_tx.send(UiEvent::Quit).await; return Ok(()); }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn ui(f: &mut Frame, app: &App) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .margin(1)
+        .constraints([Constraint::Percentage(80), Constraint::Length(3)].as_ref())
+        .split(f.size());
+
+    let messages: Vec<ListItem> = app.messages.iter().enumerate().map(|(i, m)| {
+        let mut style = Style::default();
+        if (app.mode == AppMode::Selection || app.mode == AppMode::Visual) && i == app.selected_index {
+            style = style.bg(Color::Blue).fg(Color::White).add_modifier(Modifier::BOLD);
+        }
+        ListItem::new(m.as_str()).style(style)
+    }).collect();
+    
+    let mut state = ListState::default();
+    if app.mode == AppMode::Selection || app.mode == AppMode::Visual { 
+        state.select(Some(app.selected_index)); 
+    }
+
+    let messages_list = List::new(messages)
+        .block(Block::default().borders(Borders::ALL).title("Conversation History"))
+        .highlight_symbol(">> ");
+    f.render_stateful_widget(messages_list, chunks[0], &mut state);
+
+    let mut input_text = Text::raw(app.input.as_str());
+    if let Some(start) = app.selection_start {
+        let (from, to) = if start < app.cursor_position { (start, app.cursor_position) } else { (app.cursor_position, start) };
+        if app.input.is_char_boundary(from) && app.input.is_char_boundary(to) {
+            let mut spans = Vec::new();
+            spans.push(Span::raw(&app.input[..from]));
+            spans.push(Span::styled(&app.input[from..to], Style::default().bg(Color::White).fg(Color::Black)));
+            spans.push(Span::raw(&app.input[to..]));
+            input_text = Text::from(Line::from(spans));
+        }
+    }
+
+    let input_title = match app.mode {
+        AppMode::Selection => "SELECT MESSAGE (Enter to select text, 'y' to copy whole, Esc to exit)",
+        AppMode::Visual => "VISUAL SELECTION MODE",
+        _ if app.pending_approval.is_some() => "WAITING FOR APPROVAL (y/c)",
+        _ => "Input (Ctrl+S Copy Mode, Shift+Arrows Select)",
+    };
+
+    let input = Paragraph::new(input_text)
+        .block(Block::default().borders(Borders::ALL).title(input_title));
+    f.render_widget(input, chunks[1]);
+    
+    if app.mode == AppMode::Normal {
+        // Find visible width of input to position cursor correctly
+        let prefix_len = app.input[..app.cursor_position].chars().count() as u16;
+        f.set_cursor(chunks[1].x + prefix_len + 1, chunks[1].y + 1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_app_cursor_logic() {
+        let (event_tx, _) = mpsc::channel(1);
+        let (_, response_rx) = mpsc::channel(1);
+        let (_, approval_rx) = mpsc::channel(1);
+        let mut app = App::new(event_tx, response_rx, approval_rx);
+
+        app.insert_char('a');
+        app.insert_char('c');
+        assert_eq!(app.input, "ac");
+        assert_eq!(app.cursor_position, 2);
+
+        app.move_cursor_left(false);
+        app.insert_char('b');
+        assert_eq!(app.input, "abc");
+        assert_eq!(app.cursor_position, 2);
+
+        app.delete_char();
+        assert_eq!(app.input, "ac");
+        assert_eq!(app.cursor_position, 1);
+    }
+
+    #[tokio::test]
+    async fn test_unicode_character_boundary_panic() {
+        let (event_tx, _) = mpsc::channel(1);
+        let (_, response_rx) = mpsc::channel(1);
+        let (_, approval_rx) = mpsc::channel(1);
+        let mut app = App::new(event_tx, response_rx, approval_rx);
+
+        app.insert_char('á');
+        assert_eq!(app.cursor_position, 2);
+
+        app.move_cursor_left(false);
+        assert_eq!(app.cursor_position, 0);
+        
+        app.insert_char('x'); 
+        assert_eq!(app.input, "xá");
+    }
+}

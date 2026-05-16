@@ -1,0 +1,311 @@
+// Author: Julian Bolivar
+// Version: 1.1.0
+// Date: 2026-02-12
+
+//! Self-contained cryptographic module — key derivation, authenticated
+//! encryption, and forward error correction.
+//!
+//! ### Panoptic Data Flow:
+//! 1. **Key Derivation (Argon2):** A master password (from OS Keyring) is hashed with a random salt to produce a 32-byte key + nonce.
+//! 2. **Authenticated Encryption (AES-256-GCM-SIV):** Plaintext is encrypted using the derived key. This cipher is nonce-misuse resistant, 
+//!    guaranteeing confidentiality and integrity (authentication tag).
+//! 3. **Error Correction (Reed-Solomon):** The salt and ciphertext are encoded with parity bytes. This allows recovery of the data 
+//!    even if the underlying storage suffers from bit-rot or minor corruption.
+//! 4. **Final Blob:** [Length (4b)] + [RS Encoded Payload (Salt + Ciphertext + Parity)].
+
+use std::fmt;
+
+use aes_gcm_siv::aead::generic_array::GenericArray;
+use aes_gcm_siv::aead::{Aead, KeyInit};
+use aes_gcm_siv::Aes256GcmSiv;
+use argon2::Argon2;
+use base64::engine::general_purpose::STANDARD;
+use base64::Engine;
+use rand::RngCore;
+use zeroize::Zeroizing;
+
+// ── Public constants ────────────────────────────────────────────────
+
+pub const SALT_LEN: usize = 16;
+pub const KEY_LEN: usize = 32;
+pub const RS_DEFAULT_PARITY_LEN: usize = 32;
+pub const RS_DEFAULT_DATA_LEN: usize = 223;
+
+#[allow(dead_code)]
+const RS_MAX_BLOCK_SIZE: usize = 255;
+
+// ── CryptoError ─────────────────────────────────────────────────────
+
+#[derive(Debug)]
+pub enum CryptoError {
+    KeyDerivation(String),
+    Cipher(String),
+    ErrorCorrection(String),
+    Encoding(String),
+    InvalidInput(String),
+}
+
+impl fmt::Display for CryptoError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::KeyDerivation(msg) => write!(f, "Key derivation error: {}", msg),
+            Self::Cipher(msg) => write!(f, "Cipher error: {}", msg),
+            Self::ErrorCorrection(msg) => write!(f, "Error correction error: {}", msg),
+            Self::Encoding(msg) => write!(f, "Encoding error: {}", msg),
+            Self::InvalidInput(msg) => write!(f, "Invalid input: {}", msg),
+        }
+    }
+}
+
+impl std::error::Error for CryptoError {}
+
+// ── Traits ──────────────────────────────────────────────────────────
+
+pub trait KeyDerivation: Send + Sync {
+    fn derive_key(
+        &self,
+        password: &[u8],
+        salt: &[u8],
+        output_len: usize,
+    ) -> Result<Zeroizing<Vec<u8>>, CryptoError>;
+}
+
+pub trait AuthenticatedCipher: Send + Sync {
+    fn encrypt(&self, key: &[u8], nonce: &[u8], data: &[u8]) -> Result<Vec<u8>, CryptoError>;
+    fn decrypt(&self, key: &[u8], nonce: &[u8], data: &[u8]) -> Result<Vec<u8>, CryptoError>;
+    fn nonce_len(&self) -> usize;
+}
+
+pub trait ErrorCorrection: Send + Sync {
+    fn encode(&self, data: &[u8]) -> Vec<u8>;
+    fn decode(&self, encoded: &[u8], original_len: usize) -> Result<Vec<u8>, CryptoError>;
+}
+
+// ── Argon2Kdf ───────────────────────────────────────────────────────
+
+pub struct Argon2Kdf;
+
+impl KeyDerivation for Argon2Kdf {
+    fn derive_key(
+        &self,
+        password: &[u8],
+        salt: &[u8],
+        output_len: usize,
+    ) -> Result<Zeroizing<Vec<u8>>, CryptoError> {
+        let mut key = Zeroizing::new(vec![0u8; output_len]);
+        Argon2::default()
+            .hash_password_into(password, salt, &mut key)
+            .map_err(|e| CryptoError::KeyDerivation(format!("Argon2 failed: {}", e)))?;
+        Ok(key)
+    }
+}
+
+// ── Aes256GcmSivCipher ──────────────────────────────────────────────
+
+pub struct Aes256GcmSivCipher;
+
+const AES_GCM_SIV_NONCE_LEN: usize = 12;
+
+impl AuthenticatedCipher for Aes256GcmSivCipher {
+    fn encrypt(&self, key: &[u8], nonce: &[u8], data: &[u8]) -> Result<Vec<u8>, CryptoError> {
+        let cipher = Aes256GcmSiv::new_from_slice(key)
+            .map_err(|e| CryptoError::Cipher(format!("Cipher init failed: {}", e)))?;
+        let nonce = GenericArray::from_slice(nonce);
+        cipher
+            .encrypt(nonce, data)
+            .map_err(|e| CryptoError::Cipher(format!("Encryption failed: {}", e)))
+    }
+
+    fn decrypt(&self, key: &[u8], nonce: &[u8], data: &[u8]) -> Result<Vec<u8>, CryptoError> {
+        let cipher = Aes256GcmSiv::new_from_slice(key)
+            .map_err(|e| CryptoError::Cipher(format!("Cipher init failed: {}", e)))?;
+        let nonce = GenericArray::from_slice(nonce);
+        cipher
+            .decrypt(nonce, data)
+            .map_err(|e| CryptoError::Cipher(format!("Decryption failed: {}", e)))
+    }
+
+    fn nonce_len(&self) -> usize {
+        AES_GCM_SIV_NONCE_LEN
+    }
+}
+
+// ── ReedSolomonCodec ────────────────────────────────────────────────
+
+#[derive(Debug)]
+pub struct ReedSolomonCodec {
+    parity_len: usize,
+    data_len: usize,
+}
+
+impl Default for ReedSolomonCodec {
+    fn default() -> Self {
+        Self {
+            parity_len: RS_DEFAULT_PARITY_LEN,
+            data_len: RS_DEFAULT_DATA_LEN,
+        }
+    }
+}
+
+impl ReedSolomonCodec {
+    #[allow(dead_code)]
+    pub fn new(parity_len: usize, data_len: usize) -> Result<Self, CryptoError> {
+        if parity_len == 0 || data_len == 0 {
+            return Err(CryptoError::InvalidInput("Parity and data length must be greater than zero".to_string()));
+        }
+        if parity_len + data_len > 255 {
+            return Err(CryptoError::InvalidInput(format!("parity_len ({}) + data_len ({}) exceeds GF(2^8) limit of 255", parity_len, data_len)));
+        }
+        Ok(Self { parity_len, data_len })
+    }
+}
+
+impl ErrorCorrection for ReedSolomonCodec {
+    fn encode(&self, data: &[u8]) -> Vec<u8> {
+        let enc = reed_solomon::Encoder::new(self.parity_len);
+        let mut result = Vec::new();
+        for chunk in data.chunks(self.data_len) {
+            let encoded = enc.encode(chunk);
+            result.extend_from_slice(&encoded);
+        }
+        result
+    }
+
+    fn decode(&self, encoded: &[u8], original_len: usize) -> Result<Vec<u8>, CryptoError> {
+        let dec = reed_solomon::Decoder::new(self.parity_len);
+        let block_size = self.data_len + self.parity_len;
+        let mut result = Vec::new();
+
+        for chunk in encoded.chunks(block_size) {
+            if chunk.len() <= self.parity_len {
+                return Err(CryptoError::ErrorCorrection("Encoded block too short for Reed-Solomon parity".to_string()));
+            }
+            let recovered = dec.correct(chunk, None).map_err(|_| {
+                CryptoError::ErrorCorrection("Reed-Solomon error correction failed".to_string())
+            })?;
+            result.extend_from_slice(recovered.data());
+        }
+
+        result.truncate(original_len);
+        Ok(result)
+    }
+}
+
+// ── CryptoVault ─────────────────────────────────────────────────────
+
+pub struct CryptoVault {
+    kdf: Box<dyn KeyDerivation>,
+    cipher: Box<dyn AuthenticatedCipher>,
+    fec: Box<dyn ErrorCorrection>,
+}
+
+impl Default for CryptoVault {
+    fn default() -> Self {
+        Self {
+            kdf: Box::new(Argon2Kdf),
+            cipher: Box::new(Aes256GcmSivCipher),
+            fec: Box::new(ReedSolomonCodec::default()),
+        }
+    }
+}
+
+impl CryptoVault {
+    #[allow(dead_code)]
+    pub fn new(
+        kdf: Box<dyn KeyDerivation>,
+        cipher: Box<dyn AuthenticatedCipher>,
+        fec: Box<dyn ErrorCorrection>,
+    ) -> Self {
+        Self { kdf, cipher, fec }
+    }
+
+    pub fn encrypt(&self, password: &str, plaintext: &str) -> Result<String, CryptoError> {
+        if password.is_empty() {
+            return Err(CryptoError::InvalidInput("Password must not be empty".to_string()));
+        }
+
+        let nonce_len = self.cipher.nonce_len();
+        let mut salt = [0u8; SALT_LEN];
+        rand::rngs::OsRng.fill_bytes(&mut salt);
+
+        let kdf_output = self
+            .kdf
+            .derive_key(password.as_bytes(), &salt, KEY_LEN + nonce_len)?;
+
+        let ciphertext = self.cipher.encrypt(
+            &kdf_output[..KEY_LEN],
+            &kdf_output[KEY_LEN..],
+            plaintext.as_bytes(),
+        )?;
+
+        let mut plaindata = Vec::with_capacity(SALT_LEN + ciphertext.len());
+        plaindata.extend_from_slice(&salt);
+        plaindata.extend_from_slice(&ciphertext);
+
+        let rs_encoded = self.fec.encode(&plaindata);
+
+        let original_len_u32 = u32::try_from(plaindata.len())
+            .map_err(|_| CryptoError::Encoding("Data too large for length header".to_string()))?;
+        let mut blob = Vec::with_capacity(4 + rs_encoded.len());
+        blob.extend_from_slice(&original_len_u32.to_le_bytes());
+        blob.extend_from_slice(&rs_encoded);
+
+        Ok(STANDARD.encode(&blob))
+    }
+
+    pub fn decrypt(&self, password: &str, encrypted_base64: &str) -> Result<String, CryptoError> {
+        if password.is_empty() {
+            return Err(CryptoError::InvalidInput("Password must not be empty".to_string()));
+        }
+
+        let nonce_len = self.cipher.nonce_len();
+        let blob = STANDARD.decode(encrypted_base64)
+            .map_err(|e| CryptoError::Encoding(format!("Invalid base64: {}", e)))?;
+
+        if blob.len() < 4 {
+            return Err(CryptoError::Encoding("Encrypted blob too short".to_string()));
+        }
+
+        let len_bytes: [u8; 4] = blob[..4].try_into().unwrap();
+        let original_len = u32::from_le_bytes(len_bytes) as usize;
+
+        if original_len > (blob.len() - 4) {
+            return Err(CryptoError::InvalidInput("Length header exceeds encoded data size".to_string()));
+        }
+
+        let plaindata = self.fec.decode(&blob[4..], original_len)?;
+        let salt = &plaindata[..SALT_LEN];
+        let ciphertext = &plaindata[SALT_LEN..];
+
+        let kdf_output = self.kdf.derive_key(password.as_bytes(), salt, KEY_LEN + nonce_len)?;
+
+        let plaintext = self.cipher.decrypt(&kdf_output[..KEY_LEN], &kdf_output[KEY_LEN..], ciphertext)?;
+
+        String::from_utf8(plaintext).map_err(|e| CryptoError::Encoding(format!("Invalid UTF-8: {}", e)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn vault_decrypt_roundtrip() {
+        let vault = CryptoVault::default();
+        let secret = "sk-ant-api03-real-key-here";
+        let password = "my-secure-password";
+        let encrypted = vault.encrypt(password, secret).unwrap();
+        let decrypted = vault.decrypt(password, &encrypted).unwrap();
+        assert_eq!(decrypted, secret);
+    }
+
+    #[test]
+    fn rs_corrects_corrupted_data() {
+        let rs = ReedSolomonCodec::default();
+        let data = b"FEC correction test payload for Reed-Solomon codec.";
+        let mut encoded = rs.encode(data);
+        for i in 0..10 { encoded[i * 7] ^= 0xAA; }
+        let decoded = rs.decode(&encoded, data.len()).unwrap();
+        assert_eq!(decoded, data);
+    }
+}

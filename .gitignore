@@ -1,0 +1,11 @@
+/target
+key.txt
+key.txt.bak
+key.txt.org
+*.tmp
+
+# Local developer state (per CLAUDE.local.md §1 "Politica de tracking")
+CLAUDE.md
+CLAUDE.local.md
+.claude/
+.remember/

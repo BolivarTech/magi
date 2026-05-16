@@ -1,0 +1,49 @@
+[package]
+name = "magi-rs"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1.36", features = ["full"] }
+async-trait = "0.1"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Error Handling
+thiserror = "1.0"
+anyhow = "1.0"
+
+# CLI
+clap = { version = "4.5", features = ["derive"] }
+
+# TUI
+ratatui = "0.26"
+crossterm = { version = "0.27", features = ["events"] }
+
+# Networking
+reqwest = { version = "0.11", features = ["json", "stream"] }
+futures = "0.3"
+arboard = "3.3"
+keyring = "2.3"
+axum = "0.7"
+sha2 = "0.10"
+base64 = "0.22"
+rand = "0.8"
+urlencoding = "2.1"
+aes-gcm-siv = "0.11"
+argon2 = "0.5"
+reed-solomon = "0.2"
+zeroize = "1.8"
+rusqlite = { version = "0.31", features = ["bundled"] }
+uuid = { version = "1.8", features = ["v4"] }
+
+[dev-dependencies]
+# Mocking for tests
+mockall = "0.12"
+mockito = "1.4"
+tempfile = "3.10"
+tokio-test = "0.4"
+serial_test = "3.0"
