@@ -255,6 +255,10 @@ impl EncryptedSqliteMemory {
     ) -> Result<Vec<(String, String)>> {
         self.collect_message_rows(session_id)
     }
+
+    pub(crate) fn master_password_type_for_test(&self) -> &zeroize::Zeroizing<String> {
+        &self.master_password
+    }
 }
 
 #[cfg(test)]
@@ -420,5 +424,20 @@ mod tests {
         let raw = memory.collect_message_rows_for_test(&sid).unwrap();
         let msgs = memory.decrypt_rows(raw).unwrap();
         assert_eq!(msgs, vec![Message::user("hi")]);
+    }
+
+    #[tokio::test]
+    async fn test_master_password_field_is_zeroizing_and_roundtrips() {
+        let tmp_file = NamedTempFile::new().unwrap();
+        let path = tmp_file.path().to_path_buf();
+
+        let memory = EncryptedSqliteMemory::new(path, "zeroizing_pw".to_string()).unwrap();
+        let sid = memory.create_session("p").await.unwrap();
+        memory.add_message(&sid, &Message::user("secret payload")).await.unwrap();
+
+        let _assert_type: &zeroize::Zeroizing<String> = memory.master_password_type_for_test();
+
+        let msgs = memory.get_messages(&sid).await.unwrap();
+        assert_eq!(msgs, vec![Message::user("secret payload")]);
     }
 }
