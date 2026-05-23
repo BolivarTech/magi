@@ -336,6 +336,26 @@ mod tests {
     }
 
     #[test]
+    fn test_powershell_stop_parsing_token_is_rejected() {
+        assert!(
+            !is_command_allowed("echo --% foo"),
+            "bare --% must be blocked"
+        );
+        assert!(
+            !is_command_allowed("git log --%"),
+            "--% as last token must be blocked"
+        );
+        assert!(
+            !is_command_allowed("ls --%bar"),
+            "--% prefix in a token must be blocked"
+        );
+        assert!(
+            is_command_allowed("git log --oneline"),
+            "ordinary -- flags stay allowed"
+        );
+    }
+
+    #[test]
     fn test_adversarial_bash_injections() {
         // 1. Sub-shell injection attempts
         assert!(
