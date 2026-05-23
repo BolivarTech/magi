@@ -41,6 +41,19 @@ pub const RS_DEFAULT_DATA_LEN: usize = 223;
 #[allow(dead_code)]
 const RS_MAX_BLOCK_SIZE: usize = 255;
 
+// ── Argon2 cost parameters (OWASP 2025) ─────────────────────────────
+//
+// Explicit, audited Argon2id work factors. OWASP's 2025 minimum for
+// interactive use: 64 MiB memory, 3 iterations, parallelism 4. Pinning these
+// avoids relying on the argon2 crate's implicit `Default`, which can drift
+// between crate versions and silently weaken (or strengthen) key derivation.
+/// Argon2 memory cost in KiB (64 MiB).
+pub const ARGON2_M_COST_KIB: u32 = 65536;
+/// Argon2 time cost (number of iterations).
+pub const ARGON2_T_COST: u32 = 3;
+/// Argon2 degree of parallelism.
+pub const ARGON2_P_COST: u32 = 4;
+
 // ── CryptoError ─────────────────────────────────────────────────────
 
 #[derive(Debug)]
@@ -92,6 +105,19 @@ pub trait ErrorCorrection: Send + Sync {
 
 pub struct Argon2Kdf;
 
+impl Argon2Kdf {
+    /// Returns the audited OWASP 2025 Argon2 cost parameters used for all key
+    /// derivation in this module.
+    ///
+    /// # Panics
+    /// Never in practice: the constants are valid (`m`/`t`/`p` within argon2's
+    /// accepted ranges), so `Params::new` cannot fail here.
+    pub fn owasp_params() -> argon2::Params {
+        argon2::Params::new(ARGON2_M_COST_KIB, ARGON2_T_COST, ARGON2_P_COST, None)
+            .expect("OWASP Argon2 parameters are statically valid")
+    }
+}
+
 impl KeyDerivation for Argon2Kdf {
     fn derive_key(
         &self,
@@ -100,7 +126,12 @@ impl KeyDerivation for Argon2Kdf {
         output_len: usize,
     ) -> Result<Zeroizing<Vec<u8>>, CryptoError> {
         let mut key = Zeroizing::new(vec![0u8; output_len]);
-        Argon2::default()
+        let argon2 = Argon2::new(
+            argon2::Algorithm::Argon2id,
+            argon2::Version::V0x13,
+            Self::owasp_params(),
+        );
+        argon2
             .hash_password_into(password, salt, &mut key)
             .map_err(|e| CryptoError::KeyDerivation(format!("Argon2 failed: {}", e)))?;
         Ok(key)
