@@ -237,6 +237,7 @@ impl EncryptedSqliteMemory {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
     use tempfile::NamedTempFile;
 
     #[tokio::test]
@@ -341,5 +342,49 @@ mod tests {
             result.unwrap_err().to_string().contains("poisoned"),
             "error must identify the poisoned lock"
         );
+    }
+
+    #[tokio::test]
+    async fn test_get_messages_does_not_hold_lock_during_decrypt() {
+        let tmp_file = NamedTempFile::new().unwrap();
+        let path = tmp_file.path().to_path_buf();
+        let memory = Arc::new(EncryptedSqliteMemory::new(path, "pw".to_string()).unwrap());
+        let sid = memory.create_session("p").await.unwrap();
+
+        for i in 0..16 {
+            memory
+                .add_message(&sid, &Message::user(&format!("message number {i}")))
+                .await
+                .unwrap();
+        }
+
+        let reader = {
+            let m = memory.clone();
+            let s = sid.clone();
+            tokio::spawn(async move { m.get_messages(&s).await })
+        };
+        let writer = {
+            let m = memory.clone();
+            tokio::spawn(async move { m.create_session("concurrent").await })
+        };
+
+        let msgs = reader.await.unwrap().unwrap();
+        let new_sid = writer.await.unwrap().unwrap();
+
+        assert_eq!(msgs.len(), 16, "all messages decrypt correctly after lock-drop refactor");
+        assert!(!new_sid.is_empty(), "a concurrent write completes; lock is not held across decrypt");
+        assert_eq!(msgs[0], Message::user("message number 0"));
+    }
+
+    #[tokio::test]
+    async fn test_decrypt_rows_runs_without_connection_lock() {
+        let tmp_file = NamedTempFile::new().unwrap();
+        let memory = EncryptedSqliteMemory::new(tmp_file.path().to_path_buf(), "pw".to_string()).unwrap();
+        let sid = memory.create_session("p").await.unwrap();
+        memory.add_message(&sid, &Message::user("hi")).await.unwrap();
+
+        let raw = memory.collect_message_rows_for_test(&sid).unwrap();
+        let msgs = memory.decrypt_rows(raw).unwrap();
+        assert_eq!(msgs, vec![Message::user("hi")]);
     }
 }
