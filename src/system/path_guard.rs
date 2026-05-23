@@ -5,14 +5,17 @@ use std::io;
 use std::path::{Component, Path, PathBuf};
 
 /// Utility to ensure paths are safe and stay within the workspace boundary.
-#[allow(dead_code)]
 pub struct PathGuard {
     workspace_root: PathBuf,
 }
 
-#[allow(dead_code)]
 impl PathGuard {
     /// Returns a reference to the workspace root.
+    ///
+    /// Part of `PathGuard`'s public API; retained even though no current
+    /// production caller uses it (narrow `#[allow(dead_code)]`, not a blanket
+    /// allowance on the whole type).
+    #[allow(dead_code)]
     pub fn workspace_root(&self) -> &Path {
         &self.workspace_root
     }
