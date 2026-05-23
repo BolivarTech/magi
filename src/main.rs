@@ -190,3 +190,29 @@ async fn main() -> anyhow::Result<()> {
     crate::tui::run_tui_ext(agent, Some(provider_info)).await?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_master_key_present_attaches_encrypted_memory() {
+        let outcome = decide_memory_attachment(Ok("real-master-key".to_string()));
+        match outcome {
+            MemoryAttachment::Encrypted(pwd) => assert_eq!(pwd, "real-master-key"),
+            MemoryAttachment::Ephemeral => panic!("expected encrypted attachment when key is present"),
+        }
+    }
+
+    #[test]
+    fn test_master_key_error_degrades_to_ephemeral_without_constant() {
+        let outcome = decide_memory_attachment(Err(anyhow::anyhow!("keyring inaccessible")));
+        assert!(
+            matches!(outcome, MemoryAttachment::Ephemeral),
+            "a keyring failure must degrade to an ephemeral session, never to a constant key"
+        );
+        if let MemoryAttachment::Encrypted(pwd) = decide_memory_attachment(Err(anyhow::anyhow!("x"))) {
+            panic!("error path produced a passphrase: {pwd}");
+        }
+    }
+}
