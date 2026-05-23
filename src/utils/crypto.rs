@@ -237,21 +237,19 @@ impl CryptoVault {
         }
 
         let nonce_len = self.cipher.nonce_len();
+
         let mut salt = [0u8; SALT_LEN];
         rand::rngs::OsRng.fill_bytes(&mut salt);
+        let mut nonce = vec![0u8; nonce_len];
+        rand::rngs::OsRng.fill_bytes(&mut nonce);
 
-        let kdf_output = self
-            .kdf
-            .derive_key(password.as_bytes(), &salt, KEY_LEN + nonce_len)?;
+        let key = self.kdf.derive_key(password.as_bytes(), &salt, KEY_LEN)?;
 
-        let ciphertext = self.cipher.encrypt(
-            &kdf_output[..KEY_LEN],
-            &kdf_output[KEY_LEN..],
-            plaintext.as_bytes(),
-        )?;
+        let ciphertext = self.cipher.encrypt(&key, &nonce, plaintext.as_bytes())?;
 
-        let mut plaindata = Vec::with_capacity(SALT_LEN + ciphertext.len());
+        let mut plaindata = Vec::with_capacity(SALT_LEN + nonce_len + ciphertext.len());
         plaindata.extend_from_slice(&salt);
+        plaindata.extend_from_slice(&nonce);
         plaindata.extend_from_slice(&ciphertext);
 
         let rs_encoded = self.fec.encode(&plaindata);
@@ -293,16 +291,18 @@ impl CryptoVault {
         }
 
         let plaindata = self.fec.decode(&blob[4..], original_len)?;
+        if plaindata.len() < SALT_LEN + nonce_len {
+            return Err(CryptoError::InvalidInput(
+                "Decoded blob too short for salt and nonce".to_string(),
+            ));
+        }
         let salt = &plaindata[..SALT_LEN];
-        let ciphertext = &plaindata[SALT_LEN..];
+        let nonce = &plaindata[SALT_LEN..SALT_LEN + nonce_len];
+        let ciphertext = &plaindata[SALT_LEN + nonce_len..];
 
-        let kdf_output = self
-            .kdf
-            .derive_key(password.as_bytes(), salt, KEY_LEN + nonce_len)?;
+        let key = self.kdf.derive_key(password.as_bytes(), salt, KEY_LEN)?;
 
-        let plaintext =
-            self.cipher
-                .decrypt(&kdf_output[..KEY_LEN], &kdf_output[KEY_LEN..], ciphertext)?;
+        let plaintext = self.cipher.decrypt(&key, nonce, ciphertext)?;
 
         String::from_utf8(plaintext)
             .map_err(|e| CryptoError::Encoding(format!("Invalid UTF-8: {}", e)))
