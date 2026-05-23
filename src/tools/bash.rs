@@ -126,13 +126,13 @@ fn is_command_allowed(cmd: &str) -> bool {
         }
 
         // Special case: "cargo test" is whitelisted as a pair
-        if base_cmd_lower == "cargo" {
-            if remaining_tokens.is_empty() || remaining_tokens[0] != "test" {
-                // For now, only allow 'test' subcommand for cargo in bash tool
-                // Real dev commands should be added here
-                if remaining_tokens[0] != "build" && remaining_tokens[0] != "check" {
-                    return false;
-                }
+        if base_cmd_lower == "cargo"
+            && (remaining_tokens.is_empty() || remaining_tokens[0] != "test")
+        {
+            // For now, only allow 'test' subcommand for cargo in bash tool
+            // Real dev commands should be added here
+            if remaining_tokens[0] != "build" && remaining_tokens[0] != "check" {
+                return false;
             }
         }
 

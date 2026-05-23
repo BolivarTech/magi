@@ -101,8 +101,8 @@ impl App {
         }
 
         if self.cursor_position > 0 {
-            let mut indices = self.input.char_indices().rev();
-            while let Some((idx, _)) = indices.next() {
+            let indices = self.input.char_indices().rev();
+            for (idx, _) in indices {
                 if idx < self.cursor_position {
                     self.cursor_position = idx;
                     return;
@@ -121,8 +121,8 @@ impl App {
         }
 
         if self.cursor_position < self.input.len() {
-            let mut indices = self.input.char_indices();
-            while let Some((idx, _)) = indices.next() {
+            let indices = self.input.char_indices();
+            for (idx, _) in indices {
                 if idx > self.cursor_position {
                     self.cursor_position = idx;
                     return;
@@ -414,8 +414,8 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Re
                                     app.visual_selection_start = None;
                                 }
                                 if app.visual_cursor > 0 {
-                                    let mut indices = msg.char_indices().rev();
-                                    while let Some((idx, _)) = indices.next() {
+                                    let indices = msg.char_indices().rev();
+                                    for (idx, _) in indices {
                                         if idx < app.visual_cursor {
                                             app.visual_cursor = idx;
                                             break;
@@ -432,8 +432,8 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Re
                                     app.visual_selection_start = None;
                                 }
                                 if app.visual_cursor < msg.len() {
-                                    let mut indices = msg.char_indices();
-                                    while let Some((idx, _)) = indices.next() {
+                                    let indices = msg.char_indices();
+                                    for (idx, _) in indices {
                                         if idx > app.visual_cursor {
                                             app.visual_cursor = idx;
                                             break;

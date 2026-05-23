@@ -79,7 +79,7 @@ async fn discover_config_ext(file_path: &str) -> Option<Config> {
 
     if let Ok(content) = fs::read_to_string(file_path) {
         let lines: Vec<&str> = content.lines().collect();
-        if let Some(key) = lines.get(0).map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        if let Some(key) = lines.first().map(|s| s.trim()).filter(|s| !s.is_empty()) {
             let model = lines
                 .get(1)
                 .unwrap_or(&"claude-sonnet-4-6")

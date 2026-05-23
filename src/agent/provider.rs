@@ -7,9 +7,6 @@ use futures::stream::{self, BoxStream, StreamExt};
 use serde::{Deserialize, Serialize};
 use tokio::time::{sleep, Duration};
 
-#[cfg(test)]
-use mockall::automock;
-
 use crate::tools::Tool;
 
 /// A chunk of a response from the AI.
@@ -50,7 +47,7 @@ pub trait Provider: Send + Sync {
                 Ok(mut stream) => {
                     let mut last_message = None;
                     let mut full_text = String::new();
-                    let mut role = Role::Assistant;
+                    let role = Role::Assistant;
 
                     while let Some(chunk_result) = stream.next().await {
                         match chunk_result? {
@@ -297,8 +294,7 @@ impl Provider for AnthropicProvider {
             while let Some(line_end) = buffer.find("\n\n") {
                 let block = buffer.drain(..line_end + 2).collect::<String>();
                 for line in block.lines() {
-                    if line.starts_with("data: ") {
-                        let data = &line[6..];
+                    if let Some(data) = line.strip_prefix("data: ") {
                         if let Ok(event) = serde_json::from_str::<AnthropicSseEvent>(data) {
                             match event {
                                 AnthropicSseEvent::MessageStart { message } => {
