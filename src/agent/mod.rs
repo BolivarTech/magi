@@ -17,6 +17,8 @@ const APPROVAL_TIMEOUT_SECS: u64 = 300; // 5 minutes
 /// Approval request sent to the UI.
 pub struct ApprovalRequest {
     pub tool_name: String,
+    /// Carries tool input for the approval prompt; reserved.
+    #[allow(dead_code)]
     pub input: serde_json::Value,
     pub tx: oneshot::Sender<bool>,
 }
@@ -68,15 +70,6 @@ impl Agent {
     /// Set approval channel.
     pub fn set_approval_channel(&mut self, tx: tokio::sync::mpsc::Sender<ApprovalRequest>) {
         self.approval_tx = Some(tx);
-    }
-
-    /// Sends an info message to the UI.
-    pub async fn send_info(
-        &self,
-        tx: &tokio::sync::mpsc::Sender<crate::tui::AgentResponse>,
-        info: String,
-    ) {
-        let _ = tx.send(crate::tui::AgentResponse::Info(info)).await;
     }
 
     /// Registers a tool with the agent.
@@ -160,7 +153,8 @@ impl Agent {
         self.history.clear();
     }
 
-    /// Compasts history by summarization.
+    /// Compacts history by summarization; reserved for future use.
+    #[allow(dead_code)]
     pub async fn compact_history(&mut self) -> Result<()> {
         if self.history.is_empty() {
             return Ok(());
@@ -229,7 +223,7 @@ impl Agent {
                     ResponseChunk::TextDelta(delta) => {
                         let sanitized = Self::sanitize_text(&delta);
                         full_text.push_str(&sanitized);
-                        if let Err(_) = chunk_tx.send(sanitized).await {
+                        if chunk_tx.send(sanitized).await.is_err() {
                             return Err(anyhow::anyhow!("TUI connection closed during streaming"));
                         }
                     }

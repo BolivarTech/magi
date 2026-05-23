@@ -199,10 +199,6 @@ impl App {
     }
 }
 
-pub async fn run_tui(agent: Agent) -> anyhow::Result<()> {
-    run_tui_ext(agent, None).await
-}
-
 pub async fn run_tui_ext(agent: Agent, initial_info: Option<String>) -> anyhow::Result<()> {
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |panic_info| {
@@ -648,13 +644,14 @@ fn ui(f: &mut Frame, app: &App) {
             (app.cursor_position, start)
         };
         if app.input.is_char_boundary(from) && app.input.is_char_boundary(to) {
-            let mut spans = Vec::new();
-            spans.push(Span::raw(&app.input[..from]));
-            spans.push(Span::styled(
-                &app.input[from..to],
-                Style::default().bg(Color::White).fg(Color::Black),
-            ));
-            spans.push(Span::raw(&app.input[to..]));
+            let spans = vec![
+                Span::raw(&app.input[..from]),
+                Span::styled(
+                    &app.input[from..to],
+                    Style::default().bg(Color::White).fg(Color::Black),
+                ),
+                Span::raw(&app.input[to..]),
+            ];
             input_text = Text::from(Line::from(spans));
         }
     }

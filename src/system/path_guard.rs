@@ -124,8 +124,8 @@ impl PathGuard {
         #[cfg(windows)]
         {
             let path_str = canonical.to_string_lossy();
-            if path_str.starts_with(r"\\?\") {
-                return Ok(PathBuf::from(&path_str[4..]));
+            if let Some(stripped) = path_str.strip_prefix(r"\\?\") {
+                return Ok(PathBuf::from(stripped));
             }
         }
 

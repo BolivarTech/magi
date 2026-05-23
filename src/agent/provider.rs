@@ -14,8 +14,6 @@ use crate::tools::Tool;
 pub enum ResponseChunk {
     /// A piece of text.
     TextDelta(String),
-    /// Start of a tool use.
-    ToolUseStart { id: String, name: String },
     /// Input data for a tool use.
     ToolUseInputDelta { id: String, input_json: String },
     /// Completion of a full message.
@@ -33,6 +31,9 @@ pub trait Provider: Send + Sync {
     ) -> Result<BoxStream<'static, Result<ResponseChunk>>>;
 
     /// Sends a list of messages and returns the full message (blocking until done).
+    /// Retry wrapper; used by tests and available to non-streaming callers; production uses
+    /// `query_streaming`.
+    #[allow(dead_code)]
     async fn send_messages(
         &self,
         messages: &[Message],
@@ -131,12 +132,6 @@ struct AnthropicRequest {
 }
 
 #[derive(Debug, Deserialize)]
-struct AnthropicResponse {
-    role: Role,
-    content: Vec<Content>,
-}
-
-#[derive(Debug, Deserialize)]
 struct AnthropicErrorResponse {
     error: AnthropicErrorDetail,
 }
@@ -148,7 +143,9 @@ struct AnthropicErrorDetail {
     message: String,
 }
 
-/// Anthropic SSE Event Types
+/// Anthropic SSE Event Types.
+/// Fields are deserialized from the wire protocol; not all are read at runtime.
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum AnthropicSseEvent {
@@ -177,6 +174,8 @@ enum AnthropicSseEvent {
     },
 }
 
+/// Wire-protocol message start metadata; `id` and `model` are deserialized but not read.
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 struct AnthropicMessageStart {
     id: String,
