@@ -313,6 +313,116 @@ impl CryptoVault {
 mod tests {
     use super::*;
 
+    fn extract_nonce_for_test(blob_base64: &str) -> Vec<u8> {
+        let blob = STANDARD.decode(blob_base64).unwrap();
+        let original_len = u32::from_le_bytes(blob[..4].try_into().unwrap()) as usize;
+        let codec = ReedSolomonCodec::default();
+        let plaindata = codec.decode(&blob[4..], original_len).unwrap();
+        plaindata[SALT_LEN..SALT_LEN + 12].to_vec()
+    }
+
+    /// Spy KDF: records the output_len it was called with and delegates to Argon2Kdf.
+    struct SpyKdf {
+        inner: Argon2Kdf,
+        recorded_output_len: std::sync::Mutex<Option<usize>>,
+    }
+
+    impl SpyKdf {
+        fn new() -> Self {
+            Self {
+                inner: Argon2Kdf,
+                recorded_output_len: std::sync::Mutex::new(None),
+            }
+        }
+        fn get_output_len(&self) -> Option<usize> {
+            *self.recorded_output_len.lock().unwrap()
+        }
+    }
+
+    impl KeyDerivation for SpyKdf {
+        fn derive_key(
+            &self,
+            password: &[u8],
+            salt: &[u8],
+            output_len: usize,
+        ) -> Result<Zeroizing<Vec<u8>>, CryptoError> {
+            *self.recorded_output_len.lock().unwrap() = Some(output_len);
+            self.inner.derive_key(password, salt, output_len)
+        }
+    }
+
+    #[test]
+    fn test_blob_stores_independent_nonce_in_layout() {
+        // Verify that encrypt calls derive_key with KEY_LEN only (not KEY_LEN + nonce_len).
+        // Under the OLD layout this fails: output_len == 44 (KEY_LEN + nonce_len), not 32.
+
+        // ArcKdf wraps SpyKdf in Arc so we can inspect the recorded output_len after
+        // the vault has consumed ownership.
+        let spy_arc = std::sync::Arc::new(SpyKdf::new());
+
+        struct ArcKdf(std::sync::Arc<SpyKdf>);
+        impl KeyDerivation for ArcKdf {
+            fn derive_key(
+                &self,
+                password: &[u8],
+                salt: &[u8],
+                output_len: usize,
+            ) -> Result<Zeroizing<Vec<u8>>, CryptoError> {
+                self.0.derive_key(password, salt, output_len)
+            }
+        }
+
+        let vault = CryptoVault::new(
+            Box::new(ArcKdf(spy_arc.clone())),
+            Box::new(Aes256GcmSivCipher),
+            Box::new(ReedSolomonCodec::default()),
+        );
+
+        let password = "my-secure-password";
+        let plaintext = "identical plaintext";
+        let blob = vault.encrypt(password, plaintext).unwrap();
+
+        // Under the new layout, derive_key must be called with exactly KEY_LEN (32) bytes.
+        let recorded = spy_arc
+            .get_output_len()
+            .expect("derive_key was never called");
+        assert_eq!(
+            recorded, KEY_LEN,
+            "encrypt must call derive_key with KEY_LEN={} only; got {} (old layout derives nonce from KDF too)",
+            KEY_LEN, recorded
+        );
+
+        // The blob plaindata must contain SALT_LEN + nonce_len + ciphertext.
+        // extract_nonce_for_test reads bytes at [SALT_LEN..SALT_LEN+12] — must be the stored nonce.
+        let nonce = extract_nonce_for_test(&blob);
+        assert_eq!(
+            nonce.len(),
+            12,
+            "an independent 12-byte nonce must be stored in the blob"
+        );
+
+        // Round-trip must succeed with the new layout.
+        assert_eq!(vault.decrypt(password, &blob).unwrap(), plaintext);
+
+        // Two encryptions of the same plaintext must have different stored nonces.
+        let blob_b = vault.encrypt(password, plaintext).unwrap();
+        assert_ne!(
+            extract_nonce_for_test(&blob),
+            extract_nonce_for_test(&blob_b),
+            "independent nonces should differ across encryptions (corroborating)"
+        );
+    }
+
+    #[test]
+    fn test_new_layout_roundtrips_with_embedded_nonce() {
+        let vault = CryptoVault::default();
+        let secret = "sk-ant-api03-real-key-here";
+        let password = "my-secure-password";
+        let encrypted = vault.encrypt(password, secret).unwrap();
+        let decrypted = vault.decrypt(password, &encrypted).unwrap();
+        assert_eq!(decrypted, secret);
+    }
+
     #[test]
     fn vault_decrypt_roundtrip() {
         let vault = CryptoVault::default();
