@@ -207,6 +207,13 @@ impl MemoryStore for EncryptedSqliteMemory {
 }
 
 #[cfg(test)]
+impl EncryptedSqliteMemory {
+    pub(crate) fn conn_for_test(&self) -> &Arc<Mutex<Connection>> {
+        &self.conn
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use tempfile::NamedTempFile;
@@ -292,5 +299,26 @@ mod tests {
 
         let keys = memory.list_knowledge_keys().await.unwrap();
         assert_eq!(keys.len(), 20);
+    }
+
+    #[tokio::test]
+    async fn test_poisoned_lock_returns_error_not_panic() {
+        let tmp_file = NamedTempFile::new().unwrap();
+        let path = tmp_file.path().to_path_buf();
+        let memory = EncryptedSqliteMemory::new(path, "pw".to_string()).unwrap();
+
+        let conn = memory.conn_for_test().clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = conn.lock().unwrap();
+            panic!("intentional poison");
+        })
+        .join();
+
+        let result = memory.list_sessions().await;
+        assert!(result.is_err(), "a poisoned lock must yield Err, not panic");
+        assert!(
+            result.unwrap_err().to_string().contains("poisoned"),
+            "error must identify the poisoned lock"
+        );
     }
 }
