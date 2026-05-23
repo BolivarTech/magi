@@ -53,6 +53,20 @@ incorporated into this final plan as follows:
 
 ---
 
+## Execution progress (live)
+
+Branch: `fase0-audit-remediation`. Authoritative live state: `.claude/session-state.json` (gitignored).
+
+**Phase 0.0 — baseline verde:**
+- [x] Task 1 — WU-0 provider SSE tests → `c177f87` (nextest 45/45)
+- [x] Baseline rustfmt — tree-wide `cargo fmt` → `6e3e0da` *(added during execution: §0.1 requires `fmt --check` clean, but the whole tree had never been rustfmt'd — a baseline gap not in the original scope; one rustfmt limitation on `let sse_body = ` trailing whitespace was fixed first)*
+- [ ] Task 2 — WU-9a clippy machine-applicable fixes
+- [ ] Task 3 — WU-9b remove dead code
+
+**Phase 0.1 — security remediation:** Tasks 4–18 (pending; see task list below).
+
+---
+
 ## Execution model & sequencing
 
 ### Per-phase close (NON-NEGOTIABLE — `CLAUDE.local.md` §3)
