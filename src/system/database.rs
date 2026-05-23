@@ -38,6 +38,12 @@ pub trait MemoryStore: Send + Sync {
 pub struct EncryptedSqliteMemory {
     conn: Arc<Mutex<Connection>>,
     vault: CryptoVault,
+    /// DB master password wrapped in [`Zeroizing`] (RF-8.3 / audit W8).
+    ///
+    /// `Zeroizing<String>` overwrites the heap buffer with zeros on drop,
+    /// preventing the key from lingering in freed memory. The constructor
+    /// accepts a plain `String` and wraps it at construction time; all call
+    /// sites pass `&self.master_password`, which deref-coerces to `&str`.
     master_password: Zeroizing<String>,
 }
 
