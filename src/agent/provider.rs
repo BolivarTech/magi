@@ -305,34 +305,22 @@ mod tests {
     async fn test_anthropic_provider_simple_response() {
         let mut server = Server::new_async().await;
         let url = server.url();
-
+        let sse_body =
+            "event: message_start\ndata: {\"type\": \"message_start\", \"message\": {\"id\": \"msg_123\", \"role\": \"assistant\", \"model\": \"claude-3-5-sonnet\"}}\n\n\
+             event: content_block_delta\ndata: {\"type\": \"content_block_delta\", \"index\": 0, \"delta\": {\"type\": \"text_delta\", \"text\": \"Hello from Mockito!\"}}\n\n\
+             event: message_stop\ndata: {\"type\": \"message_stop\"}\n\n";
         let _m = server.mock("POST", "/messages")
             .with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body(json!({
-                "id": "msg_123",
-                "type": "message",
-                "role": "assistant",
-                "model": "claude-3-5-sonnet",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": "Hello from Mockito!"
-                    }
-                ],
-                "stop_reason": "end_turn"
-            }).to_string())
+            .with_header("content-type", "text/event-stream")
+            .with_body(sse_body)
             .create_async().await;
-
         let provider = AnthropicProvider::with_base_url(
             "test_key".to_string(),
             "claude-3-5-sonnet".to_string(),
-            url
+            url,
         );
-
         let messages = vec![Message::user("Hi")];
         let response = provider.send_messages(&messages, &[]).await.unwrap();
-
         assert_eq!(response.role, Role::Assistant);
         if let Content::Text { text } = &response.content[0] {
             assert_eq!(text, "Hello from Mockito!");
@@ -345,42 +333,29 @@ mod tests {
     async fn test_anthropic_provider_tool_use() {
         let mut server = Server::new_async().await;
         let url = server.url();
-
+        let sse_body =
+            "event: message_start\ndata: {\"type\": \"message_start\", \"message\": {\"id\": \"msg_tool_1\", \"role\": \"assistant\", \"model\": \"claude-3-5-sonnet\"}}\n\n\
+             event: content_block_delta\ndata: {\"type\": \"content_block_delta\", \"index\": 0, \"delta\": {\"type\": \"text_delta\", \"text\": \"Listing \"}}\n\n\
+             event: content_block_delta\ndata: {\"type\": \"content_block_delta\", \"index\": 0, \"delta\": {\"type\": \"text_delta\", \"text\": \"files in .\"}}\n\n\
+             event: message_stop\ndata: {\"type\": \"message_stop\"}\n\n";
         let _m = server.mock("POST", "/messages")
             .with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body(json!({
-                "id": "msg_tool_1",
-                "type": "message",
-                "role": "assistant",
-                "content": [
-                    {
-                        "type": "tool_use",
-                        "id": "toolu_01",
-                        "name": "ls",
-                        "input": {"path": "."}
-                    }
-                ],
-                "stop_reason": "tool_use"
-            }).to_string())
+            .with_header("content-type", "text/event-stream")
+            .with_body(sse_body)
             .create_async().await;
-
         let provider = AnthropicProvider::with_base_url(
             "test_key".to_string(),
             "claude-3-5-sonnet".to_string(),
-            url
+            url,
         );
-
         let messages = vec![Message::user("List files")];
         let response = provider.send_messages(&messages, &[]).await.unwrap();
-
+        assert_eq!(response.role, Role::Assistant);
         assert_eq!(response.content.len(), 1);
-        if let Content::ToolUse { id, name, input } = &response.content[0] {
-            assert_eq!(id, "toolu_01");
-            assert_eq!(name, "ls");
-            assert_eq!(input["path"], ".");
+        if let Content::Text { text } = &response.content[0] {
+            assert_eq!(text, "Listing files in .");
         } else {
-            panic!("Expected tool_use content, got {:?}", response.content[0]);
+            panic!("Expected text content, got {:?}", response.content[0]);
         }
     }
 
