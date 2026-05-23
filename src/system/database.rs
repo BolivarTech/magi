@@ -41,6 +41,28 @@ pub struct EncryptedSqliteMemory {
 }
 
 impl EncryptedSqliteMemory {
+    /// Decrypts pre-collected `(role, blob)` rows into [`Message`]s.
+    ///
+    /// Holds **no** database lock: callers must collect rows and release the
+    /// connection guard before invoking this, so per-row Argon2 key derivation
+    /// never serializes other DB callers (audit finding W12).
+    fn decrypt_rows(&self, rows: Vec<(String, String)>) -> Result<Vec<Message>> {
+        let mut messages = Vec::with_capacity(rows.len());
+        for (role_str, blob) in rows {
+            let decrypted = self
+                .vault
+                .decrypt(&self.master_password, &blob)
+                .map_err(|e| anyhow::anyhow!("Decryption failed: {}", e))?;
+            let content = serde_json::from_str(&decrypted)?;
+            let role = match role_str.as_str() {
+                "User" => crate::agent::messages::Role::User,
+                _ => crate::agent::messages::Role::Assistant,
+            };
+            messages.push(Message { role, content });
+        }
+        Ok(messages)
+    }
+
     pub fn new(path: PathBuf, master_password: String) -> Result<Self> {
         let conn = Connection::open(path)?;
 
@@ -124,36 +146,24 @@ impl MemoryStore for EncryptedSqliteMemory {
     }
 
     async fn get_messages(&self, session_id: &str) -> Result<Vec<Message>> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| anyhow::anyhow!("DB lock poisoned: {e}"))?;
-        let mut stmt = conn.prepare(
-            "SELECT role, content_blob FROM messages WHERE session_id = ? ORDER BY created_at ASC",
-        )?;
-
-        let rows = stmt.query_map(params![session_id], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })?;
-
-        let mut messages = Vec::new();
-        for row in rows {
-            let (role_str, blob) = row?;
-            let decrypted = self
-                .vault
-                .decrypt(&self.master_password, &blob)
-                .map_err(|e| anyhow::anyhow!("Decryption failed: {}", e))?;
-
-            let content = serde_json::from_str(&decrypted)?;
-            let role = match role_str.as_str() {
-                "User" => crate::agent::messages::Role::User,
-                _ => crate::agent::messages::Role::Assistant,
-            };
-
-            messages.push(Message { role, content });
-        }
-
-        Ok(messages)
+        let raw_rows: Vec<(String, String)> = {
+            let conn = self
+                .conn
+                .lock()
+                .map_err(|e| anyhow::anyhow!("DB lock poisoned: {e}"))?;
+            let mut stmt = conn.prepare(
+                "SELECT role, content_blob FROM messages WHERE session_id = ? ORDER BY created_at ASC",
+            )?;
+            let mapped = stmt.query_map(params![session_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?;
+            let mut collected = Vec::new();
+            for row in mapped {
+                collected.push(row?);
+            }
+            collected
+        };
+        self.decrypt_rows(raw_rows)
     }
 
     async fn list_sessions(&self) -> Result<Vec<(String, String)>> {
@@ -231,6 +241,27 @@ impl MemoryStore for EncryptedSqliteMemory {
 impl EncryptedSqliteMemory {
     pub(crate) fn conn_for_test(&self) -> &Arc<Mutex<Connection>> {
         &self.conn
+    }
+
+    pub(crate) fn collect_message_rows_for_test(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<(String, String)>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow::anyhow!("DB lock poisoned: {e}"))?;
+        let mut stmt = conn.prepare(
+            "SELECT role, content_blob FROM messages WHERE session_id = ? ORDER BY created_at ASC",
+        )?;
+        let mapped = stmt.query_map(params![session_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let mut collected = Vec::new();
+        for row in mapped {
+            collected.push(row?);
+        }
+        Ok(collected)
     }
 }
 
@@ -371,17 +402,28 @@ mod tests {
         let msgs = reader.await.unwrap().unwrap();
         let new_sid = writer.await.unwrap().unwrap();
 
-        assert_eq!(msgs.len(), 16, "all messages decrypt correctly after lock-drop refactor");
-        assert!(!new_sid.is_empty(), "a concurrent write completes; lock is not held across decrypt");
+        assert_eq!(
+            msgs.len(),
+            16,
+            "all messages decrypt correctly after lock-drop refactor"
+        );
+        assert!(
+            !new_sid.is_empty(),
+            "a concurrent write completes; lock is not held across decrypt"
+        );
         assert_eq!(msgs[0], Message::user("message number 0"));
     }
 
     #[tokio::test]
     async fn test_decrypt_rows_runs_without_connection_lock() {
         let tmp_file = NamedTempFile::new().unwrap();
-        let memory = EncryptedSqliteMemory::new(tmp_file.path().to_path_buf(), "pw".to_string()).unwrap();
+        let memory =
+            EncryptedSqliteMemory::new(tmp_file.path().to_path_buf(), "pw".to_string()).unwrap();
         let sid = memory.create_session("p").await.unwrap();
-        memory.add_message(&sid, &Message::user("hi")).await.unwrap();
+        memory
+            .add_message(&sid, &Message::user("hi"))
+            .await
+            .unwrap();
 
         let raw = memory.collect_message_rows_for_test(&sid).unwrap();
         let msgs = memory.decrypt_rows(raw).unwrap();
