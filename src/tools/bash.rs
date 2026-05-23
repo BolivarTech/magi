@@ -309,6 +309,35 @@ mod tests {
     }
 
     #[test]
+    fn test_cargo_without_subcommand_is_rejected_without_panic() {
+        assert!(!is_command_allowed("cargo"), "bare cargo must be rejected");
+        assert!(
+            !is_command_allowed("cargo "),
+            "cargo with trailing space must be rejected"
+        );
+        assert!(
+            !is_command_allowed("cargo run"),
+            "cargo run must be rejected"
+        );
+        assert!(
+            !is_command_allowed("cargo install ripgrep"),
+            "cargo install must be rejected"
+        );
+        assert!(
+            is_command_allowed("cargo test"),
+            "cargo test must be allowed"
+        );
+        assert!(
+            is_command_allowed("cargo build"),
+            "cargo build must be allowed"
+        );
+        assert!(
+            is_command_allowed("cargo check"),
+            "cargo check must be allowed"
+        );
+    }
+
+    #[test]
     fn test_adversarial_bash_injections() {
         // 1. Sub-shell injection attempts
         assert!(
