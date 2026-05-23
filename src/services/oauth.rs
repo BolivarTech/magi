@@ -330,4 +330,45 @@ mod tests {
         let received_code = rx.await.unwrap();
         assert_eq!(received_code, "valid_code");
     }
+
+    #[tokio::test]
+    async fn test_callback_times_out_when_no_code_arrives() {
+        use std::time::Duration;
+        use tokio::sync::oneshot;
+
+        let (_tx, rx) = oneshot::channel::<String>();
+        let never_ending_server = std::future::pending::<Result<()>>();
+
+        let result = OAuthService::race_callback(
+            never_ending_server,
+            rx,
+            Duration::from_millis(50),
+        )
+        .await;
+
+        assert!(result.is_err(), "an abandoned callback flow must return Err, not hang");
+        assert!(
+            result.unwrap_err().to_string().contains("timed out"),
+            "the error must identify the timeout cause"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_callback_returns_code_before_timeout() {
+        use std::time::Duration;
+        use tokio::sync::oneshot;
+
+        let (tx, rx) = oneshot::channel::<String>();
+        let never_ending_server = std::future::pending::<Result<()>>();
+        tx.send("auth_code_xyz".to_string()).unwrap();
+
+        let code = OAuthService::race_callback(
+            never_ending_server,
+            rx,
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, "auth_code_xyz");
+    }
 }
