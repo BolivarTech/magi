@@ -65,6 +65,13 @@ fn is_command_allowed(cmd: &str) -> bool {
         return false;
     }
 
+    // Security: PowerShell stop-parsing token "--%" passes the remainder verbatim
+    // to the legacy command line, bypassing PowerShell quoting and re-enabling
+    // injection on the Windows code path (W4 / RF-8.2).
+    if cmd.contains("--%") {
+        return false;
+    }
+
     let mut tokens = cmd.split_whitespace();
     if let Some(base_cmd) = tokens.next() {
         let base_cmd_lower = base_cmd.to_lowercase();
