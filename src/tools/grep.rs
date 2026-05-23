@@ -102,4 +102,45 @@ mod tests {
         let result = tool.execute(args).await;
         assert!(result.is_ok());
     }
+
+    #[tokio::test]
+    async fn test_grep_rejects_symlink_escaping_workspace() {
+        let mut mock_grep = MockGrep::new();
+        mock_grep.expect_search().never();
+
+        let work = tempfile::tempdir().unwrap();
+        let root = work.path().canonicalize().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let outside_path = outside.path().canonicalize().unwrap();
+
+        let link = root.join("link");
+
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&outside_path, &link).unwrap();
+        }
+        #[cfg(windows)]
+        {
+            if std::os::windows::fs::symlink_dir(&outside_path, &link).is_err() {
+                eprintln!("skipping: cannot create directory symlink without privilege");
+                return;
+            }
+        }
+
+        let tool = GrepTool::new(Box::new(mock_grep), root).unwrap();
+        let args = serde_json::json!({ "pattern": "secret", "path": "link" });
+
+        let result = tool.execute(args).await;
+        assert!(
+            result.is_err(),
+            "symlink escaping the workspace must be rejected, got: {:?}",
+            result
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("Security") || msg.contains("sandbox") || msg.contains("traversal"),
+            "error should signal a sandbox violation, got: {}",
+            msg
+        );
+    }
 }
