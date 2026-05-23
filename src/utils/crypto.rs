@@ -351,6 +351,46 @@ impl CryptoVault {
 mod tests {
     use super::*;
 
+    #[test]
+    fn test_decrypt_rejects_oversized_length_prefix_without_alloc() {
+        let mut blob = Vec::new();
+        blob.extend_from_slice(&0xFFFFFFFFu32.to_le_bytes());
+        blob.extend_from_slice(&[0u8; 8]);
+        let encoded = STANDARD.encode(&blob);
+
+        let vault = CryptoVault::default();
+        let err = vault.decrypt("pw", &encoded).unwrap_err();
+        match err {
+            CryptoError::InvalidInput(_) => {}
+            other => panic!("expected InvalidInput for oversized prefix, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_decrypt_rejects_prefix_at_exactly_cap_plus_one() {
+        let oversized = (MAX_PLAINTEXT_LEN + 1) as u32;
+        let mut blob = Vec::new();
+        blob.extend_from_slice(&oversized.to_le_bytes());
+        blob.extend_from_slice(&[0u8; 8]);
+        let encoded = STANDARD.encode(&blob);
+
+        let vault = CryptoVault::default();
+        assert!(
+            matches!(vault.decrypt("pw", &encoded), Err(CryptoError::InvalidInput(_))),
+            "a length prefix one byte over the cap must be rejected"
+        );
+    }
+
+    #[test]
+    fn test_encrypt_rejects_plaintext_over_cap() {
+        let vault = CryptoVault::default();
+        let huge = "a".repeat(MAX_PLAINTEXT_LEN + 1);
+        assert!(
+            matches!(vault.encrypt("pw", &huge), Err(CryptoError::InvalidInput(_))),
+            "encrypting beyond MAX_PLAINTEXT_LEN must be rejected"
+        );
+    }
+
     fn extract_nonce_for_test(blob_base64: &str) -> Vec<u8> {
         let blob = STANDARD.decode(blob_base64).unwrap();
         let original_len = u32::from_le_bytes(blob[..4].try_into().unwrap()) as usize;
