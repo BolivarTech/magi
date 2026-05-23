@@ -110,4 +110,49 @@ mod tests {
         let result = tool.execute(args).await;
         assert!(result.is_ok());
     }
+
+    #[tokio::test]
+    async fn test_write_rejects_absolute_path_outside_workspace() {
+        let mut mock_fs = MockFileSystem::new();
+        mock_fs.expect_write_file().never();
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let tool = FileWriteTool::new(Arc::new(mock_fs), root.clone()).unwrap();
+
+        #[cfg(target_os = "windows")]
+        let evil = r"C:\Windows\System32\evil.dll";
+        #[cfg(not(target_os = "windows"))]
+        let evil = "/etc/evil.dll";
+
+        let args = serde_json::json!({ "file_path": evil, "content": "payload" });
+
+        let result = tool.execute(args).await;
+        assert!(
+            result.is_err(),
+            "absolute path outside workspace must be rejected, got: {:?}",
+            result
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("sandbox") || msg.contains("Security"),
+            "error should signal a sandbox violation, got: {}",
+            msg
+        );
+    }
+
+    #[tokio::test]
+    async fn test_write_rejects_parent_dir_traversal() {
+        let mut mock_fs = MockFileSystem::new();
+        mock_fs.expect_write_file().never();
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let tool = FileWriteTool::new(Arc::new(mock_fs), root).unwrap();
+
+        let args = serde_json::json!({ "file_path": "sub/../../escape.txt", "content": "payload" });
+
+        let result = tool.execute(args).await;
+        assert!(result.is_err(), "parent-dir traversal must be rejected");
+    }
 }
