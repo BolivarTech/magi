@@ -48,7 +48,7 @@ incorporated into this final plan as follows:
 | 5 | C7 (T15) align the encrypt cap with the decrypt cap (same quantity) — *Melchior* | **In-place: Task 15** — encrypt guards the projected `original_len` (salt+nonce+ciphertext), matching decrypt. |
 | 6 | C2 (T5) the symlink test must **fail, not silently pass, on platforms that can create symlinks**; gate C2 sign-off on a real symlink run — *Caspar* | Task 5 keeps the un-privileged-Windows early-return, but **§9 DoD now requires C2 verified on at least one run that actually creates the symlink** (CI Linux or Windows Developer Mode). |
 | 7 | C4 (T9) verify tool-registration ordering after the memory-match rewrite; note that a corrupt (not merely undecryptable) pre-fresh-start DB still `?`-aborts `main` rather than degrading — *Melchior/Balthasar* | Task 9: Green verifies the rewritten match block precedes the unconditional base-tool registrations; Refactor adds the corrupt-DB note to `CLAUDE.md`. |
-| 8 | Spec §4.3 over-lists `compact_history` at `agent/mod.rs:74` (only `send_info` exists there) — *Melchior* | Applied to `sbtdd/spec-behavior.md` §4.3 (removed `compact_history`); Task 3 already removes only `send_info`. |
+| 8 | ~~Spec §4.3 over-lists `compact_history`~~ — **MAGI (Melchior) error**: `compact_history` DOES exist at `agent/mod.rs:74` and is covered by `test_agent_history_compaction` (found during T3 execution) | **Reverted.** Spec §4.3 lists both. T3 removed `send_info` (truly dead) and kept `compact_history` with `#[allow(dead_code)]` (test-covered, same as `send_messages`). |
 | 9 | The per-phase `§0.1` gate (audit + doc + release-build every phase) is heavy for pure-refactor/doc phases — treat as **Phase-0-only** discipline — *Balthasar* | For lint/doc-only refactor tasks (T2, T3, T6), `cargo audit` + `cargo doc` + `cargo build --release` may run once at **task close** instead of every phase; `nextest` + `clippy` + `fmt` still run every phase. No correctness gate is relaxed. |
 
 ---
@@ -57,13 +57,13 @@ incorporated into this final plan as follows:
 
 Branch: `fase0-audit-remediation`. Authoritative live state: `.claude/session-state.json` (gitignored).
 
-**Phase 0.0 — baseline verde:**
+**Phase 0.0 — baseline verde (✅ COMPLETE — §0.1 fully green: clippy 0, nextest 45/45, fmt clean, build --release clean, doc clean):**
 - [x] Task 1 — WU-0 provider SSE tests → `c177f87` (nextest 45/45)
 - [x] Baseline rustfmt — tree-wide `cargo fmt` → `6e3e0da` *(added during execution: §0.1 requires `fmt --check` clean, but the whole tree had never been rustfmt'd — a baseline gap not in the original scope; one rustfmt limitation on `let sse_body = ` trailing whitespace was fixed first)*
-- [ ] Task 2 — WU-9a clippy machine-applicable fixes
-- [ ] Task 3 — WU-9b remove dead code
+- [x] Task 2 — WU-9a clippy machine-applicable fixes → `1cdc05f`
+- [x] Task 3 — WU-9b remove dead code → `6689afc` *(`compact_history` & `send_messages` kept via `#[allow(dead_code)]` — both test-covered, not truly dead; `send_messages`-is-used-after-T1 assumption was wrong for bin-target dead-code analysis)*
 
-**Phase 0.1 — security remediation:** Tasks 4–18 (pending; see task list below).
+**Phase 0.1 — security remediation:** Tasks 4–18 pending. **Next: Task 4 (C1, write.rs sandbox).**
 
 ---
 

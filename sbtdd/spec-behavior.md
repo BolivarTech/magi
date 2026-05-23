@@ -93,9 +93,9 @@ categoria (lista `archivo:linea` exhaustiva, no subtotales):
 - **Dead code:** `provider.rs:21` (variant `ToolUseStart`), `provider.rs:35`
   (`send_messages` — se resuelve solo tras WU-0), `provider.rs:119`
   (`AnthropicResponse`), `provider.rs:141,142,143,144,147,152` (campos never
-  read), `agent/mod.rs:20` (field `input`), `agent/mod.rs:74` (`send_info` — solo
-  este; `compact_history` no existe en `:74`, corregido tras MAGI Checkpoint 2),
-  `tui/mod.rs:194` (`run_tui`), `agent/mod.rs:368` (`sid`, solo tests).
+  read), `agent/mod.rs:20` (field `input`), `agent/mod.rs:74` (`send_info`,
+  `compact_history`), `tui/mod.rs:194` (`run_tui`), `agent/mod.rs:368` (`sid`,
+  solo tests).
 - **Lints de estilo:** `provider.rs:45` (var sin `mut`), `provider.rs:256` y
   `path_guard.rs:118` (`manual_strip` → `strip_prefix`), `agent/mod.rs:122` y
   `tui/mod.rs:105,125,344,357` (`needless_range_loop` → `for`), `bash.rs:115`
