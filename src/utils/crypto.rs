@@ -41,6 +41,12 @@ pub const RS_DEFAULT_DATA_LEN: usize = 223;
 #[allow(dead_code)]
 const RS_MAX_BLOCK_SIZE: usize = 255;
 
+/// Absolute upper bound on a single plaintext record (50 MiB). Caps the
+/// `original_len` field of a blob so a malformed/hostile length prefix can
+/// never drive an arbitrary allocation during decryption (audit finding C7),
+/// and bounds legitimate encryption payloads.
+pub const MAX_PLAINTEXT_LEN: usize = 50 * 1024 * 1024;
+
 // ── Argon2 cost parameters (OWASP 2025) ─────────────────────────────
 //
 // Explicit, audited Argon2id work factors. OWASP's 2025 minimum for
@@ -276,6 +282,14 @@ impl CryptoVault {
 
         let nonce_len = self.cipher.nonce_len();
 
+        let projected_original_len = SALT_LEN + nonce_len + plaintext.len() + 16; // +16 = GCM-SIV tag
+        if projected_original_len > MAX_PLAINTEXT_LEN {
+            return Err(CryptoError::InvalidInput(format!(
+                "Record length {} (salt+nonce+ciphertext) exceeds MAX_PLAINTEXT_LEN ({})",
+                projected_original_len, MAX_PLAINTEXT_LEN
+            )));
+        }
+
         let mut salt = [0u8; SALT_LEN];
         rand::rngs::OsRng.fill_bytes(&mut salt);
         let mut nonce = vec![0u8; nonce_len];
@@ -321,6 +335,13 @@ impl CryptoVault {
 
         let len_bytes: [u8; 4] = blob[..4].try_into().unwrap();
         let original_len = u32::from_le_bytes(len_bytes) as usize;
+
+        if original_len > MAX_PLAINTEXT_LEN {
+            return Err(CryptoError::InvalidInput(format!(
+                "Length header {} exceeds MAX_PLAINTEXT_LEN ({}); refusing to allocate",
+                original_len, MAX_PLAINTEXT_LEN
+            )));
+        }
 
         if original_len > (blob.len() - 4) {
             return Err(CryptoError::InvalidInput(
@@ -376,7 +397,10 @@ mod tests {
 
         let vault = CryptoVault::default();
         assert!(
-            matches!(vault.decrypt("pw", &encoded), Err(CryptoError::InvalidInput(_))),
+            matches!(
+                vault.decrypt("pw", &encoded),
+                Err(CryptoError::InvalidInput(_))
+            ),
             "a length prefix one byte over the cap must be rejected"
         );
     }
@@ -386,7 +410,10 @@ mod tests {
         let vault = CryptoVault::default();
         let huge = "a".repeat(MAX_PLAINTEXT_LEN + 1);
         assert!(
-            matches!(vault.encrypt("pw", &huge), Err(CryptoError::InvalidInput(_))),
+            matches!(
+                vault.encrypt("pw", &huge),
+                Err(CryptoError::InvalidInput(_))
+            ),
             "encrypting beyond MAX_PLAINTEXT_LEN must be rejected"
         );
     }
