@@ -1,12 +1,12 @@
 //! This module implements the FileWriteTool, which allows the agent to create and modify files.
 //! It includes security sandboxing via PathGuard.
 
+use crate::system::fs::FileSystem;
+use crate::tools::{Tool, ToolError, ToolResult};
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::Value;
 use std::path::PathBuf;
-use crate::tools::{Tool, ToolResult, ToolError};
-use crate::system::fs::FileSystem;
 use std::sync::Arc;
 
 /// Arguments for the `FileWriteTool`.
@@ -27,9 +27,13 @@ pub struct FileWriteTool {
 impl FileWriteTool {
     /// Creates a new `FileWriteTool` anchored to the workspace root.
     pub fn new(fs: Arc<dyn FileSystem>, workspace_root: PathBuf) -> anyhow::Result<Self> {
-        let root = workspace_root.canonicalize()
+        let root = workspace_root
+            .canonicalize()
             .map_err(|e| anyhow::anyhow!("Invalid workspace root: {}", e))?;
-        Ok(Self { fs, workspace_root: root })
+        Ok(Self {
+            fs,
+            workspace_root: root,
+        })
     }
 }
 
@@ -61,16 +65,20 @@ impl Tool for FileWriteTool {
     }
 
     async fn execute(&self, args: Value) -> ToolResult<Value> {
-        let args: WriteArgs = serde_json::from_value(args)
-            .map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
+        let args: WriteArgs =
+            serde_json::from_value(args).map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
 
         let target_path = self.workspace_root.join(&args.file_path);
-        
+
         if args.file_path.contains("..") {
-             return Err(ToolError::ExecutionError("Security Violation: Path traversal attempted".to_string()));
+            return Err(ToolError::ExecutionError(
+                "Security Violation: Path traversal attempted".to_string(),
+            ));
         }
 
-        self.fs.write_file(&target_path, &args.content).await
+        self.fs
+            .write_file(&target_path, &args.content)
+            .await
             .map_err(|e| ToolError::ExecutionError(e.to_string()))?;
 
         Ok(serde_json::json!({ "status": "success" }))
@@ -88,7 +96,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().canonicalize().unwrap();
 
-        mock_fs.expect_write_file()
+        mock_fs
+            .expect_write_file()
             .times(1)
             .returning(|_, _| Box::pin(async move { Ok(()) }));
 
@@ -97,7 +106,7 @@ mod tests {
             "file_path": "new.txt",
             "content": "hello"
         });
-        
+
         let result = tool.execute(args).await;
         assert!(result.is_ok());
     }

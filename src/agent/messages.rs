@@ -44,7 +44,9 @@ impl Message {
     pub fn user(text: &str) -> Self {
         Self {
             role: Role::User,
-            content: vec![Content::Text { text: text.to_string() }],
+            content: vec![Content::Text {
+                text: text.to_string(),
+            }],
         }
     }
 
@@ -52,7 +54,9 @@ impl Message {
     pub fn assistant(text: &str) -> Self {
         Self {
             role: Role::Assistant,
-            content: vec![Content::Text { text: text.to_string() }],
+            content: vec![Content::Text {
+                text: text.to_string(),
+            }],
         }
     }
 }

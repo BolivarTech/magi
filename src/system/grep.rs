@@ -1,8 +1,8 @@
 //! This module provides an abstraction for the Grep tool.
 
+use anyhow::Result;
 use async_trait::async_trait;
 use std::path::Path;
-use anyhow::Result;
 
 #[cfg(test)]
 use mockall::automock;
@@ -24,7 +24,9 @@ pub struct RipGrep {
 impl RipGrep {
     /// Creates a new `RipGrep` instance.
     pub fn new(binary_path: &str) -> Self {
-        Self { binary_path: binary_path.to_string() }
+        Self {
+            binary_path: binary_path.to_string(),
+        }
     }
 }
 
@@ -32,7 +34,7 @@ impl RipGrep {
 impl Grep for RipGrep {
     async fn search(&self, pattern: &str, path: &Path) -> Result<Vec<String>> {
         use tokio::process::Command;
-        
+
         let output = Command::new(&self.binary_path)
             .arg(pattern)
             .arg(path)
@@ -40,7 +42,10 @@ impl Grep for RipGrep {
             .await?;
 
         if !output.status.success() && output.status.code() != Some(1) {
-            return Err(anyhow::anyhow!("RipGrep failed: {}", String::from_utf8_lossy(&output.stderr)));
+            return Err(anyhow::anyhow!(
+                "RipGrep failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ));
         }
 
         let results = String::from_utf8_lossy(&output.stdout)
@@ -62,7 +67,7 @@ mod tests {
         mock.expect_search()
             .times(1)
             .returning(|_, _| Box::pin(async move { Ok(vec!["match".to_string()]) }));
-        
+
         let res = mock.search("test", Path::new(".")).await.unwrap();
         assert_eq!(res[0], "match");
     }

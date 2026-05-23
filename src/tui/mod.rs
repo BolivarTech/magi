@@ -1,6 +1,7 @@
 //! This module implements the Terminal User Interface using Ratatui.
 
-use std::io;
+use crate::agent::{Agent, ApprovalRequest};
+use crate::system::secrets::SecretStore;
 use crossterm::{
     event::{self, DisableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers},
     execute,
@@ -14,8 +15,7 @@ use ratatui::{
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
     Frame, Terminal,
 };
-use crate::agent::{Agent, ApprovalRequest};
-use crate::system::secrets::SecretStore;
+use std::io;
 use tokio::sync::mpsc;
 
 /// Different interaction modes for the TUI.
@@ -72,7 +72,7 @@ pub struct App {
 
 impl App {
     pub fn new(
-        event_tx: mpsc::Sender<UiEvent>, 
+        event_tx: mpsc::Sender<UiEvent>,
         response_rx: mpsc::Receiver<AgentResponse>,
         approval_rx: mpsc::Receiver<ApprovalRequest>,
     ) -> Self {
@@ -163,7 +163,11 @@ impl App {
     pub fn delete_selection(&mut self) {
         if let Some(start) = self.selection_start {
             let end = self.cursor_position;
-            let (from, to) = if start < end { (start, end) } else { (end, start) };
+            let (from, to) = if start < end {
+                (start, end)
+            } else {
+                (end, start)
+            };
             if self.input.is_char_boundary(from) && self.input.is_char_boundary(to) {
                 self.input.drain(from..to);
                 self.cursor_position = from;
@@ -176,7 +180,11 @@ impl App {
     pub fn get_selected_text(&self) -> Option<String> {
         self.selection_start.and_then(|start| {
             let end = self.cursor_position;
-            let (from, to) = if start < end { (start, end) } else { (end, start) };
+            let (from, to) = if start < end {
+                (start, end)
+            } else {
+                (end, start)
+            };
             if self.input.is_char_boundary(from) && self.input.is_char_boundary(to) {
                 Some(self.input[from..to].to_string())
             } else {
@@ -201,7 +209,8 @@ pub async fn run_tui_ext(agent: Agent, initial_info: Option<String>) -> anyhow::
         let _ = disable_raw_mode();
         let mut stdout = io::stdout();
         let _ = execute!(stdout, LeaveAlternateScreen, DisableMouseCapture);
-        let _ = Terminal::new(CrosstermBackend::new(io::stdout())).and_then(|mut t| t.show_cursor());
+        let _ =
+            Terminal::new(CrosstermBackend::new(io::stdout())).and_then(|mut t| t.show_cursor());
         original_hook(panic_info);
     }));
 
@@ -221,51 +230,92 @@ pub async fn run_tui_ext(agent: Agent, initial_info: Option<String>) -> anyhow::
 
     let mut runner_agent = agent;
     runner_agent.set_approval_channel(approval_tx);
-    
+
     tokio::spawn(async move {
         while let Some(event) = event_rx.recv().await {
             match event {
-                UiEvent::Input(text) => {
-                    match runner_agent.query(&text).await {
-                        Ok(response) => { let _ = response_tx.send(AgentResponse::Text(response)).await; }
-                        Err(e) => { let _ = response_tx.send(AgentResponse::Error(e.to_string())).await; }
+                UiEvent::Input(text) => match runner_agent.query(&text).await {
+                    Ok(response) => {
+                        let _ = response_tx.send(AgentResponse::Text(response)).await;
                     }
+                    Err(e) => {
+                        let _ = response_tx.send(AgentResponse::Error(e.to_string())).await;
+                    }
+                },
+                UiEvent::Clear => {
+                    runner_agent.clear_history();
                 }
-                UiEvent::Clear => { runner_agent.clear_history(); }
                 UiEvent::Login => {
                     let oauth = crate::services::oauth::OAuthService::new();
                     let url = oauth.get_authorize_url();
                     let _ = response_tx.send(AgentResponse::Info(url)).await;
-                    
+
                     match oauth.start_callback_server().await {
                         Ok(code) => {
-                            let _ = response_tx.send(AgentResponse::Info("Authenticating...".to_string())).await;
+                            let _ = response_tx
+                                .send(AgentResponse::Info("Authenticating...".to_string()))
+                                .await;
                             match oauth.exchange_code_for_token(&code).await {
-                                Ok(token) => {
-                                    match oauth.create_raw_api_key(&token).await {
-                                        Ok(api_key) => {
-                                            let store = crate::system::secrets::KeyringStore::new("magi-rust");
-                                            if let Err(e) = store.set_secret("ANTHROPIC_API_KEY", &api_key).await {
-                                                let _ = response_tx.send(AgentResponse::Error(format!("Failed to store key: {}", e))).await;
-                                            } else {
-                                                let _ = response_tx.send(AgentResponse::Info("Successfully logged in!".to_string())).await;
-                                            }
+                                Ok(token) => match oauth.create_raw_api_key(&token).await {
+                                    Ok(api_key) => {
+                                        let store =
+                                            crate::system::secrets::KeyringStore::new("magi-rust");
+                                        if let Err(e) =
+                                            store.set_secret("ANTHROPIC_API_KEY", &api_key).await
+                                        {
+                                            let _ = response_tx
+                                                .send(AgentResponse::Error(format!(
+                                                    "Failed to store key: {}",
+                                                    e
+                                                )))
+                                                .await;
+                                        } else {
+                                            let _ = response_tx
+                                                .send(AgentResponse::Info(
+                                                    "Successfully logged in!".to_string(),
+                                                ))
+                                                .await;
                                         }
-                                        Err(e) => { let _ = response_tx.send(AgentResponse::Error(format!("Failed to create API key: {}", e))).await; }
                                     }
+                                    Err(e) => {
+                                        let _ = response_tx
+                                            .send(AgentResponse::Error(format!(
+                                                "Failed to create API key: {}",
+                                                e
+                                            )))
+                                            .await;
+                                    }
+                                },
+                                Err(e) => {
+                                    let _ = response_tx
+                                        .send(AgentResponse::Error(format!(
+                                            "OAuth exchange failed: {}",
+                                            e
+                                        )))
+                                        .await;
                                 }
-                                Err(e) => { let _ = response_tx.send(AgentResponse::Error(format!("OAuth exchange failed: {}", e))).await; }
                             }
                         }
-                        Err(e) => { let _ = response_tx.send(AgentResponse::Error(format!("Callback server error: {}", e))).await; }
+                        Err(e) => {
+                            let _ = response_tx
+                                .send(AgentResponse::Error(format!(
+                                    "Callback server error: {}",
+                                    e
+                                )))
+                                .await;
+                        }
                     }
                 }
                 UiEvent::Logout => {
                     let store = crate::system::secrets::KeyringStore::new("magi-rust");
                     if let Err(e) = store.delete_secret("ANTHROPIC_API_KEY").await {
-                        let _ = response_tx.send(AgentResponse::Error(format!("Logout failed: {}", e))).await;
+                        let _ = response_tx
+                            .send(AgentResponse::Error(format!("Logout failed: {}", e)))
+                            .await;
                     } else {
-                        let _ = response_tx.send(AgentResponse::Info("Logged out successfully.".to_string())).await;
+                        let _ = response_tx
+                            .send(AgentResponse::Info("Logged out successfully.".to_string()))
+                            .await;
                     }
                 }
                 UiEvent::Quit => break,
@@ -277,10 +327,16 @@ pub async fn run_tui_ext(agent: Agent, initial_info: Option<String>) -> anyhow::
     let res = run_app(&mut terminal, app).await;
 
     let _ = disable_raw_mode();
-    let _ = execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture);
+    let _ = execute!(
+        terminal.backend_mut(),
+        LeaveAlternateScreen,
+        DisableMouseCapture
+    );
     let _ = terminal.show_cursor();
 
-    if let Err(err) = res { eprintln!("TUI Error: {:?}", err) }
+    if let Err(err) = res {
+        eprintln!("TUI Error: {:?}", err)
+    }
     Ok(())
 }
 
@@ -304,17 +360,27 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Re
 
         if event::poll(std::time::Duration::from_millis(50))? {
             if let Event::Key(key) = event::read()? {
-                if key.kind != KeyEventKind::Press { continue; }
+                if key.kind != KeyEventKind::Press {
+                    continue;
+                }
 
                 match app.mode {
                     AppMode::Selection => {
                         match key.code {
-                            KeyCode::Up => { if app.selected_index > 0 { app.selected_index -= 1; } }
-                            KeyCode::Down => { if app.selected_index < app.messages.len().saturating_sub(1) { app.selected_index += 1; } }
-                            KeyCode::Enter => { 
-                                app.mode = AppMode::Visual; 
-                                app.visual_cursor = 0; 
-                                app.visual_selection_start = None; 
+                            KeyCode::Up => {
+                                if app.selected_index > 0 {
+                                    app.selected_index -= 1;
+                                }
+                            }
+                            KeyCode::Down => {
+                                if app.selected_index < app.messages.len().saturating_sub(1) {
+                                    app.selected_index += 1;
+                                }
+                            }
+                            KeyCode::Enter => {
+                                app.mode = AppMode::Visual;
+                                app.visual_cursor = 0;
+                                app.visual_selection_start = None;
                             }
                             KeyCode::Char('y') => {
                                 if let Some(msg) = app.messages.get(app.selected_index) {
@@ -325,16 +391,24 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Re
                                 }
                                 app.mode = AppMode::Normal;
                             }
-                            KeyCode::Esc | KeyCode::Char('q') => { app.mode = AppMode::Normal; }
+                            KeyCode::Esc | KeyCode::Char('q') => {
+                                app.mode = AppMode::Normal;
+                            }
                             _ => {}
                         }
                         continue;
                     }
                     AppMode::Visual => {
-                        let msg = app.messages.get(app.selected_index).cloned().unwrap_or_default();
+                        let msg = app
+                            .messages
+                            .get(app.selected_index)
+                            .cloned()
+                            .unwrap_or_default();
                         match key.code {
-                            KeyCode::Left => { 
-                                if key.modifiers.contains(KeyModifiers::SHIFT) && app.visual_selection_start.is_none() {
+                            KeyCode::Left => {
+                                if key.modifiers.contains(KeyModifiers::SHIFT)
+                                    && app.visual_selection_start.is_none()
+                                {
                                     app.visual_selection_start = Some(app.visual_cursor);
                                 } else if !key.modifiers.contains(KeyModifiers::SHIFT) {
                                     app.visual_selection_start = None;
@@ -342,12 +416,17 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Re
                                 if app.visual_cursor > 0 {
                                     let mut indices = msg.char_indices().rev();
                                     while let Some((idx, _)) = indices.next() {
-                                        if idx < app.visual_cursor { app.visual_cursor = idx; break; }
+                                        if idx < app.visual_cursor {
+                                            app.visual_cursor = idx;
+                                            break;
+                                        }
                                     }
-                                } 
+                                }
                             }
-                            KeyCode::Right => { 
-                                if key.modifiers.contains(KeyModifiers::SHIFT) && app.visual_selection_start.is_none() {
+                            KeyCode::Right => {
+                                if key.modifiers.contains(KeyModifiers::SHIFT)
+                                    && app.visual_selection_start.is_none()
+                                {
                                     app.visual_selection_start = Some(app.visual_cursor);
                                 } else if !key.modifiers.contains(KeyModifiers::SHIFT) {
                                     app.visual_selection_start = None;
@@ -355,23 +434,38 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Re
                                 if app.visual_cursor < msg.len() {
                                     let mut indices = msg.char_indices();
                                     while let Some((idx, _)) = indices.next() {
-                                        if idx > app.visual_cursor { app.visual_cursor = idx; break; }
+                                        if idx > app.visual_cursor {
+                                            app.visual_cursor = idx;
+                                            break;
+                                        }
                                     }
-                                } 
+                                }
                             }
                             KeyCode::Enter => {
-                                if let (Some(msg_ref), Some(start)) = (app.messages.get(app.selected_index), app.visual_selection_start) {
-                                    let (from, to) = if start < app.visual_cursor { (start, app.visual_cursor) } else { (app.visual_cursor, start) };
-                                    if msg_ref.is_char_boundary(from) && msg_ref.is_char_boundary(to) {
+                                if let (Some(msg_ref), Some(start)) = (
+                                    app.messages.get(app.selected_index),
+                                    app.visual_selection_start,
+                                ) {
+                                    let (from, to) = if start < app.visual_cursor {
+                                        (start, app.visual_cursor)
+                                    } else {
+                                        (app.visual_cursor, start)
+                                    };
+                                    if msg_ref.is_char_boundary(from)
+                                        && msg_ref.is_char_boundary(to)
+                                    {
                                         if let Ok(mut clipboard) = arboard::Clipboard::new() {
-                                            let _ = clipboard.set_text(msg_ref[from..to].to_string());
+                                            let _ =
+                                                clipboard.set_text(msg_ref[from..to].to_string());
                                             app.push_message("System: Fragment copied".to_string());
                                         }
                                     }
                                 }
                                 app.mode = AppMode::Normal;
                             }
-                            KeyCode::Esc | KeyCode::Char('q') => { app.mode = AppMode::Selection; }
+                            KeyCode::Esc | KeyCode::Char('q') => {
+                                app.mode = AppMode::Selection;
+                            }
                             _ => {}
                         }
                         continue;
@@ -381,7 +475,9 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Re
                             (KeyCode::Char('v'), KeyModifiers::CONTROL) => {
                                 if let Ok(mut clipboard) = arboard::Clipboard::new() {
                                     if let Ok(text) = clipboard.get_text() {
-                                        for c in text.chars() { app.insert_char(c); }
+                                        for c in text.chars() {
+                                            app.insert_char(c);
+                                        }
                                     }
                                 }
                                 continue;
@@ -405,16 +501,30 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Re
                                 }
                                 continue;
                             }
-                            (KeyCode::Left, m) => { app.move_cursor_left(m.contains(KeyModifiers::SHIFT)); continue; }
-                            (KeyCode::Right, m) => { app.move_cursor_right(m.contains(KeyModifiers::SHIFT)); continue; }
+                            (KeyCode::Left, m) => {
+                                app.move_cursor_left(m.contains(KeyModifiers::SHIFT));
+                                continue;
+                            }
+                            (KeyCode::Right, m) => {
+                                app.move_cursor_right(m.contains(KeyModifiers::SHIFT));
+                                continue;
+                            }
                             _ => {}
                         }
 
                         if let Some(req) = app.pending_approval.take() {
                             match key.code {
-                                KeyCode::Char('y') | KeyCode::Char('Y') => { let _ = req.tx.send(true); app.push_message("User: Approved".to_string()); }
-                                KeyCode::Char('c') | KeyCode::Char('C') | KeyCode::Esc => { let _ = req.tx.send(false); app.push_message("User: Denied".to_string()); }
-                                _ => { app.pending_approval = Some(req); }
+                                KeyCode::Char('y') | KeyCode::Char('Y') => {
+                                    let _ = req.tx.send(true);
+                                    app.push_message("User: Approved".to_string());
+                                }
+                                KeyCode::Char('c') | KeyCode::Char('C') | KeyCode::Esc => {
+                                    let _ = req.tx.send(false);
+                                    app.push_message("User: Denied".to_string());
+                                }
+                                _ => {
+                                    app.pending_approval = Some(req);
+                                }
                             }
                             continue;
                         }
@@ -426,27 +536,62 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Re
                                 let trimmed = input.trim();
                                 if !trimmed.is_empty() {
                                     match trimmed {
-                                        "/exit" | "/quit" => { let _ = app.event_tx.send(UiEvent::Quit).await; return Ok(()); }
-                                        "/clear" => { app.messages.clear(); let _ = app.event_tx.send(UiEvent::Clear).await; continue; }
-                                        "/login" => { let _ = app.event_tx.send(UiEvent::Login).await; continue; }
-                                        "/logout" => { let _ = app.event_tx.send(UiEvent::Logout).await; continue; }
+                                        "/exit" | "/quit" => {
+                                            let _ = app.event_tx.send(UiEvent::Quit).await;
+                                            return Ok(());
+                                        }
+                                        "/clear" => {
+                                            app.messages.clear();
+                                            let _ = app.event_tx.send(UiEvent::Clear).await;
+                                            continue;
+                                        }
+                                        "/login" => {
+                                            let _ = app.event_tx.send(UiEvent::Login).await;
+                                            continue;
+                                        }
+                                        "/logout" => {
+                                            let _ = app.event_tx.send(UiEvent::Logout).await;
+                                            continue;
+                                        }
                                         "/help" => {
                                             app.push_message("Available commands:".to_string());
-                                            app.push_message("  /login, /logout - Identity management".to_string());
-                                            app.push_message("  /exit, /quit    - Exit the application".to_string());
-                                            app.push_message("  /clear          - Clear session history".to_string());
-                                            app.push_message("  /help           - Show this help message".to_string());
+                                            app.push_message(
+                                                "  /login, /logout - Identity management"
+                                                    .to_string(),
+                                            );
+                                            app.push_message(
+                                                "  /exit, /quit    - Exit the application"
+                                                    .to_string(),
+                                            );
+                                            app.push_message(
+                                                "  /clear          - Clear session history"
+                                                    .to_string(),
+                                            );
+                                            app.push_message(
+                                                "  /help           - Show this help message"
+                                                    .to_string(),
+                                            );
                                             continue;
                                         }
                                         _ => {}
                                     }
                                     app.push_message(format!("User: {}", trimmed));
-                                    let _ = app.event_tx.send(UiEvent::Input(trimmed.to_string())).await;
+                                    let _ = app
+                                        .event_tx
+                                        .send(UiEvent::Input(trimmed.to_string()))
+                                        .await;
                                 }
                             }
-                            KeyCode::Char(c) => { app.insert_char(c); }
-                            KeyCode::Backspace => { app.delete_char(); }
-                            KeyCode::Esc => { let _ = app.event_tx.send(UiEvent::Quit).await; return Ok(()); }
+                            KeyCode::Char(c) => {
+                                app.insert_char(c);
+                            }
+                            KeyCode::Backspace => {
+                                app.delete_char();
+                            }
+                            KeyCode::Esc => {
+                                let _ = app.event_tx.send(UiEvent::Quit).await;
+                                return Ok(());
+                            }
                             _ => {}
                         }
                     }
@@ -463,47 +608,70 @@ fn ui(f: &mut Frame, app: &App) {
         .constraints([Constraint::Percentage(80), Constraint::Length(3)].as_ref())
         .split(f.size());
 
-    let messages: Vec<ListItem> = app.messages.iter().enumerate().map(|(i, m)| {
-        let mut style = Style::default();
-        if (app.mode == AppMode::Selection || app.mode == AppMode::Visual) && i == app.selected_index {
-            style = style.bg(Color::Blue).fg(Color::White).add_modifier(Modifier::BOLD);
-        }
-        ListItem::new(m.as_str()).style(style)
-    }).collect();
-    
+    let messages: Vec<ListItem> = app
+        .messages
+        .iter()
+        .enumerate()
+        .map(|(i, m)| {
+            let mut style = Style::default();
+            if (app.mode == AppMode::Selection || app.mode == AppMode::Visual)
+                && i == app.selected_index
+            {
+                style = style
+                    .bg(Color::Blue)
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD);
+            }
+            ListItem::new(m.as_str()).style(style)
+        })
+        .collect();
+
     let mut state = ListState::default();
-    if app.mode == AppMode::Selection || app.mode == AppMode::Visual { 
-        state.select(Some(app.selected_index)); 
+    if app.mode == AppMode::Selection || app.mode == AppMode::Visual {
+        state.select(Some(app.selected_index));
     }
 
     let messages_list = List::new(messages)
-        .block(Block::default().borders(Borders::ALL).title("Conversation History"))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Conversation History"),
+        )
         .highlight_symbol(">> ");
     f.render_stateful_widget(messages_list, chunks[0], &mut state);
 
     let mut input_text = Text::raw(app.input.as_str());
     if let Some(start) = app.selection_start {
-        let (from, to) = if start < app.cursor_position { (start, app.cursor_position) } else { (app.cursor_position, start) };
+        let (from, to) = if start < app.cursor_position {
+            (start, app.cursor_position)
+        } else {
+            (app.cursor_position, start)
+        };
         if app.input.is_char_boundary(from) && app.input.is_char_boundary(to) {
             let mut spans = Vec::new();
             spans.push(Span::raw(&app.input[..from]));
-            spans.push(Span::styled(&app.input[from..to], Style::default().bg(Color::White).fg(Color::Black)));
+            spans.push(Span::styled(
+                &app.input[from..to],
+                Style::default().bg(Color::White).fg(Color::Black),
+            ));
             spans.push(Span::raw(&app.input[to..]));
             input_text = Text::from(Line::from(spans));
         }
     }
 
     let input_title = match app.mode {
-        AppMode::Selection => "SELECT MESSAGE (Enter to select text, 'y' to copy whole, Esc to exit)",
+        AppMode::Selection => {
+            "SELECT MESSAGE (Enter to select text, 'y' to copy whole, Esc to exit)"
+        }
         AppMode::Visual => "VISUAL SELECTION MODE",
         _ if app.pending_approval.is_some() => "WAITING FOR APPROVAL (y/c)",
         _ => "Input (Ctrl+S Copy Mode, Shift+Arrows Select)",
     };
 
-    let input = Paragraph::new(input_text)
-        .block(Block::default().borders(Borders::ALL).title(input_title));
+    let input =
+        Paragraph::new(input_text).block(Block::default().borders(Borders::ALL).title(input_title));
     f.render_widget(input, chunks[1]);
-    
+
     if app.mode == AppMode::Normal {
         // Find visible width of input to position cursor correctly
         let prefix_len = app.input[..app.cursor_position].chars().count() as u16;
@@ -549,8 +717,8 @@ mod tests {
 
         app.move_cursor_left(false);
         assert_eq!(app.cursor_position, 0);
-        
-        app.insert_char('x'); 
+
+        app.insert_char('x');
         assert_eq!(app.input, "xá");
     }
 }

@@ -7,9 +7,9 @@
 //!
 //! ### Panoptic Data Flow:
 //! 1. **Key Derivation (Argon2):** A master password (from OS Keyring) is hashed with a random salt to produce a 32-byte key + nonce.
-//! 2. **Authenticated Encryption (AES-256-GCM-SIV):** Plaintext is encrypted using the derived key. This cipher is nonce-misuse resistant, 
+//! 2. **Authenticated Encryption (AES-256-GCM-SIV):** Plaintext is encrypted using the derived key. This cipher is nonce-misuse resistant,
 //!    guaranteeing confidentiality and integrity (authentication tag).
-//! 3. **Error Correction (Reed-Solomon):** The salt and ciphertext are encoded with parity bytes. This allows recovery of the data 
+//! 3. **Error Correction (Reed-Solomon):** The salt and ciphertext are encoded with parity bytes. This allows recovery of the data
 //!    even if the underlying storage suffers from bit-rot or minor corruption.
 //! 4. **Final Blob:** [Length (4b)] + [RS Encoded Payload (Salt + Ciphertext + Parity)].
 
@@ -151,12 +151,20 @@ impl ReedSolomonCodec {
     #[allow(dead_code)]
     pub fn new(parity_len: usize, data_len: usize) -> Result<Self, CryptoError> {
         if parity_len == 0 || data_len == 0 {
-            return Err(CryptoError::InvalidInput("Parity and data length must be greater than zero".to_string()));
+            return Err(CryptoError::InvalidInput(
+                "Parity and data length must be greater than zero".to_string(),
+            ));
         }
         if parity_len + data_len > 255 {
-            return Err(CryptoError::InvalidInput(format!("parity_len ({}) + data_len ({}) exceeds GF(2^8) limit of 255", parity_len, data_len)));
+            return Err(CryptoError::InvalidInput(format!(
+                "parity_len ({}) + data_len ({}) exceeds GF(2^8) limit of 255",
+                parity_len, data_len
+            )));
         }
-        Ok(Self { parity_len, data_len })
+        Ok(Self {
+            parity_len,
+            data_len,
+        })
     }
 }
 
@@ -178,7 +186,9 @@ impl ErrorCorrection for ReedSolomonCodec {
 
         for chunk in encoded.chunks(block_size) {
             if chunk.len() <= self.parity_len {
-                return Err(CryptoError::ErrorCorrection("Encoded block too short for Reed-Solomon parity".to_string()));
+                return Err(CryptoError::ErrorCorrection(
+                    "Encoded block too short for Reed-Solomon parity".to_string(),
+                ));
             }
             let recovered = dec.correct(chunk, None).map_err(|_| {
                 CryptoError::ErrorCorrection("Reed-Solomon error correction failed".to_string())
@@ -221,7 +231,9 @@ impl CryptoVault {
 
     pub fn encrypt(&self, password: &str, plaintext: &str) -> Result<String, CryptoError> {
         if password.is_empty() {
-            return Err(CryptoError::InvalidInput("Password must not be empty".to_string()));
+            return Err(CryptoError::InvalidInput(
+                "Password must not be empty".to_string(),
+            ));
         }
 
         let nonce_len = self.cipher.nonce_len();
@@ -255,33 +267,45 @@ impl CryptoVault {
 
     pub fn decrypt(&self, password: &str, encrypted_base64: &str) -> Result<String, CryptoError> {
         if password.is_empty() {
-            return Err(CryptoError::InvalidInput("Password must not be empty".to_string()));
+            return Err(CryptoError::InvalidInput(
+                "Password must not be empty".to_string(),
+            ));
         }
 
         let nonce_len = self.cipher.nonce_len();
-        let blob = STANDARD.decode(encrypted_base64)
+        let blob = STANDARD
+            .decode(encrypted_base64)
             .map_err(|e| CryptoError::Encoding(format!("Invalid base64: {}", e)))?;
 
         if blob.len() < 4 {
-            return Err(CryptoError::Encoding("Encrypted blob too short".to_string()));
+            return Err(CryptoError::Encoding(
+                "Encrypted blob too short".to_string(),
+            ));
         }
 
         let len_bytes: [u8; 4] = blob[..4].try_into().unwrap();
         let original_len = u32::from_le_bytes(len_bytes) as usize;
 
         if original_len > (blob.len() - 4) {
-            return Err(CryptoError::InvalidInput("Length header exceeds encoded data size".to_string()));
+            return Err(CryptoError::InvalidInput(
+                "Length header exceeds encoded data size".to_string(),
+            ));
         }
 
         let plaindata = self.fec.decode(&blob[4..], original_len)?;
         let salt = &plaindata[..SALT_LEN];
         let ciphertext = &plaindata[SALT_LEN..];
 
-        let kdf_output = self.kdf.derive_key(password.as_bytes(), salt, KEY_LEN + nonce_len)?;
+        let kdf_output = self
+            .kdf
+            .derive_key(password.as_bytes(), salt, KEY_LEN + nonce_len)?;
 
-        let plaintext = self.cipher.decrypt(&kdf_output[..KEY_LEN], &kdf_output[KEY_LEN..], ciphertext)?;
+        let plaintext =
+            self.cipher
+                .decrypt(&kdf_output[..KEY_LEN], &kdf_output[KEY_LEN..], ciphertext)?;
 
-        String::from_utf8(plaintext).map_err(|e| CryptoError::Encoding(format!("Invalid UTF-8: {}", e)))
+        String::from_utf8(plaintext)
+            .map_err(|e| CryptoError::Encoding(format!("Invalid UTF-8: {}", e)))
     }
 }
 
@@ -304,7 +328,9 @@ mod tests {
         let rs = ReedSolomonCodec::default();
         let data = b"FEC correction test payload for Reed-Solomon codec.";
         let mut encoded = rs.encode(data);
-        for i in 0..10 { encoded[i * 7] ^= 0xAA; }
+        for i in 0..10 {
+            encoded[i * 7] ^= 0xAA;
+        }
         let decoded = rs.decode(&encoded, data.len()).unwrap();
         assert_eq!(decoded, data);
     }

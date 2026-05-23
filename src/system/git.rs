@@ -1,8 +1,8 @@
 //! This module provides abstractions for system-level operations.
 
+use anyhow::Result;
 use async_trait::async_trait;
 use serde::Serialize;
-use anyhow::Result;
 
 #[cfg(test)]
 use mockall::automock;
@@ -22,7 +22,7 @@ pub struct GitState {
 pub trait Git: Send + Sync {
     /// Returns the current state of the repository.
     async fn get_state(&self) -> Result<GitState>;
-    
+
     /// Checks if the current directory is a git repository.
     async fn is_git(&self) -> bool;
 }
@@ -40,15 +40,15 @@ impl RealGit {
 
     async fn run_git(&self, args: &[&str]) -> Result<String> {
         use tokio::process::Command;
-        let output = Command::new("git")
-            .args(args)
-            .output()
-            .await?;
-        
+        let output = Command::new("git").args(args).output().await?;
+
         if output.status.success() {
             Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
         } else {
-            Err(anyhow::anyhow!("Git command failed: {}", String::from_utf8_lossy(&output.stderr)))
+            Err(anyhow::anyhow!(
+                "Git command failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ))
         }
     }
 }
@@ -58,7 +58,7 @@ impl Git for RealGit {
     async fn get_state(&self) -> Result<GitState> {
         let branch = self.run_git(&["rev-parse", "--abbrev-ref", "HEAD"]).await?;
         let status = self.run_git(&["status", "--porcelain"]).await?;
-        
+
         Ok(GitState {
             branch,
             is_dirty: !status.is_empty(),
@@ -66,7 +66,9 @@ impl Git for RealGit {
     }
 
     async fn is_git(&self) -> bool {
-        self.run_git(&["rev-parse", "--is-inside-work-tree"]).await.is_ok()
+        self.run_git(&["rev-parse", "--is-inside-work-tree"])
+            .await
+            .is_ok()
     }
 }
 
@@ -80,22 +82,22 @@ mod tests {
         mock.expect_is_git()
             .times(1)
             .returning(|| Box::pin(async { true }));
-        
+
         assert!(mock.is_git().await);
     }
 
     #[tokio::test]
     async fn test_git_get_state() {
         let mut mock = MockGit::new();
-        mock.expect_get_state()
-            .times(1)
-            .returning(|| Box::pin(async { 
+        mock.expect_get_state().times(1).returning(|| {
+            Box::pin(async {
                 Ok(GitState {
                     branch: "main".to_string(),
                     is_dirty: false,
                 })
-            }));
-        
+            })
+        });
+
         let state = mock.get_state().await.unwrap();
         assert_eq!(state.branch, "main");
         assert!(!state.is_dirty);

@@ -3,12 +3,12 @@
 pub mod messages;
 pub mod provider;
 
-use std::sync::Arc;
-use crate::agent::messages::{Message, Content, Role};
+use crate::agent::messages::{Content, Message, Role};
 use crate::agent::provider::{Provider, ResponseChunk};
-use crate::tools::Tool;
 use crate::system::database::MemoryStore;
+use crate::tools::Tool;
 use anyhow::Result;
+use std::sync::Arc;
 use tokio::sync::oneshot;
 use tokio::time::{timeout, Duration};
 
@@ -71,7 +71,11 @@ impl Agent {
     }
 
     /// Sends an info message to the UI.
-    pub async fn send_info(&self, tx: &tokio::sync::mpsc::Sender<crate::tui::AgentResponse>, info: String) {
+    pub async fn send_info(
+        &self,
+        tx: &tokio::sync::mpsc::Sender<crate::tui::AgentResponse>,
+        info: String,
+    ) {
         let _ = tx.send(crate::tui::AgentResponse::Info(info)).await;
     }
 
@@ -97,16 +101,16 @@ impl Agent {
                     parts.push(format!("{}:{}", k, Self::normalize_input(v, depth + 1)?));
                 }
                 Ok(format!("{{{}}}", parts.join(",")))
-            },
+            }
             serde_json::Value::Array(arr) => {
                 let mut normalized_elements = Vec::new();
                 for v in arr {
                     normalized_elements.push(Self::normalize_input(v, depth + 1)?);
                 }
                 Ok(format!("[{}]", normalized_elements.join(",")))
-            },
+            }
             serde_json::Value::String(s) => Ok(s.trim().to_string()),
-            _ => Ok(val.to_string())
+            _ => Ok(val.to_string()),
         }
     }
 
@@ -114,13 +118,15 @@ impl Agent {
     pub fn sanitize_text(text: &str) -> String {
         let mut result = String::with_capacity(text.len());
         let mut chars = text.chars().peekable();
-        
+
         while let Some(c) = chars.next() {
             if c == '\x1B' {
                 if let Some('[') = chars.peek() {
                     chars.next();
                     while let Some(next) = chars.next() {
-                        if next.is_ascii_alphabetic() { break; }
+                        if next.is_ascii_alphabetic() {
+                            break;
+                        }
                     }
                     continue;
                 }
@@ -143,9 +149,9 @@ impl Agent {
             }
             full
         });
-        
+
         let res = self.query_streaming(text, tx).await;
-        let _ = handle.await; 
+        let _ = handle.await;
         res
     }
 
@@ -161,20 +167,23 @@ impl Agent {
         }
 
         let summary_prompt = Message::user("Please provide a concise technical summary of our conversation so far, capturing all key context, decisions, and outcomes. This summary will be used to continue our session efficiently.");
-        
+
         let mut temp_history = self.history.clone();
         temp_history.push(summary_prompt);
 
         let response = self.provider.send_messages(&temp_history, &[]).await?;
-        
+
         self.history.clear();
         let summary_msg = Message {
             role: Role::Assistant,
             content: vec![Content::Text {
-                text: format!("CONVERSATION SUMMARY: {}", match &response.content[0] {
-                    Content::Text { text } => text.clone(),
-                    _ => "Summary extraction failed.".to_string(),
-                })
+                text: format!(
+                    "CONVERSATION SUMMARY: {}",
+                    match &response.content[0] {
+                        Content::Text { text } => text.clone(),
+                        _ => "Summary extraction failed.".to_string(),
+                    }
+                ),
             }],
         };
         self.history.push(summary_msg.clone());
@@ -189,10 +198,14 @@ impl Agent {
 
     /// Process a user message and returns the final assistant response.
     /// This method supports streaming via a sender channel.
-    pub async fn query_streaming(&mut self, text: &str, chunk_tx: tokio::sync::mpsc::Sender<String>) -> Result<String> {
+    pub async fn query_streaming(
+        &mut self,
+        text: &str,
+        chunk_tx: tokio::sync::mpsc::Sender<String>,
+    ) -> Result<String> {
         let user_msg = Message::user(text);
         self.history.push(user_msg.clone());
-        
+
         // Persist user message
         if let (Some(memory), Some(sid)) = (&self.memory, &self.session_id) {
             memory.add_message(sid, &user_msg).await?;
@@ -203,7 +216,10 @@ impl Agent {
         let mut repeat_count = 0;
 
         loop {
-            let mut stream = self.provider.stream_messages(&self.history, &self.tools).await?;
+            let mut stream = self
+                .provider
+                .stream_messages(&self.history, &self.tools)
+                .await?;
             let mut full_text = String::new();
             let mut last_message: Option<Message> = None;
 
@@ -224,7 +240,8 @@ impl Agent {
                 }
             }
 
-            let response = last_message.ok_or_else(|| anyhow::anyhow!("Stream ended without MessageDone"))?;
+            let response =
+                last_message.ok_or_else(|| anyhow::anyhow!("Stream ended without MessageDone"))?;
             self.history.push(response.clone());
 
             // Persist assistant response
@@ -250,22 +267,29 @@ impl Agent {
                             if repeat_count >= 3 {
                                 return Err(anyhow::anyhow!("Repetitive tool call detected"));
                             }
-                        } else { repeat_count = 0; }
+                        } else {
+                            repeat_count = 0;
+                        }
                     }
                     last_normalized_tool = Some((name.clone(), normalized_input));
-                    
+
                     let approved = if let Some(ref tx) = self.approval_tx {
                         let (oneshot_tx, oneshot_rx) = oneshot::channel();
-                        let _ = tx.send(ApprovalRequest {
-                            tool_name: name.clone(),
-                            input: input.clone(),
-                            tx: oneshot_tx,
-                        }).await;
-                        match timeout(Duration::from_secs(APPROVAL_TIMEOUT_SECS), oneshot_rx).await {
+                        let _ = tx
+                            .send(ApprovalRequest {
+                                tool_name: name.clone(),
+                                input: input.clone(),
+                                tx: oneshot_tx,
+                            })
+                            .await;
+                        match timeout(Duration::from_secs(APPROVAL_TIMEOUT_SECS), oneshot_rx).await
+                        {
                             Ok(Ok(res)) => res,
                             _ => false,
                         }
-                    } else { true };
+                    } else {
+                        true
+                    };
 
                     if !approved {
                         tool_results.push(Content::ToolResult {
@@ -276,20 +300,36 @@ impl Agent {
                         continue;
                     }
 
-                    let tool_result = if let Some(tool) = self.tools.iter().find(|t| t.name() == name) {
-                        match tool.execute(input.clone()).await {
-                            Ok(val) => Content::ToolResult { tool_use_id: id.clone(), content: val.to_string(), is_error: false },
-                            Err(e) => Content::ToolResult { tool_use_id: id.clone(), content: e.to_string(), is_error: true },
-                        }
-                    } else {
-                        Content::ToolResult { tool_use_id: id.clone(), content: format!("Tool '{}' not found", name), is_error: true }
-                    };
+                    let tool_result =
+                        if let Some(tool) = self.tools.iter().find(|t| t.name() == name) {
+                            match tool.execute(input.clone()).await {
+                                Ok(val) => Content::ToolResult {
+                                    tool_use_id: id.clone(),
+                                    content: val.to_string(),
+                                    is_error: false,
+                                },
+                                Err(e) => Content::ToolResult {
+                                    tool_use_id: id.clone(),
+                                    content: e.to_string(),
+                                    is_error: true,
+                                },
+                            }
+                        } else {
+                            Content::ToolResult {
+                                tool_use_id: id.clone(),
+                                content: format!("Tool '{}' not found", name),
+                                is_error: true,
+                            }
+                        };
                     tool_results.push(tool_result);
                 }
             }
 
             if requested_tool {
-                let tool_res_msg = Message { role: Role::User, content: tool_results };
+                let tool_res_msg = Message {
+                    role: Role::User,
+                    content: tool_results,
+                };
                 self.history.push(tool_res_msg.clone());
                 // Persist tool results
                 if let (Some(memory), Some(sid)) = (&self.memory, &self.session_id) {
@@ -297,7 +337,9 @@ impl Agent {
                 }
             } else {
                 for content in response.content.iter().rev() {
-                    if let Content::Text { text } = content { return Ok(text.clone()); }
+                    if let Content::Text { text } = content {
+                        return Ok(text.clone());
+                    }
                 }
                 return Ok(String::new());
             }
@@ -309,23 +351,33 @@ impl Agent {
 mod tests {
     use super::*;
     use anyhow::Result;
-    use futures::stream::{self, BoxStream};
     use async_trait::async_trait;
+    use futures::stream::{self, BoxStream};
     use serde_json::json;
 
     pub struct MockProvider;
-    
+
     #[async_trait]
     impl Provider for MockProvider {
-        async fn stream_messages(&self, _messages: &[Message], _tools: &[Box<dyn Tool>]) -> Result<BoxStream<'static, Result<ResponseChunk>>> {
-             let chunks = vec![
+        async fn stream_messages(
+            &self,
+            _messages: &[Message],
+            _tools: &[Box<dyn Tool>],
+        ) -> Result<BoxStream<'static, Result<ResponseChunk>>> {
+            let chunks = vec![
                 Ok(ResponseChunk::TextDelta("Summary content.".to_string())),
-                Ok(ResponseChunk::MessageDone(Message::assistant("Summary content."))),
+                Ok(ResponseChunk::MessageDone(Message::assistant(
+                    "Summary content.",
+                ))),
             ];
             Ok(Box::pin(stream::iter(chunks)))
         }
-        async fn send_messages(&self, _messages: &[Message], _tools: &[Box<dyn Tool>]) -> Result<Message> { 
-            Ok(Message::assistant("Summary content.")) 
+        async fn send_messages(
+            &self,
+            _messages: &[Message],
+            _tools: &[Box<dyn Tool>],
+        ) -> Result<Message> {
+            Ok(Message::assistant("Summary content."))
         }
     }
 
@@ -341,13 +393,17 @@ mod tests {
         assert_eq!(agent.history.len(), 1);
         if let Content::Text { text } = &agent.history[0].content[0] {
             assert!(text.contains("Summary"));
-        } else { panic!("Expected summary"); }
+        } else {
+            panic!("Expected summary");
+        }
     }
 
     #[tokio::test]
     async fn test_agent_normalization_depth_limit() {
         let mut deep_json = json!({"path": "."});
-        for i in 0..20 { deep_json = json!({format!("level_{}", i): deep_json}); }
+        for i in 0..20 {
+            deep_json = json!({format!("level_{}", i): deep_json});
+        }
         let result = Agent::normalize_input(&deep_json, 0);
         assert!(result.is_err());
     }
@@ -363,19 +419,25 @@ mod tests {
         let tmp_dir = tempfile::tempdir().unwrap();
         let db_path = tmp_dir.path().join("test_persist.db");
         let password = "master_password_123".to_string();
-        
+
         let msg_text = "Persist this message";
         let sid = "session_1".to_string();
 
         // Scope 1: Create agent and save a message
         let sid = {
             let mut agent = Agent::new(Arc::new(MockProvider));
-            let memory = Arc::new(crate::system::database::EncryptedSqliteMemory::new(db_path.clone(), password.clone()).unwrap());
-            
+            let memory = Arc::new(
+                crate::system::database::EncryptedSqliteMemory::new(
+                    db_path.clone(),
+                    password.clone(),
+                )
+                .unwrap(),
+            );
+
             // Create session
             let id = memory.create_session("test_proj").await.unwrap();
             agent.set_memory(memory.clone(), id.clone());
-            
+
             let user_msg = Message::user(msg_text);
             agent.history.push(user_msg.clone());
             memory.add_message(&id, &user_msg).await.unwrap();
@@ -385,12 +447,14 @@ mod tests {
         // Scope 2: Recreate agent and verify loading
         {
             let mut agent = Agent::new(Arc::new(MockProvider));
-            let memory = Arc::new(crate::system::database::EncryptedSqliteMemory::new(db_path, password).unwrap());
+            let memory = Arc::new(
+                crate::system::database::EncryptedSqliteMemory::new(db_path, password).unwrap(),
+            );
             agent.set_memory(memory, sid);
-            
+
             // Load history
             agent.load_history().await.unwrap();
-            
+
             assert_eq!(agent.history.len(), 1);
             if let Content::Text { text } = &agent.history[0].content[0] {
                 assert_eq!(text, msg_text);
@@ -404,27 +468,39 @@ mod tests {
     async fn test_agent_history_resilience_to_key_rotation() {
         let tmp_dir = tempfile::tempdir().unwrap();
         let db_path = tmp_dir.path().join("resilient_test.db");
-        
+
         let key_a = "api_key_alpha".to_string();
         let key_b = "api_key_beta".to_string();
         let msg_text = "Secrets are safe";
 
         // Scope 1: Save with Key A
         let sid = {
-            let memory = crate::system::database::EncryptedSqliteMemory::new(db_path.clone(), key_a).unwrap();
+            let memory =
+                crate::system::database::EncryptedSqliteMemory::new(db_path.clone(), key_a)
+                    .unwrap();
             let id = memory.create_session("test").await.unwrap();
-            memory.add_message(&id, &Message::user(msg_text)).await.unwrap();
+            memory
+                .add_message(&id, &Message::user(msg_text))
+                .await
+                .unwrap();
             id
         };
 
         // Scope 2: Attempt to load with Key B (Simulate rotation before fix)
         {
-            let memory = crate::system::database::EncryptedSqliteMemory::new(db_path, key_b).unwrap();
+            let memory =
+                crate::system::database::EncryptedSqliteMemory::new(db_path, key_b).unwrap();
             let result = memory.get_messages(&sid).await;
-            
+
             // Expected failure: Key B cannot decrypt what Key A encrypted
-            assert!(result.is_err(), "Recovery with a different key SHOULD fail currently");
-            assert!(result.unwrap_err().to_string().contains("Decryption failed"));
+            assert!(
+                result.is_err(),
+                "Recovery with a different key SHOULD fail currently"
+            );
+            assert!(result
+                .unwrap_err()
+                .to_string()
+                .contains("Decryption failed"));
         }
     }
 }

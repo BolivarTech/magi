@@ -1,18 +1,18 @@
 //! This module implements the OAuth 2.0 flow with PKCE for Anthropic Console.
 
 use anyhow::Result;
-use serde::{Deserialize, Serialize};
-use sha2::{Sha256, Digest};
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
-use rand::{RngCore, thread_rng};
-use tokio::sync::{oneshot, Mutex};
 use axum::{
     extract::{Query, State},
     response::Redirect,
     routing::get,
     Router,
 };
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use rand::{thread_rng, RngCore};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::sync::Arc;
+use tokio::sync::{oneshot, Mutex};
 use urlencoding::encode;
 
 pub const CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
@@ -32,12 +32,15 @@ impl Pkce {
         let mut verifier_bytes = [0u8; 32];
         thread_rng().fill_bytes(&mut verifier_bytes);
         let verifier = URL_SAFE_NO_PAD.encode(verifier_bytes);
-        
+
         let mut hasher = Sha256::new();
         hasher.update(verifier.as_bytes());
         let challenge = URL_SAFE_NO_PAD.encode(hasher.finalize());
-        
-        Self { verifier, challenge }
+
+        Self {
+            verifier,
+            challenge,
+        }
     }
 }
 
@@ -70,7 +73,7 @@ impl OAuthService {
         let mut state_bytes = [0u8; 32];
         thread_rng().fill_bytes(&mut state_bytes);
         let state = URL_SAFE_NO_PAD.encode(state_bytes);
-        
+
         Self {
             pkce: Pkce::generate(),
             state,
@@ -105,8 +108,9 @@ impl OAuthService {
     pub async fn exchange_code_for_token(&self, code: &str) -> Result<String> {
         let client = reqwest::Client::new();
         let redirect_uri = format!("http://localhost:{}/callback", REDIRECT_PORT);
-        
-        let response = client.post(&self.token_url)
+
+        let response = client
+            .post(&self.token_url)
             .json(&serde_json::json!({
                 "grant_type": "authorization_code",
                 "code": code,
@@ -119,7 +123,10 @@ impl OAuthService {
             .await?;
 
         if !response.status().is_success() {
-            return Err(anyhow::anyhow!("Token exchange failed: {}", response.text().await?));
+            return Err(anyhow::anyhow!(
+                "Token exchange failed: {}",
+                response.text().await?
+            ));
         }
 
         let token_res: TokenResponse = response.json().await?;
@@ -128,13 +135,17 @@ impl OAuthService {
 
     pub async fn create_raw_api_key(&self, access_token: &str) -> Result<String> {
         let client = reqwest::Client::new();
-        let response = client.post(&self.api_key_url)
+        let response = client
+            .post(&self.api_key_url)
             .header("Authorization", format!("Bearer {}", access_token))
             .send()
             .await?;
 
         if !response.status().is_success() {
-            return Err(anyhow::anyhow!("Failed to create API key: {}", response.text().await?));
+            return Err(anyhow::anyhow!(
+                "Failed to create API key: {}",
+                response.text().await?
+            ));
         }
 
         #[derive(Deserialize)]
@@ -157,7 +168,8 @@ impl OAuthService {
             .route("/callback", get(callback_handler))
             .with_state(app_state);
 
-        let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{}", REDIRECT_PORT)).await?;
+        let listener =
+            tokio::net::TcpListener::bind(format!("127.0.0.1:{}", REDIRECT_PORT)).await?;
         let server = axum::serve(listener, app);
 
         tokio::select! {
@@ -197,19 +209,23 @@ mod tests {
     fn test_authorize_url_generation() {
         let service = OAuthService::new();
         let url = service.get_authorize_url();
-        
+
         assert!(url.contains(AUTHORIZE_URL));
         assert!(url.contains(CLIENT_ID));
         assert!(url.contains(&service.state));
         assert!(url.contains(&service.pkce.challenge));
-        
+
         // Rigorous check for URL encoding of redirect_uri
-        assert!(url.contains("redirect_uri=http%3A%2F%2Flocalhost%3A54545%2Fcallback"), 
-            "redirect_uri must be properly URL-encoded");
-            
+        assert!(
+            url.contains("redirect_uri=http%3A%2F%2Flocalhost%3A54545%2Fcallback"),
+            "redirect_uri must be properly URL-encoded"
+        );
+
         // Check for encoded scope (space replaced by %20 or +)
-        assert!(url.contains("scope=org%3Acreate_api_key%20user%3Aprofile"),
-            "scope must be properly URL-encoded");
+        assert!(
+            url.contains("scope=org%3Acreate_api_key%20user%3Aprofile"),
+            "scope must be properly URL-encoded"
+        );
     }
 
     #[tokio::test]
@@ -220,7 +236,8 @@ mod tests {
         let service = OAuthService::with_urls(format!("{}/token", url), "".to_string());
         let expected_state = service.state.clone();
 
-        let _m = server.mock("POST", "/token")
+        let _m = server
+            .mock("POST", "/token")
             .match_body(mockito::Matcher::Json(serde_json::json!({
                 "grant_type": "authorization_code",
                 "code": "mock_code",
@@ -231,10 +248,14 @@ mod tests {
             })))
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(serde_json::json!({
-                "access_token": "mock_access_token"
-            }).to_string())
-            .create_async().await;
+            .with_body(
+                serde_json::json!({
+                    "access_token": "mock_access_token"
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
 
         let token = service.exchange_code_for_token("mock_code").await.unwrap();
 
@@ -246,13 +267,18 @@ mod tests {
         let mut server = mockito::Server::new_async().await;
         let url = server.url();
 
-        let _m = server.mock("POST", "/create_key")
+        let _m = server
+            .mock("POST", "/create_key")
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(serde_json::json!({
-                "raw_key": "sk-ant-real-key"
-            }).to_string())
-            .create_async().await;
+            .with_body(
+                serde_json::json!({
+                    "raw_key": "sk-ant-real-key"
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
 
         let service = OAuthService::with_urls("".to_string(), format!("{}/create_key", url));
         let key = service.create_raw_api_key("mock_token").await.unwrap();
@@ -278,7 +304,10 @@ mod tests {
 
         // Verify that the code was NOT sent through the channel
         let result = rx.now_or_never();
-        assert!(result.is_none(), "Code should NOT be sent if state is incorrect");
+        assert!(
+            result.is_none(),
+            "Code should NOT be sent if state is incorrect"
+        );
     }
 
     #[tokio::test]

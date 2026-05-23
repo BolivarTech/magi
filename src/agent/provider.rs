@@ -1,10 +1,10 @@
 //! This module defines the Provider trait for AI backend interactions.
 
-use async_trait::async_trait;
-use crate::agent::messages::{Message, Content, Role};
+use crate::agent::messages::{Content, Message, Role};
 use anyhow::Result;
-use serde::{Deserialize, Serialize};
+use async_trait::async_trait;
 use futures::stream::{self, BoxStream, StreamExt};
+use serde::{Deserialize, Serialize};
 use tokio::time::{sleep, Duration};
 
 #[cfg(test)]
@@ -29,10 +29,18 @@ pub enum ResponseChunk {
 #[async_trait]
 pub trait Provider: Send + Sync {
     /// Sends a list of messages to the AI and returns a stream of chunks.
-    async fn stream_messages(&self, messages: &[Message], tools: &[Box<dyn Tool>]) -> Result<BoxStream<'static, Result<ResponseChunk>>>;
-    
+    async fn stream_messages(
+        &self,
+        messages: &[Message],
+        tools: &[Box<dyn Tool>],
+    ) -> Result<BoxStream<'static, Result<ResponseChunk>>>;
+
     /// Sends a list of messages and returns the full message (blocking until done).
-    async fn send_messages(&self, messages: &[Message], tools: &[Box<dyn Tool>]) -> Result<Message> {
+    async fn send_messages(
+        &self,
+        messages: &[Message],
+        tools: &[Box<dyn Tool>],
+    ) -> Result<Message> {
         let mut attempts = 0;
         let max_attempts = 3;
 
@@ -59,7 +67,7 @@ pub trait Provider: Send + Sync {
                     if let Some(msg) = last_message {
                         return Ok(msg);
                     }
-                    
+
                     if !full_text.is_empty() {
                         return Ok(Message {
                             role,
@@ -67,7 +75,9 @@ pub trait Provider: Send + Sync {
                         });
                     }
 
-                    return Err(anyhow::anyhow!("Stream ended without MessageDone or content"));
+                    return Err(anyhow::anyhow!(
+                        "Stream ended without MessageDone or content"
+                    ));
                 }
                 Err(e) if attempts < max_attempts && e.to_string().contains("429") => {
                     let wait_secs = 2_u64.pow(attempts as u32);
@@ -85,11 +95,19 @@ pub struct StaticProvider;
 
 #[async_trait]
 impl Provider for StaticProvider {
-    async fn stream_messages(&self, _messages: &[Message], _tools: &[Box<dyn Tool>]) -> Result<BoxStream<'static, Result<ResponseChunk>>> {
+    async fn stream_messages(
+        &self,
+        _messages: &[Message],
+        _tools: &[Box<dyn Tool>],
+    ) -> Result<BoxStream<'static, Result<ResponseChunk>>> {
         let msg = Message::assistant("I am a Rust-powered assistant. How can I help you today?");
         let chunks = vec![
-            Ok(ResponseChunk::TextDelta("I am a Rust-powered assistant. ".to_string())),
-            Ok(ResponseChunk::TextDelta("How can I help you today?".to_string())),
+            Ok(ResponseChunk::TextDelta(
+                "I am a Rust-powered assistant. ".to_string(),
+            )),
+            Ok(ResponseChunk::TextDelta(
+                "How can I help you today?".to_string(),
+            )),
             Ok(ResponseChunk::MessageDone(msg)),
         ];
         Ok(Box::pin(stream::iter(chunks)))
@@ -137,14 +155,29 @@ struct AnthropicErrorDetail {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum AnthropicSseEvent {
-    MessageStart { message: AnthropicMessageStart },
-    ContentBlockStart { index: usize, content_block: serde_json::Value },
-    ContentBlockDelta { index: usize, delta: AnthropicDelta },
-    ContentBlockStop { index: usize },
-    MessageDelta { delta: serde_json::Value, usage: serde_json::Value },
+    MessageStart {
+        message: AnthropicMessageStart,
+    },
+    ContentBlockStart {
+        index: usize,
+        content_block: serde_json::Value,
+    },
+    ContentBlockDelta {
+        index: usize,
+        delta: AnthropicDelta,
+    },
+    ContentBlockStop {
+        index: usize,
+    },
+    MessageDelta {
+        delta: serde_json::Value,
+        usage: serde_json::Value,
+    },
     MessageStop,
     Ping,
-    Error { error: AnthropicErrorDetail },
+    Error {
+        error: AnthropicErrorDetail,
+    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -192,10 +225,15 @@ impl AnthropicProvider {
 
 #[async_trait]
 impl Provider for AnthropicProvider {
-    async fn stream_messages(&self, messages: &[Message], tools: &[Box<dyn Tool>]) -> Result<BoxStream<'static, Result<ResponseChunk>>> {
+    async fn stream_messages(
+        &self,
+        messages: &[Message],
+        tools: &[Box<dyn Tool>],
+    ) -> Result<BoxStream<'static, Result<ResponseChunk>>> {
         let url = format!("{}/messages", self.base_url);
-        
-        let anthropic_tools: Vec<AnthropicTool> = tools.iter()
+
+        let anthropic_tools: Vec<AnthropicTool> = tools
+            .iter()
             .map(|t| AnthropicTool {
                 name: t.name().to_string(),
                 description: t.description().to_string(),
@@ -211,7 +249,9 @@ impl Provider for AnthropicProvider {
             stream: true,
         };
 
-        let response = self.client.post(&url)
+        let response = self
+            .client
+            .post(&url)
             .header("x-api-key", &self.api_key)
             .header("anthropic-version", "2023-06-01")
             .header("content-type", "application/json")
@@ -225,16 +265,19 @@ impl Provider for AnthropicProvider {
 
             if let Ok(error_res) = serde_json::from_str::<AnthropicErrorResponse>(&body) {
                 return Err(anyhow::anyhow!(
-                    "Anthropic API Error [{}] ({}): {}", 
-                    status, 
-                    error_res.error.error_type, 
+                    "Anthropic API Error [{}] ({}): {}",
+                    status,
+                    error_res.error.error_type,
                     error_res.error.message
                 ));
             }
 
-            return Err(anyhow::anyhow!("Anthropic API Error [{}]: Raw Body: {}", status, body));
+            return Err(anyhow::anyhow!(
+                "Anthropic API Error [{}]: Raw Body: {}",
+                status,
+                body
+            ));
         }
-
 
         let bytes_stream = response.bytes_stream();
         let mut buffer = String::new();
@@ -244,7 +287,9 @@ impl Provider for AnthropicProvider {
         let output_stream = bytes_stream.flat_map(move |chunk_res| {
             let chunk = match chunk_res {
                 Ok(c) => c,
-                Err(e) => return stream::iter(vec![Err(anyhow::anyhow!("Network error: {}", e))]).boxed(),
+                Err(e) => {
+                    return stream::iter(vec![Err(anyhow::anyhow!("Network error: {}", e))]).boxed()
+                }
             };
             buffer.push_str(&String::from_utf8_lossy(&chunk));
 
@@ -259,21 +304,24 @@ impl Provider for AnthropicProvider {
                                 AnthropicSseEvent::MessageStart { message } => {
                                     current_role = message.role;
                                 }
-                                AnthropicSseEvent::ContentBlockDelta { delta, .. } => {
-                                    match delta {
-                                        AnthropicDelta::TextDelta { text } => {
-                                            if let Some(Content::Text { text: existing }) = full_content.last_mut() {
-                                                existing.push_str(&text);
-                                            } else {
-                                                full_content.push(Content::Text { text: text.clone() });
-                                            }
-                                            chunks.push(Ok(ResponseChunk::TextDelta(text)));
+                                AnthropicSseEvent::ContentBlockDelta { delta, .. } => match delta {
+                                    AnthropicDelta::TextDelta { text } => {
+                                        if let Some(Content::Text { text: existing }) =
+                                            full_content.last_mut()
+                                        {
+                                            existing.push_str(&text);
+                                        } else {
+                                            full_content.push(Content::Text { text: text.clone() });
                                         }
-                                        AnthropicDelta::InputDelta { partial_json } => {
-                                            chunks.push(Ok(ResponseChunk::ToolUseInputDelta { id: String::new(), input_json: partial_json }));
-                                        }
+                                        chunks.push(Ok(ResponseChunk::TextDelta(text)));
                                     }
-                                }
+                                    AnthropicDelta::InputDelta { partial_json } => {
+                                        chunks.push(Ok(ResponseChunk::ToolUseInputDelta {
+                                            id: String::new(),
+                                            input_json: partial_json,
+                                        }));
+                                    }
+                                },
                                 AnthropicSseEvent::MessageStop => {
                                     let msg = Message {
                                         role: current_role.clone(),
@@ -297,7 +345,7 @@ impl Provider for AnthropicProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::messages::{Role, Content};
+    use crate::agent::messages::{Content, Role};
     use mockito::Server;
     use serde_json::json;
 
@@ -309,11 +357,13 @@ mod tests {
             "event: message_start\ndata: {\"type\": \"message_start\", \"message\": {\"id\": \"msg_123\", \"role\": \"assistant\", \"model\": \"claude-3-5-sonnet\"}}\n\n\
              event: content_block_delta\ndata: {\"type\": \"content_block_delta\", \"index\": 0, \"delta\": {\"type\": \"text_delta\", \"text\": \"Hello from Mockito!\"}}\n\n\
              event: message_stop\ndata: {\"type\": \"message_stop\"}\n\n";
-        let _m = server.mock("POST", "/messages")
+        let _m = server
+            .mock("POST", "/messages")
             .with_status(200)
             .with_header("content-type", "text/event-stream")
             .with_body(sse_body)
-            .create_async().await;
+            .create_async()
+            .await;
         let provider = AnthropicProvider::with_base_url(
             "test_key".to_string(),
             "claude-3-5-sonnet".to_string(),
@@ -338,11 +388,13 @@ mod tests {
              event: content_block_delta\ndata: {\"type\": \"content_block_delta\", \"index\": 0, \"delta\": {\"type\": \"text_delta\", \"text\": \"Listing \"}}\n\n\
              event: content_block_delta\ndata: {\"type\": \"content_block_delta\", \"index\": 0, \"delta\": {\"type\": \"text_delta\", \"text\": \"files in .\"}}\n\n\
              event: message_stop\ndata: {\"type\": \"message_stop\"}\n\n";
-        let _m = server.mock("POST", "/messages")
+        let _m = server
+            .mock("POST", "/messages")
             .with_status(200)
             .with_header("content-type", "text/event-stream")
             .with_body(sse_body)
-            .create_async().await;
+            .create_async()
+            .await;
         let provider = AnthropicProvider::with_base_url(
             "test_key".to_string(),
             "claude-3-5-sonnet".to_string(),
@@ -364,30 +416,44 @@ mod tests {
         let mut server = Server::new_async().await;
         let url = server.url();
 
-        let _m = server.mock("POST", "/messages")
+        let _m = server
+            .mock("POST", "/messages")
             .with_status(401)
             .with_header("content-type", "application/json")
-            .with_body(json!({
-                "type": "error",
-                "error": {
-                    "type": "authentication_error",
-                    "message": "invalid x-api-key"
-                }
-            }).to_string())
-            .create_async().await;
+            .with_body(
+                json!({
+                    "type": "error",
+                    "error": {
+                        "type": "authentication_error",
+                        "message": "invalid x-api-key"
+                    }
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
 
         let provider = AnthropicProvider::with_base_url(
             "invalid_key".to_string(),
             "claude-3-5-sonnet".to_string(),
-            url
+            url,
         );
 
         let result = provider.send_messages(&[], &[]).await;
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
-        assert!(err_msg.contains("authentication_error"), "Error should mention auth error type");
-        assert!(err_msg.contains("invalid x-api-key"), "Error should contain the specific API message");
-        assert!(err_msg.contains("401"), "Error should contain the status code");
+        assert!(
+            err_msg.contains("authentication_error"),
+            "Error should mention auth error type"
+        );
+        assert!(
+            err_msg.contains("invalid x-api-key"),
+            "Error should contain the specific API message"
+        );
+        assert!(
+            err_msg.contains("401"),
+            "Error should contain the status code"
+        );
     }
 
     #[tokio::test]
@@ -396,34 +462,36 @@ mod tests {
         let url = server.url();
 
         // Mock an SSE stream from Anthropic
-        let sse_body = 
+        let sse_body =
             "event: message_start\ndata: {\"type\": \"message_start\", \"message\": {\"id\": \"msg_1\", \"role\": \"assistant\", \"content\": [], \"model\": \"claude-3\", \"stop_reason\": null, \"stop_sequence\": null, \"usage\": {\"input_tokens\": 1, \"output_tokens\": 1}}}\n\n\
              event: content_block_start\ndata: {\"type\": \"content_block_start\", \"index\":0, \"content_block\": {\"type\": \"text\", \"text\": \"\"}}\n\n\
              event: content_block_delta\ndata: {\"type\": \"content_block_delta\", \"index\":0, \"delta\": {\"type\": \"text_delta\", \"text\": \"Hello \"}}\n\n\
              event: content_block_delta\ndata: {\"type\": \"content_block_delta\", \"index\":0, \"delta\": {\"type\": \"text_delta\", \"text\": \"world!\"}}\n\n\
              event: message_stop\ndata: {\"type\": \"message_stop\"}\n\n";
 
-        let _m = server.mock("POST", "/messages")
+        let _m = server
+            .mock("POST", "/messages")
             .with_status(200)
             .with_header("content-type", "text/event-stream")
             .with_body(sse_body)
-            .create_async().await;
+            .create_async()
+            .await;
 
         let provider = AnthropicProvider::with_base_url(
             "test_key".to_string(),
             "claude-3-5-sonnet".to_string(),
-            url
+            url,
         );
 
         let mut stream = provider.stream_messages(&[], &[]).await.unwrap();
-        
+
         let mut full_text = String::new();
         while let Some(chunk_result) = stream.next().await {
             if let Ok(ResponseChunk::TextDelta(delta)) = chunk_result {
                 full_text.push_str(&delta);
             }
         }
-        
+
         assert_eq!(full_text, "Hello world!");
     }
 
@@ -433,32 +501,34 @@ mod tests {
         let url = server.url();
 
         // One valid line, one malformed data line, one valid stop
-        let sse_body = 
+        let sse_body =
             "event: content_block_delta\ndata: {\"type\": \"content_block_delta\", \"index\":0, \"delta\": {\"type\": \"text_delta\", \"text\": \"Valid\"}}\n\n\
              event: content_block_delta\ndata: {MALFORMED_JSON}\n\n\
              event: message_stop\ndata: {\"type\": \"message_stop\"}\n\n";
 
-        let _m = server.mock("POST", "/messages")
+        let _m = server
+            .mock("POST", "/messages")
             .with_status(200)
             .with_header("content-type", "text/event-stream")
             .with_body(sse_body)
-            .create_async().await;
+            .create_async()
+            .await;
 
         let provider = AnthropicProvider::with_base_url(
             "test_key".to_string(),
             "claude-3-5-sonnet".to_string(),
-            url
+            url,
         );
 
         let mut stream = provider.stream_messages(&[], &[]).await.unwrap();
-        
+
         let mut full_text = String::new();
         while let Some(chunk_result) = stream.next().await {
             if let Ok(ResponseChunk::TextDelta(delta)) = chunk_result {
                 full_text.push_str(&delta);
             }
         }
-        
+
         // It should skip the malformed line and still finish
         assert_eq!(full_text, "Valid");
     }
@@ -469,35 +539,39 @@ mod tests {
         let url = server.url();
 
         // Mock 429 once, then 200
-        let _m1 = server.mock("POST", "/messages")
+        let _m1 = server
+            .mock("POST", "/messages")
             .with_status(429)
             .with_header("content-type", "application/json")
-            .with_body(json!({
-                "type": "error",
-                "error": {
-                    "type": "rate_limit_error",
-                    "message": "Too many requests"
-                }
-            }).to_string())
+            .with_body(
+                json!({
+                    "type": "error",
+                    "error": {
+                        "type": "rate_limit_error",
+                        "message": "Too many requests"
+                    }
+                })
+                .to_string(),
+            )
             .expect(1)
-            .create_async().await;
+            .create_async()
+            .await;
 
-        let sse_body = 
+        let sse_body =
             "event: content_block_delta\ndata: {\"type\": \"content_block_delta\", \"index\":0, \"delta\": {\"type\": \"text_delta\", \"text\": \"Recovered!\"}}\n\n\
              event: message_stop\ndata: {\"type\": \"message_stop\"}\n\n";
 
-        let _m2 = server.mock("POST", "/messages")
+        let _m2 = server
+            .mock("POST", "/messages")
             .with_status(200)
             .with_header("content-type", "text/event-stream")
             .with_body(sse_body)
             .expect(1)
-            .create_async().await;
+            .create_async()
+            .await;
 
-        let provider = AnthropicProvider::with_base_url(
-            "test_key".to_string(),
-            "test-model".to_string(),
-            url
-        );
+        let provider =
+            AnthropicProvider::with_base_url("test_key".to_string(), "test-model".to_string(), url);
 
         let response = provider.send_messages(&[], &[]).await.unwrap();
         assert_eq!(response.role, Role::Assistant);

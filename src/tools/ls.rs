@@ -1,12 +1,12 @@
 //! This module implements the ListTool (ls), which allows the agent to list files in a directory.
 //! Hardened following MAGI review to prevent sandbox escapes and infinite loops.
 
+use crate::system::fs::FileSystem;
+use crate::tools::{Tool, ToolError, ToolResult};
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::Value;
 use std::path::PathBuf;
-use crate::tools::{Tool, ToolResult, ToolError};
-use crate::system::fs::FileSystem;
 use std::sync::Arc;
 
 /// Arguments for the `ListTool`.
@@ -25,9 +25,13 @@ pub struct ListTool {
 impl ListTool {
     /// Creates a new `ListTool` anchored to the workspace root.
     pub fn new(fs: Arc<dyn FileSystem>, workspace_root: PathBuf) -> anyhow::Result<Self> {
-        let root = workspace_root.canonicalize()
+        let root = workspace_root
+            .canonicalize()
             .map_err(|e| anyhow::anyhow!("Invalid workspace root: {}", e))?;
-        Ok(Self { fs, workspace_root: root })
+        Ok(Self {
+            fs,
+            workspace_root: root,
+        })
     }
 }
 
@@ -55,20 +59,26 @@ impl Tool for ListTool {
     }
 
     async fn execute(&self, args: Value) -> ToolResult<Value> {
-        let args: ListArgs = serde_json::from_value(args)
-            .map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
+        let args: ListArgs =
+            serde_json::from_value(args).map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
 
         let target_path = self.workspace_root.join(args.path);
-        
+
         // Security check: ensure path is within workspace
-        let canonical_target = target_path.canonicalize()
+        let canonical_target = target_path
+            .canonicalize()
             .map_err(|e| ToolError::ExecutionError(format!("Invalid path: {}", e)))?;
-        
+
         if !canonical_target.starts_with(&self.workspace_root) {
-            return Err(ToolError::ExecutionError("Security Violation: Path traversal attempted".to_string()));
+            return Err(ToolError::ExecutionError(
+                "Security Violation: Path traversal attempted".to_string(),
+            ));
         }
 
-        let entries = self.fs.list_directory(&canonical_target).await
+        let entries = self
+            .fs
+            .list_directory(&canonical_target)
+            .await
             .map_err(|e| ToolError::ExecutionError(e.to_string()))?;
 
         Ok(serde_json::json!({ "entries": entries }))
@@ -86,14 +96,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().canonicalize().unwrap();
 
-        mock_fs.expect_list_directory()
+        mock_fs
+            .expect_list_directory()
             .times(1)
             .returning(|_| Box::pin(async move { Ok(vec!["file1.txt".to_string()]) }));
 
         let tool = ListTool::new(Arc::new(mock_fs), root.clone()).unwrap();
         let args = serde_json::json!({"path": "."});
         let result = tool.execute(args).await;
-        
+
         assert!(result.is_ok());
     }
 }

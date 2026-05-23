@@ -1,8 +1,8 @@
 //! This module provides a security layer for path validation and sandboxing.
 
-use std::path::{Path, PathBuf, Component};
+use anyhow::{anyhow, Result};
 use std::io;
-use anyhow::{Result, anyhow};
+use std::path::{Component, Path, PathBuf};
 
 /// Utility to ensure paths are safe and stay within the workspace boundary.
 #[allow(dead_code)]
@@ -21,14 +21,16 @@ impl PathGuard {
     pub fn new(root: PathBuf) -> Result<Self> {
         let root = Self::canonicalize_robust(&root)
             .map_err(|e| anyhow!("Invalid workspace root: {}", e))?;
-        Ok(Self { workspace_root: root })
+        Ok(Self {
+            workspace_root: root,
+        })
     }
 
     /// Validates and canonicalizes a path, ensuring it is within the workspace.
     /// Returns the fully canonicalized path to avoid TOCTOU races in the caller.
     pub fn validate(&self, input_path: &Path) -> Result<PathBuf> {
         let path_str = input_path.to_string_lossy();
-        
+
         // Security: Disallow null bytes which can be used to bypass filename checks
         if path_str.contains('\0') {
             return Err(anyhow!("Security violation: null bytes in path"));
@@ -64,10 +66,12 @@ impl PathGuard {
         if let Some(ancestor) = closest_existing_ancestor {
             let canonical_ancestor = Self::canonicalize_robust(ancestor)
                 .map_err(|e| anyhow!("Security check failed: unreachable ancestor: {}", e))?;
-            
+
             // Critical check: Ensure canonical ancestor is within workspace root
             if !canonical_ancestor.starts_with(&self.workspace_root) {
-                return Err(anyhow!("Security violation: path escapes sandbox via traversal"));
+                return Err(anyhow!(
+                    "Security violation: path escapes sandbox via traversal"
+                ));
             }
 
             // Reconstruct the final path ensuring all parts are anchored safely
@@ -75,15 +79,17 @@ impl PathGuard {
             for comp in uncanonicalized_components.into_iter().rev() {
                 final_path.push(comp);
             }
-            
+
             // Final check on reconstructed path
             if !final_path.starts_with(&self.workspace_root) {
-                 return Err(anyhow!("Security violation: final path escapes sandbox"));
+                return Err(anyhow!("Security violation: final path escapes sandbox"));
             }
 
             Ok(final_path)
         } else {
-            Err(anyhow!("Security violation: path has no valid anchor in workspace"))
+            Err(anyhow!(
+                "Security violation: path has no valid anchor in workspace"
+            ))
         }
     }
 
@@ -93,15 +99,19 @@ impl PathGuard {
         let mut components = Vec::new();
         for component in path.components() {
             match component {
-                Component::ParentDir => {
-                    match components.last() {
-                        Some(Component::Normal(_)) => { components.pop(); }
-                        Some(Component::RootDir) | Some(Component::Prefix(_)) => {} 
-                        _ => { components.push(Component::ParentDir); }
+                Component::ParentDir => match components.last() {
+                    Some(Component::Normal(_)) => {
+                        components.pop();
                     }
-                }
+                    Some(Component::RootDir) | Some(Component::Prefix(_)) => {}
+                    _ => {
+                        components.push(Component::ParentDir);
+                    }
+                },
                 Component::CurDir => {}
-                c => { components.push(c); }
+                c => {
+                    components.push(c);
+                }
             }
         }
         components.iter().collect()
@@ -110,7 +120,7 @@ impl PathGuard {
     /// Robust canonicalization that handles Windows verbatim paths (UNC prefixes) consistently.
     fn canonicalize_robust(path: &Path) -> io::Result<PathBuf> {
         let canonical = path.canonicalize()?;
-        
+
         #[cfg(windows)]
         {
             let path_str = canonical.to_string_lossy();
@@ -118,7 +128,7 @@ impl PathGuard {
                 return Ok(PathBuf::from(&path_str[4..]));
             }
         }
-        
+
         Ok(canonical)
     }
 }
@@ -126,8 +136,8 @@ impl PathGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::tempdir;
     use std::fs;
+    use tempfile::tempdir;
 
     #[test]
     fn test_path_validation() {
@@ -143,7 +153,7 @@ mod tests {
         // Unsafe path (traversal)
         let unsafe_path = root.join("dir/../../outside.txt");
         assert!(guard.validate(&unsafe_path).is_err());
-        
+
         // Null byte attack
         let null_path = Path::new("test\0file.txt");
         assert!(guard.validate(null_path).is_err());

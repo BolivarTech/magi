@@ -1,7 +1,7 @@
 //! This module provides a secure abstraction for storing secrets.
 
-use async_trait::async_trait;
 use anyhow::Result;
+use async_trait::async_trait;
 use keyring::Entry;
 
 #[cfg(test)]
@@ -13,10 +13,10 @@ use mockall::automock;
 pub trait SecretStore: Send + Sync {
     /// Stores a secret value under a specific key.
     async fn set_secret(&self, key: &str, value: &str) -> Result<()>;
-    
+
     /// Retrieves a secret value by its key.
     async fn get_secret(&self, key: &str) -> Result<Option<String>>;
-    
+
     /// Removes a secret from the store.
     async fn delete_secret(&self, key: &str) -> Result<()>;
 }
@@ -39,7 +39,8 @@ impl SecretStore for KeyringStore {
     async fn set_secret(&self, key: &str, value: &str) -> Result<()> {
         let entry = Entry::new(&self.service_name, key)
             .map_err(|e| anyhow::anyhow!("Failed to create keyring entry: {}", e))?;
-        entry.set_password(value)
+        entry
+            .set_password(value)
             .map_err(|e| anyhow::anyhow!("Failed to store secret: {}", e))?;
         Ok(())
     }
@@ -80,11 +81,11 @@ mod tests {
 
         // Set
         store.set_secret(key, value).await.unwrap();
-        
+
         // Get
         let retrieved = store.get_secret(key).await.unwrap();
         assert_eq!(retrieved, Some(value.to_string()));
-        
+
         // Delete
         store.delete_secret(key).await.unwrap();
         let deleted = store.get_secret(key).await.unwrap();
