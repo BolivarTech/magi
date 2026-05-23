@@ -41,6 +41,28 @@ pub struct EncryptedSqliteMemory {
 }
 
 impl EncryptedSqliteMemory {
+    /// Collects raw `(role, blob)` rows for a session under the connection lock.
+    ///
+    /// The lock is held only for the duration of the SELECT and the iterator
+    /// drain; it is released before any decryption happens (audit finding W12).
+    fn collect_message_rows(&self, session_id: &str) -> Result<Vec<(String, String)>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow::anyhow!("DB lock poisoned: {e}"))?;
+        let mut stmt = conn.prepare(
+            "SELECT role, content_blob FROM messages WHERE session_id = ? ORDER BY created_at ASC",
+        )?;
+        let mapped = stmt.query_map(params![session_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let mut collected = Vec::new();
+        for row in mapped {
+            collected.push(row?);
+        }
+        Ok(collected)
+    }
+
     /// Decrypts pre-collected `(role, blob)` rows into [`Message`]s.
     ///
     /// Holds **no** database lock: callers must collect rows and release the
@@ -146,23 +168,7 @@ impl MemoryStore for EncryptedSqliteMemory {
     }
 
     async fn get_messages(&self, session_id: &str) -> Result<Vec<Message>> {
-        let raw_rows: Vec<(String, String)> = {
-            let conn = self
-                .conn
-                .lock()
-                .map_err(|e| anyhow::anyhow!("DB lock poisoned: {e}"))?;
-            let mut stmt = conn.prepare(
-                "SELECT role, content_blob FROM messages WHERE session_id = ? ORDER BY created_at ASC",
-            )?;
-            let mapped = stmt.query_map(params![session_id], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })?;
-            let mut collected = Vec::new();
-            for row in mapped {
-                collected.push(row?);
-            }
-            collected
-        };
+        let raw_rows = self.collect_message_rows(session_id)?;
         self.decrypt_rows(raw_rows)
     }
 
@@ -247,21 +253,7 @@ impl EncryptedSqliteMemory {
         &self,
         session_id: &str,
     ) -> Result<Vec<(String, String)>> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| anyhow::anyhow!("DB lock poisoned: {e}"))?;
-        let mut stmt = conn.prepare(
-            "SELECT role, content_blob FROM messages WHERE session_id = ? ORDER BY created_at ASC",
-        )?;
-        let mapped = stmt.query_map(params![session_id], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })?;
-        let mut collected = Vec::new();
-        for row in mapped {
-            collected.push(row?);
-        }
-        Ok(collected)
+        self.collect_message_rows(session_id)
     }
 }
 
