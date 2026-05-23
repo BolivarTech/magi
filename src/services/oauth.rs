@@ -12,6 +12,7 @@ use rand::{thread_rng, RngCore};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::{oneshot, Mutex};
 use urlencoding::encode;
 
@@ -20,6 +21,12 @@ pub const REDIRECT_PORT: u16 = 54545;
 pub const AUTHORIZE_URL: &str = "https://console.anthropic.com/oauth/authorize";
 pub const TOKEN_URL: &str = "https://console.anthropic.com/v1/oauth/token";
 pub const API_KEY_URL: &str = "https://api.anthropic.com/api/oauth/claude_cli/create_api_key";
+
+/// Maximum time the OAuth callback server waits for the user to complete the
+/// browser authorization flow before giving up and freeing the port. Without
+/// this bound an abandoned `/login` would block the runner task indefinitely
+/// (audit finding C8).
+pub const OAUTH_CALLBACK_TIMEOUT_SECS: u64 = 600;
 
 /// PKCE helper to generate code verifier and challenge.
 pub struct Pkce {
@@ -170,11 +177,53 @@ impl OAuthService {
 
         let listener =
             tokio::net::TcpListener::bind(format!("127.0.0.1:{}", REDIRECT_PORT)).await?;
-        let server = axum::serve(listener, app);
+        let server = async move {
+            axum::serve(listener, app)
+                .await
+                .map_err(anyhow::Error::from)
+        };
 
-        tokio::select! {
-            _ = server => Err(anyhow::anyhow!("Server closed prematurely")),
-            code = rx => Ok(code?),
+        Self::race_callback(server, rx, Duration::from_secs(OAUTH_CALLBACK_TIMEOUT_SECS)).await
+    }
+
+    /// Races the callback server against the auth-code receiver under a hard
+    /// timeout.
+    ///
+    /// # Parameters
+    /// - `server`: the running callback server future; resolving early means
+    ///   the server closed unexpectedly.
+    /// - `rx`: receives the authorization code once the browser hits
+    ///   `/callback` with a matching `state`.
+    /// - `wait`: maximum time to wait before aborting the flow.
+    ///
+    /// # Returns
+    /// `Ok(code)` if the code arrives in time, otherwise `Err` describing the
+    /// timeout or premature server shutdown. Always returns (never hangs).
+    async fn race_callback<S>(
+        server: S,
+        rx: tokio::sync::oneshot::Receiver<String>,
+        wait: Duration,
+    ) -> Result<String>
+    where
+        S: std::future::Future<Output = Result<()>>,
+    {
+        let raced = async {
+            tokio::select! {
+                res = server => match res {
+                    Ok(()) => Err(anyhow::anyhow!("Server closed prematurely")),
+                    Err(e) => Err(e),
+                },
+                code = rx => Ok(code?),
+            }
+        };
+
+        match tokio::time::timeout(wait, raced).await {
+            Ok(inner) => inner,
+            Err(_elapsed) => Err(anyhow::anyhow!(
+                "OAuth callback flow timed out after {}s; aborting and freeing port {}",
+                wait.as_secs(),
+                REDIRECT_PORT
+            )),
         }
     }
 }
@@ -339,14 +388,13 @@ mod tests {
         let (_tx, rx) = oneshot::channel::<String>();
         let never_ending_server = std::future::pending::<Result<()>>();
 
-        let result = OAuthService::race_callback(
-            never_ending_server,
-            rx,
-            Duration::from_millis(50),
-        )
-        .await;
+        let result =
+            OAuthService::race_callback(never_ending_server, rx, Duration::from_millis(50)).await;
 
-        assert!(result.is_err(), "an abandoned callback flow must return Err, not hang");
+        assert!(
+            result.is_err(),
+            "an abandoned callback flow must return Err, not hang"
+        );
         assert!(
             result.unwrap_err().to_string().contains("timed out"),
             "the error must identify the timeout cause"
@@ -362,13 +410,9 @@ mod tests {
         let never_ending_server = std::future::pending::<Result<()>>();
         tx.send("auth_code_xyz".to_string()).unwrap();
 
-        let code = OAuthService::race_callback(
-            never_ending_server,
-            rx,
-            Duration::from_secs(5),
-        )
-        .await
-        .unwrap();
+        let code = OAuthService::race_callback(never_ending_server, rx, Duration::from_secs(5))
+            .await
+            .unwrap();
         assert_eq!(code, "auth_code_xyz");
     }
 }
