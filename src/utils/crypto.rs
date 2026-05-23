@@ -451,4 +451,26 @@ mod tests {
         let decoded = rs.decode(&encoded, data.len()).unwrap();
         assert_eq!(decoded, data);
     }
+
+    #[test]
+    fn test_argon2_uses_owasp_2025_parameters() {
+        let params = Argon2Kdf::owasp_params();
+        assert_eq!(
+            params.m_cost(),
+            65536,
+            "memory cost must be 64 MiB (OWASP 2025)"
+        );
+        assert_eq!(params.t_cost(), 3, "time cost (iterations) must be 3");
+        assert_eq!(params.p_cost(), 4, "parallelism must be 4");
+    }
+
+    #[test]
+    fn test_derive_key_still_roundtrips_under_owasp_params() {
+        let vault = CryptoVault::default();
+        let enc = vault.encrypt("pw", "payload under owasp params").unwrap();
+        assert_eq!(
+            vault.decrypt("pw", &enc).unwrap(),
+            "payload under owasp params"
+        );
+    }
 }
