@@ -7,6 +7,7 @@ use async_trait::async_trait;
 use rusqlite::{params, Connection};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use zeroize::Zeroizing;
 
 /// Trait defining the behavior of the agent's memory.
 #[async_trait]
@@ -37,7 +38,7 @@ pub trait MemoryStore: Send + Sync {
 pub struct EncryptedSqliteMemory {
     conn: Arc<Mutex<Connection>>,
     vault: CryptoVault,
-    master_password: String,
+    master_password: Zeroizing<String>,
 }
 
 impl EncryptedSqliteMemory {
@@ -129,7 +130,7 @@ impl EncryptedSqliteMemory {
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
             vault: CryptoVault::default(),
-            master_password,
+            master_password: Zeroizing::new(master_password),
         })
     }
 }
@@ -433,7 +434,10 @@ mod tests {
 
         let memory = EncryptedSqliteMemory::new(path, "zeroizing_pw".to_string()).unwrap();
         let sid = memory.create_session("p").await.unwrap();
-        memory.add_message(&sid, &Message::user("secret payload")).await.unwrap();
+        memory
+            .add_message(&sid, &Message::user("secret payload"))
+            .await
+            .unwrap();
 
         let _assert_type: &zeroize::Zeroizing<String> = memory.master_password_type_for_test();
 
