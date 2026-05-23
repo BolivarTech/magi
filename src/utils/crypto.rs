@@ -1,17 +1,24 @@
 // Author: Julian Bolivar
-// Version: 1.1.0
-// Date: 2026-02-12
+// Version: 1.2.0
+// Date: 2026-05-23
 
 //! Self-contained cryptographic module — key derivation, authenticated
 //! encryption, and forward error correction.
 //!
-//! ### Panoptic Data Flow:
-//! 1. **Key Derivation (Argon2):** A master password (from OS Keyring) is hashed with a random salt to produce a 32-byte key + nonce.
-//! 2. **Authenticated Encryption (AES-256-GCM-SIV):** Plaintext is encrypted using the derived key. This cipher is nonce-misuse resistant,
+//! ### Data Flow:
+//! 1. **Key Derivation (Argon2):** A master password (from OS Keyring) is hashed with a
+//!    per-record random 16-byte salt to produce a **32-byte key only**. The nonce is NOT
+//!    derived from Argon2.
+//! 2. **Nonce Sampling (OsRng):** A 12-byte AES-256-GCM-SIV nonce is sampled independently
+//!    from `OsRng` and stored in the blob. This guarantees nonce independence across
+//!    encryptions of the same plaintext under the same key (C5 fix).
+//! 3. **Authenticated Encryption (AES-256-GCM-SIV):** Plaintext is encrypted using the
+//!    derived key and the independently sampled nonce. This cipher is nonce-misuse resistant,
 //!    guaranteeing confidentiality and integrity (authentication tag).
-//! 3. **Error Correction (Reed-Solomon):** The salt and ciphertext are encoded with parity bytes. This allows recovery of the data
-//!    even if the underlying storage suffers from bit-rot or minor corruption.
-//! 4. **Final Blob:** [Length (4b)] + [RS Encoded Payload (Salt + Ciphertext + Parity)].
+//! 4. **Error Correction (Reed-Solomon):** The salt, nonce, and ciphertext are encoded with
+//!    parity bytes to allow recovery from bit-rot or minor storage corruption.
+//! 5. **Final Blob:** `[u32 LE original-len][RS-encoded(salt || nonce || ciphertext)]`,
+//!    base64-encoded for storage.
 
 use std::fmt;
 
