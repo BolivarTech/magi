@@ -1,11 +1,12 @@
 //! This module implements the GrepTool, which allows the agent to search for patterns.
 
 use crate::system::grep::Grep;
+use crate::system::path_guard::PathGuard;
 use crate::tools::{Tool, ToolError, ToolResult};
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::Value;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Arguments for the `GrepTool`.
 #[derive(Debug, Deserialize)]
@@ -61,11 +62,11 @@ impl Tool for GrepTool {
         let args: GrepArgs =
             serde_json::from_value(args).map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
 
-        let target_path = self.workspace_root.join(args.path);
-
-        if !target_path.exists() {
-            return Err(ToolError::ExecutionError("Path not found".to_string()));
-        }
+        let guard = PathGuard::new(self.workspace_root.clone())
+            .map_err(|e| ToolError::ExecutionError(format!("Sandbox init failed: {}", e)))?;
+        let target_path = guard
+            .validate(Path::new(&args.path))
+            .map_err(|e| ToolError::ExecutionError(format!("Security Violation: {}", e)))?;
 
         let results = self
             .grep
