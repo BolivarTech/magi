@@ -164,6 +164,12 @@ impl OAuthService {
         Ok(res.raw_key)
     }
 
+    /// Starts the OAuth callback server and returns the authorization code.
+    ///
+    /// Bounded by [`OAUTH_CALLBACK_TIMEOUT_SECS`]: this **always returns**
+    /// (either the code, a premature-shutdown error, or a timeout error) and
+    /// never blocks indefinitely, so the TUI runner task can rely on it not
+    /// stalling `Quit` (RF-4.2).
     pub async fn start_callback_server(&self) -> Result<String> {
         let (tx, rx) = oneshot::channel();
         let app_state = Arc::new(AppState {
