@@ -122,6 +122,37 @@ async fn discover_or_create_master_key() -> anyhow::Result<String> {
     Ok(new_key)
 }
 
+/// Decision on whether to attach encrypted persistent memory.
+///
+/// Maps the result of [`discover_or_create_master_key`] to an attachment mode.
+/// On `Ok`, the recovered master password is used to attach the encrypted
+/// SQLite store. On `Err` (e.g. an inaccessible OS keyring), the agent runs
+/// **ephemerally** — no persistence — rather than ever falling back to a
+/// constant passphrase, which would silently weaken encryption of every
+/// future record (audit finding C4).
+#[derive(Debug)]
+enum MemoryAttachment {
+    /// Attach encrypted memory using the recovered master password.
+    Encrypted(String),
+    /// Run without persistence (in-memory history only).
+    Ephemeral,
+}
+
+/// Decides the memory-attachment mode from the master-key discovery result.
+///
+/// # Parameters
+/// - `key_result`: the outcome of `discover_or_create_master_key().await`.
+///
+/// # Returns
+/// `MemoryAttachment::Encrypted(pwd)` when a key was recovered, otherwise
+/// `MemoryAttachment::Ephemeral`. Never returns a synthesized/constant key.
+fn decide_memory_attachment(key_result: anyhow::Result<String>) -> MemoryAttachment {
+    match key_result {
+        Ok(master_pwd) => MemoryAttachment::Encrypted(master_pwd),
+        Err(_) => MemoryAttachment::Ephemeral,
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
@@ -155,20 +186,31 @@ async fn main() -> anyhow::Result<()> {
 
     let mut agent = Agent::new(provider);
     let db_path = workspace_root.join(".magi-rs-memory.db");
-    let master_pwd = discover_or_create_master_key()
-        .await
-        .unwrap_or_else(|_| "emergency-key".to_string());
+    match decide_memory_attachment(discover_or_create_master_key().await) {
+        MemoryAttachment::Encrypted(master_pwd) => {
+            let memory: Arc<dyn MemoryStore> =
+                Arc::new(EncryptedSqliteMemory::new(db_path, master_pwd)?);
+            let sessions = memory.list_sessions().await?;
+            let session_id = if let Some((id, _)) = sessions.first() {
+                id.clone()
+            } else {
+                memory.create_session("default").await?
+            };
+            agent.set_memory(memory.clone(), session_id);
+            let _ = agent.load_history().await;
 
-    let memory: Arc<dyn MemoryStore> = Arc::new(EncryptedSqliteMemory::new(db_path, master_pwd)?);
-    let sessions = memory.list_sessions().await?;
-    let session_id = if let Some((id, _)) = sessions.first() {
-        id.clone()
-    } else {
-        memory.create_session("default").await?
-    };
-
-    agent.set_memory(memory.clone(), session_id);
-    let _ = agent.load_history().await;
+            // ProjectFactTool needs the same store; register it on the encrypted path only.
+            agent.register_tool(Box::new(ProjectFactTool::new(memory.clone())));
+        }
+        MemoryAttachment::Ephemeral => {
+            eprintln!(
+                "WARNING: could not access the encrypted-memory master key (OS keyring \
+                 unavailable). Running this session WITHOUT persistence — your conversation \
+                 and project knowledge will NOT be saved. Any existing on-disk database is \
+                 left untouched. Run `/login` or check your OS keyring to restore persistence."
+            );
+        }
+    }
 
     let fs: Arc<dyn FileSystem> = Arc::new(RealFileSystem::new());
     agent.register_tool(Box::new(ListTool::new(fs.clone(), workspace_root.clone())?));
@@ -185,7 +227,6 @@ async fn main() -> anyhow::Result<()> {
         workspace_root.clone(),
     )?));
     agent.register_tool(Box::new(BashTool::new(workspace_root.clone())?));
-    agent.register_tool(Box::new(ProjectFactTool::new(memory.clone())));
 
     crate::tui::run_tui_ext(agent, Some(provider_info)).await?;
     Ok(())
@@ -200,7 +241,9 @@ mod tests {
         let outcome = decide_memory_attachment(Ok("real-master-key".to_string()));
         match outcome {
             MemoryAttachment::Encrypted(pwd) => assert_eq!(pwd, "real-master-key"),
-            MemoryAttachment::Ephemeral => panic!("expected encrypted attachment when key is present"),
+            MemoryAttachment::Ephemeral => {
+                panic!("expected encrypted attachment when key is present")
+            }
         }
     }
 
@@ -211,7 +254,9 @@ mod tests {
             matches!(outcome, MemoryAttachment::Ephemeral),
             "a keyring failure must degrade to an ephemeral session, never to a constant key"
         );
-        if let MemoryAttachment::Encrypted(pwd) = decide_memory_attachment(Err(anyhow::anyhow!("x"))) {
+        if let MemoryAttachment::Encrypted(pwd) =
+            decide_memory_attachment(Err(anyhow::anyhow!("x")))
+        {
             panic!("error path produced a passphrase: {pwd}");
         }
     }
