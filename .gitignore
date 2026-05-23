@@ -9,3 +9,7 @@ CLAUDE.md
 CLAUDE.local.md
 .claude/
 .remember/
+
+# SBTDD local-only files (sbtdd-init Step 6)
+sbtdd/
+planning/
