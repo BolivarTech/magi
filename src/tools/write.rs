@@ -2,11 +2,12 @@
 //! It includes security sandboxing via PathGuard.
 
 use crate::system::fs::FileSystem;
+use crate::system::path_guard::PathGuard;
 use crate::tools::{Tool, ToolError, ToolResult};
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::Value;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// Arguments for the `FileWriteTool`.
@@ -68,13 +69,11 @@ impl Tool for FileWriteTool {
         let args: WriteArgs =
             serde_json::from_value(args).map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
 
-        let target_path = self.workspace_root.join(&args.file_path);
-
-        if args.file_path.contains("..") {
-            return Err(ToolError::ExecutionError(
-                "Security Violation: Path traversal attempted".to_string(),
-            ));
-        }
+        let guard = PathGuard::new(self.workspace_root.clone())
+            .map_err(|e| ToolError::ExecutionError(format!("Sandbox init failed: {}", e)))?;
+        let target_path = guard
+            .validate(Path::new(&args.file_path))
+            .map_err(|e| ToolError::ExecutionError(format!("Security Violation: {}", e)))?;
 
         self.fs
             .write_file(&target_path, &args.content)
