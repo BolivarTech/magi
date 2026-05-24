@@ -132,22 +132,6 @@ impl Agent {
         result
     }
 
-    /// Backwards compatibility method for non-streaming queries.
-    pub async fn query(&mut self, text: &str) -> Result<String> {
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(10);
-        let handle = tokio::spawn(async move {
-            let mut full = String::new();
-            while let Some(chunk) = rx.recv().await {
-                full.push_str(&chunk);
-            }
-            full
-        });
-
-        let res = self.query_streaming(text, tx).await;
-        let _ = handle.await;
-        res
-    }
-
     /// Clears the conversation history.
     pub fn clear_history(&mut self) {
         self.history.clear();

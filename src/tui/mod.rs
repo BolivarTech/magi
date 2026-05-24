@@ -40,6 +40,8 @@ pub enum AgentResponse {
     Text(String),
     Error(String),
     Info(String),
+    /// An incremental text delta from the streaming provider.
+    StreamDelta(String),
 }
 
 /// Represents the state of the TUI application.
@@ -68,6 +70,8 @@ pub struct App {
     pub visual_cursor: usize,
     /// Selection start within the selected message (Visual mode)
     pub visual_selection_start: Option<usize>,
+    /// Whether the agent is currently streaming a response.
+    pub streaming: bool,
 }
 
 impl App {
@@ -89,6 +93,7 @@ impl App {
             selected_index: 0,
             visual_cursor: 0,
             visual_selection_start: None,
+            streaming: false,
         }
     }
 
@@ -197,6 +202,24 @@ impl App {
     pub fn push_message(&mut self, message: String) {
         self.messages.push(message);
     }
+
+    /// Appends a streaming delta to the in-progress assistant message,
+    /// creating the line on the first delta. Append-only; never byte-indexes.
+    pub fn append_stream_delta(&mut self, delta: String) {
+        if self.streaming {
+            if let Some(last) = self.messages.last_mut() {
+                last.push_str(&delta);
+                return;
+            }
+        }
+        self.messages.push(format!("Magi Agent: {}", delta));
+        self.streaming = true;
+    }
+
+    /// Marks the end of a streamed assistant turn.
+    pub fn finalize_stream(&mut self) {
+        self.streaming = false;
+    }
 }
 
 pub async fn run_tui_ext(agent: Agent, initial_info: Option<String>) -> anyhow::Result<()> {
@@ -230,14 +253,33 @@ pub async fn run_tui_ext(agent: Agent, initial_info: Option<String>) -> anyhow::
     tokio::spawn(async move {
         while let Some(event) = event_rx.recv().await {
             match event {
-                UiEvent::Input(text) => match runner_agent.query(&text).await {
-                    Ok(response) => {
-                        let _ = response_tx.send(AgentResponse::Text(response)).await;
+                UiEvent::Input(text) => {
+                    let (chunk_tx, mut chunk_rx) = mpsc::channel::<String>(100);
+                    let forward_tx = response_tx.clone();
+                    let forwarder = tokio::spawn(async move {
+                        while let Some(delta) = chunk_rx.recv().await {
+                            if forward_tx
+                                .send(AgentResponse::StreamDelta(delta))
+                                .await
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                    });
+
+                    let result = runner_agent.query_streaming(&text, chunk_tx).await;
+                    let _ = forwarder.await;
+
+                    match result {
+                        Ok(_) => {
+                            let _ = response_tx.send(AgentResponse::Text(String::new())).await;
+                        }
+                        Err(e) => {
+                            let _ = response_tx.send(AgentResponse::Error(e.to_string())).await;
+                        }
                     }
-                    Err(e) => {
-                        let _ = response_tx.send(AgentResponse::Error(e.to_string())).await;
-                    }
-                },
+                }
                 UiEvent::Clear => {
                     runner_agent.clear_history();
                 }
@@ -342,9 +384,22 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Re
 
         while let Ok(response) = app.response_rx.try_recv() {
             match response {
-                AgentResponse::Text(t) => app.push_message(format!("Magi Agent: {}", t)),
-                AgentResponse::Error(e) => app.push_message(format!("Error: {}", e)),
-                AgentResponse::Info(i) => app.push_message(format!("System: {}", i)),
+                AgentResponse::StreamDelta(delta) => app.append_stream_delta(delta),
+                AgentResponse::Text(t) => {
+                    if t.is_empty() {
+                        app.finalize_stream();
+                    } else {
+                        app.push_message(format!("Magi Agent: {}", t));
+                    }
+                }
+                AgentResponse::Error(e) => {
+                    app.finalize_stream();
+                    app.push_message(format!("Error: {}", e));
+                }
+                AgentResponse::Info(i) => {
+                    app.finalize_stream();
+                    app.push_message(format!("System: {}", i));
+                }
             }
         }
 
