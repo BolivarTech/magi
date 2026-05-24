@@ -94,6 +94,14 @@ pub trait Provider: Send + Sync {
 /// single Anthropic SSE event.
 const MAX_SSE_BUFFER_BYTES: usize = 8 * 1024 * 1024;
 
+/// Parses an accumulated `tool_use` input-JSON string. Empty/whitespace → a valid
+/// empty object; well-formed JSON is parsed; **malformed JSON returns `Err`** so
+/// the caller can log it instead of silently degrading to `{}` (#4).
+#[allow(dead_code)]
+fn parse_tool_input(_acc: &str) -> Result<serde_json::Value, String> {
+    unimplemented!("parse_tool_input — implemented in GREEN")
+}
+
 /// A provider that returns static, canned responses.
 pub struct StaticProvider;
 
@@ -421,6 +429,28 @@ mod tests {
     use crate::agent::messages::{Content, Role};
     use mockito::Server;
     use serde_json::json;
+
+    #[test]
+    fn test_parse_tool_input_empty_is_object() {
+        // B-S1: empty / whitespace accumulates to a valid empty object.
+        assert_eq!(parse_tool_input("").unwrap(), json!({}));
+        assert_eq!(parse_tool_input("   ").unwrap(), json!({}));
+    }
+
+    #[test]
+    fn test_parse_tool_input_valid_json() {
+        // B-S2: well-formed JSON is parsed.
+        assert_eq!(
+            parse_tool_input(r#"{"path":"."}"#).unwrap(),
+            json!({"path":"."})
+        );
+    }
+
+    #[test]
+    fn test_parse_tool_input_malformed_is_err() {
+        // B-S3 (load-bearing): malformed JSON surfaces as Err, not a silent {}.
+        assert!(parse_tool_input(r#"{"path":"#).is_err());
+    }
 
     #[tokio::test]
     async fn test_anthropic_provider_simple_response() {
