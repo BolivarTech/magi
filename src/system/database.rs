@@ -680,7 +680,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_poisoned_lock_returns_error_not_panic() {
+    async fn test_poisoned_lock_recovers_and_continues() {
+        // A-S1 (#8, supersedes W11): a poisoned mutex is recovered (into_inner) so
+        // persistence keeps working instead of failing closed for the session.
         let tmp_file = NamedTempFile::new().unwrap();
         let path = tmp_file.path().to_path_buf();
         let memory = EncryptedSqliteMemory::new(path, "pw".to_string()).unwrap();
@@ -692,11 +694,17 @@ mod tests {
         })
         .join();
 
-        let result = memory.list_sessions().await;
-        assert!(result.is_err(), "a poisoned lock must yield Err, not panic");
+        // The lock is now poisoned; operations must recover and succeed.
         assert!(
-            result.unwrap_err().to_string().contains("poisoned"),
-            "error must identify the poisoned lock"
+            memory.list_sessions().await.is_ok(),
+            "a poisoned lock must be recovered, not fail closed"
+        );
+        let sid = memory.create_session("after-poison").await.unwrap();
+        assert!(!sid.is_empty());
+        assert_eq!(
+            memory.list_sessions().await.unwrap().len(),
+            1,
+            "persistence continues working after lock recovery"
         );
     }
 
