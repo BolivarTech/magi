@@ -250,6 +250,52 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
+    // Validates a command against a throwaway workspace root.
+    fn check(cmd: &str) -> bool {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().canonicalize().expect("canonicalize");
+        is_command_allowed(cmd, &root)
+    }
+
+    #[test]
+    fn test_bash_args_sandboxed_via_pathguard() {
+        // S-1 (the bug): Windows forward-slash absolute escapes the workspace.
+        assert!(
+            !check("cat C:/Windows/System32/config/SAM"),
+            "S-1 windows absolute must be rejected"
+        );
+        // S-2: parent-dir traversal.
+        assert!(
+            !check("cat ../../../etc/passwd"),
+            "S-2 traversal must be rejected"
+        );
+        // S-5: rm targeting outside the workspace.
+        assert!(
+            !check("rm C:/importante/archivo"),
+            "S-5 rm outside must be rejected"
+        );
+        assert!(
+            !check("rm -rf C:/dir"),
+            "S-5 rm -rf outside must be rejected"
+        );
+        // S-3: relative in-workspace path is allowed.
+        assert!(
+            check("cat archivo.txt"),
+            "S-3 relative in-workspace must be allowed"
+        );
+        // S-4: non-path args are allowed (resolve to workspace-relative).
+        assert!(check("echo hola"), "S-4 echo non-path arg must be allowed");
+        assert!(check("git log --oneline"), "S-4 git log must be allowed");
+        // S-6: rm destructive guard not regressed.
+        assert!(!check("rm -rf ."), "S-6 rm -rf . must stay rejected");
+        // S-7: no regression on legit commands + C3/W4 intact.
+        assert!(check("cargo test"), "cargo test allowed");
+        assert!(check("ls"), "ls allowed");
+        assert!(check("grep foo bar.txt"), "grep allowed");
+        assert!(!check("cargo"), "bare cargo rejected (C3, no panic)");
+        assert!(!check("echo --% x"), "--% rejected (W4)");
+    }
+
     #[tokio::test]
     async fn test_bash_tool_execution() {
         let dir = tempdir().expect("Failed to create temp dir");
