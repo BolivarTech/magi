@@ -529,6 +529,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_anthropic_provider_sse_buffer_cap_aborts_without_separator() {
+        let mut server = Server::new_async().await;
+        let url = server.url();
+
+        let oversized = "a".repeat(9 * 1024 * 1024);
+
+        let _m = server
+            .mock("POST", "/messages")
+            .with_status(200)
+            .with_header("content-type", "text/event-stream")
+            .with_body(oversized)
+            .create_async()
+            .await;
+
+        let provider = AnthropicProvider::with_base_url(
+            "test_key".to_string(),
+            "claude-3-5-sonnet".to_string(),
+            url,
+        );
+
+        let mut stream = provider.stream_messages(&[], &[]).await.unwrap();
+
+        let mut saw_error = false;
+        while let Some(chunk_result) = stream.next().await {
+            if let Err(e) = chunk_result {
+                let msg = e.to_string();
+                assert!(
+                    msg.contains("buffer") || msg.contains("8 MiB") || msg.contains("limit"),
+                    "error should mention the SSE buffer cap, got: {}",
+                    msg
+                );
+                saw_error = true;
+                break;
+            }
+        }
+        assert!(saw_error, "oversized separator-less stream must abort with an error");
+    }
+
+    #[tokio::test]
     async fn test_anthropic_provider_retry_on_429() {
         let mut server = Server::new_async().await;
         let url = server.url();
