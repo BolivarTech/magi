@@ -104,6 +104,15 @@ fn parse_tool_input(acc: &str) -> Result<serde_json::Value, String> {
     serde_json::from_str(acc).map_err(|e| e.to_string())
 }
 
+/// Drains complete SSE event blocks (terminated by `"\n\n"`) from a raw byte
+/// buffer, decoding each *complete* block as UTF-8. Buffering raw bytes until the
+/// event boundary means a multi-byte UTF-8 character split across network chunks
+/// is never decoded mid-character (#3). Incomplete trailing bytes stay buffered.
+#[allow(dead_code)]
+fn drain_sse_events(_buffer: &mut Vec<u8>) -> Vec<String> {
+    unimplemented!("drain_sse_events — implemented in GREEN")
+}
+
 /// A provider that returns static, canned responses.
 pub struct StaticProvider;
 
@@ -452,6 +461,37 @@ mod tests {
     fn test_parse_tool_input_malformed_is_err() {
         // B-S3 (load-bearing): malformed JSON surfaces as Err, not a silent {}.
         assert!(parse_tool_input(r#"{"path":"#).is_err());
+    }
+
+    #[test]
+    fn test_drain_sse_events_handles_multibyte_split_across_chunks() {
+        // C-S1 (load-bearing): 'é' (0xC3 0xA9) split across two pushes must not
+        // corrupt to U+FFFD — bytes are buffered until the "\n\n" boundary.
+        let mut buf: Vec<u8> = Vec::new();
+        buf.extend_from_slice("data: caf".as_bytes());
+        buf.push(0xC3);
+        assert!(
+            drain_sse_events(&mut buf).is_empty(),
+            "no event before the boundary"
+        );
+        buf.push(0xA9);
+        buf.extend_from_slice(b"\n\n");
+        assert_eq!(
+            drain_sse_events(&mut buf),
+            vec!["data: café\n\n".to_string()]
+        );
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn test_drain_sse_events_multiple_events_and_remainder() {
+        // C-S2: drain all complete blocks, leave the incomplete tail buffered.
+        let mut buf: Vec<u8> = b"event: a\n\nevent: b\n\nevent: c-incomplete".to_vec();
+        assert_eq!(
+            drain_sse_events(&mut buf),
+            vec!["event: a\n\n".to_string(), "event: b\n\n".to_string()]
+        );
+        assert_eq!(buf, b"event: c-incomplete".to_vec());
     }
 
     #[tokio::test]
