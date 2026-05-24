@@ -582,6 +582,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_all_zero_salt_self_heals_via_checksum() {
+        // B-S1 (#15): an all-zero salt blob is a VALID RS codeword that decodes to a
+        // zero payload (the #10 mis-correction residual — RS alone would "accept"
+        // it). The salt checksum won't match sha256(zero-salt) → treated as invalid
+        // → D6 self-heal, instead of adopting a wrong (zero) salt and bricking.
+        let tmp = NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+        {
+            let m = EncryptedSqliteMemory::new(path.clone(), "P".to_string()).unwrap();
+            let s = m.create_session("p").await.unwrap();
+            m.add_message(&s, &Message::user("orig")).await.unwrap();
+        }
+        {
+            // A salt blob is RS(salt[16] ‖ checksum[4]) = 20 data + 32 parity = 52
+            // bytes; an all-zero blob of that size is a valid (zero) codeword.
+            let conn = Connection::open(&path).unwrap();
+            conn.execute(
+                "UPDATE vault_meta SET value = ?1 WHERE key = 'salt'",
+                params![vec![0u8; 52]],
+            )
+            .unwrap();
+        }
+        let m = EncryptedSqliteMemory::new(path, "P".to_string()).unwrap();
+        assert!(
+            m.list_sessions().await.unwrap().is_empty(),
+            "an all-zero (checksum-mismatched) salt must self-heal, not be adopted"
+        );
+        let s = m.create_session("fresh").await.unwrap();
+        m.add_message(&s, &Message::user("new")).await.unwrap();
+        assert_eq!(m.get_messages(&s).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
     async fn test_minor_salt_bitrot_is_corrected_and_history_survives() {
         // S-3: an RS-encoded salt with a few flipped bytes is corrected on read,
         // so the derived key is unchanged and prior history still decrypts.
