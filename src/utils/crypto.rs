@@ -378,11 +378,125 @@ impl CryptoVault {
         String::from_utf8(plaintext)
             .map_err(|e| CryptoError::Encoding(format!("Invalid UTF-8: {}", e)))
     }
+
+    #[allow(dead_code)]
+    pub fn derive_key(
+        &self,
+        _password: &str,
+        _salt: &[u8],
+    ) -> Result<Zeroizing<Vec<u8>>, CryptoError> {
+        unimplemented!("derive_key — implemented in GREEN")
+    }
+
+    #[allow(dead_code)]
+    pub fn encrypt_with_key(&self, _key: &[u8], _plaintext: &str) -> Result<String, CryptoError> {
+        unimplemented!("encrypt_with_key — implemented in GREEN")
+    }
+
+    #[allow(dead_code)]
+    pub fn decrypt_with_key(
+        &self,
+        _key: &[u8],
+        _encrypted_base64: &str,
+    ) -> Result<String, CryptoError> {
+        unimplemented!("decrypt_with_key — implemented in GREEN")
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Derives a deterministic 32-byte test key.
+    fn k(vault: &CryptoVault) -> Zeroizing<Vec<u8>> {
+        vault.derive_key("pw", &[0u8; SALT_LEN]).unwrap()
+    }
+
+    #[test]
+    fn test_encrypt_with_key_roundtrips() {
+        // S-1
+        let vault = CryptoVault::default();
+        let key = k(&vault);
+        let pt = "sk-ant-secret-payload";
+        let blob = vault.encrypt_with_key(&key, pt).unwrap();
+        assert_eq!(vault.decrypt_with_key(&key, &blob).unwrap(), pt);
+    }
+
+    #[test]
+    fn test_blob_layout_carries_no_salt() {
+        // S-2: plaindata == nonce_len + (L + 16 tag); no 16-byte salt prefix.
+        let vault = CryptoVault::default();
+        let key = k(&vault);
+        let pt = "0123456789"; // L = 10
+        let blob = vault.encrypt_with_key(&key, pt).unwrap();
+        let raw = STANDARD.decode(&blob).unwrap();
+        let original_len = u32::from_le_bytes(raw[..4].try_into().unwrap()) as usize;
+        let codec = ReedSolomonCodec::default();
+        let plaindata = codec.decode(&raw[4..], original_len).unwrap();
+        assert_eq!(plaindata.len(), 12 + (pt.len() + 16));
+    }
+
+    #[test]
+    fn test_encrypt_with_key_uses_independent_nonce() {
+        // S-3
+        let vault = CryptoVault::default();
+        let key = k(&vault);
+        let pt = "identical plaintext";
+        let a = vault.encrypt_with_key(&key, pt).unwrap();
+        let b = vault.encrypt_with_key(&key, pt).unwrap();
+        assert_ne!(a, b, "independent nonces must yield different blobs");
+    }
+
+    #[test]
+    fn test_decrypt_with_wrong_key_errors_without_panic() {
+        // S-4
+        let vault = CryptoVault::default();
+        let key_a = vault.derive_key("pw-a", &[1u8; SALT_LEN]).unwrap();
+        let key_b = vault.derive_key("pw-b", &[1u8; SALT_LEN]).unwrap();
+        let blob = vault.encrypt_with_key(&key_a, "secret").unwrap();
+        assert!(matches!(
+            vault.decrypt_with_key(&key_b, &blob),
+            Err(CryptoError::Cipher(_))
+        ));
+    }
+
+    #[test]
+    fn test_decrypt_with_key_preserves_c7_caps() {
+        // S-5: oversized length-prefix and grossly-large body both rejected pre-alloc.
+        let vault = CryptoVault::default();
+        let key = k(&vault);
+
+        let mut over = Vec::new();
+        over.extend_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+        over.extend_from_slice(&[0u8; 8]);
+        assert!(matches!(
+            vault.decrypt_with_key(&key, &STANDARD.encode(&over)),
+            Err(CryptoError::InvalidInput(_))
+        ));
+
+        let mut big = Vec::new();
+        big.extend_from_slice(&100u32.to_le_bytes());
+        big.extend_from_slice(&vec![0u8; 20_000]);
+        assert!(matches!(
+            vault.decrypt_with_key(&key, &STANDARD.encode(&big)),
+            Err(CryptoError::InvalidInput(_))
+        ));
+    }
+
+    #[test]
+    fn test_invalid_key_length_errors_without_panic() {
+        // S-9: a 5-byte key is not a valid AES-256 key.
+        let vault = CryptoVault::default();
+        assert!(matches!(
+            vault.encrypt_with_key(&[0u8; 5], "x"),
+            Err(CryptoError::Cipher(_))
+        ));
+        let valid = vault.encrypt_with_key(&k(&vault), "x").unwrap();
+        assert!(matches!(
+            vault.decrypt_with_key(&[0u8; 5], &valid),
+            Err(CryptoError::Cipher(_))
+        ));
+    }
 
     #[test]
     fn test_decrypt_rejects_blob_grossly_larger_than_declared_length() {
