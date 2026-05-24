@@ -105,8 +105,11 @@ impl EncryptedSqliteMemory {
     ) -> Result<Self> {
         let mut conn = Connection::open(path)?;
 
+        // MAGI FIX: Enable WAL mode for high concurrency
+        // We use query_row because execute fails for pragmas that return values in some drivers
         let _: String = conn.query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))?;
         conn.execute("PRAGMA synchronous = NORMAL", [])?;
+        // Set a busy timeout to prevent "database is locked" errors during contention
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
 
         conn.execute(
