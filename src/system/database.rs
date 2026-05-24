@@ -92,6 +92,15 @@ impl EncryptedSqliteMemory {
         Ok(messages)
     }
 
+    #[allow(dead_code)]
+    pub(crate) fn new_with_vault(
+        _path: PathBuf,
+        _master_password: String,
+        _vault: CryptoVault,
+    ) -> Result<Self> {
+        unimplemented!("new_with_vault — implemented in GREEN")
+    }
+
     pub fn new(path: PathBuf, master_password: String) -> Result<Self> {
         let conn = Connection::open(path)?;
 
@@ -271,8 +280,137 @@ impl EncryptedSqliteMemory {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::utils::crypto::{
+        Aes256GcmSivCipher, Argon2Kdf, CryptoError, CryptoVault, KeyDerivation, ReedSolomonCodec,
+    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use tempfile::NamedTempFile;
+
+    /// KDF that counts derivations and delegates to the real Argon2id.
+    struct CountingKdf {
+        inner: Argon2Kdf,
+        calls: Arc<AtomicUsize>,
+    }
+    impl KeyDerivation for CountingKdf {
+        fn derive_key(
+            &self,
+            password: &[u8],
+            salt: &[u8],
+            output_len: usize,
+        ) -> std::result::Result<zeroize::Zeroizing<Vec<u8>>, CryptoError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.inner.derive_key(password, salt, output_len)
+        }
+    }
+
+    #[tokio::test]
+    async fn test_key_is_derived_exactly_once_for_session_load() {
+        // S-6 (load-bearing): construct + N adds + get_messages => 1 Argon2 call.
+        let tmp = NamedTempFile::new().unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let vault = CryptoVault::new(
+            Box::new(CountingKdf {
+                inner: Argon2Kdf,
+                calls: calls.clone(),
+            }),
+            Box::new(Aes256GcmSivCipher),
+            Box::new(ReedSolomonCodec::default()),
+        );
+        let memory = EncryptedSqliteMemory::new_with_vault(
+            tmp.path().to_path_buf(),
+            "pw".to_string(),
+            vault,
+        )
+        .unwrap();
+        let sid = memory.create_session("p").await.unwrap();
+        for i in 0..5 {
+            memory
+                .add_message(&sid, &Message::user(&format!("m{i}")))
+                .await
+                .unwrap();
+        }
+        let msgs = memory.get_messages(&sid).await.unwrap();
+        assert_eq!(msgs.len(), 5);
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "Argon2 must run exactly once (B′), not per record"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_legacy_db_without_salt_is_reset_on_open() {
+        // S-7: a pre-B′ DB (rows present, no vault_meta salt) is wiped on open.
+        let tmp = NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute(
+                "CREATE TABLE sessions (id TEXT PRIMARY KEY, project_name TEXT NOT NULL, \
+                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP)",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL, \
+                 role TEXT NOT NULL, content_blob TEXT NOT NULL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO sessions (id, project_name) VALUES ('old', 'legacy')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO messages (session_id, role, content_blob) VALUES ('old', 'User', 'OLD_BLOB')",
+                [],
+            )
+            .unwrap();
+        }
+
+        let memory = EncryptedSqliteMemory::new(path, "pw".to_string()).unwrap();
+        assert!(
+            memory.list_sessions().await.unwrap().is_empty(),
+            "legacy rows must be wiped on open (D6 fresh-start)"
+        );
+        let sid = memory.create_session("fresh").await.unwrap();
+        memory
+            .add_message(&sid, &Message::user("new"))
+            .await
+            .unwrap();
+        assert_eq!(memory.get_messages(&sid).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_salt_persists_across_reopen_same_password_roundtrips() {
+        // S-8: salt persists => same password round-trips; different password fails.
+        let tmp = NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+        let sid;
+        {
+            let memory = EncryptedSqliteMemory::new(path.clone(), "P".to_string()).unwrap();
+            sid = memory.create_session("p").await.unwrap();
+            memory
+                .add_message(&sid, &Message::user("persisted"))
+                .await
+                .unwrap();
+        }
+        {
+            let memory = EncryptedSqliteMemory::new(path.clone(), "P".to_string()).unwrap();
+            assert_eq!(
+                memory.get_messages(&sid).await.unwrap(),
+                vec![Message::user("persisted")]
+            );
+        }
+        {
+            let memory = EncryptedSqliteMemory::new(path, "P-different".to_string()).unwrap();
+            let res = memory.get_messages(&sid).await;
+            assert!(res.is_err());
+            assert!(res.unwrap_err().to_string().contains("Decryption failed"));
+        }
+    }
 
     #[tokio::test]
     async fn test_encrypted_sqlite_memory() {
