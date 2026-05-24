@@ -589,6 +589,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_anthropic_provider_streaming_assembles_tool_use() {
+        let mut server = Server::new_async().await;
+        let url = server.url();
+        // Genuine tool-use SSE wire events: content_block_start carries id/name,
+        // two input_json_delta chunks whose partial_json concatenates to {"path": "."},
+        // then content_block_stop and message_stop.
+        let sse_body = concat!(
+            "event: message_start\n",
+            "data: {\"type\": \"message_start\", \"message\": {\"id\": \"msg_tu\", \"role\": \"assistant\", \"model\": \"claude-3-5-sonnet\"}}\n\n",
+            "event: content_block_start\n",
+            "data: {\"type\": \"content_block_start\", \"index\": 0, \"content_block\": {\"type\": \"tool_use\", \"id\": \"toolu_abc\", \"name\": \"ls\", \"input\": {}}}\n\n",
+            "event: content_block_delta\n",
+            "data: {\"type\": \"content_block_delta\", \"index\": 0, \"delta\": {\"type\": \"input_json_delta\", \"partial_json\": \"{\\\"path\\\": \"}}\n\n",
+            "event: content_block_delta\n",
+            "data: {\"type\": \"content_block_delta\", \"index\": 0, \"delta\": {\"type\": \"input_json_delta\", \"partial_json\": \"\\\".\\\"\"}}\n\n",
+            "event: content_block_stop\n",
+            "data: {\"type\": \"content_block_stop\", \"index\": 0}\n\n",
+            "event: message_stop\n",
+            "data: {\"type\": \"message_stop\"}\n\n",
+        );
+        let _m = server
+            .mock("POST", "/messages")
+            .with_status(200)
+            .with_header("content-type", "text/event-stream")
+            .with_body(sse_body)
+            .create_async()
+            .await;
+        let provider = AnthropicProvider::with_base_url(
+            "test_key".to_string(),
+            "claude-3-5-sonnet".to_string(),
+            url,
+        );
+        let response = provider
+            .send_messages(&[Message::user("list")], &[])
+            .await
+            .unwrap();
+        let tool = response.content.iter().find_map(|c| match c {
+            Content::ToolUse { id, name, input } => {
+                Some((id.clone(), name.clone(), input.clone()))
+            }
+            _ => None,
+        });
+        let (id, name, input) =
+            tool.expect("streaming response must assemble a ToolUse content block");
+        assert_eq!(id, "toolu_abc");
+        assert_eq!(name, "ls");
+        assert_eq!(input, serde_json::json!({"path": "."}));
+    }
+
+    #[tokio::test]
     async fn test_anthropic_provider_retry_on_429() {
         let mut server = Server::new_async().await;
         let url = server.url();
