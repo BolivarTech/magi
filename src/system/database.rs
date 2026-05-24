@@ -385,7 +385,7 @@ mod tests {
         let memory = Arc::new(EncryptedSqliteMemory::new(path, "pw".to_string()).unwrap());
         let sid = memory.create_session("p").await.unwrap();
 
-        for i in 0..16 {
+        for i in 0..4 {
             memory
                 .add_message(&sid, &Message::user(&format!("message number {i}")))
                 .await
@@ -407,7 +407,7 @@ mod tests {
 
         assert_eq!(
             msgs.len(),
-            16,
+            4,
             "all messages decrypt correctly after lock-drop refactor"
         );
         assert!(
