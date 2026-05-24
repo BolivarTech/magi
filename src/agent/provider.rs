@@ -192,8 +192,15 @@ struct AnthropicMessageStart {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum AnthropicDelta {
-    TextDelta { text: String },
-    InputDelta { partial_json: String },
+    TextDelta {
+        text: String,
+    },
+    // Anthropic's real wire type is "input_json_delta", not "input_delta".
+    // The explicit rename overrides the rename_all="snake_case" for this variant.
+    #[serde(rename = "input_json_delta")]
+    InputDelta {
+        partial_json: String,
+    },
 }
 
 /// A provider that communicates with Anthropic's Messages API.
@@ -285,6 +292,8 @@ impl Provider for AnthropicProvider {
         let mut buffer = String::new();
         let mut full_content: Vec<Content> = Vec::new();
         let mut current_role = Role::Assistant;
+        // Accumulates (id, name, partial_json) for an in-progress tool_use block.
+        let mut current_tool: Option<(String, String, String)> = None;
 
         let output_stream = bytes_stream.flat_map(move |chunk_res| {
             let chunk = match chunk_res {
@@ -317,6 +326,28 @@ impl Provider for AnthropicProvider {
                                 AnthropicSseEvent::MessageStart { message } => {
                                     current_role = message.role;
                                 }
+                                AnthropicSseEvent::ContentBlockStart {
+                                    content_block, ..
+                                } => {
+                                    // When the block is a tool_use, begin accumulating its input.
+                                    if content_block
+                                        .get("type")
+                                        .and_then(|t| t.as_str())
+                                        == Some("tool_use")
+                                    {
+                                        let id = content_block
+                                            .get("id")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or_default()
+                                            .to_string();
+                                        let name = content_block
+                                            .get("name")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or_default()
+                                            .to_string();
+                                        current_tool = Some((id, name, String::new()));
+                                    }
+                                }
                                 AnthropicSseEvent::ContentBlockDelta { delta, .. } => match delta {
                                     AnthropicDelta::TextDelta { text } => {
                                         if let Some(Content::Text { text: existing }) =
@@ -329,13 +360,42 @@ impl Provider for AnthropicProvider {
                                         chunks.push(Ok(ResponseChunk::TextDelta(text)));
                                     }
                                     AnthropicDelta::InputDelta { partial_json } => {
+                                        // Accumulate into the current tool's JSON buffer.
+                                        if let Some((_, _, acc)) = current_tool.as_mut() {
+                                            acc.push_str(&partial_json);
+                                        }
                                         chunks.push(Ok(ResponseChunk::ToolUseInputDelta {
                                             id: String::new(),
                                             input_json: partial_json,
                                         }));
                                     }
                                 },
+                                AnthropicSseEvent::ContentBlockStop { .. } => {
+                                    // Finalize the accumulated tool_use block and push it to content.
+                                    if let Some((id, name, acc)) = current_tool.take() {
+                                        let input = if acc.trim().is_empty() {
+                                            serde_json::Value::Object(serde_json::Map::new())
+                                        } else {
+                                            serde_json::from_str(&acc).unwrap_or_else(|_| {
+                                                serde_json::Value::Object(serde_json::Map::new())
+                                            })
+                                        };
+                                        full_content.push(Content::ToolUse { id, name, input });
+                                    }
+                                }
                                 AnthropicSseEvent::MessageStop => {
+                                    // Defensively finalize any still-pending tool block
+                                    // in case content_block_stop was absent.
+                                    if let Some((id, name, acc)) = current_tool.take() {
+                                        let input = if acc.trim().is_empty() {
+                                            serde_json::Value::Object(serde_json::Map::new())
+                                        } else {
+                                            serde_json::from_str(&acc).unwrap_or_else(|_| {
+                                                serde_json::Value::Object(serde_json::Map::new())
+                                            })
+                                        };
+                                        full_content.push(Content::ToolUse { id, name, input });
+                                    }
                                     let msg = Message {
                                         role: current_role.clone(),
                                         content: full_content.clone(),
@@ -603,7 +663,8 @@ mod tests {
             "event: content_block_delta\n",
             "data: {\"type\": \"content_block_delta\", \"index\": 0, \"delta\": {\"type\": \"input_json_delta\", \"partial_json\": \"{\\\"path\\\": \"}}\n\n",
             "event: content_block_delta\n",
-            "data: {\"type\": \"content_block_delta\", \"index\": 0, \"delta\": {\"type\": \"input_json_delta\", \"partial_json\": \"\\\".\\\"\"}}\n\n",
+            // partial_json piece 2 = "."} — concatenated with piece 1 gives {"path": "."}
+            "data: {\"type\": \"content_block_delta\", \"index\": 0, \"delta\": {\"type\": \"input_json_delta\", \"partial_json\": \"\\\".\\\"}\"}}\n\n",
             "event: content_block_stop\n",
             "data: {\"type\": \"content_block_stop\", \"index\": 0}\n\n",
             "event: message_stop\n",
@@ -626,9 +687,7 @@ mod tests {
             .await
             .unwrap();
         let tool = response.content.iter().find_map(|c| match c {
-            Content::ToolUse { id, name, input } => {
-                Some((id.clone(), name.clone(), input.clone()))
-            }
+            Content::ToolUse { id, name, input } => Some((id.clone(), name.clone(), input.clone())),
             _ => None,
         });
         let (id, name, input) =
