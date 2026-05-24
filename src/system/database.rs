@@ -470,6 +470,84 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_corrupt_salt_triggers_self_heal_reset() {
+        // S-2: an invalid/unrecoverable salt (here: a raw, non-RS-encoded value)
+        // is treated as absent so D6 self-heals (reset) instead of bricking the DB.
+        let tmp = NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+        {
+            let memory = EncryptedSqliteMemory::new(path.clone(), "P".to_string()).unwrap();
+            let sid = memory.create_session("p").await.unwrap();
+            memory
+                .add_message(&sid, &Message::user("orig"))
+                .await
+                .unwrap();
+        }
+        // Overwrite the salt with a raw, non-RS-encoded value (irrecoverable).
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute(
+                "UPDATE vault_meta SET value = ?1 WHERE key = 'salt'",
+                params![vec![0x42u8; SALT_LEN]],
+            )
+            .unwrap();
+        }
+        // Reopen: invalid salt -> treated absent -> D6 reset, no error.
+        let memory = EncryptedSqliteMemory::new(path, "P".to_string()).unwrap();
+        assert!(
+            memory.list_sessions().await.unwrap().is_empty(),
+            "an invalid/unrecoverable salt must self-heal via a D6 reset"
+        );
+        let fresh = memory.create_session("fresh").await.unwrap();
+        memory
+            .add_message(&fresh, &Message::user("new"))
+            .await
+            .unwrap();
+        assert_eq!(memory.get_messages(&fresh).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_minor_salt_bitrot_is_corrected_and_history_survives() {
+        // S-3: an RS-encoded salt with a few flipped bytes is corrected on read,
+        // so the derived key is unchanged and prior history still decrypts.
+        let tmp = NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+        let sid;
+        {
+            let memory = EncryptedSqliteMemory::new(path.clone(), "P".to_string()).unwrap();
+            sid = memory.create_session("p").await.unwrap();
+            memory
+                .add_message(&sid, &Message::user("survives"))
+                .await
+                .unwrap();
+        }
+        // Flip a few bytes of the stored salt blob (within RS correction capacity).
+        {
+            let conn = Connection::open(&path).unwrap();
+            let mut blob: Vec<u8> = conn
+                .query_row("SELECT value FROM vault_meta WHERE key = 'salt'", [], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+            for b in blob.iter_mut().take(3) {
+                *b ^= 0xAA;
+            }
+            conn.execute(
+                "UPDATE vault_meta SET value = ?1 WHERE key = 'salt'",
+                params![blob],
+            )
+            .unwrap();
+        }
+        // Reopen: RS corrects the salt -> same key -> history survives.
+        let memory = EncryptedSqliteMemory::new(path, "P".to_string()).unwrap();
+        assert_eq!(
+            memory.get_messages(&sid).await.unwrap(),
+            vec![Message::user("survives")],
+            "RS-encoded salt must self-correct minor bit-rot, preserving history"
+        );
+    }
+
+    #[tokio::test]
     async fn test_encrypted_sqlite_memory() {
         let tmp_file = NamedTempFile::new().unwrap();
         let path = tmp_file.path().to_path_buf();
