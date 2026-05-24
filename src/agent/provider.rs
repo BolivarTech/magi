@@ -811,6 +811,94 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_missing_content_block_stop_does_not_drop_prior_tool() {
+        // B-S1 (#6a): two tool_use blocks with NO content_block_stop between them
+        // (only message_stop at the end). Both must be assembled — the first tool
+        // must not be dropped when the second content_block_start arrives.
+        let mut server = Server::new_async().await;
+        let url = server.url();
+        let sse_body = concat!(
+            "event: message_start\n",
+            "data: {\"type\": \"message_start\", \"message\": {\"id\": \"m\", \"role\": \"assistant\", \"model\": \"x\"}}\n\n",
+            "event: content_block_start\n",
+            "data: {\"type\": \"content_block_start\", \"index\": 0, \"content_block\": {\"type\": \"tool_use\", \"id\": \"toolu_A\", \"name\": \"ls\", \"input\": {}}}\n\n",
+            "event: content_block_delta\n",
+            "data: {\"type\": \"content_block_delta\", \"index\": 0, \"delta\": {\"type\": \"input_json_delta\", \"partial_json\": \"{}\"}}\n\n",
+            "event: content_block_start\n",
+            "data: {\"type\": \"content_block_start\", \"index\": 1, \"content_block\": {\"type\": \"tool_use\", \"id\": \"toolu_B\", \"name\": \"view\", \"input\": {}}}\n\n",
+            "event: content_block_delta\n",
+            "data: {\"type\": \"content_block_delta\", \"index\": 1, \"delta\": {\"type\": \"input_json_delta\", \"partial_json\": \"{}\"}}\n\n",
+            "event: message_stop\n",
+            "data: {\"type\": \"message_stop\"}\n\n",
+        );
+        let _m = server
+            .mock("POST", "/messages")
+            .with_status(200)
+            .with_header("content-type", "text/event-stream")
+            .with_body(sse_body)
+            .create_async()
+            .await;
+        let provider = AnthropicProvider::with_base_url("k".to_string(), "x".to_string(), url);
+        let response = provider
+            .send_messages(&[Message::user("go")], &[])
+            .await
+            .unwrap();
+        let ids: Vec<String> = response
+            .content
+            .iter()
+            .filter_map(|c| match c {
+                Content::ToolUse { id, .. } => Some(id.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            ids,
+            vec!["toolu_A".to_string(), "toolu_B".to_string()],
+            "a missing content_block_stop must not drop the first tool"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_tool_input_delta_chunk_carries_tool_id() {
+        // B-S2 (#6b): the ToolUseInputDelta chunk must carry the in-progress tool id.
+        let mut server = Server::new_async().await;
+        let url = server.url();
+        let sse_body = concat!(
+            "event: message_start\n",
+            "data: {\"type\": \"message_start\", \"message\": {\"id\": \"m\", \"role\": \"assistant\", \"model\": \"x\"}}\n\n",
+            "event: content_block_start\n",
+            "data: {\"type\": \"content_block_start\", \"index\": 0, \"content_block\": {\"type\": \"tool_use\", \"id\": \"toolu_x\", \"name\": \"ls\", \"input\": {}}}\n\n",
+            "event: content_block_delta\n",
+            "data: {\"type\": \"content_block_delta\", \"index\": 0, \"delta\": {\"type\": \"input_json_delta\", \"partial_json\": \"{}\"}}\n\n",
+            "event: message_stop\n",
+            "data: {\"type\": \"message_stop\"}\n\n",
+        );
+        let _m = server
+            .mock("POST", "/messages")
+            .with_status(200)
+            .with_header("content-type", "text/event-stream")
+            .with_body(sse_body)
+            .create_async()
+            .await;
+        let provider = AnthropicProvider::with_base_url("k".to_string(), "x".to_string(), url);
+        let mut stream = provider
+            .stream_messages(&[Message::user("go")], &[])
+            .await
+            .unwrap();
+        let mut delta_ids = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            if let Ok(ResponseChunk::ToolUseInputDelta { id, .. }) = chunk {
+                delta_ids.push(id);
+            }
+        }
+        assert_eq!(
+            delta_ids,
+            vec!["toolu_x".to_string()],
+            "ToolUseInputDelta chunk must carry the tool id"
+        );
+    }
+
+    #[tokio::test]
     async fn test_anthropic_provider_retry_on_429() {
         let mut server = Server::new_async().await;
         let url = server.url();
