@@ -117,6 +117,15 @@ fn drain_sse_events(buffer: &mut Vec<u8>) -> Vec<String> {
     blocks
 }
 
+/// Finalizes a pending `tool_use` block (if any): parses its accumulated input
+/// JSON (malformed → warn + `{}`, #4) and pushes a `Content::ToolUse`. `None` is a
+/// no-op. Shared by `content_block_stop`, `message_stop`, and (defensively) a new
+/// `content_block_start` (#5/#6).
+#[allow(dead_code)]
+fn finalize_tool(_tool: Option<(String, String, String)>, _full_content: &mut Vec<Content>) {
+    unimplemented!("finalize_tool — implemented in GREEN")
+}
+
 /// A provider that returns static, canned responses.
 pub struct StaticProvider;
 
@@ -493,6 +502,47 @@ mod tests {
             vec!["event: a\n\n".to_string(), "event: b\n\n".to_string()]
         );
         assert_eq!(buf, b"event: c-incomplete".to_vec());
+    }
+
+    #[test]
+    fn test_finalize_tool_pushes_parsed_tooluse() {
+        // A-S1: valid accumulated input is parsed into a ToolUse.
+        let mut content: Vec<Content> = Vec::new();
+        finalize_tool(
+            Some(("id1".into(), "ls".into(), r#"{"path":"."}"#.into())),
+            &mut content,
+        );
+        assert_eq!(
+            content,
+            vec![Content::ToolUse {
+                id: "id1".into(),
+                name: "ls".into(),
+                input: json!({"path":"."}),
+            }]
+        );
+    }
+
+    #[test]
+    fn test_finalize_tool_empty_input_is_object() {
+        // A-S2: empty accumulated input becomes an empty object.
+        let mut content: Vec<Content> = Vec::new();
+        finalize_tool(Some(("id".into(), "n".into(), String::new())), &mut content);
+        assert_eq!(
+            content,
+            vec![Content::ToolUse {
+                id: "id".into(),
+                name: "n".into(),
+                input: json!({}),
+            }]
+        );
+    }
+
+    #[test]
+    fn test_finalize_tool_none_is_noop() {
+        // A-S3: no pending tool → nothing pushed.
+        let mut content: Vec<Content> = Vec::new();
+        finalize_tool(None, &mut content);
+        assert!(content.is_empty());
     }
 
     #[tokio::test]
