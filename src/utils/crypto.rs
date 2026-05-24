@@ -7,18 +7,19 @@
 //!
 //! ### Data Flow:
 //! 1. **Key Derivation (Argon2):** A master password (from OS Keyring) is hashed with a
-//!    per-record random 16-byte salt to produce a **32-byte key only**. The nonce is NOT
-//!    derived from Argon2.
+//!    per-database 16-byte salt (derived once and cached by the store) to produce a
+//!    **32-byte key only**. The nonce is NOT derived from Argon2.
 //! 2. **Nonce Sampling (OsRng):** A 12-byte AES-256-GCM-SIV nonce is sampled independently
 //!    from `OsRng` and stored in the blob. This guarantees nonce independence across
 //!    encryptions of the same plaintext under the same key (C5 fix).
 //! 3. **Authenticated Encryption (AES-256-GCM-SIV):** Plaintext is encrypted using the
 //!    derived key and the independently sampled nonce. This cipher is nonce-misuse resistant,
 //!    guaranteeing confidentiality and integrity (authentication tag).
-//! 4. **Error Correction (Reed-Solomon):** The salt, nonce, and ciphertext are encoded with
+//! 4. **Error Correction (Reed-Solomon):** The nonce and ciphertext are encoded with
 //!    parity bytes to allow recovery from bit-rot or minor storage corruption.
-//! 5. **Final Blob:** `[u32 LE original-len][RS-encoded(salt || nonce || ciphertext)]`,
-//!    base64-encoded for storage.
+//! 5. **Final Blob:** `[u32 LE original-len][RS-encoded(nonce || ciphertext)]`,
+//!    base64-encoded for storage. The salt is stored once per database by the store
+//!    layer, not per record.
 
 use std::fmt;
 
@@ -273,114 +274,6 @@ impl CryptoVault {
         Self { kdf, cipher, fec }
     }
 
-    #[allow(dead_code)]
-    pub fn encrypt(&self, password: &str, plaintext: &str) -> Result<String, CryptoError> {
-        if password.is_empty() {
-            return Err(CryptoError::InvalidInput(
-                "Password must not be empty".to_string(),
-            ));
-        }
-
-        let nonce_len = self.cipher.nonce_len();
-
-        let projected_original_len = SALT_LEN + nonce_len + plaintext.len() + 16; // +16 = GCM-SIV tag
-        if projected_original_len > MAX_PLAINTEXT_LEN {
-            return Err(CryptoError::InvalidInput(format!(
-                "Record length {} (salt+nonce+ciphertext) exceeds MAX_PLAINTEXT_LEN ({})",
-                projected_original_len, MAX_PLAINTEXT_LEN
-            )));
-        }
-
-        let mut salt = [0u8; SALT_LEN];
-        rand::rngs::OsRng.fill_bytes(&mut salt);
-        let mut nonce = vec![0u8; nonce_len];
-        rand::rngs::OsRng.fill_bytes(&mut nonce);
-
-        let key = self.kdf.derive_key(password.as_bytes(), &salt, KEY_LEN)?;
-
-        let ciphertext = self.cipher.encrypt(&key, &nonce, plaintext.as_bytes())?;
-
-        let mut plaindata = Vec::with_capacity(SALT_LEN + nonce_len + ciphertext.len());
-        plaindata.extend_from_slice(&salt);
-        plaindata.extend_from_slice(&nonce);
-        plaindata.extend_from_slice(&ciphertext);
-
-        let rs_encoded = self.fec.encode(&plaindata);
-
-        let original_len_u32 = u32::try_from(plaindata.len())
-            .map_err(|_| CryptoError::Encoding("Data too large for length header".to_string()))?;
-        let mut blob = Vec::with_capacity(4 + rs_encoded.len());
-        blob.extend_from_slice(&original_len_u32.to_le_bytes());
-        blob.extend_from_slice(&rs_encoded);
-
-        Ok(STANDARD.encode(&blob))
-    }
-
-    #[allow(dead_code)]
-    pub fn decrypt(&self, password: &str, encrypted_base64: &str) -> Result<String, CryptoError> {
-        if password.is_empty() {
-            return Err(CryptoError::InvalidInput(
-                "Password must not be empty".to_string(),
-            ));
-        }
-
-        let nonce_len = self.cipher.nonce_len();
-        let blob = STANDARD
-            .decode(encrypted_base64)
-            .map_err(|e| CryptoError::Encoding(format!("Invalid base64: {}", e)))?;
-
-        if blob.len() < 4 {
-            return Err(CryptoError::Encoding(
-                "Encrypted blob too short".to_string(),
-            ));
-        }
-
-        let len_bytes: [u8; 4] = blob[..4].try_into().unwrap();
-        let original_len = u32::from_le_bytes(len_bytes) as usize;
-
-        if original_len > MAX_PLAINTEXT_LEN {
-            return Err(CryptoError::InvalidInput(format!(
-                "Length header {} exceeds MAX_PLAINTEXT_LEN ({}); refusing to allocate",
-                original_len, MAX_PLAINTEXT_LEN
-            )));
-        }
-
-        if original_len > (blob.len() - 4) {
-            return Err(CryptoError::InvalidInput(
-                "Length header exceeds encoded data size".to_string(),
-            ));
-        }
-
-        // C7 hardening: the RS decode allocates proportional to the encoded
-        // blob, not `original_len`, so a small declared length with a huge body
-        // would still drive a large allocation. RS(223/32) expands by at most
-        // ~1.144x; reject anything grossly beyond 2x + slack before decoding.
-        if blob.len().saturating_sub(4) > original_len.saturating_mul(2).saturating_add(4096) {
-            return Err(CryptoError::InvalidInput(format!(
-                "Encoded blob length {} is inconsistent with declared plaintext length {}; refusing to allocate",
-                blob.len() - 4,
-                original_len
-            )));
-        }
-
-        let plaindata = self.fec.decode(&blob[4..], original_len)?;
-        if plaindata.len() < SALT_LEN + nonce_len {
-            return Err(CryptoError::InvalidInput(
-                "Decoded blob too short for salt and nonce".to_string(),
-            ));
-        }
-        let salt = &plaindata[..SALT_LEN];
-        let nonce = &plaindata[SALT_LEN..SALT_LEN + nonce_len];
-        let ciphertext = &plaindata[SALT_LEN + nonce_len..];
-
-        let key = self.kdf.derive_key(password.as_bytes(), salt, KEY_LEN)?;
-
-        let plaintext = self.cipher.decrypt(&key, nonce, ciphertext)?;
-
-        String::from_utf8(plaintext)
-            .map_err(|e| CryptoError::Encoding(format!("Invalid UTF-8: {}", e)))
-    }
-
     /// Derives a 32-byte key from `password` and `salt` using the module's
     /// audited Argon2id parameters. Exposed so a caller can derive the key
     /// **once** and reuse it across many records (key caching), avoiding a
@@ -598,41 +491,6 @@ mod tests {
     }
 
     #[test]
-    fn test_decrypt_rejects_blob_grossly_larger_than_declared_length() {
-        // Declares 100 bytes of plaintext but carries a 20 KB body — far beyond
-        // any legitimate Reed-Solomon expansion (~1.14x). Must be rejected BEFORE
-        // the RS decode allocates against the oversized body.
-        let mut blob = Vec::new();
-        blob.extend_from_slice(&100u32.to_le_bytes());
-        blob.extend_from_slice(&vec![0u8; 20_000]);
-        let encoded = STANDARD.encode(&blob);
-
-        let vault = CryptoVault::default();
-        assert!(
-            matches!(
-                vault.decrypt("pw", &encoded),
-                Err(CryptoError::InvalidInput(_))
-            ),
-            "a blob far larger than its declared plaintext length must be rejected as InvalidInput"
-        );
-    }
-
-    #[test]
-    fn test_decrypt_rejects_oversized_length_prefix_without_alloc() {
-        let mut blob = Vec::new();
-        blob.extend_from_slice(&0xFFFFFFFFu32.to_le_bytes());
-        blob.extend_from_slice(&[0u8; 8]);
-        let encoded = STANDARD.encode(&blob);
-
-        let vault = CryptoVault::default();
-        let err = vault.decrypt("pw", &encoded).unwrap_err();
-        match err {
-            CryptoError::InvalidInput(_) => {}
-            other => panic!("expected InvalidInput for oversized prefix, got {other:?}"),
-        }
-    }
-
-    #[test]
     fn test_decrypt_rejects_prefix_at_exactly_cap_plus_one() {
         let oversized = (MAX_PLAINTEXT_LEN + 1) as u32;
         let mut blob = Vec::new();
@@ -641,9 +499,10 @@ mod tests {
         let encoded = STANDARD.encode(&blob);
 
         let vault = CryptoVault::default();
+        let key = k(&vault);
         assert!(
             matches!(
-                vault.decrypt("pw", &encoded),
+                vault.decrypt_with_key(&key, &encoded),
                 Err(CryptoError::InvalidInput(_))
             ),
             "a length prefix one byte over the cap must be rejected"
@@ -653,134 +512,15 @@ mod tests {
     #[test]
     fn test_encrypt_rejects_plaintext_over_cap() {
         let vault = CryptoVault::default();
+        let key = k(&vault);
         let huge = "a".repeat(MAX_PLAINTEXT_LEN + 1);
         assert!(
             matches!(
-                vault.encrypt("pw", &huge),
+                vault.encrypt_with_key(&key, &huge),
                 Err(CryptoError::InvalidInput(_))
             ),
             "encrypting beyond MAX_PLAINTEXT_LEN must be rejected"
         );
-    }
-
-    fn extract_nonce_for_test(blob_base64: &str) -> Vec<u8> {
-        let blob = STANDARD.decode(blob_base64).unwrap();
-        let original_len = u32::from_le_bytes(blob[..4].try_into().unwrap()) as usize;
-        let codec = ReedSolomonCodec::default();
-        let plaindata = codec.decode(&blob[4..], original_len).unwrap();
-        plaindata[SALT_LEN..SALT_LEN + 12].to_vec()
-    }
-
-    /// Spy KDF: records the output_len it was called with and delegates to Argon2Kdf.
-    struct SpyKdf {
-        inner: Argon2Kdf,
-        recorded_output_len: std::sync::Mutex<Option<usize>>,
-    }
-
-    impl SpyKdf {
-        fn new() -> Self {
-            Self {
-                inner: Argon2Kdf,
-                recorded_output_len: std::sync::Mutex::new(None),
-            }
-        }
-        fn get_output_len(&self) -> Option<usize> {
-            *self.recorded_output_len.lock().unwrap()
-        }
-    }
-
-    impl KeyDerivation for SpyKdf {
-        fn derive_key(
-            &self,
-            password: &[u8],
-            salt: &[u8],
-            output_len: usize,
-        ) -> Result<Zeroizing<Vec<u8>>, CryptoError> {
-            *self.recorded_output_len.lock().unwrap() = Some(output_len);
-            self.inner.derive_key(password, salt, output_len)
-        }
-    }
-
-    #[test]
-    fn test_blob_stores_independent_nonce_in_layout() {
-        // Verify that encrypt calls derive_key with KEY_LEN only (not KEY_LEN + nonce_len).
-        // Under the OLD layout this fails: output_len == 44 (KEY_LEN + nonce_len), not 32.
-
-        // ArcKdf wraps SpyKdf in Arc so we can inspect the recorded output_len after
-        // the vault has consumed ownership.
-        let spy_arc = std::sync::Arc::new(SpyKdf::new());
-
-        struct ArcKdf(std::sync::Arc<SpyKdf>);
-        impl KeyDerivation for ArcKdf {
-            fn derive_key(
-                &self,
-                password: &[u8],
-                salt: &[u8],
-                output_len: usize,
-            ) -> Result<Zeroizing<Vec<u8>>, CryptoError> {
-                self.0.derive_key(password, salt, output_len)
-            }
-        }
-
-        let vault = CryptoVault::new(
-            Box::new(ArcKdf(spy_arc.clone())),
-            Box::new(Aes256GcmSivCipher),
-            Box::new(ReedSolomonCodec::default()),
-        );
-
-        let password = "my-secure-password";
-        let plaintext = "identical plaintext";
-        let blob = vault.encrypt(password, plaintext).unwrap();
-
-        // Under the new layout, derive_key must be called with exactly KEY_LEN (32) bytes.
-        let recorded = spy_arc
-            .get_output_len()
-            .expect("derive_key was never called");
-        assert_eq!(
-            recorded, KEY_LEN,
-            "encrypt must call derive_key with KEY_LEN={} only; got {} (old layout derives nonce from KDF too)",
-            KEY_LEN, recorded
-        );
-
-        // The blob plaindata must contain SALT_LEN + nonce_len + ciphertext.
-        // extract_nonce_for_test reads bytes at [SALT_LEN..SALT_LEN+12] — must be the stored nonce.
-        let nonce = extract_nonce_for_test(&blob);
-        assert_eq!(
-            nonce.len(),
-            12,
-            "an independent 12-byte nonce must be stored in the blob"
-        );
-
-        // Round-trip must succeed with the new layout.
-        assert_eq!(vault.decrypt(password, &blob).unwrap(), plaintext);
-
-        // Two encryptions of the same plaintext must have different stored nonces.
-        let blob_b = vault.encrypt(password, plaintext).unwrap();
-        assert_ne!(
-            extract_nonce_for_test(&blob),
-            extract_nonce_for_test(&blob_b),
-            "independent nonces should differ across encryptions (corroborating)"
-        );
-    }
-
-    #[test]
-    fn test_new_layout_roundtrips_with_embedded_nonce() {
-        let vault = CryptoVault::default();
-        let secret = "sk-ant-api03-real-key-here";
-        let password = "my-secure-password";
-        let encrypted = vault.encrypt(password, secret).unwrap();
-        let decrypted = vault.decrypt(password, &encrypted).unwrap();
-        assert_eq!(decrypted, secret);
-    }
-
-    #[test]
-    fn vault_decrypt_roundtrip() {
-        let vault = CryptoVault::default();
-        let secret = "sk-ant-api03-real-key-here";
-        let password = "my-secure-password";
-        let encrypted = vault.encrypt(password, secret).unwrap();
-        let decrypted = vault.decrypt(password, &encrypted).unwrap();
-        assert_eq!(decrypted, secret);
     }
 
     #[test]
@@ -805,15 +545,5 @@ mod tests {
         );
         assert_eq!(params.t_cost(), 3, "time cost (iterations) must be 3");
         assert_eq!(params.p_cost(), 4, "parallelism must be 4");
-    }
-
-    #[test]
-    fn test_derive_key_still_roundtrips_under_owasp_params() {
-        let vault = CryptoVault::default();
-        let enc = vault.encrypt("pw", "payload under owasp params").unwrap();
-        assert_eq!(
-            vault.decrypt("pw", &enc).unwrap(),
-            "payload under owasp params"
-        );
     }
 }
