@@ -60,9 +60,8 @@ impl Agent {
 
     /// Replaces the active LLM provider (e.g. after a mid-session `/login` swaps
     /// the startup `StaticProvider` for a live `AnthropicProvider`).
-    #[allow(dead_code)]
-    pub fn set_provider(&mut self, _provider: Arc<dyn Provider>) {
-        unimplemented!("set_provider — implemented in GREEN")
+    pub fn set_provider(&mut self, provider: Arc<dyn Provider>) {
+        self.provider = provider;
     }
 
     /// Loads history from the persistent memory store.

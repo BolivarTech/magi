@@ -39,7 +39,9 @@ struct Config {
 
 /// Default model when none is configured via `ANTHROPIC_MODEL` or `key.txt`.
 /// Single source of truth — bump here to change the default everywhere.
-const DEFAULT_MODEL: &str = "claude-sonnet-4-6";
+/// `pub(crate)` so the TUI `/login` handler reuses it when rebuilding the
+/// provider in-session (#9).
+pub(crate) const DEFAULT_MODEL: &str = "claude-sonnet-4-6";
 
 /// Parses `key.txt`-style content: line 1 = API key, line 2 = optional model.
 ///

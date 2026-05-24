@@ -319,9 +319,21 @@ pub async fn run_tui_ext(agent: Agent, initial_info: Option<String>) -> anyhow::
                                                 )))
                                                 .await;
                                         } else {
+                                            // #9: rebuild the running agent's provider in-session
+                                            // so replies use the new key without a restart.
+                                            let model = std::env::var("ANTHROPIC_MODEL")
+                                                .unwrap_or_else(|_| {
+                                                    crate::DEFAULT_MODEL.to_string()
+                                                });
+                                            runner_agent.set_provider(std::sync::Arc::new(
+                                                crate::agent::provider::AnthropicProvider::new(
+                                                    api_key.clone(),
+                                                    model,
+                                                ),
+                                            ));
                                             let _ = response_tx
                                                 .send(AgentResponse::Info(
-                                                    "Successfully logged in!".to_string(),
+                                                    "Successfully logged in! Provider activated — no restart needed.".to_string(),
                                                 ))
                                                 .await;
                                         }
