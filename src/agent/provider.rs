@@ -300,6 +300,11 @@ impl Provider for AnthropicProvider {
                 ))])
                 .boxed();
             }
+            // NOTE (follow-up, future version): `from_utf8_lossy` is applied per
+            // network chunk, so a multi-byte UTF-8 character split across a chunk
+            // boundary is replaced with U+FFFD. Harmless for SSE control bytes
+            // ("\n\n", "data:"); can corrupt rare multi-byte body text. A proper
+            // fix buffers raw bytes and decodes once at each event boundary.
             buffer.push_str(&String::from_utf8_lossy(&chunk));
 
             let mut chunks = Vec::new();
