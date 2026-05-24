@@ -1,6 +1,6 @@
 // Author: Julian Bolivar
-// Version: 1.2.0
-// Date: 2026-05-23
+// Version: 1.3.0
+// Date: 2026-05-24
 
 //! Self-contained cryptographic module — key derivation, authenticated
 //! encryption, and forward error correction.
@@ -379,27 +379,127 @@ impl CryptoVault {
             .map_err(|e| CryptoError::Encoding(format!("Invalid UTF-8: {}", e)))
     }
 
+    /// Derives a 32-byte key from `password` and `salt` using the module's
+    /// audited Argon2id parameters. Exposed so a caller can derive the key
+    /// **once** and reuse it across many records (key caching), avoiding a
+    /// per-record KDF.
+    ///
+    /// # Errors
+    /// [`CryptoError::InvalidInput`] if `password` is empty; [`CryptoError::KeyDerivation`]
+    /// if Argon2 fails.
     #[allow(dead_code)]
     pub fn derive_key(
         &self,
-        _password: &str,
-        _salt: &[u8],
+        password: &str,
+        salt: &[u8],
     ) -> Result<Zeroizing<Vec<u8>>, CryptoError> {
-        unimplemented!("derive_key — implemented in GREEN")
+        if password.is_empty() {
+            return Err(CryptoError::InvalidInput(
+                "Password must not be empty".to_string(),
+            ));
+        }
+        self.kdf.derive_key(password.as_bytes(), salt, KEY_LEN)
     }
 
+    /// Encrypts `plaintext` under a pre-derived `key`. A fresh random nonce is
+    /// sampled per call; the blob layout is `[u32 LE len][RS(nonce || ciphertext)]`
+    /// (no salt — the salt lives once per database, not per record).
+    ///
+    /// # Errors
+    /// [`CryptoError::InvalidInput`] if the record exceeds [`MAX_PLAINTEXT_LEN`];
+    /// [`CryptoError::Cipher`] on encryption failure (e.g. an invalid key length).
     #[allow(dead_code)]
-    pub fn encrypt_with_key(&self, _key: &[u8], _plaintext: &str) -> Result<String, CryptoError> {
-        unimplemented!("encrypt_with_key — implemented in GREEN")
+    pub fn encrypt_with_key(&self, key: &[u8], plaintext: &str) -> Result<String, CryptoError> {
+        let nonce_len = self.cipher.nonce_len();
+
+        let projected_original_len = nonce_len + plaintext.len() + 16; // +16 = GCM-SIV tag
+        if projected_original_len > MAX_PLAINTEXT_LEN {
+            return Err(CryptoError::InvalidInput(format!(
+                "Record length {} (nonce+ciphertext) exceeds MAX_PLAINTEXT_LEN ({})",
+                projected_original_len, MAX_PLAINTEXT_LEN
+            )));
+        }
+
+        let mut nonce = vec![0u8; nonce_len];
+        rand::rngs::OsRng.fill_bytes(&mut nonce);
+
+        let ciphertext = self.cipher.encrypt(key, &nonce, plaintext.as_bytes())?;
+
+        let mut plaindata = Vec::with_capacity(nonce_len + ciphertext.len());
+        plaindata.extend_from_slice(&nonce);
+        plaindata.extend_from_slice(&ciphertext);
+
+        let rs_encoded = self.fec.encode(&plaindata);
+
+        let original_len_u32 = u32::try_from(plaindata.len())
+            .map_err(|_| CryptoError::Encoding("Data too large for length header".to_string()))?;
+        let mut blob = Vec::with_capacity(4 + rs_encoded.len());
+        blob.extend_from_slice(&original_len_u32.to_le_bytes());
+        blob.extend_from_slice(&rs_encoded);
+
+        Ok(STANDARD.encode(&blob))
     }
 
+    /// Decrypts a blob produced by [`Self::encrypt_with_key`] under the same `key`.
+    /// Preserves the C7 allocation guards (length cap + blob-size bound).
+    ///
+    /// # Errors
+    /// [`CryptoError::InvalidInput`] on a hostile/malformed length prefix;
+    /// [`CryptoError::Cipher`] if the key is wrong or authentication fails.
     #[allow(dead_code)]
     pub fn decrypt_with_key(
         &self,
-        _key: &[u8],
-        _encrypted_base64: &str,
+        key: &[u8],
+        encrypted_base64: &str,
     ) -> Result<String, CryptoError> {
-        unimplemented!("decrypt_with_key — implemented in GREEN")
+        let nonce_len = self.cipher.nonce_len();
+        let blob = STANDARD
+            .decode(encrypted_base64)
+            .map_err(|e| CryptoError::Encoding(format!("Invalid base64: {}", e)))?;
+
+        if blob.len() < 4 {
+            return Err(CryptoError::Encoding(
+                "Encrypted blob too short".to_string(),
+            ));
+        }
+
+        let len_bytes: [u8; 4] = blob[..4].try_into().unwrap();
+        let original_len = u32::from_le_bytes(len_bytes) as usize;
+
+        if original_len > MAX_PLAINTEXT_LEN {
+            return Err(CryptoError::InvalidInput(format!(
+                "Length header {} exceeds MAX_PLAINTEXT_LEN ({}); refusing to allocate",
+                original_len, MAX_PLAINTEXT_LEN
+            )));
+        }
+
+        if original_len > (blob.len() - 4) {
+            return Err(CryptoError::InvalidInput(
+                "Length header exceeds encoded data size".to_string(),
+            ));
+        }
+
+        if blob.len().saturating_sub(4) > original_len.saturating_mul(2).saturating_add(4096) {
+            return Err(CryptoError::InvalidInput(format!(
+                "Encoded blob length {} is inconsistent with declared plaintext length {}; refusing to allocate",
+                blob.len() - 4,
+                original_len
+            )));
+        }
+
+        let plaindata = self.fec.decode(&blob[4..], original_len)?;
+        if plaindata.len() < nonce_len {
+            return Err(CryptoError::InvalidInput(
+                "Decoded blob too short for nonce".to_string(),
+            ));
+        }
+        let nonce = &plaindata[..nonce_len];
+        let ciphertext = &plaindata[nonce_len..];
+
+        let plaintext = self.cipher.decrypt(key, nonce, ciphertext)?;
+
+        String::from_utf8(plaintext)
+            .map_err(|e| CryptoError::Encoding(format!("Invalid UTF-8: {}", e)))
     }
 }
 
