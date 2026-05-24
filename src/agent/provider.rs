@@ -121,9 +121,17 @@ fn drain_sse_events(buffer: &mut Vec<u8>) -> Vec<String> {
 /// JSON (malformed → warn + `{}`, #4) and pushes a `Content::ToolUse`. `None` is a
 /// no-op. Shared by `content_block_stop`, `message_stop`, and (defensively) a new
 /// `content_block_start` (#5/#6).
-#[allow(dead_code)]
-fn finalize_tool(_tool: Option<(String, String, String)>, _full_content: &mut Vec<Content>) {
-    unimplemented!("finalize_tool — implemented in GREEN")
+fn finalize_tool(tool: Option<(String, String, String)>, full_content: &mut Vec<Content>) {
+    if let Some((id, name, acc)) = tool {
+        let input = parse_tool_input(&acc).unwrap_or_else(|e| {
+            eprintln!(
+                "WARNING: malformed tool_use input JSON for tool '{}' (id {}): {}; using empty object",
+                name, id, e
+            );
+            serde_json::Value::Object(serde_json::Map::new())
+        });
+        full_content.push(Content::ToolUse { id, name, input });
+    }
 }
 
 /// A provider that returns static, canned responses.
@@ -401,30 +409,12 @@ impl Provider for AnthropicProvider {
                                 },
                                 AnthropicSseEvent::ContentBlockStop { .. } => {
                                     // Finalize the accumulated tool_use block and push it to content.
-                                    if let Some((id, name, acc)) = current_tool.take() {
-                                        let input = parse_tool_input(&acc).unwrap_or_else(|e| {
-                                            eprintln!(
-                                                "WARNING: malformed tool_use input JSON for tool '{}' (id {}): {}; using empty object",
-                                                name, id, e
-                                            );
-                                            serde_json::Value::Object(serde_json::Map::new())
-                                        });
-                                        full_content.push(Content::ToolUse { id, name, input });
-                                    }
+                                    finalize_tool(current_tool.take(), &mut full_content);
                                 }
                                 AnthropicSseEvent::MessageStop => {
                                     // Defensively finalize any still-pending tool block
                                     // in case content_block_stop was absent.
-                                    if let Some((id, name, acc)) = current_tool.take() {
-                                        let input = parse_tool_input(&acc).unwrap_or_else(|e| {
-                                            eprintln!(
-                                                "WARNING: malformed tool_use input JSON for tool '{}' (id {}): {}; using empty object",
-                                                name, id, e
-                                            );
-                                            serde_json::Value::Object(serde_json::Map::new())
-                                        });
-                                        full_content.push(Content::ToolUse { id, name, input });
-                                    }
+                                    finalize_tool(current_tool.take(), &mut full_content);
                                     let msg = Message {
                                         role: current_role.clone(),
                                         content: full_content.clone(),
