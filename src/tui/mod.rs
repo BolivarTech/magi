@@ -254,6 +254,13 @@ pub async fn run_tui_ext(agent: Agent, initial_info: Option<String>) -> anyhow::
         while let Some(event) = event_rx.recv().await {
             match event {
                 UiEvent::Input(text) => {
+                    // Stream-bridge: `chunk_tx` is owned by `query_streaming`; when
+                    // the method returns it is dropped, which closes the sender end of
+                    // the channel. The forwarder task then drains any remaining deltas
+                    // and exits its `recv()` loop naturally. `forwarder.await` joins
+                    // the task before the end-of-turn marker is sent, guaranteeing
+                    // all deltas arrive at the UI before `Text("")` (end-of-turn
+                    // convention) or `Error(...)`.
                     let (chunk_tx, mut chunk_rx) = mpsc::channel::<String>(100);
                     let forward_tx = response_tx.clone();
                     let forwarder = tokio::spawn(async move {
@@ -269,8 +276,12 @@ pub async fn run_tui_ext(agent: Agent, initial_info: Option<String>) -> anyhow::
                     });
 
                     let result = runner_agent.query_streaming(&text, chunk_tx).await;
+                    // Join the forwarder: ensures all deltas are forwarded before the
+                    // end-of-turn marker below is enqueued.
                     let _ = forwarder.await;
 
+                    // `Text("")` signals end-of-turn to `run_app`; it calls
+                    // `finalize_stream` instead of pushing an empty message line.
                     match result {
                         Ok(_) => {
                             let _ = response_tx.send(AgentResponse::Text(String::new())).await;
