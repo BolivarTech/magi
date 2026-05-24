@@ -96,7 +96,13 @@ fn is_command_allowed(cmd: &str, workspace_root: &Path) -> bool {
         for arg in &remaining_tokens {
             let arg_lower = arg.to_lowercase();
 
-            // Non-flag args must validate inside the workspace via PathGuard.
+            // Non-flag args are treated as paths and must validate inside the
+            // workspace via PathGuard. Flags (`-`-prefixed) are skipped — this
+            // assumes no whitelisted binary takes a `-`-prefixed path arg;
+            // re-check this when extending `allowed_binaries`. By design (spec
+            // D1) a non-path token (e.g. a `grep` pattern) is also validated as
+            // a workspace-relative path, so a pattern containing `..`/absolute
+            // is rejected — intentional, erring strict for the sandbox.
             if !arg.starts_with('-') && guard.validate(Path::new(arg)).is_err() {
                 return false;
             }
