@@ -373,6 +373,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_decrypt_rejects_blob_grossly_larger_than_declared_length() {
+        // Declares 100 bytes of plaintext but carries a 20 KB body — far beyond
+        // any legitimate Reed-Solomon expansion (~1.14x). Must be rejected BEFORE
+        // the RS decode allocates against the oversized body.
+        let mut blob = Vec::new();
+        blob.extend_from_slice(&100u32.to_le_bytes());
+        blob.extend_from_slice(&vec![0u8; 20_000]);
+        let encoded = STANDARD.encode(&blob);
+
+        let vault = CryptoVault::default();
+        assert!(
+            matches!(vault.decrypt("pw", &encoded), Err(CryptoError::InvalidInput(_))),
+            "a blob far larger than its declared plaintext length must be rejected as InvalidInput"
+        );
+    }
+
+    #[test]
     fn test_decrypt_rejects_oversized_length_prefix_without_alloc() {
         let mut blob = Vec::new();
         blob.extend_from_slice(&0xFFFFFFFFu32.to_le_bytes());
