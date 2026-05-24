@@ -94,6 +94,29 @@ pub trait Provider: Send + Sync {
 /// single Anthropic SSE event.
 const MAX_SSE_BUFFER_BYTES: usize = 8 * 1024 * 1024;
 
+/// Parses an accumulated `tool_use` input-JSON string. Empty/whitespace → a valid
+/// empty object; well-formed JSON is parsed; **malformed JSON returns `Err`** so
+/// the caller can log it instead of silently degrading to `{}` (#4).
+fn parse_tool_input(acc: &str) -> Result<serde_json::Value, String> {
+    if acc.trim().is_empty() {
+        return Ok(serde_json::Value::Object(serde_json::Map::new()));
+    }
+    serde_json::from_str(acc).map_err(|e| e.to_string())
+}
+
+/// Drains complete SSE event blocks (terminated by `"\n\n"`) from a raw byte
+/// buffer, decoding each *complete* block as UTF-8. Buffering raw bytes until the
+/// event boundary means a multi-byte UTF-8 character split across network chunks
+/// is never decoded mid-character (#3). Incomplete trailing bytes stay buffered.
+fn drain_sse_events(buffer: &mut Vec<u8>) -> Vec<String> {
+    let mut blocks = Vec::new();
+    while let Some(pos) = buffer.windows(2).position(|w| w == b"\n\n") {
+        let block: Vec<u8> = buffer.drain(..pos + 2).collect();
+        blocks.push(String::from_utf8_lossy(&block).into_owned());
+    }
+    blocks
+}
+
 /// A provider that returns static, canned responses.
 pub struct StaticProvider;
 
@@ -289,7 +312,7 @@ impl Provider for AnthropicProvider {
         }
 
         let bytes_stream = response.bytes_stream();
-        let mut buffer = String::new();
+        let mut buffer: Vec<u8> = Vec::new();
         let mut full_content: Vec<Content> = Vec::new();
         let mut current_role = Role::Assistant;
         // Accumulates (id, name, partial_json) for an in-progress tool_use block.
@@ -309,16 +332,13 @@ impl Provider for AnthropicProvider {
                 ))])
                 .boxed();
             }
-            // NOTE (follow-up, future version): `from_utf8_lossy` is applied per
-            // network chunk, so a multi-byte UTF-8 character split across a chunk
-            // boundary is replaced with U+FFFD. Harmless for SSE control bytes
-            // ("\n\n", "data:"); can corrupt rare multi-byte body text. A proper
-            // fix buffers raw bytes and decodes once at each event boundary.
-            buffer.push_str(&String::from_utf8_lossy(&chunk));
+            // #3: buffer raw bytes and decode once at each event boundary, so a
+            // multi-byte UTF-8 character split across a network chunk is never
+            // decoded mid-character (the W1 size cap above still applies in bytes).
+            buffer.extend_from_slice(&chunk);
 
             let mut chunks = Vec::new();
-            while let Some(line_end) = buffer.find("\n\n") {
-                let block = buffer.drain(..line_end + 2).collect::<String>();
+            for block in drain_sse_events(&mut buffer) {
                 for line in block.lines() {
                     if let Some(data) = line.strip_prefix("data: ") {
                         if let Ok(event) = serde_json::from_str::<AnthropicSseEvent>(data) {
@@ -373,13 +393,13 @@ impl Provider for AnthropicProvider {
                                 AnthropicSseEvent::ContentBlockStop { .. } => {
                                     // Finalize the accumulated tool_use block and push it to content.
                                     if let Some((id, name, acc)) = current_tool.take() {
-                                        let input = if acc.trim().is_empty() {
+                                        let input = parse_tool_input(&acc).unwrap_or_else(|e| {
+                                            eprintln!(
+                                                "WARNING: malformed tool_use input JSON for tool '{}' (id {}): {}; using empty object",
+                                                name, id, e
+                                            );
                                             serde_json::Value::Object(serde_json::Map::new())
-                                        } else {
-                                            serde_json::from_str(&acc).unwrap_or_else(|_| {
-                                                serde_json::Value::Object(serde_json::Map::new())
-                                            })
-                                        };
+                                        });
                                         full_content.push(Content::ToolUse { id, name, input });
                                     }
                                 }
@@ -387,13 +407,13 @@ impl Provider for AnthropicProvider {
                                     // Defensively finalize any still-pending tool block
                                     // in case content_block_stop was absent.
                                     if let Some((id, name, acc)) = current_tool.take() {
-                                        let input = if acc.trim().is_empty() {
+                                        let input = parse_tool_input(&acc).unwrap_or_else(|e| {
+                                            eprintln!(
+                                                "WARNING: malformed tool_use input JSON for tool '{}' (id {}): {}; using empty object",
+                                                name, id, e
+                                            );
                                             serde_json::Value::Object(serde_json::Map::new())
-                                        } else {
-                                            serde_json::from_str(&acc).unwrap_or_else(|_| {
-                                                serde_json::Value::Object(serde_json::Map::new())
-                                            })
-                                        };
+                                        });
                                         full_content.push(Content::ToolUse { id, name, input });
                                     }
                                     let msg = Message {
@@ -421,6 +441,59 @@ mod tests {
     use crate::agent::messages::{Content, Role};
     use mockito::Server;
     use serde_json::json;
+
+    #[test]
+    fn test_parse_tool_input_empty_is_object() {
+        // B-S1: empty / whitespace accumulates to a valid empty object.
+        assert_eq!(parse_tool_input("").unwrap(), json!({}));
+        assert_eq!(parse_tool_input("   ").unwrap(), json!({}));
+    }
+
+    #[test]
+    fn test_parse_tool_input_valid_json() {
+        // B-S2: well-formed JSON is parsed.
+        assert_eq!(
+            parse_tool_input(r#"{"path":"."}"#).unwrap(),
+            json!({"path":"."})
+        );
+    }
+
+    #[test]
+    fn test_parse_tool_input_malformed_is_err() {
+        // B-S3 (load-bearing): malformed JSON surfaces as Err, not a silent {}.
+        assert!(parse_tool_input(r#"{"path":"#).is_err());
+    }
+
+    #[test]
+    fn test_drain_sse_events_handles_multibyte_split_across_chunks() {
+        // C-S1 (load-bearing): 'é' (0xC3 0xA9) split across two pushes must not
+        // corrupt to U+FFFD — bytes are buffered until the "\n\n" boundary.
+        let mut buf: Vec<u8> = Vec::new();
+        buf.extend_from_slice("data: caf".as_bytes());
+        buf.push(0xC3);
+        assert!(
+            drain_sse_events(&mut buf).is_empty(),
+            "no event before the boundary"
+        );
+        buf.push(0xA9);
+        buf.extend_from_slice(b"\n\n");
+        assert_eq!(
+            drain_sse_events(&mut buf),
+            vec!["data: café\n\n".to_string()]
+        );
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn test_drain_sse_events_multiple_events_and_remainder() {
+        // C-S2: drain all complete blocks, leave the incomplete tail buffered.
+        let mut buf: Vec<u8> = b"event: a\n\nevent: b\n\nevent: c-incomplete".to_vec();
+        assert_eq!(
+            drain_sse_events(&mut buf),
+            vec!["event: a\n\n".to_string(), "event: b\n\n".to_string()]
+        );
+        assert_eq!(buf, b"event: c-incomplete".to_vec());
+    }
 
     #[tokio::test]
     async fn test_anthropic_provider_simple_response() {
