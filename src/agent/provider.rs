@@ -97,9 +97,11 @@ const MAX_SSE_BUFFER_BYTES: usize = 8 * 1024 * 1024;
 /// Parses an accumulated `tool_use` input-JSON string. Empty/whitespace → a valid
 /// empty object; well-formed JSON is parsed; **malformed JSON returns `Err`** so
 /// the caller can log it instead of silently degrading to `{}` (#4).
-#[allow(dead_code)]
-fn parse_tool_input(_acc: &str) -> Result<serde_json::Value, String> {
-    unimplemented!("parse_tool_input — implemented in GREEN")
+fn parse_tool_input(acc: &str) -> Result<serde_json::Value, String> {
+    if acc.trim().is_empty() {
+        return Ok(serde_json::Value::Object(serde_json::Map::new()));
+    }
+    serde_json::from_str(acc).map_err(|e| e.to_string())
 }
 
 /// A provider that returns static, canned responses.
@@ -381,13 +383,13 @@ impl Provider for AnthropicProvider {
                                 AnthropicSseEvent::ContentBlockStop { .. } => {
                                     // Finalize the accumulated tool_use block and push it to content.
                                     if let Some((id, name, acc)) = current_tool.take() {
-                                        let input = if acc.trim().is_empty() {
+                                        let input = parse_tool_input(&acc).unwrap_or_else(|e| {
+                                            eprintln!(
+                                                "WARNING: malformed tool_use input JSON for tool '{}' (id {}): {}; using empty object",
+                                                name, id, e
+                                            );
                                             serde_json::Value::Object(serde_json::Map::new())
-                                        } else {
-                                            serde_json::from_str(&acc).unwrap_or_else(|_| {
-                                                serde_json::Value::Object(serde_json::Map::new())
-                                            })
-                                        };
+                                        });
                                         full_content.push(Content::ToolUse { id, name, input });
                                     }
                                 }
@@ -395,13 +397,13 @@ impl Provider for AnthropicProvider {
                                     // Defensively finalize any still-pending tool block
                                     // in case content_block_stop was absent.
                                     if let Some((id, name, acc)) = current_tool.take() {
-                                        let input = if acc.trim().is_empty() {
+                                        let input = parse_tool_input(&acc).unwrap_or_else(|e| {
+                                            eprintln!(
+                                                "WARNING: malformed tool_use input JSON for tool '{}' (id {}): {}; using empty object",
+                                                name, id, e
+                                            );
                                             serde_json::Value::Object(serde_json::Map::new())
-                                        } else {
-                                            serde_json::from_str(&acc).unwrap_or_else(|_| {
-                                                serde_json::Value::Object(serde_json::Map::new())
-                                            })
-                                        };
+                                        });
                                         full_content.push(Content::ToolUse { id, name, input });
                                     }
                                     let msg = Message {
