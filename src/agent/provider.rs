@@ -88,6 +88,12 @@ pub trait Provider: Send + Sync {
     }
 }
 
+/// Maximum size the SSE accumulation buffer may reach before a complete event
+/// boundary (`"\n\n"`) is found. Guards an unbounded `buffer: String` from OOM on
+/// a malformed/hostile stream (audit finding W1). 8 MiB exceeds any legitimate
+/// single Anthropic SSE event.
+const MAX_SSE_BUFFER_BYTES: usize = 8 * 1024 * 1024;
+
 /// A provider that returns static, canned responses.
 pub struct StaticProvider;
 
@@ -287,6 +293,13 @@ impl Provider for AnthropicProvider {
                     return stream::iter(vec![Err(anyhow::anyhow!("Network error: {}", e))]).boxed()
                 }
             };
+            if buffer.len() + chunk.len() > MAX_SSE_BUFFER_BYTES {
+                return stream::iter(vec![Err(anyhow::anyhow!(
+                    "SSE buffer would exceed {} bytes without an event boundary; aborting to avoid OOM (limit: 8 MiB)",
+                    MAX_SSE_BUFFER_BYTES
+                ))])
+                .boxed();
+            }
             buffer.push_str(&String::from_utf8_lossy(&chunk));
 
             let mut chunks = Vec::new();
@@ -564,7 +577,10 @@ mod tests {
                 break;
             }
         }
-        assert!(saw_error, "oversized separator-less stream must abort with an error");
+        assert!(
+            saw_error,
+            "oversized separator-less stream must abort with an error"
+        );
     }
 
     #[tokio::test]
