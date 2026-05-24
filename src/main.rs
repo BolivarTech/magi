@@ -37,9 +37,30 @@ struct Config {
     source: String,
 }
 
+/// Default model when none is configured via `ANTHROPIC_MODEL` or `key.txt`.
+/// Single source of truth — bump here to change the default everywhere.
+const DEFAULT_MODEL: &str = "claude-sonnet-4-6";
+
+/// Parses `key.txt`-style content: line 1 = API key, line 2 = optional model.
+///
+/// Returns `(api_key, model)`. A blank, whitespace-only, or absent model line
+/// falls back to [`DEFAULT_MODEL`]. Returns `None` when there is no non-empty
+/// key line.
+fn parse_key_file(content: &str) -> Option<(String, String)> {
+    let lines: Vec<&str> = content.lines().collect();
+    let key = lines.first().map(|s| s.trim()).filter(|s| !s.is_empty())?;
+    let model = lines
+        .get(1)
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .unwrap_or(DEFAULT_MODEL)
+        .to_string();
+    Some((key.to_string(), model))
+}
+
 async fn discover_config_ext(file_path: &str) -> Option<Config> {
     if let Ok(key) = env::var("ANTHROPIC_API_KEY") {
-        let model = env::var("ANTHROPIC_MODEL").unwrap_or_else(|_| "claude-sonnet-4-6".to_string());
+        let model = env::var("ANTHROPIC_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string());
         return Some(Config {
             api_key: key.trim().to_string(),
             model,
@@ -53,7 +74,7 @@ async fn discover_config_ext(file_path: &str) -> Option<Config> {
     let legacy_store = KeyringStore::new(legacy_service);
 
     if let Ok(Some(key)) = primary_store.get_secret("ANTHROPIC_API_KEY").await {
-        let model = env::var("ANTHROPIC_MODEL").unwrap_or_else(|_| "claude-sonnet-4-6".to_string());
+        let model = env::var("ANTHROPIC_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string());
         return Some(Config {
             api_key: key,
             model,
@@ -69,7 +90,7 @@ async fn discover_config_ext(file_path: &str) -> Option<Config> {
         {
             let _ = legacy_store.delete_secret("ANTHROPIC_API_KEY").await;
         }
-        let model = env::var("ANTHROPIC_MODEL").unwrap_or_else(|_| "claude-sonnet-4-6".to_string());
+        let model = env::var("ANTHROPIC_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string());
         return Some(Config {
             api_key: key,
             model,
@@ -78,15 +99,9 @@ async fn discover_config_ext(file_path: &str) -> Option<Config> {
     }
 
     if let Ok(content) = fs::read_to_string(file_path) {
-        let lines: Vec<&str> = content.lines().collect();
-        if let Some(key) = lines.first().map(|s| s.trim()).filter(|s| !s.is_empty()) {
-            let model = lines
-                .get(1)
-                .unwrap_or(&"claude-sonnet-4-6")
-                .trim()
-                .to_string();
+        if let Some((api_key, model)) = parse_key_file(&content) {
             return Some(Config {
-                api_key: key.to_string(),
+                api_key,
                 model,
                 source: file_path.to_string(),
             });
@@ -259,5 +274,32 @@ mod tests {
         {
             panic!("error path produced a passphrase: {pwd}");
         }
+    }
+
+    #[test]
+    fn test_parse_key_file_falls_back_to_default_model_on_blank_line() {
+        // Line 2 present with a model -> that model is used.
+        assert_eq!(
+            parse_key_file("sk-ant-xyz\nclaude-opus-4-7\n"),
+            Some(("sk-ant-xyz".to_string(), "claude-opus-4-7".to_string()))
+        );
+        // Line 2 blank / whitespace / absent -> DEFAULT_MODEL (the bug fix).
+        for content in [
+            "sk-ant-xyz\n\n",
+            "sk-ant-xyz\n   \n",
+            "sk-ant-xyz\n",
+            "sk-ant-xyz",
+        ] {
+            assert_eq!(
+                parse_key_file(content),
+                Some(("sk-ant-xyz".to_string(), DEFAULT_MODEL.to_string())),
+                "blank/absent model line must fall back to DEFAULT_MODEL (content: {content:?})"
+            );
+        }
+        // No usable key line -> None.
+        assert_eq!(parse_key_file(""), None);
+        assert_eq!(parse_key_file("   \n"), None);
+        // The configured default.
+        assert_eq!(DEFAULT_MODEL, "claude-sonnet-4-6");
     }
 }
