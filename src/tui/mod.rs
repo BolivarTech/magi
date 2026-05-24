@@ -327,8 +327,7 @@ pub async fn run_tui_ext(agent: Agent, initial_info: Option<String>) -> anyhow::
                                                 });
                                             runner_agent.set_provider(std::sync::Arc::new(
                                                 crate::agent::provider::AnthropicProvider::new(
-                                                    api_key.clone(),
-                                                    model,
+                                                    api_key, model,
                                                 ),
                                             ));
                                             let _ = response_tx
