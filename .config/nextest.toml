@@ -1,0 +1,19 @@
+# nextest configuration.
+#
+# Phase 0 pinned Argon2 to OWASP 2025 cost (m=65536 KiB / 64 MiB, t=3, p=4),
+# which makes every crypto/DB test CPU- and memory-heavy. On this 12-core box
+# nextest would otherwise launch up to 12 of them at once and saturate the
+# machine; the DB-concurrency tests (internal writer threads + SQLite's 5s
+# busy_timeout) then fail intermittently under load — a flaky gate, not a real
+# regression (all such tests pass 100% in isolation).
+#
+# Capping the crypto + database test group to 2 concurrent leaves headroom so
+# the DB-concurrency tests are never CPU-starved, keeping the §0.1 gate
+# deterministic. Lower `max-threads` to 1 if any residual flake appears.
+
+[test-groups]
+heavy = { max-threads = 2 }
+
+[[profile.default.overrides]]
+filter = 'test(/utils::crypto::tests::/) | test(/system::database::tests::/)'
+test-group = "heavy"
