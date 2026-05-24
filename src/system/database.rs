@@ -522,6 +522,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_various_invalid_salt_shapes_self_heal() {
+        // Strengthens S-2: every salt shape that RS-decode REJECTS (empty,
+        // raw/non-RS-encoded, truncated below one block) must self-heal via a D6
+        // reset, never validate to a wrong salt. A valid-codeword corruption such
+        // as an all-zero block is a known RS mis-correction residual (see
+        // docs/FASE0-FOLLOWUPS.md #15) and is intentionally NOT asserted here.
+        for bad in [Vec::<u8>::new(), vec![0x42u8; SALT_LEN], vec![0x07u8; 30]] {
+            let tmp = NamedTempFile::new().unwrap();
+            let path = tmp.path().to_path_buf();
+            {
+                let m = EncryptedSqliteMemory::new(path.clone(), "P".to_string()).unwrap();
+                let s = m.create_session("p").await.unwrap();
+                m.add_message(&s, &Message::user("x")).await.unwrap();
+            }
+            {
+                let conn = Connection::open(&path).unwrap();
+                conn.execute(
+                    "UPDATE vault_meta SET value = ?1 WHERE key = 'salt'",
+                    params![bad],
+                )
+                .unwrap();
+            }
+            let m = EncryptedSqliteMemory::new(path, "P".to_string()).unwrap();
+            assert!(
+                m.list_sessions().await.unwrap().is_empty(),
+                "an RS-rejected invalid salt must self-heal via a D6 reset"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn test_minor_salt_bitrot_is_corrected_and_history_survives() {
         // S-3: an RS-encoded salt with a few flipped bytes is corrected on read,
         // so the derived key is unchanged and prior history still decrypts.
