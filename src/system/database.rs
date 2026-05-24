@@ -48,15 +48,33 @@ pub struct EncryptedSqliteMemory {
 }
 
 impl EncryptedSqliteMemory {
+    /// Locks the connection, recovering the guard if the mutex was poisoned by a
+    /// panic in another thread (the SQLite handle remains valid). Keeps
+    /// persistence available instead of failing closed for the session (#8,
+    /// supersedes the W11 error-on-poison behavior); the recovery is logged.
+    fn locked_conn(&self) -> std::sync::MutexGuard<'_, Connection> {
+        self.conn.lock().unwrap_or_else(|poisoned| {
+            use std::sync::atomic::{AtomicBool, Ordering};
+            // Warn once per process: a persistently-poisoned mutex would otherwise
+            // spam stderr on every op (and disrupt the TUI alternate screen).
+            static POISON_WARNED: AtomicBool = AtomicBool::new(false);
+            if !POISON_WARNED.swap(true, Ordering::Relaxed) {
+                eprintln!(
+                    "WARNING: database connection mutex was poisoned by a panic in another \
+                     thread; recovering the connection and continuing (further occurrences \
+                     suppressed)."
+                );
+            }
+            poisoned.into_inner()
+        })
+    }
+
     /// Collects raw `(role, blob)` rows for a session under the connection lock.
     ///
     /// The lock is held only for the duration of the SELECT and the iterator
     /// drain; it is released before any decryption happens (audit finding W12).
     fn collect_message_rows(&self, session_id: &str) -> Result<Vec<(String, String)>> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| anyhow::anyhow!("DB lock poisoned: {e}"))?;
+        let conn = self.locked_conn();
         let mut stmt = conn.prepare(
             "SELECT role, content_blob FROM messages WHERE session_id = ? ORDER BY created_at ASC",
         )?;
@@ -187,26 +205,52 @@ impl EncryptedSqliteMemory {
                 rand::rngs::OsRng.fill_bytes(&mut new_salt);
                 let salt_blob = salt_codec.encode(&new_salt);
 
-                let tx = conn.transaction()?;
-                tx.execute("DELETE FROM messages", [])?;
-                tx.execute("DELETE FROM knowledge", [])?;
-                tx.execute("DELETE FROM sessions", [])?;
-                // OR REPLACE: a self-heal reset fires when the salt row is absent
-                // *or* present-but-invalid (corrupt), so the row may already exist.
-                tx.execute(
-                    "INSERT OR REPLACE INTO vault_meta (key, value) VALUES ('salt', ?1)",
-                    params![salt_blob],
-                )?;
+                // IMMEDIATE acquires the write lock at BEGIN (#12): a process racing
+                // the same brand-new DB blocks here until the winner commits, then
+                // re-reads and ADOPTS the winner's salt — instead of failing with
+                // SQLITE_BUSY_SNAPSHOT, which a DEFERRED tx would after its read.
+                let tx =
+                    conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+                // Re-check under that write lock: a racing opener may have written a
+                // VALID salt between our pre-tx read and here. If so, adopt it (every
+                // opener converges on the same salt) and leave content untouched. Only
+                // when no valid salt exists (absent, or present-but-corrupt per the #10
+                // self-heal) do we wipe incompatible content and bootstrap our own.
+                let current: Option<Vec<u8>> = tx
+                    .query_row("SELECT value FROM vault_meta WHERE key = 'salt'", [], |r| {
+                        r.get(0)
+                    })
+                    .optional()?;
+                let current_valid = current.and_then(|b| {
+                    salt_codec
+                        .decode(&b, SALT_LEN)
+                        .ok()
+                        .filter(|s| s.len() == SALT_LEN)
+                });
+                let (salt, wiped) = match current_valid {
+                    Some(existing) => (existing, false),
+                    None => {
+                        tx.execute("DELETE FROM messages", [])?;
+                        tx.execute("DELETE FROM knowledge", [])?;
+                        tx.execute("DELETE FROM sessions", [])?;
+                        // OR REPLACE: in the self-heal case the (corrupt) row exists.
+                        tx.execute(
+                            "INSERT OR REPLACE INTO vault_meta (key, value) VALUES ('salt', ?1)",
+                            params![salt_blob],
+                        )?;
+                        (new_salt, true)
+                    }
+                };
                 tx.commit()?;
 
-                if had_rows > 0 {
+                if wiped && had_rows > 0 {
                     eprintln!(
                         "WARNING: existing on-disk history used an incompatible or corrupt \
                          encryption salt and has been reset (fresh start). This is expected \
                          after upgrading the storage format."
                     );
                 }
-                new_salt
+                salt
             }
         };
 
@@ -229,10 +273,7 @@ impl EncryptedSqliteMemory {
 impl MemoryStore for EncryptedSqliteMemory {
     async fn create_session(&self, project_name: &str) -> Result<String> {
         let id = uuid::Uuid::new_v4().to_string();
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| anyhow::anyhow!("DB lock poisoned: {e}"))?;
+        let conn = self.locked_conn();
         conn.execute(
             "INSERT INTO sessions (id, project_name) VALUES (?1, ?2)",
             params![id, project_name],
@@ -247,10 +288,7 @@ impl MemoryStore for EncryptedSqliteMemory {
             .encrypt_with_key(&self.derived_key, &json_content)
             .map_err(|e| anyhow::anyhow!("Encryption failed: {}", e))?;
 
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| anyhow::anyhow!("DB lock poisoned: {e}"))?;
+        let conn = self.locked_conn();
         conn.execute(
             "INSERT INTO messages (session_id, role, content_blob) VALUES (?1, ?2, ?3)",
             params![session_id, format!("{:?}", message.role), encrypted],
@@ -264,10 +302,7 @@ impl MemoryStore for EncryptedSqliteMemory {
     }
 
     async fn list_sessions(&self) -> Result<Vec<(String, String)>> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| anyhow::anyhow!("DB lock poisoned: {e}"))?;
+        let conn = self.locked_conn();
         let mut stmt =
             conn.prepare("SELECT id, project_name FROM sessions ORDER BY created_at DESC")?;
         let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
@@ -285,10 +320,7 @@ impl MemoryStore for EncryptedSqliteMemory {
             .encrypt_with_key(&self.derived_key, value)
             .map_err(|e| anyhow::anyhow!("Encryption failed: {}", e))?;
 
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| anyhow::anyhow!("DB lock poisoned: {e}"))?;
+        let conn = self.locked_conn();
         conn.execute(
             "INSERT OR REPLACE INTO knowledge (key, value_blob, updated_at) VALUES (?1, ?2, CURRENT_TIMESTAMP)",
             params![key, encrypted],
@@ -297,10 +329,7 @@ impl MemoryStore for EncryptedSqliteMemory {
     }
 
     async fn get_knowledge(&self, key: &str) -> Result<Option<String>> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| anyhow::anyhow!("DB lock poisoned: {e}"))?;
+        let conn = self.locked_conn();
         let mut stmt = conn.prepare("SELECT value_blob FROM knowledge WHERE key = ?")?;
 
         let res = stmt.query_row(params![key], |row| row.get::<_, String>(0));
@@ -319,10 +348,7 @@ impl MemoryStore for EncryptedSqliteMemory {
     }
 
     async fn list_knowledge_keys(&self) -> Result<Vec<String>> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| anyhow::anyhow!("DB lock poisoned: {e}"))?;
+        let conn = self.locked_conn();
         let mut stmt = conn.prepare("SELECT key FROM knowledge ORDER BY key ASC")?;
         let rows = stmt.query_map([], |row| row.get(0))?;
 
@@ -680,7 +706,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_poisoned_lock_returns_error_not_panic() {
+    async fn test_poisoned_lock_recovers_and_continues() {
+        // A-S1 (#8, supersedes W11): a poisoned mutex is recovered (into_inner) so
+        // persistence keeps working instead of failing closed for the session.
         let tmp_file = NamedTempFile::new().unwrap();
         let path = tmp_file.path().to_path_buf();
         let memory = EncryptedSqliteMemory::new(path, "pw".to_string()).unwrap();
@@ -692,11 +720,42 @@ mod tests {
         })
         .join();
 
-        let result = memory.list_sessions().await;
-        assert!(result.is_err(), "a poisoned lock must yield Err, not panic");
+        // The lock is now poisoned; operations must recover and succeed.
         assert!(
-            result.unwrap_err().to_string().contains("poisoned"),
-            "error must identify the poisoned lock"
+            memory.list_sessions().await.is_ok(),
+            "a poisoned lock must be recovered, not fail closed"
+        );
+        let sid = memory.create_session("after-poison").await.unwrap();
+        assert!(!sid.is_empty());
+        assert_eq!(
+            memory.list_sessions().await.unwrap().len(),
+            1,
+            "persistence continues working after lock recovery"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_derived_key_matches_persisted_salt() {
+        // B-S1 (#12): the cached key is always derived from the salt actually
+        // stored on disk, so a concurrent-bootstrap winner can never diverge.
+        let tmp = NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+        let memory = EncryptedSqliteMemory::new(path.clone(), "P".to_string()).unwrap();
+
+        let blob: Vec<u8> = {
+            let conn = Connection::open(&path).unwrap();
+            conn.query_row("SELECT value FROM vault_meta WHERE key = 'salt'", [], |r| {
+                r.get(0)
+            })
+            .unwrap()
+        };
+        let codec = ReedSolomonCodec::default();
+        let salt = codec.decode(&blob, SALT_LEN).unwrap();
+        let expected = CryptoVault::default().derive_key("P", &salt).unwrap();
+        assert_eq!(
+            memory.derived_key_type_for_test().as_slice(),
+            expected.as_slice(),
+            "cached derived_key must be derived from the persisted salt"
         );
     }
 
