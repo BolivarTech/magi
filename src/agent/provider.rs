@@ -108,9 +108,13 @@ fn parse_tool_input(acc: &str) -> Result<serde_json::Value, String> {
 /// buffer, decoding each *complete* block as UTF-8. Buffering raw bytes until the
 /// event boundary means a multi-byte UTF-8 character split across network chunks
 /// is never decoded mid-character (#3). Incomplete trailing bytes stay buffered.
-#[allow(dead_code)]
-fn drain_sse_events(_buffer: &mut Vec<u8>) -> Vec<String> {
-    unimplemented!("drain_sse_events — implemented in GREEN")
+fn drain_sse_events(buffer: &mut Vec<u8>) -> Vec<String> {
+    let mut blocks = Vec::new();
+    while let Some(pos) = buffer.windows(2).position(|w| w == b"\n\n") {
+        let block: Vec<u8> = buffer.drain(..pos + 2).collect();
+        blocks.push(String::from_utf8_lossy(&block).into_owned());
+    }
+    blocks
 }
 
 /// A provider that returns static, canned responses.
@@ -308,7 +312,7 @@ impl Provider for AnthropicProvider {
         }
 
         let bytes_stream = response.bytes_stream();
-        let mut buffer = String::new();
+        let mut buffer: Vec<u8> = Vec::new();
         let mut full_content: Vec<Content> = Vec::new();
         let mut current_role = Role::Assistant;
         // Accumulates (id, name, partial_json) for an in-progress tool_use block.
@@ -328,16 +332,13 @@ impl Provider for AnthropicProvider {
                 ))])
                 .boxed();
             }
-            // NOTE (follow-up, future version): `from_utf8_lossy` is applied per
-            // network chunk, so a multi-byte UTF-8 character split across a chunk
-            // boundary is replaced with U+FFFD. Harmless for SSE control bytes
-            // ("\n\n", "data:"); can corrupt rare multi-byte body text. A proper
-            // fix buffers raw bytes and decodes once at each event boundary.
-            buffer.push_str(&String::from_utf8_lossy(&chunk));
+            // #3: buffer raw bytes and decode once at each event boundary, so a
+            // multi-byte UTF-8 character split across a network chunk is never
+            // decoded mid-character (the W1 size cap above still applies in bytes).
+            buffer.extend_from_slice(&chunk);
 
             let mut chunks = Vec::new();
-            while let Some(line_end) = buffer.find("\n\n") {
-                let block = buffer.drain(..line_end + 2).collect::<String>();
+            for block in drain_sse_events(&mut buffer) {
                 for line in block.lines() {
                     if let Some(data) = line.strip_prefix("data: ") {
                         if let Ok(event) = serde_json::from_str::<AnthropicSseEvent>(data) {
