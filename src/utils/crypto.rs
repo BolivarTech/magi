@@ -419,6 +419,36 @@ mod tests {
     }
 
     #[test]
+    fn test_blob_carries_version_byte() {
+        // A-S1 (#13): the blob starts with the format version byte (1).
+        let vault = CryptoVault::default();
+        let key = k(&vault);
+        let raw = STANDARD
+            .decode(vault.encrypt_with_key(&key, "payload").unwrap())
+            .unwrap();
+        assert_eq!(raw[0], 1, "blob must start with the format version byte");
+    }
+
+    #[test]
+    fn test_decrypt_rejects_unsupported_blob_version() {
+        // A-S2 (#13): a blob whose version byte is unsupported is rejected with a
+        // version error, not misread as length/data.
+        let vault = CryptoVault::default();
+        let key = k(&vault);
+        let mut raw = STANDARD
+            .decode(vault.encrypt_with_key(&key, "x").unwrap())
+            .unwrap();
+        raw[0] = 2; // unsupported version (current is 1)
+        let err = vault
+            .decrypt_with_key(&key, &STANDARD.encode(&raw))
+            .unwrap_err();
+        assert!(
+            err.to_string().to_lowercase().contains("version"),
+            "an unsupported blob version must be rejected with a version error: {err}"
+        );
+    }
+
+    #[test]
     fn test_blob_layout_carries_no_salt() {
         // S-2: plaindata == nonce_len + (L + 16 tag); no 16-byte salt prefix.
         let vault = CryptoVault::default();
