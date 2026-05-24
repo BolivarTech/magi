@@ -48,15 +48,26 @@ pub struct EncryptedSqliteMemory {
 }
 
 impl EncryptedSqliteMemory {
+    /// Locks the connection, recovering the guard if the mutex was poisoned by a
+    /// panic in another thread (the SQLite handle remains valid). Keeps
+    /// persistence available instead of failing closed for the session (#8,
+    /// supersedes the W11 error-on-poison behavior); the recovery is logged.
+    fn locked_conn(&self) -> std::sync::MutexGuard<'_, Connection> {
+        self.conn.lock().unwrap_or_else(|poisoned| {
+            eprintln!(
+                "WARNING: database connection mutex was poisoned by a panic in another \
+                 thread; recovering the connection and continuing."
+            );
+            poisoned.into_inner()
+        })
+    }
+
     /// Collects raw `(role, blob)` rows for a session under the connection lock.
     ///
     /// The lock is held only for the duration of the SELECT and the iterator
     /// drain; it is released before any decryption happens (audit finding W12).
     fn collect_message_rows(&self, session_id: &str) -> Result<Vec<(String, String)>> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| anyhow::anyhow!("DB lock poisoned: {e}"))?;
+        let conn = self.locked_conn();
         let mut stmt = conn.prepare(
             "SELECT role, content_blob FROM messages WHERE session_id = ? ORDER BY created_at ASC",
         )?;
@@ -229,10 +240,7 @@ impl EncryptedSqliteMemory {
 impl MemoryStore for EncryptedSqliteMemory {
     async fn create_session(&self, project_name: &str) -> Result<String> {
         let id = uuid::Uuid::new_v4().to_string();
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| anyhow::anyhow!("DB lock poisoned: {e}"))?;
+        let conn = self.locked_conn();
         conn.execute(
             "INSERT INTO sessions (id, project_name) VALUES (?1, ?2)",
             params![id, project_name],
@@ -247,10 +255,7 @@ impl MemoryStore for EncryptedSqliteMemory {
             .encrypt_with_key(&self.derived_key, &json_content)
             .map_err(|e| anyhow::anyhow!("Encryption failed: {}", e))?;
 
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| anyhow::anyhow!("DB lock poisoned: {e}"))?;
+        let conn = self.locked_conn();
         conn.execute(
             "INSERT INTO messages (session_id, role, content_blob) VALUES (?1, ?2, ?3)",
             params![session_id, format!("{:?}", message.role), encrypted],
@@ -264,10 +269,7 @@ impl MemoryStore for EncryptedSqliteMemory {
     }
 
     async fn list_sessions(&self) -> Result<Vec<(String, String)>> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| anyhow::anyhow!("DB lock poisoned: {e}"))?;
+        let conn = self.locked_conn();
         let mut stmt =
             conn.prepare("SELECT id, project_name FROM sessions ORDER BY created_at DESC")?;
         let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
@@ -285,10 +287,7 @@ impl MemoryStore for EncryptedSqliteMemory {
             .encrypt_with_key(&self.derived_key, value)
             .map_err(|e| anyhow::anyhow!("Encryption failed: {}", e))?;
 
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| anyhow::anyhow!("DB lock poisoned: {e}"))?;
+        let conn = self.locked_conn();
         conn.execute(
             "INSERT OR REPLACE INTO knowledge (key, value_blob, updated_at) VALUES (?1, ?2, CURRENT_TIMESTAMP)",
             params![key, encrypted],
@@ -297,10 +296,7 @@ impl MemoryStore for EncryptedSqliteMemory {
     }
 
     async fn get_knowledge(&self, key: &str) -> Result<Option<String>> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| anyhow::anyhow!("DB lock poisoned: {e}"))?;
+        let conn = self.locked_conn();
         let mut stmt = conn.prepare("SELECT value_blob FROM knowledge WHERE key = ?")?;
 
         let res = stmt.query_row(params![key], |row| row.get::<_, String>(0));
@@ -319,10 +315,7 @@ impl MemoryStore for EncryptedSqliteMemory {
     }
 
     async fn list_knowledge_keys(&self) -> Result<Vec<String>> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| anyhow::anyhow!("DB lock poisoned: {e}"))?;
+        let conn = self.locked_conn();
         let mut stmt = conn.prepare("SELECT key FROM knowledge ORDER BY key ASC")?;
         let rows = stmt.query_map([], |row| row.get(0))?;
 
