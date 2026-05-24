@@ -54,10 +54,17 @@ impl EncryptedSqliteMemory {
     /// supersedes the W11 error-on-poison behavior); the recovery is logged.
     fn locked_conn(&self) -> std::sync::MutexGuard<'_, Connection> {
         self.conn.lock().unwrap_or_else(|poisoned| {
-            eprintln!(
-                "WARNING: database connection mutex was poisoned by a panic in another \
-                 thread; recovering the connection and continuing."
-            );
+            use std::sync::atomic::{AtomicBool, Ordering};
+            // Warn once per process: a persistently-poisoned mutex would otherwise
+            // spam stderr on every op (and disrupt the TUI alternate screen).
+            static POISON_WARNED: AtomicBool = AtomicBool::new(false);
+            if !POISON_WARNED.swap(true, Ordering::Relaxed) {
+                eprintln!(
+                    "WARNING: database connection mutex was poisoned by a panic in another \
+                     thread; recovering the connection and continuing (further occurrences \
+                     suppressed)."
+                );
+            }
             poisoned.into_inner()
         })
     }
@@ -198,13 +205,17 @@ impl EncryptedSqliteMemory {
                 rand::rngs::OsRng.fill_bytes(&mut new_salt);
                 let salt_blob = salt_codec.encode(&new_salt);
 
-                let tx = conn.transaction()?;
-                // Re-check under the EXCLUSIVE write lock (#12): a process racing the
-                // same brand-new DB may have written a VALID salt between our pre-tx
-                // read and here. If so, adopt it (every opener converges on the same
-                // salt) and leave content untouched. Only when no valid salt exists
-                // (absent, or present-but-corrupt per the #10 self-heal) do we wipe
-                // incompatible content and bootstrap our own.
+                // IMMEDIATE acquires the write lock at BEGIN (#12): a process racing
+                // the same brand-new DB blocks here until the winner commits, then
+                // re-reads and ADOPTS the winner's salt — instead of failing with
+                // SQLITE_BUSY_SNAPSHOT, which a DEFERRED tx would after its read.
+                let tx =
+                    conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+                // Re-check under that write lock: a racing opener may have written a
+                // VALID salt between our pre-tx read and here. If so, adopt it (every
+                // opener converges on the same salt) and leave content untouched. Only
+                // when no valid salt exists (absent, or present-but-corrupt per the #10
+                // self-heal) do we wipe incompatible content and bootstrap our own.
                 let current: Option<Vec<u8>> = tx
                     .query_row("SELECT value FROM vault_meta WHERE key = 'salt'", [], |r| {
                         r.get(0)
