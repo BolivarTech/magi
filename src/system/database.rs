@@ -1,7 +1,7 @@
 //! This module provides a persistent memory system based on SQLite with encryption.
 
 use crate::agent::messages::Message;
-use crate::utils::crypto::{CryptoVault, SALT_LEN};
+use crate::utils::crypto::{CryptoVault, ErrorCorrection, ReedSolomonCodec, SALT_LEN};
 use anyhow::Result;
 use async_trait::async_trait;
 use rand::RngCore;
@@ -147,17 +147,24 @@ impl EncryptedSqliteMemory {
             [],
         )?;
 
-        // B′: one per-DB salt → one key derivation. If the salt row is absent
-        // this DB predates B′ (or is brand new). Per D6: wipe any content
-        // encrypted under an old scheme and bootstrap a fresh salt in a single
-        // transaction (atomic); warn only when real (non-empty) history is
-        // discarded so the reset is observable, not silent.
-        let existing_salt: Option<Vec<u8>> = conn
+        // B′: one per-DB salt → one key derivation. The salt is **RS-encoded** on
+        // disk (#10) so minor bit-rot is corrected on read and a corrupt-but-present
+        // salt cannot silently derive a wrong key. A salt that is absent OR fails to
+        // RS-decode to SALT_LEN bytes is treated as **absent**, so D6 self-heals
+        // (reset + re-bootstrap) instead of bricking the DB. Per D6 the reset wipes
+        // content in a single transaction (atomic) and warns only when real
+        // (non-empty) history is discarded, so it is observable, not silent.
+        let salt_codec = ReedSolomonCodec::default();
+        let valid_salt: Option<Vec<u8>> = conn
             .query_row("SELECT value FROM vault_meta WHERE key = 'salt'", [], |r| {
-                r.get(0)
+                r.get::<_, Vec<u8>>(0)
             })
-            .optional()?;
-        let salt: Vec<u8> = match existing_salt {
+            .optional()?
+            .and_then(|blob| match salt_codec.decode(&blob, SALT_LEN) {
+                Ok(s) if s.len() == SALT_LEN => Some(s),
+                _ => None,
+            });
+        let salt: Vec<u8> = match valid_salt {
             Some(s) => s,
             None => {
                 let had_rows: i64 = conn.query_row(
@@ -170,22 +177,25 @@ impl EncryptedSqliteMemory {
 
                 let mut new_salt = vec![0u8; SALT_LEN];
                 rand::rngs::OsRng.fill_bytes(&mut new_salt);
+                let salt_blob = salt_codec.encode(&new_salt);
 
                 let tx = conn.transaction()?;
                 tx.execute("DELETE FROM messages", [])?;
                 tx.execute("DELETE FROM knowledge", [])?;
                 tx.execute("DELETE FROM sessions", [])?;
+                // OR REPLACE: a self-heal reset fires when the salt row is absent
+                // *or* present-but-invalid (corrupt), so the row may already exist.
                 tx.execute(
-                    "INSERT INTO vault_meta (key, value) VALUES ('salt', ?1)",
-                    params![new_salt],
+                    "INSERT OR REPLACE INTO vault_meta (key, value) VALUES ('salt', ?1)",
+                    params![salt_blob],
                 )?;
                 tx.commit()?;
 
                 if had_rows > 0 {
                     eprintln!(
-                        "WARNING: existing on-disk history used an incompatible encryption \
-                         scheme and has been reset (fresh start). This is expected after \
-                         upgrading the storage format."
+                        "WARNING: existing on-disk history used an incompatible or corrupt \
+                         encryption salt and has been reset (fresh start). This is expected \
+                         after upgrading the storage format."
                     );
                 }
                 new_salt
