@@ -4,6 +4,11 @@ key.txt.bak
 key.txt.org
 *.tmp
 
+# Local encrypted conversation/knowledge DB (runtime; per-machine, never commit)
+.magi-rs-memory.db
+.magi-rs-memory.db-shm
+.magi-rs-memory.db-wal
+
 # Local developer state (per CLAUDE.local.md §1 "Politica de tracking")
 CLAUDE.md
 CLAUDE.local.md
