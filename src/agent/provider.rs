@@ -366,6 +366,9 @@ impl Provider for AnthropicProvider {
                                 AnthropicSseEvent::ContentBlockStart {
                                     content_block, ..
                                 } => {
+                                    // Defensively finalize any still-open tool before starting a
+                                    // new block, so a missing content_block_stop never drops it (#6).
+                                    finalize_tool(current_tool.take(), &mut full_content);
                                     // When the block is a tool_use, begin accumulating its input.
                                     if content_block
                                         .get("type")
@@ -397,12 +400,16 @@ impl Provider for AnthropicProvider {
                                         chunks.push(Ok(ResponseChunk::TextDelta(text)));
                                     }
                                     AnthropicDelta::InputDelta { partial_json } => {
-                                        // Accumulate into the current tool's JSON buffer.
-                                        if let Some((_, _, acc)) = current_tool.as_mut() {
+                                        // Accumulate into the current tool's JSON buffer and tag the
+                                        // chunk with the in-progress tool id (#6).
+                                        let id = if let Some((id, _, acc)) = current_tool.as_mut() {
                                             acc.push_str(&partial_json);
-                                        }
+                                            id.clone()
+                                        } else {
+                                            String::new()
+                                        };
                                         chunks.push(Ok(ResponseChunk::ToolUseInputDelta {
-                                            id: String::new(),
+                                            id,
                                             input_json: partial_json,
                                         }));
                                     }
