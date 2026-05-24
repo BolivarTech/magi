@@ -815,6 +815,17 @@ mod tests {
         assert_eq!(id, "toolu_abc");
         assert_eq!(name, "ls");
         assert_eq!(input, serde_json::json!({"path": "."}));
+        // #6a no-double-push: the normal start→delta→stop→message_stop flow must
+        // assemble exactly ONE ToolUse (the start-time defensive finalize no-ops).
+        let tool_count = response
+            .content
+            .iter()
+            .filter(|c| matches!(c, Content::ToolUse { .. }))
+            .count();
+        assert_eq!(
+            tool_count, 1,
+            "normal flow must assemble exactly one ToolUse (no double-push)"
+        );
     }
 
     #[tokio::test]
