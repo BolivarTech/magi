@@ -148,12 +148,15 @@ impl EncryptedSqliteMemory {
         )?;
 
         // B′: one per-DB salt → one key derivation. The salt is **RS-encoded** on
-        // disk (#10) so minor bit-rot is corrected on read and a corrupt-but-present
-        // salt cannot silently derive a wrong key. A salt that is absent OR fails to
-        // RS-decode to SALT_LEN bytes is treated as **absent**, so D6 self-heals
-        // (reset + re-bootstrap) instead of bricking the DB. Per D6 the reset wipes
-        // content in a single transaction (atomic) and warns only when real
-        // (non-empty) history is discarded, so it is observable, not silent.
+        // disk (#10) so minor bit-rot is corrected on read, and a salt that is
+        // absent OR fails to RS-decode to SALT_LEN bytes is treated as **absent**,
+        // so D6 self-heals (reset + re-bootstrap) instead of bricking the DB.
+        // NOTE: Reed-Solomon is error *correction*, not a cryptographic integrity
+        // check — a valid-codeword corruption (e.g. an all-zero block) can still
+        // mis-decode to a wrong-but-valid salt and bypass the self-heal (narrow
+        // residual; a salt MAC would fully close it — see docs/FASE0-FOLLOWUPS.md #15).
+        // Per D6 the reset wipes content in a single transaction (atomic) and warns
+        // only when real (non-empty) history is discarded, so it is observable.
         let salt_codec = ReedSolomonCodec::default();
         let valid_salt: Option<Vec<u8>> = conn
             .query_row("SELECT value FROM vault_meta WHERE key = 'salt'", [], |r| {
