@@ -160,6 +160,11 @@ impl EncryptedSqliteMemory {
                 r.get::<_, Vec<u8>>(0)
             })
             .optional()?
+            // `decode` already truncates to SALT_LEN on success, so the length
+            // check is belt-and-suspenders. An `Err` (corrupt beyond RS recovery,
+            // or a non-RS raw value from a pre-#10 DB) maps to `None` to
+            // intentionally trigger the D6 self-heal below rather than deriving a
+            // wrong key from a bad salt.
             .and_then(|blob| match salt_codec.decode(&blob, SALT_LEN) {
                 Ok(s) if s.len() == SALT_LEN => Some(s),
                 _ => None,
