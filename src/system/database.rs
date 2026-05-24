@@ -1,10 +1,11 @@
 //! This module provides a persistent memory system based on SQLite with encryption.
 
 use crate::agent::messages::Message;
-use crate::utils::crypto::CryptoVault;
+use crate::utils::crypto::{CryptoVault, SALT_LEN};
 use anyhow::Result;
 use async_trait::async_trait;
-use rusqlite::{params, Connection};
+use rand::RngCore;
+use rusqlite::{params, Connection, OptionalExtension};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use zeroize::Zeroizing;
@@ -38,13 +39,12 @@ pub trait MemoryStore: Send + Sync {
 pub struct EncryptedSqliteMemory {
     conn: Arc<Mutex<Connection>>,
     vault: CryptoVault,
-    /// DB master password wrapped in [`Zeroizing`] (RF-8.3 / audit W8).
+    /// Data key derived **once** from the per-DB salt + master password (B′).
     ///
-    /// `Zeroizing<String>` overwrites the heap buffer with zeros on drop,
-    /// preventing the key from lingering in freed memory. The constructor
-    /// accepts a plain `String` and wraps it at construction time; all call
-    /// sites pass `&self.master_password`, which deref-coerces to `&str`.
-    master_password: Zeroizing<String>,
+    /// `Zeroizing<Vec<u8>>` overwrites the key on drop. Derived in
+    /// [`Self::new_with_vault`]; reused by every record so no per-record Argon2
+    /// runs on the hot path.
+    derived_key: Zeroizing<Vec<u8>>,
 }
 
 impl EncryptedSqliteMemory {
@@ -80,7 +80,7 @@ impl EncryptedSqliteMemory {
         for (role_str, blob) in rows {
             let decrypted = self
                 .vault
-                .decrypt(&self.master_password, &blob)
+                .decrypt_with_key(&self.derived_key, &blob)
                 .map_err(|e| anyhow::anyhow!("Decryption failed: {}", e))?;
             let content = serde_json::from_str(&decrypted)?;
             let role = match role_str.as_str() {
@@ -92,26 +92,23 @@ impl EncryptedSqliteMemory {
         Ok(messages)
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn new_with_vault(
-        _path: PathBuf,
-        _master_password: String,
-        _vault: CryptoVault,
-    ) -> Result<Self> {
-        unimplemented!("new_with_vault — implemented in GREEN")
+    pub fn new(path: PathBuf, master_password: String) -> Result<Self> {
+        Self::new_with_vault(path, master_password, CryptoVault::default())
     }
 
-    pub fn new(path: PathBuf, master_password: String) -> Result<Self> {
-        let conn = Connection::open(path)?;
+    /// Constructor that accepts a custom [`CryptoVault`] (e.g. a counting KDF in
+    /// tests). Derives the data key **once** from the per-DB salt and caches it.
+    pub(crate) fn new_with_vault(
+        path: PathBuf,
+        master_password: String,
+        vault: CryptoVault,
+    ) -> Result<Self> {
+        let mut conn = Connection::open(path)?;
 
-        // MAGI FIX: Enable WAL mode for high concurrency
-        // We use query_row because execute fails for pragmas that return values in some drivers
         let _: String = conn.query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))?;
         conn.execute("PRAGMA synchronous = NORMAL", [])?;
-        // Set a busy timeout to prevent "database is locked" errors during contention
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
 
-        // Initialize Schema
         conn.execute(
             "CREATE TABLE IF NOT EXISTS sessions (
                 id TEXT PRIMARY KEY,
@@ -120,7 +117,6 @@ impl EncryptedSqliteMemory {
             )",
             [],
         )?;
-
         conn.execute(
             "CREATE TABLE IF NOT EXISTS messages (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -132,7 +128,6 @@ impl EncryptedSqliteMemory {
             )",
             [],
         )?;
-
         conn.execute(
             "CREATE TABLE IF NOT EXISTS knowledge (
                 key TEXT PRIMARY KEY,
@@ -141,11 +136,70 @@ impl EncryptedSqliteMemory {
             )",
             [],
         )?;
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS vault_meta (
+                key TEXT PRIMARY KEY,
+                value BLOB NOT NULL
+            )",
+            [],
+        )?;
+
+        // B′: one per-DB salt → one key derivation. If the salt row is absent
+        // this DB predates B′ (or is brand new). Per D6: wipe any content
+        // encrypted under an old scheme and bootstrap a fresh salt in a single
+        // transaction (atomic); warn only when real (non-empty) history is
+        // discarded so the reset is observable, not silent.
+        let existing_salt: Option<Vec<u8>> = conn
+            .query_row("SELECT value FROM vault_meta WHERE key = 'salt'", [], |r| {
+                r.get(0)
+            })
+            .optional()?;
+        let salt: Vec<u8> = match existing_salt {
+            Some(s) => s,
+            None => {
+                let had_rows: i64 = conn.query_row(
+                    "SELECT (SELECT COUNT(*) FROM sessions) \
+                     + (SELECT COUNT(*) FROM messages) \
+                     + (SELECT COUNT(*) FROM knowledge)",
+                    [],
+                    |r| r.get(0),
+                )?;
+
+                let mut new_salt = vec![0u8; SALT_LEN];
+                rand::rngs::OsRng.fill_bytes(&mut new_salt);
+
+                let tx = conn.transaction()?;
+                tx.execute("DELETE FROM messages", [])?;
+                tx.execute("DELETE FROM knowledge", [])?;
+                tx.execute("DELETE FROM sessions", [])?;
+                tx.execute(
+                    "INSERT INTO vault_meta (key, value) VALUES ('salt', ?1)",
+                    params![new_salt],
+                )?;
+                tx.commit()?;
+
+                if had_rows > 0 {
+                    eprintln!(
+                        "WARNING: existing on-disk history used an incompatible encryption \
+                         scheme and has been reset (fresh start). This is expected after \
+                         upgrading the storage format."
+                    );
+                }
+                new_salt
+            }
+        };
+
+        // Derive the data key exactly once; the incoming password is zeroized
+        // after derivation.
+        let password = Zeroizing::new(master_password);
+        let derived_key = vault
+            .derive_key(&password, &salt)
+            .map_err(|e| anyhow::anyhow!("Key derivation failed: {}", e))?;
 
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
-            vault: CryptoVault::default(),
-            master_password: Zeroizing::new(master_password),
+            vault,
+            derived_key,
         })
     }
 }
@@ -169,7 +223,7 @@ impl MemoryStore for EncryptedSqliteMemory {
         let json_content = serde_json::to_string(&message.content)?;
         let encrypted = self
             .vault
-            .encrypt(&self.master_password, &json_content)
+            .encrypt_with_key(&self.derived_key, &json_content)
             .map_err(|e| anyhow::anyhow!("Encryption failed: {}", e))?;
 
         let conn = self
@@ -207,7 +261,7 @@ impl MemoryStore for EncryptedSqliteMemory {
     async fn set_knowledge(&self, key: &str, value: &str) -> Result<()> {
         let encrypted = self
             .vault
-            .encrypt(&self.master_password, value)
+            .encrypt_with_key(&self.derived_key, value)
             .map_err(|e| anyhow::anyhow!("Encryption failed: {}", e))?;
 
         let conn = self
@@ -234,7 +288,7 @@ impl MemoryStore for EncryptedSqliteMemory {
             Ok(blob) => {
                 let decrypted = self
                     .vault
-                    .decrypt(&self.master_password, &blob)
+                    .decrypt_with_key(&self.derived_key, &blob)
                     .map_err(|e| anyhow::anyhow!("Decryption failed: {}", e))?;
                 Ok(Some(decrypted))
             }
@@ -272,8 +326,8 @@ impl EncryptedSqliteMemory {
         self.collect_message_rows(session_id)
     }
 
-    pub(crate) fn master_password_type_for_test(&self) -> &zeroize::Zeroizing<String> {
-        &self.master_password
+    pub(crate) fn derived_key_type_for_test(&self) -> &zeroize::Zeroizing<Vec<u8>> {
+        &self.derived_key
     }
 }
 
@@ -572,7 +626,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_master_password_field_is_zeroizing_and_roundtrips() {
+    async fn test_derived_key_field_is_zeroizing_and_roundtrips() {
         let tmp_file = NamedTempFile::new().unwrap();
         let path = tmp_file.path().to_path_buf();
 
@@ -583,7 +637,7 @@ mod tests {
             .await
             .unwrap();
 
-        let _assert_type: &zeroize::Zeroizing<String> = memory.master_password_type_for_test();
+        let _assert_type: &zeroize::Zeroizing<Vec<u8>> = memory.derived_key_type_for_test();
 
         let msgs = memory.get_messages(&sid).await.unwrap();
         assert_eq!(msgs, vec![Message::user("secret payload")]);

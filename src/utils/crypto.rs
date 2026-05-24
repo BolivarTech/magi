@@ -273,6 +273,7 @@ impl CryptoVault {
         Self { kdf, cipher, fec }
     }
 
+    #[allow(dead_code)]
     pub fn encrypt(&self, password: &str, plaintext: &str) -> Result<String, CryptoError> {
         if password.is_empty() {
             return Err(CryptoError::InvalidInput(
@@ -315,6 +316,7 @@ impl CryptoVault {
         Ok(STANDARD.encode(&blob))
     }
 
+    #[allow(dead_code)]
     pub fn decrypt(&self, password: &str, encrypted_base64: &str) -> Result<String, CryptoError> {
         if password.is_empty() {
             return Err(CryptoError::InvalidInput(
@@ -387,7 +389,6 @@ impl CryptoVault {
     /// # Errors
     /// [`CryptoError::InvalidInput`] if `password` is empty; [`CryptoError::KeyDerivation`]
     /// if Argon2 fails.
-    #[allow(dead_code)]
     pub fn derive_key(
         &self,
         password: &str,
@@ -408,7 +409,6 @@ impl CryptoVault {
     /// # Errors
     /// [`CryptoError::InvalidInput`] if the record exceeds [`MAX_PLAINTEXT_LEN`];
     /// [`CryptoError::Cipher`] on encryption failure (e.g. an invalid key length).
-    #[allow(dead_code)]
     pub fn encrypt_with_key(&self, key: &[u8], plaintext: &str) -> Result<String, CryptoError> {
         let nonce_len = self.cipher.nonce_len();
 
@@ -446,7 +446,6 @@ impl CryptoVault {
     /// # Errors
     /// [`CryptoError::InvalidInput`] on a hostile/malformed length prefix;
     /// [`CryptoError::Cipher`] if the key is wrong or authentication fails.
-    #[allow(dead_code)]
     pub fn decrypt_with_key(
         &self,
         key: &[u8],
