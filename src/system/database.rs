@@ -199,25 +199,47 @@ impl EncryptedSqliteMemory {
                 let salt_blob = salt_codec.encode(&new_salt);
 
                 let tx = conn.transaction()?;
-                tx.execute("DELETE FROM messages", [])?;
-                tx.execute("DELETE FROM knowledge", [])?;
-                tx.execute("DELETE FROM sessions", [])?;
-                // OR REPLACE: a self-heal reset fires when the salt row is absent
-                // *or* present-but-invalid (corrupt), so the row may already exist.
-                tx.execute(
-                    "INSERT OR REPLACE INTO vault_meta (key, value) VALUES ('salt', ?1)",
-                    params![salt_blob],
-                )?;
+                // Re-check under the EXCLUSIVE write lock (#12): a process racing the
+                // same brand-new DB may have written a VALID salt between our pre-tx
+                // read and here. If so, adopt it (every opener converges on the same
+                // salt) and leave content untouched. Only when no valid salt exists
+                // (absent, or present-but-corrupt per the #10 self-heal) do we wipe
+                // incompatible content and bootstrap our own.
+                let current: Option<Vec<u8>> = tx
+                    .query_row("SELECT value FROM vault_meta WHERE key = 'salt'", [], |r| {
+                        r.get(0)
+                    })
+                    .optional()?;
+                let current_valid = current.and_then(|b| {
+                    salt_codec
+                        .decode(&b, SALT_LEN)
+                        .ok()
+                        .filter(|s| s.len() == SALT_LEN)
+                });
+                let (salt, wiped) = match current_valid {
+                    Some(existing) => (existing, false),
+                    None => {
+                        tx.execute("DELETE FROM messages", [])?;
+                        tx.execute("DELETE FROM knowledge", [])?;
+                        tx.execute("DELETE FROM sessions", [])?;
+                        // OR REPLACE: in the self-heal case the (corrupt) row exists.
+                        tx.execute(
+                            "INSERT OR REPLACE INTO vault_meta (key, value) VALUES ('salt', ?1)",
+                            params![salt_blob],
+                        )?;
+                        (new_salt, true)
+                    }
+                };
                 tx.commit()?;
 
-                if had_rows > 0 {
+                if wiped && had_rows > 0 {
                     eprintln!(
                         "WARNING: existing on-disk history used an incompatible or corrupt \
                          encryption salt and has been reset (fresh start). This is expected \
                          after upgrading the storage format."
                     );
                 }
-                new_salt
+                salt
             }
         };
 
@@ -698,6 +720,31 @@ mod tests {
             memory.list_sessions().await.unwrap().len(),
             1,
             "persistence continues working after lock recovery"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_derived_key_matches_persisted_salt() {
+        // B-S1 (#12): the cached key is always derived from the salt actually
+        // stored on disk, so a concurrent-bootstrap winner can never diverge.
+        let tmp = NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+        let memory = EncryptedSqliteMemory::new(path.clone(), "P".to_string()).unwrap();
+
+        let blob: Vec<u8> = {
+            let conn = Connection::open(&path).unwrap();
+            conn.query_row("SELECT value FROM vault_meta WHERE key = 'salt'", [], |r| {
+                r.get(0)
+            })
+            .unwrap()
+        };
+        let codec = ReedSolomonCodec::default();
+        let salt = codec.decode(&blob, SALT_LEN).unwrap();
+        let expected = CryptoVault::default().derive_key("P", &salt).unwrap();
+        assert_eq!(
+            memory.derived_key_type_for_test().as_slice(),
+            expected.as_slice(),
+            "cached derived_key must be derived from the persisted salt"
         );
     }
 
