@@ -459,6 +459,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_query_streaming_forwards_deltas_to_channel_before_final() {
+        use tokio::sync::mpsc;
+
+        struct TwoDeltaProvider;
+
+        #[async_trait]
+        impl Provider for TwoDeltaProvider {
+            async fn stream_messages(
+                &self,
+                _messages: &[Message],
+                _tools: &[Box<dyn Tool>],
+            ) -> Result<BoxStream<'static, Result<ResponseChunk>>> {
+                let chunks = vec![
+                    Ok(ResponseChunk::TextDelta("Hello ".to_string())),
+                    Ok(ResponseChunk::TextDelta("world".to_string())),
+                    Ok(ResponseChunk::MessageDone(Message::assistant(
+                        "Hello world",
+                    ))),
+                ];
+                Ok(Box::pin(stream::iter(chunks)))
+            }
+        }
+
+        let mut agent = Agent::new(Arc::new(TwoDeltaProvider));
+        let (chunk_tx, mut chunk_rx) = mpsc::channel::<String>(8);
+
+        let collector = tokio::spawn(async move {
+            let mut received = Vec::new();
+            while let Some(delta) = chunk_rx.recv().await {
+                received.push(delta);
+            }
+            received
+        });
+
+        let final_text = agent.query_streaming("Hi", chunk_tx).await.unwrap();
+        let received = collector.await.unwrap();
+
+        assert_eq!(received, vec!["Hello ".to_string(), "world".to_string()]);
+        assert_eq!(final_text, "Hello world");
+        assert_eq!(received.concat(), final_text);
+    }
+
+    #[tokio::test]
     async fn test_agent_history_resilience_to_key_rotation() {
         let tmp_dir = tempfile::tempdir().unwrap();
         let db_path = tmp_dir.path().join("resilient_test.db");
