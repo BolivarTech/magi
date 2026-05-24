@@ -2,11 +2,12 @@
 //! Hardened with strict timeouts and execution sandboxed to the workspace.
 //! Now uses a strict whitelist approach for maximum security.
 
+use crate::system::path_guard::PathGuard;
 use crate::tools::{Tool, ToolError, ToolResult};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use tokio::process::Command;
 use tokio::time::{timeout, Duration};
@@ -51,7 +52,7 @@ impl BashTool {
 
 /// Strict whitelist of allowed base commands.
 /// Anything not in this list (or involving shell-injection tokens) is rejected.
-fn is_command_allowed(cmd: &str) -> bool {
+fn is_command_allowed(cmd: &str, workspace_root: &Path) -> bool {
     let allowed_binaries = [
         "ls", "git", "npm", "cargo", "rg", "cat", "echo", "pwd", "grep", "mkdir", "touch", "rm",
         "find", "diff", "node", "python", "pytest",
@@ -72,6 +73,15 @@ fn is_command_allowed(cmd: &str) -> bool {
         return false;
     }
 
+    // Sandbox: every non-flag arg is treated as a path and must resolve inside
+    // the workspace. PathGuard rejects absolutes (any form, incl. Windows
+    // forward-slash `C:/...`), `..`, and symlink escapes uniformly per platform
+    // (replaces the old string heuristics that missed the Windows case). R-6.
+    let guard = match PathGuard::new(workspace_root.to_path_buf()) {
+        Ok(g) => g,
+        Err(_) => return false,
+    };
+
     let mut tokens = cmd.split_whitespace();
     if let Some(base_cmd) = tokens.next() {
         let base_cmd_lower = base_cmd.to_lowercase();
@@ -86,15 +96,8 @@ fn is_command_allowed(cmd: &str) -> bool {
         for arg in &remaining_tokens {
             let arg_lower = arg.to_lowercase();
 
-            // Block path traversal in any argument
-            if arg.contains("..") {
-                return false;
-            }
-
-            // Block absolute paths that might point outside sandbox (heuristically)
-            // On Unix, absolute paths start with /
-            #[cfg(not(target_os = "windows"))]
-            if arg.starts_with('/') {
+            // Non-flag args must validate inside the workspace via PathGuard.
+            if !arg.starts_with('-') && guard.validate(Path::new(arg)).is_err() {
                 return false;
             }
 
@@ -178,7 +181,7 @@ impl Tool for BashTool {
             serde_json::from_value(args).map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
 
         // Proactive Whitelist and Argument check
-        if !is_command_allowed(&args.command) {
+        if !is_command_allowed(&args.command, &self.workspace_root) {
             return Err(ToolError::ExecutionError("Security Violation: Command or arguments are not whitelisted or contain dangerous patterns.".to_string()));
         }
 
@@ -339,104 +342,71 @@ mod tests {
 
     #[test]
     fn test_whitelist_logic() {
-        assert!(is_command_allowed("ls"));
-        assert!(is_command_allowed("git status"));
-        assert!(is_command_allowed("cargo test"));
+        assert!(check("ls"));
+        assert!(check("git status"));
+        assert!(check("cargo test"));
 
-        assert!(!is_command_allowed("whoami"), "Common but not whitelisted");
-        assert!(!is_command_allowed("sudo apt update"), "Escalation attempt");
+        assert!(!check("whoami"), "Common but not whitelisted");
+        assert!(!check("sudo apt update"), "Escalation attempt");
         assert!(
-            !is_command_allowed("ls | grep test"),
+            !check("ls | grep test"),
             "Piping is currently disabled for security"
         );
-        assert!(
-            !is_command_allowed("echo hello > file.txt"),
-            "Redirection is disabled"
-        );
-        assert!(
-            !is_command_allowed("rm -rf ."),
-            "Destructive rm on workspace root"
-        );
+        assert!(!check("echo hello > file.txt"), "Redirection is disabled");
+        assert!(!check("rm -rf ."), "Destructive rm on workspace root");
     }
 
     #[test]
     fn test_cargo_without_subcommand_is_rejected_without_panic() {
-        assert!(!is_command_allowed("cargo"), "bare cargo must be rejected");
+        assert!(!check("cargo"), "bare cargo must be rejected");
         assert!(
-            !is_command_allowed("cargo "),
+            !check("cargo "),
             "cargo with trailing space must be rejected"
         );
+        assert!(!check("cargo run"), "cargo run must be rejected");
         assert!(
-            !is_command_allowed("cargo run"),
-            "cargo run must be rejected"
-        );
-        assert!(
-            !is_command_allowed("cargo install ripgrep"),
+            !check("cargo install ripgrep"),
             "cargo install must be rejected"
         );
-        assert!(
-            is_command_allowed("cargo test"),
-            "cargo test must be allowed"
-        );
-        assert!(
-            is_command_allowed("cargo build"),
-            "cargo build must be allowed"
-        );
-        assert!(
-            is_command_allowed("cargo check"),
-            "cargo check must be allowed"
-        );
+        assert!(check("cargo test"), "cargo test must be allowed");
+        assert!(check("cargo build"), "cargo build must be allowed");
+        assert!(check("cargo check"), "cargo check must be allowed");
     }
 
     #[test]
     fn test_powershell_stop_parsing_token_is_rejected() {
-        assert!(
-            !is_command_allowed("echo --% foo"),
-            "bare --% must be blocked"
-        );
-        assert!(
-            !is_command_allowed("git log --%"),
-            "--% as last token must be blocked"
-        );
-        assert!(
-            !is_command_allowed("ls --%bar"),
-            "--% prefix in a token must be blocked"
-        );
-        assert!(
-            is_command_allowed("git log --oneline"),
-            "ordinary -- flags stay allowed"
-        );
+        assert!(!check("echo --% foo"), "bare --% must be blocked");
+        assert!(!check("git log --%"), "--% as last token must be blocked");
+        assert!(!check("ls --%bar"), "--% prefix in a token must be blocked");
+        assert!(check("git log --oneline"), "ordinary -- flags stay allowed");
     }
 
     #[test]
     fn test_adversarial_bash_injections() {
         // 1. Sub-shell injection attempts
+        assert!(!check("ls $(whoami)"), "Sub-shell $() should be blocked");
         assert!(
-            !is_command_allowed("ls $(whoami)"),
-            "Sub-shell $() should be blocked"
-        );
-        assert!(
-            !is_command_allowed("ls `whoami`"),
+            !check("ls `whoami`"),
             "Backtick sub-shell should be blocked"
         );
         assert!(
-            !is_command_allowed("echo ${PATH}"),
+            !check("echo ${PATH}"),
             "Variable expansion should be blocked"
         );
 
         // 2. Argument-based injection attempts (common for 'git')
         assert!(
-            !is_command_allowed("git --exec-path=/tmp"),
+            !check("git --exec-path=/tmp"),
             "Dangerous git flags should be blocked"
         );
         assert!(
-            !is_command_allowed("git config --global core.editor 'rm -rf /'"),
+            !check("git config --global core.editor 'rm -rf /'"),
             "Dangerous git config should be blocked"
         );
 
         // 3. Recursive path traversal in arguments
         assert!(
-            !is_command_allowed("cat ../../../etc/passwd"),
+            !check("cat ../../../etc/passwd"),
             "Path traversal in cat arguments should be blocked"
         );
     }
