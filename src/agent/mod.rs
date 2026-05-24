@@ -58,6 +58,13 @@ impl Agent {
         self.session_id = Some(session_id);
     }
 
+    /// Replaces the active LLM provider (e.g. after a mid-session `/login` swaps
+    /// the startup `StaticProvider` for a live `AnthropicProvider`).
+    #[allow(dead_code)]
+    pub fn set_provider(&mut self, _provider: Arc<dyn Provider>) {
+        unimplemented!("set_provider — implemented in GREEN")
+    }
+
     /// Loads history from the persistent memory store.
     pub async fn load_history(&mut self) -> Result<()> {
         if let (Some(memory), Some(sid)) = (&self.memory, &self.session_id) {
@@ -483,6 +490,32 @@ mod tests {
         assert_eq!(received, vec!["Hello ".to_string(), "world".to_string()]);
         assert_eq!(final_text, "Hello world");
         assert_eq!(received.concat(), final_text);
+    }
+
+    #[tokio::test]
+    async fn test_set_provider_swaps_the_active_provider() {
+        // A-S1 (#9): a mid-session set_provider replaces the active provider.
+        struct FixedProvider(&'static str);
+
+        #[async_trait]
+        impl Provider for FixedProvider {
+            async fn stream_messages(
+                &self,
+                _messages: &[Message],
+                _tools: &[Box<dyn Tool>],
+            ) -> Result<BoxStream<'static, Result<ResponseChunk>>> {
+                let text = self.0.to_string();
+                Ok(Box::pin(stream::iter(vec![Ok(
+                    ResponseChunk::MessageDone(Message::assistant(&text)),
+                )])))
+            }
+        }
+
+        let mut agent = Agent::new(Arc::new(FixedProvider("from-A")));
+        agent.set_provider(Arc::new(FixedProvider("from-B")));
+        let (tx, _rx) = tokio::sync::mpsc::channel::<String>(8);
+        let out = agent.query_streaming("hi", tx).await.unwrap();
+        assert_eq!(out, "from-B", "set_provider must swap the active provider");
     }
 
     #[tokio::test]
