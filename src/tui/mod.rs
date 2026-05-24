@@ -308,7 +308,7 @@ pub async fn run_tui_ext(agent: Agent, initial_info: Option<String>) -> anyhow::
                                 Ok(token) => match oauth.create_raw_api_key(&token).await {
                                     Ok(api_key) => {
                                         let store =
-                                            crate::system::secrets::KeyringStore::new("magi-rust");
+                                            crate::system::secrets::KeyringStore::new("magi-rs");
                                         if let Err(e) =
                                             store.set_secret("ANTHROPIC_API_KEY", &api_key).await
                                         {
@@ -356,15 +356,24 @@ pub async fn run_tui_ext(agent: Agent, initial_info: Option<String>) -> anyhow::
                     }
                 }
                 UiEvent::Logout => {
-                    let store = crate::system::secrets::KeyringStore::new("magi-rust");
-                    if let Err(e) = store.delete_secret("ANTHROPIC_API_KEY").await {
-                        let _ = response_tx
-                            .send(AgentResponse::Error(format!("Logout failed: {}", e)))
-                            .await;
-                    } else {
-                        let _ = response_tx
-                            .send(AgentResponse::Info("Logged out successfully.".to_string()))
-                            .await;
+                    // Clear from both canonical ("magi-rs") and legacy ("magi-rust") services
+                    // so a key stored by either the new or the pre-migration login flow is removed.
+                    // Mirrors the CLI --logout path in main.rs. delete_secret treats NoEntry as Ok.
+                    let canonical = crate::system::secrets::KeyringStore::new("magi-rs");
+                    let legacy = crate::system::secrets::KeyringStore::new("magi-rust");
+                    let res_canonical = canonical.delete_secret("ANTHROPIC_API_KEY").await;
+                    let res_legacy = legacy.delete_secret("ANTHROPIC_API_KEY").await;
+                    match (res_canonical, res_legacy) {
+                        (Err(e), _) | (_, Err(e)) => {
+                            let _ = response_tx
+                                .send(AgentResponse::Error(format!("Logout failed: {}", e)))
+                                .await;
+                        }
+                        (Ok(()), Ok(())) => {
+                            let _ = response_tx
+                                .send(AgentResponse::Info("Logged out successfully.".to_string()))
+                                .await;
+                        }
                     }
                 }
                 UiEvent::Quit => break,
