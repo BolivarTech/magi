@@ -371,6 +371,10 @@ impl CryptoVault {
             ));
         }
 
+        // C7 hardening: the RS decode allocates proportional to the encoded
+        // blob, not `original_len`, so a small declared length with a huge body
+        // would still drive a large allocation. RS(223/32) expands by at most
+        // ~1.144x; reject anything grossly beyond 2x + slack before decoding.
         if blob.len().saturating_sub(4) > original_len.saturating_mul(2).saturating_add(4096) {
             return Err(CryptoError::InvalidInput(format!(
                 "Encoded blob length {} is inconsistent with declared plaintext length {}; refusing to allocate",
