@@ -14,6 +14,10 @@ changes and the **patch** position signals backward-compatible fixes.
 - **#17** Runtime warning visibility — malformed tool-JSON (#4) and poison recovery (#8) warnings remain stderr-only under the alt-screen; startup/login warnings are already surfaced.
 - **#18** Blob version-dispatch / migration — the blob version byte is detection-only; a future format bump still needs a migrate-or-reset path.
 
+## [0.2.0] - 2026-05-25
+
+First **public** release — the repository is now open-source (MIT OR Apache-2.0). Functionally identical to 0.1.2, promoted to the semver-correct minor version for the breaking on-disk format change made during the 0.1.x security hardening (a pre-0.1.1 `.magi-rs-memory.db` resets on upgrade). See **[0.1.1]** for the security-audit remediation and **[0.1.2]** for the docs + release-pipeline work this consolidates.
+
 ## [0.1.2] - 2026-05-24
 
 ### Changed
@@ -70,7 +74,8 @@ Initial pre-release, published primarily to reserve the `magi-rs` crate name.
 - `ratatui` TUI with Normal / Selection / Visual modes and Unicode-safe input.
 - OAuth (PKCE) login and OS keyring integration, with `magi-rust` legacy migration.
 
-[Unreleased]: https://github.com/BolivarTech/magi/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/BolivarTech/magi/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/BolivarTech/magi/releases/tag/v0.2.0
 [0.1.2]: https://github.com/BolivarTech/magi/releases/tag/v0.1.2
 [0.1.1]: https://github.com/BolivarTech/magi/releases/tag/v0.1.1
 [0.1.0]: https://github.com/BolivarTech/magi/releases/tag/v0.1.0
