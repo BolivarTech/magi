@@ -64,6 +64,14 @@ impl Agent {
         self.provider = provider;
     }
 
+    /// Whether the active provider is the canned [`StaticProvider`] (no API key).
+    /// Used by `/login` to decide whether the prior history is canned noise (safe
+    /// to clear) vs a real conversation (must be kept).
+    #[allow(dead_code)]
+    pub fn provider_is_static(&self) -> bool {
+        unimplemented!("provider_is_static — implemented in GREEN")
+    }
+
     /// Loads history from the persistent memory store.
     pub async fn load_history(&mut self) -> Result<()> {
         if let (Some(memory), Some(sid)) = (&self.memory, &self.session_id) {
@@ -515,6 +523,15 @@ mod tests {
         let (tx, _rx) = tokio::sync::mpsc::channel::<String>(8);
         let out = agent.query_streaming("hi", tx).await.unwrap();
         assert_eq!(out, "from-B", "set_provider must swap the active provider");
+    }
+
+    #[tokio::test]
+    async fn test_provider_is_static_reflects_provider() {
+        // StaticProvider → true (canned, safe to clear on login); other → false.
+        let static_agent = Agent::new(Arc::new(crate::agent::provider::StaticProvider));
+        assert!(static_agent.provider_is_static());
+        let real_agent = Agent::new(Arc::new(MockProvider));
+        assert!(!real_agent.provider_is_static());
     }
 
     #[tokio::test]
