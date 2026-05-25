@@ -459,15 +459,13 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Re
                 match app.mode {
                     AppMode::Selection => {
                         match key.code {
-                            KeyCode::Up => {
-                                if app.selected_index > 0 {
-                                    app.selected_index -= 1;
-                                }
+                            KeyCode::Up if app.selected_index > 0 => {
+                                app.selected_index -= 1;
                             }
-                            KeyCode::Down => {
-                                if app.selected_index < app.messages.len().saturating_sub(1) {
-                                    app.selected_index += 1;
-                                }
+                            KeyCode::Down
+                                if app.selected_index < app.messages.len().saturating_sub(1) =>
+                            {
+                                app.selected_index += 1;
                             }
                             KeyCode::Enter => {
                                 app.mode = AppMode::Visual;

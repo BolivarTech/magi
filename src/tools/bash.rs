@@ -109,13 +109,12 @@ fn is_command_allowed(cmd: &str, workspace_root: &Path) -> bool {
 
             // Binary-specific dangerous flags
             match base_cmd_lower.as_str() {
-                "git" => {
+                "git"
                     if arg_lower.contains("exec-path")
                         || arg_lower.contains("config")
-                        || arg_lower == "-c"
-                    {
-                        return false;
-                    }
+                        || arg_lower == "-c" =>
+                {
+                    return false;
                 }
                 "cargo" => {
                     // Only allow 'cargo test' and common build commands
