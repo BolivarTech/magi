@@ -77,6 +77,9 @@ pub struct EncryptedSqliteMemory {
     /// [`Self::new_with_vault`]; reused by every record so no per-record Argon2
     /// runs on the hot path.
     derived_key: Zeroizing<Vec<u8>>,
+    /// `true` when construction discarded incompatible/corrupt on-disk content
+    /// (the D6 reset fired on a non-empty DB). Surfaced to the user at startup (#11).
+    was_reset: bool,
 }
 
 impl EncryptedSqliteMemory {
@@ -144,6 +147,12 @@ impl EncryptedSqliteMemory {
 
     pub fn new(path: PathBuf, master_password: String) -> Result<Self> {
         Self::new_with_vault(path, master_password, CryptoVault::default())
+    }
+
+    /// Whether the on-disk DB had real content discarded (reset to fresh) during
+    /// construction (#11). The caller surfaces this to the user at startup.
+    pub fn was_reset(&self) -> bool {
+        self.was_reset
     }
 
     /// Constructor that accepts a custom [`CryptoVault`] (e.g. a counting KDF in
@@ -216,6 +225,7 @@ impl EncryptedSqliteMemory {
             // checksum-failing mis-correction) maps to `None` to trigger the D6
             // self-heal below rather than deriving a wrong key from a bad salt.
             .and_then(|blob| decode_salt(&salt_codec, &blob));
+        let mut was_reset = false;
         let salt: Vec<u8> = match valid_salt {
             Some(s) => s,
             None => {
@@ -264,7 +274,8 @@ impl EncryptedSqliteMemory {
                 };
                 tx.commit()?;
 
-                if wiped && had_rows > 0 {
+                was_reset = wiped && had_rows > 0;
+                if was_reset {
                     eprintln!(
                         "WARNING: existing on-disk history used an incompatible or corrupt \
                          encryption salt and has been reset (fresh start). This is expected \
@@ -286,6 +297,7 @@ impl EncryptedSqliteMemory {
             conn: Arc::new(Mutex::new(conn)),
             vault,
             derived_key,
+            was_reset,
         })
     }
 }
@@ -459,6 +471,49 @@ mod tests {
             1,
             "Argon2 must run exactly once (B′), not per record"
         );
+    }
+
+    #[tokio::test]
+    async fn test_was_reset_flag_reflects_content_discard() {
+        // S-1 (#11): a legacy DB (rows, no salt) that gets reset reports
+        // was_reset() == true; a fresh DB reports false.
+        let tmp = NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute(
+                "CREATE TABLE sessions (id TEXT PRIMARY KEY, project_name TEXT NOT NULL, \
+                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP)",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL, \
+                 role TEXT NOT NULL, content_blob TEXT NOT NULL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO sessions (id, project_name) VALUES ('old', 'legacy')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO messages (session_id, role, content_blob) VALUES ('old', 'User', 'X')",
+                [],
+            )
+            .unwrap();
+        }
+        let legacy = EncryptedSqliteMemory::new(path, "pw".to_string()).unwrap();
+        assert!(
+            legacy.was_reset(),
+            "a legacy DB that discarded content must report was_reset()"
+        );
+
+        let tmp2 = NamedTempFile::new().unwrap();
+        let fresh =
+            EncryptedSqliteMemory::new(tmp2.path().to_path_buf(), "pw".to_string()).unwrap();
+        assert!(!fresh.was_reset(), "a fresh DB must not report was_reset()");
     }
 
     #[tokio::test]

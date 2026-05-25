@@ -222,7 +222,7 @@ impl App {
     }
 }
 
-pub async fn run_tui_ext(agent: Agent, initial_info: Option<String>) -> anyhow::Result<()> {
+pub async fn run_tui_ext(agent: Agent, startup_notices: Vec<String>) -> anyhow::Result<()> {
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |panic_info| {
         let _ = disable_raw_mode();
@@ -243,8 +243,8 @@ pub async fn run_tui_ext(agent: Agent, initial_info: Option<String>) -> anyhow::
     let (response_tx, response_rx) = mpsc::channel(100);
     let (approval_tx, approval_rx) = mpsc::channel(100);
 
-    if let Some(info) = initial_info {
-        let _ = response_tx.send(AgentResponse::Info(info)).await;
+    for notice in startup_notices {
+        let _ = response_tx.send(AgentResponse::Info(notice)).await;
     }
 
     let mut runner_agent = agent;
@@ -325,16 +325,26 @@ pub async fn run_tui_ext(agent: Agent, initial_info: Option<String>) -> anyhow::
                                                 .unwrap_or_else(|_| {
                                                     crate::DEFAULT_MODEL.to_string()
                                                 });
+                                            // #16: only the canned StaticProvider history is safe to
+                                            // clear; a re-login over a live provider must keep the
+                                            // real conversation. Read before the swap, build banner
+                                            // before `model` moves.
+                                            let was_static = runner_agent.provider_is_static();
+                                            let banner = if was_static {
+                                                format!("Successfully logged in! Now using Magi API (model: {model}) — no restart needed; prior canned replies cleared.")
+                                            } else {
+                                                format!("Re-authenticated. Now using Magi API (model: {model}) — conversation kept.")
+                                            };
                                             runner_agent.set_provider(std::sync::Arc::new(
                                                 crate::agent::provider::AnthropicProvider::new(
                                                     api_key, model,
                                                 ),
                                             ));
-                                            let _ = response_tx
-                                                .send(AgentResponse::Info(
-                                                    "Successfully logged in! Provider activated — no restart needed.".to_string(),
-                                                ))
-                                                .await;
+                                            if was_static {
+                                                runner_agent.clear_history();
+                                            }
+                                            let _ =
+                                                response_tx.send(AgentResponse::Info(banner)).await;
                                         }
                                     }
                                     Err(e) => {
