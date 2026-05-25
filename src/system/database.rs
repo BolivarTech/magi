@@ -210,11 +210,11 @@ impl EncryptedSqliteMemory {
                 r.get::<_, Vec<u8>>(0)
             })
             .optional()?
-            // `decode` already truncates to SALT_LEN on success, so the length
-            // check is belt-and-suspenders. An `Err` (corrupt beyond RS recovery,
-            // or a non-RS raw value from a pre-#10 DB) maps to `None` to
-            // intentionally trigger the D6 self-heal below rather than deriving a
-            // wrong key from a bad salt.
+            // `decode_salt` returns the salt only if RS-decode succeeds, the payload
+            // length is exact, AND the SHA-256 checksum matches (#15); anything else
+            // (absent, corrupt, a non-RS raw value from a pre-#10 DB, or a
+            // checksum-failing mis-correction) maps to `None` to trigger the D6
+            // self-heal below rather than deriving a wrong key from a bad salt.
             .and_then(|blob| decode_salt(&salt_codec, &blob));
         let salt: Vec<u8> = match valid_salt {
             Some(s) => s,
@@ -804,12 +804,34 @@ mod tests {
             .unwrap()
         };
         let codec = ReedSolomonCodec::default();
-        let salt = codec.decode(&blob, SALT_LEN).unwrap();
+        let salt = decode_salt(&codec, &blob).expect("persisted salt must decode + verify");
         let expected = CryptoVault::default().derive_key("P", &salt).unwrap();
         assert_eq!(
             memory.derived_key_type_for_test().as_slice(),
             expected.as_slice(),
             "cached derived_key must be derived from the persisted salt"
+        );
+    }
+
+    #[test]
+    fn test_decode_salt_rejects_checksum_mismatch_and_roundtrips() {
+        // #15 helper unit test: a valid RS codeword whose payload has a WRONG
+        // checksum is rejected (the mis-correction guard), even though RS-decode
+        // itself succeeds; and a correctly-encoded salt round-trips.
+        let codec = ReedSolomonCodec::default();
+        let mut bad_payload = vec![7u8; SALT_LEN]; // non-zero salt
+        bad_payload.extend_from_slice(&[0u8; SALT_CHECKSUM_LEN]); // deliberately wrong checksum
+        let bad_blob = codec.encode(&bad_payload);
+        assert!(
+            decode_salt(&codec, &bad_blob).is_none(),
+            "a valid codeword with a mismatched checksum must be rejected"
+        );
+
+        let salt = vec![7u8; SALT_LEN];
+        assert_eq!(
+            decode_salt(&codec, &encode_salt(&codec, &salt)).unwrap(),
+            salt,
+            "a correctly-encoded salt must round-trip"
         );
     }
 

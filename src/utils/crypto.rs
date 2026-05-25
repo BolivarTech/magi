@@ -19,7 +19,8 @@
 //!    parity bytes to allow recovery from bit-rot or minor storage corruption.
 //! 5. **Final Blob:** `[u8 version][u32 LE original-len][RS-encoded(nonce || ciphertext)]`,
 //!    base64-encoded for storage. The leading version byte (#13) makes the format
-//!    self-describing for forward compatibility; an unknown version is rejected. The
+//!    self-describing: an unknown version is **detected and rejected**, not silently
+//!    mis-parsed (version-dispatch/migration is not yet implemented). The
 //!    salt is stored once per database by the store layer, not per record.
 
 use std::fmt;
