@@ -49,7 +49,7 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 uuid = { version = "1.8", features = ["v4"] }
 
 # MAGI ecosystem
-magi-core = "0.6"
+magi-core = "1.0"
 
 [dev-dependencies]
 # Mocking for tests
