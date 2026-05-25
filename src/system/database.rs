@@ -197,14 +197,11 @@ impl EncryptedSqliteMemory {
             [],
         )?;
 
-        // B′: one per-DB salt → one key derivation. The salt is **RS-encoded** on
-        // disk (#10) so minor bit-rot is corrected on read, and a salt that is
-        // absent OR fails to RS-decode to SALT_LEN bytes is treated as **absent**,
-        // so D6 self-heals (reset + re-bootstrap) instead of bricking the DB.
-        // NOTE: Reed-Solomon is error *correction*, not a cryptographic integrity
-        // check — a valid-codeword corruption (e.g. an all-zero block) can still
-        // mis-decode to a wrong-but-valid salt and bypass the self-heal (narrow
-        // residual; a salt MAC would fully close it — see docs/FASE0-FOLLOWUPS.md #15).
+        // B′: one per-DB salt → one key derivation. The salt is **RS-encoded with a
+        // SHA-256 checksum** on disk (#10 + #15): minor bit-rot is corrected on read,
+        // and a salt that is absent, fails to RS-decode, or fails the checksum (incl.
+        // a valid-codeword mis-correction such as an all-zero block) is treated as
+        // **absent**, so D6 self-heals (reset + re-bootstrap) instead of bricking.
         // Per D6 the reset wipes content in a single transaction (atomic) and warns
         // only when real (non-empty) history is discarded, so it is observable.
         let salt_codec = ReedSolomonCodec::default();
@@ -579,8 +576,8 @@ mod tests {
         // Strengthens S-2: every salt shape that RS-decode REJECTS (empty,
         // raw/non-RS-encoded, truncated below one block) must self-heal via a D6
         // reset, never validate to a wrong salt. A valid-codeword corruption such
-        // as an all-zero block is a known RS mis-correction residual (see
-        // docs/FASE0-FOLLOWUPS.md #15) and is intentionally NOT asserted here.
+        // as an all-zero block is covered by `test_all_zero_salt_self_heals_via_checksum`
+        // (#15, now closed via the salt checksum).
         for bad in [Vec::<u8>::new(), vec![0x42u8; SALT_LEN], vec![0x07u8; 30]] {
             let tmp = NamedTempFile::new().unwrap();
             let path = tmp.path().to_path_buf();

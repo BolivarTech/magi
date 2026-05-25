@@ -302,7 +302,7 @@ impl CryptoVault {
     }
 
     /// Encrypts `plaintext` under a pre-derived `key`. A fresh random nonce is
-    /// sampled per call; the blob layout is `[u32 LE len][RS(nonce || ciphertext)]`
+    /// sampled per call; the blob layout is `[u8 version][u32 LE len][RS(nonce || ciphertext)]`
     /// (no salt — the salt lives once per database, not per record).
     ///
     /// # Errors
