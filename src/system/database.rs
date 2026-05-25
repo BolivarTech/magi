@@ -6,9 +6,41 @@ use anyhow::Result;
 use async_trait::async_trait;
 use rand::RngCore;
 use rusqlite::{params, Connection, OptionalExtension};
+use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use zeroize::Zeroizing;
+
+/// Length of the SHA-256 salt checksum stored alongside the salt (#15).
+const SALT_CHECKSUM_LEN: usize = 4;
+
+/// RS-encodes the per-DB salt together with a short SHA-256 checksum (#15). The
+/// checksum lets the reader reject a salt that RS *mis-corrects* to a wrong but
+/// valid-looking codeword (e.g. an all-zero block) — which RS error-correction
+/// alone cannot detect — closing the #10 residual.
+fn encode_salt(codec: &ReedSolomonCodec, salt: &[u8]) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(SALT_LEN + SALT_CHECKSUM_LEN);
+    payload.extend_from_slice(salt);
+    payload.extend_from_slice(&Sha256::digest(salt)[..SALT_CHECKSUM_LEN]);
+    codec.encode(&payload)
+}
+
+/// Decodes and verifies a salt blob from [`encode_salt`]. Returns the 16-byte
+/// salt only if RS-decode succeeds, the payload length is exact, and the checksum
+/// matches; otherwise `None` (treated as absent → D6 self-heal).
+fn decode_salt(codec: &ReedSolomonCodec, blob: &[u8]) -> Option<Vec<u8>> {
+    let payload = codec.decode(blob, SALT_LEN + SALT_CHECKSUM_LEN).ok()?;
+    if payload.len() != SALT_LEN + SALT_CHECKSUM_LEN {
+        return None;
+    }
+    let (salt, checksum) = payload.split_at(SALT_LEN);
+    let expected = Sha256::digest(salt);
+    if expected[..SALT_CHECKSUM_LEN] == checksum[..] {
+        Some(salt.to_vec())
+    } else {
+        None
+    }
+}
 
 /// Trait defining the behavior of the agent's memory.
 #[async_trait]
@@ -165,14 +197,11 @@ impl EncryptedSqliteMemory {
             [],
         )?;
 
-        // B′: one per-DB salt → one key derivation. The salt is **RS-encoded** on
-        // disk (#10) so minor bit-rot is corrected on read, and a salt that is
-        // absent OR fails to RS-decode to SALT_LEN bytes is treated as **absent**,
-        // so D6 self-heals (reset + re-bootstrap) instead of bricking the DB.
-        // NOTE: Reed-Solomon is error *correction*, not a cryptographic integrity
-        // check — a valid-codeword corruption (e.g. an all-zero block) can still
-        // mis-decode to a wrong-but-valid salt and bypass the self-heal (narrow
-        // residual; a salt MAC would fully close it — see docs/FASE0-FOLLOWUPS.md #15).
+        // B′: one per-DB salt → one key derivation. The salt is **RS-encoded with a
+        // SHA-256 checksum** on disk (#10 + #15): minor bit-rot is corrected on read,
+        // and a salt that is absent, fails to RS-decode, or fails the checksum (incl.
+        // a valid-codeword mis-correction such as an all-zero block) is treated as
+        // **absent**, so D6 self-heals (reset + re-bootstrap) instead of bricking.
         // Per D6 the reset wipes content in a single transaction (atomic) and warns
         // only when real (non-empty) history is discarded, so it is observable.
         let salt_codec = ReedSolomonCodec::default();
@@ -181,15 +210,12 @@ impl EncryptedSqliteMemory {
                 r.get::<_, Vec<u8>>(0)
             })
             .optional()?
-            // `decode` already truncates to SALT_LEN on success, so the length
-            // check is belt-and-suspenders. An `Err` (corrupt beyond RS recovery,
-            // or a non-RS raw value from a pre-#10 DB) maps to `None` to
-            // intentionally trigger the D6 self-heal below rather than deriving a
-            // wrong key from a bad salt.
-            .and_then(|blob| match salt_codec.decode(&blob, SALT_LEN) {
-                Ok(s) if s.len() == SALT_LEN => Some(s),
-                _ => None,
-            });
+            // `decode_salt` returns the salt only if RS-decode succeeds, the payload
+            // length is exact, AND the SHA-256 checksum matches (#15); anything else
+            // (absent, corrupt, a non-RS raw value from a pre-#10 DB, or a
+            // checksum-failing mis-correction) maps to `None` to trigger the D6
+            // self-heal below rather than deriving a wrong key from a bad salt.
+            .and_then(|blob| decode_salt(&salt_codec, &blob));
         let salt: Vec<u8> = match valid_salt {
             Some(s) => s,
             None => {
@@ -203,7 +229,7 @@ impl EncryptedSqliteMemory {
 
                 let mut new_salt = vec![0u8; SALT_LEN];
                 rand::rngs::OsRng.fill_bytes(&mut new_salt);
-                let salt_blob = salt_codec.encode(&new_salt);
+                let salt_blob = encode_salt(&salt_codec, &new_salt);
 
                 // IMMEDIATE acquires the write lock at BEGIN (#12): a process racing
                 // the same brand-new DB blocks here until the winner commits, then
@@ -221,12 +247,7 @@ impl EncryptedSqliteMemory {
                         r.get(0)
                     })
                     .optional()?;
-                let current_valid = current.and_then(|b| {
-                    salt_codec
-                        .decode(&b, SALT_LEN)
-                        .ok()
-                        .filter(|s| s.len() == SALT_LEN)
-                });
+                let current_valid = current.and_then(|b| decode_salt(&salt_codec, &b));
                 let (salt, wiped) = match current_valid {
                     Some(existing) => (existing, false),
                     None => {
@@ -555,8 +576,8 @@ mod tests {
         // Strengthens S-2: every salt shape that RS-decode REJECTS (empty,
         // raw/non-RS-encoded, truncated below one block) must self-heal via a D6
         // reset, never validate to a wrong salt. A valid-codeword corruption such
-        // as an all-zero block is a known RS mis-correction residual (see
-        // docs/FASE0-FOLLOWUPS.md #15) and is intentionally NOT asserted here.
+        // as an all-zero block is covered by `test_all_zero_salt_self_heals_via_checksum`
+        // (#15, now closed via the salt checksum).
         for bad in [Vec::<u8>::new(), vec![0x42u8; SALT_LEN], vec![0x07u8; 30]] {
             let tmp = NamedTempFile::new().unwrap();
             let path = tmp.path().to_path_buf();
@@ -579,6 +600,39 @@ mod tests {
                 "an RS-rejected invalid salt must self-heal via a D6 reset"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn test_all_zero_salt_self_heals_via_checksum() {
+        // B-S1 (#15): an all-zero salt blob is a VALID RS codeword that decodes to a
+        // zero payload (the #10 mis-correction residual — RS alone would "accept"
+        // it). The salt checksum won't match sha256(zero-salt) → treated as invalid
+        // → D6 self-heal, instead of adopting a wrong (zero) salt and bricking.
+        let tmp = NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+        {
+            let m = EncryptedSqliteMemory::new(path.clone(), "P".to_string()).unwrap();
+            let s = m.create_session("p").await.unwrap();
+            m.add_message(&s, &Message::user("orig")).await.unwrap();
+        }
+        {
+            // A salt blob is RS(salt[16] ‖ checksum[4]) = 20 data + 32 parity = 52
+            // bytes; an all-zero blob of that size is a valid (zero) codeword.
+            let conn = Connection::open(&path).unwrap();
+            conn.execute(
+                "UPDATE vault_meta SET value = ?1 WHERE key = 'salt'",
+                params![vec![0u8; 52]],
+            )
+            .unwrap();
+        }
+        let m = EncryptedSqliteMemory::new(path, "P".to_string()).unwrap();
+        assert!(
+            m.list_sessions().await.unwrap().is_empty(),
+            "an all-zero (checksum-mismatched) salt must self-heal, not be adopted"
+        );
+        let s = m.create_session("fresh").await.unwrap();
+        m.add_message(&s, &Message::user("new")).await.unwrap();
+        assert_eq!(m.get_messages(&s).await.unwrap().len(), 1);
     }
 
     #[tokio::test]
@@ -750,12 +804,34 @@ mod tests {
             .unwrap()
         };
         let codec = ReedSolomonCodec::default();
-        let salt = codec.decode(&blob, SALT_LEN).unwrap();
+        let salt = decode_salt(&codec, &blob).expect("persisted salt must decode + verify");
         let expected = CryptoVault::default().derive_key("P", &salt).unwrap();
         assert_eq!(
             memory.derived_key_type_for_test().as_slice(),
             expected.as_slice(),
             "cached derived_key must be derived from the persisted salt"
+        );
+    }
+
+    #[test]
+    fn test_decode_salt_rejects_checksum_mismatch_and_roundtrips() {
+        // #15 helper unit test: a valid RS codeword whose payload has a WRONG
+        // checksum is rejected (the mis-correction guard), even though RS-decode
+        // itself succeeds; and a correctly-encoded salt round-trips.
+        let codec = ReedSolomonCodec::default();
+        let mut bad_payload = vec![7u8; SALT_LEN]; // non-zero salt
+        bad_payload.extend_from_slice(&[0u8; SALT_CHECKSUM_LEN]); // deliberately wrong checksum
+        let bad_blob = codec.encode(&bad_payload);
+        assert!(
+            decode_salt(&codec, &bad_blob).is_none(),
+            "a valid codeword with a mismatched checksum must be rejected"
+        );
+
+        let salt = vec![7u8; SALT_LEN];
+        assert_eq!(
+            decode_salt(&codec, &encode_salt(&codec, &salt)).unwrap(),
+            salt,
+            "a correctly-encoded salt must round-trip"
         );
     }
 

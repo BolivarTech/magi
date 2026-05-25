@@ -1,5 +1,5 @@
 // Author: Julian Bolivar
-// Version: 1.3.0
+// Version: 1.4.0
 // Date: 2026-05-24
 
 //! Self-contained cryptographic module — key derivation, authenticated
@@ -17,9 +17,11 @@
 //!    guaranteeing confidentiality and integrity (authentication tag).
 //! 4. **Error Correction (Reed-Solomon):** The nonce and ciphertext are encoded with
 //!    parity bytes to allow recovery from bit-rot or minor storage corruption.
-//! 5. **Final Blob:** `[u32 LE original-len][RS-encoded(nonce || ciphertext)]`,
-//!    base64-encoded for storage. The salt is stored once per database by the store
-//!    layer, not per record.
+//! 5. **Final Blob:** `[u8 version][u32 LE original-len][RS-encoded(nonce || ciphertext)]`,
+//!    base64-encoded for storage. The leading version byte (#13) makes the format
+//!    self-describing: an unknown version is **detected and rejected**, not silently
+//!    mis-parsed (version-dispatch/migration is not yet implemented). The
+//!    salt is stored once per database by the store layer, not per record.
 
 use std::fmt;
 
@@ -47,6 +49,11 @@ const RS_MAX_BLOCK_SIZE: usize = 255;
 /// never drive an arbitrary allocation during decryption (audit finding C7),
 /// and bounds legitimate encryption payloads.
 pub const MAX_PLAINTEXT_LEN: usize = 50 * 1024 * 1024;
+
+/// On-disk blob format version, prepended as the first byte of every blob so the
+/// format is self-describing and a future layout change is distinguishable from
+/// corruption (#13). Bump on any incompatible blob-layout change.
+const BLOB_VERSION: u8 = 1;
 
 // ── Argon2 cost parameters (OWASP 2025) ─────────────────────────────
 //
@@ -296,7 +303,7 @@ impl CryptoVault {
     }
 
     /// Encrypts `plaintext` under a pre-derived `key`. A fresh random nonce is
-    /// sampled per call; the blob layout is `[u32 LE len][RS(nonce || ciphertext)]`
+    /// sampled per call; the blob layout is `[u8 version][u32 LE len][RS(nonce || ciphertext)]`
     /// (no salt — the salt lives once per database, not per record).
     ///
     /// # Errors
@@ -326,7 +333,8 @@ impl CryptoVault {
 
         let original_len_u32 = u32::try_from(plaindata.len())
             .map_err(|_| CryptoError::Encoding("Data too large for length header".to_string()))?;
-        let mut blob = Vec::with_capacity(4 + rs_encoded.len());
+        let mut blob = Vec::with_capacity(1 + 4 + rs_encoded.len());
+        blob.push(BLOB_VERSION);
         blob.extend_from_slice(&original_len_u32.to_le_bytes());
         blob.extend_from_slice(&rs_encoded);
 
@@ -349,13 +357,21 @@ impl CryptoVault {
             .decode(encrypted_base64)
             .map_err(|e| CryptoError::Encoding(format!("Invalid base64: {}", e)))?;
 
-        if blob.len() < 4 {
+        if blob.len() < 5 {
             return Err(CryptoError::Encoding(
                 "Encrypted blob too short".to_string(),
             ));
         }
 
-        let len_bytes: [u8; 4] = blob[..4].try_into().unwrap();
+        // #13: validate the format version byte before reading anything else.
+        if blob[0] != BLOB_VERSION {
+            return Err(CryptoError::InvalidInput(format!(
+                "Unsupported blob version {} (expected {})",
+                blob[0], BLOB_VERSION
+            )));
+        }
+
+        let len_bytes: [u8; 4] = blob[1..5].try_into().unwrap();
         let original_len = u32::from_le_bytes(len_bytes) as usize;
 
         if original_len > MAX_PLAINTEXT_LEN {
@@ -365,7 +381,7 @@ impl CryptoVault {
             )));
         }
 
-        if original_len > (blob.len() - 4) {
+        if original_len > (blob.len() - 5) {
             return Err(CryptoError::InvalidInput(
                 "Length header exceeds encoded data size".to_string(),
             ));
@@ -375,15 +391,15 @@ impl CryptoVault {
         // blob, not `original_len`, so a small declared length with a huge body
         // would still drive a large allocation. RS(223/32) expands by at most
         // ~1.144x; reject anything grossly beyond 2x + slack before decoding.
-        if blob.len().saturating_sub(4) > original_len.saturating_mul(2).saturating_add(4096) {
+        if blob.len().saturating_sub(5) > original_len.saturating_mul(2).saturating_add(4096) {
             return Err(CryptoError::InvalidInput(format!(
                 "Encoded blob length {} is inconsistent with declared plaintext length {}; refusing to allocate",
-                blob.len() - 4,
+                blob.len() - 5,
                 original_len
             )));
         }
 
-        let plaindata = self.fec.decode(&blob[4..], original_len)?;
+        let plaindata = self.fec.decode(&blob[5..], original_len)?;
         if plaindata.len() < nonce_len {
             return Err(CryptoError::InvalidInput(
                 "Decoded blob too short for nonce".to_string(),
@@ -419,6 +435,36 @@ mod tests {
     }
 
     #[test]
+    fn test_blob_carries_version_byte() {
+        // A-S1 (#13): the blob starts with the format version byte (1).
+        let vault = CryptoVault::default();
+        let key = k(&vault);
+        let raw = STANDARD
+            .decode(vault.encrypt_with_key(&key, "payload").unwrap())
+            .unwrap();
+        assert_eq!(raw[0], 1, "blob must start with the format version byte");
+    }
+
+    #[test]
+    fn test_decrypt_rejects_unsupported_blob_version() {
+        // A-S2 (#13): a blob whose version byte is unsupported is rejected with a
+        // version error, not misread as length/data.
+        let vault = CryptoVault::default();
+        let key = k(&vault);
+        let mut raw = STANDARD
+            .decode(vault.encrypt_with_key(&key, "x").unwrap())
+            .unwrap();
+        raw[0] = 2; // unsupported version (current is 1)
+        let err = vault
+            .decrypt_with_key(&key, &STANDARD.encode(&raw))
+            .unwrap_err();
+        assert!(
+            err.to_string().to_lowercase().contains("version"),
+            "an unsupported blob version must be rejected with a version error: {err}"
+        );
+    }
+
+    #[test]
     fn test_blob_layout_carries_no_salt() {
         // S-2: plaindata == nonce_len + (L + 16 tag); no 16-byte salt prefix.
         let vault = CryptoVault::default();
@@ -426,9 +472,9 @@ mod tests {
         let pt = "0123456789"; // L = 10
         let blob = vault.encrypt_with_key(&key, pt).unwrap();
         let raw = STANDARD.decode(&blob).unwrap();
-        let original_len = u32::from_le_bytes(raw[..4].try_into().unwrap()) as usize;
+        let original_len = u32::from_le_bytes(raw[1..5].try_into().unwrap()) as usize;
         let codec = ReedSolomonCodec::default();
-        let plaindata = codec.decode(&raw[4..], original_len).unwrap();
+        let plaindata = codec.decode(&raw[5..], original_len).unwrap();
         assert_eq!(plaindata.len(), 12 + (pt.len() + 16));
     }
 
@@ -462,7 +508,7 @@ mod tests {
         let vault = CryptoVault::default();
         let key = k(&vault);
 
-        let mut over = Vec::new();
+        let mut over = vec![1u8]; // valid version byte, so the cap (not version) is tested
         over.extend_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
         over.extend_from_slice(&[0u8; 8]);
         assert!(matches!(
@@ -470,7 +516,7 @@ mod tests {
             Err(CryptoError::InvalidInput(_))
         ));
 
-        let mut big = Vec::new();
+        let mut big = vec![1u8]; // valid version byte
         big.extend_from_slice(&100u32.to_le_bytes());
         big.extend_from_slice(&vec![0u8; 20_000]);
         assert!(matches!(
@@ -497,7 +543,7 @@ mod tests {
     #[test]
     fn test_decrypt_rejects_prefix_at_exactly_cap_plus_one() {
         let oversized = (MAX_PLAINTEXT_LEN + 1) as u32;
-        let mut blob = Vec::new();
+        let mut blob = vec![1u8]; // valid version byte
         blob.extend_from_slice(&oversized.to_le_bytes());
         blob.extend_from_slice(&[0u8; 8]);
         let encoded = STANDARD.encode(&blob);
