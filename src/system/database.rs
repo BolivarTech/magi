@@ -77,6 +77,9 @@ pub struct EncryptedSqliteMemory {
     /// [`Self::new_with_vault`]; reused by every record so no per-record Argon2
     /// runs on the hot path.
     derived_key: Zeroizing<Vec<u8>>,
+    /// `true` when construction discarded incompatible/corrupt on-disk content
+    /// (the D6 reset fired on a non-empty DB). Surfaced to the user at startup (#11).
+    was_reset: bool,
 }
 
 impl EncryptedSqliteMemory {
@@ -150,7 +153,7 @@ impl EncryptedSqliteMemory {
     /// construction (#11). The caller surfaces this to the user at startup.
     #[allow(dead_code)]
     pub fn was_reset(&self) -> bool {
-        unimplemented!("was_reset — implemented in GREEN")
+        self.was_reset
     }
 
     /// Constructor that accepts a custom [`CryptoVault`] (e.g. a counting KDF in
@@ -223,6 +226,7 @@ impl EncryptedSqliteMemory {
             // checksum-failing mis-correction) maps to `None` to trigger the D6
             // self-heal below rather than deriving a wrong key from a bad salt.
             .and_then(|blob| decode_salt(&salt_codec, &blob));
+        let mut was_reset = false;
         let salt: Vec<u8> = match valid_salt {
             Some(s) => s,
             None => {
@@ -271,7 +275,8 @@ impl EncryptedSqliteMemory {
                 };
                 tx.commit()?;
 
-                if wiped && had_rows > 0 {
+                was_reset = wiped && had_rows > 0;
+                if was_reset {
                     eprintln!(
                         "WARNING: existing on-disk history used an incompatible or corrupt \
                          encryption salt and has been reset (fresh start). This is expected \
@@ -293,6 +298,7 @@ impl EncryptedSqliteMemory {
             conn: Arc::new(Mutex::new(conn)),
             vault,
             derived_key,
+            was_reset,
         })
     }
 }
