@@ -8,8 +8,6 @@
 
 **Magi Agent** (`magi-rs`) is a terminal AI assistant in Rust, modeled on Claude Code. It drives an LLM provider through a multi-turn **tool loop** with sandboxed filesystem and shell access, and persists every conversation to a **locally-encrypted SQLite store**. Nothing leaves your machine except the model API calls you explicitly authorize.
 
-> **Status: 0.1.1 — security-hardened pre-release.** The internal security audit (8 CRITICAL + 6 WARNING) is fully remediated — see [`CHANGELOG.md`](CHANGELOG.md) and [`docs/FASE0-FOLLOWUPS.md`](docs/FASE0-FOLLOWUPS.md). Today the agent is a single-backend (Anthropic) interactive TUI; the multi-backend / headless-CI roadmap lives in [`docs/STRATEGY_2026-05-16.md`](docs/STRATEGY_2026-05-16.md).
-
 ---
 
 ## Why Magi?
@@ -23,17 +21,6 @@ Most AI coding agents are SaaS-bound and tied to a single vendor. Magi is built 
 | **Sandboxed by default** | Every filesystem tool is confined to the workspace via `PathGuard`; the shell tool runs a strict command allowlist with a hard ban on shell metacharacters. |
 | **Human-in-the-loop** | Each tool call must be approved inline in the TUI before it runs. |
 | **Fails safe** | If the OS keyring is unavailable, the session degrades to ephemeral (no persistence) rather than ever encrypting with a constant key. |
-
----
-
-## Documentation
-
-| Document | Purpose |
-|----------|---------|
-| [`docs/STRATEGY_2026-05-16.md`](docs/STRATEGY_2026-05-16.md) | Strategic vision + roadmap to v1.0 (multi-backend, headless CI, `magi review`) |
-| [`docs/PENDING_IMPLEMENTATION.md`](docs/PENDING_IMPLEMENTATION.md) | Granular technical roadmap (Git context, MCP client, TUI/UX, skills) |
-| [`docs/AUDIT_2026-05-16.md`](docs/AUDIT_2026-05-16.md) | The internal security audit (findings + resolution status) |
-| [`docs/FASE0-FOLLOWUPS.md`](docs/FASE0-FOLLOWUPS.md) | Post-audit follow-ups and their resolution |
 
 ---
 
@@ -201,7 +188,7 @@ src/
     oauth.rs           -- OAuth PKCE login (callback on 127.0.0.1:54545)
   tui/
     mod.rs             -- ratatui app (Normal / Selection / Visual)
-docs/                  -- strategy, roadmap, audit, follow-ups
+docs/                  -- public overview & philosophy (OVERVIEW.md)
 Cargo.toml             -- edition 2021, MIT OR Apache-2.0
 ```
 
@@ -239,6 +226,12 @@ cargo audit
 | `ripgrep` (`rg`) | For the `grep` tool | on `PATH` |
 | OS keyring | For persistence | Windows Credential Manager / macOS Keychain / Secret Service. Without it the session runs ephemeral |
 | Anthropic API key | For live replies | env var, keyring, `key.txt`, or `/login` |
+
+---
+
+## Documentation
+
+- [`docs/OVERVIEW.md`](docs/OVERVIEW.md) — what Magi is, the `magi-core` foundation, and the multi-perspective philosophy behind the name.
 
 ---
 

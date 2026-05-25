@@ -9,7 +9,7 @@ changes and the **patch** position signals backward-compatible fixes.
 
 ## [Unreleased]
 
-### Deferred (tracked in `docs/FASE0-FOLLOWUPS.md`)
+### Deferred (tracked in internal dev-docs)
 - **#14** Envelope encryption (key rotation / crypto-shredding / multi-tenancy) — enterprise roadmap.
 - **#17** Runtime warning visibility — malformed tool-JSON (#4) and poison recovery (#8) warnings remain stderr-only under the alt-screen; startup/login warnings are already surfaced.
 - **#18** Blob version-dispatch / migration — the blob version byte is detection-only; a future format bump still needs a migrate-or-reset path.
@@ -17,7 +17,7 @@ changes and the **patch** position signals backward-compatible fixes.
 ## [0.1.1] - 2026-05-24
 
 First security-hardened release. The internal audit
-(`docs/AUDIT_2026-05-16.md`, 8 CRITICAL + 6 WARNING) is fully remediated and all
+(8 CRITICAL + 6 WARNING) is fully remediated and all
 non-deferred follow-ups are closed. Verified gate: 95/95 tests, `clippy
 --all-targets` clean, `fmt`/`build --release`/`doc` clean, `audit` baseline.
 
