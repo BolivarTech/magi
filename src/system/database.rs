@@ -6,9 +6,41 @@ use anyhow::Result;
 use async_trait::async_trait;
 use rand::RngCore;
 use rusqlite::{params, Connection, OptionalExtension};
+use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use zeroize::Zeroizing;
+
+/// Length of the SHA-256 salt checksum stored alongside the salt (#15).
+const SALT_CHECKSUM_LEN: usize = 4;
+
+/// RS-encodes the per-DB salt together with a short SHA-256 checksum (#15). The
+/// checksum lets the reader reject a salt that RS *mis-corrects* to a wrong but
+/// valid-looking codeword (e.g. an all-zero block) — which RS error-correction
+/// alone cannot detect — closing the #10 residual.
+fn encode_salt(codec: &ReedSolomonCodec, salt: &[u8]) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(SALT_LEN + SALT_CHECKSUM_LEN);
+    payload.extend_from_slice(salt);
+    payload.extend_from_slice(&Sha256::digest(salt)[..SALT_CHECKSUM_LEN]);
+    codec.encode(&payload)
+}
+
+/// Decodes and verifies a salt blob from [`encode_salt`]. Returns the 16-byte
+/// salt only if RS-decode succeeds, the payload length is exact, and the checksum
+/// matches; otherwise `None` (treated as absent → D6 self-heal).
+fn decode_salt(codec: &ReedSolomonCodec, blob: &[u8]) -> Option<Vec<u8>> {
+    let payload = codec.decode(blob, SALT_LEN + SALT_CHECKSUM_LEN).ok()?;
+    if payload.len() != SALT_LEN + SALT_CHECKSUM_LEN {
+        return None;
+    }
+    let (salt, checksum) = payload.split_at(SALT_LEN);
+    let expected = Sha256::digest(salt);
+    if expected[..SALT_CHECKSUM_LEN] == checksum[..] {
+        Some(salt.to_vec())
+    } else {
+        None
+    }
+}
 
 /// Trait defining the behavior of the agent's memory.
 #[async_trait]
@@ -186,10 +218,7 @@ impl EncryptedSqliteMemory {
             // or a non-RS raw value from a pre-#10 DB) maps to `None` to
             // intentionally trigger the D6 self-heal below rather than deriving a
             // wrong key from a bad salt.
-            .and_then(|blob| match salt_codec.decode(&blob, SALT_LEN) {
-                Ok(s) if s.len() == SALT_LEN => Some(s),
-                _ => None,
-            });
+            .and_then(|blob| decode_salt(&salt_codec, &blob));
         let salt: Vec<u8> = match valid_salt {
             Some(s) => s,
             None => {
@@ -203,7 +232,7 @@ impl EncryptedSqliteMemory {
 
                 let mut new_salt = vec![0u8; SALT_LEN];
                 rand::rngs::OsRng.fill_bytes(&mut new_salt);
-                let salt_blob = salt_codec.encode(&new_salt);
+                let salt_blob = encode_salt(&salt_codec, &new_salt);
 
                 // IMMEDIATE acquires the write lock at BEGIN (#12): a process racing
                 // the same brand-new DB blocks here until the winner commits, then
@@ -221,12 +250,7 @@ impl EncryptedSqliteMemory {
                         r.get(0)
                     })
                     .optional()?;
-                let current_valid = current.and_then(|b| {
-                    salt_codec
-                        .decode(&b, SALT_LEN)
-                        .ok()
-                        .filter(|s| s.len() == SALT_LEN)
-                });
+                let current_valid = current.and_then(|b| decode_salt(&salt_codec, &b));
                 let (salt, wiped) = match current_valid {
                     Some(existing) => (existing, false),
                     None => {
