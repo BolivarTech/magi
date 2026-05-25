@@ -1,6 +1,6 @@
 [package]
 name = "magi-rs"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 authors = ["Julian Bolivar <jbolivarg@gmail.com>"]
 description = "Magi Agent: a terminal AI assistant in Rust with sandboxed tool execution, OAuth login, and encrypted local memory (Argon2 + AES-256-GCM-SIV + Reed-Solomon FEC)."

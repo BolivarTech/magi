@@ -14,6 +14,15 @@ changes and the **patch** position signals backward-compatible fixes.
 - **#17** Runtime warning visibility — malformed tool-JSON (#4) and poison recovery (#8) warnings remain stderr-only under the alt-screen; startup/login warnings are already surfaced.
 - **#18** Blob version-dispatch / migration — the blob version byte is detection-only; a future format bump still needs a migrate-or-reset path.
 
+## [0.1.2] - 2026-05-24
+
+### Changed
+- **Internal development docs are no longer shipped.** The audit, strategy, and roadmap notes moved to a gitignored `dev-docs/` directory — excluded from the repository and the published crate.
+
+### Added
+- **`docs/OVERVIEW.md`** — a public overview of Magi, the `magi-core` foundation, and the multi-perspective (MAGI) philosophy.
+- **Windows binary in releases.** Tagged releases now attach `magi-rs-vX.Y.Z-windows-x86_64.zip` (the compiled `magi-rs.exe` + README + licenses) alongside the source archives.
+
 ## [0.1.1] - 2026-05-24
 
 First security-hardened release. The internal audit
@@ -61,6 +70,7 @@ Initial pre-release, published primarily to reserve the `magi-rs` crate name.
 - `ratatui` TUI with Normal / Selection / Visual modes and Unicode-safe input.
 - OAuth (PKCE) login and OS keyring integration, with `magi-rust` legacy migration.
 
-[Unreleased]: https://github.com/BolivarTech/magi/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/BolivarTech/magi/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/BolivarTech/magi/releases/tag/v0.1.2
 [0.1.1]: https://github.com/BolivarTech/magi/releases/tag/v0.1.1
 [0.1.0]: https://github.com/BolivarTech/magi/releases/tag/v0.1.0
