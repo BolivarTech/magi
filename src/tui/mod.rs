@@ -222,7 +222,7 @@ impl App {
     }
 }
 
-pub async fn run_tui_ext(agent: Agent, initial_info: Option<String>) -> anyhow::Result<()> {
+pub async fn run_tui_ext(agent: Agent, startup_notices: Vec<String>) -> anyhow::Result<()> {
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |panic_info| {
         let _ = disable_raw_mode();
@@ -243,8 +243,8 @@ pub async fn run_tui_ext(agent: Agent, initial_info: Option<String>) -> anyhow::
     let (response_tx, response_rx) = mpsc::channel(100);
     let (approval_tx, approval_rx) = mpsc::channel(100);
 
-    if let Some(info) = initial_info {
-        let _ = response_tx.send(AgentResponse::Info(info)).await;
+    for notice in startup_notices {
+        let _ = response_tx.send(AgentResponse::Info(notice)).await;
     }
 
     let mut runner_agent = agent;
@@ -325,16 +325,20 @@ pub async fn run_tui_ext(agent: Agent, initial_info: Option<String>) -> anyhow::
                                                 .unwrap_or_else(|_| {
                                                     crate::DEFAULT_MODEL.to_string()
                                                 });
+                                            // #16: build the refreshed banner before `model` moves.
+                                            let banner = format!(
+                                                "Successfully logged in! Now using Magi API (model: {model}) — no restart needed; prior canned replies cleared."
+                                            );
                                             runner_agent.set_provider(std::sync::Arc::new(
                                                 crate::agent::provider::AnthropicProvider::new(
                                                     api_key, model,
                                                 ),
                                             ));
-                                            let _ = response_tx
-                                                .send(AgentResponse::Info(
-                                                    "Successfully logged in! Provider activated — no restart needed.".to_string(),
-                                                ))
-                                                .await;
+                                            // #16: drop the StaticProvider canned turns so they
+                                            // are not sent to the live model as context.
+                                            runner_agent.clear_history();
+                                            let _ =
+                                                response_tx.send(AgentResponse::Info(banner)).await;
                                         }
                                     }
                                     Err(e) => {

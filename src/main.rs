@@ -203,10 +203,21 @@ async fn main() -> anyhow::Result<()> {
 
     let mut agent = Agent::new(provider);
     let db_path = workspace_root.join(".magi-rs-memory.db");
+    // Notices shown when the TUI starts — the provider banner plus any persistence
+    // or reset warnings that would otherwise be lost to pre-TUI stderr (#7/#11).
+    let mut startup_notices = vec![provider_info];
     match decide_memory_attachment(discover_or_create_master_key().await) {
         MemoryAttachment::Encrypted(master_pwd) => {
-            let memory: Arc<dyn MemoryStore> =
-                Arc::new(EncryptedSqliteMemory::new(db_path, master_pwd)?);
+            let store = EncryptedSqliteMemory::new(db_path, master_pwd)?;
+            // #11: surface a one-time reset notice if incompatible content was discarded.
+            if store.was_reset() {
+                startup_notices.push(
+                    "Note: existing on-disk history used an incompatible/corrupt format and \
+                     has been reset (fresh start)."
+                        .to_string(),
+                );
+            }
+            let memory: Arc<dyn MemoryStore> = Arc::new(store);
             let sessions = memory.list_sessions().await?;
             let session_id = if let Some((id, _)) = sessions.first() {
                 id.clone()
@@ -220,11 +231,13 @@ async fn main() -> anyhow::Result<()> {
             agent.register_tool(Box::new(ProjectFactTool::new(memory.clone())));
         }
         MemoryAttachment::Ephemeral => {
-            eprintln!(
-                "WARNING: could not access the encrypted-memory master key (OS keyring \
-                 unavailable). Running this session WITHOUT persistence — your conversation \
-                 and project knowledge will NOT be saved. Any existing on-disk database is \
-                 left untouched. Run `/login` or check your OS keyring to restore persistence."
+            // #7: surface the no-persistence state in the TUI, not just pre-TUI stderr.
+            startup_notices.push(
+                "WARNING: the OS keyring is unavailable, so this session runs WITHOUT \
+                 persistence — your conversation and project knowledge will NOT be saved \
+                 (any existing on-disk database is left untouched). Run /login or check \
+                 your OS keyring to restore persistence."
+                    .to_string(),
             );
         }
     }
@@ -245,7 +258,7 @@ async fn main() -> anyhow::Result<()> {
     )?));
     agent.register_tool(Box::new(BashTool::new(workspace_root.clone())?));
 
-    crate::tui::run_tui_ext(agent, Some(provider_info)).await?;
+    crate::tui::run_tui_ext(agent, startup_notices).await?;
     Ok(())
 }
 
