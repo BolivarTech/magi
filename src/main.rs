@@ -196,7 +196,8 @@ async fn main() -> anyhow::Result<()> {
     } else {
         (
             Arc::new(StaticProvider),
-            "Static Mode (No API Key found. Please run /login or use ANTHROPIC_API_KEY)"
+            "Static Mode: no API key found. Set ANTHROPIC_API_KEY or use key.txt \
+             (recommended). /login (OAuth) is best-effort and may be rate-limited."
                 .to_string(),
         )
     };

@@ -44,7 +44,7 @@ Most AI coding agents are SaaS-bound and tied to a single vendor. Magi is built 
 
 - A Rust toolchain (stable, edition 2021) — install via [rustup](https://rustup.rs/).
 - `ripgrep` (`rg`) on `PATH` for the `grep` tool.
-- An Anthropic API key (or use `/login` for the OAuth flow).
+- An Anthropic API key from [console.anthropic.com](https://console.anthropic.com/) (**recommended**), set via `ANTHROPIC_API_KEY` or `key.txt`. `/login` (OAuth) also works but is **best-effort** — see [Configuration](#configuration).
 
 ### Build from source
 
@@ -83,7 +83,7 @@ When the agent requests a tool, an inline prompt appears: **`y`** approves, **`c
 
 | Command | Effect |
 |---------|--------|
-| `/login` | Start the OAuth (PKCE) login flow |
+| `/login` | Start the OAuth (PKCE) login flow — **best-effort**, may be rate-limited (see Configuration); prefer an API key |
 | `/logout` | Clear stored API keys |
 | `/clear` | Clear the on-screen conversation |
 | `/help` | Show available commands |
@@ -115,7 +115,11 @@ Resolved in order, first hit wins:
 3. OS keyring, service `magi-rust` (legacy) — auto-migrated to `magi-rs` on read
 4. `key.txt` in the working directory: line 1 = API key, line 2 = optional model
 
-The model is read from `ANTHROPIC_MODEL`, then `key.txt` line 2, defaulting to `claude-sonnet-4-6`. With no key found, the agent falls back to `StaticProvider` and prints a hint to run `/login`.
+The model is read from `ANTHROPIC_MODEL`, then `key.txt` line 2, defaulting to `claude-sonnet-4-6`. With no key found, the agent falls back to `StaticProvider`.
+
+**A standard API key is the recommended, supported path.** Create one at [console.anthropic.com](https://console.anthropic.com/) (with billing enabled) and set `ANTHROPIC_API_KEY` or put it in `key.txt`.
+
+> **`/login` (OAuth) is best-effort.** It reuses Anthropic's Claude Code OAuth client to mint a key on your account — a flow intended for Anthropic's own clients — so it may be **rate-limited, throttled, or blocked** at any time and is not guaranteed. Prefer a standard API key.
 
 > `key.txt` and its variants are gitignored. Never commit a real key.
 
