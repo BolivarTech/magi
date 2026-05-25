@@ -151,7 +151,6 @@ impl EncryptedSqliteMemory {
 
     /// Whether the on-disk DB had real content discarded (reset to fresh) during
     /// construction (#11). The caller surfaces this to the user at startup.
-    #[allow(dead_code)]
     pub fn was_reset(&self) -> bool {
         self.was_reset
     }
