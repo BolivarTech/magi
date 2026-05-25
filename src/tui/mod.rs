@@ -325,18 +325,24 @@ pub async fn run_tui_ext(agent: Agent, startup_notices: Vec<String>) -> anyhow::
                                                 .unwrap_or_else(|_| {
                                                     crate::DEFAULT_MODEL.to_string()
                                                 });
-                                            // #16: build the refreshed banner before `model` moves.
-                                            let banner = format!(
-                                                "Successfully logged in! Now using Magi API (model: {model}) — no restart needed; prior canned replies cleared."
-                                            );
+                                            // #16: only the canned StaticProvider history is safe to
+                                            // clear; a re-login over a live provider must keep the
+                                            // real conversation. Read before the swap, build banner
+                                            // before `model` moves.
+                                            let was_static = runner_agent.provider_is_static();
+                                            let banner = if was_static {
+                                                format!("Successfully logged in! Now using Magi API (model: {model}) — no restart needed; prior canned replies cleared.")
+                                            } else {
+                                                format!("Re-authenticated. Now using Magi API (model: {model}) — conversation kept.")
+                                            };
                                             runner_agent.set_provider(std::sync::Arc::new(
                                                 crate::agent::provider::AnthropicProvider::new(
                                                     api_key, model,
                                                 ),
                                             ));
-                                            // #16: drop the StaticProvider canned turns so they
-                                            // are not sent to the live model as context.
-                                            runner_agent.clear_history();
+                                            if was_static {
+                                                runner_agent.clear_history();
+                                            }
                                             let _ =
                                                 response_tx.send(AgentResponse::Info(banner)).await;
                                         }

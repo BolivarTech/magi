@@ -30,6 +30,13 @@ pub trait Provider: Send + Sync {
         tools: &[Box<dyn Tool>],
     ) -> Result<BoxStream<'static, Result<ResponseChunk>>>;
 
+    /// Whether this provider is the canned [`StaticProvider`] (no API key).
+    /// Default `false`; `StaticProvider` overrides to `true`. Lets callers tell
+    /// canned startup state from a live provider (#16).
+    fn is_static(&self) -> bool {
+        false
+    }
+
     /// Sends a list of messages and returns the full message (blocking until done).
     /// Retry wrapper; used by tests and available to non-streaming callers; production uses
     /// `query_streaming`.
@@ -155,6 +162,10 @@ impl Provider for StaticProvider {
             Ok(ResponseChunk::MessageDone(msg)),
         ];
         Ok(Box::pin(stream::iter(chunks)))
+    }
+
+    fn is_static(&self) -> bool {
+        true
     }
 }
 

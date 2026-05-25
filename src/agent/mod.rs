@@ -67,9 +67,8 @@ impl Agent {
     /// Whether the active provider is the canned [`StaticProvider`] (no API key).
     /// Used by `/login` to decide whether the prior history is canned noise (safe
     /// to clear) vs a real conversation (must be kept).
-    #[allow(dead_code)]
     pub fn provider_is_static(&self) -> bool {
-        unimplemented!("provider_is_static — implemented in GREEN")
+        self.provider.is_static()
     }
 
     /// Loads history from the persistent memory store.
