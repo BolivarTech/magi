@@ -770,6 +770,11 @@ fn effective_highlight_symbol(mode: AppMode) -> &'static str {
     }
 }
 
+#[allow(dead_code)] // wired into ui() in the GREEN commit
+fn tail_lines(lines: Vec<String>, _max: usize) -> Vec<String> {
+    lines // stub: returns input unchanged — fails the "keeps_last_n" and "shifts_by_one" tests
+}
+
 fn ui(f: &mut Frame, app: &App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -987,5 +992,55 @@ mod tests {
         assert_eq!(effective_highlight_symbol(AppMode::Selection), ">> ");
         assert_eq!(effective_highlight_symbol(AppMode::Visual), ">> ");
         assert_eq!(effective_highlight_symbol(AppMode::Normal), "");
+    }
+
+    #[test]
+    fn test_tail_lines_keeps_last_n_when_input_exceeds_max() {
+        let input: Vec<String> = (0..10).map(|i| format!("line {i}")).collect();
+        let out = tail_lines(input, 3);
+        assert_eq!(
+            out,
+            vec![
+                "line 7".to_string(),
+                "line 8".to_string(),
+                "line 9".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn test_tail_lines_returns_input_unchanged_when_max_ge_len() {
+        let input: Vec<String> = vec!["a".into(), "b".into(), "c".into()];
+        assert_eq!(tail_lines(input.clone(), 3), input); // equal
+        assert_eq!(tail_lines(input.clone(), 100), input); // greater
+    }
+
+    #[test]
+    fn test_tail_lines_max_zero_returns_input_unchanged() {
+        // Defensive: max=0 (degenerate viewport) is a no-op — never lose data on resize-to-zero.
+        let input: Vec<String> = vec!["a".into(), "b".into()];
+        assert_eq!(tail_lines(input.clone(), 0), input);
+    }
+
+    #[test]
+    fn test_tail_lines_empty_input() {
+        let out = tail_lines(Vec::<String>::new(), 5);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn test_tail_lines_shifts_by_one_when_input_grows_by_one() {
+        // Simulates a streaming tick: the tail visually scrolls up by one line.
+        let before: Vec<String> = (0..20).map(|i| format!("L{i}")).collect();
+        let mut after = before.clone();
+        after.push("L20".into());
+        let max = 10;
+        let tail_before = tail_lines(before, max);
+        let tail_after = tail_lines(after, max);
+        // Tail moves forward by 1: L10..=L19  →  L11..=L20.
+        assert_eq!(tail_before.first().unwrap(), "L10");
+        assert_eq!(tail_before.last().unwrap(), "L19");
+        assert_eq!(tail_after.first().unwrap(), "L11");
+        assert_eq!(tail_after.last().unwrap(), "L20");
     }
 }
