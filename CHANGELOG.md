@@ -13,6 +13,29 @@ changes and the **patch** position signals backward-compatible fixes.
 - **#14** Envelope encryption (key rotation / crypto-shredding / multi-tenancy) — enterprise roadmap.
 - **#17** Runtime warning visibility — malformed tool-JSON (#4) and poison recovery (#8) warnings remain stderr-only under the alt-screen; startup/login warnings are already surfaced.
 - **#18** Blob version-dispatch / migration — the blob version byte is detection-only; a future format bump still needs a migrate-or-reset path.
+- **OpenAI key in keyring / `key.txt`** — `OPENAI_API_KEY` is currently env-only; aligning it with the Anthropic discovery order is a tracked follow-up.
+
+## [0.3.0] - 2026-05-25
+
+First multi-backend release. Magi can now talk to any OpenAI-compatible Chat
+Completions endpoint — local **Ollama**, OpenAI, Groq, OpenRouter — selected by
+a new `magi.toml`, alongside the existing Anthropic Messages API path. No
+regression: the Anthropic surface and all its tests are byte-equivalent.
+
+### Added
+- **`OpenAiCompatibleProvider`** (`src/agent/provider.rs`) — Chat Completions over `{base_url}/chat/completions` with `stream:true`, a `stream::unfold` SSE state machine that finalizes on `finish_reason` / `[DONE]` / stream-end with an idempotent `done` guard (`MessageDone` emitted exactly once), `data:` prefix tolerant of optional space, malformed lines swallowed, HTTP non-2xx surfaced as `Err`, `MAX_SSE_BUFFER_BYTES` (8 MiB) cap. Constructor takes a named-field `OpenAiSettings` struct (no positional same-type swap).
+- **`magi.toml` configuration** (`src/config.rs`) — `MagiConfig` / `OpenAiConfig` / `AnthropicConfig`, `serde(deny_unknown_fields)` so typos (and `api_key`) fail at parse time, **env > TOML > defaults** precedence (`MAGI_PROVIDER` / `OPENAI_BASE_URL` / `OPENAI_MODEL`). `MagiConfig::load` distinguishes `NotFound` (silent default) from other I/O errors (surfaced as a TUI startup notice). Reference `magi.toml.example` is committed; user-local `magi.toml` is gitignored.
+- **Coalesced `map_messages` / `map_tools`.** Same-turn parallel `Content::ToolUse` blocks collapse into ONE assistant message with a `tool_calls` array; User `Text`/`ToolResult` are emitted in **content order** (each block as its own OpenAI message). `Tool::input_schema` forwards as `tools:[{type:"function",function:{…}}]`.
+- **Bounded tool-call accumulator.** `MAX_TOOL_CALL_SLOTS = 64` caps streamed `tool_calls[].index`; over-cap **warns** (`eprintln`) instead of dropping silently (RF-8). Orphan `arguments` fragments (slot has neither id nor name yet) are skipped with a warning to prevent mis-attribution.
+- **`tests-121` (was 95).** 26 new tests — config parsing & precedence; coalesced message mapping; mixed-content User ordering; OpenAI text streaming (with [DONE], without [DONE]/finish_reason, malformed line, HTTP error, stream-end-only finalize); fragmented `tool_calls` assembly; bounded index; post-stop TextDelta suppression; args-before-id skip; `resolve_provider` wiring.
+
+### Security
+- **`OPENAI_API_KEY` from environment only.** Never read from `magi.toml`; `deny_unknown_fields` rejects an `api_key` field at parse time. The dummy `"ollama"` fallback for local Ollama is documented inline; real backends fail loudly with 401 if the env var is unset.
+- **Keyring separation unchanged.** The Anthropic key (`magi-rs`) and DB master key (`magi-rs-internal`) remain in separate keyring services; `test_agent_history_resilience_to_key_rotation` is untouched.
+
+### Documentation
+- **README "Configuration: `magi.toml`" section** — full precedence table for the four settings (`MAGI_PROVIDER`/`OPENAI_BASE_URL`/`OPENAI_MODEL`/`ANTHROPIC_MODEL`), keys-never-in-TOML invariant (and the `deny_unknown_fields` parse-error consequence), Ollama quickstart.
+- **`reqwest::Client` no-timeout rationale documented** — local Ollama can spend tens of seconds on cold-load before the first SSE event; a total-request timeout would truncate healthy long streams. Stream-side termination is handled by the three finalize triggers + `MAX_SSE_BUFFER_BYTES`.
 
 ## [0.2.1] - 2026-05-25
 
