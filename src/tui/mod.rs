@@ -741,18 +741,33 @@ fn wrap_message(text: &str, width: usize) -> Vec<String> {
     out
 }
 
-#[allow(dead_code)] // wired into ui() in the GREEN commit
-fn effective_selection(
-    _mode: AppMode,
-    _selected_index: usize,
-    _messages_len: usize,
-) -> Option<usize> {
-    None // stub — fails the Normal-follow-tail and Selection-uses-index assertions
+/// Selection index for the conversation `List` given the current UI mode.
+///
+/// In Selection / Visual mode the user-chosen index is used.  In Normal mode
+/// the LAST message is selected so ratatui auto-scrolls the pane to keep the
+/// newest message visible (follow-tail behavior). Empty history → `None` so
+/// the list renders without an out-of-bounds selection.
+fn effective_selection(mode: AppMode, selected_index: usize, messages_len: usize) -> Option<usize> {
+    if messages_len == 0 {
+        return None;
+    }
+    match mode {
+        AppMode::Selection | AppMode::Visual => Some(selected_index),
+        AppMode::Normal => Some(messages_len - 1),
+    }
 }
 
-#[allow(dead_code)] // wired into ui() in the GREEN commit
-fn effective_highlight_symbol(_mode: AppMode) -> &'static str {
-    "??" // stub — distinct from both possible real returns so the test fails clearly
+/// Highlight-symbol prefix for the conversation `List`.
+///
+/// Returns `">> "` only in Selection / Visual modes (where the user is
+/// actively picking a message); Normal mode returns `""` so the auto-scroll
+/// pin from `effective_selection` is invisible.
+fn effective_highlight_symbol(mode: AppMode) -> &'static str {
+    if matches!(mode, AppMode::Selection | AppMode::Visual) {
+        ">> "
+    } else {
+        ""
+    }
 }
 
 fn ui(f: &mut Frame, app: &App) {
@@ -787,8 +802,8 @@ fn ui(f: &mut Frame, app: &App) {
         .collect();
 
     let mut state = ListState::default();
-    if app.mode == AppMode::Selection || app.mode == AppMode::Visual {
-        state.select(Some(app.selected_index));
+    if let Some(idx) = effective_selection(app.mode, app.selected_index, app.messages.len()) {
+        state.select(Some(idx));
     }
 
     let messages_list = List::new(messages)
@@ -797,7 +812,7 @@ fn ui(f: &mut Frame, app: &App) {
                 .borders(Borders::ALL)
                 .title("Conversation History"),
         )
-        .highlight_symbol(">> ");
+        .highlight_symbol(effective_highlight_symbol(app.mode));
     f.render_stateful_widget(messages_list, chunks[0], &mut state);
 
     let mut input_text = Text::raw(app.input.as_str());
