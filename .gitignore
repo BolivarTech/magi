@@ -1,7 +1,5 @@
 /target
-key.txt
-key.txt.bak
-key.txt.org
+key.txt*
 magi.toml
 *.tmp
 
