@@ -1157,6 +1157,21 @@ mod tests {
         assert_eq!(v[0]["content"], "out");
     }
 
+    #[test]
+    fn test_map_user_text_before_toolresult_preserves_order() {
+        // Mixed User content [Text, ToolResult] must map in order: user then tool.
+        let msgs = vec![Message { role: Role::User, content: vec![
+            Content::Text { text: "ctx".into() },
+            Content::ToolResult { tool_use_id: "c1".into(), content: "out".into(), is_error: false },
+        ]}];
+        let v = serde_json::to_value(map_messages(&msgs)).unwrap();
+        assert_eq!(v.as_array().unwrap().len(), 2);
+        assert_eq!(v[0]["role"], "user");
+        assert_eq!(v[0]["content"], "ctx");
+        assert_eq!(v[1]["role"], "tool");
+        assert_eq!(v[1]["tool_call_id"], "c1");
+    }
+
     // ─── Anthropic retry test (unmodified) ────────────────────────────────────
 
     #[tokio::test]
