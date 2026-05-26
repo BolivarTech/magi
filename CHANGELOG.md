@@ -15,6 +15,20 @@ changes and the **patch** position signals backward-compatible fixes.
 - **#18** Blob version-dispatch / migration — the blob version byte is detection-only; a future format bump still needs a migrate-or-reset path.
 - **OpenAI key in keyring / `key.txt`** — `OPENAI_API_KEY` is currently env-only; aligning it with the Anthropic discovery order is a tracked follow-up.
 
+## [0.3.1] - 2026-05-26
+
+TUI rendering hotfix — two pre-existing UX bugs found during the 0.3.0
+end-to-end smoke (long-reply truncation + new-message scroll-off). Both
+affect all providers (Anthropic, OpenAI-compatible, Static). Render-only,
+no API / trait / contract changes.
+
+### Fixed
+- **Conversation pane truncated long messages** at the panel's right border instead of wrapping. New `wrap_message` helper (`src/tui/mod.rs`) word-wraps each message by `chars().count()` (UTF-8 char-safe) to the panel's inner width, preserves existing `\n` as hard breaks, and hard-splits absurdly long words. One message stays one `ListItem` so Selection / Visual navigation (`app.selected_index → app.messages[i]`) is unchanged.
+- **Conversation pane did not auto-scroll** when new messages overflowed the bottom. New `effective_selection` / `effective_highlight_symbol` helpers pin the last message as the selected row in Normal mode (ratatui's `List` auto-scrolls to keep the selected item visible) while suppressing the `">> "` highlight prefix so the pin is invisible. Selection / Visual modes still show the prefix and use the user-chosen index.
+
+### Added
+- 10 new tests covering the three render-time helpers (word wrap normal / multibyte / oversized word / embedded newlines / width-0 / empty; follow-tail in Normal mode / chosen index in Selection / Visual / empty messages; highlight-symbol by mode). Total tests: **131** (was 121).
+
 ## [0.3.0] - 2026-05-25
 
 First multi-backend release. Magi can now talk to any OpenAI-compatible Chat
