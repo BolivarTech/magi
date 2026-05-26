@@ -523,8 +523,23 @@ impl OaiState {
     /// Drains complete SSE blocks from `buffer`, pushing `TextDelta` chunks and
     /// finalizing on a `finish_reason` or the `[DONE]` sentinel. Malformed `data:`
     /// payloads are swallowed so one bad event never aborts the stream.
+    ///
+    /// Once `self.done` is set (the stream was finalized in a previous chunk),
+    /// any subsequent post-stop block — text or tool — is dropped on entry
+    /// (MAGI Loop 2 caveat C1). The stream-end branch in `stream_messages`
+    /// still calls `finalize()` directly; the `done` guard makes that path
+    /// idempotent.
     fn process_buffer(&mut self) {
+        if self.done {
+            return;
+        }
         for block in drain_sse_events(&mut self.buffer) {
+            // Same-chunk short-circuit: if a previous block in this same
+            // `process_buffer` call triggered `finalize()`, drop the rest of
+            // the post-stop blocks. Drains the iterator without processing.
+            if self.done {
+                continue;
+            }
             for line in block.lines() {
                 // Tolerate `data:` with or without the optional space (MAGI iter-2).
                 let Some(rest) = line.strip_prefix("data:") else {
@@ -578,14 +593,28 @@ impl OaiState {
                                 }
                             }
                             if let Some(args) = f.arguments {
+                                // MAGI Loop 2 caveat C2: an `arguments`-only fragment
+                                // arriving before any fragment carries id or name
+                                // means we have nothing to attach the args to (the
+                                // resulting ToolUse would lack id+name and is dropped
+                                // by `finalize`'s untouched-slot skip — so the args
+                                // are lost regardless). Drop the entire fragment
+                                // here: do not accumulate, do not push a delta with
+                                // an empty id.
+                                if slot.0.is_empty() && slot.1.is_empty() {
+                                    eprintln!(
+                                        "WARNING: tool_call args fragment arrived at slot {} before id/name; skipping",
+                                        tc.index
+                                    );
+                                    continue;
+                                }
                                 slot.2.push_str(&args);
                                 // MAGI: OpenAI streams id+name in the first chunk; subsequent
                                 // chunks carry args only — `slot.0` is already populated by the
                                 // time any args arrive (args-before-id never occurs in a well-
-                                // formed stream). If a provider violates this, `slot.0` is the
-                                // empty string and the delta carries an empty id; downstream
-                                // assembly in `finalize` still emits the ToolUse correctly
-                                // because the final id arrives before `finish_reason`.
+                                // formed stream). The C2 guard above defends the misbehaving
+                                // case; here `slot.0` is guaranteed non-empty when we reach
+                                // the delta push, so the delta carries a real id.
                                 self.pending.push_back(Ok(ResponseChunk::ToolUseInputDelta {
                                     id: slot.0.clone(),
                                     input_json: args,
