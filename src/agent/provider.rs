@@ -582,6 +582,13 @@ impl OaiState {
                             }
                             if let Some(args) = f.arguments {
                                 slot.2.push_str(&args);
+                                // MAGI: OpenAI streams id+name in the first chunk; subsequent
+                                // chunks carry args only — `slot.0` is already populated by the
+                                // time any args arrive (args-before-id never occurs in a well-
+                                // formed stream). If a provider violates this, `slot.0` is the
+                                // empty string and the delta carries an empty id; downstream
+                                // assembly in `finalize` still emits the ToolUse correctly
+                                // because the final id arrives before `finish_reason`.
                                 self.pending.push_back(Ok(ResponseChunk::ToolUseInputDelta {
                                     id: slot.0.clone(),
                                     input_json: args,

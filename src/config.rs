@@ -5,8 +5,8 @@
 //! Persistent magi-rs configuration from `magi.toml`. NON-SECRET only — API keys
 //! never live here (env/keyring/key.txt).
 
-// Config types are not yet wired to main.rs — wiring happens in Task 6.
-#![allow(dead_code)]
+// Public API of this module is consumed by `main.rs` (Task 6 wiring) and by
+// tests; no items here should be flagged dead_code under any cfg.
 
 use serde::Deserialize;
 use std::path::Path;
