@@ -317,7 +317,6 @@ struct OpenAiFunction {
 /// (each as its own message), so a mixed `[Text, ToolResult]` content list
 /// produces `[user, tool]` — not the inverted `[tool, user]` that deferred
 /// Text accumulation would cause.
-#[allow(dead_code)] // consumed by OpenAiCompatibleProvider in Task 4
 fn map_messages(messages: &[Message]) -> Vec<OpenAiMessage> {
     let mut out = Vec::new();
     for m in messages {
@@ -414,13 +413,11 @@ struct OpenAiStreamDelta {
     #[serde(default)]
     content: Option<String>,
     #[serde(default)]
-    #[allow(dead_code)] // assembled in Task 5; field parsed but unused this task
     tool_calls: Option<Vec<OpenAiToolCallDelta>>,
 }
 
 /// A streamed tool-call fragment, keyed by `index` across chunks (Task 5 assembly).
 #[derive(Debug, Deserialize)]
-#[allow(dead_code)] // fields consumed by the Task 5 tool-call assembler
 struct OpenAiToolCallDelta {
     index: usize,
     #[serde(default)]
@@ -430,7 +427,6 @@ struct OpenAiToolCallDelta {
 }
 
 #[derive(Debug, Default, Deserialize)]
-#[allow(dead_code)] // fields consumed by the Task 5 tool-call assembler
 struct OpenAiFnDelta {
     #[serde(default)]
     name: Option<String>,
@@ -452,7 +448,6 @@ pub struct OpenAiSettings {
 /// Caps tool-call slots from a network-controlled `index` to avoid an unbounded
 /// `Vec::resize` (OOM/DoS). 64 ≫ any real parallel-tool-call count. Used by the
 /// Task 5 tool-call assembler.
-#[allow(dead_code)] // referenced by the Task 5 tool-call assembler
 const MAX_TOOL_CALL_SLOTS: usize = 64;
 
 /// A provider that talks to any OpenAI Chat Completions-compatible backend
@@ -493,8 +488,8 @@ struct OaiState {
     buffer: Vec<u8>,
     /// Assembled content blocks for the final assistant message.
     full_content: Vec<Content>,
-    /// Per-`index` tool-call accumulators `(id, name, args_json)`. Stays empty in
-    /// Task 4 (text path); filled by the Task 5 tool-call assembler.
+    /// Per-`index` tool-call accumulators `(id, name, args_json)`, filled by the
+    /// streamed tool-call assembler and drained by [`OaiState::finalize`].
     tool_accs: Vec<(String, String, String)>,
     /// Chunks ready to yield from the stream.
     pending: std::collections::VecDeque<Result<ResponseChunk>>,
@@ -506,8 +501,8 @@ struct OaiState {
 
 impl OaiState {
     /// Emits the assembled assistant message exactly once (idempotent via `done`).
-    /// Drains any accumulated tool-call slots through [`finalize_tool`]; in Task 4
-    /// `tool_accs` is always empty, so this is a text-only finalize.
+    /// Drains any accumulated tool-call slots through [`finalize_tool`], skipping
+    /// untouched slots (id and name both empty) left by a dropped over-cap index.
     fn finalize(&mut self) {
         if self.done {
             return;
@@ -1709,6 +1704,45 @@ mod tests {
                 .filter(|c| matches!(c, Content::ToolUse { .. }))
                 .count(),
             0
+        );
+    }
+
+    #[tokio::test]
+    async fn test_openai_finalizes_on_stream_end_without_finish_or_done() {
+        // I-1: body has content but NO finish_reason and NO [DONE] sentinel; the
+        // stream-end branch must flush the buffer and finalize exactly one
+        // MessageDone carrying the assembled text.
+        let mut server = Server::new_async().await;
+        let url = server.url();
+        let sse = "data: {\"choices\":[{\"delta\":{\"content\":\"only\"}}]}\n\n";
+        let _m = server
+            .mock("POST", "/chat/completions")
+            .with_status(200)
+            .with_header("content-type", "text/event-stream")
+            .with_body(sse)
+            .create_async()
+            .await;
+        let p = OpenAiCompatibleProvider::new(OpenAiSettings {
+            base_url: url,
+            api_key: "k".into(),
+            model: "m".into(),
+        });
+        let mut stream = p
+            .stream_messages(&[Message::user("hi")], &[])
+            .await
+            .unwrap();
+        let mut done = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            if let Ok(ResponseChunk::MessageDone(m)) = chunk {
+                done.push(m);
+            }
+        }
+        assert_eq!(done.len(), 1, "exactly one MessageDone on stream end");
+        assert_eq!(
+            done[0].content,
+            vec![Content::Text {
+                text: "only".into()
+            }]
         );
     }
 }
