@@ -1,7 +1,6 @@
 /target
-key.txt
-key.txt.bak
-key.txt.org
+key.txt*
+magi.toml
 *.tmp
 
 # Local encrypted conversation/knowledge DB (runtime; per-machine, never commit)

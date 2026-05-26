@@ -254,6 +254,481 @@ enum AnthropicDelta {
     },
 }
 
+// ─── OpenAI-compatible structs ────────────────────────────────────────────────
+
+#[derive(Debug, Serialize)]
+struct OpenAiRequest {
+    model: String,
+    messages: Vec<OpenAiMessage>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    tools: Vec<OpenAiTool>,
+    stream: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct OpenAiMessage {
+    role: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_calls: Option<Vec<OpenAiToolCall>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_call_id: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct OpenAiToolCall {
+    id: String,
+    #[serde(rename = "type")]
+    kind: String,
+    function: OpenAiToolCallFn,
+}
+
+#[derive(Debug, Serialize)]
+struct OpenAiToolCallFn {
+    name: String,
+    arguments: String,
+}
+
+#[derive(Debug, Serialize)]
+struct OpenAiTool {
+    #[serde(rename = "type")]
+    kind: String,
+    function: OpenAiFunction,
+}
+
+#[derive(Debug, Serialize)]
+struct OpenAiFunction {
+    name: String,
+    description: String,
+    parameters: serde_json::Value,
+}
+
+/// Maps magi `Message`s → OpenAI messages (RF-5). Coalesces per magi message:
+/// an assistant turn's Text → `content` and its ToolUse blocks → ONE `tool_calls`
+/// array (OpenAI requires parallel calls in a single assistant message). A user
+/// turn's Text → `role:"user"`; each ToolResult → its own `role:"tool"` message.
+///
+/// # Ordering guarantee
+/// Per-message ordering preserves user → assistant(tool_calls) → tool(results)
+/// sequence, satisfying OpenAI's "tool message must follow the assistant
+/// tool_calls" contract for the typical single-turn-per-message history magi
+/// builds. User Text and ToolResult blocks are emitted **in content order**
+/// (each as its own message), so a mixed `[Text, ToolResult]` content list
+/// produces `[user, tool]` — not the inverted `[tool, user]` that deferred
+/// Text accumulation would cause.
+fn map_messages(messages: &[Message]) -> Vec<OpenAiMessage> {
+    let mut out = Vec::new();
+    for m in messages {
+        match m.role {
+            Role::Assistant => {
+                let mut text: Option<String> = None;
+                let mut calls: Vec<OpenAiToolCall> = Vec::new();
+                for c in &m.content {
+                    match c {
+                        Content::Text { text: t } => {
+                            text.get_or_insert_with(String::new).push_str(t);
+                        }
+                        Content::ToolUse { id, name, input } => calls.push(OpenAiToolCall {
+                            id: id.clone(),
+                            kind: "function".into(),
+                            function: OpenAiToolCallFn {
+                                name: name.clone(),
+                                arguments: input.to_string(),
+                            },
+                        }),
+                        Content::ToolResult { .. } => {} // assistants don't carry tool results
+                    }
+                }
+                if text.is_some() || !calls.is_empty() {
+                    out.push(OpenAiMessage {
+                        role: "assistant".into(),
+                        content: text,
+                        tool_calls: if calls.is_empty() { None } else { Some(calls) },
+                        tool_call_id: None,
+                    });
+                }
+            }
+            Role::User => {
+                for c in &m.content {
+                    match c {
+                        Content::Text { text: t } => out.push(OpenAiMessage {
+                            role: "user".into(),
+                            content: Some(t.clone()),
+                            tool_calls: None,
+                            tool_call_id: None,
+                        }),
+                        Content::ToolResult {
+                            tool_use_id,
+                            content,
+                            ..
+                        } => out.push(OpenAiMessage {
+                            role: "tool".into(),
+                            content: Some(content.clone()),
+                            tool_calls: None,
+                            tool_call_id: Some(tool_use_id.clone()),
+                        }),
+                        Content::ToolUse { .. } => {} // users don't issue tool calls
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+fn map_tools(tools: &[Box<dyn Tool>]) -> Vec<OpenAiTool> {
+    tools
+        .iter()
+        .map(|t| OpenAiTool {
+            kind: "function".into(),
+            function: OpenAiFunction {
+                name: t.name().to_string(),
+                description: t.description().to_string(),
+                parameters: t.input_schema(),
+            },
+        })
+        .collect()
+}
+
+// ─── OpenAI stream-deserialization structs ────────────────────────────────────
+
+/// One OpenAI Chat Completions SSE chunk (`data:` payload).
+#[derive(Debug, Deserialize)]
+struct OpenAiStreamChunk {
+    #[serde(default)]
+    choices: Vec<OpenAiChoice>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiChoice {
+    #[serde(default)]
+    delta: OpenAiStreamDelta,
+    #[serde(default)]
+    finish_reason: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct OpenAiStreamDelta {
+    #[serde(default)]
+    content: Option<String>,
+    #[serde(default)]
+    tool_calls: Option<Vec<OpenAiToolCallDelta>>,
+}
+
+/// A streamed tool-call fragment, keyed by `index` across chunks (Task 5 assembly).
+#[derive(Debug, Deserialize)]
+struct OpenAiToolCallDelta {
+    index: usize,
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    function: Option<OpenAiFnDelta>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct OpenAiFnDelta {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    arguments: Option<String>,
+}
+
+// ─── OpenAI-compatible provider ───────────────────────────────────────────────
+
+/// Connection settings for [`OpenAiCompatibleProvider`]. Named fields make the
+/// base_url/api_key/model order a compile-time non-issue (no positional swap).
+pub struct OpenAiSettings {
+    pub base_url: String,
+    pub api_key: String,
+    pub model: String,
+}
+
+/// Caps tool-call slots from a network-controlled `index` to avoid an unbounded
+/// `Vec::resize` (OOM/DoS). 64 ≫ any real parallel-tool-call count. Used by the
+/// Task 5 tool-call assembler.
+const MAX_TOOL_CALL_SLOTS: usize = 64;
+
+/// A provider that talks to any OpenAI Chat Completions-compatible backend
+/// (OpenAI, Ollama, Groq, OpenRouter, …) via a configurable `base_url`.
+pub struct OpenAiCompatibleProvider {
+    client: reqwest::Client,
+    base_url: String,
+    api_key: String,
+    model: String,
+}
+
+impl OpenAiCompatibleProvider {
+    /// Constructs the provider with a fresh `reqwest::Client`. No `.timeout(...)`
+    /// is set on the client — the OpenAI/Ollama stream is intentionally unbounded
+    /// at the client level. Local Ollama can spend tens of seconds on cold-load
+    /// before the first SSE event arrives; a total-request timeout (which is what
+    /// `reqwest::Client::builder().timeout(...)` configures) would truncate healthy
+    /// long streams. Stream-side termination is handled by the unfold state
+    /// machine (finalize on `finish_reason` / `[DONE]` / stream-end) plus the
+    /// 8 MiB [`MAX_SSE_BUFFER_BYTES`] cap that aborts on unbounded buffering
+    /// without an event boundary. (MAGI Checkpoint 2 iter-2 fix.)
+    pub fn new(s: OpenAiSettings) -> Self {
+        // No total-request timeout: streaming generations (esp. local Ollama) run
+        // long; reqwest `.timeout()` is a TOTAL deadline and would truncate healthy
+        // streams (MAGI iter-2). Parity with AnthropicProvider (no timeout). Anti-OOM
+        // is the bounded tool-call index (Task 5) and the SSE buffer cap, not a
+        // timeout.
+        Self {
+            client: reqwest::Client::new(),
+            base_url: s.base_url,
+            api_key: s.api_key,
+            model: s.model,
+        }
+    }
+}
+
+/// Streaming state for the OpenAI SSE `unfold`. Owns the byte source and the
+/// accumulators for the in-progress assistant message.
+struct OaiState {
+    /// Boxed byte source derived from `reqwest::Response::bytes_stream()`. Each
+    /// item is the raw chunk as `Vec<u8>` (or a network error). Mapping to
+    /// `Vec<u8>` at the boundary avoids naming `bytes::Bytes` (not a direct dep)
+    /// while preserving the streaming behavior.
+    src: BoxStream<'static, Result<Vec<u8>>>,
+    /// Raw SSE bytes accumulated until an event boundary (`"\n\n"`).
+    buffer: Vec<u8>,
+    /// Assembled content blocks for the final assistant message.
+    full_content: Vec<Content>,
+    /// Per-`index` tool-call accumulators `(id, name, args_json)`, filled by the
+    /// streamed tool-call assembler and drained by [`OaiState::finalize`].
+    tool_accs: Vec<(String, String, String)>,
+    /// Chunks ready to yield from the stream.
+    pending: std::collections::VecDeque<Result<ResponseChunk>>,
+    /// Whether `MessageDone` was already emitted (idempotent finalize).
+    done: bool,
+    /// Whether the byte source is exhausted.
+    src_done: bool,
+}
+
+impl OaiState {
+    /// Emits the assembled assistant message exactly once (idempotent via `done`).
+    /// Drains any accumulated tool-call slots through [`finalize_tool`], skipping
+    /// untouched slots (id and name both empty) left by a dropped over-cap index.
+    fn finalize(&mut self) {
+        if self.done {
+            return;
+        }
+        for acc in std::mem::take(&mut self.tool_accs) {
+            // Skip untouched slots (id AND name empty) so a gap left by a dropped
+            // over-cap index never emits a ghost ToolUse with an empty name.
+            if acc.0.is_empty() && acc.1.is_empty() {
+                continue;
+            }
+            finalize_tool(Some(acc), &mut self.full_content);
+        }
+        self.pending
+            .push_back(Ok(ResponseChunk::MessageDone(Message {
+                role: Role::Assistant,
+                content: self.full_content.clone(),
+            })));
+        self.done = true;
+    }
+
+    /// Drains complete SSE blocks from `buffer`, pushing `TextDelta` chunks and
+    /// finalizing on a `finish_reason` or the `[DONE]` sentinel. Malformed `data:`
+    /// payloads are swallowed so one bad event never aborts the stream.
+    ///
+    /// Once `self.done` is set (the stream was finalized in a previous chunk),
+    /// any subsequent post-stop block — text or tool — is dropped on entry
+    /// (MAGI Loop 2 caveat C1). The stream-end branch in `stream_messages`
+    /// still calls `finalize()` directly; the `done` guard makes that path
+    /// idempotent.
+    fn process_buffer(&mut self) {
+        if self.done {
+            return;
+        }
+        for block in drain_sse_events(&mut self.buffer) {
+            // Same-chunk short-circuit: if a previous block in this same
+            // `process_buffer` call triggered `finalize()`, drop the rest of
+            // the post-stop blocks. Drains the iterator without processing.
+            if self.done {
+                continue;
+            }
+            for line in block.lines() {
+                // Tolerate `data:` with or without the optional space (MAGI iter-2).
+                let Some(rest) = line.strip_prefix("data:") else {
+                    continue;
+                };
+                let data = rest.trim_start();
+                if data.trim() == "[DONE]" {
+                    self.finalize();
+                    continue;
+                }
+                let Ok(parsed) = serde_json::from_str::<OpenAiStreamChunk>(data) else {
+                    continue;
+                };
+                let Some(choice) = parsed.choices.into_iter().next() else {
+                    continue;
+                };
+                if let Some(text) = choice.delta.content {
+                    if let Some(Content::Text { text: existing }) = self.full_content.last_mut() {
+                        existing.push_str(&text);
+                    } else {
+                        self.full_content.push(Content::Text { text: text.clone() });
+                    }
+                    self.pending.push_back(Ok(ResponseChunk::TextDelta(text)));
+                }
+                if let Some(tcs) = choice.delta.tool_calls {
+                    for tc in tcs {
+                        if tc.index >= MAX_TOOL_CALL_SLOTS {
+                            // bound (anti-OOM); warn instead of silent drop (RF-8, MAGI iter-2)
+                            eprintln!(
+                                "WARNING: tool_call index {} exceeds cap {}; dropping",
+                                tc.index, MAX_TOOL_CALL_SLOTS
+                            );
+                            continue;
+                        }
+                        if self.tool_accs.len() <= tc.index {
+                            self.tool_accs.resize(
+                                tc.index + 1,
+                                (String::new(), String::new(), String::new()),
+                            );
+                        }
+                        let slot = &mut self.tool_accs[tc.index];
+                        if let Some(id) = tc.id {
+                            if !id.is_empty() {
+                                slot.0 = id;
+                            }
+                        }
+                        if let Some(f) = tc.function {
+                            if let Some(name) = f.name {
+                                if !name.is_empty() {
+                                    slot.1 = name;
+                                }
+                            }
+                            if let Some(args) = f.arguments {
+                                // MAGI Loop 2 caveat C2: an `arguments`-only fragment
+                                // arriving before any fragment carries id or name
+                                // means we have nothing to attach the args to (the
+                                // resulting ToolUse would lack id+name and is dropped
+                                // by `finalize`'s untouched-slot skip — so the args
+                                // are lost regardless). Drop the entire fragment
+                                // here: do not accumulate, do not push a delta with
+                                // an empty id.
+                                if slot.0.is_empty() && slot.1.is_empty() {
+                                    eprintln!(
+                                        "WARNING: tool_call args fragment arrived at slot {} before id/name; skipping",
+                                        tc.index
+                                    );
+                                    continue;
+                                }
+                                slot.2.push_str(&args);
+                                // MAGI: OpenAI streams id+name in the first chunk; subsequent
+                                // chunks carry args only — `slot.0` is already populated by the
+                                // time any args arrive (args-before-id never occurs in a well-
+                                // formed stream). The C2 guard above defends the misbehaving
+                                // case; here `slot.0` is guaranteed non-empty when we reach
+                                // the delta push, so the delta carries a real id.
+                                self.pending.push_back(Ok(ResponseChunk::ToolUseInputDelta {
+                                    id: slot.0.clone(),
+                                    input_json: args,
+                                }));
+                            }
+                        }
+                    }
+                }
+                if choice.finish_reason.is_some() {
+                    self.finalize();
+                }
+            }
+        }
+    }
+}
+
+#[async_trait]
+impl Provider for OpenAiCompatibleProvider {
+    async fn stream_messages(
+        &self,
+        messages: &[Message],
+        tools: &[Box<dyn Tool>],
+    ) -> Result<BoxStream<'static, Result<ResponseChunk>>> {
+        let url = format!("{}/chat/completions", self.base_url);
+        let request = OpenAiRequest {
+            model: self.model.clone(),
+            messages: map_messages(messages),
+            tools: map_tools(tools),
+            stream: true,
+        };
+        let response = self
+            .client
+            .post(&url)
+            .header("authorization", format!("Bearer {}", self.api_key))
+            .header("content-type", "application/json")
+            .json(&request)
+            .send()
+            .await?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(anyhow::anyhow!("OpenAI API Error [{}]: {}", status, body));
+        }
+        let st = OaiState {
+            src: response
+                .bytes_stream()
+                .map(|r| {
+                    r.map(|b| b.to_vec())
+                        .map_err(|e| anyhow::anyhow!("Network error: {}", e))
+                })
+                .boxed(),
+            buffer: Vec::new(),
+            full_content: Vec::new(),
+            tool_accs: Vec::new(),
+            pending: std::collections::VecDeque::new(),
+            done: false,
+            src_done: false,
+        };
+        let out = stream::unfold(st, |mut st| async move {
+            loop {
+                if let Some(item) = st.pending.pop_front() {
+                    return Some((item, st));
+                }
+                if st.src_done {
+                    return None;
+                }
+                match st.src.next().await {
+                    Some(Ok(chunk)) => {
+                        if st.buffer.len() + chunk.len() > MAX_SSE_BUFFER_BYTES {
+                            st.pending.push_back(Err(anyhow::anyhow!(
+                                "SSE buffer would exceed {} bytes without an event boundary; aborting to avoid OOM (limit: 8 MiB)",
+                                MAX_SSE_BUFFER_BYTES
+                            )));
+                            st.src_done = true;
+                        } else {
+                            st.buffer.extend_from_slice(&chunk);
+                            st.process_buffer();
+                        }
+                    }
+                    Some(Err(e)) => {
+                        // Error already carries the "Network error: …" context from
+                        // the byte-stream map above.
+                        st.pending.push_back(Err(e));
+                        st.src_done = true;
+                    }
+                    None => {
+                        // Stream-end (MAGI fix c + iter-2): flush a trailing event that
+                        // lacks the final blank line, then emit MessageDone.
+                        st.src_done = true;
+                        if !st.buffer.is_empty() {
+                            st.buffer.extend_from_slice(b"\n\n");
+                            st.process_buffer();
+                        }
+                        st.finalize();
+                    }
+                }
+            }
+        });
+        Ok(Box::pin(out))
+    }
+}
+
+// ─── Anthropic provider ───────────────────────────────────────────────────────
+
 /// A provider that communicates with Anthropic's Messages API.
 pub struct AnthropicProvider {
     client: reqwest::Client,
@@ -927,6 +1402,114 @@ mod tests {
         );
     }
 
+    // ─── Task 3: map_messages / map_tools tests ───────────────────────────────
+
+    #[test]
+    fn test_map_user_and_assistant_text() {
+        let v = serde_json::to_value(map_messages(&[
+            Message::user("hi"),
+            Message::assistant("yo"),
+        ]))
+        .unwrap();
+        assert_eq!(v[0]["role"], "user");
+        assert_eq!(v[0]["content"], "hi");
+        assert_eq!(v[1]["role"], "assistant");
+        assert_eq!(v[1]["content"], "yo");
+    }
+
+    #[test]
+    fn test_map_parallel_tooluse_coalesced_into_one_assistant_message() {
+        // MAGI fix a: two ToolUse in ONE assistant turn → ONE message, tool_calls len 2.
+        let msgs = vec![Message {
+            role: Role::Assistant,
+            content: vec![
+                Content::ToolUse {
+                    id: "c1".into(),
+                    name: "ls".into(),
+                    input: json!({"path": "."}),
+                },
+                Content::ToolUse {
+                    id: "c2".into(),
+                    name: "view".into(),
+                    input: json!({"path": "a"}),
+                },
+            ],
+        }];
+        let v = serde_json::to_value(map_messages(&msgs)).unwrap();
+        assert_eq!(
+            v.as_array().unwrap().len(),
+            1,
+            "parallel tool calls must be ONE assistant message"
+        );
+        assert_eq!(v[0]["role"], "assistant");
+        assert_eq!(v[0]["tool_calls"].as_array().unwrap().len(), 2);
+        assert_eq!(v[0]["tool_calls"][0]["id"], "c1");
+        assert_eq!(v[0]["tool_calls"][0]["function"]["name"], "ls");
+        assert_eq!(v[0]["tool_calls"][1]["id"], "c2");
+    }
+
+    #[test]
+    fn test_map_assistant_text_plus_tooluse_one_message() {
+        let msgs = vec![Message {
+            role: Role::Assistant,
+            content: vec![
+                Content::Text {
+                    text: "calling".into(),
+                },
+                Content::ToolUse {
+                    id: "c1".into(),
+                    name: "ls".into(),
+                    input: json!({}),
+                },
+            ],
+        }];
+        let v = serde_json::to_value(map_messages(&msgs)).unwrap();
+        assert_eq!(v.as_array().unwrap().len(), 1);
+        assert_eq!(v[0]["content"], "calling");
+        assert_eq!(v[0]["tool_calls"][0]["id"], "c1");
+    }
+
+    #[test]
+    fn test_map_toolresult_becomes_tool_role() {
+        // S-6: User + ToolResult → role:"tool" (one message per result).
+        let msgs = vec![Message {
+            role: Role::User,
+            content: vec![Content::ToolResult {
+                tool_use_id: "c1".into(),
+                content: "out".into(),
+                is_error: false,
+            }],
+        }];
+        let v = serde_json::to_value(map_messages(&msgs)).unwrap();
+        assert_eq!(v[0]["role"], "tool");
+        assert_eq!(v[0]["tool_call_id"], "c1");
+        assert_eq!(v[0]["content"], "out");
+    }
+
+    #[test]
+    fn test_map_user_text_before_toolresult_preserves_order() {
+        // Mixed User content [Text, ToolResult] must map in order: user then tool.
+        let msgs = vec![Message {
+            role: Role::User,
+            content: vec![
+                Content::Text { text: "ctx".into() },
+                Content::ToolResult {
+                    tool_use_id: "c1".into(),
+                    content: "out".into(),
+                    is_error: false,
+                },
+            ],
+        }];
+        let v = serde_json::to_value(map_messages(&msgs)).unwrap();
+        assert_eq!(v.as_array().unwrap().len(), 2);
+        assert_eq!(v[0]["role"], "user");
+        assert_eq!(v[0]["content"], "ctx");
+        assert_eq!(v[1]["role"], "tool");
+        assert_eq!(v[1]["tool_call_id"], "c1");
+    }
+
+    // ─── Anthropic retry test (unmodified) ────────────────────────────────────
+
     #[tokio::test]
     async fn test_anthropic_provider_retry_on_429() {
         let mut server = Server::new_async().await;
@@ -972,5 +1555,360 @@ mod tests {
         if let Content::Text { text } = &response.content[0] {
             assert_eq!(text, "Recovered!");
         }
+    }
+
+    // ─── OpenAiCompatibleProvider (Task 4: text streaming) ────────────────────
+
+    #[tokio::test]
+    async fn test_openai_streams_text_finalizes_on_done() {
+        let mut server = Server::new_async().await;
+        let url = server.url();
+        let sse = concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"Hello \"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"world!\"},\"finish_reason\":null}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let _m = server
+            .mock("POST", "/chat/completions")
+            .with_status(200)
+            .with_header("content-type", "text/event-stream")
+            .with_body(sse)
+            .create_async()
+            .await;
+        let p = OpenAiCompatibleProvider::new(OpenAiSettings {
+            base_url: url,
+            api_key: "k".into(),
+            model: "m".into(),
+        });
+        let r = p.send_messages(&[Message::user("hi")], &[]).await.unwrap();
+        assert_eq!(
+            r.content,
+            vec![Content::Text {
+                text: "Hello world!".into()
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_openai_finalizes_without_done_sentinel() {
+        // MAGI fix c: backend omits [DONE]; stream-end must still flush a MessageDone.
+        let mut server = Server::new_async().await;
+        let url = server.url();
+        let sse =
+            "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}]}\n\n";
+        let _m = server
+            .mock("POST", "/chat/completions")
+            .with_status(200)
+            .with_header("content-type", "text/event-stream")
+            .with_body(sse)
+            .create_async()
+            .await;
+        let p = OpenAiCompatibleProvider::new(OpenAiSettings {
+            base_url: url,
+            api_key: "k".into(),
+            model: "m".into(),
+        });
+        let r = p.send_messages(&[Message::user("hi")], &[]).await.unwrap();
+        assert_eq!(r.content, vec![Content::Text { text: "hi".into() }]);
+    }
+
+    #[tokio::test]
+    async fn test_openai_swallows_malformed_line() {
+        let mut server = Server::new_async().await;
+        let url = server.url();
+        let sse = concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"Valid\"}}]}\n\n",
+            "data: {MALFORMED}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let _m = server
+            .mock("POST", "/chat/completions")
+            .with_status(200)
+            .with_header("content-type", "text/event-stream")
+            .with_body(sse)
+            .create_async()
+            .await;
+        let p = OpenAiCompatibleProvider::new(OpenAiSettings {
+            base_url: url,
+            api_key: "k".into(),
+            model: "m".into(),
+        });
+        let r = p.send_messages(&[Message::user("hi")], &[]).await.unwrap();
+        assert_eq!(
+            r.content,
+            vec![Content::Text {
+                text: "Valid".into()
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_openai_http_error_surfaces() {
+        let mut server = Server::new_async().await;
+        let url = server.url();
+        let _m = server
+            .mock("POST", "/chat/completions")
+            .with_status(401)
+            .with_body("{\"error\":{\"message\":\"bad key\"}}")
+            .create_async()
+            .await;
+        let p = OpenAiCompatibleProvider::new(OpenAiSettings {
+            base_url: url,
+            api_key: "k".into(),
+            model: "m".into(),
+        });
+        assert!(p
+            .send_messages(&[Message::user("hi")], &[])
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("401"));
+    }
+
+    // ─── OpenAiCompatibleProvider (Task 5: tool_calls assembly) ───────────────
+
+    #[tokio::test]
+    async fn test_openai_assembles_fragmented_tool_call() {
+        // S-5: id+name first, arguments fragmented → ONE Content::ToolUse {"path":"."}.
+        let mut server = Server::new_async().await;
+        let url = server.url();
+        let sse = concat!(
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_x\",\"function\":{\"name\":\"ls\",\"arguments\":\"{\\\"path\\\":\"}}]}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"\\\".\\\"}\"}}]}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let _m = server
+            .mock("POST", "/chat/completions")
+            .with_status(200)
+            .with_header("content-type", "text/event-stream")
+            .with_body(sse)
+            .create_async()
+            .await;
+        let p = OpenAiCompatibleProvider::new(OpenAiSettings {
+            base_url: url,
+            api_key: "k".into(),
+            model: "m".into(),
+        });
+        let r = p
+            .send_messages(&[Message::user("list")], &[])
+            .await
+            .unwrap();
+        let tool = r
+            .content
+            .iter()
+            .find_map(|c| match c {
+                Content::ToolUse { id, name, input } => {
+                    Some((id.clone(), name.clone(), input.clone()))
+                }
+                _ => None,
+            })
+            .expect("must assemble a ToolUse");
+        assert_eq!(tool.0, "call_x");
+        assert_eq!(tool.1, "ls");
+        assert_eq!(tool.2, json!({"path":"."}));
+        assert_eq!(
+            r.content
+                .iter()
+                .filter(|c| matches!(c, Content::ToolUse { .. }))
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn test_openai_bounds_tool_call_index() {
+        // MAGI fix d: a hostile huge index must NOT trigger an unbounded resize; it's ignored.
+        let mut server = Server::new_async().await;
+        let url = server.url();
+        let sse = concat!(
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":999999999,\"id\":\"x\",\"function\":{\"name\":\"ls\",\"arguments\":\"{}\"}}]}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let _m = server
+            .mock("POST", "/chat/completions")
+            .with_status(200)
+            .with_header("content-type", "text/event-stream")
+            .with_body(sse)
+            .create_async()
+            .await;
+        let p = OpenAiCompatibleProvider::new(OpenAiSettings {
+            base_url: url,
+            api_key: "k".into(),
+            model: "m".into(),
+        });
+        let r = p.send_messages(&[Message::user("x")], &[]).await.unwrap();
+        // out-of-bounds index ignored → no ToolUse, no OOM, clean MessageDone.
+        assert_eq!(
+            r.content
+                .iter()
+                .filter(|c| matches!(c, Content::ToolUse { .. }))
+                .count(),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn test_openai_finalizes_on_stream_end_without_finish_or_done() {
+        // I-1: body has content but NO finish_reason and NO [DONE] sentinel; the
+        // stream-end branch must flush the buffer and finalize exactly one
+        // MessageDone carrying the assembled text.
+        let mut server = Server::new_async().await;
+        let url = server.url();
+        let sse = "data: {\"choices\":[{\"delta\":{\"content\":\"only\"}}]}\n\n";
+        let _m = server
+            .mock("POST", "/chat/completions")
+            .with_status(200)
+            .with_header("content-type", "text/event-stream")
+            .with_body(sse)
+            .create_async()
+            .await;
+        let p = OpenAiCompatibleProvider::new(OpenAiSettings {
+            base_url: url,
+            api_key: "k".into(),
+            model: "m".into(),
+        });
+        let mut stream = p
+            .stream_messages(&[Message::user("hi")], &[])
+            .await
+            .unwrap();
+        let mut done = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            if let Ok(ResponseChunk::MessageDone(m)) = chunk {
+                done.push(m);
+            }
+        }
+        assert_eq!(done.len(), 1, "exactly one MessageDone on stream end");
+        assert_eq!(
+            done[0].content,
+            vec![Content::Text {
+                text: "only".into()
+            }]
+        );
+    }
+
+    // ─── MAGI Loop 2 caveats (C1 + C2) ────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_openai_suppresses_post_stop_text_deltas() {
+        // C1: a misbehaving backend sends `delta.content` events AFTER the
+        // finalize-causing `finish_reason:"stop"` + `[DONE]` sentinel. The
+        // provider must emit exactly ONE MessageDone and NO TextDelta chunks
+        // arriving AFTER that MessageDone. Pre-fix the post-stop deltas leak
+        // through process_buffer because `done` is not checked before draining
+        // further blocks.
+        let mut server = Server::new_async().await;
+        let url = server.url();
+        let sse = concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"ghost1\"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"ghost2\"}}]}\n\n",
+        );
+        let _m = server
+            .mock("POST", "/chat/completions")
+            .with_status(200)
+            .with_header("content-type", "text/event-stream")
+            .with_body(sse)
+            .create_async()
+            .await;
+        let p = OpenAiCompatibleProvider::new(OpenAiSettings {
+            base_url: url,
+            api_key: "k".into(),
+            model: "m".into(),
+        });
+        let mut stream = p
+            .stream_messages(&[Message::user("hi")], &[])
+            .await
+            .unwrap();
+
+        // Collect chunks in order, classifying each as either a TextDelta or
+        // a MessageDone (so we can prove ordering).
+        #[derive(PartialEq, Eq)]
+        enum Kind {
+            Text,
+            Done,
+        }
+        let mut ordered: Vec<Kind> = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            match chunk {
+                Ok(ResponseChunk::TextDelta(_)) => ordered.push(Kind::Text),
+                Ok(ResponseChunk::MessageDone(_)) => ordered.push(Kind::Done),
+                _ => {}
+            }
+        }
+
+        let done_count = ordered.iter().filter(|k| **k == Kind::Done).count();
+        assert_eq!(done_count, 1, "exactly one MessageDone");
+
+        let done_pos = ordered
+            .iter()
+            .position(|k| *k == Kind::Done)
+            .expect("MessageDone present");
+        // No TextDelta may sit after MessageDone — post-stop ghost deltas must
+        // be suppressed.
+        for (i, k) in ordered.iter().enumerate() {
+            if i > done_pos {
+                assert!(
+                    *k != Kind::Text,
+                    "TextDelta at index {i} arrived after MessageDone at {done_pos}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_openai_skips_args_fragment_when_slot_empty() {
+        // C2: a misbehaving backend streams a tool_call fragment that carries
+        // ONLY `arguments` (no `id`, no `function.name`) before any fragment
+        // populates the slot's id/name. The provider must skip the fragment —
+        // no `ToolUseInputDelta` chunk and no `Content::ToolUse` are emitted.
+        let mut server = Server::new_async().await;
+        let url = server.url();
+        let sse = concat!(
+            // First tool_calls fragment: arguments only, no id, no function.name.
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"orphan\\\":true}\"}}]}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
+            "data: [DONE]\n\n",
+        );
+        let _m = server
+            .mock("POST", "/chat/completions")
+            .with_status(200)
+            .with_header("content-type", "text/event-stream")
+            .with_body(sse)
+            .create_async()
+            .await;
+        let p = OpenAiCompatibleProvider::new(OpenAiSettings {
+            base_url: url,
+            api_key: "k".into(),
+            model: "m".into(),
+        });
+        let mut stream = p.stream_messages(&[Message::user("x")], &[]).await.unwrap();
+
+        let mut tool_input_delta_count = 0usize;
+        let mut tool_use_count = 0usize;
+        while let Some(chunk) = stream.next().await {
+            match chunk {
+                Ok(ResponseChunk::ToolUseInputDelta { .. }) => tool_input_delta_count += 1,
+                Ok(ResponseChunk::MessageDone(m)) => {
+                    tool_use_count += m
+                        .content
+                        .iter()
+                        .filter(|c| matches!(c, Content::ToolUse { .. }))
+                        .count();
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(
+            tool_input_delta_count, 0,
+            "no ToolUseInputDelta emitted for orphan args fragment"
+        );
+        assert_eq!(
+            tool_use_count, 0,
+            "no Content::ToolUse emitted for orphan args fragment"
+        );
     }
 }
