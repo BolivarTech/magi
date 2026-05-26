@@ -11,28 +11,32 @@
 use serde::Deserialize;
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MagiConfig {
     pub provider: Option<String>,
+    #[serde(default)]
     pub openai: OpenAiConfig,
+    #[serde(default)]
     pub anthropic: AnthropicConfig,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct OpenAiConfig {
     pub base_url: Option<String>,
     pub model: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AnthropicConfig {
     pub model: Option<String>,
 }
 
 impl MagiConfig {
     /// Parse a `magi.toml` string. Malformed TOML or unknown fields -> `Err` (RF-1).
-    pub fn from_toml_str(_s: &str) -> Result<Self, toml::de::Error> {
-        // STUB: always returns default — tests will fail on assertion
-        Ok(Self::default())
+    pub fn from_toml_str(s: &str) -> Result<Self, toml::de::Error> {
+        toml::from_str(s)
     }
 }
 
