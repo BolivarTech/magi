@@ -513,6 +513,11 @@ impl OaiState {
             return;
         }
         for acc in std::mem::take(&mut self.tool_accs) {
+            // Skip untouched slots (id AND name empty) so a gap left by a dropped
+            // over-cap index never emits a ghost ToolUse with an empty name.
+            if acc.0.is_empty() && acc.1.is_empty() {
+                continue;
+            }
             finalize_tool(Some(acc), &mut self.full_content);
         }
         self.pending
@@ -552,7 +557,44 @@ impl OaiState {
                     }
                     self.pending.push_back(Ok(ResponseChunk::TextDelta(text)));
                 }
-                // (tool_calls handled in Task 5)
+                if let Some(tcs) = choice.delta.tool_calls {
+                    for tc in tcs {
+                        if tc.index >= MAX_TOOL_CALL_SLOTS {
+                            // bound (anti-OOM); warn instead of silent drop (RF-8, MAGI iter-2)
+                            eprintln!(
+                                "WARNING: tool_call index {} exceeds cap {}; dropping",
+                                tc.index, MAX_TOOL_CALL_SLOTS
+                            );
+                            continue;
+                        }
+                        if self.tool_accs.len() <= tc.index {
+                            self.tool_accs.resize(
+                                tc.index + 1,
+                                (String::new(), String::new(), String::new()),
+                            );
+                        }
+                        let slot = &mut self.tool_accs[tc.index];
+                        if let Some(id) = tc.id {
+                            if !id.is_empty() {
+                                slot.0 = id;
+                            }
+                        }
+                        if let Some(f) = tc.function {
+                            if let Some(name) = f.name {
+                                if !name.is_empty() {
+                                    slot.1 = name;
+                                }
+                            }
+                            if let Some(args) = f.arguments {
+                                slot.2.push_str(&args);
+                                self.pending.push_back(Ok(ResponseChunk::ToolUseInputDelta {
+                                    id: slot.0.clone(),
+                                    input_json: args,
+                                }));
+                            }
+                        }
+                    }
+                }
                 if choice.finish_reason.is_some() {
                     self.finalize();
                 }
