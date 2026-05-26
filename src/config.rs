@@ -231,4 +231,15 @@ mod tests {
             "gpt-4o-mini"
         );
     }
+
+    #[test]
+    fn test_load_unreadable_file_yields_default_plus_warning() {
+        // A directory named `magi.toml` makes read_to_string fail with a
+        // non-NotFound error → must surface a warning, not be treated as absent.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("magi.toml")).unwrap();
+        let (c, warn) = MagiConfig::load(dir.path());
+        assert_eq!(c, MagiConfig::default());
+        assert!(warn.unwrap().contains("magi.toml"));
+    }
 }
