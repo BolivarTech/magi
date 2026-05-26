@@ -254,6 +254,84 @@ enum AnthropicDelta {
     },
 }
 
+// ─── OpenAI-compatible structs ────────────────────────────────────────────────
+
+// constructed in Task 4 stream_messages; allow removed there (MAGI iter-2: keeps Task-3 §0.1 clippy green)
+#[allow(dead_code)]
+#[derive(Debug, Serialize)]
+struct OpenAiRequest {
+    model: String,
+    messages: Vec<OpenAiMessage>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    tools: Vec<OpenAiTool>,
+    stream: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct OpenAiMessage {
+    role: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_calls: Option<Vec<OpenAiToolCall>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_call_id: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct OpenAiToolCall {
+    id: String,
+    #[serde(rename = "type")]
+    kind: String,
+    function: OpenAiToolCallFn,
+}
+
+#[derive(Debug, Serialize)]
+struct OpenAiToolCallFn {
+    name: String,
+    arguments: String,
+}
+
+#[derive(Debug, Serialize)]
+struct OpenAiTool {
+    #[serde(rename = "type")]
+    kind: String,
+    function: OpenAiFunction,
+}
+
+#[derive(Debug, Serialize)]
+struct OpenAiFunction {
+    name: String,
+    description: String,
+    parameters: serde_json::Value,
+}
+
+/// Maps magi `Message`s → OpenAI messages (RF-5). Coalesces per magi message:
+/// an assistant turn's Text → `content` and its ToolUse blocks → ONE `tool_calls`
+/// array (OpenAI requires parallel calls in a single assistant message). A user
+/// turn's Text → `role:"user"`; each ToolResult → its own `role:"tool"` message.
+#[allow(dead_code)] // stub in RED phase; real impl replaces this in GREEN
+fn map_messages(_messages: &[Message]) -> Vec<OpenAiMessage> {
+    Vec::new()
+}
+
+#[allow(dead_code)] // used by OpenAiCompatibleProvider in Task 4
+fn map_tools(tools: &[Box<dyn Tool>]) -> Vec<OpenAiTool> {
+    tools
+        .iter()
+        .map(|t| OpenAiTool {
+            kind: "function".into(),
+            function: OpenAiFunction {
+                name: t.name().to_string(),
+                description: t.description().to_string(),
+                parameters: t.input_schema(),
+            },
+        })
+        .collect()
+}
+
+// ─── Anthropic provider ───────────────────────────────────────────────────────
+
 /// A provider that communicates with Anthropic's Messages API.
 pub struct AnthropicProvider {
     client: reqwest::Client,
@@ -926,6 +1004,92 @@ mod tests {
             "ToolUseInputDelta chunk must carry the tool id"
         );
     }
+
+    // ─── Task 3: map_messages / map_tools tests ───────────────────────────────
+
+    #[test]
+    fn test_map_user_and_assistant_text() {
+        let v = serde_json::to_value(map_messages(&[
+            Message::user("hi"),
+            Message::assistant("yo"),
+        ]))
+        .unwrap();
+        assert_eq!(v[0]["role"], "user");
+        assert_eq!(v[0]["content"], "hi");
+        assert_eq!(v[1]["role"], "assistant");
+        assert_eq!(v[1]["content"], "yo");
+    }
+
+    #[test]
+    fn test_map_parallel_tooluse_coalesced_into_one_assistant_message() {
+        // MAGI fix a: two ToolUse in ONE assistant turn → ONE message, tool_calls len 2.
+        let msgs = vec![Message {
+            role: Role::Assistant,
+            content: vec![
+                Content::ToolUse {
+                    id: "c1".into(),
+                    name: "ls".into(),
+                    input: json!({"path": "."}),
+                },
+                Content::ToolUse {
+                    id: "c2".into(),
+                    name: "view".into(),
+                    input: json!({"path": "a"}),
+                },
+            ],
+        }];
+        let v = serde_json::to_value(map_messages(&msgs)).unwrap();
+        assert_eq!(
+            v.as_array().unwrap().len(),
+            1,
+            "parallel tool calls must be ONE assistant message"
+        );
+        assert_eq!(v[0]["role"], "assistant");
+        assert_eq!(v[0]["tool_calls"].as_array().unwrap().len(), 2);
+        assert_eq!(v[0]["tool_calls"][0]["id"], "c1");
+        assert_eq!(v[0]["tool_calls"][0]["function"]["name"], "ls");
+        assert_eq!(v[0]["tool_calls"][1]["id"], "c2");
+    }
+
+    #[test]
+    fn test_map_assistant_text_plus_tooluse_one_message() {
+        let msgs = vec![Message {
+            role: Role::Assistant,
+            content: vec![
+                Content::Text {
+                    text: "calling".into(),
+                },
+                Content::ToolUse {
+                    id: "c1".into(),
+                    name: "ls".into(),
+                    input: json!({}),
+                },
+            ],
+        }];
+        let v = serde_json::to_value(map_messages(&msgs)).unwrap();
+        assert_eq!(v.as_array().unwrap().len(), 1);
+        assert_eq!(v[0]["content"], "calling");
+        assert_eq!(v[0]["tool_calls"][0]["id"], "c1");
+    }
+
+    #[test]
+    fn test_map_toolresult_becomes_tool_role() {
+        // S-6: User + ToolResult → role:"tool" (one message per result).
+        let msgs = vec![Message {
+            role: Role::User,
+            content: vec![Content::ToolResult {
+                tool_use_id: "c1".into(),
+                content: "out".into(),
+                is_error: false,
+            }],
+        }];
+        let v = serde_json::to_value(map_messages(&msgs)).unwrap();
+        assert_eq!(v[0]["role"], "tool");
+        assert_eq!(v[0]["tool_call_id"], "c1");
+        assert_eq!(v[0]["content"], "out");
+    }
+
+    // ─── Anthropic retry test (unmodified) ────────────────────────────────────
 
     #[tokio::test]
     async fn test_anthropic_provider_retry_on_429() {
