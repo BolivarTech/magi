@@ -315,7 +315,10 @@ struct OpenAiFunction {
 /// Per-message ordering preserves user → assistant(tool_calls) → tool(results)
 /// sequence, satisfying OpenAI's "tool message must follow the assistant
 /// tool_calls" contract for the typical single-turn-per-message history magi
-/// builds.
+/// builds. User Text and ToolResult blocks are emitted **in content order**
+/// (each as its own message), so a mixed `[Text, ToolResult]` content list
+/// produces `[user, tool]` — not the inverted `[tool, user]` that deferred
+/// Text accumulation would cause.
 #[allow(dead_code)] // consumed by OpenAiCompatibleProvider in Task 4
 fn map_messages(messages: &[Message]) -> Vec<OpenAiMessage> {
     let mut out = Vec::new();
@@ -350,12 +353,14 @@ fn map_messages(messages: &[Message]) -> Vec<OpenAiMessage> {
                 }
             }
             Role::User => {
-                let mut text: Option<String> = None;
                 for c in &m.content {
                     match c {
-                        Content::Text { text: t } => {
-                            text.get_or_insert_with(String::new).push_str(t);
-                        }
+                        Content::Text { text: t } => out.push(OpenAiMessage {
+                            role: "user".into(),
+                            content: Some(t.clone()),
+                            tool_calls: None,
+                            tool_call_id: None,
+                        }),
                         Content::ToolResult {
                             tool_use_id,
                             content,
@@ -368,14 +373,6 @@ fn map_messages(messages: &[Message]) -> Vec<OpenAiMessage> {
                         }),
                         Content::ToolUse { .. } => {} // users don't issue tool calls
                     }
-                }
-                if let Some(t) = text {
-                    out.push(OpenAiMessage {
-                        role: "user".into(),
-                        content: Some(t),
-                        tool_calls: None,
-                        tool_call_id: None,
-                    });
                 }
             }
         }
@@ -1160,10 +1157,17 @@ mod tests {
     #[test]
     fn test_map_user_text_before_toolresult_preserves_order() {
         // Mixed User content [Text, ToolResult] must map in order: user then tool.
-        let msgs = vec![Message { role: Role::User, content: vec![
-            Content::Text { text: "ctx".into() },
-            Content::ToolResult { tool_use_id: "c1".into(), content: "out".into(), is_error: false },
-        ]}];
+        let msgs = vec![Message {
+            role: Role::User,
+            content: vec![
+                Content::Text { text: "ctx".into() },
+                Content::ToolResult {
+                    tool_use_id: "c1".into(),
+                    content: "out".into(),
+                    is_error: false,
+                },
+            ],
+        }];
         let v = serde_json::to_value(map_messages(&msgs)).unwrap();
         assert_eq!(v.as_array().unwrap().len(), 2);
         assert_eq!(v[0]["role"], "user");
