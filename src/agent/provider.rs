@@ -310,9 +310,77 @@ struct OpenAiFunction {
 /// an assistant turn's Text → `content` and its ToolUse blocks → ONE `tool_calls`
 /// array (OpenAI requires parallel calls in a single assistant message). A user
 /// turn's Text → `role:"user"`; each ToolResult → its own `role:"tool"` message.
-#[allow(dead_code)] // stub in RED phase; real impl replaces this in GREEN
-fn map_messages(_messages: &[Message]) -> Vec<OpenAiMessage> {
-    Vec::new()
+///
+/// # Ordering guarantee
+/// Per-message ordering preserves user → assistant(tool_calls) → tool(results)
+/// sequence, satisfying OpenAI's "tool message must follow the assistant
+/// tool_calls" contract for the typical single-turn-per-message history magi
+/// builds.
+#[allow(dead_code)] // consumed by OpenAiCompatibleProvider in Task 4
+fn map_messages(messages: &[Message]) -> Vec<OpenAiMessage> {
+    let mut out = Vec::new();
+    for m in messages {
+        match m.role {
+            Role::Assistant => {
+                let mut text: Option<String> = None;
+                let mut calls: Vec<OpenAiToolCall> = Vec::new();
+                for c in &m.content {
+                    match c {
+                        Content::Text { text: t } => {
+                            text.get_or_insert_with(String::new).push_str(t);
+                        }
+                        Content::ToolUse { id, name, input } => calls.push(OpenAiToolCall {
+                            id: id.clone(),
+                            kind: "function".into(),
+                            function: OpenAiToolCallFn {
+                                name: name.clone(),
+                                arguments: input.to_string(),
+                            },
+                        }),
+                        Content::ToolResult { .. } => {} // assistants don't carry tool results
+                    }
+                }
+                if text.is_some() || !calls.is_empty() {
+                    out.push(OpenAiMessage {
+                        role: "assistant".into(),
+                        content: text,
+                        tool_calls: if calls.is_empty() { None } else { Some(calls) },
+                        tool_call_id: None,
+                    });
+                }
+            }
+            Role::User => {
+                let mut text: Option<String> = None;
+                for c in &m.content {
+                    match c {
+                        Content::Text { text: t } => {
+                            text.get_or_insert_with(String::new).push_str(t);
+                        }
+                        Content::ToolResult {
+                            tool_use_id,
+                            content,
+                            ..
+                        } => out.push(OpenAiMessage {
+                            role: "tool".into(),
+                            content: Some(content.clone()),
+                            tool_calls: None,
+                            tool_call_id: Some(tool_use_id.clone()),
+                        }),
+                        Content::ToolUse { .. } => {} // users don't issue tool calls
+                    }
+                }
+                if let Some(t) = text {
+                    out.push(OpenAiMessage {
+                        role: "user".into(),
+                        content: Some(t),
+                        tool_calls: None,
+                        tool_call_id: None,
+                    });
+                }
+            }
+        }
+    }
+    out
 }
 
 #[allow(dead_code)] // used by OpenAiCompatibleProvider in Task 4
