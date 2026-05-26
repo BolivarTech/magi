@@ -691,6 +691,14 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Re
     }
 }
 
+/// Word-wraps `text` so each returned line fits in `width` CHARS (not bytes).
+/// Existing `\n` are preserved as hard breaks. Words longer than `width`
+/// are hard-split into chunks. `width == 0` is treated as no-op.
+#[allow(dead_code)] // stub — used only by tests in RED; wired into ui() in GREEN
+fn wrap_message(text: &str, _width: usize) -> Vec<String> {
+    vec![text.to_string()]
+}
+
 fn ui(f: &mut Frame, app: &App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -811,5 +819,65 @@ mod tests {
 
         app.insert_char('x');
         assert_eq!(app.input, "xá");
+    }
+
+    #[test]
+    fn test_wrap_message_normal_word_wrap() {
+        let out = wrap_message("the quick brown fox jumps over the lazy dog", 12);
+        // No line should exceed the width.
+        for line in &out {
+            assert!(line.chars().count() <= 12, "line {line:?} > 12");
+        }
+        // Joining with single spaces reconstructs the original text.
+        assert_eq!(out.join(" "), "the quick brown fox jumps over the lazy dog");
+    }
+
+    #[test]
+    fn test_wrap_message_preserves_embedded_newlines() {
+        // Existing \n in the text becomes a hard line break — wrap each paragraph independently.
+        let out = wrap_message("hello world\n\nsecond paragraph here", 20);
+        // The blank line between paragraphs is preserved as an empty entry.
+        assert!(
+            out.iter().any(|l| l.is_empty()),
+            "expected an empty line for the blank paragraph: {out:?}"
+        );
+        assert!(out.iter().any(|l| l == "hello world"));
+        assert!(out.iter().any(|l| l.contains("second paragraph")));
+    }
+
+    #[test]
+    fn test_wrap_message_breaks_oversized_word() {
+        // A single word longer than width must be split into chunks of <= width chars each,
+        // not infinite-loop and not exceed width.
+        let out = wrap_message("supercalifragilisticexpialidocious", 5);
+        for line in &out {
+            assert!(line.chars().count() <= 5, "line {line:?} > 5");
+        }
+        assert!(!out.is_empty());
+        // The chunks, concatenated, must equal the original word.
+        assert_eq!(out.join(""), "supercalifragilisticexpialidocious");
+    }
+
+    #[test]
+    fn test_wrap_message_handles_multibyte_utf8() {
+        // Spanish accents: chars().count() not byte length. Width is measured in CHARS, not bytes.
+        let out = wrap_message("La capital de Venezuela es Caracas — está al norte", 18);
+        for line in &out {
+            assert!(line.chars().count() <= 18, "line {line:?} > 18 chars");
+        }
+    }
+
+    #[test]
+    fn test_wrap_message_width_zero_yields_at_least_one_line() {
+        // Defensive: width 0 must not panic / loop. A single line containing the original text is acceptable.
+        let out = wrap_message("anything", 0);
+        assert_eq!(out, vec!["anything".to_string()]);
+    }
+
+    #[test]
+    fn test_wrap_message_empty_input() {
+        let out = wrap_message("", 80);
+        // An empty input should produce one empty line so the message still renders as a row.
+        assert_eq!(out, vec!["".to_string()]);
     }
 }
