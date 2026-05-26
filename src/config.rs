@@ -43,31 +43,76 @@ impl MagiConfig {
     /// Loads `<dir>/magi.toml`. Returns `(config, Option<warning>)`. Absent → defaults,
     /// no warning. Malformed/unknown-field → defaults + a warning string (main.rs
     /// surfaces it as a startup notice — no panic, no silent stderr-only loss).
-    pub fn load(_dir: &Path) -> (Self, Option<String>) {
-        // Stub: replaced in GREEN
-        (Self::default(), None)
+    pub fn load(dir: &Path) -> (Self, Option<String>) {
+        let path = dir.join("magi.toml");
+        match std::fs::read_to_string(&path) {
+            Ok(s) => match Self::from_toml_str(&s) {
+                Ok(c) => (c, None),
+                Err(e) => (
+                    Self::default(),
+                    Some(format!(
+                        "Note: {} is invalid and was ignored ({e}); using defaults.",
+                        path.display()
+                    )),
+                ),
+            },
+            Err(_) => (Self::default(), None),
+        }
     }
 }
 
 /// env `MAGI_PROVIDER` > TOML `provider` > `"anthropic"` (RF-2).
-pub fn resolve_provider(_config: &MagiConfig, _env_provider: Option<&str>) -> String {
-    // Stub: replaced in GREEN
-    String::new()
+///
+/// # Arguments
+/// * `config` - Parsed `MagiConfig` from `magi.toml` (may be default if file absent/invalid).
+/// * `env_provider` - Value of `MAGI_PROVIDER` env var, if set.
+///
+/// # Returns
+/// Resolved provider name: env overrides TOML; falls back to `"anthropic"`.
+pub fn resolve_provider(config: &MagiConfig, env_provider: Option<&str>) -> String {
+    env_provider
+        .map(str::to_string)
+        .or_else(|| config.provider.clone())
+        .unwrap_or_else(|| "anthropic".into())
 }
 
-/// env > TOML > `https://api.openai.com/v1` (RF-3).
-pub fn resolve_openai_base_url(_config: &MagiConfig, _env_base_url: Option<&str>) -> String {
-    // Stub: replaced in GREEN
-    String::new()
+/// env `OPENAI_BASE_URL` > TOML `[openai].base_url` > `"https://api.openai.com/v1"` (RF-3).
+///
+/// # Arguments
+/// * `config` - Parsed `MagiConfig`.
+/// * `env_base_url` - Value of `OPENAI_BASE_URL` env var, if set.
+///
+/// # Returns
+/// Resolved OpenAI-compatible base URL.
+pub fn resolve_openai_base_url(config: &MagiConfig, env_base_url: Option<&str>) -> String {
+    env_base_url
+        .map(str::to_string)
+        .or_else(|| config.openai.base_url.clone())
+        .unwrap_or_else(|| "https://api.openai.com/v1".into())
 }
 
-/// env > TOML; REQUIRED → `Err` if absent in both (RF-3).
+/// env `OPENAI_MODEL` > TOML `[openai].model`; **required** — `Err` if absent in both (RF-3).
+///
+/// # Arguments
+/// * `config` - Parsed `MagiConfig`.
+/// * `env_model` - Value of `OPENAI_MODEL` env var, if set.
+///
+/// # Errors
+/// Returns `Err` when neither the env var nor the TOML field is set, because the
+/// OpenAI-compatible provider cannot operate without a model name.
 pub fn resolve_openai_model(
-    _config: &MagiConfig,
-    _env_model: Option<&str>,
+    config: &MagiConfig,
+    env_model: Option<&str>,
 ) -> anyhow::Result<String> {
-    // Stub: replaced in GREEN
-    Ok(String::new())
+    env_model
+        .map(str::to_string)
+        .or_else(|| config.openai.model.clone())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "provider 'openai' selected but no model set \
+                 (OPENAI_MODEL env or [openai].model in magi.toml)"
+            )
+        })
 }
 
 #[cfg(test)]
