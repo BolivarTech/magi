@@ -29,6 +29,11 @@ no API / trait / contract changes.
 ### Added
 - 10 new tests covering the three render-time helpers (word wrap normal / multibyte / oversized word / embedded newlines / width-0 / empty; follow-tail in Normal mode / chosen index in Selection / Visual / empty messages; highlight-symbol by mode). Total tests: **131** (was 121).
 
+### Known limitations
+- **Leading indentation and internal whitespace runs are collapsed** when a message is wrapped. `wrap_message` uses `split_whitespace`, which drops leading spaces and multi-space gaps. Markdown bullets like `"  - item"` render as `"- item"`; preformatted blocks lose alignment. Tracked for a follow-up patch (preserve per-line indentation via a different tokenizer).
+- **Streaming tail can still go off-screen for a single message TALLER than the conversation pane.** The follow-tail fix pins the *top* of the last message via ratatui's `ListState::select`, which keeps short messages visible but only shows the head of a tall in-progress reply. Multi-message conversations behave as expected; very long single replies do not yet auto-scroll past their first viewport. Tracked for a follow-up that computes a per-wrapped-line offset rather than per-item.
+- **Wrap width is measured in `chars().count()`, not terminal display width.** CJK / emoji glyphs that occupy two cells will wrap one column early; combining marks may wrap one column late. Tracked for a follow-up that switches to `unicode-width`.
+
 ## [0.3.0] - 2026-05-25
 
 First multi-backend release. Magi can now talk to any OpenAI-compatible Chat
