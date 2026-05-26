@@ -56,7 +56,14 @@ impl MagiConfig {
                     )),
                 ),
             },
-            Err(_) => (Self::default(), None),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (Self::default(), None),
+            Err(e) => (
+                Self::default(),
+                Some(format!(
+                    "Note: {} could not be read ({e}); using defaults.",
+                    path.display()
+                )),
+            ),
         }
     }
 }
