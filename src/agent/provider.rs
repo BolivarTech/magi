@@ -438,7 +438,6 @@ struct OpenAiFnDelta {
 
 /// Connection settings for [`OpenAiCompatibleProvider`]. Named fields make the
 /// base_url/api_key/model order a compile-time non-issue (no positional swap).
-#[allow(dead_code)] // constructed by main.rs in Task 6
 pub struct OpenAiSettings {
     pub base_url: String,
     pub api_key: String,
@@ -452,7 +451,6 @@ const MAX_TOOL_CALL_SLOTS: usize = 64;
 
 /// A provider that talks to any OpenAI Chat Completions-compatible backend
 /// (OpenAI, Ollama, Groq, OpenRouter, …) via a configurable `base_url`.
-#[allow(dead_code)] // constructed by main.rs in Task 6
 pub struct OpenAiCompatibleProvider {
     client: reqwest::Client,
     base_url: String,
@@ -461,7 +459,6 @@ pub struct OpenAiCompatibleProvider {
 }
 
 impl OpenAiCompatibleProvider {
-    #[allow(dead_code)] // called by main.rs in Task 6
     pub fn new(s: OpenAiSettings) -> Self {
         // No total-request timeout: streaming generations (esp. local Ollama) run
         // long; reqwest `.timeout()` is a TOTAL deadline and would truncate healthy
