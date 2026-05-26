@@ -1,4 +1,5 @@
 mod agent;
+mod config;
 mod services;
 mod system;
 mod tools;
