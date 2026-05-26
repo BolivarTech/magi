@@ -1,7 +1,7 @@
 # Magi Agent — Terminal AI Assistant in Rust
 
 [![Rust 2021](https://img.shields.io/badge/rust-2021_edition-orange.svg)](https://www.rust-lang.org/)
-[![Tests](https://img.shields.io/badge/tests-95%20passing-brightgreen.svg)](#testing)
+[![Tests](https://img.shields.io/badge/tests-119%20passing-brightgreen.svg)](#testing)
 [![Lints](https://img.shields.io/badge/lints-clippy%20clean-blue.svg)](https://github.com/rust-lang/rust-clippy)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 [![Version](https://img.shields.io/badge/version-0.2.1-informational.svg)](CHANGELOG.md)
@@ -223,9 +223,10 @@ To use OpenAI instead, edit `magi.toml` (`base_url = "https://api.openai.com/v1"
 ```
 src/
   main.rs              -- config discovery, master-key bootstrap, tool registration, entry
+  config.rs            -- MagiConfig (magi.toml load + provider/model resolution)
   agent/
     mod.rs             -- Agent orchestrator: multi-turn tool loop + approval gate
-    provider.rs        -- Provider trait; AnthropicProvider (SSE) + StaticProvider
+    provider.rs        -- Provider trait; AnthropicProvider (SSE) + OpenAiCompatibleProvider + StaticProvider
   tools/
     mod.rs             -- Tool trait + ToolError
     ls.rs read.rs write.rs grep.rs bash.rs knowledge.rs
