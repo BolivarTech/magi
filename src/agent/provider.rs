@@ -380,7 +380,7 @@ fn map_messages(messages: &[Message]) -> Vec<OpenAiMessage> {
     out
 }
 
-#[allow(dead_code)] // used by OpenAiCompatibleProvider in Task 4
+#[allow(dead_code)] // used by OpenAiCompatibleProvider in Task 4 (GREEN phase)
 fn map_tools(tools: &[Box<dyn Tool>]) -> Vec<OpenAiTool> {
     tools
         .iter()
@@ -393,6 +393,54 @@ fn map_tools(tools: &[Box<dyn Tool>]) -> Vec<OpenAiTool> {
             },
         })
         .collect()
+}
+
+// ─── OpenAI-compatible provider ───────────────────────────────────────────────
+
+/// Connection settings for [`OpenAiCompatibleProvider`]. Named fields make the
+/// base_url/api_key/model order a compile-time non-issue (no positional swap).
+#[allow(dead_code)] // constructed by main.rs in Task 6
+pub struct OpenAiSettings {
+    pub base_url: String,
+    pub api_key: String,
+    pub model: String,
+}
+
+/// A provider that talks to any OpenAI Chat Completions-compatible backend
+/// (OpenAI, Ollama, Groq, OpenRouter, …) via a configurable `base_url`.
+#[allow(dead_code)] // constructed by main.rs in Task 6
+pub struct OpenAiCompatibleProvider {
+    client: reqwest::Client,
+    base_url: String,
+    api_key: String,
+    model: String,
+}
+
+impl OpenAiCompatibleProvider {
+    #[allow(dead_code)] // called by main.rs in Task 6
+    pub fn new(s: OpenAiSettings) -> Self {
+        // No total-request timeout: streaming generations (esp. local Ollama) run
+        // long; reqwest `.timeout()` is a TOTAL deadline and would truncate healthy
+        // streams (MAGI iter-2). Parity with AnthropicProvider (no timeout).
+        Self {
+            client: reqwest::Client::new(),
+            base_url: s.base_url,
+            api_key: s.api_key,
+            model: s.model,
+        }
+    }
+}
+
+#[async_trait]
+impl Provider for OpenAiCompatibleProvider {
+    async fn stream_messages(
+        &self,
+        _messages: &[Message],
+        _tools: &[Box<dyn Tool>],
+    ) -> Result<BoxStream<'static, Result<ResponseChunk>>> {
+        // RED stub: real unfold state machine arrives in the GREEN phase.
+        Err(anyhow::anyhow!("OpenAiCompatibleProvider not implemented"))
+    }
 }
 
 // ─── Anthropic provider ───────────────────────────────────────────────────────
@@ -1223,5 +1271,114 @@ mod tests {
         if let Content::Text { text } = &response.content[0] {
             assert_eq!(text, "Recovered!");
         }
+    }
+
+    // ─── OpenAiCompatibleProvider (Task 4: text streaming) ────────────────────
+
+    #[tokio::test]
+    async fn test_openai_streams_text_finalizes_on_done() {
+        let mut server = Server::new_async().await;
+        let url = server.url();
+        let sse = concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"Hello \"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"world!\"},\"finish_reason\":null}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let _m = server
+            .mock("POST", "/chat/completions")
+            .with_status(200)
+            .with_header("content-type", "text/event-stream")
+            .with_body(sse)
+            .create_async()
+            .await;
+        let p = OpenAiCompatibleProvider::new(OpenAiSettings {
+            base_url: url,
+            api_key: "k".into(),
+            model: "m".into(),
+        });
+        let r = p.send_messages(&[Message::user("hi")], &[]).await.unwrap();
+        assert_eq!(
+            r.content,
+            vec![Content::Text {
+                text: "Hello world!".into()
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_openai_finalizes_without_done_sentinel() {
+        // MAGI fix c: backend omits [DONE]; stream-end must still flush a MessageDone.
+        let mut server = Server::new_async().await;
+        let url = server.url();
+        let sse =
+            "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}]}\n\n";
+        let _m = server
+            .mock("POST", "/chat/completions")
+            .with_status(200)
+            .with_header("content-type", "text/event-stream")
+            .with_body(sse)
+            .create_async()
+            .await;
+        let p = OpenAiCompatibleProvider::new(OpenAiSettings {
+            base_url: url,
+            api_key: "k".into(),
+            model: "m".into(),
+        });
+        let r = p.send_messages(&[Message::user("hi")], &[]).await.unwrap();
+        assert_eq!(r.content, vec![Content::Text { text: "hi".into() }]);
+    }
+
+    #[tokio::test]
+    async fn test_openai_swallows_malformed_line() {
+        let mut server = Server::new_async().await;
+        let url = server.url();
+        let sse = concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"Valid\"}}]}\n\n",
+            "data: {MALFORMED}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let _m = server
+            .mock("POST", "/chat/completions")
+            .with_status(200)
+            .with_header("content-type", "text/event-stream")
+            .with_body(sse)
+            .create_async()
+            .await;
+        let p = OpenAiCompatibleProvider::new(OpenAiSettings {
+            base_url: url,
+            api_key: "k".into(),
+            model: "m".into(),
+        });
+        let r = p.send_messages(&[Message::user("hi")], &[]).await.unwrap();
+        assert_eq!(
+            r.content,
+            vec![Content::Text {
+                text: "Valid".into()
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_openai_http_error_surfaces() {
+        let mut server = Server::new_async().await;
+        let url = server.url();
+        let _m = server
+            .mock("POST", "/chat/completions")
+            .with_status(401)
+            .with_body("{\"error\":{\"message\":\"bad key\"}}")
+            .create_async()
+            .await;
+        let p = OpenAiCompatibleProvider::new(OpenAiSettings {
+            base_url: url,
+            api_key: "k".into(),
+            model: "m".into(),
+        });
+        assert!(p
+            .send_messages(&[Message::user("hi")], &[])
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("401"));
     }
 }
