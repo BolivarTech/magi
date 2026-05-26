@@ -1585,4 +1585,88 @@ mod tests {
             .to_string()
             .contains("401"));
     }
+
+    // ─── OpenAiCompatibleProvider (Task 5: tool_calls assembly) ───────────────
+
+    #[tokio::test]
+    async fn test_openai_assembles_fragmented_tool_call() {
+        // S-5: id+name first, arguments fragmented → ONE Content::ToolUse {"path":"."}.
+        let mut server = Server::new_async().await;
+        let url = server.url();
+        let sse = concat!(
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_x\",\"function\":{\"name\":\"ls\",\"arguments\":\"{\\\"path\\\":\"}}]}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"\\\".\\\"}\"}}]}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let _m = server
+            .mock("POST", "/chat/completions")
+            .with_status(200)
+            .with_header("content-type", "text/event-stream")
+            .with_body(sse)
+            .create_async()
+            .await;
+        let p = OpenAiCompatibleProvider::new(OpenAiSettings {
+            base_url: url,
+            api_key: "k".into(),
+            model: "m".into(),
+        });
+        let r = p
+            .send_messages(&[Message::user("list")], &[])
+            .await
+            .unwrap();
+        let tool = r
+            .content
+            .iter()
+            .find_map(|c| match c {
+                Content::ToolUse { id, name, input } => {
+                    Some((id.clone(), name.clone(), input.clone()))
+                }
+                _ => None,
+            })
+            .expect("must assemble a ToolUse");
+        assert_eq!(tool.0, "call_x");
+        assert_eq!(tool.1, "ls");
+        assert_eq!(tool.2, json!({"path":"."}));
+        assert_eq!(
+            r.content
+                .iter()
+                .filter(|c| matches!(c, Content::ToolUse { .. }))
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn test_openai_bounds_tool_call_index() {
+        // MAGI fix d: a hostile huge index must NOT trigger an unbounded resize; it's ignored.
+        let mut server = Server::new_async().await;
+        let url = server.url();
+        let sse = concat!(
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":999999999,\"id\":\"x\",\"function\":{\"name\":\"ls\",\"arguments\":\"{}\"}}]}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let _m = server
+            .mock("POST", "/chat/completions")
+            .with_status(200)
+            .with_header("content-type", "text/event-stream")
+            .with_body(sse)
+            .create_async()
+            .await;
+        let p = OpenAiCompatibleProvider::new(OpenAiSettings {
+            base_url: url,
+            api_key: "k".into(),
+            model: "m".into(),
+        });
+        let r = p.send_messages(&[Message::user("x")], &[]).await.unwrap();
+        // out-of-bounds index ignored → no ToolUse, no OOM, clean MessageDone.
+        assert_eq!(
+            r.content
+                .iter()
+                .filter(|c| matches!(c, Content::ToolUse { .. }))
+                .count(),
+            0
+        );
+    }
 }
