@@ -256,8 +256,6 @@ enum AnthropicDelta {
 
 // ─── OpenAI-compatible structs ────────────────────────────────────────────────
 
-// constructed in Task 4 stream_messages; allow removed there (MAGI iter-2: keeps Task-3 §0.1 clippy green)
-#[allow(dead_code)]
 #[derive(Debug, Serialize)]
 struct OpenAiRequest {
     model: String,
@@ -380,7 +378,6 @@ fn map_messages(messages: &[Message]) -> Vec<OpenAiMessage> {
     out
 }
 
-#[allow(dead_code)] // used by OpenAiCompatibleProvider in Task 4 (GREEN phase)
 fn map_tools(tools: &[Box<dyn Tool>]) -> Vec<OpenAiTool> {
     tools
         .iter()
@@ -395,6 +392,52 @@ fn map_tools(tools: &[Box<dyn Tool>]) -> Vec<OpenAiTool> {
         .collect()
 }
 
+// ─── OpenAI stream-deserialization structs ────────────────────────────────────
+
+/// One OpenAI Chat Completions SSE chunk (`data:` payload).
+#[derive(Debug, Deserialize)]
+struct OpenAiStreamChunk {
+    #[serde(default)]
+    choices: Vec<OpenAiChoice>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiChoice {
+    #[serde(default)]
+    delta: OpenAiStreamDelta,
+    #[serde(default)]
+    finish_reason: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct OpenAiStreamDelta {
+    #[serde(default)]
+    content: Option<String>,
+    #[serde(default)]
+    #[allow(dead_code)] // assembled in Task 5; field parsed but unused this task
+    tool_calls: Option<Vec<OpenAiToolCallDelta>>,
+}
+
+/// A streamed tool-call fragment, keyed by `index` across chunks (Task 5 assembly).
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)] // fields consumed by the Task 5 tool-call assembler
+struct OpenAiToolCallDelta {
+    index: usize,
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    function: Option<OpenAiFnDelta>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[allow(dead_code)] // fields consumed by the Task 5 tool-call assembler
+struct OpenAiFnDelta {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    arguments: Option<String>,
+}
+
 // ─── OpenAI-compatible provider ───────────────────────────────────────────────
 
 /// Connection settings for [`OpenAiCompatibleProvider`]. Named fields make the
@@ -405,6 +448,12 @@ pub struct OpenAiSettings {
     pub api_key: String,
     pub model: String,
 }
+
+/// Caps tool-call slots from a network-controlled `index` to avoid an unbounded
+/// `Vec::resize` (OOM/DoS). 64 ≫ any real parallel-tool-call count. Used by the
+/// Task 5 tool-call assembler.
+#[allow(dead_code)] // referenced by the Task 5 tool-call assembler
+const MAX_TOOL_CALL_SLOTS: usize = 64;
 
 /// A provider that talks to any OpenAI Chat Completions-compatible backend
 /// (OpenAI, Ollama, Groq, OpenRouter, …) via a configurable `base_url`.
@@ -421,7 +470,8 @@ impl OpenAiCompatibleProvider {
     pub fn new(s: OpenAiSettings) -> Self {
         // No total-request timeout: streaming generations (esp. local Ollama) run
         // long; reqwest `.timeout()` is a TOTAL deadline and would truncate healthy
-        // streams (MAGI iter-2). Parity with AnthropicProvider (no timeout).
+        // streams (MAGI iter-2). Parity with AnthropicProvider (no timeout). Anti-OOM
+        // is the bounded tool-call index (Task 5), not a timeout.
         Self {
             client: reqwest::Client::new(),
             base_url: s.base_url,
@@ -431,15 +481,169 @@ impl OpenAiCompatibleProvider {
     }
 }
 
+/// Streaming state for the OpenAI SSE `unfold`. Owns the byte source and the
+/// accumulators for the in-progress assistant message.
+struct OaiState {
+    /// Boxed byte source derived from `reqwest::Response::bytes_stream()`. Each
+    /// item is the raw chunk as `Vec<u8>` (or a network error). Mapping to
+    /// `Vec<u8>` at the boundary avoids naming `bytes::Bytes` (not a direct dep)
+    /// while preserving the streaming behavior.
+    src: BoxStream<'static, Result<Vec<u8>>>,
+    /// Raw SSE bytes accumulated until an event boundary (`"\n\n"`).
+    buffer: Vec<u8>,
+    /// Assembled content blocks for the final assistant message.
+    full_content: Vec<Content>,
+    /// Per-`index` tool-call accumulators `(id, name, args_json)`. Stays empty in
+    /// Task 4 (text path); filled by the Task 5 tool-call assembler.
+    tool_accs: Vec<(String, String, String)>,
+    /// Chunks ready to yield from the stream.
+    pending: std::collections::VecDeque<Result<ResponseChunk>>,
+    /// Whether `MessageDone` was already emitted (idempotent finalize).
+    done: bool,
+    /// Whether the byte source is exhausted.
+    src_done: bool,
+}
+
+impl OaiState {
+    /// Emits the assembled assistant message exactly once (idempotent via `done`).
+    /// Drains any accumulated tool-call slots through [`finalize_tool`]; in Task 4
+    /// `tool_accs` is always empty, so this is a text-only finalize.
+    fn finalize(&mut self) {
+        if self.done {
+            return;
+        }
+        for acc in std::mem::take(&mut self.tool_accs) {
+            finalize_tool(Some(acc), &mut self.full_content);
+        }
+        self.pending
+            .push_back(Ok(ResponseChunk::MessageDone(Message {
+                role: Role::Assistant,
+                content: self.full_content.clone(),
+            })));
+        self.done = true;
+    }
+
+    /// Drains complete SSE blocks from `buffer`, pushing `TextDelta` chunks and
+    /// finalizing on a `finish_reason` or the `[DONE]` sentinel. Malformed `data:`
+    /// payloads are swallowed so one bad event never aborts the stream.
+    fn process_buffer(&mut self) {
+        for block in drain_sse_events(&mut self.buffer) {
+            for line in block.lines() {
+                // Tolerate `data:` with or without the optional space (MAGI iter-2).
+                let Some(rest) = line.strip_prefix("data:") else {
+                    continue;
+                };
+                let data = rest.trim_start();
+                if data.trim() == "[DONE]" {
+                    self.finalize();
+                    continue;
+                }
+                let Ok(parsed) = serde_json::from_str::<OpenAiStreamChunk>(data) else {
+                    continue;
+                };
+                let Some(choice) = parsed.choices.into_iter().next() else {
+                    continue;
+                };
+                if let Some(text) = choice.delta.content {
+                    if let Some(Content::Text { text: existing }) = self.full_content.last_mut() {
+                        existing.push_str(&text);
+                    } else {
+                        self.full_content.push(Content::Text { text: text.clone() });
+                    }
+                    self.pending.push_back(Ok(ResponseChunk::TextDelta(text)));
+                }
+                // (tool_calls handled in Task 5)
+                if choice.finish_reason.is_some() {
+                    self.finalize();
+                }
+            }
+        }
+    }
+}
+
 #[async_trait]
 impl Provider for OpenAiCompatibleProvider {
     async fn stream_messages(
         &self,
-        _messages: &[Message],
-        _tools: &[Box<dyn Tool>],
+        messages: &[Message],
+        tools: &[Box<dyn Tool>],
     ) -> Result<BoxStream<'static, Result<ResponseChunk>>> {
-        // RED stub: real unfold state machine arrives in the GREEN phase.
-        Err(anyhow::anyhow!("OpenAiCompatibleProvider not implemented"))
+        let url = format!("{}/chat/completions", self.base_url);
+        let request = OpenAiRequest {
+            model: self.model.clone(),
+            messages: map_messages(messages),
+            tools: map_tools(tools),
+            stream: true,
+        };
+        let response = self
+            .client
+            .post(&url)
+            .header("authorization", format!("Bearer {}", self.api_key))
+            .header("content-type", "application/json")
+            .json(&request)
+            .send()
+            .await?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(anyhow::anyhow!("OpenAI API Error [{}]: {}", status, body));
+        }
+        let st = OaiState {
+            src: response
+                .bytes_stream()
+                .map(|r| {
+                    r.map(|b| b.to_vec())
+                        .map_err(|e| anyhow::anyhow!("Network error: {}", e))
+                })
+                .boxed(),
+            buffer: Vec::new(),
+            full_content: Vec::new(),
+            tool_accs: Vec::new(),
+            pending: std::collections::VecDeque::new(),
+            done: false,
+            src_done: false,
+        };
+        let out = stream::unfold(st, |mut st| async move {
+            loop {
+                if let Some(item) = st.pending.pop_front() {
+                    return Some((item, st));
+                }
+                if st.src_done {
+                    return None;
+                }
+                match st.src.next().await {
+                    Some(Ok(chunk)) => {
+                        if st.buffer.len() + chunk.len() > MAX_SSE_BUFFER_BYTES {
+                            st.pending.push_back(Err(anyhow::anyhow!(
+                                "SSE buffer would exceed {} bytes without an event boundary; aborting to avoid OOM (limit: 8 MiB)",
+                                MAX_SSE_BUFFER_BYTES
+                            )));
+                            st.src_done = true;
+                        } else {
+                            st.buffer.extend_from_slice(&chunk);
+                            st.process_buffer();
+                        }
+                    }
+                    Some(Err(e)) => {
+                        // Error already carries the "Network error: …" context from
+                        // the byte-stream map above.
+                        st.pending.push_back(Err(e));
+                        st.src_done = true;
+                    }
+                    None => {
+                        // Stream-end (MAGI fix c + iter-2): flush a trailing event that
+                        // lacks the final blank line, then emit MessageDone.
+                        st.src_done = true;
+                        if !st.buffer.is_empty() {
+                            st.buffer.extend_from_slice(b"\n\n");
+                            st.process_buffer();
+                        }
+                        st.finalize();
+                    }
+                }
+            }
+        });
+        Ok(Box::pin(out))
     }
 }
 
