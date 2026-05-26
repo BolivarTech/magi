@@ -741,6 +741,20 @@ fn wrap_message(text: &str, width: usize) -> Vec<String> {
     out
 }
 
+#[allow(dead_code)] // wired into ui() in the GREEN commit
+fn effective_selection(
+    _mode: AppMode,
+    _selected_index: usize,
+    _messages_len: usize,
+) -> Option<usize> {
+    None // stub — fails the Normal-follow-tail and Selection-uses-index assertions
+}
+
+#[allow(dead_code)] // wired into ui() in the GREEN commit
+fn effective_highlight_symbol(_mode: AppMode) -> &'static str {
+    "??" // stub — distinct from both possible real returns so the test fails clearly
+}
+
 fn ui(f: &mut Frame, app: &App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -927,5 +941,36 @@ mod tests {
         let out = wrap_message("", 80);
         // An empty input should produce one empty line so the message still renders as a row.
         assert_eq!(out, vec!["".to_string()]);
+    }
+
+    #[test]
+    fn test_effective_selection_normal_mode_follows_tail() {
+        // Normal mode auto-pins the last message so the list auto-scrolls to bottom.
+        assert_eq!(effective_selection(AppMode::Normal, 0, 5), Some(4));
+        assert_eq!(effective_selection(AppMode::Normal, 99, 5), Some(4)); // ignores stale idx
+    }
+
+    #[test]
+    fn test_effective_selection_selection_and_visual_use_index() {
+        // Selection / Visual modes use the user's chosen index verbatim.
+        assert_eq!(effective_selection(AppMode::Selection, 2, 5), Some(2));
+        assert_eq!(effective_selection(AppMode::Visual, 0, 5), Some(0));
+        assert_eq!(effective_selection(AppMode::Visual, 4, 5), Some(4));
+    }
+
+    #[test]
+    fn test_effective_selection_empty_messages_yields_none() {
+        // No messages → no selection (avoid out-of-bounds; the List renders nothing).
+        assert_eq!(effective_selection(AppMode::Normal, 0, 0), None);
+        assert_eq!(effective_selection(AppMode::Selection, 0, 0), None);
+        assert_eq!(effective_selection(AppMode::Visual, 0, 0), None);
+    }
+
+    #[test]
+    fn test_effective_highlight_symbol_by_mode() {
+        // Selection / Visual show the ">> " marker; Normal hides it.
+        assert_eq!(effective_highlight_symbol(AppMode::Selection), ">> ");
+        assert_eq!(effective_highlight_symbol(AppMode::Visual), ">> ");
+        assert_eq!(effective_highlight_symbol(AppMode::Normal), "");
     }
 }
