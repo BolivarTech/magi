@@ -15,6 +15,25 @@ changes and the **patch** position signals backward-compatible fixes.
 - **#18** Blob version-dispatch / migration — the blob version byte is detection-only; a future format bump still needs a migrate-or-reset path.
 - **OpenAI key in keyring / `key.txt`** — `OPENAI_API_KEY` is currently env-only; aligning it with the Anthropic discovery order is a tracked follow-up.
 
+## [0.3.1] - 2026-05-26
+
+TUI rendering hotfix — two pre-existing UX bugs found during the 0.3.0
+end-to-end smoke (long-reply truncation + new-message scroll-off). Both
+affect all providers (Anthropic, OpenAI-compatible, Static). Render-only,
+no API / trait / contract changes.
+
+### Fixed
+- **Conversation pane truncated long messages** at the panel's right border instead of wrapping. New `wrap_message` helper (`src/tui/mod.rs`) word-wraps each message by `chars().count()` (UTF-8 char-safe) to the panel's inner width, preserves existing `\n` as hard breaks, and hard-splits absurdly long words. One message stays one `ListItem` so Selection / Visual navigation (`app.selected_index → app.messages[i]`) is unchanged.
+- **Conversation pane did not auto-scroll** when new messages overflowed the bottom. New `effective_selection` / `effective_highlight_symbol` helpers pin the last message as the selected row in Normal mode (ratatui's `List` auto-scrolls to keep the selected item visible) while suppressing the `">> "` highlight prefix so the pin is invisible. Selection / Visual modes still show the prefix and use the user-chosen index.
+- **Streaming tail of a tall response stayed off-screen** (and on some terminals "jumped/reset" when the message exceeded the conversation pane). The follow-tail fix now tail-truncates the rendered last message in Normal mode to its trailing `viewport_inner_height` wrapped lines, so streaming visibly scrolls line-by-line. Selection / Visual modes still render every wrapped line so the full message remains reviewable via `Ctrl+S → ↑`.
+
+### Added
+- 15 new tests covering the four render-time helpers (`wrap_message`: word wrap normal / multibyte / oversized word / embedded newlines / width-0 / empty; `effective_selection`: follow-tail in Normal mode / chosen index in Selection / Visual / empty messages; `effective_highlight_symbol`: by mode; `tail_lines`: keeps last N / unchanged when max≥len / max=0 no-op / empty / shift-by-one streaming tick). Total tests: **136** (was 121).
+
+### Known limitations
+- **Leading indentation and internal whitespace runs are collapsed** when a message is wrapped. `wrap_message` uses `split_whitespace`, which drops leading spaces and multi-space gaps. Markdown bullets like `"  - item"` render as `"- item"`; preformatted blocks lose alignment. Tracked for a follow-up patch (preserve per-line indentation via a different tokenizer).
+- **Wrap width is measured in `chars().count()`, not terminal display width.** CJK / emoji glyphs that occupy two cells will wrap one column early; combining marks may wrap one column late. Tracked for a follow-up that switches to `unicode-width`.
+
 ## [0.3.0] - 2026-05-25
 
 First multi-backend release. Magi can now talk to any OpenAI-compatible Chat
@@ -102,7 +121,9 @@ Initial pre-release, published primarily to reserve the `magi-rs` crate name.
 - `ratatui` TUI with Normal / Selection / Visual modes and Unicode-safe input.
 - OAuth (PKCE) login and OS keyring integration, with `magi-rust` legacy migration.
 
-[Unreleased]: https://github.com/BolivarTech/magi/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/BolivarTech/magi/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/BolivarTech/magi/compare/v0.3.0...v0.3.1
+[0.3.0]: https://github.com/BolivarTech/magi/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/BolivarTech/magi/releases/tag/v0.2.1
 [0.2.0]: https://github.com/BolivarTech/magi/releases/tag/v0.2.0
 [0.1.2]: https://github.com/BolivarTech/magi/releases/tag/v0.1.2

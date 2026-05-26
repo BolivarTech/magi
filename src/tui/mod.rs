@@ -691,6 +691,96 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Re
     }
 }
 
+/// Word-wraps `text` so each returned line fits in `width` CHARS (not bytes).
+/// Existing `\n` are preserved as hard breaks. Words longer than `width`
+/// are hard-split into chunks. `width == 0` is treated as no-op.
+fn wrap_message(text: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return vec![text.to_string()];
+    }
+    let mut out: Vec<String> = Vec::new();
+    for paragraph in text.split('\n') {
+        if paragraph.is_empty() {
+            out.push(String::new());
+            continue;
+        }
+        let mut line = String::new();
+        let mut line_w: usize = 0;
+        for word in paragraph.split_whitespace() {
+            let w = word.chars().count();
+            if w > width {
+                if !line.is_empty() {
+                    out.push(std::mem::take(&mut line));
+                    line_w = 0;
+                }
+                let chars: Vec<char> = word.chars().collect();
+                for chunk in chars.chunks(width) {
+                    out.push(chunk.iter().collect::<String>());
+                }
+                continue;
+            }
+            let need = if line.is_empty() { w } else { w + 1 };
+            if line_w + need > width {
+                out.push(std::mem::take(&mut line));
+                line_w = 0;
+            }
+            if !line.is_empty() {
+                line.push(' ');
+                line_w += 1;
+            }
+            line.push_str(word);
+            line_w += w;
+        }
+        if !line.is_empty() {
+            out.push(line);
+        }
+    }
+    if out.is_empty() {
+        out.push(String::new());
+    }
+    out
+}
+
+/// Selection index for the conversation `List` given the current UI mode.
+///
+/// In Selection / Visual mode the user-chosen index is used.  In Normal mode
+/// the LAST message is selected so ratatui auto-scrolls the pane to keep the
+/// newest message visible (follow-tail behavior). Empty history → `None` so
+/// the list renders without an out-of-bounds selection.
+fn effective_selection(mode: AppMode, selected_index: usize, messages_len: usize) -> Option<usize> {
+    if messages_len == 0 {
+        return None;
+    }
+    match mode {
+        AppMode::Selection | AppMode::Visual => Some(selected_index),
+        AppMode::Normal => Some(messages_len - 1),
+    }
+}
+
+/// Highlight-symbol prefix for the conversation `List`.
+///
+/// Returns `">> "` only in Selection / Visual modes (where the user is
+/// actively picking a message); Normal mode returns `""` so the auto-scroll
+/// pin from `effective_selection` is invisible.
+fn effective_highlight_symbol(mode: AppMode) -> &'static str {
+    if matches!(mode, AppMode::Selection | AppMode::Visual) {
+        ">> "
+    } else {
+        ""
+    }
+}
+
+/// Returns the LAST `max` entries of `lines` if `lines.len() > max`, else returns `lines`
+/// unchanged.  `max == 0` is treated as no-op (defensive: a viewport collapsed to height 0
+/// during a resize must never silently drop data — the next non-zero frame restores everything).
+fn tail_lines(lines: Vec<String>, max: usize) -> Vec<String> {
+    if max == 0 || lines.len() <= max {
+        return lines;
+    }
+    let skip = lines.len() - max;
+    lines.into_iter().skip(skip).collect()
+}
+
 fn ui(f: &mut Frame, app: &App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -698,6 +788,10 @@ fn ui(f: &mut Frame, app: &App) {
         .constraints([Constraint::Percentage(80), Constraint::Length(3)].as_ref())
         .split(f.size());
 
+    let inner_width = chunks[0].width.saturating_sub(2) as usize; // subtract left + right borders
+    let inner_height = chunks[0].height.saturating_sub(2) as usize; // subtract top + bottom borders
+
+    let last_idx = app.messages.len().saturating_sub(1);
     let messages: Vec<ListItem> = app
         .messages
         .iter()
@@ -712,13 +806,23 @@ fn ui(f: &mut Frame, app: &App) {
                     .fg(Color::White)
                     .add_modifier(Modifier::BOLD);
             }
-            ListItem::new(m.as_str()).style(style)
+            let wrapped = wrap_message(m, inner_width);
+            // Only the LAST message in Normal mode gets tail-truncated — this is the streaming
+            // target that can grow taller than the viewport.  Selection / Visual modes show
+            // every wrapped line so the user can review the full message (Ctrl+S → ↑ navigation).
+            let displayed = if i == last_idx && app.mode == AppMode::Normal {
+                tail_lines(wrapped, inner_height)
+            } else {
+                wrapped
+            };
+            let lines: Vec<Line> = displayed.into_iter().map(Line::from).collect();
+            ListItem::new(Text::from(lines)).style(style)
         })
         .collect();
 
     let mut state = ListState::default();
-    if app.mode == AppMode::Selection || app.mode == AppMode::Visual {
-        state.select(Some(app.selected_index));
+    if let Some(idx) = effective_selection(app.mode, app.selected_index, app.messages.len()) {
+        state.select(Some(idx));
     }
 
     let messages_list = List::new(messages)
@@ -727,7 +831,7 @@ fn ui(f: &mut Frame, app: &App) {
                 .borders(Borders::ALL)
                 .title("Conversation History"),
         )
-        .highlight_symbol(">> ");
+        .highlight_symbol(effective_highlight_symbol(app.mode));
     f.render_stateful_widget(messages_list, chunks[0], &mut state);
 
     let mut input_text = Text::raw(app.input.as_str());
@@ -811,5 +915,146 @@ mod tests {
 
         app.insert_char('x');
         assert_eq!(app.input, "xá");
+    }
+
+    #[test]
+    fn test_wrap_message_normal_word_wrap() {
+        let out = wrap_message("the quick brown fox jumps over the lazy dog", 12);
+        // No line should exceed the width.
+        for line in &out {
+            assert!(line.chars().count() <= 12, "line {line:?} > 12");
+        }
+        // Joining with single spaces reconstructs the original text.
+        assert_eq!(out.join(" "), "the quick brown fox jumps over the lazy dog");
+    }
+
+    #[test]
+    fn test_wrap_message_preserves_embedded_newlines() {
+        // Existing \n in the text becomes a hard line break — wrap each paragraph independently.
+        let out = wrap_message("hello world\n\nsecond paragraph here", 20);
+        // The blank line between paragraphs is preserved as an empty entry.
+        assert!(
+            out.iter().any(|l| l.is_empty()),
+            "expected an empty line for the blank paragraph: {out:?}"
+        );
+        assert!(out.iter().any(|l| l == "hello world"));
+        assert!(out.iter().any(|l| l.contains("second paragraph")));
+    }
+
+    #[test]
+    fn test_wrap_message_breaks_oversized_word() {
+        // A single word longer than width must be split into chunks of <= width chars each,
+        // not infinite-loop and not exceed width.
+        let out = wrap_message("supercalifragilisticexpialidocious", 5);
+        for line in &out {
+            assert!(line.chars().count() <= 5, "line {line:?} > 5");
+        }
+        assert!(!out.is_empty());
+        // The chunks, concatenated, must equal the original word.
+        assert_eq!(out.join(""), "supercalifragilisticexpialidocious");
+    }
+
+    #[test]
+    fn test_wrap_message_handles_multibyte_utf8() {
+        // Spanish accents: chars().count() not byte length. Width is measured in CHARS, not bytes.
+        let out = wrap_message("La capital de Venezuela es Caracas — está al norte", 18);
+        for line in &out {
+            assert!(line.chars().count() <= 18, "line {line:?} > 18 chars");
+        }
+    }
+
+    #[test]
+    fn test_wrap_message_width_zero_yields_at_least_one_line() {
+        // Defensive: width 0 must not panic / loop. A single line containing the original text is acceptable.
+        let out = wrap_message("anything", 0);
+        assert_eq!(out, vec!["anything".to_string()]);
+    }
+
+    #[test]
+    fn test_wrap_message_empty_input() {
+        let out = wrap_message("", 80);
+        // An empty input should produce one empty line so the message still renders as a row.
+        assert_eq!(out, vec!["".to_string()]);
+    }
+
+    #[test]
+    fn test_effective_selection_normal_mode_follows_tail() {
+        // Normal mode auto-pins the last message so the list auto-scrolls to bottom.
+        assert_eq!(effective_selection(AppMode::Normal, 0, 5), Some(4));
+        assert_eq!(effective_selection(AppMode::Normal, 99, 5), Some(4)); // ignores stale idx
+    }
+
+    #[test]
+    fn test_effective_selection_selection_and_visual_use_index() {
+        // Selection / Visual modes use the user's chosen index verbatim.
+        assert_eq!(effective_selection(AppMode::Selection, 2, 5), Some(2));
+        assert_eq!(effective_selection(AppMode::Visual, 0, 5), Some(0));
+        assert_eq!(effective_selection(AppMode::Visual, 4, 5), Some(4));
+    }
+
+    #[test]
+    fn test_effective_selection_empty_messages_yields_none() {
+        // No messages → no selection (avoid out-of-bounds; the List renders nothing).
+        assert_eq!(effective_selection(AppMode::Normal, 0, 0), None);
+        assert_eq!(effective_selection(AppMode::Selection, 0, 0), None);
+        assert_eq!(effective_selection(AppMode::Visual, 0, 0), None);
+    }
+
+    #[test]
+    fn test_effective_highlight_symbol_by_mode() {
+        // Selection / Visual show the ">> " marker; Normal hides it.
+        assert_eq!(effective_highlight_symbol(AppMode::Selection), ">> ");
+        assert_eq!(effective_highlight_symbol(AppMode::Visual), ">> ");
+        assert_eq!(effective_highlight_symbol(AppMode::Normal), "");
+    }
+
+    #[test]
+    fn test_tail_lines_keeps_last_n_when_input_exceeds_max() {
+        let input: Vec<String> = (0..10).map(|i| format!("line {i}")).collect();
+        let out = tail_lines(input, 3);
+        assert_eq!(
+            out,
+            vec![
+                "line 7".to_string(),
+                "line 8".to_string(),
+                "line 9".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn test_tail_lines_returns_input_unchanged_when_max_ge_len() {
+        let input: Vec<String> = vec!["a".into(), "b".into(), "c".into()];
+        assert_eq!(tail_lines(input.clone(), 3), input); // equal
+        assert_eq!(tail_lines(input.clone(), 100), input); // greater
+    }
+
+    #[test]
+    fn test_tail_lines_max_zero_returns_input_unchanged() {
+        // Defensive: max=0 (degenerate viewport) is a no-op — never lose data on resize-to-zero.
+        let input: Vec<String> = vec!["a".into(), "b".into()];
+        assert_eq!(tail_lines(input.clone(), 0), input);
+    }
+
+    #[test]
+    fn test_tail_lines_empty_input() {
+        let out = tail_lines(Vec::<String>::new(), 5);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn test_tail_lines_shifts_by_one_when_input_grows_by_one() {
+        // Simulates a streaming tick: the tail visually scrolls up by one line.
+        let before: Vec<String> = (0..20).map(|i| format!("L{i}")).collect();
+        let mut after = before.clone();
+        after.push("L20".into());
+        let max = 10;
+        let tail_before = tail_lines(before, max);
+        let tail_after = tail_lines(after, max);
+        // Tail moves forward by 1: L10..=L19  →  L11..=L20.
+        assert_eq!(tail_before.first().unwrap(), "L10");
+        assert_eq!(tail_before.last().unwrap(), "L19");
+        assert_eq!(tail_after.first().unwrap(), "L11");
+        assert_eq!(tail_after.last().unwrap(), "L20");
     }
 }
