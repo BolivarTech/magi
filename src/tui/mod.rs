@@ -770,9 +770,15 @@ fn effective_highlight_symbol(mode: AppMode) -> &'static str {
     }
 }
 
-#[allow(dead_code)] // wired into ui() in the GREEN commit
-fn tail_lines(lines: Vec<String>, _max: usize) -> Vec<String> {
-    lines // stub: returns input unchanged — fails the "keeps_last_n" and "shifts_by_one" tests
+/// Returns the LAST `max` entries of `lines` if `lines.len() > max`, else returns `lines`
+/// unchanged.  `max == 0` is treated as no-op (defensive: a viewport collapsed to height 0
+/// during a resize must never silently drop data — the next non-zero frame restores everything).
+fn tail_lines(lines: Vec<String>, max: usize) -> Vec<String> {
+    if max == 0 || lines.len() <= max {
+        return lines;
+    }
+    let skip = lines.len() - max;
+    lines.into_iter().skip(skip).collect()
 }
 
 fn ui(f: &mut Frame, app: &App) {
@@ -783,7 +789,9 @@ fn ui(f: &mut Frame, app: &App) {
         .split(f.size());
 
     let inner_width = chunks[0].width.saturating_sub(2) as usize; // subtract left + right borders
+    let inner_height = chunks[0].height.saturating_sub(2) as usize; // subtract top + bottom borders
 
+    let last_idx = app.messages.len().saturating_sub(1);
     let messages: Vec<ListItem> = app
         .messages
         .iter()
@@ -798,10 +806,16 @@ fn ui(f: &mut Frame, app: &App) {
                     .fg(Color::White)
                     .add_modifier(Modifier::BOLD);
             }
-            let lines: Vec<Line> = wrap_message(m, inner_width)
-                .into_iter()
-                .map(Line::from)
-                .collect();
+            let wrapped = wrap_message(m, inner_width);
+            // Only the LAST message in Normal mode gets tail-truncated — this is the streaming
+            // target that can grow taller than the viewport.  Selection / Visual modes show
+            // every wrapped line so the user can review the full message (Ctrl+S → ↑ navigation).
+            let displayed = if i == last_idx && app.mode == AppMode::Normal {
+                tail_lines(wrapped, inner_height)
+            } else {
+                wrapped
+            };
+            let lines: Vec<Line> = displayed.into_iter().map(Line::from).collect();
             ListItem::new(Text::from(lines)).style(style)
         })
         .collect();
