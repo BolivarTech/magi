@@ -9,6 +9,7 @@
 #![allow(dead_code)]
 
 use serde::Deserialize;
+use std::path::Path;
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -38,6 +39,35 @@ impl MagiConfig {
     pub fn from_toml_str(s: &str) -> Result<Self, toml::de::Error> {
         toml::from_str(s)
     }
+
+    /// Loads `<dir>/magi.toml`. Returns `(config, Option<warning>)`. Absent → defaults,
+    /// no warning. Malformed/unknown-field → defaults + a warning string (main.rs
+    /// surfaces it as a startup notice — no panic, no silent stderr-only loss).
+    pub fn load(_dir: &Path) -> (Self, Option<String>) {
+        // Stub: replaced in GREEN
+        (Self::default(), None)
+    }
+}
+
+/// env `MAGI_PROVIDER` > TOML `provider` > `"anthropic"` (RF-2).
+pub fn resolve_provider(_config: &MagiConfig, _env_provider: Option<&str>) -> String {
+    // Stub: replaced in GREEN
+    String::new()
+}
+
+/// env > TOML > `https://api.openai.com/v1` (RF-3).
+pub fn resolve_openai_base_url(_config: &MagiConfig, _env_base_url: Option<&str>) -> String {
+    // Stub: replaced in GREEN
+    String::new()
+}
+
+/// env > TOML; REQUIRED → `Err` if absent in both (RF-3).
+pub fn resolve_openai_model(
+    _config: &MagiConfig,
+    _env_model: Option<&str>,
+) -> anyhow::Result<String> {
+    // Stub: replaced in GREEN
+    Ok(String::new())
 }
 
 #[cfg(test)]
@@ -74,5 +104,86 @@ mod tests {
     #[test]
     fn test_unknown_field_is_err() {
         assert!(MagiConfig::from_toml_str("provdier = \"openai\"").is_err());
+    }
+
+    // -------------------------------------------------------------------------
+    // Task 2: load + resolution tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_load_missing_file_is_default_no_warning() {
+        let dir = tempfile::tempdir().unwrap();
+        let (c, warn) = MagiConfig::load(dir.path());
+        assert_eq!(c, MagiConfig::default());
+        assert!(warn.is_none());
+    }
+
+    #[test]
+    fn test_load_reads_file() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("magi.toml"), "provider = \"openai\"").unwrap();
+        let (c, warn) = MagiConfig::load(dir.path());
+        assert_eq!(c.provider.as_deref(), Some("openai"));
+        assert!(warn.is_none());
+    }
+
+    #[test]
+    fn test_load_malformed_yields_default_plus_warning() {
+        // RF-1 + MAGI: malformed config does not crash; returns defaults AND a
+        // human-facing warning (main.rs surfaces it as a TUI startup notice).
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("magi.toml"), "provdier = \"x\"").unwrap();
+        let (c, warn) = MagiConfig::load(dir.path());
+        assert_eq!(c, MagiConfig::default());
+        assert!(warn.unwrap().contains("magi.toml"));
+    }
+
+    #[test]
+    fn test_resolve_provider_precedence() {
+        let c = MagiConfig {
+            provider: Some("anthropic".into()),
+            ..Default::default()
+        };
+        assert_eq!(resolve_provider(&c, Some("openai")), "openai"); // S-2 env wins
+        assert_eq!(resolve_provider(&c, None), "anthropic");
+        // S-3
+        assert_eq!(resolve_provider(&MagiConfig::default(), None), "anthropic");
+    }
+
+    #[test]
+    fn test_resolve_openai_base_url_precedence() {
+        let c = MagiConfig {
+            openai: OpenAiConfig {
+                base_url: Some("http://toml/v1".into()),
+                model: None,
+            },
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_openai_base_url(&c, Some("http://env/v1")),
+            "http://env/v1"
+        );
+        assert_eq!(resolve_openai_base_url(&c, None), "http://toml/v1");
+        assert_eq!(
+            resolve_openai_base_url(&MagiConfig::default(), None),
+            "https://api.openai.com/v1"
+        );
+    }
+
+    #[test]
+    fn test_resolve_openai_model_required() {
+        assert!(resolve_openai_model(&MagiConfig::default(), None).is_err());
+        let c = MagiConfig {
+            openai: OpenAiConfig {
+                base_url: None,
+                model: Some("phi4-mini".into()),
+            },
+            ..Default::default()
+        };
+        assert_eq!(resolve_openai_model(&c, None).unwrap(), "phi4-mini");
+        assert_eq!(
+            resolve_openai_model(&c, Some("gpt-4o-mini")).unwrap(),
+            "gpt-4o-mini"
+        );
     }
 }
