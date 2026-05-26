@@ -43,6 +43,21 @@ impl MagiConfig {
     /// Loads `<dir>/magi.toml`. Returns `(config, Option<warning>)`. Absent → defaults,
     /// no warning. Malformed/unknown-field → defaults + a warning string (main.rs
     /// surfaces it as a startup notice — no panic, no silent stderr-only loss).
+    ///
+    /// Joins `dir` with the literal filename `magi.toml`. Callers should pass a
+    /// canonical directory (e.g., from `env::current_dir()?`) so the resolution
+    /// is reproducible across the process lifetime. Relative paths are accepted
+    /// but their meaning depends on the current working directory at call time;
+    /// if the process later changes `cwd`, a relative `dir` will resolve
+    /// against a different absolute location.
+    ///
+    /// # Arguments
+    /// * `dir` - Directory in which to look for `magi.toml`. Recommended to be
+    ///   canonical/absolute so subsequent code paths cannot drift.
+    ///
+    /// # Returns
+    /// `(MagiConfig, Option<String>)` — the parsed config (or defaults on any
+    /// error path) and an optional human-readable warning to surface in the UI.
     pub fn load(dir: &Path) -> (Self, Option<String>) {
         let path = dir.join("magi.toml");
         match std::fs::read_to_string(&path) {

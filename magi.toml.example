@@ -6,7 +6,10 @@
 # IMPORTANT: API keys NEVER live in this file. They come from environment
 # variables (ANTHROPIC_API_KEY / OPENAI_API_KEY), the OS keyring, or
 # `key.txt` (for the Anthropic key). This file holds non-secret runtime
-# configuration only.
+# configuration only. Placing `api_key` (or any other unknown field) in
+# this file is a PARSE ERROR under `deny_unknown_fields`, not silent
+# acceptance — magi-rs will reject the TOML at startup and fall back to
+# defaults with a surfaced warning.
 #
 # Precedence for every setting: env var > magi.toml > built-in default.
 

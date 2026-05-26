@@ -151,6 +151,7 @@ model    = "claude-sonnet-4-6"           # optional override of the Anthropic de
 
 - **Anthropic key** — `ANTHROPIC_API_KEY` env var, OS keyring (`magi-rs`), or `key.txt` (see above).
 - **OpenAI-compatible key** — `OPENAI_API_KEY` env var. For a local Ollama instance, magi-rs falls back to a dummy value (`"ollama"`) so you can run without setting anything.
+- Placing `api_key` / `OPENAI_API_KEY` (or any other unknown field) inside `magi.toml` is rejected at parse time under `deny_unknown_fields`, not silently dropped — the file is treated as invalid and magi-rs falls back to defaults with a startup warning.
 - A malformed `magi.toml` does not crash magi-rs: it falls back to defaults and surfaces a notice in the TUI on startup.
 
 #### Quick start — local Ollama (no cost, no rate limits)

@@ -459,11 +459,21 @@ pub struct OpenAiCompatibleProvider {
 }
 
 impl OpenAiCompatibleProvider {
+    /// Constructs the provider with a fresh `reqwest::Client`. No `.timeout(...)`
+    /// is set on the client — the OpenAI/Ollama stream is intentionally unbounded
+    /// at the client level. Local Ollama can spend tens of seconds on cold-load
+    /// before the first SSE event arrives; a total-request timeout (which is what
+    /// `reqwest::Client::builder().timeout(...)` configures) would truncate healthy
+    /// long streams. Stream-side termination is handled by the unfold state
+    /// machine (finalize on `finish_reason` / `[DONE]` / stream-end) plus the
+    /// 8 MiB [`MAX_SSE_BUFFER_BYTES`] cap that aborts on unbounded buffering
+    /// without an event boundary. (MAGI Checkpoint 2 iter-2 fix.)
     pub fn new(s: OpenAiSettings) -> Self {
         // No total-request timeout: streaming generations (esp. local Ollama) run
         // long; reqwest `.timeout()` is a TOTAL deadline and would truncate healthy
         // streams (MAGI iter-2). Parity with AnthropicProvider (no timeout). Anti-OOM
-        // is the bounded tool-call index (Task 5), not a timeout.
+        // is the bounded tool-call index (Task 5) and the SSE buffer cap, not a
+        // timeout.
         Self {
             client: reqwest::Client::new(),
             base_url: s.base_url,
