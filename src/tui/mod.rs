@@ -694,9 +694,51 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Re
 /// Word-wraps `text` so each returned line fits in `width` CHARS (not bytes).
 /// Existing `\n` are preserved as hard breaks. Words longer than `width`
 /// are hard-split into chunks. `width == 0` is treated as no-op.
-#[allow(dead_code)] // stub — used only by tests in RED; wired into ui() in GREEN
-fn wrap_message(text: &str, _width: usize) -> Vec<String> {
-    vec![text.to_string()]
+fn wrap_message(text: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return vec![text.to_string()];
+    }
+    let mut out: Vec<String> = Vec::new();
+    for paragraph in text.split('\n') {
+        if paragraph.is_empty() {
+            out.push(String::new());
+            continue;
+        }
+        let mut line = String::new();
+        let mut line_w: usize = 0;
+        for word in paragraph.split_whitespace() {
+            let w = word.chars().count();
+            if w > width {
+                if !line.is_empty() {
+                    out.push(std::mem::take(&mut line));
+                    line_w = 0;
+                }
+                let chars: Vec<char> = word.chars().collect();
+                for chunk in chars.chunks(width) {
+                    out.push(chunk.iter().collect::<String>());
+                }
+                continue;
+            }
+            let need = if line.is_empty() { w } else { w + 1 };
+            if line_w + need > width {
+                out.push(std::mem::take(&mut line));
+                line_w = 0;
+            }
+            if !line.is_empty() {
+                line.push(' ');
+                line_w += 1;
+            }
+            line.push_str(word);
+            line_w += w;
+        }
+        if !line.is_empty() {
+            out.push(line);
+        }
+    }
+    if out.is_empty() {
+        out.push(String::new());
+    }
+    out
 }
 
 fn ui(f: &mut Frame, app: &App) {
@@ -705,6 +747,8 @@ fn ui(f: &mut Frame, app: &App) {
         .margin(1)
         .constraints([Constraint::Percentage(80), Constraint::Length(3)].as_ref())
         .split(f.size());
+
+    let inner_width = chunks[0].width.saturating_sub(2) as usize; // subtract left + right borders
 
     let messages: Vec<ListItem> = app
         .messages
@@ -720,7 +764,11 @@ fn ui(f: &mut Frame, app: &App) {
                     .fg(Color::White)
                     .add_modifier(Modifier::BOLD);
             }
-            ListItem::new(m.as_str()).style(style)
+            let lines: Vec<Line> = wrap_message(m, inner_width)
+                .into_iter()
+                .map(Line::from)
+                .collect();
+            ListItem::new(Text::from(lines)).style(style)
         })
         .collect();
 
