@@ -1749,4 +1749,127 @@ mod tests {
             }]
         );
     }
+
+    // ─── MAGI Loop 2 caveats (C1 + C2) ────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_openai_suppresses_post_stop_text_deltas() {
+        // C1: a misbehaving backend sends `delta.content` events AFTER the
+        // finalize-causing `finish_reason:"stop"` + `[DONE]` sentinel. The
+        // provider must emit exactly ONE MessageDone and NO TextDelta chunks
+        // arriving AFTER that MessageDone. Pre-fix the post-stop deltas leak
+        // through process_buffer because `done` is not checked before draining
+        // further blocks.
+        let mut server = Server::new_async().await;
+        let url = server.url();
+        let sse = concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"ghost1\"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"ghost2\"}}]}\n\n",
+        );
+        let _m = server
+            .mock("POST", "/chat/completions")
+            .with_status(200)
+            .with_header("content-type", "text/event-stream")
+            .with_body(sse)
+            .create_async()
+            .await;
+        let p = OpenAiCompatibleProvider::new(OpenAiSettings {
+            base_url: url,
+            api_key: "k".into(),
+            model: "m".into(),
+        });
+        let mut stream = p
+            .stream_messages(&[Message::user("hi")], &[])
+            .await
+            .unwrap();
+
+        // Collect chunks in order, classifying each as either a TextDelta or
+        // a MessageDone (so we can prove ordering).
+        #[derive(PartialEq, Eq)]
+        enum Kind {
+            Text,
+            Done,
+        }
+        let mut ordered: Vec<Kind> = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            match chunk {
+                Ok(ResponseChunk::TextDelta(_)) => ordered.push(Kind::Text),
+                Ok(ResponseChunk::MessageDone(_)) => ordered.push(Kind::Done),
+                _ => {}
+            }
+        }
+
+        let done_count = ordered.iter().filter(|k| **k == Kind::Done).count();
+        assert_eq!(done_count, 1, "exactly one MessageDone");
+
+        let done_pos = ordered
+            .iter()
+            .position(|k| *k == Kind::Done)
+            .expect("MessageDone present");
+        // No TextDelta may sit after MessageDone — post-stop ghost deltas must
+        // be suppressed.
+        for (i, k) in ordered.iter().enumerate() {
+            if i > done_pos {
+                assert!(
+                    *k != Kind::Text,
+                    "TextDelta at index {i} arrived after MessageDone at {done_pos}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_openai_skips_args_fragment_when_slot_empty() {
+        // C2: a misbehaving backend streams a tool_call fragment that carries
+        // ONLY `arguments` (no `id`, no `function.name`) before any fragment
+        // populates the slot's id/name. The provider must skip the fragment —
+        // no `ToolUseInputDelta` chunk and no `Content::ToolUse` are emitted.
+        let mut server = Server::new_async().await;
+        let url = server.url();
+        let sse = concat!(
+            // First tool_calls fragment: arguments only, no id, no function.name.
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"orphan\\\":true}\"}}]}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
+            "data: [DONE]\n\n",
+        );
+        let _m = server
+            .mock("POST", "/chat/completions")
+            .with_status(200)
+            .with_header("content-type", "text/event-stream")
+            .with_body(sse)
+            .create_async()
+            .await;
+        let p = OpenAiCompatibleProvider::new(OpenAiSettings {
+            base_url: url,
+            api_key: "k".into(),
+            model: "m".into(),
+        });
+        let mut stream = p.stream_messages(&[Message::user("x")], &[]).await.unwrap();
+
+        let mut tool_input_delta_count = 0usize;
+        let mut tool_use_count = 0usize;
+        while let Some(chunk) = stream.next().await {
+            match chunk {
+                Ok(ResponseChunk::ToolUseInputDelta { .. }) => tool_input_delta_count += 1,
+                Ok(ResponseChunk::MessageDone(m)) => {
+                    tool_use_count += m
+                        .content
+                        .iter()
+                        .filter(|c| matches!(c, Content::ToolUse { .. }))
+                        .count();
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(
+            tool_input_delta_count, 0,
+            "no ToolUseInputDelta emitted for orphan args fragment"
+        );
+        assert_eq!(
+            tool_use_count, 0,
+            "no Content::ToolUse emitted for orphan args fragment"
+        );
+    }
 }
