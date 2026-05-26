@@ -123,6 +123,52 @@ The model is read from `ANTHROPIC_MODEL`, then `key.txt` line 2, defaulting to `
 
 > `key.txt` and its variants are gitignored. Never commit a real key.
 
+### `magi.toml` (optional, multi-backend)
+
+Magi can talk to any **OpenAI-compatible** Chat Completions endpoint — OpenAI itself, a local **Ollama** instance, Groq, OpenRouter — in addition to the default Anthropic Messages API. The backend and its non-secret settings live in a workspace-local `magi.toml`. A reference is committed as [`magi.toml.example`](magi.toml.example); copy it to `magi.toml` and edit. `magi.toml` is gitignored.
+
+```toml
+provider = "openai"          # "anthropic" (default) | "openai"
+
+[openai]
+base_url = "http://localhost:11434/v1"   # Ollama; or https://api.openai.com/v1, Groq, OpenRouter, …
+model    = "phi4-mini"                   # REQUIRED when provider = "openai"
+
+[anthropic]
+model    = "claude-sonnet-4-6"           # optional override of the Anthropic default
+```
+
+**Precedence (per setting): environment variable > `magi.toml` > built-in default.**
+
+| Setting | Env var | `magi.toml` | Default |
+|---------|---------|-------------|---------|
+| Provider backend | `MAGI_PROVIDER` | `provider` | `anthropic` |
+| OpenAI base URL | `OPENAI_BASE_URL` | `[openai].base_url` | `https://api.openai.com/v1` |
+| OpenAI model | `OPENAI_MODEL` | `[openai].model` | *(none — required when `provider = "openai"`)* |
+| Anthropic model | `ANTHROPIC_MODEL` | `[anthropic].model` | see [API key & model discovery](#api-key--model-discovery) |
+
+**API keys never live in `magi.toml`.** Keys come from env / OS keyring / `key.txt` only — `magi.toml` is non-secret runtime config and is the wrong place for credentials. Specifically:
+
+- **Anthropic key** — `ANTHROPIC_API_KEY` env var, OS keyring (`magi-rs`), or `key.txt` (see above).
+- **OpenAI-compatible key** — `OPENAI_API_KEY` env var. For a local Ollama instance, magi-rs falls back to a dummy value (`"ollama"`) so you can run without setting anything.
+- A malformed `magi.toml` does not crash magi-rs: it falls back to defaults and surfaces a notice in the TUI on startup.
+
+#### Quick start — local Ollama (no cost, no rate limits)
+
+```bash
+# 1. Install and start Ollama, then pull a model:
+ollama pull phi4-mini
+
+# 2. Drop a magi.toml in the workspace:
+cp magi.toml.example magi.toml
+# (the defaults already point at http://localhost:11434/v1 and phi4-mini)
+
+# 3. Run magi-rs — the startup banner reports the selected provider.
+cargo run
+```
+
+To use OpenAI instead, edit `magi.toml` (`base_url = "https://api.openai.com/v1"`, pick a `model`) and set `OPENAI_API_KEY` in the environment.
+
 ---
 
 ## How It Works

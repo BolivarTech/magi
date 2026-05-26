@@ -1,0 +1,34 @@
+# magi-rs configuration — reference example.
+#
+# Copy this file to `magi.toml` (per-workspace) and edit. `magi.toml` is
+# gitignored; only `magi.toml.example` is tracked.
+#
+# IMPORTANT: API keys NEVER live in this file. They come from environment
+# variables (ANTHROPIC_API_KEY / OPENAI_API_KEY), the OS keyring, or
+# `key.txt` (for the Anthropic key). This file holds non-secret runtime
+# configuration only.
+#
+# Precedence for every setting: env var > magi.toml > built-in default.
+
+# Which provider backend to use. Default when omitted: "anthropic".
+#   - "anthropic" — Anthropic Messages API (the default magi-rs path)
+#   - "openai"    — any OpenAI-compatible Chat Completions endpoint
+#                   (OpenAI, Ollama, Groq, OpenRouter, …)
+provider = "openai"
+
+[openai]
+# OpenAI-compatible base URL. Examples:
+#   http://localhost:11434/v1       (Ollama, local, dummy api_key accepted)
+#   https://api.openai.com/v1       (OpenAI)
+#   https://api.groq.com/openai/v1  (Groq)
+#   https://openrouter.ai/api/v1    (OpenRouter)
+base_url = "http://localhost:11434/v1"
+
+# Model name. REQUIRED when `provider = "openai"` (no implicit default —
+# magi-rs errors at startup if neither this field nor OPENAI_MODEL is set).
+model = "phi4-mini"
+
+[anthropic]
+# Anthropic model to use when `provider = "anthropic"`. Optional — when
+# omitted, magi-rs falls back to its built-in default (claude-sonnet-4-6).
+model = "claude-sonnet-4-6"

@@ -2,6 +2,7 @@
 key.txt
 key.txt.bak
 key.txt.org
+magi.toml
 *.tmp
 
 # Local encrypted conversation/knowledge DB (runtime; per-machine, never commit)
