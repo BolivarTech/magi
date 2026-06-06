@@ -20,3 +20,7 @@ planning/
 
 # Internal development docs (audit, strategy, roadmap — not public)
 dev-docs/
+
+# Graphify knowledge-graph outputs + local hook patch script (per-machine, never commit)
+graphify-out/
+patch_graphify_hooks.py
