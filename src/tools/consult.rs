@@ -14,7 +14,8 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 
 /// Reject oversized consult input before incurring 3 model calls.
-const MAX_QUERY_LEN: usize = 8192;
+/// `pub(crate)` so the forced `/consult` TUI path applies the same cap.
+pub(crate) const MAX_QUERY_LEN: usize = 8192;
 
 /// Tool wrapping a `magi_core::Magi`. `execute` runs the 3-perspective consensus
 /// (implemented in Task 4) and returns the verbatim report. The `description` is

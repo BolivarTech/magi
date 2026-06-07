@@ -326,6 +326,18 @@ pub async fn run_tui_ext(
                             continue;
                         }
                     };
+                    // Cap forced /consult input too (the tool path caps in execute; this
+                    // direct path bypasses it) — reject before any model call.
+                    if query.len() > crate::tools::consult::MAX_QUERY_LEN {
+                        let _ = response_tx
+                            .send(AgentResponse::Error(format!(
+                                "consult query too large ({} bytes; max {})",
+                                query.len(),
+                                crate::tools::consult::MAX_QUERY_LEN
+                            )))
+                            .await;
+                        continue;
+                    }
                     let _ = response_tx
                         .send(AgentResponse::Info(
                             "MAGI deliberating — 3 model calls…".to_string(),
