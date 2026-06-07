@@ -359,6 +359,9 @@ pub async fn run_tui_ext(
                             } else {
                                 report.report
                             };
+                            // Sanitize the verbatim report (LLM-generated) before rendering —
+                            // strips ANSI escapes / control chars, matching the TextDelta path.
+                            let body = crate::agent::Agent::sanitize_text(&body);
                             let _ = response_tx.send(AgentResponse::Text(body)).await;
                         }
                         Ok(Err(e)) => {

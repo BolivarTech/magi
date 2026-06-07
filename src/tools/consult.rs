@@ -74,6 +74,11 @@ impl Tool for ConsultTool {
             .get("query")
             .and_then(|v| v.as_str())
             .ok_or_else(|| ToolError::InvalidArguments("missing 'query' string".to_string()))?;
+        if query.trim().is_empty() {
+            return Err(ToolError::InvalidArguments(
+                "query must not be empty".to_string(),
+            ));
+        }
         if query.len() > MAX_QUERY_LEN {
             return Err(ToolError::InvalidArguments(format!(
                 "query too large ({} bytes; max {})",
@@ -158,6 +163,15 @@ mod tests {
             .expect("3 agents → success");
         assert!(!out["report"].as_str().expect("report string").is_empty());
         assert_eq!(out["degraded"], json!(false));
+    }
+
+    #[tokio::test]
+    async fn test_execute_empty_query_is_invalid_arguments() {
+        let tool = ConsultTool::new(magi_all_ok());
+        assert!(matches!(
+            tool.execute(json!({ "query": "   " })).await.unwrap_err(),
+            ToolError::InvalidArguments(_)
+        ));
     }
 
     #[tokio::test]
