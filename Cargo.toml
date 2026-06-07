@@ -50,9 +50,11 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 uuid = { version = "1.8", features = ["v4"] }
 
 # MAGI ecosystem
-magi-core = "1.0"
+magi-core = "1.1"
 
 [dev-dependencies]
+# RoutingMockProvider for consult tests (no extra runtime deps; reqwest NOT pulled)
+magi-core = { version = "1.1", features = ["test-utils"] }
 # Mocking for tests
 mockall = "0.12"
 mockito = "1.4"
