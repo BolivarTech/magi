@@ -5,16 +5,104 @@
 //! Adapter that bridges magi-rs's `Provider` trait to magi-core's `LlmProvider`
 //! trait, enabling MAGI consensus workflows to reuse the already-resolved backend.
 
-use std::sync::Arc;
+use crate::agent::messages::{Content, Message};
+use crate::agent::provider::Provider;
 use async_trait::async_trait;
 use magi_core::error::ProviderError;
 use magi_core::provider::{CompletionConfig, LlmProvider};
-use crate::agent::messages::{Content, Message};
-use crate::agent::provider::Provider;
+use std::sync::Arc;
 
 /// Delimiter that signals role separation when folding magi-core's distinct
 /// `system_prompt` into a magi-rs user turn (magi-rs `Role` has no `System`).
+// Used by fold_prompt (consumed in Task 3); suppress until then.
+#[allow(dead_code)]
 const SYSTEM_FOLD_DELIMITER: &str = "\n\n---\n\n";
+
+/// Adapts an `Arc<dyn Provider>` (magi-rs backend) to magi-core's `LlmProvider`.
+///
+/// `complete` folds magi-core's distinct `system_prompt` into a single magi-rs
+/// user `Message` (magi-rs `Role` has no `System` variant) and drains
+/// `Provider::send_messages` for the assembled reply text.
+///
+/// MAGI FIX (consensus-fidelity caveat): magi-core differentiates its three
+/// personas via distinct *system* prompts. magi-rs cannot send a system role
+/// without changing the `Provider` trait (out of scope), so the system text is
+/// folded into the user turn behind [`SYSTEM_FOLD_DELIMITER`]. On weak/local
+/// models this can weaken persona divergence and JSON adherence. Documented
+/// limitation; revisit when magi-rs gains a system-prompt channel.
+///
+/// `CompletionConfig` (`max_tokens`/`temperature`) is intentionally NOT applied:
+/// the magi-rs `Provider` trait exposes no per-call knobs. Deferred (CHANGELOG).
+// The struct and its constructor are consumed by Task 3 (MagiConsultWorkflow).
+// Suppress dead-code lint until that task lands.
+#[allow(dead_code)]
+pub struct MagiCoreProviderAdapter {
+    inner: Arc<dyn Provider>,
+    name: String,
+    model: String,
+}
+
+#[allow(dead_code)]
+impl MagiCoreProviderAdapter {
+    /// Creates the adapter over a resolved magi-rs backend.
+    pub fn new(
+        inner: Arc<dyn Provider>,
+        name: impl Into<String>,
+        model: impl Into<String>,
+    ) -> Self {
+        Self {
+            inner,
+            name: name.into(),
+            model: model.into(),
+        }
+    }
+
+    /// Folds a system + user prompt into one user-turn string with an explicit
+    /// role-separating delimiter. Empty system → user prompt unchanged.
+    pub(crate) fn fold_prompt(system_prompt: &str, user_prompt: &str) -> String {
+        if system_prompt.is_empty() {
+            user_prompt.to_string()
+        } else {
+            format!("{system_prompt}{SYSTEM_FOLD_DELIMITER}{user_prompt}")
+        }
+    }
+}
+
+#[async_trait]
+impl LlmProvider for MagiCoreProviderAdapter {
+    async fn complete(
+        &self,
+        system_prompt: &str,
+        user_prompt: &str,
+        _config: &CompletionConfig,
+    ) -> Result<String, ProviderError> {
+        let prompt = Self::fold_prompt(system_prompt, user_prompt);
+        let messages = [Message::user(&prompt)];
+        let reply = self
+            .inner
+            .send_messages(&messages, &[])
+            .await
+            .map_err(|e| ProviderError::Network {
+                message: e.to_string(),
+            })?;
+        let text = reply
+            .content
+            .iter()
+            .filter_map(|c| match c {
+                Content::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("");
+        Ok(text)
+    }
+    fn name(&self) -> &str {
+        &self.name
+    }
+    fn model(&self) -> &str {
+        &self.model
+    }
+}
 
 #[cfg(test)]
 mod tests {
