@@ -30,7 +30,7 @@ pub trait Provider: Send + Sync {
         tools: &[Box<dyn Tool>],
     ) -> Result<BoxStream<'static, Result<ResponseChunk>>>;
 
-    /// Whether this provider is the canned [`StaticProvider`] (no API key).
+    /// Whether this provider is the canned `StaticProvider` (no API key).
     /// Default `false`; `StaticProvider` overrides to `true`. Lets callers tell
     /// canned startup state from a live provider (#16).
     fn is_static(&self) -> bool {

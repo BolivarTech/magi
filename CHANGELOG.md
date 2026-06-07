@@ -15,6 +15,30 @@ changes and the **patch** position signals backward-compatible fixes.
 - **#18** Blob version-dispatch / migration — the blob version byte is detection-only; a future format bump still needs a migrate-or-reset path.
 - **OpenAI key in keyring / `key.txt`** — `OPENAI_API_KEY` is currently env-only; aligning it with the Anthropic discovery order is a tracked follow-up.
 
+## [0.4.0] - 2026-06-07
+
+First step of the multi-backend MAGI integration: the `magi-core` crate (already
+declared but unused) is now wired in, giving the agent a **three-perspective
+consensus** capability (Melchior / Balthasar / Caspar). Additive only — the
+`Provider` trait, the agent loop, config discovery, and encrypted memory are
+unchanged.
+
+### Added
+- **`consult` tool** — exposes `magi-core`'s 3-perspective consensus as a tool the main LLM can invoke autonomously when a question has genuine trade-offs. Routing emerges from the existing tool loop (no separate classifier); each call passes the inline approval gate, which doubles as cost control for the ≈ 3 model calls.
+- **`/consult <question>` command** — forces a MAGI consensus directly in the TUI, bypassing the router and approval, rendering the verbatim report (three perspectives + verdict). Runs `analyze` in a joined task so a panic in `magi-core` surfaces as a recoverable error instead of killing the runner; blocks the session while it runs, like a normal turn.
+- **`MagiCoreProviderAdapter`** (`src/agent/magi_adapter.rs`) — bridges magi-rs's resolved `Provider` to `magi_core::provider::LlmProvider`, so the consensus reuses the same backend + credentials (Anthropic or any OpenAI-compatible endpoint). No second LLM config layer.
+- **StaticProvider guard** — `consult` is registered (and `/consult` works) only when a real provider is configured; on the static/no-key path the tool is absent and `/consult` reports that a provider is required.
+- **Degraded surfacing** — a consult that completes with fewer than three agents is prefixed `[DEGRADED: …]` so a low-quality consensus is never silent.
+- New tests for the adapter (assembled text, role-fold delimiter, error mapping), the tool (contract + consensus + invalid-args + backend-error via `magi-core`'s `RoutingMockProvider`), and the `/consult` parser + a full-report render-safety test. Total tests: **145** (was 136).
+
+### Changed
+- `magi-core` dependency bumped `1.0` → `1.1` (no features enabled; `reqwest 0.12` is **not** pulled — the adapter reuses magi-rs's existing `reqwest 0.11` stack). `test-utils` enabled as a dev-dependency for `RoutingMockProvider`.
+
+### Known limitations
+- **System-prompt fold.** `magi-core` differentiates its three personas via distinct *system* prompts, but magi-rs's `Provider` has no system-role channel yet, so the system text is folded into the user turn (behind an explicit delimiter). On weak / small local models this can weaken persona divergence and JSON adherence. Revisit when magi-rs gains a system-prompt channel.
+- **`CompletionConfig` not applied.** The adapter does not forward `max_tokens` / `temperature` to the backend (the `Provider` trait exposes no per-call knobs). Deferred.
+- **Deferred follow-ups (internal dev-docs):** repetitive-call detection keyed on the consult `query` argument, and an `InputTooLarge` early-rejection UX for oversized `/consult` input.
+
 ## [0.3.1] - 2026-05-26
 
 TUI rendering hotfix — two pre-existing UX bugs found during the 0.3.0
