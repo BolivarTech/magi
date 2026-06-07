@@ -13,6 +13,9 @@ use magi_core::schema::Mode;
 use serde_json::{json, Value};
 use std::sync::Arc;
 
+/// Reject oversized consult input before incurring 3 model calls.
+const MAX_QUERY_LEN: usize = 8192;
+
 /// Tool wrapping a `magi_core::Magi`. `execute` runs the 3-perspective consensus
 /// (implemented in Task 4) and returns the verbatim report. The `description` is
 /// what makes the main LLM self-route here only for multi-perspective decisions.
@@ -70,6 +73,13 @@ impl Tool for ConsultTool {
             .get("query")
             .and_then(|v| v.as_str())
             .ok_or_else(|| ToolError::InvalidArguments("missing 'query' string".to_string()))?;
+        if query.len() > MAX_QUERY_LEN {
+            return Err(ToolError::InvalidArguments(format!(
+                "query too large ({} bytes; max {})",
+                query.len(),
+                MAX_QUERY_LEN
+            )));
+        }
         let report = self
             .magi
             .analyze(&Mode::Analysis, query)
@@ -114,11 +124,19 @@ mod tests {
         assert_eq!(schema["required"][0], "query");
         let lower = tool.description().to_lowercase();
         assert!(!lower.is_empty());
-        assert!(
-            lower.contains("trade-off")
-                || lower.contains("perspective")
-                || lower.contains("decision")
-        );
+        assert!(lower.contains("trade-off"));
+        assert!(lower.contains("perspective") || lower.contains("perspectives"));
+        assert!(lower.contains("decision") || lower.contains("decisions"));
+    }
+
+    #[tokio::test]
+    async fn test_execute_oversized_query_is_invalid_arguments() {
+        let tool = ConsultTool::new(magi_all_ok());
+        let big = "x".repeat(9000);
+        assert!(matches!(
+            tool.execute(json!({"query": big})).await.unwrap_err(),
+            ToolError::InvalidArguments(_)
+        ));
     }
 
     #[tokio::test]
