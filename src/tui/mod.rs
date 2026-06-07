@@ -7,6 +7,7 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
+use magi_core::schema::Mode;
 use ratatui::{
     backend::{Backend, CrosstermBackend},
     layout::{Constraint, Direction, Layout},
@@ -26,12 +27,25 @@ pub enum AppMode {
     Visual, // Mode for selecting text within a message
 }
 
+/// Parses a trimmed input line as a `/consult` command. `Some(query)` for
+/// `/consult <query>` (empty string for bare `/consult`), `None` otherwise.
+/// Requires a space boundary so `/consultation` is treated as normal input.
+pub(crate) fn parse_consult_command(trimmed: &str) -> Option<&str> {
+    let rest = trimmed.strip_prefix("/consult")?;
+    if rest.is_empty() {
+        return Some("");
+    }
+    Some(rest.strip_prefix(' ')?.trim())
+}
+
 /// Events that can happen in the UI.
 pub enum UiEvent {
     Input(String),
     Clear,
     Login,
     Logout,
+    /// Trigger a forced MAGI multi-perspective analysis with the given question.
+    Consult(String),
     Quit,
 }
 
@@ -222,7 +236,11 @@ impl App {
     }
 }
 
-pub async fn run_tui_ext(agent: Agent, startup_notices: Vec<String>) -> anyhow::Result<()> {
+pub async fn run_tui_ext(
+    agent: Agent,
+    startup_notices: Vec<String>,
+    consult: Option<std::sync::Arc<magi_core::orchestrator::Magi>>,
+) -> anyhow::Result<()> {
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |panic_info| {
         let _ = disable_raw_mode();
@@ -249,6 +267,8 @@ pub async fn run_tui_ext(agent: Agent, startup_notices: Vec<String>) -> anyhow::
 
     let mut runner_agent = agent;
     runner_agent.set_approval_channel(approval_tx);
+
+    let mut consult_magi_runner = consult;
 
     tokio::spawn(async move {
         while let Some(event) = event_rx.recv().await {
@@ -294,6 +314,76 @@ pub async fn run_tui_ext(agent: Agent, startup_notices: Vec<String>) -> anyhow::
                 UiEvent::Clear => {
                     runner_agent.clear_history();
                 }
+                UiEvent::Consult(query) => {
+                    let magi = match consult_magi_runner.as_ref() {
+                        Some(m) => m.clone(),
+                        None => {
+                            let _ = response_tx
+                                .send(AgentResponse::Error(
+                                    "consult requires a configured LLM provider — run /login or set a provider.".to_string(),
+                                ))
+                                .await;
+                            continue;
+                        }
+                    };
+                    // Cap forced /consult input too (the tool path caps in execute; this
+                    // direct path bypasses it) — reject before any model call.
+                    if query.len() > crate::tools::consult::MAX_QUERY_LEN {
+                        let _ = response_tx
+                            .send(AgentResponse::Error(format!(
+                                "consult query too large ({} bytes; max {})",
+                                query.len(),
+                                crate::tools::consult::MAX_QUERY_LEN
+                            )))
+                            .await;
+                        continue;
+                    }
+                    let _ = response_tx
+                        .send(AgentResponse::Info(
+                            "MAGI deliberating — 3 model calls…".to_string(),
+                        ))
+                        .await;
+                    // MAGI FIX: joined spawn (awaited inline → serial, no finalize-order
+                    // regression) isolates a panic in magi-core's analyze into a recoverable
+                    // JoinError so the runner survives (see plan Task 6 iteration-3).
+                    let join =
+                        tokio::spawn(async move { magi.analyze(&Mode::Analysis, &query).await })
+                            .await;
+                    match join {
+                        Ok(Ok(report)) => {
+                            let body = if report.degraded {
+                                format!(
+                                    "[DEGRADED: fewer than 3 agents responded — consensus may be unreliable]\n\n{}",
+                                    report.report
+                                )
+                            } else {
+                                report.report
+                            };
+                            // Sanitize the verbatim report (LLM-generated) before rendering —
+                            // strips ANSI escapes / control chars, matching the TextDelta path.
+                            let body = crate::agent::Agent::sanitize_text(&body);
+                            let _ = response_tx.send(AgentResponse::Text(body)).await;
+                        }
+                        Ok(Err(e)) => {
+                            eprintln!("[consult] analyze failed: {e}");
+                            let _ = response_tx
+                                .send(AgentResponse::Error(
+                                    "MAGI consult failed — check your provider/credentials and try again."
+                                        .to_string(),
+                                ))
+                                .await;
+                        }
+                        Err(join_err) => {
+                            eprintln!("[consult] analyze panicked: {join_err}");
+                            let _ = response_tx
+                                .send(AgentResponse::Error(
+                                    "MAGI consult crashed unexpectedly; the session is still alive."
+                                        .to_string(),
+                                ))
+                                .await;
+                        }
+                    }
+                }
                 UiEvent::Login => {
                     let oauth = crate::services::oauth::OAuthService::new();
                     let url = oauth.get_authorize_url();
@@ -335,11 +425,31 @@ pub async fn run_tui_ext(agent: Agent, startup_notices: Vec<String>) -> anyhow::
                                             } else {
                                                 format!("Re-authenticated. Now using Magi API (model: {model}) — conversation kept.")
                                             };
-                                            runner_agent.set_provider(std::sync::Arc::new(
+                                            let provider_arc: std::sync::Arc<
+                                                dyn crate::agent::provider::Provider,
+                                            > = std::sync::Arc::new(
                                                 crate::agent::provider::AnthropicProvider::new(
-                                                    api_key, model,
+                                                    api_key,
+                                                    model.clone(),
+                                                ),
+                                            );
+                                            runner_agent.set_provider(provider_arc.clone());
+                                            // I-5 + MAGI: rebuild the consult orchestrator over the new
+                                            // provider so BOTH the forced /consult handle and the
+                                            // registered auto-path tool use the new credentials
+                                            // (register_or_replace adds it if it was absent, e.g. after
+                                            // a static -> login transition).
+                                            let new_magi = std::sync::Arc::new(magi_core::orchestrator::Magi::new(
+                                                std::sync::Arc::new(crate::agent::magi_adapter::MagiCoreProviderAdapter::new(
+                                                    provider_arc, "anthropic", model,
+                                                )),
+                                            ));
+                                            runner_agent.register_or_replace_tool(Box::new(
+                                                crate::tools::consult::ConsultTool::new(
+                                                    new_magi.clone(),
                                                 ),
                                             ));
+                                            consult_magi_runner = Some(new_magi);
                                             if was_static {
                                                 runner_agent.clear_history();
                                             }
@@ -625,6 +735,21 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Re
                                 app.cursor_position = 0;
                                 let trimmed = input.trim();
                                 if !trimmed.is_empty() {
+                                    if let Some(query) = parse_consult_command(trimmed) {
+                                        if query.is_empty() {
+                                            app.push_message(
+                                                "Usage: /consult <question> — forces MAGI multi-perspective analysis (3 model calls)"
+                                                    .to_string(),
+                                            );
+                                        } else {
+                                            app.push_message(format!("User: /consult {query}"));
+                                            let _ = app
+                                                .event_tx
+                                                .send(UiEvent::Consult(query.to_string()))
+                                                .await;
+                                        }
+                                        continue;
+                                    }
                                     match trimmed {
                                         "/exit" | "/quit" => {
                                             let _ = app.event_tx.send(UiEvent::Quit).await;
@@ -655,6 +780,10 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Re
                                             );
                                             app.push_message(
                                                 "  /clear          - Clear session history"
+                                                    .to_string(),
+                                            );
+                                            app.push_message(
+                                                "  /consult <q>    - Force MAGI multi-perspective analysis (3 model calls)"
                                                     .to_string(),
                                             );
                                             app.push_message(
@@ -1056,5 +1185,42 @@ mod tests {
         assert_eq!(tail_before.last().unwrap(), "L19");
         assert_eq!(tail_after.first().unwrap(), "L11");
         assert_eq!(tail_after.last().unwrap(), "L20");
+    }
+
+    #[test]
+    fn test_parse_consult_command() {
+        assert_eq!(
+            super::parse_consult_command("/consult should we X?"),
+            Some("should we X?")
+        );
+        assert_eq!(super::parse_consult_command("/consult"), Some(""));
+        assert_eq!(super::parse_consult_command("hello"), None);
+        assert_eq!(super::parse_consult_command("/consultation"), None);
+    }
+
+    #[test]
+    fn test_full_report_renders_without_panic() {
+        let (event_tx, _) = mpsc::channel(1);
+        let (_, response_rx) = mpsc::channel(1);
+        let (_, approval_rx) = mpsc::channel(1);
+        let mut app = App::new(event_tx, response_rx, approval_rx);
+
+        let report = format!(
+            "+{}+\n|  MAGI VERDICT  |\n+{}+\nMelchior: APPROVE — café ☕ {}\n",
+            "=".repeat(50),
+            "=".repeat(50),
+            "x".repeat(500)
+        );
+        // Push each line of the report as a separate message (simulates how
+        // AgentResponse::Text is rendered line-by-line in run_app).
+        for line in report.lines() {
+            app.push_message(line.to_string());
+        }
+        // Must not panic; assert that the VERDICT line is present.
+        assert!(
+            app.messages.iter().any(|m| m.contains("MAGI VERDICT")),
+            "expected a message containing 'MAGI VERDICT', got: {:?}",
+            app.messages
+        );
     }
 }

@@ -31,7 +31,8 @@ Most AI coding agents are SaaS-bound and tied to a single vendor. Magi is built 
 | **TUI front-end** | `ratatui` app with **Normal / Selection / Visual** modes, UTF-8-safe cursor handling, system clipboard integration |
 | **Agent loop** | Multi-turn orchestration, bounded tool calls (max 15), repetitive-call detection, ANSI/control-char sanitization, interactive approval gate |
 | **Provider** | Anthropic **Messages API** with SSE streaming + `tool_use` assembly and 429 retry; `StaticProvider` fallback when no key is configured |
-| **Sandboxed tools** | `ls`, `view`, `edit`, `grep`, `bash` (strict allowlist), `project_knowledge` (persistent facts) |
+| **Sandboxed tools** | `ls`, `view`, `edit`, `grep`, `bash` (strict allowlist), `project_knowledge` (persistent facts), `consult` (MAGI multi-perspective consensus) |
+| **MAGI consult** | The agent can escalate hard, trade-off-heavy decisions to a 3-perspective consensus (Melchior / Balthasar / Caspar) via the `magi-core` crate — invoked autonomously through the tool loop (each call passes the approval gate) or forced with `/consult` |
 | **Encrypted memory** | SQLite (WAL) with **one cached key derivation per session** (Argon2id + per-DB salt), AES-256-GCM-SIV, Reed-Solomon FEC, salt-integrity self-heal |
 | **OAuth login** | PKCE flow against the Anthropic Console (`/login` in the TUI) |
 | **OS keyring** | API key in `magi-rs`, DB master key in `magi-rs-internal` (kept separate); `magi-rust` legacy names auto-migrated |
@@ -86,6 +87,7 @@ When the agent requests a tool, an inline prompt appears: **`y`** approves, **`c
 | `/login` | Start the OAuth (PKCE) login flow — **best-effort**, may be rate-limited (see Configuration); prefer an API key |
 | `/logout` | Clear stored API keys |
 | `/clear` | Clear the on-screen conversation |
+| `/consult <question>` | Force a MAGI 3-perspective consensus on the question (≈ 3 model calls). Blocks the session while it runs, like a normal turn. Requires a configured LLM provider. |
 | `/help` | Show available commands |
 | `/exit`, `/quit` | Leave the app |
 
@@ -99,8 +101,18 @@ When the agent requests a tool, an inline prompt appears: **`y`** approves, **`c
 | `grep` | RipGrep-backed search (sandboxed) |
 | `bash` | Run a shell command — **strict allowlist** |
 | `project_knowledge` | Persist project facts to encrypted memory |
+| `consult` | Run a MAGI 3-perspective consensus on a hard decision (via `magi-core`) |
 
 The `bash` allowlist is: `ls git npm cargo rg cat echo pwd grep mkdir touch find rm diff node python pytest` (with `cargo` restricted to `test` / `build` / `check`), plus a hard ban on the shell metacharacters `` | & ; > < ` $ ( ) { } \ ``.
+
+### MAGI consult (multi-perspective consensus)
+
+For decisions with genuine trade-offs — architecture choices, "should we X vs Y given these constraints?", risk calls — Magi can run a **three-perspective consensus** built on the [`magi-core`](https://crates.io/crates/magi-core) crate: three independent analyst agents (Melchior the scientist, Balthasar the pragmatist, Caspar the critic) evaluate the question and a consensus is synthesized.
+
+- **Automatic (transparent).** The agent decides on its own when a question warrants multi-perspective analysis and invokes the `consult` tool through the normal tool loop. Like any tool call it passes the **inline approval gate** (`y`/`n`) — which is also your cost control, since a consult is ≈ **3 model calls**. Deny it to keep the single-LLM answer.
+- **Forced.** Type `/consult <question>` to run the consensus directly, bypassing the router and the approval gate. The session shows `MAGI deliberating — 3 model calls…` and then renders the verbatim report (the three perspectives + the consensus verdict). `/consult` blocks the session while it runs, like a normal turn.
+- **Backend.** The consult reuses the **same provider and credentials** already resolved for the agent (Anthropic or any OpenAI-compatible endpoint) — no second config. It is unavailable in `StaticProvider` mode (no API key): `/consult` then reports that a provider is required, and the tool is not registered.
+- **Model capability.** Weak / small local models (e.g. Ollama `phi4-mini`) may fail to emit the strict per-agent JSON the consensus requires; the result is then marked `[DEGRADED: …]` (fewer than three agents responded). A capable model is recommended for reliable consensus.
 
 ---
 

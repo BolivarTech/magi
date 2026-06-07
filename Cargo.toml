@@ -1,6 +1,6 @@
 [package]
 name = "magi-rs"
-version = "0.3.1"
+version = "0.4.0"
 edition = "2021"
 authors = ["Julian Bolivar <jbolivarg@gmail.com>"]
 description = "Magi Agent: a terminal AI assistant in Rust with sandboxed tool execution, OAuth login, and encrypted local memory (Argon2 + AES-256-GCM-SIV + Reed-Solomon FEC)."
@@ -50,9 +50,11 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 uuid = { version = "1.8", features = ["v4"] }
 
 # MAGI ecosystem
-magi-core = "1.0"
+magi-core = "1.1"
 
 [dev-dependencies]
+# RoutingMockProvider for consult tests (no extra runtime deps; reqwest NOT pulled)
+magi-core = { version = "1.1", features = ["test-utils"] }
 # Mocking for tests
 mockall = "0.12"
 mockito = "1.4"

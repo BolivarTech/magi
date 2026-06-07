@@ -1,5 +1,6 @@
 //! The Agent orchestrator coordinates between the Provider and the Tools.
 
+pub mod magi_adapter;
 pub mod messages;
 pub mod provider;
 
@@ -64,7 +65,7 @@ impl Agent {
         self.provider = provider;
     }
 
-    /// Whether the active provider is the canned [`StaticProvider`] (no API key).
+    /// Whether the active provider is the canned `StaticProvider` (no API key).
     /// Used by `/login` to decide whether the prior history is canned noise (safe
     /// to clear) vs a real conversation (must be kept).
     pub fn provider_is_static(&self) -> bool {
@@ -88,6 +89,17 @@ impl Agent {
     /// Registers a tool with the agent.
     pub fn register_tool(&mut self, tool: Box<dyn Tool>) {
         self.tools.push(tool);
+    }
+
+    /// Registers `tool`, replacing any existing tool with the same `name()`.
+    /// Used to refresh a provider-bound tool (e.g. `consult`) after the active
+    /// provider changes via `/login`, so it never holds stale credentials.
+    pub fn register_or_replace_tool(&mut self, tool: Box<dyn Tool>) {
+        if let Some(slot) = self.tools.iter_mut().find(|t| t.name() == tool.name()) {
+            *slot = tool;
+        } else {
+            self.tools.push(tool);
+        }
     }
 
     /// Normalizes tool input recursively to detect semantically identical calls.

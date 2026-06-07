@@ -6,6 +6,7 @@ use serde_json::Value;
 use thiserror::Error;
 
 pub mod bash;
+pub mod consult;
 pub mod grep;
 pub mod knowledge;
 pub mod ls;
