@@ -1,5 +1,6 @@
 //! The Agent orchestrator coordinates between the Provider and the Tools.
 
+pub mod magi_adapter;
 pub mod messages;
 pub mod provider;
 
