@@ -81,11 +81,28 @@ impl Tool for ConsultTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use magi_core::error::ProviderError;
+    use magi_core::schema::AgentName;
+    use magi_core::test_support::RoutingMockProvider;
 
     fn dummy_tool() -> ConsultTool {
         ConsultTool::new(Arc::new(Magi::new(Arc::new(
-            magi_core::test_support::RoutingMockProvider::new(),
+            RoutingMockProvider::new(),
         ))))
+    }
+
+    fn agent_json(agent: &str) -> String {
+        format!(
+            r#"{{"agent":"{agent}","verdict":"approve","confidence":0.9,"summary":"s","reasoning":"r","findings":[],"recommendation":"rec"}}"#
+        )
+    }
+
+    fn magi_all_ok() -> Arc<Magi> {
+        let provider = RoutingMockProvider::new()
+            .with_agent_responses(AgentName::Melchior, vec![Ok(agent_json("melchior"))])
+            .with_agent_responses(AgentName::Balthasar, vec![Ok(agent_json("balthasar"))])
+            .with_agent_responses(AgentName::Caspar, vec![Ok(agent_json("caspar"))]);
+        Arc::new(Magi::new(Arc::new(provider)))
     }
 
     #[test]
@@ -103,5 +120,47 @@ mod tests {
                 || lower.contains("perspective")
                 || lower.contains("decision")
         );
+    }
+
+    #[tokio::test]
+    async fn test_execute_returns_consensus_report() {
+        let tool = ConsultTool::new(magi_all_ok());
+        let out = tool
+            .execute(json!({"query": "should we migrate X to Y?"}))
+            .await
+            .expect("3 agents → success");
+        assert!(!out["report"].as_str().expect("report string").is_empty());
+        assert_eq!(out["degraded"], json!(false));
+    }
+
+    #[tokio::test]
+    async fn test_execute_missing_query_is_invalid_arguments() {
+        let tool = ConsultTool::new(magi_all_ok());
+        assert!(matches!(
+            tool.execute(json!({})).await.unwrap_err(),
+            ToolError::InvalidArguments(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_execute_backend_failure_surfaces_error() {
+        let p = RoutingMockProvider::new()
+            .with_agent_responses(
+                AgentName::Melchior,
+                vec![Err(ProviderError::Network { message: "down".into() })],
+            )
+            .with_agent_responses(
+                AgentName::Balthasar,
+                vec![Err(ProviderError::Network { message: "down".into() })],
+            )
+            .with_agent_responses(
+                AgentName::Caspar,
+                vec![Err(ProviderError::Network { message: "down".into() })],
+            );
+        let tool = ConsultTool::new(Arc::new(Magi::new(Arc::new(p))));
+        assert!(matches!(
+            tool.execute(json!({"query": "x"})).await.unwrap_err(),
+            ToolError::ExecutionError(_)
+        ));
     }
 }
