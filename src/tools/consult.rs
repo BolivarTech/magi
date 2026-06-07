@@ -69,12 +69,17 @@ impl Tool for ConsultTool {
         })
     }
 
-    async fn execute(&self, _args: Value) -> ToolResult<Value> {
-        // Implemented under Task 4 (true Red). Sentinel until then.
-        let _ = (&self.magi, Mode::Analysis);
-        Err(ToolError::ExecutionError(
-            "consult execute not yet implemented".to_string(),
-        ))
+    async fn execute(&self, args: Value) -> ToolResult<Value> {
+        let query = args
+            .get("query")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ToolError::InvalidArguments("missing 'query' string".to_string()))?;
+        let report = self
+            .magi
+            .analyze(&Mode::Analysis, query)
+            .await
+            .map_err(|e| ToolError::ExecutionError(e.to_string()))?;
+        Ok(json!({ "report": report.report, "degraded": report.degraded }))
     }
 }
 
@@ -86,9 +91,7 @@ mod tests {
     use magi_core::test_support::RoutingMockProvider;
 
     fn dummy_tool() -> ConsultTool {
-        ConsultTool::new(Arc::new(Magi::new(Arc::new(
-            RoutingMockProvider::new(),
-        ))))
+        ConsultTool::new(Arc::new(Magi::new(Arc::new(RoutingMockProvider::new()))))
     }
 
     fn agent_json(agent: &str) -> String {
@@ -147,15 +150,21 @@ mod tests {
         let p = RoutingMockProvider::new()
             .with_agent_responses(
                 AgentName::Melchior,
-                vec![Err(ProviderError::Network { message: "down".into() })],
+                vec![Err(ProviderError::Network {
+                    message: "down".into(),
+                })],
             )
             .with_agent_responses(
                 AgentName::Balthasar,
-                vec![Err(ProviderError::Network { message: "down".into() })],
+                vec![Err(ProviderError::Network {
+                    message: "down".into(),
+                })],
             )
             .with_agent_responses(
                 AgentName::Caspar,
-                vec![Err(ProviderError::Network { message: "down".into() })],
+                vec![Err(ProviderError::Network {
+                    message: "down".into(),
+                })],
             );
         let tool = ConsultTool::new(Arc::new(Magi::new(Arc::new(p))));
         assert!(matches!(
