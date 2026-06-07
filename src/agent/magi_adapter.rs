@@ -14,8 +14,6 @@ use std::sync::Arc;
 
 /// Delimiter that signals role separation when folding magi-core's distinct
 /// `system_prompt` into a magi-rs user turn (magi-rs `Role` has no `System`).
-// Used by fold_prompt (consumed in Task 3); suppress until then.
-#[allow(dead_code)]
 const SYSTEM_FOLD_DELIMITER: &str = "\n\n---\n\n";
 
 /// Adapts an `Arc<dyn Provider>` (magi-rs backend) to magi-core's `LlmProvider`.
@@ -33,16 +31,12 @@ const SYSTEM_FOLD_DELIMITER: &str = "\n\n---\n\n";
 ///
 /// `CompletionConfig` (`max_tokens`/`temperature`) is intentionally NOT applied:
 /// the magi-rs `Provider` trait exposes no per-call knobs. Deferred (CHANGELOG).
-// The struct and its constructor are consumed by Task 3 (MagiConsultWorkflow).
-// Suppress dead-code lint until that task lands.
-#[allow(dead_code)]
 pub struct MagiCoreProviderAdapter {
     inner: Arc<dyn Provider>,
     name: String,
     model: String,
 }
 
-#[allow(dead_code)]
 impl MagiCoreProviderAdapter {
     /// Creates the adapter over a resolved magi-rs backend.
     pub fn new(

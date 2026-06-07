@@ -194,39 +194,68 @@ async fn main() -> anyhow::Result<()> {
     let (magi_config, config_warning) = MagiConfig::load(&workspace_root);
     let provider_kind = resolve_provider(&magi_config, env::var("MAGI_PROVIDER").ok().as_deref());
 
-    let (provider, provider_info): (Arc<dyn Provider>, String) = if provider_kind == "openai" {
-        // MAGI: OPENAI_API_KEY is sourced from env ONLY — NEVER from magi.toml
-        // (security invariant: secrets do not live in plain-text config). The
-        // "ollama" fallback is a dummy accepted by local Ollama which ignores
-        // the Authorization header; real OpenAI/Groq/OpenRouter requests will
-        // fail loudly with 401 if the env var is unset, which is the correct
-        // behavior — no silent insecure default.
-        let api_key = env::var("OPENAI_API_KEY").unwrap_or_else(|_| "ollama".to_string());
-        let base_url =
-            resolve_openai_base_url(&magi_config, env::var("OPENAI_BASE_URL").ok().as_deref());
-        let model = resolve_openai_model(&magi_config, env::var("OPENAI_MODEL").ok().as_deref())?;
-        let info = format!("OpenAI-compatible ({base_url}) Model: {model}");
-        (
-            Arc::new(OpenAiCompatibleProvider::new(OpenAiSettings {
-                base_url,
-                api_key,
-                model,
-            })),
-            info,
-        )
-    } else if let Some(ref c) = config {
-        (
-            Arc::new(AnthropicProvider::new(c.api_key.clone(), c.model.clone())),
-            format!("Magi API ({}) Model: {}", c.source, c.model),
-        )
-    } else {
-        (
-            Arc::new(StaticProvider),
-            "Static Mode: no API key found. Set ANTHROPIC_API_KEY or use key.txt \
-             (recommended). /login (OAuth) is best-effort and may be rate-limited."
-                .to_string(),
-        )
-    };
+    let (provider, provider_info, model_label): (Arc<dyn Provider>, String, String) =
+        if provider_kind == "openai" {
+            // MAGI: OPENAI_API_KEY is sourced from env ONLY — NEVER from magi.toml
+            // (security invariant: secrets do not live in plain-text config). The
+            // "ollama" fallback is a dummy accepted by local Ollama which ignores
+            // the Authorization header; real OpenAI/Groq/OpenRouter requests will
+            // fail loudly with 401 if the env var is unset, which is the correct
+            // behavior — no silent insecure default.
+            let api_key = env::var("OPENAI_API_KEY").unwrap_or_else(|_| "ollama".to_string());
+            let base_url =
+                resolve_openai_base_url(&magi_config, env::var("OPENAI_BASE_URL").ok().as_deref());
+            let model =
+                resolve_openai_model(&magi_config, env::var("OPENAI_MODEL").ok().as_deref())?;
+            let info = format!("OpenAI-compatible ({base_url}) Model: {model}");
+            let model_label = model.clone();
+            (
+                Arc::new(OpenAiCompatibleProvider::new(OpenAiSettings {
+                    base_url,
+                    api_key,
+                    model,
+                })),
+                info,
+                model_label,
+            )
+        } else if let Some(ref c) = config {
+            (
+                Arc::new(AnthropicProvider::new(c.api_key.clone(), c.model.clone())),
+                format!("Magi API ({}) Model: {}", c.source, c.model),
+                c.model.clone(),
+            )
+        } else {
+            (
+                Arc::new(StaticProvider),
+                "Static Mode: no API key found. Set ANTHROPIC_API_KEY or use key.txt \
+                 (recommended). /login (OAuth) is best-effort and may be rate-limited."
+                    .to_string(),
+                "static".to_string(),
+            )
+        };
+
+    // Build the MAGI orchestrator over the SAME resolved backend (shared Arc) so
+    // the consult tool reuses the resolved credentials. Skip on the StaticProvider
+    // path: magi-core cannot parse canned text, so a consult would deterministically
+    // fail with InsufficientAgents.
+    let consult_magi: Option<std::sync::Arc<magi_core::orchestrator::Magi>> =
+        if provider.is_static() {
+            None
+        } else {
+            let provider_label = if provider_kind == "openai" {
+                "openai"
+            } else {
+                "anthropic"
+            };
+            let adapter = crate::agent::magi_adapter::MagiCoreProviderAdapter::new(
+                provider.clone(),
+                provider_label,
+                model_label,
+            );
+            Some(std::sync::Arc::new(magi_core::orchestrator::Magi::new(
+                std::sync::Arc::new(adapter),
+            )))
+        };
 
     let mut agent = Agent::new(provider);
     let db_path = workspace_root.join(".magi-rs-memory.db");
@@ -289,6 +318,11 @@ async fn main() -> anyhow::Result<()> {
         workspace_root.clone(),
     )?));
     agent.register_tool(Box::new(BashTool::new(workspace_root.clone())?));
+    if let Some(ref magi) = consult_magi {
+        agent.register_tool(Box::new(crate::tools::consult::ConsultTool::new(
+            magi.clone(),
+        )));
+    }
 
     crate::tui::run_tui_ext(agent, startup_notices).await?;
     Ok(())

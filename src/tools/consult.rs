@@ -16,15 +16,11 @@ use std::sync::Arc;
 /// Tool wrapping a `magi_core::Magi`. `execute` runs the 3-perspective consensus
 /// (implemented in Task 4) and returns the verbatim report. The `description` is
 /// what makes the main LLM self-route here only for multi-perspective decisions.
-// ConsultTool and its constructor are registered in main.rs (Task 5);
-// allow dead-code warnings until that task lands.
-#[allow(dead_code)]
 pub struct ConsultTool {
     magi: Arc<Magi>,
     description: String,
 }
 
-#[allow(dead_code)]
 impl ConsultTool {
     /// Creates a `ConsultTool` over a shared `Magi` orchestrator.
     ///
