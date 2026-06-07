@@ -334,9 +334,9 @@ pub async fn run_tui_ext(
                     // MAGI FIX: joined spawn (awaited inline → serial, no finalize-order
                     // regression) isolates a panic in magi-core's analyze into a recoverable
                     // JoinError so the runner survives (see plan Task 6 iteration-3).
-                    let q = query.clone();
                     let join =
-                        tokio::spawn(async move { magi.analyze(&Mode::Analysis, &q).await }).await;
+                        tokio::spawn(async move { magi.analyze(&Mode::Analysis, &query).await })
+                            .await;
                     match join {
                         Ok(Ok(report)) => {
                             let body = if report.degraded {
@@ -419,15 +419,22 @@ pub async fn run_tui_ext(
                                                 ),
                                             );
                                             runner_agent.set_provider(provider_arc.clone());
-                                            // I-5: rebuild the consult orchestrator over the new
-                                            // provider so /consult works post-login without a restart.
-                                            consult_magi_runner = Some(std::sync::Arc::new(
-                                                magi_core::orchestrator::Magi::new(std::sync::Arc::new(
-                                                    crate::agent::magi_adapter::MagiCoreProviderAdapter::new(
-                                                        provider_arc, "anthropic", model,
-                                                    ),
+                                            // I-5 + MAGI: rebuild the consult orchestrator over the new
+                                            // provider so BOTH the forced /consult handle and the
+                                            // registered auto-path tool use the new credentials
+                                            // (register_or_replace adds it if it was absent, e.g. after
+                                            // a static -> login transition).
+                                            let new_magi = std::sync::Arc::new(magi_core::orchestrator::Magi::new(
+                                                std::sync::Arc::new(crate::agent::magi_adapter::MagiCoreProviderAdapter::new(
+                                                    provider_arc, "anthropic", model,
                                                 )),
                                             ));
+                                            runner_agent.register_or_replace_tool(Box::new(
+                                                crate::tools::consult::ConsultTool::new(
+                                                    new_magi.clone(),
+                                                ),
+                                            ));
+                                            consult_magi_runner = Some(new_magi);
                                             if was_static {
                                                 runner_agent.clear_history();
                                             }

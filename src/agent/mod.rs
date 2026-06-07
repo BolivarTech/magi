@@ -91,6 +91,17 @@ impl Agent {
         self.tools.push(tool);
     }
 
+    /// Registers `tool`, replacing any existing tool with the same `name()`.
+    /// Used to refresh a provider-bound tool (e.g. `consult`) after the active
+    /// provider changes via `/login`, so it never holds stale credentials.
+    pub fn register_or_replace_tool(&mut self, tool: Box<dyn Tool>) {
+        if let Some(slot) = self.tools.iter_mut().find(|t| t.name() == tool.name()) {
+            *slot = tool;
+        } else {
+            self.tools.push(tool);
+        }
+    }
+
     /// Normalizes tool input recursively to detect semantically identical calls.
     pub fn normalize_input(val: &serde_json::Value, depth: usize) -> Result<String> {
         const MAX_DEPTH: usize = 10;
