@@ -29,10 +29,13 @@ unchanged.
 - **`MagiCoreProviderAdapter`** (`src/agent/magi_adapter.rs`) — bridges magi-rs's resolved `Provider` to `magi_core::provider::LlmProvider`, so the consensus reuses the same backend + credentials (Anthropic or any OpenAI-compatible endpoint). No second LLM config layer.
 - **StaticProvider guard** — `consult` is registered (and `/consult` works) only when a real provider is configured; on the static/no-key path the tool is absent and `/consult` reports that a provider is required.
 - **Degraded surfacing** — a consult that completes with fewer than three agents is prefixed `[DEGRADED: …]` so a low-quality consensus is never silent.
-- New tests for the adapter (assembled text, role-fold delimiter, error mapping), the tool (contract + consensus + invalid-args + backend-error via `magi-core`'s `RoutingMockProvider`), and the `/consult` parser + a full-report render-safety test. Total tests: **145** (was 136).
+- New tests for the adapter (assembled text, role-fold delimiter, error mapping), the tool (contract + consensus + invalid-args + empty-query + oversized-query + backend-error via `magi-core`'s `RoutingMockProvider`), and the `/consult` parser + a full-report render-safety test. Total tests: **147** (was 136).
 
 ### Changed
 - `magi-core` dependency bumped `1.0` → `1.1` (no features enabled; `reqwest 0.12` is **not** pulled — the adapter reuses magi-rs's existing `reqwest 0.11` stack). `test-utils` enabled as a dev-dependency for `RoutingMockProvider`.
+
+### Security
+- The verbatim consult report (LLM-generated) is run through `sanitize_text` before rendering — strips ANSI escapes / control characters, matching the streaming-delta path. Consult input is length-capped (8192 bytes) on both the tool and forced `/consult` paths, and empty queries are rejected before any model call.
 
 ### Known limitations
 - **System-prompt fold.** `magi-core` differentiates its three personas via distinct *system* prompts, but magi-rs's `Provider` has no system-role channel yet, so the system text is folded into the user turn (behind an explicit delimiter). On weak / small local models this can weaken persona divergence and JSON adherence. Revisit when magi-rs gains a system-prompt channel.
