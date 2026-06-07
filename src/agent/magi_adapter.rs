@@ -165,7 +165,7 @@ mod tests {
         assert_eq!(MagiCoreProviderAdapter::fold_prompt("", "USR"), "USR");
     }
 
-    // magi-core (verified v1.0.1 orchestrator.rs:709,1863) does NOT branch on the
+    // magi-core (verified v1.0.1; unchanged in 1.1.0 orchestrator.rs:709,1863) does NOT branch on the
     // ProviderError variant — every provider error becomes a failed agent — so even
     // an auth-shaped message maps to Network here (no behavioral consumer for the
     // distinction). If a future magi-core branches on the variant, revisit.

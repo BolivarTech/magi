@@ -22,6 +22,7 @@ use crate::tools::ls::ListTool;
 use crate::tools::read::FileReadTool;
 use crate::tools::write::FileWriteTool;
 use clap::Parser;
+use magi_core::orchestrator::Magi;
 use std::env;
 use std::fs;
 use std::sync::Arc;
@@ -238,24 +239,21 @@ async fn main() -> anyhow::Result<()> {
     // the consult tool reuses the resolved credentials. Skip on the StaticProvider
     // path: magi-core cannot parse canned text, so a consult would deterministically
     // fail with InsufficientAgents.
-    let consult_magi: Option<std::sync::Arc<magi_core::orchestrator::Magi>> =
-        if provider.is_static() {
-            None
+    let consult_magi: Option<Arc<Magi>> = if provider.is_static() {
+        None
+    } else {
+        let provider_label = if provider_kind == "openai" {
+            "openai"
         } else {
-            let provider_label = if provider_kind == "openai" {
-                "openai"
-            } else {
-                "anthropic"
-            };
-            let adapter = crate::agent::magi_adapter::MagiCoreProviderAdapter::new(
-                provider.clone(),
-                provider_label,
-                model_label,
-            );
-            Some(std::sync::Arc::new(magi_core::orchestrator::Magi::new(
-                std::sync::Arc::new(adapter),
-            )))
+            "anthropic"
         };
+        let adapter = crate::agent::magi_adapter::MagiCoreProviderAdapter::new(
+            provider.clone(),
+            provider_label,
+            model_label,
+        );
+        Some(Arc::new(Magi::new(Arc::new(adapter))))
+    };
 
     let mut agent = Agent::new(provider);
     let db_path = workspace_root.join(".magi-rs-memory.db");

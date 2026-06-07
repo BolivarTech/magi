@@ -268,11 +268,7 @@ pub async fn run_tui_ext(
     let mut runner_agent = agent;
     runner_agent.set_approval_channel(approval_tx);
 
-    let consult_magi = consult;
-    // Compute availability before moving consult_magi into the runner spawn.
-    let consult_available = consult_magi.is_some();
-    // Clone the Arc so the runner spawn owns its own reference.
-    let consult_magi_runner = consult_magi;
+    let mut consult_magi_runner = consult;
 
     tokio::spawn(async move {
         while let Some(event) = event_rx.recv().await {
@@ -319,46 +315,57 @@ pub async fn run_tui_ext(
                     runner_agent.clear_history();
                 }
                 UiEvent::Consult(query) => {
+                    let magi = match consult_magi_runner.as_ref() {
+                        Some(m) => m.clone(),
+                        None => {
+                            let _ = response_tx
+                                .send(AgentResponse::Error(
+                                    "consult requires a configured LLM provider — run /login or set a provider.".to_string(),
+                                ))
+                                .await;
+                            continue;
+                        }
+                    };
                     let _ = response_tx
                         .send(AgentResponse::Info(
                             "MAGI deliberating — 3 model calls…".to_string(),
                         ))
                         .await;
-                    if let Some(magi) = consult_magi_runner.clone() {
-                        let q = query.clone();
-                        let join =
-                            tokio::spawn(async move { magi.analyze(&Mode::Analysis, &q).await })
-                                .await;
-                        match join {
-                            Ok(Ok(report)) => {
-                                let body = if report.degraded {
-                                    format!(
-                                        "[DEGRADED: fewer than 3 agents responded — consensus may be unreliable]\n\n{}",
-                                        report.report
-                                    )
-                                } else {
+                    // MAGI FIX: joined spawn (awaited inline → serial, no finalize-order
+                    // regression) isolates a panic in magi-core's analyze into a recoverable
+                    // JoinError so the runner survives (see plan Task 6 iteration-3).
+                    let q = query.clone();
+                    let join =
+                        tokio::spawn(async move { magi.analyze(&Mode::Analysis, &q).await }).await;
+                    match join {
+                        Ok(Ok(report)) => {
+                            let body = if report.degraded {
+                                format!(
+                                    "[DEGRADED: fewer than 3 agents responded — consensus may be unreliable]\n\n{}",
                                     report.report
-                                };
-                                let _ = response_tx.send(AgentResponse::Text(body)).await;
-                            }
-                            Ok(Err(e)) => {
-                                eprintln!("[consult] analyze failed: {e}");
-                                let _ = response_tx
-                                    .send(AgentResponse::Error(
-                                        "MAGI consult failed — check your provider/credentials and try again."
-                                            .to_string(),
-                                    ))
-                                    .await;
-                            }
-                            Err(join_err) => {
-                                eprintln!("[consult] analyze panicked: {join_err}");
-                                let _ = response_tx
-                                    .send(AgentResponse::Error(
-                                        "MAGI consult crashed unexpectedly; the session is still alive."
-                                            .to_string(),
-                                    ))
-                                    .await;
-                            }
+                                )
+                            } else {
+                                report.report
+                            };
+                            let _ = response_tx.send(AgentResponse::Text(body)).await;
+                        }
+                        Ok(Err(e)) => {
+                            eprintln!("[consult] analyze failed: {e}");
+                            let _ = response_tx
+                                .send(AgentResponse::Error(
+                                    "MAGI consult failed — check your provider/credentials and try again."
+                                        .to_string(),
+                                ))
+                                .await;
+                        }
+                        Err(join_err) => {
+                            eprintln!("[consult] analyze panicked: {join_err}");
+                            let _ = response_tx
+                                .send(AgentResponse::Error(
+                                    "MAGI consult crashed unexpectedly; the session is still alive."
+                                        .to_string(),
+                                ))
+                                .await;
                         }
                     }
                 }
@@ -403,10 +410,23 @@ pub async fn run_tui_ext(
                                             } else {
                                                 format!("Re-authenticated. Now using Magi API (model: {model}) — conversation kept.")
                                             };
-                                            runner_agent.set_provider(std::sync::Arc::new(
+                                            let provider_arc: std::sync::Arc<
+                                                dyn crate::agent::provider::Provider,
+                                            > = std::sync::Arc::new(
                                                 crate::agent::provider::AnthropicProvider::new(
-                                                    api_key, model,
+                                                    api_key,
+                                                    model.clone(),
                                                 ),
+                                            );
+                                            runner_agent.set_provider(provider_arc.clone());
+                                            // I-5: rebuild the consult orchestrator over the new
+                                            // provider so /consult works post-login without a restart.
+                                            consult_magi_runner = Some(std::sync::Arc::new(
+                                                magi_core::orchestrator::Magi::new(std::sync::Arc::new(
+                                                    crate::agent::magi_adapter::MagiCoreProviderAdapter::new(
+                                                        provider_arc, "anthropic", model,
+                                                    ),
+                                                )),
                                             ));
                                             if was_static {
                                                 runner_agent.clear_history();
@@ -471,7 +491,7 @@ pub async fn run_tui_ext(
     });
 
     let app = App::new(event_tx, response_rx, approval_rx);
-    let res = run_app(&mut terminal, app, consult_available).await;
+    let res = run_app(&mut terminal, app).await;
 
     let _ = disable_raw_mode();
     let _ = execute!(
@@ -487,11 +507,7 @@ pub async fn run_tui_ext(
     Ok(())
 }
 
-async fn run_app<B: Backend>(
-    terminal: &mut Terminal<B>,
-    mut app: App,
-    consult_available: bool,
-) -> io::Result<()> {
+async fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Result<()> {
     loop {
         terminal.draw(|f| ui(f, &app))?;
 
@@ -698,12 +714,7 @@ async fn run_app<B: Backend>(
                                 let trimmed = input.trim();
                                 if !trimmed.is_empty() {
                                     if let Some(query) = parse_consult_command(trimmed) {
-                                        if !consult_available {
-                                            app.push_message(
-                                                "consult requires a configured LLM provider — run /login or set a provider."
-                                                    .to_string(),
-                                            );
-                                        } else if query.is_empty() {
+                                        if query.is_empty() {
                                             app.push_message(
                                                 "Usage: /consult <question> — forces MAGI multi-perspective analysis (3 model calls)"
                                                     .to_string(),
