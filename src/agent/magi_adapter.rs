@@ -31,6 +31,11 @@ const SYSTEM_FOLD_DELIMITER: &str = "\n\n---\n\n";
 ///
 /// `CompletionConfig` (`max_tokens`/`temperature`) is intentionally NOT applied:
 /// the magi-rs `Provider` trait exposes no per-call knobs. Deferred (CHANGELOG).
+///
+/// **Concurrency safety**: the `Provider` trait requires `Send + Sync` (enforced
+/// by the trait bound on `Arc<dyn Provider>`), and `complete` takes `&self`, so
+/// multiple concurrent consult calls (e.g. the forced `/consult` handle and the
+/// auto-path `ConsultTool`) sharing the same `Arc<MagiCoreProviderAdapter>` are safe.
 pub struct MagiCoreProviderAdapter {
     inner: Arc<dyn Provider>,
     name: String,

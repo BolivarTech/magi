@@ -80,11 +80,20 @@ impl Tool for ConsultTool {
                 MAX_QUERY_LEN
             )));
         }
-        let report = self
-            .magi
-            .analyze(&Mode::Analysis, query)
-            .await
-            .map_err(|e| ToolError::ExecutionError(e.to_string()))?;
+        let magi = self.magi.clone();
+        let q = query.to_string();
+        // Joined spawn isolates a panic in magi-core's analyze into a recoverable
+        // JoinError instead of unwinding into the agent tool loop.
+        let report =
+            match tokio::spawn(async move { magi.analyze(&Mode::Analysis, &q).await }).await {
+                Ok(Ok(report)) => report,
+                Ok(Err(e)) => return Err(ToolError::ExecutionError(e.to_string())),
+                Err(join_err) => {
+                    return Err(ToolError::ExecutionError(format!(
+                        "consult crashed: {join_err}"
+                    )))
+                }
+            };
         Ok(json!({ "report": report.report, "degraded": report.degraded }))
     }
 }
