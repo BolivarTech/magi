@@ -324,7 +324,7 @@ async fn main() -> anyhow::Result<()> {
         )));
     }
 
-    crate::tui::run_tui_ext(agent, startup_notices).await?;
+    crate::tui::run_tui_ext(agent, startup_notices, consult_magi).await?;
     Ok(())
 }
 
