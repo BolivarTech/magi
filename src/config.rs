@@ -128,6 +128,28 @@ pub fn resolve_openai_base_url(config: &MagiConfig, env_base_url: Option<&str>) 
         .unwrap_or_else(|| "https://api.openai.com/v1".into())
 }
 
+/// Resolves a per-agent MAGI model override. Precedence: env (non-empty) > TOML
+/// (non-empty) > `None`. A blank/whitespace value (env or TOML) is treated as
+/// unset and falls through to the next level. `None` means the agent uses the
+/// principal provider's model (RF-2, S-4, S-5).
+///
+/// # Arguments
+/// * `toml_model` - The `[magi].<agent>_model` value, if present.
+/// * `env_model`  - The `MAGI_MODEL_<AGENT>` env value, if present.
+///
+/// # Returns
+/// `Some(model)` when an effective override exists; `None` otherwise.
+// consumed by main.rs Task 3 wiring (not yet called from non-test code)
+#[allow(dead_code)]
+pub fn resolve_magi_override(toml_model: Option<&str>, env_model: Option<&str>) -> Option<String> {
+    fn non_empty(s: Option<&str>) -> Option<String> {
+        s.map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    }
+    non_empty(env_model).or_else(|| non_empty(toml_model))
+}
+
 /// env `OPENAI_MODEL` > TOML `[openai].model`; **required** — `Err` if absent in both (RF-3).
 ///
 /// # Arguments
@@ -340,7 +362,10 @@ mod tests {
     #[test]
     fn test_resolve_magi_override_empty_string_is_unset() {
         // S-5: empty (env or TOML) is treated as unset, falls through precedence
-        assert_eq!(resolve_magi_override(Some("toml"), Some("   ")), Some("toml".to_string()));
+        assert_eq!(
+            resolve_magi_override(Some("toml"), Some("   ")),
+            Some("toml".to_string())
+        );
         assert_eq!(resolve_magi_override(Some(""), None), None);
         assert_eq!(resolve_magi_override(Some(""), Some("")), None);
     }
