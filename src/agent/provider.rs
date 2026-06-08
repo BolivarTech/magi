@@ -483,6 +483,28 @@ impl OpenAiCompatibleProvider {
     }
 }
 
+/// Constructs an OpenAI-compatible provider as a trait object. Single
+/// construction site for [`OpenAiSettings`], reused by the principal backend and
+/// by per-agent MAGI overrides (same endpoint/key, different model) — RF-8.
+///
+/// # Arguments
+/// * `base_url` - OpenAI-compatible endpoint base URL.
+/// * `api_key`  - Bearer token (dummy `"ollama"` accepted by local Ollama).
+/// * `model`    - Model name to request.
+// consumed by main.rs Task 6 wiring; unused in the bin target until then
+#[allow(dead_code)]
+pub fn build_openai_provider(
+    base_url: &str,
+    api_key: &str,
+    model: &str,
+) -> std::sync::Arc<dyn Provider> {
+    std::sync::Arc::new(OpenAiCompatibleProvider::new(OpenAiSettings {
+        base_url: base_url.to_string(),
+        api_key: api_key.to_string(),
+        model: model.to_string(),
+    }))
+}
+
 /// Streaming state for the OpenAI SSE `unfold`. Owns the byte source and the
 /// accumulators for the in-progress assistant message.
 struct OaiState {
