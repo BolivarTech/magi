@@ -6,7 +6,10 @@
 //! and the static-path notice. Isolates the `magi_core::schema::AgentName`
 //! coupling and the `"{backend}-{agent}"` naming so `main.rs` stays thin glue.
 
-use crate::config::MagiModelsConfig;
+// consumed by main.rs Task 6 wiring; items unused until then
+#![allow(dead_code)]
+
+use crate::config::{resolve_magi_override, MagiModelsConfig};
 use magi_core::schema::AgentName;
 
 /// Env-var model overrides for the three MAGI agents. Named fields (no positional
@@ -28,8 +31,12 @@ pub struct MagiAdapterSpec {
 }
 
 /// Lowercase label for an agent (matches magi-core's lowercase serialization).
-pub fn agent_label(_agent: AgentName) -> &'static str {
-    todo!("Task 3 green")
+pub fn agent_label(agent: AgentName) -> &'static str {
+    match agent {
+        AgentName::Melchior => "melchior",
+        AgentName::Balthasar => "balthasar",
+        AgentName::Caspar => "caspar",
+    }
 }
 
 /// Computes the per-agent adapter specs for agents with an effective override
@@ -40,11 +47,36 @@ pub fn agent_label(_agent: AgentName) -> &'static str {
 /// * `cfg`           - The `[magi]` TOML config.
 /// * `env`           - Env-var overrides per agent.
 pub fn resolve_magi_adapter_specs(
-    _backend_label: &str,
-    _cfg: &MagiModelsConfig,
-    _env: &MagiEnvModels,
+    backend_label: &str,
+    cfg: &MagiModelsConfig,
+    env: &MagiEnvModels,
 ) -> Vec<MagiAdapterSpec> {
-    todo!("Task 3 green")
+    [
+        (
+            AgentName::Melchior,
+            cfg.melchior_model.as_deref(),
+            env.melchior.as_deref(),
+        ),
+        (
+            AgentName::Balthasar,
+            cfg.balthasar_model.as_deref(),
+            env.balthasar.as_deref(),
+        ),
+        (
+            AgentName::Caspar,
+            cfg.caspar_model.as_deref(),
+            env.caspar.as_deref(),
+        ),
+    ]
+    .into_iter()
+    .filter_map(|(agent, toml, env_model)| {
+        resolve_magi_override(toml, env_model).map(|model| MagiAdapterSpec {
+            agent,
+            model,
+            adapter_name: format!("{backend_label}-{}", agent_label(agent)),
+        })
+    })
+    .collect()
 }
 
 #[cfg(test)]
@@ -76,7 +108,10 @@ mod tests {
         let specs = resolve_magi_adapter_specs(
             "anthropic",
             &cfg(Some(""), None, None),
-            &MagiEnvModels { melchior: Some("  ".into()), ..Default::default() },
+            &MagiEnvModels {
+                melchior: Some("  ".into()),
+                ..Default::default()
+            },
         );
         assert!(specs.is_empty());
     }
@@ -105,7 +140,14 @@ mod tests {
         );
         assert_eq!(specs.len(), 3);
         let names: Vec<&str> = specs.iter().map(|s| s.adapter_name.as_str()).collect();
-        assert_eq!(names, ["anthropic-melchior", "anthropic-balthasar", "anthropic-caspar"]);
+        assert_eq!(
+            names,
+            [
+                "anthropic-melchior",
+                "anthropic-balthasar",
+                "anthropic-caspar"
+            ]
+        );
     }
 
     #[test]
@@ -114,7 +156,10 @@ mod tests {
         let specs = resolve_magi_adapter_specs(
             "openai",
             &cfg(None, None, Some("toml-deepseek")),
-            &MagiEnvModels { caspar: Some("deepseek-r1:32b".into()), ..Default::default() },
+            &MagiEnvModels {
+                caspar: Some("deepseek-r1:32b".into()),
+                ..Default::default()
+            },
         );
         assert_eq!(specs.len(), 1);
         assert_eq!(specs[0].agent, AgentName::Caspar);

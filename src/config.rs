@@ -139,7 +139,7 @@ pub fn resolve_openai_base_url(config: &MagiConfig, env_base_url: Option<&str>) 
 ///
 /// # Returns
 /// `Some(model)` when an effective override exists; `None` otherwise.
-// consumed by main.rs Task 3 wiring (not yet called from non-test code)
+// consumed by magi_wiring (Task 3) / main.rs (Task 6); unused until Task 6 lands
 #[allow(dead_code)]
 pub fn resolve_magi_override(toml_model: Option<&str>, env_model: Option<&str>) -> Option<String> {
     fn non_empty(s: Option<&str>) -> Option<String> {
