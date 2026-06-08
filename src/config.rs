@@ -19,6 +19,8 @@ pub struct MagiConfig {
     pub openai: OpenAiConfig,
     #[serde(default)]
     pub anthropic: AnthropicConfig,
+    #[serde(default)]
+    pub magi: MagiModelsConfig,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
@@ -32,6 +34,19 @@ pub struct OpenAiConfig {
 #[serde(deny_unknown_fields)]
 pub struct AnthropicConfig {
     pub model: Option<String>,
+}
+
+/// Per-agent MAGI model overrides (`[magi]` section). All optional; absent ⇒ each
+/// agent shares the principal provider's model (backward compatible with v0.4.0).
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MagiModelsConfig {
+    /// Override model for Melchior (the Scientist). `None` ⇒ principal model.
+    pub melchior_model: Option<String>,
+    /// Override model for Balthasar (the Pragmatist). `None` ⇒ principal model.
+    pub balthasar_model: Option<String>,
+    /// Override model for Caspar (the Critic). `None` ⇒ principal model.
+    pub caspar_model: Option<String>,
 }
 
 impl MagiConfig {
