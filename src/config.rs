@@ -19,6 +19,8 @@ pub struct MagiConfig {
     pub openai: OpenAiConfig,
     #[serde(default)]
     pub anthropic: AnthropicConfig,
+    #[serde(default)]
+    pub magi: MagiModelsConfig,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
@@ -32,6 +34,19 @@ pub struct OpenAiConfig {
 #[serde(deny_unknown_fields)]
 pub struct AnthropicConfig {
     pub model: Option<String>,
+}
+
+/// Per-agent MAGI model overrides (`[magi]` section). All optional; absent ⇒ each
+/// agent shares the principal provider's model (backward compatible with v0.4.0).
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MagiModelsConfig {
+    /// Override model for Melchior (the Scientist). `None` ⇒ principal model.
+    pub melchior_model: Option<String>,
+    /// Override model for Balthasar (the Pragmatist). `None` ⇒ principal model.
+    pub balthasar_model: Option<String>,
+    /// Override model for Caspar (the Critic). `None` ⇒ principal model.
+    pub caspar_model: Option<String>,
 }
 
 impl MagiConfig {
@@ -111,6 +126,26 @@ pub fn resolve_openai_base_url(config: &MagiConfig, env_base_url: Option<&str>) 
         .map(str::to_string)
         .or_else(|| config.openai.base_url.clone())
         .unwrap_or_else(|| "https://api.openai.com/v1".into())
+}
+
+/// Resolves a per-agent MAGI model override. Precedence: env (non-empty) > TOML
+/// (non-empty) > `None`. A blank/whitespace value (env or TOML) is treated as
+/// unset and falls through to the next level. `None` means the agent uses the
+/// principal provider's model (RF-2, S-4, S-5).
+///
+/// # Arguments
+/// * `toml_model` - The `[magi].<agent>_model` value, if present.
+/// * `env_model`  - The `MAGI_MODEL_<AGENT>` env value, if present.
+///
+/// # Returns
+/// `Some(model)` when an effective override exists; `None` otherwise.
+pub fn resolve_magi_override(toml_model: Option<&str>, env_model: Option<&str>) -> Option<String> {
+    fn non_empty(s: Option<&str>) -> Option<String> {
+        s.map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    }
+    non_empty(env_model).or_else(|| non_empty(toml_model))
 }
 
 /// env `OPENAI_MODEL` > TOML `[openai].model`; **required** — `Err` if absent in both (RF-3).
@@ -263,5 +298,73 @@ mod tests {
         let (c, warn) = MagiConfig::load(dir.path());
         assert_eq!(c, MagiConfig::default());
         assert!(warn.unwrap().contains("magi.toml"));
+    }
+
+    // -------------------------------------------------------------------------
+    // Task 1: MagiModelsConfig parsing tests (S-1, S-2, S-3)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_parses_magi_section() {
+        // S-1
+        let c = MagiConfig::from_toml_str(
+            "[magi]\nmelchior_model = \"qwen3:8b\"\ncaspar_model = \"deepseek-r1:32b\"\n",
+        )
+        .unwrap();
+        assert_eq!(c.magi.melchior_model.as_deref(), Some("qwen3:8b"));
+        assert_eq!(c.magi.balthasar_model, None);
+        assert_eq!(c.magi.caspar_model.as_deref(), Some("deepseek-r1:32b"));
+    }
+
+    #[test]
+    fn test_absent_magi_section_is_default() {
+        // S-2
+        let c = MagiConfig::from_toml_str("provider = \"anthropic\"").unwrap();
+        assert_eq!(c.magi, MagiModelsConfig::default());
+    }
+
+    #[test]
+    fn test_unknown_field_in_magi_section_is_err() {
+        // S-3
+        assert!(MagiConfig::from_toml_str("[magi]\nunknown_field = \"x\"").is_err());
+    }
+
+    // -------------------------------------------------------------------------
+    // Task 2: resolve_magi_override precedence tests (S-4, S-5)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_resolve_magi_override_env_wins_over_toml() {
+        // S-4: env > TOML
+        assert_eq!(
+            resolve_magi_override(Some("toml-model"), Some("env-model")),
+            Some("env-model".to_string())
+        );
+    }
+
+    #[test]
+    fn test_resolve_magi_override_toml_when_no_env() {
+        // S-4: TOML when env absent
+        assert_eq!(
+            resolve_magi_override(Some("toml-model"), None),
+            Some("toml-model".to_string())
+        );
+    }
+
+    #[test]
+    fn test_resolve_magi_override_none_when_both_absent() {
+        // S-4: none ⇒ principal model
+        assert_eq!(resolve_magi_override(None, None), None);
+    }
+
+    #[test]
+    fn test_resolve_magi_override_empty_string_is_unset() {
+        // S-5: empty (env or TOML) is treated as unset, falls through precedence
+        assert_eq!(
+            resolve_magi_override(Some("toml"), Some("   ")),
+            Some("toml".to_string())
+        );
+        assert_eq!(resolve_magi_override(Some(""), None), None);
+        assert_eq!(resolve_magi_override(Some(""), Some("")), None);
     }
 }

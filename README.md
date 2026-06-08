@@ -4,7 +4,7 @@
 [![Tests](https://img.shields.io/badge/tests-136%20passing-brightgreen.svg)](#testing)
 [![Lints](https://img.shields.io/badge/lints-clippy%20clean-blue.svg)](https://github.com/rust-lang/rust-clippy)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
-[![Version](https://img.shields.io/badge/version-0.3.1-informational.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.5.0-informational.svg)](CHANGELOG.md)
 
 **Magi Agent** (`magi-rs`) is a terminal AI assistant in Rust, modeled on Claude Code. It drives an LLM provider through a multi-turn **tool loop** with sandboxed filesystem and shell access, and persists every conversation to a **locally-encrypted SQLite store**. Nothing leaves your machine except the model API calls you explicitly authorize.
 
@@ -165,6 +165,25 @@ model    = "claude-sonnet-4-6"           # optional override of the Anthropic de
 - **OpenAI-compatible key** — `OPENAI_API_KEY` env var. For a local Ollama instance, magi-rs falls back to a dummy value (`"ollama"`) so you can run without setting anything.
 - Placing `api_key` / `OPENAI_API_KEY` (or any other unknown field) inside `magi.toml` is rejected at parse time under `deny_unknown_fields`, not silently dropped — the file is treated as invalid and magi-rs falls back to defaults with a startup warning.
 - A malformed `magi.toml` does not crash magi-rs: it falls back to defaults and surfaces a notice in the TUI on startup.
+
+#### Per-agent MAGI models — `[magi]` (optional)
+
+The three MAGI perspectives (Melchior / Balthasar / Caspar) used by `/consult` and the `consult` tool can each run a **different model**, giving the consensus genuine **lineage diversity** — different model families reason and fail differently, so agreement across them carries more signal. This is **opt-in**: with no `[magi]` section and no `MAGI_MODEL_*` env vars, all three share the principal model (identical to v0.4.0).
+
+```toml
+[magi]
+melchior_model  = "qwen3:8b"       # Scientist  — theoretical analysis
+balthasar_model = "gpt-oss:20b"    # Pragmatist — practical trade-offs
+caspar_model    = "deepseek-r1:8b" # Critic     — adversarial review
+```
+
+| Setting | Env var | `magi.toml` | Default |
+|---------|---------|-------------|---------|
+| Melchior model | `MAGI_MODEL_MELCHIOR` | `[magi].melchior_model` | principal model |
+| Balthasar model | `MAGI_MODEL_BALTHASAR` | `[magi].balthasar_model` | principal model |
+| Caspar model | `MAGI_MODEL_CASPAR` | `[magi].caspar_model` | principal model |
+
+Per-agent overrides **reuse the principal provider's `base_url` + API key** and change only the model name. So real cross-family diversity (e.g. GLM + GPT + DeepSeek) requires the principal backend to be an Ollama-style endpoint serving all three families; with an Anthropic principal you can still vary across Anthropic models (tier diversity). See [`magi.toml.example`](magi.toml.example) for the Light / Balanced / Maximum tier suggestions. A blank value is treated as unset. In `StaticProvider` mode (no API key) the overrides are ignored with a startup notice.
 
 #### Quick start — local Ollama (no cost, no rate limits)
 
