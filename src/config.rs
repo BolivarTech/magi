@@ -264,4 +264,33 @@ mod tests {
         assert_eq!(c, MagiConfig::default());
         assert!(warn.unwrap().contains("magi.toml"));
     }
+
+    // -------------------------------------------------------------------------
+    // Task 1: MagiModelsConfig parsing tests (S-1, S-2, S-3)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_parses_magi_section() {
+        // S-1
+        let c = MagiConfig::from_toml_str(
+            "[magi]\nmelchior_model = \"qwen3:8b\"\ncaspar_model = \"deepseek-r1:32b\"\n",
+        )
+        .unwrap();
+        assert_eq!(c.magi.melchior_model.as_deref(), Some("qwen3:8b"));
+        assert_eq!(c.magi.balthasar_model, None);
+        assert_eq!(c.magi.caspar_model.as_deref(), Some("deepseek-r1:32b"));
+    }
+
+    #[test]
+    fn test_absent_magi_section_is_default() {
+        // S-2
+        let c = MagiConfig::from_toml_str("provider = \"anthropic\"").unwrap();
+        assert_eq!(c.magi, MagiModelsConfig::default());
+    }
+
+    #[test]
+    fn test_unknown_field_in_magi_section_is_err() {
+        // S-3
+        assert!(MagiConfig::from_toml_str("[magi]\nunknown_field = \"x\"").is_err());
+    }
 }
