@@ -1859,6 +1859,14 @@ mod tests {
         }
     }
 
+    // ─── Task 5 (Task 6 RF-8): build_openai_provider helper ──────────────────
+
+    #[test]
+    fn test_build_openai_provider_returns_non_static() {
+        let p = build_openai_provider("http://localhost:11434/v1", "ollama", "phi4-mini");
+        assert!(!p.is_static());
+    }
+
     #[tokio::test]
     async fn test_openai_skips_args_fragment_when_slot_empty() {
         // C2: a misbehaving backend streams a tool_call fragment that carries
