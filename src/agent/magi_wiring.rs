@@ -166,4 +166,18 @@ mod tests {
         assert_eq!(specs[0].model, "deepseek-r1:32b"); // env wins
         assert_eq!(specs[0].adapter_name, "openai-caspar");
     }
+
+    #[test]
+    fn test_static_with_overrides_emits_notice() {
+        // S-13
+        let n = static_override_notice(true, true);
+        assert!(n.as_deref().unwrap().contains("per-agent models ignored"));
+    }
+
+    #[test]
+    fn test_no_notice_when_not_static_or_no_overrides() {
+        assert_eq!(static_override_notice(false, true), None);
+        assert_eq!(static_override_notice(true, false), None);
+        assert_eq!(static_override_notice(false, false), None);
+    }
 }
