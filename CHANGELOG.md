@@ -9,18 +9,26 @@ changes and the **patch** position signals backward-compatible fixes.
 
 ## [Unreleased]
 
+### Deferred (tracked in internal dev-docs)
+- **#14** Envelope encryption (key rotation / crypto-shredding / multi-tenancy) — enterprise roadmap.
+- **#17** Runtime warning visibility — malformed tool-JSON (#4) and poison recovery (#8) warnings remain stderr-only under the alt-screen; startup/login warnings are already surfaced.
+- **#18** Blob version-dispatch / migration — the blob version byte is detection-only; a future format bump still needs a migrate-or-reset path.
+- **OpenAI key in keyring / `key.txt`** — `OPENAI_API_KEY` is currently env-only; aligning it with the Anthropic discovery order is a tracked follow-up.
+
+## [0.5.0] - 2026-06-08
+
+Per-agent model selection for the three MAGI perspectives (Melchior / Balthasar /
+Caspar). Additive and backward-compatible — the `Provider` trait, the agent loop,
+config discovery, the `consult` tool, `MagiCoreProviderAdapter`, and encrypted
+memory are unchanged; with no `[magi]` configuration the behavior is identical to
+v0.4.0.
+
 ### Added
 - Per-agent MAGI model selection via `magi.toml` `[magi]` section and
   `MAGI_MODEL_{MELCHIOR,BALTHASAR,CASPAR}` env vars. Opt-in; absent = all three
   perspectives share the principal model (backward compatible). Overrides reuse
   the principal backend's endpoint/key and vary only the model — true
   cross-family lineage diversity requires an Ollama-style multi-family endpoint.
-
-### Deferred (tracked in internal dev-docs)
-- **#14** Envelope encryption (key rotation / crypto-shredding / multi-tenancy) — enterprise roadmap.
-- **#17** Runtime warning visibility — malformed tool-JSON (#4) and poison recovery (#8) warnings remain stderr-only under the alt-screen; startup/login warnings are already surfaced.
-- **#18** Blob version-dispatch / migration — the blob version byte is detection-only; a future format bump still needs a migrate-or-reset path.
-- **OpenAI key in keyring / `key.txt`** — `OPENAI_API_KEY` is currently env-only; aligning it with the Anthropic discovery order is a tracked follow-up.
 
 ## [0.4.0] - 2026-06-07
 
