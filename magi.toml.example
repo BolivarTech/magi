@@ -35,3 +35,29 @@ model = "phi4-mini"
 # Anthropic model to use when `provider = "anthropic"`. Optional — when
 # omitted, magi-rs falls back to its built-in default (claude-sonnet-4-6).
 model = "claude-sonnet-4-6"
+
+# ---------------------------------------------------------------------------
+# [magi] — per-agent model selection (opt-in; absent = all three share the
+# principal model above, identical to v0.4.0 behavior).
+#
+# Why: the three MAGI perspectives reach a stronger consensus when they have
+# genuine lineage diversity — different model families reason and fail
+# differently, so agreement across them is more meaningful. Overrides reuse the
+# principal provider's base_url + api_key and change ONLY the model name, so
+# true cross-family diversity (e.g. GLM + GPT + DeepSeek) requires the principal
+# to be an Ollama-style endpoint serving all three families. With an Anthropic
+# principal you can still vary across Anthropic models (tier diversity).
+#
+# Precedence per agent: MAGI_MODEL_<AGENT> env var > this section > principal model.
+# A blank value is treated as unset.
+#
+# Suggested tiers (served via one Ollama OpenAI-compatible endpoint):
+#   Tier      Melchior            Balthasar          Caspar                 VRAM
+#   Light     qwen3:8b            gpt-oss:20b        deepseek-r1:8b         16-24 GB
+#   Balanced  qwen3:32b           gpt-oss:20b        deepseek-r1:32b        48-64 GB
+#   Maximum   glm-5:cloud         gpt-oss:120b-cloud deepseek-v4-pro:cloud  Cloud
+#
+# [magi]
+# melchior_model  = "qwen3:8b"       # Scientist  — theoretical analysis
+# balthasar_model = "gpt-oss:20b"    # Pragmatist — practical trade-offs
+# caspar_model    = "deepseek-r1:8b" # Critic     — adversarial review
