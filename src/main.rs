@@ -266,16 +266,22 @@ async fn main() -> anyhow::Result<()> {
     let specs = resolve_magi_adapter_specs(backend_label, &magi_config.magi, &env_models);
 
     // Builds a sibling provider on the SAME backend with a different model.
+    // Mirrors the principal provider resolution above: `"openai"` uses the captured
+    // OpenAI creds; any OTHER backend uses the discovered Anthropic credentials —
+    // the SAME `config.api_key` source as the principal (no second credential path).
+    // On this non-static branch the relevant source is always `Some`, so a per-agent
+    // override is never silently dropped (a malformed `provider_kind` still maps to
+    // the Anthropic path, matching how the principal itself was built).
     let build_sibling = |model: &str| -> Option<Arc<dyn Provider>> {
-        match provider_kind.as_str() {
-            "openai" => oai_creds
+        if provider_kind == "openai" {
+            oai_creds
                 .as_ref()
-                .map(|(b, k)| build_openai_provider(b, k, model)),
-            "anthropic" => config.as_ref().map(|c| {
+                .map(|(b, k)| build_openai_provider(b, k, model))
+        } else {
+            config.as_ref().map(|c| {
                 Arc::new(AnthropicProvider::new(c.api_key.clone(), model.to_string()))
                     as Arc<dyn Provider>
-            }),
-            _ => None,
+            })
         }
     };
 
