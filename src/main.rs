@@ -6,10 +6,14 @@ mod tools;
 mod tui;
 mod utils;
 
-use crate::agent::provider::{
-    AnthropicProvider, OpenAiCompatibleProvider, OpenAiSettings, Provider, StaticProvider,
+use crate::agent::magi_wiring::{
+    resolve_magi_adapter_specs, static_override_notice, MagiEnvModels,
 };
+use crate::agent::provider::{build_openai_provider, AnthropicProvider, Provider, StaticProvider};
 use crate::agent::Agent;
+// NOTE: this `MagiConfig` is the magi-rs TOML config (`crate::config::MagiConfig`).
+// It is DISTINCT from `magi_core::orchestrator::MagiConfig` — the latter is NEVER
+// imported here, avoiding the name collision.
 use crate::config::{resolve_openai_base_url, resolve_openai_model, resolve_provider, MagiConfig};
 use crate::system::database::{EncryptedSqliteMemory, MemoryStore};
 use crate::system::fs::{FileSystem, RealFileSystem};
@@ -22,7 +26,7 @@ use crate::tools::ls::ListTool;
 use crate::tools::read::FileReadTool;
 use crate::tools::write::FileWriteTool;
 use clap::Parser;
-use magi_core::orchestrator::Magi;
+use magi_core::orchestrator::{Magi, MagiBuilder};
 use std::env;
 use std::fs;
 use std::sync::Arc;
@@ -195,6 +199,10 @@ async fn main() -> anyhow::Result<()> {
     let (magi_config, config_warning) = MagiConfig::load(&workspace_root);
     let provider_kind = resolve_provider(&magi_config, env::var("MAGI_PROVIDER").ok().as_deref());
 
+    // Credentials needed to build per-agent sibling providers (same backend, different
+    // model) for MAGI per-agent overrides. Set inside the openai branch.
+    let mut oai_creds: Option<(String, String)> = None; // (base_url, api_key)
+
     let (provider, provider_info, model_label): (Arc<dyn Provider>, String, String) =
         if provider_kind == "openai" {
             // MAGI: OPENAI_API_KEY is sourced from env ONLY — NEVER from magi.toml
@@ -210,12 +218,9 @@ async fn main() -> anyhow::Result<()> {
                 resolve_openai_model(&magi_config, env::var("OPENAI_MODEL").ok().as_deref())?;
             let info = format!("OpenAI-compatible ({base_url}) Model: {model}");
             let model_label = model.clone();
+            oai_creds = Some((base_url.clone(), api_key.clone()));
             (
-                Arc::new(OpenAiCompatibleProvider::new(OpenAiSettings {
-                    base_url,
-                    api_key,
-                    model,
-                })),
+                build_openai_provider(&base_url, &api_key, &model),
                 info,
                 model_label,
             )
@@ -235,28 +240,6 @@ async fn main() -> anyhow::Result<()> {
             )
         };
 
-    // Build the MAGI orchestrator over the SAME resolved backend (shared Arc) so
-    // the consult tool reuses the resolved credentials. Skip on the StaticProvider
-    // path: magi-core cannot parse canned text, so a consult would deterministically
-    // fail with InsufficientAgents.
-    let consult_magi: Option<Arc<Magi>> = if provider.is_static() {
-        None
-    } else {
-        let provider_label = if provider_kind == "openai" {
-            "openai"
-        } else {
-            "anthropic"
-        };
-        let adapter = crate::agent::magi_adapter::MagiCoreProviderAdapter::new(
-            provider.clone(),
-            provider_label,
-            model_label,
-        );
-        Some(Arc::new(Magi::new(Arc::new(adapter))))
-    };
-
-    let mut agent = Agent::new(provider);
-    let db_path = workspace_root.join(".magi-rs-memory.db");
     // Notices shown when the TUI starts — the provider banner plus any persistence
     // or reset warnings that would otherwise be lost to pre-TUI stderr (#7/#11).
     let mut startup_notices = vec![provider_info];
@@ -265,6 +248,76 @@ async fn main() -> anyhow::Result<()> {
     if let Some(w) = config_warning {
         startup_notices.push(w);
     }
+
+    // Build the MAGI orchestrator over the resolved backend. With no per-agent
+    // overrides this is the v0.4.0 path (`Magi::new`, single shared adapter).
+    // With overrides, build one adapter per overridden agent (same backend
+    // creds, different model) via `MagiBuilder::with_provider`.
+    let backend_label = if provider_kind == "openai" {
+        "openai"
+    } else {
+        "anthropic"
+    };
+    let env_models = MagiEnvModels {
+        melchior: env::var("MAGI_MODEL_MELCHIOR").ok(),
+        balthasar: env::var("MAGI_MODEL_BALTHASAR").ok(),
+        caspar: env::var("MAGI_MODEL_CASPAR").ok(),
+    };
+    let specs = resolve_magi_adapter_specs(backend_label, &magi_config.magi, &env_models);
+
+    // Builds a sibling provider on the SAME backend with a different model.
+    let build_sibling = |model: &str| -> Option<Arc<dyn Provider>> {
+        match provider_kind.as_str() {
+            "openai" => oai_creds
+                .as_ref()
+                .map(|(b, k)| build_openai_provider(b, k, model)),
+            "anthropic" => config.as_ref().map(|c| {
+                Arc::new(AnthropicProvider::new(c.api_key.clone(), model.to_string()))
+                    as Arc<dyn Provider>
+            }),
+            _ => None,
+        }
+    };
+
+    let consult_magi: Option<Arc<Magi>> = if provider.is_static() {
+        // No backend to build adapters; surface a non-silent notice if the user
+        // configured [magi] overrides anyway (RF-10, S-13).
+        if let Some(notice) = static_override_notice(true, !specs.is_empty()) {
+            startup_notices.push(notice);
+        }
+        None
+    } else {
+        let default_adapter = crate::agent::magi_adapter::MagiCoreProviderAdapter::new(
+            provider.clone(),
+            backend_label,
+            model_label.clone(),
+        );
+        if specs.is_empty() {
+            // v0.4.0 path — unchanged (S-6).
+            Some(Arc::new(Magi::new(Arc::new(default_adapter))))
+        } else {
+            let mut builder = MagiBuilder::new(Arc::new(default_adapter));
+            for spec in &specs {
+                if let Some(sibling) = build_sibling(&spec.model) {
+                    let adapter = crate::agent::magi_adapter::MagiCoreProviderAdapter::new(
+                        sibling,
+                        spec.adapter_name.clone(),
+                        spec.model.clone(),
+                    );
+                    builder = builder.with_provider(spec.agent, Arc::new(adapter));
+                }
+            }
+            // build() is fallible (MagiError); propagate to surface at startup (RF-6).
+            Some(Arc::new(
+                builder
+                    .build()
+                    .map_err(|e| anyhow::anyhow!("MAGI builder failed: {e}"))?,
+            ))
+        }
+    };
+
+    let mut agent = Agent::new(provider);
+    let db_path = workspace_root.join(".magi-rs-memory.db");
     match decide_memory_attachment(discover_or_create_master_key().await) {
         MemoryAttachment::Encrypted(master_pwd) => {
             let store = EncryptedSqliteMemory::new(db_path, master_pwd)?;

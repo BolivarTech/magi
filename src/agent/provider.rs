@@ -491,8 +491,6 @@ impl OpenAiCompatibleProvider {
 /// * `base_url` - OpenAI-compatible endpoint base URL.
 /// * `api_key`  - Bearer token (dummy `"ollama"` accepted by local Ollama).
 /// * `model`    - Model name to request.
-// consumed by main.rs Task 6 wiring; unused in the bin target until then
-#[allow(dead_code)]
 pub fn build_openai_provider(
     base_url: &str,
     api_key: &str,

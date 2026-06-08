@@ -6,9 +6,6 @@
 //! and the static-path notice. Isolates the `magi_core::schema::AgentName`
 //! coupling and the `"{backend}-{agent}"` naming so `main.rs` stays thin glue.
 
-// consumed by main.rs Task 6 wiring; items unused until then
-#![allow(dead_code)]
-
 use crate::config::{resolve_magi_override, MagiModelsConfig};
 use magi_core::schema::AgentName;
 
