@@ -308,4 +308,40 @@ mod tests {
         // S-3
         assert!(MagiConfig::from_toml_str("[magi]\nunknown_field = \"x\"").is_err());
     }
+
+    // -------------------------------------------------------------------------
+    // Task 2: resolve_magi_override precedence tests (S-4, S-5)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_resolve_magi_override_env_wins_over_toml() {
+        // S-4: env > TOML
+        assert_eq!(
+            resolve_magi_override(Some("toml-model"), Some("env-model")),
+            Some("env-model".to_string())
+        );
+    }
+
+    #[test]
+    fn test_resolve_magi_override_toml_when_no_env() {
+        // S-4: TOML when env absent
+        assert_eq!(
+            resolve_magi_override(Some("toml-model"), None),
+            Some("toml-model".to_string())
+        );
+    }
+
+    #[test]
+    fn test_resolve_magi_override_none_when_both_absent() {
+        // S-4: none ⇒ principal model
+        assert_eq!(resolve_magi_override(None, None), None);
+    }
+
+    #[test]
+    fn test_resolve_magi_override_empty_string_is_unset() {
+        // S-5: empty (env or TOML) is treated as unset, falls through precedence
+        assert_eq!(resolve_magi_override(Some("toml"), Some("   ")), Some("toml".to_string()));
+        assert_eq!(resolve_magi_override(Some(""), None), None);
+        assert_eq!(resolve_magi_override(Some(""), Some("")), None);
+    }
 }
