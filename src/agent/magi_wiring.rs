@@ -79,6 +79,17 @@ pub fn resolve_magi_adapter_specs(
     .collect()
 }
 
+/// Returns a non-silent startup notice when `[magi]` overrides are present but
+/// the principal provider is static (no API backend to build adapters). `None`
+/// otherwise (RF-10, S-13).
+pub fn static_override_notice(is_static: bool, has_overrides: bool) -> Option<String> {
+    if is_static && has_overrides {
+        Some("[magi] per-agent models ignored: no API backend configured".to_string())
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
