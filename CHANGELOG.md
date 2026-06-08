@@ -9,6 +9,13 @@ changes and the **patch** position signals backward-compatible fixes.
 
 ## [Unreleased]
 
+### Added
+- Per-agent MAGI model selection via `magi.toml` `[magi]` section and
+  `MAGI_MODEL_{MELCHIOR,BALTHASAR,CASPAR}` env vars. Opt-in; absent = all three
+  perspectives share the principal model (backward compatible). Overrides reuse
+  the principal backend's endpoint/key and vary only the model — true
+  cross-family lineage diversity requires an Ollama-style multi-family endpoint.
+
 ### Deferred (tracked in internal dev-docs)
 - **#14** Envelope encryption (key rotation / crypto-shredding / multi-tenancy) — enterprise roadmap.
 - **#17** Runtime warning visibility — malformed tool-JSON (#4) and poison recovery (#8) warnings remain stderr-only under the alt-screen; startup/login warnings are already surfaced.
