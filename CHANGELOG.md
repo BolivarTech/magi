@@ -14,6 +14,34 @@ changes and the **patch** position signals backward-compatible fixes.
 - **#17** Runtime warning visibility — malformed tool-JSON (#4) and poison recovery (#8) warnings remain stderr-only under the alt-screen; startup/login warnings are already surfaced.
 - **#18** Blob version-dispatch / migration — the blob version byte is detection-only; a future format bump still needs a migrate-or-reset path.
 - **OpenAI key in keyring / `key.txt`** — `OPENAI_API_KEY` is currently env-only; aligning it with the Anthropic discovery order is a tracked follow-up.
+- **#24** Reasoning-model streaming (v0.5.2) — reasoning models (e.g. `kimi-k2.6:cloud`, `deepseek-r1`) emit their chain-of-thought in `delta.reasoning` with empty `delta.content`; the OpenAI-compatible streaming parser currently ignores it, so the TUI looks frozen during a long reasoning phase. Next patch streams the reasoning visibly (without persisting it).
+
+## [0.5.1] - 2026-06-08
+
+TUI usability patch — makes long output (notably the `/consult` report) readable.
+TUI-only; the agent loop, providers, persistence, and crypto are unchanged.
+
+### Added
+- **Conversation scrollback.** Scroll the history line-by-line with `↑`/`↓`, by page
+  with `PgUp`/`PgDn`, and to the top/bottom with `Home`/`End`. The pane follows the
+  tail by default and snaps back to the newest content on a new/streaming reply.
+
+### Fixed
+- **Tall messages were truncated.** A single message taller than the pane (e.g. a
+  MAGI consult report) previously showed only its tail with no way to scroll up; it
+  is now fully reachable via the new scrollback.
+- **Markdown/table indentation was lost.** `wrap_message` now returns a fitting line
+  unchanged, preserving leading indentation and internal alignment spaces (bullets,
+  ASCII tables, box-drawing). Wrapping is measured in terminal display columns, so
+  CJK/emoji (2-column) glyphs no longer wrap a column early.
+- **Long prompts were cut off at the right border.** The input box now grows (up to
+  6 rows) and wraps long/multi-line prompts instead of truncating them.
+
+### Known limitations
+- `wrap_message` still collapses internal whitespace when reflowing a line that is
+  *wider than the terminal* (word-boundary wrap); fitting lines are untouched. Mid-
+  prompt cursor placement in an input taller than 6 rows is approximate (exact while
+  typing at the end).
 
 ## [0.5.0] - 2026-06-08
 
