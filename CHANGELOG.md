@@ -14,7 +14,32 @@ changes and the **patch** position signals backward-compatible fixes.
 - **#17** Runtime warning visibility — malformed tool-JSON (#4) and poison recovery (#8) warnings remain stderr-only under the alt-screen; startup/login warnings are already surfaced.
 - **#18** Blob version-dispatch / migration — the blob version byte is detection-only; a future format bump still needs a migrate-or-reset path.
 - **OpenAI key in keyring / `key.txt`** — `OPENAI_API_KEY` is currently env-only; aligning it with the Anthropic discovery order is a tracked follow-up.
-- **#24** Reasoning-model streaming (v0.5.2) — reasoning models (e.g. `kimi-k2.6:cloud`, `deepseek-r1`) emit their chain-of-thought in `delta.reasoning` with empty `delta.content`; the OpenAI-compatible streaming parser currently ignores it, so the TUI looks frozen during a long reasoning phase. Next patch streams the reasoning visibly (without persisting it).
+
+## [0.5.2] - 2026-06-09
+
+Reasoning-model streaming (#24). Reasoning models (e.g. `kimi-k2.6:cloud`,
+`deepseek-r1`) stream their chain-of-thought in `delta.reasoning` with empty
+`delta.content`; the OpenAI-compatible parser previously ignored it, so the TUI
+showed a frozen blank during a long reasoning phase. TUI/provider only — the agent
+loop, persistence, crypto, and `/consult` are unchanged.
+
+### Added
+- **Live "thinking" feedback for reasoning models.** By default a compact
+  `🤔 MAGI Pensando…` indicator with an animated spinner shows while the model
+  reasons, instead of a frozen blank. The reasoning text itself is **never
+  persisted** to the encrypted store.
+- **`/toggle-show-thinking`** switches between the compact indicator (default) and
+  a verbose mode that streams the full chain-of-thought inline (useful for
+  debugging). Added to `/help`.
+
+### Fixed
+- Reasoning-model chats no longer appear frozen: the parser now surfaces
+  `delta.reasoning` as a distinct stream instead of dropping it.
+
+### Known limitations
+- In the verbose mode (`/toggle-show-thinking`), the reasoning and the answer are
+  streamed into the same message bubble and can visually run together; the default
+  compact mode is unaffected.
 
 ## [0.5.1] - 2026-06-08
 
