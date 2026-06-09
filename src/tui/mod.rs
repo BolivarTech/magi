@@ -1316,6 +1316,25 @@ mod tests {
     }
 
     #[test]
+    fn test_input_pane_rows_minimum_one() {
+        // Empty / short input still occupies a single visible row.
+        assert_eq!(input_pane_rows("", 10, 6), 1);
+        assert_eq!(input_pane_rows("short", 10, 6), 1);
+    }
+
+    #[test]
+    fn test_input_pane_rows_grows_with_wrapped_input() {
+        // 25 chars at width 10 wrap to 3 rows.
+        assert_eq!(input_pane_rows(&"a".repeat(25), 10, 6), 3);
+    }
+
+    #[test]
+    fn test_input_pane_rows_clamped_to_max() {
+        // 100 chars at width 10 want 10 rows but are capped at the max.
+        assert_eq!(input_pane_rows(&"a".repeat(100), 10, 6), 6);
+    }
+
+    #[test]
     fn test_parse_consult_command() {
         assert_eq!(
             super::parse_consult_command("/consult should we X?"),
