@@ -87,6 +87,15 @@ pub struct App {
     pub visual_selection_start: Option<usize>,
     /// Whether the agent is currently streaming a response.
     pub streaming: bool,
+    /// Conversation scrollback offset: wrapped lines scrolled UP from the bottom
+    /// (Normal mode). `0` follows the tail (newest content visible).
+    pub scroll_offset: usize,
+    /// Max scroll offset computed at the last render — cached so key handlers can
+    /// clamp `scroll_offset` without recomputing the wrapped-line layout.
+    pub last_max_scroll: usize,
+    /// Visible height (lines) of the conversation pane at the last render — used to
+    /// size a PageUp/PageDown step.
+    pub last_viewport_height: usize,
 }
 
 impl App {
@@ -109,6 +118,9 @@ impl App {
             visual_cursor: 0,
             visual_selection_start: None,
             streaming: false,
+            scroll_offset: 0,
+            last_max_scroll: 0,
+            last_viewport_height: 0,
         }
     }
 
@@ -216,11 +228,15 @@ impl App {
     /// Appends a message to the UI history.
     pub fn push_message(&mut self, message: String) {
         self.messages.push(message);
+        // New content → snap back to the tail so it's visible.
+        self.scroll_offset = 0;
     }
 
     /// Appends a streaming delta to the in-progress assistant message,
     /// creating the line on the first delta. Append-only; never byte-indexes.
     pub fn append_stream_delta(&mut self, delta: String) {
+        // Streaming content → follow the tail so the live reply stays visible.
+        self.scroll_offset = 0;
         if self.streaming {
             if let Some(last) = self.messages.last_mut() {
                 last.push_str(&delta);
@@ -532,7 +548,7 @@ pub async fn run_tui_ext(
 
 async fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Result<()> {
     loop {
-        terminal.draw(|f| ui(f, &app))?;
+        terminal.draw(|f| ui(f, &mut app))?;
 
         while let Ok(response) = app.response_rx.try_recv() {
             match response {
@@ -708,6 +724,25 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Re
                             }
                             (KeyCode::Right, m) => {
                                 app.move_cursor_right(m.contains(KeyModifiers::SHIFT));
+                                continue;
+                            }
+                            (KeyCode::PageUp, _) => {
+                                let page = app.last_viewport_height.saturating_sub(1).max(1);
+                                app.scroll_offset =
+                                    (app.scroll_offset + page).min(app.last_max_scroll);
+                                continue;
+                            }
+                            (KeyCode::PageDown, _) => {
+                                let page = app.last_viewport_height.saturating_sub(1).max(1);
+                                app.scroll_offset = app.scroll_offset.saturating_sub(page);
+                                continue;
+                            }
+                            (KeyCode::Home, _) => {
+                                app.scroll_offset = app.last_max_scroll;
+                                continue;
+                            }
+                            (KeyCode::End, _) => {
+                                app.scroll_offset = 0;
                                 continue;
                             }
                             _ => {}
@@ -933,18 +968,32 @@ fn effective_highlight_symbol(mode: AppMode) -> &'static str {
     }
 }
 
-/// Returns the LAST `max` entries of `lines` if `lines.len() > max`, else returns `lines`
-/// unchanged.  `max == 0` is treated as no-op (defensive: a viewport collapsed to height 0
-/// during a resize must never silently drop data — the next non-zero frame restores everything).
-fn tail_lines(lines: Vec<String>, max: usize) -> Vec<String> {
-    if max == 0 || lines.len() <= max {
-        return lines;
-    }
-    let skip = lines.len() - max;
-    lines.into_iter().skip(skip).collect()
+/// Maximum scroll offset (lines hidden above the bottom window) for a conversation
+/// of `total` wrapped lines in a viewport `height` lines tall. `0` when it all fits.
+fn max_scroll(total: usize, height: usize) -> usize {
+    total.saturating_sub(height)
 }
 
-fn ui(f: &mut Frame, app: &App) {
+/// Index range of the visible slice of a `total`-line conversation in a viewport
+/// `height` lines tall, scrolled `offset` lines UP from the bottom.
+///
+/// `offset == 0` pins to the bottom (follow-tail). The offset is clamped so the
+/// top line never scrolls past view. A conversation shorter than the viewport
+/// shows everything (`0..total`); a zero height or empty buffer yields `0..0`.
+fn scroll_window(total: usize, height: usize, offset: usize) -> std::ops::Range<usize> {
+    if height == 0 || total == 0 {
+        return 0..0;
+    }
+    if total <= height {
+        return 0..total;
+    }
+    let max_off = total - height;
+    let clamped = offset.min(max_off);
+    let start = total - height - clamped;
+    start..(start + height)
+}
+
+fn ui(f: &mut Frame, app: &mut App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .margin(1)
@@ -954,48 +1003,77 @@ fn ui(f: &mut Frame, app: &App) {
     let inner_width = chunks[0].width.saturating_sub(2) as usize; // subtract left + right borders
     let inner_height = chunks[0].height.saturating_sub(2) as usize; // subtract top + bottom borders
 
-    let last_idx = app.messages.len().saturating_sub(1);
-    let messages: Vec<ListItem> = app
-        .messages
-        .iter()
-        .enumerate()
-        .map(|(i, m)| {
-            let mut style = Style::default();
-            if (app.mode == AppMode::Selection || app.mode == AppMode::Visual)
-                && i == app.selected_index
-            {
-                style = style
-                    .bg(Color::Blue)
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD);
+    if app.mode == AppMode::Normal {
+        // Flatten every message into one wrapped-line buffer (a blank separator line
+        // between messages), then render a scrollable window of it. This gives
+        // line-level scrollback — a single message taller than the viewport (e.g. the
+        // consult report) is fully reachable via PgUp/PgDn/Home/End.
+        let mut all_lines: Vec<String> = Vec::new();
+        for (i, m) in app.messages.iter().enumerate() {
+            if i > 0 {
+                all_lines.push(String::new());
             }
-            let wrapped = wrap_message(m, inner_width);
-            // Only the LAST message in Normal mode gets tail-truncated — this is the streaming
-            // target that can grow taller than the viewport.  Selection / Visual modes show
-            // every wrapped line so the user can review the full message (Ctrl+S → ↑ navigation).
-            let displayed = if i == last_idx && app.mode == AppMode::Normal {
-                tail_lines(wrapped, inner_height)
-            } else {
-                wrapped
-            };
-            let lines: Vec<Line> = displayed.into_iter().map(Line::from).collect();
-            ListItem::new(Text::from(lines)).style(style)
-        })
-        .collect();
+            all_lines.extend(wrap_message(m, inner_width));
+        }
+        let total = all_lines.len();
+        // Cache viewport bounds so key handlers can clamp scroll_offset (see Normal keys).
+        app.last_viewport_height = inner_height;
+        app.last_max_scroll = max_scroll(total, inner_height);
+        if app.scroll_offset > app.last_max_scroll {
+            app.scroll_offset = app.last_max_scroll;
+        }
+        let range = scroll_window(total, inner_height, app.scroll_offset);
+        let visible: Vec<Line> = all_lines[range]
+            .iter()
+            .map(|l| Line::from(l.clone()))
+            .collect();
+        let title = if app.scroll_offset > 0 {
+            format!(
+                "Conversation History  [scrolled ↑{} · PgDn/End → bottom]",
+                app.scroll_offset
+            )
+        } else {
+            "Conversation History".to_string()
+        };
+        let conversation = Paragraph::new(Text::from(visible))
+            .block(Block::default().borders(Borders::ALL).title(title));
+        f.render_widget(conversation, chunks[0]);
+    } else {
+        // Selection / Visual: per-message List so the user can pick a message to copy.
+        let messages: Vec<ListItem> = app
+            .messages
+            .iter()
+            .enumerate()
+            .map(|(i, m)| {
+                let mut style = Style::default();
+                if i == app.selected_index {
+                    style = style
+                        .bg(Color::Blue)
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD);
+                }
+                let lines: Vec<Line> = wrap_message(m, inner_width)
+                    .into_iter()
+                    .map(Line::from)
+                    .collect();
+                ListItem::new(Text::from(lines)).style(style)
+            })
+            .collect();
 
-    let mut state = ListState::default();
-    if let Some(idx) = effective_selection(app.mode, app.selected_index, app.messages.len()) {
-        state.select(Some(idx));
+        let mut state = ListState::default();
+        if let Some(idx) = effective_selection(app.mode, app.selected_index, app.messages.len()) {
+            state.select(Some(idx));
+        }
+
+        let messages_list = List::new(messages)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("Conversation History"),
+            )
+            .highlight_symbol(effective_highlight_symbol(app.mode));
+        f.render_stateful_widget(messages_list, chunks[0], &mut state);
     }
-
-    let messages_list = List::new(messages)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title("Conversation History"),
-        )
-        .highlight_symbol(effective_highlight_symbol(app.mode));
-    f.render_stateful_widget(messages_list, chunks[0], &mut state);
 
     let mut input_text = Text::raw(app.input.as_str());
     if let Some(start) = app.selection_start {
@@ -1023,7 +1101,7 @@ fn ui(f: &mut Frame, app: &App) {
         }
         AppMode::Visual => "VISUAL SELECTION MODE",
         _ if app.pending_approval.is_some() => "WAITING FOR APPROVAL (y/c)",
-        _ => "Input (Ctrl+S Copy Mode, Shift+Arrows Select)",
+        _ => "Input (PgUp/PgDn/Home/End Scroll, Ctrl+S Copy, Shift+Arrows Select)",
     };
 
     let input =
@@ -1235,56 +1313,6 @@ mod tests {
     fn test_scroll_window_degenerate_zero_height_or_empty() {
         assert_eq!(scroll_window(10, 0, 0), 0..0);
         assert_eq!(scroll_window(0, 5, 0), 0..0);
-    }
-
-    #[test]
-    fn test_tail_lines_keeps_last_n_when_input_exceeds_max() {
-        let input: Vec<String> = (0..10).map(|i| format!("line {i}")).collect();
-        let out = tail_lines(input, 3);
-        assert_eq!(
-            out,
-            vec![
-                "line 7".to_string(),
-                "line 8".to_string(),
-                "line 9".to_string()
-            ]
-        );
-    }
-
-    #[test]
-    fn test_tail_lines_returns_input_unchanged_when_max_ge_len() {
-        let input: Vec<String> = vec!["a".into(), "b".into(), "c".into()];
-        assert_eq!(tail_lines(input.clone(), 3), input); // equal
-        assert_eq!(tail_lines(input.clone(), 100), input); // greater
-    }
-
-    #[test]
-    fn test_tail_lines_max_zero_returns_input_unchanged() {
-        // Defensive: max=0 (degenerate viewport) is a no-op — never lose data on resize-to-zero.
-        let input: Vec<String> = vec!["a".into(), "b".into()];
-        assert_eq!(tail_lines(input.clone(), 0), input);
-    }
-
-    #[test]
-    fn test_tail_lines_empty_input() {
-        let out = tail_lines(Vec::<String>::new(), 5);
-        assert!(out.is_empty());
-    }
-
-    #[test]
-    fn test_tail_lines_shifts_by_one_when_input_grows_by_one() {
-        // Simulates a streaming tick: the tail visually scrolls up by one line.
-        let before: Vec<String> = (0..20).map(|i| format!("L{i}")).collect();
-        let mut after = before.clone();
-        after.push("L20".into());
-        let max = 10;
-        let tail_before = tail_lines(before, max);
-        let tail_after = tail_lines(after, max);
-        // Tail moves forward by 1: L10..=L19  →  L11..=L20.
-        assert_eq!(tail_before.first().unwrap(), "L10");
-        assert_eq!(tail_before.last().unwrap(), "L19");
-        assert_eq!(tail_after.first().unwrap(), "L11");
-        assert_eq!(tail_after.last().unwrap(), "L20");
     }
 
     #[test]
