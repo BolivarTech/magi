@@ -7,11 +7,6 @@
 //! (e.g. `qwen3-max` never existed; `qwen3.6` appeared). Refresh per release; users
 //! override via `magi.toml`/env. All default literals live HERE, in one place.
 
-// The scaffolder fns (`render_default_magi_toml`/`write_default_config`) have no
-// non-test caller until Task 7 (`--init-config`) wires them; this allow is removed
-// there once a real call site exists.
-#![allow(dead_code)]
-
 use std::path::{Path, PathBuf};
 
 /// Default provider when no `magi.toml`/env is present (RF-1).

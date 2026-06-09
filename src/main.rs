@@ -38,6 +38,10 @@ struct Args {
     /// Log out and clear stored API keys.
     #[arg(short, long)]
     logout: bool,
+
+    /// Write a default magi.toml to the workspace and exit (refuses to overwrite).
+    #[arg(long)]
+    init_config: bool,
 }
 
 #[derive(Debug)]
@@ -194,6 +198,19 @@ async fn main() -> anyhow::Result<()> {
             .await;
         println!("Logged out successfully.");
         return Ok(());
+    }
+
+    if args.init_config {
+        match crate::defaults::write_default_config(&workspace_root) {
+            Ok(path) => {
+                println!("Wrote default config to {}", path.display());
+                return Ok(());
+            }
+            Err(e) => {
+                eprintln!("{e}");
+                std::process::exit(1);
+            }
+        }
     }
 
     let config = discover_config_ext("key.txt").await;
@@ -464,5 +481,14 @@ mod tests {
         assert_eq!(parse_key_file("   \n"), None);
         // The configured default.
         assert_eq!(DEFAULT_MODEL, "claude-sonnet-4-6");
+    }
+
+    #[test]
+    fn test_args_parses_init_config_flag() {
+        use clap::Parser;
+        let a = Args::parse_from(["magi-rs", "--init-config"]);
+        assert!(a.init_config);
+        let b = Args::parse_from(["magi-rs"]);
+        assert!(!b.init_config);
     }
 }
