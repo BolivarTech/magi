@@ -25,6 +25,15 @@ pub struct ApprovalRequest {
     pub tx: oneshot::Sender<bool>,
 }
 
+/// A piece of a streamed assistant turn forwarded to the UI. `Content` is answer
+/// text (persisted); `Reasoning` is a thinking model's chain-of-thought, shown
+/// live but never persisted (#24).
+#[derive(Debug, Clone, PartialEq)]
+pub enum StreamPiece {
+    Content(String),
+    Reasoning(String),
+}
+
 /// The Agent orchestrator.
 pub struct Agent {
     provider: Arc<dyn Provider>,
@@ -205,7 +214,7 @@ impl Agent {
     pub async fn query_streaming(
         &mut self,
         text: &str,
-        chunk_tx: tokio::sync::mpsc::Sender<String>,
+        chunk_tx: tokio::sync::mpsc::Sender<StreamPiece>,
     ) -> Result<String> {
         let user_msg = Message::user(text);
         self.history.push(user_msg.clone());
@@ -233,7 +242,23 @@ impl Agent {
                     ResponseChunk::TextDelta(delta) => {
                         let sanitized = Self::sanitize_text(&delta);
                         full_text.push_str(&sanitized);
-                        if chunk_tx.send(sanitized).await.is_err() {
+                        if chunk_tx
+                            .send(StreamPiece::Content(sanitized))
+                            .await
+                            .is_err()
+                        {
+                            return Err(anyhow::anyhow!("TUI connection closed during streaming"));
+                        }
+                    }
+                    ResponseChunk::ReasoningDelta(delta) => {
+                        // Forwarded for live display only — NOT added to `full_text`,
+                        // so the persisted assistant message excludes the thinking.
+                        let sanitized = Self::sanitize_text(&delta);
+                        if chunk_tx
+                            .send(StreamPiece::Reasoning(sanitized))
+                            .await
+                            .is_err()
+                        {
                             return Err(anyhow::anyhow!("TUI connection closed during streaming"));
                         }
                     }
@@ -541,7 +566,7 @@ mod tests {
 
         let mut agent = Agent::new(Arc::new(FixedProvider("from-A")));
         agent.set_provider(Arc::new(FixedProvider("from-B")));
-        let (tx, _rx) = tokio::sync::mpsc::channel::<String>(8);
+        let (tx, _rx) = tokio::sync::mpsc::channel::<StreamPiece>(8);
         let out = agent.query_streaming("hi", tx).await.unwrap();
         assert_eq!(out, "from-B", "set_provider must swap the active provider");
     }

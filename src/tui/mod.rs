@@ -1,6 +1,6 @@
 //! This module implements the Terminal User Interface using Ratatui.
 
-use crate::agent::{Agent, ApprovalRequest};
+use crate::agent::{Agent, ApprovalRequest, StreamPiece};
 use crate::system::secrets::SecretStore;
 use crossterm::{
     event::{self, DisableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers},
@@ -57,6 +57,9 @@ pub enum AgentResponse {
     Info(String),
     /// An incremental text delta from the streaming provider.
     StreamDelta(String),
+    /// An incremental reasoning (chain-of-thought) delta — shown live, never
+    /// persisted (#24).
+    ReasoningDelta(String),
 }
 
 /// Represents the state of the TUI application.
@@ -298,15 +301,15 @@ pub async fn run_tui_ext(
                     // the task before the end-of-turn marker is sent, guaranteeing
                     // all deltas arrive at the UI before `Text("")` (end-of-turn
                     // convention) or `Error(...)`.
-                    let (chunk_tx, mut chunk_rx) = mpsc::channel::<String>(100);
+                    let (chunk_tx, mut chunk_rx) = mpsc::channel::<StreamPiece>(100);
                     let forward_tx = response_tx.clone();
                     let forwarder = tokio::spawn(async move {
-                        while let Some(delta) = chunk_rx.recv().await {
-                            if forward_tx
-                                .send(AgentResponse::StreamDelta(delta))
-                                .await
-                                .is_err()
-                            {
+                        while let Some(piece) = chunk_rx.recv().await {
+                            let resp = match piece {
+                                StreamPiece::Content(s) => AgentResponse::StreamDelta(s),
+                                StreamPiece::Reasoning(s) => AgentResponse::ReasoningDelta(s),
+                            };
+                            if forward_tx.send(resp).await.is_err() {
                                 break;
                             }
                         }
@@ -553,6 +556,9 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Re
         while let Ok(response) = app.response_rx.try_recv() {
             match response {
                 AgentResponse::StreamDelta(delta) => app.append_stream_delta(delta),
+                // Unit 2: shown inline (mode A). Unit 3 makes this mode-aware
+                // (default = compact "thinking…" indicator).
+                AgentResponse::ReasoningDelta(delta) => app.append_stream_delta(delta),
                 AgentResponse::Text(t) => {
                     if t.is_empty() {
                         app.finalize_stream();
