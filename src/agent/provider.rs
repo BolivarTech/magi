@@ -1654,8 +1654,8 @@ mod tests {
     async fn test_openai_streams_reasoning_visibly_but_does_not_persist_it() {
         // v0.5.2 (#24): reasoning models (kimi-k2.6, deepseek-r1) emit their
         // chain-of-thought in `delta.reasoning` with empty `delta.content`. The
-        // provider must surface the reasoning as visible TextDeltas (so the TUI is
-        // not a frozen blank during a long think) WITHOUT persisting it — the
+        // provider surfaces it as a distinct `ResponseChunk::ReasoningDelta` (so the
+        // TUI can show it or just an activity indicator) WITHOUT persisting it — the
         // finalized message keeps only the `content` answer.
         let mut server = Server::new_async().await;
         let url = server.url();
@@ -1682,32 +1682,21 @@ mod tests {
             .stream_messages(&[Message::user("hi")], &[])
             .await
             .unwrap();
-        let mut deltas = String::new();
+        let mut reasoning = String::new();
+        let mut content = String::new();
         let mut final_msg: Option<Message> = None;
         while let Some(chunk) = stream.next().await {
             match chunk.unwrap() {
-                ResponseChunk::TextDelta(t) => deltas.push_str(&t),
+                ResponseChunk::ReasoningDelta(r) => reasoning.push_str(&r),
+                ResponseChunk::TextDelta(t) => content.push_str(&t),
                 ResponseChunk::MessageDone(m) => final_msg = Some(m),
                 _ => {}
             }
         }
-        // Visible: the reasoning is streamed to the UI.
-        assert!(
-            deltas.contains("Let me think about it"),
-            "reasoning must stream visibly, got: {deltas:?}"
-        );
-        assert!(deltas.contains("Answer."), "the answer must stream too");
-        // UX: the 🤔 marker is emitted exactly once (start of thinking), and a
-        // blank-line separator precedes the answer.
-        assert_eq!(
-            deltas.matches('🤔').count(),
-            1,
-            "one-shot marker, got: {deltas:?}"
-        );
-        assert!(
-            deltas.contains("🤔 Let me think") && deltas.contains("\n\nAnswer."),
-            "marker prefixes reasoning and separator precedes the answer, got: {deltas:?}"
-        );
+        // Reasoning is surfaced as its OWN signal (raw text, no presentation — the
+        // TUI decides how to display it), kept separate from the answer content.
+        assert_eq!(reasoning, "Let me think about it");
+        assert_eq!(content, "Answer.");
         // Not persisted: the finalized message is content-only (no reasoning).
         assert_eq!(
             final_msg.expect("MessageDone").content,
