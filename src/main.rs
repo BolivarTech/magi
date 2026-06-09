@@ -300,6 +300,10 @@ async fn main() -> anyhow::Result<()> {
     // the Anthropic path, matching how the principal itself was built).
     let build_sibling = |model: &str| -> Option<Arc<dyn Provider>> {
         if provider_kind == "openai" {
+            debug_assert!(
+                oai_creds.is_some(),
+                "openai backend must have captured oai_creds before building siblings"
+            );
             oai_creds
                 .as_ref()
                 .map(|(b, k)| build_openai_provider(b, k, model))
