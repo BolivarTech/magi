@@ -1107,6 +1107,36 @@ mod tests {
     }
 
     #[test]
+    fn test_wrap_message_preserves_leading_indent_when_fits() {
+        // Follow-up #1: a line that fits must be returned UNCHANGED, preserving its
+        // leading indentation (markdown bullets / nested lists / the consult report).
+        assert_eq!(
+            wrap_message("  - bullet item", 80),
+            vec!["  - bullet item".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_wrap_message_preserves_internal_spacing_when_fits() {
+        // Follow-up #1: multi-space alignment runs (ASCII tables) must survive, not
+        // collapse to single spaces, when the line fits.
+        assert_eq!(
+            wrap_message("col1    col2", 80),
+            vec!["col1    col2".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_wrap_message_wraps_by_display_width_for_wide_chars() {
+        // Follow-up #3: wrapping is measured in terminal display columns, not chars.
+        // Each CJK glyph is 2 columns wide, so width 6 fits exactly 3 of them per line.
+        assert_eq!(
+            wrap_message("あいうえお", 6),
+            vec!["あいう".to_string(), "えお".to_string()]
+        );
+    }
+
+    #[test]
     fn test_effective_selection_normal_mode_follows_tail() {
         // Normal mode auto-pins the last message so the list auto-scrolls to bottom.
         assert_eq!(effective_selection(AppMode::Normal, 0, 5), Some(4));
