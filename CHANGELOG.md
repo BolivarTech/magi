@@ -15,6 +15,32 @@ changes and the **patch** position signals backward-compatible fixes.
 - **#18** Blob version-dispatch / migration — the blob version byte is detection-only; a future format bump still needs a migrate-or-reset path.
 - **OpenAI key in keyring / `key.txt`** — `OPENAI_API_KEY` is currently env-only; aligning it with the Anthropic discovery order is a tracked follow-up.
 
+## [0.6.0] - 2026-06-09
+
+**BREAKING:** the default backend with no `magi.toml`/env changed from **Anthropic**
+to **Ollama** (`http://localhost:11434/v1`, `kimi-k2.6:cloud` + the qwen3.5/gpt-oss/deepseek
+trio). Anthropic still works but is now **opt-in** (`provider = "anthropic"` or
+`MAGI_PROVIDER=anthropic`).
+
+### Added
+- `src/defaults.rs` — single source of truth for the built-in default profile.
+- `--init-config` CLI flag and `/init-config` TUI command to scaffold a default `magi.toml`.
+- Startup notice (when no `magi.toml`) and an actionable error (when Ollama is unreachable),
+  both DRY-interpolated from the default constants.
+
+### Changed
+- `resolve_provider`/`resolve_openai_base_url` defaults → Ollama-first.
+- `resolve_openai_model` no longer errors when unset — returns the built-in default.
+- The MAGI trio defaults to qwen3.5/gpt-oss/deepseek on the openai path when `[magi]` is absent.
+
+### Known limitations
+- The built-in defaults assume **Ollama**. If you point `provider=openai` at real OpenAI
+  (or another non-Ollama service) WITHOUT setting `OPENAI_MODEL` / `[openai].model` / `[magi]`,
+  the defaults (`kimi-k2.6:cloud` + the `:cloud` trio) will not exist there — set them
+  explicitly.
+- The default `:cloud` model tags reflect the Ollama catalog at release time and may rot over
+  time; refresh per release. They live in one place (`src/defaults.rs`) for easy maintenance.
+
 ## [0.5.2] - 2026-06-09
 
 Reasoning-model streaming (#24). Reasoning models (e.g. `kimi-k2.6:cloud`,
@@ -216,7 +242,8 @@ Initial pre-release, published primarily to reserve the `magi-rs` crate name.
 - `ratatui` TUI with Normal / Selection / Visual modes and Unicode-safe input.
 - OAuth (PKCE) login and OS keyring integration, with `magi-rust` legacy migration.
 
-[Unreleased]: https://github.com/BolivarTech/magi/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/BolivarTech/magi/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/BolivarTech/magi/compare/v0.5.2...v0.6.0
 [0.3.1]: https://github.com/BolivarTech/magi/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/BolivarTech/magi/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/BolivarTech/magi/releases/tag/v0.2.1
