@@ -482,6 +482,7 @@ mod tests {
                 _tools: &[Box<dyn Tool>],
             ) -> Result<BoxStream<'static, Result<ResponseChunk>>> {
                 let chunks = vec![
+                    Ok(ResponseChunk::ReasoningDelta("thinking".to_string())),
                     Ok(ResponseChunk::TextDelta("Hello ".to_string())),
                     Ok(ResponseChunk::TextDelta("world".to_string())),
                     Ok(ResponseChunk::MessageDone(Message::assistant(
@@ -493,12 +494,12 @@ mod tests {
         }
 
         let mut agent = Agent::new(Arc::new(TwoDeltaProvider));
-        let (chunk_tx, mut chunk_rx) = mpsc::channel::<String>(8);
+        let (chunk_tx, mut chunk_rx) = mpsc::channel::<StreamPiece>(8);
 
         let collector = tokio::spawn(async move {
             let mut received = Vec::new();
-            while let Some(delta) = chunk_rx.recv().await {
-                received.push(delta);
+            while let Some(piece) = chunk_rx.recv().await {
+                received.push(piece);
             }
             received
         });
@@ -506,9 +507,17 @@ mod tests {
         let final_text = agent.query_streaming("Hi", chunk_tx).await.unwrap();
         let received = collector.await.unwrap();
 
-        assert_eq!(received, vec!["Hello ".to_string(), "world".to_string()]);
+        // Reasoning is forwarded as a distinct piece (for live display) and is NOT
+        // part of the persisted final answer text; content is forwarded as Content.
+        assert_eq!(
+            received,
+            vec![
+                StreamPiece::Reasoning("thinking".to_string()),
+                StreamPiece::Content("Hello ".to_string()),
+                StreamPiece::Content("world".to_string()),
+            ]
+        );
         assert_eq!(final_text, "Hello world");
-        assert_eq!(received.concat(), final_text);
     }
 
     #[tokio::test]
