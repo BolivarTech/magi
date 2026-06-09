@@ -26,6 +26,22 @@ pub const DEFAULT_MAGI_CASPAR: &str = "deepseek-v4-pro:cloud";
 /// Default Anthropic model on the opt-in path (RF-5). Was `main.rs::DEFAULT_MODEL`.
 pub const DEFAULT_ANTHROPIC_MODEL: &str = "claude-sonnet-4-6";
 
+/// Startup notice shown when no `magi.toml` is present (RF-9). Built by
+/// interpolating the default constants (RF-8 DRY) so it tracks any constant edit.
+pub fn no_config_notice() -> String {
+    format!(
+        "No magi.toml — using Ollama defaults ({base}, {model}, \
+         Melchior: {mel}, Balthasar: {bal}, Caspar: {cas}). Copy \
+         magi.toml.example to customize, or set provider=\"anthropic\" \
+         for Anthropic.",
+        base = DEFAULT_OPENAI_BASE_URL,
+        model = DEFAULT_OPENAI_MODEL,
+        mel = DEFAULT_MAGI_MELCHIOR,
+        bal = DEFAULT_MAGI_BALTHASAR,
+        cas = DEFAULT_MAGI_CASPAR,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -39,5 +55,16 @@ mod tests {
         assert_eq!(DEFAULT_MAGI_BALTHASAR, "gpt-oss:120b-cloud");
         assert_eq!(DEFAULT_MAGI_CASPAR, "deepseek-v4-pro:cloud");
         assert_eq!(DEFAULT_ANTHROPIC_MODEL, "claude-sonnet-4-6");
+    }
+
+    #[test]
+    fn test_no_config_notice_interpolates_all_defaults() {
+        // S-9: the notice is built from the constants (DRY), not hardcoded strings.
+        let n = no_config_notice();
+        assert!(n.contains(DEFAULT_OPENAI_BASE_URL));
+        assert!(n.contains(DEFAULT_OPENAI_MODEL));
+        assert!(n.contains(DEFAULT_MAGI_MELCHIOR));
+        assert!(n.contains(DEFAULT_MAGI_BALTHASAR));
+        assert!(n.contains(DEFAULT_MAGI_CASPAR));
     }
 }

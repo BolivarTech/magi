@@ -249,6 +249,11 @@ async fn main() -> anyhow::Result<()> {
     if let Some(w) = config_warning {
         startup_notices.push(w);
     }
+    // RF-9: when there is no magi.toml at all, make the Ollama-first default visible
+    // (never-silent). A present-but-minimal magi.toml does NOT trigger this.
+    if !workspace_root.join("magi.toml").exists() {
+        startup_notices.push(crate::defaults::no_config_notice());
+    }
 
     // Build the MAGI orchestrator over the resolved backend. With no per-agent
     // overrides this is the v0.4.0 path (`Magi::new`, single shared adapter).
