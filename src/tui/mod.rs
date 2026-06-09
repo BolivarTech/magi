@@ -18,6 +18,7 @@ use ratatui::{
 };
 use std::io;
 use tokio::sync::mpsc;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 /// Different interaction modes for the TUI.
 #[derive(Debug, PartialEq, Clone, Copy)]
@@ -820,9 +821,39 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Re
     }
 }
 
-/// Word-wraps `text` so each returned line fits in `width` CHARS (not bytes).
-/// Existing `\n` are preserved as hard breaks. Words longer than `width`
-/// are hard-split into chunks. `width == 0` is treated as no-op.
+/// Terminal display width of a char (0 for combining marks, 2 for wide CJK/emoji),
+/// defaulting to 0 for control chars (which the agent already sanitizes out).
+fn char_display_width(c: char) -> usize {
+    UnicodeWidthChar::width(c).unwrap_or(0)
+}
+
+/// Hard-splits a single token into chunks no wider than `width` display columns,
+/// pushing each chunk to `out`. Used for words longer than the whole line width.
+fn push_hard_split(word: &str, width: usize, out: &mut Vec<String>) {
+    let mut chunk = String::new();
+    let mut chunk_w = 0usize;
+    for ch in word.chars() {
+        let cw = char_display_width(ch);
+        if chunk_w + cw > width && !chunk.is_empty() {
+            out.push(std::mem::take(&mut chunk));
+            chunk_w = 0;
+        }
+        chunk.push(ch);
+        chunk_w += cw;
+    }
+    if !chunk.is_empty() {
+        out.push(chunk);
+    }
+}
+
+/// Word-wraps `text` so each returned line fits in `width` terminal DISPLAY
+/// COLUMNS (not chars/bytes — CJK/emoji count as 2). Existing `\n` are preserved
+/// as hard breaks. `width == 0` is treated as no-op.
+///
+/// A line that already fits is returned **unchanged**, preserving its leading
+/// indentation and internal alignment spaces (markdown bullets, ASCII tables,
+/// box-drawing — e.g. the consult report). Only lines wider than `width` are
+/// reflowed at word boundaries; a single word wider than `width` is hard-split.
 fn wrap_message(text: &str, width: usize) -> Vec<String> {
     if width == 0 {
         return vec![text.to_string()];
@@ -833,19 +864,22 @@ fn wrap_message(text: &str, width: usize) -> Vec<String> {
             out.push(String::new());
             continue;
         }
+        // Fast path: keep a fitting line byte-for-byte (indentation + spacing intact).
+        if UnicodeWidthStr::width(paragraph) <= width {
+            out.push(paragraph.to_string());
+            continue;
+        }
+        // Over-width line: reflow by word at display-column granularity.
         let mut line = String::new();
         let mut line_w: usize = 0;
         for word in paragraph.split_whitespace() {
-            let w = word.chars().count();
+            let w = UnicodeWidthStr::width(word);
             if w > width {
                 if !line.is_empty() {
                     out.push(std::mem::take(&mut line));
                     line_w = 0;
                 }
-                let chars: Vec<char> = word.chars().collect();
-                for chunk in chars.chunks(width) {
-                    out.push(chunk.iter().collect::<String>());
-                }
+                push_hard_split(word, width, &mut out);
                 continue;
             }
             let need = if line.is_empty() { w } else { w + 1 };

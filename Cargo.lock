@@ -1801,6 +1801,7 @@ dependencies = [
  "tokio",
  "tokio-test",
  "toml",
+ "unicode-width",
  "urlencoding",
  "uuid",
  "zeroize",
