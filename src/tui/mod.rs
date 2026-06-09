@@ -1131,7 +1131,10 @@ fn ui(f: &mut Frame, app: &mut App) {
             if !all_lines.is_empty() {
                 all_lines.push(String::new());
             }
-            all_lines.push(thinking_indicator(app.spinner_frame));
+            all_lines.extend(wrap_message(
+                &thinking_indicator(app.spinner_frame),
+                inner_width,
+            ));
             app.spinner_frame = next_spinner_frame(app.spinner_frame);
         }
         let total = all_lines.len();
