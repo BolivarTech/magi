@@ -77,6 +77,14 @@ pub fn write_default_config(dir: &Path) -> anyhow::Result<PathBuf> {
     Ok(path)
 }
 
+/// Whether to emit the no-config Ollama-defaults startup notice (RF-9): only when
+/// the resolved backend is the openai (Ollama) default AND no `magi.toml` exists.
+/// Prevents a misleading "using Ollama defaults" notice under `MAGI_PROVIDER=anthropic`
+/// with no file.
+pub fn should_emit_default_notice(provider_kind: &str, magi_toml_exists: bool) -> bool {
+    provider_kind == "openai" && !magi_toml_exists
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

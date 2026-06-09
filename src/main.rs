@@ -268,7 +268,10 @@ async fn main() -> anyhow::Result<()> {
     }
     // RF-9: when there is no magi.toml at all, make the Ollama-first default visible
     // (never-silent). A present-but-minimal magi.toml does NOT trigger this.
-    if !workspace_root.join("magi.toml").exists() {
+    if crate::defaults::should_emit_default_notice(
+        &provider_kind,
+        workspace_root.join("magi.toml").exists(),
+    ) {
         startup_notices.push(crate::defaults::no_config_notice());
     }
 
