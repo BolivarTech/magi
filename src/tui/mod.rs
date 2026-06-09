@@ -1553,6 +1553,20 @@ mod tests {
     }
 
     #[test]
+    fn test_finalize_stream_clears_thinking_indicator() {
+        let (event_tx, _) = mpsc::channel(1);
+        let (_, response_rx) = mpsc::channel(1);
+        let (_, approval_rx) = mpsc::channel(1);
+        let mut app = App::new(event_tx, response_rx, approval_rx);
+        // A turn that reasons but ends with NO content (empty answer / error /
+        // tool-only) must not leave the spinner stuck on screen forever.
+        app.on_reasoning("thinking".to_string());
+        assert!(app.thinking_active);
+        app.finalize_stream();
+        assert!(!app.thinking_active, "end-of-turn must drop the indicator");
+    }
+
+    #[test]
     fn test_parse_consult_command() {
         assert_eq!(
             super::parse_consult_command("/consult should we X?"),
