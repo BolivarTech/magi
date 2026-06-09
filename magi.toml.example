@@ -44,20 +44,27 @@ model = "claude-sonnet-4-6"
 # genuine lineage diversity — different model families reason and fail
 # differently, so agreement across them is more meaningful. Overrides reuse the
 # principal provider's base_url + api_key and change ONLY the model name, so
-# true cross-family diversity (e.g. GLM + GPT + DeepSeek) requires the principal
+# true cross-family diversity (e.g. Qwen + GPT + DeepSeek) requires the principal
 # to be an Ollama-style endpoint serving all three families. With an Anthropic
 # principal you can still vary across Anthropic models (tier diversity).
+#
+# Note: the Ollama cloud catalog models are all reasoning ("thinking") models, so
+# at the Maximum tier the diversity is by LINEAGE (Alibaba / OpenAI / DeepSeek),
+# each distinct from the others and from a typical principal (e.g. Moonshot kimi).
 #
 # Precedence per agent: MAGI_MODEL_<AGENT> env var > this section > principal model.
 # A blank value is treated as unset.
 #
 # Suggested tiers (served via one Ollama OpenAI-compatible endpoint):
-#   Tier      Melchior            Balthasar          Caspar                 VRAM
-#   Light     qwen3:8b            gpt-oss:20b        deepseek-r1:8b         16-24 GB
-#   Balanced  qwen3:32b           gpt-oss:20b        deepseek-r1:32b        48-64 GB
-#   Maximum   glm-5:cloud         gpt-oss:120b-cloud deepseek-v4-pro:cloud  Cloud
+#   Tier      Melchior            Balthasar           Caspar                 VRAM
+#   Light     qwen3.6:27b         gpt-oss:20b         deepseek-r1:8b         16-24 GB
+#   Balanced  qwen3.6:35b-a3b     gpt-oss:20b         deepseek-r1:32b        48-64 GB
+#   Maximum   qwen3.5:397b-cloud  gpt-oss:120b-cloud  deepseek-v4-pro:cloud  Cloud
+#
+# (Qwen 3.6 is local-only — no :cloud tag — so Maximum uses qwen3.5:397b-cloud, the
+#  flagship Qwen on Ollama cloud. Tags verified on ollama.com, 2026-06.)
 #
 # [magi]
-# melchior_model  = "qwen3:8b"       # Scientist  — theoretical analysis
-# balthasar_model = "gpt-oss:20b"    # Pragmatist — practical trade-offs
-# caspar_model    = "deepseek-r1:8b" # Critic     — adversarial review
+# melchior_model  = "qwen3.6:27b"    # Scientist  (Alibaba)  — theoretical analysis
+# balthasar_model = "gpt-oss:20b"    # Pragmatist (OpenAI)   — practical trade-offs
+# caspar_model    = "deepseek-r1:8b" # Critic     (DeepSeek) — adversarial review
