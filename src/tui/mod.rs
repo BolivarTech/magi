@@ -745,6 +745,15 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Re
                                 app.scroll_offset = 0;
                                 continue;
                             }
+                            (KeyCode::Up, _) => {
+                                app.scroll_offset =
+                                    (app.scroll_offset + 1).min(app.last_max_scroll);
+                                continue;
+                            }
+                            (KeyCode::Down, _) => {
+                                app.scroll_offset = app.scroll_offset.saturating_sub(1);
+                                continue;
+                            }
                             _ => {}
                         }
 
@@ -1101,7 +1110,7 @@ fn ui(f: &mut Frame, app: &mut App) {
         }
         AppMode::Visual => "VISUAL SELECTION MODE",
         _ if app.pending_approval.is_some() => "WAITING FOR APPROVAL (y/c)",
-        _ => "Input (PgUp/PgDn/Home/End Scroll, Ctrl+S Copy, Shift+Arrows Select)",
+        _ => "Input (↑↓/PgUp/PgDn/Home/End Scroll, Ctrl+S Copy, Shift+←→ Select)",
     };
     let input_block = Block::default().borders(Borders::ALL).title(input_title);
 
