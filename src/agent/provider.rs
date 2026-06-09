@@ -12,8 +12,11 @@ use crate::tools::Tool;
 /// A chunk of a response from the AI.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ResponseChunk {
-    /// A piece of text.
+    /// A piece of answer text (persisted into the final message).
     TextDelta(String),
+    /// A piece of a reasoning model's chain-of-thought. Surfaced for live display
+    /// but NEVER added to the final message (not persisted).
+    ReasoningDelta(String),
     /// Input data for a tool use.
     ToolUseInputDelta { id: String, input_json: String },
     /// Completion of a full message.
@@ -412,6 +415,10 @@ struct OpenAiChoice {
 struct OpenAiStreamDelta {
     #[serde(default)]
     content: Option<String>,
+    /// Reasoning models (kimi, deepseek-r1, …) stream their chain-of-thought here
+    /// with empty `content` until the answer. Surfaced live but never persisted.
+    #[serde(default)]
+    reasoning: Option<String>,
     #[serde(default)]
     tool_calls: Option<Vec<OpenAiToolCallDelta>>,
 }
@@ -586,13 +593,25 @@ impl OaiState {
                 let Some(choice) = parsed.choices.into_iter().next() else {
                     continue;
                 };
-                if let Some(text) = choice.delta.content {
-                    if let Some(Content::Text { text: existing }) = self.full_content.last_mut() {
-                        existing.push_str(&text);
-                    } else {
-                        self.full_content.push(Content::Text { text: text.clone() });
+                // Reasoning (thinking) deltas: surface as a distinct ReasoningDelta
+                // for live display, but NEVER add to `full_content` — the persisted
+                // message stays answer-only (#24). Presentation is the TUI's job.
+                if let Some(reasoning) = choice.delta.reasoning {
+                    if !reasoning.is_empty() {
+                        self.pending
+                            .push_back(Ok(ResponseChunk::ReasoningDelta(reasoning)));
                     }
-                    self.pending.push_back(Ok(ResponseChunk::TextDelta(text)));
+                }
+                if let Some(text) = choice.delta.content {
+                    if !text.is_empty() {
+                        if let Some(Content::Text { text: existing }) = self.full_content.last_mut()
+                        {
+                            existing.push_str(&text);
+                        } else {
+                            self.full_content.push(Content::Text { text: text.clone() });
+                        }
+                        self.pending.push_back(Ok(ResponseChunk::TextDelta(text)));
+                    }
                 }
                 if let Some(tcs) = choice.delta.tool_calls {
                     for tc in tcs {
@@ -1606,6 +1625,62 @@ mod tests {
             r.content,
             vec![Content::Text {
                 text: "Hello world!".into()
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_openai_streams_reasoning_visibly_but_does_not_persist_it() {
+        // v0.5.2 (#24): reasoning models (kimi-k2.6, deepseek-r1) emit their
+        // chain-of-thought in `delta.reasoning` with empty `delta.content`. The
+        // provider surfaces it as a distinct `ResponseChunk::ReasoningDelta` (so the
+        // TUI can show it or just an activity indicator) WITHOUT persisting it — the
+        // finalized message keeps only the `content` answer.
+        let mut server = Server::new_async().await;
+        let url = server.url();
+        let sse = concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"\",\"reasoning\":\"Let me think\"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"\",\"reasoning\":\" about it\"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"Answer.\"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let _m = server
+            .mock("POST", "/chat/completions")
+            .with_status(200)
+            .with_header("content-type", "text/event-stream")
+            .with_body(sse)
+            .create_async()
+            .await;
+        let p = OpenAiCompatibleProvider::new(OpenAiSettings {
+            base_url: url,
+            api_key: "k".into(),
+            model: "m".into(),
+        });
+        let mut stream = p
+            .stream_messages(&[Message::user("hi")], &[])
+            .await
+            .unwrap();
+        let mut reasoning = String::new();
+        let mut content = String::new();
+        let mut final_msg: Option<Message> = None;
+        while let Some(chunk) = stream.next().await {
+            match chunk.unwrap() {
+                ResponseChunk::ReasoningDelta(r) => reasoning.push_str(&r),
+                ResponseChunk::TextDelta(t) => content.push_str(&t),
+                ResponseChunk::MessageDone(m) => final_msg = Some(m),
+                _ => {}
+            }
+        }
+        // Reasoning is surfaced as its OWN signal (raw text, no presentation — the
+        // TUI decides how to display it), kept separate from the answer content.
+        assert_eq!(reasoning, "Let me think about it");
+        assert_eq!(content, "Answer.");
+        // Not persisted: the finalized message is content-only (no reasoning).
+        assert_eq!(
+            final_msg.expect("MessageDone").content,
+            vec![Content::Text {
+                text: "Answer.".into()
             }]
         );
     }
