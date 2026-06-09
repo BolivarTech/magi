@@ -309,6 +309,9 @@ impl App {
     /// Marks the end of a streamed assistant turn.
     pub fn finalize_stream(&mut self) {
         self.streaming = false;
+        // Turn over → drop any lingering "thinking…" indicator (covers turns that
+        // reasoned but produced no content: empty answer, error, or tool-only).
+        self.thinking_active = false;
     }
 }
 
