@@ -1,5 +1,12 @@
 # magi-rs configuration — reference example.
 #
+# NOTE: as of v0.6.0 the values below ARE the built-in defaults — what magi-rs
+# uses with NO `magi.toml` and no env vars (Ollama-first: provider = "openai",
+# http://localhost:11434/v1, kimi-k2.6:cloud + the qwen3.5 / gpt-oss / deepseek
+# trio). Running `magi-rs --init-config` or the `/init-config` TUI command
+# generates exactly this profile. To use Anthropic instead, set
+# provider = "anthropic" (or MAGI_PROVIDER=anthropic).
+#
 # Copy this file to `magi.toml` (per-workspace) and edit. `magi.toml` is
 # gitignored; only `magi.toml.example` is tracked.
 #
@@ -13,10 +20,10 @@
 #
 # Precedence for every setting: env var > magi.toml > built-in default.
 
-# Which provider backend to use. Default when omitted: "anthropic".
-#   - "anthropic" — Anthropic Messages API (the default magi-rs path)
+# Which provider backend to use. Default when omitted: "openai" (Ollama-first).
 #   - "openai"    — any OpenAI-compatible Chat Completions endpoint
-#                   (OpenAI, Ollama, Groq, OpenRouter, …)
+#                   (Ollama [default], OpenAI, Groq, OpenRouter, …)
+#   - "anthropic" — Anthropic Messages API (opt-in as of v0.6.0)
 provider = "openai"
 
 [openai]
@@ -27,9 +34,10 @@ provider = "openai"
 #   https://openrouter.ai/api/v1    (OpenRouter)
 base_url = "http://localhost:11434/v1"
 
-# Model name. REQUIRED when `provider = "openai"` (no implicit default —
-# magi-rs errors at startup if neither this field nor OPENAI_MODEL is set).
-model = "phi4-mini"
+# Model name. Built-in default when omitted: "kimi-k2.6:cloud" (env OPENAI_MODEL
+# and this field both override it). NOTE: the default is an Ollama tag — point
+# `base_url` at a non-Ollama service and you MUST set a model that exists there.
+model = "kimi-k2.6:cloud"
 
 [anthropic]
 # Anthropic model to use when `provider = "anthropic"`. Optional — when

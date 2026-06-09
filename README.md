@@ -1,10 +1,10 @@
 # Magi Agent — Terminal AI Assistant in Rust
 
 [![Rust 2021](https://img.shields.io/badge/rust-2021_edition-orange.svg)](https://www.rust-lang.org/)
-[![Tests](https://img.shields.io/badge/tests-136%20passing-brightgreen.svg)](#testing)
+[![Tests](https://img.shields.io/badge/tests-188%20passing-brightgreen.svg)](#testing)
 [![Lints](https://img.shields.io/badge/lints-clippy%20clean-blue.svg)](https://github.com/rust-lang/rust-clippy)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
-[![Version](https://img.shields.io/badge/version-0.5.2-informational.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.6.0-informational.svg)](CHANGELOG.md)
 
 **Magi Agent** (`magi-rs`) is a terminal AI assistant in Rust, modeled on Claude Code. It drives an LLM provider through a multi-turn **tool loop** with sandboxed filesystem and shell access, and persists every conversation to a **locally-encrypted SQLite store**. Nothing leaves your machine except the model API calls you explicitly authorize.
 
@@ -88,6 +88,7 @@ When the agent requests a tool, an inline prompt appears: **`y`** approves, **`c
 | `/logout` | Clear stored API keys |
 | `/clear` | Clear the on-screen conversation |
 | `/consult <question>` | Force a MAGI 3-perspective consensus on the question (≈ 3 model calls). Blocks the session while it runs, like a normal turn. Requires a configured LLM provider. |
+| `/init-config` | Scaffold a `magi.toml` in the workspace pre-filled with the built-in Ollama-first defaults (refuses to overwrite an existing file). Also available as `magi-rs --init-config`. |
 | `/help` | Show available commands |
 | `/exit`, `/quit` | Leave the app |
 
@@ -135,29 +136,61 @@ The model is read from `ANTHROPIC_MODEL`, then `key.txt` line 2, defaulting to `
 
 > `key.txt` and its variants are gitignored. Never commit a real key.
 
+### Default backend — Ollama-first (v0.6.0, BREAKING)
+
+> **Breaking change in 0.6.0.** With **no `magi.toml` and no env vars**, Magi now
+> defaults to a local **Ollama** backend (`provider = "openai"`,
+> `base_url = http://localhost:11434/v1`, model `kimi-k2.6:cloud`, and the MAGI trio
+> `qwen3.5:397b-cloud` / `gpt-oss:120b-cloud` / `deepseek-v4-pro:cloud`). Previously
+> the no-config default was Anthropic.
+
+**To use Anthropic instead**, set `provider = "anthropic"` in `magi.toml` **or**
+`MAGI_PROVIDER=anthropic` — the Anthropic Messages API path (key discovery, model
+default, `StaticProvider` fallback) is unchanged, just **opt-in** now.
+
+To scaffold a `magi.toml` pre-filled with the built-in Ollama-first defaults, run
+`magi-rs --init-config` (CLI) or the **`/init-config`** TUI command. Both refuse to
+overwrite an existing `magi.toml`.
+
 ### `magi.toml` (optional, multi-backend)
 
-Magi can talk to any **OpenAI-compatible** Chat Completions endpoint — OpenAI itself, a local **Ollama** instance, Groq, OpenRouter — in addition to the default Anthropic Messages API. The backend and its non-secret settings live in a workspace-local `magi.toml`. A reference is committed as [`magi.toml.example`](magi.toml.example); copy it to `magi.toml` and edit. `magi.toml` is gitignored.
+Magi can talk to any **OpenAI-compatible** Chat Completions endpoint — a local
+**Ollama** instance (the default), OpenAI itself, Groq, OpenRouter — in addition to
+the opt-in Anthropic Messages API. The backend and its non-secret settings live in a
+workspace-local `magi.toml`. A reference is committed as
+[`magi.toml.example`](magi.toml.example); copy it to `magi.toml` and edit, or generate
+it with `magi-rs --init-config`. `magi.toml` is gitignored.
 
 ```toml
-provider = "openai"          # "anthropic" (default) | "openai"
+provider = "openai"          # "openai" (default — Ollama) | "anthropic"
 
 [openai]
 base_url = "http://localhost:11434/v1"   # Ollama; or https://api.openai.com/v1, Groq, OpenRouter, …
-model    = "phi4-mini"                   # REQUIRED when provider = "openai"
+model    = "kimi-k2.6:cloud"             # built-in default; override per endpoint
 
 [anthropic]
-model    = "claude-sonnet-4-6"           # optional override of the Anthropic default
+model    = "claude-sonnet-4-6"           # optional override of the Anthropic default (opt-in path)
 ```
 
 **Precedence (per setting): environment variable > `magi.toml` > built-in default.**
 
 | Setting | Env var | `magi.toml` | Default |
 |---------|---------|-------------|---------|
-| Provider backend | `MAGI_PROVIDER` | `provider` | `anthropic` |
-| OpenAI base URL | `OPENAI_BASE_URL` | `[openai].base_url` | `https://api.openai.com/v1` |
-| OpenAI model | `OPENAI_MODEL` | `[openai].model` | *(none — required when `provider = "openai"`)* |
+| Provider backend | `MAGI_PROVIDER` | `provider` | `openai` (Ollama) |
+| OpenAI base URL | `OPENAI_BASE_URL` | `[openai].base_url` | `http://localhost:11434/v1` |
+| OpenAI model | `OPENAI_MODEL` | `[openai].model` | `kimi-k2.6:cloud` |
 | Anthropic model | `ANTHROPIC_MODEL` | `[anthropic].model` | see [API key & model discovery](#api-key--model-discovery) |
+
+All built-in default literals live in one place — [`src/defaults.rs`](src/defaults.rs).
+
+> **Known limitations of the Ollama-first defaults.**
+> 1. The built-in defaults assume **Ollama**. If you point `provider = "openai"` at
+>    real OpenAI (or another non-Ollama service) **without** setting `OPENAI_MODEL` /
+>    `[openai].model` (and the `[magi]` trio), the defaults — `kimi-k2.6:cloud` and the
+>    `:cloud` trio — will not exist there; set them explicitly.
+> 2. The default `:cloud` model tags reflect the Ollama catalog at release time and may
+>    rot as it changes. They are maintained in one place (`src/defaults.rs`); refresh per
+>    release.
 
 **API keys never live in `magi.toml`.** Keys come from env / OS keyring / `key.txt` only — `magi.toml` is non-secret runtime config and is the wrong place for credentials. Specifically:
 

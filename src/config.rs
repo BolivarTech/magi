@@ -98,22 +98,27 @@ impl MagiConfig {
     }
 }
 
-/// env `MAGI_PROVIDER` > TOML `provider` > `"anthropic"` (RF-2).
+/// env `MAGI_PROVIDER` > TOML `provider` > `DEFAULT_PROVIDER` (RF-1).
+///
+/// The no-config default is **Ollama-first** (`"openai"`); Anthropic is opt-in
+/// via `provider="anthropic"` in `magi.toml` or `MAGI_PROVIDER=anthropic`.
 ///
 /// # Arguments
 /// * `config` - Parsed `MagiConfig` from `magi.toml` (may be default if file absent/invalid).
 /// * `env_provider` - Value of `MAGI_PROVIDER` env var, if set.
 ///
 /// # Returns
-/// Resolved provider name: env overrides TOML; falls back to `"anthropic"`.
+/// Resolved provider name: env overrides TOML; falls back to `DEFAULT_PROVIDER`.
 pub fn resolve_provider(config: &MagiConfig, env_provider: Option<&str>) -> String {
     env_provider
         .map(str::to_string)
         .or_else(|| config.provider.clone())
-        .unwrap_or_else(|| "anthropic".into())
+        .unwrap_or_else(|| crate::defaults::DEFAULT_PROVIDER.into())
 }
 
-/// env `OPENAI_BASE_URL` > TOML `[openai].base_url` > `"https://api.openai.com/v1"` (RF-3).
+/// env `OPENAI_BASE_URL` > TOML `[openai].base_url` > `DEFAULT_OPENAI_BASE_URL` (RF-2).
+///
+/// The no-config default points at local Ollama (`http://localhost:11434/v1`).
 ///
 /// # Arguments
 /// * `config` - Parsed `MagiConfig`.
@@ -125,7 +130,7 @@ pub fn resolve_openai_base_url(config: &MagiConfig, env_base_url: Option<&str>) 
     env_base_url
         .map(str::to_string)
         .or_else(|| config.openai.base_url.clone())
-        .unwrap_or_else(|| "https://api.openai.com/v1".into())
+        .unwrap_or_else(|| crate::defaults::DEFAULT_OPENAI_BASE_URL.into())
 }
 
 /// Resolves a per-agent MAGI model override. Precedence: env (non-empty) > TOML
@@ -148,28 +153,20 @@ pub fn resolve_magi_override(toml_model: Option<&str>, env_model: Option<&str>) 
     non_empty(env_model).or_else(|| non_empty(toml_model))
 }
 
-/// env `OPENAI_MODEL` > TOML `[openai].model`; **required** — `Err` if absent in both (RF-3).
+/// env `OPENAI_MODEL` > TOML `[openai].model` > `DEFAULT_OPENAI_MODEL` (RF-3).
+/// No longer fallible: the openai path has a built-in default (Ollama-first).
 ///
 /// # Arguments
 /// * `config` - Parsed `MagiConfig`.
 /// * `env_model` - Value of `OPENAI_MODEL` env var, if set.
 ///
-/// # Errors
-/// Returns `Err` when neither the env var nor the TOML field is set, because the
-/// OpenAI-compatible provider cannot operate without a model name.
-pub fn resolve_openai_model(
-    config: &MagiConfig,
-    env_model: Option<&str>,
-) -> anyhow::Result<String> {
+/// # Returns
+/// Resolved model name; env overrides TOML, both override the built-in default.
+pub fn resolve_openai_model(config: &MagiConfig, env_model: Option<&str>) -> String {
     env_model
         .map(str::to_string)
         .or_else(|| config.openai.model.clone())
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "provider 'openai' selected but no model set \
-                 (OPENAI_MODEL env or [openai].model in magi.toml)"
-            )
-        })
+        .unwrap_or_else(|| crate::defaults::DEFAULT_OPENAI_MODEL.into())
 }
 
 #[cfg(test)]
@@ -242,18 +239,24 @@ mod tests {
 
     #[test]
     fn test_resolve_provider_precedence() {
+        use crate::defaults::DEFAULT_PROVIDER;
         let c = MagiConfig {
             provider: Some("anthropic".into()),
             ..Default::default()
         };
-        assert_eq!(resolve_provider(&c, Some("openai")), "openai"); // S-2 env wins
-        assert_eq!(resolve_provider(&c, None), "anthropic");
-        // S-3
-        assert_eq!(resolve_provider(&MagiConfig::default(), None), "anthropic");
+        assert_eq!(resolve_provider(&c, Some("openai")), "openai"); // env wins
+        assert_eq!(resolve_provider(&c, None), "anthropic"); // TOML
+                                                             // S-1: no config → DEFAULT_PROVIDER ("openai")
+        assert_eq!(
+            resolve_provider(&MagiConfig::default(), None),
+            DEFAULT_PROVIDER
+        );
+        assert_eq!(resolve_provider(&MagiConfig::default(), None), "openai");
     }
 
     #[test]
     fn test_resolve_openai_base_url_precedence() {
+        use crate::defaults::DEFAULT_OPENAI_BASE_URL;
         let c = MagiConfig {
             openai: OpenAiConfig {
                 base_url: Some("http://toml/v1".into()),
@@ -266,15 +269,26 @@ mod tests {
             "http://env/v1"
         );
         assert_eq!(resolve_openai_base_url(&c, None), "http://toml/v1");
+        // S-1: no config → Ollama
         assert_eq!(
             resolve_openai_base_url(&MagiConfig::default(), None),
-            "https://api.openai.com/v1"
+            DEFAULT_OPENAI_BASE_URL
+        );
+        assert_eq!(
+            resolve_openai_base_url(&MagiConfig::default(), None),
+            "http://localhost:11434/v1"
         );
     }
 
     #[test]
-    fn test_resolve_openai_model_required() {
-        assert!(resolve_openai_model(&MagiConfig::default(), None).is_err());
+    fn test_resolve_openai_model_defaults() {
+        use crate::defaults::DEFAULT_OPENAI_MODEL;
+        // S-2: no env, no TOML → DEFAULT_OPENAI_MODEL (was Err)
+        assert_eq!(
+            resolve_openai_model(&MagiConfig::default(), None),
+            DEFAULT_OPENAI_MODEL
+        );
+        // S-3: env/TOML still win
         let c = MagiConfig {
             openai: OpenAiConfig {
                 base_url: None,
@@ -282,11 +296,8 @@ mod tests {
             },
             ..Default::default()
         };
-        assert_eq!(resolve_openai_model(&c, None).unwrap(), "phi4-mini");
-        assert_eq!(
-            resolve_openai_model(&c, Some("gpt-4o-mini")).unwrap(),
-            "gpt-4o-mini"
-        );
+        assert_eq!(resolve_openai_model(&c, None), "phi4-mini");
+        assert_eq!(resolve_openai_model(&c, Some("gpt-4o-mini")), "gpt-4o-mini");
     }
 
     #[test]

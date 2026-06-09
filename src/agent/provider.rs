@@ -1,7 +1,7 @@
 //! This module defines the Provider trait for AI backend interactions.
 
 use crate::agent::messages::{Content, Message, Role};
-use anyhow::Result;
+use anyhow::{Context, Result};
 use async_trait::async_trait;
 use futures::stream::{self, BoxStream, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -510,6 +510,18 @@ pub fn build_openai_provider(
     }))
 }
 
+/// Actionable message when the OpenAI-compatible backend at `base_url` cannot be
+/// reached (RF-8). Interpolates `base_url` (= `DEFAULT_OPENAI_BASE_URL` in the
+/// no-config Ollama default) and points at the Anthropic opt-in escape hatch.
+pub fn connection_error_hint(base_url: &str) -> String {
+    format!(
+        "Could not reach the OpenAI-compatible backend at {base_url}. \
+         If you use Ollama, make sure it is running; if you point at OpenAI or another \
+         service, check base_url and OPENAI_API_KEY; or set provider=\"anthropic\" in \
+         magi.toml to use Anthropic."
+    )
+}
+
 /// Streaming state for the OpenAI SSE `unfold`. Owns the byte source and the
 /// accumulators for the in-progress assistant message.
 struct OaiState {
@@ -701,7 +713,8 @@ impl Provider for OpenAiCompatibleProvider {
             .header("content-type", "application/json")
             .json(&request)
             .send()
-            .await?;
+            .await
+            .with_context(|| connection_error_hint(&self.base_url))?;
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
@@ -1960,6 +1973,16 @@ mod tests {
     fn test_build_openai_provider_returns_non_static() {
         let p = build_openai_provider("http://localhost:11434/v1", "ollama", "phi4-mini");
         assert!(!p.is_static());
+    }
+
+    #[test]
+    fn test_connection_error_hint_interpolates_base_url() {
+        // S-8: the actionable hint contains the resolved base_url (DEFAULT in the
+        // no-config case) and the Anthropic-opt-in escape hatch.
+        let hint = connection_error_hint(crate::defaults::DEFAULT_OPENAI_BASE_URL);
+        assert!(hint.contains("http://localhost:11434/v1"));
+        assert!(hint.contains(crate::defaults::DEFAULT_OPENAI_BASE_URL));
+        assert!(hint.contains("provider=\"anthropic\""));
     }
 
     #[tokio::test]

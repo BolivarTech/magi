@@ -1,5 +1,6 @@
 mod agent;
 mod config;
+mod defaults;
 mod services;
 mod system;
 mod tools;
@@ -37,6 +38,10 @@ struct Args {
     /// Log out and clear stored API keys.
     #[arg(short, long)]
     logout: bool,
+
+    /// Write a default magi.toml to the workspace and exit (refuses to overwrite).
+    #[arg(long)]
+    init_config: bool,
 }
 
 #[derive(Debug)]
@@ -46,11 +51,11 @@ struct Config {
     source: String,
 }
 
-/// Default model when none is configured via `ANTHROPIC_MODEL` or `key.txt`.
-/// Single source of truth — bump here to change the default everywhere.
-/// `pub(crate)` so the TUI `/login` handler reuses it when rebuilding the
-/// provider in-session (#9).
-pub(crate) const DEFAULT_MODEL: &str = "claude-sonnet-4-6";
+/// Default Anthropic model when none is configured via `ANTHROPIC_MODEL` or
+/// `key.txt`. Single source of truth lives in `crate::defaults`; this alias keeps
+/// existing call sites (parse_key_file, discover_config_ext, the TUI `/login`
+/// handler) and tests working unchanged.
+pub(crate) use crate::defaults::DEFAULT_ANTHROPIC_MODEL as DEFAULT_MODEL;
 
 /// Parses `key.txt`-style content: line 1 = API key, line 2 = optional model.
 ///
@@ -195,6 +200,19 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    if args.init_config {
+        match crate::defaults::write_default_config(&workspace_root) {
+            Ok(path) => {
+                println!("Wrote default config to {}", path.display());
+                return Ok(());
+            }
+            Err(e) => {
+                eprintln!("{e}");
+                std::process::exit(1);
+            }
+        }
+    }
+
     let config = discover_config_ext("key.txt").await;
     let (magi_config, config_warning) = MagiConfig::load(&workspace_root);
     let provider_kind = resolve_provider(&magi_config, env::var("MAGI_PROVIDER").ok().as_deref());
@@ -215,7 +233,7 @@ async fn main() -> anyhow::Result<()> {
             let base_url =
                 resolve_openai_base_url(&magi_config, env::var("OPENAI_BASE_URL").ok().as_deref());
             let model =
-                resolve_openai_model(&magi_config, env::var("OPENAI_MODEL").ok().as_deref())?;
+                resolve_openai_model(&magi_config, env::var("OPENAI_MODEL").ok().as_deref());
             let info = format!("OpenAI-compatible ({base_url}) Model: {model}");
             let model_label = model.clone();
             oai_creds = Some((base_url.clone(), api_key.clone()));
@@ -248,6 +266,14 @@ async fn main() -> anyhow::Result<()> {
     if let Some(w) = config_warning {
         startup_notices.push(w);
     }
+    // RF-9: when there is no magi.toml at all, make the Ollama-first default visible
+    // (never-silent). A present-but-minimal magi.toml does NOT trigger this.
+    if crate::defaults::should_emit_default_notice(
+        &provider_kind,
+        workspace_root.join("magi.toml").exists(),
+    ) {
+        startup_notices.push(crate::defaults::no_config_notice());
+    }
 
     // Build the MAGI orchestrator over the resolved backend. With no per-agent
     // overrides this is the v0.4.0 path (`Magi::new`, single shared adapter).
@@ -274,6 +300,10 @@ async fn main() -> anyhow::Result<()> {
     // the Anthropic path, matching how the principal itself was built).
     let build_sibling = |model: &str| -> Option<Arc<dyn Provider>> {
         if provider_kind == "openai" {
+            debug_assert!(
+                oai_creds.is_some(),
+                "openai backend must have captured oai_creds before building siblings"
+            );
             oai_creds
                 .as_ref()
                 .map(|(b, k)| build_openai_provider(b, k, model))
@@ -381,7 +411,7 @@ async fn main() -> anyhow::Result<()> {
         )));
     }
 
-    crate::tui::run_tui_ext(agent, startup_notices, consult_magi).await?;
+    crate::tui::run_tui_ext(agent, startup_notices, consult_magi, workspace_root).await?;
     Ok(())
 }
 
@@ -416,7 +446,7 @@ mod tests {
 
     #[test]
     fn test_resolve_provider_wiring() {
-        // Wiring smoke test (Task 6): env > TOML > default "anthropic".
+        // Wiring smoke test (Task 6): env > TOML > default "openai" (Ollama-first).
         // Pure resolution; no side effects. The real branching in main() is
         // covered by integration with this same helper.
         use crate::config::{resolve_provider, MagiConfig};
@@ -430,7 +460,7 @@ mod tests {
             ),
             "openai"
         );
-        assert_eq!(resolve_provider(&MagiConfig::default(), None), "anthropic");
+        assert_eq!(resolve_provider(&MagiConfig::default(), None), "openai");
     }
 
     #[test]
@@ -458,5 +488,14 @@ mod tests {
         assert_eq!(parse_key_file("   \n"), None);
         // The configured default.
         assert_eq!(DEFAULT_MODEL, "claude-sonnet-4-6");
+    }
+
+    #[test]
+    fn test_args_parses_init_config_flag() {
+        use clap::Parser;
+        let a = Args::parse_from(["magi-rs", "--init-config"]);
+        assert!(a.init_config);
+        let b = Args::parse_from(["magi-rs"]);
+        assert!(!b.init_config);
     }
 }
