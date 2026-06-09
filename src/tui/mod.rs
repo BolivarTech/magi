@@ -993,12 +993,32 @@ fn scroll_window(total: usize, height: usize, offset: usize) -> std::ops::Range<
     start..(start + height)
 }
 
+/// Maximum number of visible content rows the input box may grow to before it
+/// stops stealing space from the conversation pane (a long prompt then scrolls
+/// internally, keeping the cursor — at the tail — in view).
+const MAX_INPUT_ROWS: usize = 6;
+
+/// Number of content rows the input box should show for `input` wrapped to
+/// `width` columns, clamped to `[1, max]`. Lets the pane grow with a long or
+/// multi-line prompt instead of truncating it, without taking the whole screen.
+fn input_pane_rows(input: &str, width: usize, max: usize) -> usize {
+    wrap_message(input, width).len().clamp(1, max.max(1))
+}
+
 fn ui(f: &mut Frame, app: &mut App) {
+    let area = f.size();
+    // Input content width = full width minus the layout margin (1 each side) and
+    // the box borders (1 each side). Compute it up front so the input pane height
+    // can grow with the wrapped prompt before the layout is split.
+    let input_content_w = (area.width as usize).saturating_sub(4);
+    let input_rows = input_pane_rows(&app.input, input_content_w, MAX_INPUT_ROWS);
+    let input_pane_height = (input_rows as u16).saturating_add(2); // + top/bottom borders
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .margin(1)
-        .constraints([Constraint::Percentage(80), Constraint::Length(3)].as_ref())
-        .split(f.size());
+        .constraints([Constraint::Min(1), Constraint::Length(input_pane_height)].as_ref())
+        .split(area);
 
     let inner_width = chunks[0].width.saturating_sub(2) as usize; // subtract left + right borders
     let inner_height = chunks[0].height.saturating_sub(2) as usize; // subtract top + bottom borders
@@ -1075,26 +1095,6 @@ fn ui(f: &mut Frame, app: &mut App) {
         f.render_stateful_widget(messages_list, chunks[0], &mut state);
     }
 
-    let mut input_text = Text::raw(app.input.as_str());
-    if let Some(start) = app.selection_start {
-        let (from, to) = if start < app.cursor_position {
-            (start, app.cursor_position)
-        } else {
-            (app.cursor_position, start)
-        };
-        if app.input.is_char_boundary(from) && app.input.is_char_boundary(to) {
-            let spans = vec![
-                Span::raw(&app.input[..from]),
-                Span::styled(
-                    &app.input[from..to],
-                    Style::default().bg(Color::White).fg(Color::Black),
-                ),
-                Span::raw(&app.input[to..]),
-            ];
-            input_text = Text::from(Line::from(spans));
-        }
-    }
-
     let input_title = match app.mode {
         AppMode::Selection => {
             "SELECT MESSAGE (Enter to select text, 'y' to copy whole, Esc to exit)"
@@ -1103,15 +1103,60 @@ fn ui(f: &mut Frame, app: &mut App) {
         _ if app.pending_approval.is_some() => "WAITING FOR APPROVAL (y/c)",
         _ => "Input (PgUp/PgDn/Home/End Scroll, Ctrl+S Copy, Shift+Arrows Select)",
     };
+    let input_block = Block::default().borders(Borders::ALL).title(input_title);
 
-    let input =
-        Paragraph::new(input_text).block(Block::default().borders(Borders::ALL).title(input_title));
-    f.render_widget(input, chunks[1]);
-
-    if app.mode == AppMode::Normal {
-        // Find visible width of input to position cursor correctly
-        let prefix_len = app.input[..app.cursor_position].chars().count() as u16;
-        f.set_cursor(chunks[1].x + prefix_len + 1, chunks[1].y + 1);
+    if input_rows <= 1 {
+        // Single-line prompt: keep the in-place selection highlight and the simple
+        // cursor (no behavior change for the common case).
+        let mut input_text = Text::raw(app.input.as_str());
+        if let Some(start) = app.selection_start {
+            let (from, to) = if start < app.cursor_position {
+                (start, app.cursor_position)
+            } else {
+                (app.cursor_position, start)
+            };
+            if app.input.is_char_boundary(from) && app.input.is_char_boundary(to) {
+                let spans = vec![
+                    Span::raw(&app.input[..from]),
+                    Span::styled(
+                        &app.input[from..to],
+                        Style::default().bg(Color::White).fg(Color::Black),
+                    ),
+                    Span::raw(&app.input[to..]),
+                ];
+                input_text = Text::from(Line::from(spans));
+            }
+        }
+        f.render_widget(Paragraph::new(input_text).block(input_block), chunks[1]);
+        if app.mode == AppMode::Normal {
+            let col = UnicodeWidthStr::width(&app.input[..app.cursor_position]) as u16;
+            f.set_cursor(chunks[1].x + col + 1, chunks[1].y + 1);
+        }
+    } else {
+        // Long / multi-line prompt: pre-wrap with the same algorithm so the cursor
+        // (derived from the prefix) lines up exactly, and tail the wrapped lines so
+        // the cursor — at the end while typing — stays visible. The in-place
+        // selection highlight is omitted here (composing, not selecting within).
+        let wrapped = wrap_message(&app.input, input_content_w);
+        let total = wrapped.len();
+        let shown = total.min(MAX_INPUT_ROWS);
+        let start = total - shown;
+        let visible: Vec<Line> = wrapped[start..]
+            .iter()
+            .map(|l| Line::from(l.clone()))
+            .collect();
+        f.render_widget(
+            Paragraph::new(Text::from(visible)).block(input_block),
+            chunks[1],
+        );
+        if app.mode == AppMode::Normal {
+            let prefix = wrap_message(&app.input[..app.cursor_position], input_content_w);
+            let cur_row_abs = prefix.len().saturating_sub(1);
+            let cur_col =
+                UnicodeWidthStr::width(prefix.last().map(String::as_str).unwrap_or("")) as u16;
+            let cur_row_vis = cur_row_abs.saturating_sub(start) as u16;
+            f.set_cursor(chunks[1].x + cur_col + 1, chunks[1].y + cur_row_vis + 1);
+        }
     }
 }
 
