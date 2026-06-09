@@ -61,6 +61,12 @@ pub(crate) fn parse_toggle_show_thinking(trimmed: &str) -> bool {
     trimmed.trim() == "/toggle-show-thinking"
 }
 
+/// True if `trimmed` is the `/init-config` command (scaffolds a default magi.toml
+/// from inside the TUI). Mirrors `parse_toggle_show_thinking`.
+pub(crate) fn parse_init_config(trimmed: &str) -> bool {
+    trimmed.trim() == "/init-config"
+}
+
 /// Events that can happen in the UI.
 pub enum UiEvent {
     Input(String),
@@ -319,6 +325,7 @@ pub async fn run_tui_ext(
     agent: Agent,
     startup_notices: Vec<String>,
     consult: Option<std::sync::Arc<magi_core::orchestrator::Magi>>,
+    workspace_root: std::path::PathBuf,
 ) -> anyhow::Result<()> {
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |panic_info| {
@@ -592,7 +599,7 @@ pub async fn run_tui_ext(
     });
 
     let app = App::new(event_tx, response_rx, approval_rx);
-    let res = run_app(&mut terminal, app).await;
+    let res = run_app(&mut terminal, app, workspace_root).await;
 
     let _ = disable_raw_mode();
     let _ = execute!(
@@ -608,7 +615,11 @@ pub async fn run_tui_ext(
     Ok(())
 }
 
-async fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Result<()> {
+async fn run_app<B: Backend>(
+    terminal: &mut Terminal<B>,
+    mut app: App,
+    workspace_root: std::path::PathBuf,
+) -> io::Result<()> {
     loop {
         terminal.draw(|f| ui(f, &mut app))?;
 
@@ -872,6 +883,19 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Re
                                         ));
                                         continue;
                                     }
+                                    if parse_init_config(trimmed) {
+                                        match crate::defaults::write_default_config(&workspace_root)
+                                        {
+                                            Ok(path) => app.push_message(format!(
+                                                "System: wrote default magi.toml to {}",
+                                                path.display()
+                                            )),
+                                            Err(e) => app.push_message(format!(
+                                                "System: could not write magi.toml ({e})"
+                                            )),
+                                        }
+                                        continue;
+                                    }
                                     match trimmed {
                                         "/exit" | "/quit" => {
                                             let _ = app.event_tx.send(UiEvent::Quit).await;
@@ -914,6 +938,10 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Re
                                             );
                                             app.push_message(
                                                 "  /toggle-show-thinking - Reasoning display: indicator (default) <-> verbose"
+                                                    .to_string(),
+                                            );
+                                            app.push_message(
+                                                "  /init-config    - Write a default magi.toml to the workspace"
                                                     .to_string(),
                                             );
                                             continue;
@@ -1489,6 +1517,15 @@ mod tests {
         ));
         assert!(!super::parse_toggle_show_thinking("/toggle"));
         assert!(!super::parse_toggle_show_thinking("hello"));
+    }
+
+    #[test]
+    fn test_parse_init_config_command() {
+        // S-13
+        assert!(parse_init_config("/init-config"));
+        assert!(parse_init_config("  /init-config  "));
+        assert!(!parse_init_config("/init-configurator"));
+        assert!(!parse_init_config("/help"));
     }
 
     #[test]
