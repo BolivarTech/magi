@@ -1202,6 +1202,42 @@ mod tests {
     }
 
     #[test]
+    fn test_max_scroll_is_overflow_above_viewport() {
+        assert_eq!(max_scroll(10, 4), 6); // 6 lines hidden above the bottom window
+        assert_eq!(max_scroll(4, 4), 0); // exactly fits → nothing to scroll
+        assert_eq!(max_scroll(3, 10), 0); // shorter than viewport → 0 (saturating)
+    }
+
+    #[test]
+    fn test_scroll_window_offset_zero_pins_to_bottom() {
+        // Follow-tail: offset 0 shows the LAST `height` lines.
+        assert_eq!(scroll_window(10, 5, 0), 5..10);
+    }
+
+    #[test]
+    fn test_scroll_window_offset_scrolls_up_by_lines() {
+        assert_eq!(scroll_window(10, 5, 2), 3..8);
+    }
+
+    #[test]
+    fn test_scroll_window_clamps_offset_to_top() {
+        // Offset past the top is clamped so the first line stays visible.
+        assert_eq!(scroll_window(10, 5, 999), 0..5);
+    }
+
+    #[test]
+    fn test_scroll_window_shorter_than_viewport_shows_all() {
+        assert_eq!(scroll_window(3, 5, 0), 0..3);
+        assert_eq!(scroll_window(3, 5, 99), 0..3); // offset ignored when it all fits
+    }
+
+    #[test]
+    fn test_scroll_window_degenerate_zero_height_or_empty() {
+        assert_eq!(scroll_window(10, 0, 0), 0..0);
+        assert_eq!(scroll_window(0, 5, 0), 0..0);
+    }
+
+    #[test]
     fn test_tail_lines_keeps_last_n_when_input_exceeds_max() {
         let input: Vec<String> = (0..10).map(|i| format!("line {i}")).collect();
         let out = tail_lines(input, 3);
