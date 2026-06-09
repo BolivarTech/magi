@@ -1,7 +1,7 @@
 # Magi Agent — Terminal AI Assistant in Rust
 
 [![Rust 2021](https://img.shields.io/badge/rust-2021_edition-orange.svg)](https://www.rust-lang.org/)
-[![Tests](https://img.shields.io/badge/tests-136%20passing-brightgreen.svg)](#testing)
+[![Tests](https://img.shields.io/badge/tests-187%20passing-brightgreen.svg)](#testing)
 [![Lints](https://img.shields.io/badge/lints-clippy%20clean-blue.svg)](https://github.com/rust-lang/rust-clippy)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 [![Version](https://img.shields.io/badge/version-0.6.0-informational.svg)](CHANGELOG.md)
