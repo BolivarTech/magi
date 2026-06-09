@@ -1395,6 +1395,75 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_toggle_thinking_command() {
+        assert!(super::parse_toggle_show_thinking("/toggle-show-thinking"));
+        assert!(super::parse_toggle_show_thinking("  /toggle-show-thinking  "));
+        assert!(!super::parse_toggle_show_thinking("/toggle"));
+        assert!(!super::parse_toggle_show_thinking("hello"));
+    }
+
+    #[test]
+    fn test_spinner_frame_cycles() {
+        // Advancing wraps around the frame set; never out of range.
+        let n = SPINNER_FRAMES.len();
+        assert_eq!(next_spinner_frame(0), 1);
+        assert_eq!(next_spinner_frame(n - 1), 0);
+    }
+
+    #[test]
+    fn test_thinking_indicator_has_label_and_a_spinner_glyph() {
+        let s = thinking_indicator(0);
+        assert!(s.contains("Pensando"), "indicator text: {s:?}");
+        assert!(s.ends_with(SPINNER_FRAMES[0]), "ends with spinner glyph: {s:?}");
+    }
+
+    #[test]
+    fn test_show_thinking_defaults_off_and_toggles() {
+        let (event_tx, _) = mpsc::channel(1);
+        let (_, response_rx) = mpsc::channel(1);
+        let (_, approval_rx) = mpsc::channel(1);
+        let mut app = App::new(event_tx, response_rx, approval_rx);
+        assert!(!app.show_thinking, "default is the compact indicator (mode B)");
+        assert!(app.toggle_show_thinking()); // → verbose (A)
+        assert!(app.show_thinking);
+        assert!(!app.toggle_show_thinking()); // → compact (B)
+        assert!(!app.show_thinking);
+    }
+
+    #[test]
+    fn test_reasoning_compact_mode_shows_indicator_not_text() {
+        let (event_tx, _) = mpsc::channel(1);
+        let (_, response_rx) = mpsc::channel(1);
+        let (_, approval_rx) = mpsc::channel(1);
+        let mut app = App::new(event_tx, response_rx, approval_rx);
+        // Default mode B: reasoning sets the activity indicator, never the message text.
+        app.on_reasoning("secret thoughts".to_string());
+        assert!(app.thinking_active);
+        assert!(
+            app.messages.is_empty(),
+            "reasoning text must NOT appear in messages in compact mode"
+        );
+        // Content arriving clears the indicator and starts the real reply.
+        app.append_stream_delta("Answer".to_string());
+        assert!(!app.thinking_active);
+        assert!(app.messages.last().unwrap().contains("Answer"));
+    }
+
+    #[test]
+    fn test_reasoning_verbose_mode_appends_text() {
+        let (event_tx, _) = mpsc::channel(1);
+        let (_, response_rx) = mpsc::channel(1);
+        let (_, approval_rx) = mpsc::channel(1);
+        let mut app = App::new(event_tx, response_rx, approval_rx);
+        app.show_thinking = true; // mode A (verbose, for debug)
+        app.on_reasoning("visible thoughts".to_string());
+        assert!(
+            app.messages.last().unwrap().contains("visible thoughts"),
+            "verbose mode streams the reasoning into the message"
+        );
+    }
+
+    #[test]
     fn test_parse_consult_command() {
         assert_eq!(
             super::parse_consult_command("/consult should we X?"),
