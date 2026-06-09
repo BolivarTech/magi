@@ -67,14 +67,22 @@ pub fn render_default_magi_toml() -> String {
 /// path written.
 pub fn write_default_config(dir: &Path) -> anyhow::Result<PathBuf> {
     let path = dir.join("magi.toml");
-    if path.exists() {
-        anyhow::bail!(
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+    {
+        Ok(mut f) => {
+            use std::io::Write;
+            f.write_all(render_default_magi_toml().as_bytes())?;
+            Ok(path)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => anyhow::bail!(
             "{} already exists — refusing to overwrite (edit it manually or delete it first)",
             path.display()
-        );
+        ),
+        Err(e) => Err(anyhow::anyhow!("failed to write {}: {e}", path.display())),
     }
-    std::fs::write(&path, render_default_magi_toml())?;
-    Ok(path)
 }
 
 /// Whether to emit the no-config Ollama-defaults startup notice (RF-9): only when
