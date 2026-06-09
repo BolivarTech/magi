@@ -1697,6 +1697,17 @@ mod tests {
             "reasoning must stream visibly, got: {deltas:?}"
         );
         assert!(deltas.contains("Answer."), "the answer must stream too");
+        // UX: the 🤔 marker is emitted exactly once (start of thinking), and a
+        // blank-line separator precedes the answer.
+        assert_eq!(
+            deltas.matches('🤔').count(),
+            1,
+            "one-shot marker, got: {deltas:?}"
+        );
+        assert!(
+            deltas.contains("🤔 Let me think") && deltas.contains("\n\nAnswer."),
+            "marker prefixes reasoning and separator precedes the answer, got: {deltas:?}"
+        );
         // Not persisted: the finalized message is content-only (no reasoning).
         assert_eq!(
             final_msg.expect("MessageDone").content,
