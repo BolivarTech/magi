@@ -36,6 +36,15 @@ pub fn agent_label(agent: AgentName) -> &'static str {
     }
 }
 
+/// The built-in default model for an agent on the openai (Ollama) path (RF-4).
+fn default_magi_model(agent: AgentName) -> &'static str {
+    match agent {
+        AgentName::Melchior => crate::defaults::DEFAULT_MAGI_MELCHIOR,
+        AgentName::Balthasar => crate::defaults::DEFAULT_MAGI_BALTHASAR,
+        AgentName::Caspar => crate::defaults::DEFAULT_MAGI_CASPAR,
+    }
+}
+
 /// Computes the per-agent adapter specs for agents with an effective override
 /// (env > TOML > none). An empty result means "no overrides — use `Magi::new`".
 ///
@@ -67,7 +76,14 @@ pub fn resolve_magi_adapter_specs(
     ]
     .into_iter()
     .filter_map(|(agent, toml, env_model)| {
-        resolve_magi_override(toml, env_model).map(|model| MagiAdapterSpec {
+        let model = resolve_magi_override(toml, env_model).or_else(|| {
+            if backend_label == "openai" {
+                Some(default_magi_model(agent).to_string())
+            } else {
+                None
+            }
+        })?;
+        Some(MagiAdapterSpec {
             agent,
             model,
             adapter_name: format!("{backend_label}-{}", agent_label(agent)),
@@ -159,20 +175,47 @@ mod tests {
     }
 
     #[test]
-    fn test_openai_naming_and_env_precedence() {
-        // S-9 + S-4 via the spec path: env beats TOML, openai backend label
+    fn test_openai_default_trio_when_no_overrides() {
+        // S-4: openai + no overrides → the 3 built-in defaults
+        use crate::defaults::{DEFAULT_MAGI_BALTHASAR, DEFAULT_MAGI_CASPAR, DEFAULT_MAGI_MELCHIOR};
         let specs = resolve_magi_adapter_specs(
             "openai",
-            &cfg(None, None, Some("toml-deepseek")),
-            &MagiEnvModels {
-                caspar: Some("deepseek-r1:32b".into()),
-                ..Default::default()
-            },
+            &MagiModelsConfig::default(),
+            &MagiEnvModels::default(),
         );
-        assert_eq!(specs.len(), 1);
-        assert_eq!(specs[0].agent, AgentName::Caspar);
-        assert_eq!(specs[0].model, "deepseek-r1:32b"); // env wins
-        assert_eq!(specs[0].adapter_name, "openai-caspar");
+        assert_eq!(specs.len(), 3);
+        assert_eq!(specs[0].model, DEFAULT_MAGI_MELCHIOR);
+        assert_eq!(specs[0].adapter_name, "openai-melchior");
+        assert_eq!(specs[1].model, DEFAULT_MAGI_BALTHASAR);
+        assert_eq!(specs[1].adapter_name, "openai-balthasar");
+        assert_eq!(specs[2].model, DEFAULT_MAGI_CASPAR);
+        assert_eq!(specs[2].adapter_name, "openai-caspar");
+    }
+
+    #[test]
+    fn test_anthropic_no_default_trio() {
+        // S-5: anthropic + no overrides → 0 specs (share principal; no Ollama defaults)
+        let specs = resolve_magi_adapter_specs(
+            "anthropic",
+            &MagiModelsConfig::default(),
+            &MagiEnvModels::default(),
+        );
+        assert!(specs.is_empty());
+    }
+
+    #[test]
+    fn test_openai_override_wins_over_default_trio() {
+        // S-6: openai + melchior override → melchior=custom, others=defaults
+        use crate::defaults::{DEFAULT_MAGI_BALTHASAR, DEFAULT_MAGI_CASPAR};
+        let specs = resolve_magi_adapter_specs(
+            "openai",
+            &cfg(Some("custom-melchior"), None, None),
+            &MagiEnvModels::default(),
+        );
+        assert_eq!(specs.len(), 3);
+        assert_eq!(specs[0].model, "custom-melchior");
+        assert_eq!(specs[1].model, DEFAULT_MAGI_BALTHASAR);
+        assert_eq!(specs[2].model, DEFAULT_MAGI_CASPAR);
     }
 
     #[test]
