@@ -1,5 +1,6 @@
 mod agent;
 mod config;
+mod defaults;
 mod services;
 mod system;
 mod tools;
@@ -46,11 +47,11 @@ struct Config {
     source: String,
 }
 
-/// Default model when none is configured via `ANTHROPIC_MODEL` or `key.txt`.
-/// Single source of truth — bump here to change the default everywhere.
-/// `pub(crate)` so the TUI `/login` handler reuses it when rebuilding the
-/// provider in-session (#9).
-pub(crate) const DEFAULT_MODEL: &str = "claude-sonnet-4-6";
+/// Default Anthropic model when none is configured via `ANTHROPIC_MODEL` or
+/// `key.txt`. Single source of truth lives in `crate::defaults`; this alias keeps
+/// existing call sites (parse_key_file, discover_config_ext, the TUI `/login`
+/// handler) and tests working unchanged.
+pub(crate) use crate::defaults::DEFAULT_ANTHROPIC_MODEL as DEFAULT_MODEL;
 
 /// Parses `key.txt`-style content: line 1 = API key, line 2 = optional model.
 ///
