@@ -216,7 +216,7 @@ async fn main() -> anyhow::Result<()> {
             let base_url =
                 resolve_openai_base_url(&magi_config, env::var("OPENAI_BASE_URL").ok().as_deref());
             let model =
-                resolve_openai_model(&magi_config, env::var("OPENAI_MODEL").ok().as_deref())?;
+                resolve_openai_model(&magi_config, env::var("OPENAI_MODEL").ok().as_deref());
             let info = format!("OpenAI-compatible ({base_url}) Model: {model}");
             let model_label = model.clone();
             oai_creds = Some((base_url.clone(), api_key.clone()));
@@ -417,7 +417,7 @@ mod tests {
 
     #[test]
     fn test_resolve_provider_wiring() {
-        // Wiring smoke test (Task 6): env > TOML > default "anthropic".
+        // Wiring smoke test (Task 6): env > TOML > default "openai" (Ollama-first).
         // Pure resolution; no side effects. The real branching in main() is
         // covered by integration with this same helper.
         use crate::config::{resolve_provider, MagiConfig};
@@ -431,7 +431,7 @@ mod tests {
             ),
             "openai"
         );
-        assert_eq!(resolve_provider(&MagiConfig::default(), None), "anthropic");
+        assert_eq!(resolve_provider(&MagiConfig::default(), None), "openai");
     }
 
     #[test]
