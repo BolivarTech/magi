@@ -1,7 +1,7 @@
 //! This module defines the Provider trait for AI backend interactions.
 
 use crate::agent::messages::{Content, Message, Role};
-use anyhow::Result;
+use anyhow::{Context, Result};
 use async_trait::async_trait;
 use futures::stream::{self, BoxStream, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -714,9 +714,7 @@ impl Provider for OpenAiCompatibleProvider {
             .json(&request)
             .send()
             .await
-            .map_err(|e| {
-                anyhow::anyhow!("{} (cause: {e})", connection_error_hint(&self.base_url))
-            })?;
+            .with_context(|| connection_error_hint(&self.base_url))?;
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
