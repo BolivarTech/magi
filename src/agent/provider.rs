@@ -412,6 +412,10 @@ struct OpenAiChoice {
 struct OpenAiStreamDelta {
     #[serde(default)]
     content: Option<String>,
+    /// Reasoning models (kimi, deepseek-r1, …) stream their chain-of-thought here
+    /// with empty `content` until the answer. Surfaced live but never persisted.
+    #[serde(default)]
+    reasoning: Option<String>,
     #[serde(default)]
     tool_calls: Option<Vec<OpenAiToolCallDelta>>,
 }
@@ -524,6 +528,13 @@ struct OaiState {
     done: bool,
     /// Whether the byte source is exhausted.
     src_done: bool,
+    /// Whether the one-time `🤔` reasoning marker has been emitted. Reasoning is
+    /// streamed visibly (so a thinking model is not a frozen blank) but NOT
+    /// accumulated into `full_content`, so it is never persisted.
+    reasoning_emitted: bool,
+    /// Whether the blank-line separator before the first answer content has been
+    /// emitted (only after some reasoning was shown).
+    answer_separated: bool,
 }
 
 impl OaiState {
@@ -586,13 +597,40 @@ impl OaiState {
                 let Some(choice) = parsed.choices.into_iter().next() else {
                     continue;
                 };
-                if let Some(text) = choice.delta.content {
-                    if let Some(Content::Text { text: existing }) = self.full_content.last_mut() {
-                        existing.push_str(&text);
-                    } else {
-                        self.full_content.push(Content::Text { text: text.clone() });
+                // Reasoning (thinking) deltas: stream them visibly so a reasoning
+                // model is not a frozen blank, but do NOT add them to
+                // `full_content` — the persisted message stays answer-only (#24).
+                if let Some(reasoning) = choice.delta.reasoning {
+                    if !reasoning.is_empty() {
+                        let visible = if self.reasoning_emitted {
+                            reasoning
+                        } else {
+                            self.reasoning_emitted = true;
+                            format!("🤔 {reasoning}")
+                        };
+                        self.pending
+                            .push_back(Ok(ResponseChunk::TextDelta(visible)));
                     }
-                    self.pending.push_back(Ok(ResponseChunk::TextDelta(text)));
+                }
+                if let Some(text) = choice.delta.content {
+                    if !text.is_empty() {
+                        if let Some(Content::Text { text: existing }) = self.full_content.last_mut()
+                        {
+                            existing.push_str(&text);
+                        } else {
+                            self.full_content.push(Content::Text { text: text.clone() });
+                        }
+                        // Separate the answer from any shown reasoning the first time
+                        // real content arrives (visible only — not persisted).
+                        let visible = if self.reasoning_emitted && !self.answer_separated {
+                            self.answer_separated = true;
+                            format!("\n\n{text}")
+                        } else {
+                            text.clone()
+                        };
+                        self.pending
+                            .push_back(Ok(ResponseChunk::TextDelta(visible)));
+                    }
                 }
                 if let Some(tcs) = choice.delta.tool_calls {
                     for tc in tcs {
@@ -702,6 +740,8 @@ impl Provider for OpenAiCompatibleProvider {
             pending: std::collections::VecDeque::new(),
             done: false,
             src_done: false,
+            reasoning_emitted: false,
+            answer_separated: false,
         };
         let out = stream::unfold(st, |mut st| async move {
             loop {
