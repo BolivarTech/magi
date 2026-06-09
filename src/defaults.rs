@@ -93,6 +93,15 @@ mod tests {
     }
 
     #[test]
+    fn test_should_emit_default_notice_only_for_openai_without_file() {
+        // Notice is for the no-config Ollama default ONLY: openai backend + no magi.toml.
+        assert!(should_emit_default_notice("openai", false));
+        assert!(!should_emit_default_notice("openai", true)); // file present
+        assert!(!should_emit_default_notice("anthropic", false)); // env opt-in to anthropic, no file
+        assert!(!should_emit_default_notice("anthropic", true));
+    }
+
+    #[test]
     fn test_no_config_notice_interpolates_all_defaults() {
         // S-9: the notice is built from the constants (DRY), not hardcoded strings.
         let n = no_config_notice();
