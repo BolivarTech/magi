@@ -39,6 +39,28 @@ pub(crate) fn parse_consult_command(trimmed: &str) -> Option<&str> {
     Some(rest.strip_prefix(' ')?.trim())
 }
 
+/// Braille spinner frames for the "thinking" activity indicator.
+pub(crate) const SPINNER_FRAMES: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+
+/// Advances the spinner frame index, wrapping around the frame set.
+pub(crate) fn next_spinner_frame(frame: usize) -> usize {
+    (frame + 1) % SPINNER_FRAMES.len()
+}
+
+/// The compact "thinking" indicator line, ending with the current spinner glyph.
+pub(crate) fn thinking_indicator(frame: usize) -> String {
+    format!(
+        "🤔 MAGI Pensando… {}",
+        SPINNER_FRAMES[frame % SPINNER_FRAMES.len()]
+    )
+}
+
+/// True if `trimmed` is the `/toggle-show-thinking` command (toggles between the
+/// compact thinking indicator and the verbose reasoning stream).
+pub(crate) fn parse_toggle_show_thinking(trimmed: &str) -> bool {
+    trimmed.trim() == "/toggle-show-thinking"
+}
+
 /// Events that can happen in the UI.
 pub enum UiEvent {
     Input(String),
@@ -99,6 +121,15 @@ pub struct App {
     /// Visible height (lines) of the conversation pane at the last render — used to
     /// size a PageUp/PageDown step.
     pub last_viewport_height: usize,
+    /// Show the full reasoning text (verbose/debug, mode A) vs a compact
+    /// "thinking…" indicator (mode B, the default). Toggled by
+    /// `/toggle-show-thinking`.
+    pub show_thinking: bool,
+    /// Whether a reasoning model is currently thinking (the compact indicator is
+    /// shown while true).
+    pub thinking_active: bool,
+    /// Current spinner frame for the thinking indicator.
+    pub spinner_frame: usize,
 }
 
 impl App {
@@ -124,6 +155,29 @@ impl App {
             scroll_offset: 0,
             last_max_scroll: 0,
             last_viewport_height: 0,
+            show_thinking: false,
+            thinking_active: false,
+            spinner_frame: 0,
+        }
+    }
+
+    /// Toggles between the compact thinking indicator (mode B, default) and the
+    /// verbose reasoning stream (mode A, for debugging). Returns the new value.
+    pub fn toggle_show_thinking(&mut self) -> bool {
+        self.show_thinking = !self.show_thinking;
+        self.show_thinking
+    }
+
+    /// Handles a reasoning (chain-of-thought) delta. In verbose mode it streams the
+    /// text into the assistant message; in the default compact mode it only raises
+    /// the activity indicator (advancing the spinner) and never shows the text.
+    pub fn on_reasoning(&mut self, delta: String) {
+        if self.show_thinking {
+            self.append_stream_delta(delta);
+        } else {
+            // Compact mode: just raise the indicator; the spinner animates in the
+            // render loop (driven by the ~50ms tick, not the delta rate).
+            self.thinking_active = true;
         }
     }
 
@@ -238,6 +292,8 @@ impl App {
     /// Appends a streaming delta to the in-progress assistant message,
     /// creating the line on the first delta. Append-only; never byte-indexes.
     pub fn append_stream_delta(&mut self, delta: String) {
+        // Answer content arriving means the thinking phase is over.
+        self.thinking_active = false;
         // Streaming content → follow the tail so the live reply stays visible.
         self.scroll_offset = 0;
         if self.streaming {
@@ -556,9 +612,9 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Re
         while let Ok(response) = app.response_rx.try_recv() {
             match response {
                 AgentResponse::StreamDelta(delta) => app.append_stream_delta(delta),
-                // Unit 2: shown inline (mode A). Unit 3 makes this mode-aware
-                // (default = compact "thinking…" indicator).
-                AgentResponse::ReasoningDelta(delta) => app.append_stream_delta(delta),
+                // Mode-aware: verbose streams the text; compact (default) raises a
+                // "thinking…" indicator without showing the chain-of-thought.
+                AgentResponse::ReasoningDelta(delta) => app.on_reasoning(delta),
                 AgentResponse::Text(t) => {
                     if t.is_empty() {
                         app.finalize_stream();
@@ -801,6 +857,18 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Re
                                         }
                                         continue;
                                     }
+                                    if parse_toggle_show_thinking(trimmed) {
+                                        let verbose = app.toggle_show_thinking();
+                                        let mode = if verbose {
+                                            "VERBOSE (full reasoning shown — for debugging)"
+                                        } else {
+                                            "COMPACT (activity indicator only)"
+                                        };
+                                        app.push_message(format!(
+                                            "System: thinking display -> {mode}"
+                                        ));
+                                        continue;
+                                    }
                                     match trimmed {
                                         "/exit" | "/quit" => {
                                             let _ = app.event_tx.send(UiEvent::Quit).await;
@@ -839,6 +907,10 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Re
                                             );
                                             app.push_message(
                                                 "  /help           - Show this help message"
+                                                    .to_string(),
+                                            );
+                                            app.push_message(
+                                                "  /toggle-show-thinking - Reasoning display: indicator (default) <-> verbose"
                                                     .to_string(),
                                             );
                                             continue;
@@ -1049,6 +1121,15 @@ fn ui(f: &mut Frame, app: &mut App) {
                 all_lines.push(String::new());
             }
             all_lines.extend(wrap_message(m, inner_width));
+        }
+        // Compact "thinking…" indicator (mode B): a transient last line while a
+        // reasoning model is thinking, with an animated spinner advanced per frame.
+        if app.thinking_active {
+            if !all_lines.is_empty() {
+                all_lines.push(String::new());
+            }
+            all_lines.push(thinking_indicator(app.spinner_frame));
+            app.spinner_frame = next_spinner_frame(app.spinner_frame);
         }
         let total = all_lines.len();
         // Cache viewport bounds so key handlers can clamp scroll_offset (see Normal keys).
@@ -1397,7 +1478,9 @@ mod tests {
     #[test]
     fn test_parse_toggle_thinking_command() {
         assert!(super::parse_toggle_show_thinking("/toggle-show-thinking"));
-        assert!(super::parse_toggle_show_thinking("  /toggle-show-thinking  "));
+        assert!(super::parse_toggle_show_thinking(
+            "  /toggle-show-thinking  "
+        ));
         assert!(!super::parse_toggle_show_thinking("/toggle"));
         assert!(!super::parse_toggle_show_thinking("hello"));
     }
@@ -1414,7 +1497,10 @@ mod tests {
     fn test_thinking_indicator_has_label_and_a_spinner_glyph() {
         let s = thinking_indicator(0);
         assert!(s.contains("Pensando"), "indicator text: {s:?}");
-        assert!(s.ends_with(SPINNER_FRAMES[0]), "ends with spinner glyph: {s:?}");
+        assert!(
+            s.ends_with(SPINNER_FRAMES[0]),
+            "ends with spinner glyph: {s:?}"
+        );
     }
 
     #[test]
@@ -1423,7 +1509,10 @@ mod tests {
         let (_, response_rx) = mpsc::channel(1);
         let (_, approval_rx) = mpsc::channel(1);
         let mut app = App::new(event_tx, response_rx, approval_rx);
-        assert!(!app.show_thinking, "default is the compact indicator (mode B)");
+        assert!(
+            !app.show_thinking,
+            "default is the compact indicator (mode B)"
+        );
         assert!(app.toggle_show_thinking()); // → verbose (A)
         assert!(app.show_thinking);
         assert!(!app.toggle_show_thinking()); // → compact (B)
