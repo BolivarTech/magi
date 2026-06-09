@@ -1611,6 +1611,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_openai_streams_reasoning_visibly_but_does_not_persist_it() {
+        // v0.5.2 (#24): reasoning models (kimi-k2.6, deepseek-r1) emit their
+        // chain-of-thought in `delta.reasoning` with empty `delta.content`. The
+        // provider must surface the reasoning as visible TextDeltas (so the TUI is
+        // not a frozen blank during a long think) WITHOUT persisting it — the
+        // finalized message keeps only the `content` answer.
+        let mut server = Server::new_async().await;
+        let url = server.url();
+        let sse = concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"\",\"reasoning\":\"Let me think\"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"\",\"reasoning\":\" about it\"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"Answer.\"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let _m = server
+            .mock("POST", "/chat/completions")
+            .with_status(200)
+            .with_header("content-type", "text/event-stream")
+            .with_body(sse)
+            .create_async()
+            .await;
+        let p = OpenAiCompatibleProvider::new(OpenAiSettings {
+            base_url: url,
+            api_key: "k".into(),
+            model: "m".into(),
+        });
+        let mut stream = p
+            .stream_messages(&[Message::user("hi")], &[])
+            .await
+            .unwrap();
+        let mut deltas = String::new();
+        let mut final_msg: Option<Message> = None;
+        while let Some(chunk) = stream.next().await {
+            match chunk.unwrap() {
+                ResponseChunk::TextDelta(t) => deltas.push_str(&t),
+                ResponseChunk::MessageDone(m) => final_msg = Some(m),
+                _ => {}
+            }
+        }
+        // Visible: the reasoning is streamed to the UI.
+        assert!(
+            deltas.contains("Let me think about it"),
+            "reasoning must stream visibly, got: {deltas:?}"
+        );
+        assert!(deltas.contains("Answer."), "the answer must stream too");
+        // Not persisted: the finalized message is content-only (no reasoning).
+        assert_eq!(
+            final_msg.expect("MessageDone").content,
+            vec![Content::Text {
+                text: "Answer.".into()
+            }]
+        );
+    }
+
+    #[tokio::test]
     async fn test_openai_finalizes_without_done_sentinel() {
         // MAGI fix c: backend omits [DONE]; stream-end must still flush a MessageDone.
         let mut server = Server::new_async().await;
