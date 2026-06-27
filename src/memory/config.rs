@@ -422,6 +422,114 @@ mod tests {
         );
     }
 
+    // ── New range-check tests (Fix 1) ────────────────────────────────────────
+
+    #[test]
+    fn test_validate_rejects_safety_margin_ratio_ge_one() {
+        assert!(
+            MemoryConfig {
+                safety_margin_ratio: 1.0,
+                ..MemoryConfig::default()
+            }
+            .validate()
+            .is_err(),
+            "safety_margin_ratio=1.0 must be rejected (usable budget becomes 0)"
+        );
+    }
+
+    #[test]
+    fn test_validate_rejects_negative_safety_margin_ratio() {
+        assert!(
+            MemoryConfig {
+                safety_margin_ratio: -0.1,
+                ..MemoryConfig::default()
+            }
+            .validate()
+            .is_err(),
+            "safety_margin_ratio=-0.1 must be rejected"
+        );
+    }
+
+    #[test]
+    fn test_validate_accepts_zero_safety_margin_ratio() {
+        assert!(
+            MemoryConfig {
+                safety_margin_ratio: 0.0,
+                ..MemoryConfig::default()
+            }
+            .validate()
+            .is_ok(),
+            "safety_margin_ratio=0.0 must be accepted (valid lower bound)"
+        );
+    }
+
+    #[test]
+    fn test_validate_rejects_zero_context_budget_tokens() {
+        assert!(
+            MemoryConfig {
+                context_budget_tokens: 0,
+                ..MemoryConfig::default()
+            }
+            .validate()
+            .is_err(),
+            "context_budget_tokens=0 must be rejected"
+        );
+    }
+
+    #[test]
+    fn test_validate_rejects_zero_top_k() {
+        assert!(
+            MemoryConfig {
+                top_k: 0,
+                ..MemoryConfig::default()
+            }
+            .validate()
+            .is_err(),
+            "top_k=0 must be rejected"
+        );
+    }
+
+    #[test]
+    fn test_validate_rejects_negative_reranker_weight() {
+        assert!(
+            MemoryConfig {
+                weight_similarity: -1.0,
+                ..MemoryConfig::default()
+            }
+            .validate()
+            .is_err(),
+            "negative weight_similarity must be rejected"
+        );
+    }
+
+    #[test]
+    fn test_validate_rejects_all_zero_reranker_weights() {
+        assert!(
+            MemoryConfig {
+                weight_similarity: 0.0,
+                weight_recency: 0.0,
+                weight_salience: 0.0,
+                ..MemoryConfig::default()
+            }
+            .validate()
+            .is_err(),
+            "all-zero reranker weights must be rejected (degenerate reranker)"
+        );
+    }
+
+    #[test]
+    fn test_validate_accepts_max_records_zero() {
+        assert!(
+            MemoryConfig {
+                max_records: 0,
+                ..MemoryConfig::default()
+            }
+            .validate()
+            .is_ok(),
+            "max_records=0 is a valid opt-out and must not be rejected"
+        );
+    }
+
     #[test]
     fn test_absent_memory_section_uses_documented_defaults() {
         let c = MagiConfig::from_toml_str("provider = \"openai\"").unwrap();
