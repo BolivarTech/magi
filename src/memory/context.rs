@@ -139,7 +139,9 @@ pub async fn assemble_selective(
     let recall_space;
 
     if turn_t > space {
-        if cfg.oversized_turn_policy == "truncate" {
+        // G5(a): case-insensitive comparison so "Truncate", "TRUNCATE", etc. all
+        // behave identically to "truncate" (defensive against TOML case drift).
+        if cfg.oversized_turn_policy.eq_ignore_ascii_case("truncate") {
             turn_text = truncate_to_tokens(&turn_text, space, cpt);
             // M2 / D-17: if truncation yields an empty turn (space == 0 because
             // system+profile consumed the entire budget), sending an empty message
