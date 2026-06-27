@@ -42,6 +42,20 @@ pub struct ApprovalRequest {
 /// A piece of a streamed assistant turn forwarded to the UI. `Content` is answer
 /// text (persisted); `Reasoning` is a thinking model's chain-of-thought, shown
 /// live but never persisted (#24).
+///
+/// # F5 — Truncation notices routing
+///
+/// Memory assembler truncation notices (e.g. "current turn truncated to fit
+/// context budget") are forwarded to the TUI as `StreamPiece::Content` prefixed
+/// with `"[memory: …]\n"` rather than as a distinct `Notice` variant.
+///
+/// Rationale: adding a third variant would require updating
+/// `AgentResponse` in `tui/mod.rs` and all exhaustive matches in tests — a
+/// non-trivial ripple for a cosmetic distinction.  The `"[memory: …]"` prefix
+/// is visible to the user (appropriate — truncation should be announced) and
+/// distinguishable programmatically by prefix without an extra enum arm.
+/// A dedicated `Notice` variant can be introduced when the TUI adds a proper
+/// status-bar or notification area.
 #[derive(Debug, Clone, PartialEq)]
 pub enum StreamPiece {
     Content(String),
@@ -720,7 +734,23 @@ async fn write_turn_to_memory(
         distilled_at: None,
     };
 
-    // Swallow write errors — a store failure must not abort the turn (REQ-29).
+    // F6b — swallow write errors intentionally (REQ-29 degradation).
+    //
+    // `store.insert` uses a plain `INSERT INTO … VALUES` and returns
+    // `MemoryError::Storage("UNIQUE constraint failed")` when a duplicate primary
+    // key is detected.  The caller discards this error with `let _ = …`.
+    //
+    // This is NOT silent data loss.  The ID is `Sha256("{now}:{role:?}:{text}")`;
+    // two writes with the SAME timestamp-second, role, and text hash to the SAME
+    // id and carry IDENTICAL content — the stored record is byte-for-byte equal
+    // to the one being discarded.  This is lossless idempotent dedup, mirroring
+    // the CP2-M migration pattern (`migrate_from_messages` uses an explicit COUNT
+    // check instead, but the semantic contract is the same).
+    //
+    // A genuine write error (disk full, crypto failure) is also swallowed here to
+    // satisfy REQ-29 ("never abort a turn because of a memory failure").  If
+    // precise error visibility is needed in future, consider logging to stderr
+    // (not to `chunk_tx`, which would confuse turn vs. diagnostic output).
     let _ = store.insert(&m).await;
 }
 
