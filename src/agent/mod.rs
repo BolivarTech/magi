@@ -19,6 +19,7 @@ use crate::memory::MemoryKind;
 use crate::system::database::MemoryStore;
 use crate::tools::Tool;
 use anyhow::Result;
+use futures::StreamExt;
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use tokio::sync::oneshot;
@@ -338,7 +339,6 @@ impl Agent {
                 let mut full_text = String::new();
                 let mut last_message: Option<Message> = None;
 
-                use futures::StreamExt;
                 while let Some(chunk_result) = stream.next().await {
                     match chunk_result? {
                         ResponseChunk::TextDelta(delta) => {
@@ -510,7 +510,6 @@ impl Agent {
             let mut full_text = String::new();
             let mut last_message: Option<Message> = None;
 
-            use futures::StreamExt;
             while let Some(chunk_result) = stream.next().await {
                 match chunk_result? {
                     ResponseChunk::TextDelta(delta) => {
