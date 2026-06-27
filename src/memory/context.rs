@@ -130,6 +130,13 @@ pub async fn assemble_selective(
     if turn_t > space {
         if cfg.oversized_turn_policy == "truncate" {
             turn_text = truncate_to_tokens(&turn_text, space, cpt);
+            // M2 / D-17: if truncation yields an empty turn (space == 0 because
+            // system+profile consumed the entire budget), sending an empty message
+            // is not useful and effectively means the config is broken — treat it
+            // the same as BudgetUnsatisfiable rather than silently sending "".
+            if turn_text.is_empty() {
+                return Err(MemoryError::BudgetUnsatisfiable);
+            }
             notices.push("current turn truncated to fit context budget".to_string());
             recall_space = 0;
         } else {
@@ -220,7 +227,11 @@ fn extract_turn_text(msg: &Message) -> String {
 ///
 /// # Invariant
 /// `estimate_tokens(result, cpt) <= max_tokens` for all non-zero `cpt`.
-fn truncate_to_tokens(text: &str, max_tokens: usize, cpt: f64) -> String {
+///
+/// # Usage outside this module
+/// Used by the distiller (`profile.rs`) to truncate oversized single-memory
+/// batches to the privacy cap before handing them to the LLM judge (M1 / R-02).
+pub(crate) fn truncate_to_tokens(text: &str, max_tokens: usize, cpt: f64) -> String {
     if max_tokens == 0 {
         return String::new();
     }

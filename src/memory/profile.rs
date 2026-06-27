@@ -126,14 +126,32 @@ pub async fn distill(
 
     // CP2-L: privacy cap — apply budget_after_margin with the same safety
     // margin used by the context assembler so the batch never over-shares.
+    // `.max(1)`: distill_max_batch_tokens=0 is tolerated per config docs; treat
+    // it as a 1-token budget so truncation always yields at least one character
+    // rather than silently sending nothing to the judge.
     let batch_budget =
-        budget_after_margin(cfg.distill_max_batch_tokens, 0, cfg.safety_margin_ratio);
+        budget_after_margin(cfg.distill_max_batch_tokens, 0, cfg.safety_margin_ratio).max(1);
     let batch: Vec<Memory> = {
         let mut acc = 0usize;
         let mut v = Vec::new();
         for m in undistilled {
             let t = estimate_tokens(&m.text, cfg.chars_per_token);
-            if acc + t > batch_budget && !v.is_empty() {
+            if acc + t > batch_budget {
+                if v.is_empty() {
+                    // M1 / R-02: the FIRST memory alone exceeds the privacy cap.
+                    // Include a truncated copy so the batch always makes progress
+                    // (CP2-AL), while never sending more than `batch_budget` tokens
+                    // to the LLM judge. Only the copy handed to the judge is
+                    // truncated; the record in the store is unchanged (hard
+                    // supersession still operates on the original embedding).
+                    let mut truncated = m.clone();
+                    truncated.text = crate::memory::context::truncate_to_tokens(
+                        &m.text,
+                        batch_budget,
+                        cfg.chars_per_token,
+                    );
+                    v.push(truncated);
+                }
                 break;
             }
             acc += t;
