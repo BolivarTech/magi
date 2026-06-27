@@ -176,6 +176,21 @@ pub trait VectorStore: Send + Sync {
         model_id: &str,
         dim: usize,
     ) -> Result<(), MemoryError>;
+
+    /// Sets `salience` for the record with `id`, clamped to `[0, 1]` (D-11).
+    ///
+    /// Called by the distiller's off-hot-path salience boost (REQ-35/SC-38):
+    /// after the distiller identifies a durable preference in episodic memory,
+    /// it can lift that memory's salience to the protected tier so that decay
+    /// never evicts it.
+    ///
+    /// A `salience` value outside `[0, 1]` is silently clamped — this is not
+    /// an error, because the caller may compute salience from floating-point
+    /// arithmetic that can drift slightly.
+    ///
+    /// # Errors
+    /// [`MemoryError::Storage`] on SQL failure.
+    async fn set_salience(&self, id: &str, salience: f64) -> Result<(), MemoryError>;
 }
 
 // ─── Free helpers ─────────────────────────────────────────────────────────────
@@ -724,6 +739,19 @@ impl VectorStore for SqliteVectorStore {
             out.push(decode_row(row, &self.vault, &self.derived_key)?);
         }
         Ok(out)
+    }
+
+    async fn set_salience(&self, id: &str, salience: f64) -> Result<(), MemoryError> {
+        // Clamp to [0, 1] before writing; floating-point drift from the caller
+        // must not produce an out-of-range value in the DB.
+        let s = salience.clamp(0.0, 1.0);
+        let c = self.locked_conn();
+        c.execute(
+            "UPDATE memories SET salience = ?2 WHERE id = ?1",
+            params![id, s],
+        )
+        .map_err(|e| MemoryError::Storage(e.to_string()))?;
+        Ok(())
     }
 }
 

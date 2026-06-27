@@ -15,6 +15,7 @@ pub mod decay;
 pub mod embedding;
 pub mod error;
 pub mod index;
+pub mod profile;
 pub mod retrieval;
 pub mod salience;
 pub mod store;
