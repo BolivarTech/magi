@@ -216,11 +216,17 @@ pub trait VectorStore: Send + Sync {
     /// it can lift that memory's salience to the protected tier so that decay
     /// never evicts it.
     ///
-    /// A `salience` value outside `[0, 1]` is silently clamped — this is not
-    /// an error, because the caller may compute salience from floating-point
+    /// A finite `salience` value outside `[0, 1]` is silently clamped — this is
+    /// not an error, because the caller may compute salience from floating-point
     /// arithmetic that can drift slightly.
     ///
+    /// **Non-finite values** (`f64::NAN`, `f64::INFINITY`, `f64::NEG_INFINITY`)
+    /// are rejected before clamping and return `Err(MemoryError::Config(_))` (G3).
+    /// `NAN.clamp(0.0, 1.0)` returns NaN in Rust (NaN comparisons are false), so
+    /// the guard must run **before** clamp, not after.
+    ///
     /// # Errors
+    /// [`MemoryError::Config`] if `salience` is non-finite (G3).
     /// [`MemoryError::Storage`] on SQL failure.
     async fn set_salience(&self, id: &str, salience: f64) -> Result<(), MemoryError>;
 }
@@ -877,6 +883,18 @@ impl VectorStore for SqliteVectorStore {
     }
 
     async fn set_salience(&self, id: &str, salience: f64) -> Result<(), MemoryError> {
+        // Reject non-finite values BEFORE clamping. `NaN.clamp(0.0, 1.0)` in
+        // Rust returns NaN (NaN < min and NaN > max are both false, so clamp
+        // returns self unchanged). A NaN stored in the DB would corrupt salience
+        // comparisons and eviction decisions. `±Inf.clamp(0.0, 1.0)` would be
+        // silently coerced to a valid value (0.0 or 1.0), hiding a caller bug
+        // — also rejected so the contract is explicit (G3).
+        if !salience.is_finite() {
+            return Err(MemoryError::Config(format!(
+                "set_salience: non-finite value is not permitted (got {salience}); \
+                 pass a finite value in [0.0, 1.0] or outside that range to clamp"
+            )));
+        }
         // Clamp to [0, 1] before writing; floating-point drift from the caller
         // must not produce an out-of-range value in the DB.
         let s = salience.clamp(0.0, 1.0);
