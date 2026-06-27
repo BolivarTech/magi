@@ -172,43 +172,6 @@ impl Agent {
         self.history.clear();
     }
 
-    /// Compacts history by summarization; reserved for future use.
-    #[allow(dead_code)]
-    pub async fn compact_history(&mut self) -> Result<()> {
-        if self.history.is_empty() {
-            return Ok(());
-        }
-
-        let summary_prompt = Message::user("Please provide a concise technical summary of our conversation so far, capturing all key context, decisions, and outcomes. This summary will be used to continue our session efficiently.");
-
-        let mut temp_history = self.history.clone();
-        temp_history.push(summary_prompt);
-
-        let response = self.provider.send_messages(&temp_history, &[]).await?;
-
-        self.history.clear();
-        let summary_msg = Message {
-            role: Role::Assistant,
-            content: vec![Content::Text {
-                text: format!(
-                    "CONVERSATION SUMMARY: {}",
-                    match &response.content[0] {
-                        Content::Text { text } => text.clone(),
-                        _ => "Summary extraction failed.".to_string(),
-                    }
-                ),
-            }],
-        };
-        self.history.push(summary_msg.clone());
-
-        // Persist summary if memory is available
-        if let (Some(memory), Some(sid)) = (&self.memory, &self.session_id) {
-            memory.add_message(sid, &summary_msg).await?;
-        }
-
-        Ok(())
-    }
-
     /// Process a user message and returns the final assistant response.
     /// This method supports streaming via a sender channel.
     pub async fn query_streaming(
@@ -407,23 +370,6 @@ mod tests {
             _tools: &[Box<dyn Tool>],
         ) -> Result<Message> {
             Ok(Message::assistant("Summary content."))
-        }
-    }
-
-    #[tokio::test]
-    async fn test_agent_history_compaction() {
-        let mut agent = Agent::new(Arc::new(MockProvider));
-        agent.history.push(Message::user("Msg 1"));
-        agent.history.push(Message::assistant("Resp 1"));
-        assert_eq!(agent.history.len(), 2);
-
-        agent.compact_history().await.unwrap();
-
-        assert_eq!(agent.history.len(), 1);
-        if let Content::Text { text } = &agent.history[0].content[0] {
-            assert!(text.contains("Summary"));
-        } else {
-            panic!("Expected summary");
         }
     }
 

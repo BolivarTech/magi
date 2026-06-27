@@ -10,29 +10,41 @@
 //! present; the system prompt and profile together must fit — otherwise the
 //! config is broken and the call returns `Err(BudgetUnsatisfiable)`.
 
-use crate::agent::messages::Message;
+use crate::agent::messages::{Content, Message};
 use crate::memory::clock::Clock;
 use crate::memory::config::MemoryConfig;
 use crate::memory::embedding::EmbeddingProvider;
 use crate::memory::error::MemoryError;
+use crate::memory::retrieval::recall;
 use crate::memory::store::VectorStore;
+use crate::memory::tokens::{budget_after_margin, estimate_tokens};
 
 // ─── Public types ─────────────────────────────────────────────────────────────
 
 /// Bounded context to send to the provider (produced by [`assemble_selective`]).
 ///
-/// The [`messages`] slice is ready to pass to `Provider::stream_messages` or
-/// `Provider::send_messages`. [`used_tokens`] is always `<= budget_after_margin(…)`.
-/// [`notices`] is non-empty only when a degraded-mode policy fires (e.g. turn
+/// The `messages` field is ready to pass to `Provider::stream_messages` or
+/// `Provider::send_messages`. `used_tokens` is always `<= budget_after_margin(…)`.
+/// `notices` is non-empty only when a degraded-mode policy fires (e.g. turn
 /// truncation under `oversized_turn_policy = "truncate"`).
+///
+/// # Message layout
+///
+/// At most two messages are produced:
+/// 1. `User(preamble)` — system + profile + kept recalls joined by `"\n\n"`.
+///    Omitted if all three are empty strings.
+/// 2. `User(current_turn_text)` — the (possibly truncated) turn.
+///
+/// Both have `Role::User` because the Anthropic Messages API expects the context
+/// injected before the actual user turn to arrive as a prior user turn (the next
+/// Task wires in the interleaving with prior assistant messages from history).
+// Narrow allow: struct fields read by the agent wiring in Task 12; no non-test caller yet.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct AssembledContext {
-    /// Assembled messages: at most `[User(preamble), User(current_turn)]`.
-    ///
-    /// The preamble message combines system, profile, and any kept recalls joined
-    /// by `"\n\n"`. The current-turn message follows it (possibly truncated).
+    /// Assembled messages: `[User(preamble)?, User(current_turn)]`.
     pub messages: Vec<Message>,
-    /// Estimated token count (`<= budget_after_margin(…)` guaranteed).
+    /// Estimated token count (guaranteed `<= budget_after_margin(…)`).
     pub used_tokens: usize,
     /// Diagnostics — non-empty only when a degraded-mode policy fired
     /// (e.g. `"current turn truncated to fit context budget"`).
@@ -50,10 +62,15 @@ pub struct AssembledContext {
 ///    (highest first). Recalls that do not fit are excluded (SC-17).
 /// 4. `current_turn` — always the last message. **Never silently dropped.**
 ///
+/// # Token budget
+/// `budget = budget_after_margin(context_budget_tokens, response_headroom_tokens,
+/// safety_margin_ratio)`. The returned [`AssembledContext::used_tokens`] is always
+/// `<= budget`.
+///
 /// # Oversized current turn (D-17)
 /// If `system + profile` fit but adding the turn would exceed the budget:
 /// - `oversized_turn_policy = "truncate"`: truncates the turn text to fit and
-///   pushes a notice to [`AssembledContext::notices`].
+///   pushes a notice to [`AssembledContext::notices`]. `recall_space` becomes `0`.
 /// - any other value (incl. `"error"`): returns `Err(BudgetUnsatisfiable)`.
 ///
 /// If `system + profile` alone do not fit (broken config) →
@@ -61,44 +78,161 @@ pub struct AssembledContext {
 ///
 /// # Determinism (R-06)
 /// All time-dependent quantities come from the injected [`Clock`]. Token counts
-/// use the deterministic heuristic from [`estimate_tokens`]. Results are fully
-/// determined by the inputs + `cfg.seed`.
+/// use the deterministic heuristic from [`estimate_tokens`] (chars / cpt).
+/// Results are fully determined by the inputs + `cfg.seed`.
 ///
 /// # Errors
 /// - [`MemoryError::BudgetUnsatisfiable`] when the budget is too small to hold
-///   even `system + profile`, or when `oversized_turn_policy = "error"` and the
-///   turn overflows.
+///   even `system + profile`, or when `oversized_turn_policy != "truncate"` and
+///   the turn overflows.
 /// - [`MemoryError::Embedding`] / [`MemoryError::Storage`] /
 ///   [`MemoryError::Crypto`] on retrieval failures.
 // Narrow allow: wired into `query_streaming` in Task 12; no non-test caller yet.
+// The 8-argument signature matches the required stable interface (D-13/B1).
 #[allow(dead_code)]
+#[allow(clippy::too_many_arguments)]
 pub async fn assemble_selective(
-    _store: &dyn VectorStore,
-    _embedder: &dyn EmbeddingProvider,
-    _clock: &dyn Clock,
-    _cfg: &MemoryConfig,
-    _system: &str,
-    _profile: &str,
-    _current_turn: &Message,
-    _scope: &str,
+    store: &dyn VectorStore,
+    embedder: &dyn EmbeddingProvider,
+    clock: &dyn Clock,
+    cfg: &MemoryConfig,
+    system: &str,
+    profile: &str,
+    current_turn: &Message,
+    scope: &str,
 ) -> Result<AssembledContext, MemoryError> {
-    // RED: stub — Green phase implements the full algorithm.
-    Err(MemoryError::Config("not implemented".into()))
+    let cpt = cfg.chars_per_token;
+    let budget = budget_after_margin(
+        cfg.context_budget_tokens,
+        cfg.response_headroom_tokens,
+        cfg.safety_margin_ratio,
+    );
+
+    // Step 1-2: compute token cost of the fixed components.
+    let sys_t = estimate_tokens(system, cpt);
+    let prof_t = estimate_tokens(profile, cpt);
+
+    // Step 3: guard against broken config (system+profile alone don't fit).
+    if sys_t + prof_t > budget {
+        return Err(MemoryError::BudgetUnsatisfiable);
+    }
+
+    // Step 4: space available for turn + recalls.
+    let space = budget - sys_t - prof_t;
+
+    // Step 5: extract and potentially truncate the current turn.
+    let mut turn_text = extract_turn_text(current_turn);
+    let turn_t = estimate_tokens(&turn_text, cpt);
+
+    let mut notices = Vec::new();
+    let recall_space;
+
+    if turn_t > space {
+        if cfg.oversized_turn_policy == "truncate" {
+            turn_text = truncate_to_tokens(&turn_text, space, cpt);
+            notices.push("current turn truncated to fit context budget".to_string());
+            recall_space = 0;
+        } else {
+            return Err(MemoryError::BudgetUnsatisfiable);
+        }
+    } else {
+        recall_space = space - turn_t;
+    }
+
+    // Step 6: retrieve ranked memories and greedily fill the recall budget.
+    let ranked = recall(store, embedder, clock, cfg, &turn_text, budget, scope).await?;
+
+    let mut kept_texts: Vec<String> = Vec::new();
+    let mut recall_tokens_used: usize = 0;
+    let mut recall_space_left = recall_space;
+
+    for rm in &ranked {
+        let t = estimate_tokens(&rm.memory.text, cpt);
+        if t <= recall_space_left {
+            kept_texts.push(rm.memory.text.clone());
+            recall_tokens_used += t;
+            recall_space_left -= t;
+        }
+        // Skip memories that don't fit; continue to see if a shorter one fits.
+    }
+
+    // Step 7: build the preamble from non-empty parts.
+    let mut parts: Vec<&str> = Vec::new();
+    if !system.is_empty() {
+        parts.push(system);
+    }
+    if !profile.is_empty() {
+        parts.push(profile);
+    }
+    for t in &kept_texts {
+        parts.push(t.as_str());
+    }
+    let preamble = parts.join("\n\n");
+
+    let mut messages: Vec<Message> = Vec::new();
+    if !preamble.is_empty() {
+        messages.push(Message::user(&preamble));
+    }
+    messages.push(Message::user(&turn_text));
+
+    // Step 8: account for all tokens; invariant: used_tokens <= budget.
+    let final_turn_t = estimate_tokens(&turn_text, cpt);
+    let used_tokens = sys_t + prof_t + recall_tokens_used + final_turn_t;
+
+    debug_assert!(
+        used_tokens <= budget,
+        "assembler invariant violated: used_tokens={used_tokens} > budget={budget}"
+    );
+
+    Ok(AssembledContext {
+        messages,
+        used_tokens,
+        notices,
+    })
 }
 
-// ─── Private helpers (stubs for RED; implemented in GREEN) ────────────────────
+// ─── Private helpers ──────────────────────────────────────────────────────────
 
-/// Joins all `Content::Text` blocks in `msg` with a space.
-#[allow(dead_code)]
-fn extract_turn_text(_msg: &Message) -> String {
-    String::new()
+/// Joins all `Content::Text` blocks in `msg` with a single space.
+///
+/// Non-text content blocks (ToolUse, ToolResult) are ignored; they carry no
+/// semantic text the assembler should embed or budget against.
+fn extract_turn_text(msg: &Message) -> String {
+    msg.content
+        .iter()
+        .filter_map(|c| {
+            if let Content::Text { text } = c {
+                Some(text.as_str())
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
-/// Truncates `text` so that `estimate_tokens(result, cpt) <= max_tokens`,
-/// respecting UTF-8 scalar boundaries (`char_indices` / `is_char_boundary`).
-#[allow(dead_code)]
-fn truncate_to_tokens(_text: &str, _max_tokens: usize, _cpt: f64) -> String {
-    String::new()
+/// Truncates `text` to the longest char-prefix whose estimated token count
+/// does not exceed `max_tokens` (using heuristic `cpt`).
+///
+/// # UTF-8 safety
+/// Iterates over Unicode scalars via `.chars()` (never byte-splits a multi-byte
+/// character). The result is always valid UTF-8.
+///
+/// # Invariant
+/// `estimate_tokens(result, cpt) <= max_tokens` for all non-zero `cpt`.
+fn truncate_to_tokens(text: &str, max_tokens: usize, cpt: f64) -> String {
+    if max_tokens == 0 {
+        return String::new();
+    }
+    let cpt = if cpt > 0.0 && cpt.is_finite() {
+        cpt
+    } else {
+        1.0
+    };
+    // max_chars is the longest prefix (in Unicode scalars) that stays under budget.
+    // ceil(max_chars / cpt) <= max_tokens  ⟺  max_chars <= max_tokens * cpt.
+    let max_chars = (max_tokens as f64 * cpt).floor() as usize;
+    text.chars().take(max_chars).collect()
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
@@ -315,7 +449,7 @@ mod tests {
         };
         let clock = FixedClock::new(1_000_000);
         // Budget: sys(1t) + profile(2t) + turn(4t) = 7t. With budget=20, recall_space=13t.
-        // Each memory is ~10t, so only 1 can fit. The relevant ones rank above distractors.
+        // Each memory is ~10t, so only 1 can fit. Relevant memories rank above distractors.
         let cfg = MemoryConfig {
             context_budget_tokens: 20,
             response_headroom_tokens: 0,
@@ -358,18 +492,10 @@ mod tests {
             .await;
         }
         let turn = Message::user("context budget");
-        let result = assemble_selective(
-            &store,
-            &emb,
-            &clock,
-            &cfg,
-            "sys",
-            "profile",
-            &turn,
-            "root",
-        )
-        .await
-        .unwrap();
+        let result =
+            assemble_selective(&store, &emb, &clock, &cfg, "sys", "profile", &turn, "root")
+                .await
+                .unwrap();
 
         assert!(
             result.used_tokens <= 20,
@@ -377,7 +503,10 @@ mod tests {
             result.used_tokens
         );
         let preamble = preamble_text(&result);
-        assert!(preamble.contains("profile"), "profile must always be present (SC-17)");
+        assert!(
+            preamble.contains("profile"),
+            "profile must always be present (SC-17)"
+        );
         // The highest-score recall (rel1 or rel2) must appear; distractors must not
         // (only ~13 recall tokens available, rel1 takes 10 → no room for distractors).
         assert!(
@@ -432,14 +561,7 @@ mod tests {
                 .await;
             }
             let result = assemble_selective(
-                &store,
-                &emb,
-                &clock,
-                &cfg,
-                "system",
-                "profile",
-                &turn,
-                "root",
+                &store, &emb, &clock, &cfg, "system", "profile", &turn, "root",
             )
             .await
             .unwrap();
@@ -468,7 +590,7 @@ mod tests {
         };
         let clock = FixedClock::new(1_000_000);
         // sys="sys"(3 chars, ~1t) + profile="profile"(7 chars, 2t) = 3t.
-        // budget=30 → space=27t.  Turn ≈ 352 chars → 101t at cpt=3.5. → must truncate.
+        // budget=30 → space=27t.  Turn ≈ 352 chars → ~101t at cpt=3.5. → must truncate.
         let cfg = MemoryConfig {
             context_budget_tokens: 30,
             response_headroom_tokens: 0,
@@ -480,21 +602,15 @@ mod tests {
         let profile = "profile";
         // ~352-char turn → ~101 tokens at default cpt=3.5.
         let long_turn: String = "abcdefghij ".repeat(32);
-        assert!(long_turn.len() > 100, "turn must be large enough to trigger truncation");
+        assert!(
+            long_turn.len() > 100,
+            "turn must be large enough to trigger truncation"
+        );
         let turn = Message::user(&long_turn);
 
-        let result = assemble_selective(
-            &store,
-            &emb,
-            &clock,
-            &cfg,
-            system,
-            profile,
-            &turn,
-            "root",
-        )
-        .await
-        .unwrap();
+        let result = assemble_selective(&store, &emb, &clock, &cfg, system, profile, &turn, "root")
+            .await
+            .unwrap();
 
         assert!(
             result.used_tokens <= 30,
@@ -542,17 +658,8 @@ mod tests {
         let profile = "User profile data that also adds tokens";
         let turn = Message::user("hello");
 
-        let result = assemble_selective(
-            &store,
-            &emb,
-            &clock,
-            &cfg,
-            system,
-            profile,
-            &turn,
-            "root",
-        )
-        .await;
+        let result =
+            assemble_selective(&store, &emb, &clock, &cfg, system, profile, &turn, "root").await;
 
         assert!(
             matches!(result, Err(MemoryError::BudgetUnsatisfiable)),
