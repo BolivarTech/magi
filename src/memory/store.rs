@@ -1154,7 +1154,11 @@ mod tests {
         let (_t, store) = test_store();
         for i in 0..3u8 {
             store
-                .insert(&sample(&format!("del{i}"), &format!("txt{i}"), vec![0.0; 3]))
+                .insert(&sample(
+                    &format!("del{i}"),
+                    &format!("txt{i}"),
+                    vec![0.0; 3],
+                ))
                 .await
                 .unwrap();
         }
@@ -1162,9 +1166,18 @@ mod tests {
             .hard_delete(&["del0".into(), "del1".into(), "del2".into()])
             .await
             .unwrap();
-        assert!(store.get("del0").await.unwrap().is_none(), "del0 must be gone");
-        assert!(store.get("del1").await.unwrap().is_none(), "del1 must be gone");
-        assert!(store.get("del2").await.unwrap().is_none(), "del2 must be gone");
+        assert!(
+            store.get("del0").await.unwrap().is_none(),
+            "del0 must be gone"
+        );
+        assert!(
+            store.get("del1").await.unwrap().is_none(),
+            "del1 must be gone"
+        );
+        assert!(
+            store.get("del2").await.unwrap().is_none(),
+            "del2 must be gone"
+        );
     }
 
     /// F2: mark_accessed on a batch updates all named ids in one shot.
@@ -1184,7 +1197,10 @@ mod tests {
         for i in 0..3u8 {
             let m = store.get(&format!("acc{i}")).await.unwrap().unwrap();
             assert_eq!(m.access_count, 1, "F2: acc{i} access_count must be 1");
-            assert_eq!(m.last_accessed_at, 5000, "F2: acc{i} last_accessed_at must be 5000");
+            assert_eq!(
+                m.last_accessed_at, 5000,
+                "F2: acc{i} last_accessed_at must be 5000"
+            );
         }
     }
 
