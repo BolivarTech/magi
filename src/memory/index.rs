@@ -40,6 +40,17 @@ use std::cmp::Ordering;
 /// `k`, and `seed` on every call. Tie-breaking by ascending `id_index` is
 /// **required** to ensure determinism when cosine scores are equal.
 ///
+/// **Determinism scope:** The determinism guarantee stated above holds fully
+/// for the **default** path ([`BruteForceIndex`]), which is exact and
+/// reproducible by construction. The opt-in ANN path (`InstantDistanceIndex`,
+/// `--features ann`) preserves determinism only for datasets small enough that
+/// HNSW construction is single-threaded (≤ ~160 points with default HNSW
+/// parameters, M=32, ml≈0.2). For larger datasets, rayon-parallel layer
+/// construction introduces non-determinism regardless of the seed. Callers
+/// requiring strict reproducibility for large corpora **must** use the default
+/// exact index; ANN is an opt-in acceleration whose per-deployment determinism
+/// must be validated via `test_ann_identical_rebuilds_are_byte_stable`.
+///
 /// # Safety
 /// Both `build` and `search` must never panic. Dimension mismatches between
 /// the index vectors and the query are handled by returning 0.0 similarity
@@ -148,6 +159,24 @@ impl VectorIndex for BruteForceIndex {
 /// similarity), keeping the HNSW metric consistent with the reranker.
 /// Final results are re-scored with the exact [`cosine`] function so scores are
 /// directly comparable with [`BruteForceIndex`] output.
+///
+/// # Determinism caveat (J4 / R-06)
+///
+/// **The full R-06 determinism guarantee applies only to the default
+/// [`BruteForceIndex`] path.** This index provides a *best-effort* guarantee:
+///
+/// - For datasets with **≤ ~160 points** (the single-level HNSW threshold at
+///   M=32, ml≈0.2) construction is single-threaded and bitwise-reproducible
+///   across builds with the same seed and data, as verified by
+///   `test_ann_identical_rebuilds_are_byte_stable`.
+/// - For **larger datasets**, rayon parallelises lower-layer insertions; thread
+///   interleaving is implementation-defined and the build is NOT guaranteed to
+///   be bitwise-identical across runs, even with the same seed.
+///
+/// Operators using `--features ann` on large corpora should treat result
+/// ordering as approximately stable rather than strictly reproducible. When
+/// strict reproducibility is required (e.g. benchmark comparison), use the
+/// default `exact` index (`memory.index = "exact"` in `magi.toml`).
 #[cfg(feature = "ann")]
 pub struct InstantDistanceIndex {
     hnsw: instant_distance::Hnsw<VecPoint>,
