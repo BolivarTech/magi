@@ -490,10 +490,10 @@ impl SqliteVectorStore {
             .map_err(|e| MemoryError::Storage(e.to_string()))?;
 
         Ok(MemoryDiagnostics {
-            active_count: active_count as usize,
-            archived_count: archived_count as usize,
-            pending_reembed_count: pending_reembed_count as usize,
-            ram_estimate_bytes: ram_estimate_bytes as usize,
+            active_count: usize::try_from(active_count).unwrap_or(usize::MAX),
+            archived_count: usize::try_from(archived_count).unwrap_or(usize::MAX),
+            pending_reembed_count: usize::try_from(pending_reembed_count).unwrap_or(usize::MAX),
+            ram_estimate_bytes: usize::try_from(ram_estimate_bytes).unwrap_or(usize::MAX),
         })
     }
 
@@ -736,7 +736,9 @@ impl VectorStore for SqliteVectorStore {
         for id in ids {
             c.execute(
                 "UPDATE memories \
-                 SET access_count = access_count + 1, last_accessed_at = ?2 \
+                 SET access_count = CASE WHEN access_count < 9223372036854775807 \
+                     THEN access_count + 1 ELSE access_count END, \
+                     last_accessed_at = ?2 \
                  WHERE id = ?1",
                 params![id, now],
             )
@@ -803,14 +805,20 @@ impl VectorStore for SqliteVectorStore {
 
         // Hold the lock only for the SQL UPDATE.
         let c = self.locked_conn();
-        c.execute(
-            "UPDATE memories \
-             SET embedding_blob = ?2, model_id = ?3, dim = ?4 \
-             WHERE id = ?1",
-            params![id, embedding_blob, model_id, dim as i64],
-        )
-        .map_err(|e| MemoryError::Storage(e.to_string()))?;
+        let affected = c
+            .execute(
+                "UPDATE memories \
+                 SET embedding_blob = ?2, model_id = ?3, dim = ?4 \
+                 WHERE id = ?1",
+                params![id, embedding_blob, model_id, dim as i64],
+            )
+            .map_err(|e| MemoryError::Storage(e.to_string()))?;
 
+        if affected == 0 {
+            return Err(MemoryError::Storage(format!(
+                "update_embedding: id not found: {id}"
+            )));
+        }
         Ok(())
     }
 
