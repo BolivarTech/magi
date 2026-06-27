@@ -162,13 +162,19 @@ pub async fn recall(
         // Default (no-ann) path: always brute force.
         #[cfg(not(feature = "ann"))]
         {
-            // C3: warn when the user configured ANN but the feature is not compiled in.
+            // C3 / J3: warn once per process when the user configured ANN but the feature
+            // is not compiled in. Without the AtomicBool gate this would fire on every
+            // `recall` call, flooding stderr in production.
             if cfg.index == "ann" {
-                eprintln!(
-                    "WARN [magi-rs]: index=\"ann\" is set but this binary was compiled \
-                     without the `ann` feature; falling back to brute-force exact search. \
-                     Recompile with `--features ann` to enable HNSW."
-                );
+                use std::sync::atomic::{AtomicBool, Ordering};
+                static WARNED: AtomicBool = AtomicBool::new(false);
+                if !WARNED.swap(true, Ordering::Relaxed) {
+                    eprintln!(
+                        "WARN [magi-rs]: index=\"ann\" is set but this binary was compiled \
+                         without the `ann` feature; falling back to brute-force exact search. \
+                         Recompile with `--features ann` to enable HNSW."
+                    );
+                }
             }
             BruteForceIndex::build(&points, cfg.seed).search(&qv, cfg.top_k)
         }
