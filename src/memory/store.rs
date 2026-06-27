@@ -503,6 +503,7 @@ impl VectorStore for SqliteVectorStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::messages::Message;
     use crate::system::database::EncryptedSqliteMemory;
 
     /// Creates a temp-file-backed `SqliteVectorStore` sharing the connection
@@ -597,5 +598,64 @@ mod tests {
             store.get("a").await.unwrap().unwrap().access_count,
             i64::MAX as u64
         );
+    }
+
+    /// SC-08: migration imports prior turns without loss and marks for lazy embed.
+    #[tokio::test]
+    async fn test_migration_imports_prior_turns_without_loss_and_marks_for_lazy_embed() {
+        let (_t, store) = test_store();
+        let prior = vec![
+            ("s1".to_string(), Message::user("old fact one")),
+            ("s1".to_string(), Message::assistant("ack")),
+        ];
+        let n = store.migrate_from_messages(&prior, 1000).await.unwrap();
+        assert_eq!(n, 2);
+        let active = store.active("root").await.unwrap();
+        assert_eq!(active.len(), 2);
+        assert!(active.iter().all(|m| m.embedding.is_empty() && m.model_id.is_empty()));
+        assert!(active.iter().all(|m| matches!(m.kind, crate::memory::MemoryKind::Episodic)));
+        assert!(active.iter().all(|m| m.scope == "root"));
+    }
+
+    /// CP2-F: re-running (and overlapping batches) imports no duplicates.
+    #[tokio::test]
+    async fn test_migration_is_idempotent_across_reruns_and_batches() {
+        let (_t, store) = test_store();
+        let prior = vec![("s1".to_string(), Message::user("fact"))];
+        assert_eq!(store.migrate_from_messages(&prior, 1000).await.unwrap(), 1);
+        assert_eq!(store.migrate_from_messages(&prior, 1000).await.unwrap(), 0); // already present
+        assert_eq!(store.active("root").await.unwrap().len(), 1);
+    }
+
+    /// CP2-V: a mid-batch error rolls the whole batch back (nothing imported).
+    #[tokio::test]
+    async fn test_migration_is_atomic_on_failure() {
+        let (_t, store) = test_store();
+        // Second turn's text exceeds the crypto plaintext cap (50 MiB) ⇒ encrypt fails fast
+        // (the cap is checked before any large allocation), aborting the transaction.
+        let huge = "x".repeat(50 * 1024 * 1024 + 1);
+        let batch = vec![
+            ("s1".to_string(), Message::user("ok")),
+            ("s1".to_string(), Message::user(&huge)),
+        ];
+        assert!(store.migrate_from_messages(&batch, 1000).await.is_err());
+        assert!(
+            store.active("root").await.unwrap().is_empty(),
+            "rollback ⇒ nothing imported"
+        );
+    }
+
+    /// CP2-F volume: a 1000-turn batch imports fully.
+    #[tokio::test]
+    async fn test_migration_imports_large_batch() {
+        let (_t, store) = test_store();
+        let prior: Vec<_> = (0..1000)
+            .map(|i| ("s1".to_string(), Message::user(&format!("fact {i}"))))
+            .collect();
+        assert_eq!(
+            store.migrate_from_messages(&prior, 1000).await.unwrap(),
+            1000
+        );
+        assert_eq!(store.active("root").await.unwrap().len(), 1000);
     }
 }
