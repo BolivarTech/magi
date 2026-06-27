@@ -130,29 +130,41 @@ impl MemoryConfig {
     /// # Errors
     /// Returns `Err(MemoryError::Config(_))` on the first invalid field found.
     pub fn validate(&self) -> Result<(), MemoryError> {
-        if self.decay_half_life_days <= 0.0 {
+        // ── f64 range checks: always reject non-finite values first, then range ──
+        //
+        // NaN comparison semantics: `NaN <= 0.0` and `NaN > 1.0` are BOTH false,
+        // so a plain `<= 0.0` guard silently accepts NaN. The `!x.is_finite()`
+        // pre-check catches NaN and ±Inf before the range expression runs (F3).
+
+        if !self.decay_half_life_days.is_finite() || self.decay_half_life_days <= 0.0 {
             return Err(MemoryError::Config(format!(
-                "decay_half_life_days must be > 0.0, got {}",
+                "decay_half_life_days must be a finite value > 0.0, got {}",
                 self.decay_half_life_days
             )));
         }
-        if self.chars_per_token <= 0.0 {
+        if !self.chars_per_token.is_finite() || self.chars_per_token <= 0.0 {
             return Err(MemoryError::Config(format!(
-                "chars_per_token must be > 0.0, got {}",
+                "chars_per_token must be a finite value > 0.0, got {}",
                 self.chars_per_token
             )));
         }
-        if self.protect_salience_threshold <= 0.0 || self.protect_salience_threshold > 1.0 {
+        if !self.protect_salience_threshold.is_finite()
+            || self.protect_salience_threshold <= 0.0
+            || self.protect_salience_threshold > 1.0
+        {
             return Err(MemoryError::Config(format!(
-                "protect_salience_threshold must be in (0.0, 1.0], got {}",
+                "protect_salience_threshold must be a finite value in (0.0, 1.0], got {}",
                 self.protect_salience_threshold
             )));
         }
         // safety_margin_ratio must be in [0.0, 1.0): a value ≥ 1.0 would reduce the
         // usable budget to 0 or negative, making the context assembler degenerate.
-        if self.safety_margin_ratio < 0.0 || self.safety_margin_ratio >= 1.0 {
+        if !self.safety_margin_ratio.is_finite()
+            || self.safety_margin_ratio < 0.0
+            || self.safety_margin_ratio >= 1.0
+        {
             return Err(MemoryError::Config(format!(
-                "safety_margin_ratio must be in [0.0, 1.0), got {}",
+                "safety_margin_ratio must be a finite value in [0.0, 1.0), got {}",
                 self.safety_margin_ratio
             )));
         }
@@ -164,11 +176,18 @@ impl MemoryConfig {
         if self.top_k == 0 {
             return Err(MemoryError::Config("top_k must be > 0".into()));
         }
-        // Individual weight negativity check before sum check so the error message
-        // names the specific offending weight.
-        if self.weight_similarity < 0.0 || self.weight_recency < 0.0 || self.weight_salience < 0.0 {
+        // Individual weight non-finite + negativity check before sum check so the
+        // error message names the specific offending weight (NaN/Inf pre-checked).
+        if !self.weight_similarity.is_finite()
+            || !self.weight_recency.is_finite()
+            || !self.weight_salience.is_finite()
+            || self.weight_similarity < 0.0
+            || self.weight_recency < 0.0
+            || self.weight_salience < 0.0
+        {
             return Err(MemoryError::Config(format!(
-                "reranker weights must be >= 0.0; got similarity={}, recency={}, salience={}",
+                "reranker weights must be finite and >= 0.0; \
+                 got similarity={}, recency={}, salience={}",
                 self.weight_similarity, self.weight_recency, self.weight_salience
             )));
         }
@@ -179,6 +198,40 @@ impl MemoryConfig {
                 "reranker weights must not all be zero (sum must be > 0.0)".into(),
             ));
         }
+
+        // ── string-enum validation (F3) ───────────────────────────────────────
+        //
+        // Typos in magi.toml are caught at parse time by `deny_unknown_fields`;
+        // these checks catch semantically invalid *values* for known fields.
+
+        match self.mode.as_str() {
+            "selective" | "load_all" => {}
+            other => {
+                return Err(MemoryError::Config(format!(
+                    "memory.mode must be \"selective\" or \"load_all\", got {:?}",
+                    other
+                )));
+            }
+        }
+        match self.oversized_turn_policy.as_str() {
+            "truncate" | "error" => {}
+            other => {
+                return Err(MemoryError::Config(format!(
+                    "memory.oversized_turn_policy must be \"truncate\" or \"error\", got {:?}",
+                    other
+                )));
+            }
+        }
+        match self.index.as_str() {
+            "exact" | "ann" => {}
+            other => {
+                return Err(MemoryError::Config(format!(
+                    "memory.index must be \"exact\" or \"ann\", got {:?}",
+                    other
+                )));
+            }
+        }
+
         Ok(())
     }
 }
