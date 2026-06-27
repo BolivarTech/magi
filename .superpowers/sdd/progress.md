@@ -17,3 +17,6 @@ Mode: serial + TDD-Guard ON. Per-phase commits (§5). Base commit: 205a5e6.
 - === PHASE MVP (T1-T7 + Clock) COMPLETE ===
 - Task 8b (decay split): COMPLETE (commits 48e8e58 test / a66f8d7 feat — SEPARATE per-phase; 231 green; strength() pure normalized [0,1], clock-driven, bounded reinforcement)
 - Task 9: COMPLETE (commits 7edd30f test / 45eb388 feat — SEPARATE; 239 green; run_forgetting+enforce_size_cap(CP2-Y)+purge+archived; protection, clock-jump cap, soft-supersession via T7 recency)
+- Task 10: COMPLETE (commits 137b00b test / a306380 feat — SEPARATE; 243 green; pure token heuristic estimate_tokens+budget_after_margin)
+- Task 11: COMPLETE (commits 1f85815 test / a1aaf95 feat — SEPARATE; 247 green; assemble_selective + AssembledContext; compact_history+test removed, clear_history kept)
+- Task 12: COMPLETE (commits 8d003a0 test / a07b301 feat / 2d3ea5a refactor — SEPARATE; 251 green; ACTIVATION: write-path + selective assembler in query_streaming, main.rs wires subsystem; load_all byte-identical)

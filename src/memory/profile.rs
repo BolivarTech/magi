@@ -32,7 +32,7 @@ use crate::memory::MemoryKind;
 /// tests (R-06).
 ///
 /// The real LLM-backed implementation (Task 13b) is injected at the call site;
-/// tests use a [`SpyJudge`](tests::SpyJudge) that records calls and returns
+/// tests use a `SpyJudge` (defined in `tests`) that records calls and returns
 /// canned values.
 ///
 /// Both methods may be called with an empty `episodic` slice or empty strings
@@ -50,10 +50,7 @@ pub trait DistillJudge: Send + Sync {
     /// [`MemoryError`] on any LLM failure. A failure here is **non-fatal**
     /// (CP2-Z): [`distill`] catches it, logs it, and leaves the batch
     /// undistilled so the next pass can retry it.
-    async fn summarize_preferences(
-        &self,
-        episodic: &[Memory],
-    ) -> Result<Vec<String>, MemoryError>;
+    async fn summarize_preferences(&self, episodic: &[Memory]) -> Result<Vec<String>, MemoryError>;
 
     /// Returns `true` when memory `b` contradicts or supersedes memory `a`
     /// about the same subject.
@@ -87,7 +84,7 @@ pub trait DistillJudge: Send + Sync {
 ///    protected tier — D-11/SC-38).
 /// 2. **Hard supersession** (D-12) — among batch members that have embeddings
 ///    from the current `embedder`, for pairs with cosine similarity ≥
-///    `supersede_similarity_threshold`, ask the judge [`contradicts`]; mark the
+///    `supersede_similarity_threshold`, ask the judge [`DistillJudge::contradicts`]; mark the
 ///    older `superseded_by` the newer. Capped at
 ///    `supersede_max_candidate_pairs` (CP2-U). Preferences use latest-wins
 ///    deterministically — no LLM needed.
@@ -102,14 +99,139 @@ pub trait DistillJudge: Send + Sync {
 // Narrow allow: wired into the agent in Task 13b.
 #[allow(dead_code)]
 pub async fn distill(
-    _store: &dyn VectorStore,
-    _judge: &dyn DistillJudge,
-    _embedder: &dyn EmbeddingProvider,
-    _clock: &dyn Clock,
-    _cfg: &MemoryConfig,
-    _scope: &str,
+    store: &dyn VectorStore,
+    judge: &dyn DistillJudge,
+    embedder: &dyn EmbeddingProvider,
+    clock: &dyn Clock,
+    cfg: &MemoryConfig,
+    scope: &str,
 ) -> Result<(), MemoryError> {
-    unimplemented!("Task 13a GREEN: distill not yet implemented")
+    // CP2-AB: master switch — zero judge calls, zero egress when disabled.
+    if !cfg.distill_enabled {
+        return Ok(());
+    }
+
+    // ── Step 1: build the batch ──────────────────────────────────────────────
+    // Fetch all active episodic memories that haven't been distilled yet.
+    let all_active = store.active(scope).await?;
+    let undistilled: Vec<Memory> = {
+        let mut v: Vec<Memory> = all_active
+            .into_iter()
+            .filter(|m| m.kind == MemoryKind::Episodic && m.distilled_at.is_none())
+            .collect();
+        // Deterministic FIFO order: created_at asc, id asc (R-06).
+        v.sort_by(|a, b| a.created_at.cmp(&b.created_at).then(a.id.cmp(&b.id)));
+        v
+    };
+
+    if undistilled.is_empty() {
+        return Ok(());
+    }
+
+    // CP2-L: privacy cap — apply budget_after_margin with the same safety
+    // margin used by the context assembler so the batch never over-shares.
+    let batch_budget =
+        budget_after_margin(cfg.distill_max_batch_tokens, 0, cfg.safety_margin_ratio);
+    let batch: Vec<Memory> = {
+        let mut acc = 0usize;
+        let mut v = Vec::new();
+        for m in undistilled {
+            let t = estimate_tokens(&m.text, cfg.chars_per_token);
+            if acc + t > batch_budget && !v.is_empty() {
+                break;
+            }
+            acc += t;
+            v.push(m);
+        }
+        v
+    };
+
+    let batch_ids: Vec<String> = batch.iter().map(|m| m.id.clone()).collect();
+    let now = clock.now();
+
+    // ── Step 2: summarize preferences ───────────────────────────────────────
+    // CP2-Z: a judge failure here is non-fatal.  We do NOT mark distilled_at
+    // so the next pass can retry the same batch.
+    let prefs = match judge.summarize_preferences(&batch).await {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("[distill] summarize_preferences error (retrying next pass): {e}");
+            return Ok(());
+        }
+    };
+
+    for pref in &prefs {
+        // Promote each preference; ignore per-item errors (SC-38 still advances).
+        if let Err(e) = promote_to_profile(store, clock, cfg, scope, pref).await {
+            eprintln!("[distill] promote_to_profile error (skipping): {e}");
+        }
+    }
+
+    // ── Step 3: hard supersession (D-12) ────────────────────────────────────
+    // Only consider batch members embedded with the *current* embedder (D-06):
+    // mixing dimensions produces meaningless cosine values.
+    let current_model = embedder.model_id();
+    let current_dim = embedder.dim();
+
+    // Skip supersession when the embedder is in autodetect mode (dim == 0).
+    if current_dim > 0 {
+        let embedded: Vec<&Memory> = batch
+            .iter()
+            .filter(|m| m.model_id == current_model && m.dim == current_dim)
+            .collect();
+
+        let mut judge_calls = 0usize;
+        'outer: for i in 0..embedded.len() {
+            for j in (i + 1)..embedded.len() {
+                if judge_calls >= cfg.supersede_max_candidate_pairs {
+                    break 'outer;
+                }
+
+                let ma = embedded[i];
+                let mb = embedded[j];
+                let sim = cosine(&ma.embedding, &mb.embedding);
+                if (sim as f64) < cfg.supersede_similarity_threshold {
+                    continue;
+                }
+
+                // Determine older / newer by created_at (then id for ties).
+                let (older, newer) = if (ma.created_at, &ma.id) < (mb.created_at, &mb.id) {
+                    (ma, mb)
+                } else {
+                    (mb, ma)
+                };
+
+                // Preferences: latest-wins deterministically — no LLM call needed.
+                let is_contradiction = if older.kind == MemoryKind::Preference
+                    || newer.kind == MemoryKind::Preference
+                {
+                    judge_calls += 1;
+                    true
+                } else {
+                    // Non-preference: ask the judge (CP2-Z: failure is non-fatal).
+                    judge_calls += 1;
+                    match judge.contradicts(&older.text, &newer.text).await {
+                        Ok(v) => v,
+                        Err(e) => {
+                            eprintln!("[distill] contradicts error (skipping pair): {e}");
+                            continue;
+                        }
+                    }
+                };
+
+                if is_contradiction {
+                    if let Err(e) = store.set_superseded(&older.id, &newer.id).await {
+                        eprintln!("[distill] set_superseded error (skipping): {e}");
+                    }
+                }
+            }
+        }
+    }
+
+    // ── Step 4: mark the batch as distilled ─────────────────────────────────
+    store.set_distilled(&batch_ids, now).await?;
+
+    Ok(())
 }
 
 /// Renders the always-injected preference profile (REQ-16/SC-22).
@@ -126,11 +248,50 @@ pub async fn distill(
 // Narrow allow: wired into the context assembler / agent in Task 13b.
 #[allow(dead_code)]
 pub async fn render_profile(
-    _store: &dyn VectorStore,
-    _cfg: &MemoryConfig,
-    _scope: &str,
+    store: &dyn VectorStore,
+    cfg: &MemoryConfig,
+    scope: &str,
 ) -> Result<String, MemoryError> {
-    unimplemented!("Task 13a GREEN: render_profile not yet implemented")
+    let active = store.active(scope).await?;
+
+    // Collect only Preference-kind memories.
+    let mut prefs: Vec<Memory> = active
+        .into_iter()
+        .filter(|m| m.kind == MemoryKind::Preference)
+        .collect();
+
+    if prefs.is_empty() {
+        return Ok(String::new());
+    }
+
+    // Sort: highest salience first, then newest first, then id ascending for
+    // full determinism (R-06).
+    prefs.sort_by(|a, b| {
+        b.salience
+            .partial_cmp(&a.salience)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(b.created_at.cmp(&a.created_at))
+            .then(a.id.cmp(&b.id))
+    });
+
+    // Emit a bullet list bounded by profile_max_tokens.
+    // Entries are never split mid-line (CP2-AI).
+    let mut out = String::new();
+    let budget = cfg.profile_max_tokens;
+    let mut used = 0usize;
+
+    for m in &prefs {
+        let line = format!("- {}\n", m.text);
+        let cost = estimate_tokens(&line, cfg.chars_per_token);
+        if used + cost > budget && used > 0 {
+            // Never truncate mid-entry; stop here (CP2-AI).
+            break;
+        }
+        used += cost;
+        out.push_str(&line);
+    }
+
+    Ok(out)
 }
 
 // ─── Internal reusable primitive ─────────────────────────────────────────────
@@ -156,17 +317,56 @@ pub async fn render_profile(
 /// # Errors
 /// [`MemoryError::Storage`] on SQL failure; [`MemoryError::Crypto`] if text
 /// encryption fails.
-// Narrow allow: called by distill (this module) and future AS-REQ-10 consumers;
-// not a public API.
+// Narrow allow: called by distill (this module) and future AS-REQ-10 consumers.
 #[allow(dead_code)]
 async fn promote_to_profile(
-    _store: &dyn VectorStore,
-    _clock: &dyn Clock,
-    _cfg: &MemoryConfig,
-    _scope: &str,
-    _pref: &str,
+    store: &dyn VectorStore,
+    clock: &dyn Clock,
+    cfg: &MemoryConfig,
+    scope: &str,
+    pref: &str,
 ) -> Result<(), MemoryError> {
-    unimplemented!("Task 13a GREEN: promote_to_profile not yet implemented")
+    // Normalize: lowercase + trim.
+    let normalized = pref.to_lowercase();
+    let normalized = normalized.trim();
+
+    // Skip empty strings silently.
+    if normalized.is_empty() {
+        return Ok(());
+    }
+
+    // Deterministic id from the normalized text (D-15 / latest-wins upsert).
+    let id = format!("pref:{:x}", Sha256::digest(normalized.as_bytes()));
+
+    // Latest-wins: remove any existing record with this id before inserting the
+    // newer one (VectorStore::insert fails on duplicate PK; no upsert surface).
+    if store.get(&id).await?.is_some() {
+        store.hard_delete(std::slice::from_ref(&id)).await?;
+    }
+
+    let now = clock.now();
+    let salience = cfg.preference_salience.clamp(0.0, 1.0);
+
+    let memory = Memory {
+        id,
+        session_id: "profile".to_string(),
+        kind: MemoryKind::Preference,
+        text: pref.to_string(),
+        // Embedding left empty for lazy population (SC-08/CP2-C).
+        embedding: vec![],
+        model_id: String::new(),
+        dim: 0,
+        created_at: now,
+        salience,
+        access_count: 0,
+        last_accessed_at: now,
+        superseded_by: None,
+        evicted_at: None,
+        scope: scope.to_string(),
+        distilled_at: None,
+    };
+
+    store.insert(&memory).await
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
@@ -276,9 +476,7 @@ mod tests {
         async fn contradicts(&self, _a: &str, _b: &str) -> Result<bool, MemoryError> {
             *self.contradicts_calls.lock().unwrap() += 1;
             if self.fail_contradicts {
-                Err(MemoryError::Storage(
-                    "spy: contradicts forced error".into(),
-                ))
+                Err(MemoryError::Storage("spy: contradicts forced error".into()))
             } else {
                 Ok(self.contradicts_val)
             }
@@ -363,8 +561,12 @@ mod tests {
         insert_episodic(&store, "e1", "some text", vec![], "", 0, 1_000).await;
 
         // Judge returns the same preference string twice → single deduped entry.
-        let (spy, _, _) =
-            make_spy(vec!["Use Rust".into(), "Use Rust".into()], false, false, false);
+        let (spy, _, _) = make_spy(
+            vec!["Use Rust".into(), "Use Rust".into()],
+            false,
+            false,
+            false,
+        );
 
         distill(&store, &spy, &emb, &clock, &cfg, "root")
             .await
