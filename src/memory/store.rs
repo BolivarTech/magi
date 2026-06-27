@@ -388,6 +388,13 @@ pub struct SqliteVectorStore {
     derived_key: Zeroizing<Vec<u8>>,
 }
 
+/// `i64::MAX` as a decimal literal for embedding in raw SQL strings.
+///
+/// SQLite does not accept Rust integer constants inline, so the value must be
+/// a decimal literal. Using this const as the source of truth ensures the SQL
+/// guard in `mark_accessed` and the Rust saturation logic remain in sync.
+const I64_MAX_SQL: i64 = i64::MAX;
+
 impl SqliteVectorStore {
     /// Builds a `SqliteVectorStore` sharing `conn` and `derived_key` with an
     /// existing `EncryptedSqliteMemory`.
@@ -761,16 +768,18 @@ impl VectorStore for SqliteVectorStore {
         let tx = c
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|e| MemoryError::Storage(e.to_string()))?;
+        // Build the SQL once; the guard uses I64_MAX_SQL so the decimal literal
+        // stays in sync with the Rust saturation check (i64::try_from + unwrap_or).
+        let sql = format!(
+            "UPDATE memories \
+             SET access_count = CASE WHEN access_count < {I64_MAX_SQL} \
+                 THEN access_count + 1 ELSE access_count END, \
+                 last_accessed_at = ?2 \
+             WHERE id = ?1"
+        );
         for id in ids {
-            tx.execute(
-                "UPDATE memories \
-                 SET access_count = CASE WHEN access_count < 9223372036854775807 \
-                     THEN access_count + 1 ELSE access_count END, \
-                     last_accessed_at = ?2 \
-                 WHERE id = ?1",
-                params![id, now],
-            )
-            .map_err(|e| MemoryError::Storage(e.to_string()))?;
+            tx.execute(&sql, params![id, now])
+                .map_err(|e| MemoryError::Storage(e.to_string()))?;
         }
         tx.commit()
             .map_err(|e| MemoryError::Storage(e.to_string()))?;
