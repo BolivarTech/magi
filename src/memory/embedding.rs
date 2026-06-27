@@ -198,13 +198,17 @@ impl OpenAiCompatibleEmbedder {
             }
         }
 
-        let response = builder.send().await.map_err(|_| {
-            // All network-level failures (connect refused, DNS, timeout, request
-            // build errors) map to Timeout.  The error detail is intentionally
-            // discarded here to guarantee the API key can never leak via the
-            // error path (the key is only in the Authorization header, but
-            // future-proofing justifies the discard).
-            EmbeddingError::Timeout
+        let response = builder.send().await.map_err(|e| {
+            // The error detail (not the error *kind*) is discarded to guarantee
+            // the API key can never leak via the error path.  The key is only in
+            // the Authorization header which reqwest never surfaces in errors, but
+            // future-proofing justifies the discard.
+            if e.is_timeout() {
+                EmbeddingError::Timeout
+            } else {
+                // Covers: connection refused, DNS, TLS, request build failures.
+                EmbeddingError::Network
+            }
         })?;
 
         let status = response.status();

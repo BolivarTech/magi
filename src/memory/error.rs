@@ -40,6 +40,11 @@ pub enum EmbeddingError {
     #[error("embedding endpoint timed out")]
     Timeout,
 
+    /// A network-level failure that is not a timeout (e.g. connection refused,
+    /// DNS resolution failure, TLS handshake error).
+    #[error("embedding network error")]
+    Network,
+
     /// The endpoint returned a response that could not be decoded as expected.
     #[error("malformed embedding response: {0}")]
     Malformed(String),
