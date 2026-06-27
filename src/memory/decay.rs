@@ -15,6 +15,7 @@ use crate::memory::clock::Clock;
 use crate::memory::config::MemoryConfig;
 use crate::memory::error::MemoryError;
 use crate::memory::store::{Memory, VectorStore};
+use crate::memory::MemoryKind;
 
 // ─── strength ─────────────────────────────────────────────────────────────────
 
@@ -73,6 +74,43 @@ pub fn strength(m: &Memory, now: i64, cfg: &MemoryConfig) -> f64 {
     (w_rec * recency + reinforcement + w_sal * salience) / divisor
 }
 
+// ─── Private helpers ──────────────────────────────────────────────────────────
+
+/// Returns `true` if `m` must not be decay-evicted.
+///
+/// A memory is **protected** iff it is a durable preference (`kind ==
+/// Preference`) OR its salience meets the protection threshold
+/// (`salience >= cfg.protect_salience_threshold`).
+///
+/// Protected memories are excluded from [`run_forgetting`]'s eviction loop
+/// and are only removed by [`enforce_size_cap`] as a last resort (CP2-Y).
+fn is_protected(m: &Memory, cfg: &MemoryConfig) -> bool {
+    m.kind == MemoryKind::Preference || m.salience >= cfg.protect_salience_threshold
+}
+
+/// Applies the D-07 eviction action for a single memory `id`.
+///
+/// - `evicted_retention_days == 0` → hard-delete immediately.
+/// - `-1` or `N > 0` → archive via `set_evicted(id, Some(now))`.
+///   For `N > 0`, [`purge_expired_archives`] performs the deferred hard-delete
+///   once the retention window elapses.
+///
+/// # Errors
+/// [`MemoryError::Storage`] on any SQLite failure.
+async fn apply_eviction(
+    store: &dyn VectorStore,
+    id: &str,
+    now: i64,
+    cfg: &MemoryConfig,
+) -> Result<(), MemoryError> {
+    if cfg.evicted_retention_days == 0 {
+        store.hard_delete(&[id.to_string()]).await
+    } else {
+        // -1 (archive forever) or N>0 (archive; purge_expired_archives cleans up later).
+        store.set_evicted(id, Some(now)).await
+    }
+}
+
 // ─── run_forgetting ───────────────────────────────────────────────────────────
 
 /// Evicts active, NON-protected memories whose `strength < cfg.forget_strength_threshold`,
@@ -81,6 +119,15 @@ pub fn strength(m: &Memory, now: i64, cfg: &MemoryConfig) -> f64 {
 ///
 /// # Scope
 /// Only memories in `scope` are considered; typically `"root"`.
+///
+/// # Protection rule (REQ-09, REQ-35)
+/// Memories where `kind == Preference` or `salience >= protect_salience_threshold`
+/// are **never** evicted by this function. Use [`enforce_size_cap`] to handle
+/// the hard-ceiling last-resort case (CP2-Y).
+///
+/// # Clock-jump guard (CP2-AD)
+/// The per-pass cap (`max_evictions_per_pass`) prevents a large backward/forward
+/// clock jump from mass-evicting healthy memories in a single run.
 ///
 /// # Errors
 /// [`MemoryError::Storage`] or [`MemoryError::Crypto`] on store failures.
@@ -92,8 +139,34 @@ pub async fn run_forgetting(
     cfg: &MemoryConfig,
     scope: &str,
 ) -> Result<usize, MemoryError> {
-    let _ = (store, clock, cfg, scope);
-    Ok(0) // STUB — Red phase
+    let now = clock.now();
+    let active = store.active(scope).await?;
+
+    // Collect non-protected candidates below the threshold.
+    let mut candidates: Vec<(String, f64)> = active
+        .iter()
+        .filter(|m| !is_protected(m, cfg))
+        .filter_map(|m| {
+            let s = strength(m, now, cfg);
+            if s < cfg.forget_strength_threshold {
+                Some((m.id.clone(), s))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    // Sort ascending by strength — weakest evicted first.
+    candidates.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+
+    // CP2-AD: cap per-pass evictions to guard against mass-eviction on a clock jump.
+    let mut count = 0usize;
+    for (id, _) in candidates.iter().take(cfg.max_evictions_per_pass) {
+        apply_eviction(store, id, now, cfg).await?;
+        count += 1;
+    }
+
+    Ok(count)
 }
 
 // ─── enforce_size_cap ─────────────────────────────────────────────────────────
@@ -102,6 +175,8 @@ pub async fn run_forgetting(
 /// max_records`, evicts the lowest-strength UNPROTECTED memory; if only protected remain and
 /// the count is still over the cap, evicts the lowest-strength PROTECTED one as a LAST RESORT
 /// (one-time WARN via eprintln). Returns the count evicted.
+///
+/// A `max_records` value of `0` disables the ceiling entirely (operator opt-out).
 ///
 /// # Errors
 /// [`MemoryError::Storage`] or [`MemoryError::Crypto`] on store failures.
@@ -113,8 +188,64 @@ pub async fn enforce_size_cap(
     cfg: &MemoryConfig,
     scope: &str,
 ) -> Result<usize, MemoryError> {
-    let _ = (store, clock, cfg, scope);
-    Ok(0) // STUB — Red phase
+    if cfg.max_records == 0 {
+        return Ok(0); // operator opt-out
+    }
+
+    let now = clock.now();
+    let active = store.active(scope).await?;
+    let total = active.len();
+
+    if total <= cfg.max_records {
+        return Ok(0);
+    }
+
+    // Partition into (unprotected, protected), each sorted by strength ASC.
+    let mut unprotected: Vec<(String, f64)> = active
+        .iter()
+        .filter(|m| !is_protected(m, cfg))
+        .map(|m| (m.id.clone(), strength(m, now, cfg)))
+        .collect();
+    unprotected.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+
+    let mut protected: Vec<(String, f64)> = active
+        .iter()
+        .filter(|m| is_protected(m, cfg))
+        .map(|m| (m.id.clone(), strength(m, now, cfg)))
+        .collect();
+    protected.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+
+    let mut remaining = total;
+    let mut count = 0usize;
+
+    // Phase 1: evict lowest-strength unprotected memories first.
+    for (id, _) in &unprotected {
+        if remaining <= cfg.max_records {
+            break;
+        }
+        apply_eviction(store, id, now, cfg).await?;
+        count += 1;
+        remaining -= 1;
+    }
+
+    // Phase 2 (CP2-Y last resort): evict protected memories only if still over cap.
+    if remaining > cfg.max_records {
+        eprintln!(
+            "WARN [magi-memory] enforce_size_cap: evicting protected memories as last resort \
+             (active={remaining}, cap={}, CP2-Y)",
+            cfg.max_records
+        );
+        for (id, _) in &protected {
+            if remaining <= cfg.max_records {
+                break;
+            }
+            apply_eviction(store, id, now, cfg).await?;
+            count += 1;
+            remaining -= 1;
+        }
+    }
+
+    Ok(count)
 }
 
 // ─── purge_expired_archives ───────────────────────────────────────────────────
@@ -122,6 +253,9 @@ pub async fn enforce_size_cap(
 /// Hard-deletes archived memories whose retention window has elapsed: only when
 /// `cfg.evicted_retention_days > 0` and `clock.now() - evicted_at > retention_days*86400`.
 /// (`-1` never purges; `0` memories were already hard-deleted at eviction.) Returns count purged.
+///
+/// This is the deferred half of the D-07 `N > 0` eviction policy. Call it
+/// periodically (e.g. at session close or on a background timer).
 ///
 /// # Errors
 /// [`MemoryError::Storage`] or [`MemoryError::Crypto`] on store failures.
@@ -132,8 +266,33 @@ pub async fn purge_expired_archives(
     clock: &dyn Clock,
     cfg: &MemoryConfig,
 ) -> Result<usize, MemoryError> {
-    let _ = (store, clock, cfg);
-    Ok(0) // STUB — Red phase
+    if cfg.evicted_retention_days <= 0 {
+        // -1 = archive forever (never purge); 0 = already hard-deleted at eviction time.
+        return Ok(0);
+    }
+
+    let now = clock.now();
+    let retention_secs = cfg.evicted_retention_days * 86_400;
+    let archived = store.archived().await?;
+
+    let expired_ids: Vec<String> = archived
+        .into_iter()
+        .filter_map(|m| {
+            m.evicted_at.and_then(|evicted_at| {
+                if now - evicted_at > retention_secs {
+                    Some(m.id)
+                } else {
+                    None
+                }
+            })
+        })
+        .collect();
+
+    let count = expired_ids.len();
+    if !expired_ids.is_empty() {
+        store.hard_delete(&expired_ids).await?;
+    }
+    Ok(count)
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
@@ -363,7 +522,11 @@ mod tests {
                 "Case A: evicted memory must not be in active"
             );
             let ar = store.archived().await.unwrap();
-            assert_eq!(ar.len(), 1, "Case A: evicted memory must appear in archived()");
+            assert_eq!(
+                ar.len(),
+                1,
+                "Case A: evicted memory must appear in archived()"
+            );
             assert_eq!(ar[0].id, "a");
         }
 
@@ -419,9 +582,7 @@ mod tests {
 
             // Before the retention window: purge should NOT delete it.
             clock.advance_days(3.0); // 3 days later — under the 7-day window
-            let purged = purge_expired_archives(&store, &clock, &cfg)
-                .await
-                .unwrap();
+            let purged = purge_expired_archives(&store, &clock, &cfg).await.unwrap();
             assert_eq!(purged, 0, "Case C: must not purge within retention window");
             assert_eq!(
                 store.archived().await.unwrap().len(),
@@ -431,10 +592,11 @@ mod tests {
 
             // After the retention window: purge MUST delete it.
             clock.advance_days(5.0); // total 8 days — past the 7-day window
-            let purged = purge_expired_archives(&store, &clock, &cfg)
-                .await
-                .unwrap();
-            assert_eq!(purged, 1, "Case C: must purge after retention window (SC-34)");
+            let purged = purge_expired_archives(&store, &clock, &cfg).await.unwrap();
+            assert_eq!(
+                purged, 1,
+                "Case C: must purge after retention window (SC-34)"
+            );
             assert!(
                 store.get("c").await.unwrap().is_none(),
                 "Case C: hard-deleted after retention window"
@@ -530,7 +692,10 @@ mod tests {
             .unwrap();
 
         // Must have evicted 3 as last resort (CP2-Y).
-        assert_eq!(evicted, 3, "CP2-Y: must evict protected memories as last resort");
+        assert_eq!(
+            evicted, 3,
+            "CP2-Y: must evict protected memories as last resort"
+        );
         assert_eq!(
             store.active("root").await.unwrap().len(),
             2,
@@ -563,7 +728,10 @@ mod tests {
         let evicted = run_forgetting(&store, &clock, &cfg, "root").await.unwrap();
 
         // The cap must be respected.
-        assert!(evicted <= cap, "must not evict more than max_evictions_per_pass (CP2-AD)");
+        assert!(
+            evicted <= cap,
+            "must not evict more than max_evictions_per_pass (CP2-AD)"
+        );
         // At least some must be evicted (proving forgetting ran).
         assert!(evicted > 0, "at least one memory should be evicted");
         assert_eq!(
