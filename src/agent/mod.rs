@@ -24,9 +24,20 @@ use crate::tools::Tool;
 use anyhow::Result;
 use futures::StreamExt;
 use sha2::{Digest, Sha256};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::oneshot;
 use tokio::time::{timeout, Duration};
+
+/// Process-monotonic counter for write-path turn-ID uniqueness (G2).
+///
+/// Each [`write_turn_to_memory`] call includes this counter in the ID hash so
+/// two calls with identical text + role + clock-second always produce distinct
+/// IDs and neither is silently dropped.
+///
+/// `migrate_from_messages` uses `"mig:…"` IDs independently of this counter
+/// (it does not call `write_turn_to_memory`) and is unaffected.
+static TURN_SEQ: AtomicU64 = AtomicU64::new(0);
 
 const APPROVAL_TIMEOUT_SECS: u64 = 300; // 5 minutes
 
@@ -357,20 +368,9 @@ impl Agent {
                 .await
                 .unwrap_or_default();
 
-            // Write user turn to vector store (best-effort; REQ-29).
-            write_turn_to_memory(
-                &store,
-                &*embedder,
-                &*clock,
-                &cfg,
-                &scope,
-                &session_id_str,
-                text,
-                Role::User,
-            )
-            .await;
-
             // Assemble bounded context: system + profile + top-k recalls + turn.
+            // G1: assemble BEFORE writing the user turn to the store so the current
+            // turn cannot recall itself into its own context (self-recall prevention).
             // D1 (REQ-29): on a transient assembly failure fall back to the full
             // history rather than aborting the turn.  Only `BudgetUnsatisfiable`
             // (a misconfigured budget, not a transient error) propagates as Err.
@@ -406,6 +406,20 @@ impl Agent {
                     .send(StreamPiece::Content(format!("[memory: {notice}]\n")))
                     .await;
             }
+
+            // Write user turn to vector store AFTER assembly (G1: self-recall prevention).
+            // Best-effort; REQ-29: failures must not abort the turn.
+            write_turn_to_memory(
+                &store,
+                &*embedder,
+                &*clock,
+                &cfg,
+                &scope,
+                &session_id_str,
+                text,
+                Role::User,
+            )
+            .await;
 
             // Run the shared tool loop. Returns (full_text, final_text):
             // - full_text: sanitized delta-accumulated text for write_turn_to_memory.
@@ -706,14 +720,17 @@ async fn write_turn_to_memory(
         _ => (Vec::new(), String::new(), 0),
     };
 
-    // Content-hash ID: `Sha256("{now}:{role:?}:{text}")` — distinct content → distinct
-    // ids; identical text + role + second → same id → idempotent dedup (NOT a bug).
-    // Adding a nonce/nanosecond would break this idempotency, which mirrors the CP2-M
-    // migration content-hash. Roles differ ("User" vs "Assistant") so the same text
-    // in the same second still produces two separate records.
+    // G2 (live write path): include a monotonic counter so two calls with the
+    // SAME text + role + clock-second always produce distinct IDs and neither is
+    // silently dropped by a UNIQUE-constraint failure.
+    //
+    // `migrate_from_messages` uses its own `"mig:…"` content-hash scheme for
+    // idempotent replay (CP2-M) and does NOT call `write_turn_to_memory`, so the
+    // migration dedup contract is unchanged.
+    let seq = TURN_SEQ.fetch_add(1, Ordering::Relaxed);
     let id = format!(
         "turn:{:x}",
-        Sha256::digest(format!("{now}:{role:?}:{text}").as_bytes())
+        Sha256::digest(format!("{now}:{role:?}:{seq}:{text}").as_bytes())
     );
 
     let m = Memory {
@@ -734,23 +751,13 @@ async fn write_turn_to_memory(
         distilled_at: None,
     };
 
-    // F6b — swallow write errors intentionally (REQ-29 degradation).
+    // F6b / G2 — swallow write errors intentionally (REQ-29 degradation).
     //
-    // `store.insert` uses a plain `INSERT INTO … VALUES` and returns
-    // `MemoryError::Storage("UNIQUE constraint failed")` when a duplicate primary
-    // key is detected.  The caller discards this error with `let _ = …`.
-    //
-    // This is NOT silent data loss.  The ID is `Sha256("{now}:{role:?}:{text}")`;
-    // two writes with the SAME timestamp-second, role, and text hash to the SAME
-    // id and carry IDENTICAL content — the stored record is byte-for-byte equal
-    // to the one being discarded.  This is lossless idempotent dedup, mirroring
-    // the CP2-M migration pattern (`migrate_from_messages` uses an explicit COUNT
-    // check instead, but the semantic contract is the same).
-    //
-    // A genuine write error (disk full, crypto failure) is also swallowed here to
-    // satisfy REQ-29 ("never abort a turn because of a memory failure").  If
-    // precise error visibility is needed in future, consider logging to stderr
-    // (not to `chunk_tx`, which would confuse turn vs. diagnostic output).
+    // `TURN_SEQ` (G2) ensures each live write has a unique ID, so the UNIQUE
+    // constraint is no longer triggered by duplicate content. Genuine write errors
+    // (disk full, crypto failure) are still swallowed to satisfy REQ-29 ("never
+    // abort a turn because of a memory failure"). If precise error visibility is
+    // needed in future, consider logging to stderr (not `chunk_tx`).
     let _ = store.insert(&m).await;
 }
 
