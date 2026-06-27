@@ -111,7 +111,17 @@ impl DistillJudge for LlmDistillJudge {
             .collect::<Vec<_>>()
             .join("\n");
 
-        Ok(text.to_lowercase().contains("yes"))
+        // F6a: match "yes" as a whole word at the start of the response to avoid
+        // false-positive supersession.  `contains("yes")` would match words like
+        // "yesterday" or "expressly", turning non-affirmative responses into
+        // spurious supersession decisions.  Find the first alphabetic token and
+        // check that it is exactly "yes" (case-insensitive).
+        let first_word = text
+            .split(|c: char| !c.is_alphabetic())
+            .find(|s| !s.is_empty());
+        Ok(first_word
+            .map(|w| w.to_lowercase() == "yes")
+            .unwrap_or(false))
     }
 }
 
@@ -240,6 +250,47 @@ mod tests {
                 .await
                 .unwrap(),
             "a 'No' response must be parsed as false"
+        );
+    }
+
+    /// F6a: "yes" must be matched as a whole word at the start of the response.
+    /// Words that CONTAIN "yes" as a substring (e.g. "Yesterday", "expressly")
+    /// must return `false` to avoid false-positive supersession.
+    /// Before fix: `contains("yes")` returns `true` for "Yesterday I..." → FAIL.
+    #[tokio::test]
+    async fn test_judge_contradicts_rejects_yes_as_substring() {
+        // "Yesterday" starts with "yes" but is NOT a "yes" answer.
+        let judge = LlmDistillJudge::new(Arc::new(CannedProvider(
+            "Yesterday I noticed a conflict".into(),
+        )));
+        assert!(
+            !judge
+                .contradicts("statement A", "statement B")
+                .await
+                .unwrap(),
+            "F6a: 'Yesterday…' must NOT be parsed as a yes answer (false-positive prevention)"
+        );
+
+        // "Yes, statement B..." is a valid affirmative — must still be true.
+        let judge2 = LlmDistillJudge::new(Arc::new(CannedProvider(
+            "Yes, statement B supersedes A".into(),
+        )));
+        assert!(
+            judge2
+                .contradicts("statement A", "statement B")
+                .await
+                .unwrap(),
+            "F6a: 'Yes, …' (comma after yes) must still parse as true"
+        );
+
+        // "expressly no" contains "yes" as substring — must be false.
+        let judge3 = LlmDistillJudge::new(Arc::new(CannedProvider("expressly no".into())));
+        assert!(
+            !judge3
+                .contradicts("statement A", "statement B")
+                .await
+                .unwrap(),
+            "F6a: 'expressly no' must NOT match (contains 'yes' but is not a yes answer)"
         );
     }
 
