@@ -37,8 +37,6 @@ use crate::memory::MemoryKind;
 ///
 /// Both methods may be called with an empty `episodic` slice or empty strings
 /// and must not panic in those cases.
-// Narrow allow: trait consumed by the agent distiller trigger (Task 13b).
-#[allow(dead_code)]
 #[async_trait]
 pub trait DistillJudge: Send + Sync {
     /// Summarize durable preferences from a batch of episodic memories.
@@ -96,8 +94,6 @@ pub trait DistillJudge: Send + Sync {
 /// # Errors
 /// [`MemoryError::Storage`] or [`MemoryError::Crypto`] from the store; never
 /// from judge failures (those are caught).
-// Narrow allow: wired into the agent in Task 13b.
-#[allow(dead_code)]
 pub async fn distill(
     store: &dyn VectorStore,
     judge: &dyn DistillJudge,
@@ -245,8 +241,6 @@ pub async fn distill(
 ///
 /// # Errors
 /// [`MemoryError::Crypto`] or [`MemoryError::Storage`] on store failure.
-// Narrow allow: wired into the context assembler / agent in Task 13b.
-#[allow(dead_code)]
 pub async fn render_profile(
     store: &dyn VectorStore,
     cfg: &MemoryConfig,
