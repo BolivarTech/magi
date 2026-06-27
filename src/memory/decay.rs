@@ -37,8 +37,33 @@ use crate::memory::store::Memory;
 /// - `m`   — the memory record to score.
 /// - `now` — current time in Unix seconds (from the injected `Clock`).
 /// - `cfg` — subsystem configuration with decay/weight fields.
-pub fn strength(_m: &Memory, _now: i64, _cfg: &MemoryConfig) -> f64 {
-    todo!("implement in Green phase")
+// Narrow allow: consumed by the forgetting / eviction pass (Task 9) and the
+// retrieval reranker (Task 7 integration); wired into the agent in Task 12.
+#[allow(dead_code)]
+pub fn strength(m: &Memory, now: i64, cfg: &MemoryConfig) -> f64 {
+    // Recency term (D-18): decay over wall-clock time via caller-supplied `now`.
+    // CP2-AD: clamp negative age (backward clock jump) to 0 so recency = 1.0.
+    let age_secs = (now - m.last_accessed_at).max(0) as f64;
+    let age_days = age_secs / 86_400.0;
+    let recency = 0.5_f64.powf(age_days / cfg.decay_half_life_days);
+
+    // Reinforcement term (D-19): bounded access contribution.
+    // cap = 0 disables reinforcement entirely (treat as 0.0).
+    let reinforcement = if cfg.access_saturation_cap == 0 {
+        0.0
+    } else {
+        m.access_count.min(cfg.access_saturation_cap) as f64 / cfg.access_saturation_cap as f64
+    };
+
+    // Salience is already in [0, 1] (assigned at write time by the salience module).
+    let salience = m.salience;
+
+    // Weighted sum normalized by the total weight so the result is in [0, 1].
+    let w_rec = cfg.weight_recency;
+    let w_sal = cfg.weight_salience;
+    let divisor = w_rec + 1.0 + w_sal;
+
+    (w_rec * recency + reinforcement + w_sal * salience) / divisor
 }
 
 #[cfg(test)]
@@ -103,9 +128,7 @@ mod tests {
         let huge = mem(0, 0.3, u64::MAX);
         let capped = mem(0, 0.3, cfg.access_saturation_cap);
         let _ = strength(&huge, 1_000, &cfg); // must not panic
-        assert!(
-            (strength(&huge, 1_000, &cfg) - strength(&capped, 1_000, &cfg)).abs() < 1e-9
-        );
+        assert!((strength(&huge, 1_000, &cfg) - strength(&capped, 1_000, &cfg)).abs() < 1e-9);
     }
 
     #[test]
