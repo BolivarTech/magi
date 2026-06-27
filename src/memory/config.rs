@@ -2,61 +2,322 @@
 // Version: 1.0.0
 // Date: 2026-06-26
 
-//! Configuration structs for the tiered-memory subsystem (stubs — RED phase).
-//! Fields present; Default yields zero/empty values until GREEN adds documented defaults.
+//! Configuration for the tiered-memory subsystem: the `[memory]` and
+//! `[embedding]` sections of `magi.toml`.
+//!
+//! Both structs use `#[serde(deny_unknown_fields)]` so a typo — or, deliberately,
+//! an `api_key` field — is a parse error rather than silent acceptance (API keys
+//! never live in `magi.toml`). Every field defaults via a function in the private
+//! [`d`] module, which is also what `Default` delegates to, so a bare config and a
+//! partially-specified section both resolve to the same documented values.
 
-/// Memory-subsystem runtime configuration (`[memory]` section of `magi.toml`).
-#[derive(Debug, Clone, PartialEq, Default, serde::Deserialize)]
+use serde::Deserialize;
+
+/// Runtime configuration for the tiered-memory subsystem (`[memory]` section).
+///
+/// Defaults are the Ollama-first, determinism-friendly profile; see each field.
+/// All weights and thresholds feed deterministic retrieval/decay (seeded by
+/// [`MemoryConfig::seed`]).
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MemoryConfig {
-    #[serde(default)] pub mode: String,
-    #[serde(default)] pub context_budget_tokens: usize,
-    #[serde(default)] pub response_headroom_tokens: usize,
-    #[serde(default)] pub safety_margin_ratio: f64,
-    #[serde(default)] pub chars_per_token: f64,
-    #[serde(default)] pub oversized_turn_policy: String,
-    #[serde(default)] pub top_k: usize,
-    #[serde(default)] pub weight_similarity: f64,
-    #[serde(default)] pub weight_recency: f64,
-    #[serde(default)] pub weight_salience: f64,
-    #[serde(default)] pub default_salience: f64,
-    #[serde(default)] pub preference_salience: f64,
-    #[serde(default)] pub protect_salience_threshold: f64,
-    #[serde(default)] pub decay_half_life_days: f64,
-    #[serde(default)] pub access_saturation_cap: u64,
-    #[serde(default)] pub forget_strength_threshold: f64,
-    #[serde(default)] pub evicted_retention_days: i64,
-    #[serde(default)] pub max_records: usize,
-    #[serde(default)] pub supersede_similarity_threshold: f64,
-    #[serde(default)] pub distill_every_n_turns: usize,
-    #[serde(default)] pub distill_on_session_close: bool,
-    #[serde(default)] pub profile_max_tokens: usize,
-    #[serde(default)] pub seed: u64,
-    #[serde(default)] pub salience_markers: Vec<String>,
-    #[serde(default)] pub index: String,
-    #[serde(default)] pub distill_max_batch_tokens: usize,
-    #[serde(default)] pub supersede_max_candidate_pairs: usize,
-    #[serde(default)] pub distill_enabled: bool,
-    #[serde(default)] pub reembed_batch_size: usize,
-    #[serde(default)] pub max_evictions_per_pass: usize,
-    #[serde(default)] pub migration_throttle_batch: usize,
+    /// `"selective"` (new tiered path) or `"load_all"` (v0.6.0 control). Default `"selective"`.
+    #[serde(default = "d::mode")]
+    pub mode: String,
+    /// Token budget for the assembled context. Default `8000`.
+    #[serde(default = "d::context_budget_tokens")]
+    pub context_budget_tokens: usize,
+    /// Tokens reserved for the model's response. Default `1024`.
+    #[serde(default = "d::response_headroom_tokens")]
+    pub response_headroom_tokens: usize,
+    /// Safety margin as a fraction of the budget, guarding heuristic underestimation. Default `0.1`.
+    #[serde(default = "d::safety_margin_ratio")]
+    pub safety_margin_ratio: f64,
+    /// Heuristic characters-per-token divisor. Conservative default `3.5` (Spanish-friendly).
+    /// Tune lower for token-dense content: code ~3.0, CJK ~2.0.
+    #[serde(default = "d::chars_per_token")]
+    pub chars_per_token: f64,
+    /// Policy when the current turn alone exceeds the budget: `"truncate"` or `"error"`. Default `"truncate"`.
+    #[serde(default = "d::oversized_turn_policy")]
+    pub oversized_turn_policy: String,
+    /// Retrieval candidate count. Default `12`.
+    #[serde(default = "d::top_k")]
+    pub top_k: usize,
+    /// Reranker weight on cosine similarity. Default `1.0`.
+    #[serde(default = "d::weight_similarity")]
+    pub weight_similarity: f64,
+    /// Reranker weight on recency. Default `0.3`.
+    #[serde(default = "d::weight_recency")]
+    pub weight_recency: f64,
+    /// Reranker weight on salience. Default `0.5`.
+    #[serde(default = "d::weight_salience")]
+    pub weight_salience: f64,
+    /// Base salience assigned at write. Default `0.3`.
+    #[serde(default = "d::default_salience")]
+    pub default_salience: f64,
+    /// Protected-floor salience for `kind=preference`. Default `1.0`.
+    #[serde(default = "d::preference_salience")]
+    pub preference_salience: f64,
+    /// Salience at/above which a memory is never evicted by decay. Default `0.9`.
+    #[serde(default = "d::protect_salience_threshold")]
+    pub protect_salience_threshold: f64,
+    /// Recency half-life in wall-clock days (decay via injected `Clock`). Default `30.0`.
+    #[serde(default = "d::decay_half_life_days")]
+    pub decay_half_life_days: f64,
+    /// Cap on the access-reinforcement contribution (diminishing returns). Default `50`.
+    #[serde(default = "d::access_saturation_cap")]
+    pub access_saturation_cap: u64,
+    /// Strength below which a memory is eligible for forgetting. Default `0.1`.
+    #[serde(default = "d::forget_strength_threshold")]
+    pub forget_strength_threshold: f64,
+    /// Eviction retention: `-1` archive (never hard-delete), `0` immediate hard-delete,
+    /// `N>0` hard-delete after N days. Default `-1`.
+    #[serde(default = "d::evicted_retention_days")]
+    pub evicted_retention_days: i64,
+    /// Hard ceiling on active records (anti-DoS). `0` = explicit operator opt-out. Default `50_000`.
+    #[serde(default = "d::max_records")]
+    pub max_records: usize,
+    /// Embedding-similarity threshold for "same subject" hard-supersession candidates. Default `0.85`.
+    #[serde(default = "d::supersede_similarity_threshold")]
+    pub supersede_similarity_threshold: f64,
+    /// Run the distiller every N turns (`0` = on-demand/session-close only). Default `20`.
+    #[serde(default = "d::distill_every_n_turns")]
+    pub distill_every_n_turns: usize,
+    /// Run the distiller on session close. Default `true`.
+    #[serde(default = "d::distill_on_session_close")]
+    pub distill_on_session_close: bool,
+    /// Token bound on the always-injected preference profile. Default `1024`.
+    #[serde(default = "d::profile_max_tokens")]
+    pub profile_max_tokens: usize,
+    /// Deterministic seed for retrieval/decay/benchmark. Default `42`.
+    #[serde(default = "d::seed")]
+    pub seed: u64,
+    /// Substrings that lift a memory's salience at write (preference markers).
+    #[serde(default = "d::salience_markers")]
+    pub salience_markers: Vec<String>,
+    /// Retrieval index: `"exact"` (deterministic brute-force, default) or `"ann"`
+    /// (opt-in, requires the `ann` build feature). Default `"exact"`.
+    #[serde(default = "d::index")]
+    pub index: String,
+    /// Token cap on the distiller's per-run LLM batch (privacy bound). Default `4000`.
+    #[serde(default = "d::distill_max_batch_tokens")]
+    pub distill_max_batch_tokens: usize,
+    /// Cap on same-subject candidate pairs the distiller judges per run. Default `50`.
+    #[serde(default = "d::supersede_max_candidate_pairs")]
+    pub supersede_max_candidate_pairs: usize,
+    /// Master switch for the LLM distiller (`false` = zero memory egress for distillation). Default `true`.
+    #[serde(default = "d::distill_enabled")]
+    pub distill_enabled: bool,
+    /// Max memories re-embedded per lazy pass (throttle). Default `32`.
+    #[serde(default = "d::reembed_batch_size")]
+    pub reembed_batch_size: usize,
+    /// Max evictions per forgetting pass (clock-jump guard). Default `1000`.
+    #[serde(default = "d::max_evictions_per_pass")]
+    pub max_evictions_per_pass: usize,
+    /// Batch size for the throttled lazy migration. Default `256`.
+    #[serde(default = "d::migration_throttle_batch")]
+    pub migration_throttle_batch: usize,
 }
 
-/// Embedding-provider configuration (`[embedding]` section of `magi.toml`).
-#[derive(Debug, Clone, PartialEq, Default, serde::Deserialize)]
+impl Default for MemoryConfig {
+    fn default() -> Self {
+        Self {
+            mode: d::mode(),
+            context_budget_tokens: d::context_budget_tokens(),
+            response_headroom_tokens: d::response_headroom_tokens(),
+            safety_margin_ratio: d::safety_margin_ratio(),
+            chars_per_token: d::chars_per_token(),
+            oversized_turn_policy: d::oversized_turn_policy(),
+            top_k: d::top_k(),
+            weight_similarity: d::weight_similarity(),
+            weight_recency: d::weight_recency(),
+            weight_salience: d::weight_salience(),
+            default_salience: d::default_salience(),
+            preference_salience: d::preference_salience(),
+            protect_salience_threshold: d::protect_salience_threshold(),
+            decay_half_life_days: d::decay_half_life_days(),
+            access_saturation_cap: d::access_saturation_cap(),
+            forget_strength_threshold: d::forget_strength_threshold(),
+            evicted_retention_days: d::evicted_retention_days(),
+            max_records: d::max_records(),
+            supersede_similarity_threshold: d::supersede_similarity_threshold(),
+            distill_every_n_turns: d::distill_every_n_turns(),
+            distill_on_session_close: d::distill_on_session_close(),
+            profile_max_tokens: d::profile_max_tokens(),
+            seed: d::seed(),
+            salience_markers: d::salience_markers(),
+            index: d::index(),
+            distill_max_batch_tokens: d::distill_max_batch_tokens(),
+            supersede_max_candidate_pairs: d::supersede_max_candidate_pairs(),
+            distill_enabled: d::distill_enabled(),
+            reembed_batch_size: d::reembed_batch_size(),
+            max_evictions_per_pass: d::max_evictions_per_pass(),
+            migration_throttle_batch: d::migration_throttle_batch(),
+        }
+    }
+}
+
+/// Embedding-provider configuration (`[embedding]` section). OpenAI-compatible;
+/// the default targets local Ollama with the `nomic-embed-text` model.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EmbeddingConfig {
-    #[serde(default)] pub provider: String,
-    #[serde(default)] pub base_url: String,
-    #[serde(default)] pub model: String,
-    #[serde(default)] pub dim: usize,
-    #[serde(default)] pub query_prefix: String,
-    #[serde(default)] pub document_prefix: String,
+    /// Provider kind; reuses the OpenAI-compatible path. Default `"openai"`.
+    #[serde(default = "d::emb_provider")]
+    pub provider: String,
+    /// Endpoint base URL. Default local Ollama `"http://localhost:11434/v1"`.
+    #[serde(default = "d::emb_base_url")]
+    pub base_url: String,
+    /// Embedding model id. Default `"nomic-embed-text"`.
+    #[serde(default = "d::emb_model")]
+    pub model: String,
+    /// Vector dimension; `0` = autodetect from the first response. Default `768`.
+    #[serde(default = "d::emb_dim")]
+    pub dim: usize,
+    /// Prefix applied to query text before embedding. Default `"search_query: "`.
+    #[serde(default = "d::query_prefix")]
+    pub query_prefix: String,
+    /// Prefix applied to stored text before embedding. Default `"search_document: "`.
+    #[serde(default = "d::document_prefix")]
+    pub document_prefix: String,
+}
+
+impl Default for EmbeddingConfig {
+    fn default() -> Self {
+        Self {
+            provider: d::emb_provider(),
+            base_url: d::emb_base_url(),
+            model: d::emb_model(),
+            dim: d::emb_dim(),
+            query_prefix: d::query_prefix(),
+            document_prefix: d::document_prefix(),
+        }
+    }
+}
+
+/// Default-value functions wrapping the documented constants. Shared by both
+/// `serde(default = ...)` and `Default`, so a bare config and a partial section
+/// resolve identically (single source of truth). Constants are centralized in
+/// `crate::defaults` in the refactor pass.
+mod d {
+    pub fn mode() -> String {
+        "selective".into()
+    }
+    pub fn context_budget_tokens() -> usize {
+        8000
+    }
+    pub fn response_headroom_tokens() -> usize {
+        1024
+    }
+    pub fn safety_margin_ratio() -> f64 {
+        0.1
+    }
+    pub fn chars_per_token() -> f64 {
+        3.5
+    }
+    pub fn oversized_turn_policy() -> String {
+        "truncate".into()
+    }
+    pub fn top_k() -> usize {
+        12
+    }
+    pub fn weight_similarity() -> f64 {
+        1.0
+    }
+    pub fn weight_recency() -> f64 {
+        0.3
+    }
+    pub fn weight_salience() -> f64 {
+        0.5
+    }
+    pub fn default_salience() -> f64 {
+        0.3
+    }
+    pub fn preference_salience() -> f64 {
+        1.0
+    }
+    pub fn protect_salience_threshold() -> f64 {
+        0.9
+    }
+    pub fn decay_half_life_days() -> f64 {
+        30.0
+    }
+    pub fn access_saturation_cap() -> u64 {
+        50
+    }
+    pub fn forget_strength_threshold() -> f64 {
+        0.1
+    }
+    pub fn evicted_retention_days() -> i64 {
+        -1
+    }
+    pub fn max_records() -> usize {
+        50_000
+    }
+    pub fn supersede_similarity_threshold() -> f64 {
+        0.85
+    }
+    pub fn distill_every_n_turns() -> usize {
+        20
+    }
+    pub fn distill_on_session_close() -> bool {
+        true
+    }
+    pub fn profile_max_tokens() -> usize {
+        1024
+    }
+    pub fn seed() -> u64 {
+        42
+    }
+    pub fn salience_markers() -> Vec<String> {
+        ["prefer", "preference", "always", "never", "remember"]
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect()
+    }
+    pub fn index() -> String {
+        "exact".into()
+    }
+    pub fn distill_max_batch_tokens() -> usize {
+        4000
+    }
+    pub fn supersede_max_candidate_pairs() -> usize {
+        50
+    }
+    pub fn distill_enabled() -> bool {
+        true
+    }
+    pub fn reembed_batch_size() -> usize {
+        32
+    }
+    pub fn max_evictions_per_pass() -> usize {
+        1000
+    }
+    pub fn migration_throttle_batch() -> usize {
+        256
+    }
+    pub fn emb_provider() -> String {
+        "openai".into()
+    }
+    pub fn emb_base_url() -> String {
+        "http://localhost:11434/v1".into()
+    }
+    pub fn emb_model() -> String {
+        "nomic-embed-text".into()
+    }
+    pub fn emb_dim() -> usize {
+        768
+    }
+    pub fn query_prefix() -> String {
+        "search_query: ".into()
+    }
+    pub fn document_prefix() -> String {
+        "search_document: ".into()
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::config::MagiConfig;
 
     #[test]
