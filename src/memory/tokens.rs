@@ -38,6 +38,19 @@
 /// assert_eq!(estimate_tokens("", 3.5), 0);
 /// assert_eq!(estimate_tokens("abc", 0.0), 3);     // bad cpt → fallback 1.0
 /// ```
+/// Converts an `f64` to `usize` with explicit saturation semantics.
+///
+/// Rust 1.45+ already saturates out-of-range `f64 as usize` casts
+/// (NaN→0, negative→0, huge→`usize::MAX`), but this helper makes the
+/// contract self-documenting at every call site.
+fn f64_to_usize_saturating(x: f64) -> usize {
+    // `max(0.0)` maps NaN and negatives to 0.0 (IEEE 754 `max` returns the
+    // non-NaN argument when one input is NaN). `min(...)` caps at `usize::MAX
+    // as f64` (≈ 2^64 on 64-bit); values above that still saturate to
+    // `usize::MAX` via the `as` cast.
+    x.max(0.0).min(usize::MAX as f64) as usize
+}
+
 pub fn estimate_tokens(text: &str, chars_per_token: f64) -> usize {
     let count = text.chars().count();
     if count == 0 {
@@ -48,7 +61,9 @@ pub fn estimate_tokens(text: &str, chars_per_token: f64) -> usize {
     } else {
         1.0
     };
-    (count as f64 / cpt).ceil() as usize
+    // Use the saturating helper to make the f64→usize contract self-documenting
+    // (Rust 1.45+: out-of-range casts saturate, but explicit > implicit).
+    f64_to_usize_saturating((count as f64 / cpt).ceil())
 }
 
 // Narrow allow: consumed by the context assembler in Task 11.
@@ -110,6 +125,32 @@ mod tests {
         // CP2-Q: with a CJK-tuned cpt (~2.0) the estimate is larger (more conservative),
         // so the assembler reserves more room — the budget never under-counts CJK.
         assert!(estimate_tokens("你好世界", 2.0) >= estimate_tokens("你好世界", 3.5));
+    }
+
+    #[test]
+    fn test_f64_to_usize_saturating_handles_extreme_inputs() {
+        // NaN → 0 (not a panic, not usize::MAX).
+        assert_eq!(f64_to_usize_saturating(f64::NAN), 0, "NaN must map to 0");
+        // +Infinity → usize::MAX (saturates).
+        assert_eq!(
+            f64_to_usize_saturating(f64::INFINITY),
+            usize::MAX,
+            "+Inf must saturate to usize::MAX"
+        );
+        // Huge finite (1e300 >> usize::MAX) → usize::MAX.
+        assert_eq!(
+            f64_to_usize_saturating(1e300),
+            usize::MAX,
+            "huge finite must saturate to usize::MAX"
+        );
+        // Negative → 0.
+        assert_eq!(f64_to_usize_saturating(-42.0), 0, "negative must map to 0");
+        // Normal value passes through unchanged.
+        assert_eq!(
+            f64_to_usize_saturating(7.0),
+            7,
+            "normal value must round-trip"
+        );
     }
 
     #[test]
