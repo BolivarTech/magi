@@ -12,6 +12,7 @@ use crate::memory::config::MemoryConfig;
 use crate::memory::context::assemble_selective;
 use crate::memory::decay::purge_expired_archives;
 use crate::memory::embedding::EmbeddingProvider;
+use crate::memory::profile::render_profile;
 use crate::memory::retrieval::reembed_pending;
 use crate::memory::salience::assign_salience;
 use crate::memory::store::{Memory, SqliteVectorStore, VectorStore};
@@ -58,11 +59,11 @@ struct MemorySubsystem {
     /// Scope tag for memory isolation; defaults to `"root"`. Multi-scope is
     /// activated in L3 (Agent Society — AS-REQ-09).
     scope: String,
-    /// Serialized preference profile always injected into the assembled context.
-    /// Empty until Task 13 (distiller) wires content.
-    profile: String,
     /// System-prompt text for token-budget accounting; empty when none is set.
     system: String,
+    /// Number of selective turns processed since `set_memory_subsystem`. Used
+    /// to determine when to fire the `distill_every_n_turns` trigger (Task 13b).
+    turns_since_open: usize,
 }
 
 /// The Agent orchestrator.
@@ -237,8 +238,8 @@ impl Agent {
             clock,
             cfg,
             scope: "root".into(),
-            profile: String::new(),
             system: String::new(),
+            turns_since_open: 0,
         });
     }
 
@@ -253,6 +254,20 @@ impl Agent {
             let _ = reembed_pending(&*s.store, &*s.embedder, &s.cfg, &s.scope).await;
             let _ = purge_expired_archives(&*s.store, &*s.clock, &s.cfg).await;
         }
+        Ok(())
+    }
+
+    /// Runs a best-effort distillation pass on session close (Task 13b).
+    ///
+    /// If the tiered-memory subsystem is attached and
+    /// `cfg.distill_on_session_close` is true, runs [`distill`] once.
+    /// Errors are swallowed — a distillation failure must never prevent clean
+    /// shutdown (REQ-29). STUB — wired in GREEN phase.
+    ///
+    /// # Errors
+    /// Always returns `Ok(())` (errors swallowed internally).
+    pub async fn on_session_close(&self) -> anyhow::Result<()> {
+        // STUB — wired in GREEN phase.
         Ok(())
     }
 
@@ -287,7 +302,7 @@ impl Agent {
             // Snapshot Arc handles (ref-count increments only; O(1)) so the mutable
             // loop body below can borrow `self` freely without conflicting field
             // borrows on `memory_subsystem`.
-            let (store, embedder, clock, cfg, scope, profile, system_str) = {
+            let (store, embedder, clock, cfg, scope, system_str) = {
                 let s = self.memory_subsystem.as_ref().unwrap();
                 (
                     s.store.clone(),
@@ -295,11 +310,16 @@ impl Agent {
                     s.clock.clone(),
                     s.cfg.clone(),
                     s.scope.clone(),
-                    s.profile.clone(),
                     s.system.clone(),
                 )
             };
             let session_id_str = self.session_id.clone().unwrap_or_default();
+
+            // Render the profile fresh from the store so promoted preferences
+            // appear in the context immediately after distillation (Task 13b/REQ-16).
+            let live_profile = render_profile(&*store, &cfg, &scope)
+                .await
+                .unwrap_or_default();
 
             // Write user turn to vector store (best-effort; REQ-29).
             write_turn_to_memory(
@@ -321,7 +341,7 @@ impl Agent {
                 &*clock,
                 &cfg,
                 &system_str,
-                &profile,
+                &live_profile,
                 &user_msg,
                 &scope,
             )
@@ -483,6 +503,11 @@ impl Agent {
                         Role::Assistant,
                     )
                     .await;
+
+                    // Increment turn counter (Task 13b). STUB — distill trigger wired in GREEN.
+                    if let Some(ref mut sub) = self.memory_subsystem {
+                        sub.turns_since_open = sub.turns_since_open.saturating_add(1);
+                    }
 
                     for content in response.content.iter().rev() {
                         if let Content::Text { text } = content {
@@ -1234,5 +1259,171 @@ mod tests {
                 .to_string()
                 .contains("Decryption failed"));
         }
+    }
+
+    // ── Task-13b tests ─────────────────────────────────────────────────────────
+
+    /// test_distill_triggers_after_n_turns: after `distill_every_n_turns = 2`
+    /// selective turns, episodic memories get `distilled_at` set.
+    ///
+    /// Fails in RED because the distill trigger is a noop stub.
+    #[tokio::test]
+    async fn test_distill_triggers_after_n_turns() {
+        use crate::memory::clock::FixedClock;
+        use crate::memory::config::MemoryConfig;
+        use crate::memory::store::{SqliteVectorStore, VectorStore};
+        use crate::system::database::EncryptedSqliteMemory;
+        use tokio::sync::mpsc;
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let mem = EncryptedSqliteMemory::new(tmp.path().to_path_buf(), "pw".into()).unwrap();
+        let vstore =
+            Arc::new(SqliteVectorStore::new(mem.shared_conn(), mem.data_key()).unwrap());
+        let embedder = Arc::new(FakeEmbedder {
+            dim: 8,
+            model: "fake".into(),
+        });
+        let clock = Arc::new(FixedClock::new(1_000_000));
+        let cfg = MemoryConfig {
+            mode: "selective".into(),
+            distill_every_n_turns: 2,
+            distill_enabled: true,
+            ..MemoryConfig::default()
+        };
+
+        // MockProvider.send_messages returns "Summary content." — the distill
+        // judge uses this to extract preferences (non-empty, so distilled_at gets set).
+        let mut agent = Agent::new(Arc::new(MockProvider));
+        agent.set_memory_subsystem(vstore.clone(), embedder, clock, cfg);
+
+        // Turn 1 — trigger threshold not reached.
+        let (tx1, _rx1) = mpsc::channel::<StreamPiece>(8);
+        agent.query_streaming("first turn", tx1).await.unwrap();
+
+        let mems_after_1 = vstore.active("root").await.unwrap();
+        let distilled_after_1 = mems_after_1
+            .iter()
+            .filter(|m| m.distilled_at.is_some())
+            .count();
+        assert_eq!(
+            distilled_after_1, 0,
+            "no memories should be distilled after turn 1 (trigger fires at 2)"
+        );
+
+        // Turn 2 — distill trigger fires (turns_since_open == 2, 2 % 2 == 0).
+        let (tx2, _rx2) = mpsc::channel::<StreamPiece>(8);
+        agent.query_streaming("second turn", tx2).await.unwrap();
+
+        let mems_after_2 = vstore.active("root").await.unwrap();
+        let distilled_after_2 = mems_after_2
+            .iter()
+            .filter(|m| m.distilled_at.is_some())
+            .count();
+        assert!(
+            distilled_after_2 > 0,
+            "at least one memory must be distilled after turn 2 \
+             (distill_every_n_turns = 2); got 0 distilled"
+        );
+    }
+
+    /// test_promoted_preference_appears_in_assembled_context: after a preference
+    /// is promoted via the distill judge (provider returns "- use rust"),
+    /// the next turn's assembled context contains "use rust".
+    ///
+    /// Fails in RED because both the distill trigger and live profile are stubs.
+    #[tokio::test]
+    async fn test_promoted_preference_appears_in_assembled_context() {
+        use crate::memory::clock::FixedClock;
+        use crate::memory::config::MemoryConfig;
+        use crate::memory::store::SqliteVectorStore;
+        use crate::system::database::EncryptedSqliteMemory;
+        use tokio::sync::mpsc;
+
+        // A provider that returns "- use rust" from stream_messages (and thus
+        // from send_messages via the default impl), and records every
+        // stream_messages call for inspection.
+        struct PrefCapProvider {
+            calls: Arc<std::sync::Mutex<Vec<Vec<Message>>>>,
+        }
+
+        #[async_trait]
+        impl Provider for PrefCapProvider {
+            async fn stream_messages(
+                &self,
+                messages: &[Message],
+                _tools: &[Box<dyn crate::tools::Tool>],
+            ) -> Result<futures::stream::BoxStream<'static, Result<ResponseChunk>>> {
+                self.calls.lock().unwrap().push(messages.to_vec());
+                Ok(Box::pin(futures::stream::iter(vec![
+                    Ok(ResponseChunk::TextDelta("- use rust".to_string())),
+                    Ok(ResponseChunk::MessageDone(Message::assistant("- use rust"))),
+                ])))
+            }
+        }
+
+        let calls = Arc::new(std::sync::Mutex::new(Vec::<Vec<Message>>::new()));
+        let provider = Arc::new(PrefCapProvider {
+            calls: calls.clone(),
+        });
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let mem = EncryptedSqliteMemory::new(tmp.path().to_path_buf(), "pw".into()).unwrap();
+        let vstore =
+            Arc::new(SqliteVectorStore::new(mem.shared_conn(), mem.data_key()).unwrap());
+        let embedder = Arc::new(FakeEmbedder {
+            dim: 8,
+            model: "fake".into(),
+        });
+        let clock = Arc::new(FixedClock::new(1_000_000));
+        let cfg = MemoryConfig {
+            mode: "selective".into(),
+            distill_every_n_turns: 1, // distill after every turn
+            distill_enabled: true,
+            context_budget_tokens: 4000,
+            response_headroom_tokens: 0,
+            safety_margin_ratio: 0.0,
+            top_k: 0, // no episodic recall; only profile contributes "use rust"
+            ..MemoryConfig::default()
+        };
+
+        let mut agent = Agent::new(provider);
+        agent.set_memory_subsystem(vstore.clone(), embedder, clock, cfg);
+
+        // Turn 1: provider returns "- use rust". After the turn, distill fires
+        // → judge calls send_messages → "- use rust" → "use rust" promoted to profile.
+        let (tx1, _rx1) = mpsc::channel::<StreamPiece>(8);
+        agent.query_streaming("hello", tx1).await.unwrap();
+
+        // Turn 2: render_profile must return "- use rust\n" as live_profile,
+        // and assemble_selective must include it in the preamble messages.
+        let (tx2, _rx2) = mpsc::channel::<StreamPiece>(8);
+        agent.query_streaming("what are my prefs", tx2).await.unwrap();
+
+        // The last stream_messages call is turn 2's provider call.
+        // Its assembled context should contain the promoted preference.
+        let locked = calls.lock().unwrap();
+        assert!(
+            locked.len() >= 2,
+            "provider must have been called at least twice (turn 1 + turn 2)"
+        );
+        let last_call = locked.last().unwrap();
+        let all_text: String = last_call
+            .iter()
+            .flat_map(|m| m.content.iter())
+            .filter_map(|c| {
+                if let Content::Text { text } = c {
+                    Some(text.as_str())
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(
+            all_text.contains("use rust"),
+            "turn 2's assembled context must contain the promoted preference 'use rust'; \
+             got:\n{all_text}"
+        );
     }
 }
