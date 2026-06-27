@@ -218,19 +218,21 @@ fn extract_turn_text(msg: &Message) -> String {
         .join(" ")
 }
 
-/// Truncates `text` to the longest char-prefix whose estimated token count
-/// does not exceed `max_tokens` (using heuristic `cpt`).
+/// UTF-8-safe token truncator: returns the longest char-prefix of `text` whose
+/// estimated token count does not exceed `max_tokens` (using heuristic `cpt`).
 ///
-/// # UTF-8 safety
-/// Iterates over Unicode scalars via `.chars()` (never byte-splits a multi-byte
-/// character). The result is always valid UTF-8.
+/// Iterates over Unicode scalars via `.chars().take()` — never byte-splits a
+/// multi-byte character. The result is always valid UTF-8.
 ///
 /// # Invariant
 /// `estimate_tokens(result, cpt) <= max_tokens` for all non-zero `cpt`.
 ///
-/// # Usage outside this module
-/// Used by the distiller (`profile.rs`) to truncate oversized single-memory
-/// batches to the privacy cap before handing them to the LLM judge (M1 / R-02).
+/// # Usage
+/// Called from two sites:
+/// - **Assembler** (`assemble_selective`): truncates the current turn when it
+///   alone exceeds the remaining context space (D-17 / `oversized_turn_policy`).
+/// - **Distiller** (`profile.rs`): truncates oversized single-memory batches to
+///   the privacy cap before handing them to the LLM judge (M1 / R-02).
 pub(crate) fn truncate_to_tokens(text: &str, max_tokens: usize, cpt: f64) -> String {
     if max_tokens == 0 {
         return String::new();
