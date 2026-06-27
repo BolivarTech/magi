@@ -112,13 +112,24 @@ pub async fn assemble_selective(
     let sys_t = estimate_tokens(system, cpt);
     let prof_t = estimate_tokens(profile, cpt);
 
-    // Step 3: guard against broken config (system+profile alone don't fit).
-    if sys_t + prof_t > budget {
+    // F1 / REQ-13: account for the preamble separator injected between system
+    // and profile when both are non-empty.  Each recall also carries a separator
+    // (see the greedy loop below).  This makes the budget estimate match the
+    // actual assembled prompt length rather than relying solely on safety_margin.
+    let sep_t = estimate_tokens(PREAMBLE_SEP, cpt);
+    let sys_prof_sep = if !system.is_empty() && !profile.is_empty() {
+        sep_t
+    } else {
+        0
+    };
+
+    // Step 3: guard against broken config (system+profile+their separator don't fit).
+    if sys_t + prof_t + sys_prof_sep > budget {
         return Err(MemoryError::BudgetUnsatisfiable);
     }
 
-    // Step 4: space available for turn + recalls.
-    let space = budget - sys_t - prof_t;
+    // Step 4: space available for turn + recalls (after fixed components + separator).
+    let space = budget - sys_t - prof_t - sys_prof_sep;
 
     // Step 5: extract and potentially truncate the current turn.
     let mut turn_text = extract_turn_text(current_turn);
@@ -147,14 +158,24 @@ pub async fn assemble_selective(
     }
 
     // Step 6: retrieve ranked memories and greedily fill the recall budget.
-    let ranked = recall(store, embedder, clock, cfg, &turn_text, budget, scope).await?;
+    // F2 / REQ-37: pass the actual remaining recall space (not the full budget)
+    // so `recall` receives a tighter advisory limit.  Skip the embed+search
+    // round-trip entirely when no recalls can fit (recall_space == 0).
+    let ranked = if recall_space > 0 {
+        recall(store, embedder, clock, cfg, &turn_text, recall_space, scope).await?
+    } else {
+        vec![]
+    };
 
     let mut kept_texts: Vec<String> = Vec::new();
     let mut recall_tokens_used: usize = 0;
     let mut recall_space_left = recall_space;
 
     for rm in &ranked {
-        let t = estimate_tokens(&rm.memory.text, cpt);
+        // F1: each recall requires a PREAMBLE_SEP in the joined preamble
+        // (joining it to the preceding component).  Include that cost so the
+        // estimate reflects the real assembled string.
+        let t = estimate_tokens(&rm.memory.text, cpt) + sep_t;
         if t <= recall_space_left {
             kept_texts.push(rm.memory.text.clone());
             recall_tokens_used += t;
@@ -174,7 +195,7 @@ pub async fn assemble_selective(
     for t in &kept_texts {
         parts.push(t.as_str());
     }
-    let preamble = parts.join("\n\n");
+    let preamble = parts.join(PREAMBLE_SEP);
 
     let mut messages: Vec<Message> = Vec::new();
     if !preamble.is_empty() {
@@ -182,14 +203,19 @@ pub async fn assemble_selective(
     }
     messages.push(Message::user(&turn_text));
 
-    // Step 8: account for all tokens; invariant: used_tokens <= budget.
+    // Step 8: account for all tokens.
+    // F1: include sys_prof_sep and the per-recall separators (already in
+    // recall_tokens_used) so the estimate matches the joined preamble exactly.
     let final_turn_t = estimate_tokens(&turn_text, cpt);
-    let used_tokens = sys_t + prof_t + recall_tokens_used + final_turn_t;
+    let used_tokens = sys_t + prof_t + sys_prof_sep + recall_tokens_used + final_turn_t;
 
-    debug_assert!(
-        used_tokens <= budget,
-        "assembler invariant violated: used_tokens={used_tokens} > budget={budget}"
-    );
+    // F4: release-safe final budget guard (defense-in-depth, REQ-13).
+    // By construction used_tokens ≤ budget always holds; this guard turns a
+    // potential future regression into a typed error rather than a silent
+    // over-budget prompt.  The debug_assert was a no-op in release builds.
+    if used_tokens > budget {
+        return Err(MemoryError::BudgetUnsatisfiable);
+    }
 
     Ok(AssembledContext {
         messages,
@@ -197,6 +223,12 @@ pub async fn assemble_selective(
         notices,
     })
 }
+
+/// Separator injected between preamble parts when building the `User(preamble)` message.
+///
+/// The token cost of this separator must be included in `used_tokens` (F1 /
+/// REQ-13 invariant) so the estimate matches the actual assembled prompt length.
+const PREAMBLE_SEP: &str = "\n\n";
 
 // ─── Private helpers ──────────────────────────────────────────────────────────
 
@@ -261,6 +293,8 @@ mod tests {
     use crate::memory::store::{Memory, SqliteVectorStore};
     use crate::memory::MemoryKind;
     use crate::system::database::EncryptedSqliteMemory;
+    use std::sync::{Arc, Mutex};
+
     use async_trait::async_trait;
 
     // ── Deterministic test embedder (bag-of-words, dim-32) ────────────────
@@ -288,6 +322,35 @@ mod tests {
     struct FakeEmbedder {
         dim: usize,
         model: String,
+    }
+
+    // ── Counting embedder for F2 test (asserts embed not called when recall_space == 0)
+
+    struct CountingEmbedder {
+        call_count: Arc<Mutex<usize>>,
+        dim: usize,
+        model: String,
+    }
+
+    #[async_trait]
+    impl EmbeddingProvider for CountingEmbedder {
+        async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, EmbeddingError> {
+            *self.call_count.lock().unwrap() += 1;
+            // Return zero vectors (content doesn't matter for this test).
+            Ok(texts.iter().map(|_| vec![0.0f32; self.dim]).collect())
+        }
+        fn model_id(&self) -> &str {
+            &self.model
+        }
+        fn dim(&self) -> usize {
+            self.dim
+        }
+        fn query_prefix(&self) -> &str {
+            ""
+        }
+        fn document_prefix(&self) -> &str {
+            ""
+        }
     }
 
     #[async_trait]
@@ -712,6 +775,114 @@ mod tests {
         assert!(
             matches!(result, Err(MemoryError::BudgetUnsatisfiable)),
             "must return BudgetUnsatisfiable when system+profile don't fit (SC-35), got: {result:?}"
+        );
+    }
+
+    // F1 ─────────────────────────────────────────────────────────────────────
+
+    /// F1: separator tokens between preamble parts must be included in
+    /// `used_tokens`. With `chars_per_token = 1.0`, "\n\n" costs 2 tokens.
+    /// Layout: sys="a"(1t) + sep(2t) + prof="b"(1t) + turn="c"(1t) = 5t.
+    /// The budget is exactly 5, so `used_tokens` must equal 5.
+    /// Before fix: used_tokens = sys_t + prof_t + turn_t = 3 (sep omitted) → FAIL.
+    #[tokio::test]
+    async fn test_separator_tokens_counted_in_used_tokens() {
+        let (_tmp, store) = make_test_store();
+        let emb = FakeEmbedder {
+            dim: 32,
+            model: "fake".into(),
+        };
+        let clock = FixedClock::new(1_000_000);
+        // With chars_per_token=1.0 each char costs 1 token.
+        // "\n\n" = 2 chars = 2 tokens.  Budget=5 = 1(sys)+2(sep)+1(prof)+1(turn).
+        let cfg = MemoryConfig {
+            context_budget_tokens: 5,
+            response_headroom_tokens: 0,
+            safety_margin_ratio: 0.0,
+            chars_per_token: 1.0,
+            ..MemoryConfig::default()
+        };
+        let turn = Message::user("c");
+        let result = assemble_selective(&store, &emb, &clock, &cfg, "a", "b", &turn, "root")
+            .await
+            .unwrap();
+        // used_tokens must account for the "\n\n" separator between system and profile.
+        assert_eq!(
+            result.used_tokens, 5,
+            "F1: used_tokens must include separator tokens; \
+             expected 5 (1+2+1+1), got {}",
+            result.used_tokens
+        );
+        assert!(
+            result.used_tokens <= 5,
+            "F1: used_tokens must not exceed budget=5"
+        );
+    }
+
+    // F2 ─────────────────────────────────────────────────────────────────────
+
+    /// F2: when the turn is oversized (truncated), `recall_space == 0` and
+    /// the recall call must be SKIPPED — no embed call for the query.
+    /// A `CountingEmbedder` records calls; before fix `embed` is called once
+    /// (for the recall query); after fix the count stays 0.
+    #[tokio::test]
+    async fn test_recall_skipped_when_recall_space_is_zero() {
+        let (_tmp, store) = make_test_store();
+        let call_count = Arc::new(Mutex::new(0usize));
+        let emb = CountingEmbedder {
+            call_count: Arc::clone(&call_count),
+            dim: 32,
+            model: "fake".into(),
+        };
+        let clock = FixedClock::new(1_000_000);
+        // budget=30, sys="sys"(1t), prof="profile"(2t), sep(1t at cpt=3.5).
+        // Long turn (>100 chars) → truncated → recall_space = 0.
+        let cfg = MemoryConfig {
+            context_budget_tokens: 30,
+            response_headroom_tokens: 0,
+            safety_margin_ratio: 0.0,
+            oversized_turn_policy: "truncate".into(),
+            ..MemoryConfig::default()
+        };
+        let long_turn: String = "abcdefghij ".repeat(32); // ~352 chars
+        let turn = Message::user(&long_turn);
+        let result =
+            assemble_selective(&store, &emb, &clock, &cfg, "sys", "profile", &turn, "root")
+                .await
+                .unwrap();
+        assert!(
+            !result.notices.is_empty(),
+            "F2 pre-condition: turn must have been truncated"
+        );
+        let count = *call_count.lock().unwrap();
+        assert_eq!(
+            count,
+            0,
+            "F2: recall must not be called (embed count must be 0) when recall_space == 0; got {count}"
+        );
+    }
+
+    // F4 ─────────────────────────────────────────────────────────────────────
+
+    /// F4: the release-safe final budget guard (replaces debug_assert) must not
+    /// reject a valid assembly. This test documents that the guard compiles and
+    /// does not spuriously fire — the guard's error path is defense-in-depth
+    /// and unreachable by construction.
+    #[tokio::test]
+    async fn test_budget_guard_does_not_fire_on_valid_assembly() {
+        let (_tmp, store) = make_test_store();
+        let emb = FakeEmbedder {
+            dim: 32,
+            model: "fake".into(),
+        };
+        let clock = FixedClock::new(1_000_000);
+        let cfg = MemoryConfig::default();
+        let turn = Message::user("hello");
+        let result =
+            assemble_selective(&store, &emb, &clock, &cfg, "sys", "prof", &turn, "root").await;
+        assert!(
+            result.is_ok(),
+            "F4: release-safe budget guard must not fire on a valid assembly; got: {result:?}"
         );
     }
 }
