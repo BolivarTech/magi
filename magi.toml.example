@@ -76,3 +76,56 @@ model = "claude-sonnet-4-6"
 # melchior_model  = "qwen3.6:27b"    # Scientist  (Alibaba)  — theoretical analysis
 # balthasar_model = "gpt-oss:20b"    # Pragmatist (OpenAI)   — practical trade-offs
 # caspar_model    = "deepseek-r1:8b" # Critic     (DeepSeek) — adversarial review
+
+# ---------------------------------------------------------------------------
+# [memory] — tiered memory subsystem (opt-in; absent = all defaults below).
+# Default mode is "selective" (embedding-indexed retrieval under a bounded
+# context). Set mode = "load_all" to reproduce the v0.6.0 "load all history"
+# behavior (the benchmark control). All values below ARE the built-in defaults.
+# NO secrets here — deny_unknown_fields rejects any unknown key (incl. api_key).
+#
+# [memory]
+# mode = "selective"                  # selective | load_all
+# context_budget_tokens = 8000        # assembled-context token budget
+# response_headroom_tokens = 1024     # tokens reserved for the reply
+# safety_margin_ratio = 0.1           # fraction of budget held back (heuristic guard)
+# chars_per_token = 3.5               # token heuristic; es ~3.5, code ~3, CJK ~2
+# oversized_turn_policy = "truncate"  # truncate | error
+# top_k = 12                          # retrieval candidates
+# weight_similarity = 1.0             # reranker weights
+# weight_recency = 0.3
+# weight_salience = 0.5
+# default_salience = 0.3              # base salience at write
+# preference_salience = 1.0           # protected floor for preferences
+# protect_salience_threshold = 0.9    # >= never evicted by decay
+# decay_half_life_days = 30.0         # wall-clock recency half-life
+# access_saturation_cap = 50          # bound on access-reinforcement
+# forget_strength_threshold = 0.1     # below this strength => forgettable
+# evicted_retention_days = -1         # -1 archive | 0 hard-delete now | N>0 after N days
+# max_records = 50000                 # hard ceiling on active records (0 = opt-out)
+# supersede_similarity_threshold = 0.85
+# distill_every_n_turns = 20          # 0 = on-demand / session-close only
+# distill_on_session_close = true
+# distill_enabled = true              # false = zero memory egress for distillation
+# distill_max_batch_tokens = 4000     # distiller per-run payload cap (privacy)
+# supersede_max_candidate_pairs = 50  # distiller hard-supersession pair cap
+# profile_max_tokens = 1024           # always-injected preference profile bound
+# reembed_batch_size = 32             # lazy re-embed throttle
+# max_evictions_per_pass = 1000       # clock-jump guard
+# migration_throttle_batch = 256      # lazy migration batch size
+# seed = 42                           # determinism
+# index = "exact"                     # exact (default) | ann (needs the `ann` build feature)
+# salience_markers = ["prefer", "preference", "always", "never", "remember"]
+
+# ---------------------------------------------------------------------------
+# [embedding] — embedding provider (OpenAI-compatible, Ollama-first).
+# The OPENAI_API_KEY for embeddings is read from the environment ONLY (dummy
+# "ollama" is fine for the local server); it NEVER lives in this file.
+#
+# [embedding]
+# provider = "openai"
+# base_url = "http://localhost:11434/v1"   # Ollama default; point elsewhere for cloud
+# model = "nomic-embed-text"
+# dim = 768                                # 0 = autodetect from the first response
+# query_prefix = "search_query: "          # nomic-embed-text asymmetric prefixes
+# document_prefix = "search_document: "

@@ -334,4 +334,35 @@ mod tests {
         assert_eq!(c.embedding.dim, 768);
         assert_eq!(c.embedding.query_prefix, "search_query: ");
     }
+
+    #[test]
+    fn test_unknown_field_in_memory_or_embedding_is_err() {
+        // deny_unknown_fields — a stray key (incl. api_key) is a parse error (REQ-21).
+        assert!(MagiConfig::from_toml_str("[memory]\napi_key = \"x\"").is_err());
+        assert!(MagiConfig::from_toml_str("[embedding]\napi_key = \"x\"").is_err());
+    }
+
+    #[test]
+    fn test_parses_full_memory_and_embedding_sections() {
+        // A present section parses its values; an omitted field still resolves to
+        // its documented default (CP2-A index="ann" is accepted).
+        let toml = "\
+[memory]
+mode = \"load_all\"
+context_budget_tokens = 4000
+evicted_retention_days = -1
+index = \"ann\"
+[embedding]
+base_url = \"http://localhost:11434/v1\"
+model = \"nomic-embed-text\"
+dim = 768
+";
+        let c = MagiConfig::from_toml_str(toml).unwrap();
+        assert_eq!(c.memory.mode, "load_all");
+        assert_eq!(c.memory.context_budget_tokens, 4000);
+        assert_eq!(c.memory.evicted_retention_days, -1);
+        assert_eq!(c.memory.index, "ann");
+        assert_eq!(c.memory.seed, 42); // omitted field → documented default
+        assert_eq!(c.embedding.model, "nomic-embed-text");
+    }
 }
