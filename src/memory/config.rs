@@ -1072,6 +1072,69 @@ mod tests {
         assert!(MagiConfig::from_toml_str("[embedding]\napi_key = \"x\"").is_err());
     }
 
+    // ── H2: EmbeddingConfig::validate() ─────────────────────────────────────────
+
+    /// H2: `EmbeddingConfig::validate()` rejects an empty `base_url`.
+    #[test]
+    fn test_embedding_validate_rejects_empty_base_url() {
+        let cfg = EmbeddingConfig {
+            base_url: String::new(),
+            ..EmbeddingConfig::default()
+        };
+        assert!(
+            matches!(cfg.validate(), Err(MemoryError::Config(_))),
+            "H2: empty base_url must be rejected"
+        );
+    }
+
+    /// H2: `EmbeddingConfig::validate()` rejects an empty `model`.
+    #[test]
+    fn test_embedding_validate_rejects_empty_model() {
+        let cfg = EmbeddingConfig {
+            model: String::new(),
+            ..EmbeddingConfig::default()
+        };
+        assert!(
+            matches!(cfg.validate(), Err(MemoryError::Config(_))),
+            "H2: empty model must be rejected"
+        );
+    }
+
+    /// H2: `EmbeddingConfig::validate()` rejects an empty `provider`.
+    #[test]
+    fn test_embedding_validate_rejects_empty_provider() {
+        let cfg = EmbeddingConfig {
+            provider: String::new(),
+            ..EmbeddingConfig::default()
+        };
+        assert!(
+            matches!(cfg.validate(), Err(MemoryError::Config(_))),
+            "H2: empty provider must be rejected"
+        );
+    }
+
+    /// H2: `EmbeddingConfig::default()` is valid (dim=0 is allowed = autodetect).
+    #[test]
+    fn test_embedding_validate_accepts_default() {
+        assert!(
+            EmbeddingConfig::default().validate().is_ok(),
+            "H2: EmbeddingConfig::default() must pass validate()"
+        );
+    }
+
+    /// H2: dim=0 is explicitly valid (autodetect from first response).
+    #[test]
+    fn test_embedding_validate_accepts_dim_zero() {
+        let cfg = EmbeddingConfig {
+            dim: 0,
+            ..EmbeddingConfig::default()
+        };
+        assert!(
+            cfg.validate().is_ok(),
+            "H2: dim=0 (autodetect) must be accepted"
+        );
+    }
+
     #[test]
     fn test_parses_full_memory_and_embedding_sections() {
         // A present section parses its values; an omitted field still resolves to
