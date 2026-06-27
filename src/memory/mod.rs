@@ -9,6 +9,45 @@
 //! decay/eviction, context assembly, and benchmarking.
 
 pub mod config;
+pub mod error;
+
+// Narrow allow: re-exports consumed by later tasks; tests use them via `use super::*`.
+#[allow(unused_imports)]
+pub use error::{EmbeddingError, MemoryError};
+
+/// Kind of a stored memory: an episodic turn, or a durable preference.
+///
+/// The on-disk representation is a stable lowercase string (see [`as_str`]).
+/// This follows the same discipline as the message `Role` serialization so
+/// that a schema change is an explicit, detectable migration — not a silent
+/// refactor.
+///
+/// [`as_str`]: MemoryKind::as_str
+// Narrow allow: enum consumed by the vector store in Task 4.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemoryKind {
+    /// A single conversational turn or tool-result, ordered by session time.
+    Episodic,
+    /// A durable user preference that is always injected into the context
+    /// profile and is never evicted by decay.
+    Preference,
+}
+
+impl MemoryKind {
+    /// Returns the stable on-disk string for this kind.
+    ///
+    /// Values: `"episodic"` | `"preference"`. Parsed back by exact match;
+    /// changing these strings requires an explicit DB migration.
+    // Narrow allow: called by the store serializer in Task 4.
+    #[allow(dead_code)]
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            MemoryKind::Episodic => "episodic",
+            MemoryKind::Preference => "preference",
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -29,11 +68,17 @@ mod tests {
         }
         let e = lift().unwrap_err();
         assert!(matches!(e, MemoryError::Embedding(EmbeddingError::Auth)));
-        assert_eq!(e.to_string(), "embedding error: embedding auth failed (401/403)");
+        assert_eq!(
+            e.to_string(),
+            "embedding error: embedding auth failed (401/403)"
+        );
     }
 
     #[test]
     fn test_rate_limited_variant_formats() {
-        assert_eq!(EmbeddingError::RateLimited.to_string(), "embedding rate-limited (429)");
+        assert_eq!(
+            EmbeddingError::RateLimited.to_string(),
+            "embedding rate-limited (429)"
+        );
     }
 }
