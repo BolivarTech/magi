@@ -10,6 +10,7 @@
 
 pub mod clock;
 pub mod config;
+pub mod context;
 pub mod decay;
 pub mod embedding;
 pub mod error;
@@ -26,6 +27,10 @@ pub use error::{EmbeddingError, MemoryError};
 // context assembler (Task 11) and future Agent Society consumers (AS-REQ-11).
 #[allow(unused_imports)]
 pub use retrieval::{recall, RankedMemory};
+// Narrow allow: `assemble_selective` / `AssembledContext` are wired into the agent in
+// Task 12; no non-test caller yet.
+#[allow(unused_imports)]
+pub use context::{assemble_selective, AssembledContext};
 
 /// Kind of a stored memory: an episodic turn, or a durable preference.
 ///
