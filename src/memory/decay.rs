@@ -54,6 +54,11 @@ pub fn strength(m: &Memory, now: i64, cfg: &MemoryConfig) -> f64 {
     let age_secs = (now - m.last_accessed_at).max(0) as f64;
     let age_days = age_secs / 86_400.0;
     // B1: guard against half_life=0 producing NaN (0.5^(x/0) = NaN).
+    // J5 (validation cross-ref): `MemoryConfig::validate()` already rejects
+    // `decay_half_life_days <= 0.0` and non-finite values at startup, so this
+    // `.max(f64::MIN_POSITIVE)` is a defense-in-depth guard for the unusual
+    // case where `strength` is called with a config that bypassed `validate()`
+    // (e.g. directly constructed in tests or library use).
     let half_life = cfg.decay_half_life_days.max(f64::MIN_POSITIVE);
     let recency = 0.5_f64.powf(age_days / half_life);
 
