@@ -9,6 +9,7 @@
 //! decay/eviction, context assembly, and benchmarking.
 
 pub mod config;
+pub mod embedding;
 pub mod error;
 
 // Narrow allow: re-exports consumed by later tasks; tests use them via `use super::*`.
