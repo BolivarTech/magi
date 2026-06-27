@@ -561,6 +561,168 @@ mod tests {
         );
     }
 
+    // ── F3: non-finite f64 rejection ──────────────────────────────────────────
+
+    #[test]
+    fn test_validate_rejects_nan_decay_half_life_days() {
+        // NaN: `NaN <= 0.0` is false so current check passes — must be caught.
+        assert!(
+            MemoryConfig {
+                decay_half_life_days: f64::NAN,
+                ..MemoryConfig::default()
+            }
+            .validate()
+            .is_err(),
+            "F3: decay_half_life_days=NaN must be rejected"
+        );
+    }
+
+    #[test]
+    fn test_validate_rejects_nan_chars_per_token() {
+        assert!(
+            MemoryConfig {
+                chars_per_token: f64::NAN,
+                ..MemoryConfig::default()
+            }
+            .validate()
+            .is_err(),
+            "F3: chars_per_token=NaN must be rejected"
+        );
+    }
+
+    #[test]
+    fn test_validate_rejects_nan_safety_margin_ratio() {
+        // NaN: `NaN < 0.0` and `NaN >= 1.0` are both false so current check passes.
+        assert!(
+            MemoryConfig {
+                safety_margin_ratio: f64::NAN,
+                ..MemoryConfig::default()
+            }
+            .validate()
+            .is_err(),
+            "F3: safety_margin_ratio=NaN must be rejected"
+        );
+    }
+
+    #[test]
+    fn test_validate_rejects_nan_protect_salience_threshold() {
+        assert!(
+            MemoryConfig {
+                protect_salience_threshold: f64::NAN,
+                ..MemoryConfig::default()
+            }
+            .validate()
+            .is_err(),
+            "F3: protect_salience_threshold=NaN must be rejected"
+        );
+    }
+
+    #[test]
+    fn test_validate_rejects_inf_decay_half_life_days() {
+        // Inf: `Inf <= 0.0` is false so current check passes — must be caught.
+        assert!(
+            MemoryConfig {
+                decay_half_life_days: f64::INFINITY,
+                ..MemoryConfig::default()
+            }
+            .validate()
+            .is_err(),
+            "F3: decay_half_life_days=Infinity must be rejected"
+        );
+    }
+
+    #[test]
+    fn test_validate_rejects_inf_weight_similarity() {
+        // Inf weight passes individual negativity check; must still be caught.
+        assert!(
+            MemoryConfig {
+                weight_similarity: f64::INFINITY,
+                ..MemoryConfig::default()
+            }
+            .validate()
+            .is_err(),
+            "F3: weight_similarity=Infinity must be rejected"
+        );
+    }
+
+    // ── F3: string-enum validation ────────────────────────────────────────────
+
+    #[test]
+    fn test_validate_rejects_bogus_mode() {
+        assert!(
+            MemoryConfig {
+                mode: "bogus".into(),
+                ..MemoryConfig::default()
+            }
+            .validate()
+            .is_err(),
+            "F3: mode='bogus' must be rejected (valid: selective, load_all)"
+        );
+    }
+
+    #[test]
+    fn test_validate_rejects_bogus_oversized_turn_policy() {
+        assert!(
+            MemoryConfig {
+                oversized_turn_policy: "skip".into(),
+                ..MemoryConfig::default()
+            }
+            .validate()
+            .is_err(),
+            "F3: oversized_turn_policy='skip' must be rejected (valid: truncate, error)"
+        );
+    }
+
+    #[test]
+    fn test_validate_rejects_bogus_index() {
+        assert!(
+            MemoryConfig {
+                index: "hnsw".into(),
+                ..MemoryConfig::default()
+            }
+            .validate()
+            .is_err(),
+            "F3: index='hnsw' must be rejected (valid: exact, ann)"
+        );
+    }
+
+    #[test]
+    fn test_validate_accepts_all_valid_string_enum_values() {
+        for mode in &["selective", "load_all"] {
+            assert!(
+                MemoryConfig {
+                    mode: (*mode).into(),
+                    ..MemoryConfig::default()
+                }
+                .validate()
+                .is_ok(),
+                "F3: mode='{mode}' must be accepted"
+            );
+        }
+        for policy in &["truncate", "error"] {
+            assert!(
+                MemoryConfig {
+                    oversized_turn_policy: (*policy).into(),
+                    ..MemoryConfig::default()
+                }
+                .validate()
+                .is_ok(),
+                "F3: oversized_turn_policy='{policy}' must be accepted"
+            );
+        }
+        for idx in &["exact", "ann"] {
+            assert!(
+                MemoryConfig {
+                    index: (*idx).into(),
+                    ..MemoryConfig::default()
+                }
+                .validate()
+                .is_ok(),
+                "F3: index='{idx}' must be accepted"
+            );
+        }
+    }
+
     #[test]
     fn test_absent_memory_section_uses_documented_defaults() {
         let c = MagiConfig::from_toml_str("provider = \"openai\"").unwrap();
