@@ -862,6 +862,48 @@ mod tests {
         );
     }
 
+    // ── G5(a) ─────────────────────────────────────────────────────────────────
+
+    /// G5(a): `oversized_turn_policy = "Truncate"` (title-case) must behave
+    /// identically to `"truncate"` — the policy comparison must be
+    /// case-insensitive.
+    ///
+    /// Before fix: `== "truncate"` (exact match) silently falls through to the
+    /// `BudgetUnsatisfiable` branch when the casing differs, causing an error
+    /// instead of truncation. After the fix `eq_ignore_ascii_case("truncate")`
+    /// treats all casings identically.
+    #[tokio::test]
+    async fn test_oversized_turn_policy_case_insensitive() {
+        let (_tmp, store) = make_test_store();
+        let emb = FakeEmbedder {
+            dim: 32,
+            model: "fake".into(),
+        };
+        let clock = FixedClock::new(1_000_000);
+        let cfg = MemoryConfig {
+            context_budget_tokens: 30,
+            response_headroom_tokens: 0,
+            safety_margin_ratio: 0.0,
+            oversized_turn_policy: "Truncate".into(), // title-case — must still truncate
+            ..MemoryConfig::default()
+        };
+        let long_turn: String = "abcdefghij ".repeat(32); // ~352 chars > budget
+        let turn = Message::user(&long_turn);
+        let result =
+            assemble_selective(&store, &emb, &clock, &cfg, "sys", "profile", &turn, "root")
+                .await;
+        assert!(
+            result.is_ok(),
+            "G5(a): 'Truncate' (title-case) policy must trigger truncation not error; \
+             got: {result:?}"
+        );
+        let assembled = result.unwrap();
+        assert!(
+            !assembled.notices.is_empty(),
+            "G5(a): a truncation notice must have fired for 'Truncate' policy"
+        );
+    }
+
     // F4 ─────────────────────────────────────────────────────────────────────
 
     /// F4: the release-safe final budget guard (replaces debug_assert) must not

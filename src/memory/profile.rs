@@ -1132,6 +1132,137 @@ mod tests {
         }
     }
 
+    // ── LenCapturingJudge ─────────────────────────────────────────────────────
+
+    /// A [`DistillJudge`] that records the char-lengths of every pair of texts
+    /// passed to `contradicts`. Used to assert G4: inputs are bounded before the
+    /// judge call.
+    struct LenCapturingJudge {
+        calls: Arc<Mutex<Vec<(usize, usize)>>>,
+    }
+
+    #[async_trait]
+    impl DistillJudge for LenCapturingJudge {
+        async fn summarize_preferences(
+            &self,
+            _episodic: &[Memory],
+        ) -> Result<Vec<String>, MemoryError> {
+            Ok(vec![])
+        }
+        async fn contradicts(&self, a: &str, b: &str) -> Result<bool, MemoryError> {
+            self.calls.lock().unwrap().push((a.len(), b.len()));
+            Ok(false)
+        }
+    }
+
+    // ── G3 ────────────────────────────────────────────────────────────────────
+
+    /// G3: when the FIRST profile entry alone exceeds `profile_max_tokens`,
+    /// `render_profile` must truncate it rather than emitting nothing.
+    ///
+    /// Before fix: the `&& used > 0` guard lets the first entry through whole
+    /// even when `cost > budget`. After the fix the entry is truncated to fit.
+    #[tokio::test]
+    async fn test_render_profile_truncates_first_entry_exceeding_budget() {
+        let (_tmp, store) = make_test_store();
+        let clock = FixedClock::new(1_000);
+        // chars_per_token=1.0 → 1 char = 1 token; cap = 5 tokens.
+        let cfg = MemoryConfig {
+            profile_max_tokens: 5,
+            chars_per_token: 1.0,
+            safety_margin_ratio: 0.0,
+            ..MemoryConfig::default()
+        };
+
+        // A preference whose text is 100 chars — far exceeds the 5-token cap.
+        let long_pref = "a".repeat(100);
+        promote_to_profile(&store, &clock, &cfg, "root", &long_pref)
+            .await
+            .unwrap();
+
+        let profile = render_profile(&store, &cfg, "root").await.unwrap();
+
+        let token_count = estimate_tokens(&profile, cfg.chars_per_token);
+        assert!(
+            token_count <= cfg.profile_max_tokens,
+            "G3: render_profile output ({token_count} tokens) must not exceed \
+             profile_max_tokens={} even when the first entry alone is oversized; \
+             got: {profile:?}",
+            cfg.profile_max_tokens
+        );
+        assert!(
+            !profile.is_empty(),
+            "G3: render_profile must not return empty output when truncation can fit content"
+        );
+    }
+
+    // ── G4 ────────────────────────────────────────────────────────────────────
+
+    /// G4: when episodic memory texts exceed `distill_max_batch_tokens / 2`
+    /// tokens each, they must be truncated before reaching `judge.contradicts`
+    /// to prevent overloading the provider context (REQ-29).
+    ///
+    /// Setup: two memories whose combined size fits within `distill_max_batch_tokens`
+    /// (so both are in the same batch) but where one text is longer than the per-text
+    /// cap (`distill_max_batch_tokens / 2`).
+    ///
+    /// Observable: neither length passed to `contradicts` exceeds the per-text cap.
+    #[tokio::test]
+    async fn test_distill_truncates_long_texts_before_contradicts_judge() {
+        let (_tmp, store) = make_test_store();
+        let emb = FakeEmbedder {
+            dim: 8,
+            model: "fake".into(),
+        };
+        let clock = FixedClock::new(1_000);
+        // chars_per_token=1.0; batch_budget=30; per-text cap = 30/2 = 15.
+        // mem_a = 8 chars (fits, below cap); mem_b = 20 chars (fits in batch with mem_a:
+        // 8+20=28 ≤ 30), but 20 > per-text cap 15 → must be truncated before contradicts.
+        let cfg = MemoryConfig {
+            distill_enabled: true,
+            distill_max_batch_tokens: 30,
+            chars_per_token: 1.0,
+            safety_margin_ratio: 0.0,
+            supersede_similarity_threshold: 0.0, // all pairs qualify
+            supersede_max_candidate_pairs: 50,
+            ..MemoryConfig::default()
+        };
+
+        insert_episodic(&store, "mem_a", &"x".repeat(8), vec![0.5f32; 8], "fake", 8, 1_000)
+            .await;
+        insert_episodic(&store, "mem_b", &"y".repeat(20), vec![0.5f32; 8], "fake", 8, 2_000)
+            .await;
+
+        let calls: Arc<Mutex<Vec<(usize, usize)>>> = Arc::new(Mutex::new(vec![]));
+        let judge = LenCapturingJudge {
+            calls: Arc::clone(&calls),
+        };
+
+        distill(&store, &judge, &emb, &clock, &cfg, "root")
+            .await
+            .unwrap();
+
+        let recorded = calls.lock().unwrap();
+        assert!(
+            !recorded.is_empty(),
+            "G4: contradicts must have been called for the similar pair"
+        );
+
+        // Each text must be ≤ distill_max_batch_tokens / 2 chars (chars_per_token=1.0).
+        let per_text_cap = (cfg.distill_max_batch_tokens / 2).max(1);
+        let max_chars = (per_text_cap as f64 * cfg.chars_per_token).floor() as usize;
+        for &(a_len, b_len) in recorded.iter() {
+            assert!(
+                a_len <= max_chars,
+                "G4: text 'a' passed to contradicts ({a_len} chars) must be ≤ {max_chars}"
+            );
+            assert!(
+                b_len <= max_chars,
+                "G4: text 'b' passed to contradicts ({b_len} chars) must be ≤ {max_chars}"
+            );
+        }
+    }
+
     // F3 ─────────────────────────────────────────────────────────────────────
 
     /// F3: when M1 fires (the first undistilled memory alone exceeds the batch

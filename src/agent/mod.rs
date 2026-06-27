@@ -1459,6 +1459,136 @@ mod tests {
     /// the next turn's assembled context contains "use rust".
     ///
     /// Fails in RED because both the distill trigger and live profile are stubs.
+    // ── G1 / G2 tests ─────────────────────────────────────────────────────────
+
+    /// G1: in selective mode, the user's current turn must NOT be recalled into
+    /// its own assembler context (self-recall prevention).
+    ///
+    /// With the bug: `write_turn_to_memory` runs BEFORE `assemble_selective`,
+    /// so the current turn is in the store during recall and can appear in the
+    /// preamble. After the fix: the write happens AFTER assembly — the store is
+    /// empty on the very first turn, so no self-recall is possible.
+    #[tokio::test]
+    async fn test_selective_mode_current_turn_not_self_recalled() {
+        use crate::memory::clock::FixedClock;
+        use crate::memory::config::MemoryConfig;
+        use crate::memory::store::SqliteVectorStore;
+        use crate::system::database::EncryptedSqliteMemory;
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let mem = EncryptedSqliteMemory::new(tmp.path().to_path_buf(), "pw".into()).unwrap();
+        let vstore =
+            Arc::new(SqliteVectorStore::new(mem.shared_conn(), mem.data_key()).unwrap());
+        let embedder = Arc::new(FakeEmbedder {
+            dim: 32,
+            model: "fake".into(),
+        });
+        let clock = Arc::new(FixedClock::new(1_000_000));
+        // Budget large enough to include recalls; top_k > 0 so recall runs.
+        let cfg = MemoryConfig {
+            mode: "selective".into(),
+            context_budget_tokens: 4000,
+            response_headroom_tokens: 0,
+            safety_margin_ratio: 0.0,
+            top_k: 5,
+            ..MemoryConfig::default()
+        };
+
+        let (cap, calls) = CapturingProvider::new();
+        let mut agent = Agent::new(Arc::new(cap));
+        agent.set_memory_subsystem(vstore, embedder, clock, cfg);
+
+        // Distinctive text that would self-recall if written before assembly.
+        let distinctive = "alpha bravo charlie unique self recall prevention test";
+        let (tx, _rx) = tokio::sync::mpsc::channel::<StreamPiece>(8);
+        agent.query_streaming(distinctive, tx).await.unwrap();
+
+        let locked = calls.lock().unwrap();
+        assert!(!locked.is_empty(), "G1: provider must have been called");
+
+        // Assembled context: at most [User(preamble), User(current_turn)].
+        // If ≥2 messages, the preamble (all but the last) must NOT contain the
+        // current turn text (which only belongs in the last message slot).
+        let turn1 = &locked[0];
+        if turn1.len() >= 2 {
+            let preamble_text: String = turn1[..turn1.len() - 1]
+                .iter()
+                .flat_map(|m| m.content.iter())
+                .filter_map(|c| {
+                    if let Content::Text { text } = c {
+                        Some(text.as_str())
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+            assert!(
+                !preamble_text.contains("alpha bravo charlie unique"),
+                "G1: current turn text must not appear in the recall preamble \
+                 on its own first turn (self-recall); preamble was:\n{preamble_text}"
+            );
+        }
+        // Single message: only the current turn → no preamble → correct by construction.
+    }
+
+    /// G2: two `write_turn_to_memory` calls with identical text + role in the
+    /// same FixedClock second must produce TWO distinct stored records.
+    ///
+    /// Before fix: ID = `Sha256("{now}:{role:?}:{text}")` — same for both calls
+    /// → second INSERT fails UNIQUE constraint (silently swallowed) → 1 record.
+    /// After fix: ID includes a monotonic counter → always unique → 2 records.
+    #[tokio::test]
+    async fn test_write_turn_produces_distinct_ids_for_same_text_in_same_second() {
+        use crate::memory::clock::FixedClock;
+        use crate::memory::config::MemoryConfig;
+        use crate::memory::store::{SqliteVectorStore, VectorStore};
+        use crate::system::database::EncryptedSqliteMemory;
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let mem = EncryptedSqliteMemory::new(tmp.path().to_path_buf(), "pw".into()).unwrap();
+        let vstore =
+            Arc::new(SqliteVectorStore::new(mem.shared_conn(), mem.data_key()).unwrap());
+        let embedder = FakeEmbedder {
+            dim: 8,
+            model: "fake".into(),
+        };
+        let clock = FixedClock::new(1_000_000); // fixed — same second for both calls
+        let cfg = MemoryConfig::default();
+
+        // Both calls: same text, same role, same clock-second.
+        write_turn_to_memory(
+            &vstore,
+            &embedder,
+            &clock,
+            &cfg,
+            "root",
+            "session1",
+            "same text same second",
+            Role::User,
+        )
+        .await;
+        write_turn_to_memory(
+            &vstore,
+            &embedder,
+            &clock,
+            &cfg,
+            "root",
+            "session1",
+            "same text same second",
+            Role::User,
+        )
+        .await;
+
+        let all = vstore.active("root").await.unwrap();
+        assert_eq!(
+            all.len(),
+            2,
+            "G2: two identical write_turn_to_memory calls in the same FixedClock second \
+             must produce 2 distinct stored records (not 1 deduped record)"
+        );
+    }
+
     #[tokio::test]
     async fn test_promoted_preference_appears_in_assembled_context() {
         use crate::memory::clock::FixedClock;
