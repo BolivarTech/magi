@@ -26,7 +26,9 @@ use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
 use crate::agent::messages::{Content, Message};
+use crate::memory::config::MemoryConfig;
 use crate::memory::error::MemoryError;
+use crate::memory::salience::assign_salience;
 use crate::memory::MemoryKind;
 use crate::utils::crypto::CryptoVault;
 
@@ -532,6 +534,7 @@ impl SqliteVectorStore {
         &self,
         msgs: &[(String, Message)],
         now: i64,
+        cfg: &MemoryConfig,
     ) -> Result<usize, MemoryError> {
         /// Holds the pre-computed, pre-encrypted blobs for one turn.
         struct Prepared {
@@ -539,6 +542,7 @@ impl SqliteVectorStore {
             session_id: String,
             text_blob: String,
             embedding_blob: String,
+            salience: f64,
         }
 
         // Phase 1: extract text, derive content-hash ids, encrypt blobs — ALL outside
@@ -565,6 +569,9 @@ impl SqliteVectorStore {
                 format!("mig:{:x}", h.finalize())
             };
 
+            // Deterministic config-aware salience at write time (H1 / REQ-35 / D-11).
+            let salience = assign_salience(MemoryKind::Episodic, &text, msg.role.clone(), cfg);
+
             // Encrypt the turn text; fails fast if text > MAX_PLAINTEXT_LEN (50 MiB).
             let text_blob = self
                 .vault
@@ -582,6 +589,7 @@ impl SqliteVectorStore {
                 session_id: session_id.clone(),
                 text_blob,
                 embedding_blob,
+                salience,
             });
         }
 
@@ -616,9 +624,16 @@ impl SqliteVectorStore {
                          (id, session_id, kind, text_blob, embedding_blob, model_id, dim, \
                           created_at, salience, access_count, last_accessed_at, \
                           superseded_by, evicted_at, scope, distilled_at) \
-                     VALUES (?1, ?2, 'episodic', ?3, ?4, '', 0, ?5, 0.3, 0, ?5, \
+                     VALUES (?1, ?2, 'episodic', ?3, ?4, '', 0, ?5, ?6, 0, ?5, \
                              NULL, NULL, 'root', NULL)",
-                    params![p.id, p.session_id, p.text_blob, p.embedding_blob, now],
+                    params![
+                        p.id,
+                        p.session_id,
+                        p.text_blob,
+                        p.embedding_blob,
+                        now,
+                        p.salience
+                    ],
                 )
                 .map_err(|e| MemoryError::Storage(e.to_string()))?;
 
@@ -1018,7 +1033,14 @@ mod tests {
             ("s1".to_string(), Message::user("old fact one")),
             ("s1".to_string(), Message::assistant("ack")),
         ];
-        let n = store.migrate_from_messages(&prior, 1000).await.unwrap();
+        let n = store
+            .migrate_from_messages(
+                &prior,
+                1000,
+                &crate::memory::config::MemoryConfig::default(),
+            )
+            .await
+            .unwrap();
         assert_eq!(n, 2);
         let active = store.active("root").await.unwrap();
         assert_eq!(active.len(), 2);
@@ -1036,8 +1058,21 @@ mod tests {
     async fn test_migration_is_idempotent_across_reruns_and_batches() {
         let (_t, store) = test_store();
         let prior = vec![("s1".to_string(), Message::user("fact"))];
-        assert_eq!(store.migrate_from_messages(&prior, 1000).await.unwrap(), 1);
-        assert_eq!(store.migrate_from_messages(&prior, 1000).await.unwrap(), 0); // already present
+        let cfg = crate::memory::config::MemoryConfig::default();
+        assert_eq!(
+            store
+                .migrate_from_messages(&prior, 1000, &cfg)
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            store
+                .migrate_from_messages(&prior, 1000, &cfg)
+                .await
+                .unwrap(),
+            0
+        ); // already present
         assert_eq!(store.active("root").await.unwrap().len(), 1);
     }
 
@@ -1052,7 +1087,14 @@ mod tests {
             ("s1".to_string(), Message::user("ok")),
             ("s1".to_string(), Message::user(&huge)),
         ];
-        assert!(store.migrate_from_messages(&batch, 1000).await.is_err());
+        assert!(store
+            .migrate_from_messages(
+                &batch,
+                1000,
+                &crate::memory::config::MemoryConfig::default()
+            )
+            .await
+            .is_err());
         assert!(
             store.active("root").await.unwrap().is_empty(),
             "rollback ⇒ nothing imported"
@@ -1158,7 +1200,14 @@ mod tests {
             .map(|i| ("s1".to_string(), Message::user(&format!("fact {i}"))))
             .collect();
         assert_eq!(
-            store.migrate_from_messages(&prior, 1000).await.unwrap(),
+            store
+                .migrate_from_messages(
+                    &prior,
+                    1000,
+                    &crate::memory::config::MemoryConfig::default()
+                )
+                .await
+                .unwrap(),
             1000
         );
         assert_eq!(store.active("root").await.unwrap().len(), 1000);
@@ -1318,7 +1367,10 @@ mod tests {
             "s1".to_string(),
             crate::agent::messages::Message::user("remember: important_marker fact"),
         )];
-        let n = store.migrate_from_messages(&prior, 1000, &cfg).await.unwrap();
+        let n = store
+            .migrate_from_messages(&prior, 1000, &cfg)
+            .await
+            .unwrap();
         assert_eq!(n, 1, "one turn must be imported");
         let active = store.active("root").await.unwrap();
         assert_eq!(active.len(), 1);
@@ -1345,7 +1397,10 @@ mod tests {
             // No marker in text; role=User adds +0.05 structural nudge → 0.55.
             crate::agent::messages::Message::user("just a plain turn"),
         )];
-        store.migrate_from_messages(&prior, 1000, &cfg).await.unwrap();
+        store
+            .migrate_from_messages(&prior, 1000, &cfg)
+            .await
+            .unwrap();
         let active = store.active("root").await.unwrap();
         // assign_salience(Episodic, "just a plain turn", User, cfg) = 0.5 + 0.05 = 0.55
         let expected = (cfg.default_salience + 0.05_f64).clamp(0.0, 1.0);
