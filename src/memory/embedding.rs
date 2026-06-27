@@ -240,12 +240,12 @@ impl OpenAiCompatibleEmbedder {
         }
 
         // In autodetect mode (configured_dim == 0), load any dimension that was
-        // established by a previous successful call.  This ensures subsequent
-        // calls enforce consistency once the first response has set the dim.
+        // established by a previous successful call. Use Acquire ordering so we
+        // see the latest value written by any thread that won the CAS (F4).
         let mut effective_dim = if self.configured_dim > 0 {
             self.configured_dim
         } else {
-            self.detected_dim.load(Ordering::Relaxed) // 0 if not yet detected
+            self.detected_dim.load(Ordering::Acquire) // 0 if not yet detected
         };
 
         let mut out = Vec::with_capacity(parsed.data.len());
@@ -260,10 +260,33 @@ impl OpenAiCompatibleEmbedder {
                     });
                 }
             } else {
-                // First successful response in autodetect mode: establish the dim
-                // for this call and all future calls on this embedder instance.
-                effective_dim = got;
-                self.detected_dim.store(got, Ordering::Relaxed);
+                // First successful response in autodetect mode. Use CAS so that
+                // concurrent first-callers all converge on ONE dimension (F4).
+                //
+                // - If CAS succeeds: we established `got` as the canonical dim.
+                // - If CAS fails: another thread already stored `winner`; enforce
+                //   that our response matches (Dim error if it doesn't).
+                match self.detected_dim.compare_exchange(
+                    0,
+                    got,
+                    Ordering::AcqRel,  // success: release our store, acquire theirs
+                    Ordering::Acquire, // failure: acquire the winner's value
+                ) {
+                    Ok(_) => {
+                        // We won the race: `got` is now the established dim.
+                        effective_dim = got;
+                    }
+                    Err(winner) => {
+                        // Another thread won before us: enforce consistency.
+                        if got != winner {
+                            return Err(EmbeddingError::Dim {
+                                expected: winner,
+                                got,
+                            });
+                        }
+                        effective_dim = winner;
+                    }
+                }
             }
             out.push(item.embedding);
         }
@@ -283,11 +306,14 @@ impl EmbeddingProvider for OpenAiCompatibleEmbedder {
 
     /// Returns the configured dimension, or the autodetected value if `dim = 0`
     /// was specified and at least one successful call has been made.
+    ///
+    /// Uses `Acquire` ordering so callers see the value established by any
+    /// thread that won the CAS in [`call_embeddings`][OpenAiCompatibleEmbedder::call_embeddings] (F4).
     fn dim(&self) -> usize {
         if self.configured_dim > 0 {
             self.configured_dim
         } else {
-            self.detected_dim.load(Ordering::Relaxed)
+            self.detected_dim.load(Ordering::Acquire)
         }
     }
 
