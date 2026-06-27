@@ -635,6 +635,41 @@ mod tests {
         );
     }
 
+    // M2 ─────────────────────────────────────────────────────────────────
+
+    /// M2: when `space` after system+profile is exactly 0 and the turn is
+    /// non-empty, `oversized_turn_policy = "truncate"` would truncate the turn
+    /// to an empty string; the assembler must return `BudgetUnsatisfiable` rather
+    /// than silently sending an empty message (D-17).
+    #[tokio::test]
+    async fn test_empty_truncation_returns_budget_unsatisfiable() {
+        let (_tmp, store) = make_test_store();
+        let emb = FakeEmbedder {
+            dim: 32,
+            model: "fake".into(),
+        };
+        let clock = FixedClock::new(1_000_000);
+        // With chars_per_token=1.0 each character costs 1 token.
+        // budget=2, sys="s"(1t), profile="p"(1t) → space=0.
+        // Any non-empty turn overflows and truncates to "".
+        let cfg = MemoryConfig {
+            context_budget_tokens: 2,
+            response_headroom_tokens: 0,
+            safety_margin_ratio: 0.0,
+            chars_per_token: 1.0,
+            oversized_turn_policy: "truncate".into(),
+            ..MemoryConfig::default()
+        };
+        let turn = Message::user("hello");
+
+        let result = assemble_selective(&store, &emb, &clock, &cfg, "s", "p", &turn, "root").await;
+
+        assert!(
+            matches!(result, Err(MemoryError::BudgetUnsatisfiable)),
+            "M2: empty truncated turn must return BudgetUnsatisfiable (D-17), got: {result:?}"
+        );
+    }
+
     // SC-35 (unsatisfiable) ───────────────────────────────────────────────
 
     /// SC-35: when `system + profile` alone exceed the budget (broken config),

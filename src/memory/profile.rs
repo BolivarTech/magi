@@ -383,6 +383,7 @@ mod tests {
     use crate::memory::config::MemoryConfig;
     use crate::memory::error::EmbeddingError;
     use crate::memory::store::{Memory, SqliteVectorStore};
+    use crate::memory::tokens::{budget_after_margin, estimate_tokens};
     use crate::memory::MemoryKind;
     use crate::system::database::EncryptedSqliteMemory;
 
@@ -935,6 +936,105 @@ mod tests {
         assert!(
             actual <= 1,
             "E1: judge_calls cap must limit contradicts() calls to at most 1; got {actual}"
+        );
+    }
+
+    // ── CapturingJudge — captures texts passed to summarize_preferences ──────
+
+    /// A `DistillJudge` that records every `Memory.text` value it receives in
+    /// `summarize_preferences`, allowing tests to assert on the exact payload
+    /// the distiller hands to the judge (M1 / R-02).
+    struct CapturingJudge {
+        captured: Arc<Mutex<Vec<String>>>,
+    }
+
+    #[async_trait]
+    impl DistillJudge for CapturingJudge {
+        async fn summarize_preferences(
+            &self,
+            episodic: &[Memory],
+        ) -> Result<Vec<String>, MemoryError> {
+            let mut guard = self.captured.lock().unwrap();
+            for m in episodic {
+                guard.push(m.text.clone());
+            }
+            Ok(vec![])
+        }
+
+        async fn contradicts(&self, _a: &str, _b: &str) -> Result<bool, MemoryError> {
+            Ok(false)
+        }
+    }
+
+    // ── M1 ────────────────────────────────────────────────────────────────────
+
+    /// M1: when the single first undistilled memory's text exceeds
+    /// `distill_max_batch_tokens`, the payload handed to the judge must be
+    /// truncated to fit the batch budget (R-02 / CP2-L), and the distiller must
+    /// still make progress (CP2-AL).  The record in the store is unchanged.
+    #[tokio::test]
+    async fn test_single_oversized_memory_truncated_before_judge() {
+        let (_tmp, store) = make_test_store();
+        let emb = FakeEmbedder {
+            dim: 8,
+            model: "fake".into(),
+        };
+        let clock = FixedClock::new(1_000);
+
+        // Tiny batch cap: 5 tokens.  chars_per_token=1.0 → 1 char = 1 token.
+        let cfg = MemoryConfig {
+            distill_enabled: true,
+            distill_max_batch_tokens: 5,
+            safety_margin_ratio: 0.0,
+            chars_per_token: 1.0,
+            ..MemoryConfig::default()
+        };
+
+        // A memory whose text (100 chars = 100 tokens) far exceeds the 5-token cap.
+        let long_text: String = "x".repeat(100);
+        insert_episodic(&store, "oversized", &long_text, vec![], "", 0, 1_000).await;
+
+        let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let judge = CapturingJudge {
+            captured: Arc::clone(&captured),
+        };
+
+        distill(&store, &judge, &emb, &clock, &cfg, "root")
+            .await
+            .unwrap();
+
+        // Judge must have been invoked (distiller made progress, CP2-AL).
+        // Drop the guard before the async store.get() call to avoid holding
+        // a Mutex lock across an await point (clippy::await_holding_lock).
+        let batch_budget =
+            budget_after_margin(cfg.distill_max_batch_tokens, 0, cfg.safety_margin_ratio).max(1);
+        {
+            let texts = captured.lock().unwrap();
+            assert!(
+                !texts.is_empty(),
+                "M1: judge must be called even when the single memory exceeds the batch budget"
+            );
+            // Every text the judge received must fit within the batch budget.
+            for text in texts.iter() {
+                let t = estimate_tokens(text, cfg.chars_per_token);
+                assert!(
+                    t <= batch_budget,
+                    "M1: text handed to judge ({} tokens) must be <= batch_budget={} (R-02/CP2-L)",
+                    t,
+                    batch_budget
+                );
+            }
+        } // MutexGuard dropped here, before any await.
+
+        // The stored record is unchanged — only the copy for the judge was truncated.
+        let stored = store
+            .get("oversized")
+            .await
+            .unwrap()
+            .expect("oversized memory must still exist in the store");
+        assert_eq!(
+            stored.text, long_text,
+            "M1: stored memory text must be unchanged after distillation"
         );
     }
 
