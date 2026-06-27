@@ -52,13 +52,19 @@ pub fn assign_salience(kind: MemoryKind, text: &str, role: Role, cfg: &MemoryCon
     let mut s = cfg.default_salience;
 
     // Marker lift: raise to the protected tier when any configured marker
-    // appears as a case-insensitive substring of the text. Markers are
-    // iterated in declaration order; iteration short-circuits on first hit.
+    // appears as a case-insensitive substring of the text. Both the text and
+    // every marker are lowercased exactly once per call — the text once here,
+    // markers collected into a Vec before the search — so there are no repeated
+    // allocations inside the `any` loop (J1: pre-lowercase-once pattern).
     let text_lower = text.to_lowercase();
-    if cfg
+    let markers_lower: Vec<String> = cfg
         .salience_markers
         .iter()
-        .any(|m| text_lower.contains(m.to_lowercase().as_str()))
+        .map(|m| m.to_lowercase())
+        .collect();
+    if markers_lower
+        .iter()
+        .any(|ml| text_lower.contains(ml.as_str()))
     {
         s = s.max(cfg.protect_salience_threshold);
     }
