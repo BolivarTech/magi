@@ -1059,6 +1059,143 @@ mod tests {
         }
     }
 
+    // ── D1/D2 tests ────────────────────────────────────────────────────────────
+
+    /// Embedder that always returns an auth error — used to simulate transient
+    /// failures in `assemble_selective`.
+    struct ErrorEmbedder;
+
+    #[async_trait]
+    impl EmbeddingProvider for ErrorEmbedder {
+        async fn embed(
+            &self,
+            _texts: &[String],
+        ) -> std::result::Result<Vec<Vec<f32>>, crate::memory::error::EmbeddingError> {
+            Err(crate::memory::error::EmbeddingError::Auth)
+        }
+        fn model_id(&self) -> &str {
+            "error-model"
+        }
+        fn dim(&self) -> usize {
+            16
+        }
+        fn query_prefix(&self) -> &str {
+            ""
+        }
+        fn document_prefix(&self) -> &str {
+            ""
+        }
+    }
+
+    /// D1 (REQ-29): when `assemble_selective` encounters a transient error (e.g.
+    /// embedder auth failure), `query_streaming` must NOT propagate the error —
+    /// it must fall back to the `load_all` history path and still return a
+    /// successful response.
+    #[tokio::test]
+    async fn test_selective_mode_falls_back_to_history_on_embedder_error() {
+        use crate::memory::clock::FixedClock;
+        use crate::memory::config::MemoryConfig;
+        use crate::memory::store::SqliteVectorStore;
+        use crate::system::database::EncryptedSqliteMemory;
+        use tokio::sync::mpsc;
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let mem = EncryptedSqliteMemory::new(tmp.path().to_path_buf(), "pw".into()).unwrap();
+        let vstore = Arc::new(SqliteVectorStore::new(mem.shared_conn(), mem.data_key()).unwrap());
+        let clock = Arc::new(FixedClock::new(1_000_000));
+        let cfg = MemoryConfig {
+            mode: "selective".into(),
+            ..MemoryConfig::default()
+        };
+
+        // Use an embedder that always errors — assemble_selective will fail.
+        let embedder = Arc::new(ErrorEmbedder);
+
+        let (cap, _calls) = CapturingProvider::new();
+        let mut agent = Agent::new(Arc::new(cap));
+        agent.set_memory_subsystem(vstore, embedder, clock, cfg);
+
+        let (tx, mut rx) = mpsc::channel::<StreamPiece>(16);
+        // Must succeed (fallback), not return an Err.
+        let result = agent.query_streaming("hello", tx).await;
+        assert!(
+            result.is_ok(),
+            "D1: selective mode with embedder error must fall back, not propagate Err: {result:?}"
+        );
+
+        // Provider must still have returned a response.
+        let mut got_response = false;
+        while let Ok(piece) = rx.try_recv() {
+            if let StreamPiece::Content(text) = piece {
+                if !text.is_empty() {
+                    got_response = true;
+                }
+            }
+        }
+        assert!(
+            got_response,
+            "D1: a response must be delivered even after embedder error (fallback path)"
+        );
+    }
+
+    /// D2: when the context assembler produces a truncation notice (D-17 oversized
+    /// turn), the notice must be forwarded to `chunk_tx` before the provider call.
+    #[tokio::test]
+    async fn test_selective_mode_forwards_assembler_notices() {
+        use crate::memory::clock::FixedClock;
+        use crate::memory::config::MemoryConfig;
+        use crate::memory::store::SqliteVectorStore;
+        use crate::system::database::EncryptedSqliteMemory;
+        use tokio::sync::mpsc;
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let mem = EncryptedSqliteMemory::new(tmp.path().to_path_buf(), "pw".into()).unwrap();
+        let vstore = Arc::new(SqliteVectorStore::new(mem.shared_conn(), mem.data_key()).unwrap());
+        let embedder = Arc::new(FakeEmbedder {
+            dim: 16,
+            model: "fake".into(),
+        });
+        let clock = Arc::new(FixedClock::new(1_000_000));
+        // Very tight budget so that a long turn triggers a truncation notice.
+        let cfg = MemoryConfig {
+            mode: "selective".into(),
+            context_budget_tokens: 20,    // 20 tokens ≈ 70 chars
+            response_headroom_tokens: 0,
+            safety_margin_ratio: 0.0,
+            oversized_turn_policy: "truncate".into(),
+            ..MemoryConfig::default()
+        };
+
+        let (cap, _calls) = CapturingProvider::new();
+        let mut agent = Agent::new(Arc::new(cap));
+        agent.set_memory_subsystem(vstore, embedder, clock, cfg);
+
+        // An oversized turn (well over the 20-token budget).
+        let long_input = "x".repeat(500);
+        let (tx, mut rx) = mpsc::channel::<StreamPiece>(32);
+        agent.query_streaming(&long_input, tx).await.unwrap();
+
+        // Collect all streamed pieces.
+        let mut pieces = Vec::new();
+        while let Ok(p) = rx.try_recv() {
+            pieces.push(p);
+        }
+
+        // At least one piece must be a `[memory: …]` notice.
+        let notice_found = pieces.iter().any(|p| {
+            if let StreamPiece::Content(text) = p {
+                text.starts_with("[memory:")
+            } else {
+                false
+            }
+        });
+        assert!(
+            notice_found,
+            "D2: a truncation notice must be forwarded to chunk_tx when the turn exceeds the budget; \
+             got pieces: {pieces:?}"
+        );
+    }
+
     // ── Task-12 tests (SC-32 / SC-22 / SC-18) ─────────────────────────────────
 
     /// SC-32: An agent with NO memory subsystem set behaves exactly as today.
