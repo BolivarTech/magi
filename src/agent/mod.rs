@@ -385,7 +385,6 @@ impl Agent {
                     (self.history.clone(), vec![])
                 }
             };
-            let mut working = working_messages;
 
             // D2 (D-17 gap): forward assembler truncation notices to the TUI.
             for notice in assembly_notices {
@@ -394,199 +393,93 @@ impl Agent {
                     .await;
             }
 
-            // ── Selective tool loop ───────────────────────────────────────────
-            let mut tool_call_count = 0;
-            let mut last_normalized_tool: Option<(String, String)> = None;
-            let mut repeat_count = 0;
+            // Run the shared tool loop. Returns (full_text, final_text):
+            // - full_text: sanitized delta-accumulated text for write_turn_to_memory.
+            // - final_text: text from MessageDone content, returned to the caller.
+            let (full_text, final_text) = self.run_tool_loop(working_messages, &chunk_tx).await?;
 
-            loop {
-                let mut stream = self.provider.stream_messages(&working, &self.tools).await?;
-                let mut full_text = String::new();
-                let mut last_message: Option<Message> = None;
+            // ── Selective-specific terminal work (after the tool loop) ─────────
+            // Write assistant response to the vector store (best-effort; REQ-29).
+            write_turn_to_memory(
+                &store,
+                &*embedder,
+                &*clock,
+                &cfg,
+                &scope,
+                &session_id_str,
+                &full_text,
+                Role::Assistant,
+            )
+            .await;
 
-                while let Some(chunk_result) = stream.next().await {
-                    match chunk_result? {
-                        ResponseChunk::TextDelta(delta) => {
-                            let sanitized = Self::sanitize_text(&delta);
-                            full_text.push_str(&sanitized);
-                            if chunk_tx
-                                .send(StreamPiece::Content(sanitized))
-                                .await
-                                .is_err()
-                            {
-                                return Err(anyhow::anyhow!(
-                                    "TUI connection closed during streaming"
-                                ));
-                            }
-                        }
-                        ResponseChunk::ReasoningDelta(delta) => {
-                            let sanitized = Self::sanitize_text(&delta);
-                            if chunk_tx
-                                .send(StreamPiece::Reasoning(sanitized))
-                                .await
-                                .is_err()
-                            {
-                                return Err(anyhow::anyhow!(
-                                    "TUI connection closed during streaming"
-                                ));
-                            }
-                        }
-                        ResponseChunk::MessageDone(msg) => {
-                            last_message = Some(msg);
-                        }
-                        _ => {}
-                    }
-                }
-
-                let response = last_message
-                    .ok_or_else(|| anyhow::anyhow!("Stream ended without MessageDone"))?;
-                // Both legacy persistence paths (self.history + memory.add_message) are
-                // kept so load_history and the existing message store stay consistent.
-                self.history.push(response.clone());
-                working.push(response.clone());
-                if let (Some(memory), Some(sid)) = (&self.memory, &self.session_id) {
-                    memory.add_message(sid, &response).await?;
-                }
-
-                let mut tool_results = Vec::new();
-                let mut requested_tool = false;
-
-                for content in &response.content {
-                    if let Content::ToolUse { id, name, input } = content {
-                        requested_tool = true;
-                        tool_call_count += 1;
-                        if tool_call_count > self.max_tool_calls {
-                            return Err(anyhow::anyhow!("Maximum tool call limit reached"));
-                        }
-
-                        let normalized_input = Self::normalize_input(input, 0)?;
-                        if let Some((ref last_name, ref last_norm_input)) = last_normalized_tool {
-                            if last_name == name && last_norm_input == &normalized_input {
-                                repeat_count += 1;
-                                if repeat_count >= 3 {
-                                    return Err(anyhow::anyhow!("Repetitive tool call detected"));
-                                }
-                            } else {
-                                repeat_count = 0;
-                            }
-                        }
-                        last_normalized_tool = Some((name.clone(), normalized_input));
-
-                        let approved = if let Some(ref tx) = self.approval_tx {
-                            let (oneshot_tx, oneshot_rx) = oneshot::channel();
-                            let _ = tx
-                                .send(ApprovalRequest {
-                                    tool_name: name.clone(),
-                                    input: input.clone(),
-                                    tx: oneshot_tx,
-                                })
-                                .await;
-                            match timeout(Duration::from_secs(APPROVAL_TIMEOUT_SECS), oneshot_rx)
-                                .await
-                            {
-                                Ok(Ok(res)) => res,
-                                _ => false,
-                            }
-                        } else {
-                            true
-                        };
-
-                        if !approved {
-                            tool_results.push(Content::ToolResult {
-                                tool_use_id: id.clone(),
-                                content: "Execution denied or timed out.".to_string(),
-                                is_error: true,
-                            });
-                            continue;
-                        }
-
-                        let tool_result =
-                            if let Some(tool) = self.tools.iter().find(|t| t.name() == name) {
-                                match tool.execute(input.clone()).await {
-                                    Ok(val) => Content::ToolResult {
-                                        tool_use_id: id.clone(),
-                                        content: val.to_string(),
-                                        is_error: false,
-                                    },
-                                    Err(e) => Content::ToolResult {
-                                        tool_use_id: id.clone(),
-                                        content: e.to_string(),
-                                        is_error: true,
-                                    },
-                                }
-                            } else {
-                                Content::ToolResult {
-                                    tool_use_id: id.clone(),
-                                    content: format!("Tool '{}' not found", name),
-                                    is_error: true,
-                                }
-                            };
-                        tool_results.push(tool_result);
-                    }
-                }
-
-                if requested_tool {
-                    let tool_res_msg = Message {
-                        role: Role::User,
-                        content: tool_results,
-                    };
-                    self.history.push(tool_res_msg.clone());
-                    working.push(tool_res_msg.clone());
-                    if let (Some(memory), Some(sid)) = (&self.memory, &self.session_id) {
-                        memory.add_message(sid, &tool_res_msg).await?;
-                    }
-                } else {
-                    // Write assistant response to the vector store (best-effort; REQ-29).
-                    write_turn_to_memory(
-                        &store,
-                        &*embedder,
-                        &*clock,
-                        &cfg,
-                        &scope,
-                        &session_id_str,
-                        &full_text,
-                        Role::Assistant,
-                    )
-                    .await;
-
-                    // Increment turn counter and fire distill pass when cadence is reached
-                    // (Task 13b / REQ-17). Errors are non-fatal (CP2-Z).
-                    let should_distill = {
-                        let sub = self.memory_subsystem.as_mut().unwrap();
-                        sub.turns_since_open = sub.turns_since_open.saturating_add(1);
-                        let n = sub.cfg.distill_every_n_turns;
-                        sub.cfg.distill_enabled && n > 0 && sub.turns_since_open.is_multiple_of(n)
-                    };
-                    if should_distill {
-                        let judge = LlmDistillJudge::new(self.provider.clone());
-                        let _ = distill(&*store, &judge, &*embedder, &*clock, &cfg, &scope)
-                            .await
-                            .map_err(|e| eprintln!("distill: {e}"));
-                    }
-
-                    for content in response.content.iter().rev() {
-                        if let Content::Text { text } = content {
-                            return Ok(text.clone());
-                        }
-                    }
-                    return Ok(String::new());
-                }
+            // Increment turn counter and fire distill pass when cadence is reached
+            // (Task 13b / REQ-17). Errors are non-fatal (CP2-Z).
+            let should_distill = {
+                let sub = self.memory_subsystem.as_mut().unwrap();
+                sub.turns_since_open = sub.turns_since_open.saturating_add(1);
+                let n = sub.cfg.distill_every_n_turns;
+                sub.cfg.distill_enabled && n > 0 && sub.turns_since_open.is_multiple_of(n)
+            };
+            if should_distill {
+                let judge = LlmDistillJudge::new(self.provider.clone());
+                let _ = distill(&*store, &judge, &*embedder, &*clock, &cfg, &scope)
+                    .await
+                    .map_err(|e| eprintln!("distill: {e}"));
             }
+
+            return Ok(final_text);
         }
 
         // ── load_all path (original, byte-identical) ──────────────────────────
         // No memory subsystem or mode != "selective" → send the full history to the
         // provider exactly as before.  This path is the sole path exercised by the
         // 188 pre-existing tests (REQ-28 / SC-32).
+        //
+        // `working` is seeded from `self.history` (which already includes the new
+        // user message). `run_tool_loop` extends both `working` and `self.history`
+        // in lock-step, so the provider sees the same growing context as before.
+        let working = self.history.clone();
+        let (_full_text, final_text) = self.run_tool_loop(working, &chunk_tx).await?;
+        Ok(final_text)
+    }
+
+    /// Inner tool-loop shared by the `selective` and `load_all` execution paths.
+    ///
+    /// Streams provider responses and dispatches tool use until the model produces
+    /// a terminal (no-tool) turn, then returns. Both paths build their own `working`
+    /// context slice and delegate here, eliminating the previous duplication while
+    /// preserving every invariant of the original loops (REQ-28).
+    ///
+    /// # Parameters
+    /// - `working` — mutable context slice sent to the provider on each iteration.
+    ///   Extended in-place as assistant responses and tool-result messages are
+    ///   appended. `self.history` is updated in parallel so `load_history` and the
+    ///   message store stay consistent across both paths.
+    /// - `chunk_tx` — streaming sender for UI pieces (shared reference).
+    ///
+    /// # Returns
+    /// A tuple `(full_text, final_text)` where:
+    /// - `full_text` — text accumulated from `TextDelta` chunks (sanitized); used
+    ///   by the `selective` caller for [`write_turn_to_memory`].
+    /// - `final_text` — text extracted from the terminal `MessageDone` content,
+    ///   matching the pre-refactor return value in both branches.
+    ///
+    /// # Invariants preserved
+    /// `max_tool_calls` cap, 3× repetition abort, approval/timeout/deny semantics,
+    /// `sanitize_text` on every delta, `MessageDone`-missing error, TUI-closed
+    /// error, and `self.history` + `memory.add_message` persistence order are all
+    /// identical to the original per-path loops.
+    async fn run_tool_loop(
+        &mut self,
+        mut working: Vec<Message>,
+        chunk_tx: &tokio::sync::mpsc::Sender<StreamPiece>,
+    ) -> Result<(String, String)> {
         let mut tool_call_count = 0;
         let mut last_normalized_tool: Option<(String, String)> = None;
         let mut repeat_count = 0;
 
         loop {
-            let mut stream = self
-                .provider
-                .stream_messages(&self.history, &self.tools)
-                .await?;
+            let mut stream = self.provider.stream_messages(&working, &self.tools).await?;
             let mut full_text = String::new();
             let mut last_message: Option<Message> = None;
 
@@ -624,9 +517,10 @@ impl Agent {
 
             let response =
                 last_message.ok_or_else(|| anyhow::anyhow!("Stream ended without MessageDone"))?;
+            // Both legacy persistence paths (self.history + memory.add_message) are
+            // kept so load_history and the existing message store stay consistent.
             self.history.push(response.clone());
-
-            // Persist assistant response
+            working.push(response.clone());
             if let (Some(memory), Some(sid)) = (&self.memory, &self.session_id) {
                 memory.add_message(sid, &response).await?;
             }
@@ -713,17 +607,27 @@ impl Agent {
                     content: tool_results,
                 };
                 self.history.push(tool_res_msg.clone());
-                // Persist tool results
+                working.push(tool_res_msg.clone());
                 if let (Some(memory), Some(sid)) = (&self.memory, &self.session_id) {
                     memory.add_message(sid, &tool_res_msg).await?;
                 }
             } else {
-                for content in response.content.iter().rev() {
-                    if let Content::Text { text } = content {
-                        return Ok(text.clone());
-                    }
-                }
-                return Ok(String::new());
+                // Extract final text from MessageDone content — matches the
+                // pre-refactor return path used by both the selective and load_all
+                // branches (distinct from `full_text` which is delta-accumulated).
+                let final_text = response
+                    .content
+                    .iter()
+                    .rev()
+                    .find_map(|c| {
+                        if let Content::Text { text } = c {
+                            Some(text.clone())
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or_default();
+                return Ok((full_text, final_text));
             }
         }
     }
