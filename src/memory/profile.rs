@@ -131,6 +131,14 @@ pub async fn distill(
     // rather than silently sending nothing to the judge.
     let batch_budget =
         budget_after_margin(cfg.distill_max_batch_tokens, 0, cfg.safety_margin_ratio).max(1);
+    // F3: track the id of any memory that was truncated for the batch (M1 case)
+    // so we can exclude it from the hard-supersession candidate set below.
+    // The truncated clone has the ORIGINAL embedding (from the full text) but a
+    // TRUNCATED text — offering it as a supersession candidate would cause the
+    // judge to see incomplete information while the embedding reports full-text
+    // similarity.  The memory will be reconsidered in a future pass.
+    let mut truncated_id: Option<String> = None;
+
     let batch: Vec<Memory> = {
         let mut acc = 0usize;
         let mut v = Vec::new();
@@ -150,6 +158,8 @@ pub async fn distill(
                         batch_budget,
                         cfg.chars_per_token,
                     );
+                    // F3: mark this id for exclusion from the supersession step.
+                    truncated_id = Some(m.id.clone());
                     v.push(truncated);
                 }
                 break;
@@ -189,9 +199,17 @@ pub async fn distill(
 
     // Skip supersession when the embedder is in autodetect mode (dim == 0).
     if current_dim > 0 {
+        // F3: exclude the M1 truncated memory (if any) from the supersession
+        // candidate set.  Its embedding is valid (from the full text) but the
+        // judge would see truncated text — an inconsistency that could produce
+        // wrong supersession decisions.  It will be reconsidered in a future pass.
         let embedded: Vec<&Memory> = batch
             .iter()
-            .filter(|m| m.model_id == current_model && m.dim == current_dim)
+            .filter(|m| {
+                m.model_id == current_model
+                    && m.dim == current_dim
+                    && truncated_id.as_deref() != Some(m.id.as_str())
+            })
             .collect();
 
         let mut judge_calls = 0usize;
@@ -1112,5 +1130,77 @@ mod tests {
                 p.text
             );
         }
+    }
+
+    // F3 ─────────────────────────────────────────────────────────────────────
+
+    /// F3: when M1 fires (the first undistilled memory alone exceeds the batch
+    /// budget), the truncated copy inserted in `v` must NOT be offered as a
+    /// supersession candidate this pass.
+    ///
+    /// The inconsistency: the clone has the ORIGINAL embedding (computed from the
+    /// full text) while the judge would see the TRUNCATED text — a mismatch that
+    /// could produce wrong supersession decisions. The fix tracks the truncated
+    /// memory's id and excludes it from the `embedded` candidate vector.
+    ///
+    /// Observable contract: a single-member batch produced by M1 must cause zero
+    /// `contradicts` calls (no pairs exist after exclusion). This was already true
+    /// before the fix (single-member → no pairs), but the fix makes the exclusion
+    /// EXPLICIT — future code that allows multi-member M1 batches will be safe
+    /// without additional changes.
+    #[tokio::test]
+    async fn test_truncated_m1_memory_excluded_from_supersession_candidates() {
+        let (_tmp, store) = make_test_store();
+        // Set chars_per_token = 1.0 so "abcdefgh" (8 chars) = 8 tokens.
+        // batch_budget = 3 → the 8-token memory triggers M1 and gets truncated.
+        let emb = FakeEmbedder {
+            dim: 8,
+            model: "fake".into(),
+        };
+        let clock = FixedClock::new(1_000);
+        let (spy, _summarize_calls, contradicts_calls) = make_spy(vec![], false, false, false);
+        let cfg = MemoryConfig {
+            distill_enabled: true,
+            distill_max_batch_tokens: 3,
+            distill_every_n_turns: 0,
+            chars_per_token: 1.0,
+            safety_margin_ratio: 0.0,
+            supersede_similarity_threshold: 0.0, // all pairs would match if offered
+            supersede_max_candidate_pairs: 50,
+            ..MemoryConfig::default()
+        };
+        // One oversized memory: 8 chars > batch_budget=3 → M1 fires.
+        // model_id and dim match the embedder so it would pass the model filter
+        // and be offered as a supersession candidate WITHOUT the F3 fix (when
+        // paired with another member — which cannot happen in M1 single-member
+        // batches, but the exclusion is now explicit rather than incidental).
+        insert_episodic(
+            &store,
+            "oversized",
+            "abcdefgh",
+            bow("abcdefgh", 8),
+            "fake",
+            8,
+            1_000,
+        )
+        .await;
+
+        distill(&store, &spy, &emb, &clock, &cfg, "root")
+            .await
+            .unwrap();
+
+        let cc = *contradicts_calls.lock().unwrap();
+        assert_eq!(
+            cc, 0,
+            "F3: truncated M1 memory must not be offered as a supersession \
+             candidate — contradicts must not be called; got {cc} call(s)"
+        );
+
+        // The memory must have been marked distilled (batch progress was made).
+        let all = store.active("root").await.unwrap();
+        assert!(
+            all.iter().all(|m| m.distilled_at.is_some()),
+            "F3: M1 memory must be marked distilled after the pass"
+        );
     }
 }
