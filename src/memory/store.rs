@@ -83,6 +83,38 @@ pub struct Memory {
     pub distilled_at: Option<i64>,
 }
 
+// ─── MemoryDiagnostics ───────────────────────────────────────────────────────
+
+/// Operator-visible store counts for the tiered memory subsystem (CP2-AN/S).
+///
+/// All queries are pure `COUNT`/`SUM` reads against the `memories` table —
+/// no decryption, no ANN index traversal. Safe to call at startup before the
+/// in-RAM index is built.
+///
+/// `active_count` and `pending_reembed_count` are scoped to the requested
+/// scope. `archived_count` spans **all** scopes: archived rows are globally
+/// excluded from active retrieval regardless of scope, so a cross-scope total
+/// is the operationally useful metric.
+///
+/// # RAM estimate
+/// `ram_estimate_bytes = Σ(dim × 4)` over active records with `dim > 0` in
+/// the requested scope — the ceiling on in-RAM ANN index memory (4 bytes per
+/// `f32` component).
+#[derive(Debug, Clone, PartialEq)]
+pub struct MemoryDiagnostics {
+    /// Active memories in the requested scope
+    /// (`evicted_at IS NULL AND superseded_by IS NULL`).
+    pub active_count: usize,
+    /// Archived (evicted) memories across all scopes (`evicted_at IS NOT NULL`).
+    pub archived_count: usize,
+    /// Active memories in scope with no embedding (`model_id = ''` or `dim = 0`):
+    /// candidates for lazy re-embed.
+    pub pending_reembed_count: usize,
+    /// In-RAM ANN index ceiling in bytes: `Σ(dim × size_of::<f32>())` for active
+    /// records with real embeddings (`dim > 0`) in the requested scope.
+    pub ram_estimate_bytes: usize,
+}
+
 // ─── VectorStore trait ────────────────────────────────────────────────────────
 
 /// Trait for the encrypted, scope-aware vector store.
@@ -397,6 +429,24 @@ impl SqliteVectorStore {
     /// recovery pattern as `EncryptedSqliteMemory::locked_conn`).
     fn locked_conn(&self) -> std::sync::MutexGuard<'_, rusqlite::Connection> {
         self.conn.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// Returns operator-visible diagnostic counts for `scope` (CP2-AN/S).
+    ///
+    /// Pure SQL reads — no decryption, no ANN traversal. Safe to call at startup.
+    ///
+    /// See [`MemoryDiagnostics`] for field semantics.
+    ///
+    /// # Errors
+    /// [`MemoryError::Storage`] if any of the underlying SQL queries fail.
+    pub async fn diagnostics(&self, _scope: &str) -> Result<MemoryDiagnostics, MemoryError> {
+        // Stub: returns zeros — real implementation lands in the Green phase.
+        Ok(MemoryDiagnostics {
+            active_count: 0,
+            archived_count: 0,
+            pending_reembed_count: 0,
+            ram_estimate_bytes: 0,
+        })
     }
 
     /// Imports prior conversation turns as episodic memories, **non-destructively**:
@@ -903,6 +953,38 @@ mod tests {
         assert!(
             store.active("root").await.unwrap().is_empty(),
             "rollback ⇒ nothing imported"
+        );
+    }
+
+    /// CP2-AN/S: diagnostics reports correct active, archived, and pending counts,
+    /// and produces a non-zero RAM estimate when active vectors exist.
+    #[tokio::test]
+    async fn test_diagnostics_reports_active_archived_and_pending() {
+        let (_t, store) = test_store();
+
+        // Active record with a real embedding.
+        let m_active = sample("diag-active", "active memory with vector", vec![0.1, 0.2, 0.3]);
+        store.insert(&m_active).await.unwrap();
+
+        // Active record with empty embedding → pending re-embed.
+        let mut m_pending = sample("diag-pending", "pending re-embed memory", vec![]);
+        m_pending.model_id = String::new();
+        m_pending.dim = 0;
+        store.insert(&m_pending).await.unwrap();
+
+        // Insert a third record then evict it → archived.
+        let m_evict = sample("diag-evicted", "evicted memory", vec![0.4, 0.5]);
+        store.insert(&m_evict).await.unwrap();
+        store.set_evicted("diag-evicted", Some(1_000_000)).await.unwrap();
+
+        let diag = store.diagnostics("root").await.unwrap();
+
+        assert_eq!(diag.active_count, 2, "two non-evicted records in root scope");
+        assert_eq!(diag.archived_count, 1, "one evicted record (any scope)");
+        assert_eq!(diag.pending_reembed_count, 1, "one active record without embedding");
+        assert!(
+            diag.ram_estimate_bytes > 0,
+            "active vector ⇒ positive RAM estimate (got 0)"
         );
     }
 

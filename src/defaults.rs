@@ -166,4 +166,23 @@ mod tests {
         let body = std::fs::read_to_string(dir.path().join("magi.toml")).unwrap();
         assert_eq!(body, "provider = \"anthropic\"");
     }
+
+    /// SC-25: `magi.toml.example` must contain no actual secret material.
+    ///
+    /// Checks that:
+    /// - No TOML field named `api_key` (with underscore) is present — keys live
+    ///   in env vars / OS keyring only, never in the config file.
+    /// - No `sk-` prefix (Anthropic / OpenAI raw key format) appears anywhere.
+    ///
+    /// The word "key" in prose (e.g. "API keys NEVER live here") is allowed.
+    #[test]
+    fn test_config_example_has_no_secret_material() {
+        let s = std::fs::read_to_string(
+            concat!(env!("CARGO_MANIFEST_DIR"), "/magi.toml.example"),
+        )
+        .unwrap();
+        let low = s.to_lowercase();
+        assert!(!low.contains("api_key"), "magi.toml.example must not contain 'api_key'");
+        assert!(!s.contains("sk-"), "magi.toml.example must not contain 'sk-' key prefix");
+    }
 }
