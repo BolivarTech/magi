@@ -655,6 +655,64 @@ mod tests {
         );
     }
 
+    // ── C1: dim filter test ───────────────────────────────────────────────
+
+    /// C1: a memory with the correct `model_id` but a stale `dim` must be
+    /// included in the re-embed batch produced by `reembed_pending`.
+    /// Without the `m.dim != embedder.dim()` guard a dim-mismatch is silently
+    /// ignored and the stale vector is used for cosine comparison.
+    #[tokio::test]
+    async fn test_dim_mismatch_triggers_reembed() {
+        let (_tmp, store) = make_test_store();
+        let emb = FakeEmbedder {
+            dim: 64,
+            model: "fake".into(),
+        };
+        let cfg = MemoryConfig {
+            reembed_batch_size: 10,
+            ..MemoryConfig::default()
+        };
+
+        // Insert a memory with the correct model_id but a different dim (16 vs 64).
+        let stale_vec: Vec<f32> = vec![1.0 / 4.0; 16]; // dim=16, model=fake
+        store
+            .insert(&crate::memory::store::Memory {
+                id: "stale_dim".into(),
+                session_id: "s".into(),
+                kind: crate::memory::MemoryKind::Episodic,
+                text: "some text".into(),
+                embedding: stale_vec,
+                model_id: "fake".into(), // model matches, dim does not
+                dim: 16,                 // mismatch: embedder uses dim=64
+                created_at: 1_000,
+                last_accessed_at: 1_000,
+                salience: 0.5,
+                access_count: 0,
+                superseded_by: None,
+                evicted_at: None,
+                scope: "root".into(),
+                distilled_at: None,
+            })
+            .await
+            .unwrap();
+
+        // Should detect the dim mismatch and re-embed.
+        let count = reembed_pending(&store, &emb, &cfg, "root").await.unwrap();
+        assert_eq!(count, 1, "C1: dim-mismatch memory must be re-embedded");
+
+        let updated = store.get("stale_dim").await.unwrap().unwrap();
+        assert_eq!(
+            updated.dim,
+            emb.dim(),
+            "C1: dim must match the embedder after re-embedding (was 16, expected 64)"
+        );
+        assert_eq!(
+            updated.embedding.len(),
+            64,
+            "C1: embedding length must equal the new dim"
+        );
+    }
+
     // ── CP2-E ─────────────────────────────────────────────────────────────
 
     /// CP2-E: evicted and superseded memories are never returned by `recall`.
