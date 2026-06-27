@@ -6,16 +6,22 @@
 //! `SqliteVectorStore` (REQ-01, REQ-03, REQ-04).
 //!
 //! # Integration design
-//! `SqliteVectorStore` shares the `Arc<Mutex<Connection>>` and cached
-//! `derived_key` from `EncryptedSqliteMemory`. See [`SqliteVectorStore::new`].
+//! `SqliteVectorStore` **shares** the `Arc<Mutex<Connection>>` and cached
+//! `derived_key` from [`EncryptedSqliteMemory`] — it does NOT open a second
+//! DB or re-derive a key. A fresh `CryptoVault::default()` is constructed
+//! locally; the vault is a stateless algorithm bundle so this is zero-cost.
 //!
 //! # Lock discipline (W12)
-//! The Mutex is held only to collect raw ciphertext rows; it is released
-//! before any decryption runs.
+//! The Mutex is held only long enough to collect raw ciphertext rows from
+//! SQLite; it is **always released before any decryption runs**. This mirrors
+//! the `collect_message_rows` / `decrypt_rows` pattern in `database.rs`.
+//!
+//! [`EncryptedSqliteMemory`]: crate::system::database::EncryptedSqliteMemory
 
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use rusqlite::params;
 use zeroize::Zeroizing;
 
 use crate::memory::error::MemoryError;
@@ -25,50 +31,271 @@ use crate::utils::crypto::CryptoVault;
 // ─── Memory struct ────────────────────────────────────────────────────────────
 
 /// One stored memory record (REQ-01, SC-01).
+///
+/// `created_at` and `last_accessed_at` are Unix seconds (UTC); they are set
+/// by the caller (a `Clock` abstraction is wired in later tasks). `access_count`
+/// is held as `u64` with saturating semantics (CP2-B) and mapped to/from
+/// `i64` in SQLite via `i64::try_from` / `u64::try_from` with `unwrap_or(MAX)`
+/// guards so no value ever causes a panic.
+///
+/// # Scope
+/// `scope` defaults to `"root"` (D-14). Multi-scope is activated in the Agent
+/// Society layer (AS-REQ-09); everything in this task lives in root.
+///
+/// # Empty embedding
+/// An empty `embedding` vector signals "needs lazy embed" (Tasks 5 / 7).
+/// `model_id = ""` similarly signals a pending embed.
+// Narrow allow: struct consumed by SqliteVectorStore (this task) and wired in Task 12.
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct Memory {
+    /// Unique identifier (UUID string).
     pub id: String,
+    /// Session that produced this memory.
     pub session_id: String,
+    /// Whether this is an episodic turn or a durable preference.
     pub kind: MemoryKind,
+    /// Raw text of the memory (stored encrypted as `text_blob`).
     pub text: String,
+    /// Embedding vector (stored encrypted as `embedding_blob`). Empty → pending.
     pub embedding: Vec<f32>,
+    /// Model that produced the embedding, e.g. `"nomic-embed-text"`. Empty → pending.
     pub model_id: String,
+    /// Vector dimension. `0` → pending embed.
     pub dim: usize,
+    /// Creation time (Unix seconds UTC).
     pub created_at: i64,
+    /// Salience score in `[0, 1]` (assigned at write time, Task 6).
     pub salience: f64,
+    /// Access counter (CP2-B: saturating at `i64::MAX` in the SQLite store).
     pub access_count: u64,
+    /// Time of last retrieval hit (Unix seconds UTC).
     pub last_accessed_at: i64,
+    /// ID of the memory that supersedes this one, if any (REQ-10).
     pub superseded_by: Option<String>,
+    /// Unix seconds when this memory was evicted, if at all (REQ-09 / D-07).
     pub evicted_at: Option<i64>,
+    /// Scope tag (D-14). Default `"root"`.
     pub scope: String,
+    /// Unix seconds when this memory was included in a distillation pass (REQ-17).
     pub distilled_at: Option<i64>,
 }
 
 // ─── VectorStore trait ────────────────────────────────────────────────────────
 
+/// Trait for the encrypted, scope-aware vector store.
+///
+/// Every method maps all failures to typed [`MemoryError`] variants; none
+/// may panic. Implementations must be `Send + Sync` for use across async tasks.
+// Narrow allow: trait and all methods consumed by retrieval/decay/distiller
+// modules (Tasks 7–10) and wired into the agent in Task 12.
+#[allow(dead_code)]
 #[async_trait]
 pub trait VectorStore: Send + Sync {
+    /// Persists a [`Memory`] record, encrypting `text` and `embedding` at rest.
+    ///
+    /// # Errors
+    /// [`MemoryError::Crypto`] on encryption failure;
+    /// [`MemoryError::Storage`] on SQLite failure (e.g. duplicate `id`).
     async fn insert(&self, m: &Memory) -> Result<(), MemoryError>;
+
+    /// Retrieves a single [`Memory`] by `id`, or `None` if not found.
+    ///
+    /// # Errors
+    /// [`MemoryError::Crypto`] if decryption fails;
+    /// [`MemoryError::Storage`] on SQL or deserialization failure.
     async fn get(&self, id: &str) -> Result<Option<Memory>, MemoryError>;
+
+    /// Returns all **active** memories for `scope` (SC-41, REQ-38):
+    /// rows where `evicted_at IS NULL AND superseded_by IS NULL AND scope = scope`.
+    ///
+    /// # Errors
+    /// [`MemoryError::Crypto`] or [`MemoryError::Storage`].
     async fn active(&self, scope: &str) -> Result<Vec<Memory>, MemoryError>;
+
+    /// Increments `access_count` and sets `last_accessed_at = now` for every id
+    /// in `ids`. Only the named records are touched (SC-09, REQ-07).
+    ///
+    /// # Errors
+    /// [`MemoryError::Storage`] on SQL failure.
     async fn mark_accessed(&self, ids: &[String], now: i64) -> Result<(), MemoryError>;
+
+    /// Sets `superseded_by = by` for the record with `id`, excluding it from
+    /// future active retrieval (REQ-10, D-12).
+    ///
+    /// # Errors
+    /// [`MemoryError::Storage`] on SQL failure.
     async fn set_superseded(&self, id: &str, by: &str) -> Result<(), MemoryError>;
+
+    /// Sets `evicted_at = at` (or `NULL` to un-evict) for the record with `id`
+    /// (REQ-09, REQ-32, D-07).
+    ///
+    /// # Errors
+    /// [`MemoryError::Storage`] on SQL failure.
     async fn set_evicted(&self, id: &str, at: Option<i64>) -> Result<(), MemoryError>;
+
+    /// Hard-deletes all records with the given `ids` (REQ-32,
+    /// `evicted_retention_days = 0`).
+    ///
+    /// # Errors
+    /// [`MemoryError::Storage`] on SQL failure.
     async fn hard_delete(&self, ids: &[String]) -> Result<(), MemoryError>;
+
+    /// Sets `distilled_at = at` for every id in `ids` (REQ-17, D-15).
+    ///
+    /// # Errors
+    /// [`MemoryError::Storage`] on SQL failure.
     async fn set_distilled(&self, ids: &[String], at: i64) -> Result<(), MemoryError>;
 }
 
-// ─── SqliteVectorStore (stub) ─────────────────────────────────────────────────
+// ─── Internal helpers ─────────────────────────────────────────────────────────
 
+/// Raw encrypted row collected from SQLite before the connection lock is
+/// released (W12 discipline: no decryption under the Mutex).
+#[allow(dead_code)]
+struct RawRow {
+    id: String,
+    session_id: String,
+    kind_str: String,
+    text_blob: String,
+    embedding_blob: String,
+    model_id: String,
+    dim: i64,
+    created_at: i64,
+    salience: f64,
+    access_count: i64,
+    last_accessed_at: i64,
+    superseded_by: Option<String>,
+    evicted_at: Option<i64>,
+    scope: String,
+    distilled_at: Option<i64>,
+}
+
+/// SQL fragment selecting all `memories` columns in the order expected by
+/// [`row_from_query`].
+#[allow(dead_code)]
+const SELECT_COLS: &str = "SELECT id, session_id, kind, text_blob, embedding_blob, \
+    model_id, dim, created_at, salience, access_count, last_accessed_at, \
+    superseded_by, evicted_at, scope, distilled_at FROM memories";
+
+/// Maps a rusqlite `Row` to a [`RawRow`]. Column order must match
+/// [`SELECT_COLS`].
+#[allow(dead_code)]
+fn row_from_query(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawRow> {
+    Ok(RawRow {
+        id: row.get(0)?,
+        session_id: row.get(1)?,
+        kind_str: row.get(2)?,
+        text_blob: row.get(3)?,
+        embedding_blob: row.get(4)?,
+        model_id: row.get(5)?,
+        dim: row.get(6)?,
+        created_at: row.get(7)?,
+        salience: row.get(8)?,
+        access_count: row.get(9)?,
+        last_accessed_at: row.get(10)?,
+        superseded_by: row.get(11)?,
+        evicted_at: row.get(12)?,
+        scope: row.get(13)?,
+        distilled_at: row.get(14)?,
+    })
+}
+
+/// Decrypts a [`RawRow`] into a [`Memory`] outside the connection lock (W12).
+///
+/// # Errors
+/// [`MemoryError::Crypto`] on cipher failure; [`MemoryError::Storage`] on JSON
+/// deserialization or an unknown `kind` string (data integrity error).
+#[allow(dead_code)]
+fn decode_row(raw: RawRow, vault: &CryptoVault, key: &[u8]) -> Result<Memory, MemoryError> {
+    let kind = parse_kind(&raw.kind_str)?;
+
+    let text = vault
+        .decrypt_with_key(key, &raw.text_blob)
+        .map_err(|e| MemoryError::Crypto(e.to_string()))?;
+
+    let emb_json = vault
+        .decrypt_with_key(key, &raw.embedding_blob)
+        .map_err(|e| MemoryError::Crypto(e.to_string()))?;
+    let embedding: Vec<f32> = serde_json::from_str(&emb_json)
+        .map_err(|e| MemoryError::Storage(format!("embedding deserialization: {e}")))?;
+
+    // CP2-B: saturating read — a negative DB value (should never happen in
+    // normal operation) maps to u64::MAX as a safe sentinel, not a panic.
+    let access_count = u64::try_from(raw.access_count).unwrap_or(u64::MAX);
+
+    Ok(Memory {
+        id: raw.id,
+        session_id: raw.session_id,
+        kind,
+        text,
+        embedding,
+        model_id: raw.model_id,
+        dim: raw.dim as usize,
+        created_at: raw.created_at,
+        salience: raw.salience,
+        access_count,
+        last_accessed_at: raw.last_accessed_at,
+        superseded_by: raw.superseded_by,
+        evicted_at: raw.evicted_at,
+        scope: raw.scope,
+        distilled_at: raw.distilled_at,
+    })
+}
+
+/// Parses the stable on-disk `kind` string back to a [`MemoryKind`].
+///
+/// An unknown string is treated as a data integrity error, not a silent
+/// default — consistent with the message `Role` serialization discipline.
+#[allow(dead_code)]
+fn parse_kind(s: &str) -> Result<MemoryKind, MemoryError> {
+    match s {
+        "episodic" => Ok(MemoryKind::Episodic),
+        "preference" => Ok(MemoryKind::Preference),
+        other => Err(MemoryError::Storage(format!(
+            "unknown memory kind in DB: {:?} (data integrity error)",
+            other
+        ))),
+    }
+}
+
+// ─── SqliteVectorStore ────────────────────────────────────────────────────────
+
+/// SQLite-backed, encrypted, scope-aware vector store.
+///
+/// Shares the `Arc<Mutex<Connection>>` and cached `derived_key` from
+/// [`EncryptedSqliteMemory`][crate::system::database::EncryptedSqliteMemory]
+/// so the `memories` table lives in the same database file and uses the same
+/// AES-256-GCM-SIV key. No second DB connection is opened and no additional
+/// Argon2 key derivation is performed.
+///
+/// # Construction
+/// ```ignore
+/// let store = SqliteVectorStore::new(mem.shared_conn(), mem.data_key())?;
+/// ```
+///
+/// # Thread safety
+/// `SqliteVectorStore` is `Send + Sync`; it can be wrapped in an `Arc` and
+/// shared across async tasks.
+// Narrow allow: struct consumed by retrieval/decay/distiller (Tasks 7–10) and
+// wired into the agent in Task 12.
+#[allow(dead_code)]
 pub struct SqliteVectorStore {
     conn: Arc<Mutex<rusqlite::Connection>>,
-    #[allow(dead_code)]
     vault: CryptoVault,
-    #[allow(dead_code)]
     derived_key: Zeroizing<Vec<u8>>,
 }
 
 impl SqliteVectorStore {
+    /// Builds a `SqliteVectorStore` sharing `conn` and `derived_key` with an
+    /// existing `EncryptedSqliteMemory`.
+    ///
+    /// Creates the `memories` table and its scope index if they do not exist.
+    ///
+    /// # Errors
+    /// [`MemoryError::Storage`] if the DDL statement fails.
+    // Narrow allow: called by the agent wiring in Task 12.
+    #[allow(dead_code)]
     pub fn new(
         conn: Arc<Mutex<rusqlite::Connection>>,
         derived_key: Zeroizing<Vec<u8>>,
@@ -103,33 +330,171 @@ impl SqliteVectorStore {
             derived_key,
         })
     }
+
+    /// Acquires the connection lock, recovering from a poisoned mutex (same
+    /// recovery pattern as `EncryptedSqliteMemory::locked_conn`).
+    fn locked_conn(&self) -> std::sync::MutexGuard<'_, rusqlite::Connection> {
+        self.conn.lock().unwrap_or_else(|p| p.into_inner())
+    }
 }
 
 #[async_trait]
 impl VectorStore for SqliteVectorStore {
-    async fn insert(&self, _m: &Memory) -> Result<(), MemoryError> {
-        Err(MemoryError::Storage("not implemented".into()))
+    async fn insert(&self, m: &Memory) -> Result<(), MemoryError> {
+        // Encrypt BEFORE acquiring the lock so the critical section is short
+        // (W12 spirit: minimize work under the Mutex).
+        let text_blob = self
+            .vault
+            .encrypt_with_key(&self.derived_key, &m.text)
+            .map_err(|e| MemoryError::Crypto(e.to_string()))?;
+
+        let emb_json = serde_json::to_string(&m.embedding)
+            .map_err(|e| MemoryError::Storage(format!("embedding serialization: {e}")))?;
+        let embedding_blob = self
+            .vault
+            .encrypt_with_key(&self.derived_key, &emb_json)
+            .map_err(|e| MemoryError::Crypto(e.to_string()))?;
+
+        // CP2-B: saturating write — u64 values above i64::MAX are clamped to
+        // i64::MAX rather than panicking or wrapping.
+        let access_count_i64 = i64::try_from(m.access_count).unwrap_or(i64::MAX);
+
+        let c = self.locked_conn();
+        c.execute(
+            "INSERT INTO memories \
+                 (id, session_id, kind, text_blob, embedding_blob, model_id, dim, \
+                  created_at, salience, access_count, last_accessed_at, \
+                  superseded_by, evicted_at, scope, distilled_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+            params![
+                m.id,
+                m.session_id,
+                m.kind.as_str(),
+                text_blob,
+                embedding_blob,
+                m.model_id,
+                m.dim as i64,
+                m.created_at,
+                m.salience,
+                access_count_i64,
+                m.last_accessed_at,
+                m.superseded_by,
+                m.evicted_at,
+                m.scope,
+                m.distilled_at,
+            ],
+        )
+        .map_err(|e| MemoryError::Storage(e.to_string()))?;
+
+        Ok(())
     }
-    async fn get(&self, _id: &str) -> Result<Option<Memory>, MemoryError> {
-        Err(MemoryError::Storage("not implemented".into()))
+
+    async fn get(&self, id: &str) -> Result<Option<Memory>, MemoryError> {
+        // 1. Collect the raw ciphertext row under the lock.
+        let raw: Option<RawRow> = {
+            let c = self.locked_conn();
+            let mut stmt = c
+                .prepare(&format!("{SELECT_COLS} WHERE id = ?1"))
+                .map_err(|e| MemoryError::Storage(e.to_string()))?;
+            let mut rows = stmt
+                .query_map(params![id], row_from_query)
+                .map_err(|e| MemoryError::Storage(e.to_string()))?;
+            match rows.next() {
+                None => None,
+                Some(r) => Some(r.map_err(|e| MemoryError::Storage(e.to_string()))?),
+            }
+        }; // lock released here
+
+        // 2. Decrypt outside the lock (W12).
+        match raw {
+            None => Ok(None),
+            Some(row) => Ok(Some(decode_row(row, &self.vault, &self.derived_key)?)),
+        }
     }
-    async fn active(&self, _scope: &str) -> Result<Vec<Memory>, MemoryError> {
-        Err(MemoryError::Storage("not implemented".into()))
+
+    async fn active(&self, scope: &str) -> Result<Vec<Memory>, MemoryError> {
+        // 1. Collect raw rows under the lock.
+        let raw_rows: Vec<RawRow> = {
+            let c = self.locked_conn();
+            let mut stmt = c
+                .prepare(&format!(
+                    "{SELECT_COLS} WHERE evicted_at IS NULL \
+                      AND superseded_by IS NULL AND scope = ?1"
+                ))
+                .map_err(|e| MemoryError::Storage(e.to_string()))?;
+            let iter = stmt
+                .query_map(params![scope], row_from_query)
+                .map_err(|e| MemoryError::Storage(e.to_string()))?;
+            let mut collected = Vec::new();
+            for r in iter {
+                collected.push(r.map_err(|e| MemoryError::Storage(e.to_string()))?);
+            }
+            collected
+        }; // lock released here
+
+        // 2. Decrypt outside the lock (W12).
+        let mut out = Vec::with_capacity(raw_rows.len());
+        for row in raw_rows {
+            out.push(decode_row(row, &self.vault, &self.derived_key)?);
+        }
+        Ok(out)
     }
-    async fn mark_accessed(&self, _ids: &[String], _now: i64) -> Result<(), MemoryError> {
-        Err(MemoryError::Storage("not implemented".into()))
+
+    async fn mark_accessed(&self, ids: &[String], now: i64) -> Result<(), MemoryError> {
+        // Pure SQL update — no decryption — so the lock may be held for the
+        // entire loop without violating the W12 discipline.
+        let c = self.locked_conn();
+        for id in ids {
+            c.execute(
+                "UPDATE memories \
+                 SET access_count = access_count + 1, last_accessed_at = ?2 \
+                 WHERE id = ?1",
+                params![id, now],
+            )
+            .map_err(|e| MemoryError::Storage(e.to_string()))?;
+        }
+        Ok(())
     }
-    async fn set_superseded(&self, _id: &str, _by: &str) -> Result<(), MemoryError> {
-        Err(MemoryError::Storage("not implemented".into()))
+
+    async fn set_superseded(&self, id: &str, by: &str) -> Result<(), MemoryError> {
+        let c = self.locked_conn();
+        c.execute(
+            "UPDATE memories SET superseded_by = ?2 WHERE id = ?1",
+            params![id, by],
+        )
+        .map_err(|e| MemoryError::Storage(e.to_string()))?;
+        Ok(())
     }
-    async fn set_evicted(&self, _id: &str, _at: Option<i64>) -> Result<(), MemoryError> {
-        Err(MemoryError::Storage("not implemented".into()))
+
+    async fn set_evicted(&self, id: &str, at: Option<i64>) -> Result<(), MemoryError> {
+        let c = self.locked_conn();
+        c.execute(
+            "UPDATE memories SET evicted_at = ?2 WHERE id = ?1",
+            params![id, at],
+        )
+        .map_err(|e| MemoryError::Storage(e.to_string()))?;
+        Ok(())
     }
-    async fn hard_delete(&self, _ids: &[String]) -> Result<(), MemoryError> {
-        Err(MemoryError::Storage("not implemented".into()))
+
+    async fn hard_delete(&self, ids: &[String]) -> Result<(), MemoryError> {
+        let c = self.locked_conn();
+        for id in ids {
+            c.execute("DELETE FROM memories WHERE id = ?1", params![id])
+                .map_err(|e| MemoryError::Storage(e.to_string()))?;
+        }
+        Ok(())
     }
-    async fn set_distilled(&self, _ids: &[String], _at: i64) -> Result<(), MemoryError> {
-        Err(MemoryError::Storage("not implemented".into()))
+
+    async fn set_distilled(&self, ids: &[String], at: i64) -> Result<(), MemoryError> {
+        let c = self.locked_conn();
+        for id in ids {
+            c.execute(
+                "UPDATE memories SET distilled_at = ?2 WHERE id = ?1",
+                params![id, at],
+            )
+            .map_err(|e| MemoryError::Storage(e.to_string()))?;
+        }
+        Ok(())
     }
 }
 
@@ -140,14 +505,17 @@ mod tests {
     use super::*;
     use crate::system::database::EncryptedSqliteMemory;
 
+    /// Creates a temp-file-backed `SqliteVectorStore` sharing the connection
+    /// and key from a fresh `EncryptedSqliteMemory`. The returned
+    /// `NamedTempFile` must stay alive for the test's lifetime.
     fn test_store() -> (tempfile::NamedTempFile, SqliteVectorStore) {
         let tmp = tempfile::NamedTempFile::new().unwrap();
-        let mem =
-            EncryptedSqliteMemory::new(tmp.path().to_path_buf(), "pw".into()).unwrap();
+        let mem = EncryptedSqliteMemory::new(tmp.path().to_path_buf(), "pw".into()).unwrap();
         let store = SqliteVectorStore::new(mem.shared_conn(), mem.data_key()).unwrap();
         (tmp, store)
     }
 
+    /// Builds a minimal `Memory` for testing.
     fn sample(id: &str, text: &str, emb: Vec<f32>) -> Memory {
         Memory {
             id: id.into(),
@@ -168,16 +536,18 @@ mod tests {
         }
     }
 
+    /// Reads a raw column value via a *separate* SQLite connection so we
+    /// inspect what is actually on disk (not what the in-process store caches).
     fn raw_blob(tmp: &tempfile::NamedTempFile, col: &str) -> String {
         let conn = rusqlite::Connection::open(tmp.path()).unwrap();
-        conn.query_row(
-            &format!("SELECT {col} FROM memories LIMIT 1"),
-            [],
-            |r| r.get::<_, String>(0),
-        )
+        conn.query_row(&format!("SELECT {col} FROM memories LIMIT 1"), [], |r| {
+            r.get::<_, String>(0)
+        })
         .unwrap()
     }
 
+    /// SC-05, SC-41: round-trip through insert/get preserves all fields; disk
+    /// blobs contain ciphertext, not plaintext.
     #[tokio::test]
     async fn test_persist_and_reload_roundtrips_vector_and_metadata() {
         let (tmp, store) = test_store();
@@ -185,11 +555,12 @@ mod tests {
         store.insert(&m).await.unwrap();
         let got = store.get("m1").await.unwrap().unwrap();
         assert_eq!(got, m);
-        assert_eq!(got.scope, "root");
-        assert!(!raw_blob(&tmp, "text_blob").contains("budget"));
-        assert!(!raw_blob(&tmp, "embedding_blob").contains("0.1"));
+        assert_eq!(got.scope, "root"); // SC-41
+        assert!(!raw_blob(&tmp, "text_blob").contains("budget")); // SC-05 no cleartext text
+        assert!(!raw_blob(&tmp, "embedding_blob").contains("0.1")); // SC-05 no cleartext vector
     }
 
+    /// SC-41: `scope` defaults to `"root"` and `active` filters by scope.
     #[tokio::test]
     async fn test_default_scope_is_root_and_active_filters_by_scope() {
         let (_t, store) = test_store();
@@ -198,6 +569,7 @@ mod tests {
         assert!(store.active("other").await.unwrap().is_empty());
     }
 
+    /// SC-09: `mark_accessed` updates ONLY the named ids.
     #[tokio::test]
     async fn test_mark_accessed_updates_only_named_ids() {
         let (_t, store) = test_store();
@@ -205,10 +577,16 @@ mod tests {
         store.insert(&sample("b", "b", vec![0.0; 3])).await.unwrap();
         store.mark_accessed(&["a".into()], 2000).await.unwrap();
         assert_eq!(store.get("a").await.unwrap().unwrap().access_count, 1);
-        assert_eq!(store.get("a").await.unwrap().unwrap().last_accessed_at, 2000);
+        assert_eq!(
+            store.get("a").await.unwrap().unwrap().last_accessed_at,
+            2000
+        );
         assert_eq!(store.get("b").await.unwrap().unwrap().access_count, 0);
     }
 
+    /// CP2-B: `access_count` values that fit in `i64` round-trip exactly.
+    /// `i64::MAX as u64` is the highest value the write-side
+    /// `i64::try_from(…).unwrap_or(i64::MAX)` passes through without clamping.
     #[tokio::test]
     async fn test_access_count_storage_saturates_at_i64_max() {
         let (_t, store) = test_store();

@@ -397,6 +397,8 @@ impl EncryptedSqliteMemory {
     /// Returns an `Arc` clone of the shared SQLite connection for use by
     /// sibling stores (e.g. the tiered-memory vector store). The connection
     /// is already in WAL mode and has the busy timeout configured.
+    // Narrow allow: called by SqliteVectorStore::new (Task 4) and wired in Task 12.
+    #[allow(dead_code)]
     pub(crate) fn shared_conn(&self) -> Arc<Mutex<Connection>> {
         self.conn.clone()
     }
@@ -404,6 +406,8 @@ impl EncryptedSqliteMemory {
     /// Returns a clone of the cached per-DB data key so sibling stores can
     /// encrypt / decrypt with the same AES-256-GCM-SIV key without running
     /// an additional Argon2 derivation.
+    // Narrow allow: called by SqliteVectorStore::new (Task 4) and wired in Task 12.
+    #[allow(dead_code)]
     pub(crate) fn data_key(&self) -> Zeroizing<Vec<u8>> {
         self.derived_key.clone()
     }
