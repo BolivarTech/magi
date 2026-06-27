@@ -236,6 +236,45 @@ To use OpenAI instead, edit `magi.toml` (`base_url = "https://api.openai.com/v1"
 
 ---
 
+## Tiered Memory (RAG)
+
+Magi's memory subsystem replaces the naive "load the entire history into every prompt" approach with semantic retrieval and principled forgetting. Three pillars govern how context is built each turn:
+
+| Pillar | What it means |
+|--------|---------------|
+| **P1 — Storage & retrieval** | Every persisted memory is indexed with an embedding via any OpenAI-compatible embedder (default: `nomic-embed-text` on a local Ollama instance). Retrieval is semantic — top-k by cosine similarity, re-ranked by a weighted combination of recency, salience, and access frequency. |
+| **P2 — Timely forgetting** | A decay model (time-based half-life, access-reinforced, salience-weighted) identifies obsolete memories. Memories below the strength threshold are archived or deleted; **preferences and high-salience facts are never evicted.** Superseded facts are soft-demoted immediately by the reranker and hard-excluded by the off-hot-path distiller. |
+| **P3 — Bounded context recall** | The context assembler packs: system prompt → preference profile (always present) → ranked episodic recalls → current turn, all within a configurable token budget. Context size is bounded regardless of total history depth — no more O(N) prompt growth. |
+
+**Default mode: `selective`** — validated by the built-in benchmark (same recall accuracy as the v0.6.0 "load all" baseline at roughly 35 % of context tokens, with zero staleness rate from superseded facts).
+
+The preference profile is always injected, cross-session: a distiller (driven by the configured LLM) periodically promotes recurring preferences from episodic memory into a compact, deduplicated profile with latest-wins semantics.
+
+### Enabling / configuring
+
+The `selective` mode is the default. To tune or disable it, add a `[memory]` section to your `magi.toml`:
+
+```toml
+[memory]
+mode = "selective"          # selective (default) | load_all (v0.6.0 behavior)
+context_budget_tokens = 8000
+top_k = 12
+decay_half_life_days = 30.0
+distill_every_n_turns = 20
+
+[embedding]
+base_url = "http://localhost:11434/v1"  # Ollama default; point elsewhere for cloud
+model = "nomic-embed-text"
+```
+
+See [`magi.toml.example`](magi.toml.example) for all options with inline documentation.
+
+### Rollback
+
+To revert to the v0.6.0 behavior: set `mode = "load_all"` in `[memory]`. The agent will stop using embeddings for context assembly and load the full history per turn (existing `messages` table unchanged). To also purge the tiered-memory table: open `.magi-rs-memory.db` with any SQLite client and run `DROP TABLE memories;` — this only removes tiered-memory records; the `sessions`, `messages`, and `knowledge` tables are unaffected.
+
+---
+
 ## How It Works
 
 ```
