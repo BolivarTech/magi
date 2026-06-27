@@ -8,6 +8,7 @@
 //! configuration surface (`config`); subsequent tasks will add storage, retrieval,
 //! decay/eviction, context assembly, and benchmarking.
 
+pub mod clock;
 pub mod config;
 pub mod embedding;
 pub mod error;
