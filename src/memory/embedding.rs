@@ -499,4 +499,112 @@ mod tests {
             "F1: connection-refused must produce Network, got: {err:?}"
         );
     }
+
+    // ── F4: CAS contract for autodetect dim ────────────────────────────────────
+
+    /// F4: in autodetect mode (`dim = 0`), the first successful embed establishes
+    /// the dimension and `dim()` reflects it; a subsequent response with a
+    /// different length must be rejected even when the initial `detected_dim` was 0.
+    ///
+    /// This test documents the CAS (compare-and-swap) contract: once the first
+    /// call establishes a dim, all subsequent calls — including concurrent ones
+    /// that also saw `detected_dim == 0` — must converge on that single value.
+    #[tokio::test]
+    async fn test_autodetect_dim_cas_contract_established_before_second_call() {
+        let mut server = mockito::Server::new_async().await;
+        // First call: dim=4 established.
+        let _m1 = server
+            .mock("POST", "/embeddings")
+            .match_body(mockito::Matcher::PartialJson(
+                serde_json::json!({"input": ["first"]}),
+            ))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"data":[{"embedding":[0.1,0.2,0.3,0.4]}]}"#)
+            .create_async()
+            .await;
+        // Second call: dim=2 (mismatch) — must be a Dim error regardless of how
+        // the first dim was stored (load/store vs CAS semantics).
+        let _m2 = server
+            .mock("POST", "/embeddings")
+            .match_body(mockito::Matcher::PartialJson(
+                serde_json::json!({"input": ["second"]}),
+            ))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"data":[{"embedding":[0.5,0.6]}]}"#)
+            .create_async()
+            .await;
+
+        let emb = OpenAiCompatibleEmbedder::new(
+            &EmbeddingConfig {
+                dim: 0, // autodetect
+                base_url: server.url(),
+                ..Default::default()
+            },
+            None,
+        );
+
+        // Before any call, dim() must be 0 (nothing detected yet).
+        assert_eq!(emb.dim(), 0, "F4: dim() before first call must be 0");
+
+        // First call establishes dim=4.
+        let first = emb.embed(&["first".into()]).await.unwrap();
+        assert_eq!(first[0].len(), 4, "F4: first response has 4 components");
+        assert_eq!(emb.dim(), 4, "F4: dim() after first call must be 4");
+
+        // Second call with dim=2 must fail: established dim (4) != got (2).
+        let err = emb.embed(&["second".into()]).await.unwrap_err();
+        assert!(
+            matches!(
+                err,
+                EmbeddingError::Dim {
+                    expected: 4,
+                    got: 2
+                }
+            ),
+            "F4: CAS contract — Dim{{expected:4,got:2}} expected, got: {err:?}"
+        );
+    }
+
+    /// F4: in autodetect mode, a second call returning the SAME dim must succeed
+    /// (convergence case — both the winner and any concurrent caller that saw
+    /// the same response must be accepted).
+    #[tokio::test]
+    async fn test_autodetect_dim_cas_same_dim_on_second_call_succeeds() {
+        let mut server = mockito::Server::new_async().await;
+        let _m1 = server
+            .mock("POST", "/embeddings")
+            .match_body(mockito::Matcher::PartialJson(
+                serde_json::json!({"input": ["a"]}),
+            ))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"data":[{"embedding":[0.1,0.2,0.3]}]}"#)
+            .create_async()
+            .await;
+        let _m2 = server
+            .mock("POST", "/embeddings")
+            .match_body(mockito::Matcher::PartialJson(
+                serde_json::json!({"input": ["b"]}),
+            ))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"data":[{"embedding":[0.4,0.5,0.6]}]}"#)
+            .create_async()
+            .await;
+
+        let emb = OpenAiCompatibleEmbedder::new(
+            &EmbeddingConfig {
+                dim: 0,
+                base_url: server.url(),
+                ..Default::default()
+            },
+            None,
+        );
+        let _ = emb.embed(&["a".into()]).await.unwrap();
+        // Same dim=3 on second call — must succeed.
+        let second = emb.embed(&["b".into()]).await.unwrap();
+        assert_eq!(second[0].len(), 3, "F4: same-dim second call must succeed");
+    }
 }
