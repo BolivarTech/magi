@@ -11,9 +11,12 @@
 //! - D-04:   asymmetric task prefixes (`query_prefix` / `document_prefix`) are applied
 //!   by the helpers [`embed_query`][OpenAiCompatibleEmbedder::embed_query] and
 //!   [`embed_documents`][OpenAiCompatibleEmbedder::embed_documents].
-//! - No `.timeout(…)` is set on the `reqwest::Client` — local Ollama can spend tens of
-//!   seconds on a cold-load before the first byte arrives; a total-request timeout would
-//!   truncate healthy long calls (matches `OpenAiCompatibleProvider` convention).
+//! - A 120 s overall request timeout is set on the `reqwest::Client` (G1). Unlike the
+//!   chat SSE provider — where a total-request timeout would truncate healthy long streams
+//!   — embedding calls are single non-streaming POSTs; 120 s is generous for cold Ollama
+//!   model loads but still bounds indefinite hangs that block the user's turn.
+//!   A hung server surfaces as [`EmbeddingError::Timeout`] and is handled by the agent's
+//!   fallback (persist text-only; continue).
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -95,10 +98,12 @@ struct EmbedData {
 /// Targets any endpoint that speaks the OpenAI embeddings API surface — local
 /// Ollama (default), Qwen Cloud, OpenAI, or any other compatible service.
 ///
-/// # No request timeout
-/// The `reqwest::Client` is built without `.timeout(…)`. Local Ollama can spend
-/// tens of seconds loading a model on a cold start before responding; a total-
-/// request deadline would truncate healthy calls.
+/// # Request timeout (G1)
+/// The `reqwest::Client` is built with a **120 s overall request timeout**. Unlike
+/// the chat SSE provider (where `.timeout(…)` would truncate healthy long streams),
+/// embedding calls are single non-streaming POSTs. 120 s is generous for cold Ollama
+/// model loads while still bounding indefinite hangs — a hung endpoint surfaces as
+/// [`EmbeddingError::Timeout`] and triggers the agent's graceful fallback.
 ///
 /// # Key safety
 /// The API key is stored internally and **never** included in any error string.
@@ -136,10 +141,16 @@ impl OpenAiCompatibleEmbedder {
     // and retrieval modules in Tasks 4–6. Only tests exercise them here.
     #[allow(dead_code)]
     pub fn new(cfg: &EmbeddingConfig, api_key: Option<String>) -> Self {
-        // No total-request timeout: cold Ollama loads can take tens of seconds
-        // before the first byte; a deadline would break healthy long embeds.
+        // 120 s total-request timeout (G1): embedding calls are single-round-trip
+        // non-streaming POSTs, unlike the chat SSE provider where a deadline would
+        // truncate healthy long streams. 120 s accommodates cold Ollama model loads
+        // while bounding indefinite hangs that would block the user's turn.
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(120))
+            .build()
+            .expect("reqwest::Client build failed — timeout duration is a fixed constant");
         Self {
-            client: reqwest::Client::new(),
+            client,
             base_url: cfg.base_url.trim_end_matches('/').to_string(),
             model: cfg.model.clone(),
             configured_dim: cfg.dim,
@@ -215,9 +226,12 @@ impl OpenAiCompatibleEmbedder {
         match status.as_u16() {
             401 | 403 => return Err(EmbeddingError::Auth),
             429 => return Err(EmbeddingError::RateLimited),
-            s if s >= 400 => {
-                // Read a short body snippet for diagnostics.
-                // The api_key is never in the server's response body.
+            200..=299 => {} // 2xx success — fall through to JSON parsing
+            s => {
+                // 3xx (if reqwest's redirect budget is exhausted or redirects are
+                // disabled), 4xx (non-401/403/429), and 5xx are all treated as HTTP
+                // errors (G5): anything not 2xx is a failure. The api_key is never
+                // in the server's response body.
                 let snippet = response
                     .text()
                     .await
@@ -227,7 +241,6 @@ impl OpenAiCompatibleEmbedder {
                     .collect::<String>();
                 return Err(EmbeddingError::Http(format!("HTTP {s} — {snippet}")));
             }
-            _ => {}
         }
 
         let parsed: EmbedResponse = response
@@ -260,6 +273,14 @@ impl OpenAiCompatibleEmbedder {
                     });
                 }
             } else {
+                // Autodetect mode: a zero-length vector must be rejected before the
+                // CAS — storing dim = 0 would make records unretrievable by the ANN
+                // index and silently corrupt the cosine-similarity filter (G4).
+                if got == 0 {
+                    return Err(EmbeddingError::Malformed(
+                        "zero-dimension embedding response".into(),
+                    ));
+                }
                 // First successful response in autodetect mode. Use CAS so that
                 // concurrent first-callers all converge on ONE dimension (F4).
                 //
