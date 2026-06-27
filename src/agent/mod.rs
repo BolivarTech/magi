@@ -62,6 +62,10 @@ struct MemorySubsystem {
     /// activated in L3 (Agent Society — AS-REQ-09).
     scope: String,
     /// System-prompt text for token-budget accounting; empty when none is set.
+    /// By design this Agent injects no `Role::System` message on any code path
+    /// (neither `selective` nor `load_all`), so this field stays `String::new()`.
+    /// The field and the assembler slot exist per REQ-13 for callers that do set
+    /// a system prompt in the future.
     system: String,
     /// Number of selective turns processed since `set_memory_subsystem`. Used
     /// to determine when to fire the `distill_every_n_turns` trigger (Task 13b).
@@ -784,8 +788,11 @@ async fn write_turn_to_memory(
         _ => (Vec::new(), String::new(), 0),
     };
 
-    // Use a content-hash-based ID so identical texts within the same second still
-    // produce distinct records if the role differs.
+    // Content-hash ID: `Sha256("{now}:{role:?}:{text}")` — distinct content → distinct
+    // ids; identical text + role + second → same id → idempotent dedup (NOT a bug).
+    // Adding a nonce/nanosecond would break this idempotency, which mirrors the CP2-M
+    // migration content-hash. Roles differ ("User" vs "Assistant") so the same text
+    // in the same second still produces two separate records.
     let id = format!(
         "turn:{:x}",
         Sha256::digest(format!("{now}:{role:?}:{text}").as_bytes())
