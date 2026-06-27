@@ -10,6 +10,7 @@
 
 pub mod clock;
 pub mod config;
+pub mod decay;
 pub mod embedding;
 pub mod error;
 pub mod index;
