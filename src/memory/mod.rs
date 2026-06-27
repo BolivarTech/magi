@@ -8,6 +8,10 @@
 //! configuration surface (`config`); subsequent tasks will add storage, retrieval,
 //! decay/eviction, context assembly, and benchmarking.
 
+// bench is test-only: all public items are consumed exclusively from
+// #[cfg(test)] blocks (the binary re-implements the minimal primitives inline).
+#[cfg(test)]
+pub mod bench;
 pub mod clock;
 pub mod config;
 pub mod context;

@@ -1,0 +1,76 @@
+{
+  "version": "1.0",
+  "seed": 42,
+  "description": "Synthetic benchmark dataset for magi-rs tiered memory evaluation (REQ-23', R-08).",
+  "sessions": {
+    "A": [
+      {
+        "fact_id": "pref_rust",
+        "role": "user",
+        "text": "I prefer Rust over Python for systems programming"
+      },
+      {
+        "role": "assistant",
+        "text": "Noted, you prefer Rust for systems programming."
+      },
+      {
+        "fact_id": "pref_dark",
+        "role": "user",
+        "text": "I use dark mode in all editors and terminals"
+      },
+      {
+        "role": "assistant",
+        "text": "Dark mode preference saved."
+      },
+      {
+        "fact_id": "editor_old",
+        "role": "user",
+        "text": "I use vim as my primary editor"
+      },
+      {
+        "role": "assistant",
+        "text": "You use vim."
+      },
+      {
+        "fact_id": "editor_new",
+        "supersedes": "editor_old",
+        "role": "user",
+        "text": "I switched from vim to neovim"
+      },
+      {
+        "role": "assistant",
+        "text": "Updated: you now use neovim."
+      },
+      {
+        "fact_id": "distractor_1",
+        "role": "user",
+        "text": "The capital of France is Paris"
+      },
+      {
+        "fact_id": "distractor_2",
+        "role": "user",
+        "text": "Water boils at one hundred degrees Celsius"
+      }
+    ]
+  },
+  "probes": [
+    {
+      "id": "q_rust",
+      "query": "Rust Python systems programming",
+      "expected_fact_ids": ["pref_rust"],
+      "staleness_fact_ids": []
+    },
+    {
+      "id": "q_editor",
+      "query": "editor vim neovim",
+      "expected_fact_ids": ["editor_new"],
+      "staleness_fact_ids": ["editor_old"]
+    },
+    {
+      "id": "q_dark",
+      "query": "dark mode editors terminals",
+      "expected_fact_ids": ["pref_dark"],
+      "staleness_fact_ids": []
+    }
+  ]
+}
