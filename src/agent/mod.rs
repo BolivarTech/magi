@@ -7,6 +7,12 @@ pub mod provider;
 
 use crate::agent::messages::{Content, Message, Role};
 use crate::agent::provider::{Provider, ResponseChunk};
+use crate::memory::clock::Clock;
+use crate::memory::config::MemoryConfig;
+use crate::memory::decay::purge_expired_archives;
+use crate::memory::embedding::EmbeddingProvider;
+use crate::memory::retrieval::reembed_pending;
+use crate::memory::store::SqliteVectorStore;
 use crate::system::database::MemoryStore;
 use crate::tools::Tool;
 use anyhow::Result;
@@ -34,6 +40,29 @@ pub enum StreamPiece {
     Reasoning(String),
 }
 
+/// Tiered-memory subsystem handle for `selective` mode (Task 12).
+///
+/// Absent (`None` on `Agent`) ⇒ legacy `load_all` behavior: the full
+/// conversation history is sent to the provider on every turn, preserving
+/// the behavior of all 188 pre-existing tests (REQ-28/SC-32).
+// Narrow allow: all fields are read in `on_session_open` (GREEN: also in
+// `query_streaming`). The struct itself is constructed in `set_memory_subsystem`.
+#[allow(dead_code)]
+struct MemorySubsystem {
+    store: Arc<SqliteVectorStore>,
+    embedder: Arc<dyn EmbeddingProvider>,
+    clock: Arc<dyn Clock>,
+    cfg: MemoryConfig,
+    /// Scope tag for memory isolation; defaults to `"root"`. Multi-scope is
+    /// activated in L3 (Agent Society — AS-REQ-09).
+    scope: String,
+    /// Serialized preference profile always injected into the assembled context.
+    /// Empty until Task 13 (distiller) wires content.
+    profile: String,
+    /// System-prompt text for token-budget accounting; empty when none is set.
+    system: String,
+}
+
 /// The Agent orchestrator.
 pub struct Agent {
     provider: Arc<dyn Provider>,
@@ -47,6 +76,12 @@ pub struct Agent {
     approval_tx: Option<tokio::sync::mpsc::Sender<ApprovalRequest>>,
     /// Safeguard for infinite loops (max tool calls per query)
     pub max_tool_calls: usize,
+    /// Optional tiered-memory subsystem for `selective` mode (Task 12).
+    /// `None` ⇒ legacy `load_all` behavior; all 188 pre-existing tests rely on
+    /// this path being byte-identical to the original implementation.
+    // Narrow allow: read in `query_streaming` selective branch (GREEN phase).
+    #[allow(dead_code)]
+    memory_subsystem: Option<MemorySubsystem>,
 }
 
 impl Agent {
@@ -60,6 +95,7 @@ impl Agent {
             session_id: None,
             approval_tx: None,
             max_tool_calls: 15,
+            memory_subsystem: None,
         }
     }
 
@@ -170,6 +206,58 @@ impl Agent {
     /// Clears the conversation history.
     pub fn clear_history(&mut self) {
         self.history.clear();
+    }
+
+    /// Attaches the tiered-memory subsystem, enabling `selective` mode inside
+    /// `query_streaming`.
+    ///
+    /// Once set, each turn is persisted as a vector-indexed episodic memory and
+    /// the bounded context assembler (`assemble_selective`) replaces the full
+    /// history on every provider call. The legacy persistence path
+    /// (`memory.add_message`) is preserved in both modes.
+    ///
+    /// # Parameters
+    /// - `store` — encrypted vector store (shares the SQLite connection of
+    ///   `EncryptedSqliteMemory`, so the file stays a single on-disk asset).
+    /// - `embedder` — text-to-vector backend (Ollama default; any openai-compat
+    ///   endpoint works by pointing `base_url`).
+    /// - `clock` — wall-clock abstraction; inject `FixedClock` in tests for
+    ///   deterministic decay (D-18 / R-06).
+    /// - `cfg` — memory configuration (context budget, weights, mode, …).
+    // Narrow allow: called from `main.rs` in GREEN phase; dead in RED binary target.
+    #[allow(dead_code)]
+    pub fn set_memory_subsystem(
+        &mut self,
+        store: Arc<SqliteVectorStore>,
+        embedder: Arc<dyn EmbeddingProvider>,
+        clock: Arc<dyn Clock>,
+        cfg: MemoryConfig,
+    ) {
+        self.memory_subsystem = Some(MemorySubsystem {
+            store,
+            embedder,
+            clock,
+            cfg,
+            scope: "root".into(),
+            profile: String::new(),
+            system: String::new(),
+        });
+    }
+
+    /// Runs best-effort maintenance on session open: re-embeds pending memories
+    /// (stored without a vector due to a transient embedding failure) and purges
+    /// expired archives.
+    ///
+    /// Errors are intentionally swallowed — maintenance failures must never
+    /// block session startup (REQ-29).
+    // Narrow allow: called from `main.rs` in GREEN phase; dead in RED binary target.
+    #[allow(dead_code)]
+    pub async fn on_session_open(&self) -> Result<()> {
+        if let Some(s) = &self.memory_subsystem {
+            let _ = reembed_pending(&*s.store, &*s.embedder, &s.cfg, &s.scope).await;
+            let _ = purge_expired_archives(&*s.store, &*s.clock, &s.cfg).await;
+        }
+        Ok(())
     }
 
     /// Process a user message and returns the final assistant response.
@@ -337,6 +425,48 @@ impl Agent {
             }
         }
     }
+}
+
+/// Persists one conversational turn to the encrypted vector store (best-effort).
+///
+/// On embedding failure the record is stored with an empty vector, which marks it
+/// for lazy re-embed on the next `on_session_open` call. A write error must never
+/// abort the user's turn (REQ-29).
+///
+/// # Parameters
+/// - `store` — encrypted vector store to insert the record into.
+/// - `embedder` — text-to-vector backend; `document_prefix` is applied before embedding.
+/// - `clock` — wall-clock abstraction for `created_at` / `last_accessed_at`.
+/// - `cfg` — memory config for salience heuristic.
+/// - `scope` — isolation scope (always `"root"` in Task 12).
+/// - `session_id` — owning session UUID.
+/// - `text` — raw turn text (not yet prefixed).
+/// - `role` — `Role::User` or `Role::Assistant`; stored in the ID hash for uniqueness.
+///
+/// # Note
+/// This is intentionally a module-level free function (not a method on `Agent`) so
+/// it can be called from inside the `query_streaming` async loop without creating
+/// conflicting borrows on `self`.
+// Narrow allow: called from `query_streaming` selective branch (GREEN phase).
+// The stub body is intentionally a no-op in RED so the TDD tests fail correctly.
+#[allow(dead_code, clippy::too_many_arguments)]
+async fn write_turn_to_memory(
+    _store: &SqliteVectorStore,
+    _embedder: &dyn EmbeddingProvider,
+    _clock: &dyn Clock,
+    _cfg: &MemoryConfig,
+    _scope: &str,
+    _session_id: &str,
+    _text: &str,
+    _role: Role,
+) {
+    // RED PHASE STUB — implemented in GREEN (Task 12).
+    // Intentionally a no-op so the three new tests fail for the right reason:
+    //   - test_selective_mode_sends_assembled_context_not_full_history: the
+    //     selective branch doesn't exist yet, so the provider receives the full
+    //     history (contains an Assistant message) → assertion fails.
+    //   - test_fact_written_in_one_turn_is_recalled_in_a_later_turn: nothing is
+    //     written to the store → vstore.active("root") is empty → assertion fails.
 }
 
 #[cfg(test)]
@@ -524,6 +654,278 @@ mod tests {
         assert!(static_agent.provider_is_static());
         let real_agent = Agent::new(Arc::new(MockProvider));
         assert!(!real_agent.provider_is_static());
+    }
+
+    // ── Task-12 helpers ────────────────────────────────────────────────────────
+
+    /// Provider that records every `messages` slice it receives.
+    /// Used to assert what context the agent sent in each call.
+    struct CapturingProvider {
+        calls: Arc<std::sync::Mutex<Vec<Vec<Message>>>>,
+    }
+
+    impl CapturingProvider {
+        fn new() -> (Self, Arc<std::sync::Mutex<Vec<Vec<Message>>>>) {
+            let calls = Arc::new(std::sync::Mutex::new(Vec::<Vec<Message>>::new()));
+            (
+                Self {
+                    calls: calls.clone(),
+                },
+                calls,
+            )
+        }
+    }
+
+    #[async_trait]
+    impl Provider for CapturingProvider {
+        async fn stream_messages(
+            &self,
+            messages: &[Message],
+            _tools: &[Box<dyn Tool>],
+        ) -> Result<BoxStream<'static, Result<ResponseChunk>>> {
+            self.calls.lock().unwrap().push(messages.to_vec());
+            let chunks = vec![
+                Ok(ResponseChunk::TextDelta("ok".to_string())),
+                Ok(ResponseChunk::MessageDone(Message::assistant("ok"))),
+            ];
+            Ok(Box::pin(stream::iter(chunks)))
+        }
+    }
+
+    /// Deterministic bag-of-words embedder for tests (no HTTP calls).
+    /// Matches the pattern used in `context.rs` and `retrieval.rs` tests.
+    fn bow(text: &str, dim: usize) -> Vec<f32> {
+        let mut v = vec![0f32; dim];
+        for w in text.to_lowercase().split_whitespace() {
+            let h = w
+                .bytes()
+                .fold(0usize, |a, b| a.wrapping_mul(31).wrapping_add(b as usize))
+                % dim;
+            v[h] += 1.0;
+        }
+        let n = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+        if n > 0.0 {
+            for x in &mut v {
+                *x /= n;
+            }
+        }
+        v
+    }
+
+    struct FakeEmbedder {
+        dim: usize,
+        model: String,
+    }
+
+    #[async_trait]
+    impl EmbeddingProvider for FakeEmbedder {
+        async fn embed(
+            &self,
+            texts: &[String],
+        ) -> std::result::Result<Vec<Vec<f32>>, crate::memory::error::EmbeddingError> {
+            Ok(texts.iter().map(|t| bow(t, self.dim)).collect())
+        }
+        fn model_id(&self) -> &str {
+            &self.model
+        }
+        fn dim(&self) -> usize {
+            self.dim
+        }
+        fn query_prefix(&self) -> &str {
+            ""
+        }
+        fn document_prefix(&self) -> &str {
+            ""
+        }
+    }
+
+    // ── Task-12 tests (SC-32 / SC-22 / SC-18) ─────────────────────────────────
+
+    /// SC-32: An agent with NO memory subsystem set behaves exactly as today.
+    /// The full conversation history grows turn by turn and is sent to the
+    /// provider unchanged.  This test must pass in RED, GREEN, and REFACTOR.
+    #[tokio::test]
+    async fn test_load_all_mode_is_unchanged() {
+        let mut agent = Agent::new(Arc::new(MockProvider));
+        let (tx1, _rx1) = tokio::sync::mpsc::channel::<StreamPiece>(8);
+        agent.query_streaming("hello", tx1).await.unwrap();
+        // After 1 turn: User("hello") + Asst("Summary content.") = 2 messages.
+        assert_eq!(
+            agent.history.len(),
+            2,
+            "load_all: history must have 2 messages after 1 turn"
+        );
+
+        let (tx2, _rx2) = tokio::sync::mpsc::channel::<StreamPiece>(8);
+        agent.query_streaming("world", tx2).await.unwrap();
+        // After 2 turns: 4 messages total.
+        assert_eq!(
+            agent.history.len(),
+            4,
+            "load_all: history must grow to 4 messages after 2 turns"
+        );
+
+        // First user turn must still be present in the full history.
+        let has_hello = agent.history.iter().any(|m| {
+            m.role == Role::User
+                && m.content
+                    .iter()
+                    .any(|c| matches!(c, Content::Text { text } if text == "hello"))
+        });
+        assert!(
+            has_hello,
+            "load_all: full history must contain the first user turn"
+        );
+    }
+
+    /// SC-32 / SC-18: In `selective` mode the provider receives the assembled
+    /// bounded context, not the growing full history.  Assembled context never
+    /// contains an `Assistant`-role message (only `User`-role context messages
+    /// are produced by the assembler).
+    ///
+    /// Fails in RED because `query_streaming` has no selective branch yet.
+    #[tokio::test]
+    async fn test_selective_mode_sends_assembled_context_not_full_history() {
+        use crate::memory::clock::FixedClock;
+        use crate::memory::config::MemoryConfig;
+        use crate::memory::store::SqliteVectorStore;
+        use crate::system::database::EncryptedSqliteMemory;
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let mem = EncryptedSqliteMemory::new(tmp.path().to_path_buf(), "pw".into()).unwrap();
+        let vstore = Arc::new(SqliteVectorStore::new(mem.shared_conn(), mem.data_key()).unwrap());
+        let embedder = Arc::new(FakeEmbedder {
+            dim: 16,
+            model: "fake".into(),
+        });
+        let clock = Arc::new(FixedClock::new(1_000_000));
+        let cfg = MemoryConfig {
+            mode: "selective".into(),
+            ..MemoryConfig::default()
+        };
+
+        let (cap, calls) = CapturingProvider::new();
+        let mut agent = Agent::new(Arc::new(cap));
+        agent.set_memory_subsystem(vstore, embedder, clock, cfg);
+
+        let (tx1, _rx1) = tokio::sync::mpsc::channel::<StreamPiece>(8);
+        agent.query_streaming("first query", tx1).await.unwrap();
+
+        let (tx2, _rx2) = tokio::sync::mpsc::channel::<StreamPiece>(8);
+        agent.query_streaming("second query", tx2).await.unwrap();
+
+        let all_calls = calls.lock().unwrap();
+        assert!(
+            all_calls.len() >= 2,
+            "provider must have been called at least twice"
+        );
+        // Assembled context is exclusively User-role messages; no Assistant turns
+        // appear (the assembler produces preamble + current turn, both User-role).
+        let turn2_msgs = &all_calls[1];
+        let has_assistant = turn2_msgs.iter().any(|m| m.role == Role::Assistant);
+        assert!(
+            !has_assistant,
+            "SC-18/SC-32: selective mode must send assembled context without \
+             Assistant messages (got {} messages in turn 2)",
+            turn2_msgs.len()
+        );
+    }
+
+    /// SC-22: In `selective` mode, a fact stated in turn 1 is written to the
+    /// vector store and visible to the assembler for turn 2.
+    ///
+    /// Fails in RED because `write_turn_to_memory` is a no-op stub.
+    #[tokio::test]
+    async fn test_fact_written_in_one_turn_is_recalled_in_a_later_turn() {
+        use crate::memory::clock::FixedClock;
+        use crate::memory::config::MemoryConfig;
+        use crate::memory::store::{SqliteVectorStore, VectorStore};
+        use crate::system::database::EncryptedSqliteMemory;
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let mem = EncryptedSqliteMemory::new(tmp.path().to_path_buf(), "pw".into()).unwrap();
+        let vstore = Arc::new(SqliteVectorStore::new(mem.shared_conn(), mem.data_key()).unwrap());
+        let embedder = Arc::new(FakeEmbedder {
+            dim: 32,
+            model: "fake".into(),
+        });
+        let clock = Arc::new(FixedClock::new(1_000_000));
+        let cfg = MemoryConfig {
+            mode: "selective".into(),
+            context_budget_tokens: 2000,
+            response_headroom_tokens: 0,
+            safety_margin_ratio: 0.0,
+            top_k: 10,
+            ..MemoryConfig::default()
+        };
+
+        let (cap, calls) = CapturingProvider::new();
+        let mut agent = Agent::new(Arc::new(cap));
+        agent.set_memory_subsystem(vstore.clone(), embedder, clock, cfg);
+
+        // Turn 1: plant a fact.
+        let (tx1, _rx1) = tokio::sync::mpsc::channel::<StreamPiece>(8);
+        agent
+            .query_streaming("favorite color is blue", tx1)
+            .await
+            .unwrap();
+
+        // The write path must have persisted at least one episodic memory.
+        let mems = vstore.active("root").await.unwrap();
+        assert!(
+            !mems.is_empty(),
+            "SC-22 (write path): vector store must be non-empty after turn 1 \
+             (write_turn_to_memory stub → fails in RED)"
+        );
+        let has_fact = mems.iter().any(|m| m.text.contains("blue"));
+        assert!(
+            has_fact,
+            "SC-22: the 'blue' fact from turn 1 must be in the vector store"
+        );
+
+        // Turn 2: the selective path must NOT send the full history.
+        let (tx2, _rx2) = tokio::sync::mpsc::channel::<StreamPiece>(8);
+        agent
+            .query_streaming("what is favorite color", tx2)
+            .await
+            .unwrap();
+
+        let all_calls = calls.lock().unwrap();
+        assert!(
+            all_calls.len() >= 2,
+            "provider must have been called at least twice"
+        );
+        let turn2_msgs = &all_calls[1];
+        let has_assistant = turn2_msgs.iter().any(|m| m.role == Role::Assistant);
+        assert!(
+            !has_assistant,
+            "SC-22: turn 2 must use assembled context (no Assistant messages)"
+        );
+    }
+
+    /// Ensures `on_session_open` compiles, runs without error on an empty store,
+    /// and does not block session startup on maintenance failures (REQ-29).
+    #[tokio::test]
+    async fn test_on_session_open_is_noop_when_store_is_empty() {
+        use crate::memory::clock::FixedClock;
+        use crate::memory::config::MemoryConfig;
+        use crate::memory::store::SqliteVectorStore;
+        use crate::system::database::EncryptedSqliteMemory;
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let mem = EncryptedSqliteMemory::new(tmp.path().to_path_buf(), "pw".into()).unwrap();
+        let vstore = Arc::new(SqliteVectorStore::new(mem.shared_conn(), mem.data_key()).unwrap());
+        let embedder = Arc::new(FakeEmbedder {
+            dim: 8,
+            model: "fake".into(),
+        });
+        let clock = Arc::new(FixedClock::new(1_000_000));
+        let cfg = MemoryConfig::default();
+
+        let mut agent = Agent::new(Arc::new(MockProvider));
+        agent.set_memory_subsystem(vstore, embedder, clock, cfg);
+        // Must complete without error even when the store is empty.
+        agent.on_session_open().await.unwrap();
     }
 
     #[tokio::test]
