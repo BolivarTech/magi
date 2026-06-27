@@ -9,13 +9,17 @@ use crate::agent::messages::{Content, Message, Role};
 use crate::agent::provider::{Provider, ResponseChunk};
 use crate::memory::clock::Clock;
 use crate::memory::config::MemoryConfig;
+use crate::memory::context::assemble_selective;
 use crate::memory::decay::purge_expired_archives;
 use crate::memory::embedding::EmbeddingProvider;
 use crate::memory::retrieval::reembed_pending;
-use crate::memory::store::SqliteVectorStore;
+use crate::memory::salience::assign_salience;
+use crate::memory::store::{Memory, SqliteVectorStore, VectorStore};
+use crate::memory::MemoryKind;
 use crate::system::database::MemoryStore;
 use crate::tools::Tool;
 use anyhow::Result;
+use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use tokio::sync::oneshot;
 use tokio::time::{timeout, Duration};
@@ -45,9 +49,6 @@ pub enum StreamPiece {
 /// Absent (`None` on `Agent`) ⇒ legacy `load_all` behavior: the full
 /// conversation history is sent to the provider on every turn, preserving
 /// the behavior of all 188 pre-existing tests (REQ-28/SC-32).
-// Narrow allow: all fields are read in `on_session_open` (GREEN: also in
-// `query_streaming`). The struct itself is constructed in `set_memory_subsystem`.
-#[allow(dead_code)]
 struct MemorySubsystem {
     store: Arc<SqliteVectorStore>,
     embedder: Arc<dyn EmbeddingProvider>,
@@ -79,8 +80,6 @@ pub struct Agent {
     /// Optional tiered-memory subsystem for `selective` mode (Task 12).
     /// `None` ⇒ legacy `load_all` behavior; all 188 pre-existing tests rely on
     /// this path being byte-identical to the original implementation.
-    // Narrow allow: read in `query_streaming` selective branch (GREEN phase).
-    #[allow(dead_code)]
     memory_subsystem: Option<MemorySubsystem>,
 }
 
@@ -224,8 +223,6 @@ impl Agent {
     /// - `clock` — wall-clock abstraction; inject `FixedClock` in tests for
     ///   deterministic decay (D-18 / R-06).
     /// - `cfg` — memory configuration (context budget, weights, mode, …).
-    // Narrow allow: called from `main.rs` in GREEN phase; dead in RED binary target.
-    #[allow(dead_code)]
     pub fn set_memory_subsystem(
         &mut self,
         store: Arc<SqliteVectorStore>,
@@ -250,8 +247,6 @@ impl Agent {
     ///
     /// Errors are intentionally swallowed — maintenance failures must never
     /// block session startup (REQ-29).
-    // Narrow allow: called from `main.rs` in GREEN phase; dead in RED binary target.
-    #[allow(dead_code)]
     pub async fn on_session_open(&self) -> Result<()> {
         if let Some(s) = &self.memory_subsystem {
             let _ = reembed_pending(&*s.store, &*s.embedder, &s.cfg, &s.scope).await;
@@ -270,11 +265,239 @@ impl Agent {
         let user_msg = Message::user(text);
         self.history.push(user_msg.clone());
 
-        // Persist user message
+        // Persist user message (both modes keep the message-store path for
+        // backward compatibility and load_history support).
         if let (Some(memory), Some(sid)) = (&self.memory, &self.session_id) {
             memory.add_message(sid, &user_msg).await?;
         }
 
+        // ── Selective tiered-memory path ──────────────────────────────────────
+        // When a subsystem is attached and `mode == "selective"`, each turn is
+        // persisted to the vector store and the assembler builds a bounded context
+        // instead of sending the full history.
+        //
+        // The load_all path below is untouched — byte-identical to the original
+        // implementation — so all 188 pre-existing tests pass unchanged (REQ-28).
+        if self
+            .memory_subsystem
+            .as_ref()
+            .is_some_and(|s| s.cfg.mode == "selective")
+        {
+            // Snapshot Arc handles (ref-count increments only; O(1)) so the mutable
+            // loop body below can borrow `self` freely without conflicting field
+            // borrows on `memory_subsystem`.
+            let (store, embedder, clock, cfg, scope, profile, system_str) = {
+                let s = self.memory_subsystem.as_ref().unwrap();
+                (
+                    s.store.clone(),
+                    s.embedder.clone(),
+                    s.clock.clone(),
+                    s.cfg.clone(),
+                    s.scope.clone(),
+                    s.profile.clone(),
+                    s.system.clone(),
+                )
+            };
+            let session_id_str = self.session_id.clone().unwrap_or_default();
+
+            // Write user turn to vector store (best-effort; REQ-29).
+            write_turn_to_memory(
+                &store,
+                &*embedder,
+                &*clock,
+                &cfg,
+                &scope,
+                &session_id_str,
+                text,
+                Role::User,
+            )
+            .await;
+
+            // Assemble bounded context: system + profile + top-k recalls + turn.
+            let assembled = assemble_selective(
+                &*store,
+                &*embedder,
+                &*clock,
+                &cfg,
+                &system_str,
+                &profile,
+                &user_msg,
+                &scope,
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("context assembly failed: {e}"))?;
+            let mut working = assembled.messages;
+
+            // ── Selective tool loop ───────────────────────────────────────────
+            let mut tool_call_count = 0;
+            let mut last_normalized_tool: Option<(String, String)> = None;
+            let mut repeat_count = 0;
+
+            loop {
+                let mut stream = self.provider.stream_messages(&working, &self.tools).await?;
+                let mut full_text = String::new();
+                let mut last_message: Option<Message> = None;
+
+                use futures::StreamExt;
+                while let Some(chunk_result) = stream.next().await {
+                    match chunk_result? {
+                        ResponseChunk::TextDelta(delta) => {
+                            let sanitized = Self::sanitize_text(&delta);
+                            full_text.push_str(&sanitized);
+                            if chunk_tx
+                                .send(StreamPiece::Content(sanitized))
+                                .await
+                                .is_err()
+                            {
+                                return Err(anyhow::anyhow!(
+                                    "TUI connection closed during streaming"
+                                ));
+                            }
+                        }
+                        ResponseChunk::ReasoningDelta(delta) => {
+                            let sanitized = Self::sanitize_text(&delta);
+                            if chunk_tx
+                                .send(StreamPiece::Reasoning(sanitized))
+                                .await
+                                .is_err()
+                            {
+                                return Err(anyhow::anyhow!(
+                                    "TUI connection closed during streaming"
+                                ));
+                            }
+                        }
+                        ResponseChunk::MessageDone(msg) => {
+                            last_message = Some(msg);
+                        }
+                        _ => {}
+                    }
+                }
+
+                let response = last_message
+                    .ok_or_else(|| anyhow::anyhow!("Stream ended without MessageDone"))?;
+                // Both legacy persistence paths (self.history + memory.add_message) are
+                // kept so load_history and the existing message store stay consistent.
+                self.history.push(response.clone());
+                working.push(response.clone());
+                if let (Some(memory), Some(sid)) = (&self.memory, &self.session_id) {
+                    memory.add_message(sid, &response).await?;
+                }
+
+                let mut tool_results = Vec::new();
+                let mut requested_tool = false;
+
+                for content in &response.content {
+                    if let Content::ToolUse { id, name, input } = content {
+                        requested_tool = true;
+                        tool_call_count += 1;
+                        if tool_call_count > self.max_tool_calls {
+                            return Err(anyhow::anyhow!("Maximum tool call limit reached"));
+                        }
+
+                        let normalized_input = Self::normalize_input(input, 0)?;
+                        if let Some((ref last_name, ref last_norm_input)) = last_normalized_tool {
+                            if last_name == name && last_norm_input == &normalized_input {
+                                repeat_count += 1;
+                                if repeat_count >= 3 {
+                                    return Err(anyhow::anyhow!("Repetitive tool call detected"));
+                                }
+                            } else {
+                                repeat_count = 0;
+                            }
+                        }
+                        last_normalized_tool = Some((name.clone(), normalized_input));
+
+                        let approved = if let Some(ref tx) = self.approval_tx {
+                            let (oneshot_tx, oneshot_rx) = oneshot::channel();
+                            let _ = tx
+                                .send(ApprovalRequest {
+                                    tool_name: name.clone(),
+                                    input: input.clone(),
+                                    tx: oneshot_tx,
+                                })
+                                .await;
+                            match timeout(Duration::from_secs(APPROVAL_TIMEOUT_SECS), oneshot_rx)
+                                .await
+                            {
+                                Ok(Ok(res)) => res,
+                                _ => false,
+                            }
+                        } else {
+                            true
+                        };
+
+                        if !approved {
+                            tool_results.push(Content::ToolResult {
+                                tool_use_id: id.clone(),
+                                content: "Execution denied or timed out.".to_string(),
+                                is_error: true,
+                            });
+                            continue;
+                        }
+
+                        let tool_result =
+                            if let Some(tool) = self.tools.iter().find(|t| t.name() == name) {
+                                match tool.execute(input.clone()).await {
+                                    Ok(val) => Content::ToolResult {
+                                        tool_use_id: id.clone(),
+                                        content: val.to_string(),
+                                        is_error: false,
+                                    },
+                                    Err(e) => Content::ToolResult {
+                                        tool_use_id: id.clone(),
+                                        content: e.to_string(),
+                                        is_error: true,
+                                    },
+                                }
+                            } else {
+                                Content::ToolResult {
+                                    tool_use_id: id.clone(),
+                                    content: format!("Tool '{}' not found", name),
+                                    is_error: true,
+                                }
+                            };
+                        tool_results.push(tool_result);
+                    }
+                }
+
+                if requested_tool {
+                    let tool_res_msg = Message {
+                        role: Role::User,
+                        content: tool_results,
+                    };
+                    self.history.push(tool_res_msg.clone());
+                    working.push(tool_res_msg.clone());
+                    if let (Some(memory), Some(sid)) = (&self.memory, &self.session_id) {
+                        memory.add_message(sid, &tool_res_msg).await?;
+                    }
+                } else {
+                    // Write assistant response to the vector store (best-effort; REQ-29).
+                    write_turn_to_memory(
+                        &store,
+                        &*embedder,
+                        &*clock,
+                        &cfg,
+                        &scope,
+                        &session_id_str,
+                        &full_text,
+                        Role::Assistant,
+                    )
+                    .await;
+
+                    for content in response.content.iter().rev() {
+                        if let Content::Text { text } = content {
+                            return Ok(text.clone());
+                        }
+                    }
+                    return Ok(String::new());
+                }
+            }
+        }
+
+        // ── load_all path (original, byte-identical) ──────────────────────────
+        // No memory subsystem or mode != "selective" → send the full history to the
+        // provider exactly as before.  This path is the sole path exercised by the
+        // 188 pre-existing tests (REQ-28 / SC-32).
         let mut tool_call_count = 0;
         let mut last_normalized_tool: Option<(String, String)> = None;
         let mut repeat_count = 0;
@@ -447,26 +670,72 @@ impl Agent {
 /// This is intentionally a module-level free function (not a method on `Agent`) so
 /// it can be called from inside the `query_streaming` async loop without creating
 /// conflicting borrows on `self`.
-// Narrow allow: called from `query_streaming` selective branch (GREEN phase).
-// The stub body is intentionally a no-op in RED so the TDD tests fail correctly.
-#[allow(dead_code, clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 async fn write_turn_to_memory(
-    _store: &SqliteVectorStore,
-    _embedder: &dyn EmbeddingProvider,
-    _clock: &dyn Clock,
-    _cfg: &MemoryConfig,
-    _scope: &str,
-    _session_id: &str,
-    _text: &str,
-    _role: Role,
+    store: &SqliteVectorStore,
+    embedder: &dyn EmbeddingProvider,
+    clock: &dyn Clock,
+    cfg: &MemoryConfig,
+    scope: &str,
+    session_id: &str,
+    text: &str,
+    role: Role,
 ) {
-    // RED PHASE STUB — implemented in GREEN (Task 12).
-    // Intentionally a no-op so the three new tests fail for the right reason:
-    //   - test_selective_mode_sends_assembled_context_not_full_history: the
-    //     selective branch doesn't exist yet, so the provider receives the full
-    //     history (contains an Assistant message) → assertion fails.
-    //   - test_fact_written_in_one_turn_is_recalled_in_a_later_turn: nothing is
-    //     written to the store → vstore.active("root") is empty → assertion fails.
+    if text.trim().is_empty() {
+        return;
+    }
+    let now = clock.now();
+    let salience = assign_salience(MemoryKind::Episodic, text, role.clone(), cfg);
+
+    // Apply document prefix before embedding (D-04 / REQ-34).
+    let doc_prefix = embedder.document_prefix();
+    let prefixed = if doc_prefix.is_empty() {
+        text.to_string()
+    } else {
+        format!("{doc_prefix}{text}")
+    };
+
+    // Best-effort embed — on failure store an empty vector marked for lazy re-embed
+    // (REQ-29: write failures must never abort the user's turn).
+    let (embedding, model_id, dim) = match embedder.embed(&[prefixed]).await {
+        Ok(v) if !v.is_empty() => {
+            let d = v[0].len();
+            (
+                v.into_iter().next().unwrap(),
+                embedder.model_id().to_string(),
+                d,
+            )
+        }
+        _ => (Vec::new(), String::new(), 0),
+    };
+
+    // Use a content-hash-based ID so identical texts within the same second still
+    // produce distinct records if the role differs.
+    let id = format!(
+        "turn:{:x}",
+        Sha256::digest(format!("{now}:{role:?}:{text}").as_bytes())
+    );
+
+    let m = Memory {
+        id,
+        session_id: session_id.to_string(),
+        kind: MemoryKind::Episodic,
+        text: text.to_string(),
+        embedding,
+        model_id,
+        dim,
+        created_at: now,
+        salience,
+        access_count: 0,
+        last_accessed_at: now,
+        superseded_by: None,
+        evicted_at: None,
+        scope: scope.to_string(),
+        distilled_at: None,
+    };
+
+    // Swallow write errors — a store failure must not abort the turn (REQ-29).
+    let _ = store.insert(&m).await;
 }
 
 #[cfg(test)]

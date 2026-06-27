@@ -17,6 +17,9 @@ use crate::agent::Agent;
 // It is DISTINCT from `magi_core::orchestrator::MagiConfig` — the latter is NEVER
 // imported here, avoiding the name collision.
 use crate::config::{resolve_openai_base_url, resolve_openai_model, resolve_provider, MagiConfig};
+use crate::memory::clock::SystemClock;
+use crate::memory::embedding::OpenAiCompatibleEmbedder;
+use crate::memory::store::SqliteVectorStore;
 use crate::system::database::{EncryptedSqliteMemory, MemoryStore};
 use crate::system::fs::{FileSystem, RealFileSystem};
 use crate::system::grep::RipGrep;
@@ -357,16 +360,27 @@ async fn main() -> anyhow::Result<()> {
     let db_path = workspace_root.join(".magi-rs-memory.db");
     match decide_memory_attachment(discover_or_create_master_key().await) {
         MemoryAttachment::Encrypted(master_pwd) => {
-            let store = EncryptedSqliteMemory::new(db_path, master_pwd)?;
+            // Use a concrete binding first so we can call the pub(crate) accessors
+            // (`shared_conn`, `data_key`) before the type is erased by
+            // `Arc<dyn MemoryStore>`.  This is the Task-12 wiring described in
+            // the brief: both stores share the same on-disk SQLite file.
+            let concrete_store = EncryptedSqliteMemory::new(db_path, master_pwd)?;
+
+            // Build the vector store from the shared connection + derived key.
+            // Errors here are non-fatal: fall through without the tiered-memory
+            // subsystem rather than refusing to start (REQ-29).
+            let vstore_result =
+                SqliteVectorStore::new(concrete_store.shared_conn(), concrete_store.data_key());
+
             // #11: surface a one-time reset notice if incompatible content was discarded.
-            if store.was_reset() {
+            if concrete_store.was_reset() {
                 startup_notices.push(
                     "Note: existing on-disk history used an incompatible/corrupt format and \
                      has been reset (fresh start)."
                         .to_string(),
                 );
             }
-            let memory: Arc<dyn MemoryStore> = Arc::new(store);
+            let memory: Arc<dyn MemoryStore> = Arc::new(concrete_store);
             let sessions = memory.list_sessions().await?;
             let session_id = if let Some((id, _)) = sessions.first() {
                 id.clone()
@@ -375,6 +389,24 @@ async fn main() -> anyhow::Result<()> {
             };
             agent.set_memory(memory.clone(), session_id);
             let _ = agent.load_history().await;
+
+            // Wire the tiered-memory subsystem when the vector store initialised
+            // successfully.  `OPENAI_API_KEY` is the embedding API key (may be the
+            // dummy `"ollama"` for the local Ollama server — it ignores auth).
+            if let Ok(vstore) = vstore_result {
+                let embedder = Arc::new(OpenAiCompatibleEmbedder::new(
+                    &magi_config.embedding,
+                    env::var("OPENAI_API_KEY").ok(),
+                ));
+                let clock = Arc::new(SystemClock);
+                agent.set_memory_subsystem(
+                    Arc::new(vstore),
+                    embedder,
+                    clock,
+                    magi_config.memory.clone(),
+                );
+                agent.on_session_open().await.ok();
+            }
 
             // ProjectFactTool needs the same store; register it on the encrypted path only.
             agent.register_tool(Box::new(ProjectFactTool::new(memory.clone())));
