@@ -407,13 +407,22 @@ async fn main() -> anyhow::Result<()> {
                     env::var("OPENAI_API_KEY").ok(),
                 ));
                 let clock = Arc::new(SystemClock);
-                agent.set_memory_subsystem(
-                    Arc::new(vstore),
-                    embedder,
-                    clock,
-                    magi_config.memory.clone(),
-                );
+                // Keep a reference for the startup diagnostics line (CP2-AN/S).
+                let vstore = Arc::new(vstore);
+                let vstore_diag = Arc::clone(&vstore);
+                agent.set_memory_subsystem(vstore, embedder, clock, magi_config.memory.clone());
                 agent.on_session_open().await.ok();
+
+                // CP2-AN/S: one-line diagnostics summary — never fail startup on error.
+                if let Ok(d) = vstore_diag.diagnostics("root").await {
+                    startup_notices.push(format!(
+                        "memory: {} active, {} archived, {} pending re-embed (~{} KB index)",
+                        d.active_count,
+                        d.archived_count,
+                        d.pending_reembed_count,
+                        d.ram_estimate_bytes / 1024,
+                    ));
+                }
 
                 // CP2-AG/AJ: warn the user when the distiller will send memory batches
                 // to a cloud embedding endpoint (non-localhost).

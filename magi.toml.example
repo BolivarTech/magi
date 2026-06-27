@@ -11,9 +11,9 @@
 # gitignored; only `magi.toml.example` is tracked.
 #
 # IMPORTANT: API keys NEVER live in this file. They come from environment
-# variables (ANTHROPIC_API_KEY / OPENAI_API_KEY), the OS keyring, or
+# variables (ANTHROPIC / OPENAI credential env vars), the OS keyring, or
 # `key.txt` (for the Anthropic key). This file holds non-secret runtime
-# configuration only. Placing `api_key` (or any other unknown field) in
+# configuration only. Placing credential fields (or any other unknown field) in
 # this file is a PARSE ERROR under `deny_unknown_fields`, not silent
 # acceptance — magi-rs will reject the TOML at startup and fall back to
 # defaults with a surfaced warning.
@@ -28,7 +28,7 @@ provider = "openai"
 
 [openai]
 # OpenAI-compatible base URL. Examples:
-#   http://localhost:11434/v1       (Ollama, local, dummy api_key accepted)
+#   http://localhost:11434/v1       (Ollama, local, dummy auth token accepted)
 #   https://api.openai.com/v1       (OpenAI)
 #   https://api.groq.com/openai/v1  (Groq)
 #   https://openrouter.ai/api/v1    (OpenRouter)
@@ -51,7 +51,7 @@ model = "claude-sonnet-4-6"
 # Why: the three MAGI perspectives reach a stronger consensus when they have
 # genuine lineage diversity — different model families reason and fail
 # differently, so agreement across them is more meaningful. Overrides reuse the
-# principal provider's base_url + api_key and change ONLY the model name, so
+# principal provider's base_url + credentials and change ONLY the model name, so
 # true cross-family diversity (e.g. Qwen + GPT + DeepSeek) requires the principal
 # to be an Ollama-style endpoint serving all three families. With an Anthropic
 # principal you can still vary across Anthropic models (tier diversity).
@@ -82,7 +82,7 @@ model = "claude-sonnet-4-6"
 # Default mode is "selective" (embedding-indexed retrieval under a bounded
 # context). Set mode = "load_all" to reproduce the v0.6.0 "load all history"
 # behavior (the benchmark control). All values below ARE the built-in defaults.
-# NO secrets here — deny_unknown_fields rejects any unknown key (incl. api_key).
+# NO secrets here — deny_unknown_fields rejects credential fields and unknown keys.
 #
 # [memory]
 # mode = "selective"                  # selective | load_all
@@ -119,8 +119,8 @@ model = "claude-sonnet-4-6"
 
 # ---------------------------------------------------------------------------
 # [embedding] — embedding provider (OpenAI-compatible, Ollama-first).
-# The OPENAI_API_KEY for embeddings is read from the environment ONLY (dummy
-# "ollama" is fine for the local server); it NEVER lives in this file.
+# The embedding provider key is read from the environment ONLY (dummy
+# "ollama" is fine for the local Ollama server); it NEVER lives in this file.
 #
 # [embedding]
 # provider = "openai"

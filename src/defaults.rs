@@ -177,12 +177,16 @@ mod tests {
     /// The word "key" in prose (e.g. "API keys NEVER live here") is allowed.
     #[test]
     fn test_config_example_has_no_secret_material() {
-        let s = std::fs::read_to_string(
-            concat!(env!("CARGO_MANIFEST_DIR"), "/magi.toml.example"),
-        )
-        .unwrap();
+        let s = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/magi.toml.example"))
+            .unwrap();
         let low = s.to_lowercase();
-        assert!(!low.contains("api_key"), "magi.toml.example must not contain 'api_key'");
-        assert!(!s.contains("sk-"), "magi.toml.example must not contain 'sk-' key prefix");
+        assert!(
+            !low.contains("api_key"),
+            "magi.toml.example must not contain 'api_key'"
+        );
+        assert!(
+            !s.contains("sk-"),
+            "magi.toml.example must not contain 'sk-' key prefix"
+        );
     }
 }

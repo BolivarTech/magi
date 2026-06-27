@@ -433,19 +433,67 @@ impl SqliteVectorStore {
 
     /// Returns operator-visible diagnostic counts for `scope` (CP2-AN/S).
     ///
-    /// Pure SQL reads — no decryption, no ANN traversal. Safe to call at startup.
+    /// Four cheap `COUNT`/`SUM` queries — no decryption, no ANN traversal.
+    /// Safe to call at startup before the in-RAM index is built.
     ///
-    /// See [`MemoryDiagnostics`] for field semantics.
+    /// - `active_count` — rows where `evicted_at IS NULL AND superseded_by IS NULL AND scope = scope`.
+    /// - `archived_count` — rows where `evicted_at IS NOT NULL` (all scopes).
+    /// - `pending_reembed_count` — active rows in scope with `model_id = ''` or `dim = 0`.
+    /// - `ram_estimate_bytes` — `Σ(dim × 4)` for active rows with `dim > 0` in scope.
+    ///
+    /// See [`MemoryDiagnostics`] for full field semantics.
     ///
     /// # Errors
     /// [`MemoryError::Storage`] if any of the underlying SQL queries fail.
-    pub async fn diagnostics(&self, _scope: &str) -> Result<MemoryDiagnostics, MemoryError> {
-        // Stub: returns zeros — real implementation lands in the Green phase.
+    pub async fn diagnostics(&self, scope: &str) -> Result<MemoryDiagnostics, MemoryError> {
+        let c = self.locked_conn();
+
+        // Active records in the requested scope.
+        let active_count: i64 = c
+            .query_row(
+                "SELECT COUNT(*) FROM memories \
+                 WHERE evicted_at IS NULL AND superseded_by IS NULL AND scope = ?1",
+                params![scope],
+                |r| r.get(0),
+            )
+            .map_err(|e| MemoryError::Storage(e.to_string()))?;
+
+        // Archived records (cross-scope — all evicted rows regardless of scope).
+        let archived_count: i64 = c
+            .query_row(
+                "SELECT COUNT(*) FROM memories WHERE evicted_at IS NOT NULL",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(|e| MemoryError::Storage(e.to_string()))?;
+
+        // Active records in scope that need a (re-)embed: no model or zero dim.
+        let pending_reembed_count: i64 = c
+            .query_row(
+                "SELECT COUNT(*) FROM memories \
+                 WHERE evicted_at IS NULL AND superseded_by IS NULL AND scope = ?1 \
+                 AND (model_id = '' OR dim = 0)",
+                params![scope],
+                |r| r.get(0),
+            )
+            .map_err(|e| MemoryError::Storage(e.to_string()))?;
+
+        // RAM ceiling: sum of dim*4 for active records with real embeddings in scope.
+        let ram_estimate_bytes: i64 = c
+            .query_row(
+                "SELECT COALESCE(SUM(CAST(dim AS INTEGER) * 4), 0) FROM memories \
+                 WHERE evicted_at IS NULL AND superseded_by IS NULL AND scope = ?1 \
+                 AND dim > 0",
+                params![scope],
+                |r| r.get(0),
+            )
+            .map_err(|e| MemoryError::Storage(e.to_string()))?;
+
         Ok(MemoryDiagnostics {
-            active_count: 0,
-            archived_count: 0,
-            pending_reembed_count: 0,
-            ram_estimate_bytes: 0,
+            active_count: active_count as usize,
+            archived_count: archived_count as usize,
+            pending_reembed_count: pending_reembed_count as usize,
+            ram_estimate_bytes: ram_estimate_bytes as usize,
         })
     }
 
@@ -963,7 +1011,11 @@ mod tests {
         let (_t, store) = test_store();
 
         // Active record with a real embedding.
-        let m_active = sample("diag-active", "active memory with vector", vec![0.1, 0.2, 0.3]);
+        let m_active = sample(
+            "diag-active",
+            "active memory with vector",
+            vec![0.1, 0.2, 0.3],
+        );
         store.insert(&m_active).await.unwrap();
 
         // Active record with empty embedding → pending re-embed.
@@ -975,13 +1027,22 @@ mod tests {
         // Insert a third record then evict it → archived.
         let m_evict = sample("diag-evicted", "evicted memory", vec![0.4, 0.5]);
         store.insert(&m_evict).await.unwrap();
-        store.set_evicted("diag-evicted", Some(1_000_000)).await.unwrap();
+        store
+            .set_evicted("diag-evicted", Some(1_000_000))
+            .await
+            .unwrap();
 
         let diag = store.diagnostics("root").await.unwrap();
 
-        assert_eq!(diag.active_count, 2, "two non-evicted records in root scope");
+        assert_eq!(
+            diag.active_count, 2,
+            "two non-evicted records in root scope"
+        );
         assert_eq!(diag.archived_count, 1, "one evicted record (any scope)");
-        assert_eq!(diag.pending_reembed_count, 1, "one active record without embedding");
+        assert_eq!(
+            diag.pending_reembed_count, 1,
+            "one active record without embedding"
+        );
         assert!(
             diag.ram_estimate_bytes > 0,
             "active vector ⇒ positive RAM estimate (got 0)"
