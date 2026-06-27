@@ -345,7 +345,17 @@ async fn run_selective_arm(
 ) -> Result<Vec<BenchProbeResult>, MemoryError> {
     let mut results = Vec::new();
     for probe in &dataset.probes {
-        let ranked = recall(store, embedder, clock, cfg, &probe.query, cfg.top_k, "root").await?;
+        // C2: pass token budget (assembler semantics) not top_k (count semantics).
+        let ranked = recall(
+            store,
+            embedder,
+            clock,
+            cfg,
+            &probe.query,
+            cfg.context_budget_tokens,
+            "root",
+        )
+        .await?;
         let context_text: String = ranked
             .iter()
             .map(|rm| rm.memory.text.as_str())

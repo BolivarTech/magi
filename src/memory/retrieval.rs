@@ -100,8 +100,11 @@ pub struct RankedMemory {
 ///
 /// # Parameters
 ///
-/// - `budget`: advisory hint for the caller (token budget); `recall` itself does
-///   NOT enforce it — the context assembler (Task 11) does.
+/// - `budget`: token-budget hint from the caller (e.g. `context_budget_tokens`);
+///   **currently unused inside `recall`** — the hard token enforcement happens in
+///   the context assembler (`assemble_selective`). Kept as part of the stable
+///   D-13 public contract so future L3 consumers can pass their own budget
+///   without a signature change.
 ///
 /// # Errors
 ///
@@ -159,6 +162,14 @@ pub async fn recall(
         // Default (no-ann) path: always brute force.
         #[cfg(not(feature = "ann"))]
         {
+            // C3: warn when the user configured ANN but the feature is not compiled in.
+            if cfg.index == "ann" {
+                eprintln!(
+                    "WARN [magi-rs]: index=\"ann\" is set but this binary was compiled \
+                     without the `ann` feature; falling back to brute-force exact search. \
+                     Recompile with `--features ann` to enable HNSW."
+                );
+            }
             BruteForceIndex::build(&points, cfg.seed).search(&qv, cfg.top_k)
         }
     };
@@ -239,9 +250,13 @@ pub async fn reembed_pending(
     let current_model = embedder.model_id();
 
     // Collect memories that need re-embedding.
+    // C1: also include memories whose dim doesn't match the current embedder,
+    // even if the model_id matches — mixing dimensions breaks cosine similarity.
     let pending: Vec<&Memory> = mems
         .iter()
-        .filter(|m| m.embedding.is_empty() || m.model_id != current_model)
+        .filter(|m| {
+            m.embedding.is_empty() || m.model_id != current_model || m.dim != embedder.dim()
+        })
         .collect();
 
     if pending.is_empty() {
