@@ -1228,6 +1228,61 @@ mod tests {
         }
     }
 
+    // ── G3: set_salience rejects non-finite values ────────────────────────────
+
+    /// G3: `set_salience` with `f64::NAN` must return `Err(MemoryError::Config(_))`
+    /// rather than a SQL-layer error or Ok. `f64::NAN.clamp(0.0, 1.0)` returns NaN
+    /// in Rust (NaN comparisons are false, so the input propagates unchanged),
+    /// which would either silently corrupt the DB or produce a `Storage` error
+    /// depending on the SQL driver — both are wrong; we want a typed `Config` error.
+    #[tokio::test]
+    async fn test_set_salience_nan_is_config_err() {
+        let (_t, store) = test_store();
+        store
+            .insert(&sample("sal-nan", "text", vec![0.0; 3]))
+            .await
+            .unwrap();
+        let result = store.set_salience("sal-nan", f64::NAN).await;
+        assert!(
+            matches!(result, Err(MemoryError::Config(_))),
+            "G3: set_salience(NaN) must return Err(Config), got: {result:?}"
+        );
+    }
+
+    /// G3: `set_salience` with `f64::INFINITY` must return `Err(MemoryError::Config(_))`.
+    /// Without the guard, `INFINITY.clamp(0.0, 1.0) = 1.0` — a valid storage value —
+    /// so the SQL succeeds and the error is silently lost.
+    #[tokio::test]
+    async fn test_set_salience_infinity_is_config_err() {
+        let (_t, store) = test_store();
+        store
+            .insert(&sample("sal-inf", "text", vec![0.0; 3]))
+            .await
+            .unwrap();
+        let result = store.set_salience("sal-inf", f64::INFINITY).await;
+        assert!(
+            matches!(result, Err(MemoryError::Config(_))),
+            "G3: set_salience(INFINITY) must return Err(Config), got: {result:?}"
+        );
+    }
+
+    /// G3: `set_salience` with a finite out-of-range value (e.g. 1.5) must
+    /// still succeed — out-of-range finite values are silently clamped to [0, 1].
+    #[tokio::test]
+    async fn test_set_salience_out_of_range_finite_is_clamped() {
+        let (_t, store) = test_store();
+        store
+            .insert(&sample("sal-clamp", "text", vec![0.0; 3]))
+            .await
+            .unwrap();
+        store.set_salience("sal-clamp", 1.5).await.unwrap();
+        let got = store.get("sal-clamp").await.unwrap().unwrap();
+        assert_eq!(
+            got.salience, 1.0,
+            "G3: out-of-range finite salience must be clamped to 1.0"
+        );
+    }
+
     /// F2: hard_delete on an empty slice is a no-op (no error, no rows touched).
     #[tokio::test]
     async fn test_hard_delete_empty_slice_is_noop() {
