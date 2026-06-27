@@ -12,6 +12,7 @@ use crate::memory::config::MemoryConfig;
 use crate::memory::context::assemble_selective;
 use crate::memory::decay::purge_expired_archives;
 use crate::memory::embedding::EmbeddingProvider;
+use crate::memory::error::MemoryError;
 use crate::memory::judge::LlmDistillJudge;
 use crate::memory::profile::{distill, render_profile};
 use crate::memory::retrieval::reembed_pending;
@@ -352,7 +353,10 @@ impl Agent {
             .await;
 
             // Assemble bounded context: system + profile + top-k recalls + turn.
-            let assembled = assemble_selective(
+            // D1 (REQ-29): on a transient assembly failure fall back to the full
+            // history rather than aborting the turn.  Only `BudgetUnsatisfiable`
+            // (a misconfigured budget, not a transient error) propagates as Err.
+            let (working_messages, assembly_notices) = match assemble_selective(
                 &*store,
                 &*embedder,
                 &*clock,
@@ -363,8 +367,28 @@ impl Agent {
                 &scope,
             )
             .await
-            .map_err(|e| anyhow::anyhow!("context assembly failed: {e}"))?;
-            let mut working = assembled.messages;
+            {
+                Ok(assembled) => (assembled.messages, assembled.notices),
+                Err(MemoryError::BudgetUnsatisfiable) => {
+                    return Err(anyhow::anyhow!("context assembly failed: budget unsatisfiable (system+profile exceed budget — check config)"));
+                }
+                Err(e) => {
+                    // Transient (embedding/storage/crypto) — log and fall back.
+                    eprintln!(
+                        "WARN [magi-rs]: selective assembly failed ({e}); \
+                             falling back to full history"
+                    );
+                    (self.history.clone(), vec![])
+                }
+            };
+            let mut working = working_messages;
+
+            // D2 (D-17 gap): forward assembler truncation notices to the TUI.
+            for notice in assembly_notices {
+                let _ = chunk_tx
+                    .send(StreamPiece::Content(format!("[memory: {notice}]\n")))
+                    .await;
+            }
 
             // ── Selective tool loop ───────────────────────────────────────────
             let mut tool_call_count = 0;
@@ -1159,7 +1183,7 @@ mod tests {
         // Very tight budget so that a long turn triggers a truncation notice.
         let cfg = MemoryConfig {
             mode: "selective".into(),
-            context_budget_tokens: 20,    // 20 tokens ≈ 70 chars
+            context_budget_tokens: 20, // 20 tokens ≈ 70 chars
             response_headroom_tokens: 0,
             safety_margin_ratio: 0.0,
             oversized_turn_policy: "truncate".into(),
