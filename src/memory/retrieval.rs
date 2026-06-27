@@ -167,6 +167,8 @@ pub async fn recall(
     let now = clock.now();
     let w_sum = cfg.weight_similarity + cfg.weight_recency + cfg.weight_salience;
     let w_sum = if w_sum == 0.0 { 1.0 } else { w_sum };
+    // B1: guard against half_life=0 producing NaN (0.5^(x/0) = NaN).
+    let half_life = cfg.decay_half_life_days.max(f64::MIN_POSITIVE);
 
     let mut ranked: Vec<RankedMemory> = hits
         .iter()
@@ -174,7 +176,7 @@ pub async fn recall(
             let m = &mems[*i];
             let age_secs = (now - m.last_accessed_at).max(0);
             let age_days = age_secs as f64 / 86_400.0;
-            let recency = 0.5f64.powf(age_days / cfg.decay_half_life_days);
+            let recency = 0.5f64.powf(age_days / half_life);
             let score = (cfg.weight_similarity * f64::from(*sim)
                 + cfg.weight_recency * recency
                 + cfg.weight_salience * m.salience)

@@ -53,7 +53,9 @@ pub fn strength(m: &Memory, now: i64, cfg: &MemoryConfig) -> f64 {
     // CP2-AD: clamp negative age (backward clock jump) to 0 so recency = 1.0.
     let age_secs = (now - m.last_accessed_at).max(0) as f64;
     let age_days = age_secs / 86_400.0;
-    let recency = 0.5_f64.powf(age_days / cfg.decay_half_life_days);
+    // B1: guard against half_life=0 producing NaN (0.5^(x/0) = NaN).
+    let half_life = cfg.decay_half_life_days.max(f64::MIN_POSITIVE);
+    let recency = 0.5_f64.powf(age_days / half_life);
 
     // Reinforcement term (D-19): bounded access contribution.
     // cap = 0 disables reinforcement entirely (treat as 0.0).
@@ -272,7 +274,7 @@ pub async fn purge_expired_archives(
     }
 
     let now = clock.now();
-    let retention_secs = cfg.evicted_retention_days * 86_400;
+    let retention_secs = cfg.evicted_retention_days.saturating_mul(86_400);
     let archived = store.archived().await?;
 
     let expired_ids: Vec<String> = archived
@@ -873,7 +875,10 @@ mod tests {
             s.is_finite(),
             "B1: strength() with half_life=0.0 must be finite, got {s}"
         );
-        assert!(!s.is_nan(), "B1: strength() must not be NaN with half_life=0.0");
+        assert!(
+            !s.is_nan(),
+            "B1: strength() must not be NaN with half_life=0.0"
+        );
     }
 
     // ── B2: saturating_mul guard for i64 overflow in purge_expired_archives ───
@@ -892,7 +897,10 @@ mod tests {
         };
         // Must not panic; no archived rows → result is 0.
         let result = purge_expired_archives(&store, &clock, &cfg).await;
-        assert!(result.is_ok(), "B2: purge must not panic on large retention: {result:?}");
+        assert!(
+            result.is_ok(),
+            "B2: purge must not panic on large retention: {result:?}"
+        );
     }
 
     // ── Race / concurrency test (CP2-D) ───────────────────────────────────────

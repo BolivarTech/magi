@@ -11,6 +11,7 @@
 //! [`d`] module, which is also what `Default` delegates to, so a bare config and a
 //! partially-specified section both resolve to the same documented values.
 
+use crate::memory::error::MemoryError;
 use serde::Deserialize;
 
 /// Runtime configuration for the tiered-memory subsystem (`[memory]` section).
@@ -117,6 +118,38 @@ pub struct MemoryConfig {
     /// Batch size for the throttled lazy migration. Default `256`.
     #[serde(default = "d::migration_throttle_batch")]
     pub migration_throttle_batch: usize,
+}
+
+impl MemoryConfig {
+    /// Validates that runtime-sensitive fields have legal values.
+    ///
+    /// Intended to be called at startup (after loading `magi.toml`) so that
+    /// a misconfigured value is surfaced as a startup notice rather than
+    /// producing silent NaN or divide-by-zero at runtime (B1).
+    ///
+    /// # Errors
+    /// Returns `Err(MemoryError::Config(_))` on the first invalid field found.
+    pub fn validate(&self) -> Result<(), MemoryError> {
+        if self.decay_half_life_days <= 0.0 {
+            return Err(MemoryError::Config(format!(
+                "decay_half_life_days must be > 0.0, got {}",
+                self.decay_half_life_days
+            )));
+        }
+        if self.chars_per_token <= 0.0 {
+            return Err(MemoryError::Config(format!(
+                "chars_per_token must be > 0.0, got {}",
+                self.chars_per_token
+            )));
+        }
+        if self.protect_salience_threshold <= 0.0 || self.protect_salience_threshold > 1.0 {
+            return Err(MemoryError::Config(format!(
+                "protect_salience_threshold must be in (0.0, 1.0], got {}",
+                self.protect_salience_threshold
+            )));
+        }
+        Ok(())
+    }
 }
 
 impl Default for MemoryConfig {
