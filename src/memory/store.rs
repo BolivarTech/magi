@@ -149,6 +149,17 @@ pub trait VectorStore: Send + Sync {
     /// [`MemoryError::Storage`] on SQL failure.
     async fn set_distilled(&self, ids: &[String], at: i64) -> Result<(), MemoryError>;
 
+    /// Returns all archived (`evicted_at IS NOT NULL`) memories, regardless of
+    /// scope. Used by [`purge_expired_archives`] to locate evicted rows that
+    /// have exceeded their retention window (REQ-32, D-07).
+    ///
+    /// # Errors
+    /// [`MemoryError::Crypto`] if decryption of any row fails;
+    /// [`MemoryError::Storage`] on SQL or deserialization failure.
+    ///
+    /// [`purge_expired_archives`]: crate::memory::decay::purge_expired_archives
+    async fn archived(&self) -> Result<Vec<Memory>, MemoryError>;
+
     /// Replaces the encrypted embedding for `id` with a freshly computed vector
     /// from the current embedder (CP2-C / REQ-02 / `reembed_pending`).
     ///
@@ -688,6 +699,31 @@ impl VectorStore for SqliteVectorStore {
         .map_err(|e| MemoryError::Storage(e.to_string()))?;
 
         Ok(())
+    }
+
+    async fn archived(&self) -> Result<Vec<Memory>, MemoryError> {
+        // 1. Collect raw rows under the lock (W12 discipline).
+        let raw_rows: Vec<RawRow> = {
+            let c = self.locked_conn();
+            let mut stmt = c
+                .prepare(&format!("{SELECT_COLS} WHERE evicted_at IS NOT NULL"))
+                .map_err(|e| MemoryError::Storage(e.to_string()))?;
+            let iter = stmt
+                .query_map([], row_from_query)
+                .map_err(|e| MemoryError::Storage(e.to_string()))?;
+            let mut collected = Vec::new();
+            for r in iter {
+                collected.push(r.map_err(|e| MemoryError::Storage(e.to_string()))?);
+            }
+            collected
+        }; // lock released here
+
+        // 2. Decrypt outside the lock (W12).
+        let mut out = Vec::with_capacity(raw_rows.len());
+        for row in raw_rows {
+            out.push(decode_row(row, &self.vault, &self.derived_key)?);
+        }
+        Ok(out)
     }
 }
 
