@@ -12,12 +12,18 @@ pub mod clock;
 pub mod config;
 pub mod embedding;
 pub mod error;
+pub mod index;
+pub mod retrieval;
 pub mod salience;
 pub mod store;
 
 // Narrow allow: re-exports consumed by later tasks; tests use them via `use super::*`.
 #[allow(unused_imports)]
 pub use error::{EmbeddingError, MemoryError};
+// Narrow allow: `recall` and `RankedMemory` are the stable B1/D-13 seam consumed by the
+// context assembler (Task 11) and future Agent Society consumers (AS-REQ-11).
+#[allow(unused_imports)]
+pub use retrieval::{recall, RankedMemory};
 
 /// Kind of a stored memory: an episodic turn, or a durable preference.
 ///

@@ -148,6 +148,23 @@ pub trait VectorStore: Send + Sync {
     /// # Errors
     /// [`MemoryError::Storage`] on SQL failure.
     async fn set_distilled(&self, ids: &[String], at: i64) -> Result<(), MemoryError>;
+
+    /// Replaces the encrypted embedding for `id` with a freshly computed vector
+    /// from the current embedder (CP2-C / REQ-02 / `reembed_pending`).
+    ///
+    /// Encrypts `embedding` outside the connection lock (W12) and then issues
+    /// a single `UPDATE` on `embedding_blob`, `model_id`, and `dim`.
+    ///
+    /// # Errors
+    /// [`MemoryError::Crypto`] if encryption fails;
+    /// [`MemoryError::Storage`] if the `UPDATE` fails or `id` does not exist.
+    async fn update_embedding(
+        &self,
+        id: &str,
+        embedding: &[f32],
+        model_id: &str,
+        dim: usize,
+    ) -> Result<(), MemoryError>;
 }
 
 // ─── Free helpers ─────────────────────────────────────────────────────────────
@@ -642,6 +659,34 @@ impl VectorStore for SqliteVectorStore {
             )
             .map_err(|e| MemoryError::Storage(e.to_string()))?;
         }
+        Ok(())
+    }
+
+    async fn update_embedding(
+        &self,
+        id: &str,
+        embedding: &[f32],
+        model_id: &str,
+        dim: usize,
+    ) -> Result<(), MemoryError> {
+        // Encrypt outside the lock (W12 discipline: no crypto under the Mutex).
+        let emb_json = serde_json::to_string(embedding)
+            .map_err(|e| MemoryError::Storage(format!("embedding serialization: {e}")))?;
+        let embedding_blob = self
+            .vault
+            .encrypt_with_key(&self.derived_key, &emb_json)
+            .map_err(|e| MemoryError::Crypto(e.to_string()))?;
+
+        // Hold the lock only for the SQL UPDATE.
+        let c = self.locked_conn();
+        c.execute(
+            "UPDATE memories \
+             SET embedding_blob = ?2, model_id = ?3, dim = ?4 \
+             WHERE id = ?1",
+            params![id, embedding_blob, model_id, dim as i64],
+        )
+        .map_err(|e| MemoryError::Storage(e.to_string()))?;
+
         Ok(())
     }
 }

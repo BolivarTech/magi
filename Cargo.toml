@@ -52,6 +52,7 @@ uuid = { version = "1.8", features = ["v4"] }
 
 # MAGI ecosystem
 magi-core = "1.1"
+instant-distance = { version = "0.6", optional = true }
 
 [dev-dependencies]
 # RoutingMockProvider for consult tests (no extra runtime deps; reqwest NOT pulled)
@@ -62,3 +63,8 @@ mockito = "1.4"
 tempfile = "3.10"
 tokio-test = "0.4"
 serial_test = "3.0"
+
+[features]
+## Enable opt-in HNSW ANN index (CP2-A). Off by default; brute-force exact
+## search is always available and is the default retrieval path (D-05).
+ann = ["dep:instant-distance"]
