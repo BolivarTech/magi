@@ -402,6 +402,68 @@ mod tests {
         assert!(!msg.contains("SECRET-KEY-123"));
     }
 
+    // ── Fix 2: Autodetect dim enforcement ─────────────────────────────────────
+
+    /// Fix 2: when `dim = 0` (autodetect), the first successful response establishes
+    /// the effective dimension; subsequent calls returning a different length must
+    /// be rejected with `EmbeddingError::Dim`.
+    ///
+    /// Mocks are differentiated by body (`input` field) so mock ordering does not
+    /// affect the test outcome.
+    #[tokio::test]
+    async fn test_autodetect_dim_enforced_on_second_call() {
+        let mut server = mockito::Server::new_async().await;
+        // Call 1 (input "hello"): 3-dim — autodetects dim = 3.
+        let _m1 = server
+            .mock("POST", "/embeddings")
+            .match_body(mockito::Matcher::PartialJson(serde_json::json!(
+                {"input": ["hello"]}
+            )))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"data":[{"embedding":[0.1,0.2,0.3]}]}"#)
+            .create_async()
+            .await;
+        // Call 2 (input "world"): 4-dim — must be rejected.
+        let _m2 = server
+            .mock("POST", "/embeddings")
+            .match_body(mockito::Matcher::PartialJson(serde_json::json!(
+                {"input": ["world"]}
+            )))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"data":[{"embedding":[0.1,0.2,0.3,0.4]}]}"#)
+            .create_async()
+            .await;
+
+        let emb = OpenAiCompatibleEmbedder::new(
+            &EmbeddingConfig {
+                dim: 0, // autodetect
+                base_url: server.url(),
+                ..Default::default()
+            },
+            None,
+        );
+
+        // First call: autodetect establishes dim = 3.
+        let first = emb.embed(&["hello".into()]).await.unwrap();
+        assert_eq!(first[0].len(), 3, "Fix2: first response establishes dim=3");
+        assert_eq!(emb.dim(), 3, "Fix2: dim() must reflect autodetected value");
+
+        // Second call: 4-dim mismatch must be a typed error.
+        let err = emb.embed(&["world".into()]).await.unwrap_err();
+        assert!(
+            matches!(
+                err,
+                EmbeddingError::Dim {
+                    expected: 3,
+                    got: 4
+                }
+            ),
+            "Fix2: expected Dim{{expected:3,got:4}}, got: {err:?}"
+        );
+    }
+
     // ── F1: Network error variant ───────────────────────────────────────────────
 
     /// F1: a connection-refused error (non-timeout) must produce
