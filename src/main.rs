@@ -1,6 +1,7 @@
 mod agent;
 mod config;
 mod defaults;
+mod memory;
 mod services;
 mod system;
 mod tools;

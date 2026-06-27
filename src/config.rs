@@ -21,6 +21,10 @@ pub struct MagiConfig {
     pub anthropic: AnthropicConfig,
     #[serde(default)]
     pub magi: MagiModelsConfig,
+    #[serde(default)]
+    pub memory: crate::memory::config::MemoryConfig,
+    #[serde(default)]
+    pub embedding: crate::memory::config::EmbeddingConfig,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
