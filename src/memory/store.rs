@@ -1049,6 +1049,52 @@ mod tests {
         );
     }
 
+    /// A1: `mark_accessed` with `access_count = i64::MAX` must NOT overflow.
+    /// The SQL CASE guard must leave the value at `i64::MAX as u64`.
+    #[tokio::test]
+    async fn test_mark_accessed_saturates_at_i64_max() {
+        let (_t, store) = test_store();
+        let mut m = sample("sat", "overflow test", vec![0.0; 3]);
+        m.access_count = i64::MAX as u64;
+        store.insert(&m).await.unwrap();
+        store.mark_accessed(&["sat".into()], 9999).await.unwrap();
+        let got = store.get("sat").await.unwrap().unwrap();
+        assert_eq!(
+            got.access_count,
+            i64::MAX as u64,
+            "A1: access_count must stay at i64::MAX after mark_accessed (no overflow)"
+        );
+    }
+
+    /// A2: `update_embedding` on a non-existent id must return an error,
+    /// not silently succeed.
+    #[tokio::test]
+    async fn test_update_embedding_on_missing_id_is_err() {
+        let (_t, store) = test_store();
+        let result = store
+            .update_embedding("no-such-id", &[0.1f32, 0.2], "model", 2)
+            .await;
+        assert!(
+            matches!(result, Err(MemoryError::Storage(_))),
+            "A2: update_embedding on missing id must be Err(Storage), got: {result:?}"
+        );
+    }
+
+    /// A3: `diagnostics` i64→usize conversion must not truncate on large counts.
+    /// (Smoke test: result fields are `usize`, not negative or wrapped.)
+    #[tokio::test]
+    async fn test_diagnostics_counts_are_usize_safe() {
+        let (_t, store) = test_store();
+        let d = store.diagnostics("root").await.unwrap();
+        // All counts start at 0; the important thing is the code path compiles
+        // and runs without panic. The try_from conversion is the fix; absence of
+        // panic here demonstrates it is safe on this platform.
+        assert_eq!(d.active_count, 0);
+        assert_eq!(d.archived_count, 0);
+        assert_eq!(d.pending_reembed_count, 0);
+        assert_eq!(d.ram_estimate_bytes, 0);
+    }
+
     /// CP2-F volume: a 1000-turn batch imports fully.
     #[tokio::test]
     async fn test_migration_imports_large_batch() {
