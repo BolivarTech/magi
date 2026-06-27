@@ -61,6 +61,14 @@ struct Config {
 /// handler) and tests working unchanged.
 pub(crate) use crate::defaults::DEFAULT_ANTHROPIC_MODEL as DEFAULT_MODEL;
 
+/// Returns `true` when `base_url` resolves to a local address
+/// (`localhost`, `127.0.0.1`, or `[::1]`) — used by the cloud-egress notice
+/// (CP2-AG/AJ, Task 13b) to suppress the warning for on-device embedders.
+fn is_localhost(base_url: &str) -> bool {
+    let lower = base_url.to_lowercase();
+    lower.contains("localhost") || lower.contains("127.0.0.1") || lower.contains("[::1]")
+}
+
 /// Parses `key.txt`-style content: line 1 = API key, line 2 = optional model.
 ///
 /// Returns `(api_key, model)`. A blank, whitespace-only, or absent model line
@@ -406,6 +414,19 @@ async fn main() -> anyhow::Result<()> {
                     magi_config.memory.clone(),
                 );
                 agent.on_session_open().await.ok();
+
+                // CP2-AG/AJ: warn the user when the distiller will send memory batches
+                // to a cloud embedding endpoint (non-localhost).
+                if magi_config.memory.distill_enabled
+                    && !is_localhost(&magi_config.embedding.base_url)
+                {
+                    startup_notices.push(format!(
+                        "Memory distiller will send bounded memory batches \
+                         (≤ {} tokens) to {} — set distill_enabled = false \
+                         in [memory] for zero cloud memory egress.",
+                        magi_config.memory.distill_max_batch_tokens, magi_config.embedding.base_url,
+                    ));
+                }
             }
 
             // ProjectFactTool needs the same store; register it on the encrypted path only.

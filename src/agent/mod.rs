@@ -12,7 +12,8 @@ use crate::memory::config::MemoryConfig;
 use crate::memory::context::assemble_selective;
 use crate::memory::decay::purge_expired_archives;
 use crate::memory::embedding::EmbeddingProvider;
-use crate::memory::profile::render_profile;
+use crate::memory::judge::LlmDistillJudge;
+use crate::memory::profile::{distill, render_profile};
 use crate::memory::retrieval::reembed_pending;
 use crate::memory::salience::assign_salience;
 use crate::memory::store::{Memory, SqliteVectorStore, VectorStore};
@@ -262,12 +263,28 @@ impl Agent {
     /// If the tiered-memory subsystem is attached and
     /// `cfg.distill_on_session_close` is true, runs [`distill`] once.
     /// Errors are swallowed — a distillation failure must never prevent clean
-    /// shutdown (REQ-29). STUB — wired in GREEN phase.
+    /// shutdown (REQ-29).
     ///
     /// # Errors
     /// Always returns `Ok(())` (errors swallowed internally).
     pub async fn on_session_close(&self) -> anyhow::Result<()> {
-        // STUB — wired in GREEN phase.
+        let Some(sub) = self.memory_subsystem.as_ref() else {
+            return Ok(());
+        };
+        if !sub.cfg.distill_on_session_close || !sub.cfg.distill_enabled {
+            return Ok(());
+        }
+        let judge = LlmDistillJudge::new(self.provider.clone());
+        let _ = distill(
+            &*sub.store,
+            &judge,
+            &*sub.embedder,
+            &*sub.clock,
+            &sub.cfg,
+            &sub.scope,
+        )
+        .await
+        .map_err(|e| eprintln!("on_session_close distill: {e}"));
         Ok(())
     }
 
@@ -504,9 +521,19 @@ impl Agent {
                     )
                     .await;
 
-                    // Increment turn counter (Task 13b). STUB — distill trigger wired in GREEN.
-                    if let Some(ref mut sub) = self.memory_subsystem {
+                    // Increment turn counter and fire distill pass when cadence is reached
+                    // (Task 13b / REQ-17). Errors are non-fatal (CP2-Z).
+                    let should_distill = {
+                        let sub = self.memory_subsystem.as_mut().unwrap();
                         sub.turns_since_open = sub.turns_since_open.saturating_add(1);
+                        let n = sub.cfg.distill_every_n_turns;
+                        sub.cfg.distill_enabled && n > 0 && sub.turns_since_open.is_multiple_of(n)
+                    };
+                    if should_distill {
+                        let judge = LlmDistillJudge::new(self.provider.clone());
+                        let _ = distill(&*store, &judge, &*embedder, &*clock, &cfg, &scope)
+                            .await
+                            .map_err(|e| eprintln!("distill: {e}"));
                     }
 
                     for content in response.content.iter().rev() {
@@ -1277,8 +1304,7 @@ mod tests {
 
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let mem = EncryptedSqliteMemory::new(tmp.path().to_path_buf(), "pw".into()).unwrap();
-        let vstore =
-            Arc::new(SqliteVectorStore::new(mem.shared_conn(), mem.data_key()).unwrap());
+        let vstore = Arc::new(SqliteVectorStore::new(mem.shared_conn(), mem.data_key()).unwrap());
         let embedder = Arc::new(FakeEmbedder {
             dim: 8,
             model: "fake".into(),
@@ -1368,8 +1394,7 @@ mod tests {
 
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let mem = EncryptedSqliteMemory::new(tmp.path().to_path_buf(), "pw".into()).unwrap();
-        let vstore =
-            Arc::new(SqliteVectorStore::new(mem.shared_conn(), mem.data_key()).unwrap());
+        let vstore = Arc::new(SqliteVectorStore::new(mem.shared_conn(), mem.data_key()).unwrap());
         let embedder = Arc::new(FakeEmbedder {
             dim: 8,
             model: "fake".into(),
@@ -1394,20 +1419,47 @@ mod tests {
         let (tx1, _rx1) = mpsc::channel::<StreamPiece>(8);
         agent.query_streaming("hello", tx1).await.unwrap();
 
+        // ── Diagnostic: check intermediate state after turn 1 ────────────────
+        {
+            let calls_after_1 = calls.lock().unwrap().len();
+            let mems = vstore.active("root").await.unwrap();
+            let pref_count = mems
+                .iter()
+                .filter(|m| m.kind == crate::memory::MemoryKind::Preference)
+                .count();
+            assert!(
+                calls_after_1 >= 2,
+                "distill must fire a provider call after turn 1; got {calls_after_1} calls"
+            );
+            assert!(
+                pref_count > 0,
+                "promote_to_profile must have inserted a preference after turn 1; \
+                 got {pref_count} preferences (total mems: {})",
+                mems.len()
+            );
+        }
+        // ── End diagnostic ───────────────────────────────────────────────────
+
         // Turn 2: render_profile must return "- use rust\n" as live_profile,
         // and assemble_selective must include it in the preamble messages.
+        //
+        // Capture the call index before turn 2 so we can pinpoint turn 2's main
+        // stream_messages call even when the per-turn distill trigger adds further
+        // calls after it (distill_every_n_turns = 1 means distill fires after
+        // EVERY turn, so locked.last() would be the distill call, not the main one).
+        let n_before_t2 = calls.lock().unwrap().len();
         let (tx2, _rx2) = mpsc::channel::<StreamPiece>(8);
-        agent.query_streaming("what are my prefs", tx2).await.unwrap();
+        agent
+            .query_streaming("what are my prefs", tx2)
+            .await
+            .unwrap();
 
-        // The last stream_messages call is turn 2's provider call.
-        // Its assembled context should contain the promoted preference.
+        // calls[n_before_t2] is turn 2's main (assembled context) provider call.
         let locked = calls.lock().unwrap();
-        assert!(
-            locked.len() >= 2,
-            "provider must have been called at least twice (turn 1 + turn 2)"
-        );
-        let last_call = locked.last().unwrap();
-        let all_text: String = last_call
+        let t2_main = locked
+            .get(n_before_t2)
+            .expect("turn 2's main stream_messages call must exist");
+        let all_text: String = t2_main
             .iter()
             .flat_map(|m| m.content.iter())
             .filter_map(|c| {

@@ -34,17 +34,84 @@ impl LlmDistillJudge {
 
 #[async_trait]
 impl DistillJudge for LlmDistillJudge {
-    async fn summarize_preferences(
-        &self,
-        _episodic: &[Memory],
-    ) -> Result<Vec<String>, MemoryError> {
-        // STUB — RED: real implementation in GREEN phase.
-        Ok(vec![])
+    async fn summarize_preferences(&self, episodic: &[Memory]) -> Result<Vec<String>, MemoryError> {
+        if episodic.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let texts = episodic
+            .iter()
+            .map(|m| m.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let prompt = format!(
+            "From the following user turns, list durable user preferences, one per line, \
+             or nothing if none:\n{texts}"
+        );
+
+        let response = self
+            .provider
+            .send_messages(&[Message::user(&prompt)], &[])
+            .await
+            .map_err(|e| MemoryError::Storage(e.to_string()))?;
+
+        let text = response
+            .content
+            .iter()
+            .filter_map(|c| {
+                if let crate::agent::messages::Content::Text { text } = c {
+                    Some(text.as_str())
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let prefs = text
+            .lines()
+            .map(|line| {
+                // Strip common list prefixes: "- ", "* ", "1. ", "2. " …
+                let stripped = line
+                    .trim_start_matches(|c: char| c.is_ascii_digit())
+                    .trim_start_matches('.')
+                    .trim_start_matches(['-', '*'])
+                    .trim();
+                stripped.to_string()
+            })
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        Ok(prefs)
     }
 
-    async fn contradicts(&self, _a: &str, _b: &str) -> Result<bool, MemoryError> {
-        // STUB — RED: real implementation in GREEN phase.
-        Ok(false)
+    async fn contradicts(&self, a: &str, b: &str) -> Result<bool, MemoryError> {
+        let prompt = format!(
+            "Does statement B contradict or supersede statement A about the same subject? \
+             Answer only yes or no.\nA: {a}\nB: {b}"
+        );
+
+        let response = self
+            .provider
+            .send_messages(&[Message::user(&prompt)], &[])
+            .await
+            .map_err(|e| MemoryError::Storage(e.to_string()))?;
+
+        let text = response
+            .content
+            .iter()
+            .filter_map(|c| {
+                if let crate::agent::messages::Content::Text { text } = c {
+                    Some(text.as_str())
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        Ok(text.to_lowercase().contains("yes"))
     }
 }
 
@@ -158,22 +225,20 @@ mod tests {
     #[tokio::test]
     async fn test_judge_contradicts_parses_yes() {
         let yes_judge = LlmDistillJudge::new(Arc::new(CannedProvider("Yes.".into())));
-        assert_eq!(
+        assert!(
             yes_judge
                 .contradicts("statement A", "statement B")
                 .await
                 .unwrap(),
-            true,
             "a 'Yes.' response must be parsed as true"
         );
 
         let no_judge = LlmDistillJudge::new(Arc::new(CannedProvider("No".into())));
-        assert_eq!(
-            no_judge
+        assert!(
+            !no_judge
                 .contradicts("statement A", "statement B")
                 .await
                 .unwrap(),
-            false,
             "a 'No' response must be parsed as false"
         );
     }

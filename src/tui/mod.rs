@@ -596,6 +596,8 @@ pub async fn run_tui_ext(
                 UiEvent::Quit => break,
             }
         }
+        // Best-effort distillation pass on exit (Task 13b / REQ-17).
+        let _ = runner_agent.on_session_close().await;
     });
 
     let app = App::new(event_tx, response_rx, approval_rx);
