@@ -364,6 +364,40 @@ pub struct EmbeddingConfig {
     pub document_prefix: String,
 }
 
+impl EmbeddingConfig {
+    /// Validates that the embedding config has required non-empty fields.
+    ///
+    /// Called alongside [`MemoryConfig::validate`] at startup to surface
+    /// misconfigured values as a startup notice rather than a runtime failure.
+    ///
+    /// # Rules
+    /// - `base_url` must be non-empty (a missing URL would silently fail every embed request).
+    /// - `model` must be non-empty (required by every openai-compat `/embeddings` call).
+    /// - `provider` must be non-empty (the route dispatcher key; empty = ambiguous).
+    /// - `dim = 0` is **valid** and means autodetect from the first response.
+    ///
+    /// # Errors
+    /// Returns `Err(MemoryError::Config(_))` on the first invalid field found.
+    pub fn validate(&self) -> Result<(), MemoryError> {
+        if self.base_url.is_empty() {
+            return Err(MemoryError::Config(
+                "embedding.base_url must not be empty".into(),
+            ));
+        }
+        if self.model.is_empty() {
+            return Err(MemoryError::Config(
+                "embedding.model must not be empty".into(),
+            ));
+        }
+        if self.provider.is_empty() {
+            return Err(MemoryError::Config(
+                "embedding.provider must not be empty".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 impl Default for EmbeddingConfig {
     fn default() -> Self {
         Self {

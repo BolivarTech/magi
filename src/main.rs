@@ -282,6 +282,10 @@ async fn main() -> anyhow::Result<()> {
     if let Err(e) = magi_config.memory.validate() {
         startup_notices.push(format!("memory config warning: {e}"));
     }
+    // H2: surface invalid embedding-config values alongside memory-config (never panic).
+    if let Err(e) = magi_config.embedding.validate() {
+        startup_notices.push(format!("embedding config warning: {e}"));
+    }
     // RF-9: when there is no magi.toml at all, make the Ollama-first default visible
     // (never-silent). A present-but-minimal magi.toml does NOT trigger this.
     if crate::defaults::should_emit_default_notice(
