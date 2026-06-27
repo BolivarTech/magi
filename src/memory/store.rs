@@ -730,11 +730,18 @@ impl VectorStore for SqliteVectorStore {
     }
 
     async fn mark_accessed(&self, ids: &[String], now: i64) -> Result<(), MemoryError> {
-        // Pure SQL update — no decryption — so the lock may be held for the
-        // entire loop without violating the W12 discipline.
-        let c = self.locked_conn();
+        if ids.is_empty() {
+            return Ok(());
+        }
+        // Pure SQL updates — no decryption — so the lock may be held for the
+        // entire transaction without violating the W12 discipline.
+        // IMMEDIATE transaction: all-or-nothing so a partial failure rolls back.
+        let mut c = self.locked_conn();
+        let tx = c
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|e| MemoryError::Storage(e.to_string()))?;
         for id in ids {
-            c.execute(
+            tx.execute(
                 "UPDATE memories \
                  SET access_count = CASE WHEN access_count < 9223372036854775807 \
                      THEN access_count + 1 ELSE access_count END, \
@@ -744,6 +751,8 @@ impl VectorStore for SqliteVectorStore {
             )
             .map_err(|e| MemoryError::Storage(e.to_string()))?;
         }
+        tx.commit()
+            .map_err(|e| MemoryError::Storage(e.to_string()))?;
         Ok(())
     }
 
@@ -768,23 +777,43 @@ impl VectorStore for SqliteVectorStore {
     }
 
     async fn hard_delete(&self, ids: &[String]) -> Result<(), MemoryError> {
-        let c = self.locked_conn();
+        if ids.is_empty() {
+            return Ok(());
+        }
+        // IMMEDIATE transaction: all-or-nothing so a partial failure rolls back (F2).
+        // Pure SQL deletes — no decryption — W12 satisfied.
+        let mut c = self.locked_conn();
+        let tx = c
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|e| MemoryError::Storage(e.to_string()))?;
         for id in ids {
-            c.execute("DELETE FROM memories WHERE id = ?1", params![id])
+            tx.execute("DELETE FROM memories WHERE id = ?1", params![id])
                 .map_err(|e| MemoryError::Storage(e.to_string()))?;
         }
+        tx.commit()
+            .map_err(|e| MemoryError::Storage(e.to_string()))?;
         Ok(())
     }
 
     async fn set_distilled(&self, ids: &[String], at: i64) -> Result<(), MemoryError> {
-        let c = self.locked_conn();
+        if ids.is_empty() {
+            return Ok(());
+        }
+        // IMMEDIATE transaction: all-or-nothing so a partial failure rolls back (F2).
+        // Pure SQL updates — no decryption — W12 satisfied.
+        let mut c = self.locked_conn();
+        let tx = c
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|e| MemoryError::Storage(e.to_string()))?;
         for id in ids {
-            c.execute(
+            tx.execute(
                 "UPDATE memories SET distilled_at = ?2 WHERE id = ?1",
                 params![id, at],
             )
             .map_err(|e| MemoryError::Storage(e.to_string()))?;
         }
+        tx.commit()
+            .map_err(|e| MemoryError::Storage(e.to_string()))?;
         Ok(())
     }
 
