@@ -17,6 +17,7 @@ pub mod index;
 pub mod retrieval;
 pub mod salience;
 pub mod store;
+pub mod tokens;
 
 // Narrow allow: re-exports consumed by later tasks; tests use them via `use super::*`.
 #[allow(unused_imports)]
