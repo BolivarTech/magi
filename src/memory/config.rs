@@ -148,6 +148,37 @@ impl MemoryConfig {
                 self.protect_salience_threshold
             )));
         }
+        // safety_margin_ratio must be in [0.0, 1.0): a value ≥ 1.0 would reduce the
+        // usable budget to 0 or negative, making the context assembler degenerate.
+        if self.safety_margin_ratio < 0.0 || self.safety_margin_ratio >= 1.0 {
+            return Err(MemoryError::Config(format!(
+                "safety_margin_ratio must be in [0.0, 1.0), got {}",
+                self.safety_margin_ratio
+            )));
+        }
+        if self.context_budget_tokens == 0 {
+            return Err(MemoryError::Config(
+                "context_budget_tokens must be > 0".into(),
+            ));
+        }
+        if self.top_k == 0 {
+            return Err(MemoryError::Config("top_k must be > 0".into()));
+        }
+        // Individual weight negativity check before sum check so the error message
+        // names the specific offending weight.
+        if self.weight_similarity < 0.0 || self.weight_recency < 0.0 || self.weight_salience < 0.0 {
+            return Err(MemoryError::Config(format!(
+                "reranker weights must be >= 0.0; got similarity={}, recency={}, salience={}",
+                self.weight_similarity, self.weight_recency, self.weight_salience
+            )));
+        }
+        // All-zero weight set makes the reranker degenerate (every candidate scores 0).
+        let weight_sum = self.weight_similarity + self.weight_recency + self.weight_salience;
+        if weight_sum == 0.0 {
+            return Err(MemoryError::Config(
+                "reranker weights must not all be zero (sum must be > 0.0)".into(),
+            ));
+        }
         Ok(())
     }
 }
