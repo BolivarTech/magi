@@ -72,7 +72,11 @@ pub fn estimate_tokens(text: &str, chars_per_token: f64) -> usize {
 /// ```
 pub fn budget_after_margin(budget: usize, headroom: usize, margin_ratio: f64) -> usize {
     let margin = if margin_ratio > 0.0 && margin_ratio.is_finite() {
-        (budget as f64 * margin_ratio).ceil() as usize
+        // Compute via f64 to avoid integer overflow, then cast with saturation
+        // (Rust 1.45+: out-of-range f64→usize casts saturate rather than wrap).
+        // Clamp to `budget` so a large ratio or extreme budget cannot produce a
+        // margin that exceeds the budget itself (J2: robustness for usize::MAX).
+        ((budget as f64 * margin_ratio).ceil() as usize).min(budget)
     } else {
         0
     };
@@ -106,5 +110,17 @@ mod tests {
         // CP2-Q: with a CJK-tuned cpt (~2.0) the estimate is larger (more conservative),
         // so the assembler reserves more room — the budget never under-counts CJK.
         assert!(estimate_tokens("你好世界", 2.0) >= estimate_tokens("你好世界", 3.5));
+    }
+
+    #[test]
+    fn test_budget_after_margin_does_not_panic_on_max_budget() {
+        // J2: extreme budget (usize::MAX, headroom=0, ratio=0.5) must not panic
+        // and must return a sane value strictly below usize::MAX.
+        let result = budget_after_margin(usize::MAX, 0, 0.5);
+        assert!(
+            result < usize::MAX,
+            "J2: result must be less than usize::MAX (margin was reserved)"
+        );
+        assert!(result > 0, "J2: result must be positive with a 50% margin");
     }
 }
