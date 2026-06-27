@@ -614,6 +614,215 @@ mod tests {
         );
     }
 
+    // ── G2: exhaustive range/inter-field checks ───────────────────────────────
+
+    #[test]
+    fn test_validate_rejects_nan_default_salience() {
+        assert!(
+            MemoryConfig {
+                default_salience: f64::NAN,
+                ..MemoryConfig::default()
+            }
+            .validate()
+            .is_err(),
+            "G2: NaN default_salience must be rejected"
+        );
+    }
+
+    #[test]
+    fn test_validate_rejects_out_of_range_default_salience() {
+        assert!(
+            MemoryConfig {
+                default_salience: 1.5,
+                ..MemoryConfig::default()
+            }
+            .validate()
+            .is_err(),
+            "G2: default_salience > 1.0 must be rejected"
+        );
+        assert!(
+            MemoryConfig {
+                default_salience: -0.1,
+                ..MemoryConfig::default()
+            }
+            .validate()
+            .is_err(),
+            "G2: default_salience < 0.0 must be rejected"
+        );
+        // Boundary values: 0.0 and 1.0 are valid
+        assert!(
+            MemoryConfig {
+                default_salience: 0.0,
+                ..MemoryConfig::default()
+            }
+            .validate()
+            .is_ok(),
+            "G2: default_salience=0.0 must be accepted (lower bound)"
+        );
+        assert!(
+            MemoryConfig {
+                default_salience: 1.0,
+                ..MemoryConfig::default()
+            }
+            .validate()
+            .is_ok(),
+            "G2: default_salience=1.0 must be accepted (upper bound)"
+        );
+    }
+
+    #[test]
+    fn test_validate_rejects_nan_preference_salience() {
+        assert!(
+            MemoryConfig {
+                preference_salience: f64::NAN,
+                ..MemoryConfig::default()
+            }
+            .validate()
+            .is_err(),
+            "G2: NaN preference_salience must be rejected"
+        );
+    }
+
+    #[test]
+    fn test_validate_rejects_out_of_range_preference_salience() {
+        assert!(
+            MemoryConfig {
+                preference_salience: 1.1,
+                ..MemoryConfig::default()
+            }
+            .validate()
+            .is_err(),
+            "G2: preference_salience > 1.0 must be rejected"
+        );
+        assert!(
+            MemoryConfig {
+                preference_salience: -0.1,
+                ..MemoryConfig::default()
+            }
+            .validate()
+            .is_err(),
+            "G2: preference_salience < 0.0 must be rejected"
+        );
+    }
+
+    #[test]
+    fn test_validate_rejects_nan_forget_strength_threshold() {
+        assert!(
+            MemoryConfig {
+                forget_strength_threshold: f64::NAN,
+                ..MemoryConfig::default()
+            }
+            .validate()
+            .is_err(),
+            "G2: NaN forget_strength_threshold must be rejected"
+        );
+    }
+
+    #[test]
+    fn test_validate_rejects_out_of_range_forget_strength_threshold() {
+        assert!(
+            MemoryConfig {
+                forget_strength_threshold: -0.1,
+                ..MemoryConfig::default()
+            }
+            .validate()
+            .is_err(),
+            "G2: negative forget_strength_threshold must be rejected"
+        );
+        assert!(
+            MemoryConfig {
+                forget_strength_threshold: 1.1,
+                ..MemoryConfig::default()
+            }
+            .validate()
+            .is_err(),
+            "G2: forget_strength_threshold > 1.0 must be rejected"
+        );
+    }
+
+    #[test]
+    fn test_validate_rejects_nan_supersede_similarity_threshold() {
+        assert!(
+            MemoryConfig {
+                supersede_similarity_threshold: f64::NAN,
+                ..MemoryConfig::default()
+            }
+            .validate()
+            .is_err(),
+            "G2: NaN supersede_similarity_threshold must be rejected"
+        );
+    }
+
+    #[test]
+    fn test_validate_rejects_out_of_range_supersede_similarity_threshold() {
+        assert!(
+            MemoryConfig {
+                supersede_similarity_threshold: 1.1,
+                ..MemoryConfig::default()
+            }
+            .validate()
+            .is_err(),
+            "G2: supersede_similarity_threshold > 1.0 must be rejected"
+        );
+        assert!(
+            MemoryConfig {
+                supersede_similarity_threshold: -0.1,
+                ..MemoryConfig::default()
+            }
+            .validate()
+            .is_err(),
+            "G2: negative supersede_similarity_threshold must be rejected"
+        );
+    }
+
+    #[test]
+    fn test_validate_rejects_evicted_retention_days_below_minus_one() {
+        assert!(
+            MemoryConfig {
+                evicted_retention_days: -2,
+                ..MemoryConfig::default()
+            }
+            .validate()
+            .is_err(),
+            "G2: evicted_retention_days < -1 must be rejected"
+        );
+        // -1 (archive forever) and 0 (immediate hard-delete) are valid
+        assert!(
+            MemoryConfig {
+                evicted_retention_days: -1,
+                ..MemoryConfig::default()
+            }
+            .validate()
+            .is_ok(),
+            "G2: evicted_retention_days = -1 (archive) must be accepted"
+        );
+        assert!(
+            MemoryConfig {
+                evicted_retention_days: 0,
+                ..MemoryConfig::default()
+            }
+            .validate()
+            .is_ok(),
+            "G2: evicted_retention_days = 0 (immediate delete) must be accepted"
+        );
+    }
+
+    #[test]
+    fn test_validate_rejects_budget_exhausted_by_headroom_and_margin() {
+        // headroom (1500) > context_budget (1000) → zero usable budget
+        assert!(
+            MemoryConfig {
+                context_budget_tokens: 1000,
+                response_headroom_tokens: 1500,
+                safety_margin_ratio: 0.1,
+                ..MemoryConfig::default()
+            }
+            .validate()
+            .is_err(),
+            "G2: headroom+margin exceeding budget must be rejected"
+        );
+    }
+
     // ── F3: non-finite f64 rejection ──────────────────────────────────────────
 
     #[test]
