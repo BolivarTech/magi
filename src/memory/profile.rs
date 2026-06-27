@@ -317,8 +317,13 @@ pub async fn render_profile(
 /// # Errors
 /// [`MemoryError::Storage`] on SQL failure; [`MemoryError::Crypto`] if text
 /// encryption fails.
-// Narrow allow: called by distill (this module) and future AS-REQ-10 consumers.
-#[allow(dead_code)]
+///
+/// # Design rationale (D-15)
+/// This is an **internal reusable primitive**: [`distill`] calls it to write
+/// preferences it found in episodic memory, and future Agent Society consumers
+/// (AS-REQ-10) will call it to promote cross-scope preferences without going
+/// through the full distillation pass. The function must never be inlined into
+/// [`distill`] — the reusability contract is intentional.
 async fn promote_to_profile(
     store: &dyn VectorStore,
     clock: &dyn Clock,
