@@ -7,6 +7,9 @@
 //! These are **pure functions** — no I/O, no time, no RNG — consumed by the
 //! context assembler (Task 11) to enforce the P3 context budget invariant.
 
+// Narrow allow: both functions are the stable P3 seam consumed by the context assembler
+// (Task 11). They are public API but have no caller yet in this task.
+#[allow(dead_code)]
 /// Conservative deterministic token estimate: `ceil(chars / chars_per_token)` (D-02/D-16).
 ///
 /// `chars` is the Unicode scalar count (`text.chars().count()`), NOT bytes. A non-positive or
@@ -36,9 +39,20 @@
 /// assert_eq!(estimate_tokens("abc", 0.0), 3);     // bad cpt → fallback 1.0
 /// ```
 pub fn estimate_tokens(text: &str, chars_per_token: f64) -> usize {
-    todo!()
+    let count = text.chars().count();
+    if count == 0 {
+        return 0;
+    }
+    let cpt = if chars_per_token > 0.0 && chars_per_token.is_finite() {
+        chars_per_token
+    } else {
+        1.0
+    };
+    (count as f64 / cpt).ceil() as usize
 }
 
+// Narrow allow: consumed by the context assembler in Task 11.
+#[allow(dead_code)]
 /// Usable budget after reserving response headroom and a safety margin (D-16):
 /// `budget - headroom - ceil(budget * margin_ratio)`, saturating at 0 (never underflows).
 ///
@@ -57,7 +71,12 @@ pub fn estimate_tokens(text: &str, chars_per_token: f64) -> usize {
 /// assert_eq!(budget_after_margin(100, 1024, 0.1), 0);     // saturates, never underflows
 /// ```
 pub fn budget_after_margin(budget: usize, headroom: usize, margin_ratio: f64) -> usize {
-    todo!()
+    let margin = if margin_ratio > 0.0 && margin_ratio.is_finite() {
+        (budget as f64 * margin_ratio).ceil() as usize
+    } else {
+        0
+    };
+    budget.saturating_sub(headroom).saturating_sub(margin)
 }
 
 #[cfg(test)]
