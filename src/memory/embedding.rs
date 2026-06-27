@@ -339,6 +339,32 @@ fn apply_prefix(prefix: &str, text: &str) -> String {
     }
 }
 
+// ─── Test-only constructors ───────────────────────────────────────────────────
+
+#[cfg(test)]
+impl OpenAiCompatibleEmbedder {
+    /// Constructs an embedder with a caller-supplied `reqwest::Client`.
+    ///
+    /// **Test use only** — allows injecting short-timeout clients (G1) or
+    /// no-redirect clients (G5) without modifying the production constructor.
+    fn new_with_client(
+        cfg: &EmbeddingConfig,
+        api_key: Option<String>,
+        client: reqwest::Client,
+    ) -> Self {
+        Self {
+            client,
+            base_url: cfg.base_url.trim_end_matches('/').to_string(),
+            model: cfg.model.clone(),
+            configured_dim: cfg.dim,
+            detected_dim: AtomicUsize::new(0),
+            query_prefix: cfg.query_prefix.clone(),
+            document_prefix: cfg.document_prefix.clone(),
+            api_key,
+        }
+    }
+}
+
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -590,6 +616,115 @@ mod tests {
                 }
             ),
             "F4: CAS contract — Dim{{expected:4,got:2}} expected, got: {err:?}"
+        );
+    }
+
+    // ── G1: embedding HTTP client timeout ────────────────────────────────────
+
+    /// G1: a request to a server that stalls before sending a response produces
+    /// `EmbeddingError::Timeout`. A raw `TcpListener` accepts the connection
+    /// but holds it open (simulating a hung Ollama / cloud endpoint), while the
+    /// short-deadline client fires before the server ever replies.
+    ///
+    /// Production verification: `new()` calls `reqwest::Client::builder().timeout(…)`
+    /// with 120 s (confirmed by reading the constructor). This test exercises the
+    /// timeout *mapping* (`e.is_timeout()` → `EmbeddingError::Timeout`) via a
+    /// test-only client; the 120 s production value is validated by code review.
+    #[tokio::test]
+    async fn test_timeout_client_respects_deadline() {
+        use tokio::net::TcpListener;
+
+        // Spawn a TCP server that accepts but stalls before sending HTTP headers.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            if let Ok((_socket, _)) = listener.accept().await {
+                // Hold the socket alive well beyond the client timeout without
+                // writing any bytes — reqwest waits for response headers and
+                // fires its deadline first.
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            }
+        });
+
+        let base_url = format!("http://127.0.0.1:{}", addr.port());
+        // 50 ms client deadline fires before the 5 s stall.
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_millis(50))
+            .build()
+            .unwrap();
+        let emb = OpenAiCompatibleEmbedder::new_with_client(
+            &EmbeddingConfig {
+                base_url,
+                ..Default::default()
+            },
+            None,
+            client,
+        );
+        assert!(
+            matches!(
+                emb.embed(&["hello".into()]).await.unwrap_err(),
+                EmbeddingError::Timeout
+            ),
+            "G1: stalled server beyond client deadline must produce Timeout"
+        );
+    }
+
+    // ── G4: autodetect zero-dim response ─────────────────────────────────────
+
+    /// G4: in autodetect mode (`dim = 0`), a server returning a zero-length
+    /// embedding vector must produce `EmbeddingError::Malformed`, not store dim = 0.
+    #[tokio::test]
+    async fn test_autodetect_zero_dim_response_is_malformed() {
+        let mut server = mockito::Server::new_async().await;
+        server
+            .mock("POST", "/embeddings")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"data":[{"embedding":[]}]}"#)
+            .create_async()
+            .await;
+        let emb = OpenAiCompatibleEmbedder::new(
+            &EmbeddingConfig {
+                dim: 0, // autodetect
+                base_url: server.url(),
+                ..Default::default()
+            },
+            None,
+        );
+        assert!(
+            matches!(
+                emb.embed(&["x".into()]).await.unwrap_err(),
+                EmbeddingError::Malformed(_)
+            ),
+            "G4: zero-length embedding in autodetect mode must produce Malformed"
+        );
+    }
+
+    // ── G5: 3xx treated as HTTP error ────────────────────────────────────────
+
+    /// G5: a 302 response (redirect not followed) must produce
+    /// `EmbeddingError::Http`, not fall through to JSON parsing and produce Malformed.
+    #[tokio::test]
+    async fn test_redirect_response_produces_http_error() {
+        let mut server = mockito::Server::new_async().await;
+        server
+            .mock("POST", "/embeddings")
+            .with_status(302)
+            .with_body("Found")
+            .create_async()
+            .await;
+        // Disable redirect-following so the 302 is returned to our status handler.
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap();
+        let emb = OpenAiCompatibleEmbedder::new_with_client(&cfg(&server.url()), None, client);
+        assert!(
+            matches!(
+                emb.embed(&["x".into()]).await.unwrap_err(),
+                EmbeddingError::Http(_)
+            ),
+            "G5: 302 response must produce EmbeddingError::Http, not Malformed"
         );
     }
 
