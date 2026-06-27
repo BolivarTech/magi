@@ -1116,4 +1116,85 @@ mod tests {
         );
         assert_eq!(store.active("root").await.unwrap().len(), 1000);
     }
+
+    // ── F2: transactional atomicity for multi-id ops ──────────────────────────
+
+    /// F2: hard_delete of multiple ids removes all of them (atomic batch).
+    #[tokio::test]
+    async fn test_hard_delete_multiple_ids_removes_all() {
+        let (_t, store) = test_store();
+        for i in 0..3u8 {
+            store
+                .insert(&sample(&format!("del{i}"), &format!("txt{i}"), vec![0.0; 3]))
+                .await
+                .unwrap();
+        }
+        store
+            .hard_delete(&["del0".into(), "del1".into(), "del2".into()])
+            .await
+            .unwrap();
+        assert!(store.get("del0").await.unwrap().is_none(), "del0 must be gone");
+        assert!(store.get("del1").await.unwrap().is_none(), "del1 must be gone");
+        assert!(store.get("del2").await.unwrap().is_none(), "del2 must be gone");
+    }
+
+    /// F2: mark_accessed on a batch updates all named ids in one shot.
+    #[tokio::test]
+    async fn test_mark_accessed_batch_updates_all_ids() {
+        let (_t, store) = test_store();
+        for i in 0..3u8 {
+            store
+                .insert(&sample(&format!("acc{i}"), &format!("t{i}"), vec![0.0; 3]))
+                .await
+                .unwrap();
+        }
+        store
+            .mark_accessed(&["acc0".into(), "acc1".into(), "acc2".into()], 5000)
+            .await
+            .unwrap();
+        for i in 0..3u8 {
+            let m = store.get(&format!("acc{i}")).await.unwrap().unwrap();
+            assert_eq!(m.access_count, 1, "F2: acc{i} access_count must be 1");
+            assert_eq!(m.last_accessed_at, 5000, "F2: acc{i} last_accessed_at must be 5000");
+        }
+    }
+
+    /// F2: set_distilled on a batch stamps all named ids.
+    #[tokio::test]
+    async fn test_set_distilled_batch_stamps_all_ids() {
+        let (_t, store) = test_store();
+        for i in 0..3u8 {
+            store
+                .insert(&sample(&format!("dst{i}"), &format!("t{i}"), vec![0.0; 3]))
+                .await
+                .unwrap();
+        }
+        store
+            .set_distilled(&["dst0".into(), "dst1".into(), "dst2".into()], 9999)
+            .await
+            .unwrap();
+        for i in 0..3u8 {
+            let m = store.get(&format!("dst{i}")).await.unwrap().unwrap();
+            assert_eq!(
+                m.distilled_at,
+                Some(9999),
+                "F2: dst{i} distilled_at must be 9999"
+            );
+        }
+    }
+
+    /// F2: hard_delete on an empty slice is a no-op (no error, no rows touched).
+    #[tokio::test]
+    async fn test_hard_delete_empty_slice_is_noop() {
+        let (_t, store) = test_store();
+        store
+            .insert(&sample("keep", "important", vec![0.0; 3]))
+            .await
+            .unwrap();
+        store.hard_delete(&[]).await.unwrap();
+        assert!(
+            store.get("keep").await.unwrap().is_some(),
+            "F2: empty hard_delete must not remove any rows"
+        );
+    }
 }
