@@ -857,6 +857,44 @@ mod tests {
         );
     }
 
+    // ── B1: NaN guard for zero half-life ─────────────────────────────────────
+
+    /// B1: `strength()` with `decay_half_life_days = 0.0` must return a finite
+    /// value, not NaN (`0.5.powf(x/0.0)` evaluates to NaN without the guard).
+    #[test]
+    fn test_strength_with_zero_half_life_returns_finite() {
+        let cfg = MemoryConfig {
+            decay_half_life_days: 0.0,
+            ..MemoryConfig::default()
+        };
+        let m = mem(0, 0.5, 0);
+        let s = strength(&m, 1000, &cfg);
+        assert!(
+            s.is_finite(),
+            "B1: strength() with half_life=0.0 must be finite, got {s}"
+        );
+        assert!(!s.is_nan(), "B1: strength() must not be NaN with half_life=0.0");
+    }
+
+    // ── B2: saturating_mul guard for i64 overflow in purge_expired_archives ───
+
+    /// B2: `purge_expired_archives` with a near-`i64::MAX` retention value must
+    /// not panic. With plain multiplication `i64::MAX * 86_400` overflows;
+    /// `saturating_mul` returns `i64::MAX`.
+    #[tokio::test]
+    async fn test_purge_expired_archives_with_large_retention_does_not_panic() {
+        let (_tmp, store) = make_test_store();
+        let clock = FixedClock::new(1_000 * 86_400);
+        let cfg = MemoryConfig {
+            // i64::MAX / 86_400 + 1 would overflow with plain multiplication.
+            evicted_retention_days: i64::MAX / 86_400 + 1,
+            ..MemoryConfig::default()
+        };
+        // Must not panic; no archived rows → result is 0.
+        let result = purge_expired_archives(&store, &clock, &cfg).await;
+        assert!(result.is_ok(), "B2: purge must not panic on large retention: {result:?}");
+    }
+
     // ── Race / concurrency test (CP2-D) ───────────────────────────────────────
 
     /// CP2-D: concurrent `run_forgetting` + `active()` over an

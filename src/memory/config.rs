@@ -318,7 +318,76 @@ mod d {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use crate::config::MagiConfig;
+
+    // ── B1 validate() tests ───────────────────────────────────────────────────
+
+    #[test]
+    fn test_validate_accepts_defaults() {
+        assert!(
+            MemoryConfig::default().validate().is_ok(),
+            "B1: defaults must pass validate()"
+        );
+    }
+
+    #[test]
+    fn test_validate_rejects_zero_half_life() {
+        let cfg = MemoryConfig {
+            decay_half_life_days: 0.0,
+            ..MemoryConfig::default()
+        };
+        assert!(
+            cfg.validate().is_err(),
+            "B1: decay_half_life_days=0.0 must be rejected by validate()"
+        );
+    }
+
+    #[test]
+    fn test_validate_rejects_zero_chars_per_token() {
+        let cfg = MemoryConfig {
+            chars_per_token: 0.0,
+            ..MemoryConfig::default()
+        };
+        assert!(
+            cfg.validate().is_err(),
+            "B1: chars_per_token=0.0 must be rejected by validate()"
+        );
+    }
+
+    #[test]
+    fn test_validate_rejects_invalid_protect_salience() {
+        // 0.0 is out of range (must be > 0.0)
+        assert!(
+            MemoryConfig {
+                protect_salience_threshold: 0.0,
+                ..MemoryConfig::default()
+            }
+            .validate()
+            .is_err(),
+            "B1: protect_salience_threshold=0.0 must be rejected"
+        );
+        // 1.5 is out of range (must be <= 1.0)
+        assert!(
+            MemoryConfig {
+                protect_salience_threshold: 1.5,
+                ..MemoryConfig::default()
+            }
+            .validate()
+            .is_err(),
+            "B1: protect_salience_threshold=1.5 must be rejected"
+        );
+        // 1.0 is valid (boundary)
+        assert!(
+            MemoryConfig {
+                protect_salience_threshold: 1.0,
+                ..MemoryConfig::default()
+            }
+            .validate()
+            .is_ok(),
+            "B1: protect_salience_threshold=1.0 must be accepted (inclusive boundary)"
+        );
+    }
 
     #[test]
     fn test_absent_memory_section_uses_documented_defaults() {

@@ -116,6 +116,15 @@ mod tests {
         assert_eq!(c.now(), 1_000 + 2 * 86_400 + 43_200);
     }
 
+    /// B3: `SystemClock::now()` must not overflow on the u64→i64 conversion.
+    /// We cannot advance the wall clock, so we just confirm the production path
+    /// returns a non-negative value (the `.min(i64::MAX as u64)` guard is the fix).
+    #[test]
+    fn test_system_clock_now_is_non_negative() {
+        let t = SystemClock.now();
+        assert!(t >= 0, "B3: SystemClock::now() must be >= 0, got {t}");
+    }
+
     #[test]
     fn test_fixed_clock_shared_behind_trait_object() {
         let c = FixedClock::new(500);
