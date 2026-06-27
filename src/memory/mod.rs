@@ -11,6 +11,7 @@
 pub mod config;
 pub mod embedding;
 pub mod error;
+pub mod store;
 
 // Narrow allow: re-exports consumed by later tasks; tests use them via `use super::*`.
 #[allow(unused_imports)]
