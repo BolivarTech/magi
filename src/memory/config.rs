@@ -215,9 +215,16 @@ impl MemoryConfig {
             ("default_salience", self.default_salience),
             ("preference_salience", self.preference_salience),
             ("forget_strength_threshold", self.forget_strength_threshold),
-            ("supersede_similarity_threshold", self.supersede_similarity_threshold),
+            (
+                "supersede_similarity_threshold",
+                self.supersede_similarity_threshold,
+            ),
         ] {
-            if !val.is_finite() || val < 0.0 || val > 1.0 {
+            // `!is_finite()` catches NaN/±Inf explicitly; the range check catches
+            // out-of-bound finite values. Both conditions reject NaN (NaN comparisons
+            // return false, so `(0.0..=1.0).contains(&NaN)` is false), but the
+            // explicit `is_finite()` guard makes the intent unambiguous.
+            if !val.is_finite() || !(0.0..=1.0).contains(&val) {
                 return Err(MemoryError::Config(format!(
                     "{name} must be a finite value in [0.0, 1.0], got {val}"
                 )));
@@ -253,9 +260,7 @@ impl MemoryConfig {
                 "context_budget_tokens ({}) after response_headroom_tokens ({}) and \
                  safety_margin_ratio ({}) leaves no usable budget; \
                  increase context_budget_tokens or reduce headroom/margin",
-                self.context_budget_tokens,
-                self.response_headroom_tokens,
-                self.safety_margin_ratio,
+                self.context_budget_tokens, self.response_headroom_tokens, self.safety_margin_ratio,
             )));
         }
 
