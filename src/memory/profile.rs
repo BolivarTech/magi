@@ -882,4 +882,149 @@ mod tests {
              (no undistilled memories)"
         );
     }
+
+    // ── E1: judge_calls must not count preference short-circuit ───────────────
+
+    /// E1: when all candidate pairs are preferences, the budget cap
+    /// (`supersede_max_candidate_pairs`) must NOT be exhausted — preference
+    /// short-circuit should not consume the LLM-call budget.
+    ///
+    /// Bug: both branches of the if/else previously incremented `judge_calls`,
+    /// so N preference-preference pairs would exhaust the cap and silently skip
+    /// any subsequent non-preference pairs.
+    #[tokio::test]
+    async fn test_preference_pairs_do_not_exhaust_judge_call_budget() {
+        let (_tmp, store) = make_test_store();
+        let emb = FakeEmbedder {
+            dim: 8,
+            model: "fake".into(),
+        };
+        let clock = FixedClock::new(1_000);
+        // Cap is 2 — if preferences were counted, 2 pref-pref pairs would hit it.
+        let cfg = MemoryConfig {
+            supersede_max_candidate_pairs: 2,
+            supersede_similarity_threshold: 0.0, // all pairs are candidates
+            distill_enabled: true,
+            distill_every_n_turns: 0,
+            ..MemoryConfig::default()
+        };
+
+        // Insert 3 preferences with identical text/embedding (all pairs are candidates).
+        let bow_vec: Vec<f32> = {
+            let text = "prefer Rust always";
+            let mut v = vec![0f32; 8];
+            for w in text.to_lowercase().split_whitespace() {
+                let h = w.bytes().fold(0usize, |a, b| a.wrapping_mul(31).wrapping_add(b as usize)) % 8;
+                v[h] += 1.0;
+            }
+            let n = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+            if n > 0.0 { for x in &mut v { *x /= n; } }
+            v
+        };
+        for i in 0..3i64 {
+            let m = Memory {
+                id: format!("pref_e1_{i}"),
+                session_id: "s".into(),
+                kind: MemoryKind::Preference,
+                text: "prefer Rust always".into(),
+                embedding: bow_vec.clone(),
+                model_id: "fake".into(),
+                dim: 8,
+                created_at: 1_000 + i * 10,
+                last_accessed_at: 1_000 + i * 10,
+                salience: 1.0,
+                access_count: 0,
+                superseded_by: None,
+                evicted_at: None,
+                scope: "root".into(),
+                distilled_at: None,
+            };
+            store.insert(&m).await.unwrap();
+        }
+
+        let (spy, _sum, contradicts) = make_spy(vec![], false, false, false);
+
+        distill(&store, &spy, &emb, &clock, &cfg, "root")
+            .await
+            .unwrap();
+
+        // Preferences must NOT call `contradicts()` (deterministic latest-wins).
+        let actual_contradicts = *contradicts.lock().unwrap();
+        assert_eq!(
+            actual_contradicts, 0,
+            "E1: preference pairs must not call contradicts(); got {actual_contradicts}"
+        );
+
+        // All 3 pairs processed without hitting the cap — none were skipped.
+        // The two older preferences should be superseded by the newest.
+        let superseded_count = store
+            .active("root")
+            .await
+            .unwrap()
+            .iter()
+            .filter(|m| m.superseded_by.is_some())
+            .count();
+        assert!(
+            superseded_count >= 1,
+            "E1: at least one preference must be superseded (latest-wins without hitting cap)"
+        );
+    }
+
+    // ── E2: promote_to_profile must trim whitespace ───────────────────────────
+
+    /// E2: `promote_to_profile` must store `pref.trim()` so the rendered profile
+    /// has no leading/trailing whitespace in any entry.
+    #[tokio::test]
+    async fn test_promote_to_profile_trims_whitespace() {
+        let (_tmp, store) = make_test_store();
+        let emb = FakeEmbedder {
+            dim: 8,
+            model: "fake".into(),
+        };
+        let clock = FixedClock::new(1_000);
+        let cfg = MemoryConfig {
+            distill_enabled: true,
+            distill_every_n_turns: 0,
+            supersede_similarity_threshold: 1.1, // no supersession pairs
+            ..MemoryConfig::default()
+        };
+
+        // `summarize_preferences` returns a preference with surrounding whitespace.
+        let (spy, _sum, _con) = make_spy(vec!["  prefer dark mode  ".into()], false, false, false);
+
+        // Insert a real episodic memory so distill has something to process.
+        insert_episodic(
+            &store,
+            "ep_e2",
+            "user prefers dark mode",
+            vec![0.5f32; 8],
+            "fake",
+            8,
+            1_000,
+        )
+        .await;
+
+        distill(&store, &spy, &emb, &clock, &cfg, "root")
+            .await
+            .unwrap();
+
+        let all_mems = store.active("root").await.unwrap();
+        let prefs: Vec<_> = all_mems
+            .iter()
+            .filter(|m| m.kind == MemoryKind::Preference)
+            .collect();
+        assert!(
+            !prefs.is_empty(),
+            "E2: distill must have promoted the preference to profile"
+        );
+        for p in &prefs {
+            assert_eq!(
+                p.text,
+                p.text.trim(),
+                "E2: profile entry must not have leading/trailing whitespace; \
+                 got: {:?}",
+                p.text
+            );
+        }
+    }
 }
