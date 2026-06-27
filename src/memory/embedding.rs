@@ -104,10 +104,10 @@ struct EmbedData {
 /// The API key is stored internally and **never** included in any error string.
 ///
 /// # Autodetect mode
-/// When `dim = 0` in [`EmbeddingConfig`], the embedder accepts whatever dimension
-/// the endpoint returns on the first call and records it atomically. Subsequent
-/// calls do not enforce a dimension check (the store layer is responsible for
-/// filtering by `model_id`/`dim` — D-06).
+/// When `dim = 0` in [`EmbeddingConfig`], the embedder records the vector length
+/// returned by the **first** successful call and enforces it on all subsequent calls
+/// — a length mismatch on a later call returns [`EmbeddingError::Dim`].  The store
+/// layer still filters by `model_id`/`dim` (D-06) as a second line of defence.
 pub struct OpenAiCompatibleEmbedder {
     client: reqwest::Client,
     base_url: String,
@@ -239,18 +239,30 @@ impl OpenAiCompatibleEmbedder {
             return Err(EmbeddingError::Malformed("empty data array".into()));
         }
 
-        let effective_dim = self.configured_dim;
+        // In autodetect mode (configured_dim == 0), load any dimension that was
+        // established by a previous successful call.  This ensures subsequent
+        // calls enforce consistency once the first response has set the dim.
+        let mut effective_dim = if self.configured_dim > 0 {
+            self.configured_dim
+        } else {
+            self.detected_dim.load(Ordering::Relaxed) // 0 if not yet detected
+        };
+
         let mut out = Vec::with_capacity(parsed.data.len());
         for item in parsed.data {
             let got = item.embedding.len();
-            if effective_dim > 0 && got != effective_dim {
-                return Err(EmbeddingError::Dim {
-                    expected: effective_dim,
-                    got,
-                });
-            }
-            if effective_dim == 0 {
-                // Autodetect: record the first observed dimension (best-effort).
+            if effective_dim > 0 {
+                // Configured or previously-detected dimension: enforce consistency.
+                if got != effective_dim {
+                    return Err(EmbeddingError::Dim {
+                        expected: effective_dim,
+                        got,
+                    });
+                }
+            } else {
+                // First successful response in autodetect mode: establish the dim
+                // for this call and all future calls on this embedder instance.
+                effective_dim = got;
                 self.detected_dim.store(got, Ordering::Relaxed);
             }
             out.push(item.embedding);
