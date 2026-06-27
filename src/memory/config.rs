@@ -12,6 +12,7 @@
 //! partially-specified section both resolve to the same documented values.
 
 use crate::memory::error::MemoryError;
+use crate::memory::tokens::budget_after_margin;
 use serde::Deserialize;
 
 /// Runtime configuration for the tiered-memory subsystem (`[memory]` section).
@@ -101,21 +102,26 @@ pub struct MemoryConfig {
     #[serde(default = "d::index")]
     pub index: String,
     /// Token cap on the distiller's per-run LLM batch (privacy bound). Default `4000`.
+    /// `0` is tolerated: code uses `.max(1)` defensively so 0 is treated as 1.
     #[serde(default = "d::distill_max_batch_tokens")]
     pub distill_max_batch_tokens: usize,
     /// Cap on same-subject candidate pairs the distiller judges per run. Default `50`.
+    /// `0` is tolerated: no pairs are judged that run (effectively disables hard-supersession).
     #[serde(default = "d::supersede_max_candidate_pairs")]
     pub supersede_max_candidate_pairs: usize,
     /// Master switch for the LLM distiller (`false` = zero memory egress for distillation). Default `true`.
     #[serde(default = "d::distill_enabled")]
     pub distill_enabled: bool,
     /// Max memories re-embedded per lazy pass (throttle). Default `32`.
+    /// `0` is tolerated: the lazy re-embed pass is effectively skipped that cycle.
     #[serde(default = "d::reembed_batch_size")]
     pub reembed_batch_size: usize,
     /// Max evictions per forgetting pass (clock-jump guard). Default `1000`.
+    /// `0` is tolerated: no evictions run that pass (effectively disables decay eviction).
     #[serde(default = "d::max_evictions_per_pass")]
     pub max_evictions_per_pass: usize,
     /// Batch size for the throttled lazy migration. Default `256`.
+    /// `0` is tolerated: migration is skipped (useful when re-running after a crash).
     #[serde(default = "d::migration_throttle_batch")]
     pub migration_throttle_batch: usize,
 }
@@ -197,6 +203,60 @@ impl MemoryConfig {
             return Err(MemoryError::Config(
                 "reranker weights must not all be zero (sum must be > 0.0)".into(),
             ));
+        }
+
+        // ── G2: salience / threshold fields ∈ [0.0, 1.0] ────────────────────
+        //
+        // Each field that represents a probability or proportion must be finite
+        // and in [0.0, 1.0]. NaN is caught by `!is_finite()` before the range
+        // check (NaN comparisons return false, so `NaN < 0.0` silently passes).
+
+        for &(name, val) in &[
+            ("default_salience", self.default_salience),
+            ("preference_salience", self.preference_salience),
+            ("forget_strength_threshold", self.forget_strength_threshold),
+            ("supersede_similarity_threshold", self.supersede_similarity_threshold),
+        ] {
+            if !val.is_finite() || val < 0.0 || val > 1.0 {
+                return Err(MemoryError::Config(format!(
+                    "{name} must be a finite value in [0.0, 1.0], got {val}"
+                )));
+            }
+        }
+
+        // ── G2: evicted_retention_days ≥ -1 ──────────────────────────────────
+        //
+        // -1 = archive forever (never hard-delete).
+        //  0 = hard-delete immediately on eviction.
+        // N > 0 = hard-delete N days after eviction.
+        // Values below -1 have no defined semantics and are rejected.
+        if self.evicted_retention_days < -1 {
+            return Err(MemoryError::Config(format!(
+                "evicted_retention_days must be >= -1 (-1=archive, 0=immediate delete, N=retain N days), \
+                 got {}",
+                self.evicted_retention_days
+            )));
+        }
+
+        // ── G2: inter-field — budget must remain positive after headroom + margin ─
+        //
+        // If headroom + margin exceeds context_budget_tokens, the assembler has no
+        // room for any recall or the current turn — a configuration error surfaced
+        // at startup rather than silently clamping to 0 at runtime.
+        if budget_after_margin(
+            self.context_budget_tokens,
+            self.response_headroom_tokens,
+            self.safety_margin_ratio,
+        ) == 0
+        {
+            return Err(MemoryError::Config(format!(
+                "context_budget_tokens ({}) after response_headroom_tokens ({}) and \
+                 safety_margin_ratio ({}) leaves no usable budget; \
+                 increase context_budget_tokens or reduce headroom/margin",
+                self.context_budget_tokens,
+                self.response_headroom_tokens,
+                self.safety_margin_ratio,
+            )));
         }
 
         // ── string-enum validation (F3) ───────────────────────────────────────
