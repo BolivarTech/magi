@@ -397,4 +397,28 @@ mod tests {
         let msg = emb.embed(&["x".into()]).await.unwrap_err().to_string();
         assert!(!msg.contains("SECRET-KEY-123"));
     }
+
+    // ── F1: Network error variant ───────────────────────────────────────────────
+
+    /// F1: a connection-refused error (non-timeout) must produce
+    /// `EmbeddingError::Network`, not `EmbeddingError::Timeout`.
+    ///
+    /// We connect to a port that nobody listens on (OS immediately refuses), which
+    /// is not a timeout — `reqwest` surfaces it as `is_connect() == true`.
+    #[tokio::test]
+    async fn test_connection_refused_produces_network_error_not_timeout() {
+        // Port 1 is almost always closed and the OS refuses immediately.
+        let emb = OpenAiCompatibleEmbedder::new(
+            &EmbeddingConfig {
+                base_url: "http://127.0.0.1:1".into(),
+                ..Default::default()
+            },
+            None,
+        );
+        let err = emb.embed(&["hello".into()]).await.unwrap_err();
+        assert!(
+            matches!(err, EmbeddingError::Network),
+            "F1: connection-refused must produce Network, got: {err:?}"
+        );
+    }
 }
