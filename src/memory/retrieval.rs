@@ -100,11 +100,10 @@ pub struct RankedMemory {
 ///
 /// # Parameters
 ///
-/// - `budget`: token-budget hint from the caller (e.g. `context_budget_tokens`);
-///   **currently unused inside `recall`** — the hard token enforcement happens in
-///   the context assembler (`assemble_selective`). Kept as part of the stable
-///   D-13 public contract so future L3 consumers can pass their own budget
-///   without a signature change.
+/// - `budget`: currently advisory — the assembler enforces the hard token budget;
+///   retained as the stable D-13 public contract for future budget-aware retrieval.
+///   L3 consumers (AS-REQ-11) may pass a tighter budget here once this module
+///   is extended to honour it; the signature will not need to change.
 ///
 /// # Errors
 ///
