@@ -21,6 +21,7 @@ use crate::memory::clock::Clock;
 use crate::memory::config::MemoryConfig;
 use crate::memory::embedding::EmbeddingProvider;
 use crate::memory::error::MemoryError;
+use crate::memory::context::truncate_to_tokens;
 use crate::memory::index::cosine;
 use crate::memory::store::{Memory, VectorStore};
 use crate::memory::tokens::{budget_after_margin, estimate_tokens};
@@ -241,8 +242,16 @@ pub async fn distill(
                     true
                 } else {
                     // Non-preference: ask the judge (CP2-Z: failure is non-fatal).
+                    // G4: truncate each text to distill_max_batch_tokens/2 tokens
+                    // before the judge call to prevent overloading the provider
+                    // context with very long memories (REQ-29).
+                    let per_text_cap = (cfg.distill_max_batch_tokens / 2).max(1);
+                    let older_text =
+                        truncate_to_tokens(&older.text, per_text_cap, cfg.chars_per_token);
+                    let newer_text =
+                        truncate_to_tokens(&newer.text, per_text_cap, cfg.chars_per_token);
                     judge_calls += 1;
-                    match judge.contradicts(&older.text, &newer.text).await {
+                    match judge.contradicts(&older_text, &newer_text).await {
                         Ok(v) => v,
                         Err(e) => {
                             eprintln!("[distill] contradicts error (skipping pair): {e}");
@@ -305,7 +314,6 @@ pub async fn render_profile(
     });
 
     // Emit a bullet list bounded by profile_max_tokens.
-    // Entries are never split mid-line (CP2-AI).
     let mut out = String::new();
     let budget = cfg.profile_max_tokens;
     let mut used = 0usize;
@@ -313,8 +321,24 @@ pub async fn render_profile(
     for m in &prefs {
         let line = format!("- {}\n", m.text);
         let cost = estimate_tokens(&line, cfg.chars_per_token);
-        if used + cost > budget && used > 0 {
-            // Never truncate mid-entry; stop here (CP2-AI).
+        if used + cost > budget {
+            if used == 0 {
+                // G3: first entry alone exceeds the budget — truncate it to fit rather
+                // than emitting nothing. The entry overhead "- \n" (3 chars) is
+                // accounted for first; any remaining chars go to the text.
+                // CP2-AI (never split mid-character) is preserved: `truncate_to_tokens`
+                // takes Unicode scalars, not bytes.
+                let overhead = estimate_tokens("- \n", cfg.chars_per_token);
+                if overhead < budget {
+                    let text_budget = budget.saturating_sub(overhead);
+                    let truncated =
+                        truncate_to_tokens(&m.text, text_budget, cfg.chars_per_token);
+                    if !truncated.is_empty() {
+                        out.push_str(&format!("- {truncated}\n"));
+                    }
+                }
+            }
+            // CP2-AI: never include a second entry that would overflow; stop here.
             break;
         }
         used += cost;
