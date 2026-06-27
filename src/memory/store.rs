@@ -1301,6 +1301,60 @@ mod tests {
         );
     }
 
+    /// H1: a migrated turn whose text contains a configured salience marker must
+    /// receive the protected salience floor (not the flat 0.3 hard-code).
+    /// SC-37-ext: config-aware salience at migration time.
+    #[tokio::test]
+    async fn test_migration_uses_config_salience_for_marker_text() {
+        let (_t, store) = test_store();
+        let cfg = crate::memory::config::MemoryConfig {
+            salience_markers: vec!["important_marker".into()],
+            protect_salience_threshold: 0.9,
+            default_salience: 0.3,
+            ..crate::memory::config::MemoryConfig::default()
+        };
+        // Text containing the marker must yield salience >= protect_salience_threshold.
+        let prior = vec![(
+            "s1".to_string(),
+            crate::agent::messages::Message::user("remember: important_marker fact"),
+        )];
+        let n = store.migrate_from_messages(&prior, 1000, &cfg).await.unwrap();
+        assert_eq!(n, 1, "one turn must be imported");
+        let active = store.active("root").await.unwrap();
+        assert_eq!(active.len(), 1);
+        assert!(
+            active[0].salience >= cfg.protect_salience_threshold,
+            "H1: migrated turn with marker must have salience >= {}, got {}",
+            cfg.protect_salience_threshold,
+            active[0].salience
+        );
+    }
+
+    /// H1: a migrated turn WITHOUT a configured marker must receive
+    /// the base salience from assign_salience (not the hard-coded 0.3 literal).
+    #[tokio::test]
+    async fn test_migration_uses_config_default_salience_for_plain_text() {
+        let (_t, store) = test_store();
+        let cfg = crate::memory::config::MemoryConfig {
+            default_salience: 0.5,
+            salience_markers: vec!["important_marker".into()],
+            ..crate::memory::config::MemoryConfig::default()
+        };
+        let prior = vec![(
+            "s1".to_string(),
+            // No marker in text; role=User adds +0.05 structural nudge → 0.55.
+            crate::agent::messages::Message::user("just a plain turn"),
+        )];
+        store.migrate_from_messages(&prior, 1000, &cfg).await.unwrap();
+        let active = store.active("root").await.unwrap();
+        // assign_salience(Episodic, "just a plain turn", User, cfg) = 0.5 + 0.05 = 0.55
+        let expected = (cfg.default_salience + 0.05_f64).clamp(0.0, 1.0);
+        assert_eq!(
+            active[0].salience, expected,
+            "H1: plain turn salience must come from assign_salience, not hard-coded 0.3"
+        );
+    }
+
     /// F2: hard_delete on an empty slice is a no-op (no error, no rows touched).
     #[tokio::test]
     async fn test_hard_delete_empty_slice_is_noop() {
