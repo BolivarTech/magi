@@ -237,6 +237,10 @@ pub async fn enforce_size_cap(
 
     // Phase 2 (CP2-Y last resort): evict protected memories only if still over cap.
     if remaining > cfg.max_records {
+        // Stderr-WARN convention: this codebase uses `eprintln!` for operator-visible
+        // warnings rather than a logging framework (consistent with the over-cap WARN
+        // in `src/agent/provider.rs`). Adding `tracing` or similar is out of scope
+        // and would introduce a new dependency not present elsewhere in the project.
         eprintln!(
             "WARN [magi-memory] enforce_size_cap: evicting protected memories as last resort \
              (active={remaining}, cap={}, CP2-Y)",
