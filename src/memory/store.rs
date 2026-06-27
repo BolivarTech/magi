@@ -21,9 +21,11 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use rusqlite::params;
+use rusqlite::{params, TransactionBehavior};
+use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
+use crate::agent::messages::{Content, Message};
 use crate::memory::error::MemoryError;
 use crate::memory::MemoryKind;
 use crate::utils::crypto::CryptoVault;
@@ -146,6 +148,23 @@ pub trait VectorStore: Send + Sync {
     /// # Errors
     /// [`MemoryError::Storage`] on SQL failure.
     async fn set_distilled(&self, ids: &[String], at: i64) -> Result<(), MemoryError>;
+}
+
+// ─── Free helpers ─────────────────────────────────────────────────────────────
+
+/// Concatenates the text from a message's [`Content::Text`] and
+/// [`Content::ToolResult`] blocks, space-joined. [`Content::ToolUse`] blocks
+/// contribute nothing. Used by [`SqliteVectorStore::migrate_from_messages`].
+fn extract_message_text(msg: &Message) -> String {
+    msg.content
+        .iter()
+        .filter_map(|c| match c {
+            Content::Text { text } => Some(text.as_str()),
+            Content::ToolResult { content, .. } => Some(content.as_str()),
+            Content::ToolUse { .. } => None,
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 // ─── Internal helpers ─────────────────────────────────────────────────────────
@@ -335,6 +354,135 @@ impl SqliteVectorStore {
     /// recovery pattern as `EncryptedSqliteMemory::locked_conn`).
     fn locked_conn(&self) -> std::sync::MutexGuard<'_, rusqlite::Connection> {
         self.conn.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// Imports prior conversation turns as episodic memories, **non-destructively**:
+    /// each turn becomes a `Memory { kind: Episodic, embedding: vec![], model_id: "",
+    /// scope: "root", .. }` (empty embedding ⇒ pending lazy re-embed in Task 7). All
+    /// inserts run in ONE `IMMEDIATE` transaction (atomic; a mid-batch error rolls back —
+    /// CP2-V). Already-present ids are skipped (idempotent — CP2-F), so re-running or
+    /// overlapping batches never duplicate. Returns the number of NEW memories imported.
+    ///
+    /// `now` is the unix-seconds timestamp to stamp `created_at`/`last_accessed_at` with
+    /// (a `Clock` is injected by the caller in later tasks).
+    ///
+    /// # Text extraction
+    /// `Content::Text` and `Content::ToolResult` blocks are space-joined; `Content::ToolUse`
+    /// contributes nothing. Turns whose combined text is empty/whitespace are skipped.
+    ///
+    /// # Idempotency
+    /// Each turn is identified by a deterministic SHA-256 content hash of
+    /// `session_id || 0x1F || role_str || 0x1F || text`, prefixed `"mig:"`.
+    /// Duplicate ids within the same batch or across re-runs are silently skipped.
+    ///
+    /// # Errors
+    /// [`MemoryError::Crypto`] if any turn's text exceeds the 50 MiB plaintext cap or
+    /// cipher fails. [`MemoryError::Storage`] on any SQLite failure.
+    /// On any error, **no** records are imported (atomic rollback).
+    // Narrow allow: called by the agent wiring in Task 12.
+    #[allow(dead_code)]
+    pub async fn migrate_from_messages(
+        &self,
+        msgs: &[(String, Message)],
+        now: i64,
+    ) -> Result<usize, MemoryError> {
+        /// Holds the pre-computed, pre-encrypted blobs for one turn.
+        struct Prepared {
+            id: String,
+            session_id: String,
+            text_blob: String,
+            embedding_blob: String,
+        }
+
+        // Phase 1: extract text, derive content-hash ids, encrypt blobs — ALL outside
+        // the connection lock (W12 discipline: no crypto under the Mutex).
+        // If any encryption fails here, no transaction has started, so nothing is imported.
+        let empty_emb_json = "[]";
+        let mut prepared: Vec<Prepared> = Vec::with_capacity(msgs.len());
+
+        for (session_id, msg) in msgs {
+            let text = extract_message_text(msg);
+            if text.trim().is_empty() {
+                continue;
+            }
+
+            // Deterministic content-hash id for idempotency (CP2-F).
+            let role_str = format!("{:?}", msg.role);
+            let id = {
+                let mut h = Sha256::new();
+                h.update(session_id.as_bytes());
+                h.update([0x1F_u8]);
+                h.update(role_str.as_bytes());
+                h.update([0x1F_u8]);
+                h.update(text.as_bytes());
+                format!("mig:{:x}", h.finalize())
+            };
+
+            // Encrypt the turn text; fails fast if text > MAX_PLAINTEXT_LEN (50 MiB).
+            let text_blob = self
+                .vault
+                .encrypt_with_key(&self.derived_key, &text)
+                .map_err(|e| MemoryError::Crypto(e.to_string()))?;
+
+            // Each record gets its own independently-nonced embedding blob.
+            let embedding_blob = self
+                .vault
+                .encrypt_with_key(&self.derived_key, empty_emb_json)
+                .map_err(|e| MemoryError::Crypto(e.to_string()))?;
+
+            prepared.push(Prepared {
+                id,
+                session_id: session_id.clone(),
+                text_blob,
+                embedding_blob,
+            });
+        }
+
+        if prepared.is_empty() {
+            return Ok(0);
+        }
+
+        // Phase 2: ONE IMMEDIATE transaction — the Mutex is held for the entire SQL
+        // batch (required for atomicity; no decryption happens here so W12 is satisfied).
+        let mut imported = 0;
+        {
+            let mut conn = self.locked_conn();
+            let tx = conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(|e| MemoryError::Storage(e.to_string()))?;
+
+            for p in &prepared {
+                // Skip ids already present (idempotency — CP2-F).
+                let count: i64 = tx
+                    .query_row(
+                        "SELECT COUNT(*) FROM memories WHERE id = ?1",
+                        params![p.id],
+                        |r| r.get(0),
+                    )
+                    .map_err(|e| MemoryError::Storage(e.to_string()))?;
+                if count > 0 {
+                    continue;
+                }
+
+                tx.execute(
+                    "INSERT INTO memories \
+                         (id, session_id, kind, text_blob, embedding_blob, model_id, dim, \
+                          created_at, salience, access_count, last_accessed_at, \
+                          superseded_by, evicted_at, scope, distilled_at) \
+                     VALUES (?1, ?2, 'episodic', ?3, ?4, '', 0, ?5, 0.3, 0, ?5, \
+                             NULL, NULL, 'root', NULL)",
+                    params![p.id, p.session_id, p.text_blob, p.embedding_blob, now],
+                )
+                .map_err(|e| MemoryError::Storage(e.to_string()))?;
+
+                imported += 1;
+            }
+
+            tx.commit()
+                .map_err(|e| MemoryError::Storage(e.to_string()))?;
+        } // MutexGuard dropped here, lock released.
+
+        Ok(imported)
     }
 }
 
@@ -612,8 +760,12 @@ mod tests {
         assert_eq!(n, 2);
         let active = store.active("root").await.unwrap();
         assert_eq!(active.len(), 2);
-        assert!(active.iter().all(|m| m.embedding.is_empty() && m.model_id.is_empty()));
-        assert!(active.iter().all(|m| matches!(m.kind, crate::memory::MemoryKind::Episodic)));
+        assert!(active
+            .iter()
+            .all(|m| m.embedding.is_empty() && m.model_id.is_empty()));
+        assert!(active
+            .iter()
+            .all(|m| matches!(m.kind, crate::memory::MemoryKind::Episodic)));
         assert!(active.iter().all(|m| m.scope == "root"));
     }
 
