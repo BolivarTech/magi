@@ -421,7 +421,9 @@ cargo audit
 | Rust toolchain (stable, edition 2021) | Yes | via [rustup](https://rustup.rs/) |
 | `ripgrep` (`rg`) | For the `grep` tool | on `PATH` |
 | OS keyring | For persistence | Windows Credential Manager / macOS Keychain / Secret Service. Without it the session runs ephemeral |
-| Anthropic API key | For live replies | env var, keyring, `key.txt`, or `/login` |
+| [Ollama](https://ollama.com/) (default backend) | For live replies (default) | running daemon + a chat model (e.g. `kimi-k2.6:cloud`); run `ollama signin` for `:cloud` tags. Any OpenAI-compatible endpoint works by pointing `base_url` elsewhere |
+| Embedding model | For tiered memory (`selective`, the default) | `ollama pull nomic-embed-text-v2-moe:latest`; without it memory degrades gracefully to text-only persistence |
+| Anthropic API key | Optional (opt-in) | only with `provider = "anthropic"`; via env var, keyring, `key.txt`, or `/login` |
 
 ---
 
