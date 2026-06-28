@@ -156,6 +156,36 @@ mod tests {
         assert!(body.contains(DEFAULT_OPENAI_MODEL));
     }
 
+    /// SC-NEW (Red): `render_default_magi_toml` must include commented `[memory]` and
+    /// `[embedding]` stubs so users can discover the embedding-model knob without
+    /// reading separate docs. Also asserts the generated TOML still parses cleanly.
+    #[test]
+    fn test_render_default_magi_toml_includes_memory_and_embedding_sections() {
+        let s = render_default_magi_toml();
+        // Section markers (commented) must be present for discoverability
+        assert!(
+            s.contains("[memory]"),
+            "generated toml must contain a [memory] section stub"
+        );
+        assert!(
+            s.contains("[embedding]"),
+            "generated toml must contain an [embedding] section stub"
+        );
+        // Default embedding model must be shown so users know which model to pull
+        assert!(
+            s.contains(DEFAULT_EMBEDDING_MODEL),
+            "generated toml must show the default embedding model ({DEFAULT_EMBEDDING_MODEL})"
+        );
+        // Commented sections must not break TOML parsing
+        let parsed = crate::config::MagiConfig::from_toml_str(&s)
+            .expect("render_default_magi_toml() must produce valid TOML");
+        assert_eq!(
+            parsed.provider.as_deref(),
+            Some("openai"),
+            "parsed provider must be 'openai'"
+        );
+    }
+
     #[test]
     fn test_write_default_config_refuses_to_overwrite() {
         // S-11
