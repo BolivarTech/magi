@@ -8,7 +8,7 @@
 # provider = "anthropic" (or MAGI_PROVIDER=anthropic).
 #
 # Copy this file to `magi.toml` (per-workspace) and edit. `magi.toml` is
-# gitignored; only `magi.toml.example` is tracked.
+# gitignored; only `docs/magi.toml.example` is tracked.
 #
 # IMPORTANT: API keys NEVER live in this file. They come from environment
 # variables (ANTHROPIC / OPENAI credential env vars), the OS keyring, or

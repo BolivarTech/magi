@@ -31,7 +31,7 @@ pub fn no_config_notice() -> String {
     format!(
         "No magi.toml — using Ollama defaults ({base}, {model}, \
          Melchior: {mel}, Balthasar: {bal}, Caspar: {cas}). Copy \
-         magi.toml.example to customize, or set provider=\"anthropic\" \
+         docs/magi.toml.example to customize, or set provider=\"anthropic\" \
          for Anthropic.",
         base = DEFAULT_OPENAI_BASE_URL,
         model = DEFAULT_OPENAI_MODEL,
@@ -624,7 +624,7 @@ mod tests {
         assert_eq!(parsed.embedding.model, DEFAULT_EMBEDDING_MODEL);
     }
 
-    /// SC-25: `magi.toml.example` must contain no actual secret material.
+    /// SC-25: `docs/magi.toml.example` must contain no actual secret material.
     ///
     /// Checks that:
     /// - No TOML field named `api_key` (with underscore) is present — keys live
@@ -634,16 +634,19 @@ mod tests {
     /// The word "key" in prose (e.g. "API keys NEVER live here") is allowed.
     #[test]
     fn test_config_example_has_no_secret_material() {
-        let s = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/magi.toml.example"))
-            .unwrap();
+        let s = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/docs/magi.toml.example"
+        ))
+        .unwrap();
         let low = s.to_lowercase();
         assert!(
             !low.contains("api_key"),
-            "magi.toml.example must not contain 'api_key'"
+            "docs/magi.toml.example must not contain 'api_key'"
         );
         assert!(
             !s.contains("sk-"),
-            "magi.toml.example must not contain 'sk-' key prefix"
+            "docs/magi.toml.example must not contain 'sk-' key prefix"
         );
     }
 }

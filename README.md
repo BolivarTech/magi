@@ -158,7 +158,7 @@ Magi can talk to any **OpenAI-compatible** Chat Completions endpoint — a local
 **Ollama** instance (the default), OpenAI itself, Groq, OpenRouter — in addition to
 the opt-in Anthropic Messages API. The backend and its non-secret settings live in a
 workspace-local `magi.toml`. A reference is committed as
-[`magi.toml.example`](magi.toml.example); copy it to `magi.toml` and edit, or generate
+[`docs/magi.toml.example`](docs/magi.toml.example); copy it to `magi.toml` and edit, or generate
 it with `magi-rs --init-config`. `magi.toml` is gitignored.
 
 ```toml
@@ -216,7 +216,7 @@ caspar_model    = "deepseek-r1:8b" # Critic     — adversarial review
 | Balthasar model | `MAGI_MODEL_BALTHASAR` | `[magi].balthasar_model` | principal model |
 | Caspar model | `MAGI_MODEL_CASPAR` | `[magi].caspar_model` | principal model |
 
-Per-agent overrides **reuse the principal provider's `base_url` + API key** and change only the model name. So real cross-family diversity (e.g. GLM + GPT + DeepSeek) requires the principal backend to be an Ollama-style endpoint serving all three families; with an Anthropic principal you can still vary across Anthropic models (tier diversity). See [`magi.toml.example`](magi.toml.example) for the Light / Balanced / Maximum tier suggestions. A blank value is treated as unset. In `StaticProvider` mode (no API key) the overrides are ignored with a startup notice.
+Per-agent overrides **reuse the principal provider's `base_url` + API key** and change only the model name. So real cross-family diversity (e.g. GLM + GPT + DeepSeek) requires the principal backend to be an Ollama-style endpoint serving all three families; with an Anthropic principal you can still vary across Anthropic models (tier diversity). See [`docs/magi.toml.example`](docs/magi.toml.example) for the Light / Balanced / Maximum tier suggestions. A blank value is treated as unset. In `StaticProvider` mode (no API key) the overrides are ignored with a startup notice.
 
 #### Quick start — local Ollama (no cost, no rate limits)
 
@@ -225,7 +225,7 @@ Per-agent overrides **reuse the principal provider's `base_url` + API key** and 
 ollama pull phi4-mini
 
 # 2. Drop a magi.toml in the workspace:
-cp magi.toml.example magi.toml
+cp docs/magi.toml.example magi.toml
 # (the defaults already point at http://localhost:11434/v1 and phi4-mini)
 
 # 3. Run magi-rs — the startup banner reports the selected provider.
@@ -267,7 +267,7 @@ base_url = "http://localhost:11434/v1"  # Ollama default; point elsewhere for cl
 model = "nomic-embed-text"
 ```
 
-See [`magi.toml.example`](magi.toml.example) for all options with inline documentation.
+See [`docs/magi.toml.example`](docs/magi.toml.example) for all options with inline documentation.
 
 ### Rollback
 
