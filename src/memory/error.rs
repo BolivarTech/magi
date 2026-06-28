@@ -91,4 +91,11 @@ pub enum MemoryError {
     /// A configuration value is invalid or out of range.
     #[error("invalid memory config: {0}")]
     Config(String),
+
+    /// An LLM/provider failure during the distillation pass (e.g. connection
+    /// refused, authentication error, rate-limit after retries). Non-fatal
+    /// (CP2-Z): the distiller catches this variant, logs it, and retries the
+    /// batch on the next scheduled pass.
+    #[error("LLM provider error: {0}")]
+    Llm(String),
 }

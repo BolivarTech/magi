@@ -294,9 +294,13 @@ mod tests {
         );
     }
 
-    /// A provider error is propagated as a typed `MemoryError` (CP2-Z: non-fatal).
+    /// A provider error (e.g. network/connection failure) is propagated as
+    /// `MemoryError::Llm`, NOT `MemoryError::Storage` (CP2-Z: non-fatal).
+    /// Correct categorisation lets the distiller log "LLM provider error" instead
+    /// of the misleading "storage error" when the OpenAI-compatible backend is
+    /// unreachable.
     #[tokio::test]
-    async fn test_judge_provider_error_is_typed_memory_error() {
+    async fn test_judge_provider_error_returns_memory_error_llm_not_storage() {
         let judge = LlmDistillJudge::new(Arc::new(FailingProvider));
         let episodic = vec![make_episodic("some text")];
 
@@ -306,8 +310,24 @@ mod tests {
             "a failing provider must produce Err, not panic"
         );
         assert!(
-            matches!(result.unwrap_err(), MemoryError::Storage(_)),
-            "the error must be a typed MemoryError::Storage"
+            matches!(result.unwrap_err(), MemoryError::Llm(_)),
+            "a provider/network failure must map to MemoryError::Llm, not Storage"
+        );
+    }
+
+    /// `contradicts` also maps provider errors to `MemoryError::Llm`.
+    #[tokio::test]
+    async fn test_judge_contradicts_provider_error_returns_memory_error_llm() {
+        let judge = LlmDistillJudge::new(Arc::new(FailingProvider));
+
+        let result = judge.contradicts("A", "B").await;
+        assert!(
+            result.is_err(),
+            "a failing provider must produce Err, not panic"
+        );
+        assert!(
+            matches!(result.unwrap_err(), MemoryError::Llm(_)),
+            "a provider/network failure in contradicts must map to MemoryError::Llm, not Storage"
         );
     }
 }
