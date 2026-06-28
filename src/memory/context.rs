@@ -169,19 +169,29 @@ pub async fn assemble_selective(
         vec![]
     };
 
+    // H1: determine whether any preamble content precedes the recall loop.
+    // When both system and profile are empty the first recall placed is the
+    // very first piece in `parts` and must NOT be charged a leading separator.
+    // Charging sep_t unconditionally was an over-count that, while safe (never
+    // over-budget), silently under-filled the context when system+profile are empty.
+    let mut first_content_added = !system.is_empty() || !profile.is_empty();
+
     let mut kept_texts: Vec<String> = Vec::new();
     let mut recall_tokens_used: usize = 0;
     let mut recall_space_left = recall_space;
 
     for rm in &ranked {
-        // F1: each recall requires a PREAMBLE_SEP in the joined preamble
-        // (joining it to the preceding component).  Include that cost so the
-        // estimate reflects the real assembled string.
-        let t = estimate_tokens(&rm.memory.text, cpt) + sep_t;
+        let recall_t = estimate_tokens(&rm.memory.text, cpt);
+        // F1: separator is charged only when this recall is NOT the first piece
+        // in the assembled preamble (i.e., at least one component precedes it).
+        let sep_cost = if first_content_added { sep_t } else { 0 };
+        let t = recall_t + sep_cost;
         if t <= recall_space_left {
             kept_texts.push(rm.memory.text.clone());
             recall_tokens_used += t;
             recall_space_left -= t;
+            // Mark that subsequent recalls will need a leading separator.
+            first_content_added = true;
         }
         // Skip memories that don't fit; continue to see if a shorter one fits.
     }
@@ -892,8 +902,7 @@ mod tests {
         let long_turn: String = "abcdefghij ".repeat(32); // ~352 chars > budget
         let turn = Message::user(&long_turn);
         let result =
-            assemble_selective(&store, &emb, &clock, &cfg, "sys", "profile", &turn, "root")
-                .await;
+            assemble_selective(&store, &emb, &clock, &cfg, "sys", "profile", &turn, "root").await;
         assert!(
             result.is_ok(),
             "G5(a): 'Truncate' (title-case) policy must trigger truncation not error; \
@@ -927,6 +936,76 @@ mod tests {
         assert!(
             result.is_ok(),
             "F4: release-safe budget guard must not fire on a valid assembly; got: {result:?}"
+        );
+    }
+
+    // H1/H3 ──────────────────────────────────────────────────────────────────
+
+    /// H1/H3: assembling with empty system AND empty profile but several recalls
+    /// must not over-count a phantom leading separator.
+    ///
+    /// With `chars_per_token = 1.0` and `PREAMBLE_SEP = "\n\n"` (2 tokens),
+    /// the actual preamble for recalls `["alpha", "beta"]` is `"alpha\n\nbeta"`
+    /// (11 chars = 11 tokens).  The estimated preamble-token count in
+    /// `used_tokens` must equal `estimate_tokens(actual_preamble, 1.0)`:
+    ///
+    /// - **Before H1 fix:** both recalls were charged `sep_t = 2` → preamble
+    ///   over-count = (5+2)+(4+2) = 13 ≠ 11 (phantom leading separator).
+    /// - **After H1 fix:** first recall charged 0 sep, second charged 2 →
+    ///   5 + 6 = 11 = actual preamble tokens. ✓
+    ///
+    /// Also verifies that `used_tokens <= budget` (SC-16 invariant) holds.
+    #[tokio::test]
+    async fn test_empty_system_and_profile_with_recalls_no_phantom_separator() {
+        let (_tmp, store) = make_test_store();
+        let emb = FakeEmbedder {
+            dim: 32,
+            model: "fake".into(),
+        };
+        let clock = FixedClock::new(1_000_000);
+        // With chars_per_token=1.0 each char costs exactly 1 token.
+        // PREAMBLE_SEP = "\n\n" = 2 chars = 2 tokens (sep_t = 2).
+        // Budget = 50 — large enough that both recalls fit.
+        let cfg = MemoryConfig {
+            context_budget_tokens: 50,
+            response_headroom_tokens: 0,
+            safety_margin_ratio: 0.0,
+            chars_per_token: 1.0,
+            top_k: 10,
+            ..MemoryConfig::default()
+        };
+
+        // Plant two recalls whose combined text is small enough to both fit.
+        insert_mem(&store, "r1", "alpha", &emb, 1000, 1000, 0.5).await;
+        insert_mem(&store, "r2", "beta", &emb, 1000, 1000, 0.5).await;
+
+        // Empty system AND profile so the first recall has no preceding content.
+        let turn = Message::user("t");
+        let result = assemble_selective(&store, &emb, &clock, &cfg, "", "", &turn, "root")
+            .await
+            .unwrap();
+
+        // Budget must not be exceeded.
+        assert!(
+            result.used_tokens <= 50,
+            "H1/H3: used_tokens={} must not exceed budget=50",
+            result.used_tokens
+        );
+
+        // The estimated preamble-token count must exactly match the actual
+        // assembled preamble text — no phantom leading separator.
+        let preamble = preamble_text(&result);
+        let turn_txt = last_turn_text(&result);
+        let preamble_t_estimated =
+            result.used_tokens.saturating_sub(estimate_tokens(&turn_txt, 1.0));
+        let preamble_t_actual = estimate_tokens(&preamble, 1.0);
+        assert_eq!(
+            preamble_t_estimated,
+            preamble_t_actual,
+            "H1/H3: estimated preamble tokens ({preamble_t_estimated}) must match \
+             actual preamble token count ({preamble_t_actual}); \
+             before fix the phantom leading separator inflates by {}",
+            estimate_tokens("\n\n", 1.0)
         );
     }
 }
