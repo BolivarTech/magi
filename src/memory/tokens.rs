@@ -56,6 +56,14 @@ pub fn estimate_tokens(text: &str, chars_per_token: f64) -> usize {
     if count == 0 {
         return 0;
     }
+    // `MemoryConfig::validate()` is the primary guard — it rejects
+    // `chars_per_token <= 0.0` at config-load time so the assembler
+    // never reaches this branch with a bad value.  The fallback below is
+    // defense-in-depth for callers that construct `MemoryConfig` directly
+    // (e.g. unit tests with hand-built configs) without calling `validate()`.
+    // The fallback value of 1.0 (one char per token) is more conservative
+    // than a smaller minimum like 0.1: it produces a larger estimate and
+    // thereby keeps the assembled context safely below the budget cap.
     let cpt = if chars_per_token > 0.0 && chars_per_token.is_finite() {
         chars_per_token
     } else {
