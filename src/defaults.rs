@@ -21,8 +21,9 @@ pub const DEFAULT_MAGI_BALTHASAR: &str = "gpt-oss:120b-cloud";
 pub const DEFAULT_MAGI_CASPAR: &str = "deepseek-v4-pro:cloud";
 /// Default Anthropic model on the opt-in path (RF-5). Was `main.rs::DEFAULT_MODEL`.
 pub const DEFAULT_ANTHROPIC_MODEL: &str = "claude-sonnet-4-6";
-/// Default embedding model (Ollama-first, local). Matches `memory::config::d::emb_model`.
-pub const DEFAULT_EMBEDDING_MODEL: &str = "nomic-embed-text";
+/// Default embedding model (Ollama-first, local). Single source of truth — also
+/// re-exported by `memory::config::d::emb_model` so both resolve identically.
+pub const DEFAULT_EMBEDDING_MODEL: &str = "nomic-embed-text-v2-moe:latest";
 
 /// Startup notice shown when no `magi.toml` is present (RF-9). Built by
 /// interpolating the default constants (RF-8 DRY) so it tracks any constant edit.

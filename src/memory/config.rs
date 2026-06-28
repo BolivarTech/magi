@@ -340,7 +340,7 @@ impl Default for MemoryConfig {
 }
 
 /// Embedding-provider configuration (`[embedding]` section). OpenAI-compatible;
-/// the default targets local Ollama with the `nomic-embed-text` model.
+/// the default targets local Ollama with the `nomic-embed-text-v2-moe:latest` model.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EmbeddingConfig {
@@ -350,7 +350,8 @@ pub struct EmbeddingConfig {
     /// Endpoint base URL. Default local Ollama `"http://localhost:11434/v1"`.
     #[serde(default = "d::emb_base_url")]
     pub base_url: String,
-    /// Embedding model id. Default `"nomic-embed-text"`.
+    /// Embedding model id. Default `"nomic-embed-text-v2-moe:latest"` (see
+    /// [`crate::defaults::DEFAULT_EMBEDDING_MODEL`] — single source of truth).
     #[serde(default = "d::emb_model")]
     pub model: String,
     /// Vector dimension; `0` = autodetect from the first response. Default `768`.
@@ -533,7 +534,7 @@ mod d {
         "http://localhost:11434/v1".into()
     }
     pub fn emb_model() -> String {
-        "nomic-embed-text".into()
+        crate::defaults::DEFAULT_EMBEDDING_MODEL.into()
     }
     pub fn emb_dim() -> usize {
         768
@@ -1108,7 +1109,7 @@ mod tests {
         assert_eq!(c.memory.max_records, 50_000);
         assert_eq!(c.memory.index, "exact");
         assert!(c.memory.distill_enabled);
-        assert_eq!(c.embedding.model, "nomic-embed-text");
+        assert_eq!(c.embedding.model, crate::defaults::DEFAULT_EMBEDDING_MODEL);
         assert_eq!(c.embedding.dim, 768);
         assert_eq!(c.embedding.query_prefix, "search_query: ");
     }
