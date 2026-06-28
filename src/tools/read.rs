@@ -58,6 +58,12 @@ impl Tool for FileReadTool {
         })
     }
 
+    /// Read-only, sandboxed to the workspace — no side effects.
+    /// Auto-approved so file-read calls do not each prompt the user.
+    fn requires_approval(&self) -> bool {
+        false
+    }
+
     async fn execute(&self, args: Value) -> ToolResult<Value> {
         let args: ReadArgs =
             serde_json::from_value(args).map_err(|e| ToolError::InvalidArguments(e.to_string()))?;

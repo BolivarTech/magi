@@ -42,6 +42,12 @@ impl Tool for ProjectFactTool {
         })
     }
 
+    /// Local encrypted-DB write — no filesystem or command risk.
+    /// Auto-approved so `project_knowledge` calls do not each prompt the user.
+    fn requires_approval(&self) -> bool {
+        false
+    }
+
     async fn execute(&self, input: Value) -> ToolResult<Value> {
         let action = input["action"]
             .as_str()

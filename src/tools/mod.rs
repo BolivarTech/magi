@@ -60,6 +60,21 @@ pub trait Tool: Send + Sync {
     /// # Returns
     /// A `ToolResult<Value>` containing the result of the execution or an error.
     async fn execute(&self, args: Value) -> ToolResult<Value>;
+
+    /// Whether executing this tool requires explicit user approval.
+    ///
+    /// Default `true` (safe-by-default): every new tool requires approval unless
+    /// it explicitly opts out. Override to `false` only for cheap, side-effect-free
+    /// or local-only operations (read-only filesystem queries; local encrypted-memory
+    /// writes). Expensive or dangerous tools (shell execution, file writes, external
+    /// multi-model consensus) MUST keep the default.
+    ///
+    /// # Returns
+    /// `true` if the agent must prompt the user before running this tool;
+    /// `false` if the tool may be executed without a prompt (auto-approved).
+    fn requires_approval(&self) -> bool {
+        true
+    }
 }
 
 /// A mock implementation of a tool for testing and architectural validation.

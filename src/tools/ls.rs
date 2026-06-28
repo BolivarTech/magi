@@ -58,6 +58,12 @@ impl Tool for ListTool {
         })
     }
 
+    /// Read-only, sandboxed to the workspace — no side effects.
+    /// Auto-approved so directory-list calls do not each prompt the user.
+    fn requires_approval(&self) -> bool {
+        false
+    }
+
     async fn execute(&self, args: Value) -> ToolResult<Value> {
         let args: ListArgs =
             serde_json::from_value(args).map_err(|e| ToolError::InvalidArguments(e.to_string()))?;

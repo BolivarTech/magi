@@ -607,21 +607,42 @@ impl Agent {
                     }
                     last_normalized_tool = Some((name.clone(), normalized_input));
 
-                    let approved = if let Some(ref tx) = self.approval_tx {
-                        let (oneshot_tx, oneshot_rx) = oneshot::channel();
-                        let _ = tx
-                            .send(ApprovalRequest {
-                                tool_name: name.clone(),
-                                input: input.clone(),
-                                tx: oneshot_tx,
-                            })
-                            .await;
-                        match timeout(Duration::from_secs(APPROVAL_TIMEOUT_SECS), oneshot_rx).await
-                        {
-                            Ok(Ok(res)) => res,
-                            _ => false,
+                    // Per-tool approval policy: look up the tool's `requires_approval()`
+                    // flag before deciding whether to prompt.  Safe tools
+                    // (requires_approval() = false) are auto-approved without emitting
+                    // any ApprovalRequest — this eliminates one prompt per stored memory
+                    // fact when the model issues multiple project_knowledge / view / ls /
+                    // grep calls in sequence.  Dangerous tools (bash / edit / consult)
+                    // keep the default (true) and go through the existing gate below.
+                    // Unknown tool names (not in the registry) default to true
+                    // (safe-by-default); they will fail as "tool not found" on execute.
+                    let needs_approval = self
+                        .tools
+                        .iter()
+                        .find(|t| t.name() == name)
+                        .is_none_or(|t| t.requires_approval());
+
+                    let approved = if needs_approval {
+                        if let Some(ref tx) = self.approval_tx {
+                            let (oneshot_tx, oneshot_rx) = oneshot::channel();
+                            let _ = tx
+                                .send(ApprovalRequest {
+                                    tool_name: name.clone(),
+                                    input: input.clone(),
+                                    tx: oneshot_tx,
+                                })
+                                .await;
+                            match timeout(Duration::from_secs(APPROVAL_TIMEOUT_SECS), oneshot_rx)
+                                .await
+                            {
+                                Ok(Ok(res)) => res,
+                                _ => false,
+                            }
+                        } else {
+                            true
                         }
                     } else {
+                        // Auto-approve: tool opted out of the gate.
                         true
                     };
 
@@ -843,10 +864,11 @@ async fn write_turn_to_memory(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tools::ToolResult;
     use anyhow::Result;
     use async_trait::async_trait;
     use futures::stream::{self, BoxStream};
-    use serde_json::json;
+    use serde_json::{json, Value};
 
     pub struct MockProvider;
 
