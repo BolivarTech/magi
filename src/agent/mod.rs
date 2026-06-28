@@ -776,10 +776,12 @@ async fn write_turn_to_memory(
     //
     // `TURN_SEQ` (G2) ensures each live write has a unique ID, so the UNIQUE
     // constraint is no longer triggered by duplicate content. Genuine write errors
-    // (disk full, crypto failure) are still swallowed to satisfy REQ-29 ("never
-    // abort a turn because of a memory failure"). If precise error visibility is
-    // needed in future, consider logging to stderr (not `chunk_tx`).
-    let _ = store.insert(&m).await;
+    // (disk full, crypto failure) are non-fatal to preserve REQ-29 ("never abort a
+    // turn because of a memory failure"), but are surfaced to stderr for operational
+    // visibility.
+    if let Err(e) = store.insert(&m).await {
+        eprintln!("WARN [magi-rs]: memory insert failed (non-fatal): {e}");
+    }
 }
 
 #[cfg(test)]
