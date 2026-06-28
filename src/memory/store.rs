@@ -233,7 +233,7 @@ pub trait VectorStore: Send + Sync {
     async fn set_salience(&self, id: &str, salience: f64) -> Result<(), MemoryError>;
 
     /// Atomically replaces the existing record with `m.id` (if any) and inserts
-    /// `m` in a single crash-safe operation (G5-c / [`promote_to_profile`]).
+    /// `m` in a single crash-safe operation (G5-c; used by the profile distiller).
     ///
     /// **Required**: implementors must provide a native atomic upsert. The former
     /// non-atomic delete-then-insert default was removed (W2) because a crash between
@@ -243,8 +243,6 @@ pub trait VectorStore: Send + Sync {
     /// # Errors
     /// [`MemoryError::Crypto`] on encryption failure;
     /// [`MemoryError::Storage`] on SQL failure.
-    ///
-    /// [`promote_to_profile`]: crate::memory::profile::promote_to_profile
     async fn upsert(&self, m: &Memory) -> Result<(), MemoryError>;
 }
 
