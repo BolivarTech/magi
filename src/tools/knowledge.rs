@@ -138,6 +138,22 @@ mod tests {
         assert_eq!(res["value"], "test_value");
     }
 
+    /// `ProjectFactTool` is a local encrypted-DB write — must NOT require approval.
+    ///
+    /// Fails in RED: `requires_approval` is not a method on the `Tool` trait yet.
+    #[tokio::test]
+    async fn test_project_fact_tool_does_not_require_approval() {
+        let tmp = NamedTempFile::new().unwrap();
+        let memory = Arc::new(
+            EncryptedSqliteMemory::new(tmp.path().to_path_buf(), "pass".to_string()).unwrap(),
+        );
+        let tool = ProjectFactTool::new(memory);
+        assert!(
+            !tool.requires_approval(),
+            "project_knowledge is a local encrypted write — must auto-approve"
+        );
+    }
+
     #[tokio::test]
     async fn test_knowledge_tool_size_limit() {
         let tmp = NamedTempFile::new().unwrap();

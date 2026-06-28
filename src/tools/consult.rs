@@ -129,6 +129,18 @@ mod tests {
         Arc::new(Magi::new(Arc::new(provider)))
     }
 
+    /// `ConsultTool` runs 3 LLM calls (cost/egress) — MUST require approval.
+    ///
+    /// Fails in RED: `requires_approval` is not a method on the `Tool` trait yet.
+    #[test]
+    fn test_consult_tool_requires_approval() {
+        let tool = dummy_tool();
+        assert!(
+            tool.requires_approval(),
+            "consult wraps 3 LLM calls — must always require approval"
+        );
+    }
+
     #[test]
     fn test_consult_tool_contract() {
         let tool = dummy_tool();

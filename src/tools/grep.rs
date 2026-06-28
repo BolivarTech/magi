@@ -83,6 +83,21 @@ mod tests {
     use super::*;
     use crate::system::grep::MockGrep;
 
+    /// `GrepTool` is read-only and sandboxed — must NOT require approval.
+    ///
+    /// Fails in RED: `requires_approval` is not a method on the `Tool` trait yet.
+    #[tokio::test]
+    async fn test_grep_tool_does_not_require_approval() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let mock_grep = MockGrep::new();
+        let tool = GrepTool::new(Box::new(mock_grep), root).unwrap();
+        assert!(
+            !tool.requires_approval(),
+            "grep is read-only — must auto-approve"
+        );
+    }
+
     #[tokio::test]
     async fn test_grep_tool_execution() {
         let mut mock_grep = MockGrep::new();

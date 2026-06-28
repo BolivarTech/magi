@@ -258,6 +258,20 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
+    /// `BashTool` executes shell commands — MUST require approval.
+    ///
+    /// Fails in RED: `requires_approval` is not a method on the `Tool` trait yet.
+    #[tokio::test]
+    async fn test_bash_tool_requires_approval() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().canonicalize().expect("canonicalize");
+        let tool = BashTool::new(root).unwrap();
+        assert!(
+            tool.requires_approval(),
+            "bash executes shell commands — must always require approval"
+        );
+    }
+
     // Validates a command against a throwaway workspace root.
     fn check(cmd: &str) -> bool {
         let dir = tempdir().expect("tempdir");

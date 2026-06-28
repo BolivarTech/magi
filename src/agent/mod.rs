@@ -1730,6 +1730,187 @@ mod tests {
         );
     }
 
+    // ── Per-tool approval-policy tests ─────────────────────────────────────────
+    //
+    // RED: fails to compile because `fn requires_approval` is not a member of
+    // the `Tool` trait yet.  After the GREEN commit both tests must pass.
+
+    /// Provider that emits one `ToolUse` on its first `stream_messages` call,
+    /// then returns a plain text response on every subsequent call (after the
+    /// agent feeds back the tool result).
+    struct SingleToolCallProvider {
+        tool_name: String,
+        call_count: Arc<std::sync::Mutex<u32>>,
+    }
+
+    impl SingleToolCallProvider {
+        fn new(tool_name: &str) -> (Self, Arc<std::sync::Mutex<u32>>) {
+            let count = Arc::new(std::sync::Mutex::new(0u32));
+            (
+                Self {
+                    tool_name: tool_name.to_string(),
+                    call_count: count.clone(),
+                },
+                count,
+            )
+        }
+    }
+
+    #[async_trait]
+    impl Provider for SingleToolCallProvider {
+        async fn stream_messages(
+            &self,
+            _messages: &[Message],
+            _tools: &[Box<dyn Tool>],
+        ) -> Result<BoxStream<'static, Result<ResponseChunk>>> {
+            let mut n = self.call_count.lock().unwrap();
+            *n += 1;
+            let call = *n;
+            drop(n);
+
+            if call == 1 {
+                // First call: ask the agent to call the registered tool.
+                let msg = Message {
+                    role: Role::Assistant,
+                    content: vec![Content::ToolUse {
+                        id: "approval-policy-test-1".to_string(),
+                        name: self.tool_name.clone(),
+                        input: serde_json::json!({}),
+                    }],
+                };
+                Ok(Box::pin(stream::iter(vec![Ok(
+                    ResponseChunk::MessageDone(msg),
+                )])))
+            } else {
+                // Subsequent calls: return the final text response.
+                Ok(Box::pin(stream::iter(vec![
+                    Ok(ResponseChunk::TextDelta("done".to_string())),
+                    Ok(ResponseChunk::MessageDone(Message::assistant("done"))),
+                ])))
+            }
+        }
+    }
+
+    /// Tool that records whether its `execute` method was called.
+    ///
+    /// `requires_approval()` returns `false` when `safe = true` and `true`
+    /// (the default) when `safe = false`.
+    ///
+    /// Fails in RED: `fn requires_approval` is not a member of trait `Tool`.
+    struct TrackingTool {
+        name_str: String,
+        executed: Arc<std::sync::Mutex<bool>>,
+        safe: bool,
+    }
+
+    impl TrackingTool {
+        fn new(name: &str, safe: bool) -> (Self, Arc<std::sync::Mutex<bool>>) {
+            let executed = Arc::new(std::sync::Mutex::new(false));
+            (
+                Self {
+                    name_str: name.to_string(),
+                    executed: executed.clone(),
+                    safe,
+                },
+                executed,
+            )
+        }
+    }
+
+    #[async_trait]
+    impl Tool for TrackingTool {
+        fn name(&self) -> &str {
+            &self.name_str
+        }
+        fn description(&self) -> &str {
+            "tracking tool for approval-policy tests"
+        }
+        fn input_schema(&self) -> Value {
+            json!({"type": "object", "properties": {}})
+        }
+        async fn execute(&self, _args: Value) -> ToolResult<Value> {
+            *self.executed.lock().unwrap() = true;
+            Ok(json!({"executed": true}))
+        }
+        /// Safe tools opt out of the approval gate; dangerous tools keep the default.
+        fn requires_approval(&self) -> bool {
+            !self.safe
+        }
+    }
+
+    /// Adversarial: a safe tool (`requires_approval() = false`) is auto-approved
+    /// and executes even when a blanket-denier `approval_tx` is connected.
+    /// No `ApprovalRequest` must be emitted for the safe tool.
+    ///
+    /// Fails in RED: `fn requires_approval` is not a member of trait `Tool`.
+    #[tokio::test]
+    async fn test_safe_tool_auto_approved_despite_blanket_denier() {
+        use tokio::sync::mpsc;
+
+        let (approval_tx, mut approval_rx) = mpsc::channel::<ApprovalRequest>(8);
+
+        let (tool, executed) = TrackingTool::new("safe_op", true /* safe */);
+        let (provider, _count) = SingleToolCallProvider::new("safe_op");
+        let mut agent = Agent::new(Arc::new(provider));
+        agent.register_tool(Box::new(tool));
+        agent.set_approval_channel(approval_tx);
+
+        let (chunk_tx, _rx) = mpsc::channel::<StreamPiece>(8);
+        agent
+            .query_streaming("do the safe thing", chunk_tx)
+            .await
+            .unwrap();
+
+        // Safe tool must have executed (auto-approved despite denier).
+        assert!(
+            *executed.lock().unwrap(),
+            "safe tool (requires_approval=false) must execute \
+             even when a blanket-denier approval_tx is connected"
+        );
+
+        // No ApprovalRequest must have been emitted for a safe tool.
+        assert!(
+            approval_rx.try_recv().is_err(),
+            "safe tool must NOT emit an ApprovalRequest (no-prompt guarantee)"
+        );
+    }
+
+    /// Adversarial: a dangerous tool (`requires_approval() = true`) is denied
+    /// and does NOT execute when a blanket-denier `approval_tx` is connected.
+    ///
+    /// Fails in RED: `fn requires_approval` is not a member of trait `Tool`.
+    #[tokio::test]
+    async fn test_dangerous_tool_denied_by_blanket_denier() {
+        use tokio::sync::mpsc;
+
+        let (approval_tx, mut approval_rx) = mpsc::channel::<ApprovalRequest>(8);
+        // Spawn a denier: immediately denies every ApprovalRequest it receives.
+        tokio::spawn(async move {
+            while let Some(req) = approval_rx.recv().await {
+                let _ = req.tx.send(false);
+            }
+        });
+
+        let (tool, executed) = TrackingTool::new("dangerous_op", false /* NOT safe */);
+        let (provider, _count) = SingleToolCallProvider::new("dangerous_op");
+        let mut agent = Agent::new(Arc::new(provider));
+        agent.register_tool(Box::new(tool));
+        agent.set_approval_channel(approval_tx);
+
+        let (chunk_tx, _rx) = mpsc::channel::<StreamPiece>(8);
+        agent
+            .query_streaming("do the dangerous thing", chunk_tx)
+            .await
+            .unwrap();
+
+        // Dangerous tool must NOT have executed (denied by approval_tx denier).
+        assert!(
+            !*executed.lock().unwrap(),
+            "dangerous tool (requires_approval=true) must NOT execute \
+             when the approval denier rejects the request"
+        );
+    }
+
     #[tokio::test]
     async fn test_promoted_preference_appears_in_assembled_context() {
         use crate::memory::clock::FixedClock;

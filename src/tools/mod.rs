@@ -139,4 +139,53 @@ mod tests {
         let err = ToolError::InvalidArguments("bad args".to_string());
         assert_eq!(err.to_string(), "Invalid arguments: bad args");
     }
+
+    // ── Per-tool approval policy (RED: fails to compile until `requires_approval`
+    //   is added to the `Tool` trait) ─────────────────────────────────────────────
+
+    /// Default `MockTool` must require approval (safe-by-default invariant).
+    ///
+    /// Fails in RED: `requires_approval` is not a method on the `Tool` trait yet.
+    #[tokio::test]
+    async fn test_approval_policy_default_requires_approval() {
+        let tool = MockTool::new("test_dangerous", "a tool that executes commands");
+        assert!(
+            tool.requires_approval(),
+            "default requires_approval must be true (safe-by-default)"
+        );
+    }
+
+    /// A mock that explicitly opts out — verifies the override mechanism compiles
+    /// and correctly returns `false`.
+    ///
+    /// Fails in RED: `fn requires_approval` is not a member of trait `Tool`.
+    struct AutoApproveMock;
+
+    #[async_trait]
+    impl Tool for AutoApproveMock {
+        fn name(&self) -> &str {
+            "auto_safe"
+        }
+        fn description(&self) -> &str {
+            "auto-approved safe mock"
+        }
+        fn input_schema(&self) -> Value {
+            serde_json::json!({"type": "object", "properties": {}})
+        }
+        async fn execute(&self, _args: Value) -> ToolResult<Value> {
+            Ok(serde_json::json!({"status": "auto"}))
+        }
+        fn requires_approval(&self) -> bool {
+            false
+        }
+    }
+
+    #[tokio::test]
+    async fn test_approval_policy_override_to_false() {
+        let tool = AutoApproveMock;
+        assert!(
+            !tool.requires_approval(),
+            "explicit override to false must be respected"
+        );
+    }
 }

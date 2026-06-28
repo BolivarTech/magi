@@ -90,6 +90,21 @@ mod tests {
     use super::*;
     use crate::system::fs::MockFileSystem;
 
+    /// `ListTool` is read-only and sandboxed — must NOT require approval.
+    ///
+    /// Fails in RED: `requires_approval` is not a method on the `Tool` trait yet.
+    #[tokio::test]
+    async fn test_list_tool_does_not_require_approval() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let mock_fs = MockFileSystem::new();
+        let tool = ListTool::new(Arc::new(mock_fs), root).unwrap();
+        assert!(
+            !tool.requires_approval(),
+            "ls (directory list) is read-only — must auto-approve"
+        );
+    }
+
     #[tokio::test]
     async fn test_ls_tool_hardened() {
         let mut mock_fs = MockFileSystem::new();

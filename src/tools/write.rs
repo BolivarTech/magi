@@ -89,6 +89,21 @@ mod tests {
     use super::*;
     use crate::system::fs::MockFileSystem;
 
+    /// `FileWriteTool` modifies files on disk — MUST require approval.
+    ///
+    /// Fails in RED: `requires_approval` is not a method on the `Tool` trait yet.
+    #[tokio::test]
+    async fn test_file_write_tool_requires_approval() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let mock_fs = MockFileSystem::new();
+        let tool = FileWriteTool::new(Arc::new(mock_fs), root).unwrap();
+        assert!(
+            tool.requires_approval(),
+            "edit (file write) modifies disk — must always require approval"
+        );
+    }
+
     #[tokio::test]
     async fn test_file_write_tool_execution() {
         let mut mock_fs = MockFileSystem::new();
