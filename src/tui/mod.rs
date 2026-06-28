@@ -339,6 +339,7 @@ pub async fn run_tui_ext(
     startup_notices: Vec<String>,
     consult: Option<std::sync::Arc<magi_core::orchestrator::Magi>>,
     workspace_root: std::path::PathBuf,
+    magi_auto_approve: bool,
 ) -> anyhow::Result<()> {
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |panic_info| {
@@ -550,6 +551,7 @@ pub async fn run_tui_ext(
                                             runner_agent.register_or_replace_tool(Box::new(
                                                 crate::tools::consult::ConsultTool::new(
                                                     new_magi.clone(),
+                                                    magi_auto_approve,
                                                 ),
                                             ));
                                             consult_magi_runner = Some(new_magi);

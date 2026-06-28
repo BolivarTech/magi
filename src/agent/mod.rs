@@ -1816,13 +1816,13 @@ mod tests {
     /// Tool that records whether its `execute` method was called.
     ///
     /// `requires_approval()` returns `false` when `safe = true` and `true`
-    /// (the default) when `safe = false`.
-    ///
-    /// Fails in RED: `fn requires_approval` is not a member of trait `Tool`.
+    /// (the default) when `safe = false`. If `notice` is `Some`, the tool
+    /// also emits an `approval_notice` when auto-approved.
     struct TrackingTool {
         name_str: String,
         executed: Arc<std::sync::Mutex<bool>>,
         safe: bool,
+        notice: Option<String>,
     }
 
     impl TrackingTool {
@@ -1833,6 +1833,21 @@ mod tests {
                     name_str: name.to_string(),
                     executed: executed.clone(),
                     safe,
+                    notice: None,
+                },
+                executed,
+            )
+        }
+
+        /// Constructor for a safe (auto-approved) tool that also returns a notice.
+        fn with_notice(name: &str, notice: &str) -> (Self, Arc<std::sync::Mutex<bool>>) {
+            let executed = Arc::new(std::sync::Mutex::new(false));
+            (
+                Self {
+                    name_str: name.to_string(),
+                    executed: executed.clone(),
+                    safe: true, // auto-approved — notice only fires on auto-approve
+                    notice: Some(notice.to_string()),
                 },
                 executed,
             )
@@ -1857,6 +1872,9 @@ mod tests {
         /// Safe tools opt out of the approval gate; dangerous tools keep the default.
         fn requires_approval(&self) -> bool {
             !self.safe
+        }
+        fn approval_notice(&self) -> Option<String> {
+            self.notice.clone()
         }
     }
 
@@ -1930,6 +1948,155 @@ mod tests {
             !*executed.lock().unwrap(),
             "dangerous tool (requires_approval=true) must NOT execute \
              when the approval denier rejects the request"
+        );
+    }
+
+    // ── approval_notice() agent-level tests ─────────────────────────────────────
+    //
+    // Verify that `run_tool_loop` emits a `StreamPiece::Notice` via `chunk_tx`
+    // BEFORE executing a tool that is auto-approved AND returns Some from
+    // `approval_notice()`.
+
+    /// Auto-approved tool with `approval_notice = Some(msg)` MUST emit a
+    /// `StreamPiece::Notice` in the chunk stream BEFORE the tool executes.
+    ///
+    /// RED: fails until the notice-emission block is added to `run_tool_loop`.
+    #[tokio::test]
+    async fn test_auto_approved_tool_with_notice_emits_stream_notice() {
+        use tokio::sync::mpsc;
+
+        const NOTICE_TEXT: &str = "auto-launch notice: consensus in progress";
+
+        let (tool, _executed) =
+            TrackingTool::with_notice("notice_op", NOTICE_TEXT);
+        let (provider, _count) = SingleToolCallProvider::new("notice_op");
+        let mut agent = Agent::new(Arc::new(provider));
+        agent.register_tool(Box::new(tool));
+        // No approval_tx → auto-approve path for all tools (or it would time out).
+
+        let (chunk_tx, mut chunk_rx) = mpsc::channel::<StreamPiece>(32);
+        agent
+            .query_streaming("do the notice thing", chunk_tx)
+            .await
+            .unwrap();
+
+        // Collect all stream pieces.
+        let mut pieces = Vec::new();
+        while let Ok(p) = chunk_rx.try_recv() {
+            pieces.push(p);
+        }
+
+        // There must be at least one Notice with the expected text.
+        let has_notice = pieces.iter().any(|p| {
+            if let StreamPiece::Notice(msg) = p {
+                msg.contains(NOTICE_TEXT)
+            } else {
+                false
+            }
+        });
+        assert!(
+            has_notice,
+            "auto-approved tool with approval_notice must emit StreamPiece::Notice \
+             with the notice text before execution; pieces: {pieces:?}"
+        );
+    }
+
+    /// Auto-approved tool with `approval_notice = None` must NOT emit any Notice.
+    ///
+    /// RED: the existing behavior for silent auto-approved tools must be unchanged —
+    /// no spurious Notice pieces when `approval_notice()` returns `None`.
+    #[tokio::test]
+    async fn test_auto_approved_tool_without_notice_emits_no_stream_notice() {
+        use tokio::sync::mpsc;
+
+        let (tool, _executed) = TrackingTool::new("silent_op", true /* safe, no notice */);
+        let (provider, _count) = SingleToolCallProvider::new("silent_op");
+        let mut agent = Agent::new(Arc::new(provider));
+        agent.register_tool(Box::new(tool));
+
+        let (chunk_tx, mut chunk_rx) = mpsc::channel::<StreamPiece>(32);
+        agent
+            .query_streaming("do the silent thing", chunk_tx)
+            .await
+            .unwrap();
+
+        let mut pieces = Vec::new();
+        while let Ok(p) = chunk_rx.try_recv() {
+            pieces.push(p);
+        }
+
+        let has_notice = pieces.iter().any(|p| matches!(p, StreamPiece::Notice(_)));
+        assert!(
+            !has_notice,
+            "auto-approved tool with approval_notice=None must NOT emit StreamPiece::Notice; \
+             pieces: {pieces:?}"
+        );
+    }
+
+    /// Gate-required tool (requires_approval=true) with a (hypothetical) approval_notice
+    /// MUST NOT emit a Notice in the stream — the notice is only for auto-approved launches.
+    ///
+    /// The test wires a blanket-approver so the tool executes (no deny), but the
+    /// notice path is gated on `!needs_approval`, so no Notice must appear.
+    #[tokio::test]
+    async fn test_gated_tool_approval_notice_not_emitted_even_when_approved() {
+        use tokio::sync::mpsc;
+
+        // A dangerous tool (requires_approval=true) that also has a notice — the
+        // notice must NOT fire since the tool goes through the approval gate.
+        struct DangerousNoticeeTool;
+        #[async_trait]
+        impl Tool for DangerousNoticeeTool {
+            fn name(&self) -> &str {
+                "dangerous_noticeee"
+            }
+            fn description(&self) -> &str {
+                "dangerous tool that also has a notice field"
+            }
+            fn input_schema(&self) -> Value {
+                json!({"type": "object", "properties": {}})
+            }
+            async fn execute(&self, _args: Value) -> ToolResult<Value> {
+                Ok(json!({"executed": true}))
+            }
+            fn requires_approval(&self) -> bool {
+                true // gated — goes through the approval prompt
+            }
+            fn approval_notice(&self) -> Option<String> {
+                Some("this should NOT appear — tool is gated".into())
+            }
+        }
+
+        let (approval_tx, mut approval_rx) = mpsc::channel::<ApprovalRequest>(8);
+        // Approve every request so the tool actually runs.
+        tokio::spawn(async move {
+            while let Some(req) = approval_rx.recv().await {
+                let _ = req.tx.send(true);
+            }
+        });
+
+        let (provider, _count) = SingleToolCallProvider::new("dangerous_noticeee");
+        let mut agent = Agent::new(Arc::new(provider));
+        agent.register_tool(Box::new(DangerousNoticeeTool));
+        agent.set_approval_channel(approval_tx);
+
+        let (chunk_tx, mut chunk_rx) = mpsc::channel::<StreamPiece>(32);
+        agent
+            .query_streaming("do the dangerous noticeee thing", chunk_tx)
+            .await
+            .unwrap();
+
+        let mut pieces = Vec::new();
+        while let Ok(p) = chunk_rx.try_recv() {
+            pieces.push(p);
+        }
+
+        let has_notice = pieces.iter().any(|p| matches!(p, StreamPiece::Notice(_)));
+        assert!(
+            !has_notice,
+            "gated tool (requires_approval=true) must NOT emit StreamPiece::Notice \
+             even if it has an approval_notice — notice is only for auto-approved launches; \
+             pieces: {pieces:?}"
         );
     }
 

@@ -42,7 +42,7 @@ pub struct AnthropicConfig {
 
 /// Per-agent MAGI model overrides (`[magi]` section). All optional; absent ⇒ each
 /// agent shares the principal provider's model (backward compatible with v0.4.0).
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MagiModelsConfig {
     /// Override model for Melchior (the Scientist). `None` ⇒ principal model.
@@ -51,6 +51,31 @@ pub struct MagiModelsConfig {
     pub balthasar_model: Option<String>,
     /// Override model for Caspar (the Critic). `None` ⇒ principal model.
     pub caspar_model: Option<String>,
+    /// Auto-approve autonomous MAGI (`consult`) launches when the main LLM
+    /// self-routes to the `consult` tool in the agent tool loop. Default `false`
+    /// — the agent asks before launching the 3-perspective consensus. `true`
+    /// launches without asking, but announces it in the TUI (3 LLM calls take
+    /// time). The explicit `/consult` TUI command is NEVER gated — it is always
+    /// user-initiated and requires no approval regardless of this flag.
+    #[serde(default = "default_auto_approve")]
+    pub auto_approve: bool,
+}
+
+impl Default for MagiModelsConfig {
+    fn default() -> Self {
+        Self {
+            melchior_model: None,
+            balthasar_model: None,
+            caspar_model: None,
+            auto_approve: default_auto_approve(),
+        }
+    }
+}
+
+/// Default value for [`MagiModelsConfig::auto_approve`]: `false` (require
+/// explicit approval before each autonomous MAGI consensus launch).
+fn default_auto_approve() -> bool {
+    false
 }
 
 impl MagiConfig {
@@ -342,6 +367,49 @@ mod tests {
     fn test_unknown_field_in_magi_section_is_err() {
         // S-3
         assert!(MagiConfig::from_toml_str("[magi]\nunknown_field = \"x\"").is_err());
+    }
+
+    // ── auto_approve field tests ──────────────────────────────────────────────
+
+    /// Default `[magi]` section (absent or empty) must have `auto_approve = false`.
+    ///
+    /// RED: fails until `auto_approve` is added to `MagiModelsConfig`.
+    #[test]
+    fn test_magi_auto_approve_defaults_to_false() {
+        let c = MagiConfig::from_toml_str("").unwrap();
+        assert!(
+            !c.magi.auto_approve,
+            "auto_approve must default to false (opt-in, never silently enabled)"
+        );
+        // Also check that an explicit [magi] section without the field also defaults.
+        let c2 = MagiConfig::from_toml_str("[magi]\nmelchior_model = \"qwen3:8b\"").unwrap();
+        assert!(
+            !c2.magi.auto_approve,
+            "auto_approve must default to false even when [magi] section is present"
+        );
+    }
+
+    /// `[magi] auto_approve = true` must parse to `true`.
+    ///
+    /// RED: fails until `auto_approve` is added to `MagiModelsConfig`.
+    #[test]
+    fn test_magi_auto_approve_true_parses() {
+        let c = MagiConfig::from_toml_str("[magi]\nauto_approve = true").unwrap();
+        assert!(
+            c.magi.auto_approve,
+            "auto_approve = true in [magi] must parse to true"
+        );
+    }
+
+    /// `deny_unknown_fields` must still reject genuinely unknown fields even after
+    /// adding `auto_approve` (regression guard — field name typos must not silently
+    /// apply the default).
+    #[test]
+    fn test_magi_auto_approve_typo_is_still_rejected() {
+        assert!(
+            MagiConfig::from_toml_str("[magi]\nauto_approv = true").is_err(),
+            "typo 'auto_approv' (missing 'e') must be rejected by deny_unknown_fields"
+        );
     }
 
     // -------------------------------------------------------------------------

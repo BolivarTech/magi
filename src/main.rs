@@ -497,10 +497,18 @@ async fn main() -> anyhow::Result<()> {
     if let Some(ref magi) = consult_magi {
         agent.register_tool(Box::new(crate::tools::consult::ConsultTool::new(
             magi.clone(),
+            magi_config.magi.auto_approve,
         )));
     }
 
-    crate::tui::run_tui_ext(agent, startup_notices, consult_magi, workspace_root).await?;
+    crate::tui::run_tui_ext(
+        agent,
+        startup_notices,
+        consult_magi,
+        workspace_root,
+        magi_config.magi.auto_approve,
+    )
+    .await?;
     Ok(())
 }
 

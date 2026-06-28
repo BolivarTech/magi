@@ -75,6 +75,22 @@ pub trait Tool: Send + Sync {
     fn requires_approval(&self) -> bool {
         true
     }
+
+    /// Optional notice shown in the TUI when this tool is AUTO-APPROVED (launched
+    /// without a user prompt). `None` (default) = launch silently. Tools that are
+    /// slow or noteworthy when auto-run return `Some(message)` so the user knows
+    /// that a potentially long operation is in progress.
+    ///
+    /// The message is sent as a `StreamPiece::Notice` **before** the tool executes,
+    /// rendered in the TUI with the `⚠` prefix/style. It is never persisted to
+    /// conversation history.
+    ///
+    /// # Returns
+    /// `None` (default) for fast or silent tools;  `Some(notice_text)` for tools
+    /// that want to announce their auto-launch (e.g. a 3-LLM consensus call).
+    fn approval_notice(&self) -> Option<String> {
+        None
+    }
 }
 
 /// A mock implementation of a tool for testing and architectural validation.
@@ -201,6 +217,58 @@ mod tests {
         assert!(
             !tool.requires_approval(),
             "explicit override to false must be respected"
+        );
+    }
+
+    // ── approval_notice() tests ────────────────────────────────────────────────
+
+    /// Default `MockTool` must return `None` from `approval_notice` (silent
+    /// auto-run is the default behavior for most tools).
+    ///
+    /// RED: fails until `approval_notice` is added to the `Tool` trait.
+    #[tokio::test]
+    async fn test_approval_notice_default_is_none() {
+        let tool = MockTool::new("test_tool", "A test tool");
+        assert!(
+            tool.approval_notice().is_none(),
+            "default approval_notice must be None (most tools are silent when auto-approved)"
+        );
+    }
+
+    /// A tool that overrides `approval_notice` to return `Some` must have its
+    /// message respected by the agent.
+    ///
+    /// RED: fails until `approval_notice` is added to the `Tool` trait.
+    #[tokio::test]
+    async fn test_approval_notice_override_to_some() {
+        struct NoticeTool;
+        #[async_trait]
+        impl Tool for NoticeTool {
+            fn name(&self) -> &str {
+                "notice_tool"
+            }
+            fn description(&self) -> &str {
+                "tool that announces itself"
+            }
+            fn input_schema(&self) -> Value {
+                serde_json::json!({"type": "object", "properties": {}})
+            }
+            async fn execute(&self, _args: Value) -> ToolResult<Value> {
+                Ok(serde_json::json!({"done": true}))
+            }
+            fn requires_approval(&self) -> bool {
+                false
+            }
+            fn approval_notice(&self) -> Option<String> {
+                Some("notice: auto-launch in progress".into())
+            }
+        }
+
+        let tool = NoticeTool;
+        assert_eq!(
+            tool.approval_notice(),
+            Some("notice: auto-launch in progress".into()),
+            "approval_notice override must return Some with the expected message"
         );
     }
 }

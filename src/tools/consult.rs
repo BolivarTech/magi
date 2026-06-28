@@ -17,12 +17,21 @@ use std::sync::Arc;
 /// `pub(crate)` so the forced `/consult` TUI path applies the same cap.
 pub(crate) const MAX_QUERY_LEN: usize = 8192;
 
+/// Notice emitted in the TUI when the `consult` tool is auto-approved.
+/// Visible to the user so they know the 3-LLM consensus was launched.
+const AUTO_LAUNCH_NOTICE: &str =
+    "launched MAGI multi-perspective consensus — awaiting evaluation…";
+
 /// Tool wrapping a `magi_core::Magi`. `execute` runs the 3-perspective consensus
 /// (implemented in Task 4) and returns the verbatim report. The `description` is
 /// what makes the main LLM self-route here only for multi-perspective decisions.
 pub struct ConsultTool {
     magi: Arc<Magi>,
     description: String,
+    /// When `true`, autonomous MAGI launches via the agent tool loop are
+    /// auto-approved (no `ApprovalRequest` emitted). The explicit `/consult`
+    /// TUI command path is NEVER gated regardless of this flag.
+    auto_approve: bool,
 }
 
 impl ConsultTool {
@@ -30,10 +39,13 @@ impl ConsultTool {
     ///
     /// # Parameters
     /// * `magi` - Shared `Magi` orchestrator that drives the 3-perspective consensus.
+    /// * `auto_approve` - When `true`, the tool opts out of the approval gate for
+    ///   autonomous launches (the agent tool loop will auto-approve it and emit a
+    ///   TUI notice). Default is `false` — the agent asks before each launch.
     ///
     /// # Returns
     /// A new `ConsultTool` instance with a routing-tuned description.
-    pub fn new(magi: Arc<Magi>) -> Self {
+    pub fn new(magi: Arc<Magi>, auto_approve: bool) -> Self {
         Self {
             magi,
             description: "Run a multi-perspective MAGI consensus (three independent \
@@ -42,6 +54,7 @@ impl ConsultTool {
                 constraints?' decisions where a single answer is risky. Do NOT use for \
                 trivial, factual, or lookup questions — answer those directly."
                 .to_string(),
+            auto_approve,
         }
     }
 }
@@ -67,6 +80,28 @@ impl Tool for ConsultTool {
             },
             "required": ["query"]
         })
+    }
+
+    /// When `auto_approve = false` (the default), autonomous MAGI launches are
+    /// gated — the agent prompts the user before each 3-LLM consensus call.
+    /// When `auto_approve = true`, the agent tool loop auto-approves the call
+    /// and emits an [`Self::approval_notice`] in the TUI instead.
+    fn requires_approval(&self) -> bool {
+        !self.auto_approve
+    }
+
+    /// Returns an announcement notice when the tool is auto-approved.
+    ///
+    /// The notice is sent as a `StreamPiece::Notice` **before** the tool runs,
+    /// so the user knows the 3-LLM consensus was launched without a prompt.
+    /// Returns `None` when `auto_approve = false` (the gate prompts the user
+    /// instead, so no proactive notice is needed).
+    fn approval_notice(&self) -> Option<String> {
+        if self.auto_approve {
+            Some(AUTO_LAUNCH_NOTICE.to_string())
+        } else {
+            None
+        }
     }
 
     async fn execute(&self, args: Value) -> ToolResult<Value> {
@@ -111,8 +146,9 @@ mod tests {
     use magi_core::schema::AgentName;
     use magi_core::test_support::RoutingMockProvider;
 
+    /// Helper: constructs a `ConsultTool` with `auto_approve = false` (the default).
     fn dummy_tool() -> ConsultTool {
-        ConsultTool::new(Arc::new(Magi::new(Arc::new(RoutingMockProvider::new()))))
+        ConsultTool::new(Arc::new(Magi::new(Arc::new(RoutingMockProvider::new()))), false)
     }
 
     fn agent_json(agent: &str) -> String {
@@ -129,15 +165,61 @@ mod tests {
         Arc::new(Magi::new(Arc::new(provider)))
     }
 
-    /// `ConsultTool` runs 3 LLM calls (cost/egress) — MUST require approval.
-    ///
-    /// Fails in RED: `requires_approval` is not a method on the `Tool` trait yet.
+    /// `ConsultTool` with `auto_approve = false` (default) MUST require approval.
     #[test]
-    fn test_consult_tool_requires_approval() {
-        let tool = dummy_tool();
+    fn test_consult_tool_requires_approval_when_auto_approve_false() {
+        let tool = dummy_tool(); // auto_approve = false
         assert!(
             tool.requires_approval(),
-            "consult wraps 3 LLM calls — must always require approval"
+            "consult with auto_approve=false must still require approval"
+        );
+    }
+
+    /// `ConsultTool` with `auto_approve = true` must NOT require approval.
+    ///
+    /// RED: fails until `requires_approval()` is wired to `!self.auto_approve`.
+    #[test]
+    fn test_consult_tool_does_not_require_approval_when_auto_approve_true() {
+        let tool = ConsultTool::new(
+            Arc::new(Magi::new(Arc::new(RoutingMockProvider::new()))),
+            true,
+        );
+        assert!(
+            !tool.requires_approval(),
+            "consult with auto_approve=true must not require approval (auto-approved)"
+        );
+    }
+
+    /// `ConsultTool` with `auto_approve = false` must return `None` from `approval_notice`.
+    ///
+    /// RED: fails until `approval_notice()` is wired to `auto_approve`.
+    #[test]
+    fn test_consult_approval_notice_is_none_when_auto_approve_false() {
+        let tool = dummy_tool(); // auto_approve = false
+        assert!(
+            tool.approval_notice().is_none(),
+            "consult with auto_approve=false must return None — user is prompted instead"
+        );
+    }
+
+    /// `ConsultTool` with `auto_approve = true` must return `Some(notice)` from `approval_notice`.
+    ///
+    /// RED: fails until `approval_notice()` is wired to `auto_approve`.
+    #[test]
+    fn test_consult_approval_notice_is_some_when_auto_approve_true() {
+        let tool = ConsultTool::new(
+            Arc::new(Magi::new(Arc::new(RoutingMockProvider::new()))),
+            true,
+        );
+        let notice = tool.approval_notice();
+        assert!(
+            notice.is_some(),
+            "consult with auto_approve=true must return Some notice for TUI announcement"
+        );
+        let msg = notice.unwrap();
+        assert!(
+            msg.contains("MAGI") || msg.contains("consensus"),
+            "auto-launch notice must mention MAGI or consensus; got: {msg:?}"
         );
     }
 
@@ -158,7 +240,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_execute_oversized_query_is_invalid_arguments() {
-        let tool = ConsultTool::new(magi_all_ok());
+        let tool = ConsultTool::new(magi_all_ok(), false);
         let big = "x".repeat(9000);
         assert!(matches!(
             tool.execute(json!({"query": big})).await.unwrap_err(),
@@ -168,7 +250,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_execute_returns_consensus_report() {
-        let tool = ConsultTool::new(magi_all_ok());
+        let tool = ConsultTool::new(magi_all_ok(), false);
         let out = tool
             .execute(json!({"query": "should we migrate X to Y?"}))
             .await
@@ -179,7 +261,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_execute_empty_query_is_invalid_arguments() {
-        let tool = ConsultTool::new(magi_all_ok());
+        let tool = ConsultTool::new(magi_all_ok(), false);
         assert!(matches!(
             tool.execute(json!({ "query": "   " })).await.unwrap_err(),
             ToolError::InvalidArguments(_)
@@ -188,7 +270,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_execute_missing_query_is_invalid_arguments() {
-        let tool = ConsultTool::new(magi_all_ok());
+        let tool = ConsultTool::new(magi_all_ok(), false);
         assert!(matches!(
             tool.execute(json!({})).await.unwrap_err(),
             ToolError::InvalidArguments(_)
@@ -216,7 +298,7 @@ mod tests {
                     message: "down".into(),
                 })],
             );
-        let tool = ConsultTool::new(Arc::new(Magi::new(Arc::new(p))));
+        let tool = ConsultTool::new(Arc::new(Magi::new(Arc::new(p))), false);
         assert!(matches!(
             tool.execute(json!({"query": "x"})).await.unwrap_err(),
             ToolError::ExecutionError(_)

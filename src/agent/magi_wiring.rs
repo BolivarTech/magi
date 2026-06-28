@@ -112,6 +112,7 @@ mod tests {
             melchior_model: m.map(str::to_string),
             balthasar_model: b.map(str::to_string),
             caspar_model: c.map(str::to_string),
+            auto_approve: false,
         }
     }
 
