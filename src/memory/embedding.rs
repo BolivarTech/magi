@@ -393,6 +393,23 @@ mod tests {
     use super::*;
     use crate::memory::config::EmbeddingConfig;
 
+    // ── W1: new() must return Result<Self, EmbeddingError>, not panic ─────────
+    //
+    // Red state: this test fails to *compile* against the current `-> Self`
+    // signature. The fix: commit changes new() to `-> Result<Self, EmbeddingError>`
+    // so that `.expect()` is replaced by `?`-propagation and the test becomes green.
+
+    #[test]
+    fn test_new_with_valid_config_returns_ok() {
+        let cfg = EmbeddingConfig::default();
+        // Type annotation drives the compile failure: new() currently returns Self,
+        // not Result<Self, EmbeddingError>, so this line does not compile until the
+        // fix: commit changes the signature.
+        let result: Result<OpenAiCompatibleEmbedder, EmbeddingError> =
+            OpenAiCompatibleEmbedder::new(&cfg, None);
+        assert!(result.is_ok(), "W1: new() with a valid config must return Ok");
+    }
+
     fn cfg(base: &str) -> EmbeddingConfig {
         EmbeddingConfig {
             provider: "openai".into(),
