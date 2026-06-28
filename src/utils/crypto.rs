@@ -865,35 +865,8 @@ impl CryptoVault {
     /// - [`CryptoError::Cipher`] if `key` has the wrong length (must be 32
     ///   bytes for AES-256-GCM-SIV).
     pub fn encrypt_with_key(&self, key: &[u8], plaintext: &str) -> Result<String, CryptoError> {
-        let nonce_len = self.cipher.nonce_len();
-
-        let projected_original_len = nonce_len + plaintext.len() + 16; // +16 = GCM-SIV tag
-        if projected_original_len > MAX_PLAINTEXT_LEN {
-            return Err(CryptoError::InvalidInput(format!(
-                "Record length {} (nonce+ciphertext) exceeds MAX_PLAINTEXT_LEN ({})",
-                projected_original_len, MAX_PLAINTEXT_LEN
-            )));
-        }
-
-        let mut nonce = vec![0u8; nonce_len];
-        rand::rngs::OsRng.fill_bytes(&mut nonce);
-
-        let ciphertext = self.cipher.encrypt(key, &nonce, plaintext.as_bytes())?;
-
-        let mut plaindata = Vec::with_capacity(nonce_len + ciphertext.len());
-        plaindata.extend_from_slice(&nonce);
-        plaindata.extend_from_slice(&ciphertext);
-
-        let rs_encoded = self.fec.encode(&plaindata);
-
-        let original_len_u32 = u32::try_from(plaindata.len())
-            .map_err(|_| CryptoError::Encoding("Data too large for length header".to_string()))?;
-        let mut blob = Vec::with_capacity(1 + 4 + rs_encoded.len());
-        blob.push(BLOB_VERSION);
-        blob.extend_from_slice(&original_len_u32.to_le_bytes());
-        blob.extend_from_slice(&rs_encoded);
-
-        Ok(STANDARD.encode(&blob))
+        // Delegates to the shared byte-level core; a UTF-8 string is just bytes here.
+        self.encrypt_bytes(key, plaintext.as_bytes())
     }
 
     /// Decrypts a base64 blob produced by [`Self::encrypt_with_key`] under the
@@ -935,6 +908,71 @@ impl CryptoVault {
         key: &[u8],
         encrypted_base64: &str,
     ) -> Result<String, CryptoError> {
+        // Delegates to the shared byte-level core (all C7 guards live there),
+        // then re-imposes the UTF-8 contract on the recovered plaintext bytes.
+        let plaintext = self.decrypt_bytes(key, encrypted_base64)?;
+        String::from_utf8(plaintext.to_vec())
+            .map_err(|e| CryptoError::Encoding(format!("Invalid UTF-8: {}", e)))
+    }
+
+    // ── Byte-level core + envelope key-wrapping helpers ─────────────────
+
+    /// Byte-level encryption core shared by [`Self::encrypt_with_key`] (UTF-8
+    /// strings) and [`Self::wrap_key`] (raw key material). Runs the full
+    /// nonce → AES-256-GCM-SIV → Reed-Solomon → versioned-blob pipeline on
+    /// arbitrary bytes, returning the base64 blob.
+    ///
+    /// # Errors
+    /// [`CryptoError::InvalidInput`] if the projected record exceeds
+    /// [`MAX_PLAINTEXT_LEN`]; [`CryptoError::Cipher`] on an invalid key length.
+    fn encrypt_bytes(&self, key: &[u8], plaintext: &[u8]) -> Result<String, CryptoError> {
+        let nonce_len = self.cipher.nonce_len();
+
+        let projected_original_len = nonce_len + plaintext.len() + 16; // +16 = GCM-SIV tag
+        if projected_original_len > MAX_PLAINTEXT_LEN {
+            return Err(CryptoError::InvalidInput(format!(
+                "Record length {} (nonce+ciphertext) exceeds MAX_PLAINTEXT_LEN ({})",
+                projected_original_len, MAX_PLAINTEXT_LEN
+            )));
+        }
+
+        let mut nonce = vec![0u8; nonce_len];
+        rand::rngs::OsRng.fill_bytes(&mut nonce);
+
+        let ciphertext = self.cipher.encrypt(key, &nonce, plaintext)?;
+
+        let mut plaindata = Vec::with_capacity(nonce_len + ciphertext.len());
+        plaindata.extend_from_slice(&nonce);
+        plaindata.extend_from_slice(&ciphertext);
+
+        let rs_encoded = self.fec.encode(&plaindata);
+
+        let original_len_u32 = u32::try_from(plaindata.len())
+            .map_err(|_| CryptoError::Encoding("Data too large for length header".to_string()))?;
+        let mut blob = Vec::with_capacity(1 + 4 + rs_encoded.len());
+        blob.push(BLOB_VERSION);
+        blob.extend_from_slice(&original_len_u32.to_le_bytes());
+        blob.extend_from_slice(&rs_encoded);
+
+        Ok(STANDARD.encode(&blob))
+    }
+
+    /// Byte-level decryption core shared by [`Self::decrypt_with_key`] and
+    /// [`Self::unwrap_key`]. Applies all C7 allocation-DoS guards (version →
+    /// length cap → body-size consistency) before decoding, then returns the
+    /// recovered plaintext bytes in a `Zeroizing` buffer (so key material is
+    /// wiped on drop).
+    ///
+    /// # Errors
+    /// [`CryptoError::Encoding`] for malformed base64; [`CryptoError::InvalidInput`]
+    /// for a hostile/malformed length prefix, bad version, or body-size
+    /// inconsistency; [`CryptoError::ErrorCorrection`] if RS cannot recover;
+    /// [`CryptoError::Cipher`] if the key is wrong or the tag does not verify.
+    fn decrypt_bytes(
+        &self,
+        key: &[u8],
+        encrypted_base64: &str,
+    ) -> Result<Zeroizing<Vec<u8>>, CryptoError> {
         let nonce_len = self.cipher.nonce_len();
         let blob = STANDARD
             .decode(encrypted_base64)
@@ -946,7 +984,6 @@ impl CryptoVault {
             ));
         }
 
-        // #13: validate the format version byte before reading anything else.
         if blob[0] != BLOB_VERSION {
             return Err(CryptoError::InvalidInput(format!(
                 "Unsupported blob version {} (expected {})",
@@ -970,10 +1007,6 @@ impl CryptoVault {
             ));
         }
 
-        // C7 hardening: the RS decode allocates proportional to the encoded
-        // blob, not `original_len`, so a small declared length with a huge body
-        // would still drive a large allocation. RS(223/32) expands by at most
-        // ~1.144x; reject anything grossly beyond 2x + slack before decoding.
         if blob.len().saturating_sub(5) > original_len.saturating_mul(2).saturating_add(4096) {
             return Err(CryptoError::InvalidInput(format!(
                 "Encoded blob length {} is inconsistent with declared plaintext length {}; refusing to allocate",
@@ -991,10 +1024,44 @@ impl CryptoVault {
         let nonce = &plaindata[..nonce_len];
         let ciphertext = &plaindata[nonce_len..];
 
-        let plaintext = self.cipher.decrypt(key, nonce, ciphertext)?;
+        Ok(Zeroizing::new(self.cipher.decrypt(key, nonce, ciphertext)?))
+    }
 
-        String::from_utf8(plaintext)
-            .map_err(|e| CryptoError::Encoding(format!("Invalid UTF-8: {}", e)))
+    /// Wraps raw `key_material` (e.g. a 32-byte envelope DEK) under the
+    /// key-encryption key `kek`, returning a base64 blob.
+    ///
+    /// Unlike [`Self::encrypt_with_key`] (which takes a UTF-8 `&str`), this
+    /// accepts arbitrary bytes — the right primitive for envelope encryption,
+    /// where a random Data Encryption Key is wrapped under a passphrase-derived
+    /// KEK. The same authenticated pipeline applies, so unwrapping with the
+    /// wrong `kek` fails the GCM-SIV tag (a clean wrong-passphrase signal).
+    ///
+    /// # Errors
+    /// As [`Self::encrypt_bytes`].
+    // Foundational primitive for the upcoming Vault store: wraps the random
+    // envelope DEK under the passphrase-derived KEK (sbtdd/spec-behavior-Vault-base.md,
+    // A-V10). No production caller yet — covered by the `wrap_unwrap` tests below.
+    #[allow(dead_code)]
+    pub fn wrap_key(&self, kek: &[u8], key_material: &[u8]) -> Result<String, CryptoError> {
+        self.encrypt_bytes(kek, key_material)
+    }
+
+    /// Unwraps key material produced by [`Self::wrap_key`] under the same `kek`,
+    /// returning the bytes in a `Zeroizing` buffer (wiped on drop).
+    ///
+    /// A wrong `kek` (e.g. derived from an incorrect passphrase) makes the
+    /// authentication tag fail, returning [`CryptoError::Cipher`] **without**
+    /// revealing any key material — the basis for safe wrong-passphrase
+    /// detection in an envelope key model.
+    ///
+    /// # Errors
+    /// As [`Self::decrypt_bytes`].
+    // Foundational primitive for the upcoming Vault store: unwraps the envelope
+    // DEK under the passphrase-derived KEK (sbtdd/spec-behavior-Vault-base.md,
+    // A-V10). No production caller yet — covered by the `wrap_unwrap` tests below.
+    #[allow(dead_code)]
+    pub fn unwrap_key(&self, kek: &[u8], wrapped: &str) -> Result<Zeroizing<Vec<u8>>, CryptoError> {
+        self.decrypt_bytes(kek, wrapped)
     }
 }
 
@@ -1015,6 +1082,97 @@ mod tests {
         let pt = "sk-ant-secret-payload";
         let blob = vault.encrypt_with_key(&key, pt).unwrap();
         assert_eq!(vault.decrypt_with_key(&key, &blob).unwrap(), pt);
+    }
+
+    #[test]
+    fn test_wrap_unwrap_key_roundtrips_raw_bytes() {
+        // V-1: wrap_key/unwrap_key round-trip arbitrary (non-UTF-8) key material —
+        // the envelope DEK is raw 32-byte binary, not a UTF-8 string.
+        let vault = CryptoVault::default();
+        let kek = k(&vault);
+        let dek: [u8; KEY_LEN] = [0xA5; KEY_LEN];
+        let wrapped = vault.wrap_key(&kek, &dek).unwrap();
+        let unwrapped = vault.unwrap_key(&kek, &wrapped).unwrap();
+        assert_eq!(
+            &*unwrapped, &dek,
+            "unwrap must recover the exact key material"
+        );
+    }
+
+    #[test]
+    fn test_wrap_key_preserves_full_byte_range_non_utf8() {
+        // V-2: every possible byte value round-trips, incl. 0x80..=0xFF that are
+        // invalid as standalone UTF-8 — proving the bytes API has no UTF-8 gate.
+        let vault = CryptoVault::default();
+        let kek = k(&vault);
+        let material: Vec<u8> = (0u8..=255).collect();
+        let wrapped = vault.wrap_key(&kek, &material).unwrap();
+        assert_eq!(&*vault.unwrap_key(&kek, &wrapped).unwrap(), &material[..]);
+    }
+
+    #[test]
+    fn test_unwrap_with_wrong_kek_fails_with_cipher_error() {
+        // V-3 (envelope wrong-passphrase signal): unwrapping under a KEK derived
+        // from a different passphrase fails the GCM-SIV tag — a clean, typed
+        // error, never a panic and never leaked key material.
+        let vault = CryptoVault::default();
+        let kek_a = vault.derive_key("pass-a", &[7u8; SALT_LEN]).unwrap();
+        let kek_b = vault.derive_key("pass-b", &[7u8; SALT_LEN]).unwrap();
+        let wrapped = vault.wrap_key(&kek_a, &[0x11; KEY_LEN]).unwrap();
+        assert!(matches!(
+            vault.unwrap_key(&kek_b, &wrapped),
+            Err(CryptoError::Cipher(_))
+        ));
+    }
+
+    #[test]
+    fn test_wrap_key_handles_empty_material() {
+        // V-4: empty key material is a valid (degenerate) input and round-trips.
+        let vault = CryptoVault::default();
+        let kek = k(&vault);
+        let wrapped = vault.wrap_key(&kek, &[]).unwrap();
+        assert_eq!(&*vault.unwrap_key(&kek, &wrapped).unwrap(), &[] as &[u8]);
+    }
+
+    #[test]
+    fn test_unwrap_rejects_tampered_blob_beyond_rs_capacity() {
+        // V-5: corruption beyond the RS(255,223) correction capacity (>16 bytes
+        // per block) is rejected (RS or auth failure), never silently wrong.
+        let vault = CryptoVault::default();
+        let kek = k(&vault);
+        let wrapped = vault.wrap_key(&kek, &[0x22; KEY_LEN]).unwrap();
+        let mut raw = STANDARD.decode(&wrapped).unwrap();
+        for b in raw.iter_mut().skip(5).take(40) {
+            *b ^= 0xFF; // corrupt 40 bytes inside the first RS block
+        }
+        assert!(vault.unwrap_key(&kek, &STANDARD.encode(&raw)).is_err());
+    }
+
+    #[test]
+    fn test_unwrap_preserves_c7_caps() {
+        // V-6: the byte core enforces the same C7 allocation guards — an oversized
+        // declared length is rejected pre-allocation (shared with decrypt_with_key).
+        let vault = CryptoVault::default();
+        let kek = k(&vault);
+        let mut over = vec![1u8]; // valid version byte
+        over.extend_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+        over.extend_from_slice(&[0u8; 8]);
+        assert!(matches!(
+            vault.unwrap_key(&kek, &STANDARD.encode(&over)),
+            Err(CryptoError::InvalidInput(_))
+        ));
+    }
+
+    #[test]
+    fn test_wrap_and_encrypt_with_key_share_one_format() {
+        // V-7 (DRY/interop): a blob produced by encrypt_with_key (UTF-8 path) and
+        // one produced by wrap_key share the same format — unwrap_key recovers the
+        // exact UTF-8 bytes of an encrypt_with_key blob, proving a single pipeline.
+        let vault = CryptoVault::default();
+        let key = k(&vault);
+        let s = "sk-ant-shared-format";
+        let blob = vault.encrypt_with_key(&key, s).unwrap();
+        assert_eq!(&*vault.unwrap_key(&key, &blob).unwrap(), s.as_bytes());
     }
 
     #[test]
