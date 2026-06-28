@@ -17,6 +17,7 @@ CLAUDE.local.md
 # SBTDD local-only files (sbtdd-init Step 6)
 sbtdd/
 planning/
+.superpowers/
 
 # Internal development docs (audit, strategy, roadmap — not public)
 dev-docs/
