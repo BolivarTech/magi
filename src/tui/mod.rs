@@ -1199,9 +1199,20 @@ fn ui(f: &mut Frame, app: &mut App) {
             app.scroll_offset = app.last_max_scroll;
         }
         let range = scroll_window(total, inner_height, app.scroll_offset);
+        // Render notice lines (⚠ prefix) with a dimmed yellow style so they are
+        // visually distinct from model Content and from system messages.
+        let notice_style = Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::DIM);
         let visible: Vec<Line> = all_lines[range]
             .iter()
-            .map(|l| Line::from(l.clone()))
+            .map(|l| {
+                if l.starts_with('⚠') {
+                    Line::styled(l.clone(), notice_style)
+                } else {
+                    Line::from(l.clone())
+                }
+            })
             .collect();
         let title = if app.scroll_offset > 0 {
             format!(

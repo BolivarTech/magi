@@ -312,6 +312,13 @@ impl Agent {
             &sub.scope,
         )
         .await
+        // TIMING NOTE (L317): on_session_close runs in the agent-runner spawned
+        // task AFTER UiEvent::Quit is processed (post event-loop break).  The TUI
+        // teardown (disable_raw_mode + LeaveAlternateScreen) happens synchronously
+        // in the main task immediately after run_app returns.  Because distillation
+        // involves an async LLM call (tens–hundreds of ms), the TUI is reliably
+        // torn down before this error path is reached.  eprintln! is therefore safe
+        // here — there is no chunk_tx available at this call site in any case.
         .map_err(|e| eprintln!("on_session_close distill: {e}"));
         Ok(())
     }
@@ -389,20 +396,21 @@ impl Agent {
                     return Err(anyhow::anyhow!("context assembly failed: budget unsatisfiable (system+profile exceed budget — check config)"));
                 }
                 Err(e) => {
-                    // Transient (embedding/storage/crypto) — log and fall back.
-                    eprintln!(
-                        "WARN [magi-rs]: selective assembly failed ({e}); \
-                             falling back to full history"
-                    );
+                    // D1 (REQ-29): transient error (embedding/storage/crypto) —
+                    // route a concise notice through chunk_tx (not eprintln! which
+                    // corrupts the ratatui frame while in EnterAlternateScreen) and
+                    // fall back to the full history so the turn still completes.
+                    let summary = summarize_assembly_error(&e);
+                    let _ = chunk_tx.send(StreamPiece::Notice(summary)).await;
                     (self.history.clone(), vec![])
                 }
             };
 
-            // D2 (D-17 gap): forward assembler truncation notices to the TUI.
+            // D2 (D-17 gap): forward assembler truncation notices to the TUI as
+            // StreamPiece::Notice so they render with the ⚠ prefix/style, distinct
+            // from model Content.
             for notice in assembly_notices {
-                let _ = chunk_tx
-                    .send(StreamPiece::Content(format!("[memory: {notice}]\n")))
-                    .await;
+                let _ = chunk_tx.send(StreamPiece::Notice(notice)).await;
             }
 
             // Write user turn to vector store AFTER assembly (G1: self-recall prevention).
@@ -416,6 +424,7 @@ impl Agent {
                 &session_id_str,
                 text,
                 Role::User,
+                Some(chunk_tx.clone()),
             )
             .await;
 
@@ -450,6 +459,7 @@ impl Agent {
                 &session_id_str,
                 &full_text,
                 Role::Assistant,
+                Some(chunk_tx.clone()),
             )
             .await;
 
@@ -463,9 +473,16 @@ impl Agent {
             };
             if should_distill {
                 let judge = LlmDistillJudge::new(self.provider.clone());
-                let _ = distill(&*store, &judge, &*embedder, &*clock, &cfg, &scope)
-                    .await
-                    .map_err(|e| eprintln!("distill: {e}"));
+                if let Err(e) = distill(&*store, &judge, &*embedder, &*clock, &cfg, &scope).await {
+                    // Non-fatal — route through chunk_tx so the notice renders inside
+                    // the ratatui frame instead of corrupting it via raw stderr.
+                    let _ = chunk_tx
+                        .send(StreamPiece::Notice(format!(
+                            "memory: distillation failed (non-fatal) — {}",
+                            e
+                        )))
+                        .await;
+                }
             }
 
             return Ok(final_text);
@@ -680,6 +697,29 @@ impl Agent {
     }
 }
 
+/// Produces a concise, single-line summary of a `MemoryError` suitable for a TUI
+/// `StreamPiece::Notice` (≤80 chars, no raw JSON blobs, TUI-safe UTF-8).
+///
+/// This keeps the notice readable on screen without dumping e.g. a full 404 JSON
+/// body into the conversation pane.
+fn summarize_assembly_error(e: &MemoryError) -> String {
+    let raw = e.to_string();
+    // Truncate long messages (e.g. full HTTP body) at 80 chars and append "…".
+    const NOTICE_MAX: usize = 80;
+    if raw.len() <= NOTICE_MAX {
+        format!(
+            "memory: context assembly failed — using full history ({})",
+            raw
+        )
+    } else {
+        let truncated: String = raw.chars().take(NOTICE_MAX).collect();
+        format!(
+            "memory: context assembly failed — using full history ({}…)",
+            truncated
+        )
+    }
+}
+
 /// Persists one conversational turn to the encrypted vector store (best-effort).
 ///
 /// On embedding failure the record is stored with an empty vector, which marks it
@@ -695,6 +735,10 @@ impl Agent {
 /// - `session_id` — owning session UUID.
 /// - `text` — raw turn text (not yet prefixed).
 /// - `role` — `Role::User` or `Role::Assistant`; stored in the ID hash for uniqueness.
+/// - `notice_tx` — optional sender for routing non-fatal write-error notices to the
+///   TUI as `StreamPiece::Notice` (instead of raw stderr that corrupts the ratatui
+///   frame).  `None` is accepted so call sites outside the streaming context (tests,
+///   future callers) are not forced to supply a channel.
 ///
 /// # Note
 /// This is intentionally a module-level free function (not a method on `Agent`) so
@@ -710,6 +754,7 @@ async fn write_turn_to_memory(
     session_id: &str,
     text: &str,
     role: Role,
+    notice_tx: Option<tokio::sync::mpsc::Sender<StreamPiece>>,
 ) {
     if text.trim().is_empty() {
         return;
@@ -775,10 +820,23 @@ async fn write_turn_to_memory(
     // `TURN_SEQ` (G2) ensures each live write has a unique ID, so the UNIQUE
     // constraint is no longer triggered by duplicate content. Genuine write errors
     // (disk full, crypto failure) are non-fatal to preserve REQ-29 ("never abort a
-    // turn because of a memory failure"), but are surfaced to stderr for operational
-    // visibility.
+    // turn because of a memory failure").
+    //
+    // When a notice_tx is supplied (in-TUI streaming context), route the warning
+    // through StreamPiece::Notice so it renders inside the ratatui frame instead of
+    // being written to raw stderr which corrupts the EnterAlternateScreen display.
+    // When no channel is available (test contexts, post-teardown callers), fall back
+    // to eprintln! for operational visibility.
     if let Err(e) = store.insert(&m).await {
-        eprintln!("WARN [magi-rs]: memory insert failed (non-fatal): {e}");
+        if let Some(tx) = notice_tx {
+            let _ = tx
+                .send(StreamPiece::Notice(
+                    "memory: turn not persisted (non-fatal)".to_string(),
+                ))
+                .await;
+        } else {
+            eprintln!("WARN [magi-rs]: memory insert failed (non-fatal): {e}");
+        }
     }
 }
 
@@ -1199,8 +1257,7 @@ mod tests {
 
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let mem = EncryptedSqliteMemory::new(tmp.path().to_path_buf(), "pw".into()).unwrap();
-        let vstore =
-            Arc::new(SqliteVectorStore::new(mem.shared_conn(), mem.data_key()).unwrap());
+        let vstore = Arc::new(SqliteVectorStore::new(mem.shared_conn(), mem.data_key()).unwrap());
         let clock = Arc::new(FixedClock::new(1_000_000));
         let cfg = MemoryConfig {
             mode: "selective".into(),
@@ -1650,6 +1707,7 @@ mod tests {
             "session1",
             "same text same second",
             Role::User,
+            None,
         )
         .await;
         write_turn_to_memory(
@@ -1661,6 +1719,7 @@ mod tests {
             "session1",
             "same text same second",
             Role::User,
+            None,
         )
         .await;
 
