@@ -235,21 +235,17 @@ pub trait VectorStore: Send + Sync {
     /// Atomically replaces the existing record with `m.id` (if any) and inserts
     /// `m` in a single crash-safe operation (G5-c / [`promote_to_profile`]).
     ///
-    /// **Default implementation**: `hard_delete` then `insert` (non-atomic — a
-    /// crash between the two operations would lose the record). Implementations
-    /// that can provide a native atomic upsert (e.g. SQLite `INSERT OR REPLACE`)
-    /// **MUST** override this method.
+    /// **Required**: implementors must provide a native atomic upsert. The former
+    /// non-atomic delete-then-insert default was removed (W2) because a crash between
+    /// the two operations would silently lose the record. Prefer `INSERT OR REPLACE`
+    /// (SQLite) or an equivalent atomic primitive on other stores.
     ///
     /// # Errors
     /// [`MemoryError::Crypto`] on encryption failure;
     /// [`MemoryError::Storage`] on SQL failure.
     ///
     /// [`promote_to_profile`]: crate::memory::profile::promote_to_profile
-    async fn upsert(&self, m: &Memory) -> Result<(), MemoryError> {
-        // Non-atomic fallback: override in SqliteVectorStore for crash-safety.
-        self.hard_delete(std::slice::from_ref(&m.id)).await?;
-        self.insert(m).await
-    }
+    async fn upsert(&self, m: &Memory) -> Result<(), MemoryError>;
 }
 
 // ─── Free helpers ─────────────────────────────────────────────────────────────
