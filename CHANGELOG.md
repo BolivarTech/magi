@@ -10,6 +10,23 @@ changes and the **patch** position signals backward-compatible fixes.
 ## [Unreleased]
 
 ### Added
+- **Tiered Agnostic Memory subsystem** (`src/memory/`). Replaces the naive
+  "load all history into context" approach with a full local RAG pipeline:
+  embedding-indexed vector store (any openai-compat endpoint, default
+  `nomic-embed-text-v2-moe:latest` on Ollama), composite reranker (similarity +
+  recency + salience), decay/eviction with configurable retention semantics, hard
+  supersession via an off-hot-path distiller, an always-injected preference
+  profile, and a token-budget context assembler with fixed priority
+  (system → profile → ranked recalls → current turn). Text **and** vectors are
+  encrypted at rest via `CryptoVault`; the ANN index lives only in RAM. The
+  v0.6.0 "load all" behavior is preserved as `mode = "load_all"` (benchmark
+  control). Built-in two-arm benchmark (`cargo run --bin bench_memory`) confirms
+  `selective` matches `load_all` recall at ~35 % of context tokens with lower
+  staleness. New `[memory]` and `[embedding]` sections in `magi.toml`. Backward
+  compatible: all 387 existing tests remain green; `load_all` reproduces the prior
+  behavior exactly. See `docs/TIERED-MEMORY.md` for the full reference and
+  `docs/E2E-TESTING.md` for hands-on testing.
+
 - **Configurable auto-approval for the MAGI `consult` tool** (`[magi] auto_approve`).
   When set to `true`, the agent tool loop auto-approves autonomous `consult` launches
   (the main LLM self-routing to the 3-perspective consensus) without prompting. A

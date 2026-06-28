@@ -1,7 +1,7 @@
 # Magi Agent — Terminal AI Assistant in Rust
 
 [![Rust 2021](https://img.shields.io/badge/rust-2021_edition-orange.svg)](https://www.rust-lang.org/)
-[![Tests](https://img.shields.io/badge/tests-188%20passing-brightgreen.svg)](#testing)
+[![Tests](https://img.shields.io/badge/tests-387%20passing-brightgreen.svg)](#testing)
 [![Lints](https://img.shields.io/badge/lints-clippy%20clean-blue.svg)](https://github.com/rust-lang/rust-clippy)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 [![Version](https://img.shields.io/badge/version-0.6.0-informational.svg)](CHANGELOG.md)
@@ -33,7 +33,8 @@ Most AI coding agents are SaaS-bound and tied to a single vendor. Magi is built 
 | **Provider** | Anthropic **Messages API** with SSE streaming + `tool_use` assembly and 429 retry; `StaticProvider` fallback when no key is configured |
 | **Sandboxed tools** | `ls`, `view`, `edit`, `grep`, `bash` (strict allowlist), `project_knowledge` (persistent facts), `consult` (MAGI multi-perspective consensus) |
 | **MAGI consult** | The agent can escalate hard, trade-off-heavy decisions to a 3-perspective consensus (Melchior / Balthasar / Caspar) via the `magi-core` crate — invoked autonomously through the tool loop (each call passes the approval gate) or forced with `/consult` |
-| **Encrypted memory** | SQLite (WAL) with **one cached key derivation per session** (Argon2id + per-DB salt), AES-256-GCM-SIV, Reed-Solomon FEC, salt-integrity self-heal |
+| **Tiered memory (RAG)** | Embedding-indexed vector store (any openai-compat endpoint, default Ollama + `nomic-embed-text-v2-moe`), composite reranker (similarity + recency + salience), decay/eviction, always-injected preference profile, hard token-budget assembler — context bounded regardless of history depth |
+| **Encrypted memory** | SQLite (WAL) with **one cached key derivation per session** (Argon2id + per-DB salt), AES-256-GCM-SIV, Reed-Solomon FEC; text **and** embedding vectors encrypted at rest |
 | **OAuth login** | PKCE flow against the Anthropic Console (`/login` in the TUI) |
 | **OS keyring** | API key in `magi-rs`, DB master key in `magi-rs-internal` (kept separate); `magi-rust` legacy names auto-migrated |
 
@@ -238,40 +239,59 @@ To use OpenAI instead, edit `magi.toml` (`base_url = "https://api.openai.com/v1"
 
 ## Tiered Memory (RAG)
 
-Magi's memory subsystem replaces the naive "load the entire history into every prompt" approach with semantic retrieval and principled forgetting. Three pillars govern how context is built each turn:
+Magi's memory subsystem replaces the naive "load the entire history into every prompt"
+approach with semantic retrieval and principled forgetting. It is a full
+Retrieval-Augmented Generation (RAG) pipeline — embed, retrieve, augment, generate —
+implemented entirely in-process with encrypted local storage (no external vector DB).
+Three pillars govern how context is built each turn:
 
 | Pillar | What it means |
 |--------|---------------|
-| **P1 — Storage & retrieval** | Every persisted memory is indexed with an embedding via any OpenAI-compatible embedder (default: `nomic-embed-text` on a local Ollama instance). Retrieval is semantic — top-k by cosine similarity, re-ranked by a weighted combination of recency, salience, and access frequency. |
-| **P2 — Timely forgetting** | A decay model (time-based half-life, access-reinforced, salience-weighted) identifies obsolete memories. Memories below the strength threshold are archived or deleted; **preferences and high-salience facts are never evicted.** Superseded facts are soft-demoted immediately by the reranker and hard-excluded by the off-hot-path distiller. |
+| **P1 — Storage & retrieval** | Every persisted memory is indexed with an embedding via any OpenAI-compatible embedder (default: `nomic-embed-text-v2-moe:latest` on a local Ollama instance). Retrieval is semantic — top-k by cosine similarity, re-ranked by a weighted combination of similarity, recency, and salience. |
+| **P2 — Timely forgetting** | A decay model (wall-clock half-life, access-reinforced with a saturation cap, salience-weighted) identifies obsolete memories. Memories below the strength threshold are archived or deleted; **preferences and high-salience facts are never evicted.** Superseded facts are soft-demoted immediately by the reranker and hard-excluded by the off-hot-path distiller. |
 | **P3 — Bounded context recall** | The context assembler packs: system prompt → preference profile (always present) → ranked episodic recalls → current turn, all within a configurable token budget. Context size is bounded regardless of total history depth — no more O(N) prompt growth. |
 
-**Default mode: `selective`** — validated by the built-in benchmark (same recall accuracy as the v0.6.0 "load all" baseline at roughly 35 % of context tokens, with zero staleness rate from superseded facts).
+**Default mode: `selective`** — validated by the built-in benchmark
+(`cargo run --release --bin bench_memory`): same recall accuracy as the v0.6.0 "load all"
+baseline at roughly **35% of context tokens**, with a lower staleness rate from superseded
+facts.
 
-The preference profile is always injected, cross-session: a distiller (driven by the configured LLM) periodically promotes recurring preferences from episodic memory into a compact, deduplicated profile with latest-wins semantics.
+The preference profile is always injected, cross-session: a distiller (driven by the
+configured LLM) periodically promotes recurring preferences from episodic memory into a
+compact, deduplicated profile with latest-wins semantics. Text **and** embedding vectors
+are encrypted at rest via `CryptoVault`; the in-RAM index is never persisted in clear.
+
+For the full technical reference see **[`docs/TIERED-MEMORY.md`](docs/TIERED-MEMORY.md)**.
+For hands-on testing against a live backend see **[`docs/E2E-TESTING.md`](docs/E2E-TESTING.md)**.
 
 ### Enabling / configuring
 
-The `selective` mode is the default. To tune or disable it, add a `[memory]` section to your `magi.toml`:
+The `selective` mode is the default. To tune or disable it, add a `[memory]` section to
+your `magi.toml`:
 
 ```toml
 [memory]
-mode = "selective"          # selective (default) | load_all (v0.6.0 behavior)
+mode = "selective"              # selective (default) | load_all (v0.6.0 behavior)
 context_budget_tokens = 8000
 top_k = 12
 decay_half_life_days = 30.0
 distill_every_n_turns = 20
 
 [embedding]
-base_url = "http://localhost:11434/v1"  # Ollama default; point elsewhere for cloud
-model = "nomic-embed-text"
+base_url = "http://localhost:11434/v1"            # Ollama default; point elsewhere for cloud
+model = "nomic-embed-text-v2-moe:latest"          # dim auto-detected from first response
 ```
 
 See [`docs/magi.toml.example`](docs/magi.toml.example) for all options with inline documentation.
 
 ### Rollback
 
-To revert to the v0.6.0 behavior: set `mode = "load_all"` in `[memory]`. The agent will stop using embeddings for context assembly and load the full history per turn (existing `messages` table unchanged). To also purge the tiered-memory table: open `.magi-rs-memory.db` with any SQLite client and run `DROP TABLE memories;` — this only removes tiered-memory records; the `sessions`, `messages`, and `knowledge` tables are unaffected.
+To revert to the v0.6.0 behavior: set `mode = "load_all"` in `[memory]`. The agent will
+stop using embeddings for context assembly and load the full history per turn (existing
+`messages` table unchanged). To also purge the tiered-memory table: open
+`.magi-rs-memory.db` with any SQLite client and run `DROP TABLE memories;` — this only
+removes tiered-memory records; the `sessions`, `messages`, and `knowledge` tables are
+unaffected.
 
 ---
 
@@ -328,12 +348,29 @@ To revert to the v0.6.0 behavior: set `mode = "load_all"` in `[memory]`. The age
 src/
   main.rs              -- config discovery, master-key bootstrap, tool registration, entry
   config.rs            -- MagiConfig (magi.toml load + provider/model resolution)
+  defaults.rs          -- single source of truth for all built-in default literals
   agent/
     mod.rs             -- Agent orchestrator: multi-turn tool loop + approval gate
     provider.rs        -- Provider trait; AnthropicProvider (SSE) + OpenAiCompatibleProvider + StaticProvider
+  memory/
+    mod.rs             -- subsystem facade: MemoryKind, public re-exports (recall, assemble_selective)
+    store.rs           -- SqliteVectorStore: encrypted vector store (memories table)
+    embedding.rs       -- EmbeddingProvider trait + OpenAiCompatibleEmbedder
+    retrieval.rs       -- recall() public API (D-13/B1 seam) + composite reranker
+    decay.rs           -- strength model, run_forgetting, enforce_size_cap
+    context.rs         -- assemble_selective: token-budget context assembler
+    profile.rs         -- preference distiller + render_profile (always-injected)
+    clock.rs           -- Clock trait (SystemClock / FixedClock for determinism)
+    config.rs          -- MemoryConfig + EmbeddingConfig (deny_unknown_fields)
+    salience.rs        -- deterministic salience heuristic at write time
+    tokens.rs          -- estimate_tokens, budget_after_margin
+    index.rs           -- BruteForceIndex (exact cosine) + InstantDistanceIndex (--features ann)
+    error.rs           -- MemoryError + EmbeddingError (thiserror)
+  bin/
+    bench_memory.rs    -- two-arm benchmark binary (cargo run --bin bench_memory)
   tools/
-    mod.rs             -- Tool trait + ToolError
-    ls.rs read.rs write.rs grep.rs bash.rs knowledge.rs
+    mod.rs             -- Tool trait + ToolError + requires_approval()
+    ls.rs read.rs write.rs grep.rs bash.rs knowledge.rs consult.rs
   system/
     database.rs        -- EncryptedSqliteMemory (MemoryStore) over SQLite + CryptoVault
     fs.rs grep.rs secrets.rs path_guard.rs
@@ -343,7 +380,11 @@ src/
     oauth.rs           -- OAuth PKCE login (callback on 127.0.0.1:54545)
   tui/
     mod.rs             -- ratatui app (Normal / Selection / Visual)
-docs/                  -- public overview & philosophy (OVERVIEW.md)
+docs/
+  OVERVIEW.md          -- what Magi is, magi-core foundation, multi-perspective philosophy
+  TIERED-MEMORY.md     -- tiered agnostic memory: full technical reference
+  E2E-TESTING.md       -- hands-on testing guide (running application)
+  magi.toml.example    -- annotated reference config (committed; magi.toml itself is gitignored)
 Cargo.toml             -- edition 2021, MIT OR Apache-2.0
 ```
 
@@ -387,6 +428,8 @@ cargo audit
 ## Documentation
 
 - [`docs/OVERVIEW.md`](docs/OVERVIEW.md) — what Magi is, the `magi-core` foundation, and the multi-perspective philosophy behind the name.
+- [`docs/TIERED-MEMORY.md`](docs/TIERED-MEMORY.md) — full technical reference for the tiered agnostic memory subsystem: RAG pipeline, three pillars, architecture, configuration, benchmark.
+- [`docs/E2E-TESTING.md`](docs/E2E-TESTING.md) — hands-on end-to-end testing guide for the tiered memory feature (cross-session recall, preferences, rollback).
 
 ---
 

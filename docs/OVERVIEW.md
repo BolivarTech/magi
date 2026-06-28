@@ -62,6 +62,16 @@ The approach earns its cost on decisions with **genuine uncertainty**, **signifi
 
 ---
 
+## Tiered Memory
+
+Magi's memory subsystem has evolved beyond "persist and reload": it now runs a
+full in-process RAG pipeline — embed each memory, retrieve by semantic relevance,
+forget the stale, and assemble context within a hard token budget, all with
+encrypted local storage. See [`docs/TIERED-MEMORY.md`](TIERED-MEMORY.md) for the
+full technical reference.
+
+---
+
 ## How it comes together
 
 Magi is two halves of one tool: an **interactive agent** you drive day to day, and a **multi-perspective panel** (via `magi-core`) you call on for the decisions that matter. The agent gets work done while your code never leaves your machine; the panel makes its reasoning auditable — cross-examined by independent perspectives before you act on it.
