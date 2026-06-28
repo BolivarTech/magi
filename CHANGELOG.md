@@ -9,6 +9,17 @@ changes and the **patch** position signals backward-compatible fixes.
 
 ## [Unreleased]
 
+### Fixed
+- **Approval-gate spam on sequential safe tool calls.** The approval gate
+  previously prompted the user for every tool call uniformly, including safe
+  local operations. A model storing N facts via `project_knowledge` produced N
+  approval prompts. Added a `requires_approval()` method to the `Tool` trait
+  (default `true`, safe-by-default). Read-only and local-memory tools — `view`,
+  `ls`, `grep`, and `project_knowledge` — override to `false` and are
+  auto-approved without emitting an `ApprovalRequest`. Shell execution (`bash`),
+  file writes (`edit`), and multi-model consensus (`consult`) keep the default
+  and still require explicit user approval.
+
 ### Deferred (tracked in internal dev-docs)
 - **#14** Envelope encryption (key rotation / crypto-shredding / multi-tenancy) — enterprise roadmap.
 - **#17** Runtime warning visibility — malformed tool-JSON (#4) and poison recovery (#8) warnings remain stderr-only under the alt-screen; startup/login warnings are already surfaced.
