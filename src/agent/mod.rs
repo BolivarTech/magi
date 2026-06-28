@@ -1245,8 +1245,6 @@ mod tests {
     /// embedder auth failure), `query_streaming` must emit a `StreamPiece::Notice`
     /// through `chunk_tx` (NOT write to stderr) AND still complete the turn via the
     /// load_all fallback path (REQ-29 / SC-30).
-    ///
-    /// RED: fails until L395 eprintln! is replaced with chunk_tx.send(Notice).
     #[tokio::test]
     async fn test_selective_d1_fallback_routes_notice_not_eprintln() {
         use crate::memory::clock::FixedClock;
