@@ -410,41 +410,59 @@ async fn main() -> anyhow::Result<()> {
             // successfully.  `OPENAI_API_KEY` is the embedding API key (may be the
             // dummy `"ollama"` for the local Ollama server — it ignores auth).
             if let Ok(vstore) = vstore_result {
-                let embedder = Arc::new(OpenAiCompatibleEmbedder::new(
+                // W1: new() now returns Result; propagate failure as a startup notice
+                // and degrade gracefully (text-only persistence; REQ-29).
+                match OpenAiCompatibleEmbedder::new(
                     &magi_config.embedding,
                     env::var("OPENAI_API_KEY").ok(),
-                ));
-                let clock = Arc::new(SystemClock);
-                // Keep a reference for the startup diagnostics line (CP2-AN/S).
-                let vstore = Arc::new(vstore);
-                let vstore_diag = Arc::clone(&vstore);
-                agent.set_memory_subsystem(vstore, embedder, clock, magi_config.memory.clone());
-                agent.on_session_open().await.ok();
+                ) {
+                    Err(err) => {
+                        startup_notices.push(format!(
+                            "embedding client init failed ({err}); \
+                         memory subsystem disabled (text-only persistence)"
+                        ));
+                    }
+                    Ok(embedder_inner) => {
+                        let embedder = Arc::new(embedder_inner);
+                        let clock = Arc::new(SystemClock);
+                        // Keep a reference for the startup diagnostics line (CP2-AN/S).
+                        let vstore = Arc::new(vstore);
+                        let vstore_diag = Arc::clone(&vstore);
+                        agent.set_memory_subsystem(
+                            vstore,
+                            embedder,
+                            clock,
+                            magi_config.memory.clone(),
+                        );
+                        agent.on_session_open().await.ok();
 
-                // CP2-AN/S: one-line diagnostics summary — never fail startup on error.
-                if let Ok(d) = vstore_diag.diagnostics("root").await {
-                    startup_notices.push(format!(
+                        // CP2-AN/S: one-line diagnostics summary — never fail startup on error.
+                        if let Ok(d) = vstore_diag.diagnostics("root").await {
+                            startup_notices.push(format!(
                         "memory: {} active, {} archived, {} pending re-embed (~{} KB index)",
                         d.active_count,
                         d.archived_count,
                         d.pending_reembed_count,
                         d.ram_estimate_bytes / 1024,
                     ));
-                }
+                        }
 
-                // CP2-AG/AJ: warn the user when the distiller will send memory batches
-                // to a cloud embedding endpoint (non-localhost).
-                if magi_config.memory.distill_enabled
-                    && !is_localhost(&magi_config.embedding.base_url)
-                {
-                    startup_notices.push(format!(
-                        "Memory distiller will send bounded memory batches \
+                        // CP2-AG/AJ: warn the user when the distiller will send memory batches
+                        // to a cloud embedding endpoint (non-localhost).
+                        if magi_config.memory.distill_enabled
+                            && !is_localhost(&magi_config.embedding.base_url)
+                        {
+                            startup_notices.push(format!(
+                                "Memory distiller will send bounded memory batches \
                          (≤ {} tokens) to {} — set distill_enabled = false \
                          in [memory] for zero cloud memory egress.",
-                        magi_config.memory.distill_max_batch_tokens, magi_config.embedding.base_url,
-                    ));
-                }
-            }
+                                magi_config.memory.distill_max_batch_tokens,
+                                magi_config.embedding.base_url,
+                            ));
+                        }
+                    } // Ok(embedder_inner) arm
+                } // match OpenAiCompatibleEmbedder::new
+            } // if let Ok(vstore)
 
             // ProjectFactTool needs the same store; register it on the encrypted path only.
             agent.register_tool(Box::new(ProjectFactTool::new(memory.clone())));

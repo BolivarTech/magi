@@ -140,16 +140,20 @@ impl OpenAiCompatibleEmbedder {
     // Narrow allow: new/embed_documents/embed_query consumed by the vector store
     // and retrieval modules in Tasks 4–6. Only tests exercise them here.
     #[allow(dead_code)]
-    pub fn new(cfg: &EmbeddingConfig, api_key: Option<String>) -> Self {
+    pub fn new(cfg: &EmbeddingConfig, api_key: Option<String>) -> Result<Self, EmbeddingError> {
         // 120 s total-request timeout (G1): embedding calls are single-round-trip
         // non-streaming POSTs, unlike the chat SSE provider where a deadline would
         // truncate healthy long streams. 120 s accommodates cold Ollama model loads
         // while bounding indefinite hangs that would block the user's turn.
+        //
+        // W1: Client::builder() can fail on systems without TLS or with an invalid
+        // certificate store. Return EmbeddingError::Network so callers apply the
+        // graceful fallback (REQ-29) instead of panicking.
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(120))
             .build()
-            .expect("reqwest::Client build failed — timeout duration is a fixed constant");
-        Self {
+            .map_err(|_| EmbeddingError::Network)?;
+        Ok(Self {
             client,
             base_url: cfg.base_url.trim_end_matches('/').to_string(),
             model: cfg.model.clone(),
@@ -158,7 +162,7 @@ impl OpenAiCompatibleEmbedder {
             query_prefix: cfg.query_prefix.clone(),
             document_prefix: cfg.document_prefix.clone(),
             api_key,
-        }
+        })
     }
 
     /// Prefixes each text with [`document_prefix`][Self::document_prefix] and
@@ -407,7 +411,10 @@ mod tests {
         // fix: commit changes the signature.
         let result: Result<OpenAiCompatibleEmbedder, EmbeddingError> =
             OpenAiCompatibleEmbedder::new(&cfg, None);
-        assert!(result.is_ok(), "W1: new() with a valid config must return Ok");
+        assert!(
+            result.is_ok(),
+            "W1: new() with a valid config must return Ok"
+        );
     }
 
     fn cfg(base: &str) -> EmbeddingConfig {
@@ -431,7 +438,8 @@ mod tests {
             .with_body(r#"{"data":[{"embedding":[0.1,0.2,0.3]}]}"#)
             .create_async()
             .await;
-        let emb = OpenAiCompatibleEmbedder::new(&cfg(&server.url()), Some("ollama".into()));
+        let emb =
+            OpenAiCompatibleEmbedder::new(&cfg(&server.url()), Some("ollama".into())).unwrap();
         let out = emb
             .embed(&["search_document: hi".to_string()])
             .await
@@ -450,7 +458,7 @@ mod tests {
             .with_status(401)
             .create_async()
             .await;
-        let emb = OpenAiCompatibleEmbedder::new(&cfg(&server.url()), Some("bad".into()));
+        let emb = OpenAiCompatibleEmbedder::new(&cfg(&server.url()), Some("bad".into())).unwrap();
         assert!(matches!(
             emb.embed(&["x".into()]).await.unwrap_err(),
             EmbeddingError::Auth
@@ -465,7 +473,7 @@ mod tests {
             .with_status(429)
             .create_async()
             .await;
-        let emb = OpenAiCompatibleEmbedder::new(&cfg(&server.url()), Some("k".into()));
+        let emb = OpenAiCompatibleEmbedder::new(&cfg(&server.url()), Some("k".into())).unwrap();
         assert!(matches!(
             emb.embed(&["x".into()]).await.unwrap_err(),
             EmbeddingError::RateLimited
@@ -484,7 +492,8 @@ mod tests {
             .with_body(r#"{"data":[{"embedding":[0.0,0.0,0.0]}]}"#)
             .create_async()
             .await;
-        let emb = OpenAiCompatibleEmbedder::new(&cfg(&server.url()), Some("ollama".into()));
+        let emb =
+            OpenAiCompatibleEmbedder::new(&cfg(&server.url()), Some("ollama".into())).unwrap();
         let _ = emb.embed_query("weather").await.unwrap();
         m.assert_async().await;
     }
@@ -499,7 +508,8 @@ mod tests {
             .with_body("boom")
             .create_async()
             .await;
-        let emb = OpenAiCompatibleEmbedder::new(&cfg(&server.url()), Some("SECRET-KEY-123".into()));
+        let emb = OpenAiCompatibleEmbedder::new(&cfg(&server.url()), Some("SECRET-KEY-123".into()))
+            .unwrap();
         let msg = emb.embed(&["x".into()]).await.unwrap_err().to_string();
         assert!(!msg.contains("SECRET-KEY-123"));
     }
@@ -545,7 +555,8 @@ mod tests {
                 ..Default::default()
             },
             None,
-        );
+        )
+        .unwrap();
 
         // First call: autodetect establishes dim = 3.
         let first = emb.embed(&["hello".into()]).await.unwrap();
@@ -582,7 +593,8 @@ mod tests {
                 ..Default::default()
             },
             None,
-        );
+        )
+        .unwrap();
         let err = emb.embed(&["hello".into()]).await.unwrap_err();
         assert!(
             matches!(err, EmbeddingError::Network),
@@ -633,7 +645,8 @@ mod tests {
                 ..Default::default()
             },
             None,
-        );
+        )
+        .unwrap();
 
         // Before any call, dim() must be 0 (nothing detected yet).
         assert_eq!(emb.dim(), 0, "F4: dim() before first call must be 0");
@@ -728,7 +741,8 @@ mod tests {
                 ..Default::default()
             },
             None,
-        );
+        )
+        .unwrap();
         assert!(
             matches!(
                 emb.embed(&["x".into()]).await.unwrap_err(),
@@ -800,7 +814,8 @@ mod tests {
                 ..Default::default()
             },
             None,
-        );
+        )
+        .unwrap();
         let _ = emb.embed(&["a".into()]).await.unwrap();
         // Same dim=3 on second call — must succeed.
         let second = emb.embed(&["b".into()]).await.unwrap();
