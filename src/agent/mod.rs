@@ -50,27 +50,25 @@ pub struct ApprovalRequest {
     pub tx: oneshot::Sender<bool>,
 }
 
-/// A piece of a streamed assistant turn forwarded to the UI. `Content` is answer
-/// text (persisted); `Reasoning` is a thinking model's chain-of-thought, shown
-/// live but never persisted (#24).
+/// A piece of a streamed assistant turn forwarded to the UI.
 ///
-/// # F5 — Truncation notices routing
+/// - `Content` — answer text (persisted); forwarded to the TUI as a `StreamDelta`.
+/// - `Reasoning` — thinking model chain-of-thought; shown live, never persisted (#24).
+/// - `Notice` — non-content operational notice (e.g. memory fallback warning,
+///   truncation advisory).  Rendered in a distinct style (dimmed/yellow, prefixed
+///   `⚠ `) in the TUI so it stands out from model output without corrupting the
+///   ratatui frame via stderr.
 ///
-/// Memory assembler truncation notices (e.g. "current turn truncated to fit
-/// context budget") are forwarded to the TUI as `StreamPiece::Content` prefixed
-/// with `"[memory: …]\n"` rather than as a distinct `Notice` variant.
-///
-/// Rationale: adding a third variant would require updating
-/// `AgentResponse` in `tui/mod.rs` and all exhaustive matches in tests — a
-/// non-trivial ripple for a cosmetic distinction.  The `"[memory: …]"` prefix
-/// is visible to the user (appropriate — truncation should be announced) and
-/// distinguishable programmatically by prefix without an extra enum arm.
-/// A dedicated `Notice` variant can be introduced when the TUI adds a proper
-/// status-bar or notification area.
+/// Memory assembler truncation notices and agent-loop warnings use `Notice` so they
+/// are routed through the channel rather than written to raw stderr while the TUI
+/// is in `EnterAlternateScreen` + raw mode.
 #[derive(Debug, Clone, PartialEq)]
 pub enum StreamPiece {
     Content(String),
     Reasoning(String),
+    /// A non-content operational notice (memory warning, truncation advisory).
+    /// Rendered distinctly in the TUI; never persisted to conversation history.
+    Notice(String),
 }
 
 /// Tiered-memory subsystem handle for `selective` mode (Task 12).
@@ -1176,17 +1174,71 @@ mod tests {
             pieces.push(p);
         }
 
-        // At least one piece must be a `[memory: …]` notice.
-        let notice_found = pieces.iter().any(|p| {
-            if let StreamPiece::Content(text) = p {
-                text.starts_with("[memory:")
-            } else {
-                false
-            }
-        });
+        // At least one piece must be a `StreamPiece::Notice` (D2 routing).
+        let notice_found = pieces.iter().any(|p| matches!(p, StreamPiece::Notice(_)));
         assert!(
             notice_found,
-            "D2: a truncation notice must be forwarded to chunk_tx when the turn exceeds the budget; \
+            "D2: a truncation notice must be forwarded to chunk_tx as StreamPiece::Notice when \
+             the turn exceeds the budget; got pieces: {pieces:?}"
+        );
+    }
+
+    /// D1-notice routing: when `assemble_selective` encounters a transient error (e.g.
+    /// embedder auth failure), `query_streaming` must emit a `StreamPiece::Notice`
+    /// through `chunk_tx` (NOT write to stderr) AND still complete the turn via the
+    /// load_all fallback path (REQ-29 / SC-30).
+    ///
+    /// RED: fails until L395 eprintln! is replaced with chunk_tx.send(Notice).
+    #[tokio::test]
+    async fn test_selective_d1_fallback_routes_notice_not_eprintln() {
+        use crate::memory::clock::FixedClock;
+        use crate::memory::config::MemoryConfig;
+        use crate::memory::store::SqliteVectorStore;
+        use crate::system::database::EncryptedSqliteMemory;
+        use tokio::sync::mpsc;
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let mem = EncryptedSqliteMemory::new(tmp.path().to_path_buf(), "pw".into()).unwrap();
+        let vstore =
+            Arc::new(SqliteVectorStore::new(mem.shared_conn(), mem.data_key()).unwrap());
+        let clock = Arc::new(FixedClock::new(1_000_000));
+        let cfg = MemoryConfig {
+            mode: "selective".into(),
+            ..MemoryConfig::default()
+        };
+
+        let (cap, _calls) = CapturingProvider::new();
+        let mut agent = Agent::new(Arc::new(cap));
+        agent.set_memory_subsystem(vstore, Arc::new(ErrorEmbedder), clock, cfg);
+
+        let (tx, mut rx) = mpsc::channel::<StreamPiece>(16);
+        // Must succeed (fallback) — REQ-29.
+        let result = agent.query_streaming("hello", tx).await;
+        assert!(
+            result.is_ok(),
+            "D1-notice: selective mode with embedder error must fall back, not Err: {result:?}"
+        );
+
+        let mut pieces = Vec::new();
+        while let Ok(p) = rx.try_recv() {
+            pieces.push(p);
+        }
+
+        // A Notice piece must have been emitted (not an eprintln! to stderr).
+        let got_notice = pieces.iter().any(|p| matches!(p, StreamPiece::Notice(_)));
+        assert!(
+            got_notice,
+            "D1-notice: a StreamPiece::Notice must be emitted through chunk_tx on \
+             assembly failure (not eprintln!); got pieces: {pieces:?}"
+        );
+
+        // The turn must also have produced a Content piece (provider still responded).
+        let got_content = pieces
+            .iter()
+            .any(|p| matches!(p, StreamPiece::Content(s) if !s.is_empty()));
+        assert!(
+            got_content,
+            "D1-notice: provider response (Content piece) must arrive after fallback; \
              got pieces: {pieces:?}"
         );
     }

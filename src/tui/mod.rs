@@ -88,6 +88,9 @@ pub enum AgentResponse {
     /// An incremental reasoning (chain-of-thought) delta — shown live, never
     /// persisted (#24).
     ReasoningDelta(String),
+    /// A non-content operational notice (memory warning, truncation advisory).
+    /// Rendered in a distinct style (⚠ prefix, dimmed/yellow) — never persisted.
+    Notice(String),
 }
 
 /// Represents the state of the TUI application.
@@ -295,6 +298,16 @@ impl App {
         self.scroll_offset = 0;
     }
 
+    /// Appends an operational notice to the UI history with the `⚠ ` prefix so
+    /// it is visually distinct from model output.  The prefix is also used by the
+    /// Normal-mode renderer to apply a dimmed/yellow style.
+    pub fn push_notice(&mut self, text: String) {
+        // Ensure the text is valid UTF-8 (it always is, but make the intent explicit).
+        let notice = format!("⚠ {}", text);
+        self.messages.push(notice);
+        self.scroll_offset = 0;
+    }
+
     /// Appends a streaming delta to the in-progress assistant message,
     /// creating the line on the first delta. Append-only; never byte-indexes.
     pub fn append_stream_delta(&mut self, delta: String) {
@@ -374,6 +387,10 @@ pub async fn run_tui_ext(
                             let resp = match piece {
                                 StreamPiece::Content(s) => AgentResponse::StreamDelta(s),
                                 StreamPiece::Reasoning(s) => AgentResponse::ReasoningDelta(s),
+                                // Operational notices (memory warnings, truncation advisories)
+                                // are routed through the channel instead of eprintln! to avoid
+                                // corrupting the ratatui frame while in EnterAlternateScreen.
+                                StreamPiece::Notice(s) => AgentResponse::Notice(s),
                             };
                             if forward_tx.send(resp).await.is_err() {
                                 break;
@@ -645,6 +662,13 @@ async fn run_app<B: Backend>(
                 AgentResponse::Info(i) => {
                     app.finalize_stream();
                     app.push_message(format!("System: {}", i));
+                }
+                AgentResponse::Notice(n) => {
+                    // Operational notices (memory warnings, truncation advisories) do
+                    // not end a streamed turn — the assistant is still responding.
+                    // Rendered with the ⚠ prefix and dimmed/yellow styling in
+                    // Normal mode so they are visually distinct from model output.
+                    app.push_notice(n);
                 }
             }
         }
@@ -1620,6 +1644,48 @@ mod tests {
         assert_eq!(super::parse_consult_command("/consult"), Some(""));
         assert_eq!(super::parse_consult_command("hello"), None);
         assert_eq!(super::parse_consult_command("/consultation"), None);
+    }
+
+    #[test]
+    fn test_push_notice_stores_with_warning_prefix() {
+        // AgentResponse::Notice must be rendered with the ⚠ prefix so it is
+        // visually distinct from model Content (REQ-29 / D1/D2 routing).
+        let (event_tx, _) = mpsc::channel(1);
+        let (_, response_rx) = mpsc::channel(1);
+        let (_, approval_rx) = mpsc::channel(1);
+        let mut app = App::new(event_tx, response_rx, approval_rx);
+
+        app.push_notice("memory: context assembly failed".to_string());
+
+        assert_eq!(
+            app.messages.len(),
+            1,
+            "push_notice must add exactly one message"
+        );
+        let stored = &app.messages[0];
+        assert!(
+            stored.starts_with("⚠ "),
+            "notice message must start with the ⚠ prefix; got: {stored:?}"
+        );
+        assert!(
+            stored.contains("context assembly failed"),
+            "notice message must contain the original text; got: {stored:?}"
+        );
+    }
+
+    #[test]
+    fn test_push_notice_scrolls_to_tail() {
+        // push_notice must snap back to the tail, consistent with push_message.
+        let (event_tx, _) = mpsc::channel(1);
+        let (_, response_rx) = mpsc::channel(1);
+        let (_, approval_rx) = mpsc::channel(1);
+        let mut app = App::new(event_tx, response_rx, approval_rx);
+        app.scroll_offset = 5;
+        app.push_notice("any notice".to_string());
+        assert_eq!(
+            app.scroll_offset, 0,
+            "push_notice must reset scroll_offset to 0 (follow-tail)"
+        );
     }
 
     #[test]
