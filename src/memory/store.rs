@@ -231,6 +231,25 @@ pub trait VectorStore: Send + Sync {
     /// [`MemoryError::Config`] if `salience` is non-finite (G3).
     /// [`MemoryError::Storage`] on SQL failure.
     async fn set_salience(&self, id: &str, salience: f64) -> Result<(), MemoryError>;
+
+    /// Atomically replaces the existing record with `m.id` (if any) and inserts
+    /// `m` in a single crash-safe operation (G5-c / [`promote_to_profile`]).
+    ///
+    /// **Default implementation**: `hard_delete` then `insert` (non-atomic — a
+    /// crash between the two operations would lose the record). Implementations
+    /// that can provide a native atomic upsert (e.g. SQLite `INSERT OR REPLACE`)
+    /// **MUST** override this method.
+    ///
+    /// # Errors
+    /// [`MemoryError::Crypto`] on encryption failure;
+    /// [`MemoryError::Storage`] on SQL failure.
+    ///
+    /// [`promote_to_profile`]: crate::memory::profile::promote_to_profile
+    async fn upsert(&self, m: &Memory) -> Result<(), MemoryError> {
+        // Non-atomic fallback: override in SqliteVectorStore for crash-safety.
+        self.hard_delete(std::slice::from_ref(&m.id)).await?;
+        self.insert(m).await
+    }
 }
 
 // ─── Free helpers ─────────────────────────────────────────────────────────────
@@ -679,6 +698,55 @@ impl VectorStore for SqliteVectorStore {
         let c = self.locked_conn();
         c.execute(
             "INSERT INTO memories \
+                 (id, session_id, kind, text_blob, embedding_blob, model_id, dim, \
+                  created_at, salience, access_count, last_accessed_at, \
+                  superseded_by, evicted_at, scope, distilled_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+            params![
+                m.id,
+                m.session_id,
+                m.kind.as_str(),
+                text_blob,
+                embedding_blob,
+                m.model_id,
+                m.dim as i64,
+                m.created_at,
+                m.salience,
+                access_count_i64,
+                m.last_accessed_at,
+                m.superseded_by,
+                m.evicted_at,
+                m.scope,
+                m.distilled_at,
+            ],
+        )
+        .map_err(|e| MemoryError::Storage(e.to_string()))?;
+
+        Ok(())
+    }
+
+    /// Atomic upsert: `INSERT OR REPLACE` is a single SQLite statement
+    /// (crash-safe — no window between delete and insert, G5-c).
+    ///
+    /// Encryption runs BEFORE the Mutex is acquired (W12: minimize work under
+    /// the lock). The semantics match [`Self::insert`] but with REPLACE conflict
+    /// resolution so an existing record with the same `id` is atomically removed.
+    async fn upsert(&self, m: &Memory) -> Result<(), MemoryError> {
+        let text_blob = self
+            .vault
+            .encrypt_with_key(&self.derived_key, &m.text)
+            .map_err(|e| MemoryError::Crypto(e.to_string()))?;
+        let emb_json = serde_json::to_string(&m.embedding)
+            .map_err(|e| MemoryError::Storage(format!("embedding serialization: {e}")))?;
+        let embedding_blob = self
+            .vault
+            .encrypt_with_key(&self.derived_key, &emb_json)
+            .map_err(|e| MemoryError::Crypto(e.to_string()))?;
+        let access_count_i64 = i64::try_from(m.access_count).unwrap_or(i64::MAX);
+
+        let c = self.locked_conn();
+        c.execute(
+            "INSERT OR REPLACE INTO memories \
                  (id, session_id, kind, text_blob, embedding_blob, model_id, dim, \
                   created_at, salience, access_count, last_accessed_at, \
                   superseded_by, evicted_at, scope, distilled_at) \

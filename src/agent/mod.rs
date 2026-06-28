@@ -1466,6 +1466,10 @@ mod tests {
     /// the next turn's assembled context contains "use rust".
     ///
     /// Fails in RED because both the distill trigger and live profile are stubs.
+    #[tokio::test]
+    #[ignore = "placeholder: wired in Task 13b"]
+    async fn test_promoted_preference_placeholder() {}
+
     // ── G1 / G2 tests ─────────────────────────────────────────────────────────
 
     /// G1: in selective mode, the user's current turn must NOT be recalled into
@@ -1484,8 +1488,7 @@ mod tests {
 
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let mem = EncryptedSqliteMemory::new(tmp.path().to_path_buf(), "pw".into()).unwrap();
-        let vstore =
-            Arc::new(SqliteVectorStore::new(mem.shared_conn(), mem.data_key()).unwrap());
+        let vstore = Arc::new(SqliteVectorStore::new(mem.shared_conn(), mem.data_key()).unwrap());
         let embedder = Arc::new(FakeEmbedder {
             dim: 32,
             model: "fake".into(),
@@ -1554,8 +1557,7 @@ mod tests {
 
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let mem = EncryptedSqliteMemory::new(tmp.path().to_path_buf(), "pw".into()).unwrap();
-        let vstore =
-            Arc::new(SqliteVectorStore::new(mem.shared_conn(), mem.data_key()).unwrap());
+        let vstore = Arc::new(SqliteVectorStore::new(mem.shared_conn(), mem.data_key()).unwrap());
         let embedder = FakeEmbedder {
             dim: 8,
             model: "fake".into(),

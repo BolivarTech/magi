@@ -19,9 +19,9 @@ use sha2::{Digest, Sha256};
 
 use crate::memory::clock::Clock;
 use crate::memory::config::MemoryConfig;
+use crate::memory::context::truncate_to_tokens;
 use crate::memory::embedding::EmbeddingProvider;
 use crate::memory::error::MemoryError;
-use crate::memory::context::truncate_to_tokens;
 use crate::memory::index::cosine;
 use crate::memory::store::{Memory, VectorStore};
 use crate::memory::tokens::{budget_after_margin, estimate_tokens};
@@ -331,8 +331,7 @@ pub async fn render_profile(
                 let overhead = estimate_tokens("- \n", cfg.chars_per_token);
                 if overhead < budget {
                     let text_budget = budget.saturating_sub(overhead);
-                    let truncated =
-                        truncate_to_tokens(&m.text, text_budget, cfg.chars_per_token);
+                    let truncated = truncate_to_tokens(&m.text, text_budget, cfg.chars_per_token);
                     if !truncated.is_empty() {
                         out.push_str(&format!("- {truncated}\n"));
                     }
@@ -397,12 +396,6 @@ async fn promote_to_profile(
     // Deterministic id from the normalized text (D-15 / latest-wins upsert).
     let id = format!("pref:{:x}", Sha256::digest(normalized.as_bytes()));
 
-    // Latest-wins: remove any existing record with this id before inserting the
-    // newer one (VectorStore::insert fails on duplicate PK; no upsert surface).
-    if store.get(&id).await?.is_some() {
-        store.hard_delete(std::slice::from_ref(&id)).await?;
-    }
-
     let now = clock.now();
     let salience = cfg.preference_salience.clamp(0.0, 1.0);
 
@@ -426,7 +419,10 @@ async fn promote_to_profile(
         distilled_at: None,
     };
 
-    store.insert(&memory).await
+    // G5-c: atomic upsert via `INSERT OR REPLACE` — a single SQL statement, crash-safe.
+    // Replaces the non-atomic get+hard_delete+insert sequence that could lose the record
+    // if the process crashed between hard_delete and insert.
+    store.upsert(&memory).await
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
@@ -1252,10 +1248,26 @@ mod tests {
             ..MemoryConfig::default()
         };
 
-        insert_episodic(&store, "mem_a", &"x".repeat(8), vec![0.5f32; 8], "fake", 8, 1_000)
-            .await;
-        insert_episodic(&store, "mem_b", &"y".repeat(20), vec![0.5f32; 8], "fake", 8, 2_000)
-            .await;
+        insert_episodic(
+            &store,
+            "mem_a",
+            &"x".repeat(8),
+            vec![0.5f32; 8],
+            "fake",
+            8,
+            1_000,
+        )
+        .await;
+        insert_episodic(
+            &store,
+            "mem_b",
+            &"y".repeat(20),
+            vec![0.5f32; 8],
+            "fake",
+            8,
+            2_000,
+        )
+        .await;
 
         let calls: Arc<Mutex<Vec<(usize, usize)>>> = Arc::new(Mutex::new(vec![]));
         let judge = LenCapturingJudge {
