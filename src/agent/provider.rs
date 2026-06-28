@@ -144,6 +144,19 @@ fn finalize_tool(tool: Option<(String, String, String)>, full_content: &mut Vec<
     }
 }
 
+/// Returns `true` when a `send_messages` error should be retried.
+///
+/// Retryable conditions (stub — always returns `false` until implementation):
+/// - `"429"` rate-limit responses.
+/// - Transient connection failures whose error message contains the
+///   [`connection_error_hint`] prefix.
+///
+/// A persistent outage will still fail after `max_attempts` tries; the
+/// distiller then retries on the next scheduled pass (CP2-Z).
+fn is_retryable_error(_msg: &str) -> bool {
+    false
+}
+
 /// A provider that returns static, canned responses.
 pub struct StaticProvider;
 
@@ -1983,6 +1996,44 @@ mod tests {
         assert!(hint.contains("http://localhost:11434/v1"));
         assert!(hint.contains(crate::defaults::DEFAULT_OPENAI_BASE_URL));
         assert!(hint.contains("provider=\"anthropic\""));
+    }
+
+    // ─── is_retryable_error predicate ────────────────────────────────────────
+
+    /// `is_retryable_error` must return `true` for a rate-limit (429) message
+    /// and for a transient connection-failure message (the connection_error_hint
+    /// substring), and `false` for unrelated errors (e.g. auth 401).
+    ///
+    /// This test is fast (no network, no sleeps): it exercises the pure predicate
+    /// directly, not the full 3× backoff loop.
+    #[test]
+    fn test_is_retryable_error_matches_429_and_connection_hint() {
+        // 429 rate-limit → retryable
+        assert!(
+            is_retryable_error("upstream replied 429 Too Many Requests"),
+            "429 must be retryable"
+        );
+        // The connection_error_hint prefix → retryable (transient connection failure)
+        let hint = connection_error_hint("http://localhost:11434/v1");
+        assert!(
+            is_retryable_error(&hint),
+            "connection_error_hint must be retryable"
+        );
+        // Just the stable substring in isolation
+        assert!(
+            is_retryable_error("Could not reach the OpenAI-compatible backend at http://x/v1."),
+            "connection-hint substring must be retryable regardless of URL"
+        );
+        // Unrelated auth error → NOT retryable
+        assert!(
+            !is_retryable_error("OpenAI API Error [401]: bad key"),
+            "401 auth error must not be retryable"
+        );
+        // 500 server error → NOT retryable
+        assert!(
+            !is_retryable_error("OpenAI API Error [500]: internal error"),
+            "500 error must not be retryable"
+        );
     }
 
     #[tokio::test]
