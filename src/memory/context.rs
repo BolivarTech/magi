@@ -996,8 +996,9 @@ mod tests {
         // assembled preamble text — no phantom leading separator.
         let preamble = preamble_text(&result);
         let turn_txt = last_turn_text(&result);
-        let preamble_t_estimated =
-            result.used_tokens.saturating_sub(estimate_tokens(&turn_txt, 1.0));
+        let preamble_t_estimated = result
+            .used_tokens
+            .saturating_sub(estimate_tokens(&turn_txt, 1.0));
         let preamble_t_actual = estimate_tokens(&preamble, 1.0);
         assert_eq!(
             preamble_t_estimated,
