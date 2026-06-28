@@ -9,6 +9,8 @@ changes and the **patch** position signals backward-compatible fixes.
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-06-28
+
 ### Added
 - **Tiered Agnostic Memory subsystem** (`src/memory/`). Replaces the naive
   "load all history into context" approach with a full local RAG pipeline:
