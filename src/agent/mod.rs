@@ -427,7 +427,22 @@ impl Agent {
             let (full_text, final_text) = self.run_tool_loop(working_messages, &chunk_tx).await?;
 
             // ── Selective-specific terminal work (after the tool loop) ─────────
-            // Write assistant response to the vector store (best-effort; REQ-29).
+            // Persist the final synthesizing assistant turn to the vector store
+            // (best-effort; REQ-29).
+            //
+            // DESIGN NOTE (H4 / REQ-01): the semantic index intentionally embeds
+            // only the user turn (written above, before the tool loop) and this
+            // synthesizing final assistant turn — the two meaningful conversational
+            // units per REQ-01.  Raw intermediate tool-use and tool-result messages
+            // are persisted to the legacy message store only (via memory.add_message
+            // inside run_tool_loop) and are NOT separately embedded here.
+            //
+            // Rationale: the final assistant turn synthesizes all tool outcomes into
+            // a coherent response, making raw intermediate messages redundant for
+            // semantic retrieval.  Embedding them separately would flood the index
+            // with low-value file-dump / command-output noise, inflate embedding
+            // cost, and increase data egress (R-02 privacy).  The benchmark (SC-29)
+            // validated recall accuracy with exactly this design.
             write_turn_to_memory(
                 &store,
                 &*embedder,
@@ -636,6 +651,12 @@ impl Agent {
                 };
                 self.history.push(tool_res_msg.clone());
                 working.push(tool_res_msg.clone());
+                // Persist the tool-result message to the legacy message store so
+                // load_history and the full-history (load_all) path stay complete.
+                // This message is intentionally NOT written to the vector store —
+                // only the user turn and the final synthesizing assistant turn are
+                // embedded in selective mode (H4 / REQ-01 / SC-29).  See the
+                // write_turn_to_memory call after run_tool_loop in query_streaming.
                 if let (Some(memory), Some(sid)) = (&self.memory, &self.session_id) {
                     memory.add_message(sid, &tool_res_msg).await?;
                 }
