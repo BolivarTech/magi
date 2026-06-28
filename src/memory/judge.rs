@@ -54,7 +54,7 @@ impl DistillJudge for LlmDistillJudge {
             .provider
             .send_messages(&[Message::user(&prompt)], &[])
             .await
-            .map_err(|e| MemoryError::Storage(e.to_string()))?;
+            .map_err(|e| MemoryError::Llm(e.to_string()))?;
 
         let text = response
             .content
@@ -96,7 +96,7 @@ impl DistillJudge for LlmDistillJudge {
             .provider
             .send_messages(&[Message::user(&prompt)], &[])
             .await
-            .map_err(|e| MemoryError::Storage(e.to_string()))?;
+            .map_err(|e| MemoryError::Llm(e.to_string()))?;
 
         let text = response
             .content
