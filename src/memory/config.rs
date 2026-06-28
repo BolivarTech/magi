@@ -394,6 +394,20 @@ impl EmbeddingConfig {
                 "embedding.provider must not be empty".into(),
             ));
         }
+        // W3: a huge dim (e.g. usize::MAX) overflows when cast to i64 for SQLite
+        // storage (`dim as i64` in store.insert). Real embedding dims are at most a
+        // few thousand; reject anything beyond 1_000_000 at startup rather than
+        // silently writing a corrupted value to the DB (i64 truncation).
+        // `dim = 0` is still valid (autodetect mode).
+        const MAX_EMBEDDING_DIM: usize = 1_000_000;
+        if self.dim > MAX_EMBEDDING_DIM {
+            return Err(MemoryError::Config(format!(
+                "embedding.dim must be <= {MAX_EMBEDDING_DIM} \
+                 (real embedding dims are ≤ a few thousand; got {}). \
+                 Use dim = 0 for autodetect.",
+                self.dim
+            )));
+        }
         Ok(())
     }
 }
