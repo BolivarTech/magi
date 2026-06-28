@@ -1169,6 +1169,62 @@ mod tests {
         );
     }
 
+    // ── W3: EmbeddingConfig::validate() must reject huge dim values ─────────
+
+    /// W3 (Red): validate() must reject dim > 1_000_000 to prevent i64 overflow
+    /// when the value is cast for SQLite storage (dim as i64 in store.insert).
+    /// Real embedding dims are at most a few thousand; a 1M cap is generous.
+    #[test]
+    fn test_embedding_validate_rejects_huge_dim() {
+        let cfg = EmbeddingConfig {
+            dim: 1_000_001,
+            ..EmbeddingConfig::default()
+        };
+        assert!(
+            matches!(cfg.validate(), Err(MemoryError::Config(_))),
+            "W3: dim > 1_000_000 must be rejected by validate()"
+        );
+    }
+
+    /// W3 (Red): dim = usize::MAX must be rejected (extreme case of the overflow).
+    #[test]
+    fn test_embedding_validate_rejects_usize_max_dim() {
+        let cfg = EmbeddingConfig {
+            dim: usize::MAX,
+            ..EmbeddingConfig::default()
+        };
+        assert!(
+            matches!(cfg.validate(), Err(MemoryError::Config(_))),
+            "W3: dim = usize::MAX must be rejected by validate()"
+        );
+    }
+
+    /// W3: validate() must accept dim = 768 (the documented default).
+    #[test]
+    fn test_embedding_validate_accepts_default_dim() {
+        let cfg = EmbeddingConfig {
+            dim: 768,
+            ..EmbeddingConfig::default()
+        };
+        assert!(
+            cfg.validate().is_ok(),
+            "W3: default dim=768 must pass validate()"
+        );
+    }
+
+    /// W3: validate() must accept dim = 1_000_000 (boundary — exact cap is accepted).
+    #[test]
+    fn test_embedding_validate_accepts_dim_at_cap() {
+        let cfg = EmbeddingConfig {
+            dim: 1_000_000,
+            ..EmbeddingConfig::default()
+        };
+        assert!(
+            cfg.validate().is_ok(),
+            "W3: dim = 1_000_000 must be accepted (boundary)"
+        );
+    }
+
     #[test]
     fn test_parses_full_memory_and_embedding_sections() {
         // A present section parses its values; an omitted field still resolves to
