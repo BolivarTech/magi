@@ -41,8 +41,11 @@ pub trait Provider: Send + Sync {
     }
 
     /// Sends a list of messages and returns the full message (blocking until done).
-    /// Retry wrapper; used by tests and available to non-streaming callers; production uses
-    /// `query_streaming`.
+    ///
+    /// Retry wrapper; used by tests and available to non-streaming callers;
+    /// production uses `query_streaming`. Retries up to 3 times with exponential
+    /// backoff (2s, 4s, 8s) on rate-limit (429) or transient connection failures
+    /// (see [`is_retryable_error`]). A persistent outage fails after 3 tries.
     #[allow(dead_code)]
     async fn send_messages(
         &self,
@@ -87,7 +90,7 @@ pub trait Provider: Send + Sync {
                         "Stream ended without MessageDone or content"
                     ));
                 }
-                Err(e) if attempts < max_attempts && e.to_string().contains("429") => {
+                Err(e) if attempts < max_attempts && is_retryable_error(&e.to_string()) => {
                     let wait_secs = 2_u64.pow(attempts as u32);
                     sleep(Duration::from_secs(wait_secs)).await;
                     continue;
@@ -146,15 +149,15 @@ fn finalize_tool(tool: Option<(String, String, String)>, full_content: &mut Vec<
 
 /// Returns `true` when a `send_messages` error should be retried.
 ///
-/// Retryable conditions (stub — always returns `false` until implementation):
-/// - `"429"` rate-limit responses.
-/// - Transient connection failures whose error message contains the
-///   [`connection_error_hint`] prefix.
+/// Retryable conditions:
+/// - `"429"` in the error string — upstream rate-limit.
+/// - `"Could not reach the OpenAI-compatible backend"` — transient connection
+///   failure (the stable prefix of [`connection_error_hint`]).
 ///
 /// A persistent outage will still fail after `max_attempts` tries; the
 /// distiller then retries on the next scheduled pass (CP2-Z).
-fn is_retryable_error(_msg: &str) -> bool {
-    false
+fn is_retryable_error(msg: &str) -> bool {
+    msg.contains("429") || msg.contains("Could not reach the OpenAI-compatible backend")
 }
 
 /// A provider that returns static, canned responses.
