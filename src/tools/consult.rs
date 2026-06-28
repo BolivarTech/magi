@@ -19,8 +19,7 @@ pub(crate) const MAX_QUERY_LEN: usize = 8192;
 
 /// Notice emitted in the TUI when the `consult` tool is auto-approved.
 /// Visible to the user so they know the 3-LLM consensus was launched.
-const AUTO_LAUNCH_NOTICE: &str =
-    "launched MAGI multi-perspective consensus — awaiting evaluation…";
+const AUTO_LAUNCH_NOTICE: &str = "launched MAGI multi-perspective consensus — awaiting evaluation…";
 
 /// Tool wrapping a `magi_core::Magi`. `execute` runs the 3-perspective consensus
 /// (implemented in Task 4) and returns the verbatim report. The `description` is
@@ -148,7 +147,10 @@ mod tests {
 
     /// Helper: constructs a `ConsultTool` with `auto_approve = false` (the default).
     fn dummy_tool() -> ConsultTool {
-        ConsultTool::new(Arc::new(Magi::new(Arc::new(RoutingMockProvider::new()))), false)
+        ConsultTool::new(
+            Arc::new(Magi::new(Arc::new(RoutingMockProvider::new()))),
+            false,
+        )
     }
 
     fn agent_json(agent: &str) -> String {

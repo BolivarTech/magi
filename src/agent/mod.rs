@@ -643,6 +643,13 @@ impl Agent {
                         }
                     } else {
                         // Auto-approve: tool opted out of the gate.
+                        // Emit an announcement notice if the tool provides one, so
+                        // the user knows a potentially slow operation is starting.
+                        if let Some(tool) = self.tools.iter().find(|t| t.name() == name) {
+                            if let Some(notice) = tool.approval_notice() {
+                                let _ = chunk_tx.send(StreamPiece::Notice(notice)).await;
+                            }
+                        }
                         true
                     };
 
@@ -1967,8 +1974,7 @@ mod tests {
 
         const NOTICE_TEXT: &str = "auto-launch notice: consensus in progress";
 
-        let (tool, _executed) =
-            TrackingTool::with_notice("notice_op", NOTICE_TEXT);
+        let (tool, _executed) = TrackingTool::with_notice("notice_op", NOTICE_TEXT);
         let (provider, _count) = SingleToolCallProvider::new("notice_op");
         let mut agent = Agent::new(Arc::new(provider));
         agent.register_tool(Box::new(tool));

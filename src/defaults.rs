@@ -102,6 +102,14 @@ pub fn render_default_magi_toml() -> String {
     writeln!(out, "melchior_model  = \"{}\"", DEFAULT_MAGI_MELCHIOR).unwrap();
     writeln!(out, "balthasar_model = \"{}\"", DEFAULT_MAGI_BALTHASAR).unwrap();
     writeln!(out, "caspar_model    = \"{}\"", DEFAULT_MAGI_CASPAR).unwrap();
+    writeln!(
+        out,
+        "auto_approve    = false \
+         # true = launch MAGI consult automatically (announces in TUI); \
+         false = ask before each autonomous launch (default). \
+         The explicit /consult TUI command is always user-initiated and never gated."
+    )
+    .unwrap();
     writeln!(out).unwrap();
 
     // ── [memory] active essentials ────────────────────────────────────────────
