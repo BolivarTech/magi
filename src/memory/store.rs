@@ -286,6 +286,18 @@ struct RawRow {
     distilled_at: Option<i64>,
 }
 
+/// Pre-encrypted blobs and scalar columns for one `memories` row,
+/// produced by [`SqliteVectorStore::encode_memory`].
+///
+/// All encryption runs BEFORE the connection lock is acquired (W12 discipline:
+/// no crypto work under the Mutex).
+struct EncodedMemoryRow {
+    text_blob: String,
+    embedding_blob: String,
+    /// `m.access_count` clamped to `i64::MAX` (CP2-B saturating write).
+    access_count_i64: i64,
+}
+
 /// SQL fragment selecting all `memories` columns in the order expected by
 /// [`row_from_query`].
 #[allow(dead_code)]
@@ -457,6 +469,42 @@ impl SqliteVectorStore {
     /// recovery pattern as `EncryptedSqliteMemory::locked_conn`).
     fn locked_conn(&self) -> std::sync::MutexGuard<'_, rusqlite::Connection> {
         self.conn.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// Encrypts `m.text` and `m.embedding`, and converts `m.access_count` to
+    /// an `i64` (saturating, CP2-B). All work runs **outside** the connection
+    /// lock so the critical section stays short (W12 discipline: no crypto under
+    /// the Mutex).
+    ///
+    /// Both [`VectorStore::insert`] and [`VectorStore::upsert`] call this
+    /// method; the only difference between those two operations is the SQL
+    /// conflict-resolution keyword (`INSERT` vs `INSERT OR REPLACE`).
+    ///
+    /// # Errors
+    /// [`MemoryError::Crypto`] if either encryption call fails;
+    /// [`MemoryError::Storage`] if `m.embedding` cannot be serialized to JSON.
+    fn encode_memory(&self, m: &Memory) -> Result<EncodedMemoryRow, MemoryError> {
+        let text_blob = self
+            .vault
+            .encrypt_with_key(&self.derived_key, &m.text)
+            .map_err(|e| MemoryError::Crypto(e.to_string()))?;
+
+        let emb_json = serde_json::to_string(&m.embedding)
+            .map_err(|e| MemoryError::Storage(format!("embedding serialization: {e}")))?;
+        let embedding_blob = self
+            .vault
+            .encrypt_with_key(&self.derived_key, &emb_json)
+            .map_err(|e| MemoryError::Crypto(e.to_string()))?;
+
+        // CP2-B: saturating write — u64 values above i64::MAX are clamped to
+        // i64::MAX rather than panicking or wrapping.
+        let access_count_i64 = i64::try_from(m.access_count).unwrap_or(i64::MAX);
+
+        Ok(EncodedMemoryRow {
+            text_blob,
+            embedding_blob,
+            access_count_i64,
+        })
     }
 
     /// Returns operator-visible diagnostic counts for `scope` (CP2-AN/S).
@@ -671,23 +719,9 @@ impl SqliteVectorStore {
 #[async_trait]
 impl VectorStore for SqliteVectorStore {
     async fn insert(&self, m: &Memory) -> Result<(), MemoryError> {
-        // Encrypt BEFORE acquiring the lock so the critical section is short
-        // (W12 spirit: minimize work under the Mutex).
-        let text_blob = self
-            .vault
-            .encrypt_with_key(&self.derived_key, &m.text)
-            .map_err(|e| MemoryError::Crypto(e.to_string()))?;
-
-        let emb_json = serde_json::to_string(&m.embedding)
-            .map_err(|e| MemoryError::Storage(format!("embedding serialization: {e}")))?;
-        let embedding_blob = self
-            .vault
-            .encrypt_with_key(&self.derived_key, &emb_json)
-            .map_err(|e| MemoryError::Crypto(e.to_string()))?;
-
-        // CP2-B: saturating write — u64 values above i64::MAX are clamped to
-        // i64::MAX rather than panicking or wrapping.
-        let access_count_i64 = i64::try_from(m.access_count).unwrap_or(i64::MAX);
+        // Encrypt BEFORE acquiring the lock (W12 discipline: no crypto under
+        // the Mutex).
+        let enc = self.encode_memory(m)?;
 
         let c = self.locked_conn();
         c.execute(
@@ -700,13 +734,13 @@ impl VectorStore for SqliteVectorStore {
                 m.id,
                 m.session_id,
                 m.kind.as_str(),
-                text_blob,
-                embedding_blob,
+                enc.text_blob,
+                enc.embedding_blob,
                 m.model_id,
                 m.dim as i64,
                 m.created_at,
                 m.salience,
-                access_count_i64,
+                enc.access_count_i64,
                 m.last_accessed_at,
                 m.superseded_by,
                 m.evicted_at,
@@ -722,21 +756,12 @@ impl VectorStore for SqliteVectorStore {
     /// Atomic upsert: `INSERT OR REPLACE` is a single SQLite statement
     /// (crash-safe — no window between delete and insert, G5-c).
     ///
-    /// Encryption runs BEFORE the Mutex is acquired (W12: minimize work under
-    /// the lock). The semantics match [`Self::insert`] but with REPLACE conflict
+    /// Encryption runs BEFORE the Mutex is acquired (W12: no crypto under the
+    /// lock). The semantics match [`Self::insert`] but with REPLACE conflict
     /// resolution so an existing record with the same `id` is atomically removed.
     async fn upsert(&self, m: &Memory) -> Result<(), MemoryError> {
-        let text_blob = self
-            .vault
-            .encrypt_with_key(&self.derived_key, &m.text)
-            .map_err(|e| MemoryError::Crypto(e.to_string()))?;
-        let emb_json = serde_json::to_string(&m.embedding)
-            .map_err(|e| MemoryError::Storage(format!("embedding serialization: {e}")))?;
-        let embedding_blob = self
-            .vault
-            .encrypt_with_key(&self.derived_key, &emb_json)
-            .map_err(|e| MemoryError::Crypto(e.to_string()))?;
-        let access_count_i64 = i64::try_from(m.access_count).unwrap_or(i64::MAX);
+        // Encrypt BEFORE acquiring the lock (W12 discipline).
+        let enc = self.encode_memory(m)?;
 
         let c = self.locked_conn();
         c.execute(
@@ -749,13 +774,13 @@ impl VectorStore for SqliteVectorStore {
                 m.id,
                 m.session_id,
                 m.kind.as_str(),
-                text_blob,
-                embedding_blob,
+                enc.text_blob,
+                enc.embedding_blob,
                 m.model_id,
                 m.dim as i64,
                 m.created_at,
                 m.salience,
-                access_count_i64,
+                enc.access_count_i64,
                 m.last_accessed_at,
                 m.superseded_by,
                 m.evicted_at,
@@ -1493,6 +1518,46 @@ mod tests {
         assert!(
             store.get("keep").await.unwrap().is_some(),
             "F2: empty hard_delete must not remove any rows"
+        );
+    }
+
+    /// DRY: `insert` and `upsert` must decode to identical values given the
+    /// same input `Memory` — proving that `encode_memory` is the single
+    /// encryption path for both operations.
+    #[tokio::test]
+    async fn test_insert_and_upsert_produce_equivalent_encrypted_rows() {
+        let (_t, store) = test_store();
+
+        // Insert via `insert`.
+        let mut via_insert = sample("eq-insert", "encryption equivalence check", vec![0.1, 0.9]);
+        via_insert.access_count = 7;
+        store.insert(&via_insert).await.unwrap();
+
+        // Insert via `upsert` (fresh id — no prior row, so REPLACE is a no-op).
+        let mut via_upsert = via_insert.clone();
+        via_upsert.id = "eq-upsert".into();
+        store.upsert(&via_upsert).await.unwrap();
+
+        let got_insert = store.get("eq-insert").await.unwrap().unwrap();
+        let got_upsert = store.get("eq-upsert").await.unwrap().unwrap();
+
+        assert_eq!(got_insert.text, got_upsert.text, "text must be identical");
+        assert_eq!(
+            got_insert.embedding, got_upsert.embedding,
+            "embedding must be identical"
+        );
+        assert_eq!(
+            got_insert.salience, got_upsert.salience,
+            "salience must be identical"
+        );
+        assert_eq!(got_insert.kind, got_upsert.kind, "kind must be identical");
+        assert_eq!(
+            got_insert.access_count, got_upsert.access_count,
+            "access_count must be identical"
+        );
+        assert_eq!(
+            got_insert.scope, got_upsert.scope,
+            "scope must be identical"
         );
     }
 }
