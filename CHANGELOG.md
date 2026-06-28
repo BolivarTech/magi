@@ -9,6 +9,15 @@ changes and the **patch** position signals backward-compatible fixes.
 
 ## [Unreleased]
 
+### Added
+- **Configurable auto-approval for the MAGI `consult` tool** (`[magi] auto_approve`).
+  When set to `true`, the agent tool loop auto-approves autonomous `consult` launches
+  (the main LLM self-routing to the 3-perspective consensus) without prompting. A
+  `StreamPiece::Notice` is emitted in the TUI before the tool runs so the user knows
+  the potentially long consensus is in progress. Default `false` (opt-in, safe). The
+  explicit `/consult` TUI command remains user-initiated and is never gated regardless
+  of this flag. Documented in `docs/magi.toml.example` and scaffolded by `--init-config`.
+
 ### Fixed
 - **Approval-gate spam on sequential safe tool calls.** The approval gate
   previously prompted the user for every tool call uniformly, including safe

@@ -76,6 +76,15 @@ model = "claude-sonnet-4-6"
 # melchior_model  = "qwen3.6:27b"    # Scientist  (Alibaba)  — theoretical analysis
 # balthasar_model = "gpt-oss:20b"    # Pragmatist (OpenAI)   — practical trade-offs
 # caspar_model    = "deepseek-r1:8b" # Critic     (DeepSeek) — adversarial review
+#
+# auto_approve = false
+#   false (default) — the agent asks for approval before each autonomous MAGI
+#                     consensus launch triggered by the main LLM in its tool loop.
+#   true            — auto-approve autonomous launches; the TUI announces the launch
+#                     so you know the 3-LLM consensus is running (takes seconds to
+#                     minutes depending on the model tier).
+#   Note: the explicit /consult TUI command is ALWAYS user-initiated and is never
+#   gated — this flag only affects auto-routing in the agent tool loop.
 
 # ---------------------------------------------------------------------------
 # [memory] — tiered memory subsystem (opt-in; absent = all defaults below).
