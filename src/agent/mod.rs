@@ -639,6 +639,13 @@ impl Agent {
                                 _ => false,
                             }
                         } else {
+                            // SECURITY: no approval channel is wired (headless / test
+                            // mode, `approval_tx == None`) — there is no UI to ask, so the
+                            // call proceeds even for a tool that requires approval. This is
+                            // pre-existing behavior: the interactive TUI ALWAYS sets
+                            // `approval_tx` (see `run_tui_ext`), so bash / edit / consult are
+                            // genuinely gated in production; only non-interactive callers
+                            // (already running tools unattended) reach this auto path.
                             true
                         }
                     } else {
@@ -647,6 +654,8 @@ impl Agent {
                         // the user knows a potentially slow operation is starting.
                         if let Some(tool) = self.tools.iter().find(|t| t.name() == name) {
                             if let Some(notice) = tool.approval_notice() {
+                                // Best-effort: a failed send (TUI gone) must not abort the
+                                // turn, so the send result is intentionally ignored.
                                 let _ = chunk_tx.send(StreamPiece::Notice(notice)).await;
                             }
                         }
