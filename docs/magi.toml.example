@@ -126,6 +126,6 @@ model = "claude-sonnet-4-6"
 # provider = "openai"
 # base_url = "http://localhost:11434/v1"   # Ollama default; point elsewhere for cloud
 # model = "nomic-embed-text-v2-moe:latest"
-# dim = 768                                # 0 = autodetect from the first response
+# dim = 0                                  # 0 = autodetect from the first response (default); set to e.g. 768 to pin the dimension
 # query_prefix = "search_query: "          # nomic-embed-text-v2-moe asymmetric prefixes
 # document_prefix = "search_document: "

@@ -354,7 +354,7 @@ pub struct EmbeddingConfig {
     /// [`crate::defaults::DEFAULT_EMBEDDING_MODEL`] — single source of truth).
     #[serde(default = "d::emb_model")]
     pub model: String,
-    /// Vector dimension; `0` = autodetect from the first response. Default `768`.
+    /// Vector dimension; `0` = autodetect from the first response. Default `0`.
     #[serde(default = "d::emb_dim")]
     pub dim: usize,
     /// Prefix applied to query text before embedding. Default `"search_query: "`.
@@ -537,7 +537,7 @@ mod d {
         crate::defaults::DEFAULT_EMBEDDING_MODEL.into()
     }
     pub fn emb_dim() -> usize {
-        768
+        0
     }
     pub fn query_prefix() -> String {
         "search_query: ".into()
@@ -1110,7 +1110,7 @@ mod tests {
         assert_eq!(c.memory.index, "exact");
         assert!(c.memory.distill_enabled);
         assert_eq!(c.embedding.model, crate::defaults::DEFAULT_EMBEDDING_MODEL);
-        assert_eq!(c.embedding.dim, 768);
+        assert_eq!(c.embedding.dim, 0);
         assert_eq!(c.embedding.query_prefix, "search_query: ");
     }
 
