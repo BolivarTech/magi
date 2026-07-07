@@ -1,0 +1,20 @@
+# .graphifyignore — extra excludes for the graphify knowledge graph.
+# Syntax = .gitignore. graphify already respects .gitignore automatically; this
+# reinforces it so the graph indexes source + docs, not generated/tooling noise.
+graphify-out/
+target/
+.git/
+.claude/
+.remember/
+sbtdd/
+planning/
+.superpowers/
+dev-docs/
+scripts/
+__pycache__/
+*.pyc
+*.tmp
+# Runtime encrypted DB + secrets (never index)
+.magi-rs-memory.db*
+key.txt*
+magi.toml
