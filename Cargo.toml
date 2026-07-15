@@ -1,10 +1,10 @@
 [package]
 name = "magi-rs"
-version = "0.7.0"
+version = "0.8.0"
 edition = "2021"
 default-run = "magi-rs"
 authors = ["Julian Bolivar <jbolivarg@gmail.com>"]
-description = "Magi Agent: a terminal AI assistant in Rust with sandboxed tool execution, OAuth login, and encrypted local memory (Argon2 + AES-256-GCM-SIV + Reed-Solomon FEC)."
+description = "Magi Agent: a terminal AI assistant in Rust with sandboxed tool execution, OAuth login, and encrypted local memory (authenticated encryption with error-correcting FEC via the cryptovault crate)."
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/BolivarTech/magi"
 readme = "README.md"
@@ -44,9 +44,7 @@ sha2 = "0.10"
 base64 = "0.22"
 rand = "0.8"
 urlencoding = "2.1"
-aes-gcm-siv = "0.11"
-argon2 = "0.5"
-reed-solomon = "0.2"
+cryptovault = "0.3.0"  # fundación criptográfica auditada (R-V01); reemplaza src/utils/crypto.rs (MS1)
 zeroize = "1.8"
 rusqlite = { version = "0.31", features = ["bundled"] }
 uuid = { version = "1.8", features = ["v4"] }

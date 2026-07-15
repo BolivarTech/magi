@@ -157,6 +157,7 @@ dependencies = [
  "blake2",
  "cpufeatures",
  "password-hash",
+ "zeroize",
 ]
 
 [[package]]
@@ -555,6 +556,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 
 [[package]]
+name = "chacha20"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c3613f74bd2eac03dad61bd53dbe620703d4371614fe0bc3b9f04dd36fe4e818"
+dependencies = [
+ "cfg-if",
+ "cipher",
+ "cpufeatures",
+]
+
+[[package]]
 name = "cipher"
 version = "0.4.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -562,6 +574,7 @@ checksum = "773f3b9af64447d2ce9850330c473515014aa235e6a783b02db81ff39e4a3dad"
 dependencies = [
  "crypto-common",
  "inout",
+ "zeroize",
 ]
 
 [[package]]
@@ -706,9 +719,9 @@ dependencies = [
 
 [[package]]
 name = "crossbeam-epoch"
-version = "0.9.18"
+version = "0.9.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5b82ac4a3c2ca9c3460964f020e1402edd5753411d7737aa39c3714ad1b5420e"
+checksum = "2d6914041f254d6e9176c01941b21115dcfb7089e55135a35411081bd106ef3f"
 dependencies = [
  "crossbeam-utils",
 ]
@@ -759,6 +772,25 @@ dependencies = [
  "generic-array",
  "rand_core 0.6.4",
  "typenum",
+]
+
+[[package]]
+name = "cryptovault"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f1fae2bf503cb03799c86c6f69f5b891fc3159b0cc63c203860fed7189bc1753"
+dependencies = [
+ "aes-gcm-siv",
+ "argon2",
+ "base64 0.22.1",
+ "chacha20",
+ "hkdf",
+ "rand 0.8.6",
+ "reedsolomon",
+ "sha2",
+ "subtle",
+ "viterbi",
+ "zeroize",
 ]
 
 [[package]]
@@ -1803,17 +1835,16 @@ dependencies = [
 
 [[package]]
 name = "magi-rs"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
- "aes-gcm-siv",
  "anyhow",
  "arboard",
- "argon2",
  "async-trait",
  "axum",
  "base64 0.22.1",
  "clap",
  "crossterm",
+ "cryptovault",
  "futures",
  "instant-distance",
  "keyring",
@@ -1822,7 +1853,6 @@ dependencies = [
  "mockito",
  "rand 0.8.6",
  "ratatui",
- "reed-solomon",
  "reqwest",
  "rusqlite",
  "serde",
@@ -2581,10 +2611,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "reed-solomon"
-version = "0.2.1"
+name = "reedsolomon"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "13de68c877a77f35885442ac72c8beb7c2f0b09380c43b734b9d63d1db69ee54"
+checksum = "fc384a10bbdccefd4a0fe6d38de640c67dac9b3e31133015cf6139da9327f7d5"
 
 [[package]]
 name = "regex"
@@ -3584,6 +3614,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
+name = "viterbi"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c92d6c16d9f3d35f215b6323cd69705ed8493c869dd60a258cf5054625eb38e2"
+
+[[package]]
 name = "waker-fn"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4212,9 +4248,9 @@ dependencies = [
 
 [[package]]
 name = "zeroize"
-version = "1.8.2"
+version = "1.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b97154e67e32c85465826e8bcc1c59429aaaf107c1e4a9e53c8d8ccd5eff88d0"
+checksum = "e13c156562582aa81c60cb29407084cdb54c4164760106ab78e6c5b0858cf64e"
 
 [[package]]
 name = "zerotrie"

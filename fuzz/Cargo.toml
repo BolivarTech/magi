@@ -1,0 +1,34 @@
+[package]
+name = "magi-rs-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+magi-rs = { path = ".." }
+cryptovault = "0.3.0"
+
+# Targets de fuzzing (REQ-V39). Ejecutar en CI Linux con nightly:
+#   cargo +nightly fuzz run fuzz_vault_meta_decode -- -max_total_time=300
+# (cargo-fuzz/libFuzzer no compila en Windows MSVC — ver docs/CODE-STANDARDS-CHECKLIST.md.)
+[[bin]]
+name = "fuzz_vault_meta_decode"
+path = "fuzz_targets/fuzz_vault_meta_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_vault_blob_decrypt"
+path = "fuzz_targets/fuzz_vault_blob_decrypt.rs"
+test = false
+doc = false
+bench = false
+
+# `fuzz/` es su propio workspace: se excluye del proyecto padre para que
+# `cargo build`/`nextest` de magi-rs no intenten compilar libFuzzer.
+[workspace]

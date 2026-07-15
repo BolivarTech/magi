@@ -17,7 +17,7 @@ Most AI coding agents are SaaS-bound and tied to a single vendor. Magi is built 
 | Principle | What it means in Magi |
 |-----------|-----------------------|
 | **Local-first** | A single static Rust binary. Conversation history and project knowledge live in an encrypted SQLite file on disk — never a third-party vault. |
-| **Encrypted at rest** | Every stored record is sealed with Argon2id → AES-256-GCM-SIV → Reed-Solomon FEC. The DB master key lives in the OS keyring, separate from the LLM API key. |
+| **Encrypted at rest** | Every stored record is sealed with AES-256-GCM-SIV + error-correcting FEC under a random data key, itself wrapped by an Argon2id-derived key — via the audited [`cryptovault`](https://crates.io/crates/cryptovault) crate. The DB master key lives in the OS keyring, separate from the LLM API key, and a wrong key never wipes the DB. |
 | **Sandboxed by default** | Every filesystem tool is confined to the workspace via `PathGuard`; the shell tool runs a strict command allowlist with a hard ban on shell metacharacters. |
 | **Human-in-the-loop** | Each tool call must be approved inline in the TUI before it runs. |
 | **Fails safe** | If the OS keyring is unavailable, the session degrades to ephemeral (no persistence) rather than ever encrypting with a constant key. |
@@ -334,8 +334,8 @@ unaffected.
 
 ## Security Model
 
-- **Encrypted memory.** Argon2id (OWASP 2025 parameters: 64 MiB, t=3, p=4) derives a 32-byte key from the DB master password and a **per-database** random salt. The key is derived **once per session** and cached (`Zeroizing`) — no longer per record. AES-256-GCM-SIV (nonce-misuse resistant) provides authenticated encryption with a fresh `OsRng` nonce per record; Reed-Solomon FEC wraps `nonce‖ciphertext` against bit-rot. Blob layout: `[u8 version][u32 LE len][RS(nonce‖ciphertext)]`.
-- **Salt integrity & self-heal.** The per-DB salt is stored RS-encoded with a SHA-256 checksum. An absent / corrupt / unrecoverable salt is treated as absent and the store **resets to a fresh start** (no on-disk migration) rather than bricking; minor bit-rot is corrected and prior history survives.
+- **Encrypted memory (envelope DEK/KEK).** A random 32-byte **data key (DEK)** encrypts every record via the audited [`cryptovault`](https://crates.io/crates/cryptovault) crate (Argon2id → AES-256-GCM-SIV → error-correcting FEC, `#![forbid(unsafe_code)]`). The DB master secret plus a per-DB salt derives a **KEK** (Argon2id, OWASP 2025: 64 MiB, t=3, p=4) that **wraps** the DEK; `vault_meta` stores `{salt, wrapped_dek}`, each FEC-encoded. The DEK is unwrapped **once per session** and cached (`Zeroizing`) — no Argon2 runs per record.
+- **Never loses your data.** A wrong master secret or a corrupt wrapped key fails with a typed, **retryable** error and **never wipes** the database — only a brand-new or pre-envelope DB (no wrapped key present) is bootstrapped fresh. `vault_meta` is FEC-protected, so on-disk bit-rot is corrected before the unwrap; corruption beyond the FEC's reach surfaces as a distinct `VaultMetaCorrupt` error, never a silent wrong key.
 - **Secrets separation.** The LLM API key (keyring `magi-rs`) and the DB master password (keyring `magi-rs-internal`) are kept in **separate** keyring services. Rotating the API key never invalidates the local conversation DB.
 - **Filesystem sandbox.** Every file-touching tool canonicalizes its target and validates it against the workspace root via `PathGuard` (handling Windows `\\?\` verbatim prefixes, null-byte attacks, and lexical normalization).
 - **Shell sandbox.** The `bash` tool enforces a per-binary argument allowlist and bans shell metacharacters to prevent subshell injection on both PowerShell and bash.
@@ -347,6 +347,7 @@ unaffected.
 ```
 src/
   main.rs              -- config discovery, master-key bootstrap, tool registration, entry
+  lib.rs               -- library root (pub mod vault) so fuzz / coverage targets can link
   config.rs            -- MagiConfig (magi.toml load + provider/model resolution)
   defaults.rs          -- single source of truth for all built-in default literals
   agent/
@@ -368,14 +369,17 @@ src/
     error.rs           -- MemoryError + EmbeddingError (thiserror)
   bin/
     bench_memory.rs    -- two-arm benchmark binary (cargo run --bin bench_memory)
+    bench_vault_crypto.rs -- FEC/decrypt performance baseline (REQ-V36)
   tools/
     mod.rs             -- Tool trait + ToolError + requires_approval()
     ls.rs read.rs write.rs grep.rs bash.rs knowledge.rs consult.rs
   system/
-    database.rs        -- EncryptedSqliteMemory (MemoryStore) over SQLite + CryptoVault
+    database.rs        -- EncryptedSqliteMemory (MemoryStore) over SQLite; opens via the vault envelope
     fs.rs grep.rs secrets.rs path_guard.rs
-  utils/
-    crypto.rs          -- CryptoVault: Argon2id → AES-256-GCM-SIV → Reed-Solomon FEC
+  vault/
+    mod.rs             -- SecretStore boundary + envelope re-exports (Vault MS1 crypto foundation)
+    envelope.rs        -- DEK/KEK envelope: bootstrap/open, wrap/unwrap, keyless FEC over vault_meta
+    error.rs           -- VaultError (thiserror): WrongPassphrase / VaultMetaCorrupt / ...
   services/
     oauth.rs           -- OAuth PKCE login (callback on 127.0.0.1:54545)
   tui/

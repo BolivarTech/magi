@@ -1547,21 +1547,32 @@ mod tests {
             id
         };
 
-        // Scope 2: Attempt to load with Key B (Simulate rotation before fix)
+        // Scope 2: Attempt to open with Key B (a different DB master).
+        // Under the DEK/KEK envelope model (REQ-V35) a wrong master now fails at
+        // OPEN — the KEK cannot unwrap the DEK, so `new` returns Err — rather
+        // than opening and failing later on a per-record decrypt. Crucially, the
+        // failed open must NEVER wipe or corrupt the existing data.
         {
-            let memory =
-                crate::system::database::EncryptedSqliteMemory::new(db_path, key_b).unwrap();
-            let result = memory.get_messages(&sid).await;
-
-            // Expected failure: Key B cannot decrypt what Key A encrypted
+            let result =
+                crate::system::database::EncryptedSqliteMemory::new(db_path.clone(), key_b);
             assert!(
                 result.is_err(),
-                "Recovery with a different key SHOULD fail currently"
+                "opening with a different DB master must fail (wrong KEK cannot unwrap the DEK)"
             );
-            assert!(result
-                .unwrap_err()
-                .to_string()
-                .contains("Decryption failed"));
+        }
+
+        // Scope 3: Re-open with the correct Key A — the data survives the failed
+        // wrong-key attempt intact (never-wipe guarantee).
+        {
+            let key_a_again = "api_key_alpha".to_string();
+            let memory =
+                crate::system::database::EncryptedSqliteMemory::new(db_path, key_a_again).unwrap();
+            let msgs = memory.get_messages(&sid).await.unwrap();
+            assert_eq!(
+                msgs,
+                vec![Message::user(msg_text)],
+                "the correct master still recovers the data after a failed wrong-key open"
+            );
         }
     }
 
