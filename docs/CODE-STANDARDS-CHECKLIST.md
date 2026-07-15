@@ -47,3 +47,19 @@ sobre cada archivo tocado, en adición a `cargo nextest` / `clippy -D warnings` 
 Todo hallazgo que no encaje en una categoría de la tabla de gates mecánicos, pero sí en la
 checklist manual de arriba, se reporta como finding de review (Loop 1 / MAGI) — nunca se
 ignora en silencio.
+
+## Alcance de Miri (REQ-V38) — spike de Task 0b (2026-07-14)
+
+**Determinado empíricamente:** `cargo +nightly miri test vault::error` corre **limpio** en este
+entorno (Windows MSVC) — los 3 tests puros de `vault::error` pasan bajo Miri (0.59s), sin
+operaciones no soportadas. Los binarios que tocan SQLite (`rusqlite` bundled, FFI en C) y tokio
+(hilos de SO) quedan **naturalmente fuera** del alcance de Miri (sus tests se filtran; Miri no
+puede interpretar FFI en C ni el runtime de hilos).
+
+**Alcance de REQ-V38 (Task 9):** Miri corre sobre el **código puro del vault** — `error` y
+`envelope` (framing de `vault_meta`, FEC keyless, wrap/unwrap). **Excluidos:** `store`/`database`
+(SQLite FFI). **Pendiente de confirmar en Task 2:** que el *crypto* del crate (`cryptovault`:
+AES-256-GCM-SIV, Argon2id) corra bajo Miri — el `aes` puede usar intrínsecos AES-NI que caen al
+backend portable bajo Miri (esperado vía `cpufeatures`), y Argon2 (m=64 MiB) puede ser lento bajo
+interpretación. Si el crypto no corre bajo Miri, el alcance se acota a `error` + al framing/FEC
+**no-AEAD** de `envelope`, y se documenta la exclusión (nunca declarar un pase que no ocurrió).
