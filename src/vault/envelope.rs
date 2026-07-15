@@ -17,9 +17,29 @@
 //! **base64 queda como capa externa**: un bit podrido en el texto base64
 //! almacenado rompe el `base64-decode` **antes** de que el FEC interno del crate
 //! pueda corregirlo. Por eso este módulo aplica **su propia** capa
-//! [`ConcatenatedFec`] sobre la representación base64 en disco — protege la
-//! *representación almacenada*, mientras la FEC interna del crate protege el
-//! *payload criptográfico*. No es redundante: corrigen capas distintas.
+//! [`ConcatenatedFec`] sobre la representación base64 en disco: corrige el
+//! bit-rot de la *representación almacenada* de modo que el `base64-decode` del
+//! crate nunca vea entrada corrupta.
+//!
+//! ## Alcance exacto de la corrección (precisión — code review Loop 1)
+//!
+//! La cobertura FEC **no es uniforme sobre todo el blob**: [`fec_encode`] antepone
+//! un prefijo **crudo** de longitud (`u32` LE, [`LEN_PREFIX`] bytes) **fuera** de la
+//! región FEC. Un bit podrido **dentro del prefijo** (4 bytes de ~600) **no** se
+//! auto-corrige — pero **falla seguro**: produce siempre [`VaultError::VaultMetaCorrupt`]
+//! (nunca panic, nunca una DEK incorrecta), porque un `pre_len` corrupto lo rechaza
+//! el chequeo de bloques de la RS o falla downstream (largo de salt inválido / tag
+//! AEAD). Verificado exhaustivamente (los 32 single-bit flips del prefijo).
+//! *No se puede meter la longitud dentro de la región FEC:* `ConcatenatedFec::decode`
+//! **exige** el `pre_len` como parámetro para decodificar, así que el prefijo debe ir
+//! por fuera. Endurecerlo (p.ej. redundancia sobre el prefijo) es un follow-up de
+//! robustez, no un defecto de correctitud (`dev-docs/PENDING_IMPLEMENTATION.md`).
+//!
+//! Nota: sobre este camino la FEC **interna del crate** rara vez corrige algo — si el
+//! `fec_decode` externo tiene éxito, ya recuperó los bytes exactos, y [`open_envelope`]
+//! solo entonces llama a `unwrap_key`; si falla, retorna `VaultMetaCorrupt` sin llegar
+//! a la FEC interna. La FEC del crate sigue siendo la defensa del payload en tránsito
+//! por otros canales; en disco, la capa externa es la que corrige.
 //!
 //! # Distinción corrupción vs. clave equivocada
 //!
