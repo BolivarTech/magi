@@ -12,3 +12,7 @@
 //!
 //! MS1 aloja los errores de dominio y las primitivas de envelope; la
 //! superficie de usuario (tabla `vault`, CLI) llega en MS2.
+
+mod error;
+
+pub use error::VaultError;
