@@ -9,6 +9,51 @@ changes and the **patch** position signals backward-compatible fixes.
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-07-15
+
+Vault **MS1 — cryptographic foundation**. A pure hardening milestone: no new
+user-facing features (the `magi vault` CLI and user passphrase land in MS2). The
+crypto is now auditable, the key model is an envelope, and a bad key can no
+longer destroy data.
+
+### Changed
+- **All at-rest encryption migrated to the audited [`cryptovault`](https://crates.io/crates/cryptovault) 0.3.0 crate.**
+  Conversation history, project knowledge, and memory vectors now encrypt through
+  the external crate (`#![forbid(unsafe_code)]`, known-answer tests, fuzz targets)
+  instead of the in-tree implementation. The primitive pipeline
+  (Argon2id → AES-256-GCM-SIV → error-correcting FEC) is unchanged.
+- **Envelope key management (DEK/KEK).** A random 32-byte data key (DEK) encrypts
+  every record; the DB master secret derives a key-encryption key (KEK, Argon2id)
+  that **wraps** the DEK. `vault_meta` stores `{salt, wrapped_dek}`, each
+  FEC-encoded so on-disk bit-rot is corrected before the unwrap. The DEK is
+  unwrapped once per session and cached — no Argon2 per record — and a future
+  master-secret rotation becomes an O(1) re-wrap with no data re-encryption.
+- Expensive crypto no longer runs while a database lock is held: knowledge and
+  message reads decrypt off-lock, and the bootstrap derives the KEK before taking
+  the write lock.
+
+### Added
+- `src/vault/` crypto-foundation module: `envelope.rs` (bootstrap/open, wrap/unwrap,
+  keyless FEC over `vault_meta`), `error.rs` (`VaultError`), `mod.rs` (public boundary).
+- `src/lib.rs` library root so fuzz and coverage targets can link the crate.
+- Fuzz targets (`fuzz/`) and a FEC performance-baseline benchmark (`bench_vault_crypto`).
+- Mechanical standards enforcement: module lint attributes, `rustfmt.toml`,
+  `deny.toml`, and a hardcoded-secret scan test.
+
+### Removed
+- In-tree `src/utils/crypto.rs` (1340 lines) and the direct `aes-gcm-siv`,
+  `argon2`, and `reed-solomon` dependencies (now transitive via `cryptovault`).
+
+### Fixed
+- **A wrong master secret or a corrupt wrapped key no longer wipes the database**
+  (REQ-V35). The former "reset on unrecoverable salt" auto-sanitisation is retired:
+  an *absent* wrapped key bootstraps fresh (brand-new or pre-envelope DB), but a
+  *present-but-unopenable* one fails with a typed, retryable error and leaves all
+  data intact. FEC-uncorrectable `vault_meta` surfaces as a distinct
+  `VaultMetaCorrupt` error rather than a silent wrong key.
+- Concurrent first-open of a fresh DB now yields a single DEK via an atomic
+  `BEGIN IMMEDIATE` bootstrap (no double-bootstrap race).
+
 ## [0.7.0] - 2026-06-28
 
 ### Added
