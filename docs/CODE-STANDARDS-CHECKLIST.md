@@ -63,3 +63,13 @@ AES-256-GCM-SIV, Argon2id) corra bajo Miri — el `aes` puede usar intrínsecos 
 backend portable bajo Miri (esperado vía `cpufeatures`), y Argon2 (m=64 MiB) puede ser lento bajo
 interpretación. Si el crypto no corre bajo Miri, el alcance se acota a `error` + al framing/FEC
 **no-AEAD** de `envelope`, y se documenta la exclusión (nunca declarar un pase que no ocurrió).
+
+## Gate de hardening de milestone — resultado (Task 9, 2026-07-15)
+
+**Miri (REQ-V38) — alcance verificado empíricamente:**
+- ✅ `cargo +nightly miri test vault::error` corre **limpio** (lógica de dominio pura, sin UB) — confirmado en el spike de Task 0b.
+- ⚠️ El **crypto del envelope** (`vault::envelope`) **NO corre bajo Miri**: invoca `cryptovault` (AES-256-GCM-SIV con posibles intrínsecos AES-NI + Argon2 a 64 MiB + FEC Viterbi), que Miri no interpreta / hace impracticablemente lento. **Alcance de Miri acotado a la lógica pura** (`error`, framing/bounds-safety), con el crypto **excluido y documentado** — nunca se declara un pase que no ocurrió (contingencia prevista en REQ-V38).
+
+**Fuzz (REQ-V39) — targets definidos, ejecución en CI Linux:**
+- Los 2 targets existen en `fuzz/fuzz_targets/`: `fuzz_vault_meta_decode` (bytes arbitrarios → `open_envelope`, invariante: nunca panic ni borrado) y `fuzz_vault_blob_decrypt` (blob arbitrario → `decrypt_with_key`, maneja no-UTF8).
+- ⚠️ **`cargo-fuzz`/libFuzzer requiere el sanitizer `-fsanitize=fuzzer` (clang/LLVM), NO soportado en Windows MSVC** (limitación conocida del tooling, no del código). Los targets se **ejecutan en un CI Linux con nightly**: `cargo +nightly fuzz run <target> -- -max_total_time=300`. El bounds-safety del split que ejercitarían (`fuzz_open_entrypoint`) está además cubierto por el lint `clippy::indexing_slicing` (rompe el build) y por `test_fuzz_entrypoint_never_panics_on_arbitrary_input` (unit test).
