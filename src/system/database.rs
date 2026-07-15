@@ -94,8 +94,9 @@ impl EncryptedSqliteMemory {
     /// Decrypts pre-collected `(role, blob)` rows into [`Message`]s.
     ///
     /// Holds **no** database lock: callers must collect rows and release the
-    /// connection guard before invoking this, so per-row Argon2 key derivation
-    /// never serializes other DB callers (audit finding W12).
+    /// connection guard before invoking this, so per-row decryption (FEC/Viterbi
+    /// decode under the cached data key) never serializes other DB callers
+    /// (audit finding W12).
     fn decrypt_rows(&self, rows: Vec<(String, String)>) -> Result<Vec<Message>> {
         let mut messages = Vec::with_capacity(rows.len());
         for (role_str, blob) in rows {
