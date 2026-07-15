@@ -4,15 +4,29 @@
 #![deny(missing_docs)]
 #![deny(rustdoc::broken_intra_doc_links)]
 #![deny(clippy::missing_errors_doc, clippy::missing_panics_doc)]
-#![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
-#![deny(clippy::todo, clippy::unimplemented)]
-#![deny(clippy::indexing_slicing, clippy::string_slice)]
+// Lints de panic/bounds-safety: SOLO en producción. Los tests usan
+// `unwrap`/`expect`/indexing idiomáticamente (un fallo en un test ES el test
+// fallando, que es el comportamiento correcto).
+#![cfg_attr(
+    not(test),
+    deny(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::todo,
+        clippy::unimplemented,
+        clippy::indexing_slicing,
+        clippy::string_slice
+    )
+)]
 
 //! Vault: fundación criptográfica del agente (endurecimiento).
 //!
 //! MS1 aloja los errores de dominio y las primitivas de envelope; la
 //! superficie de usuario (tabla `vault`, CLI) llega en MS2.
 
+mod envelope;
 mod error;
 
+pub use envelope::{bootstrap_envelope, fuzz_open_entrypoint, open_envelope};
 pub use error::VaultError;
