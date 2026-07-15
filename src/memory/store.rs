@@ -30,7 +30,7 @@ use crate::memory::config::MemoryConfig;
 use crate::memory::error::MemoryError;
 use crate::memory::salience::assign_salience;
 use crate::memory::MemoryKind;
-use crate::utils::crypto::CryptoVault;
+use cryptovault::CryptoVault;
 
 // ─── Memory struct ────────────────────────────────────────────────────────────
 
@@ -339,12 +339,14 @@ fn decode_row(raw: RawRow, vault: &CryptoVault, key: &[u8]) -> Result<Memory, Me
 
     let text = vault
         .decrypt_with_key(key, &raw.text_blob)
-        .map_err(|e| MemoryError::Crypto(e.to_string()))?;
+        .map_err(|e| MemoryError::Crypto(e.to_string()))?
+        .as_str()
+        .to_owned();
 
     let emb_json = vault
         .decrypt_with_key(key, &raw.embedding_blob)
         .map_err(|e| MemoryError::Crypto(e.to_string()))?;
-    let embedding: Vec<f32> = serde_json::from_str(&emb_json)
+    let embedding: Vec<f32> = serde_json::from_str(emb_json.as_str())
         .map_err(|e| MemoryError::Storage(format!("embedding deserialization: {e}")))?;
 
     // CP2-B: saturating read — a negative DB value (should never happen in

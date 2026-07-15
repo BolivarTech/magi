@@ -8,7 +8,6 @@ mod services;
 mod system;
 mod tools;
 mod tui;
-mod utils;
 
 use crate::agent::magi_wiring::{
     resolve_magi_adapter_specs, static_override_notice, MagiEnvModels,
