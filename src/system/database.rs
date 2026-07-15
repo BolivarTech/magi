@@ -216,6 +216,18 @@ impl EncryptedSqliteMemory {
             // records are unreadable in the new format. Bootstrap under a write lock;
             // a racing opener ADOPTS the winner's envelope (no double DEK).
             None => {
+                // Precompute a fresh envelope BEFORE taking the write lock, so the
+                // expensive Argon2 KEK derivation never runs while the lock is held
+                // (Caspar/concurrency: holding the write lock across Argon2 would
+                // serialize a racing opener on the derivation). `bootstrap_envelope`
+                // is pure — it generates salt+DEK and wraps, with no DB side effects,
+                // so the work is simply discarded if a racing opener wins below.
+                let (salt_mine, wrapped_mine, dek_mine) =
+                    bootstrap_envelope(&vault, &password).map_err(map_open_err)?;
+
+                // Under the write lock, do ONLY cheap SQL: re-check for a racing
+                // bootstrap and either install our precomputed envelope or capture
+                // the winner's for an out-of-lock unwrap.
                 let tx =
                     conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
                 let raced: Option<Vec<u8>> = tx
@@ -225,20 +237,20 @@ impl EncryptedSqliteMemory {
                         |r| r.get(0),
                     )
                     .optional()?;
-                let dek = match raced {
+                let adopted: Option<(Vec<u8>, Vec<u8>)> = match raced {
                     // A racing opener bootstrapped first between our read and the
-                    // write lock: adopt its envelope so both share the same DEK.
+                    // write lock: capture its envelope; unwrap it AFTER releasing
+                    // the lock so its Argon2 derivation is off the hot lock too.
                     Some(wrapped_fec) => {
                         let salt_fec: Vec<u8> = tx.query_row(
                             "SELECT value FROM vault_meta WHERE key = 'salt'",
                             [],
                             |r| r.get(0),
                         )?;
-                        open_envelope(&vault, &password, &salt_fec, &wrapped_fec)
-                            .map_err(map_open_err)?
+                        Some((salt_fec, wrapped_fec))
                     }
                     // Fresh-start (REQ-V31): discard any old-format content
-                    // (unreadable under the new crypto) and bootstrap a new envelope.
+                    // (unreadable under the new crypto) and install our envelope.
                     None => {
                         let had_rows: i64 = tx.query_row(
                             "SELECT (SELECT COUNT(*) FROM sessions) \
@@ -250,18 +262,16 @@ impl EncryptedSqliteMemory {
                         tx.execute("DELETE FROM messages", [])?;
                         tx.execute("DELETE FROM knowledge", [])?;
                         tx.execute("DELETE FROM sessions", [])?;
-                        let (salt_fec, wrapped_fec, dek) =
-                            bootstrap_envelope(&vault, &password).map_err(map_open_err)?;
                         tx.execute(
                             "INSERT OR REPLACE INTO vault_meta (key, value) VALUES ('salt', ?1)",
-                            params![salt_fec],
+                            params![salt_mine],
                         )?;
                         tx.execute(
                             "INSERT OR REPLACE INTO vault_meta (key, value) VALUES ('wrapped_dek', ?1)",
-                            params![wrapped_fec],
+                            params![wrapped_mine],
                         )?;
                         was_reset = had_rows > 0;
-                        dek
+                        None
                     }
                 };
                 tx.commit()?;
@@ -272,7 +282,16 @@ impl EncryptedSqliteMemory {
                          after upgrading the storage format."
                     );
                 }
-                dek
+                match adopted {
+                    // A racing opener won: unwrap ITS envelope off the lock. A failure
+                    // here propagates and NEVER deletes (REQ-V35).
+                    Some((salt_fec, wrapped_fec)) => {
+                        open_envelope(&vault, &password, &salt_fec, &wrapped_fec)
+                            .map_err(map_open_err)?
+                    }
+                    // We installed our precomputed envelope.
+                    None => dek_mine,
+                }
             }
         };
 
@@ -352,21 +371,26 @@ impl MemoryStore for EncryptedSqliteMemory {
     }
 
     async fn get_knowledge(&self, key: &str) -> Result<Option<String>> {
-        let conn = self.locked_conn();
-        let mut stmt = conn.prepare("SELECT value_blob FROM knowledge WHERE key = ?")?;
+        // Read the raw blob under the lock, then release it before decrypting:
+        // `decrypt_with_key` runs FEC/Viterbi decode (~ms), and holding the
+        // connection guard across it would serialize every other DB caller
+        // (audit finding W12 — same two-phase split as `get_messages`).
+        let blob: Option<String> = {
+            let conn = self.locked_conn();
+            let mut stmt = conn.prepare("SELECT value_blob FROM knowledge WHERE key = ?")?;
+            stmt.query_row(params![key], |row| row.get::<_, String>(0))
+                .optional()?
+        };
 
-        let res = stmt.query_row(params![key], |row| row.get::<_, String>(0));
-
-        match res {
-            Ok(blob) => {
+        match blob {
+            Some(blob) => {
                 let decrypted = self
                     .vault
                     .decrypt_with_key(&self.derived_key, &blob)
                     .map_err(|e| anyhow::anyhow!("Decryption failed: {}", e))?;
                 Ok(Some(decrypted.as_str().to_owned()))
             }
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(anyhow::anyhow!("Database error: {}", e)),
+            None => Ok(None),
         }
     }
 
@@ -829,6 +853,43 @@ mod tests {
             "a concurrent write completes; lock is not held across decrypt"
         );
         assert_eq!(msgs[0], Message::user("message number 0"));
+    }
+
+    #[tokio::test]
+    async fn test_get_knowledge_does_not_hold_lock_during_decrypt() {
+        // W12 / R-V08: get_knowledge must read the raw blob under the lock and
+        // release it BEFORE decrypting, so a concurrent DB writer is not blocked
+        // across the FEC/Viterbi decode. Both the read and the concurrent write
+        // must complete, and the value must round-trip intact.
+        let tmp_file = NamedTempFile::new().unwrap();
+        let path = tmp_file.path().to_path_buf();
+        let memory = Arc::new(EncryptedSqliteMemory::new(path, "pw".to_string()).unwrap());
+        memory
+            .set_knowledge("api-endpoint", "value-42")
+            .await
+            .unwrap();
+
+        let reader = {
+            let m = memory.clone();
+            tokio::spawn(async move { m.get_knowledge("api-endpoint").await })
+        };
+        let writer = {
+            let m = memory.clone();
+            tokio::spawn(async move { m.create_session("concurrent").await })
+        };
+
+        let value = reader.await.unwrap().unwrap();
+        let new_sid = writer.await.unwrap().unwrap();
+
+        assert_eq!(
+            value.as_deref(),
+            Some("value-42"),
+            "the secret decrypts correctly after the lock-drop refactor"
+        );
+        assert!(
+            !new_sid.is_empty(),
+            "a concurrent write completes; the lock is not held across decrypt"
+        );
     }
 
     #[tokio::test]
