@@ -85,11 +85,19 @@ fn map_crypto_err(e: CryptoError) -> VaultError {
 /// La FEC es un códec **sin clave**: corrige bit-rot de la representación en
 /// disco sin necesitar el secreto.
 fn fec_encode(bytes: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(LEN_PREFIX + bytes.len());
-    // La longitud de `salt`/`wrapped_dek` cabe holgada en u32 (nunca > 10 MiB).
+    // La longitud de `salt`/`wrapped_dek` cabe holgada en u32 (nunca > 10 MiB);
+    // el clamp es defensivo y jamás se alcanza para las entradas de `vault_meta`.
+    debug_assert!(
+        bytes.len() <= u32::MAX as usize,
+        "fec_encode input exceeds the u32 length prefix"
+    );
     let len = u32::try_from(bytes.len()).unwrap_or(u32::MAX);
+    // Codificar primero: `ConcatenatedFec` expande ~2.3x, así que dimensionar por
+    // `bytes.len()` forzaría un realloc. Con `encoded.len()` la capacidad es exacta.
+    let encoded = ConcatenatedFec::default().encode(bytes);
+    let mut out = Vec::with_capacity(LEN_PREFIX + encoded.len());
     out.extend_from_slice(&len.to_le_bytes());
-    out.extend_from_slice(&ConcatenatedFec::default().encode(bytes));
+    out.extend_from_slice(&encoded);
     out
 }
 
@@ -100,14 +108,13 @@ fn fec_encode(bytes: &[u8]) -> Vec<u8> {
 /// [`VaultError::VaultMetaCorrupt`] si el prefijo de longitud falta o el
 /// `ConcatenatedFec::decode` no logra corregir la corrupción.
 fn fec_decode(blob: &[u8]) -> Result<Vec<u8>, VaultError> {
-    let prefix = blob
-        .get(0..LEN_PREFIX)
+    // `split_first_chunk` yields the 4-byte prefix as a `&[u8; LEN_PREFIX]` and the
+    // remaining payload in one bounds-safe step — no fallible `try_into` (whose
+    // error arm was unreachable once the length was already guaranteed).
+    let (len_arr, payload) = blob
+        .split_first_chunk::<LEN_PREFIX>()
         .ok_or(VaultError::VaultMetaCorrupt)?;
-    let len_arr: [u8; LEN_PREFIX] = prefix
-        .try_into()
-        .map_err(|_| VaultError::VaultMetaCorrupt)?;
-    let pre_len = u32::from_le_bytes(len_arr) as usize;
-    let payload = blob.get(LEN_PREFIX..).ok_or(VaultError::VaultMetaCorrupt)?;
+    let pre_len = u32::from_le_bytes(*len_arr) as usize;
     ConcatenatedFec::default()
         .decode(payload, pre_len)
         .map_err(map_crypto_err)
@@ -246,6 +253,31 @@ mod tests {
         salt_fec[super::LEN_PREFIX] ^= 0x01;
         let dek2 = open_envelope(&vault, M, &salt_fec, &wrapped_fec).expect("salt bit-flip");
         assert_eq!(&dek[..], &dek2[..]);
+    }
+
+    #[test]
+    fn test_bit_flip_in_length_prefix_fails_safe_as_corrupt() {
+        // The 4-byte length prefix sits OUTSIDE the FEC-protected region
+        // (see `fec_encode`), so corruption there is not self-corrected — but it
+        // MUST fail safe: a typed `VaultMetaCorrupt`, never a panic and never a
+        // wrong DEK (REQ-V35). Documents the intentionally-uncorrected window.
+        let vault = cryptovault::CryptoVault::default();
+        let (salt_fec, wrapped_fec, _) = bootstrap_envelope(&vault, M).expect("bootstrap");
+
+        // Multi-bit flip: invert the whole 4-byte prefix so `pre_len` is enormous.
+        let mut multi = wrapped_fec.clone();
+        for b in multi.iter_mut().take(super::LEN_PREFIX) {
+            *b ^= 0xFF;
+        }
+        let err = open_envelope(&vault, M, &salt_fec, &multi).expect_err("prefix corruption fails");
+        assert!(matches!(err, VaultError::VaultMetaCorrupt));
+
+        // Single-bit flip in the most-significant prefix byte (LE) — a large
+        // `pre_len` the FEC block-count check rejects.
+        let mut single = wrapped_fec.clone();
+        single[super::LEN_PREFIX - 1] ^= 0x80;
+        let err2 = open_envelope(&vault, M, &salt_fec, &single).expect_err("prefix bit-flip fails");
+        assert!(matches!(err2, VaultError::VaultMetaCorrupt));
     }
 
     #[test]
