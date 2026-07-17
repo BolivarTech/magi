@@ -239,12 +239,14 @@ fn open_tui_memory(
     let db_absent = !db_path.exists();
     let mut passphrase = match resolve_master_passphrase(db_absent, passphrase_flag, prompt) {
         Ok(p) => p,
-        Err(_) => {
-            notices.push(
-                "WARNING: no passphrase available; running WITHOUT persistence for \
-                 this session (any existing on-disk database is left untouched)."
-                    .to_string(),
-            );
+        Err(e) => {
+            // Surface the SPECIFIC reason (e.g. a rejected weak passphrase vs. no
+            // passphrase available) so the user knows why the session degraded.
+            // VaultError's Display never contains the passphrase (verified).
+            notices.push(format!(
+                "WARNING: {e}; running WITHOUT persistence for this session (any \
+                 existing on-disk database is left untouched)."
+            ));
             return MemoryAttachment::Ephemeral;
         }
     };
