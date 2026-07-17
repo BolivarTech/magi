@@ -16,7 +16,7 @@
 //! touches a real terminal). [`TtyIo`] is the production implementation, over
 //! the real stdin/stdout/stderr.
 
-use std::io::{self, Read, Write};
+use std::io::{self, BufRead, Read, Write};
 
 use cryptovault::MAX_PLAINTEXT_LEN;
 use zeroize::Zeroizing;
@@ -227,7 +227,12 @@ impl VaultIo for TtyIo {
                 eprint!("{prompt_msg}");
                 io::stderr().flush().ok();
                 let mut line = String::new();
+                // Bound the buffered read to MAX+1 bytes even on the interactive
+                // --show path, mirroring the stdin path — `Take<StdinLock>` still
+                // stops at the newline (BufRead), so interactivity is preserved.
                 io::stdin()
+                    .lock()
+                    .take(MAX_PLAINTEXT_LEN as u64 + 1)
                     .read_line(&mut line)
                     .map_err(|e| VaultError::Io(e.to_string()))?;
                 strip_trailing_newline(line)
