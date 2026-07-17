@@ -371,15 +371,23 @@ fn run_rm(
 /// obtain `store`/`rekey` in the first place — this function never sees it.
 ///
 /// # Errors
-/// [`VaultError::WeakPassphrase`] if the new passphrase does not meet the
-/// strength floor; [`VaultError::PassphraseUnavailable`] if entry is
-/// aborted (an empty line); [`VaultError::Io`] on a terminal read failure;
-/// otherwise propagates whatever `rekey` returned.
+/// [`VaultError::PassphraseUnavailable`] if there is no TTY (a new passphrase
+/// can only be entered interactively — it never comes from `-p`/env/stdin,
+/// which carry the CURRENT passphrase and the secret value respectively) or if
+/// entry is aborted (an empty line); [`VaultError::WeakPassphrase`] if the new
+/// passphrase does not meet the strength floor; [`VaultError::Io`] on a
+/// terminal read failure; otherwise propagates whatever `rekey` returned.
 fn run_passwd(
     show: bool,
     io: &mut dyn VaultIo,
     rekey: &mut dyn FnMut(&str) -> Result<(), VaultError>,
 ) -> Result<(), VaultError> {
+    // A new passphrase can only be prompted for (double entry); without a TTY
+    // there is nowhere to read it from, so fail closed with a clear error
+    // rather than surfacing an opaque terminal-read failure (REQ-V40 spirit).
+    if !io.is_interactive() {
+        return Err(VaultError::PassphraseUnavailable);
+    }
     let new_passphrase = create_passphrase(io as &mut dyn PassphrasePrompt, show)?;
     rekey(new_passphrase.as_str())?;
     io.println("passphrase changed");
@@ -778,6 +786,22 @@ mod tests {
         )
         .expect("passwd ok");
         assert_eq!(received.as_deref(), Some("correct horse battery staple"));
+    }
+
+    #[test]
+    fn test_passwd_without_tty_fails_closed_without_rekey() {
+        // Loop-1 M-4: a new passphrase can only be entered interactively; with
+        // no TTY, passwd fails with PassphraseUnavailable and never rekeys,
+        // instead of surfacing an opaque terminal-read error.
+        let mut store = fixture_store();
+        let mut io = FakeIo::non_interactive_with_value("ignored");
+        let result = run_vault_cmd(
+            VaultCmd::Passwd { show: false },
+            &mut store,
+            &mut io,
+            &mut no_rekey(),
+        );
+        assert!(matches!(result, Err(VaultError::PassphraseUnavailable)));
     }
 
     #[test]
