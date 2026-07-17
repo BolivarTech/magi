@@ -6,8 +6,8 @@
 //! `SqliteVectorStore` (REQ-01, REQ-03, REQ-04).
 //!
 //! # Integration design
-//! `SqliteVectorStore` **shares** the `Arc<Mutex<Connection>>` and cached
-//! `derived_key` from [`EncryptedSqliteMemory`] — it does NOT open a second
+//! `SqliteVectorStore` **shares** the `Arc<Mutex<Connection>>` and the masked
+//! `dek` from [`EncryptedSqliteMemory`] — it does NOT open a second
 //! DB or re-derive a key. A fresh `CryptoVault::default()` is constructed
 //! locally; the vault is a stateless algorithm bundle so this is zero-cost.
 //!
@@ -388,7 +388,7 @@ fn parse_kind(s: &str) -> Result<MemoryKind, MemoryError> {
 
 /// SQLite-backed, encrypted, scope-aware vector store.
 ///
-/// Shares the `Arc<Mutex<Connection>>` and cached `derived_key` from
+/// Shares the `Arc<Mutex<Connection>>` and the masked `dek` from
 /// [`EncryptedSqliteMemory`][crate::system::database::EncryptedSqliteMemory]
 /// so the `memories` table lives in the same database file and uses the same
 /// AES-256-GCM-SIV key. No second DB connection is opened and no additional

@@ -183,8 +183,8 @@ impl EncryptedSqliteMemory {
         )?;
 
         // Envelope open path (REQ-V29/V35): `vault_meta` holds `{salt, wrapped_dek}`,
-        // each FEC-encoded. The master password (from the keyring, base64/UTF-8)
-        // derives the KEK that unwraps the DEK; the DEK — cached in `derived_key` —
+        // each FEC-encoded. The master passphrase (UTF-8, from `-p`/env/prompt)
+        // derives the KEK that unwraps the DEK; the DEK — held masked in `dek` —
         // encrypts every record.
         //
         // NEVER auto-delete on a crypto failure (REQ-V35): a wrong master or a
