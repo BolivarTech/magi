@@ -188,6 +188,24 @@ pub fn create_passphrase(
     }
 }
 
+/// Fuzz entrypoint (`fuzz_passphrase_input`, Task 8 / REQ-V39).
+///
+/// Feeds ARBITRARY bytes as a passphrase (via `from_utf8_lossy`, since input is a
+/// `&str`) through [`check_strength`] and a KEK derivation, **discarding** the
+/// results. Invariant: no input — empty, huge, non-UTF8 — ever panics; a weak one
+/// returns [`VaultError::WeakPassphrase`]. Tests raw-byte coverage via lossy
+/// conversion, not UTF-8 rejection (that path does not exist — input is `String`).
+#[doc(hidden)]
+pub fn fuzz_passphrase_entrypoint(data: &[u8]) {
+    let s = String::from_utf8_lossy(data);
+    let _ = check_strength(&s);
+    // Deriving a KEK must also never panic on arbitrary input.
+    let vault = cryptovault::CryptoVault::default();
+    if let Ok(salt) = cryptovault::generate_salt() {
+        let _ = vault.derive_key(&s, &salt);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -367,5 +385,17 @@ mod tests {
             .iter()
             .any(|m| m.to_lowercase().contains("no recovery")
                 || m.to_lowercase().contains("data is lost")));
+    }
+
+    #[test]
+    fn test_fuzz_passphrase_entrypoint_never_panics_on_arbitrary_input() {
+        for data in [
+            &b""[..],
+            &b"\x00"[..],
+            &b"\xff\xfe\x80"[..], // invalid UTF-8
+            &[0x41u8; 100_000],   // huge
+        ] {
+            super::fuzz_passphrase_entrypoint(data);
+        }
     }
 }

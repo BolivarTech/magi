@@ -87,3 +87,30 @@ interpretación. Si el crypto no corre bajo Miri, el alcance se acota a `error` 
 **Fuzz (REQ-V39) — targets definidos, ejecución en CI Linux:**
 - Los 2 targets existen en `fuzz/fuzz_targets/`: `fuzz_vault_meta_decode` (bytes arbitrarios → `open_envelope`, invariante: nunca panic ni borrado) y `fuzz_vault_blob_decrypt` (blob arbitrario → `decrypt_with_key`, maneja no-UTF8).
 - ⚠️ **`cargo-fuzz`/libFuzzer requiere el sanitizer `-fsanitize=fuzzer` (clang/LLVM), NO soportado en Windows MSVC** (limitación conocida del tooling, no del código). Los targets se **ejecutan en un CI Linux con nightly**: `cargo +nightly fuzz run <target> -- -max_total_time=300`. El bounds-safety del split que ejercitarían (`fuzz_open_entrypoint`) está además cubierto por el lint `clippy::indexing_slicing` (rompe el build) y por `test_fuzz_entrypoint_never_panics_on_arbitrary_input` (unit test).
+
+## Gate de hardening MS2 (REQ-V38 Miri · REQ-V39 fuzz) — Task 8 (2026-07-17)
+
+**Fuzz targets (REQ-V39) — 4 totales, wired y unit-smoked:**
+- MS1: `fuzz_vault_meta_decode`, `fuzz_vault_blob_decrypt`.
+- MS2: `fuzz_secret_value_roundtrip` (valor arbitrario → set/get, nunca panic), `fuzz_passphrase_input`
+  (passphrase arbitraria lossy → `check_strength` + derive KEK, nunca panic).
+- Cada entrypoint (`magi_rs::vault::fuzz_*_entrypoint`) tiene un **test unitario** que lo ejercita
+  con entradas degeneradas (vacía, no-UTF8, grande) bajo `cargo nextest` — cobertura de robustez
+  local que SÍ corre en cada §0.1.
+- **La corrida larga (≥ 30 min/target, coverage-guided) corre en CI Linux con nightly** (job dedicado,
+  no en el loop RGR ni en el presupuesto §7 — long-running por diseño, §0.3 de `CLAUDE.local.md`).
+  Consistente con la nota de MS1: `cargo +nightly fuzz build` en Windows-MSVC arranca la instrumentación
+  (ASan/sancov) pero el enlace con libFuzzer es problemático en MSVC (por eso el gate real es CI Linux);
+  no se declara un pase de Windows que no se verificó. El bounds-safety de los entrypoints está además
+  garantizado por `clippy::indexing_slicing` (rompe el build) + los tests unitarios de arriba.
+
+**Miri (REQ-V38) — alcance MS2 (extiende el spike de Task 0b):**
+- ✅ Cubre la **lógica pura** nueva: el enmascarado XOR de `memguard` (aritmética sobre buffers,
+  aliasing, init) y `check_strength` de `master` (zxcvbn es Rust puro). `vault::error` sigue limpio.
+- **Excluidos** (Miri no puede ejecutarlos, documentado sin fingir un pase):
+  - `store` y las pruebas de `envelope`/`database` que tocan **SQLite** (`rusqlite` bundled = FFI en C).
+  - Las **syscalls** de `region::lock`/`mlock` y de `harden_process` (`RLIMIT_CORE`/`PR_SET_DUMPABLE`)
+    — se saltean bajo `#[cfg(miri)]`; Miri no modela syscalls del SO.
+  - La derivación **Argon2id** (`m=64 MiB`, muy lenta bajo interpretación) y el AES que puede usar
+    AES-NI (cae al backend portable vía `cpufeatures`, no siempre bajo Miri).
+- **Se corre en CI** junto al fuzz; no se declara un pase de lo que no se ejecutó.

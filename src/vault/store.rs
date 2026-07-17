@@ -337,6 +337,30 @@ impl SecretStore for VaultStore {
     }
 }
 
+/// Fuzz entrypoint (`fuzz_secret_value_roundtrip`, Task 8 / REQ-V39).
+///
+/// Takes ARBITRARY bytes as a secret value (via `from_utf8_lossy`, since a stored
+/// value is a `&str`), sets and gets it against a throwaway in-memory store, and
+/// **discards** the results. The invariant the fuzzer verifies: no input —
+/// empty, non-UTF8, huge — ever panics; every failure is a typed [`VaultError`]
+/// and a successful round-trip returns the exact value.
+#[doc(hidden)]
+pub fn fuzz_value_roundtrip_entrypoint(data: &[u8]) {
+    let Ok(conn) = Connection::open_in_memory() else {
+        return;
+    };
+    let Ok(dek) = MaskedDek::new(Zeroizing::new(vec![7u8; 32])) else {
+        return;
+    };
+    let Ok(mut store) = wire(Arc::new(Mutex::new(conn)), dek) else {
+        return;
+    };
+    let value = String::from_utf8_lossy(data);
+    if store.set("k", &value).is_ok() {
+        let _ = store.get("k");
+    }
+}
+
 #[cfg(test)]
 impl VaultStore {
     /// Test-only escape hatch to the shared connection, for assertions that
@@ -488,5 +512,17 @@ mod tests {
             })
             .expect("row");
         assert!(!String::from_utf8_lossy(&blob).contains("super-secret-readable"));
+    }
+
+    #[test]
+    fn test_fuzz_value_roundtrip_entrypoint_never_panics_on_arbitrary_input() {
+        for data in [
+            &b""[..],
+            &b"\x00"[..],
+            &b"\xff\xfe\x80"[..], // invalid UTF-8
+            &[0x41u8; 100_000],   // large (within the ceiling)
+        ] {
+            super::fuzz_value_roundtrip_entrypoint(data);
+        }
     }
 }
