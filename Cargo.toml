@@ -55,6 +55,10 @@ instant-distance = { version = "0.6", optional = true }
 
 # Vault MS2 — REQ-V42 layer 1: mlock/VirtualLock via a safe crate (no own unsafe).
 region = "3.0.2"
+# Vault MS2 — REQ-V18: passphrase strength (built-in dictionaries, no network).
+zxcvbn = "3.1.1"
+# Vault MS2 — REQ-V10: hidden passphrase/value prompt (no echo) cross-platform.
+rpassword = "7.5.4"
 
 [dev-dependencies]
 # RoutingMockProvider for consult tests (no extra runtime deps; reqwest NOT pulled)

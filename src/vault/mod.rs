@@ -28,10 +28,15 @@
 
 mod envelope;
 mod error;
+mod master;
 mod memguard;
 mod store;
 
 pub use envelope::{bootstrap_envelope, fuzz_open_entrypoint, open_envelope};
 pub use error::VaultError;
+pub use master::{
+    check_strength, create_passphrase, resolve_passphrase, PassphrasePrompt, TtyPrompt,
+    MIN_PASSPHRASE_CHARS, PASSPHRASE_ENV,
+};
 pub use memguard::{harden_process, MaskedDek};
 pub use store::{wire, SecretEntry, SecretStore, VaultStore};

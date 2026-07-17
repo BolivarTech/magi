@@ -48,6 +48,21 @@ pub enum VaultError {
     /// Fallo a nivel de almacenamiento SQLite.
     #[error("storage error: {0}")]
     Storage(String),
+
+    /// No hay TTY y no se proveyó la passphrase por `-p`/`MAGI_PASSPHRASE`
+    /// (REQ-V40): la passphrase **jamás** se lee de un pipe. Reintentable.
+    #[error("no passphrase: use -p or MAGI_PASSPHRASE in non-interactive environments")]
+    PassphraseUnavailable,
+
+    /// La passphrase no alcanza el piso duro de fortaleza (REQ-V18). El mensaje
+    /// lleva los motivos + tips, **jamás** la passphrase.
+    #[error("passphrase rejected: {0}")]
+    WeakPassphrase(String),
+
+    /// Error de E/S del terminal (prompt oculto / eco). Mensaje del `io::Error`,
+    /// sin material sensible.
+    #[error("I/O error: {0}")]
+    Io(String),
 }
 
 #[cfg(test)]
