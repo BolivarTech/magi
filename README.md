@@ -17,10 +17,10 @@ Most AI coding agents are SaaS-bound and tied to a single vendor. Magi is built 
 | Principle | What it means in Magi |
 |-----------|-----------------------|
 | **Local-first** | A single static Rust binary. Conversation history and project knowledge live in an encrypted SQLite file on disk — never a third-party vault. |
-| **Encrypted at rest** | Every stored record is sealed with AES-256-GCM-SIV + error-correcting FEC under a random data key, itself wrapped by an Argon2id-derived key — via the audited [`cryptovault`](https://crates.io/crates/cryptovault) crate. The DB master key lives in the OS keyring, separate from the LLM API key, and a wrong key never wipes the DB. |
+| **Encrypted at rest** | Every stored record is sealed with AES-256-GCM-SIV + error-correcting FEC under a random data key, itself wrapped by an Argon2id-derived key — via the audited [`cryptovault`](https://crates.io/crates/cryptovault) crate. The data key is unlocked by a **user passphrase** (zero-knowledge: nothing persisted opens the DB without it), and a wrong passphrase never wipes the DB. |
 | **Sandboxed by default** | Every filesystem tool is confined to the workspace via `PathGuard`; the shell tool runs a strict command allowlist with a hard ban on shell metacharacters. |
 | **Human-in-the-loop** | Each tool call must be approved inline in the TUI before it runs. |
-| **Fails safe** | If the OS keyring is unavailable, the session degrades to ephemeral (no persistence) rather than ever encrypting with a constant key. |
+| **Fails safe** | If no passphrase is available (headless with none supplied, or entry cancelled), the session degrades to ephemeral (no persistence) rather than ever encrypting with a constant key — the existing on-disk DB is left untouched. |
 
 ---
 
@@ -35,8 +35,8 @@ Most AI coding agents are SaaS-bound and tied to a single vendor. Magi is built 
 | **MAGI consult** | The agent can escalate hard, trade-off-heavy decisions to a 3-perspective consensus (Melchior / Balthasar / Caspar) via the `magi-core` crate — invoked autonomously through the tool loop (each call passes the approval gate) or forced with `/consult` |
 | **Tiered memory (RAG)** | Embedding-indexed vector store (any openai-compat endpoint, default Ollama + `nomic-embed-text-v2-moe`), composite reranker (similarity + recency + salience), decay/eviction, always-injected preference profile, hard token-budget assembler — context bounded regardless of history depth |
 | **Encrypted memory** | SQLite (WAL) with **one cached key derivation per session** (Argon2id + per-DB salt), AES-256-GCM-SIV, Reed-Solomon FEC; text **and** embedding vectors encrypted at rest |
-| **OAuth login** | PKCE flow against the Anthropic Console (`/login` in the TUI) |
-| **OS keyring** | API key in `magi-rs`, DB master key in `magi-rs-internal` (kept separate); `magi-rust` legacy names auto-migrated |
+| **OAuth login** | PKCE flow against the Anthropic Console (`/login` in the TUI); the minted key is stored in the vault |
+| **Zero-knowledge vault** | A passphrase (never persisted) unlocks the DB; API keys and other secrets live in an encrypted `vault` table managed by `magi-rs vault {ls,set,rm,passwd}` — no OS keyring, no `key.txt` |
 
 ---
 
@@ -46,7 +46,7 @@ Most AI coding agents are SaaS-bound and tied to a single vendor. Magi is built 
 
 - A Rust toolchain (stable, edition 2021) — install via [rustup](https://rustup.rs/).
 - `ripgrep` (`rg`) on `PATH` for the `grep` tool.
-- An Anthropic API key from [console.anthropic.com](https://console.anthropic.com/) (**recommended**), set via `ANTHROPIC_API_KEY` or `key.txt`. `/login` (OAuth) also works but is **best-effort** — see [Configuration](#configuration).
+- An Anthropic API key from [console.anthropic.com](https://console.anthropic.com/) (**recommended**), set via `ANTHROPIC_API_KEY` or stored in the vault (`magi-rs vault set ANTHROPIC_API_KEY`). `/login` (OAuth) also works but is **best-effort** — see [Configuration](#configuration).
 
 ### Build from source
 
@@ -59,8 +59,8 @@ cargo build --release          # binary at target/release/magi-rs[.exe]
 ### Run
 
 ```bash
-cargo run                      # launch the TUI
-cargo run -- --logout          # clear stored API keys from the OS keyring and exit
+cargo run                      # launch the TUI (prompts for the vault passphrase)
+cargo run -- --logout          # unlock the vault and remove ANTHROPIC_API_KEY, then exit
 ```
 
 ---
@@ -122,20 +122,31 @@ For decisions with genuine trade-offs — architecture choices, "should we X vs 
 
 ### API key & model discovery
 
-Resolved in order, first hit wins:
+Resolved in order, first hit wins (`env > vault` — there is no OS keyring or `key.txt` as of v0.9.0):
 
 1. `ANTHROPIC_API_KEY` environment variable
-2. OS keyring, service `magi-rs`, key `ANTHROPIC_API_KEY`
-3. OS keyring, service `magi-rust` (legacy) — auto-migrated to `magi-rs` on read
-4. `key.txt` in the working directory: line 1 = API key, line 2 = optional model
+2. The vault entry `ANTHROPIC_API_KEY` (stored via `magi-rs vault set ANTHROPIC_API_KEY`, unlocked by the passphrase)
 
-The model is read from `ANTHROPIC_MODEL`, then `key.txt` line 2, defaulting to `claude-sonnet-4-6`. With no key found, the agent falls back to `StaticProvider`.
+The model is read from `ANTHROPIC_MODEL`, defaulting to `claude-sonnet-4-6`. With no key found, the agent falls back to `StaticProvider`. The OpenAI-compatible key (`OPENAI_API_KEY`) follows the same `env > vault` precedence.
 
-**A standard API key is the recommended, supported path.** Create one at [console.anthropic.com](https://console.anthropic.com/) (with billing enabled) and set `ANTHROPIC_API_KEY` or put it in `key.txt`.
+**A standard API key is the recommended, supported path.** Create one at [console.anthropic.com](https://console.anthropic.com/) (with billing enabled) and set `ANTHROPIC_API_KEY` or store it with `magi-rs vault set ANTHROPIC_API_KEY`.
 
-> **`/login` (OAuth) is best-effort.** It reuses Anthropic's Claude Code OAuth client to mint a key on your account — a flow intended for Anthropic's own clients — so it may be **rate-limited, throttled, or blocked** at any time and is not guaranteed. Prefer a standard API key.
+> **`/login` (OAuth) is best-effort.** It reuses Anthropic's Claude Code OAuth client to mint a key on your account — a flow intended for Anthropic's own clients — so it may be **rate-limited, throttled, or blocked** at any time and is not guaranteed. The minted key is written to the vault. Prefer a standard API key.
 
-> `key.txt` and its variants are gitignored. Never commit a real key.
+### The vault & passphrase (v0.9.0)
+
+The DB and every secret are unlocked by a **user passphrase** — resolved as `-p <passphrase>` > `MAGI_PASSPHRASE` env var > interactive hidden prompt. On first run you create one (double entry; `zxcvbn` score ≥ 3 and ≥ 12 chars enforced, no override). **Zero-knowledge: nothing persisted opens the DB without the passphrase — forgetting it means the data is unrecoverable.** `-p`/`MAGI_PASSPHRASE` make headless/CI use and moving the `.db` between machines possible.
+
+Secrets live in an encrypted `vault` table, managed by the CLI:
+
+```bash
+magi-rs vault ls                       # list secret NAMES + timestamps (never values)
+magi-rs vault set ANTHROPIC_API_KEY    # value read from a hidden prompt or stdin, never argv
+magi-rs vault rm  OPENAI_API_KEY       # delete (Y-only confirmation; -f to skip)
+magi-rs vault passwd                   # rotate the passphrase (re-wraps the same data key, O(1))
+```
+
+There is **no `get`/`cat`/`show` command** — a stored value is never printed, by design.
 
 ### Default backend — Ollama-first (v0.6.0, BREAKING)
 
@@ -193,10 +204,10 @@ All built-in default literals live in one place — [`src/defaults.rs`](src/defa
 >    rot as it changes. They are maintained in one place (`src/defaults.rs`); refresh per
 >    release.
 
-**API keys never live in `magi.toml`.** Keys come from env / OS keyring / `key.txt` only — `magi.toml` is non-secret runtime config and is the wrong place for credentials. Specifically:
+**API keys never live in `magi.toml`.** Keys come from env or the vault only — `magi.toml` is non-secret runtime config and is the wrong place for credentials. Specifically:
 
-- **Anthropic key** — `ANTHROPIC_API_KEY` env var, OS keyring (`magi-rs`), or `key.txt` (see above).
-- **OpenAI-compatible key** — `OPENAI_API_KEY` env var. For a local Ollama instance, magi-rs falls back to a dummy value (`"ollama"`) so you can run without setting anything.
+- **Anthropic key** — `ANTHROPIC_API_KEY` env var, or the vault entry of the same name (see above).
+- **OpenAI-compatible key** — `OPENAI_API_KEY` env var, or the vault entry of the same name. For a local Ollama instance, magi-rs falls back to a dummy value (`"ollama"`) so you can run without setting anything.
 - Placing `api_key` / `OPENAI_API_KEY` (or any other unknown field) inside `magi.toml` is rejected at parse time under `deny_unknown_fields`, not silently dropped — the file is treated as invalid and magi-rs falls back to defaults with a startup warning.
 - A malformed `magi.toml` does not crash magi-rs: it falls back to defaults and surfaces a notice in the TUI on startup.
 
@@ -300,8 +311,8 @@ unaffected.
 ```
             ┌───────────────────────────────┐
             │  main.rs                       │
-            │  config discovery · keyring    │
-            │  master-key · tool registration│
+            │  config discovery · passphrase │
+            │  vault open · tool registration│
             └───────────────┬───────────────┘
                             │
             ┌───────────────┴───────────────┐
@@ -334,9 +345,10 @@ unaffected.
 
 ## Security Model
 
-- **Encrypted memory (envelope DEK/KEK).** A random 32-byte **data key (DEK)** encrypts every record via the audited [`cryptovault`](https://crates.io/crates/cryptovault) crate (Argon2id → AES-256-GCM-SIV → error-correcting FEC, `#![forbid(unsafe_code)]`). The DB master secret plus a per-DB salt derives a **KEK** (Argon2id, OWASP 2025: 64 MiB, t=3, p=4) that **wraps** the DEK; `vault_meta` stores `{salt, wrapped_dek}`, each FEC-encoded. The DEK is unwrapped **once per session** and cached (`Zeroizing`) — no Argon2 runs per record.
-- **Never loses your data.** A wrong master secret or a corrupt wrapped key fails with a typed, **retryable** error and **never wipes** the database — only a brand-new or pre-envelope DB (no wrapped key present) is bootstrapped fresh. `vault_meta` is FEC-protected, so on-disk bit-rot is corrected before the unwrap; corruption beyond the FEC's reach surfaces as a distinct `VaultMetaCorrupt` error, never a silent wrong key.
-- **Secrets separation.** The LLM API key (keyring `magi-rs`) and the DB master password (keyring `magi-rs-internal`) are kept in **separate** keyring services. Rotating the API key never invalidates the local conversation DB.
+- **Encrypted memory (envelope DEK/KEK).** A random 32-byte **data key (DEK)** encrypts every record via the audited [`cryptovault`](https://crates.io/crates/cryptovault) crate (Argon2id → AES-256-GCM-SIV → error-correcting FEC, `#![forbid(unsafe_code)]`). The user **passphrase** plus a per-DB salt derives a **KEK** (Argon2id, OWASP 2025: 64 MiB, t=3, p=4) that **wraps** the DEK; `vault_meta` stores `{salt, wrapped_dek}`, each FEC-encoded. The DEK is unwrapped **once per session** and held **masked in RAM** (`MaskedDek`: XOR mask rotated from `OsRng` on every access, best-effort `mlock`) — no Argon2 runs per record.
+- **Zero-knowledge unlock.** Nothing persisted opens the DB without the passphrase — no OS keyring, no cached file, no copy of the DEK on disk (`system::secrets` and the `keyring` dependency were removed in v0.9.0). The passphrase resolves as `-p` > `MAGI_PASSPHRASE` > interactive prompt; a hard strength floor (`zxcvbn` ≥ 3, ≥ 12 chars, no override) guards against offline brute-force of a portable `.db`. Forgetting the passphrase means the data is unrecoverable — there is no backdoor.
+- **Never loses your data.** A wrong passphrase or a corrupt wrapped key fails with a typed, **retryable** error and **never wipes** the database — only a brand-new or pre-envelope DB (no wrapped key present) is bootstrapped fresh. `vault_meta` is FEC-protected, so on-disk bit-rot is corrected before the unwrap; corruption beyond the FEC's reach surfaces as a distinct `VaultMetaCorrupt` error, never a silent wrong key.
+- **Secrets separation.** The passphrase (which unlocks the DEK) and the stored API keys (entries *inside* the vault) are different secrets in different places: rotating a stored API key never requires re-keying the passphrase, and a wrong API key never invalidates the local conversation DB. `magi-rs vault passwd` rotates the passphrase without re-encrypting any record (it re-wraps the same DEK).
 - **Filesystem sandbox.** Every file-touching tool canonicalizes its target and validates it against the workspace root via `PathGuard` (handling Windows `\\?\` verbatim prefixes, null-byte attacks, and lexical normalization).
 - **Shell sandbox.** The `bash` tool enforces a per-binary argument allowlist and bans shell metacharacters to prevent subshell injection on both PowerShell and bash.
 
@@ -346,7 +358,7 @@ unaffected.
 
 ```
 src/
-  main.rs              -- config discovery, master-key bootstrap, tool registration, entry
+  main.rs              -- config discovery, passphrase resolution / vault open, tool registration, entry
   lib.rs               -- library root (pub mod vault) so fuzz / coverage targets can link
   config.rs            -- MagiConfig (magi.toml load + provider/model resolution)
   defaults.rs          -- single source of truth for all built-in default literals
@@ -375,10 +387,14 @@ src/
     ls.rs read.rs write.rs grep.rs bash.rs knowledge.rs consult.rs
   system/
     database.rs        -- EncryptedSqliteMemory (MemoryStore) over SQLite; opens via the vault envelope
-    fs.rs grep.rs secrets.rs path_guard.rs
+    fs.rs grep.rs path_guard.rs
   vault/
-    mod.rs             -- SecretStore boundary + envelope re-exports (Vault MS1 crypto foundation)
-    envelope.rs        -- DEK/KEK envelope: bootstrap/open, wrap/unwrap, keyless FEC over vault_meta
+    mod.rs             -- SecretStore boundary + public re-exports (frontier main.rs sees)
+    envelope.rs        -- DEK/KEK envelope: bootstrap/open, wrap/unwrap/rekey, keyless FEC over vault_meta
+    memguard.rs        -- MaskedDek: DEK masked in RAM (OsRng per-access rotation), harden_process
+    master.rs          -- passphrase resolution (-p > env > prompt), zxcvbn strength floor
+    store.rs           -- VaultStore: the `vault` table + SecretStore CRUD (one blob per secret)
+    cli.rs             -- `magi-rs vault {ls,set,rm,passwd}` (hidden prompt / stdin, Y-only confirm)
     error.rs           -- VaultError (thiserror): WrongPassphrase / VaultMetaCorrupt / ...
   services/
     oauth.rs           -- OAuth PKCE login (callback on 127.0.0.1:54545)
@@ -414,7 +430,7 @@ cargo doc --no-deps
 cargo audit
 ```
 
-> Some tests use real OS resources: `system::secrets` tests write to the real OS keyring under service `magi-rs-test-suite`, and the OAuth callback server binds port `54545` — avoid two interactive `/login` flows at once. DB/crypto tests are isolated via `tempfile`.
+> Some tests use real OS resources: the OAuth callback server binds port `54545` — avoid two interactive `/login` flows at once. DB/crypto/vault tests are isolated via `tempfile` plus injected connections and passphrase-prompt doubles — no OS keyring is touched anywhere (`system::secrets` was removed in v0.9.0).
 
 ---
 
@@ -424,10 +440,10 @@ cargo audit
 |-----------|----------|-------|
 | Rust toolchain (stable, edition 2021) | Yes | via [rustup](https://rustup.rs/) |
 | `ripgrep` (`rg`) | For the `grep` tool | on `PATH` |
-| OS keyring | For persistence | Windows Credential Manager / macOS Keychain / Secret Service. Without it the session runs ephemeral |
+| Vault passphrase | For persistence | Chosen on first run (or supplied via `-p`/`MAGI_PASSPHRASE`). Without one available the session runs ephemeral (the on-disk DB is left untouched) |
 | [Ollama](https://ollama.com/) (default backend) | For live replies (default) | running daemon + a chat model (e.g. `kimi-k2.6:cloud`); run `ollama signin` for `:cloud` tags. Any OpenAI-compatible endpoint works by pointing `base_url` elsewhere |
 | Embedding model | For tiered memory (`selective`, the default) | `ollama pull nomic-embed-text-v2-moe:latest`; without it memory degrades gracefully to text-only persistence |
-| Anthropic API key | Optional (opt-in) | only with `provider = "anthropic"`; via env var, keyring, `key.txt`, or `/login` |
+| Anthropic API key | Optional (opt-in) | only with `provider = "anthropic"`; via env var, the vault, or `/login` |
 
 ### Default models (Ollama)
 
