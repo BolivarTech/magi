@@ -2,6 +2,7 @@
 // Version: 1.0.0
 // Date: 2026-07-14
 #![deny(missing_docs)]
+#![deny(clippy::missing_docs_in_private_items)]
 #![deny(rustdoc::broken_intra_doc_links)]
 #![deny(clippy::missing_errors_doc, clippy::missing_panics_doc)]
 // Lints de panic/bounds-safety: SOLO en producción. Los tests usan

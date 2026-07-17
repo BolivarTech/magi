@@ -36,8 +36,22 @@ sobre cada archivo tocado, en adición a `cargo nextest` / `clippy -D warnings` 
   `unwrap_used`/`expect_used`/`panic`/`todo`/`unimplemented`/`indexing_slicing`/
   `string_slice` dentro de `src/vault/` (denegados a nivel de módulo). |
 | Formato | `cargo fmt --check` | El código sigue `rustfmt.toml` (`max_width = 100`). |
-| Documentación | `cargo doc --no-deps` | Rustdoc compila sin warnings; `missing_docs` es
-  `deny` dentro de `src/vault/`. |
+| Documentación | `cargo doc --no-deps` | Rustdoc compila sin warnings; `missing_docs` **y
+  `clippy::missing_docs_in_private_items`** son `deny` dentro de `src/vault/` (MS2 Task 0) —
+  TODO ítem, público **o `pub(crate)`/privado**, exige rustdoc. Verificado 2026-07-17: un
+  `pub(crate) fn` sin doc rompe el build. |
+
+## Archivos nuevos de MS2 (recorrer la checklist (B) por cada uno)
+
+Cada archivo nuevo del vault se somete a la checklist "Por archivo" de arriba en cada
+`/verification-before-completion` y en el gate §6:
+
+- [ ] `src/vault/memguard.rs` (Task 1) — `MaskedDek` + `harden_process`
+- [ ] `src/vault/store.rs` (Task 2) — tabla `vault` + `SecretStore` CRUD
+- [ ] `src/vault/master.rs` (Task 4) — resolución de passphrase + `zxcvbn`
+- [ ] `src/vault/cli.rs` (Task 6) — subcomandos `clap` `ls`/`set`/`rm`/`passwd`
+- [ ] `src/vault/envelope.rs` (Task 5, ampliación) — `rekey_envelope`
+- [ ] `src/vault/error.rs` (Tasks 2/4/6, variantes nuevas + corrección a inglés de las de MS1)
 | Vulnerabilidades | `cargo audit` | Sin advisories conocidos en el árbol de dependencias. |
 | Licencias | `cargo deny check licenses` | Solo licencias permisivas listadas en
   `deny.toml`. |
