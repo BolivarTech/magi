@@ -533,7 +533,10 @@ mod tests {
         // together proving the value is really encrypted and recoverable.
         assert_ne!(blob.as_slice(), b"super-secret-readable");
         assert!(!String::from_utf8_lossy(&blob).contains("super-secret-readable"));
-        assert_eq!(s.get("K").expect("roundtrip").as_str(), "super-secret-readable");
+        assert_eq!(
+            s.get("K").expect("roundtrip").as_str(),
+            "super-secret-readable"
+        );
     }
 
     #[test]

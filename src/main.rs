@@ -118,7 +118,9 @@ fn discover_config(secret_store: Option<&SharedSecretStore>) -> Option<Config> {
     let key = guard.get("ANTHROPIC_API_KEY").ok()?;
     let model = env::var("ANTHROPIC_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string());
     Some(Config {
-        api_key: key.as_str().to_string(),
+        // Trim like the env path: a stored/exported key with stray whitespace or
+        // a trailing newline would otherwise produce a malformed auth header (401).
+        api_key: key.as_str().trim().to_string(),
         model,
         source: "vault".to_string(),
     })
@@ -127,16 +129,20 @@ fn discover_config(secret_store: Option<&SharedSecretStore>) -> Option<Config> {
 /// Resolves the `OPENAI_API_KEY` used by the OpenAI-compatible chat provider
 /// and the embedder: environment first, then the vault (REQ-V12), mirroring
 /// [`discover_config`]'s precedence for the Anthropic key.
+///
+/// Both sources are trimmed for the same reason `discover_config` trims: a key
+/// with stray whitespace or a trailing newline (a common `export KEY=$(cat f)`
+/// artifact) would otherwise produce a malformed `Authorization` header (401).
 fn resolve_openai_key(secret_store: Option<&SharedSecretStore>) -> Option<String> {
     if let Ok(key) = env::var("OPENAI_API_KEY") {
-        return Some(key);
+        return Some(key.trim().to_string());
     }
     let ss = secret_store?;
     let mut guard = ss.lock().unwrap_or_else(|p| p.into_inner());
     guard
         .get("OPENAI_API_KEY")
         .ok()
-        .map(|z| z.as_str().to_string())
+        .map(|z| z.as_str().trim().to_string())
 }
 
 /// Outcome of resolving the vault passphrase and opening the encrypted store
@@ -1002,6 +1008,48 @@ mod tests {
                     let cfg = discover_config(Some(&ss)).expect("env key");
                     assert_eq!(cfg.api_key, "sk-from-env");
                     assert_eq!(cfg.source, "ENV");
+                });
+            });
+        });
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_api_keys_are_trimmed_of_surrounding_whitespace() {
+        // Loop-2 S3 (Balthasar): a key with a trailing newline (a common
+        // `export KEY=$(cat f)` artifact) or stray whitespace must be trimmed,
+        // else the auth header is malformed (401). Both keys, both paths.
+        with_var("ANTHROPIC_API_KEY", None, || {
+            with_var("ANTHROPIC_MODEL", None, || {
+                with_var("OPENAI_API_KEY", None, || {
+                    let ss = vault_fixture();
+                    {
+                        let mut guard = ss.lock().unwrap();
+                        guard.set("ANTHROPIC_API_KEY", "  sk-vault-anthropic\n").unwrap();
+                        guard.set("OPENAI_API_KEY", "sk-vault-openai\t").unwrap();
+                    }
+                    // Vault paths trim.
+                    assert_eq!(
+                        discover_config(Some(&ss)).expect("a").api_key,
+                        "sk-vault-anthropic"
+                    );
+                    assert_eq!(
+                        resolve_openai_key(Some(&ss)).as_deref(),
+                        Some("sk-vault-openai")
+                    );
+                    // Env paths trim (and win over the vault).
+                    with_var("OPENAI_API_KEY", Some("sk-env-openai\n"), || {
+                        assert_eq!(
+                            resolve_openai_key(Some(&ss)).as_deref(),
+                            Some("sk-env-openai")
+                        );
+                    });
+                    with_var("ANTHROPIC_API_KEY", Some(" sk-env-anthropic "), || {
+                        assert_eq!(
+                            discover_config(Some(&ss)).expect("b").api_key,
+                            "sk-env-anthropic"
+                        );
+                    });
                 });
             });
         });
