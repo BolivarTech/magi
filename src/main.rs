@@ -1025,7 +1025,9 @@ mod tests {
                     let ss = vault_fixture();
                     {
                         let mut guard = ss.lock().unwrap();
-                        guard.set("ANTHROPIC_API_KEY", "  sk-vault-anthropic\n").unwrap();
+                        guard
+                            .set("ANTHROPIC_API_KEY", "  sk-vault-anthropic\n")
+                            .unwrap();
                         guard.set("OPENAI_API_KEY", "sk-vault-openai\t").unwrap();
                     }
                     // Vault paths trim.
