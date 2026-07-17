@@ -75,18 +75,28 @@ fn is_affirmative(line: &str) -> bool {
 /// `\n`/`\r\n`; inner newlines are preserved, so multi-line values such as
 /// PEM keys round-trip intact.
 ///
+/// The bytes are decoded **strictly** as UTF-8: invalid input fails with a
+/// typed error rather than being lossily coerced to U+FFFD and stored as a
+/// silently-wrong secret (this mirrors the strict decode of the read path —
+/// REQ-V03). The size ceiling is enforced on the **stored** (newline-stripped)
+/// length, so a value of exactly `MAX_PLAINTEXT_LEN` bytes with a trailing
+/// newline is accepted, consistent with the TTY path.
+///
 /// # Errors
-/// [`VaultError::Io`] if the underlying read fails; [`VaultError::ValueTooLarge`]
-/// if more than `MAX_PLAINTEXT_LEN` bytes were read — checked without ever
-/// buffering more than `MAX_PLAINTEXT_LEN + 1` of them.
+/// [`VaultError::Io`] if the underlying read fails or the bytes are not valid
+/// UTF-8; [`VaultError::ValueTooLarge`] if the stored value would exceed
+/// `MAX_PLAINTEXT_LEN` — checked without ever buffering more than
+/// `MAX_PLAINTEXT_LEN + 1` bytes.
 fn read_bounded_value(reader: impl Read) -> Result<Zeroizing<String>, VaultError> {
     let mut buf = Vec::new();
     reader
         .take(MAX_PLAINTEXT_LEN as u64 + 1)
         .read_to_end(&mut buf)
         .map_err(|e| VaultError::Io(e.to_string()))?;
-    enforce_value_ceiling(buf.len())?;
-    let text = strip_trailing_newline(String::from_utf8_lossy(&buf).into_owned());
+    let decoded = String::from_utf8(buf)
+        .map_err(|_| VaultError::Io("piped value is not valid UTF-8".to_string()))?;
+    let text = strip_trailing_newline(decoded);
+    enforce_value_ceiling(text.len())?;
     Ok(Zeroizing::new(text))
 }
 
@@ -568,6 +578,16 @@ mod tests {
         let mut io = FakeIo::with_stdin_reader(std::io::repeat(b'a'));
         let r = io.read_value("value: ", false);
         assert!(matches!(r, Err(VaultError::ValueTooLarge(_))));
+    }
+
+    #[test]
+    fn test_set_rejects_non_utf8_piped_value_instead_of_silently_corrupting() {
+        // Loop-1 I-1: a piped secret with invalid UTF-8 bytes must fail with a
+        // typed error, NOT be lossily coerced to U+FFFD and stored wrong
+        // (matching the strict decode of the read path — REQ-V03).
+        let mut io = FakeIo::with_stdin_reader(&[0xff, 0xfe, 0x00, 0x80][..]);
+        let r = io.read_value("value: ", false);
+        assert!(matches!(r, Err(VaultError::Io(_))));
     }
 
     #[test]
