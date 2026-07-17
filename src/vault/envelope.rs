@@ -87,21 +87,23 @@ fn map_crypto_err(e: CryptoError) -> VaultError {
 ///
 /// La FEC es un códec **sin clave**: corrige bit-rot de la representación en
 /// disco sin necesitar el secreto.
-fn fec_encode(bytes: &[u8]) -> Vec<u8> {
-    // La longitud de `salt`/`wrapped_dek` cabe holgada en u32 (nunca > 10 MiB);
-    // el clamp es defensivo y jamás se alcanza para las entradas de `vault_meta`.
-    debug_assert!(
-        bytes.len() <= u32::MAX as usize,
-        "fec_encode input exceeds the u32 length prefix"
-    );
-    let len = u32::try_from(bytes.len()).unwrap_or(u32::MAX);
+///
+/// # Errors
+///
+/// [`VaultError::Crypto`] si `bytes.len()` no cabe en el prefijo `u32` (jamás
+/// alcanzable para las entradas de `vault_meta`, ~48 B; se reporta como error
+/// tipado en vez de truncar silenciosamente el prefijo — defensa en release).
+fn fec_encode(bytes: &[u8]) -> Result<Vec<u8>, VaultError> {
+    let len = u32::try_from(bytes.len()).map_err(|_| {
+        VaultError::Crypto("vault_meta entry exceeds the u32 length prefix".to_string())
+    })?;
     // Codificar primero: `ConcatenatedFec` expande ~2.3x, así que dimensionar por
     // `bytes.len()` forzaría un realloc. Con `encoded.len()` la capacidad es exacta.
     let encoded = ConcatenatedFec::default().encode(bytes);
     let mut out = Vec::with_capacity(LEN_PREFIX + encoded.len());
     out.extend_from_slice(&len.to_le_bytes());
     out.extend_from_slice(&encoded);
-    out
+    Ok(out)
 }
 
 /// Recupera los bytes originales de un blob producido por [`fec_encode`].
@@ -145,8 +147,8 @@ pub fn bootstrap_envelope(vault: &CryptoVault, master: &str) -> Result<Bootstrap
         .map_err(|e| VaultError::Crypto(format!("DEK generation failed: {e}")))?;
     let kek = vault.derive_key(master, &salt).map_err(map_crypto_err)?;
     let wrapped = vault.wrap_key(&kek, &salt, &dek).map_err(map_crypto_err)?;
-    let salt_fec = fec_encode(&salt);
-    let wrapped_fec = fec_encode(wrapped.as_bytes());
+    let salt_fec = fec_encode(&salt)?;
+    let wrapped_fec = fec_encode(wrapped.as_bytes())?;
     Ok((salt_fec, wrapped_fec, dek))
 }
 
@@ -255,8 +257,8 @@ fn rekey_envelope_inner(
     let wrapped_new = vault
         .wrap_key(&kek_new, &new_salt, &dek)
         .map_err(map_crypto_err)?;
-    let new_salt_fec = fec_encode(&new_salt);
-    let new_wrapped_fec = fec_encode(wrapped_new.as_bytes());
+    let new_salt_fec = fec_encode(&new_salt)?;
+    let new_wrapped_fec = fec_encode(wrapped_new.as_bytes())?;
 
     // (3) Atomic write with a compare-and-abort against a concurrent re-wrap.
     let mut guard = conn.lock().unwrap_or_else(|p| p.into_inner());
