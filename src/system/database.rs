@@ -324,10 +324,16 @@ impl EncryptedSqliteMemory {
 }
 
 /// Maps a [`VaultError`] from the envelope open/bootstrap path into an
-/// application-level [`anyhow::Error`], preserving the user-facing message
-/// (`WrongPassphrase` ⇒ "passphrase incorrecta"). **Never wipes data.**
+/// application-level [`anyhow::Error`], preserving the user-facing `Display`
+/// message (`WrongPassphrase` ⇒ "incorrect passphrase"). **Never wipes data.**
+///
+/// Uses `.into()` (not `anyhow!("{e}")`) so the original [`VaultError`]
+/// remains recoverable via [`anyhow::Error::downcast_ref`] — MS2's CLI
+/// (`main.rs`) matches on the concrete variant to pick an exit code and to
+/// drive the TUI's passphrase-retry loop (SC-V09), which a plain formatted
+/// string would make impossible.
 fn map_open_err(e: VaultError) -> anyhow::Error {
-    anyhow::anyhow!("{e}")
+    e.into()
 }
 
 #[async_trait]
