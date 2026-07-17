@@ -24,7 +24,7 @@ pub enum VaultError {
     ///
     /// Es **reintentable** y **nunca** dispara un borrado de datos: ver la
     /// política de nunca-borrar (REQ-V35).
-    #[error("passphrase incorrecta")]
+    #[error("incorrect passphrase")]
     WrongPassphrase,
 
     /// `vault_meta` está presente pero es irrecuperable **incluso tras** la
@@ -32,22 +32,48 @@ pub enum VaultError {
     ///
     /// Requiere una acción **explícita** del usuario; el sistema jamás se
     /// auto-repara destruyendo datos.
-    #[error("vault_meta corrupto e irrecuperable")]
+    #[error("vault metadata is corrupt and unrecoverable")]
     VaultMetaCorrupt,
 
     /// No existe un secreto con el nombre indicado. El nombre no es material
     /// sensible, por lo que puede figurar en el mensaje.
-    #[error("secreto no encontrado: {0}")]
+    #[error("secret not found: {0}")]
     SecretNotFound(String),
 
     /// Fallo criptográfico propagado desde `cryptovault` (mensaje ya
     /// sanitizado por el crate — sin oráculos de decode ni de timing).
-    #[error("error de cripto: {0}")]
+    #[error("crypto error: {0}")]
     Crypto(String),
 
     /// Fallo a nivel de almacenamiento SQLite.
-    #[error("error de almacenamiento: {0}")]
+    #[error("storage error: {0}")]
     Storage(String),
+
+    /// No hay TTY y no se proveyó la passphrase por `-p`/`MAGI_PASSPHRASE`
+    /// (REQ-V40): la passphrase **jamás** se lee de un pipe. Reintentable.
+    #[error("no passphrase: use -p or MAGI_PASSPHRASE in non-interactive environments")]
+    PassphraseUnavailable,
+
+    /// La passphrase no alcanza el piso duro de fortaleza (REQ-V18). El mensaje
+    /// lleva los motivos + tips, **jamás** la passphrase.
+    #[error("passphrase rejected: {0}")]
+    WeakPassphrase(String),
+
+    /// Error de E/S del terminal (prompt oculto / eco). Mensaje del `io::Error`,
+    /// sin material sensible.
+    #[error("I/O error: {0}")]
+    Io(String),
+
+    /// El usuario no confirmó una operación destructiva (REQ-V22). El CLI
+    /// sale con código de salida distinto de cero para que los scripts lo
+    /// detecten; no es un fallo del sistema.
+    #[error("operation cancelled")]
+    Aborted,
+
+    /// El valor supera `cryptovault::MAX_PLAINTEXT_LEN` (MAGI run 4,
+    /// Caspar). Lleva el límite, nunca el valor.
+    #[error("value exceeds {0} bytes")]
+    ValueTooLarge(usize),
 }
 
 #[cfg(test)]
@@ -57,7 +83,7 @@ mod tests {
     #[test]
     fn test_wrong_passphrase_display_is_user_facing_and_leaks_nothing() {
         let e = VaultError::WrongPassphrase;
-        assert_eq!(e.to_string(), "passphrase incorrecta");
+        assert_eq!(e.to_string(), "incorrect passphrase");
     }
 
     #[test]
@@ -71,5 +97,16 @@ mod tests {
         let e = VaultError::SecretNotFound("OPENAI_API_KEY".to_string());
         let msg = e.to_string();
         assert!(msg.contains("OPENAI_API_KEY"));
+    }
+
+    #[test]
+    fn test_aborted_display_is_user_facing_and_stable() {
+        assert_eq!(VaultError::Aborted.to_string(), "operation cancelled");
+    }
+
+    #[test]
+    fn test_value_too_large_includes_the_limit_only() {
+        let e = VaultError::ValueTooLarge(10 * 1024 * 1024);
+        assert!(e.to_string().contains("10485760"));
     }
 }

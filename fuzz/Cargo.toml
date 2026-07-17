@@ -32,3 +32,15 @@ bench = false
 # `fuzz/` es su propio workspace: se excluye del proyecto padre para que
 # `cargo build`/`nextest` de magi-rs no intenten compilar libFuzzer.
 [workspace]
+
+[[bin]]
+name = "fuzz_secret_value_roundtrip"
+path = "fuzz_targets/fuzz_secret_value_roundtrip.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_passphrase_input"
+path = "fuzz_targets/fuzz_passphrase_input.rs"
+test = false
+doc = false

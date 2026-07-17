@@ -1,6 +1,6 @@
 [package]
 name = "magi-rs"
-version = "0.8.0"
+version = "0.9.0"
 edition = "2021"
 default-run = "magi-rs"
 authors = ["Julian Bolivar <jbolivarg@gmail.com>"]
@@ -38,7 +38,6 @@ unicode-width = "0.1"
 reqwest = { version = "0.11", features = ["json", "stream"] }
 futures = "0.3"
 arboard = "3.3"
-keyring = "2.3"
 axum = "0.7"
 sha2 = "0.10"
 base64 = "0.22"
@@ -52,6 +51,13 @@ uuid = { version = "1.8", features = ["v4"] }
 # MAGI ecosystem
 magi-core = "1.1.1"
 instant-distance = { version = "0.6", optional = true }
+
+# Vault MS2 — REQ-V42 layer 1: mlock/VirtualLock via a safe crate (no own unsafe).
+region = "3.0.2"
+# Vault MS2 — REQ-V18: passphrase strength (built-in dictionaries, no network).
+zxcvbn = "3.1.1"
+# Vault MS2 — REQ-V10: hidden passphrase/value prompt (no echo) cross-platform.
+rpassword = "7.5.4"
 
 [dev-dependencies]
 # RoutingMockProvider for consult tests (no extra runtime deps; reqwest NOT pulled)
@@ -67,3 +73,11 @@ serial_test = "3.0"
 ## Enable opt-in HNSW ANN index (CP2-A). Off by default; brute-force exact
 ## search is always available and is the default retrieval path (D-05).
 ann = ["dep:instant-distance"]
+
+# Vault MS2 — REQ-V42 layer 2 (POSIX only): RLIMIT_CORE=0 suppresses core dumps.
+[target.'cfg(unix)'.dependencies]
+rlimit = "0.11.0"
+
+# Vault MS2 — REQ-V42 layer 2 (Linux only): PR_SET_DUMPABLE=0 (also blocks peer ptrace).
+[target.'cfg(target_os = "linux")'.dependencies]
+prctl = "1.0.0"

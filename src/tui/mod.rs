@@ -1,13 +1,13 @@
 //! This module implements the Terminal User Interface using Ratatui.
 
 use crate::agent::{Agent, ApprovalRequest, StreamPiece};
-use crate::system::secrets::SecretStore;
 use crossterm::{
     event::{self, DisableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use magi_core::schema::Mode;
+use magi_rs::vault::{SecretStore, VaultError};
 use ratatui::{
     backend::{Backend, CrosstermBackend},
     layout::{Constraint, Direction, Layout},
@@ -17,8 +17,62 @@ use ratatui::{
     Frame, Terminal,
 };
 use std::io;
+use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+
+/// A vault-backed secret store shared with `main.rs`, used by the `/login`
+/// and `/logout` handlers. `None` in an ephemeral (no-persistence) session.
+///
+/// The concrete `VaultStore` behind this trait object is `Send` but
+/// deliberately **not** `Sync` (its mask rotates on every access); the
+/// `Mutex` supplies the exclusion `Mutex<T>: Sync` requires of `T: Send`.
+pub type SharedSecretStore = Arc<Mutex<dyn SecretStore + Send>>;
+
+/// Persists a freshly-minted `ANTHROPIC_API_KEY` in the vault (SC-V36).
+///
+/// Extracted from the `/login` event handler so the storage step is
+/// unit-testable without driving a real OAuth flow or terminal (MAGI run 8).
+/// A poisoned `store` mutex is recovered (`into_inner`) rather than
+/// panicking, mirroring the `seal`/`unseal` poison-recovery pattern used
+/// elsewhere in this codebase (`system::database`).
+///
+/// # Returns
+/// [`AgentResponse::Info`] on success (stored, or — with no vault attached —
+/// an explicit "ephemeral session" notice, never a silent no-op);
+/// [`AgentResponse::Error`] if the vault write itself fails.
+fn handle_login(store: Option<&SharedSecretStore>, api_key: &str) -> AgentResponse {
+    match store {
+        Some(ss) => {
+            let mut guard = ss.lock().unwrap_or_else(|p| p.into_inner());
+            match guard.set("ANTHROPIC_API_KEY", api_key) {
+                Ok(()) => AgentResponse::Info("API key stored in the vault.".to_string()),
+                Err(e) => AgentResponse::Error(e.to_string()),
+            }
+        }
+        None => AgentResponse::Info("ephemeral session: key not persisted".to_string()),
+    }
+}
+
+/// Removes `ANTHROPIC_API_KEY` from the vault (the `/logout` analogue of
+/// [`handle_login`]). An absent key, or no vault attached at all, reports
+/// "no stored session" rather than an error — logging out twice, or logging
+/// out of an ephemeral session, is not a failure.
+fn handle_logout(store: Option<&SharedSecretStore>) -> AgentResponse {
+    match store {
+        Some(ss) => {
+            let mut guard = ss.lock().unwrap_or_else(|p| p.into_inner());
+            match guard.remove("ANTHROPIC_API_KEY") {
+                Ok(()) => AgentResponse::Info("Logged out successfully.".to_string()),
+                Err(VaultError::SecretNotFound(_)) => {
+                    AgentResponse::Info("no stored session".to_string())
+                }
+                Err(e) => AgentResponse::Error(e.to_string()),
+            }
+        }
+        None => AgentResponse::Info("no stored session".to_string()),
+    }
+}
 
 /// Different interaction modes for the TUI.
 #[derive(Debug, PartialEq, Clone, Copy)]
@@ -79,6 +133,7 @@ pub enum UiEvent {
 }
 
 /// Messages from the Agent to the UI.
+#[derive(Debug)]
 pub enum AgentResponse {
     Text(String),
     Error(String),
@@ -340,6 +395,7 @@ pub async fn run_tui_ext(
     consult: Option<std::sync::Arc<magi_core::orchestrator::Magi>>,
     workspace_root: std::path::PathBuf,
     magi_auto_approve: bool,
+    secret_store: Option<SharedSecretStore>,
 ) -> anyhow::Result<()> {
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |panic_info| {
@@ -501,18 +557,14 @@ pub async fn run_tui_ext(
                             match oauth.exchange_code_for_token(&code).await {
                                 Ok(token) => match oauth.create_raw_api_key(&token).await {
                                     Ok(api_key) => {
-                                        let store =
-                                            crate::system::secrets::KeyringStore::new("magi-rs");
-                                        if let Err(e) =
-                                            store.set_secret("ANTHROPIC_API_KEY", &api_key).await
-                                        {
-                                            let _ = response_tx
-                                                .send(AgentResponse::Error(format!(
-                                                    "Failed to store key: {}",
-                                                    e
-                                                )))
-                                                .await;
-                                        } else {
+                                        // SC-V36: persist the freshly-minted key in the vault
+                                        // (or report an ephemeral session — never a keyring).
+                                        let login_result =
+                                            handle_login(secret_store.as_ref(), &api_key);
+                                        let failed =
+                                            matches!(login_result, AgentResponse::Error(_));
+                                        let _ = response_tx.send(login_result).await;
+                                        if !failed {
                                             // #9: rebuild the running agent's provider in-session
                                             // so replies use the new key without a restart.
                                             let model = std::env::var("ANTHROPIC_MODEL")
@@ -592,25 +644,10 @@ pub async fn run_tui_ext(
                     }
                 }
                 UiEvent::Logout => {
-                    // Clear from both canonical ("magi-rs") and legacy ("magi-rust") services
-                    // so a key stored by either the new or the pre-migration login flow is removed.
-                    // Mirrors the CLI --logout path in main.rs. delete_secret treats NoEntry as Ok.
-                    let canonical = crate::system::secrets::KeyringStore::new("magi-rs");
-                    let legacy = crate::system::secrets::KeyringStore::new("magi-rust");
-                    let res_canonical = canonical.delete_secret("ANTHROPIC_API_KEY").await;
-                    let res_legacy = legacy.delete_secret("ANTHROPIC_API_KEY").await;
-                    match (res_canonical, res_legacy) {
-                        (Err(e), _) | (_, Err(e)) => {
-                            let _ = response_tx
-                                .send(AgentResponse::Error(format!("Logout failed: {}", e)))
-                                .await;
-                        }
-                        (Ok(()), Ok(())) => {
-                            let _ = response_tx
-                                .send(AgentResponse::Info("Logged out successfully.".to_string()))
-                                .await;
-                        }
-                    }
+                    // Mirrors the CLI --logout path in main.rs: removes
+                    // ANTHROPIC_API_KEY from the vault (SC-V37 — no keyring
+                    // is ever consulted).
+                    let _ = response_tx.send(handle_logout(secret_store.as_ref())).await;
                 }
                 UiEvent::Quit => break,
             }
@@ -1332,6 +1369,71 @@ fn ui(f: &mut Frame, app: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Builds an in-memory [`SharedSecretStore`] fixture for the
+    /// `handle_login`/`handle_logout` regression tests (MAGI run 8, Balthasar
+    /// — the full TUI event loop is intractable to test directly, so the
+    /// logic is extracted into these plain functions and tested here).
+    fn vault_fixture() -> SharedSecretStore {
+        let conn = rusqlite::Connection::open_in_memory().expect("mem db");
+        let dek =
+            magi_rs::vault::MaskedDek::new(zeroize::Zeroizing::new(vec![5u8; 32])).expect("32B");
+        let store = magi_rs::vault::wire(Arc::new(Mutex::new(conn)), dek).expect("wire");
+        Arc::new(Mutex::new(store)) as SharedSecretStore
+    }
+
+    #[test]
+    fn test_handle_login_stores_key_in_vault() {
+        let ss = vault_fixture();
+        let resp = handle_login(Some(&ss), "sk-fresh-key");
+        assert!(matches!(resp, AgentResponse::Info(_)));
+        let mut guard = ss.lock().unwrap();
+        assert_eq!(
+            guard.get("ANTHROPIC_API_KEY").unwrap().as_str(),
+            "sk-fresh-key"
+        );
+    }
+
+    #[test]
+    fn test_handle_login_without_vault_reports_ephemeral() {
+        let resp = handle_login(None, "sk-fresh-key");
+        match resp {
+            AgentResponse::Info(msg) => assert!(msg.to_lowercase().contains("ephemeral")),
+            other => panic!("expected an Info notice, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_handle_logout_removes_key() {
+        let ss = vault_fixture();
+        {
+            let mut guard = ss.lock().unwrap();
+            guard.set("ANTHROPIC_API_KEY", "sk-to-remove").unwrap();
+        }
+        let resp = handle_logout(Some(&ss));
+        assert!(matches!(resp, AgentResponse::Info(_)));
+        let mut guard = ss.lock().unwrap();
+        assert!(matches!(
+            guard.get("ANTHROPIC_API_KEY"),
+            Err(VaultError::SecretNotFound(_))
+        ));
+    }
+
+    #[test]
+    fn test_handle_logout_absent_key_reports_no_session() {
+        let ss = vault_fixture();
+        let resp = handle_logout(Some(&ss));
+        match resp {
+            AgentResponse::Info(msg) => assert!(msg.to_lowercase().contains("no stored session")),
+            other => panic!("expected an Info notice, got {other:?}"),
+        }
+        // No vault attached at all is the same "nothing to log out of" case.
+        let resp2 = handle_logout(None);
+        match resp2 {
+            AgentResponse::Info(msg) => assert!(msg.to_lowercase().contains("no stored session")),
+            other => panic!("expected an Info notice, got {other:?}"),
+        }
+    }
 
     #[tokio::test]
     async fn test_app_cursor_logic() {

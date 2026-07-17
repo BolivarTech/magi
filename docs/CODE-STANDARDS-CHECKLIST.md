@@ -36,8 +36,22 @@ sobre cada archivo tocado, en adición a `cargo nextest` / `clippy -D warnings` 
   `unwrap_used`/`expect_used`/`panic`/`todo`/`unimplemented`/`indexing_slicing`/
   `string_slice` dentro de `src/vault/` (denegados a nivel de módulo). |
 | Formato | `cargo fmt --check` | El código sigue `rustfmt.toml` (`max_width = 100`). |
-| Documentación | `cargo doc --no-deps` | Rustdoc compila sin warnings; `missing_docs` es
-  `deny` dentro de `src/vault/`. |
+| Documentación | `cargo doc --no-deps` | Rustdoc compila sin warnings; `missing_docs` **y
+  `clippy::missing_docs_in_private_items`** son `deny` dentro de `src/vault/` (MS2 Task 0) —
+  TODO ítem, público **o `pub(crate)`/privado**, exige rustdoc. Verificado 2026-07-17: un
+  `pub(crate) fn` sin doc rompe el build. |
+
+## Archivos nuevos de MS2 (recorrer la checklist (B) por cada uno)
+
+Cada archivo nuevo del vault se somete a la checklist "Por archivo" de arriba en cada
+`/verification-before-completion` y en el gate §6:
+
+- [ ] `src/vault/memguard.rs` (Task 1) — `MaskedDek` + `harden_process`
+- [ ] `src/vault/store.rs` (Task 2) — tabla `vault` + `SecretStore` CRUD
+- [ ] `src/vault/master.rs` (Task 4) — resolución de passphrase + `zxcvbn`
+- [ ] `src/vault/cli.rs` (Task 6) — subcomandos `clap` `ls`/`set`/`rm`/`passwd`
+- [ ] `src/vault/envelope.rs` (Task 5, ampliación) — `rekey_envelope`
+- [ ] `src/vault/error.rs` (Tasks 2/4/6, variantes nuevas + corrección a inglés de las de MS1)
 | Vulnerabilidades | `cargo audit` | Sin advisories conocidos en el árbol de dependencias. |
 | Licencias | `cargo deny check licenses` | Solo licencias permisivas listadas en
   `deny.toml`. |
@@ -73,3 +87,30 @@ interpretación. Si el crypto no corre bajo Miri, el alcance se acota a `error` 
 **Fuzz (REQ-V39) — targets definidos, ejecución en CI Linux:**
 - Los 2 targets existen en `fuzz/fuzz_targets/`: `fuzz_vault_meta_decode` (bytes arbitrarios → `open_envelope`, invariante: nunca panic ni borrado) y `fuzz_vault_blob_decrypt` (blob arbitrario → `decrypt_with_key`, maneja no-UTF8).
 - ⚠️ **`cargo-fuzz`/libFuzzer requiere el sanitizer `-fsanitize=fuzzer` (clang/LLVM), NO soportado en Windows MSVC** (limitación conocida del tooling, no del código). Los targets se **ejecutan en un CI Linux con nightly**: `cargo +nightly fuzz run <target> -- -max_total_time=300`. El bounds-safety del split que ejercitarían (`fuzz_open_entrypoint`) está además cubierto por el lint `clippy::indexing_slicing` (rompe el build) y por `test_fuzz_entrypoint_never_panics_on_arbitrary_input` (unit test).
+
+## Gate de hardening MS2 (REQ-V38 Miri · REQ-V39 fuzz) — Task 8 (2026-07-17)
+
+**Fuzz targets (REQ-V39) — 4 totales, wired y unit-smoked:**
+- MS1: `fuzz_vault_meta_decode`, `fuzz_vault_blob_decrypt`.
+- MS2: `fuzz_secret_value_roundtrip` (valor arbitrario → set/get, nunca panic), `fuzz_passphrase_input`
+  (passphrase arbitraria lossy → `check_strength` + derive KEK, nunca panic).
+- Cada entrypoint (`magi_rs::vault::fuzz_*_entrypoint`) tiene un **test unitario** que lo ejercita
+  con entradas degeneradas (vacía, no-UTF8, grande) bajo `cargo nextest` — cobertura de robustez
+  local que SÍ corre en cada §0.1.
+- **La corrida larga (≥ 30 min/target, coverage-guided) corre en CI Linux con nightly** (job dedicado,
+  no en el loop RGR ni en el presupuesto §7 — long-running por diseño, §0.3 de `CLAUDE.local.md`).
+  Consistente con la nota de MS1: `cargo +nightly fuzz build` en Windows-MSVC arranca la instrumentación
+  (ASan/sancov) pero el enlace con libFuzzer es problemático en MSVC (por eso el gate real es CI Linux);
+  no se declara un pase de Windows que no se verificó. El bounds-safety de los entrypoints está además
+  garantizado por `clippy::indexing_slicing` (rompe el build) + los tests unitarios de arriba.
+
+**Miri (REQ-V38) — alcance MS2 (extiende el spike de Task 0b):**
+- ✅ Cubre la **lógica pura** nueva: el enmascarado XOR de `memguard` (aritmética sobre buffers,
+  aliasing, init) y `check_strength` de `master` (zxcvbn es Rust puro). `vault::error` sigue limpio.
+- **Excluidos** (Miri no puede ejecutarlos, documentado sin fingir un pase):
+  - `store` y las pruebas de `envelope`/`database` que tocan **SQLite** (`rusqlite` bundled = FFI en C).
+  - Las **syscalls** de `region::lock`/`mlock` y de `harden_process` (`RLIMIT_CORE`/`PR_SET_DUMPABLE`)
+    — se saltean bajo `#[cfg(miri)]`; Miri no modela syscalls del SO.
+  - La derivación **Argon2id** (`m=64 MiB`, muy lenta bajo interpretación) y el AES que puede usar
+    AES-NI (cae al backend portable vía `cpufeatures`, no siempre bajo Miri).
+- **Se corre en CI** junto al fuzz; no se declara un pase de lo que no se ejecutó.
