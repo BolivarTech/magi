@@ -24,7 +24,7 @@ pub enum VaultError {
     ///
     /// Es **reintentable** y **nunca** dispara un borrado de datos: ver la
     /// política de nunca-borrar (REQ-V35).
-    #[error("passphrase incorrecta")]
+    #[error("incorrect passphrase")]
     WrongPassphrase,
 
     /// `vault_meta` está presente pero es irrecuperable **incluso tras** la
@@ -32,21 +32,21 @@ pub enum VaultError {
     ///
     /// Requiere una acción **explícita** del usuario; el sistema jamás se
     /// auto-repara destruyendo datos.
-    #[error("vault_meta corrupto e irrecuperable")]
+    #[error("vault metadata is corrupt and unrecoverable")]
     VaultMetaCorrupt,
 
     /// No existe un secreto con el nombre indicado. El nombre no es material
     /// sensible, por lo que puede figurar en el mensaje.
-    #[error("secreto no encontrado: {0}")]
+    #[error("secret not found: {0}")]
     SecretNotFound(String),
 
     /// Fallo criptográfico propagado desde `cryptovault` (mensaje ya
     /// sanitizado por el crate — sin oráculos de decode ni de timing).
-    #[error("error de cripto: {0}")]
+    #[error("crypto error: {0}")]
     Crypto(String),
 
     /// Fallo a nivel de almacenamiento SQLite.
-    #[error("error de almacenamiento: {0}")]
+    #[error("storage error: {0}")]
     Storage(String),
 }
 
@@ -57,7 +57,7 @@ mod tests {
     #[test]
     fn test_wrong_passphrase_display_is_user_facing_and_leaks_nothing() {
         let e = VaultError::WrongPassphrase;
-        assert_eq!(e.to_string(), "passphrase incorrecta");
+        assert_eq!(e.to_string(), "incorrect passphrase");
     }
 
     #[test]
