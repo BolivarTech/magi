@@ -35,8 +35,8 @@ use cryptovault::CryptoVault;
 use magi_core::orchestrator::{Magi, MagiBuilder};
 use magi_rs::vault::{
     check_strength, create_passphrase, harden_process, rekey_envelope, resolve_passphrase,
-    run_vault_cmd, wire, PassphrasePrompt, SecretStore, TtyIo, TtyPrompt, VaultCmd, VaultError,
-    PASSPHRASE_ENV,
+    run_vault_cmd, strip_trailing_newline, wire, PassphrasePrompt, SecretStore, TtyIo, TtyPrompt,
+    VaultCmd, VaultError, PASSPHRASE_ENV,
 };
 use std::env;
 use std::sync::{Arc, Mutex};
@@ -179,12 +179,15 @@ fn resolve_master_passphrase(
         return resolve_passphrase(passphrase_flag, prompt);
     }
     if let Some(p) = passphrase_flag {
+        // Normalize identically to unlock (resolve_passphrase) so a passphrase
+        // created with a trailing newline can be reproduced on unlock.
+        let p = strip_trailing_newline(p);
         check_strength(p.as_str())?;
         return Ok(p);
     }
     match env::var(PASSPHRASE_ENV) {
         Ok(v) if !v.is_empty() => {
-            let z = Zeroizing::new(v);
+            let z = strip_trailing_newline(Zeroizing::new(v));
             check_strength(z.as_str())?;
             Ok(z)
         }
@@ -916,6 +919,18 @@ mod tests {
         assert!(a.init_config);
         let b = Args::parse_from(["magi-rs"]);
         assert!(!b.init_config);
+    }
+
+    #[test]
+    fn test_first_run_strips_trailing_newline_from_flag_and_env_like_unlock() {
+        // Loop-2 S1 (Balthasar): first-run creation must normalize -p/env the
+        // SAME way unlock (resolve_passphrase) does. Otherwise
+        // `MAGI_PASSPHRASE=$(cat f)` (trailing \n) creates a KEK from "...\n"
+        // that unlock — which strips — can never reproduce => permanent lockout.
+        let mut prompt = FakePrompt::non_interactive();
+        let flag = Some(Zeroizing::new("correct horse battery staple\n".to_string()));
+        let got = resolve_master_passphrase(true, flag, &mut prompt).expect("first-run flag");
+        assert_eq!(got.as_str(), "correct horse battery staple");
     }
 
     #[test]

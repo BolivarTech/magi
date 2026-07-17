@@ -38,7 +38,7 @@ pub use envelope::{bootstrap_envelope, fuzz_open_entrypoint, open_envelope, reke
 pub use error::VaultError;
 pub use master::{
     check_strength, create_passphrase, fuzz_passphrase_entrypoint, resolve_passphrase,
-    PassphrasePrompt, TtyPrompt, MIN_PASSPHRASE_CHARS, PASSPHRASE_ENV,
+    strip_trailing_newline, PassphrasePrompt, TtyPrompt, MIN_PASSPHRASE_CHARS, PASSPHRASE_ENV,
 };
 pub use memguard::{harden_process, MaskedDek};
 pub use store::{fuzz_value_roundtrip_entrypoint, wire, SecretEntry, SecretStore, VaultStore};

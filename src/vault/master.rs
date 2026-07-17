@@ -79,7 +79,11 @@ impl PassphrasePrompt for TtyPrompt {
 /// Takes and returns [`Zeroizing`] so the passphrase never lands in a plain
 /// `String` that outlives the call (REQ-V41 — keep sensitive material masked
 /// end-to-end, never a bare copy).
-fn strip_trailing_newline(s: Zeroizing<String>) -> Zeroizing<String> {
+///
+/// Exposed so first-run creation (`main::resolve_master_passphrase`) normalizes
+/// `-p`/env EXACTLY as unlock does — otherwise a passphrase created with a
+/// trailing newline could never be reproduced on unlock (lockout).
+pub fn strip_trailing_newline(s: Zeroizing<String>) -> Zeroizing<String> {
     if let Some(stripped) = s.strip_suffix("\r\n") {
         Zeroizing::new(stripped.to_string())
     } else if let Some(stripped) = s.strip_suffix('\n') {
