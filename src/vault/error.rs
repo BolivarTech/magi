@@ -63,6 +63,17 @@ pub enum VaultError {
     /// sin material sensible.
     #[error("I/O error: {0}")]
     Io(String),
+
+    /// El usuario no confirmó una operación destructiva (REQ-V22). El CLI
+    /// sale con código de salida distinto de cero para que los scripts lo
+    /// detecten; no es un fallo del sistema.
+    #[error("operation cancelled")]
+    Aborted,
+
+    /// El valor supera `cryptovault::MAX_PLAINTEXT_LEN` (MAGI run 4,
+    /// Caspar). Lleva el límite, nunca el valor.
+    #[error("value exceeds {0} bytes")]
+    ValueTooLarge(usize),
 }
 
 #[cfg(test)]
@@ -86,5 +97,16 @@ mod tests {
         let e = VaultError::SecretNotFound("OPENAI_API_KEY".to_string());
         let msg = e.to_string();
         assert!(msg.contains("OPENAI_API_KEY"));
+    }
+
+    #[test]
+    fn test_aborted_display_is_user_facing_and_stable() {
+        assert_eq!(VaultError::Aborted.to_string(), "operation cancelled");
+    }
+
+    #[test]
+    fn test_value_too_large_includes_the_limit_only() {
+        let e = VaultError::ValueTooLarge(10 * 1024 * 1024);
+        assert!(e.to_string().contains("10485760"));
     }
 }

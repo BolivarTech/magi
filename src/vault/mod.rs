@@ -26,12 +26,14 @@
 //! MS1 aloja los errores de dominio y las primitivas de envelope; la
 //! superficie de usuario (tabla `vault`, CLI) llega en MS2.
 
+mod cli;
 mod envelope;
 mod error;
 mod master;
 mod memguard;
 mod store;
 
+pub use cli::{run_vault_cmd, TtyIo, VaultCmd, VaultIo};
 pub use envelope::{bootstrap_envelope, fuzz_open_entrypoint, open_envelope, rekey_envelope};
 pub use error::VaultError;
 pub use master::{
