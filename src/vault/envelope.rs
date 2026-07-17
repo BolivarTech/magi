@@ -129,16 +129,20 @@ fn fec_decode(blob: &[u8]) -> Result<Vec<u8>, VaultError> {
 /// envuelve la DEK. Devuelve `(salt_fec, wrapped_dek_fec, dek)`: las dos primeras
 /// entradas van a `vault_meta` (FEC-encoded), la DEK se cachea en memoria.
 ///
-/// `master` es la clave maestra vigente **como `&str`** (el keyring entrega
-/// base64, UTF-8 válido); nunca bytes crudos no-UTF8.
+/// `master` es la passphrase vigente del usuario **como `&str`** (UTF-8 válido
+/// por construcción; nunca bytes crudos no-UTF8).
 ///
 /// # Errors
 ///
 /// [`VaultError::Crypto`] si la generación de material aleatorio, la derivación
 /// de la KEK o el envoltorio de la DEK fallan.
 pub fn bootstrap_envelope(vault: &CryptoVault, master: &str) -> Result<Bootstrapped, VaultError> {
-    let salt = cryptovault::generate_salt().map_err(map_crypto_err)?;
-    let dek = cryptovault::generate_dek().map_err(map_crypto_err)?;
+    // Un fallo de RNG en el bootstrap NO es corrupción de `vault_meta` (aún no
+    // existe metadata): se reporta como `Crypto`, no como `VaultMetaCorrupt`.
+    let salt = cryptovault::generate_salt()
+        .map_err(|e| VaultError::Crypto(format!("salt generation failed: {e}")))?;
+    let dek = cryptovault::generate_dek()
+        .map_err(|e| VaultError::Crypto(format!("DEK generation failed: {e}")))?;
     let kek = vault.derive_key(master, &salt).map_err(map_crypto_err)?;
     let wrapped = vault.wrap_key(&kek, &salt, &dek).map_err(map_crypto_err)?;
     let salt_fec = fec_encode(&salt);
