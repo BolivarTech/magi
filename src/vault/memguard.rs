@@ -80,18 +80,24 @@ impl MaskedDek {
     /// Takes ownership of the plaintext DEK, masks it immediately, and best-effort
     /// locks its page against swap.
     ///
-    /// The 32-byte length is validated at **runtime** by the `Vec<u8>` →
-    /// `[u8; KEY_LEN]` conversion (via [`TryFrom`]), which returns `Err` on any other
-    /// length — not a `debug_assert` (stripped in release) nor an `assert!`
-    /// (forbidden by the crate lints). That is why this returns `Result`.
+    /// The 32-byte length is validated at **runtime** with an explicit
+    /// `dek.len() != KEY_LEN` check — not a `debug_assert` (stripped in release)
+    /// nor an `assert!` (forbidden by the crate lints). That is why this returns
+    /// `Result`.
+    ///
+    /// The plaintext DEK is masked in place directly from `dek` (a `Zeroizing`
+    /// buffer scrubbed on drop); no bare `[u8; KEY_LEN]` stack copy of the key
+    /// is ever materialized, so no unlockable plaintext residue is left on the
+    /// `new` stack frame (REQ-V42).
     ///
     /// # Errors
     ///
     /// [`VaultError::Crypto`] if `dek.len() != KEY_LEN` or random mask generation
     /// fails (a broken OS entropy source).
     pub fn new(dek: zeroize::Zeroizing<Vec<u8>>) -> Result<Self, VaultError> {
-        let dek_arr: [u8; KEY_LEN] = <[u8; KEY_LEN]>::try_from(dek.as_slice())
-            .map_err(|_| VaultError::Crypto("DEK length must be 32 bytes".into()))?;
+        if dek.len() != KEY_LEN {
+            return Err(VaultError::Crypto("DEK length must be 32 bytes".into()));
+        }
 
         let mut buf = Box::new([0u8; BUF_LEN]);
         {
@@ -99,7 +105,9 @@ impl MaskedDek {
             OsRng
                 .try_fill_bytes(mask)
                 .map_err(|e| VaultError::Crypto(format!("OsRng failed: {e}")))?;
-            for (out, (d, k)) in masked.iter_mut().zip(dek_arr.iter().zip(mask.iter())) {
+            // `dek` is the only holder of the plaintext key (Zeroizing, scrubbed
+            // on drop); XOR straight from it — no plaintext stack copy is made.
+            for (out, (d, k)) in masked.iter_mut().zip(dek.iter().zip(mask.iter())) {
                 *out = d ^ k;
             }
         }
