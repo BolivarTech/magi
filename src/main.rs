@@ -381,13 +381,16 @@ async fn main() -> anyhow::Result<()> {
             // (`shared_conn`, `data_key`) before the type is erased by
             // `Arc<dyn MemoryStore>`.  This is the Task-12 wiring described in
             // the brief: both stores share the same on-disk SQLite file.
-            let concrete_store = EncryptedSqliteMemory::new(db_path, master_pwd)?;
+            let concrete_store =
+                EncryptedSqliteMemory::new(db_path, zeroize::Zeroizing::new(master_pwd))?;
 
-            // Build the vector store from the shared connection + derived key.
+            // Build the vector store from the shared connection + masked DEK.
             // Errors here are non-fatal: fall through without the tiered-memory
             // subsystem rather than refusing to start (REQ-29).
-            let vstore_result =
-                SqliteVectorStore::new(concrete_store.shared_conn(), concrete_store.data_key());
+            let vstore_result = concrete_store
+                .data_key()
+                .map_err(|e| crate::memory::error::MemoryError::Crypto(e.to_string()))
+                .and_then(|dek| SqliteVectorStore::new(concrete_store.shared_conn(), dek));
 
             // #11: surface a one-time reset notice if incompatible content was discarded.
             if concrete_store.was_reset() {

@@ -4,7 +4,7 @@ use crate::agent::messages::Message;
 use anyhow::Result;
 use async_trait::async_trait;
 use cryptovault::CryptoVault;
-use magi_rs::vault::{bootstrap_envelope, open_envelope, VaultError};
+use magi_rs::vault::{bootstrap_envelope, open_envelope, MaskedDek, VaultError};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -39,12 +39,16 @@ pub trait MemoryStore: Send + Sync {
 pub struct EncryptedSqliteMemory {
     conn: Arc<Mutex<Connection>>,
     vault: CryptoVault,
-    /// Data key derived **once** from the per-DB salt + master password (B′).
+    /// Data key derived **once** from the per-DB salt + master password (B′), held
+    /// **masked** in RAM ([`MaskedDek`], MS2 REQ-V42): never in the clear at rest,
+    /// mask rotated on every access.
     ///
-    /// `Zeroizing<Vec<u8>>` overwrites the key on drop. Derived in
-    /// [`Self::new_with_vault`]; reused by every record so no per-record Argon2
-    /// runs on the hot path.
-    derived_key: Zeroizing<Vec<u8>>,
+    /// The `Mutex` provides interior mutability for the `&mut self` mask rotation
+    /// (the store is shared as `Arc<dyn MemoryStore + Send + Sync>`). **Lock
+    /// discipline (R-V08): the DEK lock is NEVER held across the connection lock** —
+    /// [`Self::seal`]/[`Self::unseal`] take and release it in a tight scope, always
+    /// outside any `self.conn` guard.
+    dek: std::sync::Mutex<MaskedDek>,
     /// `true` when construction discarded incompatible/corrupt on-disk content
     /// (the D6 reset fired on a non-empty DB). Surfaced to the user at startup (#11).
     was_reset: bool,
@@ -100,10 +104,7 @@ impl EncryptedSqliteMemory {
     fn decrypt_rows(&self, rows: Vec<(String, String)>) -> Result<Vec<Message>> {
         let mut messages = Vec::with_capacity(rows.len());
         for (role_str, blob) in rows {
-            let decrypted = self
-                .vault
-                .decrypt_with_key(&self.derived_key, &blob)
-                .map_err(|e| anyhow::anyhow!("Decryption failed: {}", e))?;
+            let decrypted = self.unseal(&blob)?;
             let content = serde_json::from_str(decrypted.as_str())?;
             let role = match role_str.as_str() {
                 "User" => crate::agent::messages::Role::User,
@@ -114,7 +115,7 @@ impl EncryptedSqliteMemory {
         Ok(messages)
     }
 
-    pub fn new(path: PathBuf, master_password: String) -> Result<Self> {
+    pub fn new(path: PathBuf, master_password: Zeroizing<String>) -> Result<Self> {
         Self::new_with_vault(path, master_password, CryptoVault::default())
     }
 
@@ -128,7 +129,7 @@ impl EncryptedSqliteMemory {
     /// tests). Derives the data key **once** from the per-DB salt and caches it.
     pub(crate) fn new_with_vault(
         path: PathBuf,
-        master_password: String,
+        master_password: Zeroizing<String>,
         vault: CryptoVault,
     ) -> Result<Self> {
         let mut conn = Connection::open(path)?;
@@ -191,7 +192,9 @@ impl EncryptedSqliteMemory {
         // turn a typo into total data loss. The ONLY discard is the one-time format
         // migration below, gated on the `wrapped_dek` row being **absent** — a
         // deterministic schema check a wrong password can never trigger.
-        let password = Zeroizing::new(master_password);
+        // Already `Zeroizing<String>` (MS2: the passphrase never exists as a bare
+        // `String`, closing the transient-copy window — REQ-V41).
+        let password = master_password;
         let mut was_reset = false;
 
         let wrapped_dek: Option<Vec<u8>> = conn
@@ -299,9 +302,24 @@ impl EncryptedSqliteMemory {
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
             vault,
-            derived_key,
+            dek: std::sync::Mutex::new(MaskedDek::new(derived_key)?),
             was_reset,
         })
+    }
+
+    /// Encrypts `plaintext` with the masked DEK. **Never call while holding the
+    /// `self.conn` lock** — takes the DEK lock internally (R-V08).
+    fn seal(&self, plaintext: &str) -> Result<String> {
+        let mut dek = self.dek.lock().unwrap_or_else(|p| p.into_inner());
+        dek.with_dek(|k| self.vault.encrypt_with_key(k, plaintext))
+            .map_err(|e| anyhow::anyhow!("Encryption failed: {e}"))
+    }
+
+    /// Decrypts `blob` with the masked DEK. Same lock contract as [`Self::seal`].
+    fn unseal(&self, blob: &str) -> Result<Zeroizing<String>> {
+        let mut dek = self.dek.lock().unwrap_or_else(|p| p.into_inner());
+        dek.with_dek(|k| self.vault.decrypt_with_key(k, blob))
+            .map_err(|e| anyhow::anyhow!("Decryption failed: {e}"))
     }
 }
 
@@ -326,10 +344,7 @@ impl MemoryStore for EncryptedSqliteMemory {
 
     async fn add_message(&self, session_id: &str, message: &Message) -> Result<()> {
         let json_content = serde_json::to_string(&message.content)?;
-        let encrypted = self
-            .vault
-            .encrypt_with_key(&self.derived_key, &json_content)
-            .map_err(|e| anyhow::anyhow!("Encryption failed: {}", e))?;
+        let encrypted = self.seal(&json_content)?;
 
         let conn = self.locked_conn();
         conn.execute(
@@ -358,10 +373,7 @@ impl MemoryStore for EncryptedSqliteMemory {
     }
 
     async fn set_knowledge(&self, key: &str, value: &str) -> Result<()> {
-        let encrypted = self
-            .vault
-            .encrypt_with_key(&self.derived_key, value)
-            .map_err(|e| anyhow::anyhow!("Encryption failed: {}", e))?;
+        let encrypted = self.seal(value)?;
 
         let conn = self.locked_conn();
         conn.execute(
@@ -385,10 +397,7 @@ impl MemoryStore for EncryptedSqliteMemory {
 
         match blob {
             Some(blob) => {
-                let decrypted = self
-                    .vault
-                    .decrypt_with_key(&self.derived_key, &blob)
-                    .map_err(|e| anyhow::anyhow!("Decryption failed: {}", e))?;
+                let decrypted = self.unseal(&blob)?;
                 Ok(Some(decrypted.as_str().to_owned()))
             }
             None => Ok(None),
@@ -418,13 +427,21 @@ impl EncryptedSqliteMemory {
         self.conn.clone()
     }
 
-    /// Returns a clone of the cached per-DB data key so sibling stores can
-    /// encrypt / decrypt with the same AES-256-GCM-SIV key without running
-    /// an additional Argon2 derivation.
-    // Narrow allow: called by SqliteVectorStore::new (Task 4) and wired in Task 12.
-    #[allow(dead_code)]
-    pub(crate) fn data_key(&self) -> Zeroizing<Vec<u8>> {
-        self.derived_key.clone()
+    /// Returns an independently-masked copy of the cached per-DB data key so sibling
+    /// stores (e.g. the tiered-memory vector store, the vault) can encrypt / decrypt
+    /// with the same AES-256-GCM-SIV key without running an additional Argon2
+    /// derivation. `&self`, not `&mut self`: the `Mutex` gives interior mutability
+    /// for the rotate-on-duplicate, so `main.rs` can call it on a shared value.
+    ///
+    /// # Errors
+    ///
+    /// [`VaultError::Crypto`] if generating the copy's fresh mask fails (a broken OS
+    /// entropy source).
+    pub(crate) fn data_key(&self) -> std::result::Result<MaskedDek, VaultError> {
+        self.dek
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .duplicate()
     }
 }
 
@@ -441,8 +458,10 @@ impl EncryptedSqliteMemory {
         self.collect_message_rows(session_id)
     }
 
-    pub(crate) fn derived_key_type_for_test(&self) -> &zeroize::Zeroizing<Vec<u8>> {
-        &self.derived_key
+    /// Test-only: an independently-masked copy of the DEK, to assert the key is
+    /// held via [`MaskedDek`] (the internal masking is unit-tested in `memguard`).
+    pub(crate) fn data_key_for_test(&self) -> MaskedDek {
+        self.data_key().expect("data_key")
     }
 }
 
@@ -516,7 +535,7 @@ mod tests {
         );
         let memory = EncryptedSqliteMemory::new_with_vault(
             tmp.path().to_path_buf(),
-            "pw".to_string(),
+            Zeroizing::new("pw".to_string()),
             vault,
         )
         .unwrap();
@@ -567,7 +586,7 @@ mod tests {
             )
             .unwrap();
         }
-        let legacy = EncryptedSqliteMemory::new(path, "pw".to_string()).unwrap();
+        let legacy = EncryptedSqliteMemory::new(path, Zeroizing::new("pw".to_string())).unwrap();
         assert!(
             legacy.was_reset(),
             "a legacy DB that discarded content must report was_reset()"
@@ -575,7 +594,8 @@ mod tests {
 
         let tmp2 = NamedTempFile::new().unwrap();
         let fresh =
-            EncryptedSqliteMemory::new(tmp2.path().to_path_buf(), "pw".to_string()).unwrap();
+            EncryptedSqliteMemory::new(tmp2.path().to_path_buf(), Zeroizing::new("pw".to_string()))
+                .unwrap();
         assert!(!fresh.was_reset(), "a fresh DB must not report was_reset()");
     }
 
@@ -610,7 +630,7 @@ mod tests {
             .unwrap();
         }
 
-        let memory = EncryptedSqliteMemory::new(path, "pw".to_string()).unwrap();
+        let memory = EncryptedSqliteMemory::new(path, Zeroizing::new("pw".to_string())).unwrap();
         assert!(
             memory.list_sessions().await.unwrap().is_empty(),
             "legacy rows must be wiped on open (D6 fresh-start)"
@@ -630,7 +650,8 @@ mod tests {
         let path = tmp.path().to_path_buf();
         let sid;
         {
-            let memory = EncryptedSqliteMemory::new(path.clone(), "P".to_string()).unwrap();
+            let memory =
+                EncryptedSqliteMemory::new(path.clone(), Zeroizing::new("P".to_string())).unwrap();
             sid = memory.create_session("p").await.unwrap();
             memory
                 .add_message(&sid, &Message::user("persisted"))
@@ -638,7 +659,8 @@ mod tests {
                 .unwrap();
         }
         {
-            let memory = EncryptedSqliteMemory::new(path.clone(), "P".to_string()).unwrap();
+            let memory =
+                EncryptedSqliteMemory::new(path.clone(), Zeroizing::new("P".to_string())).unwrap();
             assert_eq!(
                 memory.get_messages(&sid).await.unwrap(),
                 vec![Message::user("persisted")]
@@ -648,7 +670,7 @@ mod tests {
             // A different master password now fails to OPEN the envelope
             // (REQ-V35: the KEK-unwrap AEAD tag fails immediately), rather than
             // opening successfully and failing later on a per-record decrypt.
-            let res = EncryptedSqliteMemory::new(path, "P-different".to_string());
+            let res = EncryptedSqliteMemory::new(path, Zeroizing::new("P-different".to_string()));
             assert!(res.is_err());
         }
     }
@@ -669,7 +691,8 @@ mod tests {
         let path = tmp.path().to_path_buf();
         let sid;
         {
-            let memory = EncryptedSqliteMemory::new(path.clone(), "P".to_string()).unwrap();
+            let memory =
+                EncryptedSqliteMemory::new(path.clone(), Zeroizing::new("P".to_string())).unwrap();
             sid = memory.create_session("p").await.unwrap();
             memory
                 .add_message(&sid, &Message::user("survives"))
@@ -697,7 +720,7 @@ mod tests {
         // REQ-V35, this must NEVER silently discard the data even if correction
         // failed (it would surface as a typed Err instead) — so an `unwrap()`
         // here is the correct, honest assertion of the never-wipe contract.
-        let memory = EncryptedSqliteMemory::new(path, "P".to_string()).unwrap();
+        let memory = EncryptedSqliteMemory::new(path, Zeroizing::new("P".to_string())).unwrap();
         assert_eq!(
             memory.get_messages(&sid).await.unwrap(),
             vec![Message::user("survives")],
@@ -711,7 +734,8 @@ mod tests {
         let path = tmp_file.path().to_path_buf();
         let password = "master_key_123";
 
-        let memory = EncryptedSqliteMemory::new(path, password.to_string()).unwrap();
+        let memory =
+            EncryptedSqliteMemory::new(path, Zeroizing::new(password.to_string())).unwrap();
         let sid = memory.create_session("test_proj").await.unwrap();
 
         let msg = Message::user("Hello secure world");
@@ -745,7 +769,7 @@ mod tests {
         let path = tmp_file.path().to_path_buf();
         let password = "knowledge_key_123".to_string();
 
-        let memory = EncryptedSqliteMemory::new(path, password).unwrap();
+        let memory = EncryptedSqliteMemory::new(path, Zeroizing::new(password)).unwrap();
 
         memory
             .set_knowledge("architecture", "Clean hex with encrypted SQLite")
@@ -767,7 +791,9 @@ mod tests {
     async fn test_sqlite_concurrency_stress() {
         let tmp_file = tempfile::NamedTempFile::new().unwrap();
         let path = tmp_file.path().to_path_buf();
-        let memory = Arc::new(EncryptedSqliteMemory::new(path, "stress_pass".to_string()).unwrap());
+        let memory = Arc::new(
+            EncryptedSqliteMemory::new(path, Zeroizing::new("stress_pass".to_string())).unwrap(),
+        );
 
         let mut handles = vec![];
         for i in 0..20 {
@@ -794,7 +820,7 @@ mod tests {
         // persistence keeps working instead of failing closed for the session.
         let tmp_file = NamedTempFile::new().unwrap();
         let path = tmp_file.path().to_path_buf();
-        let memory = EncryptedSqliteMemory::new(path, "pw".to_string()).unwrap();
+        let memory = EncryptedSqliteMemory::new(path, Zeroizing::new("pw".to_string())).unwrap();
 
         let conn = memory.conn_for_test().clone();
         let _ = std::thread::spawn(move || {
@@ -821,7 +847,8 @@ mod tests {
     async fn test_get_messages_does_not_hold_lock_during_decrypt() {
         let tmp_file = NamedTempFile::new().unwrap();
         let path = tmp_file.path().to_path_buf();
-        let memory = Arc::new(EncryptedSqliteMemory::new(path, "pw".to_string()).unwrap());
+        let memory =
+            Arc::new(EncryptedSqliteMemory::new(path, Zeroizing::new("pw".to_string())).unwrap());
         let sid = memory.create_session("p").await.unwrap();
 
         for i in 0..4 {
@@ -864,7 +891,8 @@ mod tests {
         // must complete, and the value must round-trip intact.
         let tmp_file = NamedTempFile::new().unwrap();
         let path = tmp_file.path().to_path_buf();
-        let memory = Arc::new(EncryptedSqliteMemory::new(path, "pw".to_string()).unwrap());
+        let memory =
+            Arc::new(EncryptedSqliteMemory::new(path, Zeroizing::new("pw".to_string())).unwrap());
         memory
             .set_knowledge("api-endpoint", "value-42")
             .await
@@ -896,8 +924,11 @@ mod tests {
     #[tokio::test]
     async fn test_decrypt_rows_runs_without_connection_lock() {
         let tmp_file = NamedTempFile::new().unwrap();
-        let memory =
-            EncryptedSqliteMemory::new(tmp_file.path().to_path_buf(), "pw".to_string()).unwrap();
+        let memory = EncryptedSqliteMemory::new(
+            tmp_file.path().to_path_buf(),
+            Zeroizing::new("pw".to_string()),
+        )
+        .unwrap();
         let sid = memory.create_session("p").await.unwrap();
         memory
             .add_message(&sid, &Message::user("hi"))
@@ -914,14 +945,18 @@ mod tests {
         let tmp_file = NamedTempFile::new().unwrap();
         let path = tmp_file.path().to_path_buf();
 
-        let memory = EncryptedSqliteMemory::new(path, "zeroizing_pw".to_string()).unwrap();
+        let memory =
+            EncryptedSqliteMemory::new(path, Zeroizing::new("zeroizing_pw".to_string())).unwrap();
         let sid = memory.create_session("p").await.unwrap();
         memory
             .add_message(&sid, &Message::user("secret payload"))
             .await
             .unwrap();
 
-        let _assert_type: &zeroize::Zeroizing<Vec<u8>> = memory.derived_key_type_for_test();
+        // The DEK is held via MaskedDek (masking unit-tested in `memguard`); here we
+        // assert it still yields a 32-byte key and the record round-trips.
+        let mut dek = memory.data_key_for_test();
+        assert_eq!(dek.with_dek(|k| k.len()), 32);
 
         let msgs = memory.get_messages(&sid).await.unwrap();
         assert_eq!(msgs, vec![Message::user("secret payload")]);
@@ -936,9 +971,11 @@ mod tests {
         let path = tmp.path().to_path_buf();
         let sid;
         {
-            let memory =
-                EncryptedSqliteMemory::new(path.clone(), "correcto-master-key-string".to_string())
-                    .unwrap();
+            let memory = EncryptedSqliteMemory::new(
+                path.clone(),
+                Zeroizing::new("correcto-master-key-string".to_string()),
+            )
+            .unwrap();
             sid = memory.create_session("p").await.unwrap();
             memory
                 .add_message(&sid, &Message::user("must survive"))
@@ -946,16 +983,21 @@ mod tests {
                 .unwrap();
         }
         {
-            let res =
-                EncryptedSqliteMemory::new(path.clone(), "wrong-master-key-string".to_string());
+            let res = EncryptedSqliteMemory::new(
+                path.clone(),
+                Zeroizing::new("wrong-master-key-string".to_string()),
+            );
             assert!(
                 res.is_err(),
                 "a wrong master password must fail to open, not silently succeed"
             );
         }
         {
-            let memory =
-                EncryptedSqliteMemory::new(path, "correcto-master-key-string".to_string()).unwrap();
+            let memory = EncryptedSqliteMemory::new(
+                path,
+                Zeroizing::new("correcto-master-key-string".to_string()),
+            )
+            .unwrap();
             assert_eq!(
                 memory.get_messages(&sid).await.unwrap(),
                 vec![Message::user("must survive")],
@@ -1047,7 +1089,7 @@ mod tests {
                 rt.block_on(async {
                     let memory = EncryptedSqliteMemory::new_with_vault(
                         path,
-                        "shared-master".to_string(),
+                        Zeroizing::new("shared-master".to_string()),
                         fast_kdf_vault(),
                     )
                     .expect("open must not fail under a concurrent bootstrap race");
@@ -1071,7 +1113,7 @@ mod tests {
         // for whichever session was written under the race loser's key.
         let memory = EncryptedSqliteMemory::new_with_vault(
             path,
-            "shared-master".to_string(),
+            Zeroizing::new("shared-master".to_string()),
             fast_kdf_vault(),
         )
         .unwrap();

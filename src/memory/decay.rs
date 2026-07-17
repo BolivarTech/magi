@@ -324,8 +324,12 @@ mod tests {
 
     fn make_test_store() -> (tempfile::NamedTempFile, SqliteVectorStore) {
         let tmp = tempfile::NamedTempFile::new().unwrap();
-        let mem = EncryptedSqliteMemory::new(tmp.path().to_path_buf(), "pw".into()).unwrap();
-        let store = SqliteVectorStore::new(mem.shared_conn(), mem.data_key()).unwrap();
+        let mem = EncryptedSqliteMemory::new(
+            tmp.path().to_path_buf(),
+            zeroize::Zeroizing::new("pw".to_string()),
+        )
+        .unwrap();
+        let store = SqliteVectorStore::new(mem.shared_conn(), mem.data_key().unwrap()).unwrap();
         (tmp, store)
     }
 

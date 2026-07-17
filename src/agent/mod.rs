@@ -943,7 +943,7 @@ mod tests {
             let memory = Arc::new(
                 crate::system::database::EncryptedSqliteMemory::new(
                     db_path.clone(),
-                    password.clone(),
+                    zeroize::Zeroizing::new(password.clone()),
                 )
                 .unwrap(),
             );
@@ -962,7 +962,11 @@ mod tests {
         {
             let mut agent = Agent::new(Arc::new(MockProvider));
             let memory = Arc::new(
-                crate::system::database::EncryptedSqliteMemory::new(db_path, password).unwrap(),
+                crate::system::database::EncryptedSqliteMemory::new(
+                    db_path,
+                    zeroize::Zeroizing::new(password),
+                )
+                .unwrap(),
             );
             agent.set_memory(memory, sid);
 
@@ -1189,8 +1193,13 @@ mod tests {
         use tokio::sync::mpsc;
 
         let tmp = tempfile::NamedTempFile::new().unwrap();
-        let mem = EncryptedSqliteMemory::new(tmp.path().to_path_buf(), "pw".into()).unwrap();
-        let vstore = Arc::new(SqliteVectorStore::new(mem.shared_conn(), mem.data_key()).unwrap());
+        let mem = EncryptedSqliteMemory::new(
+            tmp.path().to_path_buf(),
+            zeroize::Zeroizing::new("pw".to_string()),
+        )
+        .unwrap();
+        let vstore =
+            Arc::new(SqliteVectorStore::new(mem.shared_conn(), mem.data_key().unwrap()).unwrap());
         let clock = Arc::new(FixedClock::new(1_000_000));
         let cfg = MemoryConfig {
             mode: "selective".into(),
@@ -1238,8 +1247,13 @@ mod tests {
         use tokio::sync::mpsc;
 
         let tmp = tempfile::NamedTempFile::new().unwrap();
-        let mem = EncryptedSqliteMemory::new(tmp.path().to_path_buf(), "pw".into()).unwrap();
-        let vstore = Arc::new(SqliteVectorStore::new(mem.shared_conn(), mem.data_key()).unwrap());
+        let mem = EncryptedSqliteMemory::new(
+            tmp.path().to_path_buf(),
+            zeroize::Zeroizing::new("pw".to_string()),
+        )
+        .unwrap();
+        let vstore =
+            Arc::new(SqliteVectorStore::new(mem.shared_conn(), mem.data_key().unwrap()).unwrap());
         let embedder = Arc::new(FakeEmbedder {
             dim: 16,
             model: "fake".into(),
@@ -1292,8 +1306,13 @@ mod tests {
         use tokio::sync::mpsc;
 
         let tmp = tempfile::NamedTempFile::new().unwrap();
-        let mem = EncryptedSqliteMemory::new(tmp.path().to_path_buf(), "pw".into()).unwrap();
-        let vstore = Arc::new(SqliteVectorStore::new(mem.shared_conn(), mem.data_key()).unwrap());
+        let mem = EncryptedSqliteMemory::new(
+            tmp.path().to_path_buf(),
+            zeroize::Zeroizing::new("pw".to_string()),
+        )
+        .unwrap();
+        let vstore =
+            Arc::new(SqliteVectorStore::new(mem.shared_conn(), mem.data_key().unwrap()).unwrap());
         let clock = Arc::new(FixedClock::new(1_000_000));
         let cfg = MemoryConfig {
             mode: "selective".into(),
@@ -1389,8 +1408,13 @@ mod tests {
         use crate::system::database::EncryptedSqliteMemory;
 
         let tmp = tempfile::NamedTempFile::new().unwrap();
-        let mem = EncryptedSqliteMemory::new(tmp.path().to_path_buf(), "pw".into()).unwrap();
-        let vstore = Arc::new(SqliteVectorStore::new(mem.shared_conn(), mem.data_key()).unwrap());
+        let mem = EncryptedSqliteMemory::new(
+            tmp.path().to_path_buf(),
+            zeroize::Zeroizing::new("pw".to_string()),
+        )
+        .unwrap();
+        let vstore =
+            Arc::new(SqliteVectorStore::new(mem.shared_conn(), mem.data_key().unwrap()).unwrap());
         let embedder = Arc::new(FakeEmbedder {
             dim: 16,
             model: "fake".into(),
@@ -1440,8 +1464,13 @@ mod tests {
         use crate::system::database::EncryptedSqliteMemory;
 
         let tmp = tempfile::NamedTempFile::new().unwrap();
-        let mem = EncryptedSqliteMemory::new(tmp.path().to_path_buf(), "pw".into()).unwrap();
-        let vstore = Arc::new(SqliteVectorStore::new(mem.shared_conn(), mem.data_key()).unwrap());
+        let mem = EncryptedSqliteMemory::new(
+            tmp.path().to_path_buf(),
+            zeroize::Zeroizing::new("pw".to_string()),
+        )
+        .unwrap();
+        let vstore =
+            Arc::new(SqliteVectorStore::new(mem.shared_conn(), mem.data_key().unwrap()).unwrap());
         let embedder = Arc::new(FakeEmbedder {
             dim: 32,
             model: "fake".into(),
@@ -1510,8 +1539,13 @@ mod tests {
         use crate::system::database::EncryptedSqliteMemory;
 
         let tmp = tempfile::NamedTempFile::new().unwrap();
-        let mem = EncryptedSqliteMemory::new(tmp.path().to_path_buf(), "pw".into()).unwrap();
-        let vstore = Arc::new(SqliteVectorStore::new(mem.shared_conn(), mem.data_key()).unwrap());
+        let mem = EncryptedSqliteMemory::new(
+            tmp.path().to_path_buf(),
+            zeroize::Zeroizing::new("pw".to_string()),
+        )
+        .unwrap();
+        let vstore =
+            Arc::new(SqliteVectorStore::new(mem.shared_conn(), mem.data_key().unwrap()).unwrap());
         let embedder = Arc::new(FakeEmbedder {
             dim: 8,
             model: "fake".into(),
@@ -1536,9 +1570,11 @@ mod tests {
 
         // Scope 1: Save with Key A
         let sid = {
-            let memory =
-                crate::system::database::EncryptedSqliteMemory::new(db_path.clone(), key_a)
-                    .unwrap();
+            let memory = crate::system::database::EncryptedSqliteMemory::new(
+                db_path.clone(),
+                zeroize::Zeroizing::new(key_a),
+            )
+            .unwrap();
             let id = memory.create_session("test").await.unwrap();
             memory
                 .add_message(&id, &Message::user(msg_text))
@@ -1553,8 +1589,10 @@ mod tests {
         // than opening and failing later on a per-record decrypt. Crucially, the
         // failed open must NEVER wipe or corrupt the existing data.
         {
-            let result =
-                crate::system::database::EncryptedSqliteMemory::new(db_path.clone(), key_b);
+            let result = crate::system::database::EncryptedSqliteMemory::new(
+                db_path.clone(),
+                zeroize::Zeroizing::new(key_b),
+            );
             assert!(
                 result.is_err(),
                 "opening with a different DB master must fail (wrong KEK cannot unwrap the DEK)"
@@ -1565,8 +1603,11 @@ mod tests {
         // wrong-key attempt intact (never-wipe guarantee).
         {
             let key_a_again = "api_key_alpha".to_string();
-            let memory =
-                crate::system::database::EncryptedSqliteMemory::new(db_path, key_a_again).unwrap();
+            let memory = crate::system::database::EncryptedSqliteMemory::new(
+                db_path,
+                zeroize::Zeroizing::new(key_a_again),
+            )
+            .unwrap();
             let msgs = memory.get_messages(&sid).await.unwrap();
             assert_eq!(
                 msgs,
@@ -1591,8 +1632,13 @@ mod tests {
         use tokio::sync::mpsc;
 
         let tmp = tempfile::NamedTempFile::new().unwrap();
-        let mem = EncryptedSqliteMemory::new(tmp.path().to_path_buf(), "pw".into()).unwrap();
-        let vstore = Arc::new(SqliteVectorStore::new(mem.shared_conn(), mem.data_key()).unwrap());
+        let mem = EncryptedSqliteMemory::new(
+            tmp.path().to_path_buf(),
+            zeroize::Zeroizing::new("pw".to_string()),
+        )
+        .unwrap();
+        let vstore =
+            Arc::new(SqliteVectorStore::new(mem.shared_conn(), mem.data_key().unwrap()).unwrap());
         let embedder = Arc::new(FakeEmbedder {
             dim: 8,
             model: "fake".into(),
@@ -1666,8 +1712,13 @@ mod tests {
         use crate::system::database::EncryptedSqliteMemory;
 
         let tmp = tempfile::NamedTempFile::new().unwrap();
-        let mem = EncryptedSqliteMemory::new(tmp.path().to_path_buf(), "pw".into()).unwrap();
-        let vstore = Arc::new(SqliteVectorStore::new(mem.shared_conn(), mem.data_key()).unwrap());
+        let mem = EncryptedSqliteMemory::new(
+            tmp.path().to_path_buf(),
+            zeroize::Zeroizing::new("pw".to_string()),
+        )
+        .unwrap();
+        let vstore =
+            Arc::new(SqliteVectorStore::new(mem.shared_conn(), mem.data_key().unwrap()).unwrap());
         let embedder = Arc::new(FakeEmbedder {
             dim: 32,
             model: "fake".into(),
@@ -1735,8 +1786,13 @@ mod tests {
         use crate::system::database::EncryptedSqliteMemory;
 
         let tmp = tempfile::NamedTempFile::new().unwrap();
-        let mem = EncryptedSqliteMemory::new(tmp.path().to_path_buf(), "pw".into()).unwrap();
-        let vstore = Arc::new(SqliteVectorStore::new(mem.shared_conn(), mem.data_key()).unwrap());
+        let mem = EncryptedSqliteMemory::new(
+            tmp.path().to_path_buf(),
+            zeroize::Zeroizing::new("pw".to_string()),
+        )
+        .unwrap();
+        let vstore =
+            Arc::new(SqliteVectorStore::new(mem.shared_conn(), mem.data_key().unwrap()).unwrap());
         let embedder = FakeEmbedder {
             dim: 8,
             model: "fake".into(),
@@ -2162,8 +2218,13 @@ mod tests {
         });
 
         let tmp = tempfile::NamedTempFile::new().unwrap();
-        let mem = EncryptedSqliteMemory::new(tmp.path().to_path_buf(), "pw".into()).unwrap();
-        let vstore = Arc::new(SqliteVectorStore::new(mem.shared_conn(), mem.data_key()).unwrap());
+        let mem = EncryptedSqliteMemory::new(
+            tmp.path().to_path_buf(),
+            zeroize::Zeroizing::new("pw".to_string()),
+        )
+        .unwrap();
+        let vstore =
+            Arc::new(SqliteVectorStore::new(mem.shared_conn(), mem.data_key().unwrap()).unwrap());
         let embedder = Arc::new(FakeEmbedder {
             dim: 8,
             model: "fake".into(),

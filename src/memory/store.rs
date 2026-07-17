@@ -31,6 +31,7 @@ use crate::memory::error::MemoryError;
 use crate::memory::salience::assign_salience;
 use crate::memory::MemoryKind;
 use cryptovault::CryptoVault;
+use magi_rs::vault::MaskedDek;
 
 // ─── Memory struct ────────────────────────────────────────────────────────────
 
@@ -334,18 +335,13 @@ fn row_from_query(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawRow> {
 /// [`MemoryError::Crypto`] on cipher failure; [`MemoryError::Storage`] on JSON
 /// deserialization or an unknown `kind` string (data integrity error).
 #[allow(dead_code)]
-fn decode_row(raw: RawRow, vault: &CryptoVault, key: &[u8]) -> Result<Memory, MemoryError> {
+fn decode_row(store: &SqliteVectorStore, raw: RawRow) -> Result<Memory, MemoryError> {
     let kind = parse_kind(&raw.kind_str)?;
 
-    let text = vault
-        .decrypt_with_key(key, &raw.text_blob)
-        .map_err(|e| MemoryError::Crypto(e.to_string()))?
-        .as_str()
-        .to_owned();
+    // Each field unseals via the masked DEK (mask rotates per access — SC-V50).
+    let text = store.unseal(&raw.text_blob)?.as_str().to_owned();
 
-    let emb_json = vault
-        .decrypt_with_key(key, &raw.embedding_blob)
-        .map_err(|e| MemoryError::Crypto(e.to_string()))?;
+    let emb_json = store.unseal(&raw.embedding_blob)?;
     let embedding: Vec<f32> = serde_json::from_str(emb_json.as_str())
         .map_err(|e| MemoryError::Storage(format!("embedding deserialization: {e}")))?;
 
@@ -400,7 +396,7 @@ fn parse_kind(s: &str) -> Result<MemoryKind, MemoryError> {
 ///
 /// # Construction
 /// ```ignore
-/// let store = SqliteVectorStore::new(mem.shared_conn(), mem.data_key())?;
+/// let store = SqliteVectorStore::new(mem.shared_conn(), mem.data_key().unwrap())?;
 /// ```
 ///
 /// # Thread safety
@@ -412,7 +408,10 @@ fn parse_kind(s: &str) -> Result<MemoryKind, MemoryError> {
 pub struct SqliteVectorStore {
     conn: Arc<Mutex<rusqlite::Connection>>,
     vault: CryptoVault,
-    derived_key: Zeroizing<Vec<u8>>,
+    /// The shared per-DB data key held **masked** in RAM ([`MaskedDek`], MS2). The
+    /// `Mutex` gives interior mutability for the `&mut self` mask rotation; the DEK
+    /// lock is never held across the connection lock (R-V08, via seal/unseal).
+    dek: std::sync::Mutex<MaskedDek>,
 }
 
 /// `i64::MAX` as a decimal literal for embedding in raw SQL strings.
@@ -423,7 +422,7 @@ pub struct SqliteVectorStore {
 const I64_MAX_SQL: i64 = i64::MAX;
 
 impl SqliteVectorStore {
-    /// Builds a `SqliteVectorStore` sharing `conn` and `derived_key` with an
+    /// Builds a `SqliteVectorStore` sharing `conn` and the masked DEK with an
     /// existing `EncryptedSqliteMemory`.
     ///
     /// Creates the `memories` table and its scope index if they do not exist.
@@ -434,7 +433,7 @@ impl SqliteVectorStore {
     #[allow(dead_code)]
     pub fn new(
         conn: Arc<Mutex<rusqlite::Connection>>,
-        derived_key: Zeroizing<Vec<u8>>,
+        dek: MaskedDek,
     ) -> Result<Self, MemoryError> {
         {
             let c = conn.lock().unwrap_or_else(|p| p.into_inner());
@@ -463,8 +462,29 @@ impl SqliteVectorStore {
         Ok(Self {
             conn,
             vault: CryptoVault::default(),
-            derived_key,
+            dek: std::sync::Mutex::new(dek),
         })
+    }
+
+    /// Encrypts `plaintext` with the masked DEK. **Never call while holding the
+    /// `self.conn` lock** — takes the DEK lock internally (R-V08).
+    ///
+    /// # Errors
+    /// [`MemoryError::Crypto`] if encryption fails.
+    fn seal(&self, plaintext: &str) -> Result<String, MemoryError> {
+        let mut dek = self.dek.lock().unwrap_or_else(|p| p.into_inner());
+        dek.with_dek(|k| self.vault.encrypt_with_key(k, plaintext))
+            .map_err(|e| MemoryError::Crypto(e.to_string()))
+    }
+
+    /// Decrypts `blob` with the masked DEK. Same lock contract as [`Self::seal`].
+    ///
+    /// # Errors
+    /// [`MemoryError::Crypto`] if decryption fails.
+    fn unseal(&self, blob: &str) -> Result<Zeroizing<String>, MemoryError> {
+        let mut dek = self.dek.lock().unwrap_or_else(|p| p.into_inner());
+        dek.with_dek(|k| self.vault.decrypt_with_key(k, blob))
+            .map_err(|e| MemoryError::Crypto(e.to_string()))
     }
 
     /// Acquires the connection lock, recovering from a poisoned mutex (same
@@ -486,17 +506,11 @@ impl SqliteVectorStore {
     /// [`MemoryError::Crypto`] if either encryption call fails;
     /// [`MemoryError::Storage`] if `m.embedding` cannot be serialized to JSON.
     fn encode_memory(&self, m: &Memory) -> Result<EncodedMemoryRow, MemoryError> {
-        let text_blob = self
-            .vault
-            .encrypt_with_key(&self.derived_key, &m.text)
-            .map_err(|e| MemoryError::Crypto(e.to_string()))?;
+        let text_blob = self.seal(&m.text)?;
 
         let emb_json = serde_json::to_string(&m.embedding)
             .map_err(|e| MemoryError::Storage(format!("embedding serialization: {e}")))?;
-        let embedding_blob = self
-            .vault
-            .encrypt_with_key(&self.derived_key, &emb_json)
-            .map_err(|e| MemoryError::Crypto(e.to_string()))?;
+        let embedding_blob = self.seal(&emb_json)?;
 
         // CP2-B: saturating write — u64 values above i64::MAX are clamped to
         // i64::MAX rather than panicking or wrapping.
@@ -643,16 +657,10 @@ impl SqliteVectorStore {
             let salience = assign_salience(MemoryKind::Episodic, &text, msg.role.clone(), cfg);
 
             // Encrypt the turn text; fails fast if text > MAX_PLAINTEXT_LEN (50 MiB).
-            let text_blob = self
-                .vault
-                .encrypt_with_key(&self.derived_key, &text)
-                .map_err(|e| MemoryError::Crypto(e.to_string()))?;
+            let text_blob = self.seal(&text)?;
 
             // Each record gets its own independently-nonced embedding blob.
-            let embedding_blob = self
-                .vault
-                .encrypt_with_key(&self.derived_key, empty_emb_json)
-                .map_err(|e| MemoryError::Crypto(e.to_string()))?;
+            let embedding_blob = self.seal(empty_emb_json)?;
 
             prepared.push(Prepared {
                 id,
@@ -814,7 +822,7 @@ impl VectorStore for SqliteVectorStore {
         // 2. Decrypt outside the lock (W12).
         match raw {
             None => Ok(None),
-            Some(row) => Ok(Some(decode_row(row, &self.vault, &self.derived_key)?)),
+            Some(row) => Ok(Some(decode_row(self, row)?)),
         }
     }
 
@@ -841,7 +849,7 @@ impl VectorStore for SqliteVectorStore {
         // 2. Decrypt outside the lock (W12).
         let mut out = Vec::with_capacity(raw_rows.len());
         for row in raw_rows {
-            out.push(decode_row(row, &self.vault, &self.derived_key)?);
+            out.push(decode_row(self, row)?);
         }
         Ok(out)
     }
@@ -946,10 +954,7 @@ impl VectorStore for SqliteVectorStore {
         // Encrypt outside the lock (W12 discipline: no crypto under the Mutex).
         let emb_json = serde_json::to_string(embedding)
             .map_err(|e| MemoryError::Storage(format!("embedding serialization: {e}")))?;
-        let embedding_blob = self
-            .vault
-            .encrypt_with_key(&self.derived_key, &emb_json)
-            .map_err(|e| MemoryError::Crypto(e.to_string()))?;
+        let embedding_blob = self.seal(&emb_json)?;
 
         // Hold the lock only for the SQL UPDATE.
         let c = self.locked_conn();
@@ -990,7 +995,7 @@ impl VectorStore for SqliteVectorStore {
         // 2. Decrypt outside the lock (W12).
         let mut out = Vec::with_capacity(raw_rows.len());
         for row in raw_rows {
-            out.push(decode_row(row, &self.vault, &self.derived_key)?);
+            out.push(decode_row(self, row)?);
         }
         Ok(out)
     }
@@ -1034,8 +1039,12 @@ mod tests {
     /// `NamedTempFile` must stay alive for the test's lifetime.
     fn test_store() -> (tempfile::NamedTempFile, SqliteVectorStore) {
         let tmp = tempfile::NamedTempFile::new().unwrap();
-        let mem = EncryptedSqliteMemory::new(tmp.path().to_path_buf(), "pw".into()).unwrap();
-        let store = SqliteVectorStore::new(mem.shared_conn(), mem.data_key()).unwrap();
+        let mem = EncryptedSqliteMemory::new(
+            tmp.path().to_path_buf(),
+            zeroize::Zeroizing::new("pw".to_string()),
+        )
+        .unwrap();
+        let store = SqliteVectorStore::new(mem.shared_conn(), mem.data_key().unwrap()).unwrap();
         (tmp, store)
     }
 

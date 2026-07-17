@@ -508,8 +508,13 @@ mod tests {
     /// Convenience to open a fresh in-memory store backed by a tempfile DB.
     fn open_store() -> (NamedTempFile, Arc<SqliteVectorStore>) {
         let tmp = NamedTempFile::new().unwrap();
-        let mem = EncryptedSqliteMemory::new(tmp.path().to_path_buf(), "benchpw".into()).unwrap();
-        let store = Arc::new(SqliteVectorStore::new(mem.shared_conn(), mem.data_key()).unwrap());
+        let mem = EncryptedSqliteMemory::new(
+            tmp.path().to_path_buf(),
+            zeroize::Zeroizing::new("benchpw".to_string()),
+        )
+        .unwrap();
+        let store =
+            Arc::new(SqliteVectorStore::new(mem.shared_conn(), mem.data_key().unwrap()).unwrap());
         (tmp, store)
     }
 

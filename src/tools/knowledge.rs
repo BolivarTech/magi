@@ -116,7 +116,11 @@ mod tests {
     async fn test_knowledge_tool_execution() {
         let tmp = NamedTempFile::new().unwrap();
         let memory = Arc::new(
-            EncryptedSqliteMemory::new(tmp.path().to_path_buf(), "pass".to_string()).unwrap(),
+            EncryptedSqliteMemory::new(
+                tmp.path().to_path_buf(),
+                zeroize::Zeroizing::new("pass".to_string()),
+            )
+            .unwrap(),
         );
         let tool = ProjectFactTool::new(memory.clone());
 
@@ -151,7 +155,11 @@ mod tests {
     async fn test_project_fact_tool_does_not_require_approval() {
         let tmp = NamedTempFile::new().unwrap();
         let memory = Arc::new(
-            EncryptedSqliteMemory::new(tmp.path().to_path_buf(), "pass".to_string()).unwrap(),
+            EncryptedSqliteMemory::new(
+                tmp.path().to_path_buf(),
+                zeroize::Zeroizing::new("pass".to_string()),
+            )
+            .unwrap(),
         );
         let tool = ProjectFactTool::new(memory);
         assert!(
@@ -164,7 +172,11 @@ mod tests {
     async fn test_knowledge_tool_size_limit() {
         let tmp = NamedTempFile::new().unwrap();
         let memory = Arc::new(
-            EncryptedSqliteMemory::new(tmp.path().to_path_buf(), "pass".to_string()).unwrap(),
+            EncryptedSqliteMemory::new(
+                tmp.path().to_path_buf(),
+                zeroize::Zeroizing::new("pass".to_string()),
+            )
+            .unwrap(),
         );
         let tool = ProjectFactTool::new(memory.clone());
 
