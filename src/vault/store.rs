@@ -341,9 +341,11 @@ impl SecretStore for VaultStore {
 ///
 /// Takes ARBITRARY bytes as a secret value (via `from_utf8_lossy`, since a stored
 /// value is a `&str`), sets and gets it against a throwaway in-memory store, and
-/// **discards** the results. The invariant the fuzzer verifies: no input —
-/// empty, non-UTF8, huge — ever panics; every failure is a typed [`VaultError`]
-/// and a successful round-trip returns the exact value.
+/// **discards** the results. The ONLY invariant this entrypoint verifies is
+/// panic-freedom: no input — empty, non-UTF8, huge — ever panics, and every
+/// failure is a typed [`VaultError`]. Round-trip VALUE equality is asserted
+/// separately in the unit tests (`test_set_then_get_roundtrips_the_exact_value`),
+/// NOT here — a fuzzer only needs to prove nothing crashes.
 #[doc(hidden)]
 pub fn fuzz_value_roundtrip_entrypoint(data: &[u8]) {
     let Ok(conn) = Connection::open_in_memory() else {
@@ -516,14 +518,22 @@ mod tests {
         // class the BLOB column happens to report.
         let mut s = fixture();
         s.set("K", "super-secret-readable").expect("set");
-        let conn = s.debug_conn();
-        let guard = conn.lock().expect("lock");
-        let blob: Vec<u8> = guard
-            .query_row("SELECT value_blob FROM vault WHERE name='K'", [], |r| {
-                Ok(raw_column_bytes(r.get_ref(0)?))
-            })
-            .expect("row");
+        let blob: Vec<u8> = {
+            let conn = s.debug_conn();
+            let guard = conn.lock().expect("lock");
+            guard
+                .query_row("SELECT value_blob FROM vault WHERE name='K'", [], |r| {
+                    Ok(raw_column_bytes(r.get_ref(0)?))
+                })
+                .expect("row")
+        };
+        // Deterministic, not just a probabilistic substring miss: the on-disk
+        // blob is NOT the plaintext bytes (AEAD+FEC expands and randomizes it),
+        // does not contain them, AND still decrypts back to the exact value —
+        // together proving the value is really encrypted and recoverable.
+        assert_ne!(blob.as_slice(), b"super-secret-readable");
         assert!(!String::from_utf8_lossy(&blob).contains("super-secret-readable"));
+        assert_eq!(s.get("K").expect("roundtrip").as_str(), "super-secret-readable");
     }
 
     #[test]
