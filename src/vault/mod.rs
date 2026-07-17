@@ -32,7 +32,7 @@ mod master;
 mod memguard;
 mod store;
 
-pub use envelope::{bootstrap_envelope, fuzz_open_entrypoint, open_envelope};
+pub use envelope::{bootstrap_envelope, fuzz_open_entrypoint, open_envelope, rekey_envelope};
 pub use error::VaultError;
 pub use master::{
     check_strength, create_passphrase, resolve_passphrase, PassphrasePrompt, TtyPrompt,
