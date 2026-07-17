@@ -429,6 +429,18 @@ mod tests {
     }
 
     #[test]
+    fn test_contains_reports_presence_and_rejects_empty_name() {
+        // Loop-1 M-2: direct coverage of `contains` — true after set, false for
+        // an absent name, and a typed error for a blank name (REQ-V00 per-fn
+        // happy + edge coverage).
+        let mut s = fixture();
+        assert!(!s.contains("K").expect("absent")); // happy: absent => false
+        s.set("K", "v").expect("set");
+        assert!(s.contains("K").expect("present")); // happy: present => true
+        assert!(matches!(s.contains(""), Err(VaultError::SecretNotFound(_)))); // edge: blank
+    }
+
+    #[test]
     fn test_list_yields_names_and_dates_never_values() {
         let mut s = fixture();
         s.set("A", "secret-value-A").expect("set");
