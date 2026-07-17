@@ -6,10 +6,10 @@
 //! The passphrase is the ONLY key: there is no keyring, no recovery, no backdoor
 //! (REQ-V23). It resolves with a deterministic precedence (`-p`, then
 //! `MAGI_PASSPHRASE`, then interactive prompt) and is used only to derive the KEK,
-//! then zeroized (the caller holds it in [`Zeroizing`]). A moved `.db` is
-//! brute-forced offline
-//! with no rate-limiting, creation/rotation enforce a **hard** strength floor
-//! (`zxcvbn` score ≥ 3, ≥ 12 chars) with **no override** (REQ-V18).
+//! then zeroized (the caller holds it in [`Zeroizing`]). Because a moved `.db`
+//! can be brute-forced offline with no rate-limiting, creation and rotation
+//! enforce a **hard** strength floor (`zxcvbn` score ≥ 3, ≥ 12 chars) with
+//! **no override** (REQ-V18).
 
 use std::io::IsTerminal;
 
@@ -60,7 +60,7 @@ impl PassphrasePrompt for TtyPrompt {
             std::io::stdin()
                 .read_line(&mut line)
                 .map_err(|e| VaultError::Io(e.to_string()))?;
-            Ok(Zeroizing::new(strip_trailing_newline(line)))
+            Ok(strip_trailing_newline(Zeroizing::new(line)))
         } else {
             rpassword::prompt_password(msg)
                 .map(Zeroizing::new)
@@ -75,11 +75,15 @@ impl PassphrasePrompt for TtyPrompt {
 /// stripping it aligns `-p`/env with the interactive prompt and prevents the
 /// silent lockout of `MAGI_PASSPHRASE=$(cat f)` (trailing `\n`). Inner or
 /// deliberate trailing spaces/tabs are preserved (REQ-V18 / MAGI run 10).
-fn strip_trailing_newline(s: String) -> String {
+///
+/// Takes and returns [`Zeroizing`] so the passphrase never lands in a plain
+/// `String` that outlives the call (REQ-V41 — keep sensitive material masked
+/// end-to-end, never a bare copy).
+fn strip_trailing_newline(s: Zeroizing<String>) -> Zeroizing<String> {
     if let Some(stripped) = s.strip_suffix("\r\n") {
-        stripped.to_string()
+        Zeroizing::new(stripped.to_string())
     } else if let Some(stripped) = s.strip_suffix('\n') {
-        stripped.to_string()
+        Zeroizing::new(stripped.to_string())
     } else {
         s
     }
@@ -101,13 +105,12 @@ pub fn resolve_passphrase(
     prompt: &mut dyn PassphrasePrompt,
 ) -> Result<Zeroizing<String>, VaultError> {
     if let Some(p) = flag {
-        return Ok(Zeroizing::new(strip_trailing_newline(
-            p.as_str().to_string(),
-        )));
+        // `p` is already `Zeroizing`; strip in place with no bare-`String` copy.
+        return Ok(strip_trailing_newline(p));
     }
     if let Ok(env) = std::env::var(PASSPHRASE_ENV) {
         if !env.is_empty() {
-            return Ok(Zeroizing::new(strip_trailing_newline(env)));
+            return Ok(strip_trailing_newline(Zeroizing::new(env)));
         }
     }
     if !prompt.is_interactive() {
