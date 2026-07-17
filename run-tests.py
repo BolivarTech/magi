@@ -51,7 +51,10 @@ def main() -> int:
         cwd=project_root,
     )
 
-    return guard.returncode
+    # The reporter (`--passthrough`) exits 0 even when tests fail — it only writes
+    # test.json. The authoritative pass/fail is nextest's own exit code, so a real
+    # test failure must propagate (else the gate silently passes on red).
+    return nextest.returncode if nextest.returncode != 0 else guard.returncode
 
 
 if __name__ == "__main__":
