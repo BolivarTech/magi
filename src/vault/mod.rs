@@ -28,6 +28,8 @@
 
 mod envelope;
 mod error;
+mod memguard;
 
 pub use envelope::{bootstrap_envelope, fuzz_open_entrypoint, open_envelope};
 pub use error::VaultError;
+pub use memguard::{harden_process, MaskedDek};

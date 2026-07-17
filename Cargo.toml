@@ -53,6 +53,9 @@ uuid = { version = "1.8", features = ["v4"] }
 magi-core = "1.1.1"
 instant-distance = { version = "0.6", optional = true }
 
+# Vault MS2 — REQ-V42 layer 1: mlock/VirtualLock via a safe crate (no own unsafe).
+region = "3.0.2"
+
 [dev-dependencies]
 # RoutingMockProvider for consult tests (no extra runtime deps; reqwest NOT pulled)
 magi-core = { version = "1.1.1", features = ["test-utils"] }
@@ -67,3 +70,11 @@ serial_test = "3.0"
 ## Enable opt-in HNSW ANN index (CP2-A). Off by default; brute-force exact
 ## search is always available and is the default retrieval path (D-05).
 ann = ["dep:instant-distance"]
+
+# Vault MS2 — REQ-V42 layer 2 (POSIX only): RLIMIT_CORE=0 suppresses core dumps.
+[target.'cfg(unix)'.dependencies]
+rlimit = "0.11.0"
+
+# Vault MS2 — REQ-V42 layer 2 (Linux only): PR_SET_DUMPABLE=0 (also blocks peer ptrace).
+[target.'cfg(target_os = "linux")'.dependencies]
+prctl = "1.0.0"
