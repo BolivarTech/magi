@@ -9,6 +9,97 @@ changes and the **patch** position signals backward-compatible fixes.
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-07-17
+
+Vault **MS2 — the vault CLI + zero-knowledge passphrase**. The user-facing surface
+promised by MS1's cryptographic foundation: a `magi-rs vault` CLI, a passphrase
+in place of the OS keyring, and the DEK protected in RAM rather than held as
+plain bytes.
+
+### Added
+- **`magi-rs vault {ls,set,rm,passwd}` CLI.** `ls` lists secret names with
+  `created_at`/`updated_at` only; `set <name>` reads the value from a hidden
+  prompt (TTY) or raw stdin (no TTY), never as a CLI argument, and asks for a
+  `Y`-only confirmation before overwriting an existing name (`--force`/`-f`
+  skips it); `rm <name>` needs the same confirmation; `passwd` re-keys the
+  envelope. There is deliberately no `get`/`cat`/`show <name>` — a stored
+  secret's value can never be printed.
+- **`-p`/`--passphrase` global flag and `MAGI_PASSPHRASE` env var**, resolved
+  with a fixed precedence (`-p` > env > interactive hidden prompt) ahead of
+  every TUI launch and every `vault` subcommand. First run asks the user to
+  create a passphrase and enforces a hard strength floor (`zxcvbn` score ≥ 3,
+  ≥ 12 characters, no composition rules, no override).
+- **`MaskedDek` RAM protection** (`src/vault/memguard.rs`). The data key is
+  held masked (XOR, `OsRng`-derived mask rotated on every access) rather than
+  as plain bytes, backed by best-effort `mlock`/`VirtualLock` (no swap),
+  `RLIMIT_CORE=0` (Unix) and `PR_SET_DUMPABLE=0` (Linux) to suppress core
+  dumps and same-user `ptrace`. All three layers fail open with a visible
+  warning rather than refusing to start.
+- **`env > vault` API-key resolution** for both `ANTHROPIC_API_KEY` and
+  `OPENAI_API_KEY` — the vault is now the single shared secret store for
+  both, closing the previous "OpenAI key is env-only" gap.
+- **`passwd`** re-derives the KEK from a new passphrase and re-wraps the
+  existing DEK in one crash-safe transaction (openable with the old or new
+  passphrase at every point, never bricked) — an O(1) re-key, no record
+  re-encryption.
+- 2 new fuzz targets (`fuzz_secret_value_roundtrip`, `fuzz_passphrase_input`)
+  covering the vault-value and passphrase-input surfaces added in MS2, plus
+  `cargo +nightly miri test` coverage of the new core (`memguard`/`store`/
+  `master`).
+
+### Changed / BREAKING
+- **The OS keyring and `key.txt` are removed entirely.** `system::secrets`
+  (`KeyringStore`) is deleted, the `keyring` dependency is gone from
+  `Cargo.toml`, and `key.txt`/`key.txt.bak` are no longer read anywhere. The
+  DB now opens **only** with the user passphrase.
+- **A DB created before v0.9.0** was wrapped with the keyring-era master
+  secret; opening it with any passphrase deterministically yields
+  `incorrect passphrase`. There is no migration path (pre-1.0, zero installs)
+  — delete `.magi-rs-memory.db` manually to start fresh.
+- **Every TUI launch now prompts for the passphrase**, and `--logout`/`/logout`
+  require unlocking the vault first (they now do `vault rm ANTHROPIC_API_KEY`
+  instead of clearing a keyring entry). This is a deliberate UX trade-off —
+  daily friction traded for a hard zero-knowledge guarantee (no more silent
+  DB unlock from a keyring-cached secret) — and is called out explicitly
+  rather than left to be discovered.
+- **`/login` (OAuth) writes the minted key to the vault**, not a keyring.
+
+### Security
+- **Zero-knowledge, no backdoor.** Nothing persisted anywhere opens the DB
+  without the passphrase — no keyring entry, no cached file, no copy of the
+  DEK on disk. Forgetting the passphrase means the data is unrecoverable;
+  this is stated to the user on first-run passphrase creation and again in
+  `vault passwd`.
+- **Passphrase strength floor is a hard rejection, not advisory.** `zxcvbn`
+  score < 3, under 12 characters, or a blocklist match are all rejected
+  outright with no override flag — closing an offline brute-force exposure
+  that a portable, keyring-free `.db` file otherwise leaves open.
+- **The passphrase is never read from a pipe.** Without a TTY, stdin is
+  reserved exclusively for a vault-command *value*; the passphrase must come
+  from `-p`/`MAGI_PASSPHRASE` or the command fails closed
+  (`VaultError::PassphraseUnavailable`) rather than misreading a piped value
+  as the passphrase.
+- **The DEK is masked in RAM** (see "Added" above) rather than cached as a
+  plain `Vec<u8>`; the mask rotates on every access, even if the operation
+  panics.
+
+### Known limitations
+- **`passwd` does not re-encrypt records.** Rotating the passphrase re-wraps
+  the DEK in O(1) but leaves every record encrypted under the *same* DEK.
+  This protects against a compromised passphrase, not against a DEK already
+  extracted from a running process's RAM. Documented, not surfaced as a
+  runtime warning (would be noise for routine rotation) — see `CLAUDE.md`
+  and the `vault passwd` docs.
+- **`mlock`/core-dump suppression are best-effort and platform-uneven.**
+  Windows cannot prevent a user-initiated process dump from inside the
+  program in any language; containers/CI without `CAP_IPC_LOCK` degrade with
+  a visible warning instead of refusing to start. None of the three RAM
+  layers defeat an attacker with debugger access to the process — the module
+  rustdoc says so explicitly.
+- **Unlock ergonomics** (avoiding a passphrase prompt on every launch) and
+  **hardware-backed key protection** (TPM/Secure Enclave) remain deferred —
+  see `dev-docs/PENDING_IMPLEMENTATION.md` §13.3/§13.4.
+
 ## [0.8.0] - 2026-07-15
 
 Vault **MS1 — cryptographic foundation**. A pure hardening milestone: no new
