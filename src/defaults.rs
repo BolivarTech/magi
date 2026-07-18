@@ -25,46 +25,14 @@ pub const DEFAULT_ANTHROPIC_MODEL: &str = "claude-sonnet-4-6";
 /// re-exported by `memory::config::d::emb_model` so both resolve identically.
 pub const DEFAULT_EMBEDDING_MODEL: &str = "nomic-embed-text-v2-moe:latest";
 
-// ── Headless mode constants (single source of truth; overridable via the
-// `[headless]` section of `magi.toml`). Origin per the spec, §11. ─────────────
+// ── Headless mode constants ───────────────────────────────────────────────────
 //
-// Declared here in T0 (plan Step 4) as the single source of truth; their
-// consumers land in later MS1 tasks (T4 bounded read, T5 parser, T7 output,
-// T8 logs, T11 clap wiring). The per-const `#[allow(dead_code)]` is a scoped,
-// documented forward declaration — NOT a whole-file allow (which would mask
-// genuine dead code elsewhere in this shared module). Each attribute is removed
-// by the task that first consumes its constant.
-
-/// Cap on `-i`/stdin input bytes read (DoS bound, REQ-H29). 10 MiB. Read with
-/// `take(cap+1)` so a hostile unbounded source never buffers fully.
-#[allow(dead_code)]
-pub const MAX_INPUT_BYTES: usize = 10 * 1024 * 1024;
-/// Max JSON nesting depth of the envelope parser (stack-DoS bound, REQ-H29).
-/// The default `serde_json` limit (128) exceeds this, so our counter fires first.
-#[allow(dead_code)]
-pub const MAX_JSON_DEPTH: u32 = 64;
-/// Cap on each tool `result` in the rich output, with a truncation marker
-/// (REQ-H14). 64 KiB.
-#[allow(dead_code)]
-pub const TOOL_RESULT_CAP: usize = 64 * 1024;
-/// Retention: keep at most the last N run logs, pruned at start (REQ-H34). 50.
-#[allow(dead_code)]
-pub const LOG_RETENTION_RUNS: usize = 50;
-/// Retention: total log-dir byte ceiling, pruned oldest-first (REQ-H24). 512 MiB.
-#[allow(dead_code)]
-pub const LOG_MAX_BYTES: u64 = 512 * 1024 * 1024;
-/// Hard wall-clock ceiling (seconds) applied by default under `--full-auto`
-/// (and any tool-executing tier) when no `--timeout` is given (REQ-H36). 900 s.
-#[allow(dead_code)]
-pub const FULL_AUTO_TIMEOUT_SECS: u64 = 900;
-/// Normal per-query tool-call cap; the operator ceiling when `magi.toml` sets
-/// none (REQ-H08/H12b). 15.
-#[allow(dead_code)]
-pub const NORMAL_MAX_TOOL_CALLS: u32 = 15;
-/// Elevated tool-call cap under `--full-auto`; a hard backstop, not infinite
-/// (REQ-H08). 50.
-#[allow(dead_code)]
-pub const FULL_AUTO_MAX_TOOL_CALLS: u32 = 50;
+// The headless numeric caps (`MAX_INPUT_BYTES`, `MAX_JSON_DEPTH`, …) live in the
+// lib module `magi_rs::headless::limits` — lib-visible so the `headless` lib
+// modules can use them directly, which the bin-only `defaults` module cannot
+// provide across the crate split. Reference them via `magi_rs::headless::limits`
+// (bin) or `crate::limits` (within `headless`). Overridable via the `[headless]`
+// section of `magi.toml`. Origin per the spec, §11.
 
 /// Startup notice shown when no `magi.toml` is present (RF-9). Built by
 /// interpolating the default constants (RF-8 DRY) so it tracks any constant edit.
@@ -496,19 +464,6 @@ mod tests {
         assert_eq!(DEFAULT_MAGI_BALTHASAR, "gpt-oss:120b-cloud");
         assert_eq!(DEFAULT_MAGI_CASPAR, "deepseek-v4-pro:cloud");
         assert_eq!(DEFAULT_ANTHROPIC_MODEL, "claude-sonnet-4-6");
-    }
-
-    #[test]
-    fn test_headless_constants_match_the_spec_defaults() {
-        // §11 fixed defaults — a change here is a contract change, not a refactor.
-        assert_eq!(MAX_INPUT_BYTES, 10 * 1024 * 1024);
-        assert_eq!(MAX_JSON_DEPTH, 64);
-        assert_eq!(TOOL_RESULT_CAP, 64 * 1024);
-        assert_eq!(LOG_RETENTION_RUNS, 50);
-        assert_eq!(LOG_MAX_BYTES, 512 * 1024 * 1024);
-        assert_eq!(FULL_AUTO_TIMEOUT_SECS, 900);
-        assert_eq!(NORMAL_MAX_TOOL_CALLS, 15);
-        assert_eq!(FULL_AUTO_MAX_TOOL_CALLS, 50);
     }
 
     #[test]
