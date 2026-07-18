@@ -400,10 +400,7 @@ fn place_magi_dir(magi_dir: &Path) -> Result<(), HeadlessError> {
         .ok_or_else(|| HeadlessError::Io("target .magi has no parent directory".to_owned()))?;
     let tmp = parent.join(format!("{TMP_DIR_PREFIX}{:016x}", rand::random::<u64>()));
     create_gate_dir(&tmp)?;
-    if let Err(e) = populate_in_place(&tmp) {
-        let _ = fs::remove_dir_all(&tmp);
-        return Err(e);
-    }
+    populate_or_cleanup(&tmp)?;
     rename_no_replace(&tmp, magi_dir)
 }
 
@@ -426,11 +423,45 @@ fn place_magi_dir(magi_dir: &Path) -> Result<(), HeadlessError> {
 /// [`HeadlessError::Storage`] on a filesystem or schema error.
 fn place_via_mkdir_gate(magi_dir: &Path) -> Result<(), HeadlessError> {
     create_gate_dir(magi_dir)?;
-    if let Err(e) = populate_in_place(magi_dir) {
-        let _ = fs::remove_dir_all(magi_dir);
-        return Err(e);
+    populate_or_cleanup(magi_dir)
+}
+
+/// Populates the freshly-created, restricted `scaffold` directory and, on any
+/// populate error, best-effort removes the scaffold `init` itself just created,
+/// returning the **original** error (never the cleanup error).
+///
+/// Removing `init`'s own half-built scaffold does **not** violate never-delete
+/// (REQ-H20/H41): the scaffold holds no user data yet — only `logs/`, a
+/// defaults `magi.toml`, and an empty envelope-less DB. Leaving it orphaned
+/// would make a later `init` refuse (the no-replace gate), so the cleanup keeps
+/// a crashed/failed `init` retryable.
+///
+/// # Errors
+/// The original [`HeadlessError`] from [`populate_in_place`] (I/O, storage, or a
+/// pre-existing child), unchanged; the cleanup outcome is intentionally ignored.
+fn populate_or_cleanup(scaffold: &Path) -> Result<(), HeadlessError> {
+    populate_or_cleanup_with(scaffold, populate_in_place)
+}
+
+/// [`populate_or_cleanup`] with an injectable populate step, so the
+/// failure-cleanup path is unit-testable without forcing a real populate error.
+///
+/// # Errors
+/// The original error returned by `populate`, unchanged (cleanup errors are
+/// swallowed).
+fn populate_or_cleanup_with<F>(scaffold: &Path, populate: F) -> Result<(), HeadlessError>
+where
+    F: FnOnce(&Path) -> Result<(), HeadlessError>,
+{
+    match populate(scaffold) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            // Best-effort: the scaffold contains NO user data (never-delete safe);
+            // return the ORIGINAL error, not the cleanup outcome.
+            let _ = fs::remove_dir_all(scaffold);
+            Err(e)
+        }
     }
-    Ok(())
 }
 
 /// Renames `tmp` onto `final_dir` atomically without replacing an existing
@@ -646,7 +677,9 @@ fn restrict_to_current_user(path: &Path) -> Result<(), HeadlessError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{detect_legacy_files, discover, init, Workspace};
+    use super::{
+        create_gate_dir, detect_legacy_files, discover, init, populate_or_cleanup_with, Workspace,
+    };
     use magi_rs::headless::HeadlessError;
     use std::path::PathBuf;
 
@@ -790,6 +823,40 @@ mod tests {
         assert!(ws.magi_dir.is_dir());
         assert!(ws.db_path().exists());
         // The `.magi/` is complete, not half-populated.
+        assert!(ws.magi_dir.join("magi.toml").exists());
+    }
+
+    #[test]
+    fn test_populate_failure_cleans_up_scaffold_and_allows_retry() {
+        // REQ-H41 / Fix: a populate error AFTER the scaffold dir is created must
+        // remove only that just-built scaffold (no user data yet), return the
+        // ORIGINAL error, and leave no orphan that a retry would refuse.
+        let tmp = tempfile::tempdir().unwrap();
+        let scaffold = tmp.path().join(".magi");
+        create_gate_dir(&scaffold).expect("gate dir created");
+        assert!(
+            scaffold.is_dir(),
+            "the scaffold exists before populate runs"
+        );
+
+        let err = populate_or_cleanup_with(&scaffold, |_| {
+            Err(HeadlessError::Storage(
+                "injected populate failure".to_owned(),
+            ))
+        })
+        .expect_err("the injected populate failure must propagate");
+        assert!(
+            matches!(err, HeadlessError::Storage(_)),
+            "the ORIGINAL populate error is returned, not the cleanup outcome"
+        );
+        assert!(
+            !scaffold.exists(),
+            "the half-built scaffold must be removed on populate failure"
+        );
+
+        // The cleaned-up failure does not block a subsequent real init.
+        let ws = init(tmp.path()).expect("init proceeds after the cleaned-up failure");
+        assert!(ws.db_path().exists());
         assert!(ws.magi_dir.join("magi.toml").exists());
     }
 
