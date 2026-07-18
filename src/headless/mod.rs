@@ -31,6 +31,7 @@
 mod error;
 pub mod input;
 pub mod limits;
+pub(crate) mod log;
 pub(crate) mod output;
 pub(crate) mod resolution;
 pub(crate) mod types;

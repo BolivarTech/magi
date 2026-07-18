@@ -393,7 +393,11 @@ fn match_generic_secret_run(chars: &[char], i: usize) -> Option<usize> {
 /// caso, pero `n` aquí es el largo de un mensaje de error de diagnóstico
 /// (típicamente bytes a pocos KB, no un payload arbitrario), por lo que el
 /// costo real es despreciable.
-fn redact_secret_patterns(raw: &str) -> String {
+///
+/// `pub(crate)` (ensanchado desde privado en T8, REQ-H24): `headless::log`
+/// reusa este mismo redactor para el `input` de un tool-call a nivel debug —
+/// nunca se reimplementan los matchers en un segundo lugar (DRY).
+pub(crate) fn redact_secret_patterns(raw: &str) -> String {
     let chars: Vec<char> = raw.chars().collect();
     let mut out = String::with_capacity(raw.len());
     let mut i = 0usize;
