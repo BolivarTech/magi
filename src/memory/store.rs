@@ -425,7 +425,8 @@ impl SqliteVectorStore {
     /// Builds a `SqliteVectorStore` sharing `conn` and the masked DEK with an
     /// existing `EncryptedSqliteMemory`.
     ///
-    /// Creates the `memories` table and its scope index if they do not exist.
+    /// Ensures the full schema (incl. the `memories` table and its scope index)
+    /// exists, delegating to the shared [`crate::system::database::init_schema`].
     ///
     /// # Errors
     /// [`MemoryError::Storage`] if the DDL statement fails.
@@ -437,27 +438,10 @@ impl SqliteVectorStore {
     ) -> Result<Self, MemoryError> {
         {
             let c = conn.lock().unwrap_or_else(|p| p.into_inner());
-            c.execute_batch(
-                "CREATE TABLE IF NOT EXISTS memories (
-                    id TEXT PRIMARY KEY,
-                    session_id TEXT NOT NULL,
-                    kind TEXT NOT NULL,
-                    text_blob TEXT NOT NULL,
-                    embedding_blob TEXT NOT NULL,
-                    model_id TEXT NOT NULL,
-                    dim INTEGER NOT NULL,
-                    created_at INTEGER NOT NULL,
-                    salience REAL NOT NULL,
-                    access_count INTEGER NOT NULL DEFAULT 0,
-                    last_accessed_at INTEGER NOT NULL,
-                    superseded_by TEXT,
-                    evicted_at INTEGER,
-                    scope TEXT NOT NULL DEFAULT 'root',
-                    distilled_at INTEGER
-                );
-                CREATE INDEX IF NOT EXISTS idx_memories_scope ON memories(scope);",
-            )
-            .map_err(|e| MemoryError::Storage(e.to_string()))?;
+            // Single source of truth for the schema (incl. the `memories` table and
+            // its scope index) lives in `database::init_schema` — reuse it (DRY).
+            crate::system::database::init_schema(&c)
+                .map_err(|e| MemoryError::Storage(e.to_string()))?;
         }
         Ok(Self {
             conn,

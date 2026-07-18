@@ -147,40 +147,8 @@ impl EncryptedSqliteMemory {
         let _: String = conn.query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))?;
         conn.execute("PRAGMA synchronous = NORMAL", [])?;
 
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS sessions (
-                id TEXT PRIMARY KEY,
-                project_name TEXT NOT NULL,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-            )",
-            [],
-        )?;
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS messages (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                session_id TEXT NOT NULL,
-                role TEXT NOT NULL,
-                content_blob TEXT NOT NULL,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY(session_id) REFERENCES sessions(id)
-            )",
-            [],
-        )?;
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS knowledge (
-                key TEXT PRIMARY KEY,
-                value_blob TEXT NOT NULL,
-                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-            )",
-            [],
-        )?;
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS vault_meta (
-                key TEXT PRIMARY KEY,
-                value BLOB NOT NULL
-            )",
-            [],
-        )?;
+        // Create every table of the schema (single source of truth — `init_schema`).
+        init_schema(&conn)?;
 
         // Envelope open path (REQ-V29/V35): `vault_meta` holds `{salt, wrapped_dek}`,
         // each FEC-encoded. The master passphrase (UTF-8, from `-p`/env/prompt)
@@ -334,6 +302,66 @@ impl EncryptedSqliteMemory {
 /// string would make impossible.
 fn map_open_err(e: VaultError) -> anyhow::Error {
     e.into()
+}
+
+/// Creates every table of the magi-rs on-disk schema, idempotently.
+///
+/// Single source of truth for the schema shared by three call sites: the
+/// encrypted store bootstrap ([`EncryptedSqliteMemory::new_with_vault`]), the
+/// vector store ([`crate::memory::store::SqliteVectorStore::new`]), and the
+/// headless `magi init` scaffold ([`crate::system::workspace::init`]). The five
+/// tables — `sessions`, `messages`, `knowledge`, `vault_meta`, `memories` — are
+/// exactly the set the bootstrap state machine (MS1 Task 3) row-counts; keeping
+/// them in one place guarantees a freshly-`init`ed DB never self-reports
+/// `DbCorrupt` for a missing table. All statements use `IF NOT EXISTS`, so
+/// re-running against an initialized DB is a no-op. Does **not** set any
+/// `PRAGMA` (WAL/synchronous) — those stay at the connection-open call sites.
+///
+/// # Errors
+/// Returns the underlying [`rusqlite::Error`] if any `CREATE` statement fails.
+pub(crate) fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS sessions (
+            id TEXT PRIMARY KEY,
+            project_name TEXT NOT NULL,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL,
+            role TEXT NOT NULL,
+            content_blob TEXT NOT NULL,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(session_id) REFERENCES sessions(id)
+        );
+        CREATE TABLE IF NOT EXISTS knowledge (
+            key TEXT PRIMARY KEY,
+            value_blob TEXT NOT NULL,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS vault_meta (
+            key TEXT PRIMARY KEY,
+            value BLOB NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS memories (
+            id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            text_blob TEXT NOT NULL,
+            embedding_blob TEXT NOT NULL,
+            model_id TEXT NOT NULL,
+            dim INTEGER NOT NULL,
+            created_at INTEGER NOT NULL,
+            salience REAL NOT NULL,
+            access_count INTEGER NOT NULL DEFAULT 0,
+            last_accessed_at INTEGER NOT NULL,
+            superseded_by TEXT,
+            evicted_at INTEGER,
+            scope TEXT NOT NULL DEFAULT 'root',
+            distilled_at INTEGER
+        );
+        CREATE INDEX IF NOT EXISTS idx_memories_scope ON memories(scope);",
+    )
 }
 
 #[async_trait]

@@ -84,3 +84,17 @@ rlimit = "0.11.0"
 # Vault MS2 — REQ-V42 layer 2 (Linux only): PR_SET_DUMPABLE=0 (also blocks peer ptrace).
 [target.'cfg(target_os = "linux")'.dependencies]
 prctl = "1.0.0"
+# Headless MS1 T2 — REQ-H01/H41: atomic no-replace rename for the `.magi/` scaffold.
+# `renameat_with(RenameFlags::NOREPLACE)` → `renameat2(RENAME_NOREPLACE)`, a
+# portable safe wrapper (no own `unsafe`, honoring crate-wide `forbid(unsafe_code)`).
+# Linux-only: rustix gates `renameat_with` behind `cfg(linux_kernel)`; macOS/other
+# unix fall back to the portable `create_dir` mkdir-gate (also atomic no-replace).
+# Pinned; `fs` feature only.
+rustix = { version = "0.38", features = ["fs"] }
+
+# Headless MS1 T2 — REQ-H38: restrict `.magi/` ACL to the current user on Windows
+# (the POSIX 0700/0600 equivalent). `windows-acl` encapsulates the Win32 `unsafe`
+# inside a safe crate, so magi-rs keeps `forbid(unsafe_code)`; NO raw Win32.
+# Pinned; Windows-only target.
+[target.'cfg(windows)'.dependencies]
+windows-acl = "0.3"

@@ -40,6 +40,7 @@
 
 use std::fs;
 use std::io;
+use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 
 use magi_rs::headless::HeadlessError;
@@ -58,6 +59,23 @@ const LOGS_DIR_NAME: &str = "logs";
 
 /// Mensaje de error cuando un componente de la ruta descubierta es un symlink.
 const SYMLINK_COMPONENT_MSG: &str = "symlinked path component in .magi discovery";
+
+/// Prefijo del directorio temporal hermano del `init` atómico en Linux
+/// (`.magi.tmp.<rand>`), renombrado no-reemplazante sobre el `.magi/` final.
+const TMP_DIR_PREFIX: &str = ".magi.tmp.";
+
+/// Modo restrictivo de directorio (`0700`): rwx solo para el dueño (REQ-H38, unix).
+#[cfg(unix)]
+const RESTRICTIVE_DIR_MODE: u32 = 0o700;
+
+/// Modo restrictivo de archivo (`0600`): rw solo para el dueño (REQ-H38, unix).
+#[cfg(unix)]
+const RESTRICTIVE_FILE_MODE: u32 = 0o600;
+
+/// Máscara de acceso `GENERIC_ALL` de Windows — control total para el usuario
+/// al que se restringe la ACL (REQ-H38, Windows).
+#[cfg(windows)]
+const WINDOWS_FULL_CONTROL_MASK: u32 = 0x1000_0000;
 
 /// El directorio de estado `.magi/` descubierto y las rutas de sus artefactos.
 ///
@@ -311,11 +329,294 @@ fn volume_prefix(path: &Path) -> Option<std::ffi::OsString> {
     })
 }
 
+/// Scaffolds a fresh `.magi/` state directory under `cwd` and returns the
+/// resulting [`Workspace`] (REQ-H01/H38/H41).
+///
+/// Creates `cwd/.magi/` holding `magi.toml` (rendered defaults), an empty
+/// `logs/` subdirectory, and the encrypted-store database with **all five
+/// tables** created empty and **no envelope** (the first real open bootstraps
+/// it, MS1 Task 3). The directory is placed **atomically and no-replace**: on
+/// Linux via `renameat2(RENAME_NOREPLACE)` of a sibling temp dir, elsewhere via
+/// a `create_dir` mkdir-gate — both refuse (never overwrite) if `.magi/`
+/// already exists. Every created object is restricted to the current user
+/// (`0700`/`0600` on unix, an ACL restricted to the current user on Windows).
+///
+/// # Errors
+/// - [`HeadlessError::Aborted`] if `cwd/.magi/` already exists.
+/// - [`HeadlessError::Io`] on a filesystem or ACL error (bad parent, rename).
+/// - [`HeadlessError::Storage`] if the database schema cannot be created.
+pub fn init(cwd: &Path) -> Result<Workspace, HeadlessError> {
+    let absolute = std::path::absolute(cwd).map_err(|e| HeadlessError::Io(e.to_string()))?;
+    let root = lexical_normalize(&absolute);
+    let magi_dir = root.join(MAGI_DIR_NAME);
+    place_magi_dir(&magi_dir)?;
+    Ok(Workspace { root, magi_dir })
+}
+
+/// Places a populated `.magi/` at `magi_dir` atomically and no-replace via
+/// `renameat2(RENAME_NOREPLACE)` of a sibling temp directory (Linux).
+///
+/// Builds the whole tree in `.magi.tmp.<rand>` (never a half-populated `.magi/`
+/// visible to a reader) and renames it into place; on a populate error removes
+/// only its own freshly-created scaffold.
+///
+/// # Errors
+/// [`HeadlessError::Aborted`] if `magi_dir` exists; [`HeadlessError::Io`] /
+/// [`HeadlessError::Storage`] on a filesystem or schema error.
+#[cfg(target_os = "linux")]
+fn place_magi_dir(magi_dir: &Path) -> Result<(), HeadlessError> {
+    let parent = magi_dir
+        .parent()
+        .ok_or_else(|| HeadlessError::Io("target .magi has no parent directory".to_owned()))?;
+    let tmp = parent.join(format!("{TMP_DIR_PREFIX}{:016x}", rand::random::<u64>()));
+    create_gate_dir(&tmp)?;
+    if let Err(e) = populate_in_place(&tmp) {
+        let _ = fs::remove_dir_all(&tmp);
+        return Err(e);
+    }
+    rename_no_replace(&tmp, magi_dir)
+}
+
+/// Places a populated `.magi/` at `magi_dir` via a `create_dir` mkdir-gate
+/// (macOS, other unix, Windows) — `create_dir` is itself atomic no-replace.
+///
+/// # Errors
+/// [`HeadlessError::Aborted`] if `magi_dir` exists; [`HeadlessError::Io`] /
+/// [`HeadlessError::Storage`] on a filesystem or schema error.
+#[cfg(not(target_os = "linux"))]
+fn place_magi_dir(magi_dir: &Path) -> Result<(), HeadlessError> {
+    place_via_mkdir_gate(magi_dir)
+}
+
+/// Creates `magi_dir` in place as the atomic no-replace gate and populates it;
+/// on a population error removes only the just-created scaffold (no user data).
+///
+/// # Errors
+/// [`HeadlessError::Aborted`] if `magi_dir` exists; [`HeadlessError::Io`] /
+/// [`HeadlessError::Storage`] on a filesystem or schema error.
+fn place_via_mkdir_gate(magi_dir: &Path) -> Result<(), HeadlessError> {
+    create_gate_dir(magi_dir)?;
+    if let Err(e) = populate_in_place(magi_dir) {
+        let _ = fs::remove_dir_all(magi_dir);
+        return Err(e);
+    }
+    Ok(())
+}
+
+/// Renames `tmp` onto `final_dir` atomically without replacing an existing
+/// target (`renameat2(RENAME_NOREPLACE)`), falling back to the portable
+/// mkdir-gate if the kernel/filesystem does not support the flag.
+///
+/// # Errors
+/// [`HeadlessError::Aborted`] if `final_dir` already exists; [`HeadlessError::Io`]
+/// / [`HeadlessError::Storage`] on any other error.
+#[cfg(target_os = "linux")]
+fn rename_no_replace(tmp: &Path, final_dir: &Path) -> Result<(), HeadlessError> {
+    use rustix::fs::{renameat_with, RenameFlags, CWD};
+    use rustix::io::Errno;
+
+    match renameat_with(CWD, tmp, CWD, final_dir, RenameFlags::NOREPLACE) {
+        Ok(()) => Ok(()),
+        Err(errno) => {
+            let _ = fs::remove_dir_all(tmp);
+            if errno == Errno::EXIST {
+                Err(HeadlessError::Aborted)
+            } else if errno == Errno::NOSYS || errno == Errno::INVAL || errno == Errno::OPNOTSUPP {
+                // RENAME_NOREPLACE unsupported here → portable mkdir-gate fallback.
+                place_via_mkdir_gate(final_dir)
+            } else {
+                Err(HeadlessError::Io(format!("rename failed: {errno:?}")))
+            }
+        }
+    }
+}
+
+/// Creates a directory as an atomic no-replace gate with restrictive permissions
+/// from creation (`0700` on unix, a current-user ACL on Windows).
+///
+/// # Errors
+/// [`HeadlessError::Aborted`] if `path` already exists; [`HeadlessError::Io`] on
+/// any other filesystem or ACL error.
+fn create_gate_dir(path: &Path) -> Result<(), HeadlessError> {
+    create_restricted_dir_impl(path).map_err(map_create_err)?;
+    #[cfg(windows)]
+    restrict_to_current_user(path)?;
+    Ok(())
+}
+
+/// Maps a directory/file creation [`io::Error`] to a [`HeadlessError`], turning
+/// an `AlreadyExists` into [`HeadlessError::Aborted`] (the no-replace refusal).
+fn map_create_err(e: io::Error) -> HeadlessError {
+    if e.kind() == io::ErrorKind::AlreadyExists {
+        HeadlessError::Aborted
+    } else {
+        HeadlessError::Io(e.to_string())
+    }
+}
+
+/// Creates a single directory restricted to the owner (`0700`) from creation.
+///
+/// # Errors
+/// Propagates the underlying [`io::Error`] (incl. `AlreadyExists`).
+#[cfg(unix)]
+fn create_restricted_dir_impl(path: &Path) -> io::Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+    fs::DirBuilder::new()
+        .mode(RESTRICTIVE_DIR_MODE)
+        .create(path)
+}
+
+/// Creates a single directory (non-recursive, no-replace); permissions are
+/// tightened separately per platform.
+///
+/// # Errors
+/// Propagates the underlying [`io::Error`] (incl. `AlreadyExists`).
+#[cfg(not(unix))]
+fn create_restricted_dir_impl(path: &Path) -> io::Result<()> {
+    fs::create_dir(path)
+}
+
+/// Populates an already-created, restricted `.magi/` directory with `logs/`,
+/// `magi.toml` (rendered defaults) and the empty five-table database.
+///
+/// # Errors
+/// [`HeadlessError::Io`] on a filesystem/ACL error, [`HeadlessError::Storage`] if
+/// the schema cannot be created, or [`HeadlessError::Aborted`] on an unexpected
+/// pre-existing child (should not occur in a fresh directory).
+fn populate_in_place(dir: &Path) -> Result<(), HeadlessError> {
+    create_gate_dir(&dir.join(LOGS_DIR_NAME))?;
+    write_restricted_file(
+        &dir.join(CONFIG_FILE_NAME),
+        crate::defaults::render_default_magi_toml().as_bytes(),
+    )?;
+    create_db(&dir.join(DB_FILE_NAME))?;
+    Ok(())
+}
+
+/// Writes `contents` to a new owner-restricted file (`0600` on unix, current-user
+/// ACL on Windows), refusing to overwrite an existing file.
+///
+/// # Errors
+/// [`HeadlessError::Aborted`] if the file already exists; [`HeadlessError::Io`] on
+/// any other filesystem or ACL error.
+fn write_restricted_file(path: &Path, contents: &[u8]) -> Result<(), HeadlessError> {
+    let mut file = open_new_restricted(path).map_err(map_create_err)?;
+    file.write_all(contents)
+        .map_err(|e| HeadlessError::Io(e.to_string()))?;
+    #[cfg(windows)]
+    restrict_to_current_user(path)?;
+    Ok(())
+}
+
+/// Creates and opens a new file restricted to the owner (`0600`) from creation,
+/// failing if it already exists.
+///
+/// # Errors
+/// Propagates the underlying [`io::Error`] (incl. `AlreadyExists`).
+#[cfg(unix)]
+fn open_new_restricted(path: &Path) -> io::Result<fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(RESTRICTIVE_FILE_MODE)
+        .open(path)
+}
+
+/// Creates and opens a new file (no-replace); permissions are tightened
+/// separately per platform.
+///
+/// # Errors
+/// Propagates the underlying [`io::Error`] (incl. `AlreadyExists`).
+#[cfg(not(unix))]
+fn open_new_restricted(path: &Path) -> io::Result<fs::File> {
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+}
+
+/// Creates the state database at `path` with all five schema tables empty (no
+/// envelope), restricted to the owner.
+///
+/// Pre-creates the file with restrictive permissions so `rusqlite` never
+/// materializes it world-readable under the umask; SQLite then treats the empty
+/// file as a fresh database. No `PRAGMA` is set here — the first real open
+/// (MS1 Task 3) configures WAL and bootstraps the envelope.
+///
+/// # Errors
+/// [`HeadlessError::Aborted`] if the file already exists; [`HeadlessError::Io`]
+/// on an ACL error; [`HeadlessError::Storage`] if the schema cannot be created.
+fn create_db(path: &Path) -> Result<(), HeadlessError> {
+    open_new_restricted(path).map_err(map_create_err)?;
+    {
+        let conn =
+            rusqlite::Connection::open(path).map_err(|e| HeadlessError::Storage(e.to_string()))?;
+        crate::system::database::init_schema(&conn)
+            .map_err(|e| HeadlessError::Storage(e.to_string()))?;
+    }
+    #[cfg(windows)]
+    restrict_to_current_user(path)?;
+    Ok(())
+}
+
+/// Restricts `path`'s DACL to the current user only — the Windows equivalent of
+/// unix `0700`/`0600` (REQ-H38) — using the safe `windows-acl` crate.
+///
+/// Grants the current user full control (which writes a PROTECTED DACL, severing
+/// inheritance) then removes every other ACE, leaving exactly one allow entry.
+///
+/// # Errors
+/// [`HeadlessError::Io`] if the path is not valid UTF-8 or any Win32 ACL call
+/// fails (the numeric error code is included, never a secret).
+#[cfg(windows)]
+fn restrict_to_current_user(path: &Path) -> Result<(), HeadlessError> {
+    use windows_acl::acl::{AceType, ACL};
+    use windows_acl::helper::{current_user, name_to_sid, sid_to_string, string_to_sid};
+
+    let path_str = path.to_str().ok_or_else(|| {
+        HeadlessError::Io("path is not valid UTF-8 for ACL application".to_owned())
+    })?;
+    let user = current_user()
+        .ok_or_else(|| HeadlessError::Io("cannot resolve current Windows user".to_owned()))?;
+    let user_sid = name_to_sid(&user, None)
+        .map_err(|code| HeadlessError::Io(format!("name_to_sid failed (code {code})")))?;
+    let user_string = sid_to_string(user_sid.as_ptr() as _)
+        .map_err(|code| HeadlessError::Io(format!("sid_to_string failed (code {code})")))?;
+
+    let mut acl = ACL::from_file_path(path_str, false)
+        .map_err(|code| HeadlessError::Io(format!("read ACL failed (code {code})")))?;
+
+    // Grant the current user full control; windows-acl writes a PROTECTED DACL,
+    // severing inheritance so no parent ACE leaks in.
+    acl.add_entry(
+        user_sid.as_ptr() as _,
+        AceType::AccessAllow,
+        0,
+        WINDOWS_FULL_CONTROL_MASK,
+    )
+    .map_err(|code| HeadlessError::Io(format!("grant user ACE failed (code {code})")))?;
+
+    // Remove every ACE that is not the current user's, restricting access to
+    // exactly this user (drops inherited SYSTEM/Administrators/Users entries).
+    let entries = acl
+        .all()
+        .map_err(|code| HeadlessError::Io(format!("enumerate ACL failed (code {code})")))?;
+    for entry in entries {
+        if entry.string_sid == user_string {
+            continue;
+        }
+        let sid = string_to_sid(&entry.string_sid)
+            .map_err(|code| HeadlessError::Io(format!("string_to_sid failed (code {code})")))?;
+        acl.remove(sid.as_ptr() as _, None, None)
+            .map_err(|code| HeadlessError::Io(format!("remove ACE failed (code {code})")))?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{detect_legacy_files, discover, Workspace};
-    // Solo los tests de rechazo de symlink (cfg(unix)) inspeccionan la variante.
-    #[cfg(unix)]
+    use super::{detect_legacy_files, discover, init, Workspace};
     use magi_rs::headless::HeadlessError;
     use std::path::PathBuf;
 
@@ -390,6 +691,111 @@ mod tests {
         assert_eq!(ws.db_path(), magi_dir.join(".magi-rs-memory.db"));
         assert_eq!(ws.config_path(), magi_dir.join("magi.toml"));
         assert_eq!(ws.logs_dir(), magi_dir.join("logs"));
+    }
+
+    #[test]
+    fn test_init_creates_structure_and_refuses_overwrite() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = init(tmp.path()).expect("init");
+        assert!(ws.magi_dir.join("magi.toml").exists());
+        assert!(ws.magi_dir.join("logs").is_dir());
+        assert!(ws.db_path().exists());
+        // A second init must refuse (never overwrite) — atomic no-replace gate.
+        assert!(matches!(init(tmp.path()), Err(HeadlessError::Aborted)));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_init_sets_restrictive_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = init(tmp.path()).unwrap();
+        let dir_mode = std::fs::metadata(&ws.magi_dir)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        let db_mode = std::fs::metadata(ws.db_path())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(dir_mode, 0o700);
+        assert_eq!(db_mode, 0o600);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn test_init_restricts_acl_to_current_user() {
+        use windows_acl::acl::ACL;
+        use windows_acl::helper::{current_user, name_to_sid, sid_to_string};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = init(tmp.path()).unwrap();
+
+        let user = current_user().unwrap();
+        let user_sid = name_to_sid(&user, None).unwrap();
+        let user_string = sid_to_string(user_sid.as_ptr() as _).unwrap();
+
+        let acl = ACL::from_file_path(ws.magi_dir.to_str().unwrap(), false).unwrap();
+        let entries = acl.all().unwrap();
+        assert!(!entries.is_empty(), "the DACL must contain the user's ACE");
+        for entry in entries {
+            assert_eq!(
+                entry.string_sid, user_string,
+                "only the current user may hold an ACE on .magi/"
+            );
+        }
+        // Owner access is retained: the DB the process just wrote is still there.
+        assert!(ws.db_path().exists());
+    }
+
+    #[test]
+    fn test_orphan_tmp_dir_does_not_break_a_later_init() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Simulate a crashed prior run that left a stray sibling temp dir behind.
+        std::fs::create_dir(tmp.path().join(".magi.tmp.deadbeef")).unwrap();
+
+        let ws = init(tmp.path()).expect("init succeeds despite the orphan tmp");
+        assert!(ws.magi_dir.is_dir());
+        assert!(ws.db_path().exists());
+        // The `.magi/` is complete, not half-populated.
+        assert!(ws.magi_dir.join("magi.toml").exists());
+    }
+
+    // T2↔T3 lock-in (MS1 Task 2 Step 4c-bis): a freshly-`init`ed DB has exactly
+    // the five empty tables and NO envelope row — the precondition under which
+    // Task 3's state machine bootstraps cleanly (never `DbCorrupt`).
+    //
+    // `#[ignore]`: the final assertion calls Task 3's `open_with_state_machine`,
+    // which does not exist yet. Task 3 Step 9b un-ignores this and swaps the body
+    // for `open_with_state_machine(ws.db_path(), test_master()) => Ok(_)`.
+    #[test]
+    #[ignore = "un-ignore when T3 lands (Task 3 Step 9b): swap for open_with_state_machine"]
+    fn test_fresh_init_db_bootstraps_cleanly_under_state_machine() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = init(tmp.path()).unwrap();
+        let conn = rusqlite::Connection::open(ws.db_path()).unwrap();
+        for table in [
+            "sessions",
+            "messages",
+            "knowledge",
+            "memories",
+            "vault_meta",
+        ] {
+            let count: i64 = conn
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
+                .unwrap_or_else(|_| panic!("table `{table}` must exist on fresh init"));
+            assert_eq!(count, 0, "table `{table}` must be empty on fresh init");
+        }
+        let has_envelope: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM vault_meta WHERE key = 'wrapped_dek'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(has_envelope, 0, "a fresh init has no envelope yet");
     }
 
     #[test]
