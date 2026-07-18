@@ -170,13 +170,6 @@ pub(crate) enum SystemPolicy {
     CallerOverride(String),
 }
 
-/// Interpretación forzada del formato de entrada (`--input-format`).
-///
-/// Ausente ⇒ auto-detect (objeto JSON con `prompt` ⇒ envelope; si no ⇒ texto).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum InputFormat {
-    /// La entrada es texto plano: todo el contenido es el `prompt` verbatim.
-    Text,
-    /// La entrada debe parsearse como un envelope JSON.
-    Json,
-}
+// NOTE: `InputFormat` is defined in `input.rs` (parser-local, `pub` for the
+// fuzz target), not here — it is a parser input, not part of the output
+// contract. The former duplicate declaration in this module was removed.
