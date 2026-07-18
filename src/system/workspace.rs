@@ -19,14 +19,6 @@
         clippy::string_slice
     )
 )]
-// Scaffolding intencional del plan (MS1 T1): [`Workspace`]/[`discover`]/
-// [`detect_legacy_files`] son la API pública de descubrimiento que consume el
-// wiring de `magi init` en MS2/T11 (una tarea posterior del mismo plan). Los
-// tests de este módulo ya ejercitan cada ítem; el warning solo aparece en
-// builds sin `cfg(test)`. No es un símbolo huérfano fabricado para silenciar al
-// linter — mismo patrón sancionado en `src/headless/types.rs` (T0).
-#![allow(dead_code)]
-
 //! Descubrimiento del directorio de estado unificado `.magi/` (REQ-H16/H30/H31).
 //!
 //! El estado del proyecto (config, DB cifrada, logs) vive bajo un único
@@ -62,6 +54,9 @@ const SYMLINK_COMPONENT_MSG: &str = "symlinked path component in .magi discovery
 
 /// Prefijo del directorio temporal hermano del `init` atómico en Linux
 /// (`.magi.tmp.<rand>`), renombrado no-reemplazante sobre el `.magi/` final.
+// Narrow allow: only the Linux `renameat2` path (`place_magi_dir`) consumes this;
+// on other platforms the mkdir-gate is used and the constant is unreferenced.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 const TMP_DIR_PREFIX: &str = ".magi.tmp.";
 
 /// Modo restrictivo de directorio (`0700`): rwx solo para el dueño (REQ-H38, unix).
@@ -97,12 +92,18 @@ impl Workspace {
     }
 
     /// Ruta del archivo de configuración (`.magi/magi.toml`).
+    // Narrow allow: consumed by the MS2 headless wiring (config load); `db_path`
+    // is already used by `magi init` (T11) but this accessor is not yet.
+    #[allow(dead_code)]
     #[must_use]
     pub fn config_path(&self) -> PathBuf {
         self.magi_dir.join(CONFIG_FILE_NAME)
     }
 
     /// Ruta del subdirectorio de logs (`.magi/logs`).
+    // Narrow allow: consumed by the MS2 headless log writer; not yet used in
+    // production (T11 only needs `db_path`).
+    #[allow(dead_code)]
     #[must_use]
     pub fn logs_dir(&self) -> PathBuf {
         self.magi_dir.join(LOGS_DIR_NAME)
@@ -166,6 +167,10 @@ pub fn discover(start: &Path) -> Result<Option<Workspace>, HeadlessError> {
 /// uno de los archivos del layout legacy (`.magi-rs-memory.db` o `magi.toml`)
 /// suelto en `cwd`. Con un `.magi/` presente el layout ya está migrado y no hay
 /// nada que advertir.
+// Narrow allow: `init`/`discover` are now used by `magi init` (main.rs, MS1 T11),
+// but this legacy-file primitive's only consumer is MS2 T7 (startup warning
+// emission) — kept as a scoped allow rather than a module-wide one until then.
+#[allow(dead_code)]
 #[must_use]
 pub fn detect_legacy_files(cwd: &Path) -> bool {
     !cwd.join(MAGI_DIR_NAME).is_dir()

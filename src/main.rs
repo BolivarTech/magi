@@ -73,11 +73,18 @@ struct Args {
 }
 
 /// Top-level subcommands beyond the default TUI launch.
+///
+/// MS2 extends this same enum with `Query`/`Consult`; keep new variants
+/// self-contained so that addition stays mechanical.
 #[derive(clap::Subcommand, Debug)]
 enum TopCmd {
     /// Encrypted, zero-knowledge secret store (`ls`/`set`/`rm`/`passwd`).
     #[command(subcommand)]
     Vault(VaultCmd),
+
+    /// Scaffold a fresh `.magi/` state directory in the working directory
+    /// (config, encrypted DB, logs); refuses to nest or overwrite (REQ-H01).
+    Init,
 }
 
 #[derive(Debug)]
@@ -450,6 +457,119 @@ fn run_logout(passphrase_flag: Option<Zeroizing<String>>, workspace_root: &std::
     }
 }
 
+/// Maps a [`magi_rs::headless::HeadlessError`] to the CLI's process exit code,
+/// mirroring the headless exit taxonomy (REQ-H23): input/misuse ⇒ 2, every
+/// other class ⇒ 1.
+///
+/// The library's `headless::exit::exit_code` is `pub(crate)` and thus
+/// unreachable from this bin crate, so the `magi init` edges map directly here;
+/// the exhaustive `match` (no `_` arm) keeps the two taxonomies from drifting —
+/// a new variant breaks the build instead of defaulting silently.
+fn headless_error_exit_code(e: &magi_rs::headless::HeadlessError) -> i32 {
+    use magi_rs::headless::HeadlessError;
+    match e {
+        HeadlessError::InputInvalid(_) | HeadlessError::InputTooLarge(_) => 2,
+        HeadlessError::Io(_)
+        | HeadlessError::Storage(_)
+        | HeadlessError::Aborted
+        | HeadlessError::PassphraseUnavailable
+        | HeadlessError::Db(_) => 1,
+    }
+}
+
+/// Resolves the passphrase used to bootstrap the vault envelope during
+/// `magi init`, **never** prompting interactively (§2.2): `-p` wins, then
+/// `MAGI_PASSPHRASE`. If neither is set the DB is left envelope-less
+/// (`Ok(None)`) — the documented "first interactive run creates it" behavior,
+/// not an error. A supplied value is normalized (trailing newline stripped, so
+/// a later unlock reproduces the KEK) and must clear the strength floor
+/// ([`check_strength`], REQ-V17).
+///
+/// # Errors
+/// [`VaultError::WeakPassphrase`] if a supplied passphrase is below the floor.
+fn resolve_init_passphrase(
+    passphrase_flag: Option<Zeroizing<String>>,
+) -> Result<Option<Zeroizing<String>>, VaultError> {
+    if let Some(p) = passphrase_flag {
+        let p = strip_trailing_newline(p);
+        check_strength(p.as_str())?;
+        return Ok(Some(p));
+    }
+    match env::var(PASSPHRASE_ENV) {
+        Ok(v) if !v.is_empty() => {
+            let z = strip_trailing_newline(Zeroizing::new(v));
+            check_strength(z.as_str())?;
+            Ok(Some(z))
+        }
+        _ => Ok(None),
+    }
+}
+
+/// Runs `magi-rs init`: scaffolds a fresh `.magi/` state directory under `cwd`
+/// and, when a passphrase is available non-interactively, bootstraps the empty
+/// vault envelope so headless runs need no interaction (§2.2). Returns the
+/// process exit code (0 on success; non-zero on refusal or error).
+///
+/// Refuses (never destroys state) in three cases: a discoverable `.magi/`
+/// already exists in an ancestor (would nest — Step 4b), the walk-up aborts on
+/// a symlinked component (propagated, never treated as "clean" — Step 4c), or a
+/// `.magi/` already exists in `cwd` ([`workspace::init`] returns `Aborted`).
+/// Diagnostics go to stderr; the created path is the sole stdout line.
+fn run_init(cwd: &std::path::Path, passphrase_flag: Option<Zeroizing<String>>) -> i32 {
+    // Nested-`.magi/` guard: handle ALL THREE `discover` branches explicitly —
+    // a walk aborted by a symlink is NOT "no ancestor found" and must never
+    // fall through to init (Step 4b/4c).
+    match crate::system::workspace::discover(cwd) {
+        Ok(Some(ws)) => {
+            eprintln!(
+                "error: an existing .magi/ was found at {}; use it, or run \
+                 `magi init` from a different root (refusing to nest a second \
+                 .magi/ inside it)",
+                ws.magi_dir.display()
+            );
+            return 1;
+        }
+        Ok(None) => {}
+        Err(e) => {
+            eprintln!("error: {e}");
+            return headless_error_exit_code(&e);
+        }
+    }
+
+    // Resolve the bootstrap passphrase BEFORE touching the filesystem so a weak
+    // `-p`/env value fails fast without leaving a half-created `.magi/`.
+    let bootstrap_passphrase = match resolve_init_passphrase(passphrase_flag) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return vault_error_exit_code(&e);
+        }
+    };
+
+    let ws = match crate::system::workspace::init(cwd) {
+        Ok(ws) => ws,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return headless_error_exit_code(&e);
+        }
+    };
+    // stdout carries only the created state directory (diagnostics ⇒ stderr).
+    println!("{}", ws.magi_dir.display());
+
+    // §2.2: bootstrap the envelope when a passphrase was supplied; otherwise
+    // leave the DB envelope-less for the first interactive run to create.
+    if let Some(passphrase) = bootstrap_passphrase {
+        if let Err(e) = crate::system::database::EncryptedSqliteMemory::open_with_state_machine(
+            ws.db_path(),
+            passphrase,
+        ) {
+            eprintln!("error: {e}");
+            return vault_error_exit_code(&e);
+        }
+    }
+    0
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let mut args = Args::parse();
@@ -465,13 +585,20 @@ async fn main() -> anyhow::Result<()> {
     // material exists.
     let hardening_warnings = harden_process();
 
-    if let Some(TopCmd::Vault(cmd)) = args.command.take() {
-        std::process::exit(run_vault_subcommand(
-            cmd,
-            passphrase_flag,
-            &workspace_root,
-            &hardening_warnings,
-        ));
+    match args.command.take() {
+        Some(TopCmd::Vault(cmd)) => {
+            std::process::exit(run_vault_subcommand(
+                cmd,
+                passphrase_flag,
+                &workspace_root,
+                &hardening_warnings,
+            ));
+        }
+        Some(TopCmd::Init) => {
+            std::process::exit(run_init(&workspace_root, passphrase_flag));
+        }
+        // No subcommand ⇒ fall through to the TUI launch below.
+        None => {}
     }
 
     if args.logout {
@@ -1211,5 +1338,134 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let workspace = tmp.path().to_path_buf();
         assert_eq!(run_logout(None, &workspace), 0);
+    }
+
+    #[test]
+    fn test_args_parses_init_subcommand() {
+        use clap::Parser;
+        let a = Args::parse_from(["magi-rs", "init"]);
+        assert!(matches!(a.command, Some(TopCmd::Init)));
+        // `-p` remains global ahead of `init` (mirrors the vault subcommand).
+        let b = Args::parse_from(["magi-rs", "-p", "hunter2", "init"]);
+        assert_eq!(b.passphrase.as_deref(), Some("hunter2"));
+        assert!(matches!(b.command, Some(TopCmd::Init)));
+    }
+
+    /// Returns how many envelope rows (`wrapped_dek`) a freshly-`init`ed DB has:
+    /// `0` ⇒ envelope-less, `1` ⇒ bootstrapped. Test-only helper.
+    fn envelope_row_count(db_path: &std::path::Path) -> i64 {
+        let conn = rusqlite::Connection::open(db_path).expect("open db");
+        conn.query_row(
+            "SELECT COUNT(*) FROM vault_meta WHERE key = 'wrapped_dek'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("query envelope")
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_run_init_creates_magi_dir_and_refuses_second_run() {
+        // Step 5 e2e: in-process dispatch in a tempdir cwd — first init succeeds
+        // and creates the full `.magi/`; a second refuses (exit != 0).
+        with_var(PASSPHRASE_ENV, None, || {
+            let tmp = tempfile::tempdir().unwrap();
+            let cwd = dunce::canonicalize(tmp.path()).unwrap();
+
+            assert_eq!(run_init(&cwd, None), 0, "first init must succeed");
+            assert!(cwd.join(".magi").is_dir(), ".magi/ must exist after init");
+            assert!(cwd.join(".magi/.magi-rs-memory.db").exists());
+            assert!(cwd.join(".magi/magi.toml").exists());
+            assert!(cwd.join(".magi/logs").is_dir());
+
+            assert_ne!(
+                run_init(&cwd, None),
+                0,
+                "a second init must refuse (nested/existing .magi/)"
+            );
+        });
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_run_init_without_passphrase_leaves_no_envelope() {
+        // §2.2: no `-p`/env ⇒ DB left envelope-less (first interactive run
+        // creates it), and it is NOT an error.
+        with_var(PASSPHRASE_ENV, None, || {
+            let tmp = tempfile::tempdir().unwrap();
+            let cwd = dunce::canonicalize(tmp.path()).unwrap();
+            assert_eq!(run_init(&cwd, None), 0);
+            assert_eq!(
+                envelope_row_count(&cwd.join(".magi/.magi-rs-memory.db")),
+                0,
+                "no passphrase must leave the DB without an envelope"
+            );
+        });
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_run_init_with_passphrase_bootstraps_the_envelope() {
+        // §2.2: a supplied passphrase (via `-p`) bootstraps the empty vault
+        // envelope so the DB is headless-ready without interaction.
+        with_var(PASSPHRASE_ENV, None, || {
+            let tmp = tempfile::tempdir().unwrap();
+            let cwd = dunce::canonicalize(tmp.path()).unwrap();
+            let pass = Some(Zeroizing::new("correct horse battery staple".to_string()));
+            assert_eq!(run_init(&cwd, pass), 0);
+            assert_eq!(
+                envelope_row_count(&cwd.join(".magi/.magi-rs-memory.db")),
+                1,
+                "a supplied passphrase must bootstrap the envelope"
+            );
+        });
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_run_init_refuses_to_nest_inside_ancestor_magi_dir() {
+        // Step 4b: an ancestor already has a discoverable `.magi/` ⇒ refuse,
+        // and create nothing under the nested cwd.
+        with_var(PASSPHRASE_ENV, None, || {
+            let tmp = tempfile::tempdir().unwrap();
+            let root = dunce::canonicalize(tmp.path()).unwrap();
+            std::fs::create_dir_all(root.join(".magi")).unwrap();
+            let sub = root.join("a/b");
+            std::fs::create_dir_all(&sub).unwrap();
+
+            assert_ne!(run_init(&sub, None), 0, "must refuse to nest a .magi/");
+            assert!(
+                !sub.join(".magi").exists(),
+                "a refused nested init must create no .magi/"
+            );
+        });
+    }
+
+    #[test]
+    #[cfg(unix)]
+    #[serial_test::serial]
+    fn test_run_init_fails_and_creates_nothing_when_ancestor_is_symlink() {
+        // Step 4c: an ancestor is a symlink ⇒ `discover` returns `Err`; the
+        // command must FAIL (not treat it as a clean tree) and create no `.magi/`.
+        with_var(PASSPHRASE_ENV, None, || {
+            let tmp = tempfile::tempdir().unwrap();
+            let root = dunce::canonicalize(tmp.path()).unwrap();
+            let real = root.join("real");
+            std::fs::create_dir_all(&real).unwrap();
+            let link = root.join("link");
+            std::os::unix::fs::symlink(&real, &link).unwrap();
+            let sub = link.join("sub");
+            std::fs::create_dir_all(&sub).unwrap();
+
+            assert_ne!(
+                run_init(&sub, None),
+                0,
+                "a walk aborted by a symlink must fail, not init"
+            );
+            assert!(
+                !sub.join(".magi").exists(),
+                "an aborted walk must create no .magi/"
+            );
+        });
     }
 }
