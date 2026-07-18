@@ -66,7 +66,7 @@ a los de `src/vault/mod.rs` (`deny(missing_docs, missing_docs_in_private_items, 
 - [x] `src/headless/types.rs` (Task 0) — tipos compartidos DECLARADOS del contrato MS1↔MS2 (`pub(crate)`)
 - [x] `src/headless/test_support.rs` (Task 0, `#[cfg(test)]`) — helper genérico de entorno `with_var`
 - [ ] `src/headless/input.rs` (Tasks 4/5/6) — lectura acotada + auto-detect + parser de envelope + resolución
-- [ ] `src/headless/output.rs` (Task 7) — formateo texto/JSON rico + truncado + redacción de errores
+- [x] `src/headless/output.rs` (Task 7) — formateo texto/JSON rico + truncado + redacción de errores
 - [ ] `src/headless/log.rs` (Task 8) — JSONL a `.magi/logs/`, niveles, retención count+size, redacción
 - [ ] `src/headless/exit.rs` (Task 9) — taxonomía de exit codes (0/1/2/3)
 - [ ] `src/system/workspace.rs` (Tasks 1/2) — descubrir/init `.magi/` (walk-up, symlink-reject, perms, atómico)

@@ -1,0 +1,60 @@
+{
+  "applied_caps": {
+    "max_tool_calls": 15,
+    "max_tool_calls_clamped": false,
+    "system_override_applied": false,
+    "timeout_secs": null
+  },
+  "consult": null,
+  "error": null,
+  "model": "claude-sonnet-4-6",
+  "provider": "anthropic",
+  "response": "Hello from magi.",
+  "schema_version": 1,
+  "stop_reason": "done",
+  "timings": {
+    "per_turn_ms": [
+      600,
+      634
+    ],
+    "total_ms": 1234,
+    "ttfb_ms": 200
+  },
+  "tool_calls": [
+    {
+      "input": {
+        "path": "."
+      },
+      "ms": 12,
+      "name": "ls",
+      "ok": true,
+      "result": "file1\nfile2"
+    }
+  ],
+  "transcript": [
+    {
+      "content": "list files",
+      "role": "user",
+      "tool_calls": null
+    },
+    {
+      "content": "Hello from magi.",
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "input": {
+            "path": "."
+          },
+          "ms": 12,
+          "name": "ls",
+          "ok": true,
+          "result": "file1\nfile2"
+        }
+      ]
+    }
+  ],
+  "usage": {
+    "input_tokens": 100,
+    "output_tokens": 50
+  }
+}
