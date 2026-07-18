@@ -6,9 +6,26 @@ use async_trait::async_trait;
 use cryptovault::CryptoVault;
 use magi_rs::vault::{bootstrap_envelope, open_envelope, MaskedDek, VaultError};
 use rusqlite::{params, Connection, OptionalExtension};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use zeroize::Zeroizing;
+
+/// SQLite busy-timeout (seconds) applied at connection open. Two openers racing
+/// on a brand-new DB contend for the WAL-header / table-creation write lock;
+/// without this timeout the loser fails immediately with `SQLITE_BUSY` instead
+/// of waiting for the winner to finish bootstrapping (REQ-V35 / SC-V51).
+const BUSY_TIMEOUT_SECS: u64 = 5;
+
+/// Data tables that must **all** exist and be **empty** for a DB that has no
+/// envelope to be a legitimate bootstrap candidate (§2.1 / REQ-H20 / D-H10). A
+/// missing one is a partial/foreign schema ([`VaultError::DbCorrupt`]); any
+/// populated one is data with no key to read it ([`VaultError::DbCorrupt`]).
+/// Iterated in this deterministic order so the reported corruption is stable.
+const DATA_TABLES: [&str; 4] = ["sessions", "messages", "knowledge", "memories"];
+
+/// `detail` for the §2.1 "no envelope, yet records present" corruption: the
+/// encrypted rows cannot be read without the DEK and are **never** discarded.
+const DETAIL_DATA_WITHOUT_ENVELOPE: &str = "data present without envelope";
 
 /// Trait defining the behavior of the agent's memory.
 #[async_trait]
@@ -49,9 +66,6 @@ pub struct EncryptedSqliteMemory {
     /// [`Self::seal`]/[`Self::unseal`] take and release it in a tight scope, always
     /// outside any `self.conn` guard.
     dek: std::sync::Mutex<MaskedDek>,
-    /// `true` when construction discarded incompatible/corrupt on-disk content
-    /// (the D6 reset fired on a non-empty DB). Surfaced to the user at startup (#11).
-    was_reset: bool,
 }
 
 impl EncryptedSqliteMemory {
@@ -119,159 +133,88 @@ impl EncryptedSqliteMemory {
         Self::new_with_vault(path, master_password, CryptoVault::default())
     }
 
-    /// Whether the on-disk DB had real content discarded (reset to fresh) during
-    /// construction (#11). The caller surfaces this to the user at startup.
-    pub fn was_reset(&self) -> bool {
-        self.was_reset
-    }
-
     /// Constructor that accepts a custom [`CryptoVault`] (e.g. a counting KDF in
-    /// tests). Derives the data key **once** from the per-DB salt and caches it.
+    /// tests). Opens a **raw path**, so it **creates the schema** ([`init_schema`])
+    /// before applying the §2.1 state machine — the TUI/`vault`-CLI path that may
+    /// point at a not-yet-initialized file. Derives the data key **once** from the
+    /// per-DB salt and caches it (masked).
+    ///
+    /// Because [`init_schema`] guarantees every table exists, the "missing table"
+    /// corruption arm of the state machine is unreachable from here; a
+    /// data-without-envelope DB still surfaces as [`VaultError::DbCorrupt`] and is
+    /// **never** wiped (never-delete absolute, REQ-H20 / D-H10). Use
+    /// [`Self::open_with_state_machine`] to open an already-initialized `.magi/` DB
+    /// without re-creating any schema.
     pub(crate) fn new_with_vault(
         path: PathBuf,
         master_password: Zeroizing<String>,
         vault: CryptoVault,
     ) -> Result<Self> {
-        let mut conn = Connection::open(path)?;
-
-        // Set the busy timeout **FIRST**, before any pragma or table creation:
-        // two openers racing on a brand-new DB contend for the WAL-header /
-        // table-creation write lock, and without the timeout the loser fails
-        // immediately with SQLITE_BUSY ("database is locked") instead of waiting
-        // for the winner to finish bootstrapping. (Regression caught by the
-        // concurrent-bootstrap test, REQ-V35 / SC-V51.)
-        conn.busy_timeout(std::time::Duration::from_secs(5))?;
-
-        // MAGI FIX: Enable WAL mode for high concurrency
-        // We use query_row because execute fails for pragmas that return values in some drivers
-        let _: String = conn.query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))?;
-        conn.execute("PRAGMA synchronous = NORMAL", [])?;
+        let mut conn = open_connection(&path).map_err(map_open_err)?;
 
         // Create every table of the schema (single source of truth — `init_schema`).
         init_schema(&conn)?;
 
-        // Envelope open path (REQ-V29/V35): `vault_meta` holds `{salt, wrapped_dek}`,
-        // each FEC-encoded. The master passphrase (UTF-8, from `-p`/env/prompt)
-        // derives the KEK that unwraps the DEK; the DEK — held masked in `dek` —
-        // encrypts every record.
-        //
-        // NEVER auto-delete on a crypto failure (REQ-V35): a wrong master or a
-        // corrupt wrapped_dek fail the AEAD tag identically, so wiping here would
-        // turn a typo into total data loss. The ONLY discard is the one-time format
-        // migration below, gated on the `wrapped_dek` row being **absent** — a
-        // deterministic schema check a wrong password can never trigger.
         // Already `Zeroizing<String>` (MS2: the passphrase never exists as a bare
         // `String`, closing the transient-copy window — REQ-V41).
-        let password = master_password;
-        let mut was_reset = false;
-
-        let wrapped_dek: Option<Vec<u8>> = conn
-            .query_row(
-                "SELECT value FROM vault_meta WHERE key = 'wrapped_dek'",
-                [],
-                |r| r.get(0),
-            )
-            .optional()?;
-
-        let derived_key = match wrapped_dek {
-            // Existing envelope: open it. A failure propagates and NEVER deletes.
-            Some(wrapped_fec) => {
-                let salt_fec: Vec<u8> = conn
-                    .query_row("SELECT value FROM vault_meta WHERE key = 'salt'", [], |r| {
-                        r.get(0)
-                    })
-                    .optional()?
-                    .ok_or_else(|| anyhow::anyhow!("vault_meta has wrapped_dek but no salt"))?;
-                open_envelope(&vault, &password, &salt_fec, &wrapped_fec).map_err(map_open_err)?
-            }
-            // No envelope: brand-new DB, or a pre-envelope (old-format) DB whose
-            // records are unreadable in the new format. Bootstrap under a write lock;
-            // a racing opener ADOPTS the winner's envelope (no double DEK).
-            None => {
-                // Precompute a fresh envelope BEFORE taking the write lock, so the
-                // expensive Argon2 KEK derivation never runs while the lock is held
-                // (Caspar/concurrency: holding the write lock across Argon2 would
-                // serialize a racing opener on the derivation). `bootstrap_envelope`
-                // is pure — it generates salt+DEK and wraps, with no DB side effects,
-                // so the work is simply discarded if a racing opener wins below.
-                let (salt_mine, wrapped_mine, dek_mine) =
-                    bootstrap_envelope(&vault, &password).map_err(map_open_err)?;
-
-                // Under the write lock, do ONLY cheap SQL: re-check for a racing
-                // bootstrap and either install our precomputed envelope or capture
-                // the winner's for an out-of-lock unwrap.
-                let tx =
-                    conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-                let raced: Option<Vec<u8>> = tx
-                    .query_row(
-                        "SELECT value FROM vault_meta WHERE key = 'wrapped_dek'",
-                        [],
-                        |r| r.get(0),
-                    )
-                    .optional()?;
-                let adopted: Option<(Vec<u8>, Vec<u8>)> = match raced {
-                    // A racing opener bootstrapped first between our read and the
-                    // write lock: capture its envelope; unwrap it AFTER releasing
-                    // the lock so its Argon2 derivation is off the hot lock too.
-                    Some(wrapped_fec) => {
-                        let salt_fec: Vec<u8> = tx.query_row(
-                            "SELECT value FROM vault_meta WHERE key = 'salt'",
-                            [],
-                            |r| r.get(0),
-                        )?;
-                        Some((salt_fec, wrapped_fec))
-                    }
-                    // Fresh-start (REQ-V31): discard any old-format content
-                    // (unreadable under the new crypto) and install our envelope.
-                    None => {
-                        let had_rows: i64 = tx.query_row(
-                            "SELECT (SELECT COUNT(*) FROM sessions) \
-                             + (SELECT COUNT(*) FROM messages) \
-                             + (SELECT COUNT(*) FROM knowledge)",
-                            [],
-                            |r| r.get(0),
-                        )?;
-                        tx.execute("DELETE FROM messages", [])?;
-                        tx.execute("DELETE FROM knowledge", [])?;
-                        tx.execute("DELETE FROM sessions", [])?;
-                        tx.execute(
-                            "INSERT OR REPLACE INTO vault_meta (key, value) VALUES ('salt', ?1)",
-                            params![salt_mine],
-                        )?;
-                        tx.execute(
-                            "INSERT OR REPLACE INTO vault_meta (key, value) VALUES ('wrapped_dek', ?1)",
-                            params![wrapped_mine],
-                        )?;
-                        was_reset = had_rows > 0;
-                        None
-                    }
-                };
-                tx.commit()?;
-                if was_reset {
-                    eprintln!(
-                        "WARNING: existing on-disk history used an incompatible (pre-envelope) \
-                         encryption format and has been reset (fresh start). This is expected \
-                         after upgrading the storage format."
-                    );
-                }
-                match adopted {
-                    // A racing opener won: unwrap ITS envelope off the lock. A failure
-                    // here propagates and NEVER deletes (REQ-V35).
-                    Some((salt_fec, wrapped_fec)) => {
-                        open_envelope(&vault, &password, &salt_fec, &wrapped_fec)
-                            .map_err(map_open_err)?
-                    }
-                    // We installed our precomputed envelope.
-                    None => dek_mine,
-                }
-            }
-        };
+        let derived_key = open_or_bootstrap(&mut conn, &vault, master_password.as_str(), &path)
+            .map_err(map_open_err)?;
 
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
             vault,
             dek: std::sync::Mutex::new(MaskedDek::new(derived_key)?),
-            was_reset,
+        })
+    }
+
+    /// Opens an **already-initialized** `.magi/` DB via the §2.1 never-delete
+    /// bootstrap state machine, **without creating any schema**. This is the
+    /// headless open path: `magi init` (Task 1/2) already created the schema, so a
+    /// missing table here is corruption, never silently re-created.
+    ///
+    /// See [`open_or_bootstrap`] for the exact §2.1 evaluation order and the
+    /// never-delete guarantee (REQ-H20 / D-H10 / SC-H21).
+    ///
+    /// # Errors
+    ///
+    /// - [`VaultError::DbCorrupt`] — a missing data table (partial/foreign schema)
+    ///   or records present with no envelope. **Never wipes.**
+    /// - [`VaultError::VaultMetaCorrupt`] — `vault_meta` present but FEC-uncorrectable.
+    /// - [`VaultError::WrongPassphrase`] — envelope present, AEAD tag fails. Retryable.
+    /// - [`VaultError::Crypto`] / [`VaultError::Storage`] — a crypto or SQL failure.
+    // Narrow allow: the headless open path is exercised by tests here and in
+    // `system::workspace` (the T2↔T3 lock-in) and wired into the `magi query`
+    // runner in a later MS2 task; it is not a fabricated symbol.
+    #[allow(dead_code)]
+    pub(crate) fn open_with_state_machine(
+        path: PathBuf,
+        master_password: Zeroizing<String>,
+    ) -> std::result::Result<Self, VaultError> {
+        Self::open_with_state_machine_vault(path, master_password, CryptoVault::default())
+    }
+
+    /// [`Self::open_with_state_machine`] with an injectable [`CryptoVault`] (a fast
+    /// deterministic KDF in tests). Same never-delete semantics and errors.
+    ///
+    /// # Errors
+    ///
+    /// Identical to [`Self::open_with_state_machine`].
+    // Narrow allow: same rationale as `open_with_state_machine` — delegated to by
+    // it and by the test-only fast-KDF open path.
+    #[allow(dead_code)]
+    pub(crate) fn open_with_state_machine_vault(
+        path: PathBuf,
+        master_password: Zeroizing<String>,
+        vault: CryptoVault,
+    ) -> std::result::Result<Self, VaultError> {
+        let mut conn = open_connection(&path)?;
+        // NO init_schema: opening, not initializing. A missing table is corruption.
+        let derived_key = open_or_bootstrap(&mut conn, &vault, master_password.as_str(), &path)?;
+
+        Ok(Self {
+            conn: Arc::new(Mutex::new(conn)),
+            vault,
+            dek: std::sync::Mutex::new(MaskedDek::new(derived_key)?),
         })
     }
 
@@ -302,6 +245,249 @@ impl EncryptedSqliteMemory {
 /// string would make impossible.
 fn map_open_err(e: VaultError) -> anyhow::Error {
     e.into()
+}
+
+/// Opens a SQLite connection with the standard pragmas (busy timeout, WAL,
+/// `synchronous = NORMAL`). Shared by both entry points so the pragma order is
+/// identical regardless of whether the schema is created afterwards.
+///
+/// The busy timeout is set **first**, before any pragma, so two openers racing
+/// on a brand-new file wait for one another instead of failing `SQLITE_BUSY`.
+///
+/// # Errors
+///
+/// [`VaultError::Storage`] if the file cannot be opened or a pragma fails.
+fn open_connection(path: &Path) -> std::result::Result<Connection, VaultError> {
+    let conn = Connection::open(path).map_err(|e| VaultError::Storage(e.to_string()))?;
+    conn.busy_timeout(std::time::Duration::from_secs(BUSY_TIMEOUT_SECS))
+        .map_err(|e| VaultError::Storage(e.to_string()))?;
+    // `query_row` (not `execute`): `journal_mode` returns the new mode, which
+    // `execute` rejects on some driver builds.
+    let _: String = conn
+        .query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))
+        .map_err(|e| VaultError::Storage(e.to_string()))?;
+    conn.execute("PRAGMA synchronous = NORMAL", [])
+        .map_err(|e| VaultError::Storage(e.to_string()))?;
+    Ok(conn)
+}
+
+/// Maps a `rusqlite` error from a table read into a [`VaultError`], turning
+/// SQLite's "no such table" into [`VaultError::DbCorrupt`] (a partial/foreign
+/// schema is corruption, **never** a bootstrap candidate — §2.1). Any other
+/// failure is [`VaultError::Storage`].
+fn map_table_err(e: rusqlite::Error, table: &str, db_path: &Path) -> VaultError {
+    // SQLite reports a missing table as "no such table: <name>". Matching the
+    // message keeps this robust across rusqlite's error-struct shapes.
+    if e.to_string().contains("no such table") {
+        VaultError::DbCorrupt {
+            db_path: db_path.to_path_buf(),
+            detail: format!("missing table `{table}`"),
+        }
+    } else {
+        VaultError::Storage(e.to_string())
+    }
+}
+
+/// Counts the rows of `table`, mapping a missing table to
+/// [`VaultError::DbCorrupt`] (§2.1). `table` is always a compile-time constant
+/// from [`DATA_TABLES`], never caller input, so the formatted SQL carries no
+/// injection risk.
+///
+/// # Errors
+///
+/// - [`VaultError::DbCorrupt`] if `table` is absent (`detail` names it).
+/// - [`VaultError::Storage`] on any other SQLite failure.
+fn count_rows(
+    conn: &Connection,
+    table: &str,
+    db_path: &Path,
+) -> std::result::Result<i64, VaultError> {
+    conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
+        .map_err(|e| map_table_err(e, table, db_path))
+}
+
+/// Reads the FEC-encoded `wrapped_dek` row from `vault_meta` (absent ⇒ `None`).
+///
+/// # Errors
+///
+/// [`VaultError::DbCorrupt`] if `vault_meta` itself is missing (schema
+/// corruption); [`VaultError::Storage`] on any other SQLite failure.
+fn read_wrapped_dek(
+    conn: &Connection,
+    db_path: &Path,
+) -> std::result::Result<Option<Vec<u8>>, VaultError> {
+    conn.query_row(
+        "SELECT value FROM vault_meta WHERE key = 'wrapped_dek'",
+        [],
+        |r| r.get(0),
+    )
+    .optional()
+    .map_err(|e| map_table_err(e, "vault_meta", db_path))
+}
+
+/// Applies the §2.1 never-delete bootstrap state machine on an already-open
+/// connection, returning the recovered or freshly-generated DEK. **Never
+/// deletes data** (REQ-H20 / D-H10 / SC-H21).
+///
+/// Evaluation order:
+/// 1. **Envelope row present** ⇒ [`open_envelope`], which FEC-decodes `vault_meta`
+///    **before** the AEAD: unwrap OK ⇒ open; FEC-uncorrectable ⇒
+///    [`VaultError::VaultMetaCorrupt`]; AEAD tag fails ⇒
+///    [`VaultError::WrongPassphrase`] (retryable, never wipes).
+/// 2. **No envelope row** ⇒ [`count_rows`] every table in [`DATA_TABLES`] (a
+///    missing table ⇒ [`VaultError::DbCorrupt`]): **all empty** ⇒ bootstrap a
+///    fresh envelope under a `BEGIN IMMEDIATE` write lock (adopt-winner on a
+///    concurrent race); **any data** ⇒ [`VaultError::DbCorrupt`]
+///    (`"data present without envelope"`) — the ciphertext is unreadable without
+///    the DEK and is **never** discarded.
+///
+/// **R-V08:** the expensive KEK/Argon2 derivation (inside [`bootstrap_envelope`]
+/// / [`open_envelope`]) runs **outside** the connection write lock; the
+/// `BEGIN IMMEDIATE` transaction wraps only the cheap `{salt, wrapped_dek}`
+/// INSERT.
+///
+/// # Errors
+///
+/// See the branches above; also [`VaultError::Storage`] on a SQL failure.
+fn open_or_bootstrap(
+    conn: &mut Connection,
+    vault: &CryptoVault,
+    password: &str,
+    db_path: &Path,
+) -> std::result::Result<Zeroizing<Vec<u8>>, VaultError> {
+    match read_wrapped_dek(conn, db_path)? {
+        Some(wrapped_fec) => open_existing_envelope(conn, vault, password, &wrapped_fec, db_path),
+        None => bootstrap_fresh_envelope(conn, vault, password, db_path),
+    }
+}
+
+/// Opens an existing envelope (`vault_meta` has a `wrapped_dek`). Delegates to
+/// [`open_envelope`], which evaluates FEC **before** the AEAD (§2.1).
+///
+/// # Errors
+///
+/// - [`VaultError::VaultMetaCorrupt`] if the `salt` row is missing or the FEC is
+///   uncorrectable.
+/// - [`VaultError::WrongPassphrase`] if the master is wrong (AEAD tag fails).
+/// - [`VaultError::Storage`] on a SQLite failure.
+fn open_existing_envelope(
+    conn: &Connection,
+    vault: &CryptoVault,
+    password: &str,
+    wrapped_fec: &[u8],
+    db_path: &Path,
+) -> std::result::Result<Zeroizing<Vec<u8>>, VaultError> {
+    let salt_fec: Vec<u8> = conn
+        .query_row("SELECT value FROM vault_meta WHERE key = 'salt'", [], |r| {
+            r.get(0)
+        })
+        .optional()
+        .map_err(|e| map_table_err(e, "vault_meta", db_path))?
+        // A `wrapped_dek` with no `salt` is corrupt metadata, not a wrong master.
+        .ok_or(VaultError::VaultMetaCorrupt)?;
+    open_envelope(vault, password, &salt_fec, wrapped_fec)
+}
+
+/// Bootstraps a fresh envelope for a DB that has no `wrapped_dek` row.
+///
+/// The **never-delete guard** runs first: every [`DATA_TABLES`] entry must exist
+/// (a missing one ⇒ [`VaultError::DbCorrupt`]) and be empty (any data ⇒
+/// [`VaultError::DbCorrupt`] `"data present without envelope"`). Only an
+/// all-empty schema is bootstrapped; **nothing is ever deleted**.
+///
+/// The KEK derivation runs **before** the `BEGIN IMMEDIATE` write lock (R-V08);
+/// under the lock a racing opener's envelope is **adopted** rather than
+/// double-bootstrapped (SC-V51 / §2.2).
+///
+/// # Errors
+///
+/// - [`VaultError::DbCorrupt`] on a missing table or data-without-envelope.
+/// - [`VaultError::WrongPassphrase`] if a concurrent winner's adopted envelope
+///   does not open under this passphrase.
+/// - [`VaultError::Crypto`] / [`VaultError::Storage`] on a crypto or SQL failure.
+fn bootstrap_fresh_envelope(
+    conn: &mut Connection,
+    vault: &CryptoVault,
+    password: &str,
+    db_path: &Path,
+) -> std::result::Result<Zeroizing<Vec<u8>>, VaultError> {
+    // NEVER-DELETE guard (§2.1): a no-envelope DB is a bootstrap candidate ONLY
+    // if every data table exists and is empty. Any present table with data ⇒
+    // DbCorrupt; a missing table ⇒ DbCorrupt (via `count_rows`). Neither is EVER
+    // wiped or bootstrapped over. Row counting is cheap and needs no write lock.
+    let mut total: i64 = 0;
+    for table in DATA_TABLES {
+        total = total
+            .checked_add(count_rows(conn, table, db_path)?)
+            .ok_or_else(|| VaultError::Storage("row-count overflow".to_string()))?;
+    }
+    if total > 0 {
+        return Err(VaultError::DbCorrupt {
+            db_path: db_path.to_path_buf(),
+            detail: DETAIL_DATA_WITHOUT_ENVELOPE.to_string(),
+        });
+    }
+
+    // Precompute a fresh envelope BEFORE taking the write lock, so the expensive
+    // Argon2 KEK derivation never runs while the lock is held (R-V08).
+    // `bootstrap_envelope` is pure (no DB side effects), so the work is simply
+    // discarded if a racing opener wins the lock below.
+    let (salt_mine, wrapped_mine, dek_mine) = bootstrap_envelope(vault, password)?;
+
+    // Under the write lock, do ONLY cheap SQL: re-check for a racing bootstrap
+    // and either install our precomputed envelope or capture the winner's for an
+    // out-of-lock unwrap.
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| VaultError::Storage(e.to_string()))?;
+    let raced: Option<Vec<u8>> = tx
+        .query_row(
+            "SELECT value FROM vault_meta WHERE key = 'wrapped_dek'",
+            [],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(|e| VaultError::Storage(e.to_string()))?;
+    let adopted: Option<(Vec<u8>, Vec<u8>)> = match raced {
+        // A racing opener bootstrapped first between our read and the write lock:
+        // capture its envelope; unwrap it AFTER releasing the lock so its Argon2
+        // derivation is off the hot lock too.
+        Some(wrapped_fec) => {
+            let salt_fec: Vec<u8> = tx
+                .query_row("SELECT value FROM vault_meta WHERE key = 'salt'", [], |r| {
+                    r.get(0)
+                })
+                .map_err(|e| VaultError::Storage(e.to_string()))?;
+            Some((salt_fec, wrapped_fec))
+        }
+        // No racing envelope: install ours. `INSERT OR REPLACE` tolerates a stale
+        // partial `salt` row from a crashed prior bootstrap (crash-safe). This is
+        // the ONLY write on this path — there is NO `DELETE` (never-delete
+        // absolute, REQ-H20 / D-H10).
+        None => {
+            tx.execute(
+                "INSERT OR REPLACE INTO vault_meta (key, value) VALUES ('salt', ?1)",
+                params![salt_mine],
+            )
+            .map_err(|e| VaultError::Storage(e.to_string()))?;
+            tx.execute(
+                "INSERT OR REPLACE INTO vault_meta (key, value) VALUES ('wrapped_dek', ?1)",
+                params![wrapped_mine],
+            )
+            .map_err(|e| VaultError::Storage(e.to_string()))?;
+            None
+        }
+    };
+    tx.commit()
+        .map_err(|e| VaultError::Storage(e.to_string()))?;
+
+    match adopted {
+        // A racing opener won: unwrap ITS envelope off the lock. A failure here
+        // propagates and NEVER deletes.
+        Some((salt_fec, wrapped_fec)) => open_envelope(vault, password, &salt_fec, &wrapped_fec),
+        // We installed our precomputed envelope.
+        None => Ok(dek_mine),
+    }
 }
 
 /// Creates every table of the magi-rs on-disk schema, idempotently.
@@ -505,9 +691,73 @@ mod tests {
     use cryptovault::cipher::Aes256GcmSivCipher;
     use cryptovault::fec::ConcatenatedFec;
     use cryptovault::kdf::{Argon2Kdf, KeyDerivation};
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Barrier};
     use tempfile::NamedTempFile;
+
+    /// Fixed passphrase for the §2.1 state-machine tests.
+    fn test_master() -> Zeroizing<String> {
+        Zeroizing::new("state-machine-test-master-key".to_string())
+    }
+
+    /// Counts rows of `table` on a raw connection (test oracle for the
+    /// never-delete "before == after" assertions).
+    fn row_count(conn: &Connection, table: &str) -> i64 {
+        conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
+            .unwrap()
+    }
+
+    /// Seeds a DB that has the full schema and a row in `messages` but **no**
+    /// envelope row in `vault_meta` — the §2.1 "data present without envelope"
+    /// corruption. Returns the live tempfile (keep it in scope so the path stays
+    /// valid), a raw read connection, and the DB path.
+    fn seed_db_with_messages_no_envelope() -> (NamedTempFile, Connection, PathBuf) {
+        let tmp = NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+        let conn = Connection::open(&path).unwrap();
+        init_schema(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO sessions (id, project_name) VALUES ('s', 'p')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO messages (session_id, role, content_blob) VALUES ('s', 'User', 'ciphertext')",
+            [],
+        )
+        .unwrap();
+        // `vault_meta` intentionally left EMPTY (no envelope).
+        (tmp, conn, path)
+    }
+
+    /// KDF that, at derivation time, probes whether a second connection can take
+    /// an IMMEDIATE write lock — proving the bootstrap holds **no** write lock
+    /// across the (expensive) KEK derivation (R-V08). Delegates to [`FastKdf`].
+    struct LockProbeKdf {
+        inner: FastKdf,
+        db_path: PathBuf,
+        lock_free_at_derivation: Arc<AtomicBool>,
+    }
+    impl KeyDerivation for LockProbeKdf {
+        fn derive_master(
+            &self,
+            password: &[u8],
+            salt: &[u8],
+        ) -> cryptovault::Result<Zeroizing<Vec<u8>>> {
+            // If a refactor moved the derivation inside the BEGIN IMMEDIATE, this
+            // probe would block for the busy timeout and fail, flipping the flag.
+            let mut probe = Connection::open(&self.db_path).unwrap();
+            probe
+                .busy_timeout(std::time::Duration::from_millis(200))
+                .unwrap();
+            let got_lock = probe
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                .is_ok();
+            self.lock_free_at_derivation
+                .store(got_lock, Ordering::SeqCst);
+            self.inner.derive_master(password, salt)
+        }
+    }
 
     /// KDF that counts derivations and delegates to the real Argon2id.
     struct CountingKdf {
@@ -589,53 +839,19 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn test_was_reset_flag_reflects_content_discard() {
-        // S-1 (#11): a legacy DB (rows, no salt) that gets reset reports
-        // was_reset() == true; a fresh DB reports false.
-        let tmp = NamedTempFile::new().unwrap();
-        let path = tmp.path().to_path_buf();
-        {
-            let conn = Connection::open(&path).unwrap();
-            conn.execute(
-                "CREATE TABLE sessions (id TEXT PRIMARY KEY, project_name TEXT NOT NULL, \
-                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP)",
-                [],
-            )
-            .unwrap();
-            conn.execute(
-                "CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL, \
-                 role TEXT NOT NULL, content_blob TEXT NOT NULL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)",
-                [],
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO sessions (id, project_name) VALUES ('old', 'legacy')",
-                [],
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO messages (session_id, role, content_blob) VALUES ('old', 'User', 'X')",
-                [],
-            )
-            .unwrap();
-        }
-        let legacy = EncryptedSqliteMemory::new(path, Zeroizing::new("pw".to_string())).unwrap();
-        assert!(
-            legacy.was_reset(),
-            "a legacy DB that discarded content must report was_reset()"
-        );
-
-        let tmp2 = NamedTempFile::new().unwrap();
-        let fresh =
-            EncryptedSqliteMemory::new(tmp2.path().to_path_buf(), Zeroizing::new("pw".to_string()))
-                .unwrap();
-        assert!(!fresh.was_reset(), "a fresh DB must not report was_reset()");
-    }
+    // NOTE (MS1 Task 3, Step 8c): the former `test_was_reset_flag_reflects_content_discard`
+    // was REMOVED. Under never-delete ABSOLUTE (REQ-H20 / D-H10) there is no reset
+    // — the `was_reset` flag and its startup notice no longer exist. A DB with data
+    // but no envelope now yields `DbCorrupt` and is never wiped; that behavior is
+    // covered by `test_open_without_envelope_but_with_data_is_dbcorrupt_never_wipes`
+    // and `test_legacy_db_without_salt_is_dbcorrupt_and_never_wiped` below.
 
     #[tokio::test]
-    async fn test_legacy_db_without_salt_is_reset_on_open() {
-        // S-7: a pre-B′ DB (rows present, no vault_meta salt) is wiped on open.
+    async fn test_legacy_db_without_salt_is_dbcorrupt_and_never_wiped() {
+        // Step 8c rewrite of the former `test_legacy_db_without_salt_is_reset_on_open`.
+        // A pre-envelope DB (rows present, no `vault_meta` envelope) is now
+        // CORRUPTION, not a fresh-start: opening returns `DbCorrupt` and the data
+        // is left completely intact (never-delete absolute, REQ-H20 / D-H10 / SC-H21).
         let tmp = NamedTempFile::new().unwrap();
         let path = tmp.path().to_path_buf();
         {
@@ -664,17 +880,328 @@ mod tests {
             .unwrap();
         }
 
-        let memory = EncryptedSqliteMemory::new(path, Zeroizing::new("pw".to_string())).unwrap();
+        // `new` runs `init_schema` (adding the missing tables) then the state
+        // machine: no envelope + data present ⇒ DbCorrupt (never wiped).
+        let err = EncryptedSqliteMemory::new(path.clone(), Zeroizing::new("pw".to_string()))
+            .err()
+            .expect("data without an envelope must fail to open, not be wiped");
         assert!(
-            memory.list_sessions().await.unwrap().is_empty(),
-            "legacy rows must be wiped on open (D6 fresh-start)"
+            matches!(
+                err.downcast_ref::<VaultError>(),
+                Some(VaultError::DbCorrupt { .. })
+            ),
+            "expected DbCorrupt, got {err:?}"
         );
-        let sid = memory.create_session("fresh").await.unwrap();
-        memory
-            .add_message(&sid, &Message::user("new"))
-            .await
+
+        // The legacy rows survive untouched — never-delete absolute.
+        let reopened = Connection::open(&path).unwrap();
+        assert_eq!(
+            row_count(&reopened, "sessions"),
+            1,
+            "never-delete: the legacy session row must survive the failed open"
+        );
+        assert_eq!(
+            row_count(&reopened, "messages"),
+            1,
+            "never-delete: the legacy message row must survive the failed open"
+        );
+    }
+
+    #[test]
+    fn test_open_without_envelope_but_with_data_is_dbcorrupt_never_wipes() {
+        // Step 1 (the MOST critical): a DB with records but no envelope ⇒
+        // DbCorrupt, and the state machine NEVER wipes the data (SC-H21).
+        let (_tmp, conn, path) = seed_db_with_messages_no_envelope();
+        let before = row_count(&conn, "messages");
+        assert!(before > 0, "the seed must actually contain data");
+
+        let err = EncryptedSqliteMemory::open_with_state_machine(path.clone(), test_master())
+            .err()
+            .expect("data without an envelope must be DbCorrupt");
+        assert!(
+            matches!(err, VaultError::DbCorrupt { .. }),
+            "expected DbCorrupt, got {err:?}"
+        );
+
+        // The DB is INTACT — never wiped.
+        let reopened = Connection::open(&path).unwrap();
+        let after = row_count(&reopened, "messages");
+        assert_eq!(
+            before, after,
+            "never-delete: the state machine must not delete any row"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_open_without_envelope_and_empty_bootstraps_cleanly() {
+        // Step 5: a fully-initialized, EMPTY DB (all tables present, no envelope)
+        // is the legitimate bootstrap candidate ⇒ the state machine creates the
+        // envelope and opens (SC-H20). The envelope then persists across reopen.
+        let tmp = NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+        {
+            let conn = Connection::open(&path).unwrap();
+            init_schema(&conn).unwrap();
+        }
+
+        let store = EncryptedSqliteMemory::open_with_state_machine_vault(
+            path.clone(),
+            test_master(),
+            fast_kdf_vault(),
+        )
+        .expect("an empty initialized DB must bootstrap cleanly");
+        let sid = store.create_session("p").await.unwrap();
+        store.add_message(&sid, &Message::user("hi")).await.unwrap();
+        assert_eq!(
+            store.get_messages(&sid).await.unwrap(),
+            vec![Message::user("hi")]
+        );
+        drop(store);
+
+        // Reopen: the envelope now exists, so the same passphrase opens it and the
+        // history is intact.
+        let reopened = EncryptedSqliteMemory::open_with_state_machine_vault(
+            path,
+            test_master(),
+            fast_kdf_vault(),
+        )
+        .expect("the bootstrapped envelope must reopen with the same passphrase");
+        assert_eq!(
+            reopened.get_messages(&sid).await.unwrap(),
+            vec![Message::user("hi")]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_wrong_passphrase_via_state_machine_is_wrong_passphrase_and_intact() {
+        // Step 7: a wrong passphrase ⇒ WrongPassphrase (retryable), data intact —
+        // the vault never-wipe invariant expressed through the state machine.
+        let tmp = NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+        {
+            let conn = Connection::open(&path).unwrap();
+            init_schema(&conn).unwrap();
+        }
+        let right = || Zeroizing::new("right-master-alpha".to_string());
+        let wrong = || Zeroizing::new("wrong-master-bravo".to_string());
+
+        let sid;
+        {
+            let store = EncryptedSqliteMemory::open_with_state_machine_vault(
+                path.clone(),
+                right(),
+                fast_kdf_vault(),
+            )
             .unwrap();
-        assert_eq!(memory.get_messages(&sid).await.unwrap().len(), 1);
+            sid = store.create_session("p").await.unwrap();
+            store
+                .add_message(&sid, &Message::user("must survive"))
+                .await
+                .unwrap();
+        }
+
+        let err = EncryptedSqliteMemory::open_with_state_machine_vault(
+            path.clone(),
+            wrong(),
+            fast_kdf_vault(),
+        )
+        .err()
+        .expect("a wrong passphrase must fail to open");
+        assert!(
+            matches!(err, VaultError::WrongPassphrase),
+            "expected WrongPassphrase, got {err:?}"
+        );
+
+        let store =
+            EncryptedSqliteMemory::open_with_state_machine_vault(path, right(), fast_kdf_vault())
+                .expect("the correct passphrase must still open the untouched DB");
+        assert_eq!(
+            store.get_messages(&sid).await.unwrap(),
+            vec![Message::user("must survive")],
+            "the failed wrong-passphrase open must not have wiped the data"
+        );
+    }
+
+    #[test]
+    fn test_fec_damaged_vault_meta_is_vault_meta_corrupt_before_aead() {
+        // Step 8: an envelope present but FEC-uncorrectable ⇒ VaultMetaCorrupt,
+        // evaluated BEFORE the AEAD (a mass bit-flip fails the FEC decode, so no
+        // derivation/AEAD runs at all).
+        let tmp = NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+        // Bootstrap a valid envelope on an empty initialized DB.
+        {
+            let conn = Connection::open(&path).unwrap();
+            init_schema(&conn).unwrap();
+        }
+        EncryptedSqliteMemory::open_with_state_machine_vault(
+            path.clone(),
+            test_master(),
+            fast_kdf_vault(),
+        )
+        .unwrap();
+
+        // Corrupt the wrapped_dek FEC beyond correction (mass bit-flip).
+        {
+            let conn = Connection::open(&path).unwrap();
+            let mut blob: Vec<u8> = conn
+                .query_row(
+                    "SELECT value FROM vault_meta WHERE key = 'wrapped_dek'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            for b in blob.iter_mut() {
+                *b ^= 0xFF;
+            }
+            conn.execute(
+                "UPDATE vault_meta SET value = ?1 WHERE key = 'wrapped_dek'",
+                params![blob],
+            )
+            .unwrap();
+        }
+
+        let err = EncryptedSqliteMemory::open_with_state_machine_vault(
+            path,
+            test_master(),
+            fast_kdf_vault(),
+        )
+        .err()
+        .expect("FEC-uncorrectable vault_meta must fail");
+        assert!(
+            matches!(err, VaultError::VaultMetaCorrupt),
+            "FEC damage must be VaultMetaCorrupt (before the AEAD), got {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_concurrent_bootstrap_different_passphrase_loser_gets_wrong_passphrase() {
+        // Step 8b (adopt-winner, §2.2 / SC-V51): two fresh opens race to bootstrap
+        // the SAME empty DB with DIFFERENT passphrases. Only one persists the
+        // {salt, wrapped_dek}; the other ADOPTS it and, because its passphrase
+        // differs, fails the AEAD tag ⇒ WrongPassphrase — never a second DEK,
+        // never wiped, retryable.
+        let tmp = NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+        // Pre-seed WAL + the full schema so the race exercises the ENVELOPE
+        // bootstrap (the invariant under test), not DB-file-setup contention.
+        {
+            let seed = Connection::open(&path).unwrap();
+            let _: String = seed
+                .query_row("PRAGMA journal_mode = WAL", [], |r| r.get(0))
+                .unwrap();
+            init_schema(&seed).unwrap();
+        }
+
+        let barrier = Arc::new(Barrier::new(2));
+        // The thread reduces its open to a `Send` outcome (`Ok(())` opened /
+        // `Err(kind)` classified) so the store never crosses the thread boundary.
+        let spawn_opener = |pass: &'static str| {
+            let path = path.clone();
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || -> std::result::Result<(), &'static str> {
+                barrier.wait();
+                match EncryptedSqliteMemory::new_with_vault(
+                    path,
+                    Zeroizing::new(pass.to_string()),
+                    fast_kdf_vault(),
+                ) {
+                    Ok(_) => Ok(()),
+                    Err(e) => match e.downcast_ref::<VaultError>() {
+                        Some(VaultError::WrongPassphrase) => Err("WrongPassphrase"),
+                        _ => Err("other"),
+                    },
+                }
+            })
+        };
+
+        let t1 = spawn_opener("passphrase-alpha-1234567");
+        let t2 = spawn_opener("passphrase-bravo-7654321");
+        let r1 = t1.join().expect("thread-a must not panic");
+        let r2 = t2.join().expect("thread-b must not panic");
+
+        let oks = [&r1, &r2].iter().filter(|r| r.is_ok()).count();
+        assert_eq!(
+            oks, 1,
+            "exactly one opener bootstraps the envelope; the other adopts it"
+        );
+        for r in [&r1, &r2] {
+            if let Err(kind) = r {
+                assert_eq!(
+                    *kind, "WrongPassphrase",
+                    "the loser adopts the winner's envelope and fails the AEAD tag"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_partial_schema_missing_table_is_dbcorrupt_and_intact() {
+        // Step 8d: a partial/foreign schema (a data table missing) ⇒ DbCorrupt
+        // naming the table; the surviving tables are left intact (never-delete).
+        let tmp = NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+        {
+            let conn = Connection::open(&path).unwrap();
+            init_schema(&conn).unwrap();
+            conn.execute("DROP TABLE messages", []).unwrap();
+            // A surviving row proves nothing is wiped on the corruption path.
+            conn.execute(
+                "INSERT INTO sessions (id, project_name) VALUES ('s', 'p')",
+                [],
+            )
+            .unwrap();
+        }
+
+        let err = EncryptedSqliteMemory::open_with_state_machine(path.clone(), test_master())
+            .err()
+            .expect("a missing data table is corruption");
+        match err {
+            VaultError::DbCorrupt { ref detail, .. } => assert!(
+                detail.contains("messages"),
+                "detail must name the missing table, got {detail:?}"
+            ),
+            other => panic!("expected DbCorrupt naming the table, got {other:?}"),
+        }
+
+        // Intact: the surviving `sessions` row is untouched.
+        let reopened = Connection::open(&path).unwrap();
+        assert_eq!(
+            row_count(&reopened, "sessions"),
+            1,
+            "never-delete: a partial-schema corruption must not wipe surviving tables"
+        );
+    }
+
+    #[test]
+    fn test_kek_derivation_happens_before_the_bootstrap_write_lock() {
+        // Step 8e (R-V08 lock-ordering regression): the expensive KEK derivation
+        // must run BEFORE the BEGIN IMMEDIATE write lock. The probe KDF confirms a
+        // second connection can take an IMMEDIATE lock AT derivation time — which
+        // is only possible if the bootstrap holds no write lock across the KDF.
+        let tmp = NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+        {
+            let conn = Connection::open(&path).unwrap();
+            init_schema(&conn).unwrap();
+        }
+        let lock_free = Arc::new(AtomicBool::new(false));
+        let vault = CryptoVault::new(
+            Box::new(LockProbeKdf {
+                inner: FastKdf,
+                db_path: path.clone(),
+                lock_free_at_derivation: lock_free.clone(),
+            }),
+            Box::new(Aes256GcmSivCipher),
+            Box::new(ConcatenatedFec::default()),
+        );
+
+        EncryptedSqliteMemory::open_with_state_machine_vault(path, test_master(), vault)
+            .expect("bootstrap must succeed");
+        assert!(
+            lock_free.load(Ordering::SeqCst),
+            "R-V08: the KEK derivation must run BEFORE the BEGIN IMMEDIATE write lock"
+        );
     }
 
     #[tokio::test]

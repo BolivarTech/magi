@@ -763,18 +763,16 @@ mod tests {
         assert!(ws.magi_dir.join("magi.toml").exists());
     }
 
-    // T2↔T3 lock-in (MS1 Task 2 Step 4c-bis): a freshly-`init`ed DB has exactly
-    // the five empty tables and NO envelope row — the precondition under which
-    // Task 3's state machine bootstraps cleanly (never `DbCorrupt`).
-    //
-    // `#[ignore]`: the final assertion calls Task 3's `open_with_state_machine`,
-    // which does not exist yet. Task 3 Step 9b un-ignores this and swaps the body
-    // for `open_with_state_machine(ws.db_path(), test_master()) => Ok(_)`.
+    // T2↔T3 lock-in (MS1 Task 2 Step 4c-bis / Task 3 Step 9b): a freshly-`init`ed
+    // DB has exactly the five empty tables and NO envelope row — the precondition
+    // under which Task 3's never-delete state machine bootstraps cleanly (never
+    // `DbCorrupt`). Now that `open_with_state_machine` exists (T3), the final
+    // assertion drives it directly, closing the T2↔T3 coupling executably.
     #[test]
-    #[ignore = "un-ignore when T3 lands (Task 3 Step 9b): swap for open_with_state_machine"]
     fn test_fresh_init_db_bootstraps_cleanly_under_state_machine() {
         let tmp = tempfile::tempdir().unwrap();
         let ws = init(tmp.path()).unwrap();
+        // Structural precondition: five empty tables, no envelope.
         let conn = rusqlite::Connection::open(ws.db_path()).unwrap();
         for table in [
             "sessions",
@@ -796,6 +794,17 @@ mod tests {
             )
             .unwrap();
         assert_eq!(has_envelope, 0, "a fresh init has no envelope yet");
+        drop(conn);
+
+        // T3 lock-in: the state machine opens the fresh DB cleanly (bootstraps the
+        // envelope), NEVER `DbCorrupt`.
+        match crate::system::database::EncryptedSqliteMemory::open_with_state_machine(
+            ws.db_path(),
+            zeroize::Zeroizing::new("fresh-init-state-machine-master".to_string()),
+        ) {
+            Ok(_) => {}
+            Err(e) => panic!("fresh init must bootstrap cleanly under the state machine: {e:?}"),
+        }
     }
 
     #[test]

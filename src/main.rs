@@ -694,14 +694,9 @@ async fn main() -> anyhow::Result<()> {
                 .map_err(|e| crate::memory::error::MemoryError::Crypto(e.to_string()))
                 .and_then(|dek| SqliteVectorStore::new(concrete_store.shared_conn(), dek));
 
-            // #11: surface a one-time reset notice if incompatible content was discarded.
-            if concrete_store.was_reset() {
-                startup_notices.push(
-                    "Note: existing on-disk history used an incompatible/corrupt format and \
-                     has been reset (fresh start)."
-                        .to_string(),
-                );
-            }
+            // Never-delete absolute (REQ-H20 / D-H10): on-disk content is NEVER
+            // auto-reset — a data-without-envelope DB fails to open with a typed
+            // `DbCorrupt` instead of being wiped — so there is no reset notice.
             let memory: Arc<dyn MemoryStore> = Arc::new(concrete_store);
             let sessions = memory.list_sessions().await?;
             let session_id = if let Some((id, _)) = sessions.first() {

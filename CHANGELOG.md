@@ -9,6 +9,34 @@ changes and the **patch** position signals backward-compatible fixes.
 
 ## [Unreleased]
 
+## [0.10.0]
+
+Headless **MS1 — unified `.magi/` state + the never-delete ABSOLUTE bootstrap
+state machine**. Foundation for the non-interactive `init`/`query`/`consult`
+surface.
+
+### Changed
+- **Never-delete ABSOLUTE (REQ-H20 / D-H10 / SC-H21).** The DB open/bootstrap
+  logic (`src/system/database.rs`) is rewritten to the §2.1 state machine and
+  **the last automatic `DELETE` is gone**. Previously a DB whose records had no
+  envelope (`wrapped_dek` absent) was treated as a pre-envelope format and
+  **wiped** to a fresh start. That path is removed: a DB with data but no
+  envelope is now **corruption** (`VaultError::DbCorrupt`, exit 1) and is
+  **never** deleted or bootstrapped over — restore a backup or remove `.magi/`
+  by hand. The evaluation order is: envelope present ⇒ open (FEC before AEAD;
+  FEC-uncorrectable ⇒ `VaultMetaCorrupt`, wrong passphrase ⇒ `WrongPassphrase`,
+  never wiped); no envelope + all data tables empty ⇒ bootstrap; no envelope +
+  any data (or a missing data table = partial/foreign schema) ⇒ `DbCorrupt`.
+- **`EncryptedSqliteMemory::open_with_state_machine`** opens an
+  already-initialized `.magi/` DB **without creating any schema**, so a missing
+  table surfaces as `DbCorrupt` instead of being silently re-created. The raw
+  `EncryptedSqliteMemory::new` path keeps auto-initializing the schema (TUI /
+  `vault` CLI) but shares the same never-delete state machine.
+
+### Removed
+- **`EncryptedSqliteMemory::was_reset()`** and the "content has been reset"
+  startup notice. With never-delete absolute there is no reset to report.
+
 ## [0.9.0] - 2026-07-17
 
 Vault **MS2 — the vault CLI + zero-knowledge passphrase**. The user-facing surface
