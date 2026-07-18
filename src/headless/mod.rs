@@ -29,6 +29,7 @@
 //! codes llegan en las tareas posteriores de MS1; el cableado del `Agent` en MS2.
 
 mod error;
+pub mod input;
 pub mod limits;
 pub(crate) mod types;
 
