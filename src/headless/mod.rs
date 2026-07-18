@@ -41,3 +41,9 @@ pub(crate) mod types;
 pub(crate) mod test_support;
 
 pub use error::HeadlessError;
+
+/// Re-export del fuzz entrypoint del sanitizer para el target externo
+/// `fuzz_sanitize_error` (Task 10 / REQ-H35). `#[doc(hidden)]`: no ensancha la
+/// API pública documentada, sólo la hace alcanzable desde el crate `fuzz/`.
+#[doc(hidden)]
+pub use output::fuzz_sanitize_error_entrypoint;

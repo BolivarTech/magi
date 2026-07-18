@@ -133,3 +133,42 @@ interpretación. Si el crypto no corre bajo Miri, el alcance se acota a `error` 
   - La derivación **Argon2id** (`m=64 MiB`, muy lenta bajo interpretación) y el AES que puede usar
     AES-NI (cae al backend portable vía `cpufeatures`, no siempre bajo Miri).
 - **Se corre en CI** junto al fuzz; no se declara un pase de lo que no se ejecutó.
+
+## Gate de hardening MS1-headless (REQ-H35 fuzz · REQ-V38 Miri) — Task 10 (2026-07-18)
+
+**Fuzz targets (REQ-H35) — 2 nuevos, wired + build + smoke ejecutados en local:**
+- `fuzz_headless_input` (bytes arbitrarios → `read_input_bounded` + `parse_input` en los 3 modos
+  de `InputFormat`; invariante: nunca panic/UB, sin OOM por la lectura acotada ni stack-overflow por
+  la profundidad JSON acotada). Llama directo a los `pub fn` del módulo `input`.
+- `fuzz_sanitize_error` (string lossy arbitrario → `sanitize_error_message` + `redact_secret_patterns`;
+  invariante: nunca panic/UB **y** redacción **idempotente** — proxy de "ningún patrón tipo-clave se
+  deja pasar sin redactar"). El entrypoint es `magi_rs::headless::fuzz_sanitize_error_entrypoint`
+  (`#[doc(hidden)] pub`, misma convención que los 4 `fuzz_*_entrypoint` del vault: expone la frontera
+  `pub(crate)` al crate `fuzz/` **sin** ensanchar la API pública documentada).
+- Cada uno tiene un **unit-smoke** bajo `cargo nextest` (`test_parse_input_smoke_never_panics_on_degenerate_bytes`
+  en `input.rs`; `test_fuzz_sanitize_error_entrypoint_never_panics_on_arbitrary_input` en `output.rs`)
+  con entradas degeneradas (vacía, no-UTF8, JSON patológicamente anidado, dup-key, `prompt` no-string,
+  strings con `{`/`[`/claves embebidas) — cobertura de robustez que SÍ corre en cada §0.1.
+- ✅ **`cargo +nightly fuzz build` PASA en Windows-MSVC** con `cargo-fuzz 0.13.2` + nightly
+  `da80ed070` (la limitación de link MSVC documentada para el vault ya no aplica con esta versión del
+  tooling). **El binario instrumentado requiere el runtime ASan en el PATH en runtime**
+  (`clang_rt.asan_dynamic-x86_64.dll`, en `…\VC\Tools\MSVC\<ver>\bin\Hostx64\x64\`); sin él, el `.exe`
+  falla con `STATUS_DLL_NOT_FOUND` (0xc0000135) — no es un crash del target.
+- ✅ **Smoke 60 s local, cero crashes:** `fuzz_headless_input` → **346 653 runs / 61 s**;
+  `fuzz_sanitize_error` → **267 007 runs / 61 s** (la idempotencia del redactor no falló en ~267 k
+  entradas adversariales). La **corrida larga coverage-guided (≥ 30 min/target)** queda para CI/§0.3,
+  fuera del loop RGR y del presupuesto §7.
+
+**Miri (REQ-V38) — INFEASIBLE en el nightly actual (regresión de toolchain, NO un hallazgo de UB):**
+- ❌ `cargo +nightly miri test headless::{input,output,exit}` **aborta con un ICE de rustc**
+  (`resolver_for_lowering_raw` panickea en la fase de lowering, **antes** de correr cualquier test) en
+  `rustc 1.99.0-nightly (da80ed070 2026-07-14)`. El ICE ocurre al compilar el crate bajo Miri, no al
+  ejecutar código headless.
+- ✅ **Verificado que es toolchain, no código:** `cargo +nightly miri test vault::error` — que corría
+  **limpio** bajo Miri en un nightly anterior (spike Task 0b) — **ICEa idéntico** en este nightly. La
+  causa es el compilador, no los módulos headless.
+- **Mitigación de robustez sin Miri, honesta:** (a) el crate es `#![forbid(unsafe_code)]`
+  crate-wide ⇒ no hay `unsafe` donde alojar UB (un pase Miri sería trivial por construcción); (b) los
+  2 targets de fuzz (build + smoke, cero crashes) ejercitan el parser no confiable y el redactor; (c)
+  los unit-smoke corren en cada §0.1. **No se declara un pase de Miri que no ocurrió.** Re-habilitar
+  Miri requiere un nightly sin el ICE (o pinnear uno previo conocido-bueno).

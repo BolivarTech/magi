@@ -602,4 +602,35 @@ mod tests {
             Err(HeadlessError::InputInvalid(_))
         ));
     }
+
+    /// Unit-smoke del target de fuzz `fuzz_headless_input` (REQ-H35): entradas
+    /// degeneradas (vacía, no-UTF8, JSON patológicamente anidado, clave
+    /// duplicada, `prompt` no-string, strings con `{`/`[`/claves embebidas)
+    /// nunca panican y siempre devuelven un `Result` tipado — ni OOM (lectura
+    /// acotada) ni stack overflow (profundidad acotada). Corre en cada §0.1,
+    /// complementando la corrida coverage-guided de CI.
+    #[test]
+    fn test_parse_input_smoke_never_panics_on_degenerate_bytes() {
+        let deep = format!("{}1{}", "[".repeat(200), "]".repeat(200));
+        let cases: Vec<Vec<u8>> = vec![
+            Vec::new(),
+            vec![0xff, 0xfe, 0x00, 0x80],
+            deep.into_bytes(),
+            br#"{"prompt":"a","prompt":"b"}"#.to_vec(),
+            br#"{"prompt":123}"#.to_vec(),
+            b"{[not valid json".to_vec(),
+            br#"["array","not","object"]"#.to_vec(),
+            b"{".to_vec(),
+            b"plain text with { and [ chars".to_vec(),
+            br#"{"prompt":"x","unknown":{"nested":[1,2,3]}}"#.to_vec(),
+        ];
+        for bytes in &cases {
+            for fmt in [None, Some(InputFormat::Json), Some(InputFormat::Text)] {
+                // Nunca panic; el resultado tipado se descarta (sólo robustez).
+                let _ = parse_input(bytes, fmt);
+            }
+            // La lectura acotada del mismo input tampoco panica.
+            let _ = read_input_bounded(Cursor::new(bytes.clone()));
+        }
+    }
 }

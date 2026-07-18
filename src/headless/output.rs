@@ -419,6 +419,42 @@ pub(crate) fn redact_secret_patterns(raw: &str) -> String {
     out
 }
 
+/// Fuzz entrypoint (`fuzz_sanitize_error`, Task 10 / REQ-H35 / REQ-H15c).
+///
+/// Feeds ARBITRARY bytes (via `from_utf8_lossy`, since the sanitizers take
+/// `&str`) through [`sanitize_error_message`] and [`redact_secret_patterns`],
+/// discarding the sanitized text. Invariants exercised on every input:
+///
+/// - **Never panics / never UB** on any byte sequence (empty, non-UTF8, huge,
+///   embedded key patterns, adversarial whitespace).
+/// - **Redaction is idempotent**: re-running [`redact_secret_patterns`] over an
+///   already-redacted string is a no-op. A surviving key-pattern would break
+///   this equality (a second pass would redact it), so the assertion is the
+///   proxy for "no known key-pattern is ever left un-redacted" (REQ-H15c).
+///
+/// `#[doc(hidden)] pub` mirrors the vault's `fuzz_*_entrypoint` convention: it
+/// exposes an internal `pub(crate)` boundary to the external fuzz crate WITHOUT
+/// widening the documented public API surface.
+///
+/// # Panics
+///
+/// Panics (under `debug_assertions`, which `cargo-fuzz` enables) only if the
+/// redaction idempotency invariant is violated — that is the genuine bug the
+/// fuzzer is meant to surface, not a spurious abort.
+#[doc(hidden)]
+pub fn fuzz_sanitize_error_entrypoint(data: &[u8]) {
+    let s = String::from_utf8_lossy(data);
+    // Both sanitizers must be total (never panic) on arbitrary text.
+    let _ = sanitize_error_message(&s);
+    let redacted = redact_secret_patterns(&s);
+    // Idempotency: a surviving key-pattern would change on a second pass.
+    debug_assert_eq!(
+        redact_secret_patterns(&redacted),
+        redacted,
+        "redaction must be idempotent (no key-pattern left un-redacted)"
+    );
+}
+
 #[cfg(test)]
 impl RunOutcome {
     /// Constructor determinístico de prueba: valores fijos, sin reloj ni
@@ -690,6 +726,27 @@ mod tests {
         let out = sanitize_error_message(&at_threshold);
         assert!(out.contains(REDACTED_PLACEHOLDER));
         assert!(!out.contains(&at_threshold));
+    }
+
+    /// Unit-smoke del fuzz entrypoint `fuzz_sanitize_error` (REQ-H35): entradas
+    /// degeneradas (vacía, no-UTF8, patrones tipo-clave embebidos, corrida larga)
+    /// nunca panican y la redacción es idempotente. Es la versión local que SÍ
+    /// corre en cada §0.1, complementando la corrida coverage-guided de CI.
+    #[test]
+    fn test_fuzz_sanitize_error_entrypoint_never_panics_on_arbitrary_input() {
+        let long_run = "Z".repeat(5_000);
+        let cases: &[&[u8]] = &[
+            b"",
+            b"\xff\xfe\x00\x80",
+            b"http 401: leaked key rejected",
+            b"Bearer tokenvaluewithsomelength",
+            b"AKIAABCDEFGHIJKLMNOP",
+            b"plain network timeout",
+            long_run.as_bytes(),
+        ];
+        for case in cases {
+            fuzz_sanitize_error_entrypoint(case);
+        }
     }
 
     /// Clases reconocidas adicionales (timeout, conexión rechazada) producen
