@@ -115,14 +115,18 @@ impl Workspace {
 ///
 /// El walk es **crudo** (no resuelve symlinks del `start`, para poder
 /// rechazarlos en vez de seguirlos): (1) `start` se vuelve absoluto con
-/// [`std::path::absolute`] y se normaliza **léxicamente** (sin tocar el fs);
-/// (2) se valida que **ningún** componente de esa ruta sea un symlink —
-/// defensa real contra config-injection en el mismo filesystem; (3) se sube
-/// componente a componente, deteniéndose en el **límite de sistema de
-/// archivos**, buscando un `.magi` que sea un directorio (y no un symlink).
-/// El resultado es la ruta absoluta ya validada, **sin re-canonicalizar**
-/// (anti-TOCTOU: una segunda resolución del fs reabriría la ventana
-/// check→use).
+/// [`std::path::absolute`] **sin** resolver `..`; (2) se valida que **ningún**
+/// componente `Normal` de esa ruta **cruda** sea un symlink, recorriéndola de
+/// izquierda a derecha y resolviendo `..` léxicamente por *pop* del prefijo —
+/// así un componente symlink se rechaza **antes** de que un `..` posterior lo
+/// borre léxicamente (`<root>/link/../sub` normalizaría a `<root>/sub`,
+/// ocultando el `link` symlink si el chequeo corriera tras normalizar); (3)
+/// recién entonces se normaliza **léxicamente** (`lexical_normalize`, ya
+/// garantizada libre de symlinks) y se sube componente a componente,
+/// deteniéndose en el **límite de sistema de archivos**, buscando un `.magi`
+/// que sea un directorio (y no un symlink). El resultado es la ruta absoluta ya
+/// validada, **sin re-canonicalizar** (anti-TOCTOU: una segunda resolución del
+/// fs reabriría la ventana check→use).
 ///
 /// # Complejidad
 /// `O(d)` accesos al fs, con `d` = profundidad de `start` (una llamada
@@ -142,8 +146,11 @@ impl Workspace {
 /// error de E/S al hacer absoluta la ruta o leer metadatos.
 pub fn discover(start: &Path) -> Result<Option<Workspace>, HeadlessError> {
     let absolute = std::path::absolute(start).map_err(|e| HeadlessError::Io(e.to_string()))?;
+    // Symlink check on the RAW absolute path BEFORE lexical `..` resolution, so a
+    // symlinked component is caught at its own depth even when a later `..` would
+    // lexically erase it (`<root>/link/../sub`).
+    ensure_raw_chain_symlink_free(&absolute)?;
     let start_norm = lexical_normalize(&absolute);
-    ensure_ancestor_chain_symlink_free(&start_norm)?;
 
     for dir in collect_search_dirs(&start_norm)? {
         let candidate = dir.join(MAGI_DIR_NAME);
@@ -210,34 +217,52 @@ fn classify_magi_candidate(candidate: &Path) -> Result<MagiCandidate, HeadlessEr
     }
 }
 
-/// Valida que **ningún** componente de `path` (de la raíz al final) sea un
-/// symlink, recorriendo los prefijos de más corto a más largo.
+/// Valida que **ningún** componente `Normal` de la ruta **cruda** `absolute`
+/// sea un symlink, recorriéndola de izquierda a derecha y resolviendo `..`
+/// léxicamente por *pop* del prefijo acumulado.
 ///
-/// El orden raíz→hoja es esencial: al llegar a cada prefijo, todos los
-/// prefijos más cortos ya se confirmaron no-symlink, así que
-/// `symlink_metadata` sigue sus componentes intermedios con seguridad (son
-/// reales) y solo el **último** componente del prefijo queda bajo prueba —
-/// exactamente el que aún no se validó.
+/// Correr sobre la ruta **cruda** (antes de [`lexical_normalize`]) es lo que
+/// cierra el bypass `..`-a-través-de-symlink: cada componente `Normal` se
+/// `symlink_metadata`-prueba en el instante en que se *empuja* al prefijo —a su
+/// propia profundidad—, así un symlink se rechaza **antes** de que un `..`
+/// posterior lo borre léxicamente (`<root>/link/../sub`). Un
+/// [`Component::ParentDir`] hace *pop* de un componente que ya se validó al
+/// empujarlo, de modo que un `..` legítimo en la ruta del operador sigue
+/// funcionando; [`Component::Prefix`]/[`Component::RootDir`] anclan el recorrido
+/// y [`Component::CurDir`] se ignora.
 ///
 /// # Complejidad
-/// `O(d)` con `d` = número de componentes de `path`.
+/// `O(d)` con `d` = número de componentes de `absolute` (un `symlink_metadata`
+/// por componente `Normal`).
 ///
 /// # Errors
-/// Devuelve [`HeadlessError::InputInvalid`] si algún componente es un symlink,
-/// o [`HeadlessError::Io`] ante un error de E/S distinto de "no existe".
-fn ensure_ancestor_chain_symlink_free(path: &Path) -> Result<(), HeadlessError> {
-    let mut prefixes: Vec<&Path> = path.ancestors().collect();
-    prefixes.reverse();
-    for prefix in prefixes {
-        match fs::symlink_metadata(prefix) {
-            Ok(md) if md.file_type().is_symlink() => {
-                return Err(HeadlessError::InputInvalid(
-                    SYMLINK_COMPONENT_MSG.to_owned(),
-                ));
+/// Devuelve [`HeadlessError::InputInvalid`] si algún componente `Normal` es un
+/// symlink, o [`HeadlessError::Io`] ante un error de E/S distinto de "no existe".
+fn ensure_raw_chain_symlink_free(absolute: &Path) -> Result<(), HeadlessError> {
+    let mut prefix = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                // The popped component was already symlink-checked when pushed.
+                prefix.pop();
             }
-            Ok(_) => {}
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-            Err(e) => return Err(HeadlessError::Io(e.to_string())),
+            Component::Prefix(_) | Component::RootDir => {
+                prefix.push(component.as_os_str());
+            }
+            Component::Normal(name) => {
+                prefix.push(name);
+                match fs::symlink_metadata(&prefix) {
+                    Ok(md) if md.file_type().is_symlink() => {
+                        return Err(HeadlessError::InputInvalid(
+                            SYMLINK_COMPONENT_MSG.to_owned(),
+                        ));
+                    }
+                    Ok(_) => {}
+                    Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                    Err(e) => return Err(HeadlessError::Io(e.to_string())),
+                }
+            }
         }
     }
     Ok(())
@@ -843,5 +868,44 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
 
         assert!(!detect_legacy_files(tmp.path()));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_discover_rejects_parentdir_through_symlink_component() {
+        // The `..`-through-symlink bypass: a start path that traverses a symlink
+        // and then `..` back out. Lexical normalization would rewrite
+        // `<root>/link/../real/sub` to `<root>/real/sub`, erasing the symlinked
+        // `link` before it is ever checked. The raw-component check catches `link`
+        // at its own depth, BEFORE the `..` pops it.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = dunce::canonicalize(tmp.path()).unwrap();
+        let real = root.join("real");
+        std::fs::create_dir_all(real.join(".magi")).unwrap();
+        std::fs::create_dir_all(real.join("sub")).unwrap();
+        std::os::unix::fs::symlink(&real, root.join("link")).unwrap();
+
+        let start = root.join("link").join("..").join("real").join("sub");
+        assert!(
+            matches!(discover(&start), Err(HeadlessError::InputInvalid(_))),
+            "a `..` that first traverses a symlinked component must be rejected"
+        );
+    }
+
+    #[test]
+    fn test_discover_allows_parentdir_on_non_symlinked_path() {
+        // A legitimate `..` on a fully non-symlinked path still resolves and finds
+        // the ancestor `.magi/`: `<root>/a/b/../c` normalizes to `<root>/a/c`, and
+        // the walk-up discovers `<root>/a/.magi`.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = dunce::canonicalize(tmp.path()).unwrap();
+        std::fs::create_dir_all(root.join("a").join(".magi")).unwrap();
+        std::fs::create_dir_all(root.join("a").join("b")).unwrap();
+        std::fs::create_dir_all(root.join("a").join("c")).unwrap();
+
+        let start = root.join("a").join("b").join("..").join("c");
+        let ws = discover(&start).unwrap().expect("found");
+        assert_eq!(ws.magi_dir, root.join("a").join(".magi"));
+        assert_eq!(ws.root, root.join("a"));
     }
 }
