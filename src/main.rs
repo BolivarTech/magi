@@ -305,6 +305,7 @@ fn vault_error_exit_code(e: &VaultError) -> i32 {
         VaultError::Crypto(_)
         | VaultError::Storage(_)
         | VaultError::VaultMetaCorrupt
+        | VaultError::DbCorrupt { .. }
         | VaultError::Io(_) => 2,
     }
 }

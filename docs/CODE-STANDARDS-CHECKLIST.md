@@ -52,6 +52,25 @@ Cada archivo nuevo del vault se somete a la checklist "Por archivo" de arriba en
 - [ ] `src/vault/cli.rs` (Task 6) — subcomandos `clap` `ls`/`set`/`rm`/`passwd`
 - [ ] `src/vault/envelope.rs` (Task 5, ampliación) — `rekey_envelope`
 - [ ] `src/vault/error.rs` (Tasks 2/4/6, variantes nuevas + corrección a inglés de las de MS1)
+
+## Archivos nuevos de MS1 (headless) — recorrer la checklist (B) por cada uno
+
+Módulo `src/headless/` (vive en `lib.rs` como `pub mod headless`, igual que `vault`, para
+que fuzz/coverage linkeen — REQ-H00). Los lint attrs de `src/headless/mod.rs` son **idénticos**
+a los de `src/vault/mod.rs` (`deny(missing_docs, missing_docs_in_private_items, unwrap_used[not(test)],
+…)`). Cobertura `cargo llvm-cov` **≥ 90 %** sobre `src/headless/` **y `src/system/workspace.rs`**
+(exclusiones documentadas para glue puro).
+
+- [x] `src/headless/mod.rs` (Task 0) — frontera + lint attrs (REQ-H00) + re-exports
+- [x] `src/headless/error.rs` (Task 0) — `HeadlessError` (`thiserror`) + `From<VaultError>` exhaustivo
+- [x] `src/headless/types.rs` (Task 0) — tipos compartidos DECLARADOS del contrato MS1↔MS2 (`pub(crate)`)
+- [x] `src/headless/test_support.rs` (Task 0, `#[cfg(test)]`) — helper genérico de entorno `with_var`
+- [ ] `src/headless/input.rs` (Tasks 4/5/6) — lectura acotada + auto-detect + parser de envelope + resolución
+- [ ] `src/headless/output.rs` (Task 7) — formateo texto/JSON rico + truncado + redacción de errores
+- [ ] `src/headless/log.rs` (Task 8) — JSONL a `.magi/logs/`, niveles, retención count+size, redacción
+- [ ] `src/headless/exit.rs` (Task 9) — taxonomía de exit codes (0/1/2/3)
+- [ ] `src/system/workspace.rs` (Tasks 1/2) — descubrir/init `.magi/` (walk-up, symlink-reject, perms, atómico)
+
 | Vulnerabilidades | `cargo audit` | Sin advisories conocidos en el árbol de dependencias. |
 | Licencias | `cargo deny check licenses` | Solo licencias permisivas listadas en
   `deny.toml`. |
