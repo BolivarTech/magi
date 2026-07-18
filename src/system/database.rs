@@ -182,10 +182,6 @@ impl EncryptedSqliteMemory {
     /// - [`VaultError::VaultMetaCorrupt`] — `vault_meta` present but FEC-uncorrectable.
     /// - [`VaultError::WrongPassphrase`] — envelope present, AEAD tag fails. Retryable.
     /// - [`VaultError::Crypto`] / [`VaultError::Storage`] — a crypto or SQL failure.
-    // Narrow allow: the headless open path is exercised by tests here and in
-    // `system::workspace` (the T2↔T3 lock-in) and wired into the `magi query`
-    // runner in a later MS2 task; it is not a fabricated symbol.
-    #[allow(dead_code)]
     pub(crate) fn open_with_state_machine(
         path: PathBuf,
         master_password: Zeroizing<String>,
@@ -199,9 +195,6 @@ impl EncryptedSqliteMemory {
     /// # Errors
     ///
     /// Identical to [`Self::open_with_state_machine`].
-    // Narrow allow: same rationale as `open_with_state_machine` — delegated to by
-    // it and by the test-only fast-KDF open path.
-    #[allow(dead_code)]
     pub(crate) fn open_with_state_machine_vault(
         path: PathBuf,
         master_password: Zeroizing<String>,
@@ -802,6 +795,57 @@ mod tests {
             Box::new(Aes256GcmSivCipher),
             Box::new(ConcatenatedFec::default()),
         )
+    }
+
+    #[test]
+    fn test_init_schema_creates_exactly_the_guarded_data_tables() {
+        // Drift guard (Fix): DATA_TABLES (the never-delete row-count set) and
+        // `init_schema` (the DDL) are coupled by convention only. Adding a table to
+        // one but not the other silently weakens never-delete. This test pins the
+        // relationship: the *data* tables `init_schema` creates must be EXACTLY
+        // DATA_TABLES, plus `vault_meta` — which is the envelope, NOT user data, and
+        // is therefore intentionally absent from DATA_TABLES. A future schema/guard
+        // drift (add to one, forget the other) fails here.
+        let conn = Connection::open_in_memory().unwrap();
+        init_schema(&conn).unwrap();
+
+        let mut stmt = conn
+            .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
+            .unwrap();
+        // Filter SQLite's internal bookkeeping tables (e.g. `sqlite_sequence`,
+        // created by the AUTOINCREMENT column on `messages`).
+        let created: std::collections::BTreeSet<String> = stmt
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .filter(|name| !name.starts_with("sqlite_"))
+            .collect();
+
+        let mut expected: std::collections::BTreeSet<String> =
+            DATA_TABLES.iter().map(|t| (*t).to_string()).collect();
+        // The envelope table is created by `init_schema` but is never a DATA_TABLE.
+        expected.insert("vault_meta".to_string());
+
+        assert_eq!(
+            created, expected,
+            "init_schema must create exactly the DATA_TABLES plus vault_meta; a drift \
+             between DATA_TABLES and init_schema is a silent never-delete weakening"
+        );
+
+        // Every DATA_TABLES entry is actually created by init_schema (no guard
+        // entry without matching DDL).
+        for table in DATA_TABLES {
+            assert!(
+                created.contains(table),
+                "DATA_TABLES entry `{table}` must be created by init_schema"
+            );
+        }
+        // `vault_meta` is the envelope and must NEVER be a never-delete DATA_TABLE
+        // (row-counting it would misclassify a bootstrapped-but-empty DB).
+        assert!(
+            !DATA_TABLES.contains(&"vault_meta"),
+            "vault_meta is the envelope, not user data — it must not be a DATA_TABLE"
+        );
     }
 
     #[tokio::test]
