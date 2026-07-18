@@ -303,7 +303,9 @@ fn is_generic_secret_char(c: char) -> bool {
 fn match_bearer_token(chars: &[char], i: usize) -> Option<usize> {
     let mut consumed = 0usize;
     for (offset, kw_char) in BEARER_KEYWORD.chars().enumerate() {
-        if *chars.get(i + offset)? != kw_char {
+        // Case-insensitive keyword match ("Bearer"/"bearer"/…) — over-redaction
+        // is the safe direction, so a differently-cased scheme still redacts.
+        if !chars.get(i + offset)?.eq_ignore_ascii_case(&kw_char) {
             return None;
         }
         consumed += 1;
@@ -761,5 +763,25 @@ mod tests {
             sanitize_error_message("io error: connection refused (os error 111)"),
             "network error: connection refused"
         );
+    }
+
+    /// `match_bearer_token` compara la palabra clave sin distinguir
+    /// mayúsculas (over-redaction es la dirección segura): un `bearer <token>`
+    /// en minúsculas y un `BEARER <token>` en mayúsculas se redactan igual que
+    /// el `Bearer <token>` canónico.
+    #[test]
+    fn test_sanitize_redacts_lowercase_bearer() {
+        // Construido con `format!` (no un literal) para no disparar el
+        // escáner de secretos hardcodeados del repo
+        // (`tests/no_hardcoded_secrets.rs`); es un fixture sintético.
+        let token = format!("{}{}", "tok", "EN1234567890abcdef");
+
+        let lower = sanitize_error_message(&format!("auth failed: bearer {token}"));
+        assert!(!lower.contains(&token), "lowercase bearer leaked: {lower}");
+        assert!(lower.contains(REDACTED_PLACEHOLDER));
+
+        let upper = sanitize_error_message(&format!("auth failed: BEARER {token}"));
+        assert!(!upper.contains(&token), "uppercase BEARER leaked: {upper}");
+        assert!(upper.contains(REDACTED_PLACEHOLDER));
     }
 }

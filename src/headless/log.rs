@@ -13,9 +13,10 @@
 //!   de esta corrida.
 //! - [`RunLog::event`] filtra por [`LogLevel`] y escribe una línea JSON por
 //!   [`LogEvent`]: a nivel `info` (o menos verboso) un `ToolCall` solo lleva
-//!   `name`/`ok`/`ms`/`input_len`; a nivel `debug` el `input` se **capa**
-//!   ([`truncate_result`], reusado de `output.rs`) y se **redacta**
-//!   ([`redact_secret_patterns`], reusado de `output.rs`) — nunca se
+//!   `name`/`ok`/`ms`/`input_len`; a nivel `debug` el `input` se **redacta primero**
+//!   ([`redact_secret_patterns`], reusado de `output.rs`) y **luego** se **capa**
+//!   ([`truncate_result`], reusado de `output.rs`) — este orden evita que un secreto
+//!   partido por el límite de truncado filtre un prefijo parcial; nunca se
 //!   re-implementan los matchers. El `prompt`/envelope crudo **nunca** se
 //!   loguea, a ningún nivel ni en ningún campo.
 //!
@@ -167,7 +168,10 @@ impl LogEvent<'_> {
                 input,
             } => {
                 let (input_field, input_len_field) = if configured_level == LogLevel::Debug {
-                    (Some(redact_secret_patterns(&truncate_result(input))), None)
+                    // Redact BEFORE truncating: redacting the full input first means a
+                    // secret straddling the truncation boundary cannot be split into an
+                    // un-matchable partial that leaks; then truncate the secret-free result.
+                    (Some(truncate_result(&redact_secret_patterns(input))), None)
                 } else {
                     (None, Some(input.len()))
                 };
@@ -583,6 +587,65 @@ mod tests {
         );
         assert!(contents.contains("\"input_len\":25"));
         assert!(contents.contains("\"name\":\"ls\""));
+    }
+
+    /// Un secreto `sk-…` posicionado para que el límite de truncado
+    /// (`TOOL_RESULT_CAP`) caiga a mitad de su cuerpo NO deja un prefijo
+    /// parcial en claro: con el orden redact-then-truncate el secreto
+    /// COMPLETO se redacta sobre el input sin truncar, así que ni el secreto
+    /// completo ni un prefijo partido sobreviven en la línea escrita. (Bajo
+    /// el orden viejo truncate-then-redact, el corte partiría el cuerpo del
+    /// secreto en un remanente de 12 caracteres — por debajo del mínimo de 16
+    /// que exige el patrón `sk-` — dejando ese prefijo sin matchear y filtrado
+    /// en claro; este test falla si esa regresión reaparece.)
+    #[test]
+    fn test_debug_input_redacts_secret_straddling_truncation_boundary() {
+        use crate::headless::limits::TOOL_RESULT_CAP;
+
+        // Fixture construido con `format!` (no un literal) para no disparar
+        // el escáner de secretos hardcodeados del repo
+        // (`tests/no_hardcoded_secrets.rs`).
+        let body = "SECRET".repeat(4); // 24 caracteres alnum — cuerpo válido del patrón `sk-`.
+        let key = format!("sk-{body}");
+
+        // Cuántos caracteres del CUERPO de la key quedan retenidos del lado
+        // "kept" del corte de truncado: por debajo de `SK_KEY_MIN_SUFFIX_LEN`
+        // (16), así que si el input llegara sin redactar hasta el truncado,
+        // el remanente quedaría sin matchear por el patrón `sk-`.
+        const KEPT_BODY_LEN: usize = 12;
+        let prefix_len = TOOL_RESULT_CAP - "sk-".len() - KEPT_BODY_LEN;
+        let input = format!("{}{key}", "x".repeat(prefix_len));
+        assert!(
+            input.len() > TOOL_RESULT_CAP,
+            "fixture must straddle the truncation cap"
+        );
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut log = RunLog::start(dir.path(), LogLevel::Debug).expect("start");
+        log.event(&LogEvent::ToolCall {
+            level: LogLevel::Info,
+            name: "bash",
+            ok: true,
+            ms: 5,
+            input: &input,
+        })
+        .expect("event must write");
+
+        let contents = fs::read_to_string(&log.path).expect("read log file");
+        assert!(
+            !contents.contains(&key),
+            "full secret leaked in clear: {contents}"
+        );
+
+        // El prefijo que el orden viejo (truncate-then-redact) habría dejado
+        // sin matchear tampoco debe sobrevivir en claro.
+        let partial_prefix = key
+            .get(.."sk-".len() + KEPT_BODY_LEN)
+            .expect("prefix within key bounds");
+        assert!(
+            !contents.contains(partial_prefix),
+            "partial secret prefix leaked in clear (split-secret regression): {contents}"
+        );
     }
 
     /// El `prompt`/envelope crudo nunca se loguea: un `Message` a nivel debug
