@@ -35,9 +35,9 @@ use clap::Parser;
 use cryptovault::CryptoVault;
 use magi_core::orchestrator::{Magi, MagiBuilder};
 use magi_rs::vault::{
-    check_strength, create_passphrase, harden_process, rekey_envelope, resolve_passphrase,
-    run_vault_cmd, strip_trailing_newline, wire, PassphrasePrompt, SecretStore, TtyIo, TtyPrompt,
-    VaultCmd, VaultError, PASSPHRASE_ENV,
+    check_strength, create_passphrase, diagnose, format_diagnose_report, harden_process,
+    rekey_envelope, resolve_passphrase, run_vault_cmd, strip_trailing_newline, wire,
+    PassphrasePrompt, SecretStore, TtyIo, TtyPrompt, VaultCmd, VaultError, PASSPHRASE_ENV,
 };
 use std::env;
 use std::sync::{Arc, Mutex};
@@ -492,6 +492,66 @@ fn run_vault_subcommand(
     }
 }
 
+/// Resolves the DB path `magi vault diagnose` inspects: the `.magi/`
+/// discovered by [`crate::system::workspace::discover`] (nearest ancestor,
+/// REQ-H16) when one exists, otherwise the legacy `workspace_root`-relative
+/// path [`run_vault_subcommand`] and the TUI still use. A discovery failure
+/// (e.g. a symlinked `.magi` component, REQ-H30) is surfaced rather than
+/// silently falling back, since that failure is itself security-relevant.
+///
+/// # Errors
+/// Propagates [`magi_rs::headless::HeadlessError`] from `discover`.
+fn resolve_diagnose_db_path(
+    workspace_root: &std::path::Path,
+) -> Result<std::path::PathBuf, magi_rs::headless::HeadlessError> {
+    match crate::system::workspace::discover(workspace_root)? {
+        Some(ws) => Ok(ws.db_path()),
+        None => Ok(workspace_root.join(".magi-rs-memory.db")),
+    }
+}
+
+/// Runs `magi-rs vault diagnose`: a **read-only** structural probe (REQ-H32)
+/// that never unlocks the vault and never requires a passphrase — it is
+/// intercepted in [`main`] BEFORE [`run_vault_subcommand`]'s passphrase
+/// resolution ever runs. Returns the process exit code.
+///
+/// An absent DB is reported (not an error): there is nothing to diagnose yet.
+fn run_vault_diagnose(workspace_root: &std::path::Path, names: bool) -> i32 {
+    let db_path = match resolve_diagnose_db_path(workspace_root) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return headless_error_exit_code(&e);
+        }
+    };
+    if !db_path.exists() {
+        println!("no database found at {}", db_path.display());
+        return 0;
+    }
+    let conn = match rusqlite::Connection::open_with_flags(
+        &db_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    ) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("error: storage error: {e}");
+            return vault_error_exit_code(&VaultError::Storage(e.to_string()));
+        }
+    };
+    match diagnose(&conn, names) {
+        Ok(report) => {
+            for line in format_diagnose_report(&report) {
+                println!("{line}");
+            }
+            0
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            vault_error_exit_code(&e)
+        }
+    }
+}
+
 /// Runs `magi-rs --logout`: opens the vault and removes `ANTHROPIC_API_KEY`
 /// (the CLI analogue of SC-V36/SC-V37). An absent DB, or an absent key, is
 /// reported as "no stored session" rather than an error. Returns the
@@ -673,6 +733,11 @@ async fn main() -> anyhow::Result<()> {
     let hardening_warnings = harden_process();
 
     match args.command.take() {
+        // REQ-H32: intercepted BEFORE `run_vault_subcommand` so a diagnose
+        // never resolves a passphrase or opens/unlocks the vault.
+        Some(TopCmd::Vault(VaultCmd::Diagnose { names })) => {
+            std::process::exit(run_vault_diagnose(&workspace_root, names));
+        }
         Some(TopCmd::Vault(cmd)) => {
             std::process::exit(run_vault_subcommand(
                 cmd,
@@ -1565,6 +1630,68 @@ mod tests {
                 envelope_row_count(&cwd.join(".magi/.magi-rs-memory.db")),
                 1,
                 "a supplied passphrase must bootstrap the envelope"
+            );
+        });
+    }
+
+    #[test]
+    fn test_args_parses_vault_diagnose_subcommand() {
+        use clap::Parser;
+        let a = Args::parse_from(["magi-rs", "vault", "diagnose"]);
+        assert!(matches!(
+            a.command,
+            Some(TopCmd::Vault(VaultCmd::Diagnose { names: false }))
+        ));
+        let b = Args::parse_from(["magi-rs", "vault", "diagnose", "--names"]);
+        assert!(matches!(
+            b.command,
+            Some(TopCmd::Vault(VaultCmd::Diagnose { names: true }))
+        ));
+    }
+
+    #[test]
+    fn test_run_vault_diagnose_reports_no_database_when_absent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace = dunce::canonicalize(tmp.path()).unwrap();
+        assert_eq!(run_vault_diagnose(&workspace, false), 0);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_run_vault_diagnose_never_needs_a_passphrase_and_finds_magi_dir() {
+        // REQ-H32: diagnose must succeed WITHOUT `-p`/`MAGI_PASSPHRASE` and
+        // WITHOUT ever unlocking the vault, using the discovered `.magi/` DB
+        // (not the legacy cwd-relative path) once `magi init` created one.
+        with_var(PASSPHRASE_ENV, None, || {
+            let tmp = tempfile::tempdir().unwrap();
+            let cwd = dunce::canonicalize(tmp.path()).unwrap();
+            assert_eq!(run_init(&cwd, None), 0, "init must succeed");
+
+            // No envelope yet (init ran without -p): a fresh DB.
+            assert_eq!(run_vault_diagnose(&cwd, false), 0);
+        });
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_run_vault_diagnose_never_mutates_or_unlocks_a_bootstrapped_db() {
+        with_var(PASSPHRASE_ENV, None, || {
+            let tmp = tempfile::tempdir().unwrap();
+            let cwd = dunce::canonicalize(tmp.path()).unwrap();
+            let pass = Some(Zeroizing::new("correct horse battery staple".to_string()));
+            assert_eq!(run_init(&cwd, pass), 0, "init -p must succeed");
+
+            let db_path = cwd.join(".magi/.magi-rs-memory.db");
+            let envelope_rows_before = envelope_row_count(&db_path);
+            assert_eq!(envelope_rows_before, 1, "init -p bootstraps an envelope");
+
+            // Diagnose with a completely WRONG passphrase available in the
+            // environment must still succeed (it never even looks at it).
+            assert_eq!(run_vault_diagnose(&cwd, true), 0);
+            assert_eq!(
+                envelope_row_count(&db_path),
+                envelope_rows_before,
+                "diagnose must never mutate vault_meta"
             );
         });
     }
