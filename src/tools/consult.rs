@@ -36,6 +36,39 @@ pub(crate) fn report_to_consult_json(report: &MagiReport) -> Value {
     json!({ "report": report.report, "degraded": report.degraded })
 }
 
+/// RAII backstop that aborts a spawned task when the guard is dropped.
+///
+/// [`ConsultTool::execute`] runs the 3-perspective analysis on a `tokio::spawn`
+/// task and awaits it under a `select!`. The explicit cancel arm aborts the
+/// task on `--timeout`, but if the `execute` future itself is *dropped* before
+/// either arm resolves (e.g. the caller drops the tool call), a bare spawned
+/// task would keep running and orphan its three in-flight LLM calls. Holding
+/// this guard across the `select!` aborts the task on that drop too, mirroring
+/// the `GroupKiller` backstop the `bash` tool uses for its subprocess.
+struct AbortOnDrop {
+    /// Abort handle of the guarded task.
+    handle: tokio::task::AbortHandle,
+}
+
+impl AbortOnDrop {
+    /// Wraps a task's abort handle so dropping the guard aborts the task.
+    fn new(handle: tokio::task::AbortHandle) -> Self {
+        Self { handle }
+    }
+
+    /// Aborts the guarded task now. Idempotent: aborting an already-finished or
+    /// already-aborted task is a no-op, so `Drop` re-invoking it is harmless.
+    fn abort(&self) {
+        self.handle.abort();
+    }
+}
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.handle.abort();
+    }
+}
+
 /// Notice emitted in the TUI when the `consult` tool is auto-approved.
 /// Visible to the user so they know the 3-LLM consensus was launched.
 const AUTO_LAUNCH_NOTICE: &str = "launched MAGI multi-perspective consensus — awaiting evaluation…";
@@ -144,9 +177,12 @@ impl Tool for ConsultTool {
         // Joined spawn isolates a panic in magi-core's analyze into a recoverable
         // JoinError instead of unwinding into the agent tool loop.
         let handle = tokio::spawn(async move { magi.analyze(&Mode::Analysis, &q).await });
-        // Held separately from `handle` (which the `select!` consumes) so the
-        // cancel arm can abort the in-flight task without a borrow conflict.
-        let aborter = handle.abort_handle();
+        // RAII backstop: aborts the spawned analysis if this `execute` future is
+        // dropped before the `select!` resolves — a dropped tool call would
+        // otherwise orphan the three in-flight LLM calls. The abort handle is
+        // taken separately from `handle` (which the `select!` consumes), so
+        // there is no borrow conflict.
+        let abort_guard = AbortOnDrop::new(handle.abort_handle());
         // A proactive consult runs three MAGI LLM calls; on the run's `--timeout`
         // cancellation (REQ-H36) the task is **aborted** — not merely detached —
         // so those expensive API calls actually stop instead of being orphaned.
@@ -155,7 +191,7 @@ impl Tool for ConsultTool {
         let report = tokio::select! {
             biased;
             () = cancel.cancelled() => {
-                aborter.abort();
+                abort_guard.abort();
                 return Err(ToolError::ExecutionError(
                     "consult cancelled by timeout".to_string(),
                 ));
@@ -181,6 +217,7 @@ mod tests {
     use magi_core::provider::{CompletionConfig, LlmProvider};
     use magi_core::schema::AgentName;
     use magi_core::test_support::RoutingMockProvider;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
 
     /// Upper bound on how long a *cancelled* `execute` may take to return. The
@@ -392,6 +429,35 @@ mod tests {
         assert!(
             elapsed.as_millis() < CANCEL_RETURN_BUDGET_MS,
             "cancelled consult must return promptly (took {elapsed:?}); it awaited the full analysis"
+        );
+    }
+
+    /// The `AbortOnDrop` backstop aborts its guarded task the instant the guard
+    /// is dropped, so a dropped `execute` future cannot orphan the spawned
+    /// analysis (the drop path the explicit cancel arm does not cover). A bare
+    /// dropped `JoinHandle`/`AbortHandle` would merely detach the task, leaving
+    /// it to run to completion — this asserts the join reports cancellation and
+    /// the task never reached its completion store.
+    #[tokio::test]
+    async fn test_abort_on_drop_aborts_task_when_guard_dropped() {
+        let ran_to_completion = Arc::new(AtomicBool::new(false));
+        let flag = ran_to_completion.clone();
+        let handle = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(BlockingProvider::SLEEP_SECS)).await;
+            flag.store(true, Ordering::SeqCst);
+        });
+        {
+            let _guard = AbortOnDrop::new(handle.abort_handle());
+            // `_guard` drops here without ever calling `abort()` explicitly.
+        }
+        let joined = handle.await;
+        assert!(
+            joined.as_ref().err().map(|e| e.is_cancelled()).unwrap_or(false),
+            "dropping the guard must abort the task (join must report cancellation); got {joined:?}"
+        );
+        assert!(
+            !ran_to_completion.load(Ordering::SeqCst),
+            "aborted task must not have reached its completion store"
         );
     }
 
