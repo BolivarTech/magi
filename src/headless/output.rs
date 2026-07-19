@@ -20,10 +20,8 @@
 //! con una **red de seguridad** basada en patrones tipo-clave como último
 //! recurso para el texto que no clasifica en ninguna plantilla conocida.
 //!
-//! MS2 no consume este módulo todavía (el `Agent` no está cableado hasta
-//! entonces), de ahí el `allow(dead_code)` de alcance de módulo — mismo
-//! scaffolding intencional que `types.rs`/`resolution.rs`.
-#![allow(dead_code)]
+//! Estos formateadores son `pub`: el runner de MS2 vive en el crate del
+//! binario y solo puede alcanzar API `pub` de la lib.
 
 use std::io::Write;
 
@@ -132,12 +130,11 @@ struct WireOutcome<'a> {
 /// # Examples
 ///
 /// ```rust,ignore
-/// // Ilustrativo: `truncate_result` es `pub(crate)`, no un doctest ejecutable
-/// // fuera del crate.
+/// // Ilustrativo, no un doctest ejecutado.
 /// let short = truncate_result("hola");
 /// assert_eq!(short, "hola");
 /// ```
-pub(crate) fn truncate_result(s: &str) -> String {
+pub fn truncate_result(s: &str) -> String {
     if s.len() <= TOOL_RESULT_CAP {
         return s.to_string();
     }
@@ -182,7 +179,7 @@ fn truncate_transcript_entry(entry: &TranscriptEntry) -> TranscriptEntry {
 ///
 /// Devuelve [`HeadlessError::Io`] si la serialización hacia `out` falla (p.
 /// ej. el `Write` subyacente devuelve un error de E/S).
-pub(crate) fn write_json(out: &mut impl Write, o: &RunOutcome) -> Result<(), HeadlessError> {
+pub fn write_json(out: &mut impl Write, o: &RunOutcome) -> Result<(), HeadlessError> {
     let wire = WireOutcome {
         schema_version: SCHEMA_VERSION,
         response: &o.response,
@@ -211,7 +208,7 @@ pub(crate) fn write_json(out: &mut impl Write, o: &RunOutcome) -> Result<(), Hea
 /// devuelve `Result` (contrato fijado por el llamador headless, MS2), así que
 /// no hay un canal para propagarlos; es el mismo trade-off que asumen la
 /// mayoría de las CLIs Unix ante `SIGPIPE`/`EPIPE`.
-pub(crate) fn write_text(out: &mut impl Write, err_out: &mut impl Write, o: &RunOutcome) {
+pub fn write_text(out: &mut impl Write, err_out: &mut impl Write, o: &RunOutcome) {
     if let Some(response) = &o.response {
         let _ = out.write_all(response.as_bytes());
     }
@@ -260,15 +257,14 @@ fn classify_http_status(raw: &str) -> Option<u16> {
 /// # Examples
 ///
 /// ```rust,ignore
-/// // Ilustrativo: `sanitize_error_message` es `pub(crate)`, no un doctest
-/// // ejecutable fuera del crate.
+/// // Ilustrativo, no un doctest ejecutado.
 /// assert_eq!(
 ///     sanitize_error_message("http 401 Unauthorized: sk-ant-xxxxxxxxxxxxxxxx"),
 ///     "provider error: HTTP 401"
 /// );
 /// assert_eq!(sanitize_error_message("plain network timeout"), "plain network timeout");
 /// ```
-pub(crate) fn sanitize_error_message(raw: &str) -> String {
+pub fn sanitize_error_message(raw: &str) -> String {
     if let Some(status) = classify_http_status(raw) {
         return format!("provider error: HTTP {status}");
     }
@@ -384,22 +380,23 @@ fn match_generic_secret_run(chars: &[char], i: usize) -> Option<usize> {
 
 /// Recorre `raw` en un único pase y redacta cualquier patrón tipo-clave
 /// conocido (`Bearer …`, `sk-…`, `AKIA…`, corridas largas tipo hex/base64) a
-/// [`REDACTED_PLACEHOLDER`]; el resto del texto pasa sin cambios.
+/// `REDACTED_PLACEHOLDER`; el resto del texto pasa sin cambios.
 ///
 /// **Complejidad:** cada posición se evalúa contra los cuatro patrones; si
 /// alguno matchea, el cursor salta de una vez el largo completo del match
 /// (`i += consumed`), así que un secreto encontrado no se re-escanea
 /// carácter a carácter. El caso patológico (una corrida de caracteres
 /// elegibles cuyo largo queda apenas por debajo de
-/// [`GENERIC_SECRET_RUN_MIN_LEN`] en cada posición) es `O(n²)` en el peor
+/// `GENERIC_SECRET_RUN_MIN_LEN` en cada posición) es `O(n²)` en el peor
 /// caso, pero `n` aquí es el largo de un mensaje de error de diagnóstico
 /// (típicamente bytes a pocos KB, no un payload arbitrario), por lo que el
 /// costo real es despreciable.
 ///
-/// `pub(crate)` (ensanchado desde privado en T8, REQ-H24): `headless::log`
-/// reusa este mismo redactor para el `input` de un tool-call a nivel debug —
-/// nunca se reimplementan los matchers en un segundo lugar (DRY).
-pub(crate) fn redact_secret_patterns(raw: &str) -> String {
+/// `pub` (ensanchado desde privado en T8, REQ-H24, y desde `pub(crate)` para
+/// el runner de MS2 en el crate del binario): `headless::log` reusa este
+/// mismo redactor para el `input` de un tool-call a nivel debug — nunca se
+/// reimplementan los matchers en un segundo lugar (DRY).
+pub fn redact_secret_patterns(raw: &str) -> String {
     let chars: Vec<char> = raw.chars().collect();
     let mut out = String::with_capacity(raw.len());
     let mut i = 0usize;

@@ -12,19 +12,17 @@
 //!
 //! **Precedencia** (REQ-H23, "cuando co-ocurren varias condiciones"): un error
 //! tipado presente domina siempre — `InputInvalid`/`InputTooLarge` ⇒
-//! [`EXIT_MISUSE`], cualquier otra variante ⇒ [`EXIT_RUNTIME`]. Solo en
+//! `EXIT_MISUSE`, cualquier otra variante ⇒ `EXIT_RUNTIME`. Solo en
 //! **ausencia** de error se evalúa el criterio determinístico de exit 3
 //! (REQ-H23b): el tier denegó al menos un tool **y** el turno final del
 //! agente no produjo respuesta (`response_empty`) **y** el `stop_reason`
 //! resultante es [`StopReason::Denied`] — las tres señales coinciden por
 //! construcción (`Denied` se asigna precisamente bajo esa condición), pero se
 //! verifican las tres para no depender de un único canal. Cualquier otro caso
-//! es éxito ([`EXIT_OK`]).
+//! es éxito (`EXIT_OK`).
 //!
-//! MS2 no invoca esta función todavía (el bin no está cableado hasta
-//! entonces), de ahí el `allow(dead_code)` de alcance de módulo — mismo
-//! scaffolding intencional que `output.rs`/`log.rs`/`resolution.rs`.
-#![allow(dead_code)]
+//! `exit_code` es `pub`: el runner de MS2 vive en el crate del binario y
+//! solo puede alcanzar API `pub` de la lib.
 
 use super::types::StopReason;
 use super::HeadlessError;
@@ -56,9 +54,9 @@ const EXIT_TIER_DENIED: i32 = 3;
 /// - `tier_denied`: si al menos un tool fue denegado por el tier durante la
 ///   corrida (independientemente de si el agente logró sortear la denegación).
 ///
-/// Devuelve uno de [`EXIT_OK`], [`EXIT_RUNTIME`], [`EXIT_MISUSE`] o
-/// [`EXIT_TIER_DENIED`].
-pub(crate) fn exit_code(
+/// Devuelve uno de `EXIT_OK`, `EXIT_RUNTIME`, `EXIT_MISUSE` o
+/// `EXIT_TIER_DENIED`.
+pub fn exit_code(
     err: Option<&HeadlessError>,
     stop_reason: StopReason,
     response_empty: bool,

@@ -24,19 +24,21 @@
 //! Headless: superficie no-interactiva de magi-rs (modo CI/CD + backend de IA).
 //!
 //! MS1 aloja los errores de dominio ([`HeadlessError`]) y los tipos compartidos
-//! del contrato de salida (módulo `types`, `pub(crate)`, declarados aquí para
-//! evitar forward-refs entre tareas TDD). El parser, el formateo, los logs y los exit
-//! codes llegan en las tareas posteriores de MS1; el cableado del `Agent` en MS2.
+//! del contrato de salida (módulo `types`, declarados aquí para evitar
+//! forward-refs entre tareas TDD). El parser, el formateo, los logs y los exit
+//! codes llegan en las tareas posteriores de MS1. Todos los módulos son
+//! `pub`: el runner de MS2 vive en el crate del binario y solo puede alcanzar
+//! API `pub` de la lib (un bin no puede llegar a `pub(crate)`).
 
 mod error;
-pub(crate) mod exit;
+pub mod exit;
 pub mod input;
 pub mod limits;
-pub(crate) mod log;
-pub(crate) mod output;
+pub mod log;
+pub mod output;
 pub mod policy;
-pub(crate) mod resolution;
-pub(crate) mod types;
+pub mod resolution;
+pub mod types;
 
 #[cfg(test)]
 pub(crate) mod test_support;

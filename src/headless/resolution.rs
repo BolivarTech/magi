@@ -17,14 +17,9 @@
 //! La función es **pura y sin dependencias del bin** (toma structs lib-locales,
 //! no `MagiConfig`/`Args`), por lo que se testea en aislamiento (R-H05).
 //!
-//! Visibilidad `pub(crate)`: [`Resolved`] embebe [`SystemPolicy`]/[`AppliedCaps`]
-//! de `types.rs`, que T0 mantiene `pub(crate)` (aún no congelados como API
-//! pública). Para no exponer un tipo más privado a través de uno público
-//! (`private_interfaces`), toda la superficie de este módulo comparte esa
-//! visibilidad; MS2 la ensancha (o la cablea desde el lib) cuando conecte el
-//! `Agent`. El `allow(dead_code)` de módulo cubre ese hueco temporal (mismo
-//! scaffolding intencional que `types.rs`, no un símbolo huérfano fabricado).
-#![allow(dead_code)]
+//! Visibilidad `pub`: [`Resolved`] embebe [`SystemPolicy`]/[`AppliedCaps`] de
+//! `types.rs`, que son `pub` por la misma razón — el runner de MS2 vive en el
+//! crate del binario y solo puede alcanzar API `pub` de la lib.
 
 use super::input::Envelope;
 use super::types::{AppliedCaps, SystemPolicy};
@@ -35,7 +30,7 @@ use super::types::{AppliedCaps, SystemPolicy};
 /// bin colapsa el fallback toml→built-in antes de construir este struct; los
 /// opcionales quedan `None` cuando ni el toml ni el built-in fijan un valor.
 #[derive(Debug, Clone)]
-pub(crate) struct ConfigDefaults {
+pub struct ConfigDefaults {
     /// Modelo LLM por defecto (toml o built-in ya colapsados).
     pub model: String,
     /// Proveedor LLM por defecto (toml o built-in ya colapsados).
@@ -53,7 +48,7 @@ pub(crate) struct ConfigDefaults {
 /// Todo `None` significa "el operador no pasó ese flag": la resolución cae al
 /// envelope y luego a los defaults.
 #[derive(Debug, Clone, Default)]
-pub(crate) struct CliOverrides {
+pub struct CliOverrides {
     /// Modelo forzado por flag, si se pasó.
     pub model: Option<String>,
     /// Proveedor forzado por flag, si se pasó.
@@ -69,7 +64,7 @@ pub(crate) struct CliOverrides {
 /// `applied_caps` hace **visible** el resultado de los límites de seguridad
 /// (clamp de costo, override de system) para que el caller no falle en silencio.
 #[derive(Debug, Clone)]
-pub(crate) struct Resolved {
+pub struct Resolved {
     /// Modelo LLM efectivo.
     pub model: String,
     /// Proveedor LLM efectivo.
@@ -102,9 +97,9 @@ pub(crate) struct Resolved {
 /// Un envelope que pide `max_tool_calls: Some(999)` con `operator_ceiling = 15`
 /// produce un [`Resolved`] con `max_tool_calls == 15` y
 /// `applied_caps.max_tool_calls_clamped == true` (el pedido se recorta al techo).
-/// Ver los tests del módulo para casos ejecutables (el tipo es `pub(crate)`, de
-/// ahí que el ejemplo sea ilustrativo y no un doctest).
-pub(crate) fn resolve(
+/// Ver los tests del módulo para casos ejecutables; este ejemplo es
+/// ilustrativo (`ignore`), no un doctest ejecutado.
+pub fn resolve(
     env: Envelope,
     defaults: &ConfigDefaults,
     overrides: &CliOverrides,

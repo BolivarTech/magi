@@ -20,10 +20,8 @@
 //!   re-implementan los matchers. El `prompt`/envelope crudo **nunca** se
 //!   loguea, a ningún nivel ni en ningún campo.
 //!
-//! MS2 no consume este módulo todavía (el runner headless se cablea recién
-//! entonces), de ahí el `allow(dead_code)` de alcance de módulo — mismo
-//! scaffolding intencional que `types.rs`/`output.rs`/`resolution.rs`.
-#![allow(dead_code)]
+//! `RunLog`/`LogLevel`/`LogEvent` son `pub`: el runner de MS2 vive en el
+//! crate del binario y solo puede alcanzar API `pub` de la lib.
 
 use std::fs::{self, OpenOptions};
 use std::io::Write as _;
@@ -72,7 +70,7 @@ const EVENT_KIND_TOOL_CALL: &str = "tool_call";
 /// (pasa el filtro sii `evento.level() <= configurado`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum LogLevel {
+pub enum LogLevel {
     /// Solo fallos irrecuperables.
     Error,
     /// Condiciones recuperables pero dignas de aviso (p. ej. un clamp, una
@@ -106,7 +104,7 @@ struct LogFileEntry {
 /// [`RunLog`], que en cambio gobierna la redacción del `input` de un
 /// `ToolCall` (REQ-H24).
 #[derive(Debug, Clone)]
-pub(crate) enum LogEvent<'a> {
+pub enum LogEvent<'a> {
     /// Un diagnóstico de texto libre (avisos de arranque, clamps, notices).
     /// **Nunca** debe ser el `prompt`/envelope crudo del caller (REQ-H11/H24).
     Message {
@@ -232,7 +230,7 @@ struct ToolCallLine<'a> {
 
 /// Log de una corrida headless, en JSONL (REQ-H24/H34).
 #[derive(Debug)]
-pub(crate) struct RunLog {
+pub struct RunLog {
     /// Ruta del archivo JSONL de esta corrida.
     path: PathBuf,
     /// Verbosidad configurada: eventos más verbosos que este nivel se filtran.
@@ -249,7 +247,7 @@ impl RunLog {
     /// Devuelve [`HeadlessError::Io`] si no se puede crear `logs_dir` o abrir
     /// el archivo de esta corrida. La poda de retención en sí **nunca**
     /// produce un error propagado — es best-effort (REQ-H34).
-    pub(crate) fn start(logs_dir: &Path, level: LogLevel) -> Result<Self, HeadlessError> {
+    pub fn start(logs_dir: &Path, level: LogLevel) -> Result<Self, HeadlessError> {
         fs::create_dir_all(logs_dir).map_err(|e| HeadlessError::Io(e.to_string()))?;
         prune_retention(logs_dir);
 
@@ -276,7 +274,7 @@ impl RunLog {
     ///
     /// Devuelve [`HeadlessError::Io`] si serializar el evento o escribir al
     /// archivo del log falla.
-    pub(crate) fn event(&mut self, ev: &LogEvent<'_>) -> Result<(), HeadlessError> {
+    pub fn event(&mut self, ev: &LogEvent<'_>) -> Result<(), HeadlessError> {
         if ev.level() > self.level {
             return Ok(());
         }

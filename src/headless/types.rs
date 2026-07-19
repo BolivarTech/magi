@@ -5,16 +5,13 @@
 //!
 //! DEFINIDO acá, no referenciado sin definir — evita el build-break de orden
 //! TDD (T6 usa `AppliedCaps` antes de que T7 exista). Los tipos se declaran
-//! `pub(crate)` con sus campos + derives, **sin lógica todavía**: T6 consume
-//! [`AppliedCaps`]/[`SystemPolicy`]; T7 implementa el formateo y el golden sobre
-//! [`RunOutcome`] y compañía. MS2 los **llena** con la salida real del `Agent`;
-//! por eso **no** se congelan como API pública (`pub(crate)`, no `pub`).
+//! `pub` con sus campos + derives: T6 consume [`AppliedCaps`]/[`SystemPolicy`];
+//! T7 implementa el formateo y el golden sobre [`RunOutcome`] y compañía. MS2
+//! **llena** estos tipos con la salida real del `Agent` desde el crate del
+//! binario, que solo puede alcanzar API `pub` de la lib (no `pub(crate)`).
 //!
 //! Los consumidores reales de estos tipos llegan en tareas posteriores del mismo
-//! milestone (T6/T7); en T0 solo se declaran, de ahí el `allow(dead_code)` de
-//! alcance de módulo (scaffolding intencional del plan, Step 2c — no un símbolo
-//! huérfano fabricado para silenciar al linter).
-#![allow(dead_code)]
+//! milestone (T6/T7) y en el runner del binario (MS2).
 
 use serde::Serialize;
 
@@ -23,7 +20,7 @@ use serde::Serialize;
 /// Es la proyección **estable** que el contrato serializa (REQ-H14),
 /// desacoplada del `Message` interno del `Agent`: MS2 la llena, no la redefine.
 #[derive(Debug, Clone, Serialize)]
-pub(crate) struct RunOutcome {
+pub struct RunOutcome {
     /// Texto de respuesta del agente; `None` si la corrida terminó en error.
     pub response: Option<String>,
     /// Modelo efectivo usado en la corrida.
@@ -50,7 +47,7 @@ pub(crate) struct RunOutcome {
 
 /// Conteo de tokens consumidos por la corrida.
 #[derive(Debug, Clone, Serialize)]
-pub(crate) struct Usage {
+pub struct Usage {
     /// Tokens de entrada (prompt + contexto + tool results).
     pub input_tokens: u64,
     /// Tokens de salida generados por el modelo.
@@ -59,7 +56,7 @@ pub(crate) struct Usage {
 
 /// Latencias observadas durante la corrida.
 #[derive(Debug, Clone, Serialize)]
-pub(crate) struct Timings {
+pub struct Timings {
     /// Duración total de la corrida en milisegundos.
     pub total_ms: u64,
     /// Time-to-first-byte del primer token, si se midió.
@@ -74,7 +71,7 @@ pub(crate) struct Timings {
 /// `Done`. Serializa en `snake_case` (contrato estable).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum StopReason {
+pub enum StopReason {
     /// El agente completó y produjo su respuesta final.
     Done,
     /// Se alcanzó el tope de invocaciones de tool.
@@ -87,7 +84,7 @@ pub(crate) enum StopReason {
 
 /// Registro auditable de una única invocación de tool.
 #[derive(Debug, Clone, Serialize)]
-pub(crate) struct ToolCallRecord {
+pub struct ToolCallRecord {
     /// Nombre del tool invocado.
     pub name: String,
     /// Input JSON con el que se invocó el tool.
@@ -102,7 +99,7 @@ pub(crate) struct ToolCallRecord {
 
 /// Una entrada de la transcripción normalizada (una por mensaje).
 #[derive(Debug, Clone, Serialize)]
-pub(crate) struct TranscriptEntry {
+pub struct TranscriptEntry {
     /// Rol normalizado del mensaje (`assistant`/`user`/`tool`).
     pub role: String,
     /// Contenido textual del mensaje.
@@ -113,7 +110,7 @@ pub(crate) struct TranscriptEntry {
 
 /// Límites efectivos aplicados a la corrida (hace visible el clamp de REQ-H12b).
 #[derive(Debug, Clone, Serialize)]
-pub(crate) struct AppliedCaps {
+pub struct AppliedCaps {
     /// Tope efectivo de invocaciones de tool tras aplicar el techo del operador.
     pub max_tool_calls: u32,
     /// `true` si el `max_tool_calls` del envelope fue recortado al techo.
@@ -126,7 +123,7 @@ pub(crate) struct AppliedCaps {
 
 /// Detalle estructurado de un error de la corrida en la salida JSON.
 #[derive(Debug, Clone, Serialize)]
-pub(crate) struct ErrorPayload {
+pub struct ErrorPayload {
     /// Mensaje seguro (ya sanitizado; jamás un secreto crudo).
     pub message: String,
     /// Clase del error, para que el caller ruteé sin parsear el mensaje.
@@ -139,7 +136,7 @@ pub(crate) struct ErrorPayload {
 /// el consumidor debe tratar un valor desconocido como catch-all, no romper.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum ErrorKind {
+pub enum ErrorKind {
     /// Entrada inválida / mal uso de la CLI (→ exit 2).
     InputInvalid,
     /// DB corrupta: datos presentes sin envelope (→ exit 1, never-delete).
@@ -163,7 +160,7 @@ pub(crate) enum ErrorKind {
 /// El origen es un límite de seguridad: el `system` del envelope solo se honra
 /// si el operador lo habilitó; si no, rige el del operador.
 #[derive(Debug, Clone)]
-pub(crate) enum SystemPolicy {
+pub enum SystemPolicy {
     /// System-prompt fijado por el operador (default; no overridable por el caller).
     Operator(String),
     /// System-prompt del envelope, aceptado porque el operador lo habilitó.
