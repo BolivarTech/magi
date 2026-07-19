@@ -10,12 +10,10 @@ pub struct PathGuard {
 }
 
 impl PathGuard {
-    /// Returns a reference to the workspace root.
+    /// Returns a reference to the (canonicalized) workspace root.
     ///
-    /// Part of `PathGuard`'s public API; retained even though no current
-    /// production caller uses it (narrow `#[allow(dead_code)]`, not a blanket
-    /// allowance on the whole type).
-    #[allow(dead_code)]
+    /// Used by the `bash` tool's rm-root guard to detect a destructive `rm`
+    /// whose target resolves to the workspace root itself.
     pub fn workspace_root(&self) -> &Path {
         &self.workspace_root
     }

@@ -98,14 +98,26 @@ fn is_command_allowed(cmd: &str, workspace_root: &Path) -> bool {
             let arg_lower = arg.to_lowercase();
 
             // Non-flag args are treated as paths and must validate inside the
-            // workspace via PathGuard. Flags (`-`-prefixed) are skipped — this
-            // assumes no whitelisted binary takes a `-`-prefixed path arg;
-            // re-check this when extending `allowed_binaries`. By design (spec
-            // D1) a non-path token (e.g. a `grep` pattern) is also validated as
-            // a workspace-relative path, so a pattern containing `..`/absolute
-            // is rejected — intentional, erring strict for the sandbox.
-            if !arg.starts_with('-') && guard.validate(Path::new(arg)).is_err() {
-                return false;
+            // workspace via PathGuard. By design (spec D1) a non-path token
+            // (e.g. a `grep` pattern) is also validated as a workspace-relative
+            // path, so a pattern containing `..`/absolute is rejected —
+            // intentional, erring strict for the sandbox.
+            if !arg.starts_with('-') {
+                if guard.validate(Path::new(arg)).is_err() {
+                    return false;
+                }
+            } else if let Some((_, value)) = arg.split_once('=') {
+                // `--flag=value`: the value can carry a path (e.g. an absolute
+                // `--file=/etc/passwd`), which the bare-arg branch above never
+                // inspects because the whole token is `-`-prefixed. Validate the
+                // value the same way so a `--flag=`-wrapped path cannot escape
+                // the sandbox that bare path args are held to. A non-path value
+                // (`--format=oneline`) validates as a workspace-relative path
+                // and passes; the same strict-sandbox tradeoff as bare tokens
+                // applies (D1).
+                if !value.is_empty() && guard.validate(Path::new(value)).is_err() {
+                    return false;
+                }
             }
 
             // Binary-specific dangerous flags
@@ -117,27 +129,36 @@ fn is_command_allowed(cmd: &str, workspace_root: &Path) -> bool {
                 {
                     return false;
                 }
-                "cargo" => {
-                    // Only allow 'cargo test' and common build commands
-                    // Block arbitrary script execution via cargo
-                }
-                "rm" => {
-                    // Block destructive patterns
-                    let has_rf = arg_lower == "-rf"
-                        || arg_lower == "-fr"
-                        || arg_lower == "-r"
-                        || arg_lower == "-f";
-                    if has_rf {
-                        // Scan other args for sensitive paths
-                        if remaining_tokens
-                            .iter()
-                            .any(|&a| a == "/" || a == "/*" || a == ".")
-                        {
-                            return false;
-                        }
-                    }
-                }
                 _ => {}
+            }
+        }
+
+        // rm workspace-root guard: PathGuard (above) already rejects targets
+        // *outside* the workspace but permits the workspace root itself (`.`,
+        // `./`, `.//`, a `foo/..` that resolves to root, or an absolute to
+        // root). A recursive `rm` on the root would wipe the whole sandbox, so
+        // block any destructive `rm` whose target resolves to the root.
+        // Accumulating the flag across *all* tokens also closes the split form
+        // (`rm -r -f ./`); matching any `-`-flag that carries `r`/`f` covers the
+        // combined (`-rf`), split (`-r -f`), and long (`--recursive --force`)
+        // spellings, erring toward blocking (the safe direction).
+        if base_cmd_lower == "rm" {
+            let has_destructive = remaining_tokens.iter().any(|&a| {
+                let l = a.to_lowercase();
+                l.starts_with('-') && (l.contains('r') || l.contains('f'))
+            });
+            if has_destructive {
+                let root = guard.workspace_root();
+                let targets_root = remaining_tokens.iter().any(|&a| {
+                    !a.starts_with('-')
+                        && guard
+                            .validate(Path::new(a))
+                            .map(|p| p.as_path() == root)
+                            .unwrap_or(false)
+                });
+                if targets_root {
+                    return false;
+                }
             }
         }
 
@@ -320,6 +341,62 @@ mod tests {
     }
 
     #[test]
+    fn test_rm_root_equivalent_targets_are_rejected() {
+        // The literal `.` was already blocked; these lexical equivalents of the
+        // workspace root must be too (MAGI S2: `rm -rf ./` slipped the guard).
+        assert!(
+            !check("rm -rf ./"),
+            "rm -rf ./ (root via ./) must be rejected"
+        );
+        assert!(!check("rm -rf .//"), "rm -rf .// must be rejected");
+        assert!(
+            !check("rm -r -f ./"),
+            "split-flag rm -r -f ./ must be rejected"
+        );
+        assert!(
+            !check("rm --recursive --force ./"),
+            "long-form rm --recursive --force ./ must be rejected"
+        );
+        assert!(
+            !check("rm -rf foo/.."),
+            "rm -rf foo/.. (resolves to root) must be rejected"
+        );
+        // No over-blocking: destructive rm of an in-workspace subdir stays legal.
+        assert!(check("rm -rf src"), "rm -rf src (subdir) must stay allowed");
+        assert!(
+            check("rm -r -f ./build"),
+            "rm -r -f ./build (subdir via ./) must stay allowed"
+        );
+        assert!(
+            check("rm archivo.txt"),
+            "non-recursive rm of a file allowed"
+        );
+    }
+
+    #[test]
+    fn test_flag_value_path_cannot_escape_sandbox() {
+        // `--flag=value` where value is a path must be validated too — a
+        // `-`-prefixed token used to skip PathGuard entirely (MAGI S2).
+        assert!(
+            !check("grep --file=C:/Windows/System32/config/SAM foo"),
+            "--file=<absolute> must be rejected"
+        );
+        assert!(
+            !check("grep --file=../../etc/passwd foo"),
+            "--file=<traversal> must be rejected"
+        );
+        // Legit non-path flag values still pass (validate as workspace-relative).
+        assert!(
+            check("git log --format=oneline"),
+            "--format=oneline must stay allowed"
+        );
+        assert!(
+            check("git log --max-count=5"),
+            "--max-count=5 must stay allowed"
+        );
+    }
+
+    #[test]
     fn test_bash_args_sandboxed_via_pathguard() {
         // S-1 (the bug): Windows forward-slash absolute escapes the workspace.
         assert!(
@@ -384,8 +461,11 @@ mod tests {
         assert!(stdout.contains("Hello Rust"));
     }
 
+    /// A binary outside `allowed_binaries` (`whoami`) is rejected as a security
+    /// violation before any subprocess is spawned. (Formerly misnamed
+    /// `test_bash_tool_timeout` — it never exercised the timeout path.)
     #[tokio::test]
-    async fn test_bash_tool_timeout() {
+    async fn test_non_whitelisted_binary_is_rejected() {
         let dir = tempdir().expect("Failed to create temp dir");
         let root = dir
             .path()
@@ -610,6 +690,17 @@ mod tests {
     /// 2. **End-to-end** (skips only if `python` is unavailable): a real
     ///    `python probe.py` run through the tool writes an empty `exfil.marker`,
     ///    proving the interpreter saw none of the three.
+    ///
+    /// Scope note (the `/proc/<ppid>/environ` vector): this test covers the
+    /// **child**-environment layer. The complementary parent-scrub layer — which
+    /// removes the same three names from the *parent* process env at startup so a
+    /// child cannot read them via `/proc/<ppid>/environ` — is REQ-H37's symmetric
+    /// `unsetenv`, verified by `test_scrub_removes_passphrase_and_api_keys_from_process_env`
+    /// in `main.rs`. A `/proc/<ppid>/environ` probe is deliberately NOT added here:
+    /// this test intentionally sets the secrets live in its parent env and cannot
+    /// scrub them (`std::env::remove_var` is UB under this multi-thread runtime —
+    /// the exact reason the real scrub runs single-threaded pre-runtime), so such a
+    /// probe would report the harness's own env, not a magi defect.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[serial_test::serial]
     async fn test_bash_interpreter_cannot_exfiltrate_secrets() {
