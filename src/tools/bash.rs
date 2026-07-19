@@ -129,6 +129,17 @@ fn is_command_allowed(cmd: &str, workspace_root: &Path) -> bool {
                 {
                     return false;
                 }
+                // `find`'s `-delete` action recursively removes matched entries
+                // with no shell metacharacters, so `find . -delete` (or a bare
+                // `find -delete`, whose path defaults to `.`) wipes the whole
+                // workspace, sidestepping the rm-root guard below. `find` is a
+                // search tool here — deletion goes through `rm` (which carries
+                // the root guard) — so block `-delete` outright (safe
+                // direction). `-exec`/`-execdir`/`-ok` always need `{}`/`;`/`+`
+                // and are already rejected by the metacharacter ban.
+                "find" if arg_lower == "-delete" => {
+                    return false;
+                }
                 _ => {}
             }
         }
@@ -139,13 +150,15 @@ fn is_command_allowed(cmd: &str, workspace_root: &Path) -> bool {
         // root). A recursive `rm` on the root would wipe the whole sandbox, so
         // block any destructive `rm` whose target resolves to the root.
         // Accumulating the flag across *all* tokens also closes the split form
-        // (`rm -r -f ./`); matching any `-`-flag that carries `r`/`f` covers the
-        // combined (`-rf`), split (`-r -f`), and long (`--recursive --force`)
-        // spellings, erring toward blocking (the safe direction).
+        // (`rm -r -f ./`); matching any `-`-flag that carries `r`/`f`/`d` covers
+        // the combined (`-rf`), split (`-r -f`), long (`--recursive --force`),
+        // and empty-dir (`-d`/`--dir`, so `rm -d .` on an empty root) spellings,
+        // erring toward blocking (the safe direction — e.g. the harmless
+        // `--preserve-root` is also flagged, but its target is still the root).
         if base_cmd_lower == "rm" {
             let has_destructive = remaining_tokens.iter().any(|&a| {
                 let l = a.to_lowercase();
-                l.starts_with('-') && (l.contains('r') || l.contains('f'))
+                l.starts_with('-') && (l.contains('r') || l.contains('f') || l.contains('d'))
             });
             if has_destructive {
                 let root = guard.workspace_root();
@@ -371,6 +384,37 @@ mod tests {
             check("rm archivo.txt"),
             "non-recursive rm of a file allowed"
         );
+        // `rm -d .` removes an empty workspace root — closed via the `d` flag.
+        assert!(
+            !check("rm -d ."),
+            "rm -d . (empty-root removal) must be rejected"
+        );
+        assert!(!check("rm -d ./"), "rm -d ./ must be rejected");
+    }
+
+    #[test]
+    fn test_find_delete_is_rejected() {
+        // `find . -delete` recursively wipes the workspace with no shell
+        // metacharacters (MAGI S2) — must be blocked regardless of start path.
+        assert!(!check("find . -delete"), "find . -delete must be rejected");
+        assert!(
+            !check("find -delete"),
+            "bare find -delete (path defaults to .) must be rejected"
+        );
+        assert!(
+            !check("find src -delete"),
+            "find <subdir> -delete must be rejected"
+        );
+        assert!(
+            !check("find . -name x.rs -delete"),
+            "find with -delete anywhere in the expression must be rejected"
+        );
+        // Non-deleting find stays allowed.
+        assert!(
+            check("find . -name main.rs"),
+            "ordinary find search must stay allowed"
+        );
+        assert!(check("find . -type f"), "find -type f must stay allowed");
     }
 
     #[test]
