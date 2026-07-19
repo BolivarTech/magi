@@ -122,7 +122,7 @@ impl Tool for ConsultTool {
         }
     }
 
-    async fn execute(&self, args: Value, _cancel: &CancellationToken) -> ToolResult<Value> {
+    async fn execute(&self, args: Value, cancel: &CancellationToken) -> ToolResult<Value> {
         let query = args
             .get("query")
             .and_then(|v| v.as_str())
@@ -143,8 +143,24 @@ impl Tool for ConsultTool {
         let q = query.to_string();
         // Joined spawn isolates a panic in magi-core's analyze into a recoverable
         // JoinError instead of unwinding into the agent tool loop.
-        let report =
-            match tokio::spawn(async move { magi.analyze(&Mode::Analysis, &q).await }).await {
+        let handle = tokio::spawn(async move { magi.analyze(&Mode::Analysis, &q).await });
+        // Held separately from `handle` (which the `select!` consumes) so the
+        // cancel arm can abort the in-flight task without a borrow conflict.
+        let aborter = handle.abort_handle();
+        // A proactive consult runs three MAGI LLM calls; on the run's `--timeout`
+        // cancellation (REQ-H36) the task is **aborted** — not merely detached —
+        // so those expensive API calls actually stop instead of being orphaned.
+        // `biased` polls the cancel arm first, so an already-cancelled token
+        // short-circuits before the analysis is awaited.
+        let report = tokio::select! {
+            biased;
+            () = cancel.cancelled() => {
+                aborter.abort();
+                return Err(ToolError::ExecutionError(
+                    "consult cancelled by timeout".to_string(),
+                ));
+            }
+            joined = handle => match joined {
                 Ok(Ok(report)) => report,
                 Ok(Err(e)) => return Err(ToolError::ExecutionError(e.to_string())),
                 Err(join_err) => {
@@ -152,7 +168,8 @@ impl Tool for ConsultTool {
                         "consult crashed: {join_err}"
                     )))
                 }
-            };
+            },
+        };
         Ok(report_to_consult_json(&report))
     }
 }
@@ -161,8 +178,51 @@ impl Tool for ConsultTool {
 mod tests {
     use super::*;
     use magi_core::error::ProviderError;
+    use magi_core::provider::{CompletionConfig, LlmProvider};
     use magi_core::schema::AgentName;
     use magi_core::test_support::RoutingMockProvider;
+    use std::time::Duration;
+
+    /// Upper bound on how long a *cancelled* `execute` may take to return. The
+    /// cancel path aborts the in-flight analysis, so it must resolve almost
+    /// immediately; sized generously to absorb scheduler jitter while staying
+    /// far below the blocking provider's [`BlockingProvider::SLEEP_SECS`] sleep,
+    /// so a regression that awaited the full analysis would blow this budget.
+    const CANCEL_RETURN_BUDGET_MS: u128 = 2_000;
+
+    /// A provider whose `complete` blocks far longer than any test tolerates, so
+    /// a MAGI analysis over it never finishes within the test. Used to prove that
+    /// [`ConsultTool::execute`] returns on cancellation *without* waiting for the
+    /// analysis: if the cancel token were ignored, `execute` would block on this
+    /// sleep and overrun [`CANCEL_RETURN_BUDGET_MS`].
+    struct BlockingProvider;
+
+    impl BlockingProvider {
+        /// Sleep duration of each `complete` call — long enough that awaiting the
+        /// full analysis is unmistakably distinguishable from a prompt cancel.
+        const SLEEP_SECS: u64 = 3_600;
+    }
+
+    #[async_trait]
+    impl LlmProvider for BlockingProvider {
+        async fn complete(
+            &self,
+            _system_prompt: &str,
+            _user_prompt: &str,
+            _config: &CompletionConfig,
+        ) -> Result<String, ProviderError> {
+            tokio::time::sleep(Duration::from_secs(Self::SLEEP_SECS)).await;
+            Ok(String::new())
+        }
+
+        fn name(&self) -> &str {
+            "blocking"
+        }
+
+        fn model(&self) -> &str {
+            "blocking"
+        }
+    }
 
     /// Helper: constructs a `ConsultTool` with `auto_approve = false` (the default).
     fn dummy_tool() -> ConsultTool {
@@ -305,6 +365,34 @@ mod tests {
                 .unwrap_err(),
             ToolError::InvalidArguments(_)
         ));
+    }
+
+    /// A pre-cancelled token makes `execute` return the cancellation error
+    /// promptly, aborting the in-flight 3-LLM analysis instead of running it to
+    /// completion (REQ-H36). Uses [`BlockingProvider`] so the analysis would
+    /// otherwise block for an hour: returning within [`CANCEL_RETURN_BUDGET_MS`]
+    /// proves the cancel path pre-empts the work rather than awaiting it.
+    #[tokio::test]
+    async fn test_execute_returns_cancellation_error_without_running_full_analysis() {
+        let tool = ConsultTool::new(Arc::new(Magi::new(Arc::new(BlockingProvider))), false);
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+
+        let start = std::time::Instant::now();
+        let err = tool
+            .execute(json!({ "query": "should we migrate X to Y?" }), &cancel)
+            .await
+            .expect_err("a cancelled consult must return an error, not a report");
+        let elapsed = start.elapsed();
+
+        assert!(
+            matches!(err, ToolError::ExecutionError(ref m) if m.contains("cancelled")),
+            "cancelled consult must surface a typed cancellation error; got: {err:?}"
+        );
+        assert!(
+            elapsed.as_millis() < CANCEL_RETURN_BUDGET_MS,
+            "cancelled consult must return promptly (took {elapsed:?}); it awaited the full analysis"
+        );
     }
 
     #[tokio::test]
