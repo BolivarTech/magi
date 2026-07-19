@@ -352,26 +352,6 @@ const LEGACY_LAYOUT_WARNING: &str =
      the pre-.magi/ layout is no longer used — run `magi init` to create a .magi/ \
      state directory (the legacy files are not read or migrated)";
 
-/// Environment variable names a tool subprocess is allowed to inherit (REQ-H37).
-///
-/// Literal names, matched by exact equality (never a prefix): a subprocess
-/// receives only these and therefore can never inherit `MAGI_PASSPHRASE`, an
-/// API key, or an attacker-chosen `LC_EVIL`. Covers the locale, temp-dir, and
-/// path variables a benign command legitimately needs on POSIX and Windows.
-const TOOL_ENV_ALLOWLIST: &[&str] = &[
-    "PATH",
-    "HOME",
-    "USERPROFILE",
-    "LANG",
-    "LC_ALL",
-    "LC_CTYPE",
-    "LC_MESSAGES",
-    "TMPDIR",
-    "TEMP",
-    "TMP",
-    "SystemRoot",
-];
-
 /// Secrets read out of the process environment before it is scrubbed (REQ-H37).
 ///
 /// The passphrase is wrapped in [`Zeroizing`] so its memory is wiped on drop
@@ -418,19 +398,6 @@ fn read_then_scrub_secret_env() -> ConsumedSecrets {
         anthropic_key,
         openai_key,
     }
-}
-
-/// Returns the current environment filtered to exactly [`TOOL_ENV_ALLOWLIST`],
-/// for use as a spawned tool subprocess's environment (REQ-H37).
-///
-/// Filtering is by literal name equality, so a subprocess inherits neither the
-/// scrubbed secrets nor an arbitrary variable such as `LC_EVIL`.
-// Wired in T7: the bash tool spawn passes this as the child's environment.
-#[allow(dead_code)]
-fn tool_child_env() -> Vec<(String, String)> {
-    env::vars()
-        .filter(|(name, _)| TOOL_ENV_ALLOWLIST.contains(&name.as_str()))
-        .collect()
 }
 
 /// Outcome of resolving the vault passphrase and opening the encrypted store
@@ -2412,7 +2379,8 @@ mod tests {
         // REQ-H37: the child env is a literal-equality allowlist, not a prefix
         // match — so secrets and an attacker-chosen `LC_EVIL` are excluded while
         // an allowlisted `LC_ALL` and `PATH` pass through. `PATH` is pinned so
-        // the assertion never depends on the host's ambient environment.
+        // the assertion never depends on the host's ambient environment. The
+        // allowlist now lives in `crate::tools::proc_group` (single source).
         with_var(PASSPHRASE_ENV, Some("pw-secret"), || {
             with_var(ANTHROPIC_KEY_ENV, Some("sk-anthropic"), || {
                 with_var(OPENAI_KEY_ENV, Some("sk-openai"), || {
@@ -2420,7 +2388,9 @@ mod tests {
                         with_var("LC_ALL", Some("C.UTF-8"), || {
                             with_var("PATH", Some("/usr/bin"), || {
                                 let child: std::collections::HashMap<String, String> =
-                                    tool_child_env().into_iter().collect();
+                                    crate::tools::proc_group::tool_child_env()
+                                        .into_iter()
+                                        .collect();
                                 // Secrets and arbitrary `LC_*` are excluded.
                                 assert!(!child.contains_key(PASSPHRASE_ENV));
                                 assert!(!child.contains_key(ANTHROPIC_KEY_ENV));

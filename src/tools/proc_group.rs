@@ -46,9 +46,121 @@
 //! any grandchild, the window between `CreateProcess` returning and assignment
 //! is not observably exploitable, and the tree-kill guarantee itself is intact.
 
+use std::env;
+
 use tokio::process::{Child, Command};
 
 use crate::tools::{ToolError, ToolResult};
+
+/// Environment variable names a spawned tool subprocess is allowed to inherit
+/// (REQ-H37, defense-in-depth).
+///
+/// This is the **single source** of the allowlist, imported by both the bash
+/// tool ([`scrub_child_env`]) and `main.rs` (which owns the parent-process env
+/// scrub). Membership is tested by **exact, literal name equality** — never a
+/// prefix — so a subprocess inherits neither a scrubbed secret nor an
+/// attacker-chosen variable such as `LC_EVIL`.
+///
+/// The list is deliberately **broad enough** for the whitelisted shells and
+/// binaries (`powershell`/`bash`, `cargo`, `git`, `npm`, `node`, `python`,
+/// `pytest`, `rg`) to still function after [`Command::env_clear`]: it carries
+/// the OS bootstrap, locale, temp-dir, home, and (non-secret) toolchain
+/// configuration variables those programs legitimately need on Windows and
+/// POSIX. It is curated to **exclude every secret** — `MAGI_PASSPHRASE`, the API
+/// keys, and any `*_KEY`/`*_TOKEN`/`*_SECRET`/`*_PASSWORD` — which are never
+/// operationally required by a build/search/VCS command.
+pub(crate) const TOOL_ENV_ALLOWLIST: &[&str] = &[
+    // ── Windows OS bootstrap (powershell + child processes need these) ──
+    "PATH",
+    "PATHEXT",
+    "SystemRoot",
+    "SystemDrive",
+    "ComSpec",
+    "windir",
+    "USERPROFILE",
+    "HOMEDRIVE",
+    "HOMEPATH",
+    "APPDATA",
+    "LOCALAPPDATA",
+    "TEMP",
+    "TMP",
+    "NUMBER_OF_PROCESSORS",
+    "PROCESSOR_ARCHITECTURE",
+    "OS",
+    "PSModulePath",
+    // ── Cross-platform / POSIX shell + locale ──
+    "HOME",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "LC_MESSAGES",
+    "TZ",
+    "TERM",
+    "SHELL",
+    "TMPDIR",
+    "USER",
+    "LOGNAME",
+    // ── Non-secret toolchain configuration (cargo / rustup / python / node / git) ──
+    "CARGO_HOME",
+    "RUSTUP_HOME",
+    "RUSTUP_TOOLCHAIN",
+    "PYTHONPATH",
+    "PYTHONHOME",
+    "NODE_PATH",
+    "GIT_EXEC_PATH",
+    "GIT_TEMPLATE_DIR",
+];
+
+/// Returns `true` if `name` is an allowlisted environment variable — by **whole-name
+/// equality**, never a prefix, so `LC_EVIL` never matches `LC_ALL` and no secret
+/// slips through.
+///
+/// The comparison is **case-insensitive on Windows** (where the OS itself treats
+/// environment variable names case-insensitively and the real `PATH` is commonly
+/// stored as `Path`) and **case-sensitive on POSIX** (where names are
+/// case-sensitive by contract). It stays equality on both platforms, so
+/// broadening to case-insensitive on Windows cannot let a secret through — a
+/// secret name equals no allowlist entry under any casing.
+fn is_allowed_env_name(name: &str) -> bool {
+    #[cfg(windows)]
+    {
+        TOOL_ENV_ALLOWLIST
+            .iter()
+            .any(|allowed| allowed.eq_ignore_ascii_case(name))
+    }
+    #[cfg(not(windows))]
+    {
+        TOOL_ENV_ALLOWLIST.contains(&name)
+    }
+}
+
+/// Returns the current process environment filtered to exactly the names
+/// [`is_allowed_env_name`] admits, for use as a spawned tool subprocess's
+/// environment (REQ-H37).
+///
+/// Filtering is by whole-name equality, so the returned pairs contain neither
+/// the scrubbed secrets (which `main.rs` also removes from the parent env at
+/// startup) nor an arbitrary variable such as `LC_EVIL`.
+pub(crate) fn tool_child_env() -> Vec<(String, String)> {
+    env::vars()
+        .filter(|(name, _)| is_allowed_env_name(name))
+        .collect()
+}
+
+/// Replaces `cmd`'s inherited environment with exactly the allowlisted, non-secret
+/// variables (REQ-H37, defense-in-depth for the bash tool spawn).
+///
+/// Clears the whole inherited environment ([`Command::env_clear`]) then re-adds
+/// only [`tool_child_env`], so an in-workspace interpreter (`python`/`node`)
+/// cannot read `MAGI_PASSPHRASE` or an API key out of its own environment — even
+/// if a future code path failed to scrub the parent process. This layers on top
+/// of the parent-env scrub in `main.rs`; the two together close the env-exfil
+/// vector. The hard barriers (allowlist, metachar ban, `PathGuard`) are
+/// untouched — this only narrows the child's environment.
+pub(crate) fn scrub_child_env(cmd: &mut Command) {
+    cmd.env_clear();
+    cmd.envs(tool_child_env());
+}
 
 /// A spawned child paired with the OS resource that can kill its whole tree.
 ///
@@ -211,6 +323,48 @@ d = os.path.dirname(os.path.abspath(__file__))\n\
 open(os.path.join(d, 'start.marker'), 'w').close()\n\
 time.sleep(4)\n\
 open(os.path.join(d, 'done.marker'), 'w').close()\n";
+
+    /// A two-level worker that spawns a **grandchild** (relative to the shell:
+    /// shell→python→python) and lingers so the shell keeps waiting. The grandchild
+    /// writes `start.marker`, sleeps well past any test's cancel, then — **only if
+    /// it survives** — writes `done.marker`. The parent `sleep(6)` keeps the shell
+    /// blocked past the cancel so the run does not complete cleanly first. Proves
+    /// the Job Object / process group kills the **whole tree** (a detached
+    /// grandchild has no job of its own), not merely the direct child: START must
+    /// exist (the grandchild ran) and DONE must never appear (it was killed).
+    pub(crate) const TREE_KILL_GRANDCHILD_WORKER: &str = "\
+import os, sys, subprocess, time\n\
+d = os.path.dirname(os.path.abspath(__file__))\n\
+gc = (\n\
+    \"import os, time\\n\"\n\
+    \"d = \" + repr(d) + \"\\n\"\n\
+    \"open(os.path.join(d, 'start.marker'), 'w').close()\\n\"\n\
+    \"time.sleep(4)\\n\"\n\
+    \"open(os.path.join(d, 'done.marker'), 'w').close()\\n\"\n\
+)\n\
+subprocess.Popen([sys.executable, \"-c\", gc])\n\
+time.sleep(6)\n";
+
+    /// A probe that reports whether it can read the three magi-managed secrets
+    /// (`MAGI_PASSPHRASE`/`ANTHROPIC_API_KEY`/`OPENAI_API_KEY`) from its own
+    /// environment and, on unix, from `/proc/self/environ`. It writes every name
+    /// it *found* into `exfil.marker` (an empty file iff none leaked), so the test
+    /// asserts the marker exists (the probe ran) **and** is empty (no secret
+    /// reached the child — REQ-H37 pen-test).
+    // NOTE: written with **no indented blocks** (single-line `try:`/`except:` and
+    // `open(...).write(...)`), because Rust's `\`-line-continuation strips the
+    // leading whitespace of the next source line — indented Python here would
+    // become an `IndentationError`. Compound statements stay on one physical line.
+    pub(crate) const EXFIL_PROBE_WORKER: &str = "\
+import os\n\
+d = os.path.dirname(os.path.abspath(__file__))\n\
+names = ['MAGI_PASSPHRASE', 'ANTHROPIC_API_KEY', 'OPENAI_API_KEY']\n\
+found = [n for n in names if n in os.environ]\n\
+raw = b''\n\
+try: raw = open('/proc/self/environ', 'rb').read()\n\
+except Exception: raw = b''\n\
+found += [n + ':proc' for n in names if (n + '=').encode() in raw]\n\
+open(os.path.join(d, 'exfil.marker'), 'w').write(','.join(found))\n";
 
     /// `true` if a `python` interpreter can be launched — the kill mechanism
     /// cannot be verified without a real long-lived child, so callers skip when

@@ -813,6 +813,48 @@ mod tests {
     }
 
     #[test]
+    fn test_init_concurrent_yields_exactly_one_magi_dir() {
+        // REQ-H03/H41: two threads racing `init` on the same fresh directory must
+        // resolve to exactly ONE `.magi/` — the atomic no-replace gate lets one
+        // win and refuses the other with `Aborted`, never a half-populated dir or
+        // two envelopes. A `Barrier` maximizes the overlap of the two `init`s.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().to_path_buf();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+
+        let handles: Vec<_> = (0..2)
+            .map(|_| {
+                let dir = dir.clone();
+                let barrier = std::sync::Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    init(&dir)
+                })
+            })
+            .collect();
+
+        let results: Vec<Result<Workspace, HeadlessError>> =
+            handles.into_iter().map(|h| h.join().unwrap()).collect();
+
+        let winners = results.iter().filter(|r| r.is_ok()).count();
+        let aborted = results
+            .iter()
+            .filter(|r| matches!(r, Err(HeadlessError::Aborted)))
+            .count();
+        assert_eq!(winners, 1, "exactly one concurrent init must win");
+        assert_eq!(
+            aborted, 1,
+            "the loser must be refused with Aborted (atomic no-replace)"
+        );
+
+        // The single `.magi/` is COMPLETE (not half-populated) and unique.
+        let magi = dir.join(".magi");
+        assert!(magi.join("magi.toml").exists(), "config present");
+        assert!(magi.join(".magi-rs-memory.db").exists(), "DB present");
+        assert!(magi.join("logs").is_dir(), "logs/ present");
+    }
+
+    #[test]
     fn test_orphan_tmp_dir_does_not_break_a_later_init() {
         let tmp = tempfile::tempdir().unwrap();
         // Simulate a crashed prior run that left a stray sibling temp dir behind.

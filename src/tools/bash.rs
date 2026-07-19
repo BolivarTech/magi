@@ -215,6 +215,13 @@ impl Tool for BashTool {
             .stderr(Stdio::piped())
             .kill_on_drop(true);
 
+        // REQ-H37 (defense-in-depth): the subprocess inherits ONLY the
+        // non-secret allowlist, never `MAGI_PASSPHRASE`/API keys. An in-workspace
+        // interpreter (`python`/`node`) that reads its own environment therefore
+        // cannot exfiltrate a secret, layering on top of the parent-env scrub in
+        // `main.rs`. Applied before `spawn_in_group` so the child is born clean.
+        proc_group::scrub_child_env(&mut cmd);
+
         // Spawn the shell inside a killable group (Job Object on Windows, new
         // process group on POSIX). On a wall-clock cancel (REQ-H36) the whole
         // subprocess TREE is terminated — not just the shell — so a long
@@ -472,23 +479,47 @@ mod tests {
     #[cfg(windows)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_bash_cancel_kills_subprocess_tree_windows() {
-        cancel_kills_subprocess_tree().await;
+        use crate::tools::proc_group::test_support::TREE_KILL_WORKER;
+        cancel_kills_subprocess_tree(TREE_KILL_WORKER).await;
     }
 
     /// POSIX process-group analog of the Windows test above (CI-only).
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_bash_cancel_kills_subprocess_tree_unix() {
-        cancel_kills_subprocess_tree().await;
+        use crate::tools::proc_group::test_support::TREE_KILL_WORKER;
+        cancel_kills_subprocess_tree(TREE_KILL_WORKER).await;
+    }
+
+    /// REQ-H36 (Windows Job Object): a **grandchild** (shell→python→python) dies
+    /// when the timeout fires. The direct child spawns a detached grandchild and
+    /// lingers; only the Job Object's kill-on-close reaches the grandchild (it has
+    /// no job of its own), so DONE never appears. Runs on this host.
+    #[cfg(windows)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_bash_cancel_kills_grandchild_windows() {
+        use crate::tools::proc_group::test_support::TREE_KILL_GRANDCHILD_WORKER;
+        cancel_kills_subprocess_tree(TREE_KILL_GRANDCHILD_WORKER).await;
+    }
+
+    /// POSIX process-group analog of the grandchild-kill test above (CI-only):
+    /// `kill(-pgid, SIGKILL)` reaches every descendant in the group.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_bash_cancel_kills_grandchild_unix() {
+        use crate::tools::proc_group::test_support::TREE_KILL_GRANDCHILD_WORKER;
+        cancel_kills_subprocess_tree(TREE_KILL_GRANDCHILD_WORKER).await;
     }
 
     /// Shared body: run a real allowlisted long command (`python worker.py`)
     /// through the `bash` tool, fire the cancellation token mid-work, and assert
     /// the whole subprocess tree died — START marker present, DONE marker absent
     /// even after waiting past when a surviving orphan would have written it.
+    /// Parameterized on the worker source so a single-child and a grandchild
+    /// worker share one proof harness (DRY).
     #[cfg(any(windows, unix))]
-    async fn cancel_kills_subprocess_tree() {
-        use crate::tools::proc_group::test_support::{python_available, TREE_KILL_WORKER};
+    async fn cancel_kills_subprocess_tree(worker_src: &str) {
+        use crate::tools::proc_group::test_support::python_available;
 
         if !python_available() {
             eprintln!("skipping: python interpreter not found — cannot spawn a real child");
@@ -496,7 +527,7 @@ mod tests {
         }
         let dir = tempdir().expect("tempdir");
         let root = dir.path().canonicalize().expect("canonicalize");
-        std::fs::write(root.join("worker.py"), TREE_KILL_WORKER).expect("write worker");
+        std::fs::write(root.join("worker.py"), worker_src).expect("write worker");
 
         let tool = BashTool::new(root.clone()).expect("BashTool");
         let cancel = CancellationToken::new();
@@ -536,5 +567,85 @@ mod tests {
             !done.exists(),
             "DONE marker must NOT exist — the subprocess tree was killed, not orphaned"
         );
+    }
+
+    // ── REQ-H37: an in-workspace interpreter cannot exfiltrate the magi secrets ──
+
+    /// Names of the three magi-managed secrets that must never reach a tool
+    /// subprocess (REQ-H37).
+    const EXFIL_SECRET_NAMES: [&str; 3] =
+        ["MAGI_PASSPHRASE", "ANTHROPIC_API_KEY", "OPENAI_API_KEY"];
+
+    /// REQ-H37 pen-test: the three secrets are set in the PARENT environment, yet
+    /// a tool subprocess spawned through the `bash` tool (`env_clear` + allowlist)
+    /// cannot read them — neither from `os.environ` nor (unix) from
+    /// `/proc/self/environ`.
+    ///
+    /// Two layers are asserted:
+    /// 1. **Directly** (always): [`tool_child_env`] omits all three secret names
+    ///    even while they are live in the parent env — the allowlist excludes
+    ///    them by whole-name equality.
+    /// 2. **End-to-end** (skips only if `python` is unavailable): a real
+    ///    `python probe.py` run through the tool writes an empty `exfil.marker`,
+    ///    proving the interpreter saw none of the three.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial_test::serial]
+    async fn test_bash_interpreter_cannot_exfiltrate_secrets() {
+        use crate::tools::proc_group::test_support::{python_available, EXFIL_PROBE_WORKER};
+        use crate::tools::proc_group::tool_child_env;
+
+        // Set all three secrets live in the PARENT environment.
+        for name in EXFIL_SECRET_NAMES {
+            std::env::set_var(name, "top-secret-value");
+        }
+
+        // Layer 1 — direct: the allowlist-filtered child env omits every secret.
+        let child_env: std::collections::HashMap<String, String> =
+            tool_child_env().into_iter().collect();
+        for name in EXFIL_SECRET_NAMES {
+            assert!(
+                !child_env.contains_key(name),
+                "secret `{name}` must be absent from the tool child environment"
+            );
+        }
+
+        // Layer 2 — end-to-end through the real bash-tool spawn.
+        if python_available() {
+            let dir = tempdir().expect("tempdir");
+            let root = dir.path().canonicalize().expect("canonicalize");
+            std::fs::write(root.join("probe.py"), EXFIL_PROBE_WORKER).expect("write probe");
+
+            let tool = BashTool::new(root.clone()).expect("BashTool");
+            let result = tool
+                .execute(
+                    serde_json::json!({ "command": "python probe.py", "timeout": 20000 }),
+                    &CancellationToken::new(),
+                )
+                .await
+                .expect("probe executes");
+            assert_eq!(
+                result["interrupted"],
+                serde_json::json!(false),
+                "the probe must run to completion, not be interrupted"
+            );
+
+            let marker = root.join("exfil.marker");
+            assert!(
+                marker.exists(),
+                "the probe must have run and written exfil.marker"
+            );
+            let leaked = std::fs::read_to_string(&marker).expect("read exfil.marker");
+            assert!(
+                leaked.trim().is_empty(),
+                "no secret may reach the child; probe reported leaked: {leaked:?}"
+            );
+        } else {
+            eprintln!("skipping end-to-end probe: python interpreter not found");
+        }
+
+        // Clean up the parent environment (serialized test — no cross-test leak).
+        for name in EXFIL_SECRET_NAMES {
+            std::env::remove_var(name);
+        }
     }
 }
