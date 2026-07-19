@@ -16,7 +16,8 @@
 //!   grandchild cannot outlive the kill. Assignment happens immediately after
 //!   spawn; if it fails (the shell is already in a job we cannot join) the
 //!   direct-child [`kill_on_drop`](tokio::process::Command::kill_on_drop)
-//!   backstop still applies.
+//!   backstop still applies, and the degradation to direct-child-only tree-kill
+//!   is **surfaced on stderr** (never silent — see `warn_tree_kill_degraded`).
 //! - **POSIX**: the shell leads a **new process group**
 //!   ([`process_group(0)`](tokio::process::Command::process_group)); the group
 //!   is signalled with `SIGKILL` via the safe [`rustix`] wrapper.
@@ -189,7 +190,9 @@ impl GroupChild {
 /// Job Object's kill-on-close; on POSIX via `kill(-pgid, SIGKILL)`.
 pub(crate) struct GroupKiller {
     /// Windows: the kill-on-close Job Object. `None` if the job could not be
-    /// created or the child could not be assigned (direct-child kill backstops).
+    /// created or the child could not be assigned — in which case the
+    /// direct-child kill backstops and the degradation is surfaced on stderr
+    /// (`warn_tree_kill_degraded`), never silently.
     #[cfg(windows)]
     job: Option<win32job::Job>,
     /// POSIX: the child's process-group id (equal to its pid, since the child
@@ -227,6 +230,9 @@ impl GroupKiller {
         {
             if let Some(pgid) = self.pgid.take() {
                 if let Some(pid) = rustix::process::Pid::from_raw(pgid) {
+                    // `rustix` is pinned to 0.38 (see Cargo.toml); the
+                    // `kill_process_group` signature is compile-verified — it
+                    // builds, so the API matches this call.
                     let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::Kill);
                 }
             }
@@ -267,17 +273,29 @@ pub(crate) fn spawn_in_group(cmd: &mut Command) -> ToolResult<GroupChild> {
 
     #[cfg(windows)]
     let killer = {
-        // Best-effort: assign the child to a kill-on-close Job Object.
-        let job = build_kill_on_close_job();
-        let assigned = match (job, child.raw_handle()) {
-            (Some(job), Some(handle)) => {
-                if job.assign_process(handle as isize).is_ok() {
-                    Some(job)
-                } else {
+        // Best-effort: assign the child to a kill-on-close Job Object. If the job
+        // cannot be created, the child handle is unavailable, or the assignment
+        // fails, tree-kill degrades to the direct-child `kill_on_drop` backstop.
+        // That degradation is security-relevant (a grandchild could survive a
+        // `--timeout` kill — REQ-H36), so it is surfaced VISIBLY on stderr via
+        // `warn_tree_kill_degraded` rather than failing silently. The fallback
+        // itself is unchanged: the direct child is still killed.
+        let assigned = match (build_kill_on_close_job(), child.raw_handle()) {
+            (Some(job), Some(handle)) => match job.assign_process(handle as isize) {
+                Ok(()) => Some(job),
+                Err(e) => {
+                    warn_tree_kill_degraded(&format!("Job Object assignment failed: {e}"));
                     None
                 }
+            },
+            (None, _) => {
+                warn_tree_kill_degraded("Job Object could not be created");
+                None
             }
-            _ => None,
+            (Some(_), None) => {
+                warn_tree_kill_degraded("child process handle was unavailable");
+                None
+            }
         };
         GroupKiller {
             job: assigned,
@@ -305,6 +323,24 @@ fn build_kill_on_close_job() -> Option<win32job::Job> {
     let mut info = win32job::ExtendedLimitInfo::new();
     info.limit_kill_on_job_close();
     win32job::Job::create_with_limit_info(&info).ok()
+}
+
+/// Emits a VISIBLE diagnostic on **stderr** (the headless diagnostic stream) when
+/// the child cannot be placed in a kill-on-close Job Object, so the resulting
+/// degradation of the REQ-H36 tree-kill control to direct-child-only is never a
+/// silent failure of a security control.
+///
+/// The fallback behavior is intentionally unchanged — the direct child is still
+/// killed via the `kill_on_drop` backstop, the best available option — but a
+/// grandchild may survive a `--timeout` kill in this degraded mode, which an
+/// operator must be able to see. `reason` names the specific failure (job
+/// creation, missing handle, or a failed assignment).
+#[cfg(windows)]
+fn warn_tree_kill_degraded(reason: &str) {
+    eprintln!(
+        "warning: could not assign subprocess to a Windows Job Object; tree-kill \
+         degraded to direct-child-only (grandchildren may survive a --timeout kill): {reason}"
+    );
 }
 
 /// Shared fixtures for the deterministic subprocess-kill tests, reused by both
@@ -383,6 +419,27 @@ gc = (\n\
     \"open(os.path.join(d, 'done.marker'), 'w').close()\\n\"\n\
 )\n\
 subprocess.Popen([sys.executable, \"-c\", gc])\n\
+time.sleep({GRANDCHILD_PARENT_SLEEP_SECS})\n"
+        )
+    }
+
+    /// Like [`tree_kill_grandchild_worker`], but spawns the grandchild **as early
+    /// as possible** — the `Popen` is the direct child's first substantive action
+    /// (only the imports and the marker-directory lookup precede it), so the
+    /// grandchild comes into existence with minimal shell work after spawn. This
+    /// is the adversarial fixture for the fork↔assign race window on Windows: the
+    /// module assigns the shell to the Job Object immediately post-spawn (not via
+    /// `CREATE_SUSPENDED`, which would need forbidden `unsafe`), and this worker
+    /// maximizes the chance a grandchild slips out before assignment completes. If
+    /// the grandchild is still killed (DONE never written), that window is not a
+    /// practical escape hatch. Same marker contract: START written, DONE only on
+    /// survival.
+    pub(crate) fn tree_kill_early_grandchild_worker() -> String {
+        format!(
+            "\
+import os, sys, subprocess, time\n\
+d = os.path.dirname(os.path.abspath(__file__))\n\
+subprocess.Popen([sys.executable, \"-c\", \"import os, time\\n\" + \"d = \" + repr(d) + \"\\n\" + \"open(os.path.join(d, 'start.marker'), 'w').close()\\n\" + \"time.sleep({WORKER_SLEEP_SECS})\\n\" + \"open(os.path.join(d, 'done.marker'), 'w').close()\\n\"])\n\
 time.sleep({GRANDCHILD_PARENT_SLEEP_SECS})\n"
         )
     }

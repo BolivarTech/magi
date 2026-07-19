@@ -514,6 +514,21 @@ mod tests {
         cancel_kills_subprocess_tree(&tree_kill_grandchild_worker()).await;
     }
 
+    /// REQ-H36 (Windows Job Object) — fork↔assign race window (Melchior's
+    /// adversarial ask): the direct child spawns the grandchild **as early as
+    /// possible** (the `Popen` is its first substantive action), maximizing the
+    /// chance the grandchild exists before the module's immediate-post-spawn Job
+    /// assignment completes. If the grandchild is still killed when the timeout
+    /// fires (DONE marker never written), the immediate-assign window — the
+    /// documented deviation from `CREATE_SUSPENDED` (which would require forbidden
+    /// `unsafe`) — is not a practical escape hatch. Runs on this host.
+    #[cfg(windows)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_bash_cancel_kills_early_spawned_grandchild_windows() {
+        use crate::tools::proc_group::test_support::tree_kill_early_grandchild_worker;
+        cancel_kills_subprocess_tree(&tree_kill_early_grandchild_worker()).await;
+    }
+
     /// Shared body: run a real allowlisted long command (`python worker.py`)
     /// through the `bash` tool, fire the cancellation token mid-work, and assert
     /// the whole subprocess tree died — START marker present, DONE marker absent
