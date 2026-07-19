@@ -479,16 +479,16 @@ mod tests {
     #[cfg(windows)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_bash_cancel_kills_subprocess_tree_windows() {
-        use crate::tools::proc_group::test_support::TREE_KILL_WORKER;
-        cancel_kills_subprocess_tree(TREE_KILL_WORKER).await;
+        use crate::tools::proc_group::test_support::tree_kill_worker;
+        cancel_kills_subprocess_tree(&tree_kill_worker()).await;
     }
 
     /// POSIX process-group analog of the Windows test above (CI-only).
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_bash_cancel_kills_subprocess_tree_unix() {
-        use crate::tools::proc_group::test_support::TREE_KILL_WORKER;
-        cancel_kills_subprocess_tree(TREE_KILL_WORKER).await;
+        use crate::tools::proc_group::test_support::tree_kill_worker;
+        cancel_kills_subprocess_tree(&tree_kill_worker()).await;
     }
 
     /// REQ-H36 (Windows Job Object): a **grandchild** (shell→python→python) dies
@@ -498,8 +498,8 @@ mod tests {
     #[cfg(windows)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_bash_cancel_kills_grandchild_windows() {
-        use crate::tools::proc_group::test_support::TREE_KILL_GRANDCHILD_WORKER;
-        cancel_kills_subprocess_tree(TREE_KILL_GRANDCHILD_WORKER).await;
+        use crate::tools::proc_group::test_support::tree_kill_grandchild_worker;
+        cancel_kills_subprocess_tree(&tree_kill_grandchild_worker()).await;
     }
 
     /// POSIX process-group analog of the grandchild-kill test above (CI-only):
@@ -507,8 +507,8 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_bash_cancel_kills_grandchild_unix() {
-        use crate::tools::proc_group::test_support::TREE_KILL_GRANDCHILD_WORKER;
-        cancel_kills_subprocess_tree(TREE_KILL_GRANDCHILD_WORKER).await;
+        use crate::tools::proc_group::test_support::tree_kill_grandchild_worker;
+        cancel_kills_subprocess_tree(&tree_kill_grandchild_worker()).await;
     }
 
     /// Shared body: run a real allowlisted long command (`python worker.py`)
@@ -519,7 +519,9 @@ mod tests {
     /// worker share one proof harness (DRY).
     #[cfg(any(windows, unix))]
     async fn cancel_kills_subprocess_tree(worker_src: &str) {
-        use crate::tools::proc_group::test_support::python_available;
+        use crate::tools::proc_group::test_support::{
+            python_available, CANCEL_FIRE_DELAY_MS, POST_KILL_WAIT_MS,
+        };
 
         if !python_available() {
             eprintln!("skipping: python interpreter not found — cannot spawn a real child");
@@ -533,11 +535,13 @@ mod tests {
         let cancel = CancellationToken::new();
         let args = serde_json::json!({ "command": "python worker.py" });
 
-        // Fire cancel after START is surely written (python cold start + margin)
-        // but well before the 4 s worker sleep would complete.
+        // Fire cancel after START is surely written (python cold start + margin,
+        // generous enough to absorb full-suite CPU contention — see
+        // `CANCEL_FIRE_DELAY_MS` rustdoc) but well before the worker's sleep
+        // would complete, so the kill genuinely pre-empts live work.
         let cancel_fire = cancel.clone();
         let firer = tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(2000)).await;
+            tokio::time::sleep(Duration::from_millis(CANCEL_FIRE_DELAY_MS)).await;
             cancel_fire.cancel();
         });
 
@@ -559,10 +563,10 @@ mod tests {
             start.exists(),
             "START marker must exist — the real subprocess actually ran"
         );
-        // Wait past when a SURVIVING (orphaned) worker would have written DONE
-        // (worker sleeps 4 s; cancel at 2 s ⇒ an orphan finishes ~2 s later). If
-        // the tree was truly killed, DONE never appears.
-        tokio::time::sleep(Duration::from_millis(3500)).await;
+        // Wait past when a SURVIVING (orphaned) worker would have written DONE —
+        // see `POST_KILL_WAIT_MS` rustdoc for the margin math. If the tree was
+        // truly killed, DONE never appears.
+        tokio::time::sleep(Duration::from_millis(POST_KILL_WAIT_MS)).await;
         assert!(
             !done.exists(),
             "DONE marker must NOT exist — the subprocess tree was killed, not orphaned"

@@ -1400,7 +1400,9 @@ mod tests {
     #[cfg(any(windows, unix))]
     async fn run_query_timeout_kills_bash() {
         use crate::tools::bash::BashTool;
-        use crate::tools::proc_group::test_support::{python_available, TREE_KILL_WORKER};
+        use crate::tools::proc_group::test_support::{
+            python_available, tree_kill_worker, CANCEL_FIRE_DELAY_MS, POST_KILL_WAIT_MS,
+        };
 
         if !python_available() {
             eprintln!("skipping: python interpreter not found — cannot spawn a real child");
@@ -1408,7 +1410,7 @@ mod tests {
         }
         let dir = tempfile::tempdir().expect("tempdir");
         let root = dir.path().canonicalize().expect("canonicalize");
-        std::fs::write(root.join("worker.py"), TREE_KILL_WORKER).expect("write worker");
+        std::fs::write(root.join("worker.py"), tree_kill_worker()).expect("write worker");
 
         let provider = ScriptedProvider::new(vec![
             Turn::Tool {
@@ -1421,13 +1423,18 @@ mod tests {
         let mut agent = Agent::new(provider);
         agent.register_tool(Box::new(BashTool::new(root.clone()).expect("BashTool")));
 
+        // The `--timeout` budget below must absorb python/shell cold-start under
+        // full-suite CPU contention (see `CANCEL_FIRE_DELAY_MS` rustdoc) while
+        // still firing well before the worker's sleep completes, so the
+        // wall-clock timeout genuinely pre-empts live work rather than racing
+        // a cold start that hasn't even written START yet.
         let policy = Policy::new(Tier::Auto, 15, None);
         let outcome = run_query(
             resolved_stub(),
             policy,
             &mut agent,
             "go",
-            Some(Duration::from_millis(2000)),
+            Some(Duration::from_millis(CANCEL_FIRE_DELAY_MS)),
             None,
             None,
         )
@@ -1447,9 +1454,10 @@ mod tests {
             "error.kind must be timeout (first-class)"
         );
 
-        // Prove the tree died: wait past when a surviving orphan would write DONE.
+        // Prove the tree died: wait past when a surviving orphan would write
+        // DONE — see `POST_KILL_WAIT_MS` rustdoc for the margin math.
         let done = root.join("done.marker");
-        tokio::time::sleep(Duration::from_millis(3500)).await;
+        tokio::time::sleep(Duration::from_millis(POST_KILL_WAIT_MS)).await;
         assert!(
             root.join("start.marker").exists(),
             "the child really ran (START present)"

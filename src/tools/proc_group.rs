@@ -311,39 +311,81 @@ fn build_kill_on_close_job() -> Option<win32job::Job> {
 /// the `bash` tool tests and the headless-runner timeout test (DRY).
 #[cfg(test)]
 pub(crate) mod test_support {
+    /// How long the worker (or, for the grandchild fixture, the grandchild
+    /// itself) sleeps before it would write `done.marker` if left to survive.
+    /// Must comfortably outlast [`CANCEL_FIRE_DELAY_MS`] under CPU contention —
+    /// see the module-level rustdoc on [`CANCEL_FIRE_DELAY_MS`] for the full
+    /// budget rationale shared by `bash.rs` and `headless_runner.rs`.
+    pub(crate) const WORKER_SLEEP_SECS: u64 = 15;
+
+    /// How long the **parent** (direct child of the shell) sleeps in the
+    /// grandchild fixture after spawning the grandchild, keeping the shell
+    /// blocked so the run cannot complete cleanly before the cancel/timeout
+    /// fires. Must exceed [`CANCEL_FIRE_DELAY_MS`] with generous margin for the
+    /// same cold-start-under-contention reason as [`WORKER_SLEEP_SECS`].
+    pub(crate) const GRANDCHILD_PARENT_SLEEP_SECS: u64 = 18;
+
+    /// Delay before a test fires its cancellation/timeout trigger. Sized to
+    /// absorb interpreter (and, on Windows, shell) **cold-start latency under
+    /// full-suite CPU contention** — when hundreds of tests (including
+    /// 120–220 s memory tests) saturate every core, `python`/`powershell`
+    /// process creation can be delayed well past the ~2 s this used to be,
+    /// which previously caused a spurious "START marker missing" failure
+    /// (the kill fired before the worker had even started, not a kill-logic
+    /// bug). 5 s gives comfortable headroom while still firing well before
+    /// [`WORKER_SLEEP_SECS`]/[`GRANDCHILD_PARENT_SLEEP_SECS`] elapse, so the
+    /// kill still genuinely pre-empts live work rather than racing completion.
+    pub(crate) const CANCEL_FIRE_DELAY_MS: u64 = 5_000;
+
+    /// How long a test waits, after the kill/timeout has fired, before
+    /// asserting `done.marker` is absent. Must exceed the worker's *remaining*
+    /// sleep at the moment of the kill (`WORKER_SLEEP_SECS * 1000 -
+    /// CANCEL_FIRE_DELAY_MS` = 10 000 ms) with margin, so a surviving
+    /// (un-killed) orphan would provably have written `done.marker` by the
+    /// time we check — otherwise the assertion would be meaningless.
+    pub(crate) const POST_KILL_WAIT_MS: u64 = 13_000;
+
     /// A Python worker that writes a `start.marker` immediately, sleeps well past
     /// any test's cancel, then — **only if it survives** — writes a `done.marker`.
     /// Paths are absolute (derived from the script's own directory) so the worker
     /// is cwd-independent. Used to prove a kill deterministically: START must
     /// exist (the real grandchild ran) and DONE must never appear (it was killed
     /// mid-work, not merely denied time — the test waits past the sleep).
-    pub(crate) const TREE_KILL_WORKER: &str = "\
+    pub(crate) fn tree_kill_worker() -> String {
+        format!(
+            "\
 import os, time\n\
 d = os.path.dirname(os.path.abspath(__file__))\n\
 open(os.path.join(d, 'start.marker'), 'w').close()\n\
-time.sleep(4)\n\
-open(os.path.join(d, 'done.marker'), 'w').close()\n";
+time.sleep({WORKER_SLEEP_SECS})\n\
+open(os.path.join(d, 'done.marker'), 'w').close()\n"
+        )
+    }
 
     /// A two-level worker that spawns a **grandchild** (relative to the shell:
     /// shell→python→python) and lingers so the shell keeps waiting. The grandchild
     /// writes `start.marker`, sleeps well past any test's cancel, then — **only if
-    /// it survives** — writes `done.marker`. The parent `sleep(6)` keeps the shell
+    /// it survives** — writes `done.marker`. The parent sleep keeps the shell
     /// blocked past the cancel so the run does not complete cleanly first. Proves
     /// the Job Object / process group kills the **whole tree** (a detached
     /// grandchild has no job of its own), not merely the direct child: START must
     /// exist (the grandchild ran) and DONE must never appear (it was killed).
-    pub(crate) const TREE_KILL_GRANDCHILD_WORKER: &str = "\
+    pub(crate) fn tree_kill_grandchild_worker() -> String {
+        format!(
+            "\
 import os, sys, subprocess, time\n\
 d = os.path.dirname(os.path.abspath(__file__))\n\
 gc = (\n\
     \"import os, time\\n\"\n\
     \"d = \" + repr(d) + \"\\n\"\n\
     \"open(os.path.join(d, 'start.marker'), 'w').close()\\n\"\n\
-    \"time.sleep(4)\\n\"\n\
+    \"time.sleep({WORKER_SLEEP_SECS})\\n\"\n\
     \"open(os.path.join(d, 'done.marker'), 'w').close()\\n\"\n\
 )\n\
 subprocess.Popen([sys.executable, \"-c\", gc])\n\
-time.sleep(6)\n";
+time.sleep({GRANDCHILD_PARENT_SLEEP_SECS})\n"
+        )
+    }
 
     /// A probe that reports whether it can read the three magi-managed secrets
     /// (`MAGI_PASSPHRASE`/`ANTHROPIC_API_KEY`/`OPENAI_API_KEY`) from its own
