@@ -19,12 +19,14 @@ use crate::agent::Agent;
 // It is DISTINCT from `magi_core::orchestrator::MagiConfig` — the latter is NEVER
 // imported here, avoiding the name collision.
 use crate::config::{resolve_openai_base_url, resolve_openai_model, resolve_provider, MagiConfig};
+use crate::headless_runner::{resolve_run_timeout, run_consult, run_query};
 use crate::memory::clock::SystemClock;
 use crate::memory::embedding::OpenAiCompatibleEmbedder;
 use crate::memory::store::SqliteVectorStore;
 use crate::system::database::{EncryptedSqliteMemory, MemoryStore};
 use crate::system::fs::{FileSystem, RealFileSystem};
 use crate::system::grep::RipGrep;
+use crate::system::workspace::Workspace;
 use crate::tools::bash::BashTool;
 use crate::tools::grep::GrepTool;
 use crate::tools::knowledge::ProjectFactTool;
@@ -34,14 +36,28 @@ use crate::tools::write::FileWriteTool;
 use clap::Parser;
 use cryptovault::CryptoVault;
 use magi_core::orchestrator::{Magi, MagiBuilder};
+use magi_rs::headless::exit::exit_code as headless_exit_code;
+use magi_rs::headless::input::{parse_input, read_input_bounded, InputFormat};
+use magi_rs::headless::limits::{FULL_AUTO_MAX_TOOL_CALLS, NORMAL_MAX_TOOL_CALLS};
+use magi_rs::headless::log::{LogLevel, RunLog};
+use magi_rs::headless::output::{write_json, write_text};
+use magi_rs::headless::policy::{Policy, Tier};
+use magi_rs::headless::resolution::{
+    resolve as resolve_params, CliOverrides, ConfigDefaults, Resolved,
+};
+use magi_rs::headless::types::{ErrorKind, RunOutcome, StopReason};
+use magi_rs::headless::HeadlessError;
 use magi_rs::vault::{
     check_strength, create_passphrase, diagnose, format_diagnose_report, harden_process,
     rekey_envelope, resolve_passphrase, run_vault_cmd, strip_trailing_newline, wire,
     PassphrasePrompt, SecretStore, TtyIo, TtyPrompt, VaultCmd, VaultError, PASSPHRASE_ENV,
 };
 use std::env;
+use std::io::Write as _;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use zeroize::Zeroizing;
 
 /// A [`SecretStore`] shared between the passphrase-resolution/API-key
@@ -53,6 +69,34 @@ use zeroize::Zeroizing;
 /// — see `src/vault/store.rs`); the `Mutex` supplies the exclusion, which is
 /// exactly what `Mutex<T>: Sync` requires of its `T: Send`.
 type SharedSecretStore = Arc<Mutex<dyn SecretStore + Send>>;
+
+/// A passphrase read from `-p`/`--passphrase`, wrapped in [`Zeroizing`] so the
+/// plaintext never lingers in memory after use (secrets-separation invariant).
+///
+/// Its [`Debug`] is redacted so the secret can never leak through the derived
+/// `Debug` of [`Args`]; it `Deref`s to `str` so existing accessors
+/// (`args.passphrase.as_deref()`) keep working unchanged.
+#[derive(Clone)]
+struct SecretArg(Zeroizing<String>);
+
+impl std::ops::Deref for SecretArg {
+    type Target = str;
+    fn deref(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+impl std::fmt::Debug for SecretArg {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SecretArg(<redacted>)")
+    }
+}
+
+/// clap value-parser for [`SecretArg`]: wraps the raw CLI string in
+/// [`Zeroizing`]. Infallible — any string is a syntactically valid passphrase.
+fn parse_secret_arg(s: &str) -> Result<SecretArg, std::convert::Infallible> {
+    Ok(SecretArg(Zeroizing::new(s.to_string())))
+}
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -67,11 +111,127 @@ struct Args {
 
     /// Master passphrase (precedence: -p > MAGI_PASSPHRASE > interactive
     /// prompt). Global: also applies to the `vault` subcommand (REQ-V04).
-    #[arg(short = 'p', long, global = true)]
-    passphrase: Option<String>,
+    #[arg(short = 'p', long, global = true, value_parser = parse_secret_arg)]
+    passphrase: Option<SecretArg>,
 
     #[command(subcommand)]
     command: Option<TopCmd>,
+}
+
+/// Input format selector for `--input-format` (REQ-H04); maps to the library's
+/// [`InputFormat`] (auto-detect when the flag is absent).
+#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+enum CliInputFormat {
+    /// Treat the whole input as the prompt verbatim (never parsed as JSON).
+    Text,
+    /// Parse the input as a JSON envelope object.
+    Json,
+}
+
+impl CliInputFormat {
+    /// Maps this CLI selector to the library [`InputFormat`].
+    fn into_lib(self) -> InputFormat {
+        match self {
+            CliInputFormat::Text => InputFormat::Text,
+            CliInputFormat::Json => InputFormat::Json,
+        }
+    }
+}
+
+/// Output format selector for `--output-format` (REQ-H04); text (default) or a
+/// single buffered JSON object.
+#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+enum CliOutputFormat {
+    /// The response text only (streamed to stdout / buffered to `-o`).
+    Text,
+    /// A single rich JSON object (buffered).
+    Json,
+}
+
+/// Log-verbosity selector for `--log-level` (REQ-H24); maps to [`LogLevel`].
+#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+enum CliLogLevel {
+    /// Only irrecoverable failures.
+    Error,
+    /// Recoverable but noteworthy conditions.
+    Warn,
+    /// Normal operational notices (default).
+    Info,
+    /// Maximum verbosity (redacted, capped tool inputs).
+    Debug,
+}
+
+impl CliLogLevel {
+    /// Maps this CLI selector to the library [`LogLevel`].
+    fn into_lib(self) -> LogLevel {
+        match self {
+            CliLogLevel::Error => LogLevel::Error,
+            CliLogLevel::Warn => LogLevel::Warn,
+            CliLogLevel::Info => LogLevel::Info,
+            CliLogLevel::Debug => LogLevel::Debug,
+        }
+    }
+}
+
+/// Flags shared by the `query` and `consult` headless subcommands
+/// (REQ-H03/H04/H05/H07/H08/H12/H36). `--consult` is only meaningful for
+/// `query` (`consult` already forces the multi-perspective pass); on `consult`
+/// it is inert.
+#[derive(clap::Args, Debug)]
+struct HeadlessArgs {
+    /// Read the prompt/envelope from a file; omitted ⇒ stdin (REQ-H03).
+    #[arg(short = 'i', long)]
+    input: Option<PathBuf>,
+    /// Write the output to a file (atomic); omitted ⇒ stdout (REQ-H03).
+    #[arg(short = 'o', long)]
+    output: Option<PathBuf>,
+    /// Force the input interpretation; omitted ⇒ auto-detect (REQ-H04).
+    #[arg(long, value_enum)]
+    input_format: Option<CliInputFormat>,
+    /// Output format; omitted ⇒ text (REQ-H04).
+    #[arg(long, value_enum)]
+    output_format: Option<CliOutputFormat>,
+    /// Working directory: file-tool sandbox root and `.magi/` walk-up base
+    /// (default cwd, REQ-H05).
+    #[arg(short = 'w', long)]
+    workdir: Option<PathBuf>,
+    /// Stateless: do not persist session/history/memories (REQ-H18).
+    #[arg(long)]
+    no_memory: bool,
+    /// Auto-approve all registered tools, hard barriers intact (REQ-H07).
+    #[arg(long)]
+    auto: bool,
+    /// Like `--auto` plus elevated caps and silenced soft guards (REQ-H08).
+    #[arg(long)]
+    full_auto: bool,
+    /// Wall-clock ceiling in seconds for the whole run (REQ-H36).
+    #[arg(long)]
+    timeout: Option<u64>,
+    /// Run-log verbosity; omitted ⇒ info (REQ-H24).
+    #[arg(long, value_enum)]
+    log_level: Option<CliLogLevel>,
+    /// Override the run-log directory (default `.magi/logs`, REQ-H24).
+    #[arg(long)]
+    log_dir: Option<PathBuf>,
+    /// Honor an envelope `system` override (default: ignore it, REQ-H12b).
+    #[arg(long)]
+    allow_system_override: bool,
+    /// Refuse to overwrite the `-o` output file if it already exists (REQ-H03).
+    #[arg(long)]
+    no_clobber: bool,
+    /// Force exactly one MAGI multi-perspective pass in `query` (REQ-H22).
+    #[arg(long)]
+    consult: bool,
+    /// Per-request model override (wins over the envelope, REQ-H12).
+    #[arg(long)]
+    model: Option<String>,
+    /// Per-request provider override (wins over the envelope, REQ-H12).
+    #[arg(long)]
+    provider: Option<String>,
+    /// Per-request tool-call cap; the operator flag can RAISE the ceiling
+    /// (REQ-H08/H12b).
+    #[arg(long)]
+    max_tool_calls: Option<u32>,
 }
 
 /// Top-level subcommands beyond the default TUI launch.
@@ -87,6 +247,12 @@ enum TopCmd {
     /// Scaffold a fresh `.magi/` state directory in the working directory
     /// (config, encrypted DB, logs); refuses to nest or overwrite (REQ-H01).
     Init,
+
+    /// Run the agent headless over a prompt with structured I/O (REQ-H02).
+    Query(HeadlessArgs),
+
+    /// Force a MAGI multi-perspective analysis over the prompt (REQ-H02/H21).
+    Consult(HeadlessArgs),
 }
 
 #[derive(Debug)]
@@ -858,7 +1024,7 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
     let passphrase_flag: Option<Zeroizing<String>> = args
         .passphrase
         .take()
-        .map(Zeroizing::new)
+        .map(|s| s.0)
         .or_else(|| env_passphrase.filter(|p| !p.is_empty()));
     let workspace_root = env::current_dir()?;
 
@@ -888,6 +1054,30 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
         }
         Some(TopCmd::Init) => {
             return Ok(exit_code(run_init(&workspace_root, passphrase_flag)));
+        }
+        Some(TopCmd::Query(h)) => {
+            return Ok(exit_code(
+                run_query_subcommand(
+                    h,
+                    passphrase_flag,
+                    &workspace_root,
+                    anthropic_key,
+                    openai_key,
+                )
+                .await,
+            ));
+        }
+        Some(TopCmd::Consult(h)) => {
+            return Ok(exit_code(
+                run_consult_subcommand(
+                    h,
+                    passphrase_flag,
+                    &workspace_root,
+                    anthropic_key,
+                    openai_key,
+                )
+                .await,
+            ));
         }
         // No subcommand ⇒ fall through to the TUI launch below.
         None => {}
@@ -1070,160 +1260,49 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
     } else {
         "anthropic"
     };
-    let env_models = MagiEnvModels {
-        melchior: env::var("MAGI_MODEL_MELCHIOR").ok(),
-        balthasar: env::var("MAGI_MODEL_BALTHASAR").ok(),
-        caspar: env::var("MAGI_MODEL_CASPAR").ok(),
-    };
-    let specs = resolve_magi_adapter_specs(backend_label, &magi_config.magi, &env_models);
-
-    // Builds a sibling provider on the SAME backend with a different model.
-    // Mirrors the principal provider resolution above: `"openai"` uses the captured
-    // OpenAI creds; any OTHER backend uses the discovered Anthropic credentials —
-    // the SAME `config.api_key` source as the principal (no second credential path).
-    // On this non-static branch the relevant source is always `Some`, so a per-agent
-    // override is never silently dropped (a malformed `provider_kind` still maps to
-    // the Anthropic path, matching how the principal itself was built).
-    let build_sibling = |model: &str| -> Option<Arc<dyn Provider>> {
-        if provider_kind == "openai" {
-            debug_assert!(
-                oai_creds.is_some(),
-                "openai backend must have captured oai_creds before building siblings"
-            );
-            oai_creds
-                .as_ref()
-                .map(|(b, k)| build_openai_provider(b, k, model))
-        } else {
-            config.as_ref().map(|c| {
-                Arc::new(AnthropicProvider::new(c.api_key.clone(), model.to_string()))
-                    as Arc<dyn Provider>
-            })
-        }
-    };
-
     let consult_magi: Option<Arc<Magi>> = if provider.is_static() {
         // No backend to build adapters; surface a non-silent notice if the user
         // configured [magi] overrides anyway (RF-10, S-13).
+        let specs = resolve_magi_adapter_specs(
+            backend_label,
+            &magi_config.magi,
+            &MagiEnvModels {
+                melchior: env::var("MAGI_MODEL_MELCHIOR").ok(),
+                balthasar: env::var("MAGI_MODEL_BALTHASAR").ok(),
+                caspar: env::var("MAGI_MODEL_CASPAR").ok(),
+            },
+        );
         if let Some(notice) = static_override_notice(true, !specs.is_empty()) {
             startup_notices.push(notice);
         }
         None
     } else {
-        let default_adapter = crate::agent::magi_adapter::MagiCoreProviderAdapter::new(
+        Some(build_magi_orchestrator(
             provider.clone(),
             backend_label,
-            model_label.clone(),
-        );
-        if specs.is_empty() {
-            // v0.4.0 path — unchanged (S-6).
-            Some(Arc::new(Magi::new(Arc::new(default_adapter))))
-        } else {
-            let mut builder = MagiBuilder::new(Arc::new(default_adapter));
-            for spec in &specs {
-                if let Some(sibling) = build_sibling(&spec.model) {
-                    let adapter = crate::agent::magi_adapter::MagiCoreProviderAdapter::new(
-                        sibling,
-                        spec.adapter_name.clone(),
-                        spec.model.clone(),
-                    );
-                    builder = builder.with_provider(spec.agent, Arc::new(adapter));
-                }
-            }
-            // build() is fallible (MagiError); propagate to surface at startup (RF-6).
-            Some(Arc::new(
-                builder
-                    .build()
-                    .map_err(|e| anyhow::anyhow!("MAGI builder failed: {e}"))?,
-            ))
-        }
+            &model_label,
+            &magi_config,
+            oai_creds,
+            config.as_ref().map(|c| c.api_key.clone()),
+        )?)
     };
 
     let mut agent = Agent::new(provider);
 
     match memory_store {
         Some(concrete_store) => {
-            // Build the vector store from the shared connection + masked DEK.
-            // Errors here are non-fatal: fall through without the tiered-memory
-            // subsystem rather than refusing to start (REQ-29).
-            let vstore_result = concrete_store
-                .data_key()
-                .map_err(|e| crate::memory::error::MemoryError::Crypto(e.to_string()))
-                .and_then(|dek| SqliteVectorStore::new(concrete_store.shared_conn(), dek));
-
-            // Never-delete absolute (REQ-H20 / D-H10): on-disk content is NEVER
-            // auto-reset — a data-without-envelope DB fails to open with a typed
-            // `DbCorrupt` instead of being wiped — so there is no reset notice.
-            let memory: Arc<dyn MemoryStore> = Arc::new(concrete_store);
-            let sessions = memory.list_sessions().await?;
-            let session_id = if let Some((id, _)) = sessions.first() {
-                id.clone()
-            } else {
-                memory.create_session("default").await?
-            };
-            agent.set_memory(memory.clone(), session_id);
-            let _ = agent.load_history().await;
-
-            // Wire the tiered-memory subsystem when the vector store initialised
-            // successfully. `OPENAI_API_KEY` is the embedding API key (env > vault,
-            // REQ-V12; may be the dummy `"ollama"` for the local Ollama server —
-            // it ignores auth).
-            if let Ok(vstore) = vstore_result {
-                // W1: new() now returns Result; propagate failure as a startup notice
-                // and degrade gracefully (text-only persistence; REQ-29).
-                match OpenAiCompatibleEmbedder::new(
-                    &magi_config.embedding,
-                    resolve_openai_key(openai_key.as_deref(), secret_store.as_ref()),
-                ) {
-                    Err(err) => {
-                        startup_notices.push(format!(
-                            "embedding client init failed ({err}); \
-                         memory subsystem disabled (text-only persistence)"
-                        ));
-                    }
-                    Ok(embedder_inner) => {
-                        let embedder = Arc::new(embedder_inner);
-                        let clock = Arc::new(SystemClock);
-                        // Keep a reference for the startup diagnostics line (CP2-AN/S).
-                        let vstore = Arc::new(vstore);
-                        let vstore_diag = Arc::clone(&vstore);
-                        agent.set_memory_subsystem(
-                            vstore,
-                            embedder,
-                            clock,
-                            magi_config.memory.clone(),
-                        );
-                        agent.on_session_open().await.ok();
-
-                        // CP2-AN/S: one-line diagnostics summary — never fail startup on error.
-                        if let Ok(d) = vstore_diag.diagnostics("root").await {
-                            startup_notices.push(format!(
-                        "memory: {} active, {} archived, {} pending re-embed (~{} KB index)",
-                        d.active_count,
-                        d.archived_count,
-                        d.pending_reembed_count,
-                        d.ram_estimate_bytes / 1024,
-                    ));
-                        }
-
-                        // CP2-AG/AJ: warn the user when the distiller will send memory batches
-                        // to a cloud embedding endpoint (non-localhost).
-                        if magi_config.memory.distill_enabled
-                            && !is_localhost(&magi_config.embedding.base_url)
-                        {
-                            startup_notices.push(format!(
-                                "Memory distiller will send bounded memory batches \
-                         (≤ {} tokens) to {} — set distill_enabled = false \
-                         in [memory] for zero cloud memory egress.",
-                                magi_config.memory.distill_max_batch_tokens,
-                                magi_config.embedding.base_url,
-                            ));
-                        }
-                    } // Ok(embedder_inner) arm
-                } // match OpenAiCompatibleEmbedder::new
-            } // if let Ok(vstore)
-
-            // ProjectFactTool needs the same store; register it on the encrypted path only.
-            agent.register_tool(Box::new(ProjectFactTool::new(memory.clone())));
+            // Wire persistence + the tiered-memory subsystem (shared with the
+            // headless `query` path, DRY). The embedding key is resolved here
+            // (env > vault) so the helper stays free of the secret-store plumbing.
+            let embed_key = resolve_openai_key(openai_key.as_deref(), secret_store.as_ref());
+            attach_persistent_memory(
+                &mut agent,
+                concrete_store,
+                &magi_config,
+                embed_key,
+                &mut startup_notices,
+            )
+            .await?;
         }
         None => {
             // #7: surface the no-persistence state in the TUI, not just pre-TUI stderr.
@@ -1269,6 +1348,778 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
     )
     .await?;
     Ok(ExitCode::SUCCESS)
+}
+
+/// Builds the MAGI orchestrator over `provider` (the resolved principal
+/// backend), honoring per-agent model overrides from `[magi]`/`MAGI_MODEL_*`
+/// by constructing a sibling provider (same backend credentials, different
+/// model) for each overridden agent. Shared by the TUI launch and the headless
+/// `query`/`consult` paths (DRY).
+///
+/// `oai_creds` (openai `(base_url, api_key)`) and `anthropic_key` are the
+/// credential sources for sibling providers; the one matching `backend_label`
+/// is `Some` for a live backend, matching how the principal provider was built.
+///
+/// # Errors
+/// Propagates a `MagiBuilder::build` failure (a misconfigured per-agent adapter)
+/// as an `anyhow` error so the caller can surface it.
+fn build_magi_orchestrator(
+    provider: Arc<dyn Provider>,
+    backend_label: &str,
+    model_label: &str,
+    magi_config: &MagiConfig,
+    oai_creds: Option<(String, String)>,
+    anthropic_key: Option<String>,
+) -> anyhow::Result<Arc<Magi>> {
+    let env_models = MagiEnvModels {
+        melchior: env::var("MAGI_MODEL_MELCHIOR").ok(),
+        balthasar: env::var("MAGI_MODEL_BALTHASAR").ok(),
+        caspar: env::var("MAGI_MODEL_CASPAR").ok(),
+    };
+    let specs = resolve_magi_adapter_specs(backend_label, &magi_config.magi, &env_models);
+
+    // Builds a sibling provider on the SAME backend with a different model,
+    // from whichever credential source matches `backend_label`.
+    let build_sibling = |model: &str| -> Option<Arc<dyn Provider>> {
+        if backend_label == "openai" {
+            oai_creds
+                .as_ref()
+                .map(|(b, k)| build_openai_provider(b, k, model))
+        } else {
+            anthropic_key.as_ref().map(|k| {
+                Arc::new(AnthropicProvider::new(k.clone(), model.to_string())) as Arc<dyn Provider>
+            })
+        }
+    };
+
+    let default_adapter = crate::agent::magi_adapter::MagiCoreProviderAdapter::new(
+        provider,
+        backend_label,
+        model_label,
+    );
+    if specs.is_empty() {
+        // v0.4.0 path — a single shared adapter.
+        return Ok(Arc::new(Magi::new(Arc::new(default_adapter))));
+    }
+    let mut builder = MagiBuilder::new(Arc::new(default_adapter));
+    for spec in &specs {
+        if let Some(sibling) = build_sibling(&spec.model) {
+            let adapter = crate::agent::magi_adapter::MagiCoreProviderAdapter::new(
+                sibling,
+                spec.adapter_name.clone(),
+                spec.model.clone(),
+            );
+            builder = builder.with_provider(spec.agent, Arc::new(adapter));
+        }
+    }
+    Ok(Arc::new(builder.build().map_err(|e| {
+        anyhow::anyhow!("MAGI builder failed: {e}")
+    })?))
+}
+
+/// Wires an opened encrypted store into `agent` as persistent message memory
+/// plus the tiered-memory subsystem (Task 12), appending any non-fatal notices
+/// to `notices`. Shared by the TUI launch and the headless `query` path so the
+/// memory wiring lives in exactly one place (DRY).
+///
+/// `embed_key` is the already-resolved `OPENAI_API_KEY` for the embedder
+/// (`env > vault`); the caller resolves it so this helper stays free of the
+/// secret-store plumbing.
+///
+/// # Errors
+/// Propagates a fatal session-store error from `list_sessions`/`create_session`;
+/// a failed vector-store or embedder init degrades to text-only persistence
+/// with a notice, never an error (REQ-29).
+async fn attach_persistent_memory(
+    agent: &mut Agent,
+    concrete_store: EncryptedSqliteMemory,
+    magi_config: &MagiConfig,
+    embed_key: Option<String>,
+    notices: &mut Vec<String>,
+) -> anyhow::Result<()> {
+    // Build the vector store from the shared connection + masked DEK. Errors
+    // here are non-fatal: fall through without the tiered-memory subsystem
+    // rather than refusing to start (REQ-29).
+    let vstore_result = concrete_store
+        .data_key()
+        .map_err(|e| crate::memory::error::MemoryError::Crypto(e.to_string()))
+        .and_then(|dek| SqliteVectorStore::new(concrete_store.shared_conn(), dek));
+
+    // Never-delete absolute (REQ-H20 / D-H10): on-disk content is NEVER
+    // auto-reset — a data-without-envelope DB fails to open with a typed
+    // `DbCorrupt` instead of being wiped — so there is no reset notice.
+    let memory: Arc<dyn MemoryStore> = Arc::new(concrete_store);
+    let sessions = memory.list_sessions().await?;
+    let session_id = if let Some((id, _)) = sessions.first() {
+        id.clone()
+    } else {
+        memory.create_session("default").await?
+    };
+    agent.set_memory(memory.clone(), session_id);
+    let _ = agent.load_history().await;
+
+    // Wire the tiered-memory subsystem when the vector store initialised
+    // successfully. The embedding key may be the dummy `"ollama"` for the local
+    // Ollama server (it ignores auth).
+    if let Ok(vstore) = vstore_result {
+        // W1: new() returns Result; a failure degrades to text-only persistence.
+        match OpenAiCompatibleEmbedder::new(&magi_config.embedding, embed_key) {
+            Err(err) => {
+                notices.push(format!(
+                    "embedding client init failed ({err}); \
+                     memory subsystem disabled (text-only persistence)"
+                ));
+            }
+            Ok(embedder_inner) => {
+                let embedder = Arc::new(embedder_inner);
+                let clock = Arc::new(SystemClock);
+                let vstore = Arc::new(vstore);
+                let vstore_diag = Arc::clone(&vstore);
+                agent.set_memory_subsystem(vstore, embedder, clock, magi_config.memory.clone());
+                agent.on_session_open().await.ok();
+
+                // CP2-AN/S: one-line diagnostics summary — never fail startup on error.
+                if let Ok(d) = vstore_diag.diagnostics("root").await {
+                    notices.push(format!(
+                        "memory: {} active, {} archived, {} pending re-embed (~{} KB index)",
+                        d.active_count,
+                        d.archived_count,
+                        d.pending_reembed_count,
+                        d.ram_estimate_bytes / 1024,
+                    ));
+                }
+
+                // CP2-AG/AJ: warn when the distiller will send memory batches to a
+                // cloud embedding endpoint (non-localhost).
+                if magi_config.memory.distill_enabled
+                    && !is_localhost(&magi_config.embedding.base_url)
+                {
+                    notices.push(format!(
+                        "Memory distiller will send bounded memory batches \
+                         (≤ {} tokens) to {} — set distill_enabled = false \
+                         in [memory] for zero cloud memory egress.",
+                        magi_config.memory.distill_max_batch_tokens, magi_config.embedding.base_url,
+                    ));
+                }
+            }
+        }
+    }
+
+    // ProjectFactTool needs the same store; register it on the encrypted path only.
+    agent.register_tool(Box::new(ProjectFactTool::new(memory.clone())));
+    Ok(())
+}
+
+/// Opens the encrypted store at `db_path` with `passphrase` for a headless run,
+/// mapping the vault failure to a typed [`HeadlessError`] (never wiping — a
+/// wrong passphrase is retryable, REQ-H20/H23).
+///
+/// # Errors
+/// The mapped [`HeadlessError`] behind an `EncryptedSqliteMemory::new` failure
+/// (`WrongPassphrase`, `DbCorrupt`, storage, …).
+fn open_headless_memory(
+    db_path: &Path,
+    passphrase: Zeroizing<String>,
+) -> Result<Option<EncryptedSqliteMemory>, HeadlessError> {
+    match EncryptedSqliteMemory::new(db_path.to_path_buf(), passphrase) {
+        Ok(store) => Ok(Some(store)),
+        Err(e) => Err(match e.downcast::<VaultError>() {
+            Ok(ve) => HeadlessError::from(ve),
+            Err(other) => HeadlessError::Storage(other.to_string()),
+        }),
+    }
+}
+
+/// Reads the headless input from `-i <file>` or stdin, bounded to
+/// `MAX_INPUT_BYTES` (REQ-H29, anti-DoS).
+///
+/// # Errors
+/// [`HeadlessError::Io`] on a file open or read failure, or
+/// [`HeadlessError::InputTooLarge`] when the source exceeds the cap.
+fn read_headless_input(input: Option<&Path>) -> Result<Vec<u8>, HeadlessError> {
+    match input {
+        Some(path) => {
+            let file = std::fs::File::open(path).map_err(|e| HeadlessError::Io(e.to_string()))?;
+            read_input_bounded(file)
+        }
+        None => read_input_bounded(std::io::stdin().lock()),
+    }
+}
+
+/// Maps a [`RunOutcome`] error class to a class-equivalent [`HeadlessError`] so
+/// the shared headless exit taxonomy ([`headless_exit_code`]) assigns the exit
+/// code (REQ-H14/H23). Only the error *class* matters here (the message is
+/// already rendered), so a runtime-class kind maps to a placeholder `Io`.
+fn headless_error_for_exit(kind: ErrorKind) -> HeadlessError {
+    match kind {
+        ErrorKind::InputInvalid => HeadlessError::InputInvalid(String::new()),
+        ErrorKind::PassphraseUnavailable => HeadlessError::PassphraseUnavailable,
+        ErrorKind::DbCorrupt
+        | ErrorKind::WrongPassphrase
+        | ErrorKind::TierDenied
+        | ErrorKind::Provider
+        | ErrorKind::Timeout
+        | ErrorKind::Runtime => HeadlessError::Io(String::new()),
+    }
+}
+
+/// Computes the process exit code of a finished headless run through the shared
+/// headless taxonomy (REQ-H23/H23b): a typed error dominates; otherwise a
+/// task-blocking tier denial (empty response + `stop_reason == Denied`) ⇒ 3;
+/// else 0.
+fn exit_code_for_outcome(outcome: &RunOutcome) -> i32 {
+    let exit_err = outcome
+        .error
+        .as_ref()
+        .map(|e| headless_error_for_exit(e.kind));
+    let response_empty = outcome.response.as_deref().is_none_or(str::is_empty);
+    let tier_denied = outcome.stop_reason == StopReason::Denied;
+    headless_exit_code(
+        exit_err.as_ref(),
+        outcome.stop_reason,
+        response_empty,
+        tier_denied,
+    )
+}
+
+/// Writes `contents` to `path` atomically (REQ-H03): with `--no-clobber` an
+/// atomic `O_CREAT|O_EXCL` create that refuses an existing file; otherwise a
+/// temp-file + rename that overwrites in place. The parent directory must exist.
+///
+/// # Errors
+/// [`HeadlessError::InputInvalid`] (→ exit 2) if the parent is missing or the
+/// destination exists under `--no-clobber`; [`HeadlessError::Io`] on any other
+/// filesystem error.
+fn write_output_atomic(
+    path: &Path,
+    contents: &[u8],
+    no_clobber: bool,
+) -> Result<(), HeadlessError> {
+    let parent = match path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+        _ => PathBuf::from("."),
+    };
+    if !parent.exists() {
+        return Err(HeadlessError::InputInvalid(format!(
+            "output parent directory does not exist: {}",
+            parent.display()
+        )));
+    }
+    if no_clobber {
+        // O_CREAT|O_EXCL atomic create — no TOCTOU check-then-write.
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+        {
+            Ok(mut f) => f
+                .write_all(contents)
+                .map_err(|e| HeadlessError::Io(e.to_string())),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                Err(HeadlessError::InputInvalid(format!(
+                    "output file already exists (--no-clobber): {}",
+                    path.display()
+                )))
+            }
+            Err(e) => Err(HeadlessError::Io(e.to_string())),
+        }
+    } else {
+        let tmp = parent.join(format!(".magi-out.tmp.{:016x}", rand::random::<u64>()));
+        std::fs::write(&tmp, contents).map_err(|e| HeadlessError::Io(e.to_string()))?;
+        std::fs::rename(&tmp, path).map_err(|e| {
+            let _ = std::fs::remove_file(&tmp);
+            HeadlessError::Io(e.to_string())
+        })
+    }
+}
+
+/// Serializes `outcome` in the requested format to the destination selected by
+/// `h` — a buffered atomic `-o <file>` (REQ-H03), or stdout (JSON buffered, text
+/// streamed; clamp notices always go to stderr, REQ-H13/H14).
+///
+/// # Errors
+/// [`HeadlessError`] on a serialization or output-write failure.
+fn write_headless_output(
+    h: &HeadlessArgs,
+    outcome: &RunOutcome,
+    out_json: bool,
+) -> Result<(), HeadlessError> {
+    if let Some(path) = &h.output {
+        // With `-o` the output is BUFFERED (never streamed to a file) and then
+        // written atomically (REQ-H13 reconciled with REQ-H03).
+        let mut buf: Vec<u8> = Vec::new();
+        if out_json {
+            write_json(&mut buf, outcome)?;
+        } else {
+            write_text(&mut buf, &mut std::io::stderr(), outcome);
+        }
+        write_output_atomic(path, &buf, h.no_clobber)
+    } else {
+        let stdout = std::io::stdout();
+        let mut out = stdout.lock();
+        if out_json {
+            write_json(&mut out, outcome)?;
+        } else {
+            write_text(&mut out, &mut std::io::stderr(), outcome);
+        }
+        out.flush().map_err(|e| HeadlessError::Io(e.to_string()))
+    }
+}
+
+/// Emits `outcome` in the requested format and returns the process exit code
+/// (shared by `query` and `consult`). An output-write failure is reported to
+/// stderr and mapped to its own exit code.
+fn finish_headless(h: &HeadlessArgs, outcome: &RunOutcome) -> i32 {
+    let out_json = matches!(h.output_format, Some(CliOutputFormat::Json));
+    if let Err(e) = write_headless_output(h, outcome, out_json) {
+        eprintln!("error: {e}");
+        return headless_error_exit_code(&e);
+    }
+    exit_code_for_outcome(outcome)
+}
+
+/// Starts the JSONL run log for a headless run, or returns `None` when logging
+/// is disabled (`--no-memory` without an explicit `--log-dir`, REQ-H24). A
+/// start failure degrades to no logging with a stderr warning (best-effort).
+fn build_run_log(h: &HeadlessArgs, workspace: Option<&Workspace>) -> Option<RunLog> {
+    let level = h
+        .log_level
+        .map(CliLogLevel::into_lib)
+        .unwrap_or(LogLevel::Info);
+    let logs_dir = if let Some(d) = &h.log_dir {
+        Some(d.clone())
+    } else if h.no_memory {
+        None
+    } else {
+        workspace.map(Workspace::logs_dir)
+    };
+    let dir = logs_dir?;
+    match RunLog::start(&dir, level) {
+        Ok(log) => Some(log),
+        Err(e) => {
+            eprintln!("warning: could not start the run log ({e}); continuing without it");
+            None
+        }
+    }
+}
+
+/// Maps the `--auto`/`--full-auto` flags to an authorization [`Tier`]:
+/// `--full-auto` wins when both are set; neither ⇒ the read-only `Default`
+/// (REQ-H07/H08).
+fn tier_from_flags(auto: bool, full_auto: bool) -> Tier {
+    if full_auto {
+        Tier::FullAuto
+    } else if auto {
+        Tier::Auto
+    } else {
+        Tier::Default
+    }
+}
+
+/// The resolved run context shared by the headless `query` and `consult`
+/// dispatchers: state discovery, an (optionally) opened store, the resolved
+/// parameters, and a ready-built principal provider (REQ-H02).
+struct HeadlessContext {
+    /// The `.magi/` walk-up base and file-tool sandbox root (`-w`/cwd).
+    workdir: PathBuf,
+    /// The opened encrypted store (persistence + vault), if one was unlocked.
+    memory: Option<EncryptedSqliteMemory>,
+    /// The loaded `magi.toml` config from the discovered `.magi/`.
+    magi_config: MagiConfig,
+    /// The resolved principal LLM provider.
+    provider: Arc<dyn Provider>,
+    /// The resolved provider kind (`"openai"`/`"anthropic"`/…).
+    provider_kind: String,
+    /// The effective model label for MAGI adapter naming.
+    model_label: String,
+    /// Captured OpenAI `(base_url, api_key)` for sibling MAGI providers.
+    oai_creds: Option<(String, String)>,
+    /// Captured Anthropic key for sibling MAGI providers.
+    anthropic_key_for_siblings: Option<String>,
+    /// The resolved effective run parameters (model/provider/caps/consult).
+    resolved: Resolved,
+    /// The resolved user prompt.
+    prompt: String,
+    /// The authorization tier for this run.
+    tier: Tier,
+    /// The already-resolved embedding key (`env > vault`), for persistence.
+    embed_key: Option<String>,
+    /// The started run log, if logging is enabled.
+    run_log: Option<RunLog>,
+}
+
+/// Discovers state, unlocks the vault (fail-closed), loads config, reads and
+/// parses the input, resolves the effective parameters, and builds the
+/// principal provider — the shared prelude of `query` and `consult` (REQ-H02).
+///
+/// # Errors
+/// Returns (via `Err`) the process exit code after reporting the failure to
+/// stderr (input/discovery/passphrase/vault errors), so the dispatcher can
+/// return it directly.
+async fn prepare_headless(
+    h: &HeadlessArgs,
+    mut passphrase_flag: Option<Zeroizing<String>>,
+    cwd: &Path,
+    anthropic_key: Option<String>,
+    openai_key: Option<String>,
+) -> Result<HeadlessContext, i32> {
+    let workdir = h.workdir.clone().unwrap_or_else(|| cwd.to_path_buf());
+
+    // `.magi/` discovery (walk-up, nearest ancestor, hardened, REQ-H16/H30).
+    let workspace = match crate::system::workspace::discover(&workdir) {
+        Ok(ws) => ws,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return Err(headless_error_exit_code(&e));
+        }
+    };
+    // A run that requires persistent state fails clearly without a `.magi/`
+    // (REQ-H17); a stateless `--no-memory` run may proceed env-only.
+    if workspace.is_none() && !h.no_memory {
+        eprintln!(
+            "error: no .magi/ state directory found in this directory or any \
+             parent; run `magi init` to create one"
+        );
+        return Err(1);
+    }
+
+    // Open the vault only when a DB exists AND a passphrase is available
+    // (REQ-H19). If persistence is requested but no passphrase can unlock the
+    // existing DB, fail closed (REQ-H25) rather than silently dropping it.
+    let db_path = workspace
+        .as_ref()
+        .map(Workspace::db_path)
+        .filter(|p| p.exists());
+    let memory = if let Some(db) = &db_path {
+        if let Some(pass) = passphrase_flag.take() {
+            match open_headless_memory(db, pass) {
+                Ok(m) => m,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    return Err(headless_error_exit_code(&e));
+                }
+            }
+        } else if !h.no_memory {
+            let e = HeadlessError::PassphraseUnavailable;
+            eprintln!("error: {e}");
+            return Err(headless_error_exit_code(&e));
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    // Wire the vault over the opened store (env > vault secret resolution).
+    let secret_store: Option<SharedSecretStore> = memory.as_ref().and_then(|store| {
+        let dek = store.data_key().ok()?;
+        let vstore = wire(store.shared_conn(), dek).ok()?;
+        Some(Arc::new(Mutex::new(vstore)) as SharedSecretStore)
+    });
+
+    // Config lives in `.magi/magi.toml`; absent ⇒ built-in defaults.
+    let (magi_config, cfg_warn) = match workspace.as_ref() {
+        Some(ws) => MagiConfig::load(&ws.magi_dir),
+        None => (MagiConfig::default(), None),
+    };
+    if let Some(w) = cfg_warn {
+        eprintln!("warning: {w}");
+    }
+
+    // Read + parse the (bounded) input into an envelope (REQ-H03/H10/H29).
+    let bytes = match read_headless_input(h.input.as_deref()) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return Err(headless_error_exit_code(&e));
+        }
+    };
+    let forced_fmt = h.input_format.map(CliInputFormat::into_lib);
+    let envelope = match parse_input(&bytes, forced_fmt) {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return Err(headless_error_exit_code(&e));
+        }
+    };
+    let prompt = envelope.prompt.clone();
+
+    // Per-field defaults (toml/built-in), then resolution with the CLI
+    // overrides and the operator cost ceiling (REQ-H12/H12b).
+    let default_provider =
+        resolve_provider(&magi_config, env::var("MAGI_PROVIDER").ok().as_deref());
+    let default_model = if default_provider == "openai" {
+        resolve_openai_model(&magi_config, env::var("OPENAI_MODEL").ok().as_deref())
+    } else {
+        magi_config
+            .anthropic
+            .model
+            .clone()
+            .or_else(|| env::var("ANTHROPIC_MODEL").ok())
+            .unwrap_or_else(|| DEFAULT_MODEL.to_string())
+    };
+    let defaults = ConfigDefaults {
+        model: default_model,
+        provider: default_provider,
+        // No `[headless]` cost/consult defaults yet; the Agent injects no system
+        // message on any path, so the operator system prompt is empty.
+        max_tool_calls: None,
+        consult: None,
+        system: String::new(),
+    };
+    let overrides = CliOverrides {
+        model: h.model.clone(),
+        provider: h.provider.clone(),
+        max_tool_calls: h.max_tool_calls,
+        consult: if h.consult { Some(true) } else { None },
+    };
+    let tier = tier_from_flags(h.auto, h.full_auto);
+    // Operator ceiling: an explicit flag can RAISE it; else the `--full-auto`
+    // elevation; else the toml value; else the normal cap (REQ-H08/H12b).
+    let operator_ceiling = h
+        .max_tool_calls
+        .or(if h.full_auto {
+            Some(FULL_AUTO_MAX_TOOL_CALLS)
+        } else {
+            None
+        })
+        .or(defaults.max_tool_calls)
+        .unwrap_or(NORMAL_MAX_TOOL_CALLS);
+    let resolved = resolve_params(
+        envelope,
+        &defaults,
+        &overrides,
+        operator_ceiling,
+        h.allow_system_override,
+    );
+
+    // Build the principal provider from the resolved model/provider + keys.
+    let provider_kind = resolved.provider.clone();
+    let mut oai_creds: Option<(String, String)> = None;
+    let (provider, model_label, anthropic_key_for_siblings): (
+        Arc<dyn Provider>,
+        String,
+        Option<String>,
+    ) = if provider_kind == "openai" {
+        let api_key = resolve_openai_key(openai_key.as_deref(), secret_store.as_ref())
+            .unwrap_or_else(|| "ollama".to_string());
+        let base_url =
+            resolve_openai_base_url(&magi_config, env::var("OPENAI_BASE_URL").ok().as_deref());
+        oai_creds = Some((base_url.clone(), api_key.clone()));
+        (
+            build_openai_provider(&base_url, &api_key, &resolved.model),
+            resolved.model.clone(),
+            None,
+        )
+    } else if let Some(cfg) = discover_config(anthropic_key.as_deref(), secret_store.as_ref()) {
+        let key = cfg.api_key;
+        (
+            Arc::new(AnthropicProvider::new(key.clone(), resolved.model.clone())),
+            resolved.model.clone(),
+            Some(key),
+        )
+    } else {
+        (Arc::new(StaticProvider), "static".to_string(), None)
+    };
+
+    let embed_key = resolve_openai_key(openai_key.as_deref(), secret_store.as_ref());
+    let run_log = build_run_log(h, workspace.as_ref());
+
+    Ok(HeadlessContext {
+        workdir,
+        memory,
+        magi_config,
+        provider,
+        provider_kind,
+        model_label,
+        oai_creds,
+        anthropic_key_for_siblings,
+        resolved,
+        prompt,
+        tier,
+        embed_key,
+        run_log,
+    })
+}
+
+/// Registers the sandboxed file tools on `agent` with `workdir` as the
+/// `PathGuard` root (shared by the headless `query` path).
+///
+/// # Errors
+/// Propagates a tool-construction failure (e.g. an un-canonicalizable root).
+fn register_headless_tools(agent: &mut Agent, workdir: &Path) -> anyhow::Result<()> {
+    let fs: Arc<dyn FileSystem> = Arc::new(RealFileSystem::new());
+    agent.register_tool(Box::new(ListTool::new(fs.clone(), workdir.to_path_buf())?));
+    agent.register_tool(Box::new(FileReadTool::new(
+        fs.clone(),
+        workdir.to_path_buf(),
+    )?));
+    agent.register_tool(Box::new(FileWriteTool::new(
+        fs.clone(),
+        workdir.to_path_buf(),
+    )?));
+    agent.register_tool(Box::new(GrepTool::new(
+        Box::new(RipGrep::new("rg")),
+        workdir.to_path_buf(),
+    )?));
+    agent.register_tool(Box::new(BashTool::new(workdir.to_path_buf())?));
+    Ok(())
+}
+
+/// Runs `magi query`: builds the agent (provider + tools + optional persistence
+/// and MAGI), drives the tier-gated tool loop through [`run_query`], and emits
+/// the structured outcome. Returns the process exit code (REQ-H02/H13/H14/H23).
+async fn run_query_subcommand(
+    h: HeadlessArgs,
+    passphrase_flag: Option<Zeroizing<String>>,
+    cwd: &Path,
+    anthropic_key: Option<String>,
+    openai_key: Option<String>,
+) -> i32 {
+    let ctx = match prepare_headless(&h, passphrase_flag, cwd, anthropic_key, openai_key).await {
+        Ok(c) => c,
+        Err(code) => return code,
+    };
+    let HeadlessContext {
+        workdir,
+        magi_config,
+        provider,
+        provider_kind,
+        model_label,
+        oai_creds,
+        anthropic_key_for_siblings,
+        resolved,
+        prompt,
+        tier,
+        embed_key,
+        memory,
+        mut run_log,
+        ..
+    } = ctx;
+
+    let backend_label = if provider_kind == "openai" {
+        "openai"
+    } else {
+        "anthropic"
+    };
+    // MAGI orchestrator for a forced/proactive `consult`; none over a static
+    // provider (no live backend to drive the three perspectives).
+    let consult_magi: Option<Arc<Magi>> = if provider.is_static() {
+        None
+    } else {
+        match build_magi_orchestrator(
+            provider.clone(),
+            backend_label,
+            &model_label,
+            &magi_config,
+            oai_creds,
+            anthropic_key_for_siblings,
+        ) {
+            Ok(m) => Some(m),
+            Err(e) => {
+                eprintln!("error: {e}");
+                return 1;
+            }
+        }
+    };
+
+    let mut agent = Agent::new(provider);
+
+    // Persistence unless `--no-memory` (REQ-H18): notices go to stderr.
+    if !h.no_memory {
+        if let Some(store) = memory {
+            let mut notices = Vec::new();
+            if let Err(e) =
+                attach_persistent_memory(&mut agent, store, &magi_config, embed_key, &mut notices)
+                    .await
+            {
+                eprintln!("error: {e}");
+                return 1;
+            }
+            for n in notices {
+                eprintln!("note: {n}");
+            }
+        }
+    }
+
+    if let Err(e) = register_headless_tools(&mut agent, &workdir) {
+        eprintln!("error: {e}");
+        return 1;
+    }
+    if let Some(ref magi) = consult_magi {
+        agent.register_tool(Box::new(crate::tools::consult::ConsultTool::new(
+            magi.clone(),
+            magi_config.magi.auto_approve,
+        )));
+    }
+
+    let policy = Policy::new(tier, resolved.max_tool_calls, h.timeout);
+    let timeout = resolve_run_timeout(&policy);
+    let outcome = run_query(
+        resolved,
+        policy,
+        &mut agent,
+        &prompt,
+        timeout,
+        consult_magi,
+        run_log.as_mut(),
+    )
+    .await;
+    finish_headless(&h, &outcome)
+}
+
+/// Runs `magi consult`: forces a direct MAGI multi-perspective analysis over the
+/// prompt (no agent tool-loop) via [`run_consult`], then emits the structured
+/// outcome. Returns the process exit code (REQ-H02/H21/H33).
+async fn run_consult_subcommand(
+    h: HeadlessArgs,
+    passphrase_flag: Option<Zeroizing<String>>,
+    cwd: &Path,
+    anthropic_key: Option<String>,
+    openai_key: Option<String>,
+) -> i32 {
+    let ctx = match prepare_headless(&h, passphrase_flag, cwd, anthropic_key, openai_key).await {
+        Ok(c) => c,
+        Err(code) => return code,
+    };
+    let HeadlessContext {
+        magi_config,
+        provider,
+        provider_kind,
+        model_label,
+        oai_creds,
+        anthropic_key_for_siblings,
+        resolved,
+        prompt,
+        mut run_log,
+        ..
+    } = ctx;
+
+    let backend_label = if provider_kind == "openai" {
+        "openai"
+    } else {
+        "anthropic"
+    };
+    let magi = match build_magi_orchestrator(
+        provider,
+        backend_label,
+        &model_label,
+        &magi_config,
+        oai_creds,
+        anthropic_key_for_siblings,
+    ) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return 1;
+        }
+    };
+
+    // The consult path has no tier tool-gate; only an explicit `--timeout`
+    // bounds it (an over-cap prompt is rejected inside `run_consult`, REQ-H33).
+    let timeout = h.timeout.map(Duration::from_secs);
+    let outcome = run_consult(resolved, magi, &prompt, timeout, run_log.as_mut()).await;
+    finish_headless(&h, &outcome)
 }
 
 #[cfg(test)]
@@ -1914,6 +2765,287 @@ mod tests {
             assert!(
                 !sub.join(".magi").exists(),
                 "an aborted walk must create no .magi/"
+            );
+        });
+    }
+
+    // ── T7: headless query/consult dispatch ────────────────────────────────
+
+    /// A [`HeadlessArgs`] with every field at its inert default, for tests.
+    fn base_hargs() -> HeadlessArgs {
+        HeadlessArgs {
+            input: None,
+            output: None,
+            input_format: None,
+            output_format: None,
+            workdir: None,
+            no_memory: false,
+            auto: false,
+            full_auto: false,
+            timeout: None,
+            log_level: None,
+            log_dir: None,
+            allow_system_override: false,
+            no_clobber: false,
+            consult: false,
+            model: None,
+            provider: None,
+            max_tool_calls: None,
+        }
+    }
+
+    /// A finished [`RunOutcome`] with the given stop reason and optional error,
+    /// enough to exercise the exit-code mapping.
+    fn outcome_with(
+        stop_reason: StopReason,
+        response: Option<&str>,
+        error_kind: Option<ErrorKind>,
+    ) -> RunOutcome {
+        use magi_rs::headless::types::{AppliedCaps, ErrorPayload, Timings, Usage};
+        RunOutcome {
+            response: response.map(str::to_string),
+            model: "m".to_string(),
+            provider: "p".to_string(),
+            usage: Usage {
+                input_tokens: 0,
+                output_tokens: 0,
+            },
+            timings: Timings {
+                total_ms: 1,
+                ttfb_ms: None,
+                per_turn_ms: Vec::new(),
+            },
+            stop_reason,
+            tool_calls: Vec::new(),
+            transcript: Vec::new(),
+            consult: None,
+            applied_caps: AppliedCaps {
+                max_tool_calls: 15,
+                max_tool_calls_clamped: false,
+                timeout_secs: None,
+                system_override_applied: false,
+            },
+            error: error_kind.map(|kind| ErrorPayload {
+                message: String::new(),
+                kind,
+            }),
+        }
+    }
+
+    #[test]
+    fn test_tier_from_flags_full_auto_wins() {
+        assert!(matches!(tier_from_flags(false, false), Tier::Default));
+        assert!(matches!(tier_from_flags(true, false), Tier::Auto));
+        assert!(matches!(tier_from_flags(false, true), Tier::FullAuto));
+        assert!(matches!(tier_from_flags(true, true), Tier::FullAuto));
+    }
+
+    #[test]
+    fn test_exit_code_for_outcome_taxonomy() {
+        // Success ⇒ 0.
+        assert_eq!(
+            exit_code_for_outcome(&outcome_with(StopReason::Done, Some("hi"), None)),
+            0
+        );
+        // Input-invalid error ⇒ 2 (misuse).
+        assert_eq!(
+            exit_code_for_outcome(&outcome_with(
+                StopReason::Error,
+                None,
+                Some(ErrorKind::InputInvalid)
+            )),
+            2
+        );
+        // Tier denial that blocked the task (empty response + Denied) ⇒ 3.
+        assert_eq!(
+            exit_code_for_outcome(&outcome_with(StopReason::Denied, Some(""), None)),
+            3
+        );
+        // A runtime-class error (timeout/provider/runtime) ⇒ 1.
+        assert_eq!(
+            exit_code_for_outcome(&outcome_with(
+                StopReason::Error,
+                None,
+                Some(ErrorKind::Timeout)
+            )),
+            1
+        );
+    }
+
+    #[test]
+    fn test_write_output_atomic_overwrites_by_default() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("out.txt");
+        std::fs::write(&path, b"old").unwrap();
+        write_output_atomic(&path, b"new", false).expect("overwrite must succeed");
+        assert_eq!(std::fs::read(&path).unwrap(), b"new");
+    }
+
+    #[test]
+    fn test_write_output_atomic_no_clobber_refuses_existing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("out.txt");
+        std::fs::write(&path, b"keep").unwrap();
+        let err = write_output_atomic(&path, b"new", true).expect_err("no-clobber must refuse");
+        assert!(matches!(err, HeadlessError::InputInvalid(_)));
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            b"keep",
+            "existing file unchanged"
+        );
+        assert_eq!(
+            headless_error_exit_code(&err),
+            2,
+            "no-clobber refusal is misuse"
+        );
+    }
+
+    #[test]
+    fn test_write_output_atomic_no_clobber_creates_when_absent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("fresh.txt");
+        write_output_atomic(&path, b"data", true).expect("create must succeed");
+        assert_eq!(std::fs::read(&path).unwrap(), b"data");
+    }
+
+    #[test]
+    fn test_args_parses_query_and_consult_subcommands() {
+        use clap::Parser;
+        let q = Args::parse_from(["magi-rs", "query", "--auto", "-i", "q.txt"]);
+        match q.command {
+            Some(TopCmd::Query(h)) => {
+                assert!(h.auto);
+                assert_eq!(h.input.as_deref(), Some(std::path::Path::new("q.txt")));
+            }
+            _ => panic!("expected the query subcommand"),
+        }
+        let c = Args::parse_from([
+            "magi-rs",
+            "consult",
+            "--full-auto",
+            "--output-format",
+            "json",
+        ]);
+        match c.command {
+            Some(TopCmd::Consult(h)) => {
+                assert!(h.full_auto);
+                assert!(matches!(h.output_format, Some(CliOutputFormat::Json)));
+            }
+            _ => panic!("expected the consult subcommand"),
+        }
+    }
+
+    /// Builds a `.magi/` under a fresh tempdir cwd with `provider = "anthropic"`
+    /// so a keyless run resolves to the canned `StaticProvider` (deterministic,
+    /// no network). Returns the temp guard (kept alive) and the canonical cwd.
+    fn init_static_workspace() -> (tempfile::TempDir, std::path::PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = dunce::canonicalize(tmp.path()).unwrap();
+        crate::system::workspace::init(&cwd).expect("init .magi/");
+        std::fs::write(cwd.join(".magi/magi.toml"), "provider = \"anthropic\"\n").unwrap();
+        (tmp, cwd)
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_headless_query_static_provider_returns_response_exit_0() {
+        with_var("MAGI_PROVIDER", None, || {
+            let (_tmp, cwd) = init_static_workspace();
+            let prompt = cwd.join("prompt.txt");
+            std::fs::write(&prompt, b"hello").unwrap();
+            let out = cwd.join("out.txt");
+
+            let mut h = base_hargs();
+            h.input = Some(prompt);
+            h.output = Some(out.clone());
+            h.workdir = Some(cwd.clone());
+            h.no_memory = true; // stateless ⇒ env-only, no passphrase needed
+
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            let code = rt.block_on(run_query_subcommand(h, None, &cwd, None, None));
+            assert_eq!(code, 0, "a static-provider query must succeed");
+            let body = std::fs::read_to_string(&out).unwrap();
+            assert!(!body.is_empty(), "the response must be written to -o");
+        });
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_headless_query_json_output_has_schema_version_and_stop_reason() {
+        with_var("MAGI_PROVIDER", None, || {
+            let (_tmp, cwd) = init_static_workspace();
+            let prompt = cwd.join("q.txt");
+            std::fs::write(&prompt, b"hello json").unwrap();
+            let out = cwd.join("out.json");
+
+            let mut h = base_hargs();
+            h.input = Some(prompt);
+            h.output = Some(out.clone());
+            h.workdir = Some(cwd.clone());
+            h.no_memory = true;
+            h.output_format = Some(CliOutputFormat::Json);
+
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            let code = rt.block_on(run_query_subcommand(h, None, &cwd, None, None));
+            assert_eq!(code, 0);
+            let v: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&out).unwrap()).unwrap();
+            assert_eq!(v["schema_version"], 1);
+            assert!(v.get("response").is_some());
+            assert!(v.get("stop_reason").is_some());
+            assert!(v.get("tool_calls").is_some());
+        });
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_headless_query_no_clobber_on_existing_output_exits_2() {
+        with_var("MAGI_PROVIDER", None, || {
+            let (_tmp, cwd) = init_static_workspace();
+            let prompt = cwd.join("q.txt");
+            std::fs::write(&prompt, b"hi").unwrap();
+            let out = cwd.join("exists.txt");
+            std::fs::write(&out, b"PRESERVE").unwrap();
+
+            let mut h = base_hargs();
+            h.input = Some(prompt);
+            h.output = Some(out.clone());
+            h.workdir = Some(cwd.clone());
+            h.no_memory = true;
+            h.no_clobber = true;
+
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            let code = rt.block_on(run_query_subcommand(h, None, &cwd, None, None));
+            assert_eq!(code, 2, "--no-clobber on an existing -o file ⇒ exit 2");
+            assert_eq!(
+                std::fs::read(&out).unwrap(),
+                b"PRESERVE",
+                "the existing file must be untouched"
+            );
+        });
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_headless_consult_over_max_query_len_exits_2() {
+        with_var("MAGI_PROVIDER", None, || {
+            let (_tmp, cwd) = init_static_workspace();
+            let prompt = cwd.join("big.txt");
+            // Exceed MAX_QUERY_LEN (8192) so run_consult rejects it (REQ-H33).
+            std::fs::write(&prompt, "x".repeat(9000)).unwrap();
+            let out = cwd.join("out.txt");
+
+            let mut h = base_hargs();
+            h.input = Some(prompt);
+            h.output = Some(out);
+            h.workdir = Some(cwd.clone());
+            h.no_memory = true;
+
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            let code = rt.block_on(run_consult_subcommand(h, None, &cwd, None, None));
+            assert_eq!(
+                code, 2,
+                "an over-cap consult prompt ⇒ exit 2 (rejected, not truncated)"
             );
         });
     }

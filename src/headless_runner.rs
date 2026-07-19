@@ -22,13 +22,9 @@
 //! and the final-turn text-block count that the [`StreamPiece`] stream does not
 //! carry — the data needed to build a faithful, auditable [`RunOutcome`].
 //!
-//! Staged rollout: this module is fully implemented and exercised by its own
-//! tests, but its production caller — the `magi query` / `magi consult`
-//! subcommand dispatch in `main.rs` — lands in MS2 Task 6. Until then the plain
-//! (non-test) binary build has no live path into it, so `dead_code` is allowed
-//! **only** for `not(test)`; the test build reaches every item.
-
-#![cfg_attr(not(test), allow(dead_code))]
+//! The `magi query` / `magi consult` subcommand dispatch in `main.rs` (MS2 T7)
+//! is the production caller of [`run_query`] / [`run_consult`] /
+//! [`resolve_run_timeout`]; every item is reachable in the non-test build.
 
 use std::collections::HashMap;
 use std::future;
