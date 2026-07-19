@@ -40,6 +40,7 @@ use magi_rs::vault::{
     PassphrasePrompt, SecretStore, TtyIo, TtyPrompt, VaultCmd, VaultError, PASSPHRASE_ENV,
 };
 use std::env;
+use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
 use zeroize::Zeroizing;
 
@@ -108,12 +109,21 @@ fn is_localhost(base_url: &str) -> bool {
     lower.contains("localhost") || lower.contains("127.0.0.1") || lower.contains("[::1]")
 }
 
-/// Resolves the `ANTHROPIC_API_KEY` config: environment first, then the
-/// vault (REQ-V12) — the OS keyring and `key.txt` are no longer consulted at
-/// all (REQ-V37). `secret_store` is `None` for an ephemeral (no-persistence)
-/// session, in which case only the environment is consulted.
-fn discover_config(secret_store: Option<&SharedSecretStore>) -> Option<Config> {
-    if let Ok(key) = env::var("ANTHROPIC_API_KEY") {
+/// Resolves the `ANTHROPIC_API_KEY` config: the **consumed environment value**
+/// first, then the vault (REQ-V12/H12) — the OS keyring and `key.txt` are no
+/// longer consulted at all (REQ-V37).
+///
+/// `env_key` is the `ANTHROPIC_API_KEY` value that was read out of the process
+/// environment (and scrubbed) at startup by [`read_then_scrub_secret_env`]
+/// (REQ-H37): sourcing it from there — rather than re-reading `env::var` — keeps
+/// the `env > vault` precedence intact even after the live env var is gone.
+/// `secret_store` is `None` for an ephemeral (no-persistence) session, in which
+/// case only the consumed environment value is consulted.
+fn discover_config(
+    env_key: Option<&str>,
+    secret_store: Option<&SharedSecretStore>,
+) -> Option<Config> {
+    if let Some(key) = env_key {
         let model = env::var("ANTHROPIC_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string());
         return Some(Config {
             api_key: key.trim().to_string(),
@@ -135,14 +145,22 @@ fn discover_config(secret_store: Option<&SharedSecretStore>) -> Option<Config> {
 }
 
 /// Resolves the `OPENAI_API_KEY` used by the OpenAI-compatible chat provider
-/// and the embedder: environment first, then the vault (REQ-V12), mirroring
-/// [`discover_config`]'s precedence for the Anthropic key.
+/// and the embedder: the **consumed environment value** first, then the vault
+/// (REQ-V12/H12), mirroring [`discover_config`]'s precedence for the Anthropic
+/// key.
 ///
-/// Both sources are trimmed for the same reason `discover_config` trims: a key
-/// with stray whitespace or a trailing newline (a common `export KEY=$(cat f)`
-/// artifact) would otherwise produce a malformed `Authorization` header (401).
-fn resolve_openai_key(secret_store: Option<&SharedSecretStore>) -> Option<String> {
-    if let Ok(key) = env::var("OPENAI_API_KEY") {
+/// `env_key` is the value read out of (and scrubbed from) the process
+/// environment at startup ([`read_then_scrub_secret_env`], REQ-H37); consulting
+/// it — rather than re-reading `env::var` — preserves `env > vault` after the
+/// live env var is gone. Both sources are trimmed for the same reason
+/// `discover_config` trims: a key with stray whitespace or a trailing newline (a
+/// common `export KEY=$(cat f)` artifact) would otherwise produce a malformed
+/// `Authorization` header (401).
+fn resolve_openai_key(
+    env_key: Option<&str>,
+    secret_store: Option<&SharedSecretStore>,
+) -> Option<String> {
+    if let Some(key) = env_key {
         return Some(key.trim().to_string());
     }
     let ss = secret_store?;
@@ -158,6 +176,15 @@ const ANTHROPIC_KEY_ENV: &str = "ANTHROPIC_API_KEY";
 
 /// Environment variable name holding the OpenAI-compatible API key (REQ-H37).
 const OPENAI_KEY_ENV: &str = "OPENAI_API_KEY";
+
+/// Warning emitted at startup when loose legacy state files sit in the working
+/// directory but no `.magi/` exists (REQ-H17/H31). The pre-headless layout is no
+/// longer read or migrated — the user must run `magi init` to adopt the unified
+/// `.magi/` state directory.
+const LEGACY_LAYOUT_WARNING: &str =
+    "warning: found a legacy .magi-rs-memory.db/magi.toml loose in this directory; \
+     the pre-.magi/ layout is no longer used — run `magi init` to create a .magi/ \
+     state directory (the legacy files are not read or migrated)";
 
 /// Environment variable names a tool subprocess is allowed to inherit (REQ-H37).
 ///
@@ -184,9 +211,10 @@ const TOOL_ENV_ALLOWLIST: &[&str] = &[
 /// The passphrase is wrapped in [`Zeroizing`] so its memory is wiped on drop
 /// (the secrets-separation invariant); the API keys are plain `String`s,
 /// matching how the rest of `main.rs` already carries them.
-// Wired in T7: the fields are consumed by the runtime bootstrap (config and
-// passphrase resolution) once `main` reads secrets from here instead of env.
-#[allow(dead_code)]
+///
+/// The fields are consumed by [`bootstrap_headless`]/[`run`]: after the scrub
+/// the live env vars are gone, so config and passphrase resolution source these
+/// captured values instead of `env::var` (REQ-H37).
 struct ConsumedSecrets {
     /// The master passphrase (`MAGI_PASSPHRASE`), if it was set.
     passphrase: Option<Zeroizing<String>>,
@@ -208,10 +236,10 @@ struct ConsumedSecrets {
 /// This calls [`std::env::remove_var`], which is **undefined behaviour** once
 /// the process has spawned additional threads (a concurrent env read races the
 /// removal). It **must** therefore be invoked single-threaded at startup,
-/// **before** the multi-thread tokio runtime spawns any worker. T7 enforces
-/// that call site; this function only provides the mechanism.
-// Wired in T7: `main` calls this before building the tokio runtime.
-#[allow(dead_code)]
+/// **before** the multi-thread tokio runtime spawns any worker.
+/// [`bootstrap_headless`] enforces that call site (it invokes this as its first
+/// statement, before building the runtime); this function only provides the
+/// mechanism.
 fn read_then_scrub_secret_env() -> ConsumedSecrets {
     let passphrase = env::var(PASSPHRASE_ENV).ok().map(Zeroizing::new);
     let anthropic_key = env::var(ANTHROPIC_KEY_ENV).ok();
@@ -256,14 +284,18 @@ enum MemoryAttachment {
 /// Resolves the passphrase that opens (or bootstraps) the encrypted store.
 ///
 /// `db_absent` selects between two policies: **present** ⇒
-/// [`resolve_passphrase`] (`-p` > env > prompt, single entry, REQ-V04);
-/// **absent** (first run) ⇒ if `-p` or `MAGI_PASSPHRASE` already supply a
-/// value it is used directly after [`check_strength`] (nothing to confirm
-/// it against); otherwise, with a TTY, [`create_passphrase`] runs the
-/// double-entry + zero-knowledge-warning flow (REQ-V17); without a TTY and
-/// without `-p`/env, fails closed with [`VaultError::PassphraseUnavailable`]
-/// rather than hanging on a prompt that cannot be read (mirrors REQ-V40's
-/// fail-closed spirit, applied to bootstrap).
+/// [`resolve_passphrase`] (`-p`/env-flag > prompt, single entry, REQ-V04);
+/// **absent** (first run) ⇒ if `passphrase_flag` already supplies a value it is
+/// used directly after [`check_strength`] (nothing to confirm it against);
+/// otherwise, with a TTY, [`create_passphrase`] runs the double-entry +
+/// zero-knowledge-warning flow (REQ-V17); without a TTY and without a flag,
+/// fails closed with [`VaultError::PassphraseUnavailable`] rather than hanging
+/// on a prompt that cannot be read (REQ-H25 / REQ-V40's fail-closed spirit,
+/// applied to bootstrap).
+///
+/// `passphrase_flag` already folds the `-p` CLI flag and the (scrubbed,
+/// consumed) `MAGI_PASSPHRASE` value together with `-p` winning (REQ-H37): after
+/// the startup env scrub there is no live env var left to read here.
 ///
 /// # Errors
 /// [`VaultError::PassphraseUnavailable`] as described above;
@@ -285,19 +317,12 @@ fn resolve_master_passphrase(
         check_strength(p.as_str())?;
         return Ok(p);
     }
-    match env::var(PASSPHRASE_ENV) {
-        Ok(v) if !v.is_empty() => {
-            let z = strip_trailing_newline(Zeroizing::new(v));
-            check_strength(z.as_str())?;
-            Ok(z)
-        }
-        _ => {
-            if !prompt.is_interactive() {
-                return Err(VaultError::PassphraseUnavailable);
-            }
-            create_passphrase(prompt, false)
-        }
+    // First run with no `-p`/`MAGI_PASSPHRASE`: create interactively, or fail
+    // closed when there is no TTY (never hang on an unreadable prompt).
+    if !prompt.is_interactive() {
+        return Err(VaultError::PassphraseUnavailable);
     }
+    create_passphrase(prompt, false)
 }
 
 /// Whether an [`EncryptedSqliteMemory::new`] failure was specifically
@@ -421,16 +446,47 @@ fn report_open_failure(e: &anyhow::Error) -> i32 {
     }
 }
 
+/// Discovers the unified `.magi/` state directory for a subcommand that
+/// **requires** persistent state, mapping the two failure modes to a CLI exit
+/// code: no `.magi/` in the ancestor chain ⇒ a clear "run `magi init`" refusal
+/// (REQ-H17), a discovery error (e.g. a symlinked `.magi` component, REQ-H30) ⇒
+/// its typed exit code. Legacy loose files in the cwd are never read (D-H07).
+///
+/// # Errors
+/// Returns (via `Err`) the process exit code to use on absence (1) or on a
+/// discovery error ([`headless_error_exit_code`]).
+fn require_workspace(cwd: &std::path::Path) -> Result<crate::system::workspace::Workspace, i32> {
+    match crate::system::workspace::discover(cwd) {
+        Ok(Some(ws)) => Ok(ws),
+        Ok(None) => {
+            eprintln!(
+                "error: no .magi/ state directory found in this directory or any \
+                 parent; run `magi init` to create one"
+            );
+            Err(1)
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            Err(headless_error_exit_code(&e))
+        }
+    }
+}
+
 /// Runs `magi-rs vault <cmd>` (short-lived process, never reaches the TUI):
-/// resolves the passphrase, opens the encrypted store, wires the vault, and
-/// drives [`run_vault_cmd`]. Returns the process exit code.
+/// discovers the `.magi/` state directory (REQ-H16/H17), resolves the
+/// passphrase, opens the encrypted store, wires the vault, and drives
+/// [`run_vault_cmd`]. Returns the process exit code.
 fn run_vault_subcommand(
     cmd: VaultCmd,
     passphrase_flag: Option<Zeroizing<String>>,
     workspace_root: &std::path::Path,
     hardening_warnings: &[String],
 ) -> i32 {
-    let db_path = workspace_root.join(".magi-rs-memory.db");
+    let ws = match require_workspace(workspace_root) {
+        Ok(ws) => ws,
+        Err(code) => return code,
+    };
+    let db_path = ws.db_path();
     let db_absent = !db_path.exists();
     let mut prompt = TtyPrompt;
     let passphrase = match resolve_master_passphrase(db_absent, passphrase_flag, &mut prompt) {
@@ -557,7 +613,20 @@ fn run_vault_diagnose(workspace_root: &std::path::Path, names: bool) -> i32 {
 /// reported as "no stored session" rather than an error. Returns the
 /// process exit code.
 fn run_logout(passphrase_flag: Option<Zeroizing<String>>, workspace_root: &std::path::Path) -> i32 {
-    let db_path = workspace_root.join(".magi-rs-memory.db");
+    // Route through `.magi/` discovery (REQ-H16/H17): no `.magi/` (or a `.magi/`
+    // with no DB yet) means there is nothing to log out of — reported as "no
+    // stored session", not an error. Legacy loose files are never read.
+    let db_path = match crate::system::workspace::discover(workspace_root) {
+        Ok(Some(ws)) => ws.db_path(),
+        Ok(None) => {
+            println!("no stored session");
+            return 0;
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            return headless_error_exit_code(&e);
+        }
+    };
     if !db_path.exists() {
         println!("no stored session");
         return 0;
@@ -625,12 +694,12 @@ fn headless_error_exit_code(e: &magi_rs::headless::HeadlessError) -> i32 {
 }
 
 /// Resolves the passphrase used to bootstrap the vault envelope during
-/// `magi init`, **never** prompting interactively (§2.2): `-p` wins, then
-/// `MAGI_PASSPHRASE`. If neither is set the DB is left envelope-less
-/// (`Ok(None)`) — the documented "first interactive run creates it" behavior,
-/// not an error. A supplied value is normalized (trailing newline stripped, so
-/// a later unlock reproduces the KEK) and must clear the strength floor
-/// ([`check_strength`], REQ-V17).
+/// `magi init`, **never** prompting interactively (§2.2). `passphrase_flag`
+/// already folds `-p` and the consumed `MAGI_PASSPHRASE` (`-p` wins, REQ-H37);
+/// if it is absent the DB is left envelope-less (`Ok(None)`) — the documented
+/// "first interactive run creates it" behavior, not an error. A supplied value
+/// is normalized (trailing newline stripped, so a later unlock reproduces the
+/// KEK) and must clear the strength floor ([`check_strength`], REQ-V17).
 ///
 /// # Errors
 /// [`VaultError::WeakPassphrase`] if a supplied passphrase is below the floor.
@@ -642,14 +711,7 @@ fn resolve_init_passphrase(
         check_strength(p.as_str())?;
         return Ok(Some(p));
     }
-    match env::var(PASSPHRASE_ENV) {
-        Ok(v) if !v.is_empty() => {
-            let z = strip_trailing_newline(Zeroizing::new(v));
-            check_strength(z.as_str())?;
-            Ok(Some(z))
-        }
-        _ => Ok(None),
-    }
+    Ok(None)
 }
 
 /// Runs `magi-rs init`: scaffolds a fresh `.magi/` state directory under `cwd`
@@ -717,16 +779,94 @@ fn run_init(cwd: &std::path::Path, passphrase_flag: Option<Zeroizing<String>>) -
     0
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+/// Converts a subcommand's legacy `i32` exit status (always `0..=3` for this
+/// CLI) into a process [`ExitCode`], clamping any out-of-range value to a
+/// generic failure so the conversion can never panic.
+fn exit_code(code: i32) -> ExitCode {
+    ExitCode::from(u8::try_from(code).unwrap_or(1))
+}
+
+/// Startup ordering harness (REQ-H37, anti-UB): reads and **scrubs** the secret
+/// environment variables single-threaded — as its very first statement, before
+/// any tokio runtime exists — then builds the multi-thread runtime and drives
+/// `body` on it, handing the captured [`ConsumedSecrets`] in.
+///
+/// Encapsulating scrub → build → `block_on` here makes the ordering invariant
+/// **structural**: [`std::env::remove_var`] is undefined behaviour once worker
+/// threads exist, so the only way to move the scrub after the runtime is built
+/// would be to rewrite this function's body. `main` therefore does nothing but
+/// call this.
+///
+/// A runtime-build failure, or an error returned by `body`, is reported to
+/// stderr and mapped to [`ExitCode::FAILURE`]; a successful `body` returns its
+/// own [`ExitCode`].
+fn bootstrap_headless<F, Fut>(body: F) -> ExitCode
+where
+    F: FnOnce(ConsumedSecrets) -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<ExitCode>>,
+{
+    // FIRST: capture + scrub the secret env single-threaded, before the runtime
+    // spawns any worker (`remove_var` is UB under concurrency — REQ-H37).
+    let secrets = read_then_scrub_secret_env();
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!("error: failed to build the async runtime: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    match runtime.block_on(body(secrets)) {
+        Ok(code) => code,
+        Err(e) => {
+            eprintln!("error: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn main() -> ExitCode {
+    bootstrap_headless(run)
+}
+
+/// The async application body, driven on the multi-thread runtime built by
+/// [`bootstrap_headless`]. `secrets` carries the passphrase and API keys read
+/// out of (and removed from) the process environment at startup (REQ-H37):
+/// every downstream resolution sources them from here, never from a now-scrubbed
+/// `env::var`.
+///
+/// # Errors
+/// Propagates any fatal I/O, configuration, or TUI error (mapped to
+/// [`ExitCode::FAILURE`] by [`bootstrap_headless`]).
+async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
+    let ConsumedSecrets {
+        passphrase: env_passphrase,
+        anthropic_key,
+        openai_key,
+    } = secrets;
+
     let mut args = Args::parse();
-    // Own the passphrase as `Zeroizing` immediately (REQ-V41): the only
-    // remaining bare copy is clap's own field, dropped right after this
-    // `.take()`. `-p` itself stays visible in `argv`/process listings by
-    // design (REQ-V04, decision of plan 4) — only the *value* leaving argv
-    // unzeroized is in scope here.
-    let passphrase_flag = args.passphrase.take().map(Zeroizing::new);
+    // Fold the `-p` CLI flag and the consumed `MAGI_PASSPHRASE` into ONE flag,
+    // `-p` winning (precedence `-p` > `MAGI_PASSPHRASE`, REQ-H37): after the env
+    // scrub there is no live env var left, so the captured value carries the env
+    // tier. An empty env value counts as absent (matches `resolve_passphrase`).
+    // Own it as `Zeroizing` (REQ-V41): the only bare copy is clap's own field,
+    // dropped right after this `.take()`. `-p` itself stays visible in `argv` by
+    // design (REQ-V04) — only the *value* leaving argv unzeroized is in scope.
+    let passphrase_flag: Option<Zeroizing<String>> = args
+        .passphrase
+        .take()
+        .map(Zeroizing::new)
+        .or_else(|| env_passphrase.filter(|p| !p.is_empty()));
     let workspace_root = env::current_dir()?;
+
+    // REQ-H31: loose legacy state with no `.magi/` ⇒ a visible stderr warning
+    // (detect only — never read or migrate the legacy files, D-H07).
+    if crate::system::workspace::detect_legacy_files(&workspace_root) {
+        eprintln!("{LEGACY_LAYOUT_WARNING}");
+    }
 
     // REQ-V42: best-effort process hardening, once, before any secret
     // material exists.
@@ -736,36 +876,36 @@ async fn main() -> anyhow::Result<()> {
         // REQ-H32: intercepted BEFORE `run_vault_subcommand` so a diagnose
         // never resolves a passphrase or opens/unlocks the vault.
         Some(TopCmd::Vault(VaultCmd::Diagnose { names })) => {
-            std::process::exit(run_vault_diagnose(&workspace_root, names));
+            return Ok(exit_code(run_vault_diagnose(&workspace_root, names)));
         }
         Some(TopCmd::Vault(cmd)) => {
-            std::process::exit(run_vault_subcommand(
+            return Ok(exit_code(run_vault_subcommand(
                 cmd,
                 passphrase_flag,
                 &workspace_root,
                 &hardening_warnings,
-            ));
+            )));
         }
         Some(TopCmd::Init) => {
-            std::process::exit(run_init(&workspace_root, passphrase_flag));
+            return Ok(exit_code(run_init(&workspace_root, passphrase_flag)));
         }
         // No subcommand ⇒ fall through to the TUI launch below.
         None => {}
     }
 
     if args.logout {
-        std::process::exit(run_logout(passphrase_flag, &workspace_root));
+        return Ok(exit_code(run_logout(passphrase_flag, &workspace_root)));
     }
 
     if args.init_config {
         match crate::defaults::write_default_config(&workspace_root) {
             Ok(path) => {
                 println!("Wrote default config to {}", path.display());
-                return Ok(());
+                return Ok(ExitCode::SUCCESS);
             }
             Err(e) => {
                 eprintln!("{e}");
-                std::process::exit(1);
+                return Ok(ExitCode::FAILURE);
             }
         }
     }
@@ -776,9 +916,39 @@ async fn main() -> anyhow::Result<()> {
         .map(|w| format!("warning: {w}"))
         .collect();
 
-    let db_path = workspace_root.join(".magi-rs-memory.db");
+    // Discover the unified `.magi/` state directory (walk-up, nearest ancestor,
+    // REQ-H16). A discovery error degrades to no-persistence with a notice
+    // (never crashes the TUI); a missing `.magi/` runs ephemeral and hints
+    // `magi init` (REQ-H17) — the legacy cwd-relative DB/config are never read.
+    let workspace = match crate::system::workspace::discover(&workspace_root) {
+        Ok(ws) => ws,
+        Err(e) => {
+            startup_notices.push(format!(
+                "WARNING: could not resolve the .magi/ state directory ({e}); \
+                 running WITHOUT persistence for this session."
+            ));
+            None
+        }
+    };
+
     let mut prompt = TtyPrompt;
-    let attachment = open_tui_memory(&db_path, passphrase_flag, &mut prompt, &mut startup_notices);
+    let attachment = match workspace.as_ref() {
+        Some(ws) => open_tui_memory(
+            &ws.db_path(),
+            passphrase_flag,
+            &mut prompt,
+            &mut startup_notices,
+        ),
+        None => {
+            startup_notices.push(
+                "WARNING: no .magi/ state directory found — running WITHOUT \
+                 persistence. Run `magi init` to create one and enable saved \
+                 history (any existing on-disk database is left untouched)."
+                    .to_string(),
+            );
+            MemoryAttachment::Ephemeral
+        }
+    };
 
     let (memory_store, secret_store): (Option<EncryptedSqliteMemory>, Option<SharedSecretStore>) =
         match attachment {
@@ -814,9 +984,16 @@ async fn main() -> anyhow::Result<()> {
             MemoryAttachment::Ephemeral => (None, None),
         };
 
-    // REQ-V12: API key discovery happens AFTER the vault is (possibly) open.
-    let config = discover_config(secret_store.as_ref());
-    let (magi_config, config_warning) = MagiConfig::load(&workspace_root);
+    // REQ-V12/H12: API key discovery happens AFTER the vault is (possibly) open,
+    // env tier sourced from the consumed (scrubbed) value.
+    let config = discover_config(anthropic_key.as_deref(), secret_store.as_ref());
+    // Config lives in `.magi/magi.toml` (REQ-H16/H17): load it from the
+    // discovered `.magi/`, or fall back to built-in defaults when none exists —
+    // the legacy loose cwd `magi.toml` is never read.
+    let (magi_config, config_warning) = match workspace.as_ref() {
+        Some(ws) => MagiConfig::load(&ws.magi_dir),
+        None => (MagiConfig::default(), None),
+    };
     let provider_kind = resolve_provider(&magi_config, env::var("MAGI_PROVIDER").ok().as_deref());
 
     // Credentials needed to build per-agent sibling providers (same backend, different
@@ -828,8 +1005,8 @@ async fn main() -> anyhow::Result<()> {
             // env > vault (REQ-V12); falls back to the local-Ollama dummy so a
             // real OpenAI/Groq/OpenRouter endpoint still fails loudly with 401
             // rather than silently defaulting to an insecure constant.
-            let api_key =
-                resolve_openai_key(secret_store.as_ref()).unwrap_or_else(|| "ollama".to_string());
+            let api_key = resolve_openai_key(openai_key.as_deref(), secret_store.as_ref())
+                .unwrap_or_else(|| "ollama".to_string());
             let base_url =
                 resolve_openai_base_url(&magi_config, env::var("OPENAI_BASE_URL").ok().as_deref());
             let model =
@@ -995,7 +1172,7 @@ async fn main() -> anyhow::Result<()> {
                 // and degrade gracefully (text-only persistence; REQ-29).
                 match OpenAiCompatibleEmbedder::new(
                     &magi_config.embedding,
-                    resolve_openai_key(secret_store.as_ref()),
+                    resolve_openai_key(openai_key.as_deref(), secret_store.as_ref()),
                 ) {
                     Err(err) => {
                         startup_notices.push(format!(
@@ -1091,7 +1268,7 @@ async fn main() -> anyhow::Result<()> {
         secret_store,
     )
     .await?;
-    Ok(())
+    Ok(ExitCode::SUCCESS)
 }
 
 #[cfg(test)]
@@ -1262,31 +1439,30 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn test_api_key_resolution_prefers_env_over_vault() {
-        // SC-V12: env set => env wins; env unset + vault has the key => vault
-        // wins; neither => None (StaticProvider).
-        with_var("ANTHROPIC_API_KEY", None, || {
-            with_var("ANTHROPIC_MODEL", None, || {
-                let ss = vault_fixture();
-                {
-                    let mut guard = ss.lock().unwrap();
-                    guard.set("ANTHROPIC_API_KEY", "sk-from-vault").unwrap();
-                }
+        // SC-V12 / REQ-H12: the consumed env value wins; else the vault; else
+        // None (StaticProvider). The env tier is now a value threaded from
+        // `ConsumedSecrets`, not a live env var — so it is passed explicitly.
+        // `ANTHROPIC_MODEL` is still read from the environment by
+        // `discover_config`, so it is pinned absent for determinism.
+        with_var("ANTHROPIC_MODEL", None, || {
+            let ss = vault_fixture();
+            {
+                let mut guard = ss.lock().unwrap();
+                guard.set("ANTHROPIC_API_KEY", "sk-from-vault").unwrap();
+            }
 
-                // Neither env nor vault (fresh fixture, unset env): None.
-                assert!(discover_config(None).is_none());
+            // Neither consumed env value nor vault: None.
+            assert!(discover_config(None, None).is_none());
 
-                // Vault only: vault wins.
-                let cfg = discover_config(Some(&ss)).expect("vault key");
-                assert_eq!(cfg.api_key, "sk-from-vault");
-                assert_eq!(cfg.source, "vault");
+            // Vault only (no consumed env value): vault wins.
+            let cfg = discover_config(None, Some(&ss)).expect("vault key");
+            assert_eq!(cfg.api_key, "sk-from-vault");
+            assert_eq!(cfg.source, "vault");
 
-                // Both present: env wins.
-                with_var("ANTHROPIC_API_KEY", Some("sk-from-env"), || {
-                    let cfg = discover_config(Some(&ss)).expect("env key");
-                    assert_eq!(cfg.api_key, "sk-from-env");
-                    assert_eq!(cfg.source, "ENV");
-                });
-            });
+            // Both present: the consumed env value wins.
+            let cfg = discover_config(Some("sk-from-env"), Some(&ss)).expect("env key");
+            assert_eq!(cfg.api_key, "sk-from-env");
+            assert_eq!(cfg.source, "ENV");
         });
     }
 
@@ -1295,63 +1471,61 @@ mod tests {
     fn test_api_keys_are_trimmed_of_surrounding_whitespace() {
         // Loop-2 S3 (Balthasar): a key with a trailing newline (a common
         // `export KEY=$(cat f)` artifact) or stray whitespace must be trimmed,
-        // else the auth header is malformed (401). Both keys, both paths.
-        with_var("ANTHROPIC_API_KEY", None, || {
-            with_var("ANTHROPIC_MODEL", None, || {
-                with_var("OPENAI_API_KEY", None, || {
-                    let ss = vault_fixture();
-                    {
-                        let mut guard = ss.lock().unwrap();
-                        guard
-                            .set("ANTHROPIC_API_KEY", "  sk-vault-anthropic\n")
-                            .unwrap();
-                        guard.set("OPENAI_API_KEY", "sk-vault-openai\t").unwrap();
-                    }
-                    // Vault paths trim.
-                    assert_eq!(
-                        discover_config(Some(&ss)).expect("a").api_key,
-                        "sk-vault-anthropic"
-                    );
-                    assert_eq!(
-                        resolve_openai_key(Some(&ss)).as_deref(),
-                        Some("sk-vault-openai")
-                    );
-                    // Env paths trim (and win over the vault).
-                    with_var("OPENAI_API_KEY", Some("sk-env-openai\n"), || {
-                        assert_eq!(
-                            resolve_openai_key(Some(&ss)).as_deref(),
-                            Some("sk-env-openai")
-                        );
-                    });
-                    with_var("ANTHROPIC_API_KEY", Some(" sk-env-anthropic "), || {
-                        assert_eq!(
-                            discover_config(Some(&ss)).expect("b").api_key,
-                            "sk-env-anthropic"
-                        );
-                    });
-                });
-            });
+        // else the auth header is malformed (401). Both keys, both paths — the
+        // env tier is now the consumed value passed explicitly (REQ-H12/H37).
+        // `ANTHROPIC_MODEL` is still read from the environment, pinned absent.
+        with_var("ANTHROPIC_MODEL", None, || {
+            let ss = vault_fixture();
+            {
+                let mut guard = ss.lock().unwrap();
+                guard
+                    .set("ANTHROPIC_API_KEY", "  sk-vault-anthropic\n")
+                    .unwrap();
+                guard.set("OPENAI_API_KEY", "sk-vault-openai\t").unwrap();
+            }
+            // Vault paths trim.
+            assert_eq!(
+                discover_config(None, Some(&ss)).expect("a").api_key,
+                "sk-vault-anthropic"
+            );
+            assert_eq!(
+                resolve_openai_key(None, Some(&ss)).as_deref(),
+                Some("sk-vault-openai")
+            );
+            // Consumed env values trim (and win over the vault).
+            assert_eq!(
+                resolve_openai_key(Some("sk-env-openai\n"), Some(&ss)).as_deref(),
+                Some("sk-env-openai")
+            );
+            assert_eq!(
+                discover_config(Some(" sk-env-anthropic "), Some(&ss))
+                    .expect("b")
+                    .api_key,
+                "sk-env-anthropic"
+            );
         });
     }
 
     #[test]
-    #[serial_test::serial]
     fn test_resolve_openai_key_prefers_env_over_vault() {
-        with_var("OPENAI_API_KEY", None, || {
-            let ss = vault_fixture();
-            assert!(resolve_openai_key(Some(&ss)).is_none());
-            {
-                let mut guard = ss.lock().unwrap();
-                guard.set("OPENAI_API_KEY", "sk-oai-vault").unwrap();
-            }
-            assert_eq!(
-                resolve_openai_key(Some(&ss)).as_deref(),
-                Some("sk-oai-vault")
-            );
-            with_var("OPENAI_API_KEY", Some("sk-oai-env"), || {
-                assert_eq!(resolve_openai_key(Some(&ss)).as_deref(), Some("sk-oai-env"));
-            });
-        });
+        // REQ-H12: the consumed env value wins; else the vault; else None. The
+        // resolver no longer reads a live env var, so this is fully isolated.
+        let ss = vault_fixture();
+        assert!(resolve_openai_key(None, None).is_none());
+        assert!(resolve_openai_key(None, Some(&ss)).is_none());
+        {
+            let mut guard = ss.lock().unwrap();
+            guard.set("OPENAI_API_KEY", "sk-oai-vault").unwrap();
+        }
+        assert_eq!(
+            resolve_openai_key(None, Some(&ss)).as_deref(),
+            Some("sk-oai-vault")
+        );
+        // The consumed env value wins over the vault entry.
+        assert_eq!(
+            resolve_openai_key(Some("sk-oai-env"), Some(&ss)).as_deref(),
+            Some("sk-oai-env")
+        );
     }
 
     #[test]

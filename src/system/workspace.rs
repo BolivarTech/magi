@@ -174,10 +174,9 @@ pub fn discover(start: &Path) -> Result<Option<Workspace>, HeadlessError> {
 /// uno de los archivos del layout legacy (`.magi-rs-memory.db` o `magi.toml`)
 /// suelto en `cwd`. Con un `.magi/` presente el layout ya está migrado y no hay
 /// nada que advertir.
-// Narrow allow: `init`/`discover` are now used by `magi init` (main.rs, MS1 T11),
-// but this legacy-file primitive's only consumer is MS2 T7 (startup warning
-// emission) — kept as a scoped allow rather than a module-wide one until then.
-#[allow(dead_code)]
+///
+/// Wired in MS2 T7: `main::run` emits the REQ-H31 startup warning when this
+/// returns `true` (detect only — the legacy files are never read or migrated).
 #[must_use]
 pub fn detect_legacy_files(cwd: &Path) -> bool {
     !cwd.join(MAGI_DIR_NAME).is_dir()
