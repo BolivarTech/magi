@@ -60,3 +60,12 @@ path = "fuzz_targets/fuzz_sanitize_error.rs"
 test = false
 doc = false
 bench = false
+
+# Target de la matriz de política de tiers (REQ-H35 / MS2 Task 10). Bytes
+# arbitrarios ⇒ (tier, nombre de tool); invariante: nunca panic + fail-closed.
+[[bin]]
+name = "fuzz_policy"
+path = "fuzz_targets/fuzz_policy.rs"
+test = false
+doc = false
+bench = false

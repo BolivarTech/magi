@@ -148,6 +148,64 @@ impl Policy {
     }
 }
 
+/// Fuzz entrypoint del target `fuzz_policy` (MS2 Task 10 / REQ-H35): mapea
+/// bytes arbitrarios a `(tier, nombre_de_tool)` y ejercita toda la superficie
+/// pública de [`Policy`].
+///
+/// El primer byte selecciona el tier (`0` ⇒ [`Tier::Default`], `1` ⇒
+/// [`Tier::Auto`], cualquier otro ⇒ [`Tier::FullAuto`]) y el resto de los bytes
+/// es el nombre del tool, convertido con `String::from_utf8_lossy` — de modo
+/// que la entrada cubre nombres no-UTF8. Invariantes verificadas sobre TODA
+/// entrada: **nunca panic** (la matriz es lógica pura, total), y **fail-closed**
+/// — una aprobación implica que el nombre pertenece al set conocido de tools en
+/// cualquier tier (un nombre desconocido jamás devuelve `true`).
+///
+/// `#[doc(hidden)] pub` espeja la convención de los `fuzz_*_entrypoint` del
+/// vault y de [`output`](super::output): expone la frontera al crate `fuzz/`
+/// sin ensanchar la API pública documentada del módulo.
+///
+/// # Panics
+///
+/// Panica (bajo `debug_assertions`, que `cargo-fuzz` activa) solo si la
+/// invariante fail-closed se viola — ese es el bug genuino que el fuzzer busca,
+/// no un abort espurio.
+#[doc(hidden)]
+pub fn fuzz_policy_entrypoint(data: &[u8]) {
+    // Primer byte ⇒ tier; resto ⇒ nombre del tool (lossy, cubre no-UTF8). El
+    // fallback `(&0, &[])` cubre la entrada vacía sin indexar (fail-closed).
+    let (&tier_byte, name_bytes) = data.split_first().unwrap_or((&0, &[]));
+    let tier = match tier_byte {
+        0 => Tier::Default,
+        1 => Tier::Auto,
+        _ => Tier::FullAuto,
+    };
+
+    // `max_tool_calls`/`timeout` derivados de la cola para ejercitar los
+    // accesores con valores variados; no participan en la lógica de aprobación.
+    let max_tool_calls = u32::try_from(name_bytes.len()).unwrap_or(u32::MAX);
+    let timeout = name_bytes.first().map(|&b| u64::from(b));
+
+    let name = String::from_utf8_lossy(name_bytes);
+    let policy = Policy::new(tier, max_tool_calls, timeout);
+
+    // Toda la superficie pública debe ser total (nunca panic) sobre la entrada.
+    let approved = policy.approves(&name);
+    let _ = policy.silences_soft_guards();
+    let _ = policy.warnings();
+    let _ = policy.tier();
+    let _ = policy.max_tool_calls();
+    let _ = policy.timeout();
+
+    // Fail-closed: una aprobación implica un nombre de tool conocido, en
+    // cualquier tier — un nombre desconocido jamás se auto-aprueba (REQ-H09).
+    let name_ref: &str = name.as_ref();
+    let is_known = READ_ONLY_TOOLS.contains(&name_ref) || READ_WRITE_TOOLS.contains(&name_ref);
+    debug_assert!(
+        !approved || is_known,
+        "fail-closed violated: approved unknown tool name {name_ref:?} in tier {tier:?}"
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -276,5 +334,26 @@ mod tests {
 
         let no_timeout = Policy::new(Tier::Default, 15, None);
         assert_eq!(no_timeout.timeout(), None);
+    }
+
+    /// Unit-smoke del fuzz entrypoint `fuzz_policy` (REQ-H35): entradas
+    /// degeneradas (vacía, tier fuera de rango, cola no-UTF8, tool desconocido)
+    /// nunca panican y respetan el fail-closed. Es la versión local que SÍ
+    /// corre en cada §0.1, complementando la corrida coverage-guided de CI.
+    #[test]
+    fn test_fuzz_policy_entrypoint_never_panics_on_arbitrary_input() {
+        let cases: &[&[u8]] = &[
+            b"",
+            b"\x00",
+            b"\x01",
+            b"\x00ls",
+            b"\x01bash",
+            b"\xffedit",
+            b"\x00tool_que_no_existe",
+            &[0x02, 0xff, 0xfe, 0xfd],
+        ];
+        for case in cases {
+            fuzz_policy_entrypoint(case);
+        }
     }
 }

@@ -50,3 +50,9 @@ pub use error::HeadlessError;
 /// API pública documentada, sólo la hace alcanzable desde el crate `fuzz/`.
 #[doc(hidden)]
 pub use output::fuzz_sanitize_error_entrypoint;
+
+/// Re-export del fuzz entrypoint de la matriz de política de tiers para el
+/// target externo `fuzz_policy` (MS2 Task 10 / REQ-H35). `#[doc(hidden)]`: misma
+/// convención — alcanzable desde `fuzz/` sin ensanchar la API documentada.
+#[doc(hidden)]
+pub use policy::fuzz_policy_entrypoint;
