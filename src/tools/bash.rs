@@ -368,9 +368,12 @@ mod tests {
 
         let tool = BashTool::new(root.clone()).unwrap();
 
+        // Generous timeout: this test only verifies `echo` runs, not the timeout
+        // path. A tight budget flakes under full-suite CPU contention because a
+        // Windows PowerShell cold-start (~1-2 s) can eat most of a small budget.
         let args = serde_json::json!({
             "command": "echo 'Hello Rust'",
-            "timeout": 5000
+            "timeout": 30000
         });
 
         let result = tool.execute(args, &CancellationToken::new()).await;
