@@ -9,14 +9,32 @@
 use crate::tools::{Tool, ToolError, ToolResult};
 use async_trait::async_trait;
 use magi_core::orchestrator::Magi;
+use magi_core::reporting::MagiReport;
 use magi_core::schema::Mode;
 use serde_json::{json, Value};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 /// Reject oversized consult input before incurring 3 model calls.
-/// `pub(crate)` so the forced `/consult` TUI path applies the same cap.
+/// `pub(crate)` so the forced `/consult` TUI path and the headless direct/forced
+/// consult path ([`crate::headless_runner`]) apply the same cap (REQ-H33).
 pub(crate) const MAX_QUERY_LEN: usize = 8192;
+
+/// Builds the stable `consult` JSON object from a finished MAGI report.
+///
+/// Single source of truth for the `{report, degraded}` shape shared by the
+/// tool-loop [`ConsultTool::execute`] path and the headless direct/forced
+/// consult path (REQ-H21/H22) — so the on-the-wire shape never drifts between
+/// the two entry points.
+///
+/// # Parameters
+/// * `report` - The finished multi-perspective consensus report.
+///
+/// # Returns
+/// A JSON object `{"report": <markdown>, "degraded": <bool>}`.
+pub(crate) fn report_to_consult_json(report: &MagiReport) -> Value {
+    json!({ "report": report.report, "degraded": report.degraded })
+}
 
 /// Notice emitted in the TUI when the `consult` tool is auto-approved.
 /// Visible to the user so they know the 3-LLM consensus was launched.
@@ -135,7 +153,7 @@ impl Tool for ConsultTool {
                     )))
                 }
             };
-        Ok(json!({ "report": report.report, "degraded": report.degraded }))
+        Ok(report_to_consult_json(&report))
     }
 }
 

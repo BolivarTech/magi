@@ -31,9 +31,13 @@
 #![cfg_attr(not(test), allow(dead_code))]
 
 use std::collections::HashMap;
+use std::future;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
+use magi_core::orchestrator::Magi;
+use magi_core::schema::Mode;
+use serde_json::{json, Value};
 use tokio_util::sync::CancellationToken;
 
 use magi_rs::headless::limits::FULL_AUTO_TIMEOUT_SECS;
@@ -48,6 +52,7 @@ use magi_rs::headless::types::{
 
 use crate::agent::messages::{Content, Message, Role};
 use crate::agent::{Agent, AgentRunConfig, RunObserver, StreamPiece, MAX_TOOL_CALLS_ERROR};
+use crate::tools::consult::{report_to_consult_json, MAX_QUERY_LEN};
 
 /// Buffered capacity of the internal chunk channel; mirrors the interactive TUI
 /// bridge so backpressure behaves identically. The channel is drained
@@ -62,6 +67,171 @@ const ROLE_ASSISTANT: &str = "assistant";
 
 /// `error.message` when a run is aborted by the wall-clock `--timeout` (REQ-H36).
 const TIMEOUT_MESSAGE: &str = "run exceeded the --timeout wall-clock limit";
+
+/// Registered name of the multi-perspective MAGI `consult` tool (REQ-H21/H22).
+/// Single source of truth for the name matched when forcing/capturing a consult.
+const CONSULT_TOOL: &str = "consult";
+
+/// JSON input key the `consult` tool expects (mirrors `ConsultTool::input_schema`).
+const CONSULT_QUERY_KEY: &str = "query";
+
+/// Synthetic tool-use id of a runner-injected forced consult (REQ-H22). It never
+/// correlates to an assistant `ToolUse` block, so it appears in `tool_calls` but
+/// not in the transcript — the forced pass is a runner action, not a model turn.
+const FORCED_CONSULT_ID: &str = "forced-consult";
+
+/// `error.message` for a direct/forced consult whose prompt is empty or exceeds
+/// [`MAX_QUERY_LEN`] (REQ-H33: reject, never truncate).
+const CONSULT_INPUT_INVALID_MESSAGE: &str = "consult prompt is empty or exceeds the maximum length";
+
+/// Recorded result of a forced consult that a tool-executing tier authorized but
+/// that has no MAGI orchestrator wired (defensive; production always wires one).
+const CONSULT_UNAVAILABLE_MESSAGE: &str = "MAGI orchestrator is not configured for consult";
+
+/// Typed failure of a direct/forced consult, mapped to an [`ErrorKind`] by the
+/// caller so an over-cap prompt becomes `input_invalid` (exit 2, REQ-H33) and a
+/// wall-clock abort becomes `timeout` (exit 1, REQ-H36).
+enum ConsultRunError {
+    /// The prompt was empty or exceeded [`MAX_QUERY_LEN`] (→ `input_invalid`).
+    InputInvalid,
+    /// The consult was cancelled by the `--timeout` deadline (→ `timeout`).
+    Timeout,
+    /// The MAGI orchestrator failed or panicked; the message is sanitized before
+    /// use (→ `runtime`).
+    Runtime(String),
+}
+
+/// Builds the `consult` tool input object (`{"query": <prompt>}`) recorded for a
+/// forced consult, matching the schema of the interactive `consult` tool.
+fn consult_input(prompt: &str) -> Value {
+    json!({ CONSULT_QUERY_KEY: prompt })
+}
+
+/// Runs `prompt` directly through the 3-perspective MAGI consensus, off the agent
+/// tool-loop (REQ-H21), honoring the same input cap ([`MAX_QUERY_LEN`], REQ-H33)
+/// and the `--timeout`/cancellation plumbing of the enclosing run (REQ-H36).
+///
+/// The `analyze` call runs on a joined task so a panic in `magi-core` surfaces as
+/// a recoverable [`ConsultRunError::Runtime`] instead of unwinding the caller; on
+/// cancellation or deadline the task is **aborted** (not merely detached) and
+/// [`ConsultRunError::Timeout`] is returned.
+///
+/// # Parameters
+/// - `magi` — shared MAGI orchestrator (the same one wired for the interactive
+///   `consult` tool).
+/// - `prompt` — the decision/content to analyze.
+/// - `cancel` — cooperative cancellation fired by the enclosing run's deadline.
+/// - `timeout` — optional wall-clock ceiling for this consult specifically.
+///
+/// # Errors
+/// - [`ConsultRunError::InputInvalid`] if `prompt` is empty or exceeds
+///   [`MAX_QUERY_LEN`].
+/// - [`ConsultRunError::Timeout`] if cancelled or the deadline elapsed.
+/// - [`ConsultRunError::Runtime`] if the MAGI analysis failed or panicked.
+async fn analyze_direct(
+    magi: &Arc<Magi>,
+    prompt: &str,
+    cancel: &CancellationToken,
+    timeout: Option<Duration>,
+) -> Result<Value, ConsultRunError> {
+    if prompt.trim().is_empty() || prompt.len() > MAX_QUERY_LEN {
+        return Err(ConsultRunError::InputInvalid);
+    }
+
+    let magi = Arc::clone(magi);
+    let owned = prompt.to_string();
+    let handle = tokio::spawn(async move { magi.analyze(&Mode::Analysis, &owned).await });
+    let aborter = handle.abort_handle();
+
+    // A `None` timeout parks forever, so the deadline arm never fires; the cancel
+    // arm still aborts if the enclosing run is cancelled.
+    let deadline = async {
+        match timeout {
+            Some(dur) => tokio::time::sleep(dur).await,
+            None => future::pending::<()>().await,
+        }
+    };
+    tokio::pin!(deadline);
+
+    let joined = tokio::select! {
+        biased;
+        () = cancel.cancelled() => {
+            aborter.abort();
+            return Err(ConsultRunError::Timeout);
+        }
+        () = &mut deadline => {
+            aborter.abort();
+            return Err(ConsultRunError::Timeout);
+        }
+        joined = handle => joined,
+    };
+
+    match joined {
+        Ok(Ok(report)) => Ok(report_to_consult_json(&report)),
+        Ok(Err(e)) => Err(ConsultRunError::Runtime(e.to_string())),
+        Err(join_err) => Err(ConsultRunError::Runtime(format!(
+            "consult crashed: {join_err}"
+        ))),
+    }
+}
+
+/// Maps a [`ConsultRunError`] to the `(response, consult, stop_reason, error)`
+/// tuple of a **direct** `magi consult` outcome (REQ-H21/H33/H36), reused by
+/// [`run_consult`] so the direct path's error taxonomy stays in one place.
+fn consult_error_outcome(
+    err: ConsultRunError,
+) -> (
+    Option<String>,
+    Option<Value>,
+    StopReason,
+    Option<ErrorPayload>,
+) {
+    let payload = match err {
+        ConsultRunError::InputInvalid => ErrorPayload {
+            message: CONSULT_INPUT_INVALID_MESSAGE.to_string(),
+            kind: ErrorKind::InputInvalid,
+        },
+        ConsultRunError::Timeout => ErrorPayload {
+            message: TIMEOUT_MESSAGE.to_string(),
+            kind: ErrorKind::Timeout,
+        },
+        ConsultRunError::Runtime(message) => ErrorPayload {
+            message: sanitize_error_message(&message),
+            kind: ErrorKind::Runtime,
+        },
+    };
+    (None, None, StopReason::Error, Some(payload))
+}
+
+/// Projects a direct consult into the normalized transcript (REQ-H14): the user
+/// prompt, plus the MAGI report as a single assistant turn when one was produced.
+/// No `tool_calls` appear — the direct path never runs the agent tool-loop.
+fn build_consult_transcript(prompt: &str, report: Option<&str>) -> Vec<TranscriptEntry> {
+    let mut transcript = vec![TranscriptEntry {
+        role: ROLE_USER.to_string(),
+        content: prompt.to_string(),
+        tool_calls: None,
+    }];
+    if let Some(text) = report {
+        transcript.push(TranscriptEntry {
+            role: ROLE_ASSISTANT.to_string(),
+            content: text.to_string(),
+            tool_calls: None,
+        });
+    }
+    transcript
+}
+
+/// Extracts the MAGI object of the last **successful** `consult` tool call from a
+/// finished run's records (REQ-H22): the forced or proactive consult result, or
+/// `None` when no consult succeeded (e.g. denied by the tier).
+fn extract_consult_value(calls: &[(String, ToolCallRecord)]) -> Option<Value> {
+    calls
+        .iter()
+        .rev()
+        .find(|(_, rec)| rec.name == CONSULT_TOOL && rec.ok)
+        .and_then(|(_, rec)| serde_json::from_str::<Value>(&rec.result).ok())
+}
 
 /// Mutable state collected by [`RunTracker`] during a run.
 ///
@@ -248,6 +418,95 @@ fn build_transcript(
     transcript
 }
 
+/// Runs `prompt` directly through the 3-perspective MAGI consensus for the
+/// `magi consult` subcommand (REQ-H21), returning a [`RunOutcome`] whose `consult`
+/// field holds the MAGI object.
+///
+/// This is the **forced, direct** path: it always runs the three perspectives via
+/// `magi-core` (never the agent tool-loop), so it does **not** consult the tier
+/// tool-gate — `magi consult` *is* the multi-perspective analysis. The outcome
+/// reflects that direct nature: `tool_calls` is empty, `response` is the MAGI
+/// report text, and `transcript` is the prompt plus that report.
+///
+/// An over-cap prompt (`prompt.len() > MAX_QUERY_LEN`) or an empty prompt is
+/// rejected with `error.kind = input_invalid` (REQ-H33: reject, never truncate),
+/// which the caller (Task 7) maps to exit 2. A `--timeout` abort yields
+/// `error.kind = timeout` (REQ-H36); a MAGI failure yields a sanitized `runtime`.
+///
+/// # Parameters
+/// - `resolved` — effective run parameters; supplies `model`/`provider`/
+///   `applied_caps` for the output.
+/// - `magi` — shared MAGI orchestrator (same one wired for the `consult` tool).
+/// - `prompt` — the decision/content to analyze.
+/// - `timeout` — optional wall-clock ceiling (REQ-H36).
+/// - `run_log` — optional JSONL run log; the terminal summary is recorded
+///   best-effort.
+///
+/// # Gaps (documented, never fabricated)
+/// - `usage` is `Usage { 0, 0 }`: `magi-core` does not surface token counts here.
+/// - `timings.per_turn_ms` is empty and `ttfb_ms` is `None`: the direct consult is
+///   a single buffered analysis, not a streamed turn sequence.
+pub async fn run_consult(
+    resolved: Resolved,
+    magi: Arc<Magi>,
+    prompt: &str,
+    timeout: Option<Duration>,
+    mut run_log: Option<&mut RunLog>,
+) -> RunOutcome {
+    // A fresh token: the direct consult has no enclosing agent run to inherit a
+    // cancellation from, so `analyze_direct`'s cancel arm only fires if this run's
+    // own `timeout` deadline elapses.
+    let cancel = CancellationToken::new();
+    let run_start = Instant::now();
+    let result = analyze_direct(&magi, prompt, &cancel, timeout).await;
+    let total_ms = elapsed_ms(run_start);
+
+    let (response, consult, stop_reason, error) = match result {
+        Ok(value) => {
+            let response = value
+                .get("report")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            (response, Some(value), StopReason::Done, None)
+        }
+        Err(err) => consult_error_outcome(err),
+    };
+
+    let transcript = build_consult_transcript(prompt, response.as_deref());
+
+    let summary = format!("consult complete: stop_reason={stop_reason:?}");
+    log_event(
+        run_log.as_mut(),
+        &LogEvent::Message {
+            level: LogLevel::Info,
+            text: &summary,
+        },
+    );
+
+    RunOutcome {
+        response,
+        model: resolved.model,
+        provider: resolved.provider,
+        // Gap: magi-core does not surface token counts to this layer.
+        usage: Usage {
+            input_tokens: 0,
+            output_tokens: 0,
+        },
+        timings: Timings {
+            total_ms,
+            ttfb_ms: None,
+            per_turn_ms: Vec::new(),
+        },
+        stop_reason,
+        // Direct path: no agent tool-loop, so no tool calls.
+        tool_calls: Vec::new(),
+        transcript,
+        consult,
+        applied_caps: resolved.applied_caps,
+        error,
+    }
+}
+
 /// Runs `agent` over `prompt` non-interactively under `policy`, returning a fully
 /// assembled [`RunOutcome`] (REQ-H02/H09/H23b).
 ///
@@ -284,21 +543,43 @@ fn build_transcript(
 ///   `stop_reason = Error` / `error.kind = Timeout` is returned. The tier default
 ///   (900 s for `--auto`/`--full-auto`) is selected by the caller (Task 7) and
 ///   passed here; use [`resolve_run_timeout`] to apply it.
+/// - `consult_magi` — MAGI orchestrator used to satisfy a **forced** consult
+///   (`resolved.consult == Some(true)`, REQ-H22). `None` disables forcing (the
+///   agent may still call the `consult` tool proactively under `--auto`+).
 /// - `run_log` — optional JSONL run log; tier warnings and each tool call are
 ///   recorded best-effort.
+///
+/// # Forced consult (REQ-H22)
+/// When `resolved.consult == Some(true)` and the run did not time out, the runner
+/// guarantees **exactly one** consult: if the agent already invoked the `consult`
+/// tool during the loop, that call is reused (never re-fired); otherwise the
+/// runner injects a single consult through the **same tier gate** (the observer's
+/// [`RunObserver::authorize`]), so the tier wins — in `default` the forced consult
+/// is recorded denied (`ok = false`) and `consult` stays `None`, never elevated
+/// out of the tier. Whichever consult succeeded (forced or proactive) populates
+/// `RunOutcome.consult`.
+///
+/// **Trade-off (reported):** the injected forced consult runs as a post-loop pass
+/// through the tracker rather than literally inside the provider-driven loop —
+/// forcing an extra tool call *inside* the loop would require invasive changes to
+/// `Agent` that risk the interactive path and the deterministic `stop_reason`
+/// accounting. It still flows through the identical authorization/recording path,
+/// so tier gating, `tier_denied` accounting and the audit record are faithful;
+/// its only divergence is that it is not fed back into the agent's answer and does
+/// not appear in `transcript` (it is a runner action, recorded in `tool_calls`).
 ///
 /// # Gaps (documented, never fabricated)
 /// - `usage` is `Usage { 0, 0 }`: the agent/provider do not surface token counts
 ///   to this layer.
 /// - `timings.per_turn_ms` is empty: turn boundaries are not observable from
 ///   outside the loop. `total_ms` and (best-effort) `ttfb_ms` are measured.
-/// - `consult` is `None` (forced consult is a later task).
 pub async fn run_query(
     resolved: Resolved,
     policy: Policy,
     agent: &mut Agent,
     prompt: &str,
     timeout: Option<Duration>,
+    consult_magi: Option<Arc<Magi>>,
     mut run_log: Option<&mut RunLog>,
 ) -> RunOutcome {
     // Tier warnings (only under --full-auto) are recorded up front.
@@ -362,6 +643,15 @@ pub async fn run_query(
         None => Some(query_fut.await),
     };
     let ttfb_ms = drain.await.ok().flatten();
+
+    // Forced consult (REQ-H22): only when requested AND the run actually ran (a
+    // timeout dropped the loop mid-flight ⇒ nothing to force onto). Injected
+    // through the SAME tracker so its authorization, `tier_denied` accounting and
+    // audit record are identical to a loop tool call — the tier gate wins.
+    if resolved.consult == Some(true) && outcome_result.is_some() {
+        force_consult_once(&tracker, consult_magi.as_ref(), prompt, &cancel, timeout).await;
+    }
+
     let total_ms = elapsed_ms(run_start);
 
     // Snapshot the observer state once (the run is over; no more callbacks).
@@ -456,12 +746,69 @@ pub async fn run_query(
         stop_reason,
         tool_calls,
         transcript,
-        // Forced consult is a later task; a proactive consult (in --auto+) is
-        // still recorded in `tool_calls` like any other tool.
-        consult: None,
+        // The MAGI object of whichever consult succeeded (forced or a proactive
+        // `--auto`+ call); `None` when none ran or it was denied by the tier.
+        consult: extract_consult_value(&calls),
         applied_caps: resolved.applied_caps,
         error,
     }
+}
+
+/// Ensures **exactly one** consult for a forced run (REQ-H22), recorded through
+/// `tracker` so the tier gate and accounting match a loop tool call.
+///
+/// No-op if the agent already invoked `consult` during the loop (the existing
+/// call is reused — never re-fired). Otherwise the forced consult is authorized
+/// via [`RunObserver::authorize`] — in `default` this denies and records
+/// `ok = false` (the tier wins, `consult` stays `None`); in `--auto`+ it runs the
+/// direct analysis and records the result. A `None` `magi` under an authorizing
+/// tier records an `ok = false` "not configured" call (defensive; production
+/// always wires the orchestrator when consult is possible).
+async fn force_consult_once(
+    tracker: &Arc<RunTracker>,
+    magi: Option<&Arc<Magi>>,
+    prompt: &str,
+    cancel: &CancellationToken,
+    timeout: Option<Duration>,
+) {
+    let already_consulted = with_state(&tracker.state, |s| {
+        s.calls.iter().any(|(_, r)| r.name == CONSULT_TOOL)
+    });
+    if already_consulted {
+        return;
+    }
+
+    let input = consult_input(prompt);
+    if !tracker.authorize(CONSULT_TOOL) {
+        // Tier denial: recorded exactly like a loop denial; `consult` stays None.
+        let denial = format!(
+            "Tool '{CONSULT_TOOL}' denied: not authorized in the current authorization tier"
+        );
+        tracker.on_tool_call(FORCED_CONSULT_ID, CONSULT_TOOL, &input, &denial, false, 0);
+        return;
+    }
+
+    let Some(magi) = magi else {
+        tracker.on_tool_call(
+            FORCED_CONSULT_ID,
+            CONSULT_TOOL,
+            &input,
+            CONSULT_UNAVAILABLE_MESSAGE,
+            false,
+            0,
+        );
+        return;
+    };
+
+    let started = Instant::now();
+    let (result, ok) = match analyze_direct(magi, prompt, cancel, timeout).await {
+        Ok(value) => (value.to_string(), true),
+        Err(ConsultRunError::InputInvalid) => (CONSULT_INPUT_INVALID_MESSAGE.to_string(), false),
+        Err(ConsultRunError::Timeout) => (TIMEOUT_MESSAGE.to_string(), false),
+        Err(ConsultRunError::Runtime(message)) => (sanitize_error_message(&message), false),
+    };
+    let ms = elapsed_ms(started);
+    tracker.on_tool_call(FORCED_CONSULT_ID, CONSULT_TOOL, &input, &result, ok, ms);
 }
 
 #[cfg(test)]
@@ -474,11 +821,39 @@ mod tests {
     use serde_json::{json, Value};
     use std::collections::VecDeque;
 
+    use magi_core::schema::AgentName;
+    use magi_core::test_support::RoutingMockProvider;
+
     use magi_rs::headless::policy::Tier;
     use magi_rs::headless::types::{AppliedCaps, SystemPolicy};
 
     use crate::agent::provider::{Provider, ResponseChunk};
+    use crate::tools::consult::ConsultTool;
     use crate::tools::{Tool, ToolResult};
+
+    /// A canned MAGI orchestrator whose three perspectives all approve, over a
+    /// `RoutingMockProvider` (no network) — deterministic, mirrors the double used
+    /// in `consult.rs` so a direct/forced consult yields a non-degraded report.
+    fn canned_magi() -> Arc<Magi> {
+        fn agent_json(agent: &str) -> String {
+            format!(
+                r#"{{"agent":"{agent}","verdict":"approve","confidence":0.9,"summary":"s","reasoning":"r","findings":[],"recommendation":"rec"}}"#
+            )
+        }
+        let provider = RoutingMockProvider::new()
+            .with_agent_responses(AgentName::Melchior, vec![Ok(agent_json("melchior"))])
+            .with_agent_responses(AgentName::Balthasar, vec![Ok(agent_json("balthasar"))])
+            .with_agent_responses(AgentName::Caspar, vec![Ok(agent_json("caspar"))]);
+        Arc::new(Magi::new(Arc::new(provider)))
+    }
+
+    /// A [`Resolved`] stub with a **forced** consult (`consult = Some(true)`).
+    fn forced_resolved() -> Resolved {
+        Resolved {
+            consult: Some(true),
+            ..resolved_stub()
+        }
+    }
 
     /// One scripted provider turn.
     enum Turn {
@@ -629,7 +1004,16 @@ mod tests {
         register_echo(&mut agent, "edit");
 
         let policy = Policy::new(Tier::Default, 15, None);
-        let outcome = run_query(resolved_stub(), policy, &mut agent, "prompt", None, None).await;
+        let outcome = run_query(
+            resolved_stub(),
+            policy,
+            &mut agent,
+            "prompt",
+            None,
+            None,
+            None,
+        )
+        .await;
 
         assert!(
             outcome.tool_calls.iter().any(|t| t.name == "edit" && !t.ok),
@@ -659,7 +1043,16 @@ mod tests {
         register_echo(&mut agent, "bash");
 
         let policy = Policy::new(Tier::Auto, 15, None);
-        let outcome = run_query(resolved_stub(), policy, &mut agent, "prompt", None, None).await;
+        let outcome = run_query(
+            resolved_stub(),
+            policy,
+            &mut agent,
+            "prompt",
+            None,
+            None,
+            None,
+        )
+        .await;
 
         assert!(outcome.tool_calls.iter().any(|t| t.name == "edit" && t.ok));
         assert!(outcome.tool_calls.iter().any(|t| t.name == "bash" && t.ok));
@@ -675,7 +1068,16 @@ mod tests {
         register_echo(&mut agent, "edit");
 
         let policy = Policy::new(Tier::Default, 15, None);
-        let outcome = run_query(resolved_stub(), policy, &mut agent, "prompt", None, None).await;
+        let outcome = run_query(
+            resolved_stub(),
+            policy,
+            &mut agent,
+            "prompt",
+            None,
+            None,
+            None,
+        )
+        .await;
 
         assert!(
             outcome.tool_calls.iter().any(|t| t.name == "edit" && !t.ok),
@@ -703,7 +1105,16 @@ mod tests {
         register_echo(&mut agent, "ls");
 
         let policy = Policy::new(Tier::Auto, 2, None);
-        let outcome = run_query(resolved_stub(), policy, &mut agent, "prompt", None, None).await;
+        let outcome = run_query(
+            resolved_stub(),
+            policy,
+            &mut agent,
+            "prompt",
+            None,
+            None,
+            None,
+        )
+        .await;
 
         assert_eq!(outcome.stop_reason, StopReason::MaxToolCalls);
         assert!(
@@ -719,7 +1130,16 @@ mod tests {
         let mut agent = Agent::new(provider);
 
         let policy = Policy::new(Tier::Auto, 15, None);
-        let outcome = run_query(resolved_stub(), policy, &mut agent, "prompt", None, None).await;
+        let outcome = run_query(
+            resolved_stub(),
+            policy,
+            &mut agent,
+            "prompt",
+            None,
+            None,
+            None,
+        )
+        .await;
 
         assert_eq!(outcome.stop_reason, StopReason::Error);
         assert!(outcome.error.is_some(), "error payload must be populated");
@@ -735,7 +1155,16 @@ mod tests {
         register_echo(&mut agent, "edit");
 
         let policy = Policy::new(Tier::Default, 15, None);
-        let outcome = run_query(resolved_stub(), policy, &mut agent, "prompt", None, None).await;
+        let outcome = run_query(
+            resolved_stub(),
+            policy,
+            &mut agent,
+            "prompt",
+            None,
+            None,
+            None,
+        )
+        .await;
 
         assert!(
             outcome.tool_calls.iter().any(|t| t.name == "edit" && !t.ok),
@@ -762,7 +1191,16 @@ mod tests {
 
         // Default denies edit; cap 2 ⇒ the 3rd (denied) call trips the cap.
         let policy = Policy::new(Tier::Default, 2, None);
-        let outcome = run_query(resolved_stub(), policy, &mut agent, "prompt", None, None).await;
+        let outcome = run_query(
+            resolved_stub(),
+            policy,
+            &mut agent,
+            "prompt",
+            None,
+            None,
+            None,
+        )
+        .await;
 
         assert_eq!(
             outcome.stop_reason,
@@ -783,7 +1221,16 @@ mod tests {
         register_echo(&mut agent, "edit");
 
         let policy = Policy::new(Tier::FullAuto, 50, None);
-        let outcome = run_query(resolved_stub(), policy, &mut agent, "prompt", None, None).await;
+        let outcome = run_query(
+            resolved_stub(),
+            policy,
+            &mut agent,
+            "prompt",
+            None,
+            None,
+            None,
+        )
+        .await;
 
         assert_eq!(
             outcome.stop_reason,
@@ -809,7 +1256,16 @@ mod tests {
         register_echo(&mut agent, "edit");
 
         let policy = Policy::new(Tier::Auto, 15, None);
-        let outcome = run_query(resolved_stub(), policy, &mut agent, "prompt", None, None).await;
+        let outcome = run_query(
+            resolved_stub(),
+            policy,
+            &mut agent,
+            "prompt",
+            None,
+            None,
+            None,
+        )
+        .await;
 
         assert_eq!(
             outcome.stop_reason,
@@ -830,7 +1286,16 @@ mod tests {
         register_echo(&mut agent, "ls");
 
         let policy = Policy::new(Tier::Auto, 15, None);
-        let outcome = run_query(resolved_stub(), policy, &mut agent, "prompt", None, None).await;
+        let outcome = run_query(
+            resolved_stub(),
+            policy,
+            &mut agent,
+            "prompt",
+            None,
+            None,
+            None,
+        )
+        .await;
 
         // user prompt, assistant(tool-use), assistant(final text).
         let user = outcome
@@ -895,7 +1360,16 @@ mod tests {
         register_echo(&mut agent, "ls");
 
         let policy = Policy::new(Tier::Auto, 15, None);
-        let outcome = run_query(resolved_stub(), policy, &mut agent, "prompt", None, None).await;
+        let outcome = run_query(
+            resolved_stub(),
+            policy,
+            &mut agent,
+            "prompt",
+            None,
+            None,
+            None,
+        )
+        .await;
 
         assert_eq!(
             outcome.stop_reason,
@@ -959,6 +1433,7 @@ mod tests {
             "go",
             Some(Duration::from_millis(2000)),
             None,
+            None,
         )
         .await;
 
@@ -986,6 +1461,176 @@ mod tests {
         assert!(
             !done.exists(),
             "the bash subprocess tree must be dead — no DONE marker"
+        );
+    }
+
+    // ── REQ-H21/H22: consult (direct + forced) ─────────────────────────────────
+
+    /// `magi consult` direct path: the 3 perspectives run off the agent loop and
+    /// `RunOutcome.consult` is the (non-null) MAGI object; `response` is the report
+    /// and no tool calls are recorded (REQ-H21).
+    #[tokio::test]
+    async fn test_run_consult_direct_runs_three_perspectives_and_populates_consult() {
+        let outcome = run_consult(
+            resolved_stub(),
+            canned_magi(),
+            "should we migrate X to Y?",
+            None,
+            None,
+        )
+        .await;
+
+        assert_eq!(outcome.stop_reason, StopReason::Done);
+        assert!(outcome.error.is_none(), "a healthy consult has no error");
+        let consult = outcome.consult.expect("the MAGI object must be present");
+        assert_eq!(consult["degraded"], json!(false), "3 agents ⇒ not degraded");
+        assert!(
+            consult["report"].as_str().is_some_and(|s| !s.is_empty()),
+            "the consult object carries the MAGI report"
+        );
+        assert!(
+            outcome.response.as_deref().is_some_and(|s| !s.is_empty()),
+            "response reflects the direct report text"
+        );
+        assert!(
+            outcome.tool_calls.is_empty(),
+            "the direct path runs no agent tool-loop ⇒ no tool calls"
+        );
+    }
+
+    /// `magi consult` over `MAX_QUERY_LEN` is rejected as `input_invalid` (exit 2),
+    /// NOT truncated: `consult`/`response` stay `None` (REQ-H33).
+    #[tokio::test]
+    async fn test_run_consult_over_cap_is_input_invalid_not_truncated() {
+        let big = "x".repeat(MAX_QUERY_LEN + 1);
+        let outcome = run_consult(resolved_stub(), canned_magi(), &big, None, None).await;
+
+        assert_eq!(outcome.stop_reason, StopReason::Error);
+        let err = outcome
+            .error
+            .expect("an over-cap prompt populates the error");
+        assert_eq!(
+            err.kind,
+            ErrorKind::InputInvalid,
+            "over-cap ⇒ input_invalid (→ exit 2)"
+        );
+        assert!(outcome.consult.is_none(), "rejected input ⇒ no MAGI object");
+        assert!(outcome.response.is_none(), "rejected, not truncated");
+    }
+
+    /// `query --consult` in `--auto` invokes consult **exactly once** and populates
+    /// `RunOutcome.consult`, even though the agent itself did not consult (REQ-H22).
+    #[tokio::test]
+    async fn test_query_forced_consult_auto_runs_exactly_once_and_populates() {
+        let provider = ScriptedProvider::new(vec![Turn::Text("here is my answer".to_string())]);
+        let mut agent = Agent::new(provider);
+
+        let policy = Policy::new(Tier::Auto, 15, None);
+        let outcome = run_query(
+            forced_resolved(),
+            policy,
+            &mut agent,
+            "decide X vs Y",
+            None,
+            Some(canned_magi()),
+            None,
+        )
+        .await;
+
+        let consult_calls = outcome
+            .tool_calls
+            .iter()
+            .filter(|t| t.name == "consult")
+            .count();
+        assert_eq!(consult_calls, 1, "forced consult runs exactly once");
+        assert!(
+            outcome
+                .tool_calls
+                .iter()
+                .any(|t| t.name == "consult" && t.ok),
+            "the forced consult succeeded under --auto"
+        );
+        assert!(
+            outcome.consult.is_some(),
+            "the forced consult result is captured into RunOutcome.consult"
+        );
+    }
+
+    /// `query --consult` in `default` DENIES the forced consult (the tier gate
+    /// wins): it is recorded `ok = false` and `RunOutcome.consult` stays `None` —
+    /// it is NOT elevated out of the read-only tier (REQ-H22 precedence).
+    #[tokio::test]
+    async fn test_query_forced_consult_default_denied_and_not_elevated() {
+        let provider = ScriptedProvider::new(vec![Turn::Text("read-only answer".to_string())]);
+        let mut agent = Agent::new(provider);
+
+        let policy = Policy::new(Tier::Default, 15, None);
+        let outcome = run_query(
+            forced_resolved(),
+            policy,
+            &mut agent,
+            "decide X vs Y",
+            None,
+            Some(canned_magi()),
+            None,
+        )
+        .await;
+
+        assert!(
+            outcome
+                .tool_calls
+                .iter()
+                .any(|t| t.name == "consult" && !t.ok),
+            "the forced consult is denied by the default tier (ok=false)"
+        );
+        assert!(
+            outcome.consult.is_none(),
+            "a denied consult leaves RunOutcome.consult null — not elevated"
+        );
+    }
+
+    /// A forced consult does NOT double-fire: when the agent already invoked the
+    /// `consult` tool during the loop, exactly one consult call is recorded and no
+    /// second (injected) pass runs (REQ-H22 exactly-once).
+    #[tokio::test]
+    async fn test_query_forced_consult_does_not_double_fire() {
+        let provider = ScriptedProvider::new(vec![
+            Turn::Tool {
+                id: "c1".to_string(),
+                name: "consult".to_string(),
+                input: json!({ "query": "decide X vs Y" }),
+            },
+            Turn::Text("synthesized".to_string()),
+        ]);
+        let mut agent = Agent::new(provider);
+        // A real ConsultTool over a canned MAGI so the agent's proactive call
+        // executes and is recorded (auto_approve is moot — the observer authorizes).
+        agent.register_tool(Box::new(ConsultTool::new(canned_magi(), true)));
+
+        let policy = Policy::new(Tier::Auto, 15, None);
+        let outcome = run_query(
+            forced_resolved(),
+            policy,
+            &mut agent,
+            "decide X vs Y",
+            None,
+            Some(canned_magi()),
+            None,
+        )
+        .await;
+
+        let consult_calls = outcome
+            .tool_calls
+            .iter()
+            .filter(|t| t.name == "consult")
+            .count();
+        assert_eq!(
+            consult_calls, 1,
+            "the agent's own consult is reused — the forced pass does not re-fire"
+        );
+        assert!(
+            outcome.consult.is_some(),
+            "the single (proactive) consult populates RunOutcome.consult"
         );
     }
 }
