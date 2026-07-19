@@ -2403,6 +2403,136 @@ mod tests {
         );
     }
 
+    // ── Interactive-path regression (MS2 T8, REQ-H28) ───────────────────────────
+    //
+    // The headless MS2 work threaded an `AgentRunConfig` (T3), a
+    // `Tool::execute(cancel)` argument (T4) and a `.magi/` discovery step (T7)
+    // through the shared agent loop. The TUI callers were updated to pass
+    // `AgentRunConfig::default()` (max_tool_calls = 15, repetitive guard ENABLED,
+    // no observer) + a never-cancelled token. These tests pin that the interactive
+    // path (observer = None) behaves byte-for-byte as it did in v0.9.0: the
+    // approval gate still mediates a dangerous tool, and the repetitive-call guard
+    // still fires — neither is auto-approved nor silenced by the new plumbing.
+
+    /// Provider that requests the SAME identical tool call on EVERY turn, so the
+    /// agent's 3-repetition guard is the terminal condition (well before the
+    /// 15-call cap). `id` is constant, but `normalize_input` compares only
+    /// `(name, normalized_input)`, so the repetition is detected regardless.
+    struct AlwaysSameToolProvider {
+        tool_name: String,
+    }
+
+    #[async_trait]
+    impl Provider for AlwaysSameToolProvider {
+        async fn stream_messages(
+            &self,
+            _messages: &[Message],
+            _tools: &[Box<dyn Tool>],
+        ) -> Result<BoxStream<'static, Result<ResponseChunk>>> {
+            let msg = Message {
+                role: Role::Assistant,
+                content: vec![Content::ToolUse {
+                    id: "repeat-id".to_string(),
+                    name: self.tool_name.clone(),
+                    input: json!({"same": "input"}),
+                }],
+            };
+            Ok(Box::pin(stream::iter(vec![Ok(
+                ResponseChunk::MessageDone(msg),
+            )])))
+        }
+    }
+
+    /// REGRESSION: on the interactive path (`AgentRunConfig::default()`, no
+    /// observer) a dangerous tool (`requires_approval() == true`) is STILL gated
+    /// through the `approval_tx` prompt — it is NOT auto-approved — and the run
+    /// executes it only after the UI approves, returning the model's normal text.
+    ///
+    /// This is the v0.9.0 approval-gate behavior; the MS2 `AgentRunConfig`/observer
+    /// plumbing must not have changed it for the observer-less interactive path.
+    #[tokio::test]
+    async fn test_interactive_path_regression_approval_gate_still_gates_dangerous_tool() {
+        use tokio::sync::mpsc;
+
+        // Approver that records every tool name it is asked to authorize, then
+        // approves — proving an ApprovalRequest was actually emitted (the gate
+        // ran) rather than the tool being silently auto-approved.
+        let gated: Arc<std::sync::Mutex<Vec<String>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (approval_tx, mut approval_rx) = mpsc::channel::<ApprovalRequest>(8);
+        let gated_seen = gated.clone();
+        tokio::spawn(async move {
+            while let Some(req) = approval_rx.recv().await {
+                gated_seen.lock().unwrap().push(req.tool_name.clone());
+                let _ = req.tx.send(true);
+            }
+        });
+
+        let (tool, executed) = TrackingTool::new("gated_op", false /* dangerous */);
+        let (provider, _count) = SingleToolCallProvider::new("gated_op");
+        let mut agent = Agent::new(Arc::new(provider));
+        agent.register_tool(Box::new(tool));
+        agent.set_approval_channel(approval_tx);
+
+        let (chunk_tx, _rx) = mpsc::channel::<StreamPiece>(8);
+        let response = agent
+            .query_streaming("use the gated tool", chunk_tx, AgentRunConfig::default())
+            .await
+            .expect("interactive run must complete once approval is granted");
+
+        // The gate ran: exactly one ApprovalRequest for the dangerous tool.
+        assert_eq!(
+            *gated.lock().unwrap(),
+            vec!["gated_op".to_string()],
+            "interactive path must route a dangerous tool through the approval gate \
+             (one ApprovalRequest), NOT auto-approve it"
+        );
+        // Approval was honored: the tool executed.
+        assert!(
+            *executed.lock().unwrap(),
+            "the approved dangerous tool must execute on the interactive path"
+        );
+        // Response semantics unchanged: the model's final text is returned.
+        assert_eq!(
+            response, "done",
+            "interactive run must return the model's normal final text after the tool call"
+        );
+    }
+
+    /// REGRESSION: on the interactive path (`AgentRunConfig::default()`, whose
+    /// `disable_repetitive_guard == false`) three identical consecutive tool calls
+    /// STILL abort the run with "Repetitive tool call detected". The `--full-auto`
+    /// soft-guard silencing (REQ-H08) must NOT leak into the interactive/Default
+    /// path.
+    #[tokio::test]
+    async fn test_interactive_path_regression_repetitive_guard_still_fires() {
+        use tokio::sync::mpsc;
+
+        let (tool, _executed) = TrackingTool::new("loop_op", true /* auto-approve */);
+        let provider = AlwaysSameToolProvider {
+            tool_name: "loop_op".to_string(),
+        };
+        let mut agent = Agent::new(Arc::new(provider));
+        agent.register_tool(Box::new(tool));
+
+        let (chunk_tx, _rx) = mpsc::channel::<StreamPiece>(8);
+        let err = agent
+            .query_streaming("loop forever", chunk_tx, AgentRunConfig::default())
+            .await
+            .expect_err("the repetitive-call guard must abort the run on the interactive path");
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Repetitive tool call detected"),
+            "interactive path must fire the repetitive-call guard (not be silenced); got: {msg}"
+        );
+        // The guard — not the tool-call cap — is the terminal condition, matching
+        // v0.9.0 semantics (guard fires at the 3rd repeat, well under the 15 cap).
+        assert!(
+            !msg.contains(MAX_TOOL_CALLS_ERROR),
+            "the guard must terminate the run before the max-tool-calls cap; got: {msg}"
+        );
+    }
+
     #[tokio::test]
     async fn test_promoted_preference_appears_in_assembled_context() {
         use crate::memory::clock::FixedClock;
