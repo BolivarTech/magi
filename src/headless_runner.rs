@@ -324,6 +324,34 @@ fn elapsed_ms(start: Instant) -> u64 {
     u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
+/// The wall-clock budget left for a post-loop forced consult (REQ-H36).
+///
+/// The run shares ONE `--timeout` across the agent loop **and** the forced
+/// consult, so the consult runs against the time REMAINING after `elapsed`,
+/// never a fresh `dur` — a fresh deadline here would let `loop + forced consult`
+/// reach up to **2×** `dur`, weakening the wall-clock DoS ceiling that
+/// `--auto`/`--full-auto` rely on. `None` (no timeout) stays unbounded; an
+/// already-exhausted budget saturates to [`Duration::ZERO`], which the consult
+/// treats as an immediate timeout.
+fn forced_consult_budget(timeout: Option<Duration>, elapsed: Duration) -> Option<Duration> {
+    timeout.map(|dur| dur.checked_sub(elapsed).unwrap_or(Duration::ZERO))
+}
+
+/// The `(response, stop_reason, error)` triple of a wall-clock timeout abort
+/// (REQ-H36): no response, a first-class [`ErrorKind::Timeout`] payload. Shared
+/// by the loop-timeout and forced-consult-timeout arms so the timeout outcome is
+/// defined in exactly one place.
+fn timeout_outcome() -> (Option<String>, StopReason, Option<ErrorPayload>) {
+    (
+        None,
+        StopReason::Error,
+        Some(ErrorPayload {
+            message: TIMEOUT_MESSAGE.to_string(),
+            kind: ErrorKind::Timeout,
+        }),
+    )
+}
+
 /// Writes `event` to `run_log` if one is attached; a log write failure is
 /// swallowed (best-effort — logging must never abort or contaminate the run).
 ///
@@ -553,7 +581,11 @@ pub async fn run_consult(
 /// [`RunObserver::authorize`]), so the tier wins — in `default` the forced consult
 /// is recorded denied (`ok = false`) and `consult` stays `None`, never elevated
 /// out of the tier. Whichever consult succeeded (forced or proactive) populates
-/// `RunOutcome.consult`.
+/// `RunOutcome.consult`. The injected consult shares the run's **single**
+/// wall-clock budget: it runs against the time remaining after the agent loop
+/// ([`forced_consult_budget`]), so `loop + forced consult` never exceeds one
+/// `dur`; if that remaining budget elapses the whole run reports a `Timeout`
+/// (REQ-H36).
 ///
 /// **Trade-off (reported):** the injected forced consult runs as a post-loop pass
 /// through the tracker rather than literally inside the provider-driven loop —
@@ -644,8 +676,17 @@ pub async fn run_query(
     // timeout dropped the loop mid-flight ⇒ nothing to force onto). Injected
     // through the SAME tracker so its authorization, `tier_denied` accounting and
     // audit record are identical to a loop tool call — the tier gate wins.
+    //
+    // It shares the run's SINGLE wall-clock budget (REQ-H36): the consult runs
+    // against the time REMAINING after the agent loop, not a fresh `dur`, so
+    // `loop + forced consult` can never exceed one `dur`. If that remaining
+    // budget elapses the consult reports a timeout, which dominates the outcome
+    // mapping below exactly like a loop timeout.
+    let mut forced_consult_timed_out = false;
     if resolved.consult == Some(true) && outcome_result.is_some() {
-        force_consult_once(&tracker, consult_magi.as_ref(), prompt, &cancel, timeout).await;
+        let remaining = forced_consult_budget(timeout, run_start.elapsed());
+        forced_consult_timed_out =
+            force_consult_once(&tracker, consult_magi.as_ref(), prompt, &cancel, remaining).await;
     }
 
     let total_ms = elapsed_ms(run_start);
@@ -665,16 +706,12 @@ pub async fn run_query(
 
     // Deterministic outcome mapping (priority Error > MaxToolCalls > Denied >
     // Done); a wall-clock timeout is a first-class `Error` (kind = timeout) and
-    // dominates every other signal because it dropped the run mid-flight.
+    // dominates every other signal because it dropped the run mid-flight. A
+    // forced consult that exhausted the shared budget is the same wall-clock
+    // timeout and produces the identical outcome (REQ-H36).
     let (response, stop_reason, error) = match outcome_result {
-        None => (
-            None,
-            StopReason::Error,
-            Some(ErrorPayload {
-                message: TIMEOUT_MESSAGE.to_string(),
-                kind: ErrorKind::Timeout,
-            }),
-        ),
+        None => timeout_outcome(),
+        Some(_) if forced_consult_timed_out => timeout_outcome(),
         Some(Ok(text)) => {
             let stop_reason = if tier_denied && response_empty {
                 StopReason::Denied
@@ -760,18 +797,24 @@ pub async fn run_query(
 /// direct analysis and records the result. A `None` `magi` under an authorizing
 /// tier records an `ok = false` "not configured" call (defensive; production
 /// always wires the orchestrator when consult is possible).
+///
+/// # Returns
+/// `true` iff the forced consult was cut short by the wall-clock `timeout`
+/// (`ConsultRunError::Timeout`); the caller promotes that to the run-level
+/// timeout outcome (REQ-H36). Every other path — no-op reuse, tier denial,
+/// missing orchestrator, input-invalid, runtime failure — returns `false`.
 async fn force_consult_once(
     tracker: &Arc<RunTracker>,
     magi: Option<&Arc<Magi>>,
     prompt: &str,
     cancel: &CancellationToken,
     timeout: Option<Duration>,
-) {
+) -> bool {
     let already_consulted = with_state(&tracker.state, |s| {
         s.calls.iter().any(|(_, r)| r.name == CONSULT_TOOL)
     });
     if already_consulted {
-        return;
+        return false;
     }
 
     let input = consult_input(prompt);
@@ -781,7 +824,7 @@ async fn force_consult_once(
             "Tool '{CONSULT_TOOL}' denied: not authorized in the current authorization tier"
         );
         tracker.on_tool_call(FORCED_CONSULT_ID, CONSULT_TOOL, &input, &denial, false, 0);
-        return;
+        return false;
     }
 
     let Some(magi) = magi else {
@@ -793,18 +836,21 @@ async fn force_consult_once(
             false,
             0,
         );
-        return;
+        return false;
     };
 
     let started = Instant::now();
-    let (result, ok) = match analyze_direct(magi, prompt, cancel, timeout).await {
-        Ok(value) => (value.to_string(), true),
-        Err(ConsultRunError::InputInvalid) => (CONSULT_INPUT_INVALID_MESSAGE.to_string(), false),
-        Err(ConsultRunError::Timeout) => (TIMEOUT_MESSAGE.to_string(), false),
-        Err(ConsultRunError::Runtime(message)) => (sanitize_error_message(&message), false),
+    let (result, ok, timed_out) = match analyze_direct(magi, prompt, cancel, timeout).await {
+        Ok(value) => (value.to_string(), true, false),
+        Err(ConsultRunError::InputInvalid) => {
+            (CONSULT_INPUT_INVALID_MESSAGE.to_string(), false, false)
+        }
+        Err(ConsultRunError::Timeout) => (TIMEOUT_MESSAGE.to_string(), false, true),
+        Err(ConsultRunError::Runtime(message)) => (sanitize_error_message(&message), false, false),
     };
     let ms = elapsed_ms(started);
     tracker.on_tool_call(FORCED_CONSULT_ID, CONSULT_TOOL, &input, &result, ok, ms);
+    timed_out
 }
 
 #[cfg(test)]
@@ -841,6 +887,42 @@ mod tests {
             .with_agent_responses(AgentName::Balthasar, vec![Ok(agent_json("balthasar"))])
             .with_agent_responses(AgentName::Caspar, vec![Ok(agent_json("caspar"))]);
         Arc::new(Magi::new(Arc::new(provider)))
+    }
+
+    /// A MAGI orchestrator whose every perspective blocks for `delay` before
+    /// answering — used to make a forced/direct consult deterministically exhaust
+    /// its wall-clock budget (the reply content is irrelevant; the deadline fires
+    /// first and the analysis task is aborted).
+    fn slow_magi(delay: Duration) -> Arc<Magi> {
+        use magi_core::error::ProviderError;
+        use magi_core::provider::{CompletionConfig, LlmProvider};
+
+        /// An [`LlmProvider`] that sleeps `delay` on every completion.
+        struct SlowLlm {
+            /// How long each `complete` call blocks before returning.
+            delay: Duration,
+        }
+
+        #[async_trait]
+        impl LlmProvider for SlowLlm {
+            async fn complete(
+                &self,
+                _system_prompt: &str,
+                _user_prompt: &str,
+                _config: &CompletionConfig,
+            ) -> Result<String, ProviderError> {
+                tokio::time::sleep(self.delay).await;
+                Ok(r#"{"agent":"melchior","verdict":"approve","confidence":0.9,"summary":"s","reasoning":"r","findings":[],"recommendation":"rec"}"#.to_string())
+            }
+            fn name(&self) -> &str {
+                "slow"
+            }
+            fn model(&self) -> &str {
+                "slow-model"
+            }
+        }
+
+        Arc::new(Magi::new(Arc::new(SlowLlm { delay })))
     }
 
     /// A [`Resolved`] stub with a **forced** consult (`consult = Some(true)`).
@@ -1635,6 +1717,92 @@ mod tests {
         assert!(
             outcome.consult.is_some(),
             "the single (proactive) consult populates RunOutcome.consult"
+        );
+    }
+
+    /// Structural proof of the single-deadline bound (REQ-H36): the forced consult
+    /// gets the budget REMAINING after the loop, never a fresh `dur`. Against the
+    /// pre-fix code — which handed the forced consult the full original `timeout` —
+    /// `loop + forced consult` could reach 2× `dur`; this arithmetic rejects that.
+    #[test]
+    fn test_forced_consult_budget_is_remaining_not_fresh() {
+        // 1000 ms budget, 600 ms already spent by the loop ⇒ only 400 ms left
+        // (NOT a fresh 1000 ms).
+        assert_eq!(
+            forced_consult_budget(
+                Some(Duration::from_millis(1000)),
+                Duration::from_millis(600)
+            ),
+            Some(Duration::from_millis(400)),
+            "the forced consult may only use the time remaining after the loop"
+        );
+        // An already-exhausted budget saturates to zero (immediate timeout),
+        // never underflows.
+        assert_eq!(
+            forced_consult_budget(Some(Duration::from_millis(500)), Duration::from_millis(900)),
+            Some(Duration::ZERO),
+            "an over-budget loop leaves zero for the consult, not a wrapped value"
+        );
+        // No timeout ⇒ unbounded (the interactive/None path is unaffected).
+        assert_eq!(
+            forced_consult_budget(None, Duration::from_millis(900)),
+            None,
+            "a None timeout stays unbounded for the forced consult too"
+        );
+    }
+
+    /// Behavioral proof (REQ-H36): a forced consult shares the run's SINGLE
+    /// wall-clock budget. The agent loop finishes fast, but the forced consult
+    /// would block far past the remaining budget, so the run times out as a whole
+    /// — `stop_reason = Error` / `error.kind = Timeout`. Against the pre-fix code
+    /// (a fresh deadline whose consult timeout was NOT propagated) this same run
+    /// reported `Done`, so this test fails on the old 2×-budget code.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_forced_consult_shares_single_wall_clock_budget() {
+        let provider = ScriptedProvider::new(vec![Turn::Text("fast loop answer".to_string())]);
+        let mut agent = Agent::new(provider);
+
+        // A MAGI whose analysis blocks far longer than the run's --timeout, so the
+        // forced consult is guaranteed to exhaust the shared budget.
+        let magi = slow_magi(Duration::from_secs(30));
+
+        let started = Instant::now();
+        let policy = Policy::new(Tier::Auto, 15, None);
+        let outcome = run_query(
+            forced_resolved(),
+            policy,
+            &mut agent,
+            "decide X vs Y",
+            Some(Duration::from_millis(300)),
+            Some(magi),
+            None,
+        )
+        .await;
+        let elapsed = started.elapsed();
+
+        assert_eq!(
+            outcome.stop_reason,
+            StopReason::Error,
+            "loop + forced consult over the shared budget ⇒ Error (pre-fix: Done)"
+        );
+        assert_eq!(
+            outcome
+                .error
+                .expect("a wall-clock timeout populates the error payload")
+                .kind,
+            ErrorKind::Timeout,
+            "the combined wall-clock overrun is a first-class Timeout"
+        );
+        assert!(
+            outcome.consult.is_none(),
+            "a timed-out forced consult yields no MAGI object"
+        );
+        // The forced consult was cut by the shared deadline, NOT run to its 30 s
+        // completion: a generous bound that never flakes but rejects an unbounded
+        // (or 2×) run.
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "the forced consult must be bounded by the deadline, not run to completion"
         );
     }
 }

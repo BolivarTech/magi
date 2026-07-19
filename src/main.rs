@@ -1530,11 +1530,28 @@ fn headless_error_for_exit(kind: ErrorKind) -> HeadlessError {
     }
 }
 
+/// Process exit code when the authorization tier blocked the task (REQ-H14/H23b).
+/// Mirrors the library's tier-denied code so a `TierDenied` error payload maps to
+/// the same value the `stop_reason == Denied` path already yields.
+const EXIT_TIER_DENIED: i32 = 3;
+
 /// Computes the process exit code of a finished headless run through the shared
 /// headless taxonomy (REQ-H23/H23b): a typed error dominates; otherwise a
 /// task-blocking tier denial (empty response + `stop_reason == Denied`) ⇒ 3;
 /// else 0.
 fn exit_code_for_outcome(outcome: &RunOutcome) -> i32 {
+    // A `TierDenied` error payload maps to the dedicated tier-denied exit code
+    // (REQ-H14 taxonomy). This payload is currently unreachable — tier denials
+    // flow via `stop_reason == Denied` with `error == None`, handled below — but
+    // the error-payload→exit mapping is kept consistent with the taxonomy so a
+    // future `TierDenied` payload never silently degrades to a generic runtime 1.
+    if outcome
+        .error
+        .as_ref()
+        .is_some_and(|e| e.kind == ErrorKind::TierDenied)
+    {
+        return EXIT_TIER_DENIED;
+    }
     let exit_err = outcome
         .error
         .as_ref()
@@ -2839,6 +2856,16 @@ mod tests {
                 Some(ErrorKind::Timeout)
             )),
             1
+        );
+        // A TierDenied error payload ⇒ 3 (taxonomy consistency, REQ-H14). Though
+        // currently unreachable, the payload→exit mapping must not degrade to 1.
+        assert_eq!(
+            exit_code_for_outcome(&outcome_with(
+                StopReason::Error,
+                None,
+                Some(ErrorKind::TierDenied)
+            )),
+            3
         );
     }
 
