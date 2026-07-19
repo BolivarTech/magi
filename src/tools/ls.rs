@@ -8,6 +8,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use std::path::PathBuf;
 use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
 
 /// Arguments for the `ListTool`.
 #[derive(Debug, Deserialize)]
@@ -64,7 +65,7 @@ impl Tool for ListTool {
         false
     }
 
-    async fn execute(&self, args: Value) -> ToolResult<Value> {
+    async fn execute(&self, args: Value, _cancel: &CancellationToken) -> ToolResult<Value> {
         let args: ListArgs =
             serde_json::from_value(args).map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
 
@@ -124,7 +125,7 @@ mod tests {
 
         let tool = ListTool::new(Arc::new(mock_fs), root.clone()).unwrap();
         let args = serde_json::json!({"path": "."});
-        let result = tool.execute(args).await;
+        let result = tool.execute(args, &CancellationToken::new()).await;
 
         assert!(result.is_ok());
     }

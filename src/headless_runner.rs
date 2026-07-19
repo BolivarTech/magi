@@ -32,11 +32,14 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
+use tokio_util::sync::CancellationToken;
+
+use magi_rs::headless::limits::FULL_AUTO_TIMEOUT_SECS;
 use magi_rs::headless::log::{LogEvent, LogLevel, RunLog};
 use magi_rs::headless::output::sanitize_error_message;
-use magi_rs::headless::policy::Policy;
+use magi_rs::headless::policy::{Policy, Tier};
 use magi_rs::headless::resolution::Resolved;
 use magi_rs::headless::types::{
     ErrorKind, ErrorPayload, RunOutcome, StopReason, Timings, ToolCallRecord, TranscriptEntry,
@@ -56,6 +59,9 @@ const ROLE_USER: &str = "user";
 
 /// Normalized transcript role for an assistant turn (REQ-H14).
 const ROLE_ASSISTANT: &str = "assistant";
+
+/// `error.message` when a run is aborted by the wall-clock `--timeout` (REQ-H36).
+const TIMEOUT_MESSAGE: &str = "run exceeded the --timeout wall-clock limit";
 
 /// Mutable state collected by [`RunTracker`] during a run.
 ///
@@ -121,6 +127,29 @@ impl RunObserver for RunTracker {
 
     fn on_final_turn(&self, text_block_count: usize) {
         with_state(&self.state, |s| s.final_turn_text_blocks = text_block_count);
+    }
+}
+
+/// Resolves the effective wall-clock timeout for a run from its tier policy
+/// (REQ-H36), applying the tier default when none was explicitly configured.
+///
+/// Precedence: an explicit `--timeout` / `[headless] timeout_secs` (already
+/// resolved into [`Policy::timeout`]) wins; otherwise any **tool-executing**
+/// tier (`--auto`/`--full-auto`) receives the hard [`FULL_AUTO_TIMEOUT_SECS`]
+/// default (the permissive tiers always carry a wall-clock ceiling), and the
+/// read-only `default` tier gets no timeout. The result is passed straight to
+/// [`run_query`].
+///
+/// # Returns
+/// `Some(duration)` when a ceiling applies; `None` for an unbounded run.
+#[must_use]
+pub fn resolve_run_timeout(policy: &Policy) -> Option<Duration> {
+    if let Some(secs) = policy.timeout() {
+        return Some(Duration::from_secs(secs));
+    }
+    match policy.tier() {
+        Tier::Auto | Tier::FullAuto => Some(Duration::from_secs(FULL_AUTO_TIMEOUT_SECS)),
+        Tier::Default => None,
     }
 }
 
@@ -247,6 +276,14 @@ fn build_transcript(
 ///   soft-guard silencing.
 /// - `agent` — a constructed agent (provider + registered tools).
 /// - `prompt` — the resolved user prompt.
+/// - `timeout` — optional wall-clock ceiling for the whole run (REQ-H36). `None`
+///   ⇒ no timeout (the interactive default). On elapse the agent future is
+///   dropped — cancelling the in-flight LLM stream — the run's
+///   [`CancellationToken`] is fired so any in-flight `bash` subprocess *tree* is
+///   killed (its group killer drops with the future), and a partial outcome with
+///   `stop_reason = Error` / `error.kind = Timeout` is returned. The tier default
+///   (900 s for `--auto`/`--full-auto`) is selected by the caller (Task 7) and
+///   passed here; use [`resolve_run_timeout`] to apply it.
 /// - `run_log` — optional JSONL run log; tier warnings and each tool call are
 ///   recorded best-effort.
 ///
@@ -261,6 +298,7 @@ pub async fn run_query(
     policy: Policy,
     agent: &mut Agent,
     prompt: &str,
+    timeout: Option<Duration>,
     mut run_log: Option<&mut RunLog>,
 ) -> RunOutcome {
     // Tier warnings (only under --full-auto) are recorded up front.
@@ -278,10 +316,14 @@ pub async fn run_query(
         policy: policy.clone(),
         state: Mutex::new(TrackerState::default()),
     });
+    // Cancellation fired on wall-clock timeout so in-flight tool subprocess trees
+    // are killed (bash) and the run stops (REQ-H36).
+    let cancel = CancellationToken::new();
     let config = AgentRunConfig {
         max_tool_calls: usize::try_from(policy.max_tool_calls()).unwrap_or(usize::MAX),
         disable_repetitive_guard: policy.silences_soft_guards(),
         observer: Some(Arc::clone(&tracker) as Arc<dyn RunObserver>),
+        cancel: cancel.clone(),
     };
 
     let (chunk_tx, mut chunk_rx) =
@@ -303,7 +345,22 @@ pub async fn run_query(
         ttfb_ms
     });
 
-    let result = agent.query_streaming(prompt, chunk_tx, config).await;
+    // Race the run against the optional wall-clock deadline. On elapse the query
+    // future is dropped (cancelling the LLM stream); firing `cancel` lets a
+    // still-polled tool observe cancellation, and the bash group killer drops
+    // with the future — killing any subprocess tree either way. `None` on the
+    // outcome marks a timeout.
+    let query_fut = agent.query_streaming(prompt, chunk_tx, config);
+    let outcome_result: Option<Result<String, anyhow::Error>> = match timeout {
+        Some(dur) => match tokio::time::timeout(dur, query_fut).await {
+            Ok(r) => Some(r),
+            Err(_elapsed) => {
+                cancel.cancel();
+                None
+            }
+        },
+        None => Some(query_fut.await),
+    };
     let ttfb_ms = drain.await.ok().flatten();
     let total_ms = elapsed_ms(run_start);
 
@@ -320,17 +377,27 @@ pub async fn run_query(
         calls.iter().map(|(id, rec)| (id.as_str(), rec)).collect();
     let transcript = build_transcript(agent.history(), &records_by_id);
 
-    // Deterministic outcome mapping (priority Error > MaxToolCalls > Denied > Done).
-    let (response, stop_reason, error) = match &result {
-        Ok(text) => {
+    // Deterministic outcome mapping (priority Error > MaxToolCalls > Denied >
+    // Done); a wall-clock timeout is a first-class `Error` (kind = timeout) and
+    // dominates every other signal because it dropped the run mid-flight.
+    let (response, stop_reason, error) = match outcome_result {
+        None => (
+            None,
+            StopReason::Error,
+            Some(ErrorPayload {
+                message: TIMEOUT_MESSAGE.to_string(),
+                kind: ErrorKind::Timeout,
+            }),
+        ),
+        Some(Ok(text)) => {
             let stop_reason = if tier_denied && response_empty {
                 StopReason::Denied
             } else {
                 StopReason::Done
             };
-            (Some(text.clone()), stop_reason, None)
+            (Some(text), stop_reason, None)
         }
-        Err(e) => {
+        Some(Err(e)) => {
             let message = e.to_string();
             if message == MAX_TOOL_CALLS_ERROR {
                 // Cap reached is a terminal state, not an error: no payload, and
@@ -500,7 +567,7 @@ mod tests {
         fn input_schema(&self) -> Value {
             json!({"type": "object", "properties": {}})
         }
-        async fn execute(&self, _args: Value) -> ToolResult<Value> {
+        async fn execute(&self, _args: Value, _cancel: &CancellationToken) -> ToolResult<Value> {
             Ok(json!(format!("{}-ran", self.name)))
         }
     }
@@ -554,13 +621,15 @@ mod tests {
     /// (the denial is recorded, exit 0) — MS2.md Task 3 Step 1 / REQ-H23b.
     #[tokio::test]
     async fn test_runner_default_denies_edit_and_reports_without_aborting() {
-        let provider =
-            ScriptedProvider::new(vec![tool_turn("t1", "edit"), Turn::Text("answered anyway".to_string())]);
+        let provider = ScriptedProvider::new(vec![
+            tool_turn("t1", "edit"),
+            Turn::Text("answered anyway".to_string()),
+        ]);
         let mut agent = Agent::new(provider);
         register_echo(&mut agent, "edit");
 
         let policy = Policy::new(Tier::Default, 15, None);
-        let outcome = run_query(resolved_stub(), policy, &mut agent, "prompt", None).await;
+        let outcome = run_query(resolved_stub(), policy, &mut agent, "prompt", None, None).await;
 
         assert!(
             outcome.tool_calls.iter().any(|t| t.name == "edit" && !t.ok),
@@ -590,7 +659,7 @@ mod tests {
         register_echo(&mut agent, "bash");
 
         let policy = Policy::new(Tier::Auto, 15, None);
-        let outcome = run_query(resolved_stub(), policy, &mut agent, "prompt", None).await;
+        let outcome = run_query(resolved_stub(), policy, &mut agent, "prompt", None, None).await;
 
         assert!(outcome.tool_calls.iter().any(|t| t.name == "edit" && t.ok));
         assert!(outcome.tool_calls.iter().any(|t| t.name == "bash" && t.ok));
@@ -606,7 +675,7 @@ mod tests {
         register_echo(&mut agent, "edit");
 
         let policy = Policy::new(Tier::Default, 15, None);
-        let outcome = run_query(resolved_stub(), policy, &mut agent, "prompt", None).await;
+        let outcome = run_query(resolved_stub(), policy, &mut agent, "prompt", None, None).await;
 
         assert!(
             outcome.tool_calls.iter().any(|t| t.name == "edit" && !t.ok),
@@ -634,7 +703,7 @@ mod tests {
         register_echo(&mut agent, "ls");
 
         let policy = Policy::new(Tier::Auto, 2, None);
-        let outcome = run_query(resolved_stub(), policy, &mut agent, "prompt", None).await;
+        let outcome = run_query(resolved_stub(), policy, &mut agent, "prompt", None, None).await;
 
         assert_eq!(outcome.stop_reason, StopReason::MaxToolCalls);
         assert!(
@@ -650,7 +719,7 @@ mod tests {
         let mut agent = Agent::new(provider);
 
         let policy = Policy::new(Tier::Auto, 15, None);
-        let outcome = run_query(resolved_stub(), policy, &mut agent, "prompt", None).await;
+        let outcome = run_query(resolved_stub(), policy, &mut agent, "prompt", None, None).await;
 
         assert_eq!(outcome.stop_reason, StopReason::Error);
         assert!(outcome.error.is_some(), "error payload must be populated");
@@ -666,7 +735,7 @@ mod tests {
         register_echo(&mut agent, "edit");
 
         let policy = Policy::new(Tier::Default, 15, None);
-        let outcome = run_query(resolved_stub(), policy, &mut agent, "prompt", None).await;
+        let outcome = run_query(resolved_stub(), policy, &mut agent, "prompt", None, None).await;
 
         assert!(
             outcome.tool_calls.iter().any(|t| t.name == "edit" && !t.ok),
@@ -693,7 +762,7 @@ mod tests {
 
         // Default denies edit; cap 2 ⇒ the 3rd (denied) call trips the cap.
         let policy = Policy::new(Tier::Default, 2, None);
-        let outcome = run_query(resolved_stub(), policy, &mut agent, "prompt", None).await;
+        let outcome = run_query(resolved_stub(), policy, &mut agent, "prompt", None, None).await;
 
         assert_eq!(
             outcome.stop_reason,
@@ -714,7 +783,7 @@ mod tests {
         register_echo(&mut agent, "edit");
 
         let policy = Policy::new(Tier::FullAuto, 50, None);
-        let outcome = run_query(resolved_stub(), policy, &mut agent, "prompt", None).await;
+        let outcome = run_query(resolved_stub(), policy, &mut agent, "prompt", None, None).await;
 
         assert_eq!(
             outcome.stop_reason,
@@ -740,7 +809,7 @@ mod tests {
         register_echo(&mut agent, "edit");
 
         let policy = Policy::new(Tier::Auto, 15, None);
-        let outcome = run_query(resolved_stub(), policy, &mut agent, "prompt", None).await;
+        let outcome = run_query(resolved_stub(), policy, &mut agent, "prompt", None, None).await;
 
         assert_eq!(
             outcome.stop_reason,
@@ -753,13 +822,15 @@ mod tests {
     /// tool call (with its recorded result and `ok`) into the assistant entry.
     #[tokio::test]
     async fn test_runner_transcript_folds_tool_call_into_assistant_entry() {
-        let provider =
-            ScriptedProvider::new(vec![tool_turn("call-1", "ls"), Turn::Text("here you go".to_string())]);
+        let provider = ScriptedProvider::new(vec![
+            tool_turn("call-1", "ls"),
+            Turn::Text("here you go".to_string()),
+        ]);
         let mut agent = Agent::new(provider);
         register_echo(&mut agent, "ls");
 
         let policy = Policy::new(Tier::Auto, 15, None);
-        let outcome = run_query(resolved_stub(), policy, &mut agent, "prompt", None).await;
+        let outcome = run_query(resolved_stub(), policy, &mut agent, "prompt", None, None).await;
 
         // user prompt, assistant(tool-use), assistant(final text).
         let user = outcome
@@ -778,5 +849,143 @@ mod tests {
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].name, "ls");
         assert!(calls[0].ok);
+    }
+
+    // ── REQ-H36: wall-clock timeout ─────────────────────────────────────────────
+
+    /// `resolve_run_timeout` applies the tier default: the read-only `default`
+    /// tier gets no ceiling, while the tool-executing tiers get the 900 s hard
+    /// default when none was configured; an explicit config value always wins.
+    #[test]
+    fn test_resolve_run_timeout_applies_tier_default() {
+        // No configured timeout: default tier ⇒ None; Auto/FullAuto ⇒ 900 s.
+        assert_eq!(
+            resolve_run_timeout(&Policy::new(Tier::Default, 15, None)),
+            None,
+            "the read-only default tier carries no wall-clock ceiling"
+        );
+        assert_eq!(
+            resolve_run_timeout(&Policy::new(Tier::Auto, 15, None)),
+            Some(Duration::from_secs(FULL_AUTO_TIMEOUT_SECS))
+        );
+        assert_eq!(
+            resolve_run_timeout(&Policy::new(Tier::FullAuto, 50, None)),
+            Some(Duration::from_secs(FULL_AUTO_TIMEOUT_SECS))
+        );
+        // An explicit configured timeout wins over the tier default, in any tier.
+        assert_eq!(
+            resolve_run_timeout(&Policy::new(Tier::Auto, 15, Some(5))),
+            Some(Duration::from_secs(5))
+        );
+        assert_eq!(
+            resolve_run_timeout(&Policy::new(Tier::Default, 15, Some(7))),
+            Some(Duration::from_secs(7))
+        );
+    }
+
+    /// With `timeout = None` the run is never cancelled: a normal tool + text run
+    /// completes with `Done` and no error payload.
+    #[tokio::test]
+    async fn test_run_query_none_timeout_does_not_cancel() {
+        let provider = ScriptedProvider::new(vec![
+            tool_turn("t1", "ls"),
+            Turn::Text("finished".to_string()),
+        ]);
+        let mut agent = Agent::new(provider);
+        register_echo(&mut agent, "ls");
+
+        let policy = Policy::new(Tier::Auto, 15, None);
+        let outcome = run_query(resolved_stub(), policy, &mut agent, "prompt", None, None).await;
+
+        assert_eq!(
+            outcome.stop_reason,
+            StopReason::Done,
+            "an unbounded run completes normally"
+        );
+        assert!(outcome.error.is_none(), "no timeout ⇒ no error payload");
+        assert_eq!(outcome.response.as_deref(), Some("finished"));
+        assert!(outcome.tool_calls.iter().any(|t| t.name == "ls" && t.ok));
+    }
+
+    /// Deterministic end-to-end wall-clock timeout: a real `bash` subprocess tree
+    /// is killed when `--timeout` elapses, and the run reports
+    /// `stop_reason = Error` / `error.kind = Timeout` (REQ-H36). Windows path.
+    #[cfg(windows)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_run_query_timeout_kills_bash_and_reports_timeout_windows() {
+        run_query_timeout_kills_bash().await;
+    }
+
+    /// POSIX process-group analog of the Windows timeout test above (CI-only).
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_run_query_timeout_kills_bash_and_reports_timeout_unix() {
+        run_query_timeout_kills_bash().await;
+    }
+
+    /// Shared body: drive a real [`BashTool`] running a long `python worker.py`
+    /// under a short `--timeout`; assert the outcome is a `Timeout` error and the
+    /// subprocess tree was terminated (no DONE marker) via the group killer's
+    /// `Drop` backstop (the query future is dropped by `tokio::time::timeout`).
+    #[cfg(any(windows, unix))]
+    async fn run_query_timeout_kills_bash() {
+        use crate::tools::bash::BashTool;
+        use crate::tools::proc_group::test_support::{python_available, TREE_KILL_WORKER};
+
+        if !python_available() {
+            eprintln!("skipping: python interpreter not found — cannot spawn a real child");
+            return;
+        }
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().canonicalize().expect("canonicalize");
+        std::fs::write(root.join("worker.py"), TREE_KILL_WORKER).expect("write worker");
+
+        let provider = ScriptedProvider::new(vec![
+            Turn::Tool {
+                id: "b1".to_string(),
+                name: "bash".to_string(),
+                input: json!({ "command": "python worker.py" }),
+            },
+            Turn::Text("unreached".to_string()),
+        ]);
+        let mut agent = Agent::new(provider);
+        agent.register_tool(Box::new(BashTool::new(root.clone()).expect("BashTool")));
+
+        let policy = Policy::new(Tier::Auto, 15, None);
+        let outcome = run_query(
+            resolved_stub(),
+            policy,
+            &mut agent,
+            "go",
+            Some(Duration::from_millis(2000)),
+            None,
+        )
+        .await;
+
+        assert_eq!(
+            outcome.stop_reason,
+            StopReason::Error,
+            "a wall-clock timeout maps to Error"
+        );
+        let err = outcome
+            .error
+            .expect("a timeout populates the error payload");
+        assert_eq!(
+            err.kind,
+            ErrorKind::Timeout,
+            "error.kind must be timeout (first-class)"
+        );
+
+        // Prove the tree died: wait past when a surviving orphan would write DONE.
+        let done = root.join("done.marker");
+        tokio::time::sleep(Duration::from_millis(3500)).await;
+        assert!(
+            root.join("start.marker").exists(),
+            "the child really ran (START present)"
+        );
+        assert!(
+            !done.exists(),
+            "the bash subprocess tree must be dead — no DONE marker"
+        );
     }
 }

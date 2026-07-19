@@ -5,6 +5,7 @@ use crate::tools::{Tool, ToolError, ToolResult};
 use async_trait::async_trait;
 use serde_json::{json, Value};
 use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
 
 pub struct ProjectFactTool {
     memory: Arc<dyn MemoryStore>,
@@ -48,7 +49,7 @@ impl Tool for ProjectFactTool {
         false
     }
 
-    async fn execute(&self, input: Value) -> ToolResult<Value> {
+    async fn execute(&self, input: Value, _cancel: &CancellationToken) -> ToolResult<Value> {
         let action = input["action"]
             .as_str()
             .ok_or_else(|| ToolError::InvalidArguments("Missing action".to_string()))?;
@@ -126,11 +127,14 @@ mod tests {
 
         // Test Remember
         let res = tool
-            .execute(json!({
-                "action": "remember",
-                "key": "test_key",
-                "value": "test_value"
-            }))
+            .execute(
+                json!({
+                    "action": "remember",
+                    "key": "test_key",
+                    "value": "test_value"
+                }),
+                &CancellationToken::new(),
+            )
             .await
             .unwrap();
 
@@ -138,10 +142,13 @@ mod tests {
 
         // Test Recall
         let res = tool
-            .execute(json!({
-                "action": "recall",
-                "key": "test_key"
-            }))
+            .execute(
+                json!({
+                    "action": "recall",
+                    "key": "test_key"
+                }),
+                &CancellationToken::new(),
+            )
             .await
             .unwrap();
 
@@ -183,11 +190,14 @@ mod tests {
         // Attempt to store a very large value (e.g., 1MB)
         let large_val = "X".repeat(1024 * 1024);
         let res = tool
-            .execute(json!({
-                "action": "remember",
-                "key": "too_big",
-                "value": large_val
-            }))
+            .execute(
+                json!({
+                    "action": "remember",
+                    "key": "too_big",
+                    "value": large_val
+                }),
+                &CancellationToken::new(),
+            )
             .await;
 
         assert!(res.is_err(), "Should fail when value exceeds size limit");

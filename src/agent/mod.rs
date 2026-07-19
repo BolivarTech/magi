@@ -29,6 +29,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::oneshot;
 use tokio::time::{timeout, Duration};
+use tokio_util::sync::CancellationToken;
 
 /// Process-monotonic counter for write-path turn-ID uniqueness (G2).
 ///
@@ -133,6 +134,12 @@ pub struct AgentRunConfig {
     /// Optional external observer/authorizer (headless runner). `None` ⇒ the
     /// interactive `requires_approval()` / `approval_tx` path runs unchanged.
     pub observer: Option<Arc<dyn RunObserver>>,
+    /// Cooperative run cancellation, passed to every `Tool::execute` (REQ-H36).
+    /// The headless runner fires this when a wall-clock `--timeout` elapses so an
+    /// in-flight `bash` subprocess tree is killed. [`AgentRunConfig::default`]
+    /// installs a fresh, never-cancelled token, so the interactive/TUI path is
+    /// unaffected.
+    pub cancel: CancellationToken,
 }
 
 impl Default for AgentRunConfig {
@@ -141,6 +148,7 @@ impl Default for AgentRunConfig {
             max_tool_calls: DEFAULT_MAX_TOOL_CALLS,
             disable_repetitive_guard: false,
             observer: None,
+            cancel: CancellationToken::new(),
         }
     }
 }
@@ -831,7 +839,7 @@ impl Agent {
                     let started = Instant::now();
                     let (result_content, is_error) =
                         if let Some(tool) = self.tools.iter().find(|t| t.name() == name) {
-                            match tool.execute(input.clone()).await {
+                            match tool.execute(input.clone(), &config.cancel).await {
                                 Ok(val) => (val.to_string(), false),
                                 Err(e) => (e.to_string(), true),
                             }
@@ -2149,7 +2157,7 @@ mod tests {
         fn input_schema(&self) -> Value {
             json!({"type": "object", "properties": {}})
         }
-        async fn execute(&self, _args: Value) -> ToolResult<Value> {
+        async fn execute(&self, _args: Value, _cancel: &CancellationToken) -> ToolResult<Value> {
             *self.executed.lock().unwrap() = true;
             Ok(json!({"executed": true}))
         }
@@ -2343,7 +2351,11 @@ mod tests {
             fn input_schema(&self) -> Value {
                 json!({"type": "object", "properties": {}})
             }
-            async fn execute(&self, _args: Value) -> ToolResult<Value> {
+            async fn execute(
+                &self,
+                _args: Value,
+                _cancel: &CancellationToken,
+            ) -> ToolResult<Value> {
                 Ok(json!({"executed": true}))
             }
             fn requires_approval(&self) -> bool {

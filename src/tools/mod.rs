@@ -4,12 +4,14 @@
 use async_trait::async_trait;
 use serde_json::Value;
 use thiserror::Error;
+use tokio_util::sync::CancellationToken;
 
 pub mod bash;
 pub mod consult;
 pub mod grep;
 pub mod knowledge;
 pub mod ls;
+pub(crate) mod proc_group;
 pub mod read;
 pub mod write;
 
@@ -56,10 +58,16 @@ pub trait Tool: Send + Sync {
     ///
     /// # Parameters
     /// * `args` - A `serde_json::Value` containing the arguments for the tool.
+    /// * `cancel` - Cooperative cancellation for the run (REQ-H36). A tool that
+    ///   owns a subprocess (`bash`) MUST race this token and kill its process
+    ///   *tree* when it fires, so a wall-clock `--timeout` is a real bound. Fast,
+    ///   non-subprocess tools may ignore it (they finish before it matters) or
+    ///   abort cooperatively at their next await. The interactive/TUI path passes
+    ///   a fresh, never-cancelled token, so this parameter is inert there.
     ///
     /// # Returns
     /// A `ToolResult<Value>` containing the result of the execution or an error.
-    async fn execute(&self, args: Value) -> ToolResult<Value>;
+    async fn execute(&self, args: Value, cancel: &CancellationToken) -> ToolResult<Value>;
 
     /// Whether executing this tool requires explicit user approval.
     ///
@@ -138,7 +146,7 @@ impl Tool for MockTool {
         })
     }
 
-    async fn execute(&self, _args: Value) -> ToolResult<Value> {
+    async fn execute(&self, _args: Value, _cancel: &CancellationToken) -> ToolResult<Value> {
         Ok(serde_json::json!({"status": "success"}))
     }
 }
@@ -157,7 +165,12 @@ mod tests {
     #[tokio::test]
     async fn test_tool_execution() {
         let tool = MockTool::new("test_tool", "A test tool");
-        let result = tool.execute(serde_json::json!({"input": "test"})).await;
+        let result = tool
+            .execute(
+                serde_json::json!({"input": "test"}),
+                &CancellationToken::new(),
+            )
+            .await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), serde_json::json!({"status": "success"}));
     }
@@ -203,7 +216,7 @@ mod tests {
         fn input_schema(&self) -> Value {
             serde_json::json!({"type": "object", "properties": {}})
         }
-        async fn execute(&self, _args: Value) -> ToolResult<Value> {
+        async fn execute(&self, _args: Value, _cancel: &CancellationToken) -> ToolResult<Value> {
             Ok(serde_json::json!({"status": "auto"}))
         }
         fn requires_approval(&self) -> bool {
@@ -253,7 +266,11 @@ mod tests {
             fn input_schema(&self) -> Value {
                 serde_json::json!({"type": "object", "properties": {}})
             }
-            async fn execute(&self, _args: Value) -> ToolResult<Value> {
+            async fn execute(
+                &self,
+                _args: Value,
+                _cancel: &CancellationToken,
+            ) -> ToolResult<Value> {
                 Ok(serde_json::json!({"done": true}))
             }
             fn requires_approval(&self) -> bool {

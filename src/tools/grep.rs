@@ -7,6 +7,7 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
+use tokio_util::sync::CancellationToken;
 
 /// Arguments for the `GrepTool`.
 #[derive(Debug, Deserialize)]
@@ -64,7 +65,7 @@ impl Tool for GrepTool {
         false
     }
 
-    async fn execute(&self, args: Value) -> ToolResult<Value> {
+    async fn execute(&self, args: Value, _cancel: &CancellationToken) -> ToolResult<Value> {
         let args: GrepArgs =
             serde_json::from_value(args).map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
 
@@ -121,7 +122,7 @@ mod tests {
             "path": "."
         });
 
-        let result = tool.execute(args).await;
+        let result = tool.execute(args, &CancellationToken::new()).await;
         assert!(result.is_ok());
     }
 
@@ -152,7 +153,7 @@ mod tests {
         let tool = GrepTool::new(Box::new(mock_grep), root).unwrap();
         let args = serde_json::json!({ "pattern": "secret", "path": "link" });
 
-        let result = tool.execute(args).await;
+        let result = tool.execute(args, &CancellationToken::new()).await;
         assert!(
             result.is_err(),
             "symlink escaping the workspace must be rejected, got: {:?}",

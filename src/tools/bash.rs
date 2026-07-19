@@ -3,7 +3,7 @@
 //! Now uses a strict whitelist approach for maximum security.
 
 use crate::system::path_guard::PathGuard;
-use crate::tools::{Tool, ToolError, ToolResult};
+use crate::tools::{proc_group, Tool, ToolError, ToolResult};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use tokio::process::Command;
 use tokio::time::{timeout, Duration};
+use tokio_util::sync::CancellationToken;
 
 const DEFAULT_TIMEOUT_MS: u64 = 120_000; // 2 minutes
 const MAX_TIMEOUT_MS: u64 = 600_000; // 10 minutes
@@ -181,11 +182,11 @@ impl Tool for BashTool {
         })
     }
 
-    async fn execute(&self, args: Value) -> ToolResult<Value> {
+    async fn execute(&self, args: Value, cancel: &CancellationToken) -> ToolResult<Value> {
         let args: BashArgs =
             serde_json::from_value(args).map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
 
-        // Proactive Whitelist and Argument check
+        // Proactive Whitelist and Argument check — HARD BARRIER, unchanged.
         if !is_command_allowed(&args.command, &self.workspace_root) {
             return Err(ToolError::ExecutionError("Security Violation: Command or arguments are not whitelisted or contain dangerous patterns.".to_string()));
         }
@@ -214,40 +215,72 @@ impl Tool for BashTool {
             .stderr(Stdio::piped())
             .kill_on_drop(true);
 
-        let child = cmd
-            .spawn()
-            .map_err(|e| ToolError::ExecutionError(format!("Failed to spawn process: {}", e)))?;
+        // Spawn the shell inside a killable group (Job Object on Windows, new
+        // process group on POSIX). On a wall-clock cancel (REQ-H36) the whole
+        // subprocess TREE is terminated — not just the shell — so a long
+        // grandchild (`cargo build`, `python …`) cannot outlive the timeout.
+        // The hard barrier above is untouched; only the spawn/kill is wrapped.
+        let (child, mut killer) = proc_group::spawn_in_group(&mut cmd)?.into_parts();
 
-        let exec_future = child.wait_with_output();
+        // Race the shell against (a) the tool's own per-command timeout and (b)
+        // external run cancellation. `killer` is held out of the wait future so
+        // either branch can fire it without a borrow conflict.
+        let output_fut = timeout(Duration::from_millis(timeout_ms), child.wait_with_output());
+        tokio::pin!(output_fut);
 
-        match timeout(Duration::from_millis(timeout_ms), exec_future).await {
-            Ok(Ok(output)) => {
-                let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-
-                let result = BashResult {
-                    stdout,
-                    stderr,
-                    exit_code: output.status.code(),
-                    interrupted: false,
-                };
-
-                Ok(serde_json::to_value(result)
-                    .map_err(|e| ToolError::ExecutionError(e.to_string()))?)
-            }
-            Ok(Err(e)) => Err(ToolError::ExecutionError(format!(
-                "Error reading process output: {}",
-                e
-            ))),
-            Err(_) => {
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => {
+                // Wall-clock `--timeout`: kill the tree now and report an aborted
+                // run. (When this future is dropped outright instead of polled —
+                // e.g. by `tokio::time::timeout` elapsing at the run layer — the
+                // `Drop` backstop on `killer` performs the same tree kill.)
+                killer.kill();
                 let result = BashResult {
                     stdout: String::new(),
-                    stderr: "Command timed out and was killed.".to_string(),
+                    stderr: "Command aborted: run wall-clock timeout reached.".to_string(),
                     exit_code: None,
                     interrupted: true,
                 };
-                Ok(serde_json::to_value(result)
-                    .map_err(|e| ToolError::ExecutionError(e.to_string()))?)
+                serde_json::to_value(result).map_err(|e| ToolError::ExecutionError(e.to_string()))
+            }
+            res = &mut output_fut => match res {
+                Ok(Ok(output)) => {
+                    // Clean exit: the group is reaped — disarm the Drop backstop.
+                    killer.disarm();
+                    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                    let result = BashResult {
+                        stdout,
+                        stderr,
+                        exit_code: output.status.code(),
+                        interrupted: false,
+                    };
+                    serde_json::to_value(result)
+                        .map_err(|e| ToolError::ExecutionError(e.to_string()))
+                }
+                Ok(Err(e)) => {
+                    // I/O error draining the process: state uncertain, kill the tree.
+                    killer.kill();
+                    Err(ToolError::ExecutionError(format!(
+                        "Error reading process output: {}",
+                        e
+                    )))
+                }
+                Err(_) => {
+                    // Per-command timeout elapsed: kill the TREE (not just the
+                    // shell, which `kill_on_drop` alone would leave orphaning
+                    // grandchildren).
+                    killer.kill();
+                    let result = BashResult {
+                        stdout: String::new(),
+                        stderr: "Command timed out and was killed.".to_string(),
+                        exit_code: None,
+                        interrupted: true,
+                    };
+                    serde_json::to_value(result)
+                        .map_err(|e| ToolError::ExecutionError(e.to_string()))
+                }
             }
         }
     }
@@ -333,7 +366,7 @@ mod tests {
             "timeout": 5000
         });
 
-        let result = tool.execute(args).await;
+        let result = tool.execute(args, &CancellationToken::new()).await;
         assert!(result.is_ok());
 
         let result_val = result.unwrap();
@@ -354,7 +387,7 @@ mod tests {
         let args = serde_json::json!({
             "command": "whoami"
         });
-        let result = tool.execute(args).await;
+        let result = tool.execute(args, &CancellationToken::new()).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("not whitelisted"));
     }
@@ -427,6 +460,81 @@ mod tests {
         assert!(
             !check("cat ../../../etc/passwd"),
             "Path traversal in cat arguments should be blocked"
+        );
+    }
+
+    // ── REQ-H36: wall-clock cancel kills the whole subprocess TREE ───────────────
+
+    /// Deterministic subprocess-tree-kill proof for the Windows Job-Object path:
+    /// a cancel fired mid-work terminates the grandchild worker, verified by
+    /// marker files (START written, DONE never written), with no panic and no
+    /// orphaned child. Runs on this host.
+    #[cfg(windows)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_bash_cancel_kills_subprocess_tree_windows() {
+        cancel_kills_subprocess_tree().await;
+    }
+
+    /// POSIX process-group analog of the Windows test above (CI-only).
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_bash_cancel_kills_subprocess_tree_unix() {
+        cancel_kills_subprocess_tree().await;
+    }
+
+    /// Shared body: run a real allowlisted long command (`python worker.py`)
+    /// through the `bash` tool, fire the cancellation token mid-work, and assert
+    /// the whole subprocess tree died — START marker present, DONE marker absent
+    /// even after waiting past when a surviving orphan would have written it.
+    #[cfg(any(windows, unix))]
+    async fn cancel_kills_subprocess_tree() {
+        use crate::tools::proc_group::test_support::{python_available, TREE_KILL_WORKER};
+
+        if !python_available() {
+            eprintln!("skipping: python interpreter not found — cannot spawn a real child");
+            return;
+        }
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().canonicalize().expect("canonicalize");
+        std::fs::write(root.join("worker.py"), TREE_KILL_WORKER).expect("write worker");
+
+        let tool = BashTool::new(root.clone()).expect("BashTool");
+        let cancel = CancellationToken::new();
+        let args = serde_json::json!({ "command": "python worker.py" });
+
+        // Fire cancel after START is surely written (python cold start + margin)
+        // but well before the 4 s worker sleep would complete.
+        let cancel_fire = cancel.clone();
+        let firer = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(2000)).await;
+            cancel_fire.cancel();
+        });
+
+        let result = tool
+            .execute(args, &cancel)
+            .await
+            .expect("execute returns an (aborted) value, never a panic");
+        firer.await.expect("cancel task joins");
+
+        assert_eq!(
+            result["interrupted"],
+            serde_json::json!(true),
+            "a cancelled run must report interrupted=true"
+        );
+
+        let start = root.join("start.marker");
+        let done = root.join("done.marker");
+        assert!(
+            start.exists(),
+            "START marker must exist — the real subprocess actually ran"
+        );
+        // Wait past when a SURVIVING (orphaned) worker would have written DONE
+        // (worker sleeps 4 s; cancel at 2 s ⇒ an orphan finishes ~2 s later). If
+        // the tree was truly killed, DONE never appears.
+        tokio::time::sleep(Duration::from_millis(3500)).await;
+        assert!(
+            !done.exists(),
+            "DONE marker must NOT exist — the subprocess tree was killed, not orphaned"
         );
     }
 }

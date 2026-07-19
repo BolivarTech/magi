@@ -9,6 +9,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
 
 /// Arguments for the `FileWriteTool`.
 #[derive(Debug, Deserialize)]
@@ -65,7 +66,7 @@ impl Tool for FileWriteTool {
         })
     }
 
-    async fn execute(&self, args: Value) -> ToolResult<Value> {
+    async fn execute(&self, args: Value, _cancel: &CancellationToken) -> ToolResult<Value> {
         let args: WriteArgs =
             serde_json::from_value(args).map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
 
@@ -121,7 +122,7 @@ mod tests {
             "content": "hello"
         });
 
-        let result = tool.execute(args).await;
+        let result = tool.execute(args, &CancellationToken::new()).await;
         assert!(result.is_ok());
     }
 
@@ -141,7 +142,7 @@ mod tests {
 
         let args = serde_json::json!({ "file_path": evil, "content": "payload" });
 
-        let result = tool.execute(args).await;
+        let result = tool.execute(args, &CancellationToken::new()).await;
         assert!(
             result.is_err(),
             "absolute path outside workspace must be rejected, got: {:?}",
@@ -166,7 +167,7 @@ mod tests {
 
         let args = serde_json::json!({ "file_path": "sub/../../escape.txt", "content": "payload" });
 
-        let result = tool.execute(args).await;
+        let result = tool.execute(args, &CancellationToken::new()).await;
         assert!(result.is_err(), "parent-dir traversal must be rejected");
     }
 }

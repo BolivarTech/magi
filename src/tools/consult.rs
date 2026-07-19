@@ -12,6 +12,7 @@ use magi_core::orchestrator::Magi;
 use magi_core::schema::Mode;
 use serde_json::{json, Value};
 use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
 
 /// Reject oversized consult input before incurring 3 model calls.
 /// `pub(crate)` so the forced `/consult` TUI path applies the same cap.
@@ -103,7 +104,7 @@ impl Tool for ConsultTool {
         }
     }
 
-    async fn execute(&self, args: Value) -> ToolResult<Value> {
+    async fn execute(&self, args: Value, _cancel: &CancellationToken) -> ToolResult<Value> {
         let query = args
             .get("query")
             .and_then(|v| v.as_str())
@@ -245,7 +246,9 @@ mod tests {
         let tool = ConsultTool::new(magi_all_ok(), false);
         let big = "x".repeat(9000);
         assert!(matches!(
-            tool.execute(json!({"query": big})).await.unwrap_err(),
+            tool.execute(json!({"query": big}), &CancellationToken::new())
+                .await
+                .unwrap_err(),
             ToolError::InvalidArguments(_)
         ));
     }
@@ -254,7 +257,10 @@ mod tests {
     async fn test_execute_returns_consensus_report() {
         let tool = ConsultTool::new(magi_all_ok(), false);
         let out = tool
-            .execute(json!({"query": "should we migrate X to Y?"}))
+            .execute(
+                json!({"query": "should we migrate X to Y?"}),
+                &CancellationToken::new(),
+            )
             .await
             .expect("3 agents → success");
         assert!(!out["report"].as_str().expect("report string").is_empty());
@@ -265,7 +271,9 @@ mod tests {
     async fn test_execute_empty_query_is_invalid_arguments() {
         let tool = ConsultTool::new(magi_all_ok(), false);
         assert!(matches!(
-            tool.execute(json!({ "query": "   " })).await.unwrap_err(),
+            tool.execute(json!({ "query": "   " }), &CancellationToken::new())
+                .await
+                .unwrap_err(),
             ToolError::InvalidArguments(_)
         ));
     }
@@ -274,7 +282,9 @@ mod tests {
     async fn test_execute_missing_query_is_invalid_arguments() {
         let tool = ConsultTool::new(magi_all_ok(), false);
         assert!(matches!(
-            tool.execute(json!({})).await.unwrap_err(),
+            tool.execute(json!({}), &CancellationToken::new())
+                .await
+                .unwrap_err(),
             ToolError::InvalidArguments(_)
         ));
     }
@@ -302,7 +312,9 @@ mod tests {
             );
         let tool = ConsultTool::new(Arc::new(Magi::new(Arc::new(p))), false);
         assert!(matches!(
-            tool.execute(json!({"query": "x"})).await.unwrap_err(),
+            tool.execute(json!({"query": "x"}), &CancellationToken::new())
+                .await
+                .unwrap_err(),
             ToolError::ExecutionError(_)
         ));
     }

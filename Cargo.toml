@@ -58,6 +58,11 @@ region = "3.0.2"
 zxcvbn = "3.1.1"
 # Vault MS2 — REQ-V10: hidden passphrase/value prompt (no echo) cross-platform.
 rpassword = "7.5.4"
+# Headless MS2 T4 — REQ-H36: `CancellationToken` for cooperative run cancellation
+# (wall-clock `--timeout` fires it to drop the in-flight LLM stream and signal
+# tool subprocesses to die). Pure-Rust, no own unsafe; `sync` module needs no
+# feature flag. Pinned (minor), no default features.
+tokio-util = { version = "0.7", default-features = false }
 
 [dev-dependencies]
 # RoutingMockProvider for consult tests (no extra runtime deps; reqwest NOT pulled)
@@ -80,6 +85,13 @@ ann = ["dep:instant-distance"]
 # Vault MS2 — REQ-V42 layer 2 (POSIX only): RLIMIT_CORE=0 suppresses core dumps.
 [target.'cfg(unix)'.dependencies]
 rlimit = "0.11.0"
+# Headless MS2 T4 — REQ-H36: kill a bash subprocess TREE on `--timeout`. The tool
+# spawns the shell in its own process group (`Command::process_group(0)`) and, on
+# cancel, `rustix::process::kill_process_group(pid, SIGKILL)` signals the whole
+# group. Safe wrapper over `kill(2)`, honoring crate-wide `forbid(unsafe_code)`;
+# `process` feature only. On Linux this unions with the `fs` feature declared in
+# the linux-only block below. Pinned.
+rustix = { version = "0.38", features = ["process"] }
 
 # Vault MS2 — REQ-V42 layer 2 (Linux only): PR_SET_DUMPABLE=0 (also blocks peer ptrace).
 [target.'cfg(target_os = "linux")'.dependencies]
@@ -97,4 +109,11 @@ rustix = { version = "0.38", features = ["fs"] }
 # inside a safe crate, so magi-rs keeps `forbid(unsafe_code)`; NO raw Win32.
 # Pinned; Windows-only target.
 [target.'cfg(windows)'.dependencies]
+# Headless MS2 T4 — REQ-H36: kill a bash subprocess TREE on `--timeout`. The tool
+# assigns the spawned shell to a Win32 Job Object created with
+# `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`; dropping the job handle terminates the
+# whole tree (grandchildren included), the dual of the POSIX process-group kill.
+# `win32job` encapsulates the Win32 `unsafe` in a safe crate, so magi-rs keeps
+# `forbid(unsafe_code)`; NO raw Win32, NO `windows`-crate calls of our own. Pinned.
+win32job = "2.0.3"
 windows-acl = "0.3"
