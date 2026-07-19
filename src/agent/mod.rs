@@ -26,6 +26,7 @@ use futures::StreamExt;
 use sha2::{Digest, Sha256};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::sync::oneshot;
 use tokio::time::{timeout, Duration};
 
@@ -40,6 +41,109 @@ use tokio::time::{timeout, Duration};
 static TURN_SEQ: AtomicU64 = AtomicU64::new(0);
 
 const APPROVAL_TIMEOUT_SECS: u64 = 300; // 5 minutes
+
+/// Default per-query tool-call cap (interactive and headless-normal tiers).
+///
+/// Single source of truth for the "normal" cap used by both [`Agent::new`] and
+/// [`AgentRunConfig::default`], so the interactive path and an unconfigured run
+/// share the same limit.
+pub const DEFAULT_MAX_TOOL_CALLS: usize = 15;
+
+/// Error message returned when a single query exceeds its tool-call cap.
+///
+/// Exposed as a `pub const` so an out-of-loop caller (the headless runner) can
+/// distinguish "cap reached" (a non-error terminal state, `stop_reason =
+/// max_tool_calls`) from a genuine runtime error by comparing the returned
+/// error's `Display` against this exact string — a shared contract rather than
+/// a brittle inline literal match.
+pub const MAX_TOOL_CALLS_ERROR: &str = "Maximum tool call limit reached";
+
+/// Observes an agent run from **outside** the tool loop, for the headless runner.
+///
+/// Absent ([`AgentRunConfig::observer`] is `None`) ⇒ the interactive tool loop
+/// runs byte-for-byte unchanged. When present it becomes **authoritative for
+/// every tool call in all tiers** (REQ-H06/H07/H09): it replaces the
+/// `requires_approval()` / `approval_tx` gate, so tools that opt out of
+/// interactive approval (`project_knowledge`, an auto-approve `consult`) are
+/// still gated by the tier — the interactive gate alone cannot express a tier
+/// because those tools never reach it.
+///
+/// It also captures per-call and final-turn data the [`StreamPiece`] stream does
+/// not carry (tool results with wall-clock timing, and the final-turn text-block
+/// count for the deterministic `stop_reason` of REQ-H23b).
+///
+/// All methods take `&self`; an implementor uses interior mutability. They are
+/// invoked from inside `Agent::query_streaming` on the run's task.
+pub trait RunObserver: Send + Sync {
+    /// Decides whether `tool_name` may run. Consulted for **every** tool call,
+    /// before execution, replacing the interactive approval decision.
+    ///
+    /// # Returns
+    /// `true` to run the tool; `false` to deny it (the call is recorded with
+    /// `ok = false` and the agent continues — a denial never aborts the loop).
+    fn authorize(&self, tool_name: &str) -> bool;
+
+    /// Records one resolved tool call (executed or tier-denied).
+    ///
+    /// # Parameters
+    /// - `id` — the tool-use id, correlating this call with the assistant
+    ///   `ToolUse` block that requested it (used to assemble the transcript).
+    /// - `name` — the tool name.
+    /// - `input` — the JSON input the tool was invoked with.
+    /// - `result` — the tool result (or the denial / not-found message).
+    /// - `ok` — `true` on successful execution; `false` on failure or denial.
+    /// - `ms` — wall-clock execution time in milliseconds (`0` for a denied
+    ///   call, which never executes).
+    fn on_tool_call(
+        &self,
+        id: &str,
+        name: &str,
+        input: &serde_json::Value,
+        result: &str,
+        ok: bool,
+        ms: u64,
+    );
+
+    /// Records the number of `TextDelta` blocks emitted in the agent's FINAL
+    /// turn (REQ-H23b: `response_empty` ⇔ this count is zero). Counts raw
+    /// stream blocks, not the emptiness of the concatenated text.
+    fn on_final_turn(&self, text_block_count: usize);
+}
+
+/// Per-run configuration for [`Agent::query_streaming`].
+///
+/// [`AgentRunConfig::default`] reproduces the interactive behavior exactly
+/// ([`DEFAULT_MAX_TOOL_CALLS`], repetitive-guard enabled, no observer), so the
+/// TUI and the existing tests pass `AgentRunConfig::default()` and keep the
+/// interactive path byte-for-byte unchanged. It has a hand-written [`Default`]
+/// impl rather than a derived one because a derived `usize` default is `0`,
+/// which would silently reduce the interactive cap to zero.
+///
+/// No field ever relaxes a **hard** barrier (`bash::is_command_allowed`, the
+/// metacharacter ban, `PathGuard::validate`) — those live inside each tool and
+/// are enforced regardless of this configuration.
+pub struct AgentRunConfig {
+    /// Maximum tool calls for this run. Interactive default:
+    /// [`DEFAULT_MAX_TOOL_CALLS`]; the headless runner passes the tier-resolved
+    /// cap (elevated under `--full-auto`).
+    pub max_tool_calls: usize,
+    /// When `true`, the 3-identical-call repetitive **soft** guard is disabled
+    /// (REQ-H08, `--full-auto` only). Never disables any hard barrier.
+    pub disable_repetitive_guard: bool,
+    /// Optional external observer/authorizer (headless runner). `None` ⇒ the
+    /// interactive `requires_approval()` / `approval_tx` path runs unchanged.
+    pub observer: Option<Arc<dyn RunObserver>>,
+}
+
+impl Default for AgentRunConfig {
+    fn default() -> Self {
+        Self {
+            max_tool_calls: DEFAULT_MAX_TOOL_CALLS,
+            disable_repetitive_guard: false,
+            observer: None,
+        }
+    }
+}
 
 /// Approval request sent to the UI.
 pub struct ApprovalRequest {
@@ -106,8 +210,6 @@ pub struct Agent {
     session_id: Option<String>,
     /// Optional channel to request approval for tools.
     approval_tx: Option<tokio::sync::mpsc::Sender<ApprovalRequest>>,
-    /// Safeguard for infinite loops (max tool calls per query)
-    pub max_tool_calls: usize,
     /// Optional tiered-memory subsystem for `selective` mode (Task 12).
     /// `None` ⇒ legacy `load_all` behavior; all 188 pre-existing tests rely on
     /// this path being byte-identical to the original implementation.
@@ -124,7 +226,6 @@ impl Agent {
             memory: None,
             session_id: None,
             approval_tx: None,
-            max_tool_calls: 15,
             memory_subsystem: None,
         }
     }
@@ -146,6 +247,22 @@ impl Agent {
     /// to clear) vs a real conversation (must be kept).
     pub fn provider_is_static(&self) -> bool {
         self.provider.is_static()
+    }
+
+    /// Borrows the current conversation history.
+    ///
+    /// Exposed read-only so an out-of-loop caller (the headless runner) can
+    /// project the finished run into a normalized transcript without the Agent
+    /// itself depending on the headless output types. Includes the user turn,
+    /// each assistant turn (with any `ToolUse` blocks), and the `User`-role
+    /// tool-result messages, in order.
+    ///
+    /// Consumed by the headless runner, whose production caller lands in MS2
+    /// Task 6; until then the plain (non-test) binary has no live path here, so
+    /// `dead_code` is allowed only for `not(test)`.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn history(&self) -> &[Message] {
+        &self.history
     }
 
     /// Loads history from the persistent memory store.
@@ -329,6 +446,7 @@ impl Agent {
         &mut self,
         text: &str,
         chunk_tx: tokio::sync::mpsc::Sender<StreamPiece>,
+        config: AgentRunConfig,
     ) -> Result<String> {
         let user_msg = Message::user(text);
         self.history.push(user_msg.clone());
@@ -431,7 +549,9 @@ impl Agent {
             // Run the shared tool loop. Returns (full_text, final_text):
             // - full_text: sanitized delta-accumulated text for write_turn_to_memory.
             // - final_text: text from MessageDone content, returned to the caller.
-            let (full_text, final_text) = self.run_tool_loop(working_messages, &chunk_tx).await?;
+            let (full_text, final_text) = self
+                .run_tool_loop(working_messages, &chunk_tx, &config)
+                .await?;
 
             // ── Selective-specific terminal work (after the tool loop) ─────────
             // Persist the final synthesizing assistant turn to the vector store
@@ -497,7 +617,7 @@ impl Agent {
         // user message). `run_tool_loop` extends both `working` and `self.history`
         // in lock-step, so the provider sees the same growing context as before.
         let working = self.history.clone();
-        let (_full_text, final_text) = self.run_tool_loop(working, &chunk_tx).await?;
+        let (_full_text, final_text) = self.run_tool_loop(working, &chunk_tx, &config).await?;
         Ok(final_text)
     }
 
@@ -531,6 +651,7 @@ impl Agent {
         &mut self,
         mut working: Vec<Message>,
         chunk_tx: &tokio::sync::mpsc::Sender<StreamPiece>,
+        config: &AgentRunConfig,
     ) -> Result<(String, String)> {
         let mut tool_call_count = 0;
         let mut last_normalized_tool: Option<(String, String)> = None;
@@ -539,12 +660,16 @@ impl Agent {
         loop {
             let mut stream = self.provider.stream_messages(&working, &self.tools).await?;
             let mut full_text = String::new();
+            // REQ-H23b: count TextDelta blocks in THIS turn (reset each iteration);
+            // the terminal turn's count is the run's `final_turn_text_blocks`.
+            let mut turn_text_blocks = 0usize;
             let mut last_message: Option<Message> = None;
 
             while let Some(chunk_result) = stream.next().await {
                 match chunk_result? {
                     ResponseChunk::TextDelta(delta) => {
                         let sanitized = Self::sanitize_text(&delta);
+                        turn_text_blocks += 1;
                         full_text.push_str(&sanitized);
                         if chunk_tx
                             .send(StreamPiece::Content(sanitized))
@@ -590,15 +715,17 @@ impl Agent {
                 if let Content::ToolUse { id, name, input } = content {
                     requested_tool = true;
                     tool_call_count += 1;
-                    if tool_call_count > self.max_tool_calls {
-                        return Err(anyhow::anyhow!("Maximum tool call limit reached"));
+                    if tool_call_count > config.max_tool_calls {
+                        return Err(anyhow::anyhow!(MAX_TOOL_CALLS_ERROR));
                     }
 
                     let normalized_input = Self::normalize_input(input, 0)?;
                     if let Some((ref last_name, ref last_norm_input)) = last_normalized_tool {
                         if last_name == name && last_norm_input == &normalized_input {
                             repeat_count += 1;
-                            if repeat_count >= 3 {
+                            // REQ-H08: `--full-auto` silences this SOFT guard (only).
+                            // No hard barrier is affected.
+                            if repeat_count >= 3 && !config.disable_repetitive_guard {
                                 return Err(anyhow::anyhow!("Repetitive tool call detected"));
                             }
                         } else {
@@ -607,92 +734,127 @@ impl Agent {
                     }
                     last_normalized_tool = Some((name.clone(), normalized_input));
 
-                    // Per-tool approval policy: look up the tool's `requires_approval()`
-                    // flag before deciding whether to prompt.  Safe tools
-                    // (requires_approval() = false) are auto-approved without emitting
-                    // any ApprovalRequest — this eliminates one prompt per stored memory
-                    // fact when the model issues multiple project_knowledge / view / ls /
-                    // grep calls in sequence.  Dangerous tools (bash / edit / consult)
-                    // keep the default (true) and go through the existing gate below.
-                    // Unknown tool names (not in the registry) default to true
-                    // (safe-by-default); they will fail as "tool not found" on execute.
-                    let needs_approval = self
-                        .tools
-                        .iter()
-                        .find(|t| t.name() == name)
-                        .is_none_or(|t| t.requires_approval());
+                    // Authorization decision. When a headless observer is
+                    // attached it is AUTHORITATIVE for EVERY tool (REQ-H06/H07/
+                    // H09) — the only place a tier can gate tools that opt out of
+                    // interactive approval (`project_knowledge`, an auto-approve
+                    // `consult`), which never reach the `approval_tx` gate. With
+                    // no observer the original interactive path runs unchanged.
+                    let approved = if let Some(observer) = config.observer.as_deref() {
+                        observer.authorize(name)
+                    } else {
+                        // Per-tool approval policy: look up the tool's
+                        // `requires_approval()` flag before deciding whether to
+                        // prompt.  Safe tools (false) are auto-approved without
+                        // emitting any ApprovalRequest — this eliminates one prompt
+                        // per stored memory fact when the model issues multiple
+                        // project_knowledge / view / ls / grep calls in sequence.
+                        // Dangerous tools (bash / edit / consult) keep the default
+                        // (true) and go through the existing gate below.  Unknown
+                        // tool names default to true (safe-by-default); they fail
+                        // as "tool not found" on execute.
+                        let needs_approval = self
+                            .tools
+                            .iter()
+                            .find(|t| t.name() == name)
+                            .is_none_or(|t| t.requires_approval());
 
-                    let approved = if needs_approval {
-                        if let Some(ref tx) = self.approval_tx {
-                            let (oneshot_tx, oneshot_rx) = oneshot::channel();
-                            let _ = tx
-                                .send(ApprovalRequest {
-                                    tool_name: name.clone(),
-                                    input: input.clone(),
-                                    tx: oneshot_tx,
-                                })
-                                .await;
-                            match timeout(Duration::from_secs(APPROVAL_TIMEOUT_SECS), oneshot_rx)
+                        if needs_approval {
+                            if let Some(ref tx) = self.approval_tx {
+                                let (oneshot_tx, oneshot_rx) = oneshot::channel();
+                                let _ = tx
+                                    .send(ApprovalRequest {
+                                        tool_name: name.clone(),
+                                        input: input.clone(),
+                                        tx: oneshot_tx,
+                                    })
+                                    .await;
+                                match timeout(
+                                    Duration::from_secs(APPROVAL_TIMEOUT_SECS),
+                                    oneshot_rx,
+                                )
                                 .await
-                            {
-                                Ok(Ok(res)) => res,
-                                _ => false,
+                                {
+                                    Ok(Ok(res)) => res,
+                                    _ => false,
+                                }
+                            } else {
+                                // SECURITY: no approval channel is wired (headless
+                                // / test mode, `approval_tx == None`) — there is no
+                                // UI to ask, so the call proceeds even for a tool
+                                // that requires approval. Pre-existing behavior: the
+                                // interactive TUI ALWAYS sets `approval_tx` (see
+                                // `run_tui_ext`), so bash / edit / consult are
+                                // genuinely gated in production; only non-interactive
+                                // callers reach this auto path.
+                                true
                             }
                         } else {
-                            // SECURITY: no approval channel is wired (headless / test
-                            // mode, `approval_tx == None`) — there is no UI to ask, so the
-                            // call proceeds even for a tool that requires approval. This is
-                            // pre-existing behavior: the interactive TUI ALWAYS sets
-                            // `approval_tx` (see `run_tui_ext`), so bash / edit / consult are
-                            // genuinely gated in production; only non-interactive callers
-                            // (already running tools unattended) reach this auto path.
+                            // Auto-approve: tool opted out of the gate.
+                            // Emit an announcement notice if the tool provides one,
+                            // so the user knows a potentially slow operation starts.
+                            if let Some(tool) = self.tools.iter().find(|t| t.name() == name) {
+                                if let Some(notice) = tool.approval_notice() {
+                                    // Best-effort: a failed send (TUI gone) must not
+                                    // abort the turn.
+                                    let _ = chunk_tx.send(StreamPiece::Notice(notice)).await;
+                                }
+                            }
                             true
                         }
-                    } else {
-                        // Auto-approve: tool opted out of the gate.
-                        // Emit an announcement notice if the tool provides one, so
-                        // the user knows a potentially slow operation is starting.
-                        if let Some(tool) = self.tools.iter().find(|t| t.name() == name) {
-                            if let Some(notice) = tool.approval_notice() {
-                                // Best-effort: a failed send (TUI gone) must not abort the
-                                // turn, so the send result is intentionally ignored.
-                                let _ = chunk_tx.send(StreamPiece::Notice(notice)).await;
-                            }
-                        }
-                        true
                     };
 
                     if !approved {
+                        // A tier denial gets a clear audit message; the interactive
+                        // path keeps its original "denied or timed out" wording.
+                        let denial_msg = if config.observer.is_some() {
+                            format!(
+                                "Tool '{name}' denied: not authorized in the current \
+                                 authorization tier"
+                            )
+                        } else {
+                            "Execution denied or timed out.".to_string()
+                        };
+                        if let Some(observer) = config.observer.as_deref() {
+                            observer.on_tool_call(id, name, input, &denial_msg, false, 0);
+                        }
                         tool_results.push(Content::ToolResult {
                             tool_use_id: id.clone(),
-                            content: "Execution denied or timed out.".to_string(),
+                            content: denial_msg,
                             is_error: true,
                         });
                         continue;
                     }
 
-                    let tool_result =
+                    // Execute, measuring wall-clock time so the observer records a
+                    // faithful per-call duration.
+                    let started = Instant::now();
+                    let (result_content, is_error) =
                         if let Some(tool) = self.tools.iter().find(|t| t.name() == name) {
                             match tool.execute(input.clone()).await {
-                                Ok(val) => Content::ToolResult {
-                                    tool_use_id: id.clone(),
-                                    content: val.to_string(),
-                                    is_error: false,
-                                },
-                                Err(e) => Content::ToolResult {
-                                    tool_use_id: id.clone(),
-                                    content: e.to_string(),
-                                    is_error: true,
-                                },
+                                Ok(val) => (val.to_string(), false),
+                                Err(e) => (e.to_string(), true),
                             }
                         } else {
-                            Content::ToolResult {
-                                tool_use_id: id.clone(),
-                                content: format!("Tool '{}' not found", name),
-                                is_error: true,
-                            }
+                            (format!("Tool '{}' not found", name), true)
                         };
-                    tool_results.push(tool_result);
+                    let elapsed_ms =
+                        u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+                    if let Some(observer) = config.observer.as_deref() {
+                        observer.on_tool_call(
+                            id,
+                            name,
+                            input,
+                            &result_content,
+                            !is_error,
+                            elapsed_ms,
+                        );
+                    }
+                    tool_results.push(Content::ToolResult {
+                        tool_use_id: id.clone(),
+                        content: result_content,
+                        is_error,
+                    });
                 }
             }
 
@@ -713,6 +875,11 @@ impl Agent {
                     memory.add_message(sid, &tool_res_msg).await?;
                 }
             } else {
+                // Terminal (no-tool) turn: report its TextDelta block count for
+                // the deterministic REQ-H23b `response_empty` signal.
+                if let Some(observer) = config.observer.as_deref() {
+                    observer.on_final_turn(turn_text_blocks);
+                }
                 // Extract final text from MessageDone content — matches the
                 // pre-refactor return path used by both the selective and load_all
                 // branches (distinct from `full_text` which is delta-accumulated).
@@ -1018,7 +1185,10 @@ mod tests {
             received
         });
 
-        let final_text = agent.query_streaming("Hi", chunk_tx).await.unwrap();
+        let final_text = agent
+            .query_streaming("Hi", chunk_tx, AgentRunConfig::default())
+            .await
+            .unwrap();
         let received = collector.await.unwrap();
 
         // Reasoning is forwarded as a distinct piece (for live display) and is NOT
@@ -1056,7 +1226,10 @@ mod tests {
         let mut agent = Agent::new(Arc::new(FixedProvider("from-A")));
         agent.set_provider(Arc::new(FixedProvider("from-B")));
         let (tx, _rx) = tokio::sync::mpsc::channel::<StreamPiece>(8);
-        let out = agent.query_streaming("hi", tx).await.unwrap();
+        let out = agent
+            .query_streaming("hi", tx, AgentRunConfig::default())
+            .await
+            .unwrap();
         assert_eq!(out, "from-B", "set_provider must swap the active provider");
     }
 
@@ -1215,7 +1388,9 @@ mod tests {
 
         let (tx, mut rx) = mpsc::channel::<StreamPiece>(16);
         // Must succeed (fallback), not return an Err.
-        let result = agent.query_streaming("hello", tx).await;
+        let result = agent
+            .query_streaming("hello", tx, AgentRunConfig::default())
+            .await;
         assert!(
             result.is_ok(),
             "D1: selective mode with embedder error must fall back, not propagate Err: {result:?}"
@@ -1276,7 +1451,10 @@ mod tests {
         // An oversized turn (well over the 20-token budget).
         let long_input = "x".repeat(500);
         let (tx, mut rx) = mpsc::channel::<StreamPiece>(32);
-        agent.query_streaming(&long_input, tx).await.unwrap();
+        agent
+            .query_streaming(&long_input, tx, AgentRunConfig::default())
+            .await
+            .unwrap();
 
         // Collect all streamed pieces.
         let mut pieces = Vec::new();
@@ -1325,7 +1503,9 @@ mod tests {
 
         let (tx, mut rx) = mpsc::channel::<StreamPiece>(16);
         // Must succeed (fallback) — REQ-29.
-        let result = agent.query_streaming("hello", tx).await;
+        let result = agent
+            .query_streaming("hello", tx, AgentRunConfig::default())
+            .await;
         assert!(
             result.is_ok(),
             "D1-notice: selective mode with embedder error must fall back, not Err: {result:?}"
@@ -1364,7 +1544,10 @@ mod tests {
     async fn test_load_all_mode_is_unchanged() {
         let mut agent = Agent::new(Arc::new(MockProvider));
         let (tx1, _rx1) = tokio::sync::mpsc::channel::<StreamPiece>(8);
-        agent.query_streaming("hello", tx1).await.unwrap();
+        agent
+            .query_streaming("hello", tx1, AgentRunConfig::default())
+            .await
+            .unwrap();
         // After 1 turn: User("hello") + Asst("Summary content.") = 2 messages.
         assert_eq!(
             agent.history.len(),
@@ -1373,7 +1556,10 @@ mod tests {
         );
 
         let (tx2, _rx2) = tokio::sync::mpsc::channel::<StreamPiece>(8);
-        agent.query_streaming("world", tx2).await.unwrap();
+        agent
+            .query_streaming("world", tx2, AgentRunConfig::default())
+            .await
+            .unwrap();
         // After 2 turns: 4 messages total.
         assert_eq!(
             agent.history.len(),
@@ -1430,10 +1616,16 @@ mod tests {
         agent.set_memory_subsystem(vstore, embedder, clock, cfg);
 
         let (tx1, _rx1) = tokio::sync::mpsc::channel::<StreamPiece>(8);
-        agent.query_streaming("first query", tx1).await.unwrap();
+        agent
+            .query_streaming("first query", tx1, AgentRunConfig::default())
+            .await
+            .unwrap();
 
         let (tx2, _rx2) = tokio::sync::mpsc::channel::<StreamPiece>(8);
-        agent.query_streaming("second query", tx2).await.unwrap();
+        agent
+            .query_streaming("second query", tx2, AgentRunConfig::default())
+            .await
+            .unwrap();
 
         let all_calls = calls.lock().unwrap();
         assert!(
@@ -1492,7 +1684,7 @@ mod tests {
         // Turn 1: plant a fact.
         let (tx1, _rx1) = tokio::sync::mpsc::channel::<StreamPiece>(8);
         agent
-            .query_streaming("favorite color is blue", tx1)
+            .query_streaming("favorite color is blue", tx1, AgentRunConfig::default())
             .await
             .unwrap();
 
@@ -1512,7 +1704,7 @@ mod tests {
         // Turn 2: the selective path must NOT send the full history.
         let (tx2, _rx2) = tokio::sync::mpsc::channel::<StreamPiece>(8);
         agent
-            .query_streaming("what is favorite color", tx2)
+            .query_streaming("what is favorite color", tx2, AgentRunConfig::default())
             .await
             .unwrap();
 
@@ -1658,7 +1850,10 @@ mod tests {
 
         // Turn 1 — trigger threshold not reached.
         let (tx1, _rx1) = mpsc::channel::<StreamPiece>(8);
-        agent.query_streaming("first turn", tx1).await.unwrap();
+        agent
+            .query_streaming("first turn", tx1, AgentRunConfig::default())
+            .await
+            .unwrap();
 
         let mems_after_1 = vstore.active("root").await.unwrap();
         let distilled_after_1 = mems_after_1
@@ -1672,7 +1867,10 @@ mod tests {
 
         // Turn 2 — distill trigger fires (turns_since_open == 2, 2 % 2 == 0).
         let (tx2, _rx2) = mpsc::channel::<StreamPiece>(8);
-        agent.query_streaming("second turn", tx2).await.unwrap();
+        agent
+            .query_streaming("second turn", tx2, AgentRunConfig::default())
+            .await
+            .unwrap();
 
         let mems_after_2 = vstore.active("root").await.unwrap();
         let distilled_after_2 = mems_after_2
@@ -1741,7 +1939,10 @@ mod tests {
         // Distinctive text that would self-recall if written before assembly.
         let distinctive = "alpha bravo charlie unique self recall prevention test";
         let (tx, _rx) = tokio::sync::mpsc::channel::<StreamPiece>(8);
-        agent.query_streaming(distinctive, tx).await.unwrap();
+        agent
+            .query_streaming(distinctive, tx, AgentRunConfig::default())
+            .await
+            .unwrap();
 
         let locked = calls.lock().unwrap();
         assert!(!locked.is_empty(), "G1: provider must have been called");
@@ -1980,7 +2181,7 @@ mod tests {
 
         let (chunk_tx, _rx) = mpsc::channel::<StreamPiece>(8);
         agent
-            .query_streaming("do the safe thing", chunk_tx)
+            .query_streaming("do the safe thing", chunk_tx, AgentRunConfig::default())
             .await
             .unwrap();
 
@@ -2022,7 +2223,11 @@ mod tests {
 
         let (chunk_tx, _rx) = mpsc::channel::<StreamPiece>(8);
         agent
-            .query_streaming("do the dangerous thing", chunk_tx)
+            .query_streaming(
+                "do the dangerous thing",
+                chunk_tx,
+                AgentRunConfig::default(),
+            )
             .await
             .unwrap();
 
@@ -2058,7 +2263,7 @@ mod tests {
 
         let (chunk_tx, mut chunk_rx) = mpsc::channel::<StreamPiece>(32);
         agent
-            .query_streaming("do the notice thing", chunk_tx)
+            .query_streaming("do the notice thing", chunk_tx, AgentRunConfig::default())
             .await
             .unwrap();
 
@@ -2098,7 +2303,7 @@ mod tests {
 
         let (chunk_tx, mut chunk_rx) = mpsc::channel::<StreamPiece>(32);
         agent
-            .query_streaming("do the silent thing", chunk_tx)
+            .query_streaming("do the silent thing", chunk_tx, AgentRunConfig::default())
             .await
             .unwrap();
 
@@ -2164,7 +2369,11 @@ mod tests {
 
         let (chunk_tx, mut chunk_rx) = mpsc::channel::<StreamPiece>(32);
         agent
-            .query_streaming("do the dangerous noticeee thing", chunk_tx)
+            .query_streaming(
+                "do the dangerous noticeee thing",
+                chunk_tx,
+                AgentRunConfig::default(),
+            )
             .await
             .unwrap();
 
@@ -2247,7 +2456,10 @@ mod tests {
         // Turn 1: provider returns "- use rust". After the turn, distill fires
         // → judge calls send_messages → "- use rust" → "use rust" promoted to profile.
         let (tx1, _rx1) = mpsc::channel::<StreamPiece>(8);
-        agent.query_streaming("hello", tx1).await.unwrap();
+        agent
+            .query_streaming("hello", tx1, AgentRunConfig::default())
+            .await
+            .unwrap();
 
         // ── Diagnostic: check intermediate state after turn 1 ────────────────
         {
@@ -2280,7 +2492,7 @@ mod tests {
         let n_before_t2 = calls.lock().unwrap().len();
         let (tx2, _rx2) = mpsc::channel::<StreamPiece>(8);
         agent
-            .query_streaming("what are my prefs", tx2)
+            .query_streaming("what are my prefs", tx2, AgentRunConfig::default())
             .await
             .unwrap();
 

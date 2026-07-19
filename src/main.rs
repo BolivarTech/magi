@@ -3,6 +3,7 @@
 mod agent;
 mod config;
 mod defaults;
+mod headless_runner;
 mod memory;
 mod services;
 mod system;
