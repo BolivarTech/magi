@@ -152,6 +152,92 @@ fn resolve_openai_key(secret_store: Option<&SharedSecretStore>) -> Option<String
         .map(|z| z.as_str().trim().to_string())
 }
 
+/// Environment variable name holding the Anthropic API key (REQ-H37).
+const ANTHROPIC_KEY_ENV: &str = "ANTHROPIC_API_KEY";
+
+/// Environment variable name holding the OpenAI-compatible API key (REQ-H37).
+const OPENAI_KEY_ENV: &str = "OPENAI_API_KEY";
+
+/// Environment variable names a tool subprocess is allowed to inherit (REQ-H37).
+///
+/// Literal names, matched by exact equality (never a prefix): a subprocess
+/// receives only these and therefore can never inherit `MAGI_PASSPHRASE`, an
+/// API key, or an attacker-chosen `LC_EVIL`. Covers the locale, temp-dir, and
+/// path variables a benign command legitimately needs on POSIX and Windows.
+const TOOL_ENV_ALLOWLIST: &[&str] = &[
+    "PATH",
+    "HOME",
+    "USERPROFILE",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "LC_MESSAGES",
+    "TMPDIR",
+    "TEMP",
+    "TMP",
+    "SystemRoot",
+];
+
+/// Secrets read out of the process environment before it is scrubbed (REQ-H37).
+///
+/// The passphrase is wrapped in [`Zeroizing`] so its memory is wiped on drop
+/// (the secrets-separation invariant); the API keys are plain `String`s,
+/// matching how the rest of `main.rs` already carries them.
+// Wired in T7: the fields are consumed by the runtime bootstrap (config and
+// passphrase resolution) once `main` reads secrets from here instead of env.
+#[allow(dead_code)]
+struct ConsumedSecrets {
+    /// The master passphrase (`MAGI_PASSPHRASE`), if it was set.
+    passphrase: Option<Zeroizing<String>>,
+    /// The Anthropic API key (`ANTHROPIC_API_KEY`), if it was set.
+    anthropic_key: Option<String>,
+    /// The OpenAI-compatible API key (`OPENAI_API_KEY`), if it was set.
+    openai_key: Option<String>,
+}
+
+/// Reads the three secret env vars into a [`ConsumedSecrets`], then removes all
+/// three from the process environment (REQ-H37).
+///
+/// The removal is **symmetric** — passphrase *and* both API keys — so that a
+/// later in-workspace interpreter (`python`/`node`) cannot exfiltrate them by
+/// reading `/proc/<pid>/environ`.
+///
+/// # Safety of call site
+///
+/// This calls [`std::env::remove_var`], which is **undefined behaviour** once
+/// the process has spawned additional threads (a concurrent env read races the
+/// removal). It **must** therefore be invoked single-threaded at startup,
+/// **before** the multi-thread tokio runtime spawns any worker. T7 enforces
+/// that call site; this function only provides the mechanism.
+// Wired in T7: `main` calls this before building the tokio runtime.
+#[allow(dead_code)]
+fn read_then_scrub_secret_env() -> ConsumedSecrets {
+    let passphrase = env::var(PASSPHRASE_ENV).ok().map(Zeroizing::new);
+    let anthropic_key = env::var(ANTHROPIC_KEY_ENV).ok();
+    let openai_key = env::var(OPENAI_KEY_ENV).ok();
+    env::remove_var(PASSPHRASE_ENV);
+    env::remove_var(ANTHROPIC_KEY_ENV);
+    env::remove_var(OPENAI_KEY_ENV);
+    ConsumedSecrets {
+        passphrase,
+        anthropic_key,
+        openai_key,
+    }
+}
+
+/// Returns the current environment filtered to exactly [`TOOL_ENV_ALLOWLIST`],
+/// for use as a spawned tool subprocess's environment (REQ-H37).
+///
+/// Filtering is by literal name equality, so a subprocess inherits neither the
+/// scrubbed secrets nor an arbitrary variable such as `LC_EVIL`.
+// Wired in T7: the bash tool spawn passes this as the child's environment.
+#[allow(dead_code)]
+fn tool_child_env() -> Vec<(String, String)> {
+    env::vars()
+        .filter(|(name, _)| TOOL_ENV_ALLOWLIST.contains(&name.as_str()))
+        .collect()
+}
+
 /// Outcome of resolving the vault passphrase and opening the encrypted store
 /// for the TUI (`main.rs`'s resequencing, REQ-V04/V06/V17/V35).
 enum MemoryAttachment {
@@ -1198,6 +1284,67 @@ mod tests {
             );
             with_var("OPENAI_API_KEY", Some("sk-oai-env"), || {
                 assert_eq!(resolve_openai_key(Some(&ss)).as_deref(), Some("sk-oai-env"));
+            });
+        });
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_scrub_removes_passphrase_and_api_keys_from_process_env() {
+        // REQ-H37: the three secrets are captured into the struct AND removed
+        // from the process env (symmetric) so `/proc/<pid>/environ` cannot leak
+        // them to a later in-workspace interpreter. `with_var` restores the
+        // pre-test env on drop, so the scrub leaves no state between tests.
+        with_var(PASSPHRASE_ENV, Some("pw-secret"), || {
+            with_var(ANTHROPIC_KEY_ENV, Some("sk-anthropic"), || {
+                with_var(OPENAI_KEY_ENV, Some("sk-openai"), || {
+                    let consumed = read_then_scrub_secret_env();
+                    // Values were captured before removal.
+                    assert_eq!(
+                        consumed.passphrase.as_deref().map(String::as_str),
+                        Some("pw-secret")
+                    );
+                    assert_eq!(consumed.anthropic_key.as_deref(), Some("sk-anthropic"));
+                    assert_eq!(consumed.openai_key.as_deref(), Some("sk-openai"));
+                    // All three are now gone from the environment.
+                    assert!(env::var(PASSPHRASE_ENV).is_err());
+                    assert!(env::var(ANTHROPIC_KEY_ENV).is_err());
+                    assert!(env::var(OPENAI_KEY_ENV).is_err());
+                });
+            });
+        });
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_tool_child_env_excludes_secrets_and_arbitrary_lc() {
+        // REQ-H37: the child env is a literal-equality allowlist, not a prefix
+        // match — so secrets and an attacker-chosen `LC_EVIL` are excluded while
+        // an allowlisted `LC_ALL` and `PATH` pass through. `PATH` is pinned so
+        // the assertion never depends on the host's ambient environment.
+        with_var(PASSPHRASE_ENV, Some("pw-secret"), || {
+            with_var(ANTHROPIC_KEY_ENV, Some("sk-anthropic"), || {
+                with_var(OPENAI_KEY_ENV, Some("sk-openai"), || {
+                    with_var("LC_EVIL", Some("evil"), || {
+                        with_var("LC_ALL", Some("C.UTF-8"), || {
+                            with_var("PATH", Some("/usr/bin"), || {
+                                let child: std::collections::HashMap<String, String> =
+                                    tool_child_env().into_iter().collect();
+                                // Secrets and arbitrary `LC_*` are excluded.
+                                assert!(!child.contains_key(PASSPHRASE_ENV));
+                                assert!(!child.contains_key(ANTHROPIC_KEY_ENV));
+                                assert!(!child.contains_key(OPENAI_KEY_ENV));
+                                assert!(!child.contains_key("LC_EVIL"));
+                                // Allowlisted names pass through (literal match).
+                                assert_eq!(child.get("PATH").map(String::as_str), Some("/usr/bin"));
+                                assert_eq!(
+                                    child.get("LC_ALL").map(String::as_str),
+                                    Some("C.UTF-8")
+                                );
+                            });
+                        });
+                    });
+                });
             });
         });
     }
