@@ -1503,19 +1503,23 @@ fn open_headless_memory(
     }
 }
 
-/// Reads the headless input from `-i <file>` or stdin, bounded to
-/// `MAX_INPUT_BYTES` (REQ-H29, anti-DoS).
+/// Reads the headless input from `-i <file>` or stdin, bounded to the
+/// EFFECTIVE `max_input_bytes` cap (REQ-H29, anti-DoS; spec §11 — the operator
+/// may lower it below `MAX_INPUT_BYTES` via `[headless] max_input_bytes`).
 ///
 /// # Errors
 /// [`HeadlessError::Io`] on a file open or read failure, or
 /// [`HeadlessError::InputTooLarge`] when the source exceeds the cap.
-fn read_headless_input(input: Option<&Path>) -> Result<Vec<u8>, HeadlessError> {
+fn read_headless_input(
+    input: Option<&Path>,
+    max_input_bytes: usize,
+) -> Result<Vec<u8>, HeadlessError> {
     match input {
         Some(path) => {
             let file = std::fs::File::open(path).map_err(|e| HeadlessError::Io(e.to_string()))?;
-            read_input_bounded(file)
+            read_input_bounded(file, max_input_bytes)
         }
-        None => read_input_bounded(std::io::stdin().lock()),
+        None => read_input_bounded(std::io::stdin().lock(), max_input_bytes),
     }
 }
 
@@ -1838,8 +1842,13 @@ async fn prepare_headless(
         eprintln!("warning: {w}");
     }
 
+    // Resolved BEFORE reading input so the effective `max_input_bytes` (an
+    // operator-lowered `[headless]` cap, spec §11) governs the read itself
+    // rather than only the later ceiling — never the module constant alone.
+    let limits = resolve_headless_limits(&magi_config.headless);
+
     // Read + parse the (bounded) input into an envelope (REQ-H03/H10/H29).
-    let bytes = match read_headless_input(h.input.as_deref()) {
+    let bytes = match read_headless_input(h.input.as_deref(), limits.max_input_bytes) {
         Ok(b) => b,
         Err(e) => {
             eprintln!("error: {e}");
@@ -1888,7 +1897,7 @@ async fn prepare_headless(
     let tier = tier_from_flags(h.auto, h.full_auto);
     // Operator ceiling: an explicit flag can RAISE it; else the `--full-auto`
     // elevation; else the toml value; else the normal cap (REQ-H08/H12b).
-    let limits = resolve_headless_limits(&magi_config.headless);
+    // (`limits` was already resolved above, before reading the input.)
     let operator_ceiling = h
         .max_tool_calls
         .or(if h.full_auto {

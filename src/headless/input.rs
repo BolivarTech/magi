@@ -310,25 +310,36 @@ impl<'de> Visitor<'de> for EnvelopeVisitor {
     }
 }
 
-/// Lee `reader` hasta EOF, acotado a `MAX_INPUT_BYTES` (REQ-H29, anti-DoS).
+/// Lee `reader` hasta EOF, acotado a `max_input_bytes` (REQ-H29, anti-DoS).
 ///
-/// Usa `reader.take(MAX_INPUT_BYTES as u64 + 1)`: el `+1` es lo que permite
+/// `max_input_bytes` es el cap EFECTIVO de esta corrida — el operador puede
+/// bajarlo (nunca subirlo) vía `[headless] max_input_bytes` en `magi.toml`
+/// (spec §11); [`MAX_INPUT_BYTES`] es solo el valor por-default que
+/// `HeadlessLimits::default()` usa cuando el operador no lo fija.
+///
+/// Usa `reader.take(max_input_bytes as u64 + 1)`: el `+1` es lo que permite
 /// distinguir "la fuente tenía exactamente el cap" de "la fuente excedía el
 /// cap" sin necesidad de leer más allá — una fuente hostil e ilimitada (p.ej.
 /// `std::io::repeat`) nunca se bufferiza por completo, porque `take` corta la
 /// lectura en `cap + 1` bytes pase lo que pase aguas arriba.
 ///
 /// Complejidad `O(n)` en el tamaño de la entrada, acotada por `cap + 1`
-/// (`MAX_INPUT_BYTES + 1`) sin importar cuánto produzca `reader`.
+/// sin importar cuánto produzca `reader`.
 ///
 /// # Errors
 ///
 /// Devuelve [`HeadlessError::InputTooLarge`] con el límite configurado si el
-/// contenido leído excede `MAX_INPUT_BYTES`. Devuelve [`HeadlessError::Io`] si
+/// contenido leído excede `max_input_bytes`. Devuelve [`HeadlessError::Io`] si
 /// el `reader` subyacente falla durante la lectura (p.ej. un error real de E/S
 /// de stdin o de un archivo); ese caso se propaga tal cual, sin exponer nunca
 /// contenido de la entrada en el mensaje de error.
-pub fn read_input_bounded(reader: impl Read) -> Result<Vec<u8>, HeadlessError> {
+pub fn read_input_bounded(
+    reader: impl Read,
+    max_input_bytes: usize,
+) -> Result<Vec<u8>, HeadlessError> {
+    // STUB (TDD Red): ignores the effective cap and always bounds against the
+    // module constant. The Green commit wires `max_input_bytes` through.
+    let _ = max_input_bytes;
     let mut buf = Vec::new();
     reader
         .take(MAX_INPUT_BYTES as u64 + 1)
@@ -433,7 +444,7 @@ mod tests {
     fn test_read_input_rejects_oversized_without_buffering_all() {
         let r = std::io::repeat(b'a');
         assert!(matches!(
-            read_input_bounded(r),
+            read_input_bounded(r, MAX_INPUT_BYTES),
             Err(HeadlessError::InputTooLarge(_))
         ));
     }
@@ -443,14 +454,17 @@ mod tests {
     #[test]
     fn test_read_input_empty_reader_returns_empty_vec() {
         let r = Cursor::new(Vec::new());
-        assert_eq!(read_input_bounded(r).unwrap(), Vec::<u8>::new());
+        assert_eq!(
+            read_input_bounded(r, MAX_INPUT_BYTES).unwrap(),
+            Vec::<u8>::new()
+        );
     }
 
     /// Caso borde exacto: `MAX_INPUT_BYTES` bytes caben justo bajo el cap.
     #[test]
     fn test_read_input_accepts_exactly_max_input_bytes() {
         let r = std::io::repeat(b'x').take(MAX_INPUT_BYTES as u64);
-        let out = read_input_bounded(r).expect("exactly the cap must be accepted");
+        let out = read_input_bounded(r, MAX_INPUT_BYTES).expect("exactly the cap must be accepted");
         assert_eq!(out.len(), MAX_INPUT_BYTES);
     }
 
@@ -459,9 +473,31 @@ mod tests {
     fn test_read_input_rejects_max_input_bytes_plus_one() {
         let r = std::io::repeat(b'x').take(MAX_INPUT_BYTES as u64 + 1);
         assert!(matches!(
-            read_input_bounded(r),
+            read_input_bounded(r, MAX_INPUT_BYTES),
             Err(HeadlessError::InputTooLarge(limit)) if limit == MAX_INPUT_BYTES
         ));
+    }
+
+    /// REQ-H29/spec §11: el cap EFECTIVO (`[headless] max_input_bytes`) debe
+    /// gobernar la lectura, no el `MAX_INPUT_BYTES` constante — un operador que
+    /// baja el cap a 10 bytes debe ver una entrada de 11 bytes rechazada aunque
+    /// esté muy por debajo del default de 10 MiB.
+    #[test]
+    fn test_read_input_bounded_respects_custom_effective_cap() {
+        let small_cap = 10usize;
+        let r = Cursor::new(vec![b'x'; small_cap + 1]);
+        assert!(
+            matches!(
+                read_input_bounded(r, small_cap),
+                Err(HeadlessError::InputTooLarge(limit)) if limit == small_cap
+            ),
+            "a custom (smaller) effective cap must be enforced, not the module constant"
+        );
+
+        let r_ok = Cursor::new(vec![b'x'; small_cap]);
+        let out =
+            read_input_bounded(r_ok, small_cap).expect("exactly the custom cap must be accepted");
+        assert_eq!(out.len(), small_cap);
     }
 
     // ---- parse_input --------------------------------------------------------
@@ -630,7 +666,7 @@ mod tests {
                 let _ = parse_input(bytes, fmt);
             }
             // La lectura acotada del mismo input tampoco panica.
-            let _ = read_input_bounded(Cursor::new(bytes.clone()));
+            let _ = read_input_bounded(Cursor::new(bytes.clone()), MAX_INPUT_BYTES);
         }
     }
 }
