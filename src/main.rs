@@ -2346,6 +2346,47 @@ mod tests {
         assert!(!resolve_allow_system_override(false, Some(false)));
     }
 
+    /// MAGI re-gate finding (Caspar): the "no magi.toml" default-notice check
+    /// must consult the canonical `.magi/magi.toml` (REQ-H16/H17), not a loose
+    /// `<cwd>/magi.toml`. A workspace whose `.magi/magi.toml` exists reports
+    /// `true`; no discovered workspace at all reports `false`.
+    #[test]
+    fn test_magi_toml_exists_checks_canonical_dot_magi_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = dunce::canonicalize(tmp.path()).unwrap();
+
+        assert!(!magi_toml_exists(None), "no workspace ⇒ no config file");
+
+        let magi_dir = cwd.join(".magi");
+        std::fs::create_dir(&magi_dir).unwrap();
+        std::fs::write(magi_dir.join("magi.toml"), "provider = \"anthropic\"\n").unwrap();
+        let ws = Workspace {
+            root: cwd.clone(),
+            magi_dir: magi_dir.clone(),
+        };
+        assert!(magi_toml_exists(Some(&ws)));
+    }
+
+    /// A loose `magi.toml` sitting directly in cwd (the legacy pre-headless
+    /// layout, REQ-H17) must NOT count, even though `.magi/` exists without
+    /// its own config file — regression test for the bug where the call site
+    /// checked `workspace_root.join("magi.toml")` instead of
+    /// `ws.config_path()`.
+    #[test]
+    fn test_magi_toml_exists_ignores_legacy_loose_cwd_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = dunce::canonicalize(tmp.path()).unwrap();
+        std::fs::write(cwd.join("magi.toml"), "provider = \"anthropic\"\n").unwrap();
+
+        let magi_dir = cwd.join(".magi");
+        std::fs::create_dir(&magi_dir).unwrap();
+        let ws = Workspace {
+            root: cwd.clone(),
+            magi_dir,
+        };
+        assert!(!magi_toml_exists(Some(&ws)));
+    }
+
     /// RAII env-var guard (no `temp_env` dep); restores the prior value on
     /// drop. Mirrors `vault::master`'s test helper — needed here too because
     /// `resolve_master_passphrase`/`discover_config`/`resolve_openai_key`
