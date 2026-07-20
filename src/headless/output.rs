@@ -11,7 +11,9 @@
 //!   a `err_out` si aplica) — para `--output-format text` (default).
 //! - [`write_json`] serializa **un único objeto JSON buffered**, con
 //!   `schema_version` como **primer campo físico** (REQ-H14), truncando cada
-//!   `result`/`content` grande a [`TOOL_RESULT_CAP`] con un marcador.
+//!   `result`/`content` grande al cap EFECTIVO
+//!   ([`TOOL_RESULT_CAP`](super::limits::TOOL_RESULT_CAP) por default) con un
+//!   marcador.
 //!
 //! [`sanitize_error_message`] es la frontera de seguridad para cualquier texto
 //! de error que pueda haber sido generado por una capa externa (provider
@@ -27,7 +29,6 @@ use std::io::Write;
 
 use serde::Serialize;
 
-use super::limits::TOOL_RESULT_CAP;
 use super::types::{
     AppliedCaps, ErrorPayload, RunOutcome, StopReason, Timings, ToolCallRecord, TranscriptEntry,
     Usage,
@@ -127,8 +128,9 @@ struct WireOutcome<'a> {
 ///
 /// `cap` es el cap EFECTIVO de esta corrida — el operador puede bajarlo
 /// (nunca subirlo) vía `[headless] tool_result_cap_bytes` en `magi.toml`
-/// (spec §11); [`TOOL_RESULT_CAP`] es solo el valor por-default que
-/// `HeadlessLimits::default()` usa cuando el operador no lo fija.
+/// (spec §11); [`TOOL_RESULT_CAP`](super::limits::TOOL_RESULT_CAP) es solo el
+/// valor por-default que `HeadlessLimits::default()` usa cuando el operador
+/// no lo fija.
 ///
 /// Si `s` ya cabe en el cap, se devuelve sin cambios (sin marcador).
 ///
@@ -140,15 +142,12 @@ struct WireOutcome<'a> {
 /// assert_eq!(short, "hola");
 /// ```
 pub fn truncate_result(s: &str, cap: usize) -> String {
-    // STUB (TDD Red): ignores the effective cap and always truncates against
-    // the module constant. The Green commit wires `cap` through.
-    let _ = cap;
-    if s.len() <= TOOL_RESULT_CAP {
+    if s.len() <= cap {
         return s.to_string();
     }
     // Retroceder desde el cap hasta el límite de carácter válido más cercano
     // (nunca se parte un carácter multi-byte a mitad).
-    let mut boundary = TOOL_RESULT_CAP;
+    let mut boundary = cap;
     while boundary > 0 && !s.is_char_boundary(boundary) {
         boundary -= 1;
     }
@@ -529,6 +528,7 @@ impl RunOutcome {
 
 #[cfg(test)]
 mod tests {
+    use super::super::limits::TOOL_RESULT_CAP;
     use super::*;
 
     /// REQ-H14: el objeto JSON lleva `schema_version` y trunca un `result`
@@ -661,11 +661,16 @@ mod tests {
 
         let truncated = truncate_result(&s, small_cap);
 
+        // The kept prefix must be EXACTLY `small_cap` bytes long (not the
+        // full untruncated string, and not TOOL_RESULT_CAP bytes — the
+        // module constant is far larger than `s` and would never truncate
+        // it at all): the marker must begin right after the custom cap.
+        let expected_prefix = format!("{}{TRUNCATION_MARKER_PREFIX}", "x".repeat(small_cap));
         assert!(
-            truncated.len() < s.len(),
-            "a custom (smaller) effective cap must truncate, not the module constant: {truncated}"
+            truncated.starts_with(&expected_prefix),
+            "a custom (smaller) effective cap must truncate at {small_cap} bytes, \
+             not the module constant: {truncated}"
         );
-        assert!(truncated.starts_with(&"x".repeat(small_cap)));
         assert!(truncated.contains("[truncated 4 bytes]"));
     }
 
