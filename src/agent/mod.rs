@@ -544,6 +544,9 @@ impl Agent {
         });
 
         if let Some((store, embedder, clock, cfg, scope)) = selective_snapshot {
+            // `unwrap_or_default()` cannot panic: a `None` session_id yields an
+            // empty string (a persistence run without a bound session is a no-op
+            // downstream), so selective mode never depends on a bound session.
             let session_id_str = self.session_id.clone().unwrap_or_default();
 
             // Render the profile fresh from the store so promoted preferences
