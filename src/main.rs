@@ -2270,6 +2270,37 @@ mod tests {
         assert_eq!(limits, HeadlessLimits::default());
     }
 
+    /// MAGI re-gate finding (Balthasar): `headless::input::read_input_bounded`
+    /// computes `max_input_bytes as u64 + 1` downstream; an operator-set
+    /// `[headless] max_input_bytes = usize::MAX` must never reach that call
+    /// site unclamped, or the `+1` overflows. `resolve_headless_limits` is the
+    /// single place the effective cap is built from operator config, so the
+    /// clamp lives here: `usize::MAX` is capped down to `usize::MAX - 1`.
+    #[test]
+    fn test_resolve_headless_limits_clamps_max_input_bytes_below_usize_max() {
+        let cfg = HeadlessConfig {
+            max_input_bytes: Some(usize::MAX),
+            ..Default::default()
+        };
+        let limits = resolve_headless_limits(&cfg);
+        assert_eq!(
+            limits.max_input_bytes,
+            usize::MAX - 1,
+            "usize::MAX must be clamped so the downstream +1 cannot overflow"
+        );
+    }
+
+    /// A normal operator value passes through the clamp unchanged.
+    #[test]
+    fn test_resolve_headless_limits_leaves_normal_max_input_bytes_unclamped() {
+        let cfg = HeadlessConfig {
+            max_input_bytes: Some(2048),
+            ..Default::default()
+        };
+        let limits = resolve_headless_limits(&cfg);
+        assert_eq!(limits.max_input_bytes, 2048);
+    }
+
     /// `read_headless_input` enforces the EFFECTIVE cap passed in, not the
     /// `MAX_INPUT_BYTES` module constant — an operator-lowered `[headless]
     /// max_input_bytes` must reject an oversized `-i` file well below the
