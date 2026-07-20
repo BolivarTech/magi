@@ -2101,7 +2101,7 @@ async fn run_query_subcommand(
     }
 
     let policy = Policy::new(tier, resolved.max_tool_calls, h.timeout);
-    let timeout = resolve_run_timeout(&policy);
+    let timeout = resolve_run_timeout(&policy, limits.full_auto_timeout_secs);
     let outcome = run_query(
         resolved,
         policy,

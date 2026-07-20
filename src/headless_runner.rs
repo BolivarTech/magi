@@ -301,15 +301,20 @@ impl RunObserver for RunTracker {
 ///
 /// Precedence: an explicit `--timeout` / `[headless] timeout_secs` (already
 /// resolved into [`Policy::timeout`]) wins; otherwise any **tool-executing**
-/// tier (`--auto`/`--full-auto`) receives the hard [`FULL_AUTO_TIMEOUT_SECS`]
-/// default (the permissive tiers always carry a wall-clock ceiling), and the
-/// read-only `default` tier gets no timeout. The result is passed straight to
+/// tier (`--auto`/`--full-auto`) receives `full_auto_timeout_secs` — the
+/// EFFECTIVE default (spec §11; an operator can lower it below
+/// [`FULL_AUTO_TIMEOUT_SECS`] via `[headless] timeout_secs`) — since the
+/// permissive tiers always carry a wall-clock ceiling; the read-only
+/// `default` tier gets no timeout. The result is passed straight to
 /// [`run_query`].
 ///
 /// # Returns
 /// `Some(duration)` when a ceiling applies; `None` for an unbounded run.
 #[must_use]
-pub fn resolve_run_timeout(policy: &Policy) -> Option<Duration> {
+pub fn resolve_run_timeout(policy: &Policy, full_auto_timeout_secs: u64) -> Option<Duration> {
+    // STUB (TDD Red): ignores the effective default and always applies the
+    // module constant. The Green commit wires `full_auto_timeout_secs` through.
+    let _ = full_auto_timeout_secs;
     if let Some(secs) = policy.timeout() {
         return Some(Duration::from_secs(secs));
     }
@@ -1403,26 +1408,66 @@ mod tests {
     fn test_resolve_run_timeout_applies_tier_default() {
         // No configured timeout: default tier ⇒ None; Auto/FullAuto ⇒ 900 s.
         assert_eq!(
-            resolve_run_timeout(&Policy::new(Tier::Default, 15, None)),
+            resolve_run_timeout(
+                &Policy::new(Tier::Default, 15, None),
+                FULL_AUTO_TIMEOUT_SECS
+            ),
             None,
             "the read-only default tier carries no wall-clock ceiling"
         );
         assert_eq!(
-            resolve_run_timeout(&Policy::new(Tier::Auto, 15, None)),
+            resolve_run_timeout(&Policy::new(Tier::Auto, 15, None), FULL_AUTO_TIMEOUT_SECS),
             Some(Duration::from_secs(FULL_AUTO_TIMEOUT_SECS))
         );
         assert_eq!(
-            resolve_run_timeout(&Policy::new(Tier::FullAuto, 50, None)),
+            resolve_run_timeout(
+                &Policy::new(Tier::FullAuto, 50, None),
+                FULL_AUTO_TIMEOUT_SECS
+            ),
             Some(Duration::from_secs(FULL_AUTO_TIMEOUT_SECS))
         );
         // An explicit configured timeout wins over the tier default, in any tier.
         assert_eq!(
-            resolve_run_timeout(&Policy::new(Tier::Auto, 15, Some(5))),
+            resolve_run_timeout(
+                &Policy::new(Tier::Auto, 15, Some(5)),
+                FULL_AUTO_TIMEOUT_SECS
+            ),
             Some(Duration::from_secs(5))
         );
         assert_eq!(
-            resolve_run_timeout(&Policy::new(Tier::Default, 15, Some(7))),
+            resolve_run_timeout(
+                &Policy::new(Tier::Default, 15, Some(7)),
+                FULL_AUTO_TIMEOUT_SECS
+            ),
             Some(Duration::from_secs(7))
+        );
+    }
+
+    /// REQ-H36, spec §11: the tool-executing tiers must fall back to the
+    /// EFFECTIVE `full_auto_timeout_secs` (an operator-lowered
+    /// `[headless] timeout_secs`), not the `FULL_AUTO_TIMEOUT_SECS` constant,
+    /// when no explicit `--timeout`/policy timeout was configured.
+    #[test]
+    fn test_resolve_run_timeout_respects_custom_effective_full_auto_default() {
+        let custom_default = 42u64;
+        assert_ne!(
+            custom_default, FULL_AUTO_TIMEOUT_SECS,
+            "fixture must differ from the module constant to prove it is not used"
+        );
+
+        assert_eq!(
+            resolve_run_timeout(&Policy::new(Tier::Auto, 15, None), custom_default),
+            Some(Duration::from_secs(custom_default)),
+            "a custom (smaller) effective default must apply, not the module constant"
+        );
+        assert_eq!(
+            resolve_run_timeout(&Policy::new(Tier::FullAuto, 50, None), custom_default),
+            Some(Duration::from_secs(custom_default))
+        );
+        // The read-only tier is still unbounded regardless of the effective default.
+        assert_eq!(
+            resolve_run_timeout(&Policy::new(Tier::Default, 15, None), custom_default),
+            None
         );
     }
 
