@@ -301,6 +301,16 @@ fn collect_search_dirs(start: &Path) -> Result<Vec<PathBuf>, HeadlessError> {
 /// Resolver `..` de forma léxica es seguro aquí porque [`discover`] rechaza
 /// después cualquier componente symlink de la cadena resultante.
 ///
+/// # MAGI re-gate WARNING — verified FALSE POSITIVE
+/// Caspar flagged that `out.pop()` might pop `..` past the root, turning an
+/// absolute input into a relative one. It does not: `PathBuf::pop()` truncates
+/// to `self.parent()`, and `Path::parent()` returns `None` — so `pop()` is a
+/// documented no-op — exactly when the path terminates in a `RootDir`/`Prefix`
+/// (verified empirically: `lexical_normalize(Path::new(r"C:\..\..\etc"))` stays
+/// `C:\etc`, never `etc` or `..\etc`). This module's only two callers
+/// ([`discover`], [`init`]) always feed it the output of `std::path::absolute`,
+/// which is always rooted, so the root/prefix boundary is never at risk here.
+///
 /// # Complejidad
 /// `O(d)` con `d` = número de componentes de `path`.
 fn lexical_normalize(path: &Path) -> PathBuf {
@@ -519,6 +529,19 @@ fn rename_no_replace(tmp: &Path, final_dir: &Path) -> Result<(), HeadlessError> 
 /// flags), which requires raw platform calls this crate's
 /// `#![forbid(unsafe_code)]` does not allow; the narrow case carries no data
 /// loss (an empty directory holds nothing to lose).
+///
+/// # MAGI re-gate INFO — a SYMLINKED `.magi` is verified FALSE POSITIVE
+/// Balthasar asked whether this fallback could replace or follow a *symlinked*
+/// `.magi` (distinct from the empty-real-dir residual above). It cannot, on
+/// every platform this branch covers: a directory rename requires the
+/// destination to be either absent or itself a directory by type — a symlink
+/// is neither, regardless of what it points to or whether that target is
+/// empty. Verified empirically on this Windows host: renaming a fresh
+/// directory onto a `.magi` NTFS junction (both an empty and a non-empty
+/// target were tried) fails with `PermissionDenied`, never replacing or
+/// writing through the junction. POSIX `rename(2)` documents the same type
+/// check via `lstat` semantics, so macOS/BSD reject it the same way Linux's
+/// `renameat2` does above.
 ///
 /// # Errors
 /// [`HeadlessError::Aborted`] if `final_dir` exists and is non-empty;
