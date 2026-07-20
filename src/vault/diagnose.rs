@@ -571,6 +571,53 @@ mod tests {
     }
 
     #[test]
+    fn test_envelope_present_but_data_table_missing_is_corrupt() {
+        // MAGI re-gate WARNING: spec-behavior.md §2.1 says "envelope present
+        // + a data table ABSENT ⇒ DbCorrupt" — a missing table means the DB
+        // cannot open at all, regardless of which passphrase is supplied, so
+        // it must never be reported as the ambiguous
+        // `WrongPassphrasePossible` (which implies the right passphrase
+        // would open it fine). Before the fix, `diagnose` only inspected the
+        // FEC-decode result for the `Envelope` branch and never consulted
+        // `counts`, so an intact envelope over a schema missing `memories`
+        // was misreported as `WrongPassphrasePossible`.
+        let conn = Connection::open_in_memory().expect("mem db");
+        // Deliberately omit `memories` — everything else present, including
+        // an intact envelope.
+        conn.execute_batch(
+            "CREATE TABLE sessions (id TEXT PRIMARY KEY);
+             CREATE TABLE messages (id INTEGER PRIMARY KEY);
+             CREATE TABLE knowledge (key TEXT PRIMARY KEY);
+             CREATE TABLE vault_meta (key TEXT PRIMARY KEY, value BLOB NOT NULL);",
+        )
+        .expect("partial schema");
+        let vault = cryptovault::CryptoVault::default();
+        let (salt_fec, wrapped_fec, _dek) =
+            bootstrap_envelope(&vault, "bootstrap-master-passphrase").expect("bootstrap");
+        conn.execute(
+            "INSERT INTO vault_meta (key, value) VALUES ('salt', ?1)",
+            [&salt_fec],
+        )
+        .expect("insert salt");
+        conn.execute(
+            "INSERT INTO vault_meta (key, value) VALUES ('wrapped_dek', ?1)",
+            [&wrapped_fec],
+        )
+        .expect("insert wrapped_dek");
+
+        let report = diagnose(&conn, false).expect("diagnose ok");
+        assert!(report.envelope_present);
+        assert_eq!(report.fec_ok, Some(true));
+        assert_eq!(
+            report.verdict,
+            DiagnoseVerdict::Corrupt,
+            "a missing data table alongside an intact envelope must be Corrupt, \
+             never WrongPassphrasePossible"
+        );
+        assert_eq!(report.counts.memories, None);
+    }
+
+    #[test]
     fn test_names_opt_in_lists_names_never_values() {
         let conn = fresh_conn();
         let dek = MaskedDek::new(Zeroizing::new(vec![7u8; 32])).expect("32B dek");
