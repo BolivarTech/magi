@@ -301,6 +301,13 @@ fn is_localhost(base_url: &str) -> bool {
 /// loose `<cwd>/magi.toml` path (D-H07 retired that layout) instead of the
 /// canonical `.magi/magi.toml`, so the "no magi.toml — using Ollama
 /// defaults" startup notice fired/suppressed based on the wrong file.
+///
+/// The `.exists()` here carries no path-traversal risk: `ws` is the workspace
+/// already produced by the hardened `crate::system::workspace::discover`, which
+/// rejects a symlinked/junction `.magi` component and confines to the operator's
+/// `-w`/cwd tree (REQ-H30). `config_path()` merely joins the fixed
+/// `magi.toml` leaf to that validated, operator-controlled `.magi/` dir — no
+/// caller/attacker-supplied path component reaches this probe.
 fn magi_toml_exists(workspace: Option<&Workspace>) -> bool {
     workspace.is_some_and(|ws| ws.config_path().exists())
 }
@@ -1886,6 +1893,14 @@ async fn prepare_headless(
     let workdir = h.workdir.clone().unwrap_or_else(|| cwd.to_path_buf());
 
     // `.magi/` discovery (walk-up, nearest ancestor, hardened, REQ-H16/H30).
+    // A discovery `Err` is security-relevant — it is the REQ-H30 rejection of a
+    // symlinked/junction `.magi` component (or an IO fault during the hardened
+    // walk), NOT a benign "no `.magi/` here". It is surfaced even under
+    // `--no-memory`: a stateless run must still refuse to operate under a
+    // symlinked `.magi` in its ancestry (there is no `--no-memory` carve-out in
+    // REQ-H30). A benign ABSENCE is `Ok(None)`, handled just below — that path
+    // is where `--no-memory` legitimately proceeds env-only (Docker-ephemeral,
+    // SC-H24).
     let workspace = match crate::system::workspace::discover(&workdir) {
         Ok(ws) => ws,
         Err(e) => {
