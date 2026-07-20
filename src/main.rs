@@ -2024,7 +2024,27 @@ async fn prepare_headless(
     // overrides and the operator cost ceiling (REQ-H12/H12b).
     let default_provider =
         resolve_provider(&magi_config, env::var("MAGI_PROVIDER").ok().as_deref());
-    let default_model = if default_provider == "openai" {
+    // MAGI re-gate WARNING (Caspar): `default_model` must be computed for the
+    // EFFECTIVE provider, not the config-default one. `resolve()` below
+    // applies the envelope's `provider` and `model` overrides INDEPENDENTLY
+    // (each field falls back to `defaults` on its own), so an envelope that
+    // overrides only `provider` (e.g. `{"provider":"anthropic"}`, no `model`)
+    // would otherwise inherit `default_model` computed for the *old* default
+    // provider — a cross-provider mismatch (an Anthropic provider built with
+    // an Ollama/OpenAI model name, or vice versa). Peeking `h.provider` (CLI
+    // flag) and `envelope.provider` (envelope) here — with the SAME
+    // precedence `resolve()` itself uses (override > envelope > default) —
+    // makes `defaults.model` consistent with whichever provider will
+    // actually win, without changing that precedence: an explicit envelope
+    // `model` still overrides `defaults.model` unconditionally inside
+    // `resolve()`, and a neither-set envelope still falls back to the
+    // config-default provider's default model exactly as before.
+    let effective_provider = h
+        .provider
+        .clone()
+        .or_else(|| envelope.provider.clone())
+        .unwrap_or_else(|| default_provider.clone());
+    let default_model = if effective_provider == "openai" {
         resolve_openai_model(&magi_config, env::var("OPENAI_MODEL").ok().as_deref())
     } else {
         resolve_anthropic_model(&magi_config, env::var("ANTHROPIC_MODEL").ok().as_deref())
