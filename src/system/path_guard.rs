@@ -209,6 +209,95 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
+    fn test_validate_rejects_symlink_dotdot_escape() {
+        // MAGI re-gate CRITICAL: `validate` used to lexically collapse `..`
+        // (`lexical_normalize`) BEFORE ever walking the filesystem for an
+        // existing ancestor. That collapse is only sound on a symlink-free
+        // path: `root/sym/../x`, with `sym` a symlink to an OUTSIDE directory,
+        // lexically becomes `root/x` (validates fine), but the OS resolves the
+        // ORIGINAL string by first following `sym` to the outside target and
+        // THEN applying `..` there — landing outside the workspace entirely.
+        // The fix finds the closest EXISTING ancestor by testing raw
+        // component-slices (so an intermediate symlink is followed by the OS,
+        // not lexically erased), canonicalizes ONLY that existing prefix, and
+        // only then lexically normalizes the non-existent (therefore
+        // symlink-free) tail.
+        let dir = tempdir().expect("temp dir");
+        let root = dir.path().to_path_buf();
+        let guard = PathGuard::new(root.clone()).expect("guard");
+
+        let outside = tempdir().expect("outside temp dir");
+        std::fs::create_dir_all(outside.path().join("etc")).expect("outside/etc");
+        std::fs::write(outside.path().join("etc").join("passwd"), b"root:x:0:0").unwrap();
+
+        std::os::unix::fs::symlink(outside.path(), root.join("sym")).expect("create symlink");
+
+        let escape_one = root.join("sym").join("..").join("x");
+        assert!(
+            guard.validate(&escape_one).is_err(),
+            "root/sym/../x must not escape via a symlinked `sym`"
+        );
+
+        let escape_two = root
+            .join("sym")
+            .join("..")
+            .join("..")
+            .join("etc")
+            .join("passwd");
+        assert!(
+            guard.validate(&escape_two).is_err(),
+            "root/sym/../../etc/passwd must not escape via a symlinked `sym`"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_validate_rejects_existing_symlink_to_outside_component() {
+        // A symlink component that IS immediately followed by a real,
+        // existing file on the far side (no `..` involved at all) must still
+        // be rejected: the ancestor-search finds the full path as "existing"
+        // (the OS follows `sym` transparently mid-path), and canonicalizing
+        // it resolves fully outside the workspace root.
+        let dir = tempdir().expect("temp dir");
+        let root = dir.path().to_path_buf();
+        let guard = PathGuard::new(root.clone()).expect("guard");
+
+        let outside = tempdir().expect("outside temp dir");
+        std::fs::write(outside.path().join("file"), b"secret").unwrap();
+
+        std::os::unix::fs::symlink(outside.path(), root.join("sym")).expect("create symlink");
+
+        let target = root.join("sym").join("file");
+        assert!(
+            guard.validate(&target).is_err(),
+            "a path through an existing symlink to an outside directory must be rejected"
+        );
+    }
+
+    #[test]
+    fn test_validate_allows_legit_dotdot_within_workspace() {
+        // A `..` that never leaves a symlink-free workspace must still
+        // resolve fine: `root/a/../b.txt` with `a` a REAL (non-symlink)
+        // directory is legitimate, even though `b.txt` doesn't exist yet.
+        // Canonicalize `root` up front (as the verbatim-path tests above do)
+        // to avoid Windows 8.3 short-name aliasing between `root` and the
+        // fully-canonicalized path `validate` returns.
+        let dir = tempdir().expect("temp dir");
+        let root = dunce::canonicalize(dir.path()).expect("canonicalize root");
+        let guard = PathGuard::new(root.clone()).expect("guard");
+
+        std::fs::create_dir_all(root.join("a")).unwrap();
+
+        let legit = root.join("a").join("..").join("b.txt");
+        let validated = guard
+            .validate(&legit)
+            .expect("a legitimate .. within the workspace must validate");
+        assert!(validated.starts_with(&root));
+        assert_eq!(validated, root.join("b.txt"));
+    }
+
+    #[test]
     #[cfg(windows)]
     fn test_canonicalize_robust_preserves_valid_verbatim_unc_form() {
         // MAGI re-gate finding: the OLD `canonicalize_robust` did an
