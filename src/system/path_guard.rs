@@ -1,6 +1,7 @@
 //! This module provides a security layer for path validation and sandboxing.
 
 use anyhow::{anyhow, Result};
+use std::fs;
 use std::io;
 use std::path::{Component, Path, PathBuf};
 
@@ -49,9 +50,15 @@ impl PathGuard {
         let mut uncanonicalized_components = Vec::new();
         let mut closest_existing_ancestor = None;
 
-        // Iteratively find the closest existing ancestor
+        // Iteratively find the closest existing ancestor. Uses
+        // `symlink_metadata` (does NOT follow the final symlink) rather than
+        // `Path::exists()` (which follows it and reports `false` for a
+        // DANGLING symlink): a dangling symlink is a real filesystem object
+        // right now, not a "not yet created" component, and must be resolved
+        // (and rejected if it escapes the workspace) rather than silently
+        // treated as a future, safely-appendable path segment.
         while closest_existing_ancestor.is_none() {
-            if current.exists() {
+            if fs::symlink_metadata(current).is_ok() {
                 closest_existing_ancestor = Some(current);
             } else {
                 if let Some(file_name) = current.file_name() {
@@ -162,6 +169,43 @@ mod tests {
         // Non-existent safe path with multiple levels
         let new_file = root.join("a/b/c/new_file.txt");
         assert!(guard.validate(&new_file).is_ok());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_validate_rejects_path_through_dangling_symlink_component() {
+        // MAGI re-gate finding: the closest-existing-ancestor walk used
+        // `Path::exists()`, which FOLLOWS the final symlink and returns
+        // `false` for a DANGLING symlink (link present, target missing). A
+        // dangling symlink component was therefore misclassified as "doesn't
+        // exist yet" (a future, safely-creatable path segment) and appended
+        // lexically onto the ancestor without ever being resolved — but it
+        // DOES exist as a filesystem object right now, and an attacker who
+        // controls its target (anywhere on the filesystem) can redirect a
+        // later real write through it, straight out of the sandbox. Using
+        // `fs::symlink_metadata` (which does not follow the final symlink)
+        // instead of `exists()` fixes this: the dangling link is found as a
+        // real ancestor, `canonicalize_robust` then fails to resolve it (or
+        // resolves it outside the workspace), and `validate` rejects it.
+        //
+        // Windows dev host cannot exercise this (symlink creation requires a
+        // privilege this environment lacks — verified empirically); CI runs
+        // ubuntu-latest, where this test executes for real.
+        let dir = tempdir().expect("temp dir");
+        let root = dir.path().to_path_buf();
+        let guard = PathGuard::new(root.clone()).expect("guard");
+
+        std::os::unix::fs::symlink(
+            "/nonexistent-target-for-magi-pathguard-test",
+            root.join("danglink"),
+        )
+        .expect("create dangling symlink");
+
+        let target = root.join("danglink").join("sub").join("file.txt");
+        assert!(
+            guard.validate(&target).is_err(),
+            "a path through a dangling symlink component must be rejected, not silently accepted"
+        );
     }
 
     #[test]
