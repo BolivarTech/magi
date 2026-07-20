@@ -226,6 +226,32 @@ pub fn resolve_openai_model(config: &MagiConfig, env_model: Option<&str>) -> Str
         .unwrap_or_else(|| crate::defaults::DEFAULT_OPENAI_MODEL.into())
 }
 
+/// env `ANTHROPIC_MODEL` > TOML `[anthropic].model` > `DEFAULT_ANTHROPIC_MODEL`.
+///
+/// Mirrors [`resolve_openai_model`]'s precedence exactly. Fixes a MAGI re-gate
+/// WARNING: prior call sites in `main.rs` disagreed on precedence — the
+/// headless path checked TOML before env (backwards), and the TUI/other path
+/// (`discover_config`) read only env and ignored `[anthropic].model`
+/// entirely. Both now route through this single resolver.
+///
+/// # Arguments
+/// * `config` - Parsed `MagiConfig`.
+/// * `env_model` - Value of `ANTHROPIC_MODEL` env var, if set.
+///
+/// # Returns
+/// Resolved model name; env overrides TOML, both override the built-in default.
+pub fn resolve_anthropic_model(config: &MagiConfig, env_model: Option<&str>) -> String {
+    // TODO(Red): placeholder mirrors the pre-fix headless bug (TOML checked
+    // before env, backwards) so the precedence tests fail for the right
+    // reason. Corrected in the following `fix:` commit.
+    config
+        .anthropic
+        .model
+        .clone()
+        .or_else(|| env_model.map(str::to_string))
+        .unwrap_or_else(|| crate::defaults::DEFAULT_ANTHROPIC_MODEL.into())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -355,6 +381,42 @@ mod tests {
         };
         assert_eq!(resolve_openai_model(&c, None), "phi4-mini");
         assert_eq!(resolve_openai_model(&c, Some("gpt-4o-mini")), "gpt-4o-mini");
+    }
+
+    #[test]
+    fn test_resolve_anthropic_model_env_wins_over_toml() {
+        // MAGI re-gate WARNING fix: env must win over TOML (not the other way
+        // around, which was the bug in the pre-fix headless call site).
+        let c = MagiConfig {
+            anthropic: AnthropicConfig {
+                model: Some("claude-toml-model".into()),
+            },
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_anthropic_model(&c, Some("claude-env-model")),
+            "claude-env-model"
+        );
+    }
+
+    #[test]
+    fn test_resolve_anthropic_model_toml_when_no_env() {
+        let c = MagiConfig {
+            anthropic: AnthropicConfig {
+                model: Some("claude-toml-model".into()),
+            },
+            ..Default::default()
+        };
+        assert_eq!(resolve_anthropic_model(&c, None), "claude-toml-model");
+    }
+
+    #[test]
+    fn test_resolve_anthropic_model_default_when_neither() {
+        use crate::defaults::DEFAULT_ANTHROPIC_MODEL;
+        assert_eq!(
+            resolve_anthropic_model(&MagiConfig::default(), None),
+            DEFAULT_ANTHROPIC_MODEL
+        );
     }
 
     #[test]
