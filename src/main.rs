@@ -553,12 +553,16 @@ fn vault_error_exit_code(e: &VaultError) -> i32 {
         | VaultError::PassphraseUnavailable
         | VaultError::WeakPassphrase(_)
         | VaultError::ValueTooLarge(_)
-        | VaultError::SecretNotFound(_) => 1,
-        VaultError::Crypto(_)
-        | VaultError::Storage(_)
+        | VaultError::SecretNotFound(_)
+        // Data-corruption errors are runtime failures, not CLI misuse (REQ-H23
+        // names `DbCorrupt` → 1 explicitly). The headless taxonomy already maps
+        // both corruption variants to `HeadlessError::Db` → exit 1, so the same
+        // corruption now exits the same code on the vault and headless surfaces
+        // (the user action is restore/delete, never "you invoked me wrong").
         | VaultError::VaultMetaCorrupt
-        | VaultError::DbCorrupt { .. }
-        | VaultError::Io(_) => 2,
+        | VaultError::DbCorrupt { .. } => 1,
+        // Unexpected internal failures the caller cannot act on directly.
+        VaultError::Crypto(_) | VaultError::Storage(_) | VaultError::Io(_) => 2,
     }
 }
 
@@ -1521,9 +1525,14 @@ fn headless_error_for_exit(kind: ErrorKind) -> HeadlessError {
     match kind {
         ErrorKind::InputInvalid => HeadlessError::InputInvalid(String::new()),
         ErrorKind::PassphraseUnavailable => HeadlessError::PassphraseUnavailable,
+        // `TierDenied` is exit-mapped upstream in `exit_code_for_outcome`
+        // (`EXIT_TIER_DENIED` = 3) before this function is reached; `HeadlessError`
+        // has no tier-denied representation, so this explicit arm exists to make
+        // the invariant visible — a tier denial must never fall into the generic
+        // runtime bucket below and silently degrade to exit 1.
+        ErrorKind::TierDenied => HeadlessError::Io(String::new()),
         ErrorKind::DbCorrupt
         | ErrorKind::WrongPassphrase
-        | ErrorKind::TierDenied
         | ErrorKind::Provider
         | ErrorKind::Timeout
         | ErrorKind::Runtime => HeadlessError::Io(String::new()),
@@ -2246,27 +2255,32 @@ mod tests {
 
     #[test]
     fn test_vault_error_exit_code_assigns_one_or_two_to_every_variant() {
-        // Sanity check for the exhaustive match: user/operation errors -> 1,
-        // system/data errors -> 2. Guards against a silent flip during
-        // refactors (the compiler already guards against a MISSING variant).
-        let user_errors = [
+        // Sanity check for the exhaustive match: runtime errors (incl. data
+        // corruption, REQ-H23) -> 1; unexpected internal failures -> 2. Guards
+        // against a silent flip during refactors (the compiler already guards
+        // against a MISSING variant).
+        let exit_one = [
             VaultError::Aborted,
             VaultError::WrongPassphrase,
             VaultError::PassphraseUnavailable,
             VaultError::WeakPassphrase("x".into()),
             VaultError::ValueTooLarge(1),
             VaultError::SecretNotFound("x".into()),
+            VaultError::VaultMetaCorrupt,
+            VaultError::DbCorrupt {
+                db_path: std::path::PathBuf::from("x"),
+                detail: "data present without envelope".into(),
+            },
         ];
-        for e in &user_errors {
+        for e in &exit_one {
             assert_eq!(vault_error_exit_code(e), 1, "{e}");
         }
-        let system_errors = [
+        let exit_two = [
             VaultError::Crypto("x".into()),
             VaultError::Storage("x".into()),
-            VaultError::VaultMetaCorrupt,
             VaultError::Io("x".into()),
         ];
-        for e in &system_errors {
+        for e in &exit_two {
             assert_eq!(vault_error_exit_code(e), 2, "{e}");
         }
     }
