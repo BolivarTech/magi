@@ -1089,6 +1089,34 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
+    fn test_init_rejects_symlinked_ancestor_component() {
+        // MAGI re-gate WARNING (parity with `discover`, REQ-H30): `discover`
+        // rejects a symlinked ancestor component before walking up, but
+        // `init` used to just `std::path::absolute` + lexically normalize the
+        // target `cwd` with no symlink check at all — so a symlinked ancestor
+        // component would be silently followed by the OS at directory-creation
+        // time instead of rejected up front. `init` now runs the same
+        // `ensure_raw_chain_symlink_free` check `discover` does, on the same
+        // raw absolute `cwd`, before ever touching the filesystem.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = dunce::canonicalize(tmp.path()).unwrap();
+        let real = root.join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        let link = root.join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        assert!(
+            matches!(init(&link), Err(HeadlessError::InputInvalid(_))),
+            "init through a symlinked ancestor component must be rejected"
+        );
+        assert!(
+            !real.join(".magi").exists(),
+            "no .magi/ must be created through the rejected symlink"
+        );
+    }
+
+    #[test]
     fn test_discover_allows_parentdir_on_non_symlinked_path() {
         // A legitimate `..` on a fully non-symlinked path still resolves and finds
         // the ancestor `.magi/`: `<root>/a/b/../c` normalizes to `<root>/a/c`, and
