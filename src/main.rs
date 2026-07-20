@@ -1801,12 +1801,8 @@ struct HeadlessContext {
 /// config value — **never weaker** than either source alone, since this is a
 /// SECURITY gate (a caller-controlled `system` override is a prompt-injection
 /// vector unless the operator explicitly opts in via either surface).
-///
-/// STUB (TDD Red): ignores `cfg` entirely — only the CLI flag applies. The
-/// Green commit ORs `cfg` in.
 fn resolve_allow_system_override(flag: bool, cfg: Option<bool>) -> bool {
-    let _ = cfg;
-    flag
+    flag || cfg.unwrap_or(false)
 }
 
 /// Resolves the effective headless numeric caps for this run by applying the
