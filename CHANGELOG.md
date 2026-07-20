@@ -9,7 +9,7 @@ changes and the **patch** position signals backward-compatible fixes.
 
 ## [Unreleased]
 
-## [0.10.0]
+## [0.10.0] - 2026-07-20
 
 **Headless mode — Magi is now invocable non-interactively** as a CI/CD pipeline
 step and as an AI backend for another application, alongside the unchanged TUI.
