@@ -1747,9 +1747,17 @@ struct HeadlessContext {
 /// `[headless]` `magi.toml` overrides over the built-in constant defaults
 /// (spec §11). Each unset `[headless]` key keeps its constant default.
 fn resolve_headless_limits(cfg: &HeadlessConfig) -> HeadlessLimits {
-    // STUB (TDD Red): ignores the config; the real override logic lands in Green.
-    let _ = cfg;
-    HeadlessLimits::default()
+    let d = HeadlessLimits::default();
+    HeadlessLimits {
+        max_input_bytes: cfg.max_input_bytes.unwrap_or(d.max_input_bytes),
+        full_auto_max_tool_calls: cfg
+            .full_auto_max_tool_calls
+            .unwrap_or(d.full_auto_max_tool_calls),
+        log_retention_runs: cfg.log_retention.unwrap_or(d.log_retention_runs),
+        log_max_bytes: cfg.log_max_bytes.unwrap_or(d.log_max_bytes),
+        tool_result_cap: cfg.tool_result_cap_bytes.unwrap_or(d.tool_result_cap),
+        full_auto_timeout_secs: cfg.timeout_secs.unwrap_or(d.full_auto_timeout_secs),
+    }
 }
 
 /// Discovers state, unlocks the vault (fail-closed), loads config, reads and
