@@ -34,36 +34,43 @@ struct BashResult {
     interrupted: bool,
 }
 
+/// Shell metacharacters banned from every command — sub-shells, redirection,
+/// variable expansion, escapes, newlines, and nul. This is a hard barrier that
+/// blocks injection on both the PowerShell and bash code paths; never widen it.
+const DANGEROUS_TOKENS: [char; 14] = [
+    '|', '&', ';', '>', '<', '`', '$', '(', ')', '{', '}', '\\', '\n', '\0',
+];
+
 /// A tool that executes shell commands.
 pub struct BashTool {
-    workspace_root: PathBuf,
+    /// Sandbox guard, built once from the canonicalized workspace root and
+    /// reused for every command validation — avoids re-canonicalizing the root
+    /// on each `is_command_allowed` call.
+    guard: PathGuard,
 }
 
 impl BashTool {
     /// Creates a new `BashTool` anchored to the workspace root.
+    ///
+    /// # Errors
+    /// Returns an error if the workspace root cannot be canonicalized.
     pub fn new(workspace_root: PathBuf) -> anyhow::Result<Self> {
-        let root = workspace_root
-            .canonicalize()
+        let guard = PathGuard::new(workspace_root)
             .map_err(|e| anyhow::anyhow!("Invalid workspace root for BashTool: {}", e))?;
-        Ok(Self {
-            workspace_root: root,
-        })
+        Ok(Self { guard })
     }
 }
 
 /// Strict whitelist of allowed base commands.
 /// Anything not in this list (or involving shell-injection tokens) is rejected.
-fn is_command_allowed(cmd: &str, workspace_root: &Path) -> bool {
+fn is_command_allowed(cmd: &str, guard: &PathGuard) -> bool {
     let allowed_binaries = [
         "ls", "git", "npm", "cargo", "rg", "cat", "echo", "pwd", "grep", "mkdir", "touch", "rm",
         "find", "diff", "node", "python", "pytest",
     ];
 
-    // Security: Broad set of dangerous tokens including sub-shells and variable expansion
-    let dangerous_tokens = [
-        '|', '&', ';', '>', '<', '`', '$', '(', ')', '{', '}', '\\', '\n', '\0',
-    ];
-    if cmd.chars().any(|c| dangerous_tokens.contains(&c)) {
+    // Security: reject any command carrying a banned shell metacharacter.
+    if cmd.chars().any(|c| DANGEROUS_TOKENS.contains(&c)) {
         return false;
     }
 
@@ -75,14 +82,10 @@ fn is_command_allowed(cmd: &str, workspace_root: &Path) -> bool {
     }
 
     // Sandbox: every non-flag arg is treated as a path and must resolve inside
-    // the workspace. PathGuard rejects absolutes (any form, incl. Windows
-    // forward-slash `C:/...`), `..`, and symlink escapes uniformly per platform
-    // (replaces the old string heuristics that missed the Windows case). R-6.
-    let guard = match PathGuard::new(workspace_root.to_path_buf()) {
-        Ok(g) => g,
-        Err(_) => return false,
-    };
-
+    // the workspace via the caller-provided `guard`. PathGuard rejects absolutes
+    // (any form, incl. Windows forward-slash `C:/...`), `..`, and symlink escapes
+    // uniformly per platform (replaces the old string heuristics that missed the
+    // Windows case). R-6.
     let mut tokens = cmd.split_whitespace();
     if let Some(base_cmd) = tokens.next() {
         let base_cmd_lower = base_cmd.to_lowercase();
@@ -221,7 +224,7 @@ impl Tool for BashTool {
             serde_json::from_value(args).map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
 
         // Proactive Whitelist and Argument check — HARD BARRIER, unchanged.
-        if !is_command_allowed(&args.command, &self.workspace_root) {
+        if !is_command_allowed(&args.command, &self.guard) {
             return Err(ToolError::ExecutionError("Security Violation: Command or arguments are not whitelisted or contain dangerous patterns.".to_string()));
         }
 
@@ -244,7 +247,7 @@ impl Tool for BashTool {
             c
         };
 
-        cmd.current_dir(&self.workspace_root)
+        cmd.current_dir(self.guard.workspace_root())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
@@ -350,7 +353,8 @@ mod tests {
     fn check(cmd: &str) -> bool {
         let dir = tempdir().expect("tempdir");
         let root = dir.path().canonicalize().expect("canonicalize");
-        is_command_allowed(cmd, &root)
+        let guard = PathGuard::new(root).expect("guard");
+        is_command_allowed(cmd, &guard)
     }
 
     #[test]
