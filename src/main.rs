@@ -1642,8 +1642,16 @@ fn finish_no_clobber_write(
     path: &Path,
     write_result: std::io::Result<()>,
 ) -> Result<(), HeadlessError> {
-    let _ = path; // TODO(Red): cleanup not yet implemented.
-    write_result.map_err(|e| HeadlessError::Io(e.to_string()))
+    write_result.map_err(|e| {
+        // A partial write must not leave a truncated target file on disk —
+        // mirror the tmp+rename branch's own cleanup-on-rename-failure. The
+        // `remove_file` result is intentionally ignored: the write error is
+        // already the primary failure to report, and this cleanup racing
+        // with another process (or itself failing) is best-effort, not a
+        // new error condition.
+        let _ = std::fs::remove_file(path);
+        HeadlessError::Io(e.to_string())
+    })
 }
 
 /// Writes `contents` to `path` atomically (REQ-H03): with `--no-clobber` an
