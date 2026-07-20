@@ -1130,6 +1130,7 @@ mod tests {
     use crate::agent::messages::{Content, Role};
     use mockito::Server;
     use serde_json::json;
+    use std::sync::{Arc, Mutex};
 
     #[test]
     fn test_parse_tool_input_empty_is_object() {
@@ -2234,5 +2235,315 @@ mod tests {
             tool_use_count, 0,
             "no Content::ToolUse emitted for orphan args fragment"
         );
+    }
+
+    // ─── Feature E: system-prompt injection (REQ-H12b) ────────────────────────
+
+    /// Captures the raw UTF-8 request body mockito received, via
+    /// `with_body_from_request`, while still returning `sse_body` as the mocked
+    /// response — letting a test assert exactly what the provider serialized
+    /// (including a field's *absence*, which a `Matcher` alone cannot express).
+    async fn capture_body_mock(
+        server: &mut Server,
+        path: &str,
+        sse_body: &'static str,
+    ) -> (mockito::Mock, Arc<Mutex<Option<String>>>) {
+        let captured = Arc::new(Mutex::new(None));
+        let captured_clone = captured.clone();
+        let mock = server
+            .mock("POST", path)
+            .with_status(200)
+            .with_header("content-type", "text/event-stream")
+            .with_body_from_request(move |req| {
+                *captured_clone.lock().unwrap() =
+                    Some(req.utf8_lossy_body().unwrap_or_default().into_owned());
+                sse_body.as_bytes().to_vec()
+            })
+            .create_async()
+            .await;
+        (mock, captured)
+    }
+
+    const MESSAGE_STOP_SSE: &str = "event: message_stop\ndata: {\"type\": \"message_stop\"}\n\n";
+
+    #[tokio::test]
+    async fn test_anthropic_provider_sends_top_level_system_field_when_present() {
+        let mut server = Server::new_async().await;
+        let url = server.url();
+        let (_m, captured) = capture_body_mock(&mut server, "/messages", MESSAGE_STOP_SSE).await;
+        let provider = AnthropicProvider::with_base_url("k".into(), "m".into(), url);
+        let mut stream = provider
+            .stream_messages(
+                &[Message::user("hi")],
+                &[],
+                Some("You are a test assistant."),
+            )
+            .await
+            .unwrap();
+        while stream.next().await.is_some() {}
+        let body = captured.lock().unwrap().clone().expect("request captured");
+        let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(parsed["system"], "You are a test assistant.");
+    }
+
+    #[tokio::test]
+    async fn test_anthropic_provider_omits_system_field_when_none() {
+        // Interactive path: AgentRunConfig::default().system == None must reach
+        // the wire as NO `system` field at all (not an empty string).
+        let mut server = Server::new_async().await;
+        let url = server.url();
+        let (_m, captured) = capture_body_mock(&mut server, "/messages", MESSAGE_STOP_SSE).await;
+        let provider = AnthropicProvider::with_base_url("k".into(), "m".into(), url);
+        let mut stream = provider
+            .stream_messages(&[Message::user("hi")], &[], None)
+            .await
+            .unwrap();
+        while stream.next().await.is_some() {}
+        let body = captured.lock().unwrap().clone().expect("request captured");
+        let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert!(
+            parsed.get("system").is_none(),
+            "no system field must be serialized when system=None, got: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_anthropic_provider_omits_system_field_when_empty_string() {
+        let mut server = Server::new_async().await;
+        let url = server.url();
+        let (_m, captured) = capture_body_mock(&mut server, "/messages", MESSAGE_STOP_SSE).await;
+        let provider = AnthropicProvider::with_base_url("k".into(), "m".into(), url);
+        let mut stream = provider
+            .stream_messages(&[Message::user("hi")], &[], Some(""))
+            .await
+            .unwrap();
+        while stream.next().await.is_some() {}
+        let body = captured.lock().unwrap().clone().expect("request captured");
+        let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert!(
+            parsed.get("system").is_none(),
+            "empty system string must not be serialized, got: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_openai_provider_prepends_system_message_when_present() {
+        let mut server = Server::new_async().await;
+        let url = server.url();
+        let (_m, captured) =
+            capture_body_mock(&mut server, "/chat/completions", "data: [DONE]\n\n").await;
+        let p = OpenAiCompatibleProvider::new(OpenAiSettings {
+            base_url: url,
+            api_key: "k".into(),
+            model: "m".into(),
+        });
+        let mut stream = p
+            .stream_messages(
+                &[Message::user("hi")],
+                &[],
+                Some("You are a test assistant."),
+            )
+            .await
+            .unwrap();
+        while stream.next().await.is_some() {}
+        let body = captured.lock().unwrap().clone().expect("request captured");
+        let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let messages = parsed["messages"].as_array().unwrap();
+        assert_eq!(messages[0]["role"], "system");
+        assert_eq!(messages[0]["content"], "You are a test assistant.");
+        assert_eq!(messages[1]["role"], "user");
+    }
+
+    #[tokio::test]
+    async fn test_openai_provider_omits_system_message_when_none() {
+        let mut server = Server::new_async().await;
+        let url = server.url();
+        let (_m, captured) =
+            capture_body_mock(&mut server, "/chat/completions", "data: [DONE]\n\n").await;
+        let p = OpenAiCompatibleProvider::new(OpenAiSettings {
+            base_url: url,
+            api_key: "k".into(),
+            model: "m".into(),
+        });
+        let mut stream = p
+            .stream_messages(&[Message::user("hi")], &[], None)
+            .await
+            .unwrap();
+        while stream.next().await.is_some() {}
+        let body = captured.lock().unwrap().clone().expect("request captured");
+        let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let messages = parsed["messages"].as_array().unwrap();
+        assert_eq!(
+            messages.len(),
+            1,
+            "no system message must be prepended when system=None, got: {body}"
+        );
+        assert_eq!(messages[0]["role"], "user");
+    }
+
+    // ─── Feature C: token usage (ResponseChunk::Usage) ────────────────────────
+
+    #[tokio::test]
+    async fn test_anthropic_provider_emits_usage_chunk_with_input_and_output_tokens() {
+        let mut server = Server::new_async().await;
+        let url = server.url();
+        let sse_body = concat!(
+            "event: message_start\n",
+            "data: {\"type\": \"message_start\", \"message\": {\"id\": \"m\", \"role\": \"assistant\", \"model\": \"x\", \"usage\": {\"input_tokens\": 42, \"output_tokens\": 0}}}\n\n",
+            "event: content_block_delta\n",
+            "data: {\"type\": \"content_block_delta\", \"index\":0, \"delta\": {\"type\": \"text_delta\", \"text\": \"hi\"}}\n\n",
+            "event: message_delta\n",
+            "data: {\"type\": \"message_delta\", \"delta\": {}, \"usage\": {\"output_tokens\": 7}}\n\n",
+            "event: message_stop\n",
+            "data: {\"type\": \"message_stop\"}\n\n",
+        );
+        let _m = server
+            .mock("POST", "/messages")
+            .with_status(200)
+            .with_header("content-type", "text/event-stream")
+            .with_body(sse_body)
+            .create_async()
+            .await;
+        let provider = AnthropicProvider::with_base_url("k".into(), "m".into(), url);
+        let mut stream = provider
+            .stream_messages(&[Message::user("hi")], &[], None)
+            .await
+            .unwrap();
+        let mut usage = None;
+        while let Some(chunk) = stream.next().await {
+            if let Ok(ResponseChunk::Usage {
+                input_tokens,
+                output_tokens,
+            }) = chunk
+            {
+                usage = Some((input_tokens, output_tokens));
+            }
+        }
+        assert_eq!(usage, Some((42, 7)));
+    }
+
+    #[tokio::test]
+    async fn test_anthropic_provider_usage_defaults_to_zero_when_absent_from_wire() {
+        // Existing fixtures with no `usage` field in message_start/message_delta
+        // must not panic and must report zero (no fabrication).
+        let mut server = Server::new_async().await;
+        let url = server.url();
+        let _m = server
+            .mock("POST", "/messages")
+            .with_status(200)
+            .with_header("content-type", "text/event-stream")
+            .with_body(MESSAGE_STOP_SSE)
+            .create_async()
+            .await;
+        let provider = AnthropicProvider::with_base_url("k".into(), "m".into(), url);
+        let mut stream = provider
+            .stream_messages(&[Message::user("hi")], &[], None)
+            .await
+            .unwrap();
+        let mut usage = None;
+        while let Some(chunk) = stream.next().await {
+            if let Ok(ResponseChunk::Usage {
+                input_tokens,
+                output_tokens,
+            }) = chunk
+            {
+                usage = Some((input_tokens, output_tokens));
+            }
+        }
+        assert_eq!(usage, Some((0, 0)));
+    }
+
+    #[tokio::test]
+    async fn test_openai_provider_emits_usage_chunk_from_stream_options() {
+        let mut server = Server::new_async().await;
+        let url = server.url();
+        let sse = concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":3}}\n\n",
+            "data: [DONE]\n\n",
+        );
+        let _m = server
+            .mock("POST", "/chat/completions")
+            .with_status(200)
+            .with_header("content-type", "text/event-stream")
+            .with_body(sse)
+            .create_async()
+            .await;
+        let p = OpenAiCompatibleProvider::new(OpenAiSettings {
+            base_url: url,
+            api_key: "k".into(),
+            model: "m".into(),
+        });
+        let mut stream = p
+            .stream_messages(&[Message::user("hi")], &[], None)
+            .await
+            .unwrap();
+        let mut usage = None;
+        while let Some(chunk) = stream.next().await {
+            if let Ok(ResponseChunk::Usage {
+                input_tokens,
+                output_tokens,
+            }) = chunk
+            {
+                usage = Some((input_tokens, output_tokens));
+            }
+        }
+        assert_eq!(usage, Some((11, 3)));
+    }
+
+    #[tokio::test]
+    async fn test_openai_provider_emits_no_usage_when_backend_omits_it() {
+        // A backend that ignores stream_options.include_usage (or doesn't support
+        // it) must not cause a fabricated Usage chunk — none is emitted at all.
+        let mut server = Server::new_async().await;
+        let url = server.url();
+        let sse = concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n",
+        );
+        let _m = server
+            .mock("POST", "/chat/completions")
+            .with_status(200)
+            .with_header("content-type", "text/event-stream")
+            .with_body(sse)
+            .create_async()
+            .await;
+        let p = OpenAiCompatibleProvider::new(OpenAiSettings {
+            base_url: url,
+            api_key: "k".into(),
+            model: "m".into(),
+        });
+        let mut stream = p
+            .stream_messages(&[Message::user("hi")], &[], None)
+            .await
+            .unwrap();
+        let mut saw_usage = false;
+        while let Some(chunk) = stream.next().await {
+            if let Ok(ResponseChunk::Usage { .. }) = chunk {
+                saw_usage = true;
+            }
+        }
+        assert!(!saw_usage, "no Usage chunk must be fabricated when absent");
+    }
+
+    #[tokio::test]
+    async fn test_openai_provider_requests_stream_options_include_usage() {
+        let mut server = Server::new_async().await;
+        let url = server.url();
+        let (_m, captured) =
+            capture_body_mock(&mut server, "/chat/completions", "data: [DONE]\n\n").await;
+        let p = OpenAiCompatibleProvider::new(OpenAiSettings {
+            base_url: url,
+            api_key: "k".into(),
+            model: "m".into(),
+        });
+        let mut stream = p
+            .stream_messages(&[Message::user("hi")], &[], None)
+            .await
+            .unwrap();
+        while stream.next().await.is_some() {}
+        let body = captured.lock().unwrap().clone().expect("request captured");
+        let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(parsed["stream_options"]["include_usage"], true);
     }
 }
