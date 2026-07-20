@@ -544,6 +544,37 @@ mod tests {
     }
 
     #[test]
+    fn test_guard_verdict_does_not_overflow_or_panic_on_huge_counts() {
+        // MAGI re-gate finding: summing four `i64` row counts with `.sum()`
+        // can overflow (and panic under debug overflow-checks) for a
+        // sufficiently large DB. `guard_verdict` only needs to know whether
+        // ANY guard table holds data, never the total, so this must neither
+        // panic nor misreport with counts near `i64::MAX`.
+        let counts = TableCounts {
+            vault: None,
+            sessions: Some(i64::MAX),
+            messages: Some(i64::MAX),
+            knowledge: Some(0),
+            memories: Some(0),
+        };
+        assert_eq!(guard_verdict(&counts), DiagnoseVerdict::Corrupt);
+    }
+
+    #[test]
+    fn test_guard_verdict_is_fresh_when_huge_counts_are_all_zero() {
+        // Non-overflow companion case: large but all-zero counts must still
+        // report Fresh, proving the no-overflow fix didn't flip the verdict.
+        let counts = TableCounts {
+            vault: None,
+            sessions: Some(0),
+            messages: Some(0),
+            knowledge: Some(0),
+            memories: Some(0),
+        };
+        assert_eq!(guard_verdict(&counts), DiagnoseVerdict::Fresh);
+    }
+
+    #[test]
     fn test_diagnose_never_requires_or_accepts_a_passphrase() {
         // Structural: `diagnose`'s signature has no passphrase parameter at
         // all, so a caller without one can still call it. This test locks
