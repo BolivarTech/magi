@@ -52,11 +52,10 @@ const LOGS_DIR_NAME: &str = "logs";
 /// Mensaje de error cuando un componente de la ruta descubierta es un symlink.
 const SYMLINK_COMPONENT_MSG: &str = "symlinked path component in .magi discovery";
 
-/// Prefijo del directorio temporal hermano del `init` atómico en Linux
-/// (`.magi.tmp.<rand>`), renombrado no-reemplazante sobre el `.magi/` final.
-// Narrow allow: only the Linux `renameat2` path (`place_magi_dir`) consumes this;
-// on other platforms the mkdir-gate is used and the constant is unreferenced.
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+/// Prefijo del directorio temporal hermano del `init` atómico, usado en
+/// **todas** las plataformas (`.magi.tmp.<rand>`), renombrado no-reemplazante
+/// sobre el `.magi/` final (Linux: `renameat2(RENAME_NOREPLACE)`; otras:
+/// `std::fs::rename`, ver [`rename_no_replace`]).
 const TMP_DIR_PREFIX: &str = ".magi.tmp.";
 
 /// Modo restrictivo de directorio (`0700`): rwx solo para el dueño (REQ-H38, unix).
@@ -364,11 +363,15 @@ fn volume_prefix(path: &Path) -> Option<std::ffi::OsString> {
 /// Creates `cwd/.magi/` holding `magi.toml` (rendered defaults), an empty
 /// `logs/` subdirectory, and the encrypted-store database with **all five
 /// tables** created empty and **no envelope** (the first real open bootstraps
-/// it, MS1 Task 3). The directory is placed **atomically and no-replace**: on
-/// Linux via `renameat2(RENAME_NOREPLACE)` of a sibling temp dir, elsewhere via
-/// a `create_dir` mkdir-gate — both refuse (never overwrite) if `.magi/`
-/// already exists. Every created object is restricted to the current user
-/// (`0700`/`0600` on unix, an ACL restricted to the current user on Windows).
+/// it, MS1 Task 3). The directory is placed **atomically and no-replace** on
+/// **every** platform: the whole tree is built inside a randomly-named sibling
+/// temp directory (`.magi.tmp.<rand>`, never a half-populated `.magi/` visible
+/// to a concurrent reader — REQ-H07) and then moved into place with a single,
+/// platform-appropriate no-replace rename (Linux: `renameat2(RENAME_NOREPLACE)`;
+/// elsewhere: `std::fs::rename`, see [`rename_no_replace`]) that refuses to
+/// replace an existing `.magi/`. Every created object is restricted to the
+/// current user (`0700`/`0600` on unix, an ACL restricted to the current user
+/// on Windows).
 ///
 /// # Errors
 /// - [`HeadlessError::Aborted`] if `cwd/.magi/` already exists.
@@ -382,17 +385,15 @@ pub fn init(cwd: &Path) -> Result<Workspace, HeadlessError> {
     Ok(Workspace { root, magi_dir })
 }
 
-/// Places a populated `.magi/` at `magi_dir` atomically and no-replace via
-/// `renameat2(RENAME_NOREPLACE)` of a sibling temp directory (Linux).
-///
-/// Builds the whole tree in `.magi.tmp.<rand>` (never a half-populated `.magi/`
-/// visible to a reader) and renames it into place; on a populate error removes
-/// only its own freshly-created scaffold.
+/// Places a populated `.magi/` at `magi_dir` atomically and no-replace, on
+/// every platform: builds the whole tree in a sibling `.magi.tmp.<rand>` (never
+/// a half-populated `.magi/` visible to a reader) and renames it into place via
+/// [`rename_no_replace`]; on a populate error removes only its own
+/// freshly-created scaffold.
 ///
 /// # Errors
 /// [`HeadlessError::Aborted`] if `magi_dir` exists; [`HeadlessError::Io`] /
 /// [`HeadlessError::Storage`] on a filesystem or schema error.
-#[cfg(target_os = "linux")]
 fn place_magi_dir(magi_dir: &Path) -> Result<(), HeadlessError> {
     let parent = magi_dir
         .parent()
@@ -403,23 +404,19 @@ fn place_magi_dir(magi_dir: &Path) -> Result<(), HeadlessError> {
     rename_no_replace(&tmp, magi_dir)
 }
 
-/// Places a populated `.magi/` at `magi_dir` via a `create_dir` mkdir-gate
-/// (macOS, other unix, Windows) — `create_dir` is itself atomic no-replace.
-///
-/// # Errors
-/// [`HeadlessError::Aborted`] if `magi_dir` exists; [`HeadlessError::Io`] /
-/// [`HeadlessError::Storage`] on a filesystem or schema error.
-#[cfg(not(target_os = "linux"))]
-fn place_magi_dir(magi_dir: &Path) -> Result<(), HeadlessError> {
-    place_via_mkdir_gate(magi_dir)
-}
-
 /// Creates `magi_dir` in place as the atomic no-replace gate and populates it;
 /// on a population error removes only the just-created scaffold (no user data).
 ///
+/// Used as the Linux fallback when `renameat2(RENAME_NOREPLACE)` is
+/// unsupported by the kernel/filesystem (rare — old kernels or exotic
+/// filesystems); the normal Linux path and every other platform build in a
+/// temp sibling instead (see [`place_magi_dir`] / [`rename_no_replace`]) so the
+/// well-known final path never appears half-populated.
+///
 /// # Errors
 /// [`HeadlessError::Aborted`] if `magi_dir` exists; [`HeadlessError::Io`] /
 /// [`HeadlessError::Storage`] on a filesystem or schema error.
+#[cfg(target_os = "linux")]
 fn place_via_mkdir_gate(magi_dir: &Path) -> Result<(), HeadlessError> {
     create_gate_dir(magi_dir)?;
     populate_or_cleanup(magi_dir)
@@ -486,6 +483,49 @@ fn rename_no_replace(tmp: &Path, final_dir: &Path) -> Result<(), HeadlessError> 
                 place_via_mkdir_gate(final_dir)
             } else {
                 Err(HeadlessError::Io(format!("rename failed: {errno:?}")))
+            }
+        }
+    }
+}
+
+/// Renames `tmp` onto `final_dir` atomically via `std::fs::rename` (Windows,
+/// macOS, other unix) — the portable counterpart of the Linux `renameat2`
+/// variant above.
+///
+/// A directory rename's OS semantics already refuse to replace an existing
+/// **non-empty** destination (`ErrorKind::DirectoryNotEmpty` on Windows,
+/// `ENOTEMPTY`-mapped errors on other unix): every real `.magi/` this guards
+/// against is non-empty (`init` never leaves one with fewer than its three
+/// children), so that failure is mapped to [`HeadlessError::Aborted`], the
+/// same refusal Linux's `RENAME_NOREPLACE` gives directly.
+///
+/// # Residual (documented, not fixed)
+/// An existing but **empty** `.magi/` — never `init`'s own output, only a
+/// directory created by something else (e.g. a bare `mkdir`) — is *replaced*
+/// rather than refused: `std::fs::rename`'s directory semantics allow renaming
+/// onto an empty destination on Windows and (for non-Linux) other unix
+/// targets. Closing this fully needs an atomic "create-with-initial-content"
+/// primitive (Windows: a `CreateFile`/`MoveFileEx` sequence with explicit
+/// flags), which requires raw platform calls this crate's
+/// `#![forbid(unsafe_code)]` does not allow; the narrow case carries no data
+/// loss (an empty directory holds nothing to lose).
+///
+/// # Errors
+/// [`HeadlessError::Aborted`] if `final_dir` exists and is non-empty;
+/// [`HeadlessError::Io`] on any other rename failure.
+#[cfg(not(target_os = "linux"))]
+fn rename_no_replace(tmp: &Path, final_dir: &Path) -> Result<(), HeadlessError> {
+    match fs::rename(tmp, final_dir) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let _ = fs::remove_dir_all(tmp);
+            if matches!(
+                e.kind(),
+                io::ErrorKind::AlreadyExists | io::ErrorKind::DirectoryNotEmpty
+            ) {
+                Err(HeadlessError::Aborted)
+            } else {
+                Err(HeadlessError::Io(e.to_string()))
             }
         }
     }
