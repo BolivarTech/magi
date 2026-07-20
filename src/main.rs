@@ -3457,6 +3457,133 @@ mod tests {
         (tmp, cwd)
     }
 
+    /// Builds a `.magi/` under a fresh tempdir cwd with NO provider override —
+    /// `resolve_provider` falls through to `DEFAULT_PROVIDER` (`"openai"`), so
+    /// tests here observe an ENVELOPE `provider` override crossing away from
+    /// that config-default. Returns the temp guard and the canonical cwd.
+    fn init_default_workspace() -> (tempfile::TempDir, std::path::PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = dunce::canonicalize(tmp.path()).unwrap();
+        crate::system::workspace::init(&cwd).expect("init .magi/");
+        (tmp, cwd)
+    }
+
+    /// Writes a JSON envelope `body` to `<cwd>/<name>` and returns its path.
+    fn write_envelope(cwd: &Path, name: &str, body: &str) -> std::path::PathBuf {
+        let path = cwd.join(name);
+        std::fs::write(&path, body).unwrap();
+        path
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_prepare_headless_provider_only_envelope_resolves_matching_default_model() {
+        // MAGI re-gate WARNING (Caspar): `resolve()` (headless/resolution.rs)
+        // applies the envelope's `provider` and `model` overrides
+        // INDEPENDENTLY. Before the fix, `default_model` was computed for the
+        // config-DEFAULT provider ("openai" here — no toml override), so an
+        // envelope overriding only `provider` to "anthropic" (no `model`) fed
+        // an Ollama/OpenAI model name into `resolved.model` while
+        // `resolved.provider` said "anthropic" — a cross-provider mismatch.
+        with_var("MAGI_PROVIDER", None, || {
+            with_var("ANTHROPIC_MODEL", None, || {
+                with_var("OPENAI_MODEL", None, || {
+                    let (_tmp, cwd) = init_default_workspace();
+                    let input = write_envelope(
+                        &cwd,
+                        "env.json",
+                        r#"{"prompt":"hi","provider":"anthropic"}"#,
+                    );
+
+                    let mut h = base_hargs();
+                    h.input = Some(input);
+                    h.workdir = Some(cwd.clone());
+                    h.no_memory = true; // stateless ⇒ env-only, no passphrase needed
+
+                    let rt = tokio::runtime::Runtime::new().unwrap();
+                    let ctx = rt
+                        .block_on(prepare_headless(&h, None, &cwd, None, None))
+                        .expect("prepare_headless must succeed");
+
+                    assert_eq!(ctx.resolved.provider, "anthropic");
+                    assert_eq!(
+                        ctx.resolved.model,
+                        crate::defaults::DEFAULT_ANTHROPIC_MODEL,
+                        "provider-without-model must resolve the default MODEL for the \
+                         EFFECTIVE (envelope-overridden) provider, not the config-default \
+                         provider's model"
+                    );
+                });
+            });
+        });
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_prepare_headless_explicit_envelope_model_still_wins_over_provider_default() {
+        // The envelope's explicit `model` must still take precedence over
+        // whatever default the effective-provider peek would otherwise supply
+        // (precedence unchanged by the fix).
+        with_var("MAGI_PROVIDER", None, || {
+            with_var("ANTHROPIC_MODEL", None, || {
+                with_var("OPENAI_MODEL", None, || {
+                    let (_tmp, cwd) = init_default_workspace();
+                    let input = write_envelope(
+                        &cwd,
+                        "env.json",
+                        r#"{"prompt":"hi","provider":"anthropic","model":"custom-model"}"#,
+                    );
+
+                    let mut h = base_hargs();
+                    h.input = Some(input);
+                    h.workdir = Some(cwd.clone());
+                    h.no_memory = true;
+
+                    let rt = tokio::runtime::Runtime::new().unwrap();
+                    let ctx = rt
+                        .block_on(prepare_headless(&h, None, &cwd, None, None))
+                        .expect("prepare_headless must succeed");
+
+                    assert_eq!(ctx.resolved.provider, "anthropic");
+                    assert_eq!(
+                        ctx.resolved.model, "custom-model",
+                        "an explicit envelope model must still win"
+                    );
+                });
+            });
+        });
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_prepare_headless_neither_provider_nor_model_set_uses_config_default() {
+        // With neither the envelope nor a CLI flag setting `provider`, the
+        // effective-provider peek must fall back to the SAME config-default
+        // provider `resolve()` already used — no behavior change for the
+        // common case.
+        with_var("MAGI_PROVIDER", None, || {
+            with_var("ANTHROPIC_MODEL", None, || {
+                with_var("OPENAI_MODEL", None, || {
+                    let (_tmp, cwd) = init_default_workspace();
+                    let input = write_envelope(&cwd, "env.json", r#"{"prompt":"hi"}"#);
+
+                    let mut h = base_hargs();
+                    h.input = Some(input);
+                    h.workdir = Some(cwd.clone());
+                    h.no_memory = true;
+
+                    let rt = tokio::runtime::Runtime::new().unwrap();
+                    let ctx = rt
+                        .block_on(prepare_headless(&h, None, &cwd, None, None))
+                        .expect("prepare_headless must succeed");
+
+                    assert_eq!(ctx.resolved.provider, "openai");
+                    assert_eq!(ctx.resolved.model, crate::defaults::DEFAULT_OPENAI_MODEL);
+                });
+            });
+        });
+    }
+
     #[test]
     #[serial_test::serial]
     fn test_headless_query_static_provider_returns_response_exit_0() {
