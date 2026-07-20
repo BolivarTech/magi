@@ -2179,6 +2179,28 @@ mod tests {
         assert_eq!(limits, HeadlessLimits::default());
     }
 
+    /// `read_headless_input` enforces the EFFECTIVE cap passed in, not the
+    /// `MAX_INPUT_BYTES` module constant — an operator-lowered `[headless]
+    /// max_input_bytes` must reject an oversized `-i` file well below the
+    /// 10 MiB default (REQ-H29, spec §11).
+    #[test]
+    fn test_read_headless_input_enforces_custom_effective_cap_from_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("prompt.txt");
+        std::fs::write(&path, vec![b'x'; 11]).expect("write fixture");
+
+        let small_cap = 10usize;
+        let err = read_headless_input(Some(&path), small_cap)
+            .expect_err("11 bytes must exceed the custom 10-byte cap");
+        assert!(matches!(err, HeadlessError::InputTooLarge(limit) if limit == small_cap));
+
+        // Exactly at the (smaller) cap is accepted.
+        let path_ok = dir.path().join("prompt_ok.txt");
+        std::fs::write(&path_ok, vec![b'x'; small_cap]).expect("write fixture");
+        let bytes = read_headless_input(Some(&path_ok), small_cap).expect("must fit exactly");
+        assert_eq!(bytes.len(), small_cap);
+    }
+
     /// RAII env-var guard (no `temp_env` dep); restores the prior value on
     /// drop. Mirrors `vault::master`'s test helper — needed here too because
     /// `resolve_master_passphrase`/`discover_config`/`resolve_openai_key`

@@ -22,7 +22,7 @@ use serde::de::{
     self, DeserializeSeed, Deserializer, Error as _, IgnoredAny, MapAccess, SeqAccess, Visitor,
 };
 
-use super::limits::{MAX_INPUT_BYTES, MAX_JSON_DEPTH};
+use super::limits::MAX_JSON_DEPTH;
 use super::HeadlessError;
 
 /// Mensaje de error cuando el anidamiento JSON supera [`MAX_JSON_DEPTH`].
@@ -314,8 +314,9 @@ impl<'de> Visitor<'de> for EnvelopeVisitor {
 ///
 /// `max_input_bytes` es el cap EFECTIVO de esta corrida — el operador puede
 /// bajarlo (nunca subirlo) vía `[headless] max_input_bytes` en `magi.toml`
-/// (spec §11); [`MAX_INPUT_BYTES`] es solo el valor por-default que
-/// `HeadlessLimits::default()` usa cuando el operador no lo fija.
+/// (spec §11); [`MAX_INPUT_BYTES`](super::limits::MAX_INPUT_BYTES) es solo el
+/// valor por-default que `HeadlessLimits::default()` usa cuando el operador no
+/// lo fija.
 ///
 /// Usa `reader.take(max_input_bytes as u64 + 1)`: el `+1` es lo que permite
 /// distinguir "la fuente tenía exactamente el cap" de "la fuente excedía el
@@ -337,17 +338,14 @@ pub fn read_input_bounded(
     reader: impl Read,
     max_input_bytes: usize,
 ) -> Result<Vec<u8>, HeadlessError> {
-    // STUB (TDD Red): ignores the effective cap and always bounds against the
-    // module constant. The Green commit wires `max_input_bytes` through.
-    let _ = max_input_bytes;
     let mut buf = Vec::new();
     reader
-        .take(MAX_INPUT_BYTES as u64 + 1)
+        .take(max_input_bytes as u64 + 1)
         .read_to_end(&mut buf)
         .map_err(|e| HeadlessError::Io(e.to_string()))?;
 
-    if buf.len() > MAX_INPUT_BYTES {
-        return Err(HeadlessError::InputTooLarge(MAX_INPUT_BYTES));
+    if buf.len() > max_input_bytes {
+        return Err(HeadlessError::InputTooLarge(max_input_bytes));
     }
 
     Ok(buf)
@@ -436,6 +434,7 @@ pub fn parse_input(
 mod tests {
     use std::io::Cursor;
 
+    use super::super::limits::MAX_INPUT_BYTES;
     use super::*;
 
     /// Una fuente ilimitada (`io::repeat`) nunca se bufferiza por completo:
