@@ -1793,6 +1793,9 @@ struct HeadlessContext {
     embed_key: Option<String>,
     /// The started run log, if logging is enabled.
     run_log: Option<RunLog>,
+    /// Effective headless numeric caps for this run (spec §11), resolved once in
+    /// `prepare_headless` and reused by both dispatchers.
+    limits: HeadlessLimits,
 }
 
 /// Resolves the effective `allow_system_override` gate (REQ-H12b, spec §11):
@@ -2034,6 +2037,7 @@ async fn prepare_headless(
         tier,
         embed_key,
         run_log,
+        limits,
     })
 }
 
@@ -2089,12 +2093,9 @@ async fn run_query_subcommand(
         embed_key,
         memory,
         mut run_log,
+        limits,
         ..
     } = ctx;
-
-    // Effective numeric caps for this run (spec §11) — reused below for the
-    // output tool-result truncation.
-    let limits = resolve_headless_limits(&magi_config.headless);
 
     let backend_label = if provider_kind == "openai" {
         "openai"
@@ -2190,12 +2191,9 @@ async fn run_consult_subcommand(
         resolved,
         prompt,
         mut run_log,
+        limits,
         ..
     } = ctx;
-
-    // Effective numeric caps for this run (spec §11) — reused below for the
-    // output tool-result truncation.
-    let limits = resolve_headless_limits(&magi_config.headless);
 
     let backend_label = if provider_kind == "openai" {
         "openai"
