@@ -1795,6 +1795,20 @@ struct HeadlessContext {
     run_log: Option<RunLog>,
 }
 
+/// Resolves the effective `allow_system_override` gate (REQ-H12b, spec §11):
+/// whether the envelope `system` override is honored. Precedence: the
+/// `--allow-system-override` CLI flag OR the `[headless] allow_system_override`
+/// config value — **never weaker** than either source alone, since this is a
+/// SECURITY gate (a caller-controlled `system` override is a prompt-injection
+/// vector unless the operator explicitly opts in via either surface).
+///
+/// STUB (TDD Red): ignores `cfg` entirely — only the CLI flag applies. The
+/// Green commit ORs `cfg` in.
+fn resolve_allow_system_override(flag: bool, cfg: Option<bool>) -> bool {
+    let _ = cfg;
+    flag
+}
+
 /// Resolves the effective headless numeric caps for this run by applying the
 /// `[headless]` `magi.toml` overrides over the built-in constant defaults
 /// (spec §11). Each unset `[headless]` key keeps its constant default.
@@ -1955,12 +1969,16 @@ async fn prepare_headless(
         })
         .or(defaults.max_tool_calls)
         .unwrap_or(NORMAL_MAX_TOOL_CALLS);
+    let allow_system_override = resolve_allow_system_override(
+        h.allow_system_override,
+        magi_config.headless.allow_system_override,
+    );
     let resolved = resolve_params(
         envelope,
         &defaults,
         &overrides,
         operator_ceiling,
-        h.allow_system_override,
+        allow_system_override,
     );
 
     // Build the principal provider from the resolved model/provider + keys.
@@ -2307,6 +2325,32 @@ mod tests {
             resolve_log_level(None, Some("verbose")),
             Err(HeadlessError::InputInvalid(_))
         ));
+    }
+
+    /// REQ-H12b, spec §11: SECURITY gate — `[headless] allow_system_override`
+    /// must be able to enable the envelope `system` override even without the
+    /// `--allow-system-override` CLI flag (the effective value is
+    /// `flag OR config`, never weaker than either source alone).
+    #[test]
+    fn test_resolve_allow_system_override_config_enables_without_cli_flag() {
+        assert!(
+            resolve_allow_system_override(false, Some(true)),
+            "a true [headless] allow_system_override must enable the gate on its own"
+        );
+    }
+
+    /// The CLI flag alone (no config) still enables the gate.
+    #[test]
+    fn test_resolve_allow_system_override_cli_flag_alone_enables() {
+        assert!(resolve_allow_system_override(true, None));
+        assert!(resolve_allow_system_override(true, Some(false)));
+    }
+
+    /// Neither source set ⇒ the gate stays closed (secure default, REQ-H12b).
+    #[test]
+    fn test_resolve_allow_system_override_defaults_closed() {
+        assert!(!resolve_allow_system_override(false, None));
+        assert!(!resolve_allow_system_override(false, Some(false)));
     }
 
     /// RAII env-var guard (no `temp_env` dep); restores the prior value on
