@@ -855,6 +855,54 @@ mod tests {
     }
 
     #[test]
+    fn test_init_never_exposes_a_partially_populated_final_dir() {
+        // REQ-H07 / MAGI re-gate finding: on EVERY platform (not just Linux),
+        // a concurrent observer polling `.magi/`'s existence must never see
+        // it present without ALREADY being fully populated (`magi.toml`,
+        // `logs/`, and the DB all present) — the final directory must come
+        // into existence pre-built via a single atomic rename, never via an
+        // in-place `mkdir` followed by separate population steps that leave
+        // a visible half-built window.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().to_path_buf();
+        let magi = dir.join(".magi");
+        let seen_partial = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+
+        let watcher = {
+            let magi = magi.clone();
+            let seen_partial = std::sync::Arc::clone(&seen_partial);
+            let barrier = std::sync::Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                // Bounded hot-spin: stop as soon as `.magi/` is observed, or
+                // after a generous cap so a slow/CI machine can't hang.
+                for _ in 0..2_000_000 {
+                    if magi.is_dir() {
+                        let complete = magi.join("magi.toml").exists()
+                            && magi.join("logs").is_dir()
+                            && magi.join(".magi-rs-memory.db").exists();
+                        if !complete {
+                            seen_partial.store(true, std::sync::atomic::Ordering::SeqCst);
+                        }
+                        break;
+                    }
+                }
+            })
+        };
+
+        barrier.wait();
+        let ws = init(&dir).expect("init");
+        watcher.join().unwrap();
+
+        assert!(
+            !seen_partial.load(std::sync::atomic::Ordering::SeqCst),
+            "a concurrent observer must never see .magi/ half-populated"
+        );
+        assert!(ws.db_path().exists());
+    }
+
+    #[test]
     fn test_orphan_tmp_dir_does_not_break_a_later_init() {
         let tmp = tempfile::tempdir().unwrap();
         // Simulate a crashed prior run that left a stray sibling temp dir behind.
