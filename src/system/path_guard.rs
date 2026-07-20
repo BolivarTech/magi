@@ -30,6 +30,27 @@ impl PathGuard {
 
     /// Validates and canonicalizes a path, ensuring it is within the workspace.
     /// Returns the fully canonicalized path to avoid TOCTOU races in the caller.
+    ///
+    /// # Security: why the ancestor search runs on RAW components
+    ///
+    /// A purely lexical `..` collapse (as [`Self::lexical_normalize`] performs)
+    /// is only sound on a path that is already known to be symlink-free. This
+    /// method used to collapse `..` on the RAW input first — but
+    /// `workspace/sym/../x`, with `sym` a symlink to an outside directory,
+    /// lexically collapses to `workspace/x` (validates fine) while the OS
+    /// actually resolves the original by following `sym` FIRST and only then
+    /// applying `..` on the far side, landing outside the workspace entirely
+    /// (MAGI re-gate CRITICAL finding).
+    ///
+    /// The fix: find the closest EXISTING ancestor by testing raw
+    /// component-slices of the **un-normalized** path directly against
+    /// `fs::symlink_metadata` (letting the OS itself resolve any embedded `..`
+    /// or symlink along the way — this is what makes it sound), canonicalize
+    /// only that existing prefix (resolving every symlink in it), verify it is
+    /// inside the workspace, and only THEN lexically normalize the
+    /// (non-existent, and therefore necessarily symlink-free) tail appended to
+    /// it. A final `starts_with` check catches a tail `..` that would
+    /// otherwise walk back out of the now-canonical ancestor.
     pub fn validate(&self, input_path: &Path) -> Result<PathBuf> {
         let path_str = input_path.to_string_lossy();
 
@@ -44,61 +65,57 @@ impl PathGuard {
             self.workspace_root.join(input_path)
         };
 
-        let normalized = self.lexical_normalize(&absolute_path);
+        let comps: Vec<Component> = absolute_path.components().collect();
 
-        let mut current = normalized.as_path();
-        let mut uncanonicalized_components = Vec::new();
-        let mut closest_existing_ancestor = None;
+        let (ancestor, tail_start) = Self::closest_existing_ancestor(&comps)
+            .ok_or_else(|| anyhow!("Security violation: path has no valid anchor in workspace"))?;
 
-        // Iteratively find the closest existing ancestor. Uses
-        // `symlink_metadata` (does NOT follow the final symlink) rather than
-        // `Path::exists()` (which follows it and reports `false` for a
-        // DANGLING symlink): a dangling symlink is a real filesystem object
-        // right now, not a "not yet created" component, and must be resolved
-        // (and rejected if it escapes the workspace) rather than silently
-        // treated as a future, safely-appendable path segment.
-        while closest_existing_ancestor.is_none() {
-            if fs::symlink_metadata(current).is_ok() {
-                closest_existing_ancestor = Some(current);
-            } else {
-                if let Some(file_name) = current.file_name() {
-                    uncanonicalized_components.push(file_name);
-                }
-                match current.parent() {
-                    Some(p) => current = p,
-                    None => break, // Reached volume root
-                }
-            }
+        let canonical_ancestor = Self::canonicalize_robust(&ancestor)
+            .map_err(|e| anyhow!("Security check failed: unreachable ancestor: {}", e))?;
+
+        // Critical check: the EXISTING prefix (fully symlink-resolved) must
+        // already be inside the workspace, before any tail is appended.
+        if !canonical_ancestor.starts_with(&self.workspace_root) {
+            return Err(anyhow!(
+                "Security violation: path escapes sandbox via traversal"
+            ));
         }
 
-        if let Some(ancestor) = closest_existing_ancestor {
-            let canonical_ancestor = Self::canonicalize_robust(ancestor)
-                .map_err(|e| anyhow!("Security check failed: unreachable ancestor: {}", e))?;
-
-            // Critical check: Ensure canonical ancestor is within workspace root
-            if !canonical_ancestor.starts_with(&self.workspace_root) {
-                return Err(anyhow!(
-                    "Security violation: path escapes sandbox via traversal"
-                ));
-            }
-
-            // Reconstruct the final path ensuring all parts are anchored safely
-            let mut final_path = canonical_ancestor;
-            for comp in uncanonicalized_components.into_iter().rev() {
-                final_path.push(comp);
-            }
-
-            // Final check on reconstructed path
-            if !final_path.starts_with(&self.workspace_root) {
-                return Err(anyhow!("Security violation: final path escapes sandbox"));
-            }
-
-            Ok(final_path)
-        } else {
-            Err(anyhow!(
-                "Security violation: path has no valid anchor in workspace"
-            ))
+        // The tail is guaranteed non-existent (else it would have been part
+        // of the ancestor), so it cannot contain a symlink: lexically
+        // normalizing it here, anchored on the already-canonical ancestor, is
+        // sound.
+        let mut reconstructed = canonical_ancestor;
+        for comp in comps.get(tail_start..).into_iter().flatten() {
+            reconstructed.push(comp.as_os_str());
         }
+        let final_path = self.lexical_normalize(&reconstructed);
+
+        // Final check: a tail `..` could still walk back out of the
+        // canonical ancestor (`starts_with` alone never resolves `..`).
+        if !final_path.starts_with(&self.workspace_root) {
+            return Err(anyhow!("Security violation: final path escapes sandbox"));
+        }
+
+        Ok(final_path)
+    }
+
+    /// Finds the closest existing ancestor of `comps` by testing raw
+    /// component-slices — from the full path down to the root — directly
+    /// against `fs::symlink_metadata`, letting the OS resolve any `..` or
+    /// symlink embedded in the candidate itself.
+    ///
+    /// Returns `(ancestor_path, tail_start)` where `comps[tail_start..]` is
+    /// the non-existent (and therefore symlink-free) tail, or `None` if not
+    /// even the shortest candidate (the volume root/prefix) exists.
+    fn closest_existing_ancestor(comps: &[Component]) -> Option<(PathBuf, usize)> {
+        for k in (1..=comps.len()).rev() {
+            let candidate: PathBuf = comps.get(..k)?.iter().collect();
+            if fs::symlink_metadata(&candidate).is_ok() {
+                return Some((candidate, k));
+            }
+        }
+        None
     }
 
     /// Purely lexical normalization of a path.
