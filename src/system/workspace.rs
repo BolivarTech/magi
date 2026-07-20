@@ -373,12 +373,22 @@ fn volume_prefix(path: &Path) -> Option<std::ffi::OsString> {
 /// current user (`0700`/`0600` on unix, an ACL restricted to the current user
 /// on Windows).
 ///
+/// Rejects a symlinked ANCESTOR component of `cwd` itself (parity with
+/// [`discover`]'s REQ-H30 check, via the same [`ensure_raw_chain_symlink_free`]):
+/// without it, `init` would silently scaffold `.magi/` inside whatever a
+/// symlinked component resolves to instead of refusing — the atomic
+/// no-replace rename only protects against a pre-existing `.magi/` itself
+/// being a symlink, not an ancestor directory on the path leading to it.
+///
 /// # Errors
+/// - [`HeadlessError::InputInvalid`] if an ancestor component of `cwd` is a
+///   symlink.
 /// - [`HeadlessError::Aborted`] if `cwd/.magi/` already exists.
 /// - [`HeadlessError::Io`] on a filesystem or ACL error (bad parent, rename).
 /// - [`HeadlessError::Storage`] if the database schema cannot be created.
 pub fn init(cwd: &Path) -> Result<Workspace, HeadlessError> {
     let absolute = std::path::absolute(cwd).map_err(|e| HeadlessError::Io(e.to_string()))?;
+    ensure_raw_chain_symlink_free(&absolute)?;
     let root = lexical_normalize(&absolute);
     let magi_dir = root.join(MAGI_DIR_NAME);
     place_magi_dir(&magi_dir)?;
