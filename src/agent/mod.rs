@@ -898,6 +898,13 @@ impl Agent {
     /// again — recorded only in the conversation, NOT re-added to the observer's
     /// audit trail (so `RunOutcome.tool_calls` still shows exactly one `consult`
     /// entry). This is REQ-H22's "no se re-dispara aunque el agente quisiera".
+    ///
+    /// The injection deliberately does **not** seed `last_normalized_tool`/
+    /// `repeat_count` (the 3x-identical-call guard below): it is a runner
+    /// injection, not a model-issued call, so it must not count toward — or
+    /// shift the threshold for — the model's own repetition tracking. A
+    /// model-issued `consult` that happens to match the forced call's input
+    /// is tracked exactly like any other first occurrence.
     async fn run_tool_loop(
         &mut self,
         mut working: Vec<Message>,
@@ -923,11 +930,11 @@ impl Agent {
             if tool_call_count > config.max_tool_calls {
                 return Err(anyhow::anyhow!(MAX_TOOL_CALLS_ERROR));
             }
-            last_normalized_tool = Some((
-                CONSULT_TOOL_NAME.to_string(),
-                Self::normalize_input(&input, 0)?,
-            ));
-
+            // Deliberately NOT seeding `last_normalized_tool` here: this is a
+            // runner injection, not a model-issued call, so it must not count
+            // toward the model's own 3x-identical repetitive-call guard below
+            // (REQ-H22). Seeding it would let a genuinely distinct model call
+            // be miscounted as a repeat of this forced one.
             let result_content = self
                 .authorize_and_execute_tool(
                     FORCED_CONSULT_TOOL_USE_ID,
