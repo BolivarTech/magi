@@ -62,14 +62,15 @@ pub trait Provider: Send + Sync {
 
     /// Sends a list of messages and returns the full message (blocking until done).
     ///
-    /// Retry wrapper; used by tests and available to non-streaming callers;
-    /// production uses `query_streaming`. Retries up to 3 times with exponential
-    /// backoff (2s, 4s, 8s) on rate-limit (429) or transient connection failures
-    /// (see [`is_retryable_error`]). A persistent outage fails after 3 tries.
+    /// Retry wrapper; used by non-streaming callers (`LlmDistillJudge`, the MAGI
+    /// consult adapter) and by tests; production `query_streaming` calls
+    /// `stream_messages` directly. Retries up to 3 times, waiting with
+    /// exponential backoff (2s, then 4s) between attempts, on rate-limit (429)
+    /// or transient connection failures (see [`is_retryable_error`]). A
+    /// persistent outage fails after the 3rd attempt with no further wait.
     ///
     /// `system` is forwarded unchanged to [`Provider::stream_messages`] on every
     /// attempt.
-    #[allow(dead_code)]
     async fn send_messages(
         &self,
         messages: &[Message],
