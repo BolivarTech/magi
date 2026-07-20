@@ -239,17 +239,27 @@ pub struct RunLog {
 
 impl RunLog {
     /// Arranca el log de una corrida nueva bajo `logs_dir`: crea el
-    /// directorio si falta, poda los runs viejos (best-effort, REQ-H34) y
-    /// toca el archivo `run-<ts>-<pid>-<rand>.jsonl` de esta corrida.
+    /// directorio si falta, poda los runs viejos (best-effort, REQ-H34) hasta
+    /// los caps EFECTIVOS `retention_runs`/`max_log_bytes` (spec §11, un
+    /// operador puede bajarlos vía `[headless] log_retention`/`log_max_bytes`),
+    /// y toca el archivo `run-<ts>-<pid>-<rand>.jsonl` de esta corrida.
     ///
     /// # Errors
     ///
     /// Devuelve [`HeadlessError::Io`] si no se puede crear `logs_dir` o abrir
     /// el archivo de esta corrida. La poda de retención en sí **nunca**
     /// produce un error propagado — es best-effort (REQ-H34).
-    pub fn start(logs_dir: &Path, level: LogLevel) -> Result<Self, HeadlessError> {
+    pub fn start(
+        logs_dir: &Path,
+        level: LogLevel,
+        retention_runs: usize,
+        max_log_bytes: u64,
+    ) -> Result<Self, HeadlessError> {
+        // STUB (TDD Red): ignores the effective caps and always prunes
+        // against the module constants. The Green commit wires them through.
+        let _ = (retention_runs, max_log_bytes);
         fs::create_dir_all(logs_dir).map_err(|e| HeadlessError::Io(e.to_string()))?;
-        prune_retention(logs_dir);
+        prune_retention(logs_dir, LOG_RETENTION_RUNS, LOG_MAX_BYTES);
 
         let path = logs_dir.join(generate_log_file_name());
         OpenOptions::new()
@@ -377,8 +387,11 @@ fn try_prune_one(path: &Path) -> bool {
 }
 
 /// Poda los `run-*.jsonl` de `dir` hasta que queden a lo sumo
-/// [`LOG_RETENTION_RUNS`] **y** su tamaño combinado sea a lo sumo
-/// [`LOG_MAX_BYTES`] (REQ-H24/H34).
+/// `retention_runs` **y** su tamaño combinado sea a lo sumo `max_bytes`
+/// (REQ-H24/H34). Ambos son los caps EFECTIVOS de esta corrida (spec §11,
+/// `[headless] log_retention`/`log_max_bytes`) — [`LOG_RETENTION_RUNS`] y
+/// [`LOG_MAX_BYTES`] son solo los defaults que `HeadlessLimits::default()`
+/// usa cuando el operador no los fija.
 ///
 /// Eviction oldest-first: un nombre cuyo timestamp no parsea ordena como el
 /// más viejo (`None < Some`, `Option::Ord`), así que un nombre ajeno/corrupto
@@ -389,9 +402,9 @@ fn try_prune_one(path: &Path) -> bool {
 ///
 /// **Complejidad:** `O(n log n)` por el `sort_by_key` más `O(n)` por el
 /// recorrido de poda, con `n` = cantidad de archivos `run-*.jsonl` en el
-/// directorio — en la práctica acotado por [`LOG_RETENTION_RUNS`] más lo
-/// acumulado desde la última poda.
-fn prune_retention(dir: &Path) {
+/// directorio — en la práctica acotado por `retention_runs` más lo acumulado
+/// desde la última poda.
+fn prune_retention(dir: &Path, retention_runs: usize, max_bytes: u64) {
     let mut entries = list_run_logs(dir);
     entries.sort_by_key(|e| e.ts);
 
@@ -399,7 +412,7 @@ fn prune_retention(dir: &Path) {
     let mut total_bytes: u64 = entries.iter().map(|e| e.size_bytes).sum();
 
     for entry in &entries {
-        if count <= LOG_RETENTION_RUNS && total_bytes <= LOG_MAX_BYTES {
+        if count <= retention_runs && total_bytes <= max_bytes {
             break;
         }
         if try_prune_one(&entry.path) {
@@ -416,7 +429,8 @@ mod tests {
 
     use super::{
         current_epoch_millis, parse_log_timestamp, prune_retention, LogEvent, LogLevel, RunLog,
-        LOG_FILENAME_PREFIX, LOG_FILENAME_SUFFIX, LOG_RETENTION_RUNS, TIMESTAMP_WIDTH,
+        LOG_FILENAME_PREFIX, LOG_FILENAME_SUFFIX, LOG_MAX_BYTES, LOG_RETENTION_RUNS,
+        TIMESTAMP_WIDTH,
     };
 
     /// Crea un archivo `run-*.jsonl` fake con un timestamp parseable
@@ -442,12 +456,40 @@ mod tests {
             touch_log(dir.path(), i);
         }
 
-        let _log = RunLog::start(dir.path(), LogLevel::Info).expect("start must succeed");
+        let _log = RunLog::start(
+            dir.path(),
+            LogLevel::Info,
+            LOG_RETENTION_RUNS,
+            LOG_MAX_BYTES,
+        )
+        .expect("start must succeed");
 
         let n = fs::read_dir(dir.path()).expect("read_dir").count();
         assert!(
             n <= LOG_RETENTION_RUNS + 1,
             "expected pruned count, got {n}"
+        );
+    }
+
+    /// REQ-H24/H34, spec §11: la retención debe respetar el cap EFECTIVO
+    /// (`[headless] log_retention`) pasado a `start`, no el
+    /// `LOG_RETENTION_RUNS` constante — un operador que baja el tope a 3 debe
+    /// ver la poda quedarse en ese número, muy por debajo del default de 50.
+    #[test]
+    fn test_run_log_start_respects_custom_effective_retention_count() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let small_retention = 3usize;
+        for i in 0..(small_retention + 5) {
+            touch_log(dir.path(), i);
+        }
+
+        let _log = RunLog::start(dir.path(), LogLevel::Info, small_retention, LOG_MAX_BYTES)
+            .expect("start must succeed");
+
+        let n = fs::read_dir(dir.path()).expect("read_dir").count();
+        assert!(
+            n <= small_retention + 1,
+            "expected pruning down to the custom (smaller) retention cap, got {n} files"
         );
     }
 
@@ -461,7 +503,7 @@ mod tests {
             paths.push(touch_log(dir.path(), i));
         }
 
-        prune_retention(dir.path());
+        prune_retention(dir.path(), LOG_RETENTION_RUNS, LOG_MAX_BYTES);
 
         // The newest entry (highest i) must have survived the prune.
         let newest = paths.last().expect("at least one path");
@@ -487,7 +529,12 @@ mod tests {
         // Simulate a concurrent run already having pruned the oldest file.
         fs::remove_file(&paths[0]).expect("simulated race removal");
 
-        let result = RunLog::start(dir.path(), LogLevel::Info);
+        let result = RunLog::start(
+            dir.path(),
+            LogLevel::Info,
+            LOG_RETENTION_RUNS,
+            LOG_MAX_BYTES,
+        );
         assert!(
             result.is_ok(),
             "start must tolerate a vanished prune candidate"
@@ -507,7 +554,7 @@ mod tests {
             touch_log(dir.path(), i);
         }
 
-        prune_retention(dir.path());
+        prune_retention(dir.path(), LOG_RETENTION_RUNS, LOG_MAX_BYTES);
 
         assert!(
             !garbage_path.exists(),
@@ -539,7 +586,13 @@ mod tests {
         let secret = format!("sk-ant-{}", "SECRET".repeat(3));
         let input = format!("{{\"token\":\"{secret}\"}}");
 
-        let mut log = RunLog::start(dir.path(), LogLevel::Debug).expect("start");
+        let mut log = RunLog::start(
+            dir.path(),
+            LogLevel::Debug,
+            LOG_RETENTION_RUNS,
+            LOG_MAX_BYTES,
+        )
+        .expect("start");
         log.event(&LogEvent::ToolCall {
             level: LogLevel::Info,
             name: "bash",
@@ -568,7 +621,13 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let input = "plain non-secret argument";
 
-        let mut log = RunLog::start(dir.path(), LogLevel::Info).expect("start");
+        let mut log = RunLog::start(
+            dir.path(),
+            LogLevel::Info,
+            LOG_RETENTION_RUNS,
+            LOG_MAX_BYTES,
+        )
+        .expect("start");
         log.event(&LogEvent::ToolCall {
             level: LogLevel::Info,
             name: "ls",
@@ -619,7 +678,13 @@ mod tests {
         );
 
         let dir = tempfile::tempdir().expect("tempdir");
-        let mut log = RunLog::start(dir.path(), LogLevel::Debug).expect("start");
+        let mut log = RunLog::start(
+            dir.path(),
+            LogLevel::Debug,
+            LOG_RETENTION_RUNS,
+            LOG_MAX_BYTES,
+        )
+        .expect("start");
         log.event(&LogEvent::ToolCall {
             level: LogLevel::Info,
             name: "bash",
@@ -652,7 +717,13 @@ mod tests {
     #[test]
     fn test_message_event_never_carries_a_raw_prompt_field() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let mut log = RunLog::start(dir.path(), LogLevel::Debug).expect("start");
+        let mut log = RunLog::start(
+            dir.path(),
+            LogLevel::Debug,
+            LOG_RETENTION_RUNS,
+            LOG_MAX_BYTES,
+        )
+        .expect("start");
         log.event(&LogEvent::Message {
             level: LogLevel::Info,
             text: "startup notice",
@@ -669,7 +740,13 @@ mod tests {
     #[test]
     fn test_event_more_verbose_than_configured_level_is_filtered_out() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let mut log = RunLog::start(dir.path(), LogLevel::Warn).expect("start");
+        let mut log = RunLog::start(
+            dir.path(),
+            LogLevel::Warn,
+            LOG_RETENTION_RUNS,
+            LOG_MAX_BYTES,
+        )
+        .expect("start");
         log.event(&LogEvent::Message {
             level: LogLevel::Debug,
             text: "should not appear",
@@ -688,7 +765,13 @@ mod tests {
     #[test]
     fn test_event_at_or_below_configured_level_is_written() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let mut log = RunLog::start(dir.path(), LogLevel::Warn).expect("start");
+        let mut log = RunLog::start(
+            dir.path(),
+            LogLevel::Warn,
+            LOG_RETENTION_RUNS,
+            LOG_MAX_BYTES,
+        )
+        .expect("start");
         log.event(&LogEvent::Message {
             level: LogLevel::Warn,
             text: "a warning",

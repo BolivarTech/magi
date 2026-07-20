@@ -1680,7 +1680,14 @@ fn finish_headless(h: &HeadlessArgs, outcome: &RunOutcome) -> i32 {
 /// Starts the JSONL run log for a headless run, or returns `None` when logging
 /// is disabled (`--no-memory` without an explicit `--log-dir`, REQ-H24). A
 /// start failure degrades to no logging with a stderr warning (best-effort).
-fn build_run_log(h: &HeadlessArgs, workspace: Option<&Workspace>) -> Option<RunLog> {
+///
+/// `limits` supplies the EFFECTIVE `log_retention`/`log_max_bytes` caps (spec
+/// §11) so an operator-lowered `[headless]` override actually governs pruning.
+fn build_run_log(
+    h: &HeadlessArgs,
+    workspace: Option<&Workspace>,
+    limits: &HeadlessLimits,
+) -> Option<RunLog> {
     let level = h
         .log_level
         .map(CliLogLevel::into_lib)
@@ -1693,7 +1700,7 @@ fn build_run_log(h: &HeadlessArgs, workspace: Option<&Workspace>) -> Option<RunL
         workspace.map(Workspace::logs_dir)
     };
     let dir = logs_dir?;
-    match RunLog::start(&dir, level) {
+    match RunLog::start(&dir, level, limits.log_retention_runs, limits.log_max_bytes) {
         Ok(log) => Some(log),
         Err(e) => {
             eprintln!("warning: could not start the run log ({e}); continuing without it");
@@ -1945,7 +1952,7 @@ async fn prepare_headless(
     };
 
     let embed_key = resolve_openai_key(openai_key.as_deref(), secret_store.as_ref());
-    let run_log = build_run_log(h, workspace.as_ref());
+    let run_log = build_run_log(h, workspace.as_ref(), &limits);
 
     Ok(HeadlessContext {
         workdir,
