@@ -432,24 +432,6 @@ fn place_magi_dir(magi_dir: &Path) -> Result<(), HeadlessError> {
     rename_no_replace(&tmp, magi_dir)
 }
 
-/// Creates `magi_dir` in place as the atomic no-replace gate and populates it;
-/// on a population error removes only the just-created scaffold (no user data).
-///
-/// Used as the Linux fallback when `renameat2(RENAME_NOREPLACE)` is
-/// unsupported by the kernel/filesystem (rare — old kernels or exotic
-/// filesystems); the normal Linux path and every other platform build in a
-/// temp sibling instead (see [`place_magi_dir`] / [`rename_no_replace`]) so the
-/// well-known final path never appears half-populated.
-///
-/// # Errors
-/// [`HeadlessError::Aborted`] if `magi_dir` exists; [`HeadlessError::Io`] /
-/// [`HeadlessError::Storage`] on a filesystem or schema error.
-#[cfg(target_os = "linux")]
-fn place_via_mkdir_gate(magi_dir: &Path) -> Result<(), HeadlessError> {
-    create_gate_dir(magi_dir)?;
-    populate_or_cleanup(magi_dir)
-}
-
 /// Populates the freshly-created, restricted `scaffold` directory and, on any
 /// populate error, best-effort removes the scaffold `init` itself just created,
 /// returning the **original** error (never the cleanup error).
@@ -507,8 +489,15 @@ fn rename_no_replace(tmp: &Path, final_dir: &Path) -> Result<(), HeadlessError> 
             if errno == Errno::EXIST {
                 Err(HeadlessError::Aborted)
             } else if errno == Errno::NOSYS || errno == Errno::INVAL || errno == Errno::OPNOTSUPP {
-                // RENAME_NOREPLACE unsupported here → portable mkdir-gate fallback.
-                place_via_mkdir_gate(final_dir)
+                // RENAME_NOREPLACE unsupported (pre-3.15 kernel or exotic FS):
+                // fail closed rather than degrade to a non-atomic in-place gate,
+                // which would briefly expose a half-populated `.magi/` at the
+                // well-known path (REQ-H07 atomicity; MAGI re-gate WARNING).
+                Err(HeadlessError::Io(format!(
+                    "atomic no-replace directory creation is unsupported by this \
+                     kernel/filesystem (renameat2 RENAME_NOREPLACE: {errno:?}); \
+                     refusing to create .magi/ non-atomically (REQ-H07)"
+                )))
             } else {
                 Err(HeadlessError::Io(format!("rename failed: {errno:?}")))
             }
