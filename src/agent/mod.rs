@@ -365,11 +365,13 @@ impl Agent {
 
         match val {
             serde_json::Value::Object(map) => {
-                let mut sorted_keys: Vec<_> = map.keys().collect();
-                sorted_keys.sort();
+                // Sort (key, value) pairs directly instead of sorting keys and then
+                // re-looking them up: this yields the same key order without ever
+                // needing a `map.get(k)` that could (in principle) miss.
+                let mut sorted_entries: Vec<_> = map.iter().collect();
+                sorted_entries.sort_by_key(|(k, _)| *k);
                 let mut parts = Vec::new();
-                for k in sorted_keys {
-                    let v = map.get(k).unwrap();
+                for (k, v) in sorted_entries {
                     parts.push(format!("{}:{}", k, Self::normalize_input(v, depth + 1)?));
                 }
                 Ok(format!("{{{}}}", parts.join(",")))
@@ -524,16 +526,13 @@ impl Agent {
         //
         // The load_all path below is untouched — byte-identical to the original
         // implementation — so all 188 pre-existing tests pass unchanged (REQ-28).
-        if self
-            .memory_subsystem
-            .as_ref()
-            .is_some_and(|s| s.cfg.mode == "selective")
-        {
-            // Snapshot Arc handles (ref-count increments only; O(1)) so the mutable
-            // loop body below can borrow `self` freely without conflicting field
-            // borrows on `memory_subsystem`.
-            let (store, embedder, clock, cfg, scope) = {
-                let s = self.memory_subsystem.as_ref().unwrap();
+        // Snapshot Arc handles (ref-count increments only; O(1)) so the mutable loop
+        // body below can borrow `self` freely without conflicting field borrows on
+        // `memory_subsystem`. Folding the "is selective mode" check into the same
+        // `Option` match that produces the snapshot avoids a separate `unwrap()` on
+        // a second, independent `as_ref()` call.
+        let selective_snapshot = self.memory_subsystem.as_ref().and_then(|s| {
+            (s.cfg.mode == "selective").then(|| {
                 (
                     s.store.clone(),
                     s.embedder.clone(),
@@ -541,7 +540,10 @@ impl Agent {
                     s.cfg.clone(),
                     s.scope.clone(),
                 )
-            };
+            })
+        });
+
+        if let Some((store, embedder, clock, cfg, scope)) = selective_snapshot {
             let session_id_str = self.session_id.clone().unwrap_or_default();
 
             // Render the profile fresh from the store so promoted preferences
@@ -657,11 +659,19 @@ impl Agent {
 
             // Increment turn counter and fire distill pass when cadence is reached
             // (Task 13b / REQ-17). Errors are non-fatal (CP2-Z).
-            let should_distill = {
-                let sub = self.memory_subsystem.as_mut().unwrap();
+            //
+            // `memory_subsystem` is guaranteed `Some` here — `selective_snapshot`
+            // above only produced `Some(..)` (entering this `if let` block at all)
+            // when `self.memory_subsystem` was `Some`, and nothing in between
+            // clears it — but the `None` arm still returns a safe, no-op default
+            // instead of unwrapping, so this can never panic even if that
+            // invariant is ever violated by a future edit.
+            let should_distill = if let Some(sub) = self.memory_subsystem.as_mut() {
                 sub.turns_since_open = sub.turns_since_open.saturating_add(1);
                 let n = sub.cfg.distill_every_n_turns;
                 sub.cfg.distill_enabled && n > 0 && sub.turns_since_open.is_multiple_of(n)
+            } else {
+                false
             };
             if should_distill {
                 let judge = LlmDistillJudge::new(self.provider.clone());
@@ -1188,16 +1198,22 @@ async fn write_turn_to_memory(
 
     // Best-effort embed — on failure store an empty vector marked for lazy re-embed
     // (REQ-29: write failures must never abort the user's turn).
+    //
+    // `embed` is called with a single-element input slice, so per its contract
+    // (see `EmbeddingProvider::embed` rustdoc) an `Ok` result has exactly one
+    // vector. Rather than indexing `v[0]` (panics on an out-of-contract empty
+    // `Ok`) and separately `unwrap()`-ing `v.into_iter().next()`, consume the
+    // iterator once and match on the `Option` it yields — the `None` arm covers
+    // both an empty `Ok` and an `Err` with the same safe fallback.
     let (embedding, model_id, dim) = match embedder.embed(&[prefixed]).await {
-        Ok(v) if !v.is_empty() => {
-            let d = v[0].len();
-            (
-                v.into_iter().next().unwrap(),
-                embedder.model_id().to_string(),
-                d,
-            )
-        }
-        _ => (Vec::new(), String::new(), 0),
+        Ok(v) => match v.into_iter().next() {
+            Some(first) => {
+                let d = first.len();
+                (first, embedder.model_id().to_string(), d)
+            }
+            None => (Vec::new(), String::new(), 0),
+        },
+        Err(_) => (Vec::new(), String::new(), 0),
     };
 
     // G2 (live write path): include a monotonic counter so two calls with the
