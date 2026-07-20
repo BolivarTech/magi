@@ -190,6 +190,21 @@ fn read_table_counts(conn: &Connection) -> Result<TableCounts, VaultError> {
 /// a half-written bootstrap — is classified as [`MetaState::PartialSaltOnly`]
 /// rather than falling through to [`MetaState::NoEnvelope`].
 ///
+/// **Why only the first (`wrapped_dek`) query checks [`is_missing_table`]
+/// (MAGI re-gate WARNING, verified as a false positive):** both queries
+/// target the SAME `vault_meta` table, read sequentially over the SAME
+/// `&Connection` within this single synchronous call — nothing else can
+/// drop or create `vault_meta` between them. So by the time the `salt`
+/// query runs, the table's existence has already been settled by the first
+/// query: if it were missing, we would already have returned
+/// `Ok(MetaState::TableMissing)` above. A "no such table" error surfacing
+/// from the `salt` query is therefore unreachable in practice; if it ever
+/// did (e.g. an external process dropped the table via a separate
+/// connection to the same file mid-call), the generic `.map_err` mapping
+/// still returns a typed [`VaultError::Storage`] — never a panic or a
+/// misclassification — so no symmetric `is_missing_table` branch is needed
+/// here.
+///
 /// # Errors
 /// [`VaultError::Storage`] on any SQLite failure other than a missing table.
 fn read_meta_state(conn: &Connection) -> Result<MetaState, VaultError> {
@@ -245,25 +260,45 @@ fn read_vault_names(conn: &Connection) -> Result<Vec<String>, VaultError> {
     Ok(names)
 }
 
-/// Applies the §2.1 never-delete guard over [`GUARD_TABLES`]: `None` in any
-/// entry means a missing table (corruption, regardless of the rest); all
-/// present and zero means "fresh, not yet bootstrapped"; any present count
-/// above zero means data with nothing to decrypt it (corruption).
+/// Returns `true` iff at least one of [`GUARD_TABLES`]' row counts is `None`
+/// (the table itself does not exist, rather than existing-but-empty).
+///
+/// Shared by [`guard_verdict`] (the no-envelope case) and the
+/// `MetaState::Envelope` arm of [`diagnose`] (the envelope-present case,
+/// MAGI re-gate WARNING): spec-behavior.md §2.1 states "envelope present + a
+/// data table ABSENT ⇒ `DbCorrupt`" — a missing table means the DB cannot
+/// open at all, so this must be checked regardless of whether the envelope
+/// itself looks intact.
+fn any_guard_table_missing(counts: &TableCounts) -> bool {
+    [
+        counts.sessions,
+        counts.messages,
+        counts.knowledge,
+        counts.memories,
+    ]
+    .iter()
+    .any(Option::is_none)
+}
+
+/// Applies the §2.1 never-delete guard over [`GUARD_TABLES`]: a missing
+/// table (corruption, regardless of the rest); all present and zero means
+/// "fresh, not yet bootstrapped"; any present count above zero means data
+/// with nothing to decrypt it (corruption).
 ///
 /// Checks "is any count non-zero" directly (`any`) rather than summing the
 /// four `i64` counts first: a `.sum()` can overflow — and panic under debug
 /// overflow-checks — for a sufficiently large DB, when the verdict never
 /// actually needs the total, only whether at least one table holds data.
 fn guard_verdict(counts: &TableCounts) -> DiagnoseVerdict {
+    if any_guard_table_missing(counts) {
+        return DiagnoseVerdict::Corrupt;
+    }
     let entries = [
         counts.sessions,
         counts.messages,
         counts.knowledge,
         counts.memories,
     ];
-    if entries.iter().any(Option::is_none) {
-        return DiagnoseVerdict::Corrupt;
-    }
     if entries.iter().flatten().any(|&n| n > 0) {
         DiagnoseVerdict::Corrupt
     } else {
@@ -310,10 +345,14 @@ pub fn diagnose(conn: &Connection, include_names: bool) -> Result<DiagnoseReport
             salt_fec: Some(salt_fec),
         } => {
             let ok = check_meta_fec(&salt_fec, &wrapped_dek_fec).is_ok();
-            let verdict = if ok {
-                DiagnoseVerdict::WrongPassphrasePossible
-            } else {
+            // An intact-looking envelope does not override a missing data
+            // table: §2.1 classifies that combination as Corrupt regardless
+            // of the passphrase, never as the ambiguous
+            // WrongPassphrasePossible (MAGI re-gate WARNING).
+            let verdict = if !ok || any_guard_table_missing(&counts) {
                 DiagnoseVerdict::Corrupt
+            } else {
+                DiagnoseVerdict::WrongPassphrasePossible
             };
             (true, Some(ok), verdict)
         }
