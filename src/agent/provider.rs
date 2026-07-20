@@ -1094,10 +1094,10 @@ struct AnthropicState {
     usage_output_tokens: u64,
     /// Whether real usage data was observed (a `message_start` with a `usage`
     /// object, or any `message_delta` event) — distinct from the zero defaults
-    /// left by `#[serde(default)]`. Gates the stream-end `Usage` emission in
-    /// [`AnthropicState::finalize_truncated`] so an abnormal close never
-    /// fabricates a `(0, 0)` usage reading; the well-formed `message_stop` path
-    /// is unaffected and keeps its existing unconditional emission.
+    /// left by `#[serde(default)]`. Gates the `Usage` emission on both the
+    /// `message_stop` path and [`AnthropicState::finalize_truncated`] so
+    /// neither a well-formed close nor an abnormal one ever fabricates a
+    /// `(0, 0)` usage reading (REQ-H14).
     usage_seen: bool,
     /// Chunks ready to yield from the stream.
     pending: std::collections::VecDeque<Result<ResponseChunk>>,
@@ -1193,13 +1193,16 @@ impl AnthropicState {
                         // Defensively finalize any still-pending tool block in case
                         // content_block_stop was absent.
                         finalize_tool(self.current_tool.take(), &mut self.full_content);
-                        // Unconditional (pre-existing behavior, unrelated to
-                        // `usage_seen`): a well-formed `message_stop` always reports
-                        // usage, even a (0, 0) default when the backend omitted it.
-                        self.pending.push_back(Ok(ResponseChunk::Usage {
-                            input_tokens: self.usage_input_tokens,
-                            output_tokens: self.usage_output_tokens,
-                        }));
+                        // Only emit Usage when real usage data was actually observed
+                        // (same gate as `finalize_truncated`) — a degenerate stream
+                        // that never reports usage must not fabricate a (0, 0)
+                        // reading (MAGI re-gate WARNING 2).
+                        if self.usage_seen {
+                            self.pending.push_back(Ok(ResponseChunk::Usage {
+                                input_tokens: self.usage_input_tokens,
+                                output_tokens: self.usage_output_tokens,
+                            }));
+                        }
                         let msg = Message {
                             role: self.current_role.clone(),
                             content: self.full_content.clone(),
