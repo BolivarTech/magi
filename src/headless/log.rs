@@ -83,6 +83,33 @@ pub enum LogLevel {
     Debug,
 }
 
+impl std::str::FromStr for LogLevel {
+    type Err = HeadlessError;
+
+    /// Parsea el valor de `[headless] log_level` (spec §11): exactamente
+    /// `"error"`, `"warn"`, `"info"` o `"debug"` — los mismos cuatro literales
+    /// que acepta `--log-level` (case-sensitive, sin normalización, para que
+    /// un typo en `magi.toml` sea un error claro en vez de una coincidencia
+    /// accidental).
+    ///
+    /// # Errors
+    ///
+    /// Devuelve [`HeadlessError::InputInvalid`] con el valor recibido si `s`
+    /// no es uno de los cuatro literales reconocidos.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "error" => Ok(LogLevel::Error),
+            "warn" => Ok(LogLevel::Warn),
+            "info" => Ok(LogLevel::Info),
+            "debug" => Ok(LogLevel::Debug),
+            other => Err(HeadlessError::InputInvalid(format!(
+                "invalid [headless] log_level {other:?} (expected one of \
+                 error|warn|info|debug)"
+            ))),
+        }
+    }
+}
+
 /// Un registro de un archivo `run-*.jsonl` descubierto durante un escaneo de
 /// retención (REQ-H24/H34).
 struct LogFileEntry {
@@ -447,8 +474,8 @@ mod tests {
 
     use super::super::limits::{LOG_MAX_BYTES, LOG_RETENTION_RUNS, TOOL_RESULT_CAP};
     use super::{
-        current_epoch_millis, parse_log_timestamp, prune_retention, LogEvent, LogLevel, RunLog,
-        LOG_FILENAME_PREFIX, LOG_FILENAME_SUFFIX, TIMESTAMP_WIDTH,
+        current_epoch_millis, parse_log_timestamp, prune_retention, HeadlessError, LogEvent,
+        LogLevel, RunLog, LOG_FILENAME_PREFIX, LOG_FILENAME_SUFFIX, TIMESTAMP_WIDTH,
     };
 
     /// Crea un archivo `run-*.jsonl` fake con un timestamp parseable
@@ -821,6 +848,35 @@ mod tests {
         assert!(LogLevel::Error < LogLevel::Warn);
         assert!(LogLevel::Warn < LogLevel::Info);
         assert!(LogLevel::Info < LogLevel::Debug);
+    }
+
+    /// REQ-H24, spec §11: `[headless] log_level` parses exactly the four
+    /// documented literals to their `LogLevel` variant.
+    #[test]
+    fn test_log_level_from_str_parses_all_four_literals() {
+        assert_eq!("error".parse::<LogLevel>().unwrap(), LogLevel::Error);
+        assert_eq!("warn".parse::<LogLevel>().unwrap(), LogLevel::Warn);
+        assert_eq!("info".parse::<LogLevel>().unwrap(), LogLevel::Info);
+        assert_eq!("debug".parse::<LogLevel>().unwrap(), LogLevel::Debug);
+    }
+
+    /// An unrecognized `[headless] log_level` string is a clear typed error,
+    /// never a silent fallback to a default.
+    #[test]
+    fn test_log_level_from_str_rejects_unknown_value() {
+        assert!(matches!(
+            "verbose".parse::<LogLevel>(),
+            Err(HeadlessError::InputInvalid(_))
+        ));
+        assert!(matches!(
+            "".parse::<LogLevel>(),
+            Err(HeadlessError::InputInvalid(_))
+        ));
+        // Case-sensitive: no silent normalization of a near-miss.
+        assert!(matches!(
+            "Debug".parse::<LogLevel>(),
+            Err(HeadlessError::InputInvalid(_))
+        ));
     }
 
     /// `current_epoch_millis` nunca entra en pánico y devuelve un valor

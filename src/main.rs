@@ -1685,21 +1685,44 @@ fn finish_headless(h: &HeadlessArgs, outcome: &RunOutcome, tool_result_cap: usiz
     exit_code_for_outcome(outcome)
 }
 
+/// Resolves the effective run-log verbosity (REQ-H24, spec §11). Precedence:
+/// the `--log-level` CLI flag wins; else the `[headless] log_level` config
+/// string is parsed; else the default (`info`).
+///
+/// STUB (TDD Red): ignores `cfg` entirely — only the CLI flag or the default
+/// apply. The Green commit wires `cfg` through via [`LogLevel`]'s `FromStr`.
+///
+/// # Errors
+/// [`HeadlessError::InputInvalid`] if `cfg` is set but is not one of
+/// `error`/`warn`/`info`/`debug` — an unrecognized value is a clear typed
+/// error, never a silent fallback to the default.
+fn resolve_log_level(
+    cli: Option<CliLogLevel>,
+    cfg: Option<&str>,
+) -> Result<LogLevel, HeadlessError> {
+    let _ = cfg;
+    Ok(cli.map(CliLogLevel::into_lib).unwrap_or(LogLevel::Info))
+}
+
 /// Starts the JSONL run log for a headless run, or returns `None` when logging
 /// is disabled (`--no-memory` without an explicit `--log-dir`, REQ-H24). A
 /// start failure degrades to no logging with a stderr warning (best-effort).
 ///
 /// `limits` supplies the EFFECTIVE `log_retention`/`log_max_bytes` caps (spec
 /// §11) so an operator-lowered `[headless]` override actually governs pruning.
+///
+/// # Errors
+/// [`HeadlessError::InputInvalid`] if `--log-level`/`[headless] log_level`
+/// resolve to an invalid verbosity string (see [`resolve_log_level`]) — this
+/// is a config/usage error, distinct from the best-effort log-file-open
+/// degradation below.
 fn build_run_log(
     h: &HeadlessArgs,
     workspace: Option<&Workspace>,
     limits: &HeadlessLimits,
-) -> Option<RunLog> {
-    let level = h
-        .log_level
-        .map(CliLogLevel::into_lib)
-        .unwrap_or(LogLevel::Info);
+    log_level_cfg: Option<&str>,
+) -> Result<Option<RunLog>, HeadlessError> {
+    let level = resolve_log_level(h.log_level, log_level_cfg)?;
     let logs_dir = if let Some(d) = &h.log_dir {
         Some(d.clone())
     } else if h.no_memory {
@@ -1707,7 +1730,9 @@ fn build_run_log(
     } else {
         workspace.map(Workspace::logs_dir)
     };
-    let dir = logs_dir?;
+    let Some(dir) = logs_dir else {
+        return Ok(None);
+    };
     match RunLog::start(
         &dir,
         level,
@@ -1715,10 +1740,10 @@ fn build_run_log(
         limits.log_max_bytes,
         limits.tool_result_cap,
     ) {
-        Ok(log) => Some(log),
+        Ok(log) => Ok(Some(log)),
         Err(e) => {
             eprintln!("warning: could not start the run log ({e}); continuing without it");
-            None
+            Ok(None)
         }
     }
 }
@@ -1966,7 +1991,18 @@ async fn prepare_headless(
     };
 
     let embed_key = resolve_openai_key(openai_key.as_deref(), secret_store.as_ref());
-    let run_log = build_run_log(h, workspace.as_ref(), &limits);
+    let run_log = match build_run_log(
+        h,
+        workspace.as_ref(),
+        &limits,
+        magi_config.headless.log_level.as_deref(),
+    ) {
+        Ok(log) => log,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return Err(headless_error_exit_code(&e));
+        }
+    };
 
     Ok(HeadlessContext {
         workdir,
@@ -2228,6 +2264,47 @@ mod tests {
         std::fs::write(&path_ok, vec![b'x'; small_cap]).expect("write fixture");
         let bytes = read_headless_input(Some(&path_ok), small_cap).expect("must fit exactly");
         assert_eq!(bytes.len(), small_cap);
+    }
+
+    /// REQ-H24, spec §11: with no `--log-level` CLI flag, the
+    /// `[headless] log_level` config string must resolve the run-log
+    /// verbosity, not silently fall back to the `info` default.
+    #[test]
+    fn test_resolve_log_level_config_wins_over_default_without_cli_flag() {
+        let level = resolve_log_level(None, Some("debug"))
+            .expect("a valid config string must resolve, not error");
+        assert_eq!(
+            level,
+            LogLevel::Debug,
+            "the [headless] log_level config value must take effect, not the info default"
+        );
+    }
+
+    /// The `--log-level` CLI flag wins over a conflicting config value.
+    #[test]
+    fn test_resolve_log_level_cli_flag_wins_over_config() {
+        let level = resolve_log_level(Some(CliLogLevel::Error), Some("debug"))
+            .expect("must resolve with both sources present");
+        assert_eq!(level, LogLevel::Error);
+    }
+
+    /// No CLI flag and no config ⇒ the `info` default.
+    #[test]
+    fn test_resolve_log_level_defaults_to_info_when_unset() {
+        assert_eq!(
+            resolve_log_level(None, None).expect("must resolve"),
+            LogLevel::Info
+        );
+    }
+
+    /// An invalid `[headless] log_level` string is a clear typed error, never
+    /// a silent fallback.
+    #[test]
+    fn test_resolve_log_level_rejects_invalid_config_string() {
+        assert!(matches!(
+            resolve_log_level(None, Some("verbose")),
+            Err(HeadlessError::InputInvalid(_))
+        ));
     }
 
     /// RAII env-var guard (no `temp_env` dep); restores the prior value on
