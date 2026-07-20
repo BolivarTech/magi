@@ -269,12 +269,27 @@ struct Config {
 /// existing call sites and tests working unchanged.
 pub(crate) use crate::defaults::DEFAULT_ANTHROPIC_MODEL as DEFAULT_MODEL;
 
-/// Returns `true` when `base_url` resolves to a local address
-/// (`localhost`, `127.0.0.1`, or `[::1]`) — used by the cloud-egress notice
+/// The four host strings `reqwest::Url::host_str` can return for a local
+/// address (MAGI re-gate hardening, Caspar/Melchior): the bare loopback
+/// forms and the bracketed IPv6 form the `url` crate actually emits for
+/// `[::1]` hosts. Compared for an EXACT match, never a substring.
+const LOCAL_HOSTS: [&str; 4] = ["localhost", "127.0.0.1", "::1", "[::1]"];
+
+/// Returns `true` when `base_url` resolves to a local address (`localhost`,
+/// `127.0.0.1`, or `::1`/`[::1]`) — used by the cloud-egress notice
 /// (CP2-AG/AJ, Task 13b) to suppress the warning for on-device embedders.
+///
+/// Parses `base_url` and compares the **host** component exactly against
+/// [`LOCAL_HOSTS`] (never a substring match — a prior substring-based
+/// version false-matched a hostname like `notlocalhost.evil.com`, silently
+/// suppressing the warning). A `base_url` whose host cannot be parsed is
+/// treated as **non-local**: for a security-egress notice, erring toward
+/// showing the warning is the safe direction (fail-safe).
 fn is_localhost(base_url: &str) -> bool {
-    let lower = base_url.to_lowercase();
-    lower.contains("localhost") || lower.contains("127.0.0.1") || lower.contains("[::1]")
+    reqwest::Url::parse(base_url)
+        .ok()
+        .and_then(|url| url.host_str().map(|host| LOCAL_HOSTS.contains(&host)))
+        .unwrap_or(false)
 }
 
 /// Whether the discovered workspace has a `.magi/magi.toml` on disk — the
