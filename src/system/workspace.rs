@@ -350,6 +350,14 @@ fn is_fs_boundary(dir: &Path, parent: &Path) -> Result<bool, HeadlessError> {
 /// compara la raíz de volumen **léxicamente** vía [`Component::Prefix`], sin
 /// syscall crudo (respeta `#![forbid(unsafe_code)]`).
 ///
+/// # Test coverage note (MAGI re-gate INFO)
+///
+/// The walk-up's boundary stop is exercised generically by the discovery
+/// tests, but there is no dedicated Windows test that asserts a drive/UNC
+/// volume change (e.g. `C:\...` vs `D:\...` or a differing `\\server\share`)
+/// specifically halts the walk. The lexical comparison is total and
+/// side-effect-free, so this is a coverage gap, not a correctness concern.
+///
 /// # Errors
 /// Nunca falla; la firma `Result` unifica con la variante POSIX.
 #[cfg(windows)]
@@ -566,6 +574,21 @@ fn rename_no_replace(tmp: &Path, final_dir: &Path) -> Result<(), HeadlessError> 
 
 /// Creates a directory as an atomic no-replace gate with restrictive permissions
 /// from creation (`0700` on unix, a current-user ACL on Windows).
+///
+/// # Platform note: Windows ACL is applied post-creation (best-effort, REQ-H38)
+///
+/// On unix the mode is set atomically at `mkdir` time (`DirBuilder::mode`), so
+/// the directory is never visible with looser permissions. On **Windows** the
+/// directory is created with the default (inherited) DACL and then tightened by
+/// [`restrict_to_current_user`], leaving a brief post-creation TOCTOU window in
+/// which the object carries its inherited ACL (MAGI re-gate INFO). This is a
+/// **best-effort** protection: the window is on the random-named temp sibling
+/// (`.magi.tmp.<rand>`), not yet renamed into place as `.magi/`, so an attacker
+/// would have to both guess the random name and win a sub-millisecond race.
+/// Closing it fully would require creating the directory with an explicit
+/// `SECURITY_ATTRIBUTES` via `CreateDirectoryW` (out of scope); the residual is
+/// documented rather than eliminated, consistent with the crate's other
+/// best-effort OS-hardening measures.
 ///
 /// # Errors
 /// [`HeadlessError::Aborted`] if `path` already exists; [`HeadlessError::Io`] on
