@@ -109,6 +109,12 @@ pub trait RunObserver: Send + Sync {
 
     /// Records one resolved tool call (executed or tier-denied).
     ///
+    /// Records only calls that reached the authorize/execute path. A model-issued
+    /// `consult` that is short-circuited by the forced-consult lock (REQ-H22, see
+    /// [`CONSULT_ALREADY_FORCED_MESSAGE`]) is answered directly and is
+    /// deliberately NOT recorded here — it neither authorized nor executed, so the
+    /// audit shows exactly the one forced `consult` that actually ran.
+    ///
     /// # Parameters
     /// - `id` — the tool-use id, correlating this call with the assistant
     ///   `ToolUse` block that requested it (used to assemble the transcript).
@@ -133,10 +139,12 @@ pub trait RunObserver: Send + Sync {
     /// stream blocks, not the emptiness of the concatenated text.
     fn on_final_turn(&self, text_block_count: usize);
 
-    /// Records token usage for one provider turn (`ResponseChunk::Usage`,
-    /// consumed at most once per `stream_messages` call, whenever the backend
-    /// reports it). Called once per agent-loop turn that carries usage — an
-    /// implementor accumulates across turns for a whole-run total.
+    /// Records token usage from a `ResponseChunk::Usage`, whenever the backend
+    /// reports it (the built-in providers emit at most one usage chunk per
+    /// `stream_messages` call, but that is a provider convention, not a
+    /// guarantee this method enforces). Each call is **additive**: an implementor
+    /// accumulates across calls for a whole-run total, so a backend that happened
+    /// to report usage in several chunks simply sums correctly.
     ///
     /// Default empty body: an observer that does not care about usage (or a
     /// future implementor written before this method existed) needs no change.
