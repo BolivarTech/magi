@@ -1292,6 +1292,173 @@ mod tests {
         assert!(!real_agent.provider_is_static());
     }
 
+    // ── Feature E: AgentRunConfig::system reaches the Provider (REQ-H12b) ──────
+
+    /// Provider that records every `system` argument it received across calls.
+    struct SystemCapturingProvider {
+        seen: Arc<std::sync::Mutex<Vec<Option<String>>>>,
+    }
+
+    #[async_trait]
+    impl Provider for SystemCapturingProvider {
+        async fn stream_messages(
+            &self,
+            _messages: &[Message],
+            _tools: &[Box<dyn Tool>],
+            system: Option<&str>,
+        ) -> Result<BoxStream<'static, Result<ResponseChunk>>> {
+            self.seen.lock().unwrap().push(system.map(str::to_string));
+            Ok(Box::pin(stream::iter(vec![Ok(
+                ResponseChunk::MessageDone(Message::assistant("ok")),
+            )])))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_query_streaming_forwards_configured_system_to_provider() {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut agent = Agent::new(Arc::new(SystemCapturingProvider { seen: seen.clone() }));
+        let (tx, _rx) = tokio::sync::mpsc::channel::<StreamPiece>(8);
+        let config = AgentRunConfig {
+            system: Some("You are a headless test assistant.".to_string()),
+            ..AgentRunConfig::default()
+        };
+        agent.query_streaming("hi", tx, config).await.unwrap();
+        assert_eq!(
+            seen.lock().unwrap().as_slice(),
+            &[Some("You are a headless test assistant.".to_string())]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_query_streaming_default_config_sends_no_system() {
+        // Interactive default: AgentRunConfig::default().system == None must
+        // reach the provider as None — the TUI path stays byte-for-byte
+        // unaffected by the headless system-prompt channel.
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut agent = Agent::new(Arc::new(SystemCapturingProvider { seen: seen.clone() }));
+        let (tx, _rx) = tokio::sync::mpsc::channel::<StreamPiece>(8);
+        agent
+            .query_streaming("hi", tx, AgentRunConfig::default())
+            .await
+            .unwrap();
+        assert_eq!(seen.lock().unwrap().as_slice(), &[None]);
+    }
+
+    // ── Feature C: usage accumulation via RunObserver::on_usage ────────────────
+
+    /// Provider that replays a fixed script of turns (tool-call, then terminal
+    /// text), emitting a `ResponseChunk::Usage` on every turn — used to exercise
+    /// per-turn `RunObserver::on_usage` accumulation across ≥2 provider calls.
+    struct UsageScriptedProvider {
+        /// `(input_tokens, output_tokens)` per call, consumed in order.
+        turns: std::sync::Mutex<std::collections::VecDeque<(u64, u64)>>,
+    }
+
+    #[async_trait]
+    impl Provider for UsageScriptedProvider {
+        async fn stream_messages(
+            &self,
+            _messages: &[Message],
+            _tools: &[Box<dyn Tool>],
+            _system: Option<&str>,
+        ) -> Result<BoxStream<'static, Result<ResponseChunk>>> {
+            let (input_tokens, output_tokens) =
+                self.turns.lock().unwrap().pop_front().unwrap_or((0, 0));
+            let is_last = self.turns.lock().unwrap().is_empty();
+            let mut chunks = vec![Ok(ResponseChunk::Usage {
+                input_tokens,
+                output_tokens,
+            })];
+            if is_last {
+                // Terminal turn: no ToolUse ⇒ run_tool_loop returns.
+                chunks.push(Ok(ResponseChunk::MessageDone(Message::assistant("done"))));
+            } else {
+                chunks.push(Ok(ResponseChunk::MessageDone(Message {
+                    role: Role::Assistant,
+                    content: vec![Content::ToolUse {
+                        id: "u1".to_string(),
+                        name: "no-such-tool".to_string(),
+                        input: serde_json::json!({}),
+                    }],
+                })));
+            }
+            Ok(Box::pin(stream::iter(chunks)))
+        }
+    }
+
+    /// Minimal [`RunObserver`] spy: authorizes every tool, accumulates every
+    /// `on_usage` call, ignores `on_tool_call`/`on_final_turn`.
+    #[derive(Default)]
+    struct UsageSpyObserver {
+        total: std::sync::Mutex<(u64, u64)>,
+    }
+
+    impl RunObserver for UsageSpyObserver {
+        fn authorize(&self, _tool_name: &str) -> bool {
+            true
+        }
+        fn on_tool_call(
+            &self,
+            _id: &str,
+            _name: &str,
+            _input: &serde_json::Value,
+            _result: &str,
+            _ok: bool,
+            _ms: u64,
+        ) {
+        }
+        fn on_final_turn(&self, _text_block_count: usize) {}
+        fn on_usage(&self, input_tokens: u64, output_tokens: u64) {
+            let mut t = self.total.lock().unwrap();
+            t.0 += input_tokens;
+            t.1 += output_tokens;
+        }
+    }
+
+    #[tokio::test]
+    async fn test_run_tool_loop_accumulates_usage_via_observer_across_turns() {
+        // Two turns: turn 1 (a tool call) reports (10, 2); turn 2 (terminal)
+        // reports (5, 3). The observer must see BOTH calls and the run's total
+        // usage is the sum across turns, not just the last one.
+        let provider = Arc::new(UsageScriptedProvider {
+            turns: std::sync::Mutex::new(std::collections::VecDeque::from([(10, 2), (5, 3)])),
+        });
+        let mut agent = Agent::new(provider);
+        let observer = Arc::new(UsageSpyObserver::default());
+        let config = AgentRunConfig {
+            observer: Some(observer.clone() as Arc<dyn RunObserver>),
+            ..AgentRunConfig::default()
+        };
+        let (tx, _rx) = tokio::sync::mpsc::channel::<StreamPiece>(8);
+        agent.query_streaming("hi", tx, config).await.unwrap();
+        assert_eq!(*observer.total.lock().unwrap(), (15, 5));
+    }
+
+    #[tokio::test]
+    async fn test_on_usage_default_impl_is_a_no_op_for_observers_that_ignore_it() {
+        // A RunObserver written before on_usage existed compiles unchanged and
+        // calling the default method never panics.
+        struct MinimalObserver;
+        impl RunObserver for MinimalObserver {
+            fn authorize(&self, _tool_name: &str) -> bool {
+                true
+            }
+            fn on_tool_call(
+                &self,
+                _id: &str,
+                _name: &str,
+                _input: &serde_json::Value,
+                _result: &str,
+                _ok: bool,
+                _ms: u64,
+            ) {
+            }
+            fn on_final_turn(&self, _text_block_count: usize) {}
+        }
+        MinimalObserver.on_usage(1, 1);
+    }
+
     // ── Task-12 helpers ────────────────────────────────────────────────────────
 
     /// Provider that records every `messages` slice it receives.
