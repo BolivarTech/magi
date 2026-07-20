@@ -138,9 +138,13 @@ fn is_command_allowed(cmd: &str, guard: &PathGuard) -> bool {
                 // workspace, sidestepping the rm-root guard below. `find` is a
                 // search tool here — deletion goes through `rm` (which carries
                 // the root guard) — so block `-delete` outright (safe
-                // direction). `-exec`/`-execdir`/`-ok` always need `{}`/`;`/`+`
-                // and are already rejected by the metacharacter ban.
-                "find" if arg_lower == "-delete" => {
+                // direction). Both the `-delete` and the double-dash `--delete`
+                // spelling are rejected: rather than depend on a given `find`
+                // build (GNU/BSD/busybox/Windows port) rejecting `--delete` as
+                // an unknown predicate, the barrier owns the decision.
+                // `-exec`/`-execdir`/`-ok` always need `{}`/`;`/`+` and are
+                // already rejected by the metacharacter ban.
+                "find" if arg_lower == "-delete" || arg_lower == "--delete" => {
                     return false;
                 }
                 _ => {}
@@ -401,6 +405,10 @@ mod tests {
         // `find . -delete` recursively wipes the workspace with no shell
         // metacharacters (MAGI S2) — must be blocked regardless of start path.
         assert!(!check("find . -delete"), "find . -delete must be rejected");
+        assert!(
+            !check("find . --delete"),
+            "double-dash find . --delete must also be rejected"
+        );
         assert!(
             !check("find -delete"),
             "bare find -delete (path defaults to .) must be rejected"
