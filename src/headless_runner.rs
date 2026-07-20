@@ -1788,6 +1788,61 @@ mod tests {
         );
     }
 
+    /// REQ-H22 x repetitive-call guard: the runner-injected forced consult
+    /// must NOT seed the model's own repetition tracking
+    /// (`last_normalized_tool`/`repeat_count`). If it did, the model's own
+    /// SUBSEQUENT identical `consult` requests would be miscounted as repeats
+    /// of a call the model never made, tripping the "Repetitive tool call
+    /// detected" abort one call earlier than it should.
+    ///
+    /// Script: 4 model-issued `consult` calls, identical to the forced
+    /// consult's `{"query": prompt}` input, with `max_tool_calls` capped at
+    /// exactly 4 (one slot for the forced call + three for the model). If the
+    /// guard counts only GENUINE model repeats (correct), the model's 3rd
+    /// identical call brings `repeat_count` to 2 — still under the 3-repeat
+    /// threshold — so no abort; the model's 4th attempt then trips
+    /// `max_tool_calls` first, giving `StopReason::MaxToolCalls`. If the
+    /// forced call wrongly seeds the tracker (bug), the model's 3rd identical
+    /// call is miscounted as the 3rd repeat and the run aborts early with
+    /// `StopReason::Error` / "Repetitive tool call detected" instead.
+    #[tokio::test]
+    async fn test_forced_consult_does_not_seed_repetitive_guard_for_model_calls() {
+        let consult_call = || Turn::Tool {
+            id: "c".to_string(),
+            name: "consult".to_string(),
+            input: json!({ "query": "decide X vs Y" }),
+        };
+        let provider = ScriptedProvider::new(vec![
+            consult_call(),
+            consult_call(),
+            consult_call(),
+            consult_call(),
+        ]);
+        let mut agent = Agent::new(provider);
+        agent.register_tool(Box::new(ConsultTool::new(canned_magi(), true)));
+
+        // One slot for the forced consult + three for the model's own attempts.
+        let policy = Policy::new(Tier::Auto, 4, None);
+        let outcome = run_query(
+            forced_resolved(),
+            policy,
+            &mut agent,
+            "decide X vs Y",
+            None,
+            None,
+        )
+        .await;
+
+        assert_eq!(
+            outcome.stop_reason,
+            StopReason::MaxToolCalls,
+            "the cap, not the repetitive guard, must be what stops the run — \
+             the forced consult must not have seeded the model's repeat \
+             tracking (got error: {:?})",
+            outcome.error,
+        );
+    }
+
     /// A provider that reports whether its (only) call saw a `consult`
     /// `ToolResult` already present in the message history — proves the
     /// model's turn genuinely reacts to the forced consult's content, not
