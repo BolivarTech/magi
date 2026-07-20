@@ -630,11 +630,19 @@ pub async fn run_query(
     // Cancellation fired on wall-clock timeout so in-flight tool subprocess trees
     // are killed (bash) and the run stops (REQ-H36).
     let cancel = CancellationToken::new();
+    // Effective system prompt (REQ-H12b): `resolved.system` already carries the
+    // origin-aware decision (operator default, or the caller override only when
+    // `--allow-system-override` enabled it — `applied_caps.system_override_applied`
+    // reports which). Empty text is equivalent to no system prompt at all; the
+    // provider layer treats `Some("")` the same as `None`, but normalizing here
+    // keeps the intent explicit at the call site.
+    let system = resolved.system.text();
     let config = AgentRunConfig {
         max_tool_calls: usize::try_from(policy.max_tool_calls()).unwrap_or(usize::MAX),
         disable_repetitive_guard: policy.silences_soft_guards(),
         observer: Some(Arc::clone(&tracker) as Arc<dyn RunObserver>),
         cancel: cancel.clone(),
+        system: (!system.is_empty()).then(|| system.to_string()),
     };
 
     let (chunk_tx, mut chunk_rx) =
@@ -974,6 +982,7 @@ mod tests {
             &self,
             _messages: &[Message],
             _tools: &[Box<dyn Tool>],
+            _system: Option<&str>,
         ) -> Result<BoxStream<'static, Result<ResponseChunk>>> {
             let turn = self
                 .turns

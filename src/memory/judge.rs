@@ -52,7 +52,7 @@ impl DistillJudge for LlmDistillJudge {
 
         let response = self
             .provider
-            .send_messages(&[Message::user(&prompt)], &[])
+            .send_messages(&[Message::user(&prompt)], &[], None)
             .await
             .map_err(|e| MemoryError::Llm(e.to_string()))?;
 
@@ -94,7 +94,7 @@ impl DistillJudge for LlmDistillJudge {
 
         let response = self
             .provider
-            .send_messages(&[Message::user(&prompt)], &[])
+            .send_messages(&[Message::user(&prompt)], &[], None)
             .await
             .map_err(|e| MemoryError::Llm(e.to_string()))?;
 
@@ -154,6 +154,7 @@ mod tests {
             &self,
             _messages: &[Message],
             _tools: &[Box<dyn crate::tools::Tool>],
+            _system: Option<&str>,
         ) -> Result<BoxStream<'static, Result<ResponseChunk>>> {
             let text = self.0.clone();
             Ok(Box::pin(stream::iter(vec![
@@ -166,6 +167,7 @@ mod tests {
             &self,
             _messages: &[Message],
             _tools: &[Box<dyn crate::tools::Tool>],
+            _system: Option<&str>,
         ) -> Result<Message> {
             Ok(Message::assistant(&self.0))
         }
@@ -180,6 +182,7 @@ mod tests {
             &self,
             _messages: &[Message],
             _tools: &[Box<dyn crate::tools::Tool>],
+            _system: Option<&str>,
         ) -> Result<BoxStream<'static, Result<ResponseChunk>>> {
             Err(anyhow::anyhow!("provider failed"))
         }
@@ -188,6 +191,7 @@ mod tests {
             &self,
             _messages: &[Message],
             _tools: &[Box<dyn crate::tools::Tool>],
+            _system: Option<&str>,
         ) -> Result<Message> {
             Err(anyhow::anyhow!("provider failed"))
         }

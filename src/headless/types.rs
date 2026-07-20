@@ -167,6 +167,20 @@ pub enum SystemPolicy {
     CallerOverride(String),
 }
 
+impl SystemPolicy {
+    /// Texto efectivo del system-prompt, sin importar el origen.
+    ///
+    /// El runner headless lo consume para poblar `AgentRunConfig::system`
+    /// (REQ-H12b) — el origen ya quedó registrado en
+    /// `AppliedCaps::system_override_applied` en el momento de la resolución.
+    #[must_use]
+    pub fn text(&self) -> &str {
+        match self {
+            Self::Operator(s) | Self::CallerOverride(s) => s,
+        }
+    }
+}
+
 // NOTE: `InputFormat` is defined in `input.rs` (parser-local, `pub` for the
 // fuzz target), not here — it is a parser input, not part of the output
 // contract. The former duplicate declaration in this module was removed.

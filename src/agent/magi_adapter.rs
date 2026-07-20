@@ -77,9 +77,14 @@ impl LlmProvider for MagiCoreProviderAdapter {
     ) -> Result<String, ProviderError> {
         let prompt = Self::fold_prompt(system_prompt, user_prompt);
         let messages = [Message::user(&prompt)];
+        // The magi-core persona system prompt is folded into the user turn above
+        // (`fold_prompt`), not passed here — see the MAGI FIX doc comment on this
+        // impl for why (magi-rs's `system` channel, added for REQ-H12b headless
+        // injection, is not wired into this adapter to keep this fix's scope to
+        // the headless runner; revisit alongside that documented limitation).
         let reply = self
             .inner
-            .send_messages(&messages, &[])
+            .send_messages(&messages, &[], None)
             .await
             .map_err(|e| ProviderError::Network {
                 message: e.to_string(),
@@ -118,6 +123,7 @@ mod tests {
             &self,
             _messages: &[Message],
             _tools: &[Box<dyn Tool>],
+            _system: Option<&str>,
         ) -> Result<BoxStream<'static, Result<ResponseChunk>>> {
             let chunks = vec![
                 Ok(ResponseChunk::TextDelta("hello ".to_string())),
@@ -136,6 +142,7 @@ mod tests {
             &self,
             _messages: &[Message],
             _tools: &[Box<dyn Tool>],
+            _system: Option<&str>,
         ) -> Result<BoxStream<'static, Result<ResponseChunk>>> {
             Err(anyhow!("boom 401 unauthorized"))
         }

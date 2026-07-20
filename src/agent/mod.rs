@@ -109,6 +109,17 @@ pub trait RunObserver: Send + Sync {
     /// turn (REQ-H23b: `response_empty` ⇔ this count is zero). Counts raw
     /// stream blocks, not the emptiness of the concatenated text.
     fn on_final_turn(&self, text_block_count: usize);
+
+    /// Records token usage for one provider turn (`ResponseChunk::Usage`,
+    /// consumed at most once per `stream_messages` call, whenever the backend
+    /// reports it). Called once per agent-loop turn that carries usage — an
+    /// implementor accumulates across turns for a whole-run total.
+    ///
+    /// Default empty body: an observer that does not care about usage (or a
+    /// future implementor written before this method existed) needs no change.
+    /// Not implementing this method never affects `authorize`/`on_tool_call`/
+    /// `on_final_turn` semantics.
+    fn on_usage(&self, _input_tokens: u64, _output_tokens: u64) {}
 }
 
 /// Per-run configuration for [`Agent::query_streaming`].
@@ -140,6 +151,13 @@ pub struct AgentRunConfig {
     /// installs a fresh, never-cancelled token, so the interactive/TUI path is
     /// unaffected.
     pub cancel: CancellationToken,
+    /// Effective system-prompt text for this run (REQ-H12b), forwarded to every
+    /// `Provider::stream_messages` call. `None` ⇒ no system prompt is sent — the
+    /// interactive default — so the TUI path is unaffected. The headless runner
+    /// sets this from the resolved `SystemPolicy` (`magi_rs::headless::types`):
+    /// the operator default, or — only when explicitly enabled — the caller
+    /// override.
+    pub system: Option<String>,
 }
 
 impl Default for AgentRunConfig {
@@ -149,6 +167,7 @@ impl Default for AgentRunConfig {
             disable_repetitive_guard: false,
             observer: None,
             cancel: CancellationToken::new(),
+            system: None,
         }
     }
 }
@@ -196,12 +215,6 @@ struct MemorySubsystem {
     /// Scope tag for memory isolation; defaults to `"root"`. Multi-scope is
     /// activated in L3 (Agent Society — AS-REQ-09).
     scope: String,
-    /// System-prompt text for token-budget accounting; empty when none is set.
-    /// By design this Agent injects no `Role::System` message on any code path
-    /// (neither `selective` nor `load_all`), so this field stays `String::new()`.
-    /// The field and the assembler slot exist per REQ-13 for callers that do set
-    /// a system prompt in the future.
-    system: String,
     /// Number of selective turns processed since `set_memory_subsystem`. Used
     /// to determine when to fire the `distill_every_n_turns` trigger (Task 13b).
     turns_since_open: usize,
@@ -392,7 +405,6 @@ impl Agent {
             clock,
             cfg,
             scope: "root".into(),
-            system: String::new(),
             turns_since_open: 0,
         });
     }
@@ -480,7 +492,7 @@ impl Agent {
             // Snapshot Arc handles (ref-count increments only; O(1)) so the mutable
             // loop body below can borrow `self` freely without conflicting field
             // borrows on `memory_subsystem`.
-            let (store, embedder, clock, cfg, scope, system_str) = {
+            let (store, embedder, clock, cfg, scope) = {
                 let s = self.memory_subsystem.as_ref().unwrap();
                 (
                     s.store.clone(),
@@ -488,7 +500,6 @@ impl Agent {
                     s.clock.clone(),
                     s.cfg.clone(),
                     s.scope.clone(),
-                    s.system.clone(),
                 )
             };
             let session_id_str = self.session_id.clone().unwrap_or_default();
@@ -505,12 +516,25 @@ impl Agent {
             // D1 (REQ-29): on a transient assembly failure fall back to the full
             // history rather than aborting the turn.  Only `BudgetUnsatisfiable`
             // (a misconfigured budget, not a transient error) propagates as Err.
+            //
+            // The `system` argument is always `""` here: the real system-prompt
+            // injection point is `AgentRunConfig::system`, forwarded straight to
+            // `Provider::stream_messages` (REQ-H12b) for BOTH the selective and
+            // load_all paths from the single call site in `run_tool_loop`. This
+            // assembler's own `system` parameter remains part of `assemble_selective`'s
+            // stable signature (its budget-accounting/preamble role is exercised
+            // directly by `context.rs`'s tests) but is not fed from `Agent` state —
+            // the former `MemorySubsystem.system` field was always `""` (dead: no
+            // setter ever populated it) and has been removed rather than wired to
+            // `config.system`, which would have sent the same system text to the
+            // provider twice (once via the API's dedicated system channel, once
+            // folded into this preamble as ordinary message text).
             let (working_messages, assembly_notices) = match assemble_selective(
                 &*store,
                 &*embedder,
                 &*clock,
                 &cfg,
-                &system_str,
+                "",
                 &live_profile,
                 &user_msg,
                 &scope,
@@ -666,7 +690,10 @@ impl Agent {
         let mut repeat_count = 0;
 
         loop {
-            let mut stream = self.provider.stream_messages(&working, &self.tools).await?;
+            let mut stream = self
+                .provider
+                .stream_messages(&working, &self.tools, config.system.as_deref())
+                .await?;
             let mut full_text = String::new();
             // REQ-H23b: count TextDelta blocks in THIS turn (reset each iteration);
             // the terminal turn's count is the run's `final_turn_text_blocks`.
@@ -702,7 +729,18 @@ impl Agent {
                     ResponseChunk::MessageDone(msg) => {
                         last_message = Some(msg);
                     }
-                    _ => {}
+                    ResponseChunk::Usage {
+                        input_tokens,
+                        output_tokens,
+                    } => {
+                        // Headless-only signal: no observer ⇒ no-op (default empty
+                        // body), so the interactive path is unaffected. Forwarded
+                        // per turn; the observer accumulates the run total.
+                        if let Some(observer) = config.observer.as_deref() {
+                            observer.on_usage(input_tokens, output_tokens);
+                        }
+                    }
+                    ResponseChunk::ToolUseInputDelta { .. } => {}
                 }
             }
 
@@ -1069,6 +1107,7 @@ mod tests {
             &self,
             _messages: &[Message],
             _tools: &[Box<dyn Tool>],
+            _system: Option<&str>,
         ) -> Result<BoxStream<'static, Result<ResponseChunk>>> {
             let chunks = vec![
                 Ok(ResponseChunk::TextDelta("Summary content.".to_string())),
@@ -1082,6 +1121,7 @@ mod tests {
             &self,
             _messages: &[Message],
             _tools: &[Box<dyn Tool>],
+            _system: Option<&str>,
         ) -> Result<Message> {
             Ok(Message::assistant("Summary content."))
         }
@@ -1169,6 +1209,7 @@ mod tests {
                 &self,
                 _messages: &[Message],
                 _tools: &[Box<dyn Tool>],
+                _system: Option<&str>,
             ) -> Result<BoxStream<'static, Result<ResponseChunk>>> {
                 let chunks = vec![
                     Ok(ResponseChunk::ReasoningDelta("thinking".to_string())),
@@ -1223,6 +1264,7 @@ mod tests {
                 &self,
                 _messages: &[Message],
                 _tools: &[Box<dyn Tool>],
+                _system: Option<&str>,
             ) -> Result<BoxStream<'static, Result<ResponseChunk>>> {
                 let text = self.0.to_string();
                 Ok(Box::pin(stream::iter(vec![Ok(
@@ -1276,6 +1318,7 @@ mod tests {
             &self,
             messages: &[Message],
             _tools: &[Box<dyn Tool>],
+            _system: Option<&str>,
         ) -> Result<BoxStream<'static, Result<ResponseChunk>>> {
             self.calls.lock().unwrap().push(messages.to_vec());
             let chunks = vec![
@@ -2076,6 +2119,7 @@ mod tests {
             &self,
             _messages: &[Message],
             _tools: &[Box<dyn Tool>],
+            _system: Option<&str>,
         ) -> Result<BoxStream<'static, Result<ResponseChunk>>> {
             let mut n = self.call_count.lock().unwrap();
             *n += 1;
@@ -2428,6 +2472,7 @@ mod tests {
             &self,
             _messages: &[Message],
             _tools: &[Box<dyn Tool>],
+            _system: Option<&str>,
         ) -> Result<BoxStream<'static, Result<ResponseChunk>>> {
             let msg = Message {
                 role: Role::Assistant,
@@ -2554,6 +2599,7 @@ mod tests {
                 &self,
                 messages: &[Message],
                 _tools: &[Box<dyn crate::tools::Tool>],
+                _system: Option<&str>,
             ) -> Result<futures::stream::BoxStream<'static, Result<ResponseChunk>>> {
                 self.calls.lock().unwrap().push(messages.to_vec());
                 Ok(Box::pin(futures::stream::iter(vec![
