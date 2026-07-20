@@ -2555,9 +2555,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_anthropic_provider_usage_defaults_to_zero_when_absent_from_wire() {
-        // Existing fixtures with no `usage` field in message_start/message_delta
-        // must not panic and must report zero (no fabrication).
+    async fn test_anthropic_provider_emits_no_usage_when_absent_from_wire() {
+        // MAGI re-gate WARNING 2: a well-formed `message_stop` with no prior
+        // `usage` anywhere on the wire (no `message_start.message.usage`, no
+        // `message_delta.usage`) must NOT fabricate a `(0, 0)` Usage chunk — that
+        // contradicts REQ-H14 and diverges from `OaiState`/`finalize_truncated`,
+        // both of which gate emission on usage actually being observed.
         let mut server = Server::new_async().await;
         let url = server.url();
         let _m = server
@@ -2572,17 +2575,16 @@ mod tests {
             .stream_messages(&[Message::user("hi")], &[], None)
             .await
             .unwrap();
-        let mut usage = None;
+        let mut saw_usage = false;
         while let Some(chunk) = stream.next().await {
-            if let Ok(ResponseChunk::Usage {
-                input_tokens,
-                output_tokens,
-            }) = chunk
-            {
-                usage = Some((input_tokens, output_tokens));
+            if let Ok(ResponseChunk::Usage { .. }) = chunk {
+                saw_usage = true;
             }
         }
-        assert_eq!(usage, Some((0, 0)));
+        assert!(
+            !saw_usage,
+            "no Usage chunk must be fabricated when the wire never reported usage"
+        );
     }
 
     // ─── Feature D: mid-stream `error` events + truncated-stream finalization ──
