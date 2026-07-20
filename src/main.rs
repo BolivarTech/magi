@@ -2882,32 +2882,39 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn test_tool_child_env_excludes_secrets_and_arbitrary_lc() {
-        // REQ-H37: the child env is a literal-equality allowlist, not a prefix
+        // REQ-H37: the child env is a whole-name-equality allowlist, not a prefix
         // match — so secrets and an attacker-chosen `LC_EVIL` are excluded while
         // an allowlisted `LC_ALL` and `PATH` pass through. `PATH` is pinned so
         // the assertion never depends on the host's ambient environment. The
         // allowlist now lives in `crate::tools::proc_group` (single source).
+        //
+        // Lookups here are CASE-INSENSITIVE: Windows does not guarantee the case
+        // of the env-var name it returns (a set `PATH` may come back as `Path`),
+        // and the allowlist itself matches case-insensitively on Windows — so a
+        // case-sensitive `get("PATH")` would spuriously miss the passed-through
+        // entry on some Windows hosts (a real CI flake). Exclusion is checked
+        // under any casing too, which only strengthens the secret guarantee.
         with_var(PASSPHRASE_ENV, Some("pw-secret"), || {
             with_var(ANTHROPIC_KEY_ENV, Some("sk-anthropic"), || {
                 with_var(OPENAI_KEY_ENV, Some("sk-openai"), || {
                     with_var("LC_EVIL", Some("evil"), || {
                         with_var("LC_ALL", Some("C.UTF-8"), || {
                             with_var("PATH", Some("/usr/bin"), || {
-                                let child: std::collections::HashMap<String, String> =
-                                    crate::tools::proc_group::tool_child_env()
-                                        .into_iter()
-                                        .collect();
-                                // Secrets and arbitrary `LC_*` are excluded.
-                                assert!(!child.contains_key(PASSPHRASE_ENV));
-                                assert!(!child.contains_key(ANTHROPIC_KEY_ENV));
-                                assert!(!child.contains_key(OPENAI_KEY_ENV));
-                                assert!(!child.contains_key("LC_EVIL"));
-                                // Allowlisted names pass through (literal match).
-                                assert_eq!(child.get("PATH").map(String::as_str), Some("/usr/bin"));
-                                assert_eq!(
-                                    child.get("LC_ALL").map(String::as_str),
-                                    Some("C.UTF-8")
-                                );
+                                let child = crate::tools::proc_group::tool_child_env();
+                                let lookup = |key: &str| -> Option<&str> {
+                                    child
+                                        .iter()
+                                        .find(|(k, _)| k.eq_ignore_ascii_case(key))
+                                        .map(|(_, v)| v.as_str())
+                                };
+                                // Secrets and arbitrary `LC_*` are excluded (under any casing).
+                                assert!(lookup(PASSPHRASE_ENV).is_none());
+                                assert!(lookup(ANTHROPIC_KEY_ENV).is_none());
+                                assert!(lookup(OPENAI_KEY_ENV).is_none());
+                                assert!(lookup("LC_EVIL").is_none());
+                                // Allowlisted names pass through.
+                                assert_eq!(lookup("PATH"), Some("/usr/bin"));
+                                assert_eq!(lookup("LC_ALL"), Some("C.UTF-8"));
                             });
                         });
                     });
