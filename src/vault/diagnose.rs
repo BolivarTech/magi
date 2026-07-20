@@ -236,6 +236,11 @@ fn read_vault_names(conn: &Connection) -> Result<Vec<String>, VaultError> {
 /// entry means a missing table (corruption, regardless of the rest); all
 /// present and zero means "fresh, not yet bootstrapped"; any present count
 /// above zero means data with nothing to decrypt it (corruption).
+///
+/// Checks "is any count non-zero" directly (`any`) rather than summing the
+/// four `i64` counts first: a `.sum()` can overflow — and panic under debug
+/// overflow-checks — for a sufficiently large DB, when the verdict never
+/// actually needs the total, only whether at least one table holds data.
 fn guard_verdict(counts: &TableCounts) -> DiagnoseVerdict {
     let entries = [
         counts.sessions,
@@ -246,8 +251,7 @@ fn guard_verdict(counts: &TableCounts) -> DiagnoseVerdict {
     if entries.iter().any(Option::is_none) {
         return DiagnoseVerdict::Corrupt;
     }
-    let total: i64 = entries.iter().flatten().sum();
-    if total > 0 {
+    if entries.iter().flatten().any(|&n| n > 0) {
         DiagnoseVerdict::Corrupt
     } else {
         DiagnoseVerdict::Fresh
