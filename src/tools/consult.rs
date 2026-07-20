@@ -9,13 +9,69 @@
 use crate::tools::{Tool, ToolError, ToolResult};
 use async_trait::async_trait;
 use magi_core::orchestrator::Magi;
+use magi_core::reporting::MagiReport;
 use magi_core::schema::Mode;
 use serde_json::{json, Value};
 use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
 
 /// Reject oversized consult input before incurring 3 model calls.
-/// `pub(crate)` so the forced `/consult` TUI path applies the same cap.
+/// `pub(crate)` so the forced `/consult` TUI path and the headless direct/forced
+/// consult path ([`crate::headless_runner`]) apply the same cap (REQ-H33).
 pub(crate) const MAX_QUERY_LEN: usize = 8192;
+
+/// Builds the stable `consult` JSON object from a finished MAGI report.
+///
+/// Single source of truth for the `{report, degraded}` shape shared by the
+/// tool-loop [`ConsultTool::execute`] path and the headless direct/forced
+/// consult path (REQ-H21/H22) — so the on-the-wire shape never drifts between
+/// the two entry points.
+///
+/// # Parameters
+/// * `report` - The finished multi-perspective consensus report.
+///
+/// # Returns
+/// A JSON object `{"report": <markdown>, "degraded": <bool>}`.
+pub(crate) fn report_to_consult_json(report: &MagiReport) -> Value {
+    json!({ "report": report.report, "degraded": report.degraded })
+}
+
+/// RAII backstop that aborts a spawned task when the guard is dropped.
+///
+/// [`ConsultTool::execute`] runs the 3-perspective analysis on a `tokio::spawn`
+/// task and awaits it under a `select!`. The explicit cancel arm aborts the
+/// task on `--timeout`, but if the `execute` future itself is *dropped* before
+/// either arm resolves (e.g. the caller drops the tool call), a bare spawned
+/// task would keep running and orphan its three in-flight LLM calls. Holding
+/// this guard across the `select!` aborts the task on that drop too, mirroring
+/// the `GroupKiller` backstop the `bash` tool uses for its subprocess.
+///
+/// `pub(crate)` so [`crate::headless_runner`]'s direct `magi consult` path
+/// (`analyze_direct`) reuses this exact primitive for its own spawned MAGI
+/// analysis rather than duplicating it — same gap, same fix, one guard type.
+pub(crate) struct AbortOnDrop {
+    /// Abort handle of the guarded task.
+    handle: tokio::task::AbortHandle,
+}
+
+impl AbortOnDrop {
+    /// Wraps a task's abort handle so dropping the guard aborts the task.
+    pub(crate) fn new(handle: tokio::task::AbortHandle) -> Self {
+        Self { handle }
+    }
+
+    /// Aborts the guarded task now. Idempotent: aborting an already-finished or
+    /// already-aborted task is a no-op, so `Drop` re-invoking it is harmless.
+    pub(crate) fn abort(&self) {
+        self.handle.abort();
+    }
+}
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.handle.abort();
+    }
+}
 
 /// Notice emitted in the TUI when the `consult` tool is auto-approved.
 /// Visible to the user so they know the 3-LLM consensus was launched.
@@ -103,7 +159,7 @@ impl Tool for ConsultTool {
         }
     }
 
-    async fn execute(&self, args: Value) -> ToolResult<Value> {
+    async fn execute(&self, args: Value, cancel: &CancellationToken) -> ToolResult<Value> {
         let query = args
             .get("query")
             .and_then(|v| v.as_str())
@@ -124,8 +180,27 @@ impl Tool for ConsultTool {
         let q = query.to_string();
         // Joined spawn isolates a panic in magi-core's analyze into a recoverable
         // JoinError instead of unwinding into the agent tool loop.
-        let report =
-            match tokio::spawn(async move { magi.analyze(&Mode::Analysis, &q).await }).await {
+        let handle = tokio::spawn(async move { magi.analyze(&Mode::Analysis, &q).await });
+        // RAII backstop: aborts the spawned analysis if this `execute` future is
+        // dropped before the `select!` resolves — a dropped tool call would
+        // otherwise orphan the three in-flight LLM calls. The abort handle is
+        // taken separately from `handle` (which the `select!` consumes), so
+        // there is no borrow conflict.
+        let abort_guard = AbortOnDrop::new(handle.abort_handle());
+        // A proactive consult runs three MAGI LLM calls; on the run's `--timeout`
+        // cancellation (REQ-H36) the task is **aborted** — not merely detached —
+        // so those expensive API calls actually stop instead of being orphaned.
+        // `biased` polls the cancel arm first, so an already-cancelled token
+        // short-circuits before the analysis is awaited.
+        let report = tokio::select! {
+            biased;
+            () = cancel.cancelled() => {
+                abort_guard.abort();
+                return Err(ToolError::ExecutionError(
+                    "consult cancelled by timeout".to_string(),
+                ));
+            }
+            joined = handle => match joined {
                 Ok(Ok(report)) => report,
                 Ok(Err(e)) => return Err(ToolError::ExecutionError(e.to_string())),
                 Err(join_err) => {
@@ -133,8 +208,9 @@ impl Tool for ConsultTool {
                         "consult crashed: {join_err}"
                     )))
                 }
-            };
-        Ok(json!({ "report": report.report, "degraded": report.degraded }))
+            },
+        };
+        Ok(report_to_consult_json(&report))
     }
 }
 
@@ -142,8 +218,52 @@ impl Tool for ConsultTool {
 mod tests {
     use super::*;
     use magi_core::error::ProviderError;
+    use magi_core::provider::{CompletionConfig, LlmProvider};
     use magi_core::schema::AgentName;
     use magi_core::test_support::RoutingMockProvider;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+
+    /// Upper bound on how long a *cancelled* `execute` may take to return. The
+    /// cancel path aborts the in-flight analysis, so it must resolve almost
+    /// immediately; sized generously to absorb scheduler jitter while staying
+    /// far below the blocking provider's [`BlockingProvider::SLEEP_SECS`] sleep,
+    /// so a regression that awaited the full analysis would blow this budget.
+    const CANCEL_RETURN_BUDGET_MS: u128 = 2_000;
+
+    /// A provider whose `complete` blocks far longer than any test tolerates, so
+    /// a MAGI analysis over it never finishes within the test. Used to prove that
+    /// [`ConsultTool::execute`] returns on cancellation *without* waiting for the
+    /// analysis: if the cancel token were ignored, `execute` would block on this
+    /// sleep and overrun [`CANCEL_RETURN_BUDGET_MS`].
+    struct BlockingProvider;
+
+    impl BlockingProvider {
+        /// Sleep duration of each `complete` call — long enough that awaiting the
+        /// full analysis is unmistakably distinguishable from a prompt cancel.
+        const SLEEP_SECS: u64 = 3_600;
+    }
+
+    #[async_trait]
+    impl LlmProvider for BlockingProvider {
+        async fn complete(
+            &self,
+            _system_prompt: &str,
+            _user_prompt: &str,
+            _config: &CompletionConfig,
+        ) -> Result<String, ProviderError> {
+            tokio::time::sleep(Duration::from_secs(Self::SLEEP_SECS)).await;
+            Ok(String::new())
+        }
+
+        fn name(&self) -> &str {
+            "blocking"
+        }
+
+        fn model(&self) -> &str {
+            "blocking"
+        }
+    }
 
     /// Helper: constructs a `ConsultTool` with `auto_approve = false` (the default).
     fn dummy_tool() -> ConsultTool {
@@ -245,7 +365,9 @@ mod tests {
         let tool = ConsultTool::new(magi_all_ok(), false);
         let big = "x".repeat(9000);
         assert!(matches!(
-            tool.execute(json!({"query": big})).await.unwrap_err(),
+            tool.execute(json!({"query": big}), &CancellationToken::new())
+                .await
+                .unwrap_err(),
             ToolError::InvalidArguments(_)
         ));
     }
@@ -254,7 +376,10 @@ mod tests {
     async fn test_execute_returns_consensus_report() {
         let tool = ConsultTool::new(magi_all_ok(), false);
         let out = tool
-            .execute(json!({"query": "should we migrate X to Y?"}))
+            .execute(
+                json!({"query": "should we migrate X to Y?"}),
+                &CancellationToken::new(),
+            )
             .await
             .expect("3 agents → success");
         assert!(!out["report"].as_str().expect("report string").is_empty());
@@ -265,7 +390,9 @@ mod tests {
     async fn test_execute_empty_query_is_invalid_arguments() {
         let tool = ConsultTool::new(magi_all_ok(), false);
         assert!(matches!(
-            tool.execute(json!({ "query": "   " })).await.unwrap_err(),
+            tool.execute(json!({ "query": "   " }), &CancellationToken::new())
+                .await
+                .unwrap_err(),
             ToolError::InvalidArguments(_)
         ));
     }
@@ -274,9 +401,68 @@ mod tests {
     async fn test_execute_missing_query_is_invalid_arguments() {
         let tool = ConsultTool::new(magi_all_ok(), false);
         assert!(matches!(
-            tool.execute(json!({})).await.unwrap_err(),
+            tool.execute(json!({}), &CancellationToken::new())
+                .await
+                .unwrap_err(),
             ToolError::InvalidArguments(_)
         ));
+    }
+
+    /// A pre-cancelled token makes `execute` return the cancellation error
+    /// promptly, aborting the in-flight 3-LLM analysis instead of running it to
+    /// completion (REQ-H36). Uses [`BlockingProvider`] so the analysis would
+    /// otherwise block for an hour: returning within [`CANCEL_RETURN_BUDGET_MS`]
+    /// proves the cancel path pre-empts the work rather than awaiting it.
+    #[tokio::test]
+    async fn test_execute_returns_cancellation_error_without_running_full_analysis() {
+        let tool = ConsultTool::new(Arc::new(Magi::new(Arc::new(BlockingProvider))), false);
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+
+        let start = std::time::Instant::now();
+        let err = tool
+            .execute(json!({ "query": "should we migrate X to Y?" }), &cancel)
+            .await
+            .expect_err("a cancelled consult must return an error, not a report");
+        let elapsed = start.elapsed();
+
+        assert!(
+            matches!(err, ToolError::ExecutionError(ref m) if m.contains("cancelled")),
+            "cancelled consult must surface a typed cancellation error; got: {err:?}"
+        );
+        assert!(
+            elapsed.as_millis() < CANCEL_RETURN_BUDGET_MS,
+            "cancelled consult must return promptly (took {elapsed:?}); it awaited the full analysis"
+        );
+    }
+
+    /// The `AbortOnDrop` backstop aborts its guarded task the instant the guard
+    /// is dropped, so a dropped `execute` future cannot orphan the spawned
+    /// analysis (the drop path the explicit cancel arm does not cover). A bare
+    /// dropped `JoinHandle`/`AbortHandle` would merely detach the task, leaving
+    /// it to run to completion — this asserts the join reports cancellation and
+    /// the task never reached its completion store.
+    #[tokio::test]
+    async fn test_abort_on_drop_aborts_task_when_guard_dropped() {
+        let ran_to_completion = Arc::new(AtomicBool::new(false));
+        let flag = ran_to_completion.clone();
+        let handle = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(BlockingProvider::SLEEP_SECS)).await;
+            flag.store(true, Ordering::SeqCst);
+        });
+        {
+            let _guard = AbortOnDrop::new(handle.abort_handle());
+            // `_guard` drops here without ever calling `abort()` explicitly.
+        }
+        let joined = handle.await;
+        assert!(
+            joined.as_ref().err().map(|e| e.is_cancelled()).unwrap_or(false),
+            "dropping the guard must abort the task (join must report cancellation); got {joined:?}"
+        );
+        assert!(
+            !ran_to_completion.load(Ordering::SeqCst),
+            "aborted task must not have reached its completion store"
+        );
     }
 
     #[tokio::test]
@@ -302,7 +488,9 @@ mod tests {
             );
         let tool = ConsultTool::new(Arc::new(Magi::new(Arc::new(p))), false);
         assert!(matches!(
-            tool.execute(json!({"query": "x"})).await.unwrap_err(),
+            tool.execute(json!({"query": "x"}), &CancellationToken::new())
+                .await
+                .unwrap_err(),
             ToolError::ExecutionError(_)
         ));
     }

@@ -118,6 +118,90 @@ For decisions with genuine trade-offs — architecture choices, "should we X vs 
 
 ---
 
+## Headless mode
+
+Magi runs non-interactively as a **CI/CD pipeline step** or as an **AI backend**
+for another application. It composes the Unix way: read from stdin / `-i`, write
+to stdout / `-o`, send diagnostics to stderr, and return a meaningful exit code.
+Running `magi` with no subcommand still launches the TUI, unchanged.
+
+### Subcommands
+
+```bash
+# Scaffold the .magi/ state directory (config, encrypted DB, logs).
+# With -p / MAGI_PASSPHRASE it also bootstraps an empty vault so later
+# headless runs need no interaction. Refuses to overwrite an existing .magi/.
+magi init -p "correct horse battery staple"
+
+# Prompt from stdin, streamed text answer to stdout.
+echo "explain the retry logic in provider.rs" | magi query
+
+# Rich JSON envelope in, one buffered JSON object out.
+magi query -i q.json -o out.json --output-format json
+
+# Force a MAGI 3-perspective consensus on the prompt directly.
+magi consult -i decision.txt
+
+# Read-only structural probe of the .magi/ DB — never unlocks, never prints a secret.
+magi vault diagnose
+```
+
+**Input** is auto-detected: a JSON object with a top-level `prompt` string is a
+rich **envelope** (`{prompt, system?, model?, provider?, max_tool_calls?,
+consult?}`); anything else is a plain-text prompt. CLI flags win over envelope
+fields, and the operator's `magi.toml` caps (e.g. `max_tool_calls`) are a ceiling
+the envelope cannot exceed. `--input-format` / `--output-format` force the
+interpretation.
+
+### Authorization tiers
+
+Secure by default — a read-only CI job cannot mutate or execute:
+
+| Tier | Flag | Tools auto-approved | Notes |
+|------|------|---------------------|-------|
+| `default` | *(none)* | read-only: `ls` / `view` / `grep` | others are denied; the run continues and records the denial |
+| auto | `--auto` | **all** registered tools (`edit`/`bash`/`consult`) | sandboxed |
+| full-auto | `--full-auto` | all + elevated `max_tool_calls` (15 → 50) | **prints a WARNING** to stderr and the log; silences the soft repetitive-call guard and the normal cap |
+
+The **hard barriers are always active in every tier** — the `bash` allowlist, the
+shell-metacharacter ban, and `PathGuard` sandboxing. No flag relaxes them; even
+`--full-auto` rejects `rm -rf /`, `$(...)`, and path traversal.
+
+### State layout & the breaking change
+
+All project state lives in a single **`.magi/`** directory — `magi.toml`, the
+encrypted DB (`.magi-rs-memory.db`), and `logs/` — discovered by walking up from
+the working directory (`-w`/cwd) to the nearest ancestor, `.git`-style.
+
+> **BREAKING (v0.10.0):** loose legacy files in the current directory (a bare
+> `.magi-rs-memory.db` / `magi.toml`) are **no longer read**. Migrate with one
+> line: run **`magi init`**, then re-add secrets with **`magi vault set <NAME>`**
+> (e.g. `ANTHROPIC_API_KEY`). Prior conversation history is not carried over.
+
+### Exit codes
+
+| Code | Meaning |
+|------|---------|
+| `0` | success |
+| `1` | runtime / agent error (incl. `DbCorrupt`, wrong passphrase, timeout) |
+| `2` | CLI misuse / invalid input (missing `prompt`, unknown field, over-cap input) |
+| `3` | blocked by tier — an essential tool was denied and the run produced no response |
+
+### Output is caller-sensitive
+
+The rich JSON output — in particular `transcript[]` and `tool_calls[]` — **echoes
+tool output**. A `view` of a file that contains a token, or a `bash` command that
+prints an environment secret, can surface in that echo. Magi guarantees only that
+**its own** managed secrets (the passphrase and stored vault values) never appear;
+it **cannot** guarantee the output is free of *non-vault* secrets. Treat the rich
+output as sensitive (REQ-H15).
+
+> **Passphrase hygiene:** prefer `MAGI_PASSPHRASE` or the interactive prompt over
+> `-p <passphrase>`; a value on `argv` is visible via `ps` / `/proc/<pid>/cmdline`
+> to the same user (a deliberate, documented trade-off for CI).
+
+---
+
 ## Configuration
 
 ### API key & model discovery

@@ -2,7 +2,9 @@
 // Version: 1.0.0
 // Date: 2026-07-17
 //! `magi-rs vault` subcommands: `ls` / `set` / `rm` / `passwd` (REQ-V07..V11,
-//! V21, V22, V40).
+//! V21, V22, V40) plus `diagnose` (REQ-H32) — see [`VaultCmd::Diagnose`] for
+//! why that one subcommand is deliberately dispatched OUTSIDE
+//! [`run_vault_cmd`] rather than through it.
 //!
 //! There is deliberately no `get`/`cat`/`show <name>`/`reveal`/`export`
 //! subcommand — nothing in this module can ever print a *stored* secret's
@@ -141,6 +143,20 @@ pub enum VaultCmd {
         #[arg(long)]
         show: bool,
     },
+    /// Read-only structural diagnosis of the `.magi/` DB (REQ-H32): reports
+    /// whether an envelope exists, whether its FEC decodes, and per-table
+    /// row counts — **without** unlocking or mutating anything and
+    /// **without** requiring a passphrase.
+    ///
+    /// Deliberately dispatched OUTSIDE [`run_vault_cmd`] — see that
+    /// function's `Diagnose` arm for why.
+    Diagnose {
+        /// Also lists the `vault` table's secret NAMES (never values,
+        /// REQ-V09) — opt-in because a name can itself be sensitive
+        /// metadata a caller may not want echoed by default.
+        #[arg(long)]
+        names: bool,
+    },
 }
 
 /// Injectable CLI I/O (R-V07): value entry, deliberate confirmations, and
@@ -274,7 +290,8 @@ impl VaultIo for TtyIo {
 /// [`VaultError::Aborted`] if a `[Y/n]` confirmation did not answer exactly
 /// `"Y"`, or if a destructive operation was attempted without a TTY and
 /// without `-f`; otherwise propagates whatever the store, `io`, or `rekey`
-/// returned.
+/// returned. Always returns [`VaultError::Aborted`] for
+/// [`VaultCmd::Diagnose`] — see that arm below.
 pub fn run_vault_cmd(
     cmd: VaultCmd,
     store: &mut dyn SecretStore,
@@ -286,6 +303,20 @@ pub fn run_vault_cmd(
         VaultCmd::Set { name, show, force } => run_set(&name, show, force, store, io),
         VaultCmd::Rm { name, force } => run_rm(&name, force, store, io),
         VaultCmd::Passwd { show } => run_passwd(show, io, rekey),
+        VaultCmd::Diagnose { .. } => {
+            // `Diagnose` deliberately never reaches here in production: unlike
+            // every other subcommand, REQ-H32 requires it to run WITHOUT an
+            // unlocked store (it never derives a KEK or attempts the AEAD
+            // unwrap). The binary crate's `main.rs` intercepts
+            // `VaultCmd::Diagnose` BEFORE resolving a passphrase or opening
+            // the vault, and calls `crate::vault::diagnose` directly against
+            // a read-only connection instead. This arm exists only so the
+            // match stays exhaustive (no `_`, so a future `VaultCmd` variant
+            // can never be silently forgotten here); reaching it would mean
+            // that interception regressed, so it fails loudly rather than
+            // silently no-op'ing.
+            Err(VaultError::Aborted)
+        }
     }
 }
 
@@ -807,6 +838,26 @@ mod tests {
             &mut no_rekey(),
         );
         assert!(matches!(result, Err(VaultError::PassphraseUnavailable)));
+    }
+
+    #[test]
+    fn test_diagnose_is_never_dispatched_through_run_vault_cmd() {
+        // REQ-H32: `Diagnose` must never unlock the store. `main.rs`
+        // intercepts it before `run_vault_cmd` is ever called; this locks in
+        // that the fallback arm here is a loud, typed failure rather than a
+        // silent no-op, and that the store is left untouched either way.
+        let mut store = fixture_store();
+        store.set("K", "v").expect("seed");
+        let mut io = FakeIo::interactive(Vec::new());
+        let result = run_vault_cmd(
+            VaultCmd::Diagnose { names: false },
+            &mut store,
+            &mut io,
+            &mut no_rekey(),
+        );
+        assert!(matches!(result, Err(VaultError::Aborted)));
+        assert_eq!(store.get("K").expect("get").as_str(), "v");
+        assert!(io.output.is_empty(), "must never print anything");
     }
 
     #[test]

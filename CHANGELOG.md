@@ -9,6 +9,102 @@ changes and the **patch** position signals backward-compatible fixes.
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-07-20
+
+**Headless mode — Magi is now invocable non-interactively** as a CI/CD pipeline
+step and as an AI backend for another application, alongside the unchanged TUI.
+Three subcommands (`magi init` / `magi query` / `magi consult`) with structured
+I/O, a 3-tier tool-authorization policy, and all state unified under `.magi/`.
+Delivered across MS1 (unified `.magi/` state + the never-delete ABSOLUTE bootstrap
+state machine) and MS2 (subcommands, tiers, rich I/O, `vault diagnose`).
+
+### Added
+- **`magi query` / `magi consult` subcommands.** `query` runs the normal agent
+  loop (LLM ↔ tools) over a prompt; `consult` forces a MAGI 3-perspective
+  analysis of the prompt directly. Input from `-i <file>` or **stdin**; output to
+  `-o <file>` or **stdout**; diagnostics/logs always to **stderr**. Input is
+  auto-detected as a rich JSON **envelope** (`{prompt, system?, model?, provider?,
+  max_tool_calls?, consult?}`) when it is a JSON object with a top-level `prompt`,
+  otherwise it is treated as a plain-text prompt. Running `magi` with no subcommand
+  still launches the TUI, unchanged.
+- **3-tier tool authorization.** `default` (no flag) auto-approves only read-only
+  tools (`ls`/`view`/`grep`) and denies the rest; `--auto` auto-approves every
+  registered tool (`edit`/`bash`/`consult`), sandboxed; `--full-auto` additionally
+  raises `max_tool_calls` (15 → 50) and silences the two **soft** guards
+  (3-identical-call detection + the normal cap), printing a **WARNING** to stderr
+  and the log at startup. The **hard** barriers (`bash` allowlist, the
+  metacharacter ban, `PathGuard::validate`) are **always** active in every tier —
+  no flag relaxes them.
+- **Rich JSON / text output.** `--output-format json` emits one buffered object
+  with `schema_version`, `response`, `model`, `provider`, `usage`, `timings`,
+  `stop_reason`, `tool_calls[]`, `transcript[]`, `consult`, `applied_caps` and
+  `error`; `--output-format text` (default) streams the response to stdout. Tool
+  results are truncated to 64 KiB with a marker.
+- **Exit-code taxonomy:** `0` success, `1` runtime/agent error (incl. `DbCorrupt`,
+  wrong passphrase), `2` CLI misuse / invalid input (missing `prompt`, unknown
+  field, over-cap input), `3` blocked by tier (an essential tool denied and the
+  run produced no response).
+- **`magi vault diagnose`** — a **read-only** structural probe of the `.magi/` DB
+  (envelope present? FEC-decodable? row counts of `vault`/`sessions`/`messages`/
+  `knowledge`/`memories`? the §2.1 state-machine verdict) that **never** unlocks,
+  mutates, or prints a secret value. `--names` may list vault *names* (already
+  non-secret via `vault ls`), never values.
+- **`--timeout <secs>`** bounds the whole run's wall-clock: on expiry the run
+  aborts cleanly (partial output, `stop_reason = error` / `error.kind = timeout`,
+  exit 1), cancelling the in-flight LLM stream and killing any tool subprocess
+  tree (POSIX process-group / Windows Job Object). Tiers that execute tools
+  (`--auto`+) get a hard 900 s default when no timeout is set.
+- **Secret hygiene for headless (REQ-H37).** At startup the process reads and
+  **scrubs** `MAGI_PASSPHRASE`, `ANTHROPIC_API_KEY` and `OPENAI_API_KEY` from its
+  environment (single-threaded, before the tokio runtime starts), and spawns tool
+  subprocesses with an allowlisted environment — so an in-workspace interpreter
+  cannot exfiltrate them via `/proc/<pid>/environ`. `.magi/` is created with
+  restrictive permissions (`0700` dir / `0600` files; Windows ACL equivalent).
+
+### Changed
+- **BREAKING — all state now lives in `.magi/`, discovered by walk-up.** The
+  config (`magi.toml`), the encrypted DB (`.magi-rs-memory.db`) and run logs
+  (`logs/`) live under a single `.magi/` directory, discovered from the working
+  directory (`-w`/cwd) up through the nearest ancestor (`.git`-style), stopping at
+  a filesystem boundary and rejecting a symlinked `.magi`. **Loose legacy files in
+  the current directory (a bare `.magi-rs-memory.db` / `magi.toml`) are NO LONGER
+  READ.** A startup warning flags such leftovers and points at `magi init`. This
+  is a deliberate pre-1.0 break with no on-disk migration (see the migration
+  one-liner below).
+- **`magi init`** scaffolds a fresh `.magi/` (config, `logs/`, and the DB with all
+  tables created empty), building it in a temporary sibling and atomically renaming
+  it into place; it refuses to overwrite or nest inside an existing `.magi/`. With
+  `-p`/`MAGI_PASSPHRASE` it also bootstraps an empty vault (envelope + `vault_meta`
+  row) so headless runs need no interaction.
+- **Never-delete ABSOLUTE (REQ-H20 / D-H10 / SC-H21).** The DB open/bootstrap
+  logic (`src/system/database.rs`) is rewritten to the §2.1 state machine and
+  **the last automatic `DELETE` is gone**. Previously a DB whose records had no
+  envelope (`wrapped_dek` absent) was treated as a pre-envelope format and
+  **wiped** to a fresh start. That path is removed: a DB with data but no
+  envelope is now **corruption** (`VaultError::DbCorrupt`, exit 1) and is
+  **never** deleted or bootstrapped over — restore a backup or remove `.magi/`
+  by hand. The evaluation order is: envelope present ⇒ open (FEC before AEAD;
+  FEC-uncorrectable ⇒ `VaultMetaCorrupt`, wrong passphrase ⇒ `WrongPassphrase`,
+  never wiped); no envelope + all data tables empty ⇒ bootstrap; no envelope +
+  any data (or a missing data table = partial/foreign schema) ⇒ `DbCorrupt`.
+- **`EncryptedSqliteMemory::open_with_state_machine`** opens an
+  already-initialized `.magi/` DB **without creating any schema**, so a missing
+  table surfaces as `DbCorrupt` instead of being silently re-created. The raw
+  `EncryptedSqliteMemory::new` path keeps auto-initializing the schema (TUI /
+  `vault` CLI) but shares the same never-delete state machine.
+
+### Removed
+- **`EncryptedSqliteMemory::was_reset()`** and the "content has been reset"
+  startup notice, along with the v0.9.0 fresh-start auto-reset it reported. With
+  never-delete absolute there is no reset to report.
+
+### Migration (from v0.9.0)
+- Run **`magi init`** to create `.magi/`, then re-add your secrets with **`magi
+  vault set <NAME>`** (e.g. `ANTHROPIC_API_KEY`). The loose legacy DB in the
+  current directory is not read or migrated (you are warned about it at startup);
+  prior conversation history is not carried over (it was local and pre-1.0). This
+  is a one-liner, not a migration tool.
+
 ## [0.9.0] - 2026-07-17
 
 Vault **MS2 — the vault CLI + zero-knowledge passphrase**. The user-facing surface

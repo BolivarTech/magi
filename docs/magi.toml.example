@@ -138,3 +138,53 @@ model = "claude-sonnet-4-6"
 # dim = 0                                  # 0 = autodetect from the first response (default); set to e.g. 768 to pin the dimension
 # query_prefix = "search_query: "          # nomic-embed-text-v2-moe asymmetric prefixes
 # document_prefix = "search_document: "
+
+# ---------------------------------------------------------------------------
+# [headless] — numeric caps and gates for the non-interactive `magi init`/
+# `query`/`consult` subcommands (opt-in; absent = all built-in defaults
+# below). Every key is OPTIONAL and OVERRIDES its module-constant default;
+# an unset key keeps the default. Unknown keys are a PARSE ERROR under
+# deny_unknown_fields, same as every other section in this file. All values
+# below ARE the built-in defaults (spec §11) except where noted.
+#
+# [headless]
+# max_input_bytes = 10485760
+#   Cap on -i/stdin input bytes read (REQ-H29, anti-DoS). An operator may only
+#   LOWER this below the 10 MiB default; it is never a source of extra budget
+#   for an untrusted caller.
+#
+# full_auto_max_tool_calls = 50
+#   Elevated tool-call ceiling under --full-auto (REQ-H08). A hard backstop,
+#   not infinite — silencing the repetitive-call soft guard under --full-auto
+#   only permits legitimate repeats up to this cap.
+#
+# log_retention = 50
+#   Keep at most the last N run-log files under ./.magi/logs/ (REQ-H34),
+#   pruned best-effort at the start of every run.
+#
+# log_max_bytes = 536870912
+#   Total run-log directory byte ceiling (512 MiB, REQ-H24), pruned
+#   oldest-first alongside the count-based retention above — whichever limit
+#   is hit first triggers pruning.
+#
+# tool_result_cap_bytes = 65536
+#   Cap on each tool result/transcript entry in the JSON output and on the
+#   debug-level redacted tool input in the run log (REQ-H14), 64 KiB, with a
+#   "…[truncated N bytes]" marker appended when exceeded.
+#
+# log_level = "info"
+#   Default run-log verbosity when --log-level is not passed on the CLI:
+#   "error" | "warn" | "info" | "debug". Only "debug" includes the redacted,
+#   capped raw tool input in the log; other levels log only its length.
+#
+# timeout_secs = 900
+#   Default wall-clock ceiling (seconds) for --auto/--full-auto runs when
+#   --timeout is not passed (REQ-H36). Every tool-executing tier always
+#   carries SOME wall-clock ceiling; this is what fills it in.
+#
+# allow_system_override = false
+#   SECURITY GATE (REQ-H12b): whether an envelope's `system` field may
+#   override the operator's system prompt. Effective value is
+#   `--allow-system-override flag OR this config value` — never weaker than
+#   either source alone. Leave false unless the caller supplying prompts is
+#   trusted; a caller-controlled system prompt is a prompt-injection vector.

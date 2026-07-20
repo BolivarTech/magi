@@ -25,6 +25,15 @@ pub const DEFAULT_ANTHROPIC_MODEL: &str = "claude-sonnet-4-6";
 /// re-exported by `memory::config::d::emb_model` so both resolve identically.
 pub const DEFAULT_EMBEDDING_MODEL: &str = "nomic-embed-text-v2-moe:latest";
 
+// ── Headless mode constants ───────────────────────────────────────────────────
+//
+// The headless numeric caps (`MAX_INPUT_BYTES`, `MAX_JSON_DEPTH`, …) live in the
+// lib module `magi_rs::headless::limits` — lib-visible so the `headless` lib
+// modules can use them directly, which the bin-only `defaults` module cannot
+// provide across the crate split. Reference them via `magi_rs::headless::limits`
+// (bin) or `crate::limits` (within `headless`). Overridable via the `[headless]`
+// section of `magi.toml`. Origin per the spec, §11.
+
 /// Startup notice shown when no `magi.toml` is present (RF-9). Built by
 /// interpolating the default constants (RF-8 DRY) so it tracks any constant edit.
 pub fn no_config_notice() -> String {

@@ -25,6 +25,34 @@ pub struct MagiConfig {
     pub memory: crate::memory::config::MemoryConfig,
     #[serde(default)]
     pub embedding: crate::memory::config::EmbeddingConfig,
+    #[serde(default)]
+    pub headless: HeadlessConfig,
+}
+
+/// `[headless]` section of `magi.toml` (spec §11). Every field is optional; an
+/// unset field falls back to its built-in constant default (see
+/// `main.rs::resolve_headless_limits`). Unknown keys are a parse error.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HeadlessConfig {
+    /// Cap on `-i`/stdin input bytes (REQ-H29). Overrides `MAX_INPUT_BYTES`.
+    pub max_input_bytes: Option<usize>,
+    /// Elevated tool-call cap under `--full-auto` (REQ-H08). Overrides `FULL_AUTO_MAX_TOOL_CALLS`.
+    pub full_auto_max_tool_calls: Option<u32>,
+    /// Keep at most the last N run logs (REQ-H34). Overrides `LOG_RETENTION_RUNS`.
+    pub log_retention: Option<usize>,
+    /// Total log-dir byte ceiling (REQ-H24). Overrides `LOG_MAX_BYTES`.
+    pub log_max_bytes: Option<u64>,
+    /// Cap on each tool result in the output (REQ-H14). Overrides `TOOL_RESULT_CAP`.
+    pub tool_result_cap_bytes: Option<usize>,
+    /// Default log level (REQ-H24): `error`|`warn`|`info`|`debug`. Overrides `"info"`.
+    pub log_level: Option<String>,
+    /// Default wall-clock timeout secs for tool-executing tiers (REQ-H36).
+    /// Overrides `FULL_AUTO_TIMEOUT_SECS`.
+    pub timeout_secs: Option<u64>,
+    /// Whether the envelope may override the operator `system` prompt (REQ-H12b).
+    /// Defaults to `false` (the envelope `system` is ignored unless enabled).
+    pub allow_system_override: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
@@ -198,6 +226,27 @@ pub fn resolve_openai_model(config: &MagiConfig, env_model: Option<&str>) -> Str
         .unwrap_or_else(|| crate::defaults::DEFAULT_OPENAI_MODEL.into())
 }
 
+/// env `ANTHROPIC_MODEL` > TOML `[anthropic].model` > `DEFAULT_ANTHROPIC_MODEL`.
+///
+/// Mirrors [`resolve_openai_model`]'s precedence exactly. Fixes a MAGI re-gate
+/// WARNING: prior call sites in `main.rs` disagreed on precedence — the
+/// headless path checked TOML before env (backwards), and the TUI/other path
+/// (`discover_config`) read only env and ignored `[anthropic].model`
+/// entirely. Both now route through this single resolver.
+///
+/// # Arguments
+/// * `config` - Parsed `MagiConfig`.
+/// * `env_model` - Value of `ANTHROPIC_MODEL` env var, if set.
+///
+/// # Returns
+/// Resolved model name; env overrides TOML, both override the built-in default.
+pub fn resolve_anthropic_model(config: &MagiConfig, env_model: Option<&str>) -> String {
+    env_model
+        .map(str::to_string)
+        .or_else(|| config.anthropic.model.clone())
+        .unwrap_or_else(|| crate::defaults::DEFAULT_ANTHROPIC_MODEL.into())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -330,6 +379,42 @@ mod tests {
     }
 
     #[test]
+    fn test_resolve_anthropic_model_env_wins_over_toml() {
+        // MAGI re-gate WARNING fix: env must win over TOML (not the other way
+        // around, which was the bug in the pre-fix headless call site).
+        let c = MagiConfig {
+            anthropic: AnthropicConfig {
+                model: Some("claude-toml-model".into()),
+            },
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_anthropic_model(&c, Some("claude-env-model")),
+            "claude-env-model"
+        );
+    }
+
+    #[test]
+    fn test_resolve_anthropic_model_toml_when_no_env() {
+        let c = MagiConfig {
+            anthropic: AnthropicConfig {
+                model: Some("claude-toml-model".into()),
+            },
+            ..Default::default()
+        };
+        assert_eq!(resolve_anthropic_model(&c, None), "claude-toml-model");
+    }
+
+    #[test]
+    fn test_resolve_anthropic_model_default_when_neither() {
+        use crate::defaults::DEFAULT_ANTHROPIC_MODEL;
+        assert_eq!(
+            resolve_anthropic_model(&MagiConfig::default(), None),
+            DEFAULT_ANTHROPIC_MODEL
+        );
+    }
+
+    #[test]
     fn test_load_unreadable_file_yields_default_plus_warning() {
         // A directory named `magi.toml` makes read_to_string fail with a
         // non-NotFound error → must surface a warning, not be treated as absent.
@@ -449,5 +534,57 @@ mod tests {
         );
         assert_eq!(resolve_magi_override(Some(""), None), None);
         assert_eq!(resolve_magi_override(Some(""), Some("")), None);
+    }
+
+    // -------------------------------------------------------------------------
+    // [headless] section tests (spec §11). `HeadlessConfig` already derives
+    // `#[serde(deny_unknown_fields)]`, so these LOCK the existing parsing
+    // contract (documenting, not driving it) rather than being a Red/Green
+    // pair — they still fail if a future edit silently loosens the section.
+    // -------------------------------------------------------------------------
+
+    /// An unknown key inside `[headless]` (e.g. a typo) is a parse ERROR, not
+    /// silent acceptance — `deny_unknown_fields` applies to this section like
+    /// every other `MagiConfig` sub-table.
+    #[test]
+    fn test_headless_section_unknown_field_is_err() {
+        assert!(MagiConfig::from_toml_str("[headless]\nmax_input_byte = 1024").is_err());
+    }
+
+    /// A `[headless]` block with several keys set parses into the matching
+    /// `Option` fields; unset keys stay `None` (resolved to their built-in
+    /// default elsewhere, `main.rs::resolve_headless_limits`/
+    /// `resolve_log_level`/`resolve_allow_system_override`).
+    #[test]
+    fn test_headless_section_parses_configured_keys() {
+        let c = MagiConfig::from_toml_str(
+            "[headless]\n\
+             max_input_bytes = 2048\n\
+             full_auto_max_tool_calls = 30\n\
+             log_retention = 7\n\
+             log_max_bytes = 1048576\n\
+             tool_result_cap_bytes = 4096\n\
+             log_level = \"debug\"\n\
+             timeout_secs = 120\n\
+             allow_system_override = true\n",
+        )
+        .unwrap();
+
+        assert_eq!(c.headless.max_input_bytes, Some(2048));
+        assert_eq!(c.headless.full_auto_max_tool_calls, Some(30));
+        assert_eq!(c.headless.log_retention, Some(7));
+        assert_eq!(c.headless.log_max_bytes, Some(1_048_576));
+        assert_eq!(c.headless.tool_result_cap_bytes, Some(4096));
+        assert_eq!(c.headless.log_level.as_deref(), Some("debug"));
+        assert_eq!(c.headless.timeout_secs, Some(120));
+        assert_eq!(c.headless.allow_system_override, Some(true));
+    }
+
+    /// An absent `[headless]` section parses to all-`None` (every cap falls
+    /// back to its built-in default).
+    #[test]
+    fn test_headless_section_absent_is_all_none() {
+        let c = MagiConfig::from_toml_str("").unwrap();
+        assert_eq!(c.headless, HeadlessConfig::default());
     }
 }

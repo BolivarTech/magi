@@ -21,16 +21,36 @@ pub enum ResponseChunk {
     ToolUseInputDelta { id: String, input_json: String },
     /// Completion of a full message.
     MessageDone(Message),
+    /// Token usage for the provider turn that just completed.
+    ///
+    /// Transient — never added to the final [`Message`] and never persisted.
+    /// Emitted at most once per `stream_messages` call, only when the backend
+    /// actually reports usage (a backend that omits it emits nothing — usage is
+    /// never fabricated). Consumed by [`crate::agent::RunObserver::on_usage`] to
+    /// accumulate the headless `RunOutcome.usage` totals across agent-loop turns.
+    Usage {
+        /// Prompt/context tokens billed for the request.
+        input_tokens: u64,
+        /// Tokens generated in the response.
+        output_tokens: u64,
+    },
 }
 
 /// Trait representing an AI backend provider.
 #[async_trait]
 pub trait Provider: Send + Sync {
     /// Sends a list of messages to the AI and returns a stream of chunks.
+    ///
+    /// `system` is the effective system-prompt text for this call, if any
+    /// (`None`/empty ⇒ no system prompt is sent — the interactive path always
+    /// passes `None`, REQ-H12b). Each implementation applies it however its wire
+    /// protocol expects (a top-level field for Anthropic, a prepended `system`
+    /// message for OpenAI-compatible backends).
     async fn stream_messages(
         &self,
         messages: &[Message],
         tools: &[Box<dyn Tool>],
+        system: Option<&str>,
     ) -> Result<BoxStream<'static, Result<ResponseChunk>>>;
 
     /// Whether this provider is the canned `StaticProvider` (no API key).
@@ -42,22 +62,27 @@ pub trait Provider: Send + Sync {
 
     /// Sends a list of messages and returns the full message (blocking until done).
     ///
-    /// Retry wrapper; used by tests and available to non-streaming callers;
-    /// production uses `query_streaming`. Retries up to 3 times with exponential
-    /// backoff (2s, 4s, 8s) on rate-limit (429) or transient connection failures
-    /// (see [`is_retryable_error`]). A persistent outage fails after 3 tries.
-    #[allow(dead_code)]
+    /// Retry wrapper; used by non-streaming callers (`LlmDistillJudge`, the MAGI
+    /// consult adapter) and by tests; production `query_streaming` calls
+    /// `stream_messages` directly. Retries up to 3 times, waiting with
+    /// exponential backoff (2s, then 4s) between attempts, on rate-limit (429)
+    /// or transient connection failures (see [`is_retryable_error`]). A
+    /// persistent outage fails after the 3rd attempt with no further wait.
+    ///
+    /// `system` is forwarded unchanged to [`Provider::stream_messages`] on every
+    /// attempt.
     async fn send_messages(
         &self,
         messages: &[Message],
         tools: &[Box<dyn Tool>],
+        system: Option<&str>,
     ) -> Result<Message> {
         let mut attempts = 0;
         let max_attempts = 3;
 
         loop {
             attempts += 1;
-            match self.stream_messages(messages, tools).await {
+            match self.stream_messages(messages, tools, system).await {
                 Ok(mut stream) => {
                     let mut last_message = None;
                     let mut full_text = String::new();
@@ -169,6 +194,7 @@ impl Provider for StaticProvider {
         &self,
         _messages: &[Message],
         _tools: &[Box<dyn Tool>],
+        _system: Option<&str>,
     ) -> Result<BoxStream<'static, Result<ResponseChunk>>> {
         let msg = Message::assistant("I am a Rust-powered assistant. How can I help you today?");
         let chunks = vec![
@@ -205,6 +231,10 @@ struct AnthropicRequest {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tools: Vec<AnthropicTool>,
     stream: bool,
+    /// Effective system prompt (top-level field per the Messages API — Anthropic
+    /// has no `Role::System` message). Omitted entirely when `None` (REQ-H12b).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    system: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -241,7 +271,8 @@ enum AnthropicSseEvent {
     },
     MessageDelta {
         delta: serde_json::Value,
-        usage: serde_json::Value,
+        #[serde(default)]
+        usage: AnthropicOutputUsage,
     },
     MessageStop,
     Ping,
@@ -257,6 +288,28 @@ struct AnthropicMessageStart {
     id: String,
     role: Role,
     model: String,
+    /// Present on every real `message_start` event; absent in older test fixtures
+    /// (`#[serde(default)]` keeps those parsing exactly as before).
+    #[serde(default)]
+    usage: Option<AnthropicStartUsage>,
+}
+
+/// `message_start.message.usage` — carries the input-token count known at the
+/// start of the turn (`output_tokens` is present but not yet meaningful here;
+/// the authoritative output count comes from `message_delta.usage`, below).
+#[derive(Debug, Default, Deserialize)]
+struct AnthropicStartUsage {
+    #[serde(default)]
+    input_tokens: u64,
+}
+
+/// `message_delta.usage` — carries the cumulative output-token count, updated
+/// (possibly more than once) as the turn streams; the last value observed before
+/// `message_stop` is the turn's final `output_tokens`.
+#[derive(Debug, Default, Deserialize)]
+struct AnthropicOutputUsage {
+    #[serde(default)]
+    output_tokens: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -282,6 +335,15 @@ struct OpenAiRequest {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tools: Vec<OpenAiTool>,
     stream: bool,
+    /// Requests a final SSE chunk carrying token usage (`choices: []`, `usage:
+    /// {...}`) so the provider can surface `ResponseChunk::Usage`. A backend that
+    /// ignores the field simply omits the usage chunk — nothing is fabricated.
+    stream_options: OpenAiStreamOptions,
+}
+
+#[derive(Debug, Serialize)]
+struct OpenAiStreamOptions {
+    include_usage: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -417,6 +479,19 @@ fn map_tools(tools: &[Box<dyn Tool>]) -> Vec<OpenAiTool> {
 struct OpenAiStreamChunk {
     #[serde(default)]
     choices: Vec<OpenAiChoice>,
+    /// Present only on the trailing usage chunk requested by `stream_options:
+    /// {include_usage: true}` (typically carries `choices: []` alongside it).
+    #[serde(default)]
+    usage: Option<OpenAiUsage>,
+}
+
+/// Token usage reported on the trailing `stream_options.include_usage` chunk.
+#[derive(Debug, Deserialize)]
+struct OpenAiUsage {
+    #[serde(default)]
+    prompt_tokens: u64,
+    #[serde(default)]
+    completion_tokens: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -559,6 +634,9 @@ struct OaiState {
     done: bool,
     /// Whether the byte source is exhausted.
     src_done: bool,
+    /// Whether a `ResponseChunk::Usage` was already emitted (defensive — the
+    /// backend is expected to send the usage chunk at most once).
+    usage_emitted: bool,
 }
 
 impl OaiState {
@@ -590,21 +668,13 @@ impl OaiState {
     /// payloads are swallowed so one bad event never aborts the stream.
     ///
     /// Once `self.done` is set (the stream was finalized in a previous chunk),
-    /// any subsequent post-stop block — text or tool — is dropped on entry
-    /// (MAGI Loop 2 caveat C1). The stream-end branch in `stream_messages`
-    /// still calls `finalize()` directly; the `done` guard makes that path
-    /// idempotent.
+    /// any subsequent post-stop text/tool content is dropped (MAGI Loop 2 caveat
+    /// C1) — except a trailing usage-only chunk, which is captured regardless of
+    /// `self.done` because it legitimately arrives after `finish_reason`. The
+    /// stream-end branch in `stream_messages` still calls `finalize()` directly;
+    /// the `done` guard makes that path idempotent.
     fn process_buffer(&mut self) {
-        if self.done {
-            return;
-        }
         for block in drain_sse_events(&mut self.buffer) {
-            // Same-chunk short-circuit: if a previous block in this same
-            // `process_buffer` call triggered `finalize()`, drop the rest of
-            // the post-stop blocks. Drains the iterator without processing.
-            if self.done {
-                continue;
-            }
             for line in block.lines() {
                 // Tolerate `data:` with or without the optional space (MAGI iter-2).
                 let Some(rest) = line.strip_prefix("data:") else {
@@ -618,6 +688,26 @@ impl OaiState {
                 let Ok(parsed) = serde_json::from_str::<OpenAiStreamChunk>(data) else {
                     continue;
                 };
+                // The trailing usage chunk (`stream_options.include_usage`)
+                // legitimately arrives AFTER the `finish_reason` chunk that
+                // triggers `finalize()` below, so it is captured unconditionally
+                // — even once `self.done` is already set. Every OTHER kind of
+                // post-stop content stays suppressed by the `self.done` check
+                // just below (MAGI Loop 2 caveat C1: a misbehaving backend must
+                // not leak ghost TextDelta/tool-call chunks after the stream is
+                // finalized).
+                if let Some(usage) = parsed.usage {
+                    if !self.usage_emitted {
+                        self.usage_emitted = true;
+                        self.pending.push_back(Ok(ResponseChunk::Usage {
+                            input_tokens: usage.prompt_tokens,
+                            output_tokens: usage.completion_tokens,
+                        }));
+                    }
+                }
+                if self.done {
+                    continue;
+                }
                 let Some(choice) = parsed.choices.into_iter().next() else {
                     continue;
                 };
@@ -714,13 +804,32 @@ impl Provider for OpenAiCompatibleProvider {
         &self,
         messages: &[Message],
         tools: &[Box<dyn Tool>],
+        system: Option<&str>,
     ) -> Result<BoxStream<'static, Result<ResponseChunk>>> {
         let url = format!("{}/chat/completions", self.base_url);
+        let mut oai_messages = map_messages(messages);
+        // OpenAI Chat Completions has no top-level system field (unlike
+        // Anthropic) — a system prompt is a regular message, prepended so it
+        // precedes every other turn (REQ-H12b).
+        if let Some(sys) = system.filter(|s| !s.is_empty()) {
+            oai_messages.insert(
+                0,
+                OpenAiMessage {
+                    role: "system".to_string(),
+                    content: Some(sys.to_string()),
+                    tool_calls: None,
+                    tool_call_id: None,
+                },
+            );
+        }
         let request = OpenAiRequest {
             model: self.model.clone(),
-            messages: map_messages(messages),
+            messages: oai_messages,
             tools: map_tools(tools),
             stream: true,
+            stream_options: OpenAiStreamOptions {
+                include_usage: true,
+            },
         };
         let response = self
             .client
@@ -750,6 +859,7 @@ impl Provider for OpenAiCompatibleProvider {
             pending: std::collections::VecDeque::new(),
             done: false,
             src_done: false,
+            usage_emitted: false,
         };
         let out = stream::unfold(st, |mut st| async move {
             loop {
@@ -832,6 +942,7 @@ impl Provider for AnthropicProvider {
         &self,
         messages: &[Message],
         tools: &[Box<dyn Tool>],
+        system: Option<&str>,
     ) -> Result<BoxStream<'static, Result<ResponseChunk>>> {
         let url = format!("{}/messages", self.base_url);
 
@@ -850,6 +961,9 @@ impl Provider for AnthropicProvider {
             max_tokens: 4096,
             tools: anthropic_tools,
             stream: true,
+            // Anthropic takes the system prompt as a dedicated top-level field,
+            // never as a message (REQ-H12b). Empty/`None` ⇒ omitted entirely.
+            system: system.filter(|s| !s.is_empty()).map(str::to_string),
         };
 
         let response = self
@@ -882,116 +996,282 @@ impl Provider for AnthropicProvider {
             ));
         }
 
-        let bytes_stream = response.bytes_stream();
-        let mut buffer: Vec<u8> = Vec::new();
-        let mut full_content: Vec<Content> = Vec::new();
-        let mut current_role = Role::Assistant;
-        // Accumulates (id, name, partial_json) for an in-progress tool_use block.
-        let mut current_tool: Option<(String, String, String)> = None;
+        let bytes_stream = response
+            .bytes_stream()
+            .map(|r| {
+                r.map(|b| b.to_vec())
+                    .map_err(|e| anyhow::anyhow!("Network error: {}", e))
+            })
+            .boxed();
 
-        let output_stream = bytes_stream.flat_map(move |chunk_res| {
-            let chunk = match chunk_res {
-                Ok(c) => c,
-                Err(e) => {
-                    return stream::iter(vec![Err(anyhow::anyhow!("Network error: {}", e))]).boxed()
+        let state = AnthropicState {
+            src: bytes_stream,
+            buffer: Vec::new(),
+            full_content: Vec::new(),
+            current_role: Role::Assistant,
+            current_tool: None,
+            usage_input_tokens: 0,
+            usage_output_tokens: 0,
+            usage_seen: false,
+            pending: std::collections::VecDeque::new(),
+            done: false,
+            src_done: false,
+        };
+
+        // Mirrors `OaiState`'s unfold shape: drain any pending chunks first, then
+        // pull more bytes from the source, finalizing on stream-end (`None`) so a
+        // connection that closes without a `message_stop` still flushes whatever
+        // content/tool calls were assembled (Gap 2 fix) instead of silently
+        // dropping them.
+        let output_stream = stream::unfold(state, |mut st| async move {
+            loop {
+                if let Some(item) = st.pending.pop_front() {
+                    return Some((item, st));
                 }
-            };
-            if buffer.len() + chunk.len() > MAX_SSE_BUFFER_BYTES {
-                return stream::iter(vec![Err(anyhow::anyhow!(
-                    "SSE buffer would exceed {} bytes without an event boundary; aborting to avoid OOM (limit: 8 MiB)",
-                    MAX_SSE_BUFFER_BYTES
-                ))])
-                .boxed();
-            }
-            // #3: buffer raw bytes and decode once at each event boundary, so a
-            // multi-byte UTF-8 character split across a network chunk is never
-            // decoded mid-character (the W1 size cap above still applies in bytes).
-            buffer.extend_from_slice(&chunk);
-
-            let mut chunks = Vec::new();
-            for block in drain_sse_events(&mut buffer) {
-                for line in block.lines() {
-                    if let Some(data) = line.strip_prefix("data: ") {
-                        if let Ok(event) = serde_json::from_str::<AnthropicSseEvent>(data) {
-                            match event {
-                                AnthropicSseEvent::MessageStart { message } => {
-                                    current_role = message.role;
-                                }
-                                AnthropicSseEvent::ContentBlockStart {
-                                    content_block, ..
-                                } => {
-                                    // Defensively finalize any still-open tool before starting a
-                                    // new block, so a missing content_block_stop never drops it (#6).
-                                    finalize_tool(current_tool.take(), &mut full_content);
-                                    // When the block is a tool_use, begin accumulating its input.
-                                    if content_block
-                                        .get("type")
-                                        .and_then(|t| t.as_str())
-                                        == Some("tool_use")
-                                    {
-                                        let id = content_block
-                                            .get("id")
-                                            .and_then(|v| v.as_str())
-                                            .unwrap_or_default()
-                                            .to_string();
-                                        let name = content_block
-                                            .get("name")
-                                            .and_then(|v| v.as_str())
-                                            .unwrap_or_default()
-                                            .to_string();
-                                        current_tool = Some((id, name, String::new()));
-                                    }
-                                }
-                                AnthropicSseEvent::ContentBlockDelta { delta, .. } => match delta {
-                                    AnthropicDelta::TextDelta { text } => {
-                                        if let Some(Content::Text { text: existing }) =
-                                            full_content.last_mut()
-                                        {
-                                            existing.push_str(&text);
-                                        } else {
-                                            full_content.push(Content::Text { text: text.clone() });
-                                        }
-                                        chunks.push(Ok(ResponseChunk::TextDelta(text)));
-                                    }
-                                    AnthropicDelta::InputDelta { partial_json } => {
-                                        // Accumulate into the current tool's JSON buffer and tag the
-                                        // chunk with the in-progress tool id (#6).
-                                        let id = if let Some((id, _, acc)) = current_tool.as_mut() {
-                                            acc.push_str(&partial_json);
-                                            id.clone()
-                                        } else {
-                                            String::new()
-                                        };
-                                        chunks.push(Ok(ResponseChunk::ToolUseInputDelta {
-                                            id,
-                                            input_json: partial_json,
-                                        }));
-                                    }
-                                },
-                                AnthropicSseEvent::ContentBlockStop { .. } => {
-                                    // Finalize the accumulated tool_use block and push it to content.
-                                    finalize_tool(current_tool.take(), &mut full_content);
-                                }
-                                AnthropicSseEvent::MessageStop => {
-                                    // Defensively finalize any still-pending tool block
-                                    // in case content_block_stop was absent.
-                                    finalize_tool(current_tool.take(), &mut full_content);
-                                    let msg = Message {
-                                        role: current_role.clone(),
-                                        content: full_content.clone(),
-                                    };
-                                    chunks.push(Ok(ResponseChunk::MessageDone(msg)));
-                                }
-                                _ => {}
-                            }
+                if st.src_done {
+                    return None;
+                }
+                match st.src.next().await {
+                    Some(Ok(chunk)) => {
+                        if st.buffer.len() + chunk.len() > MAX_SSE_BUFFER_BYTES {
+                            st.pending.push_back(Err(anyhow::anyhow!(
+                                "SSE buffer would exceed {} bytes without an event boundary; aborting to avoid OOM (limit: 8 MiB)",
+                                MAX_SSE_BUFFER_BYTES
+                            )));
+                            st.src_done = true;
+                        } else {
+                            // #3: buffer raw bytes and decode once at each event
+                            // boundary, so a multi-byte UTF-8 character split across a
+                            // network chunk is never decoded mid-character (the W1
+                            // size cap above still applies in bytes).
+                            st.buffer.extend_from_slice(&chunk);
+                            st.process_buffer();
                         }
+                    }
+                    Some(Err(e)) => {
+                        // Error already carries the "Network error: …" context from
+                        // the byte-stream map above.
+                        st.pending.push_back(Err(e));
+                        st.src_done = true;
+                    }
+                    None => {
+                        // Stream-end: flush a trailing event that lacks the final
+                        // blank line, then finalize a truncated turn if
+                        // `message_stop` never arrived (Gap 2 fix).
+                        st.src_done = true;
+                        if !st.buffer.is_empty() {
+                            st.buffer.extend_from_slice(b"\n\n");
+                            st.process_buffer();
+                        }
+                        st.finalize_truncated();
                     }
                 }
             }
-            stream::iter(chunks).boxed()
         });
 
         Ok(Box::pin(output_stream))
+    }
+}
+
+/// Streaming state for the Anthropic SSE `unfold`. Owns the byte source and the
+/// accumulators for the in-progress assistant message; mirrors [`OaiState`]'s
+/// shape so both providers share the same stream-end-finalization guarantee.
+struct AnthropicState {
+    /// Boxed byte source derived from `reqwest::Response::bytes_stream()`,
+    /// already mapped to `Vec<u8>`/`anyhow::Error` at the boundary.
+    src: BoxStream<'static, Result<Vec<u8>>>,
+    /// Raw SSE bytes accumulated until an event boundary (`"\n\n"`).
+    buffer: Vec<u8>,
+    /// Assembled content blocks for the final assistant message.
+    full_content: Vec<Content>,
+    /// Role carried by `message_start`; defaults to `Assistant` if the turn is
+    /// truncated before `message_start` ever arrives.
+    current_role: Role,
+    /// Accumulates `(id, name, partial_json)` for an in-progress `tool_use` block.
+    current_tool: Option<(String, String, String)>,
+    /// `message_start.message.usage.input_tokens`, if reported.
+    usage_input_tokens: u64,
+    /// Cumulative `message_delta.usage.output_tokens`, if reported.
+    usage_output_tokens: u64,
+    /// Whether real usage data was observed (a `message_start` with a `usage`
+    /// object, or any `message_delta` event) — distinct from the zero defaults
+    /// left by `#[serde(default)]`. Gates the `Usage` emission on both the
+    /// `message_stop` path and [`AnthropicState::finalize_truncated`] so
+    /// neither a well-formed close nor an abnormal one ever fabricates a
+    /// `(0, 0)` usage reading (REQ-H14).
+    usage_seen: bool,
+    /// Chunks ready to yield from the stream.
+    pending: std::collections::VecDeque<Result<ResponseChunk>>,
+    /// Whether `MessageDone` was already emitted (idempotent finalize).
+    done: bool,
+    /// Whether the byte source is exhausted.
+    src_done: bool,
+}
+
+impl AnthropicState {
+    /// Drains complete SSE blocks from `buffer`, pushing `TextDelta`/
+    /// `ToolUseInputDelta` chunks, updating usage/content accumulators, and
+    /// finalizing on `message_stop`. Malformed `data:` payloads and lines missing
+    /// the `"data: "` prefix are swallowed so one bad event never aborts the
+    /// stream (matches the pre-existing behavior).
+    ///
+    /// Once `self.done` is set (the stream was already finalized by a prior
+    /// `message_stop` or by [`AnthropicState::finalize_truncated`]), every
+    /// subsequent event is dropped before it can touch any accumulator — this
+    /// mirrors [`OaiState::process_buffer`]'s post-finalize ghost-content guard
+    /// (MAGI Loop 2 caveat C1) so a misbehaving backend that keeps sending
+    /// `content_block_delta`/`content_block_start` after the turn already
+    /// finalized can never leak a second `TextDelta`/tool chunk or corrupt the
+    /// already-emitted message. Unlike `OaiState`, Anthropic has no trailing
+    /// usage-only event that legitimately arrives after finalization (usage
+    /// rides on `message_start`/`message_delta`, both pre-`message_stop`), so
+    /// the guard is unconditional here.
+    fn process_buffer(&mut self) {
+        for block in drain_sse_events(&mut self.buffer) {
+            for line in block.lines() {
+                let Some(data) = line.strip_prefix("data: ") else {
+                    continue;
+                };
+                let Ok(event) = serde_json::from_str::<AnthropicSseEvent>(data) else {
+                    continue;
+                };
+                if self.done {
+                    continue;
+                }
+                match event {
+                    AnthropicSseEvent::MessageStart { message } => {
+                        self.current_role = message.role;
+                        if message.usage.is_some() {
+                            self.usage_seen = true;
+                        }
+                        self.usage_input_tokens =
+                            message.usage.map(|u| u.input_tokens).unwrap_or(0);
+                    }
+                    AnthropicSseEvent::ContentBlockStart { content_block, .. } => {
+                        // Defensively finalize any still-open tool before starting a
+                        // new block, so a missing content_block_stop never drops it (#6).
+                        finalize_tool(self.current_tool.take(), &mut self.full_content);
+                        // When the block is a tool_use, begin accumulating its input.
+                        if content_block.get("type").and_then(|t| t.as_str()) == Some("tool_use") {
+                            let id = content_block
+                                .get("id")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or_default()
+                                .to_string();
+                            let name = content_block
+                                .get("name")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or_default()
+                                .to_string();
+                            self.current_tool = Some((id, name, String::new()));
+                        }
+                    }
+                    AnthropicSseEvent::ContentBlockDelta { delta, .. } => match delta {
+                        AnthropicDelta::TextDelta { text } => {
+                            if let Some(Content::Text { text: existing }) =
+                                self.full_content.last_mut()
+                            {
+                                existing.push_str(&text);
+                            } else {
+                                self.full_content.push(Content::Text { text: text.clone() });
+                            }
+                            self.pending.push_back(Ok(ResponseChunk::TextDelta(text)));
+                        }
+                        AnthropicDelta::InputDelta { partial_json } => {
+                            // Accumulate into the current tool's JSON buffer and tag the
+                            // chunk with the in-progress tool id (#6).
+                            let id = if let Some((id, _, acc)) = self.current_tool.as_mut() {
+                                acc.push_str(&partial_json);
+                                id.clone()
+                            } else {
+                                String::new()
+                            };
+                            self.pending.push_back(Ok(ResponseChunk::ToolUseInputDelta {
+                                id,
+                                input_json: partial_json,
+                            }));
+                        }
+                    },
+                    AnthropicSseEvent::ContentBlockStop { .. } => {
+                        // Finalize the accumulated tool_use block and push it to content.
+                        finalize_tool(self.current_tool.take(), &mut self.full_content);
+                    }
+                    AnthropicSseEvent::MessageDelta { usage, .. } => {
+                        // Cumulative output-token count; the last value observed
+                        // before message_stop is authoritative.
+                        self.usage_seen = true;
+                        self.usage_output_tokens = usage.output_tokens;
+                    }
+                    AnthropicSseEvent::MessageStop => {
+                        // A duplicate/late message_stop can never reach this arm:
+                        // the top-of-loop `if self.done { continue; }` guard above
+                        // already drops it once the first message_stop set `done`.
+                        // Defensively finalize any still-pending tool block in case
+                        // content_block_stop was absent.
+                        finalize_tool(self.current_tool.take(), &mut self.full_content);
+                        // Only emit Usage when real usage data was actually observed
+                        // (same gate as `finalize_truncated`) — a degenerate stream
+                        // that never reports usage must not fabricate a (0, 0)
+                        // reading (MAGI re-gate WARNING 2).
+                        if self.usage_seen {
+                            self.pending.push_back(Ok(ResponseChunk::Usage {
+                                input_tokens: self.usage_input_tokens,
+                                output_tokens: self.usage_output_tokens,
+                            }));
+                        }
+                        let msg = Message {
+                            role: self.current_role.clone(),
+                            content: self.full_content.clone(),
+                        };
+                        self.pending.push_back(Ok(ResponseChunk::MessageDone(msg)));
+                        self.done = true;
+                    }
+                    AnthropicSseEvent::Error { error } => {
+                        // Gap 1 fix: a well-formed mid-stream `error` event (e.g.
+                        // "overloaded_error") surfaces as Err instead of being
+                        // swallowed. The message is the API's own description, safe
+                        // to show — no request header/key is echoed.
+                        self.pending.push_back(Err(anyhow::anyhow!(
+                            "Anthropic API error ({}): {}",
+                            error.error_type,
+                            error.message
+                        )));
+                    }
+                    AnthropicSseEvent::Ping => {}
+                }
+            }
+        }
+    }
+
+    /// Finalizes the assembled assistant message when the byte source closes
+    /// without a prior `message_stop` event — a truncated/dropped connection.
+    /// Idempotent via `done` (a no-op once `message_stop` already finalized the
+    /// turn). Mirrors [`OaiState::finalize`]'s stream-end flush (Gap 2 fix):
+    /// without this, a mid-turn disconnect silently dropped every
+    /// already-streamed `TextDelta`/`ToolUseInputDelta`'s accumulated content —
+    /// those chunks had already reached the caller, but no `MessageDone` ever
+    /// followed, so `run_tool_loop` errored with "Stream ended without
+    /// MessageDone" and the assistant's partial turn was lost, not persisted.
+    fn finalize_truncated(&mut self) {
+        if self.done {
+            return;
+        }
+        finalize_tool(self.current_tool.take(), &mut self.full_content);
+        // Unlike the unconditional message_stop emission above, only emit Usage
+        // here when real usage data was actually observed — an abnormal close
+        // must not fabricate a (0, 0) reading.
+        if self.usage_seen {
+            self.pending.push_back(Ok(ResponseChunk::Usage {
+                input_tokens: self.usage_input_tokens,
+                output_tokens: self.usage_output_tokens,
+            }));
+        }
+        let msg = Message {
+            role: self.current_role.clone(),
+            content: self.full_content.clone(),
+        };
+        self.pending.push_back(Ok(ResponseChunk::MessageDone(msg)));
+        self.done = true;
     }
 }
 
@@ -1001,6 +1281,7 @@ mod tests {
     use crate::agent::messages::{Content, Role};
     use mockito::Server;
     use serde_json::json;
+    use std::sync::{Arc, Mutex};
 
     #[test]
     fn test_parse_tool_input_empty_is_object() {
@@ -1117,7 +1398,7 @@ mod tests {
             url,
         );
         let messages = vec![Message::user("Hi")];
-        let response = provider.send_messages(&messages, &[]).await.unwrap();
+        let response = provider.send_messages(&messages, &[], None).await.unwrap();
         assert_eq!(response.role, Role::Assistant);
         if let Content::Text { text } = &response.content[0] {
             assert_eq!(text, "Hello from Mockito!");
@@ -1148,7 +1429,7 @@ mod tests {
             url,
         );
         let messages = vec![Message::user("List files")];
-        let response = provider.send_messages(&messages, &[]).await.unwrap();
+        let response = provider.send_messages(&messages, &[], None).await.unwrap();
         assert_eq!(response.role, Role::Assistant);
         assert_eq!(response.content.len(), 1);
         if let Content::Text { text } = &response.content[0] {
@@ -1186,7 +1467,7 @@ mod tests {
             url,
         );
 
-        let result = provider.send_messages(&[], &[]).await;
+        let result = provider.send_messages(&[], &[], None).await;
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(
@@ -1230,7 +1511,7 @@ mod tests {
             url,
         );
 
-        let mut stream = provider.stream_messages(&[], &[]).await.unwrap();
+        let mut stream = provider.stream_messages(&[], &[], None).await.unwrap();
 
         let mut full_text = String::new();
         while let Some(chunk_result) = stream.next().await {
@@ -1267,7 +1548,7 @@ mod tests {
             url,
         );
 
-        let mut stream = provider.stream_messages(&[], &[]).await.unwrap();
+        let mut stream = provider.stream_messages(&[], &[], None).await.unwrap();
 
         let mut full_text = String::new();
         while let Some(chunk_result) = stream.next().await {
@@ -1301,7 +1582,7 @@ mod tests {
             url,
         );
 
-        let mut stream = provider.stream_messages(&[], &[]).await.unwrap();
+        let mut stream = provider.stream_messages(&[], &[], None).await.unwrap();
 
         let mut saw_error = false;
         while let Some(chunk_result) = stream.next().await {
@@ -1357,7 +1638,7 @@ mod tests {
             url,
         );
         let response = provider
-            .send_messages(&[Message::user("list")], &[])
+            .send_messages(&[Message::user("list")], &[], None)
             .await
             .unwrap();
         let tool = response.content.iter().find_map(|c| match c {
@@ -1412,7 +1693,7 @@ mod tests {
             .await;
         let provider = AnthropicProvider::with_base_url("k".to_string(), "x".to_string(), url);
         let response = provider
-            .send_messages(&[Message::user("go")], &[])
+            .send_messages(&[Message::user("go")], &[], None)
             .await
             .unwrap();
         let ids: Vec<String> = response
@@ -1454,7 +1735,7 @@ mod tests {
             .await;
         let provider = AnthropicProvider::with_base_url("k".to_string(), "x".to_string(), url);
         let mut stream = provider
-            .stream_messages(&[Message::user("go")], &[])
+            .stream_messages(&[Message::user("go")], &[], None)
             .await
             .unwrap();
         let mut delta_ids = Vec::new();
@@ -1618,7 +1899,7 @@ mod tests {
         let provider =
             AnthropicProvider::with_base_url("test_key".to_string(), "test-model".to_string(), url);
 
-        let response = provider.send_messages(&[], &[]).await.unwrap();
+        let response = provider.send_messages(&[], &[], None).await.unwrap();
         assert_eq!(response.role, Role::Assistant);
         if let Content::Text { text } = &response.content[0] {
             assert_eq!(text, "Recovered!");
@@ -1649,7 +1930,10 @@ mod tests {
             api_key: "k".into(),
             model: "m".into(),
         });
-        let r = p.send_messages(&[Message::user("hi")], &[]).await.unwrap();
+        let r = p
+            .send_messages(&[Message::user("hi")], &[], None)
+            .await
+            .unwrap();
         assert_eq!(
             r.content,
             vec![Content::Text {
@@ -1687,7 +1971,7 @@ mod tests {
             model: "m".into(),
         });
         let mut stream = p
-            .stream_messages(&[Message::user("hi")], &[])
+            .stream_messages(&[Message::user("hi")], &[], None)
             .await
             .unwrap();
         let mut reasoning = String::new();
@@ -1733,7 +2017,10 @@ mod tests {
             api_key: "k".into(),
             model: "m".into(),
         });
-        let r = p.send_messages(&[Message::user("hi")], &[]).await.unwrap();
+        let r = p
+            .send_messages(&[Message::user("hi")], &[], None)
+            .await
+            .unwrap();
         assert_eq!(r.content, vec![Content::Text { text: "hi".into() }]);
     }
 
@@ -1758,7 +2045,10 @@ mod tests {
             api_key: "k".into(),
             model: "m".into(),
         });
-        let r = p.send_messages(&[Message::user("hi")], &[]).await.unwrap();
+        let r = p
+            .send_messages(&[Message::user("hi")], &[], None)
+            .await
+            .unwrap();
         assert_eq!(
             r.content,
             vec![Content::Text {
@@ -1783,7 +2073,7 @@ mod tests {
             model: "m".into(),
         });
         assert!(p
-            .send_messages(&[Message::user("hi")], &[])
+            .send_messages(&[Message::user("hi")], &[], None)
             .await
             .unwrap_err()
             .to_string()
@@ -1816,7 +2106,7 @@ mod tests {
             model: "m".into(),
         });
         let r = p
-            .send_messages(&[Message::user("list")], &[])
+            .send_messages(&[Message::user("list")], &[], None)
             .await
             .unwrap();
         let tool = r
@@ -1863,7 +2153,10 @@ mod tests {
             api_key: "k".into(),
             model: "m".into(),
         });
-        let r = p.send_messages(&[Message::user("x")], &[]).await.unwrap();
+        let r = p
+            .send_messages(&[Message::user("x")], &[], None)
+            .await
+            .unwrap();
         // out-of-bounds index ignored → no ToolUse, no OOM, clean MessageDone.
         assert_eq!(
             r.content
@@ -1895,7 +2188,7 @@ mod tests {
             model: "m".into(),
         });
         let mut stream = p
-            .stream_messages(&[Message::user("hi")], &[])
+            .stream_messages(&[Message::user("hi")], &[], None)
             .await
             .unwrap();
         let mut done = Vec::new();
@@ -1944,7 +2237,7 @@ mod tests {
             model: "m".into(),
         });
         let mut stream = p
-            .stream_messages(&[Message::user("hi")], &[])
+            .stream_messages(&[Message::user("hi")], &[], None)
             .await
             .unwrap();
 
@@ -2065,7 +2358,10 @@ mod tests {
             api_key: "k".into(),
             model: "m".into(),
         });
-        let mut stream = p.stream_messages(&[Message::user("x")], &[]).await.unwrap();
+        let mut stream = p
+            .stream_messages(&[Message::user("x")], &[], None)
+            .await
+            .unwrap();
 
         let mut tool_input_delta_count = 0usize;
         let mut tool_use_count = 0usize;
@@ -2090,5 +2386,482 @@ mod tests {
             tool_use_count, 0,
             "no Content::ToolUse emitted for orphan args fragment"
         );
+    }
+
+    // ─── Feature E: system-prompt injection (REQ-H12b) ────────────────────────
+
+    /// Captures the raw UTF-8 request body mockito received, via
+    /// `with_body_from_request`, while still returning `sse_body` as the mocked
+    /// response — letting a test assert exactly what the provider serialized
+    /// (including a field's *absence*, which a `Matcher` alone cannot express).
+    async fn capture_body_mock(
+        server: &mut Server,
+        path: &str,
+        sse_body: &'static str,
+    ) -> (mockito::Mock, Arc<Mutex<Option<String>>>) {
+        let captured = Arc::new(Mutex::new(None));
+        let captured_clone = captured.clone();
+        let mock = server
+            .mock("POST", path)
+            .with_status(200)
+            .with_header("content-type", "text/event-stream")
+            .with_body_from_request(move |req| {
+                *captured_clone.lock().unwrap() =
+                    Some(req.utf8_lossy_body().unwrap_or_default().into_owned());
+                sse_body.as_bytes().to_vec()
+            })
+            .create_async()
+            .await;
+        (mock, captured)
+    }
+
+    const MESSAGE_STOP_SSE: &str = "event: message_stop\ndata: {\"type\": \"message_stop\"}\n\n";
+
+    #[tokio::test]
+    async fn test_anthropic_provider_sends_top_level_system_field_when_present() {
+        let mut server = Server::new_async().await;
+        let url = server.url();
+        let (_m, captured) = capture_body_mock(&mut server, "/messages", MESSAGE_STOP_SSE).await;
+        let provider = AnthropicProvider::with_base_url("k".into(), "m".into(), url);
+        let mut stream = provider
+            .stream_messages(
+                &[Message::user("hi")],
+                &[],
+                Some("You are a test assistant."),
+            )
+            .await
+            .unwrap();
+        while stream.next().await.is_some() {}
+        let body = captured.lock().unwrap().clone().expect("request captured");
+        let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(parsed["system"], "You are a test assistant.");
+    }
+
+    #[tokio::test]
+    async fn test_anthropic_provider_omits_system_field_when_none() {
+        // Interactive path: AgentRunConfig::default().system == None must reach
+        // the wire as NO `system` field at all (not an empty string).
+        let mut server = Server::new_async().await;
+        let url = server.url();
+        let (_m, captured) = capture_body_mock(&mut server, "/messages", MESSAGE_STOP_SSE).await;
+        let provider = AnthropicProvider::with_base_url("k".into(), "m".into(), url);
+        let mut stream = provider
+            .stream_messages(&[Message::user("hi")], &[], None)
+            .await
+            .unwrap();
+        while stream.next().await.is_some() {}
+        let body = captured.lock().unwrap().clone().expect("request captured");
+        let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert!(
+            parsed.get("system").is_none(),
+            "no system field must be serialized when system=None, got: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_anthropic_provider_omits_system_field_when_empty_string() {
+        let mut server = Server::new_async().await;
+        let url = server.url();
+        let (_m, captured) = capture_body_mock(&mut server, "/messages", MESSAGE_STOP_SSE).await;
+        let provider = AnthropicProvider::with_base_url("k".into(), "m".into(), url);
+        let mut stream = provider
+            .stream_messages(&[Message::user("hi")], &[], Some(""))
+            .await
+            .unwrap();
+        while stream.next().await.is_some() {}
+        let body = captured.lock().unwrap().clone().expect("request captured");
+        let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert!(
+            parsed.get("system").is_none(),
+            "empty system string must not be serialized, got: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_openai_provider_prepends_system_message_when_present() {
+        let mut server = Server::new_async().await;
+        let url = server.url();
+        let (_m, captured) =
+            capture_body_mock(&mut server, "/chat/completions", "data: [DONE]\n\n").await;
+        let p = OpenAiCompatibleProvider::new(OpenAiSettings {
+            base_url: url,
+            api_key: "k".into(),
+            model: "m".into(),
+        });
+        let mut stream = p
+            .stream_messages(
+                &[Message::user("hi")],
+                &[],
+                Some("You are a test assistant."),
+            )
+            .await
+            .unwrap();
+        while stream.next().await.is_some() {}
+        let body = captured.lock().unwrap().clone().expect("request captured");
+        let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let messages = parsed["messages"].as_array().unwrap();
+        assert_eq!(messages[0]["role"], "system");
+        assert_eq!(messages[0]["content"], "You are a test assistant.");
+        assert_eq!(messages[1]["role"], "user");
+    }
+
+    #[tokio::test]
+    async fn test_openai_provider_omits_system_message_when_none() {
+        let mut server = Server::new_async().await;
+        let url = server.url();
+        let (_m, captured) =
+            capture_body_mock(&mut server, "/chat/completions", "data: [DONE]\n\n").await;
+        let p = OpenAiCompatibleProvider::new(OpenAiSettings {
+            base_url: url,
+            api_key: "k".into(),
+            model: "m".into(),
+        });
+        let mut stream = p
+            .stream_messages(&[Message::user("hi")], &[], None)
+            .await
+            .unwrap();
+        while stream.next().await.is_some() {}
+        let body = captured.lock().unwrap().clone().expect("request captured");
+        let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let messages = parsed["messages"].as_array().unwrap();
+        assert_eq!(
+            messages.len(),
+            1,
+            "no system message must be prepended when system=None, got: {body}"
+        );
+        assert_eq!(messages[0]["role"], "user");
+    }
+
+    // ─── Feature C: token usage (ResponseChunk::Usage) ────────────────────────
+
+    #[tokio::test]
+    async fn test_anthropic_provider_emits_usage_chunk_with_input_and_output_tokens() {
+        let mut server = Server::new_async().await;
+        let url = server.url();
+        let sse_body = concat!(
+            "event: message_start\n",
+            "data: {\"type\": \"message_start\", \"message\": {\"id\": \"m\", \"role\": \"assistant\", \"model\": \"x\", \"usage\": {\"input_tokens\": 42, \"output_tokens\": 0}}}\n\n",
+            "event: content_block_delta\n",
+            "data: {\"type\": \"content_block_delta\", \"index\":0, \"delta\": {\"type\": \"text_delta\", \"text\": \"hi\"}}\n\n",
+            "event: message_delta\n",
+            "data: {\"type\": \"message_delta\", \"delta\": {}, \"usage\": {\"output_tokens\": 7}}\n\n",
+            "event: message_stop\n",
+            "data: {\"type\": \"message_stop\"}\n\n",
+        );
+        let _m = server
+            .mock("POST", "/messages")
+            .with_status(200)
+            .with_header("content-type", "text/event-stream")
+            .with_body(sse_body)
+            .create_async()
+            .await;
+        let provider = AnthropicProvider::with_base_url("k".into(), "m".into(), url);
+        let mut stream = provider
+            .stream_messages(&[Message::user("hi")], &[], None)
+            .await
+            .unwrap();
+        let mut usage = None;
+        while let Some(chunk) = stream.next().await {
+            if let Ok(ResponseChunk::Usage {
+                input_tokens,
+                output_tokens,
+            }) = chunk
+            {
+                usage = Some((input_tokens, output_tokens));
+            }
+        }
+        assert_eq!(usage, Some((42, 7)));
+    }
+
+    #[tokio::test]
+    async fn test_anthropic_provider_emits_no_usage_when_absent_from_wire() {
+        // MAGI re-gate WARNING 2: a well-formed `message_stop` with no prior
+        // `usage` anywhere on the wire (no `message_start.message.usage`, no
+        // `message_delta.usage`) must NOT fabricate a `(0, 0)` Usage chunk — that
+        // contradicts REQ-H14 and diverges from `OaiState`/`finalize_truncated`,
+        // both of which gate emission on usage actually being observed.
+        let mut server = Server::new_async().await;
+        let url = server.url();
+        let _m = server
+            .mock("POST", "/messages")
+            .with_status(200)
+            .with_header("content-type", "text/event-stream")
+            .with_body(MESSAGE_STOP_SSE)
+            .create_async()
+            .await;
+        let provider = AnthropicProvider::with_base_url("k".into(), "m".into(), url);
+        let mut stream = provider
+            .stream_messages(&[Message::user("hi")], &[], None)
+            .await
+            .unwrap();
+        let mut saw_usage = false;
+        while let Some(chunk) = stream.next().await {
+            if let Ok(ResponseChunk::Usage { .. }) = chunk {
+                saw_usage = true;
+            }
+        }
+        assert!(
+            !saw_usage,
+            "no Usage chunk must be fabricated when the wire never reported usage"
+        );
+    }
+
+    // ─── Feature D: mid-stream `error` events + truncated-stream finalization ──
+
+    #[tokio::test]
+    async fn test_anthropic_provider_surfaces_mid_stream_error_event() {
+        // Gap 1 (MAGI re-gate): a mid-stream Anthropic `error` event (e.g. the
+        // backend going overloaded) must surface as an Err on the stream — before
+        // the fix it either failed to deserialize or fell through the `_ => {}`
+        // catch-all and was silently swallowed.
+        let mut server = Server::new_async().await;
+        let url = server.url();
+        let sse_body = concat!(
+            "event: message_start\n",
+            "data: {\"type\": \"message_start\", \"message\": {\"id\": \"m\", \"role\": \"assistant\", \"model\": \"x\"}}\n\n",
+            "event: content_block_delta\n",
+            "data: {\"type\": \"content_block_delta\", \"index\": 0, \"delta\": {\"type\": \"text_delta\", \"text\": \"partial\"}}\n\n",
+            "event: error\n",
+            "data: {\"type\": \"error\", \"error\": {\"type\": \"overloaded_error\", \"message\": \"Overloaded\"}}\n\n",
+        );
+        let _m = server
+            .mock("POST", "/messages")
+            .with_status(200)
+            .with_header("content-type", "text/event-stream")
+            .with_body(sse_body)
+            .create_async()
+            .await;
+        let provider = AnthropicProvider::with_base_url("k".into(), "m".into(), url);
+        let mut stream = provider
+            .stream_messages(&[Message::user("hi")], &[], None)
+            .await
+            .unwrap();
+
+        let mut saw_error = false;
+        while let Some(chunk) = stream.next().await {
+            if let Err(e) = chunk {
+                let msg = e.to_string();
+                assert!(
+                    msg.contains("overloaded_error") && msg.contains("Overloaded"),
+                    "error message must surface the Anthropic error type and message, got: {}",
+                    msg
+                );
+                saw_error = true;
+            }
+        }
+        assert!(
+            saw_error,
+            "a mid-stream Anthropic `error` event must surface as Err, not be swallowed"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_anthropic_provider_truncated_stream_flushes_partial_content_as_message_done() {
+        // Gap 2 (MAGI re-gate): the byte source can close mid-turn (dropped
+        // connection, proxy timeout) BEFORE a `message_stop` event ever arrives.
+        // Before the fix the Anthropic stream had no stream-end hook (unlike the
+        // OpenAI provider's `stream::unfold` `None` branch), so every
+        // already-streamed TextDelta's accumulated content silently vanished — no
+        // MessageDone was ever emitted, and the caller (`run_tool_loop`) only saw
+        // "Stream ended without MessageDone", discarding the partial turn.
+        let mut server = Server::new_async().await;
+        let url = server.url();
+        // No message_stop: the mock body ends right after the delta.
+        let sse_body = concat!(
+            "event: message_start\n",
+            "data: {\"type\": \"message_start\", \"message\": {\"id\": \"m\", \"role\": \"assistant\", \"model\": \"x\"}}\n\n",
+            "event: content_block_delta\n",
+            "data: {\"type\": \"content_block_delta\", \"index\": 0, \"delta\": {\"type\": \"text_delta\", \"text\": \"Partial answer\"}}\n\n",
+        );
+        let _m = server
+            .mock("POST", "/messages")
+            .with_status(200)
+            .with_header("content-type", "text/event-stream")
+            .with_body(sse_body)
+            .create_async()
+            .await;
+        let provider = AnthropicProvider::with_base_url("k".into(), "m".into(), url);
+        let mut stream = provider
+            .stream_messages(&[Message::user("hi")], &[], None)
+            .await
+            .unwrap();
+
+        let mut final_msg = None;
+        let mut saw_usage = false;
+        while let Some(chunk) = stream.next().await {
+            match chunk {
+                Ok(ResponseChunk::MessageDone(msg)) => final_msg = Some(msg),
+                Ok(ResponseChunk::Usage { .. }) => saw_usage = true,
+                _ => {}
+            }
+        }
+        let msg = final_msg.expect(
+            "a truncated stream (no message_stop) must still flush a MessageDone with the \
+             partial content instead of silently dropping it",
+        );
+        assert_eq!(
+            msg.content,
+            vec![Content::Text {
+                text: "Partial answer".to_string()
+            }]
+        );
+        assert!(
+            !saw_usage,
+            "no Usage chunk must be fabricated on a truncated stream that never reported usage"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_anthropic_provider_drops_content_events_after_message_stop() {
+        // MAGI re-gate WARNING 1: `AnthropicState` did not mirror `OaiState`'s
+        // post-finalize ghost-content guard (`if self.done { continue }`) — a
+        // misbehaving backend that sends more `content_block_delta` events AFTER
+        // `message_stop` must not leak that text into the assembled message, and
+        // must never trigger a second `MessageDone`.
+        let mut server = Server::new_async().await;
+        let url = server.url();
+        let sse_body = concat!(
+            "event: content_block_delta\n",
+            "data: {\"type\": \"content_block_delta\", \"index\":0, \"delta\": {\"type\": \"text_delta\", \"text\": \"Hello\"}}\n\n",
+            "event: message_stop\n",
+            "data: {\"type\": \"message_stop\"}\n\n",
+            "event: content_block_delta\n",
+            "data: {\"type\": \"content_block_delta\", \"index\":0, \"delta\": {\"type\": \"text_delta\", \"text\": \" ghost\"}}\n\n",
+        );
+        let _m = server
+            .mock("POST", "/messages")
+            .with_status(200)
+            .with_header("content-type", "text/event-stream")
+            .with_body(sse_body)
+            .create_async()
+            .await;
+        let provider = AnthropicProvider::with_base_url("k".into(), "m".into(), url);
+        let mut stream = provider
+            .stream_messages(&[Message::user("hi")], &[], None)
+            .await
+            .unwrap();
+
+        let mut done_count = 0;
+        let mut final_msg = None;
+        let mut saw_ghost_text = false;
+        while let Some(chunk) = stream.next().await {
+            match chunk {
+                Ok(ResponseChunk::MessageDone(msg)) => {
+                    done_count += 1;
+                    final_msg = Some(msg);
+                }
+                Ok(ResponseChunk::TextDelta(t)) if t.contains("ghost") => {
+                    saw_ghost_text = true;
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(done_count, 1, "MessageDone must be emitted exactly once");
+        assert!(
+            !saw_ghost_text,
+            "a content_block_delta arriving after message_stop must not leak a TextDelta"
+        );
+        let msg = final_msg.expect("a MessageDone must still be emitted for the valid turn");
+        assert_eq!(
+            msg.content,
+            vec![Content::Text {
+                text: "Hello".to_string()
+            }],
+            "the assembled message must not include post-message_stop ghost content"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_openai_provider_emits_usage_chunk_from_stream_options() {
+        let mut server = Server::new_async().await;
+        let url = server.url();
+        let sse = concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":3}}\n\n",
+            "data: [DONE]\n\n",
+        );
+        let _m = server
+            .mock("POST", "/chat/completions")
+            .with_status(200)
+            .with_header("content-type", "text/event-stream")
+            .with_body(sse)
+            .create_async()
+            .await;
+        let p = OpenAiCompatibleProvider::new(OpenAiSettings {
+            base_url: url,
+            api_key: "k".into(),
+            model: "m".into(),
+        });
+        let mut stream = p
+            .stream_messages(&[Message::user("hi")], &[], None)
+            .await
+            .unwrap();
+        let mut usage = None;
+        while let Some(chunk) = stream.next().await {
+            if let Ok(ResponseChunk::Usage {
+                input_tokens,
+                output_tokens,
+            }) = chunk
+            {
+                usage = Some((input_tokens, output_tokens));
+            }
+        }
+        assert_eq!(usage, Some((11, 3)));
+    }
+
+    #[tokio::test]
+    async fn test_openai_provider_emits_no_usage_when_backend_omits_it() {
+        // A backend that ignores stream_options.include_usage (or doesn't support
+        // it) must not cause a fabricated Usage chunk — none is emitted at all.
+        let mut server = Server::new_async().await;
+        let url = server.url();
+        let sse = concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n",
+        );
+        let _m = server
+            .mock("POST", "/chat/completions")
+            .with_status(200)
+            .with_header("content-type", "text/event-stream")
+            .with_body(sse)
+            .create_async()
+            .await;
+        let p = OpenAiCompatibleProvider::new(OpenAiSettings {
+            base_url: url,
+            api_key: "k".into(),
+            model: "m".into(),
+        });
+        let mut stream = p
+            .stream_messages(&[Message::user("hi")], &[], None)
+            .await
+            .unwrap();
+        let mut saw_usage = false;
+        while let Some(chunk) = stream.next().await {
+            if let Ok(ResponseChunk::Usage { .. }) = chunk {
+                saw_usage = true;
+            }
+        }
+        assert!(!saw_usage, "no Usage chunk must be fabricated when absent");
+    }
+
+    #[tokio::test]
+    async fn test_openai_provider_requests_stream_options_include_usage() {
+        let mut server = Server::new_async().await;
+        let url = server.url();
+        let (_m, captured) =
+            capture_body_mock(&mut server, "/chat/completions", "data: [DONE]\n\n").await;
+        let p = OpenAiCompatibleProvider::new(OpenAiSettings {
+            base_url: url,
+            api_key: "k".into(),
+            model: "m".into(),
+        });
+        let mut stream = p
+            .stream_messages(&[Message::user("hi")], &[], None)
+            .await
+            .unwrap();
+        while stream.next().await.is_some() {}
+        let body = captured.lock().unwrap().clone().expect("request captured");
+        let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(parsed["stream_options"]["include_usage"], true);
     }
 }

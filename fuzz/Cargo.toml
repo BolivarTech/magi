@@ -44,3 +44,28 @@ name = "fuzz_passphrase_input"
 path = "fuzz_targets/fuzz_passphrase_input.rs"
 test = false
 doc = false
+
+# Targets de headless (REQ-H35). Parser de entrada no confiable + sanitizador
+# de errores; entrada arbitraria ⇒ nunca panic/UB, siempre Result tipado.
+[[bin]]
+name = "fuzz_headless_input"
+path = "fuzz_targets/fuzz_headless_input.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_sanitize_error"
+path = "fuzz_targets/fuzz_sanitize_error.rs"
+test = false
+doc = false
+bench = false
+
+# Target de la matriz de política de tiers (REQ-H35 / MS2 Task 10). Bytes
+# arbitrarios ⇒ (tier, nombre de tool); invariante: nunca panic + fail-closed.
+[[bin]]
+name = "fuzz_policy"
+path = "fuzz_targets/fuzz_policy.rs"
+test = false
+doc = false
+bench = false

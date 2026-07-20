@@ -1,6 +1,6 @@
 [package]
 name = "magi-rs"
-version = "0.9.0"
+version = "0.10.0"
 edition = "2021"
 default-run = "magi-rs"
 authors = ["Julian Bolivar <jbolivarg@gmail.com>"]
@@ -58,6 +58,21 @@ region = "3.0.2"
 zxcvbn = "3.1.1"
 # Vault MS2 — REQ-V10: hidden passphrase/value prompt (no echo) cross-platform.
 rpassword = "7.5.4"
+# Headless MS2 T4 — REQ-H36: `CancellationToken` for cooperative run cancellation
+# (wall-clock `--timeout` fires it to drop the in-flight LLM stream and signal
+# tool subprocesses to die). Pure-Rust, no own unsafe; `sync` module needs no
+# feature flag. Pinned (minor), no default features.
+tokio-util = { version = "0.7", default-features = false }
+# PathGuard::canonicalize_robust — Windows verbatim (`\\?\C:\...`) and UNC
+# (`\\?\UNC\server\share\...`) canonical forms. A hand-rolled `strip_prefix`
+# only handled the local-disk verbatim shape and produced an invalid,
+# non-absolute path (`UNC\server\share\...`) for the UNC shape; `dunce` is a
+# tiny, dependency-free, no-`unsafe` crate purpose-built for exactly this
+# distinction (see its `is_safe_to_strip_unc`, which only strips
+# `Prefix::VerbatimDisk`, never `VerbatimUNC`). Already present (as a
+# dev-dependency for test fixtures); promoted here for production use, no new
+# transitive dependency introduced.
+dunce = "1.0.5"
 
 [dev-dependencies]
 # RoutingMockProvider for consult tests (no extra runtime deps; reqwest NOT pulled)
@@ -68,6 +83,9 @@ mockito = "1.4"
 tempfile = "3.10"
 tokio-test = "0.4"
 serial_test = "3.0"
+# dunce is a regular dependency now (see [dependencies]); test fixtures still
+# use it to canonicalize temp-dir roots without Windows verbatim `\\?\`
+# prefixes / macOS `/tmp`→`/private/tmp` symlinks (T1 fixtures).
 
 [features]
 ## Enable opt-in HNSW ANN index (CP2-A). Off by default; brute-force exact
@@ -77,7 +95,35 @@ ann = ["dep:instant-distance"]
 # Vault MS2 — REQ-V42 layer 2 (POSIX only): RLIMIT_CORE=0 suppresses core dumps.
 [target.'cfg(unix)'.dependencies]
 rlimit = "0.11.0"
+# Headless MS2 T4 — REQ-H36: kill a bash subprocess TREE on `--timeout`. The tool
+# spawns the shell in its own process group (`Command::process_group(0)`) and, on
+# cancel, `rustix::process::kill_process_group(pid, SIGKILL)` signals the whole
+# group. Safe wrapper over `kill(2)`, honoring crate-wide `forbid(unsafe_code)`;
+# `process` feature only. On Linux this unions with the `fs` feature declared in
+# the linux-only block below. Pinned.
+rustix = { version = "0.38", features = ["process"] }
 
 # Vault MS2 — REQ-V42 layer 2 (Linux only): PR_SET_DUMPABLE=0 (also blocks peer ptrace).
 [target.'cfg(target_os = "linux")'.dependencies]
 prctl = "1.0.0"
+# Headless MS1 T2 — REQ-H01/H41: atomic no-replace rename for the `.magi/` scaffold.
+# `renameat_with(RenameFlags::NOREPLACE)` → `renameat2(RENAME_NOREPLACE)`, a
+# portable safe wrapper (no own `unsafe`, honoring crate-wide `forbid(unsafe_code)`).
+# Linux-only: rustix gates `renameat_with` behind `cfg(linux_kernel)`; macOS/other
+# unix fall back to the portable `create_dir` mkdir-gate (also atomic no-replace).
+# Pinned; `fs` feature only.
+rustix = { version = "0.38", features = ["fs"] }
+
+# Headless MS1 T2 — REQ-H38: restrict `.magi/` ACL to the current user on Windows
+# (the POSIX 0700/0600 equivalent). `windows-acl` encapsulates the Win32 `unsafe`
+# inside a safe crate, so magi-rs keeps `forbid(unsafe_code)`; NO raw Win32.
+# Pinned; Windows-only target.
+[target.'cfg(windows)'.dependencies]
+# Headless MS2 T4 — REQ-H36: kill a bash subprocess TREE on `--timeout`. The tool
+# assigns the spawned shell to a Win32 Job Object created with
+# `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`; dropping the job handle terminates the
+# whole tree (grandchildren included), the dual of the POSIX process-group kill.
+# `win32job` encapsulates the Win32 `unsafe` in a safe crate, so magi-rs keeps
+# `forbid(unsafe_code)`; NO raw Win32, NO `windows`-crate calls of our own. Pinned.
+win32job = "2.0.3"
+windows-acl = "0.3"

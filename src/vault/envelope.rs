@@ -180,6 +180,25 @@ pub fn open_envelope(
         .map_err(map_crypto_err)
 }
 
+/// Read-only FEC-only check used by `magi vault diagnose` (REQ-H32): verifies
+/// that both `vault_meta` blobs (`salt_fec`, `wrapped_dek_fec`) FEC-decode
+/// **without ever attempting the AEAD unwrap** — no master passphrase is
+/// accepted or needed, so this can run on a DB nobody can currently unlock.
+///
+/// `pub(super)` (not re-exported from [`crate::vault`]): this is an internal
+/// building block for [`crate::vault::diagnose`], not part of the crate's
+/// public API surface.
+///
+/// # Errors
+/// [`VaultError::VaultMetaCorrupt`] if either blob fails to FEC-decode (the
+/// same failure [`open_envelope`] would report **before** it ever reaches the
+/// AEAD stage).
+pub(super) fn check_meta_fec(salt_fec: &[u8], wrapped_dek_fec: &[u8]) -> Result<(), VaultError> {
+    fec_decode(salt_fec)?;
+    fec_decode(wrapped_dek_fec)?;
+    Ok(())
+}
+
 /// Reads the FEC-encoded `salt` and `wrapped_dek` rows from `vault_meta`.
 ///
 /// # Errors
@@ -517,6 +536,27 @@ mod tests {
         single[super::LEN_PREFIX - 1] ^= 0x80;
         let err2 = open_envelope(&vault, M, &salt_fec, &single).expect_err("prefix bit-flip fails");
         assert!(matches!(err2, VaultError::VaultMetaCorrupt));
+    }
+
+    #[test]
+    fn test_check_meta_fec_succeeds_without_attempting_the_aead_unwrap() {
+        // A bogus master never enters this check at all — it only takes the two
+        // FEC blobs, so a passphrase-less caller (`vault diagnose`) can call it.
+        let vault = cryptovault::CryptoVault::default();
+        let (salt_fec, wrapped_fec, _dek) = bootstrap_envelope(&vault, M).expect("bootstrap");
+        super::check_meta_fec(&salt_fec, &wrapped_fec).expect("both blobs FEC-decode");
+    }
+
+    #[test]
+    fn test_check_meta_fec_reports_corrupt_on_an_uncorrectable_wrapped_blob() {
+        let vault = cryptovault::CryptoVault::default();
+        let (salt_fec, mut wrapped_fec, _dek) = bootstrap_envelope(&vault, M).expect("bootstrap");
+        for b in wrapped_fec.iter_mut() {
+            *b ^= 0xFF; // damage beyond the FEC's correction capacity
+        }
+        let err = super::check_meta_fec(&salt_fec, &wrapped_fec)
+            .expect_err("uncorrectable blob must fail");
+        assert!(matches!(err, VaultError::VaultMetaCorrupt));
     }
 
     #[test]

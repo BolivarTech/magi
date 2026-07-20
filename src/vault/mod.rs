@@ -27,6 +27,7 @@
 //! superficie de usuario (tabla `vault`, CLI) llega en MS2.
 
 mod cli;
+mod diagnose;
 mod envelope;
 mod error;
 mod master;
@@ -34,6 +35,9 @@ mod memguard;
 mod store;
 
 pub use cli::{run_vault_cmd, TtyIo, VaultCmd, VaultIo};
+pub use diagnose::{
+    diagnose, format_diagnose_report, DiagnoseReport, DiagnoseVerdict, TableCounts,
+};
 pub use envelope::{bootstrap_envelope, fuzz_open_entrypoint, open_envelope, rekey_envelope};
 pub use error::VaultError;
 pub use master::{

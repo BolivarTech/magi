@@ -46,7 +46,10 @@ use crate::memory::error::EmbeddingError;
 pub trait EmbeddingProvider: Send + Sync {
     /// Embeds `texts` that have already been prefixed by the caller.
     ///
-    /// Returns one vector per input text, in order.
+    /// Returns one vector per input text, in order. Implementations MUST uphold
+    /// this as an invariant: an `Ok` result is never a `Vec` shorter than `texts`
+    /// (in particular, `Ok` for a non-empty `texts` is never an empty `Vec`) —
+    /// any per-text failure must surface as `Err`, not as a missing/short vector.
     ///
     /// # Errors
     /// See [`EmbeddingError`] for the typed failure cases; never panics.

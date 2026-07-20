@@ -26,8 +26,10 @@ use futures::StreamExt;
 use sha2::{Digest, Sha256};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::sync::oneshot;
 use tokio::time::{timeout, Duration};
+use tokio_util::sync::CancellationToken;
 
 /// Process-monotonic counter for write-path turn-ID uniqueness (G2).
 ///
@@ -40,6 +42,184 @@ use tokio::time::{timeout, Duration};
 static TURN_SEQ: AtomicU64 = AtomicU64::new(0);
 
 const APPROVAL_TIMEOUT_SECS: u64 = 300; // 5 minutes
+
+/// Default per-query tool-call cap (interactive and headless-normal tiers).
+///
+/// Single source of truth for the "normal" cap used by both [`Agent::new`] and
+/// [`AgentRunConfig::default`], so the interactive path and an unconfigured run
+/// share the same limit.
+pub const DEFAULT_MAX_TOOL_CALLS: usize = 15;
+
+/// Error message returned when a single query exceeds its tool-call cap.
+///
+/// Exposed as a `pub const` so an out-of-loop caller (the headless runner) can
+/// distinguish "cap reached" (a non-error terminal state, `stop_reason =
+/// max_tool_calls`) from a genuine runtime error by comparing the returned
+/// error's `Display` against this exact string — a shared contract rather than
+/// a brittle inline literal match.
+///
+/// **Stability contract:** this exact string is the wire format between this
+/// module (producer, both `Err(anyhow::anyhow!(MAX_TOOL_CALLS_ERROR))` sites
+/// below) and `crate::headless_runner::run_query` (consumer, its
+/// `message == MAX_TOOL_CALLS_ERROR` comparison). Changing the string value is
+/// a breaking change to that contract. It is pinned end-to-end by
+/// `headless_runner::tests::test_runner_max_tool_calls_when_cap_exhausted`
+/// (cap exhausted ⇒ `StopReason::MaxToolCalls`, no error payload) and
+/// `test_runner_max_tool_calls_priority_over_denied`.
+pub const MAX_TOOL_CALLS_ERROR: &str = "Maximum tool call limit reached";
+
+/// Registered name of the multi-perspective MAGI tool, mirroring
+/// `ConsultTool::name()` (`src/tools/consult.rs`) — the single string the
+/// forced-consult injection and its at-most-once guard compare against
+/// (REQ-H22). Kept independent of the tool's own literal (no cross-crate-layer
+/// import from `agent` into `tools`' private constants), same precedent as
+/// `headless_runner::CONSULT_TOOL`.
+const CONSULT_TOOL_NAME: &str = "consult";
+
+/// Synthetic tool-use id of the runner-injected forced consult (REQ-H22).
+/// Unlike the pre-refactor post-loop pass, this now correlates a REAL
+/// assistant `ToolUse` / `ToolResult` message pair appended to `history` —
+/// the model's next provider turn genuinely sees it and can react.
+const FORCED_CONSULT_TOOL_USE_ID: &str = "forced-consult";
+
+/// `ToolResult` content recorded — WITHOUT going through the observer, so it
+/// never appears twice in the run's tool-call audit — when the model itself
+/// requests `consult` after the forced consult already ran for this query.
+/// REQ-H22 guarantees exactly one consult invocation per forced run: the
+/// model's ToolUse block still needs an answer (the API contract requires
+/// one), so it gets this message, but the tool is never re-executed.
+const CONSULT_ALREADY_FORCED_MESSAGE: &str =
+    "consult already ran once for this forced query; no further invocations";
+
+/// Observes an agent run from **outside** the tool loop, for the headless runner.
+///
+/// Absent ([`AgentRunConfig::observer`] is `None`) ⇒ the interactive tool loop
+/// runs byte-for-byte unchanged. When present it becomes **authoritative for
+/// every tool call in all tiers** (REQ-H06/H07/H09): it replaces the
+/// `requires_approval()` / `approval_tx` gate, so tools that opt out of
+/// interactive approval (`project_knowledge`, an auto-approve `consult`) are
+/// still gated by the tier — the interactive gate alone cannot express a tier
+/// because those tools never reach it.
+///
+/// It also captures per-call and final-turn data the [`StreamPiece`] stream does
+/// not carry (tool results with wall-clock timing, and the final-turn text-block
+/// count for the deterministic `stop_reason` of REQ-H23b).
+///
+/// All methods take `&self`; an implementor uses interior mutability. They are
+/// invoked from inside `Agent::query_streaming` on the run's task.
+pub trait RunObserver: Send + Sync {
+    /// Decides whether `tool_name` may run. Consulted for **every** tool call,
+    /// before execution, replacing the interactive approval decision.
+    ///
+    /// # Returns
+    /// `true` to run the tool; `false` to deny it (the call is recorded with
+    /// `ok = false` and the agent continues — a denial never aborts the loop).
+    fn authorize(&self, tool_name: &str) -> bool;
+
+    /// Records one resolved tool call (executed or tier-denied).
+    ///
+    /// Records only calls that reached the authorize/execute path. A model-issued
+    /// `consult` that is short-circuited by the forced-consult lock (REQ-H22, see
+    /// [`CONSULT_ALREADY_FORCED_MESSAGE`]) is answered directly and is
+    /// deliberately NOT recorded here — it neither authorized nor executed, so the
+    /// audit shows exactly the one forced `consult` that actually ran.
+    ///
+    /// # Parameters
+    /// - `id` — the tool-use id, correlating this call with the assistant
+    ///   `ToolUse` block that requested it (used to assemble the transcript).
+    /// - `name` — the tool name.
+    /// - `input` — the JSON input the tool was invoked with.
+    /// - `result` — the tool result (or the denial / not-found message).
+    /// - `ok` — `true` on successful execution; `false` on failure or denial.
+    /// - `ms` — wall-clock execution time in milliseconds (`0` for a denied
+    ///   call, which never executes).
+    fn on_tool_call(
+        &self,
+        id: &str,
+        name: &str,
+        input: &serde_json::Value,
+        result: &str,
+        ok: bool,
+        ms: u64,
+    );
+
+    /// Records the number of `TextDelta` blocks emitted in the agent's FINAL
+    /// turn (REQ-H23b: `response_empty` ⇔ this count is zero). Counts raw
+    /// stream blocks, not the emptiness of the concatenated text.
+    fn on_final_turn(&self, text_block_count: usize);
+
+    /// Records token usage from a `ResponseChunk::Usage`, whenever the backend
+    /// reports it (the built-in providers emit at most one usage chunk per
+    /// `stream_messages` call, but that is a provider convention, not a
+    /// guarantee this method enforces). Each call is **additive**: an implementor
+    /// accumulates across calls for a whole-run total, so a backend that happened
+    /// to report usage in several chunks simply sums correctly.
+    ///
+    /// Default empty body: an observer that does not care about usage (or a
+    /// future implementor written before this method existed) needs no change.
+    /// Not implementing this method never affects `authorize`/`on_tool_call`/
+    /// `on_final_turn` semantics.
+    fn on_usage(&self, _input_tokens: u64, _output_tokens: u64) {}
+}
+
+/// Per-run configuration for [`Agent::query_streaming`].
+///
+/// [`AgentRunConfig::default`] reproduces the interactive behavior exactly
+/// ([`DEFAULT_MAX_TOOL_CALLS`], repetitive-guard enabled, no observer), so the
+/// TUI and the existing tests pass `AgentRunConfig::default()` and keep the
+/// interactive path byte-for-byte unchanged. It has a hand-written [`Default`]
+/// impl rather than a derived one because a derived `usize` default is `0`,
+/// which would silently reduce the interactive cap to zero.
+///
+/// No field ever relaxes a **hard** barrier (`bash::is_command_allowed`, the
+/// metacharacter ban, `PathGuard::validate`) — those live inside each tool and
+/// are enforced regardless of this configuration.
+pub struct AgentRunConfig {
+    /// Maximum tool calls for this run. Interactive default:
+    /// [`DEFAULT_MAX_TOOL_CALLS`]; the headless runner passes the tier-resolved
+    /// cap (elevated under `--full-auto`).
+    pub max_tool_calls: usize,
+    /// When `true`, the 3-identical-call repetitive **soft** guard is disabled
+    /// (REQ-H08, `--full-auto` only). Never disables any hard barrier.
+    pub disable_repetitive_guard: bool,
+    /// Optional external observer/authorizer (headless runner). `None` ⇒ the
+    /// interactive `requires_approval()` / `approval_tx` path runs unchanged.
+    pub observer: Option<Arc<dyn RunObserver>>,
+    /// Cooperative run cancellation, passed to every `Tool::execute` (REQ-H36).
+    /// The headless runner fires this when a wall-clock `--timeout` elapses so an
+    /// in-flight `bash` subprocess tree is killed. [`AgentRunConfig::default`]
+    /// installs a fresh, never-cancelled token, so the interactive/TUI path is
+    /// unaffected.
+    pub cancel: CancellationToken,
+    /// Effective system-prompt text for this run (REQ-H12b), forwarded to every
+    /// `Provider::stream_messages` call. `None` ⇒ no system prompt is sent — the
+    /// interactive default — so the TUI path is unaffected. The headless runner
+    /// sets this from the resolved `SystemPolicy` (`magi_rs::headless::types`):
+    /// the operator default, or — only when explicitly enabled — the caller
+    /// override.
+    pub system: Option<String>,
+    /// When `true`, [`Agent::run_tool_loop`] injects exactly one **in-loop**
+    /// `consult` tool call before the first provider turn (REQ-H22 forced
+    /// consult: `magi query --consult` / envelope `consult:true`). `false` (the
+    /// default) never injects anything — the interactive/TUI path and an
+    /// unconfigured headless run are unaffected. See the rustdoc on
+    /// [`Agent::run_tool_loop`] for the full authorization/at-most-once
+    /// contract.
+    pub force_consult: bool,
+}
+
+impl Default for AgentRunConfig {
+    fn default() -> Self {
+        Self {
+            max_tool_calls: DEFAULT_MAX_TOOL_CALLS,
+            disable_repetitive_guard: false,
+            observer: None,
+            cancel: CancellationToken::new(),
+            system: None,
+            force_consult: false,
+        }
+    }
+}
 
 /// Approval request sent to the UI.
 pub struct ApprovalRequest {
@@ -84,12 +264,6 @@ struct MemorySubsystem {
     /// Scope tag for memory isolation; defaults to `"root"`. Multi-scope is
     /// activated in L3 (Agent Society — AS-REQ-09).
     scope: String,
-    /// System-prompt text for token-budget accounting; empty when none is set.
-    /// By design this Agent injects no `Role::System` message on any code path
-    /// (neither `selective` nor `load_all`), so this field stays `String::new()`.
-    /// The field and the assembler slot exist per REQ-13 for callers that do set
-    /// a system prompt in the future.
-    system: String,
     /// Number of selective turns processed since `set_memory_subsystem`. Used
     /// to determine when to fire the `distill_every_n_turns` trigger (Task 13b).
     turns_since_open: usize,
@@ -106,8 +280,6 @@ pub struct Agent {
     session_id: Option<String>,
     /// Optional channel to request approval for tools.
     approval_tx: Option<tokio::sync::mpsc::Sender<ApprovalRequest>>,
-    /// Safeguard for infinite loops (max tool calls per query)
-    pub max_tool_calls: usize,
     /// Optional tiered-memory subsystem for `selective` mode (Task 12).
     /// `None` ⇒ legacy `load_all` behavior; all 188 pre-existing tests rely on
     /// this path being byte-identical to the original implementation.
@@ -124,7 +296,6 @@ impl Agent {
             memory: None,
             session_id: None,
             approval_tx: None,
-            max_tool_calls: 15,
             memory_subsystem: None,
         }
     }
@@ -146,6 +317,22 @@ impl Agent {
     /// to clear) vs a real conversation (must be kept).
     pub fn provider_is_static(&self) -> bool {
         self.provider.is_static()
+    }
+
+    /// Borrows the current conversation history.
+    ///
+    /// Exposed read-only so an out-of-loop caller (the headless runner) can
+    /// project the finished run into a normalized transcript without the Agent
+    /// itself depending on the headless output types. Includes the user turn,
+    /// each assistant turn (with any `ToolUse` blocks), and the `User`-role
+    /// tool-result messages, in order.
+    ///
+    /// Consumed by the headless runner, whose production caller lands in MS2
+    /// Task 6; until then the plain (non-test) binary has no live path here, so
+    /// `dead_code` is allowed only for `not(test)`.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn history(&self) -> &[Message] {
+        &self.history
     }
 
     /// Loads history from the persistent memory store.
@@ -187,11 +374,13 @@ impl Agent {
 
         match val {
             serde_json::Value::Object(map) => {
-                let mut sorted_keys: Vec<_> = map.keys().collect();
-                sorted_keys.sort();
+                // Sort (key, value) pairs directly instead of sorting keys and then
+                // re-looking them up: this yields the same key order without ever
+                // needing a `map.get(k)` that could (in principle) miss.
+                let mut sorted_entries: Vec<_> = map.iter().collect();
+                sorted_entries.sort_by_key(|(k, _)| *k);
                 let mut parts = Vec::new();
-                for k in sorted_keys {
-                    let v = map.get(k).unwrap();
+                for (k, v) in sorted_entries {
                     parts.push(format!("{}:{}", k, Self::normalize_input(v, depth + 1)?));
                 }
                 Ok(format!("{{{}}}", parts.join(",")))
@@ -267,7 +456,6 @@ impl Agent {
             clock,
             cfg,
             scope: "root".into(),
-            system: String::new(),
             turns_since_open: 0,
         });
     }
@@ -329,6 +517,7 @@ impl Agent {
         &mut self,
         text: &str,
         chunk_tx: tokio::sync::mpsc::Sender<StreamPiece>,
+        config: AgentRunConfig,
     ) -> Result<String> {
         let user_msg = Message::user(text);
         self.history.push(user_msg.clone());
@@ -346,25 +535,27 @@ impl Agent {
         //
         // The load_all path below is untouched — byte-identical to the original
         // implementation — so all 188 pre-existing tests pass unchanged (REQ-28).
-        if self
-            .memory_subsystem
-            .as_ref()
-            .is_some_and(|s| s.cfg.mode == "selective")
-        {
-            // Snapshot Arc handles (ref-count increments only; O(1)) so the mutable
-            // loop body below can borrow `self` freely without conflicting field
-            // borrows on `memory_subsystem`.
-            let (store, embedder, clock, cfg, scope, system_str) = {
-                let s = self.memory_subsystem.as_ref().unwrap();
+        // Snapshot Arc handles (ref-count increments only; O(1)) so the mutable loop
+        // body below can borrow `self` freely without conflicting field borrows on
+        // `memory_subsystem`. Folding the "is selective mode" check into the same
+        // `Option` match that produces the snapshot avoids a separate `unwrap()` on
+        // a second, independent `as_ref()` call.
+        let selective_snapshot = self.memory_subsystem.as_ref().and_then(|s| {
+            (s.cfg.mode == "selective").then(|| {
                 (
                     s.store.clone(),
                     s.embedder.clone(),
                     s.clock.clone(),
                     s.cfg.clone(),
                     s.scope.clone(),
-                    s.system.clone(),
                 )
-            };
+            })
+        });
+
+        if let Some((store, embedder, clock, cfg, scope)) = selective_snapshot {
+            // `unwrap_or_default()` cannot panic: a `None` session_id yields an
+            // empty string (a persistence run without a bound session is a no-op
+            // downstream), so selective mode never depends on a bound session.
             let session_id_str = self.session_id.clone().unwrap_or_default();
 
             // Render the profile fresh from the store so promoted preferences
@@ -379,12 +570,25 @@ impl Agent {
             // D1 (REQ-29): on a transient assembly failure fall back to the full
             // history rather than aborting the turn.  Only `BudgetUnsatisfiable`
             // (a misconfigured budget, not a transient error) propagates as Err.
+            //
+            // The `system` argument is always `""` here: the real system-prompt
+            // injection point is `AgentRunConfig::system`, forwarded straight to
+            // `Provider::stream_messages` (REQ-H12b) for BOTH the selective and
+            // load_all paths from the single call site in `run_tool_loop`. This
+            // assembler's own `system` parameter remains part of `assemble_selective`'s
+            // stable signature (its budget-accounting/preamble role is exercised
+            // directly by `context.rs`'s tests) but is not fed from `Agent` state —
+            // the former `MemorySubsystem.system` field was always `""` (dead: no
+            // setter ever populated it) and has been removed rather than wired to
+            // `config.system`, which would have sent the same system text to the
+            // provider twice (once via the API's dedicated system channel, once
+            // folded into this preamble as ordinary message text).
             let (working_messages, assembly_notices) = match assemble_selective(
                 &*store,
                 &*embedder,
                 &*clock,
                 &cfg,
-                &system_str,
+                "",
                 &live_profile,
                 &user_msg,
                 &scope,
@@ -431,7 +635,9 @@ impl Agent {
             // Run the shared tool loop. Returns (full_text, final_text):
             // - full_text: sanitized delta-accumulated text for write_turn_to_memory.
             // - final_text: text from MessageDone content, returned to the caller.
-            let (full_text, final_text) = self.run_tool_loop(working_messages, &chunk_tx).await?;
+            let (full_text, final_text) = self
+                .run_tool_loop(working_messages, &chunk_tx, &config, text)
+                .await?;
 
             // ── Selective-specific terminal work (after the tool loop) ─────────
             // Persist the final synthesizing assistant turn to the vector store
@@ -465,11 +671,19 @@ impl Agent {
 
             // Increment turn counter and fire distill pass when cadence is reached
             // (Task 13b / REQ-17). Errors are non-fatal (CP2-Z).
-            let should_distill = {
-                let sub = self.memory_subsystem.as_mut().unwrap();
+            //
+            // `memory_subsystem` is guaranteed `Some` here — `selective_snapshot`
+            // above only produced `Some(..)` (entering this `if let` block at all)
+            // when `self.memory_subsystem` was `Some`, and nothing in between
+            // clears it — but the `None` arm still returns a safe, no-op default
+            // instead of unwrapping, so this can never panic even if that
+            // invariant is ever violated by a future edit.
+            let should_distill = if let Some(sub) = self.memory_subsystem.as_mut() {
                 sub.turns_since_open = sub.turns_since_open.saturating_add(1);
                 let n = sub.cfg.distill_every_n_turns;
                 sub.cfg.distill_enabled && n > 0 && sub.turns_since_open.is_multiple_of(n)
+            } else {
+                false
             };
             if should_distill {
                 let judge = LlmDistillJudge::new(self.provider.clone());
@@ -497,8 +711,147 @@ impl Agent {
         // user message). `run_tool_loop` extends both `working` and `self.history`
         // in lock-step, so the provider sees the same growing context as before.
         let working = self.history.clone();
-        let (_full_text, final_text) = self.run_tool_loop(working, &chunk_tx).await?;
+        let (_full_text, final_text) = self
+            .run_tool_loop(working, &chunk_tx, &config, text)
+            .await?;
         Ok(final_text)
+    }
+
+    /// Authorizes, executes, and records ONE tool call, returning the
+    /// `Content::ToolResult` to fold into the requesting turn's results.
+    ///
+    /// Shared by the model-driven `ToolUse` dispatch inside [`Self::run_tool_loop`]
+    /// and its pre-loop forced-consult injection (REQ-H22), so both sites run
+    /// through IDENTICAL approval/execution/observer-recording logic — a forced
+    /// consult is authorized and executed exactly like a model-requested one.
+    ///
+    /// # Authorization
+    /// A headless observer ([`AgentRunConfig::observer`]), when present, is
+    /// AUTHORITATIVE for every tool (REQ-H06/H07/H09) — the only mechanism that
+    /// can gate a tool opting out of interactive approval (`project_knowledge`,
+    /// an auto-approve `consult`), which never reaches `approval_tx`. Without an
+    /// observer the original interactive `approval_tx` / `requires_approval()`
+    /// gate runs unchanged.
+    ///
+    /// # Parameters
+    /// - `id` — the tool-use id correlating this call with its `ToolResult`.
+    /// - `name` — the tool name to look up in `self.tools`.
+    /// - `input` — the JSON input to execute the tool with.
+    /// - `config` — the run configuration (observer, cancellation, approval).
+    /// - `chunk_tx` — streaming sender, used only to forward an auto-approved
+    ///   tool's [`Tool::approval_notice`].
+    ///
+    /// # Returns
+    /// `Content::ToolResult` — a denial (`is_error = true`) when not approved,
+    /// otherwise the tool's own result (`is_error` reflecting `Tool::execute`).
+    /// A name with no matching registered tool resolves to a "not found" error
+    /// result rather than panicking.
+    async fn authorize_and_execute_tool(
+        &mut self,
+        id: &str,
+        name: &str,
+        input: &serde_json::Value,
+        config: &AgentRunConfig,
+        chunk_tx: &tokio::sync::mpsc::Sender<StreamPiece>,
+    ) -> Content {
+        let approved = if let Some(observer) = config.observer.as_deref() {
+            observer.authorize(name)
+        } else {
+            // Per-tool approval policy: look up the tool's
+            // `requires_approval()` flag before deciding whether to
+            // prompt.  Safe tools (false) are auto-approved without
+            // emitting any ApprovalRequest — this eliminates one prompt
+            // per stored memory fact when the model issues multiple
+            // project_knowledge / view / ls / grep calls in sequence.
+            // Dangerous tools (bash / edit / consult) keep the default
+            // (true) and go through the existing gate below.  Unknown
+            // tool names default to true (safe-by-default); they fail
+            // as "tool not found" on execute.
+            let needs_approval = self
+                .tools
+                .iter()
+                .find(|t| t.name() == name)
+                .is_none_or(|t| t.requires_approval());
+
+            if needs_approval {
+                if let Some(ref tx) = self.approval_tx {
+                    let (oneshot_tx, oneshot_rx) = oneshot::channel();
+                    let _ = tx
+                        .send(ApprovalRequest {
+                            tool_name: name.to_string(),
+                            input: input.clone(),
+                            tx: oneshot_tx,
+                        })
+                        .await;
+                    match timeout(Duration::from_secs(APPROVAL_TIMEOUT_SECS), oneshot_rx).await {
+                        Ok(Ok(res)) => res,
+                        _ => false,
+                    }
+                } else {
+                    // SECURITY: no approval channel is wired (headless
+                    // / test mode, `approval_tx == None`) — there is no
+                    // UI to ask, so the call proceeds even for a tool
+                    // that requires approval. Pre-existing behavior: the
+                    // interactive TUI ALWAYS sets `approval_tx` (see
+                    // `run_tui_ext`), so bash / edit / consult are
+                    // genuinely gated in production; only non-interactive
+                    // callers reach this auto path.
+                    true
+                }
+            } else {
+                // Auto-approve: tool opted out of the gate.
+                // Emit an announcement notice if the tool provides one,
+                // so the user knows a potentially slow operation starts.
+                if let Some(tool) = self.tools.iter().find(|t| t.name() == name) {
+                    if let Some(notice) = tool.approval_notice() {
+                        // Best-effort: a failed send (TUI gone) must not
+                        // abort the turn.
+                        let _ = chunk_tx.send(StreamPiece::Notice(notice)).await;
+                    }
+                }
+                true
+            }
+        };
+
+        if !approved {
+            // A tier denial gets a clear audit message; the interactive
+            // path keeps its original "denied or timed out" wording.
+            let denial_msg = if config.observer.is_some() {
+                format!("Tool '{name}' denied: not authorized in the current authorization tier")
+            } else {
+                "Execution denied or timed out.".to_string()
+            };
+            if let Some(observer) = config.observer.as_deref() {
+                observer.on_tool_call(id, name, input, &denial_msg, false, 0);
+            }
+            return Content::ToolResult {
+                tool_use_id: id.to_string(),
+                content: denial_msg,
+                is_error: true,
+            };
+        }
+
+        // Execute, measuring wall-clock time so the observer records a
+        // faithful per-call duration.
+        let started = Instant::now();
+        let (result_content, is_error) =
+            if let Some(tool) = self.tools.iter().find(|t| t.name() == name) {
+                match tool.execute(input.clone(), &config.cancel).await {
+                    Ok(val) => (val.to_string(), false),
+                    Err(e) => (e.to_string(), true),
+                }
+            } else {
+                (format!("Tool '{}' not found", name), true)
+            };
+        let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        if let Some(observer) = config.observer.as_deref() {
+            observer.on_tool_call(id, name, input, &result_content, !is_error, elapsed_ms);
+        }
+        Content::ToolResult {
+            tool_use_id: id.to_string(),
+            content: result_content,
+            is_error,
+        }
     }
 
     /// Inner tool-loop shared by the `selective` and `load_all` execution paths.
@@ -514,6 +867,9 @@ impl Agent {
     ///   appended. `self.history` is updated in parallel so `load_history` and the
     ///   message store stay consistent across both paths.
     /// - `chunk_tx` — streaming sender for UI pieces (shared reference).
+    /// - `prompt` — the original user query text for this turn. Used ONLY by the
+    ///   [`AgentRunConfig::force_consult`] injection (REQ-H22) to build the
+    ///   forced consult's `{"query": prompt}` input; ignored otherwise.
     ///
     /// # Returns
     /// A tuple `(full_text, final_text)` where:
@@ -527,24 +883,122 @@ impl Agent {
     /// `sanitize_text` on every delta, `MessageDone`-missing error, TUI-closed
     /// error, and `self.history` + `memory.add_message` persistence order are all
     /// identical to the original per-path loops.
+    ///
+    /// # Forced consult (REQ-H22)
+    /// When `config.force_consult` is `true`, BEFORE the first provider call this
+    /// method injects exactly one synthetic `consult` tool call — a real
+    /// `Assistant` `ToolUse` message immediately followed by a `User`
+    /// `ToolResult` message, appended to both `working` and `self.history`
+    /// exactly like a model-requested call. This means: it consumes one
+    /// `max_tool_calls` slot, it is authorized through the same
+    /// [`RunObserver::authorize`] tier gate (so `default` denies it, `ok =
+    /// false`, never elevated), it is executed via the SAME registered
+    /// `consult` tool a proactive call would use (so authorization/execution/
+    /// recording are identical), and — because it is appended to `working`
+    /// before the loop's first `stream_messages` call — the model's very first
+    /// turn already sees the result and can react to it. If the tool is not
+    /// registered on this agent, the call is recorded as a "not found" failure
+    /// instead of panicking.
+    ///
+    /// Once injected (successfully or not), `forced_consult_done` locks out any
+    /// further `consult` request for the rest of THIS run: if the model also
+    /// requests `consult` afterward, that `ToolUse` is answered with
+    /// [`CONSULT_ALREADY_FORCED_MESSAGE`] and neither authorized nor executed
+    /// again — recorded only in the conversation, NOT re-added to the observer's
+    /// audit trail (so `RunOutcome.tool_calls` still shows exactly one `consult`
+    /// entry). This is REQ-H22's "no se re-dispara aunque el agente quisiera".
+    ///
+    /// The injection deliberately does **not** seed `last_normalized_tool`/
+    /// `repeat_count` (the 3x-identical-call guard below): it is a runner
+    /// injection, not a model-issued call, so it must not count toward — or
+    /// shift the threshold for — the model's own repetition tracking. A
+    /// model-issued `consult` that happens to match the forced call's input
+    /// is tracked exactly like any other first occurrence.
     async fn run_tool_loop(
         &mut self,
         mut working: Vec<Message>,
         chunk_tx: &tokio::sync::mpsc::Sender<StreamPiece>,
+        config: &AgentRunConfig,
+        prompt: &str,
     ) -> Result<(String, String)> {
         let mut tool_call_count = 0;
         let mut last_normalized_tool: Option<(String, String)> = None;
         let mut repeat_count = 0;
+        // REQ-H22: locks out any further `consult` request once the forced
+        // pre-loop injection below has run (success, denial, or "not found").
+        // Defensive/redundant by construction: the injection block runs iff
+        // `config.force_consult`, and sets this to `true` unconditionally, so
+        // when `force_consult` is set this is always `true` by the time the loop
+        // reads it. It is kept explicit (rather than reusing `config.force_consult`
+        // alone) so a future reader sees the "already fired" intent directly.
+        let mut forced_consult_done = false;
+
+        if config.force_consult {
+            let input = serde_json::json!({ "query": prompt });
+            tool_call_count += 1;
+            if tool_call_count > config.max_tool_calls {
+                // See `MAX_TOOL_CALLS_ERROR`'s rustdoc: this exact string is a
+                // stability contract with `headless_runner::run_query`.
+                return Err(anyhow::anyhow!(MAX_TOOL_CALLS_ERROR));
+            }
+            // Deliberately NOT seeding `last_normalized_tool` here: this is a
+            // runner injection, not a model-issued call, so it must not count
+            // toward the model's own 3x-identical repetitive-call guard below
+            // (REQ-H22). Seeding it would let a genuinely distinct model call
+            // be miscounted as a repeat of this forced one.
+            let result_content = self
+                .authorize_and_execute_tool(
+                    FORCED_CONSULT_TOOL_USE_ID,
+                    CONSULT_TOOL_NAME,
+                    &input,
+                    config,
+                    chunk_tx,
+                )
+                .await;
+
+            let tool_use_msg = Message {
+                role: Role::Assistant,
+                content: vec![Content::ToolUse {
+                    id: FORCED_CONSULT_TOOL_USE_ID.to_string(),
+                    name: CONSULT_TOOL_NAME.to_string(),
+                    input: input.clone(),
+                }],
+            };
+            self.history.push(tool_use_msg.clone());
+            working.push(tool_use_msg.clone());
+            if let (Some(memory), Some(sid)) = (&self.memory, &self.session_id) {
+                memory.add_message(sid, &tool_use_msg).await?;
+            }
+
+            let tool_res_msg = Message {
+                role: Role::User,
+                content: vec![result_content],
+            };
+            self.history.push(tool_res_msg.clone());
+            working.push(tool_res_msg.clone());
+            if let (Some(memory), Some(sid)) = (&self.memory, &self.session_id) {
+                memory.add_message(sid, &tool_res_msg).await?;
+            }
+
+            forced_consult_done = true;
+        }
 
         loop {
-            let mut stream = self.provider.stream_messages(&working, &self.tools).await?;
+            let mut stream = self
+                .provider
+                .stream_messages(&working, &self.tools, config.system.as_deref())
+                .await?;
             let mut full_text = String::new();
+            // REQ-H23b: count TextDelta blocks in THIS turn (reset each iteration);
+            // the terminal turn's count is the run's `final_turn_text_blocks`.
+            let mut turn_text_blocks = 0usize;
             let mut last_message: Option<Message> = None;
 
             while let Some(chunk_result) = stream.next().await {
                 match chunk_result? {
                     ResponseChunk::TextDelta(delta) => {
                         let sanitized = Self::sanitize_text(&delta);
+                        turn_text_blocks += 1;
                         full_text.push_str(&sanitized);
                         if chunk_tx
                             .send(StreamPiece::Content(sanitized))
@@ -569,7 +1023,18 @@ impl Agent {
                     ResponseChunk::MessageDone(msg) => {
                         last_message = Some(msg);
                     }
-                    _ => {}
+                    ResponseChunk::Usage {
+                        input_tokens,
+                        output_tokens,
+                    } => {
+                        // Headless-only signal: no observer ⇒ no-op (default empty
+                        // body), so the interactive path is unaffected. Forwarded
+                        // per turn; the observer accumulates the run total.
+                        if let Some(observer) = config.observer.as_deref() {
+                            observer.on_usage(input_tokens, output_tokens);
+                        }
+                    }
+                    ResponseChunk::ToolUseInputDelta { .. } => {}
                 }
             }
 
@@ -590,15 +1055,20 @@ impl Agent {
                 if let Content::ToolUse { id, name, input } = content {
                     requested_tool = true;
                     tool_call_count += 1;
-                    if tool_call_count > self.max_tool_calls {
-                        return Err(anyhow::anyhow!("Maximum tool call limit reached"));
+                    if tool_call_count > config.max_tool_calls {
+                        // See `MAX_TOOL_CALLS_ERROR`'s rustdoc: this exact
+                        // string is a stability contract with
+                        // `headless_runner::run_query`.
+                        return Err(anyhow::anyhow!(MAX_TOOL_CALLS_ERROR));
                     }
 
                     let normalized_input = Self::normalize_input(input, 0)?;
                     if let Some((ref last_name, ref last_norm_input)) = last_normalized_tool {
                         if last_name == name && last_norm_input == &normalized_input {
                             repeat_count += 1;
-                            if repeat_count >= 3 {
+                            // REQ-H08: `--full-auto` silences this SOFT guard (only).
+                            // No hard barrier is affected.
+                            if repeat_count >= 3 && !config.disable_repetitive_guard {
                                 return Err(anyhow::anyhow!("Repetitive tool call detected"));
                             }
                         } else {
@@ -607,92 +1077,30 @@ impl Agent {
                     }
                     last_normalized_tool = Some((name.clone(), normalized_input));
 
-                    // Per-tool approval policy: look up the tool's `requires_approval()`
-                    // flag before deciding whether to prompt.  Safe tools
-                    // (requires_approval() = false) are auto-approved without emitting
-                    // any ApprovalRequest — this eliminates one prompt per stored memory
-                    // fact when the model issues multiple project_knowledge / view / ls /
-                    // grep calls in sequence.  Dangerous tools (bash / edit / consult)
-                    // keep the default (true) and go through the existing gate below.
-                    // Unknown tool names (not in the registry) default to true
-                    // (safe-by-default); they will fail as "tool not found" on execute.
-                    let needs_approval = self
-                        .tools
-                        .iter()
-                        .find(|t| t.name() == name)
-                        .is_none_or(|t| t.requires_approval());
-
-                    let approved = if needs_approval {
-                        if let Some(ref tx) = self.approval_tx {
-                            let (oneshot_tx, oneshot_rx) = oneshot::channel();
-                            let _ = tx
-                                .send(ApprovalRequest {
-                                    tool_name: name.clone(),
-                                    input: input.clone(),
-                                    tx: oneshot_tx,
-                                })
-                                .await;
-                            match timeout(Duration::from_secs(APPROVAL_TIMEOUT_SECS), oneshot_rx)
-                                .await
-                            {
-                                Ok(Ok(res)) => res,
-                                _ => false,
-                            }
-                        } else {
-                            // SECURITY: no approval channel is wired (headless / test
-                            // mode, `approval_tx == None`) — there is no UI to ask, so the
-                            // call proceeds even for a tool that requires approval. This is
-                            // pre-existing behavior: the interactive TUI ALWAYS sets
-                            // `approval_tx` (see `run_tui_ext`), so bash / edit / consult are
-                            // genuinely gated in production; only non-interactive callers
-                            // (already running tools unattended) reach this auto path.
-                            true
-                        }
-                    } else {
-                        // Auto-approve: tool opted out of the gate.
-                        // Emit an announcement notice if the tool provides one, so
-                        // the user knows a potentially slow operation is starting.
-                        if let Some(tool) = self.tools.iter().find(|t| t.name() == name) {
-                            if let Some(notice) = tool.approval_notice() {
-                                // Best-effort: a failed send (TUI gone) must not abort the
-                                // turn, so the send result is intentionally ignored.
-                                let _ = chunk_tx.send(StreamPiece::Notice(notice)).await;
-                            }
-                        }
-                        true
-                    };
-
-                    if !approved {
-                        tool_results.push(Content::ToolResult {
-                            tool_use_id: id.clone(),
-                            content: "Execution denied or timed out.".to_string(),
-                            is_error: true,
-                        });
-                        continue;
-                    }
-
-                    let tool_result =
-                        if let Some(tool) = self.tools.iter().find(|t| t.name() == name) {
-                            match tool.execute(input.clone()).await {
-                                Ok(val) => Content::ToolResult {
-                                    tool_use_id: id.clone(),
-                                    content: val.to_string(),
-                                    is_error: false,
-                                },
-                                Err(e) => Content::ToolResult {
-                                    tool_use_id: id.clone(),
-                                    content: e.to_string(),
-                                    is_error: true,
-                                },
-                            }
-                        } else {
+                    // REQ-H22: once the forced consult has run (successfully or
+                    // not), any further `consult` request for the rest of THIS
+                    // run — model-issued or not — is answered but never
+                    // re-authorized/re-executed/re-recorded (see the
+                    // `# Forced consult` rustdoc on this method). Such a blocked
+                    // request still consumed one `max_tool_calls` slot (counted
+                    // at the top of this iteration) and its ToolUse/ToolResult
+                    // stay in the conversation history, but it is deliberately
+                    // absent from the observer audit trail (`on_tool_call` is not
+                    // called), so `RunOutcome.tool_calls` shows exactly the one
+                    // forced consult that actually ran.
+                    let result_content =
+                        if config.force_consult && forced_consult_done && name == CONSULT_TOOL_NAME
+                        {
                             Content::ToolResult {
                                 tool_use_id: id.clone(),
-                                content: format!("Tool '{}' not found", name),
+                                content: CONSULT_ALREADY_FORCED_MESSAGE.to_string(),
                                 is_error: true,
                             }
+                        } else {
+                            self.authorize_and_execute_tool(id, name, input, config, chunk_tx)
+                                .await
                         };
-                    tool_results.push(tool_result);
+                    tool_results.push(result_content);
                 }
             }
 
@@ -713,6 +1121,11 @@ impl Agent {
                     memory.add_message(sid, &tool_res_msg).await?;
                 }
             } else {
+                // Terminal (no-tool) turn: report its TextDelta block count for
+                // the deterministic REQ-H23b `response_empty` signal.
+                if let Some(observer) = config.observer.as_deref() {
+                    observer.on_final_turn(turn_text_blocks);
+                }
                 // Extract final text from MessageDone content — matches the
                 // pre-refactor return path used by both the selective and load_all
                 // branches (distinct from `full_text` which is delta-accumulated).
@@ -809,16 +1222,22 @@ async fn write_turn_to_memory(
 
     // Best-effort embed — on failure store an empty vector marked for lazy re-embed
     // (REQ-29: write failures must never abort the user's turn).
+    //
+    // `embed` is called with a single-element input slice, so per its contract
+    // (see `EmbeddingProvider::embed` rustdoc) an `Ok` result has exactly one
+    // vector. Rather than indexing `v[0]` (panics on an out-of-contract empty
+    // `Ok`) and separately `unwrap()`-ing `v.into_iter().next()`, consume the
+    // iterator once and match on the `Option` it yields — the `None` arm covers
+    // both an empty `Ok` and an `Err` with the same safe fallback.
     let (embedding, model_id, dim) = match embedder.embed(&[prefixed]).await {
-        Ok(v) if !v.is_empty() => {
-            let d = v[0].len();
-            (
-                v.into_iter().next().unwrap(),
-                embedder.model_id().to_string(),
-                d,
-            )
-        }
-        _ => (Vec::new(), String::new(), 0),
+        Ok(v) => match v.into_iter().next() {
+            Some(first) => {
+                let d = first.len();
+                (first, embedder.model_id().to_string(), d)
+            }
+            None => (Vec::new(), String::new(), 0),
+        },
+        Err(_) => (Vec::new(), String::new(), 0),
     };
 
     // G2 (live write path): include a monotonic counter so two calls with the
@@ -894,6 +1313,7 @@ mod tests {
             &self,
             _messages: &[Message],
             _tools: &[Box<dyn Tool>],
+            _system: Option<&str>,
         ) -> Result<BoxStream<'static, Result<ResponseChunk>>> {
             let chunks = vec![
                 Ok(ResponseChunk::TextDelta("Summary content.".to_string())),
@@ -907,6 +1327,7 @@ mod tests {
             &self,
             _messages: &[Message],
             _tools: &[Box<dyn Tool>],
+            _system: Option<&str>,
         ) -> Result<Message> {
             Ok(Message::assistant("Summary content."))
         }
@@ -994,6 +1415,7 @@ mod tests {
                 &self,
                 _messages: &[Message],
                 _tools: &[Box<dyn Tool>],
+                _system: Option<&str>,
             ) -> Result<BoxStream<'static, Result<ResponseChunk>>> {
                 let chunks = vec![
                     Ok(ResponseChunk::ReasoningDelta("thinking".to_string())),
@@ -1018,7 +1440,10 @@ mod tests {
             received
         });
 
-        let final_text = agent.query_streaming("Hi", chunk_tx).await.unwrap();
+        let final_text = agent
+            .query_streaming("Hi", chunk_tx, AgentRunConfig::default())
+            .await
+            .unwrap();
         let received = collector.await.unwrap();
 
         // Reasoning is forwarded as a distinct piece (for live display) and is NOT
@@ -1045,6 +1470,7 @@ mod tests {
                 &self,
                 _messages: &[Message],
                 _tools: &[Box<dyn Tool>],
+                _system: Option<&str>,
             ) -> Result<BoxStream<'static, Result<ResponseChunk>>> {
                 let text = self.0.to_string();
                 Ok(Box::pin(stream::iter(vec![Ok(
@@ -1056,7 +1482,10 @@ mod tests {
         let mut agent = Agent::new(Arc::new(FixedProvider("from-A")));
         agent.set_provider(Arc::new(FixedProvider("from-B")));
         let (tx, _rx) = tokio::sync::mpsc::channel::<StreamPiece>(8);
-        let out = agent.query_streaming("hi", tx).await.unwrap();
+        let out = agent
+            .query_streaming("hi", tx, AgentRunConfig::default())
+            .await
+            .unwrap();
         assert_eq!(out, "from-B", "set_provider must swap the active provider");
     }
 
@@ -1067,6 +1496,173 @@ mod tests {
         assert!(static_agent.provider_is_static());
         let real_agent = Agent::new(Arc::new(MockProvider));
         assert!(!real_agent.provider_is_static());
+    }
+
+    // ── Feature E: AgentRunConfig::system reaches the Provider (REQ-H12b) ──────
+
+    /// Provider that records every `system` argument it received across calls.
+    struct SystemCapturingProvider {
+        seen: Arc<std::sync::Mutex<Vec<Option<String>>>>,
+    }
+
+    #[async_trait]
+    impl Provider for SystemCapturingProvider {
+        async fn stream_messages(
+            &self,
+            _messages: &[Message],
+            _tools: &[Box<dyn Tool>],
+            system: Option<&str>,
+        ) -> Result<BoxStream<'static, Result<ResponseChunk>>> {
+            self.seen.lock().unwrap().push(system.map(str::to_string));
+            Ok(Box::pin(stream::iter(vec![Ok(
+                ResponseChunk::MessageDone(Message::assistant("ok")),
+            )])))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_query_streaming_forwards_configured_system_to_provider() {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut agent = Agent::new(Arc::new(SystemCapturingProvider { seen: seen.clone() }));
+        let (tx, _rx) = tokio::sync::mpsc::channel::<StreamPiece>(8);
+        let config = AgentRunConfig {
+            system: Some("You are a headless test assistant.".to_string()),
+            ..AgentRunConfig::default()
+        };
+        agent.query_streaming("hi", tx, config).await.unwrap();
+        assert_eq!(
+            seen.lock().unwrap().as_slice(),
+            &[Some("You are a headless test assistant.".to_string())]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_query_streaming_default_config_sends_no_system() {
+        // Interactive default: AgentRunConfig::default().system == None must
+        // reach the provider as None — the TUI path stays byte-for-byte
+        // unaffected by the headless system-prompt channel.
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut agent = Agent::new(Arc::new(SystemCapturingProvider { seen: seen.clone() }));
+        let (tx, _rx) = tokio::sync::mpsc::channel::<StreamPiece>(8);
+        agent
+            .query_streaming("hi", tx, AgentRunConfig::default())
+            .await
+            .unwrap();
+        assert_eq!(seen.lock().unwrap().as_slice(), &[None]);
+    }
+
+    // ── Feature C: usage accumulation via RunObserver::on_usage ────────────────
+
+    /// Provider that replays a fixed script of turns (tool-call, then terminal
+    /// text), emitting a `ResponseChunk::Usage` on every turn — used to exercise
+    /// per-turn `RunObserver::on_usage` accumulation across ≥2 provider calls.
+    struct UsageScriptedProvider {
+        /// `(input_tokens, output_tokens)` per call, consumed in order.
+        turns: std::sync::Mutex<std::collections::VecDeque<(u64, u64)>>,
+    }
+
+    #[async_trait]
+    impl Provider for UsageScriptedProvider {
+        async fn stream_messages(
+            &self,
+            _messages: &[Message],
+            _tools: &[Box<dyn Tool>],
+            _system: Option<&str>,
+        ) -> Result<BoxStream<'static, Result<ResponseChunk>>> {
+            let (input_tokens, output_tokens) =
+                self.turns.lock().unwrap().pop_front().unwrap_or((0, 0));
+            let is_last = self.turns.lock().unwrap().is_empty();
+            let mut chunks = vec![Ok(ResponseChunk::Usage {
+                input_tokens,
+                output_tokens,
+            })];
+            if is_last {
+                // Terminal turn: no ToolUse ⇒ run_tool_loop returns.
+                chunks.push(Ok(ResponseChunk::MessageDone(Message::assistant("done"))));
+            } else {
+                chunks.push(Ok(ResponseChunk::MessageDone(Message {
+                    role: Role::Assistant,
+                    content: vec![Content::ToolUse {
+                        id: "u1".to_string(),
+                        name: "no-such-tool".to_string(),
+                        input: serde_json::json!({}),
+                    }],
+                })));
+            }
+            Ok(Box::pin(stream::iter(chunks)))
+        }
+    }
+
+    /// Minimal [`RunObserver`] spy: authorizes every tool, accumulates every
+    /// `on_usage` call, ignores `on_tool_call`/`on_final_turn`.
+    #[derive(Default)]
+    struct UsageSpyObserver {
+        total: std::sync::Mutex<(u64, u64)>,
+    }
+
+    impl RunObserver for UsageSpyObserver {
+        fn authorize(&self, _tool_name: &str) -> bool {
+            true
+        }
+        fn on_tool_call(
+            &self,
+            _id: &str,
+            _name: &str,
+            _input: &serde_json::Value,
+            _result: &str,
+            _ok: bool,
+            _ms: u64,
+        ) {
+        }
+        fn on_final_turn(&self, _text_block_count: usize) {}
+        fn on_usage(&self, input_tokens: u64, output_tokens: u64) {
+            let mut t = self.total.lock().unwrap();
+            t.0 += input_tokens;
+            t.1 += output_tokens;
+        }
+    }
+
+    #[tokio::test]
+    async fn test_run_tool_loop_accumulates_usage_via_observer_across_turns() {
+        // Two turns: turn 1 (a tool call) reports (10, 2); turn 2 (terminal)
+        // reports (5, 3). The observer must see BOTH calls and the run's total
+        // usage is the sum across turns, not just the last one.
+        let provider = Arc::new(UsageScriptedProvider {
+            turns: std::sync::Mutex::new(std::collections::VecDeque::from([(10, 2), (5, 3)])),
+        });
+        let mut agent = Agent::new(provider);
+        let observer = Arc::new(UsageSpyObserver::default());
+        let config = AgentRunConfig {
+            observer: Some(observer.clone() as Arc<dyn RunObserver>),
+            ..AgentRunConfig::default()
+        };
+        let (tx, _rx) = tokio::sync::mpsc::channel::<StreamPiece>(8);
+        agent.query_streaming("hi", tx, config).await.unwrap();
+        assert_eq!(*observer.total.lock().unwrap(), (15, 5));
+    }
+
+    #[tokio::test]
+    async fn test_on_usage_default_impl_is_a_no_op_for_observers_that_ignore_it() {
+        // A RunObserver written before on_usage existed compiles unchanged and
+        // calling the default method never panics.
+        struct MinimalObserver;
+        impl RunObserver for MinimalObserver {
+            fn authorize(&self, _tool_name: &str) -> bool {
+                true
+            }
+            fn on_tool_call(
+                &self,
+                _id: &str,
+                _name: &str,
+                _input: &serde_json::Value,
+                _result: &str,
+                _ok: bool,
+                _ms: u64,
+            ) {
+            }
+            fn on_final_turn(&self, _text_block_count: usize) {}
+        }
+        MinimalObserver.on_usage(1, 1);
     }
 
     // ── Task-12 helpers ────────────────────────────────────────────────────────
@@ -1095,6 +1691,7 @@ mod tests {
             &self,
             messages: &[Message],
             _tools: &[Box<dyn Tool>],
+            _system: Option<&str>,
         ) -> Result<BoxStream<'static, Result<ResponseChunk>>> {
             self.calls.lock().unwrap().push(messages.to_vec());
             let chunks = vec![
@@ -1215,7 +1812,9 @@ mod tests {
 
         let (tx, mut rx) = mpsc::channel::<StreamPiece>(16);
         // Must succeed (fallback), not return an Err.
-        let result = agent.query_streaming("hello", tx).await;
+        let result = agent
+            .query_streaming("hello", tx, AgentRunConfig::default())
+            .await;
         assert!(
             result.is_ok(),
             "D1: selective mode with embedder error must fall back, not propagate Err: {result:?}"
@@ -1276,7 +1875,10 @@ mod tests {
         // An oversized turn (well over the 20-token budget).
         let long_input = "x".repeat(500);
         let (tx, mut rx) = mpsc::channel::<StreamPiece>(32);
-        agent.query_streaming(&long_input, tx).await.unwrap();
+        agent
+            .query_streaming(&long_input, tx, AgentRunConfig::default())
+            .await
+            .unwrap();
 
         // Collect all streamed pieces.
         let mut pieces = Vec::new();
@@ -1325,7 +1927,9 @@ mod tests {
 
         let (tx, mut rx) = mpsc::channel::<StreamPiece>(16);
         // Must succeed (fallback) — REQ-29.
-        let result = agent.query_streaming("hello", tx).await;
+        let result = agent
+            .query_streaming("hello", tx, AgentRunConfig::default())
+            .await;
         assert!(
             result.is_ok(),
             "D1-notice: selective mode with embedder error must fall back, not Err: {result:?}"
@@ -1364,7 +1968,10 @@ mod tests {
     async fn test_load_all_mode_is_unchanged() {
         let mut agent = Agent::new(Arc::new(MockProvider));
         let (tx1, _rx1) = tokio::sync::mpsc::channel::<StreamPiece>(8);
-        agent.query_streaming("hello", tx1).await.unwrap();
+        agent
+            .query_streaming("hello", tx1, AgentRunConfig::default())
+            .await
+            .unwrap();
         // After 1 turn: User("hello") + Asst("Summary content.") = 2 messages.
         assert_eq!(
             agent.history.len(),
@@ -1373,7 +1980,10 @@ mod tests {
         );
 
         let (tx2, _rx2) = tokio::sync::mpsc::channel::<StreamPiece>(8);
-        agent.query_streaming("world", tx2).await.unwrap();
+        agent
+            .query_streaming("world", tx2, AgentRunConfig::default())
+            .await
+            .unwrap();
         // After 2 turns: 4 messages total.
         assert_eq!(
             agent.history.len(),
@@ -1430,10 +2040,16 @@ mod tests {
         agent.set_memory_subsystem(vstore, embedder, clock, cfg);
 
         let (tx1, _rx1) = tokio::sync::mpsc::channel::<StreamPiece>(8);
-        agent.query_streaming("first query", tx1).await.unwrap();
+        agent
+            .query_streaming("first query", tx1, AgentRunConfig::default())
+            .await
+            .unwrap();
 
         let (tx2, _rx2) = tokio::sync::mpsc::channel::<StreamPiece>(8);
-        agent.query_streaming("second query", tx2).await.unwrap();
+        agent
+            .query_streaming("second query", tx2, AgentRunConfig::default())
+            .await
+            .unwrap();
 
         let all_calls = calls.lock().unwrap();
         assert!(
@@ -1492,7 +2108,7 @@ mod tests {
         // Turn 1: plant a fact.
         let (tx1, _rx1) = tokio::sync::mpsc::channel::<StreamPiece>(8);
         agent
-            .query_streaming("favorite color is blue", tx1)
+            .query_streaming("favorite color is blue", tx1, AgentRunConfig::default())
             .await
             .unwrap();
 
@@ -1512,7 +2128,7 @@ mod tests {
         // Turn 2: the selective path must NOT send the full history.
         let (tx2, _rx2) = tokio::sync::mpsc::channel::<StreamPiece>(8);
         agent
-            .query_streaming("what is favorite color", tx2)
+            .query_streaming("what is favorite color", tx2, AgentRunConfig::default())
             .await
             .unwrap();
 
@@ -1658,7 +2274,10 @@ mod tests {
 
         // Turn 1 — trigger threshold not reached.
         let (tx1, _rx1) = mpsc::channel::<StreamPiece>(8);
-        agent.query_streaming("first turn", tx1).await.unwrap();
+        agent
+            .query_streaming("first turn", tx1, AgentRunConfig::default())
+            .await
+            .unwrap();
 
         let mems_after_1 = vstore.active("root").await.unwrap();
         let distilled_after_1 = mems_after_1
@@ -1672,7 +2291,10 @@ mod tests {
 
         // Turn 2 — distill trigger fires (turns_since_open == 2, 2 % 2 == 0).
         let (tx2, _rx2) = mpsc::channel::<StreamPiece>(8);
-        agent.query_streaming("second turn", tx2).await.unwrap();
+        agent
+            .query_streaming("second turn", tx2, AgentRunConfig::default())
+            .await
+            .unwrap();
 
         let mems_after_2 = vstore.active("root").await.unwrap();
         let distilled_after_2 = mems_after_2
@@ -1741,7 +2363,10 @@ mod tests {
         // Distinctive text that would self-recall if written before assembly.
         let distinctive = "alpha bravo charlie unique self recall prevention test";
         let (tx, _rx) = tokio::sync::mpsc::channel::<StreamPiece>(8);
-        agent.query_streaming(distinctive, tx).await.unwrap();
+        agent
+            .query_streaming(distinctive, tx, AgentRunConfig::default())
+            .await
+            .unwrap();
 
         let locked = calls.lock().unwrap();
         assert!(!locked.is_empty(), "G1: provider must have been called");
@@ -1867,6 +2492,7 @@ mod tests {
             &self,
             _messages: &[Message],
             _tools: &[Box<dyn Tool>],
+            _system: Option<&str>,
         ) -> Result<BoxStream<'static, Result<ResponseChunk>>> {
             let mut n = self.call_count.lock().unwrap();
             *n += 1;
@@ -1948,7 +2574,7 @@ mod tests {
         fn input_schema(&self) -> Value {
             json!({"type": "object", "properties": {}})
         }
-        async fn execute(&self, _args: Value) -> ToolResult<Value> {
+        async fn execute(&self, _args: Value, _cancel: &CancellationToken) -> ToolResult<Value> {
             *self.executed.lock().unwrap() = true;
             Ok(json!({"executed": true}))
         }
@@ -1980,7 +2606,7 @@ mod tests {
 
         let (chunk_tx, _rx) = mpsc::channel::<StreamPiece>(8);
         agent
-            .query_streaming("do the safe thing", chunk_tx)
+            .query_streaming("do the safe thing", chunk_tx, AgentRunConfig::default())
             .await
             .unwrap();
 
@@ -2022,7 +2648,11 @@ mod tests {
 
         let (chunk_tx, _rx) = mpsc::channel::<StreamPiece>(8);
         agent
-            .query_streaming("do the dangerous thing", chunk_tx)
+            .query_streaming(
+                "do the dangerous thing",
+                chunk_tx,
+                AgentRunConfig::default(),
+            )
             .await
             .unwrap();
 
@@ -2058,7 +2688,7 @@ mod tests {
 
         let (chunk_tx, mut chunk_rx) = mpsc::channel::<StreamPiece>(32);
         agent
-            .query_streaming("do the notice thing", chunk_tx)
+            .query_streaming("do the notice thing", chunk_tx, AgentRunConfig::default())
             .await
             .unwrap();
 
@@ -2098,7 +2728,7 @@ mod tests {
 
         let (chunk_tx, mut chunk_rx) = mpsc::channel::<StreamPiece>(32);
         agent
-            .query_streaming("do the silent thing", chunk_tx)
+            .query_streaming("do the silent thing", chunk_tx, AgentRunConfig::default())
             .await
             .unwrap();
 
@@ -2138,7 +2768,11 @@ mod tests {
             fn input_schema(&self) -> Value {
                 json!({"type": "object", "properties": {}})
             }
-            async fn execute(&self, _args: Value) -> ToolResult<Value> {
+            async fn execute(
+                &self,
+                _args: Value,
+                _cancel: &CancellationToken,
+            ) -> ToolResult<Value> {
                 Ok(json!({"executed": true}))
             }
             fn requires_approval(&self) -> bool {
@@ -2164,7 +2798,11 @@ mod tests {
 
         let (chunk_tx, mut chunk_rx) = mpsc::channel::<StreamPiece>(32);
         agent
-            .query_streaming("do the dangerous noticeee thing", chunk_tx)
+            .query_streaming(
+                "do the dangerous noticeee thing",
+                chunk_tx,
+                AgentRunConfig::default(),
+            )
             .await
             .unwrap();
 
@@ -2179,6 +2817,137 @@ mod tests {
             "gated tool (requires_approval=true) must NOT emit StreamPiece::Notice \
              even if it has an approval_notice — notice is only for auto-approved launches; \
              pieces: {pieces:?}"
+        );
+    }
+
+    // ── Interactive-path regression (MS2 T8, REQ-H28) ───────────────────────────
+    //
+    // The headless MS2 work threaded an `AgentRunConfig` (T3), a
+    // `Tool::execute(cancel)` argument (T4) and a `.magi/` discovery step (T7)
+    // through the shared agent loop. The TUI callers were updated to pass
+    // `AgentRunConfig::default()` (max_tool_calls = 15, repetitive guard ENABLED,
+    // no observer) + a never-cancelled token. These tests pin that the interactive
+    // path (observer = None) behaves byte-for-byte as it did in v0.9.0: the
+    // approval gate still mediates a dangerous tool, and the repetitive-call guard
+    // still fires — neither is auto-approved nor silenced by the new plumbing.
+
+    /// Provider that requests the SAME identical tool call on EVERY turn, so the
+    /// agent's 3-repetition guard is the terminal condition (well before the
+    /// 15-call cap). `id` is constant, but `normalize_input` compares only
+    /// `(name, normalized_input)`, so the repetition is detected regardless.
+    struct AlwaysSameToolProvider {
+        tool_name: String,
+    }
+
+    #[async_trait]
+    impl Provider for AlwaysSameToolProvider {
+        async fn stream_messages(
+            &self,
+            _messages: &[Message],
+            _tools: &[Box<dyn Tool>],
+            _system: Option<&str>,
+        ) -> Result<BoxStream<'static, Result<ResponseChunk>>> {
+            let msg = Message {
+                role: Role::Assistant,
+                content: vec![Content::ToolUse {
+                    id: "repeat-id".to_string(),
+                    name: self.tool_name.clone(),
+                    input: json!({"same": "input"}),
+                }],
+            };
+            Ok(Box::pin(stream::iter(vec![Ok(
+                ResponseChunk::MessageDone(msg),
+            )])))
+        }
+    }
+
+    /// REGRESSION: on the interactive path (`AgentRunConfig::default()`, no
+    /// observer) a dangerous tool (`requires_approval() == true`) is STILL gated
+    /// through the `approval_tx` prompt — it is NOT auto-approved — and the run
+    /// executes it only after the UI approves, returning the model's normal text.
+    ///
+    /// This is the v0.9.0 approval-gate behavior; the MS2 `AgentRunConfig`/observer
+    /// plumbing must not have changed it for the observer-less interactive path.
+    #[tokio::test]
+    async fn test_interactive_path_regression_approval_gate_still_gates_dangerous_tool() {
+        use tokio::sync::mpsc;
+
+        // Approver that records every tool name it is asked to authorize, then
+        // approves — proving an ApprovalRequest was actually emitted (the gate
+        // ran) rather than the tool being silently auto-approved.
+        let gated: Arc<std::sync::Mutex<Vec<String>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (approval_tx, mut approval_rx) = mpsc::channel::<ApprovalRequest>(8);
+        let gated_seen = gated.clone();
+        tokio::spawn(async move {
+            while let Some(req) = approval_rx.recv().await {
+                gated_seen.lock().unwrap().push(req.tool_name.clone());
+                let _ = req.tx.send(true);
+            }
+        });
+
+        let (tool, executed) = TrackingTool::new("gated_op", false /* dangerous */);
+        let (provider, _count) = SingleToolCallProvider::new("gated_op");
+        let mut agent = Agent::new(Arc::new(provider));
+        agent.register_tool(Box::new(tool));
+        agent.set_approval_channel(approval_tx);
+
+        let (chunk_tx, _rx) = mpsc::channel::<StreamPiece>(8);
+        let response = agent
+            .query_streaming("use the gated tool", chunk_tx, AgentRunConfig::default())
+            .await
+            .expect("interactive run must complete once approval is granted");
+
+        // The gate ran: exactly one ApprovalRequest for the dangerous tool.
+        assert_eq!(
+            *gated.lock().unwrap(),
+            vec!["gated_op".to_string()],
+            "interactive path must route a dangerous tool through the approval gate \
+             (one ApprovalRequest), NOT auto-approve it"
+        );
+        // Approval was honored: the tool executed.
+        assert!(
+            *executed.lock().unwrap(),
+            "the approved dangerous tool must execute on the interactive path"
+        );
+        // Response semantics unchanged: the model's final text is returned.
+        assert_eq!(
+            response, "done",
+            "interactive run must return the model's normal final text after the tool call"
+        );
+    }
+
+    /// REGRESSION: on the interactive path (`AgentRunConfig::default()`, whose
+    /// `disable_repetitive_guard == false`) three identical consecutive tool calls
+    /// STILL abort the run with "Repetitive tool call detected". The `--full-auto`
+    /// soft-guard silencing (REQ-H08) must NOT leak into the interactive/Default
+    /// path.
+    #[tokio::test]
+    async fn test_interactive_path_regression_repetitive_guard_still_fires() {
+        use tokio::sync::mpsc;
+
+        let (tool, _executed) = TrackingTool::new("loop_op", true /* auto-approve */);
+        let provider = AlwaysSameToolProvider {
+            tool_name: "loop_op".to_string(),
+        };
+        let mut agent = Agent::new(Arc::new(provider));
+        agent.register_tool(Box::new(tool));
+
+        let (chunk_tx, _rx) = mpsc::channel::<StreamPiece>(8);
+        let err = agent
+            .query_streaming("loop forever", chunk_tx, AgentRunConfig::default())
+            .await
+            .expect_err("the repetitive-call guard must abort the run on the interactive path");
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Repetitive tool call detected"),
+            "interactive path must fire the repetitive-call guard (not be silenced); got: {msg}"
+        );
+        // The guard — not the tool-call cap — is the terminal condition, matching
+        // v0.9.0 semantics (guard fires at the 3rd repeat, well under the 15 cap).
+        assert!(
+            !msg.contains(MAX_TOOL_CALLS_ERROR),
+            "the guard must terminate the run before the max-tool-calls cap; got: {msg}"
         );
     }
 
@@ -2203,6 +2972,7 @@ mod tests {
                 &self,
                 messages: &[Message],
                 _tools: &[Box<dyn crate::tools::Tool>],
+                _system: Option<&str>,
             ) -> Result<futures::stream::BoxStream<'static, Result<ResponseChunk>>> {
                 self.calls.lock().unwrap().push(messages.to_vec());
                 Ok(Box::pin(futures::stream::iter(vec![
@@ -2247,7 +3017,10 @@ mod tests {
         // Turn 1: provider returns "- use rust". After the turn, distill fires
         // → judge calls send_messages → "- use rust" → "use rust" promoted to profile.
         let (tx1, _rx1) = mpsc::channel::<StreamPiece>(8);
-        agent.query_streaming("hello", tx1).await.unwrap();
+        agent
+            .query_streaming("hello", tx1, AgentRunConfig::default())
+            .await
+            .unwrap();
 
         // ── Diagnostic: check intermediate state after turn 1 ────────────────
         {
@@ -2280,7 +3053,7 @@ mod tests {
         let n_before_t2 = calls.lock().unwrap().len();
         let (tx2, _rx2) = mpsc::channel::<StreamPiece>(8);
         agent
-            .query_streaming("what are my prefs", tx2)
+            .query_streaming("what are my prefs", tx2, AgentRunConfig::default())
             .await
             .unwrap();
 

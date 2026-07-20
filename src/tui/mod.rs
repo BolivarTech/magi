@@ -1,6 +1,6 @@
 //! This module implements the Terminal User Interface using Ratatui.
 
-use crate::agent::{Agent, ApprovalRequest, StreamPiece};
+use crate::agent::{Agent, AgentRunConfig, ApprovalRequest, StreamPiece};
 use crossterm::{
     event::{self, DisableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers},
     execute,
@@ -455,7 +455,11 @@ pub async fn run_tui_ext(
                         }
                     });
 
-                    let result = runner_agent.query_streaming(&text, chunk_tx).await;
+                    // Interactive path: default config = normal cap, repetitive
+                    // guard on, no headless observer (byte-for-byte unchanged).
+                    let result = runner_agent
+                        .query_streaming(&text, chunk_tx, AgentRunConfig::default())
+                        .await;
                     // Join the forwarder: ensures all deltas are forwarded before the
                     // end-of-turn marker below is enqueued.
                     let _ = forwarder.await;
