@@ -243,6 +243,9 @@ struct TrackerState {
     tier_denials: usize,
     /// TextDelta block count of the agent's final turn (REQ-H23b `response_empty`).
     final_turn_text_blocks: usize,
+    /// Token usage summed across every provider turn that reported one
+    /// (`RunObserver::on_usage`); `(input_tokens, output_tokens)`.
+    usage_total: (u64, u64),
 }
 
 /// [`RunObserver`] that enforces the tier policy for every tool and records the
@@ -292,6 +295,13 @@ impl RunObserver for RunTracker {
 
     fn on_final_turn(&self, text_block_count: usize) {
         with_state(&self.state, |s| s.final_turn_text_blocks = text_block_count);
+    }
+
+    fn on_usage(&self, input_tokens: u64, output_tokens: u64) {
+        with_state(&self.state, |s| {
+            s.usage_total.0 = s.usage_total.0.saturating_add(input_tokens);
+            s.usage_total.1 = s.usage_total.1.saturating_add(output_tokens);
+        });
     }
 }
 
@@ -702,11 +712,12 @@ pub async fn run_query(
     let total_ms = elapsed_ms(run_start);
 
     // Snapshot the observer state once (the run is over; no more callbacks).
-    let (calls, tier_denied, response_empty) = with_state(&tracker.state, |s| {
+    let (calls, tier_denied, response_empty, usage_total) = with_state(&tracker.state, |s| {
         (
             s.calls.clone(),
             s.tier_denials > 0,
             s.final_turn_text_blocks == 0,
+            s.usage_total,
         )
     });
     let tool_calls: Vec<ToolCallRecord> = calls.iter().map(|(_, rec)| rec.clone()).collect();
@@ -776,10 +787,13 @@ pub async fn run_query(
         response,
         model: resolved.model,
         provider: resolved.provider,
-        // Gap: the agent/provider do not surface token counts to this layer.
+        // Summed from every ResponseChunk::Usage the provider reported across
+        // the run's turns (RunObserver::on_usage). A proactive `consult` tool
+        // call's 3 magi-core LLM calls are NOT included: magi-core's
+        // `LlmProvider` exposes no token counts to this layer.
         usage: Usage {
-            input_tokens: 0,
-            output_tokens: 0,
+            input_tokens: usage_total.0,
+            output_tokens: usage_total.1,
         },
         timings: Timings {
             total_ms,
@@ -1059,6 +1073,77 @@ mod tests {
                 Some(Turn::Fail) => Err(anyhow::anyhow!("provider network failure")),
             }
         }
+    }
+
+    /// A provider that records the `system` argument of its one expected call
+    /// and returns a fixed terminal turn — used to prove `run_query` forwards
+    /// the resolved `SystemPolicy` text into `AgentRunConfig::system`.
+    struct SystemCapturingProvider {
+        seen: Mutex<Vec<Option<String>>>,
+    }
+
+    impl SystemCapturingProvider {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                seen: Mutex::new(Vec::new()),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl Provider for SystemCapturingProvider {
+        async fn stream_messages(
+            &self,
+            _messages: &[Message],
+            _tools: &[Box<dyn Tool>],
+            system: Option<&str>,
+        ) -> Result<BoxStream<'static, Result<ResponseChunk>>> {
+            self.seen
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(system.map(str::to_string));
+            Ok(Box::pin(stream::iter(vec![Ok(
+                ResponseChunk::MessageDone(Message::assistant("ok")),
+            )])))
+        }
+    }
+
+    /// The runner sets `AgentRunConfig::system` from `resolved.system.text()` —
+    /// a `SystemPolicy::CallerOverride` reaches the provider verbatim.
+    #[tokio::test]
+    async fn test_run_query_sets_system_from_caller_override_policy() {
+        let provider = SystemCapturingProvider::new();
+        let mut agent = Agent::new(provider.clone());
+        let resolved = Resolved {
+            system: SystemPolicy::CallerOverride("caller system prompt".to_string()),
+            ..resolved_stub()
+        };
+        let policy = Policy::new(Tier::Default, 15, None);
+        run_query(resolved, policy, &mut agent, "prompt", None, None, None).await;
+        assert_eq!(
+            provider.seen.lock().unwrap().as_slice(),
+            &[Some("caller system prompt".to_string())]
+        );
+    }
+
+    /// An empty `SystemPolicy::Operator("")` (the `resolved_stub()` default)
+    /// must reach the provider as `None`, not `Some("")`.
+    #[tokio::test]
+    async fn test_run_query_sends_no_system_when_operator_default_is_empty() {
+        let provider = SystemCapturingProvider::new();
+        let mut agent = Agent::new(provider.clone());
+        let policy = Policy::new(Tier::Default, 15, None);
+        run_query(
+            resolved_stub(),
+            policy,
+            &mut agent,
+            "prompt",
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(provider.seen.lock().unwrap().as_slice(), &[None]);
     }
 
     /// A tool that always succeeds, echoing its name — enough to exercise tier
