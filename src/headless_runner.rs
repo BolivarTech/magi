@@ -36,7 +36,6 @@ use magi_core::schema::Mode;
 use serde_json::{json, Value};
 use tokio_util::sync::CancellationToken;
 
-use magi_rs::headless::limits::FULL_AUTO_TIMEOUT_SECS;
 use magi_rs::headless::log::{LogEvent, LogLevel, RunLog};
 use magi_rs::headless::output::sanitize_error_message;
 use magi_rs::headless::policy::{Policy, Tier};
@@ -303,7 +302,8 @@ impl RunObserver for RunTracker {
 /// resolved into [`Policy::timeout`]) wins; otherwise any **tool-executing**
 /// tier (`--auto`/`--full-auto`) receives `full_auto_timeout_secs` — the
 /// EFFECTIVE default (spec §11; an operator can lower it below
-/// [`FULL_AUTO_TIMEOUT_SECS`] via `[headless] timeout_secs`) — since the
+/// [`FULL_AUTO_TIMEOUT_SECS`](magi_rs::headless::limits::FULL_AUTO_TIMEOUT_SECS)
+/// via `[headless] timeout_secs`) — since the
 /// permissive tiers always carry a wall-clock ceiling; the read-only
 /// `default` tier gets no timeout. The result is passed straight to
 /// [`run_query`].
@@ -312,14 +312,11 @@ impl RunObserver for RunTracker {
 /// `Some(duration)` when a ceiling applies; `None` for an unbounded run.
 #[must_use]
 pub fn resolve_run_timeout(policy: &Policy, full_auto_timeout_secs: u64) -> Option<Duration> {
-    // STUB (TDD Red): ignores the effective default and always applies the
-    // module constant. The Green commit wires `full_auto_timeout_secs` through.
-    let _ = full_auto_timeout_secs;
     if let Some(secs) = policy.timeout() {
         return Some(Duration::from_secs(secs));
     }
     match policy.tier() {
-        Tier::Auto | Tier::FullAuto => Some(Duration::from_secs(FULL_AUTO_TIMEOUT_SECS)),
+        Tier::Auto | Tier::FullAuto => Some(Duration::from_secs(full_auto_timeout_secs)),
         Tier::Default => None,
     }
 }
@@ -865,6 +862,7 @@ mod tests {
     use anyhow::Result;
     use async_trait::async_trait;
     use futures::stream::{self, BoxStream};
+    use magi_rs::headless::limits::FULL_AUTO_TIMEOUT_SECS;
     use serde_json::{json, Value};
     use std::collections::VecDeque;
 
