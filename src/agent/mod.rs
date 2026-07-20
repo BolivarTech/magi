@@ -57,6 +57,15 @@ pub const DEFAULT_MAX_TOOL_CALLS: usize = 15;
 /// max_tool_calls`) from a genuine runtime error by comparing the returned
 /// error's `Display` against this exact string — a shared contract rather than
 /// a brittle inline literal match.
+///
+/// **Stability contract:** this exact string is the wire format between this
+/// module (producer, both `Err(anyhow::anyhow!(MAX_TOOL_CALLS_ERROR))` sites
+/// below) and `crate::headless_runner::run_query` (consumer, its
+/// `message == MAX_TOOL_CALLS_ERROR` comparison). Changing the string value is
+/// a breaking change to that contract. It is pinned end-to-end by
+/// `headless_runner::tests::test_runner_max_tool_calls_when_cap_exhausted`
+/// (cap exhausted ⇒ `StopReason::MaxToolCalls`, no error payload) and
+/// `test_runner_max_tool_calls_priority_over_denied`.
 pub const MAX_TOOL_CALLS_ERROR: &str = "Maximum tool call limit reached";
 
 /// Registered name of the multi-perspective MAGI tool, mirroring
@@ -928,6 +937,8 @@ impl Agent {
             let input = serde_json::json!({ "query": prompt });
             tool_call_count += 1;
             if tool_call_count > config.max_tool_calls {
+                // See `MAX_TOOL_CALLS_ERROR`'s rustdoc: this exact string is a
+                // stability contract with `headless_runner::run_query`.
                 return Err(anyhow::anyhow!(MAX_TOOL_CALLS_ERROR));
             }
             // Deliberately NOT seeding `last_normalized_tool` here: this is a
@@ -1045,6 +1056,9 @@ impl Agent {
                     requested_tool = true;
                     tool_call_count += 1;
                     if tool_call_count > config.max_tool_calls {
+                        // See `MAX_TOOL_CALLS_ERROR`'s rustdoc: this exact
+                        // string is a stability contract with
+                        // `headless_runner::run_query`.
                         return Err(anyhow::anyhow!(MAX_TOOL_CALLS_ERROR));
                     }
 

@@ -715,6 +715,12 @@ pub async fn run_query(
         }
         Some(Err(e)) => {
             let message = e.to_string();
+            // `MAX_TOOL_CALLS_ERROR`'s exact string value is a stability
+            // contract with `crate::agent`'s two producer sites (see its
+            // rustdoc in `src/agent/mod.rs`), not a brittle inline literal —
+            // pinned end-to-end by
+            // `tests::test_runner_max_tool_calls_when_cap_exhausted` and
+            // `tests::test_runner_max_tool_calls_priority_over_denied`.
             if message == MAX_TOOL_CALLS_ERROR {
                 // Cap reached is a terminal state, not an error: no payload, and
                 // `exit::exit_code` maps it to success.
