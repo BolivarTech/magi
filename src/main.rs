@@ -2160,7 +2160,6 @@ async fn run_query_subcommand(
         &mut agent,
         &prompt,
         timeout,
-        consult_magi,
         run_log.as_mut(),
     )
     .await;

@@ -33,7 +33,7 @@ use std::time::{Duration, Instant};
 
 use magi_core::orchestrator::Magi;
 use magi_core::schema::Mode;
-use serde_json::{json, Value};
+use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
 use magi_rs::headless::log::{LogEvent, LogLevel, RunLog};
@@ -64,28 +64,20 @@ const ROLE_ASSISTANT: &str = "assistant";
 const TIMEOUT_MESSAGE: &str = "run exceeded the --timeout wall-clock limit";
 
 /// Registered name of the multi-perspective MAGI `consult` tool (REQ-H21/H22).
-/// Single source of truth for the name matched when forcing/capturing a consult.
+/// Single source of truth for the name matched when capturing the consult
+/// result out of a finished run's tool-call records ([`extract_consult_value`]).
+/// The FORCING itself now happens in-loop
+/// (`Agent::run_tool_loop`/`AgentRunConfig::force_consult`, REQ-H22) — this
+/// module only reads the result back out.
 const CONSULT_TOOL: &str = "consult";
 
-/// JSON input key the `consult` tool expects (mirrors `ConsultTool::input_schema`).
-const CONSULT_QUERY_KEY: &str = "query";
-
-/// Synthetic tool-use id of a runner-injected forced consult (REQ-H22). It never
-/// correlates to an assistant `ToolUse` block, so it appears in `tool_calls` but
-/// not in the transcript — the forced pass is a runner action, not a model turn.
-const FORCED_CONSULT_ID: &str = "forced-consult";
-
-/// `error.message` for a direct/forced consult whose prompt is empty or exceeds
+/// `error.message` for a direct `magi consult` prompt that is empty or exceeds
 /// [`MAX_QUERY_LEN`] (REQ-H33: reject, never truncate).
 const CONSULT_INPUT_INVALID_MESSAGE: &str = "consult prompt is empty or exceeds the maximum length";
 
-/// Recorded result of a forced consult that a tool-executing tier authorized but
-/// that has no MAGI orchestrator wired (defensive; production always wires one).
-const CONSULT_UNAVAILABLE_MESSAGE: &str = "MAGI orchestrator is not configured for consult";
-
-/// Typed failure of a direct/forced consult, mapped to an [`ErrorKind`] by the
-/// caller so an over-cap prompt becomes `input_invalid` (exit 2, REQ-H33) and a
-/// wall-clock abort becomes `timeout` (exit 1, REQ-H36).
+/// Typed failure of a direct `magi consult` run, mapped to an [`ErrorKind`] by
+/// the caller so an over-cap prompt becomes `input_invalid` (exit 2, REQ-H33)
+/// and a wall-clock abort becomes `timeout` (exit 1, REQ-H36).
 enum ConsultRunError {
     /// The prompt was empty or exceeded [`MAX_QUERY_LEN`] (→ `input_invalid`).
     InputInvalid,
@@ -94,12 +86,6 @@ enum ConsultRunError {
     /// The MAGI orchestrator failed or panicked; the message is sanitized before
     /// use (→ `runtime`).
     Runtime(String),
-}
-
-/// Builds the `consult` tool input object (`{"query": <prompt>}`) recorded for a
-/// forced consult, matching the schema of the interactive `consult` tool.
-fn consult_input(prompt: &str) -> Value {
-    json!({ CONSULT_QUERY_KEY: prompt })
 }
 
 /// Runs `prompt` directly through the 3-perspective MAGI consensus, off the agent
@@ -336,23 +322,13 @@ fn elapsed_ms(start: Instant) -> u64 {
     u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
-/// The wall-clock budget left for a post-loop forced consult (REQ-H36).
-///
-/// The run shares ONE `--timeout` across the agent loop **and** the forced
-/// consult, so the consult runs against the time REMAINING after `elapsed`,
-/// never a fresh `dur` — a fresh deadline here would let `loop + forced consult`
-/// reach up to **2×** `dur`, weakening the wall-clock DoS ceiling that
-/// `--auto`/`--full-auto` rely on. `None` (no timeout) stays unbounded; an
-/// already-exhausted budget saturates to [`Duration::ZERO`], which the consult
-/// treats as an immediate timeout.
-fn forced_consult_budget(timeout: Option<Duration>, elapsed: Duration) -> Option<Duration> {
-    timeout.map(|dur| dur.checked_sub(elapsed).unwrap_or(Duration::ZERO))
-}
-
 /// The `(response, stop_reason, error)` triple of a wall-clock timeout abort
-/// (REQ-H36): no response, a first-class [`ErrorKind::Timeout`] payload. Shared
-/// by the loop-timeout and forced-consult-timeout arms so the timeout outcome is
-/// defined in exactly one place.
+/// (REQ-H36): no response, a first-class [`ErrorKind::Timeout`] payload. A
+/// forced consult now runs strictly INSIDE the agent loop (REQ-H22:
+/// `AgentRunConfig::force_consult`), sharing the loop's single
+/// `tokio::time::timeout` wrapper — there is no separate forced-consult
+/// deadline to reconcile, so this triple has exactly one caller: the run-level
+/// timeout arm in [`run_query`].
 fn timeout_outcome() -> (Option<String>, StopReason, Option<ErrorPayload>) {
     (
         None,
@@ -579,44 +555,39 @@ pub async fn run_consult(
 ///   `stop_reason = Error` / `error.kind = Timeout` is returned. The tier default
 ///   (900 s for `--auto`/`--full-auto`) is selected by the caller (Task 7) and
 ///   passed here; use [`resolve_run_timeout`] to apply it.
-/// - `consult_magi` — MAGI orchestrator used to satisfy a **forced** consult
-///   (`resolved.consult == Some(true)`, REQ-H22). `None` disables forcing (the
-///   agent may still call the `consult` tool proactively under `--auto`+).
 /// - `run_log` — optional JSONL run log; tier warnings and each tool call are
 ///   recorded best-effort.
 ///
 /// # Forced consult (REQ-H22)
-/// When `resolved.consult == Some(true)` and the run did not time out, the runner
-/// guarantees **exactly one** consult: if the agent already invoked the `consult`
-/// tool during the loop, that call is reused (never re-fired); otherwise the
-/// runner injects a single consult through the **same tier gate** (the observer's
-/// [`RunObserver::authorize`]), so the tier wins — in `default` the forced consult
-/// is recorded denied (`ok = false`) and `consult` stays `None`, never elevated
-/// out of the tier. Whichever consult succeeded (forced or proactive) populates
-/// `RunOutcome.consult`. The injected consult shares the run's **single**
-/// wall-clock budget: it runs against the time remaining after the agent loop
-/// ([`forced_consult_budget`]), so `loop + forced consult` never exceeds one
-/// `dur`; if that remaining budget elapses the whole run reports a `Timeout`
-/// (REQ-H36).
-///
-/// **Trade-off (reported):** the injected forced consult runs as a post-loop pass
-/// through the tracker rather than literally inside the provider-driven loop —
-/// forcing an extra tool call *inside* the loop would require invasive changes to
-/// `Agent` that risk the interactive path and the deterministic `stop_reason`
-/// accounting. It still flows through the identical authorization/recording path,
-/// so tier gating, `tier_denied` accounting and the audit record are faithful;
-/// its only divergence is that it is not fed back into the agent's answer and does
-/// not appear in `transcript` (it is a runner action, recorded in `tool_calls`).
+/// `resolved.consult == Some(true)` sets `AgentRunConfig::force_consult`, which
+/// makes [`Agent::run_tool_loop`] inject exactly one **in-loop** `consult` tool
+/// call before the first provider turn: a genuine `ToolUse`/`ToolResult`
+/// message pair through the SAME registered `consult` tool a proactive
+/// (`--auto`+) call would use, authorized by the SAME tier gate (the observer's
+/// [`RunObserver::authorize`], so the tier wins — in `default` it is recorded
+/// denied, `ok = false`, and `consult` stays `None`, never elevated), counted
+/// against `max_tool_calls`, and fed back into the conversation so the model's
+/// own next turn can react to it. If the model itself also requests `consult`
+/// afterward, that request is answered but never re-executed (REQ-H22:
+/// exactly one invocation per forced run). The caller (`agent` here) must have
+/// the `consult` tool registered for the injection to succeed — `main.rs`
+/// registers it whenever a MAGI orchestrator is wired, unconditionally, so
+/// this is already true for every production headless run with a live
+/// backend. The injected consult shares the run's single wall-clock deadline
+/// automatically: it runs inside the same `tokio::time::timeout` that bounds
+/// [`Agent::query_streaming`] below, so there is no separate budget to
+/// reconcile — a mid-consult timeout surfaces as the ordinary run-level
+/// `Timeout` (REQ-H36).
 ///
 /// # Usage accounting
 /// `RunOutcome.usage` is the sum of every `ResponseChunk::Usage` the provider
 /// reported across the run's turns (`RunObserver::on_usage`, accumulated in
-/// `RunTracker`). It reflects only the MAIN agent-loop tokens: a **proactive**
-/// `consult` tool call invoked during the loop (`--auto`+) runs its 3
-/// magi-core LLM calls through `magi-core`'s own `LlmProvider`, which exposes
-/// no token counts to this layer, so those tokens are **not** included in the
-/// total — the same gap `run_consult` documents for the forced/direct path. A
-/// backend that never reports usage yields `{0, 0}`, never a fabricated value.
+/// `RunTracker`). It reflects only the MAIN agent-loop tokens: a `consult` tool
+/// call (forced or proactive) runs its 3 magi-core LLM calls through
+/// `magi-core`'s own `LlmProvider`, which exposes no token counts to this
+/// layer, so those tokens are **not** included in the total — the same gap
+/// `run_consult` documents for the direct `magi consult` path. A backend that
+/// never reports usage yields `{0, 0}`, never a fabricated value.
 ///
 /// # Gaps (documented, never fabricated)
 /// - `timings.per_turn_ms` is empty: turn boundaries are not observable from
@@ -627,7 +598,6 @@ pub async fn run_query(
     agent: &mut Agent,
     prompt: &str,
     timeout: Option<Duration>,
-    consult_magi: Option<Arc<Magi>>,
     mut run_log: Option<&mut RunLog>,
 ) -> RunOutcome {
     // Tier warnings (only under --full-auto) are recorded up front.
@@ -661,6 +631,10 @@ pub async fn run_query(
         observer: Some(Arc::clone(&tracker) as Arc<dyn RunObserver>),
         cancel: cancel.clone(),
         system: (!system.is_empty()).then(|| system.to_string()),
+        // REQ-H22: `magi query --consult` / envelope `consult:true` forces
+        // exactly one IN-LOOP consult (see the `# Forced consult` rustdoc
+        // above) rather than the pre-refactor post-loop pass.
+        force_consult: resolved.consult == Some(true),
     };
 
     let (chunk_tx, mut chunk_rx) =
@@ -700,23 +674,6 @@ pub async fn run_query(
     };
     let ttfb_ms = drain.await.ok().flatten();
 
-    // Forced consult (REQ-H22): only when requested AND the run actually ran (a
-    // timeout dropped the loop mid-flight ⇒ nothing to force onto). Injected
-    // through the SAME tracker so its authorization, `tier_denied` accounting and
-    // audit record are identical to a loop tool call — the tier gate wins.
-    //
-    // It shares the run's SINGLE wall-clock budget (REQ-H36): the consult runs
-    // against the time REMAINING after the agent loop, not a fresh `dur`, so
-    // `loop + forced consult` can never exceed one `dur`. If that remaining
-    // budget elapses the consult reports a timeout, which dominates the outcome
-    // mapping below exactly like a loop timeout.
-    let mut forced_consult_timed_out = false;
-    if resolved.consult == Some(true) && outcome_result.is_some() {
-        let remaining = forced_consult_budget(timeout, run_start.elapsed());
-        forced_consult_timed_out =
-            force_consult_once(&tracker, consult_magi.as_ref(), prompt, &cancel, remaining).await;
-    }
-
     let total_ms = elapsed_ms(run_start);
 
     // Snapshot the observer state once (the run is over; no more callbacks).
@@ -735,12 +692,11 @@ pub async fn run_query(
 
     // Deterministic outcome mapping (priority Error > MaxToolCalls > Denied >
     // Done); a wall-clock timeout is a first-class `Error` (kind = timeout) and
-    // dominates every other signal because it dropped the run mid-flight. A
-    // forced consult that exhausted the shared budget is the same wall-clock
-    // timeout and produces the identical outcome (REQ-H36).
+    // dominates every other signal because it dropped the run mid-flight — a
+    // forced consult that exhausts the deadline is dropped along with the rest
+    // of the loop and produces this same `None` arm (REQ-H36).
     let (response, stop_reason, error) = match outcome_result {
         None => timeout_outcome(),
-        Some(_) if forced_consult_timed_out => timeout_outcome(),
         Some(Ok(text)) => {
             let stop_reason = if tier_denied && response_empty {
                 StopReason::Denied
@@ -817,72 +773,6 @@ pub async fn run_query(
         applied_caps: resolved.applied_caps,
         error,
     }
-}
-
-/// Ensures **exactly one** consult for a forced run (REQ-H22), recorded through
-/// `tracker` so the tier gate and accounting match a loop tool call.
-///
-/// No-op if the agent already invoked `consult` during the loop (the existing
-/// call is reused — never re-fired). Otherwise the forced consult is authorized
-/// via [`RunObserver::authorize`] — in `default` this denies and records
-/// `ok = false` (the tier wins, `consult` stays `None`); in `--auto`+ it runs the
-/// direct analysis and records the result. A `None` `magi` under an authorizing
-/// tier records an `ok = false` "not configured" call (defensive; production
-/// always wires the orchestrator when consult is possible).
-///
-/// # Returns
-/// `true` iff the forced consult was cut short by the wall-clock `timeout`
-/// (`ConsultRunError::Timeout`); the caller promotes that to the run-level
-/// timeout outcome (REQ-H36). Every other path — no-op reuse, tier denial,
-/// missing orchestrator, input-invalid, runtime failure — returns `false`.
-async fn force_consult_once(
-    tracker: &Arc<RunTracker>,
-    magi: Option<&Arc<Magi>>,
-    prompt: &str,
-    cancel: &CancellationToken,
-    timeout: Option<Duration>,
-) -> bool {
-    let already_consulted = with_state(&tracker.state, |s| {
-        s.calls.iter().any(|(_, r)| r.name == CONSULT_TOOL)
-    });
-    if already_consulted {
-        return false;
-    }
-
-    let input = consult_input(prompt);
-    if !tracker.authorize(CONSULT_TOOL) {
-        // Tier denial: recorded exactly like a loop denial; `consult` stays None.
-        let denial = format!(
-            "Tool '{CONSULT_TOOL}' denied: not authorized in the current authorization tier"
-        );
-        tracker.on_tool_call(FORCED_CONSULT_ID, CONSULT_TOOL, &input, &denial, false, 0);
-        return false;
-    }
-
-    let Some(magi) = magi else {
-        tracker.on_tool_call(
-            FORCED_CONSULT_ID,
-            CONSULT_TOOL,
-            &input,
-            CONSULT_UNAVAILABLE_MESSAGE,
-            false,
-            0,
-        );
-        return false;
-    };
-
-    let started = Instant::now();
-    let (result, ok, timed_out) = match analyze_direct(magi, prompt, cancel, timeout).await {
-        Ok(value) => (value.to_string(), true, false),
-        Err(ConsultRunError::InputInvalid) => {
-            (CONSULT_INPUT_INVALID_MESSAGE.to_string(), false, false)
-        }
-        Err(ConsultRunError::Timeout) => (TIMEOUT_MESSAGE.to_string(), false, true),
-        Err(ConsultRunError::Runtime(message)) => (sanitize_error_message(&message), false, false),
-    };
-    let ms = elapsed_ms(started);
-    tracker.on_tool_call(FORCED_CONSULT_ID, CONSULT_TOOL, &input, &result, ok, ms);
-    timed_out
 }
 
 #[cfg(test)]
@@ -1127,7 +1017,7 @@ mod tests {
             ..resolved_stub()
         };
         let policy = Policy::new(Tier::Default, 15, None);
-        run_query(resolved, policy, &mut agent, "prompt", None, None, None).await;
+        run_query(resolved, policy, &mut agent, "prompt", None, None).await;
         assert_eq!(
             provider.seen.lock().unwrap().as_slice(),
             &[Some("caller system prompt".to_string())]
@@ -1141,16 +1031,7 @@ mod tests {
         let provider = SystemCapturingProvider::new();
         let mut agent = Agent::new(provider.clone());
         let policy = Policy::new(Tier::Default, 15, None);
-        run_query(
-            resolved_stub(),
-            policy,
-            &mut agent,
-            "prompt",
-            None,
-            None,
-            None,
-        )
-        .await;
+        run_query(resolved_stub(), policy, &mut agent, "prompt", None, None).await;
         assert_eq!(provider.seen.lock().unwrap().as_slice(), &[None]);
     }
 
@@ -1245,16 +1126,7 @@ mod tests {
         register_echo(&mut agent, "edit");
 
         let policy = Policy::new(Tier::Auto, 15, None);
-        let outcome = run_query(
-            resolved_stub(),
-            policy,
-            &mut agent,
-            "prompt",
-            None,
-            None,
-            None,
-        )
-        .await;
+        let outcome = run_query(resolved_stub(), policy, &mut agent, "prompt", None, None).await;
 
         assert_eq!(outcome.usage.input_tokens, 15);
         assert_eq!(outcome.usage.output_tokens, 5);
@@ -1267,16 +1139,7 @@ mod tests {
         let provider = ScriptedProvider::new(vec![Turn::Text("hi".to_string())]);
         let mut agent = Agent::new(provider);
         let policy = Policy::new(Tier::Default, 15, None);
-        let outcome = run_query(
-            resolved_stub(),
-            policy,
-            &mut agent,
-            "prompt",
-            None,
-            None,
-            None,
-        )
-        .await;
+        let outcome = run_query(resolved_stub(), policy, &mut agent, "prompt", None, None).await;
         assert_eq!(outcome.usage.input_tokens, 0);
         assert_eq!(outcome.usage.output_tokens, 0);
     }
@@ -1293,16 +1156,7 @@ mod tests {
         register_echo(&mut agent, "edit");
 
         let policy = Policy::new(Tier::Default, 15, None);
-        let outcome = run_query(
-            resolved_stub(),
-            policy,
-            &mut agent,
-            "prompt",
-            None,
-            None,
-            None,
-        )
-        .await;
+        let outcome = run_query(resolved_stub(), policy, &mut agent, "prompt", None, None).await;
 
         assert!(
             outcome.tool_calls.iter().any(|t| t.name == "edit" && !t.ok),
@@ -1332,16 +1186,7 @@ mod tests {
         register_echo(&mut agent, "bash");
 
         let policy = Policy::new(Tier::Auto, 15, None);
-        let outcome = run_query(
-            resolved_stub(),
-            policy,
-            &mut agent,
-            "prompt",
-            None,
-            None,
-            None,
-        )
-        .await;
+        let outcome = run_query(resolved_stub(), policy, &mut agent, "prompt", None, None).await;
 
         assert!(outcome.tool_calls.iter().any(|t| t.name == "edit" && t.ok));
         assert!(outcome.tool_calls.iter().any(|t| t.name == "bash" && t.ok));
@@ -1357,16 +1202,7 @@ mod tests {
         register_echo(&mut agent, "edit");
 
         let policy = Policy::new(Tier::Default, 15, None);
-        let outcome = run_query(
-            resolved_stub(),
-            policy,
-            &mut agent,
-            "prompt",
-            None,
-            None,
-            None,
-        )
-        .await;
+        let outcome = run_query(resolved_stub(), policy, &mut agent, "prompt", None, None).await;
 
         assert!(
             outcome.tool_calls.iter().any(|t| t.name == "edit" && !t.ok),
@@ -1394,16 +1230,7 @@ mod tests {
         register_echo(&mut agent, "ls");
 
         let policy = Policy::new(Tier::Auto, 2, None);
-        let outcome = run_query(
-            resolved_stub(),
-            policy,
-            &mut agent,
-            "prompt",
-            None,
-            None,
-            None,
-        )
-        .await;
+        let outcome = run_query(resolved_stub(), policy, &mut agent, "prompt", None, None).await;
 
         assert_eq!(outcome.stop_reason, StopReason::MaxToolCalls);
         assert!(
@@ -1419,16 +1246,7 @@ mod tests {
         let mut agent = Agent::new(provider);
 
         let policy = Policy::new(Tier::Auto, 15, None);
-        let outcome = run_query(
-            resolved_stub(),
-            policy,
-            &mut agent,
-            "prompt",
-            None,
-            None,
-            None,
-        )
-        .await;
+        let outcome = run_query(resolved_stub(), policy, &mut agent, "prompt", None, None).await;
 
         assert_eq!(outcome.stop_reason, StopReason::Error);
         assert!(outcome.error.is_some(), "error payload must be populated");
@@ -1444,16 +1262,7 @@ mod tests {
         register_echo(&mut agent, "edit");
 
         let policy = Policy::new(Tier::Default, 15, None);
-        let outcome = run_query(
-            resolved_stub(),
-            policy,
-            &mut agent,
-            "prompt",
-            None,
-            None,
-            None,
-        )
-        .await;
+        let outcome = run_query(resolved_stub(), policy, &mut agent, "prompt", None, None).await;
 
         assert!(
             outcome.tool_calls.iter().any(|t| t.name == "edit" && !t.ok),
@@ -1480,16 +1289,7 @@ mod tests {
 
         // Default denies edit; cap 2 ⇒ the 3rd (denied) call trips the cap.
         let policy = Policy::new(Tier::Default, 2, None);
-        let outcome = run_query(
-            resolved_stub(),
-            policy,
-            &mut agent,
-            "prompt",
-            None,
-            None,
-            None,
-        )
-        .await;
+        let outcome = run_query(resolved_stub(), policy, &mut agent, "prompt", None, None).await;
 
         assert_eq!(
             outcome.stop_reason,
@@ -1510,16 +1310,7 @@ mod tests {
         register_echo(&mut agent, "edit");
 
         let policy = Policy::new(Tier::FullAuto, 50, None);
-        let outcome = run_query(
-            resolved_stub(),
-            policy,
-            &mut agent,
-            "prompt",
-            None,
-            None,
-            None,
-        )
-        .await;
+        let outcome = run_query(resolved_stub(), policy, &mut agent, "prompt", None, None).await;
 
         assert_eq!(
             outcome.stop_reason,
@@ -1545,16 +1336,7 @@ mod tests {
         register_echo(&mut agent, "edit");
 
         let policy = Policy::new(Tier::Auto, 15, None);
-        let outcome = run_query(
-            resolved_stub(),
-            policy,
-            &mut agent,
-            "prompt",
-            None,
-            None,
-            None,
-        )
-        .await;
+        let outcome = run_query(resolved_stub(), policy, &mut agent, "prompt", None, None).await;
 
         assert_eq!(
             outcome.stop_reason,
@@ -1575,16 +1357,7 @@ mod tests {
         register_echo(&mut agent, "ls");
 
         let policy = Policy::new(Tier::Auto, 15, None);
-        let outcome = run_query(
-            resolved_stub(),
-            policy,
-            &mut agent,
-            "prompt",
-            None,
-            None,
-            None,
-        )
-        .await;
+        let outcome = run_query(resolved_stub(), policy, &mut agent, "prompt", None, None).await;
 
         // user prompt, assistant(tool-use), assistant(final text).
         let user = outcome
@@ -1689,16 +1462,7 @@ mod tests {
         register_echo(&mut agent, "ls");
 
         let policy = Policy::new(Tier::Auto, 15, None);
-        let outcome = run_query(
-            resolved_stub(),
-            policy,
-            &mut agent,
-            "prompt",
-            None,
-            None,
-            None,
-        )
-        .await;
+        let outcome = run_query(resolved_stub(), policy, &mut agent, "prompt", None, None).await;
 
         assert_eq!(
             outcome.stop_reason,
@@ -1768,7 +1532,6 @@ mod tests {
             &mut agent,
             "go",
             Some(Duration::from_millis(CANCEL_FIRE_DELAY_MS)),
-            None,
             None,
         )
         .await;
@@ -1855,12 +1618,17 @@ mod tests {
         assert!(outcome.response.is_none(), "rejected, not truncated");
     }
 
-    /// `query --consult` in `--auto` invokes consult **exactly once** and populates
-    /// `RunOutcome.consult`, even though the agent itself did not consult (REQ-H22).
+    /// `query --consult` in `--auto` invokes consult **exactly once**, IN-LOOP —
+    /// through the SAME registered `consult` tool a proactive call would use —
+    /// and populates `RunOutcome.consult`, even though the agent itself did not
+    /// request it (REQ-H22).
     #[tokio::test]
     async fn test_query_forced_consult_auto_runs_exactly_once_and_populates() {
         let provider = ScriptedProvider::new(vec![Turn::Text("here is my answer".to_string())]);
         let mut agent = Agent::new(provider);
+        // Production always has this registered whenever a MAGI orchestrator is
+        // wired (main.rs); the forced injection reuses it by name (REQ-H22).
+        agent.register_tool(Box::new(ConsultTool::new(canned_magi(), true)));
 
         let policy = Policy::new(Tier::Auto, 15, None);
         let outcome = run_query(
@@ -1869,7 +1637,6 @@ mod tests {
             &mut agent,
             "decide X vs Y",
             None,
-            Some(canned_magi()),
             None,
         )
         .await;
@@ -1895,11 +1662,14 @@ mod tests {
 
     /// `query --consult` in `default` DENIES the forced consult (the tier gate
     /// wins): it is recorded `ok = false` and `RunOutcome.consult` stays `None` —
-    /// it is NOT elevated out of the read-only tier (REQ-H22 precedence).
+    /// it is NOT elevated out of the read-only tier (REQ-H22 precedence). The
+    /// tier gate fires before the tool is ever looked up, so this holds even
+    /// though `consult` IS registered (matching production wiring).
     #[tokio::test]
     async fn test_query_forced_consult_default_denied_and_not_elevated() {
         let provider = ScriptedProvider::new(vec![Turn::Text("read-only answer".to_string())]);
         let mut agent = Agent::new(provider);
+        agent.register_tool(Box::new(ConsultTool::new(canned_magi(), true)));
 
         let policy = Policy::new(Tier::Default, 15, None);
         let outcome = run_query(
@@ -1908,7 +1678,6 @@ mod tests {
             &mut agent,
             "decide X vs Y",
             None,
-            Some(canned_magi()),
             None,
         )
         .await;
@@ -1926,9 +1695,12 @@ mod tests {
         );
     }
 
-    /// A forced consult does NOT double-fire: when the agent already invoked the
-    /// `consult` tool during the loop, exactly one consult call is recorded and no
-    /// second (injected) pass runs (REQ-H22 exactly-once).
+    /// A forced consult does NOT double-fire: the runner-injected consult runs
+    /// FIRST (before the model's first turn), and if the model ALSO requests
+    /// `consult` afterward, that redundant request is answered but never
+    /// re-executed or re-recorded — `RunOutcome.tool_calls` still shows exactly
+    /// one `consult` entry (REQ-H22: "no se re-dispara aunque el agente
+    /// quisiera").
     #[tokio::test]
     async fn test_query_forced_consult_does_not_double_fire() {
         let provider = ScriptedProvider::new(vec![
@@ -1940,8 +1712,9 @@ mod tests {
             Turn::Text("synthesized".to_string()),
         ]);
         let mut agent = Agent::new(provider);
-        // A real ConsultTool over a canned MAGI so the agent's proactive call
-        // executes and is recorded (auto_approve is moot — the observer authorizes).
+        // A real ConsultTool over a canned MAGI: the FORCED (pre-loop) call
+        // executes against this; the model's own subsequent request must be
+        // blocked without invoking it a second time.
         agent.register_tool(Box::new(ConsultTool::new(canned_magi(), true)));
 
         let policy = Policy::new(Tier::Auto, 15, None);
@@ -1951,7 +1724,6 @@ mod tests {
             &mut agent,
             "decide X vs Y",
             None,
-            Some(canned_magi()),
             None,
         )
         .await;
@@ -1963,51 +1735,126 @@ mod tests {
             .count();
         assert_eq!(
             consult_calls, 1,
-            "the agent's own consult is reused — the forced pass does not re-fire"
+            "the forced pass runs once; the model's own later request is blocked \
+             without a second observer-recorded call"
         );
         assert!(
             outcome.consult.is_some(),
-            "the single (proactive) consult populates RunOutcome.consult"
+            "the single forced consult populates RunOutcome.consult"
         );
     }
 
-    /// Structural proof of the single-deadline bound (REQ-H36): the forced consult
-    /// gets the budget REMAINING after the loop, never a fresh `dur`. Against the
-    /// pre-fix code — which handed the forced consult the full original `timeout` —
-    /// `loop + forced consult` could reach 2× `dur`; this arithmetic rejects that.
-    #[test]
-    fn test_forced_consult_budget_is_remaining_not_fresh() {
-        // 1000 ms budget, 600 ms already spent by the loop ⇒ only 400 ms left
-        // (NOT a fresh 1000 ms).
-        assert_eq!(
-            forced_consult_budget(
-                Some(Duration::from_millis(1000)),
-                Duration::from_millis(600)
-            ),
-            Some(Duration::from_millis(400)),
-            "the forced consult may only use the time remaining after the loop"
-        );
-        // An already-exhausted budget saturates to zero (immediate timeout),
-        // never underflows.
-        assert_eq!(
-            forced_consult_budget(Some(Duration::from_millis(500)), Duration::from_millis(900)),
-            Some(Duration::ZERO),
-            "an over-budget loop leaves zero for the consult, not a wrapped value"
-        );
-        // No timeout ⇒ unbounded (the interactive/None path is unaffected).
-        assert_eq!(
-            forced_consult_budget(None, Duration::from_millis(900)),
+    /// The forced consult is a genuine IN-LOOP tool call: it consumes one
+    /// `max_tool_calls` slot rather than running "for free" outside the loop
+    /// (REQ-H22). With the cap set to exactly 1, the injected consult exhausts
+    /// it, so the model's very first (non-consult) tool request immediately
+    /// exceeds the cap — proving the forced call occupied the one slot.
+    #[tokio::test]
+    async fn test_query_forced_consult_counts_against_max_tool_calls() {
+        let provider = ScriptedProvider::new(vec![tool_turn("t1", "edit")]);
+        let mut agent = Agent::new(provider);
+        agent.register_tool(Box::new(ConsultTool::new(canned_magi(), true)));
+        register_echo(&mut agent, "edit");
+
+        let policy = Policy::new(Tier::Auto, 1, None);
+        let outcome = run_query(
+            forced_resolved(),
+            policy,
+            &mut agent,
+            "decide X vs Y",
             None,
-            "a None timeout stays unbounded for the forced consult too"
+            None,
+        )
+        .await;
+
+        assert_eq!(
+            outcome.stop_reason,
+            StopReason::MaxToolCalls,
+            "the forced consult already spent the single available slot, so the \
+             model's next tool request trips the cap"
+        );
+        let consult_calls = outcome
+            .tool_calls
+            .iter()
+            .filter(|t| t.name == "consult")
+            .count();
+        assert_eq!(
+            consult_calls, 1,
+            "the forced consult itself did run — it occupied the slot"
+        );
+        assert!(
+            outcome.tool_calls.iter().all(|t| t.name != "edit"),
+            "the cap trips before the model's tool is ever authorized/executed"
+        );
+    }
+
+    /// A provider that reports whether its (only) call saw a `consult`
+    /// `ToolResult` already present in the message history — proves the
+    /// model's turn genuinely reacts to the forced consult's content, not
+    /// merely that the loop continued after it.
+    struct ConsultReactingProvider;
+
+    #[async_trait]
+    impl Provider for ConsultReactingProvider {
+        async fn stream_messages(
+            &self,
+            messages: &[Message],
+            _tools: &[Box<dyn Tool>],
+            _system: Option<&str>,
+        ) -> Result<BoxStream<'static, Result<ResponseChunk>>> {
+            let saw_consult = messages.iter().any(|m| {
+                m.content.iter().any(|c| {
+                    matches!(c, Content::ToolResult { content, .. } if content.contains("degraded"))
+                })
+            });
+            let text = if saw_consult {
+                "reacted-to-consult"
+            } else {
+                "no-consult-seen"
+            };
+            Ok(Box::pin(stream::iter(vec![
+                Ok(ResponseChunk::TextDelta(text.to_string())),
+                Ok(ResponseChunk::MessageDone(Message::assistant(text))),
+            ])))
+        }
+    }
+
+    /// The model's turn AFTER the forced consult genuinely includes its result
+    /// in the conversation it sees — this is the point of moving the forced
+    /// pass in-loop (REQ-H22): the consult's `{"report":…,"degraded":…}`
+    /// `ToolResult` is already in `working` by the time the FIRST provider
+    /// call happens.
+    #[tokio::test]
+    async fn test_query_forced_consult_result_reaches_the_models_next_turn() {
+        let mut agent = Agent::new(Arc::new(ConsultReactingProvider));
+        agent.register_tool(Box::new(ConsultTool::new(canned_magi(), true)));
+
+        let policy = Policy::new(Tier::Auto, 15, None);
+        let outcome = run_query(
+            forced_resolved(),
+            policy,
+            &mut agent,
+            "decide X vs Y",
+            None,
+            None,
+        )
+        .await;
+
+        assert_eq!(
+            outcome.response.as_deref(),
+            Some("reacted-to-consult"),
+            "the model's first provider turn must already see the forced \
+             consult's ToolResult content"
         );
     }
 
     /// Behavioral proof (REQ-H36): a forced consult shares the run's SINGLE
-    /// wall-clock budget. The agent loop finishes fast, but the forced consult
-    /// would block far past the remaining budget, so the run times out as a whole
-    /// — `stop_reason = Error` / `error.kind = Timeout`. Against the pre-fix code
-    /// (a fresh deadline whose consult timeout was NOT propagated) this same run
-    /// reported `Done`, so this test fails on the old 2×-budget code.
+    /// wall-clock budget automatically, because it is now a genuine in-loop
+    /// tool call bounded by the SAME `tokio::time::timeout` as the rest of the
+    /// loop — there is no separate forced-consult deadline to reconcile. The
+    /// agent loop would finish fast, but the registered `consult` tool blocks
+    /// far past `--timeout`, so the WHOLE run times out — `stop_reason = Error`
+    /// / `error.kind = Timeout`.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_forced_consult_shares_single_wall_clock_budget() {
         let provider = ScriptedProvider::new(vec![Turn::Text("fast loop answer".to_string())]);
@@ -2016,6 +1863,7 @@ mod tests {
         // A MAGI whose analysis blocks far longer than the run's --timeout, so the
         // forced consult is guaranteed to exhaust the shared budget.
         let magi = slow_magi(Duration::from_secs(30));
+        agent.register_tool(Box::new(ConsultTool::new(magi, true)));
 
         let started = Instant::now();
         let policy = Policy::new(Tier::Auto, 15, None);
@@ -2025,7 +1873,6 @@ mod tests {
             &mut agent,
             "decide X vs Y",
             Some(Duration::from_millis(300)),
-            Some(magi),
             None,
         )
         .await;
@@ -2034,7 +1881,7 @@ mod tests {
         assert_eq!(
             outcome.stop_reason,
             StopReason::Error,
-            "loop + forced consult over the shared budget ⇒ Error (pre-fix: Done)"
+            "loop + forced consult over the shared budget ⇒ Error"
         );
         assert_eq!(
             outcome

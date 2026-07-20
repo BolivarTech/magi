@@ -59,6 +59,29 @@ pub const DEFAULT_MAX_TOOL_CALLS: usize = 15;
 /// a brittle inline literal match.
 pub const MAX_TOOL_CALLS_ERROR: &str = "Maximum tool call limit reached";
 
+/// Registered name of the multi-perspective MAGI tool, mirroring
+/// `ConsultTool::name()` (`src/tools/consult.rs`) — the single string the
+/// forced-consult injection and its at-most-once guard compare against
+/// (REQ-H22). Kept independent of the tool's own literal (no cross-crate-layer
+/// import from `agent` into `tools`' private constants), same precedent as
+/// `headless_runner::CONSULT_TOOL`.
+const CONSULT_TOOL_NAME: &str = "consult";
+
+/// Synthetic tool-use id of the runner-injected forced consult (REQ-H22).
+/// Unlike the pre-refactor post-loop pass, this now correlates a REAL
+/// assistant `ToolUse` / `ToolResult` message pair appended to `history` —
+/// the model's next provider turn genuinely sees it and can react.
+const FORCED_CONSULT_TOOL_USE_ID: &str = "forced-consult";
+
+/// `ToolResult` content recorded — WITHOUT going through the observer, so it
+/// never appears twice in the run's tool-call audit — when the model itself
+/// requests `consult` after the forced consult already ran for this query.
+/// REQ-H22 guarantees exactly one consult invocation per forced run: the
+/// model's ToolUse block still needs an answer (the API contract requires
+/// one), so it gets this message, but the tool is never re-executed.
+const CONSULT_ALREADY_FORCED_MESSAGE: &str =
+    "consult already ran once for this forced query; no further invocations";
+
 /// Observes an agent run from **outside** the tool loop, for the headless runner.
 ///
 /// Absent ([`AgentRunConfig::observer`] is `None`) ⇒ the interactive tool loop
@@ -158,6 +181,14 @@ pub struct AgentRunConfig {
     /// the operator default, or — only when explicitly enabled — the caller
     /// override.
     pub system: Option<String>,
+    /// When `true`, [`Agent::run_tool_loop`] injects exactly one **in-loop**
+    /// `consult` tool call before the first provider turn (REQ-H22 forced
+    /// consult: `magi query --consult` / envelope `consult:true`). `false` (the
+    /// default) never injects anything — the interactive/TUI path and an
+    /// unconfigured headless run are unaffected. See the rustdoc on
+    /// [`Agent::run_tool_loop`] for the full authorization/at-most-once
+    /// contract.
+    pub force_consult: bool,
 }
 
 impl Default for AgentRunConfig {
@@ -168,6 +199,7 @@ impl Default for AgentRunConfig {
             observer: None,
             cancel: CancellationToken::new(),
             system: None,
+            force_consult: false,
         }
     }
 }
@@ -582,7 +614,7 @@ impl Agent {
             // - full_text: sanitized delta-accumulated text for write_turn_to_memory.
             // - final_text: text from MessageDone content, returned to the caller.
             let (full_text, final_text) = self
-                .run_tool_loop(working_messages, &chunk_tx, &config)
+                .run_tool_loop(working_messages, &chunk_tx, &config, text)
                 .await?;
 
             // ── Selective-specific terminal work (after the tool loop) ─────────
@@ -649,8 +681,147 @@ impl Agent {
         // user message). `run_tool_loop` extends both `working` and `self.history`
         // in lock-step, so the provider sees the same growing context as before.
         let working = self.history.clone();
-        let (_full_text, final_text) = self.run_tool_loop(working, &chunk_tx, &config).await?;
+        let (_full_text, final_text) = self
+            .run_tool_loop(working, &chunk_tx, &config, text)
+            .await?;
         Ok(final_text)
+    }
+
+    /// Authorizes, executes, and records ONE tool call, returning the
+    /// `Content::ToolResult` to fold into the requesting turn's results.
+    ///
+    /// Shared by the model-driven `ToolUse` dispatch inside [`Self::run_tool_loop`]
+    /// and its pre-loop forced-consult injection (REQ-H22), so both sites run
+    /// through IDENTICAL approval/execution/observer-recording logic — a forced
+    /// consult is authorized and executed exactly like a model-requested one.
+    ///
+    /// # Authorization
+    /// A headless observer ([`AgentRunConfig::observer`]), when present, is
+    /// AUTHORITATIVE for every tool (REQ-H06/H07/H09) — the only mechanism that
+    /// can gate a tool opting out of interactive approval (`project_knowledge`,
+    /// an auto-approve `consult`), which never reaches `approval_tx`. Without an
+    /// observer the original interactive `approval_tx` / `requires_approval()`
+    /// gate runs unchanged.
+    ///
+    /// # Parameters
+    /// - `id` — the tool-use id correlating this call with its `ToolResult`.
+    /// - `name` — the tool name to look up in `self.tools`.
+    /// - `input` — the JSON input to execute the tool with.
+    /// - `config` — the run configuration (observer, cancellation, approval).
+    /// - `chunk_tx` — streaming sender, used only to forward an auto-approved
+    ///   tool's [`Tool::approval_notice`].
+    ///
+    /// # Returns
+    /// `Content::ToolResult` — a denial (`is_error = true`) when not approved,
+    /// otherwise the tool's own result (`is_error` reflecting `Tool::execute`).
+    /// A name with no matching registered tool resolves to a "not found" error
+    /// result rather than panicking.
+    async fn authorize_and_execute_tool(
+        &mut self,
+        id: &str,
+        name: &str,
+        input: &serde_json::Value,
+        config: &AgentRunConfig,
+        chunk_tx: &tokio::sync::mpsc::Sender<StreamPiece>,
+    ) -> Content {
+        let approved = if let Some(observer) = config.observer.as_deref() {
+            observer.authorize(name)
+        } else {
+            // Per-tool approval policy: look up the tool's
+            // `requires_approval()` flag before deciding whether to
+            // prompt.  Safe tools (false) are auto-approved without
+            // emitting any ApprovalRequest — this eliminates one prompt
+            // per stored memory fact when the model issues multiple
+            // project_knowledge / view / ls / grep calls in sequence.
+            // Dangerous tools (bash / edit / consult) keep the default
+            // (true) and go through the existing gate below.  Unknown
+            // tool names default to true (safe-by-default); they fail
+            // as "tool not found" on execute.
+            let needs_approval = self
+                .tools
+                .iter()
+                .find(|t| t.name() == name)
+                .is_none_or(|t| t.requires_approval());
+
+            if needs_approval {
+                if let Some(ref tx) = self.approval_tx {
+                    let (oneshot_tx, oneshot_rx) = oneshot::channel();
+                    let _ = tx
+                        .send(ApprovalRequest {
+                            tool_name: name.to_string(),
+                            input: input.clone(),
+                            tx: oneshot_tx,
+                        })
+                        .await;
+                    match timeout(Duration::from_secs(APPROVAL_TIMEOUT_SECS), oneshot_rx).await {
+                        Ok(Ok(res)) => res,
+                        _ => false,
+                    }
+                } else {
+                    // SECURITY: no approval channel is wired (headless
+                    // / test mode, `approval_tx == None`) — there is no
+                    // UI to ask, so the call proceeds even for a tool
+                    // that requires approval. Pre-existing behavior: the
+                    // interactive TUI ALWAYS sets `approval_tx` (see
+                    // `run_tui_ext`), so bash / edit / consult are
+                    // genuinely gated in production; only non-interactive
+                    // callers reach this auto path.
+                    true
+                }
+            } else {
+                // Auto-approve: tool opted out of the gate.
+                // Emit an announcement notice if the tool provides one,
+                // so the user knows a potentially slow operation starts.
+                if let Some(tool) = self.tools.iter().find(|t| t.name() == name) {
+                    if let Some(notice) = tool.approval_notice() {
+                        // Best-effort: a failed send (TUI gone) must not
+                        // abort the turn.
+                        let _ = chunk_tx.send(StreamPiece::Notice(notice)).await;
+                    }
+                }
+                true
+            }
+        };
+
+        if !approved {
+            // A tier denial gets a clear audit message; the interactive
+            // path keeps its original "denied or timed out" wording.
+            let denial_msg = if config.observer.is_some() {
+                format!("Tool '{name}' denied: not authorized in the current authorization tier")
+            } else {
+                "Execution denied or timed out.".to_string()
+            };
+            if let Some(observer) = config.observer.as_deref() {
+                observer.on_tool_call(id, name, input, &denial_msg, false, 0);
+            }
+            return Content::ToolResult {
+                tool_use_id: id.to_string(),
+                content: denial_msg,
+                is_error: true,
+            };
+        }
+
+        // Execute, measuring wall-clock time so the observer records a
+        // faithful per-call duration.
+        let started = Instant::now();
+        let (result_content, is_error) =
+            if let Some(tool) = self.tools.iter().find(|t| t.name() == name) {
+                match tool.execute(input.clone(), &config.cancel).await {
+                    Ok(val) => (val.to_string(), false),
+                    Err(e) => (e.to_string(), true),
+                }
+            } else {
+                (format!("Tool '{}' not found", name), true)
+            };
+        let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        if let Some(observer) = config.observer.as_deref() {
+            observer.on_tool_call(id, name, input, &result_content, !is_error, elapsed_ms);
+        }
+        Content::ToolResult {
+            tool_use_id: id.to_string(),
+            content: result_content,
+            is_error,
+        }
     }
 
     /// Inner tool-loop shared by the `selective` and `load_all` execution paths.
@@ -666,6 +837,9 @@ impl Agent {
     ///   appended. `self.history` is updated in parallel so `load_history` and the
     ///   message store stay consistent across both paths.
     /// - `chunk_tx` — streaming sender for UI pieces (shared reference).
+    /// - `prompt` — the original user query text for this turn. Used ONLY by the
+    ///   [`AgentRunConfig::force_consult`] injection (REQ-H22) to build the
+    ///   forced consult's `{"query": prompt}` input; ignored otherwise.
     ///
     /// # Returns
     /// A tuple `(full_text, final_text)` where:
@@ -679,15 +853,91 @@ impl Agent {
     /// `sanitize_text` on every delta, `MessageDone`-missing error, TUI-closed
     /// error, and `self.history` + `memory.add_message` persistence order are all
     /// identical to the original per-path loops.
+    ///
+    /// # Forced consult (REQ-H22)
+    /// When `config.force_consult` is `true`, BEFORE the first provider call this
+    /// method injects exactly one synthetic `consult` tool call — a real
+    /// `Assistant` `ToolUse` message immediately followed by a `User`
+    /// `ToolResult` message, appended to both `working` and `self.history`
+    /// exactly like a model-requested call. This means: it consumes one
+    /// `max_tool_calls` slot, it is authorized through the same
+    /// [`RunObserver::authorize`] tier gate (so `default` denies it, `ok =
+    /// false`, never elevated), it is executed via the SAME registered
+    /// `consult` tool a proactive call would use (so authorization/execution/
+    /// recording are identical), and — because it is appended to `working`
+    /// before the loop's first `stream_messages` call — the model's very first
+    /// turn already sees the result and can react to it. If the tool is not
+    /// registered on this agent, the call is recorded as a "not found" failure
+    /// instead of panicking.
+    ///
+    /// Once injected (successfully or not), `forced_consult_done` locks out any
+    /// further `consult` request for the rest of THIS run: if the model also
+    /// requests `consult` afterward, that `ToolUse` is answered with
+    /// [`CONSULT_ALREADY_FORCED_MESSAGE`] and neither authorized nor executed
+    /// again — recorded only in the conversation, NOT re-added to the observer's
+    /// audit trail (so `RunOutcome.tool_calls` still shows exactly one `consult`
+    /// entry). This is REQ-H22's "no se re-dispara aunque el agente quisiera".
     async fn run_tool_loop(
         &mut self,
         mut working: Vec<Message>,
         chunk_tx: &tokio::sync::mpsc::Sender<StreamPiece>,
         config: &AgentRunConfig,
+        prompt: &str,
     ) -> Result<(String, String)> {
         let mut tool_call_count = 0;
         let mut last_normalized_tool: Option<(String, String)> = None;
         let mut repeat_count = 0;
+        // REQ-H22: locks out any further `consult` request once the forced
+        // pre-loop injection below has run (success, denial, or "not found").
+        let mut forced_consult_done = false;
+
+        if config.force_consult {
+            let input = serde_json::json!({ "query": prompt });
+            tool_call_count += 1;
+            if tool_call_count > config.max_tool_calls {
+                return Err(anyhow::anyhow!(MAX_TOOL_CALLS_ERROR));
+            }
+            last_normalized_tool = Some((
+                CONSULT_TOOL_NAME.to_string(),
+                Self::normalize_input(&input, 0)?,
+            ));
+
+            let result_content = self
+                .authorize_and_execute_tool(
+                    FORCED_CONSULT_TOOL_USE_ID,
+                    CONSULT_TOOL_NAME,
+                    &input,
+                    config,
+                    chunk_tx,
+                )
+                .await;
+
+            let tool_use_msg = Message {
+                role: Role::Assistant,
+                content: vec![Content::ToolUse {
+                    id: FORCED_CONSULT_TOOL_USE_ID.to_string(),
+                    name: CONSULT_TOOL_NAME.to_string(),
+                    input: input.clone(),
+                }],
+            };
+            self.history.push(tool_use_msg.clone());
+            working.push(tool_use_msg.clone());
+            if let (Some(memory), Some(sid)) = (&self.memory, &self.session_id) {
+                memory.add_message(sid, &tool_use_msg).await?;
+            }
+
+            let tool_res_msg = Message {
+                role: Role::User,
+                content: vec![result_content],
+            };
+            self.history.push(tool_res_msg.clone());
+            working.push(tool_res_msg.clone());
+            if let (Some(memory), Some(sid)) = (&self.memory, &self.session_id) {
+                memory.add_message(sid, &tool_res_msg).await?;
+            }
+
+            forced_consult_done = true;
+        }
 
         loop {
             let mut stream = self
@@ -780,127 +1030,24 @@ impl Agent {
                     }
                     last_normalized_tool = Some((name.clone(), normalized_input));
 
-                    // Authorization decision. When a headless observer is
-                    // attached it is AUTHORITATIVE for EVERY tool (REQ-H06/H07/
-                    // H09) — the only place a tier can gate tools that opt out of
-                    // interactive approval (`project_knowledge`, an auto-approve
-                    // `consult`), which never reach the `approval_tx` gate. With
-                    // no observer the original interactive path runs unchanged.
-                    let approved = if let Some(observer) = config.observer.as_deref() {
-                        observer.authorize(name)
-                    } else {
-                        // Per-tool approval policy: look up the tool's
-                        // `requires_approval()` flag before deciding whether to
-                        // prompt.  Safe tools (false) are auto-approved without
-                        // emitting any ApprovalRequest — this eliminates one prompt
-                        // per stored memory fact when the model issues multiple
-                        // project_knowledge / view / ls / grep calls in sequence.
-                        // Dangerous tools (bash / edit / consult) keep the default
-                        // (true) and go through the existing gate below.  Unknown
-                        // tool names default to true (safe-by-default); they fail
-                        // as "tool not found" on execute.
-                        let needs_approval = self
-                            .tools
-                            .iter()
-                            .find(|t| t.name() == name)
-                            .is_none_or(|t| t.requires_approval());
-
-                        if needs_approval {
-                            if let Some(ref tx) = self.approval_tx {
-                                let (oneshot_tx, oneshot_rx) = oneshot::channel();
-                                let _ = tx
-                                    .send(ApprovalRequest {
-                                        tool_name: name.clone(),
-                                        input: input.clone(),
-                                        tx: oneshot_tx,
-                                    })
-                                    .await;
-                                match timeout(
-                                    Duration::from_secs(APPROVAL_TIMEOUT_SECS),
-                                    oneshot_rx,
-                                )
+                    // REQ-H22: once the forced consult has run (successfully or
+                    // not), any further `consult` request for the rest of THIS
+                    // run — model-issued or not — is answered but never
+                    // re-authorized/re-executed/re-recorded (see the
+                    // `# Forced consult` rustdoc on this method).
+                    let result_content =
+                        if config.force_consult && forced_consult_done && name == CONSULT_TOOL_NAME
+                        {
+                            Content::ToolResult {
+                                tool_use_id: id.clone(),
+                                content: CONSULT_ALREADY_FORCED_MESSAGE.to_string(),
+                                is_error: true,
+                            }
+                        } else {
+                            self.authorize_and_execute_tool(id, name, input, config, chunk_tx)
                                 .await
-                                {
-                                    Ok(Ok(res)) => res,
-                                    _ => false,
-                                }
-                            } else {
-                                // SECURITY: no approval channel is wired (headless
-                                // / test mode, `approval_tx == None`) — there is no
-                                // UI to ask, so the call proceeds even for a tool
-                                // that requires approval. Pre-existing behavior: the
-                                // interactive TUI ALWAYS sets `approval_tx` (see
-                                // `run_tui_ext`), so bash / edit / consult are
-                                // genuinely gated in production; only non-interactive
-                                // callers reach this auto path.
-                                true
-                            }
-                        } else {
-                            // Auto-approve: tool opted out of the gate.
-                            // Emit an announcement notice if the tool provides one,
-                            // so the user knows a potentially slow operation starts.
-                            if let Some(tool) = self.tools.iter().find(|t| t.name() == name) {
-                                if let Some(notice) = tool.approval_notice() {
-                                    // Best-effort: a failed send (TUI gone) must not
-                                    // abort the turn.
-                                    let _ = chunk_tx.send(StreamPiece::Notice(notice)).await;
-                                }
-                            }
-                            true
-                        }
-                    };
-
-                    if !approved {
-                        // A tier denial gets a clear audit message; the interactive
-                        // path keeps its original "denied or timed out" wording.
-                        let denial_msg = if config.observer.is_some() {
-                            format!(
-                                "Tool '{name}' denied: not authorized in the current \
-                                 authorization tier"
-                            )
-                        } else {
-                            "Execution denied or timed out.".to_string()
                         };
-                        if let Some(observer) = config.observer.as_deref() {
-                            observer.on_tool_call(id, name, input, &denial_msg, false, 0);
-                        }
-                        tool_results.push(Content::ToolResult {
-                            tool_use_id: id.clone(),
-                            content: denial_msg,
-                            is_error: true,
-                        });
-                        continue;
-                    }
-
-                    // Execute, measuring wall-clock time so the observer records a
-                    // faithful per-call duration.
-                    let started = Instant::now();
-                    let (result_content, is_error) =
-                        if let Some(tool) = self.tools.iter().find(|t| t.name() == name) {
-                            match tool.execute(input.clone(), &config.cancel).await {
-                                Ok(val) => (val.to_string(), false),
-                                Err(e) => (e.to_string(), true),
-                            }
-                        } else {
-                            (format!("Tool '{}' not found", name), true)
-                        };
-                    let elapsed_ms =
-                        u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-                    if let Some(observer) = config.observer.as_deref() {
-                        observer.on_tool_call(
-                            id,
-                            name,
-                            input,
-                            &result_content,
-                            !is_error,
-                            elapsed_ms,
-                        );
-                    }
-                    tool_results.push(Content::ToolResult {
-                        tool_use_id: id.clone(),
-                        content: result_content,
-                        is_error,
-                    });
+                    tool_results.push(result_content);
                 }
             }
 
