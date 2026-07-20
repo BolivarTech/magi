@@ -25,6 +25,34 @@ pub struct MagiConfig {
     pub memory: crate::memory::config::MemoryConfig,
     #[serde(default)]
     pub embedding: crate::memory::config::EmbeddingConfig,
+    #[serde(default)]
+    pub headless: HeadlessConfig,
+}
+
+/// `[headless]` section of `magi.toml` (spec §11). Every field is optional; an
+/// unset field falls back to its built-in constant default (see
+/// `main.rs::resolve_headless_limits`). Unknown keys are a parse error.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HeadlessConfig {
+    /// Cap on `-i`/stdin input bytes (REQ-H29). Overrides `MAX_INPUT_BYTES`.
+    pub max_input_bytes: Option<usize>,
+    /// Elevated tool-call cap under `--full-auto` (REQ-H08). Overrides `FULL_AUTO_MAX_TOOL_CALLS`.
+    pub full_auto_max_tool_calls: Option<u32>,
+    /// Keep at most the last N run logs (REQ-H34). Overrides `LOG_RETENTION_RUNS`.
+    pub log_retention: Option<usize>,
+    /// Total log-dir byte ceiling (REQ-H24). Overrides `LOG_MAX_BYTES`.
+    pub log_max_bytes: Option<u64>,
+    /// Cap on each tool result in the output (REQ-H14). Overrides `TOOL_RESULT_CAP`.
+    pub tool_result_cap_bytes: Option<usize>,
+    /// Default log level (REQ-H24): `error`|`warn`|`info`|`debug`. Overrides `"info"`.
+    pub log_level: Option<String>,
+    /// Default wall-clock timeout secs for tool-executing tiers (REQ-H36).
+    /// Overrides `FULL_AUTO_TIMEOUT_SECS`.
+    pub timeout_secs: Option<u64>,
+    /// Whether the envelope may override the operator `system` prompt (REQ-H12b).
+    /// Defaults to `false` (the envelope `system` is ignored unless enabled).
+    pub allow_system_override: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]

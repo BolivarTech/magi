@@ -41,6 +41,44 @@ pub const NORMAL_MAX_TOOL_CALLS: u32 = 15;
 /// (REQ-H08). 50.
 pub const FULL_AUTO_MAX_TOOL_CALLS: u32 = 50;
 
+/// Effective headless numeric caps for one run, after the `[headless]`
+/// `magi.toml` overrides are applied over the built-in constant defaults
+/// (spec §11).
+///
+/// Built once per run (see `main.rs::resolve_headless_limits`); each field
+/// defaults to its module constant and is overridden only when the operator
+/// sets the matching `[headless]` key. Non-numeric knobs (`log_level`,
+/// `allow_system_override`) resolve at their own sites, not here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeadlessLimits {
+    /// Effective `-i`/stdin byte cap (default [`MAX_INPUT_BYTES`]).
+    pub max_input_bytes: usize,
+    /// Effective `--full-auto` tool-call cap (default [`FULL_AUTO_MAX_TOOL_CALLS`]).
+    pub full_auto_max_tool_calls: u32,
+    /// Effective run-log retention count (default [`LOG_RETENTION_RUNS`]).
+    pub log_retention_runs: usize,
+    /// Effective log-dir byte ceiling (default [`LOG_MAX_BYTES`]).
+    pub log_max_bytes: u64,
+    /// Effective per-tool-result byte cap (default [`TOOL_RESULT_CAP`]).
+    pub tool_result_cap: usize,
+    /// Effective default wall-clock timeout secs for tool-executing tiers
+    /// (default [`FULL_AUTO_TIMEOUT_SECS`]).
+    pub full_auto_timeout_secs: u64,
+}
+
+impl Default for HeadlessLimits {
+    fn default() -> Self {
+        Self {
+            max_input_bytes: MAX_INPUT_BYTES,
+            full_auto_max_tool_calls: FULL_AUTO_MAX_TOOL_CALLS,
+            log_retention_runs: LOG_RETENTION_RUNS,
+            log_max_bytes: LOG_MAX_BYTES,
+            tool_result_cap: TOOL_RESULT_CAP,
+            full_auto_timeout_secs: FULL_AUTO_TIMEOUT_SECS,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

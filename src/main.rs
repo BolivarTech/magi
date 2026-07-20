@@ -18,7 +18,9 @@ use crate::agent::Agent;
 // NOTE: this `MagiConfig` is the magi-rs TOML config (`crate::config::MagiConfig`).
 // It is DISTINCT from `magi_core::orchestrator::MagiConfig` — the latter is NEVER
 // imported here, avoiding the name collision.
-use crate::config::{resolve_openai_base_url, resolve_openai_model, resolve_provider, MagiConfig};
+use crate::config::{
+    resolve_openai_base_url, resolve_openai_model, resolve_provider, HeadlessConfig, MagiConfig,
+};
 use crate::headless_runner::{resolve_run_timeout, run_consult, run_query};
 use crate::memory::clock::SystemClock;
 use crate::memory::embedding::OpenAiCompatibleEmbedder;
@@ -38,7 +40,7 @@ use cryptovault::CryptoVault;
 use magi_core::orchestrator::{Magi, MagiBuilder};
 use magi_rs::headless::exit::exit_code as headless_exit_code;
 use magi_rs::headless::input::{parse_input, read_input_bounded, InputFormat};
-use magi_rs::headless::limits::{FULL_AUTO_MAX_TOOL_CALLS, NORMAL_MAX_TOOL_CALLS};
+use magi_rs::headless::limits::{HeadlessLimits, NORMAL_MAX_TOOL_CALLS};
 use magi_rs::headless::log::{LogLevel, RunLog};
 use magi_rs::headless::output::{write_json, write_text};
 use magi_rs::headless::policy::{Policy, Tier};
@@ -1741,6 +1743,15 @@ struct HeadlessContext {
     run_log: Option<RunLog>,
 }
 
+/// Resolves the effective headless numeric caps for this run by applying the
+/// `[headless]` `magi.toml` overrides over the built-in constant defaults
+/// (spec §11). Each unset `[headless]` key keeps its constant default.
+fn resolve_headless_limits(cfg: &HeadlessConfig) -> HeadlessLimits {
+    // STUB (TDD Red): ignores the config; the real override logic lands in Green.
+    let _ = cfg;
+    HeadlessLimits::default()
+}
+
 /// Discovers state, unlocks the vault (fail-closed), loads config, reads and
 /// parses the input, resolves the effective parameters, and builds the
 /// principal provider — the shared prelude of `query` and `consult` (REQ-H02).
@@ -1869,10 +1880,11 @@ async fn prepare_headless(
     let tier = tier_from_flags(h.auto, h.full_auto);
     // Operator ceiling: an explicit flag can RAISE it; else the `--full-auto`
     // elevation; else the toml value; else the normal cap (REQ-H08/H12b).
+    let limits = resolve_headless_limits(&magi_config.headless);
     let operator_ceiling = h
         .max_tool_calls
         .or(if h.full_auto {
-            Some(FULL_AUTO_MAX_TOOL_CALLS)
+            Some(limits.full_auto_max_tool_calls)
         } else {
             None
         })
@@ -2120,6 +2132,35 @@ mod tests {
     use super::*;
     use crate::agent::messages::Message;
     use magi_rs::vault::MaskedDek;
+
+    /// A `[headless]` config that sets a value overrides the constant default
+    /// for every numeric cap (REQ-H08/H12b/H14/H24/H29/H34/H36, spec §11).
+    #[test]
+    fn test_resolve_headless_limits_applies_config_overrides() {
+        let cfg = HeadlessConfig {
+            max_input_bytes: Some(2048),
+            full_auto_max_tool_calls: Some(30),
+            log_retention: Some(7),
+            log_max_bytes: Some(1024),
+            tool_result_cap_bytes: Some(4096),
+            timeout_secs: Some(120),
+            ..Default::default()
+        };
+        let limits = resolve_headless_limits(&cfg);
+        assert_eq!(limits.max_input_bytes, 2048);
+        assert_eq!(limits.full_auto_max_tool_calls, 30);
+        assert_eq!(limits.log_retention_runs, 7);
+        assert_eq!(limits.log_max_bytes, 1024);
+        assert_eq!(limits.tool_result_cap, 4096);
+        assert_eq!(limits.full_auto_timeout_secs, 120);
+    }
+
+    /// An empty `[headless]` config keeps every built-in constant default.
+    #[test]
+    fn test_resolve_headless_limits_defaults_when_unset() {
+        let limits = resolve_headless_limits(&HeadlessConfig::default());
+        assert_eq!(limits, HeadlessLimits::default());
+    }
 
     /// RAII env-var guard (no `temp_env` dep); restores the prior value on
     /// drop. Mirrors `vault::master`'s test helper — needed here too because
