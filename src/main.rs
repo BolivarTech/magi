@@ -1636,19 +1636,24 @@ fn write_output_atomic(
 /// `h` — a buffered atomic `-o <file>` (REQ-H03), or stdout (JSON buffered, text
 /// streamed; clamp notices always go to stderr, REQ-H13/H14).
 ///
+/// `tool_result_cap` is the EFFECTIVE per-tool-result byte cap (spec §11) — an
+/// operator-lowered `[headless] tool_result_cap_bytes` reaches the JSON
+/// truncation from here.
+///
 /// # Errors
 /// [`HeadlessError`] on a serialization or output-write failure.
 fn write_headless_output(
     h: &HeadlessArgs,
     outcome: &RunOutcome,
     out_json: bool,
+    tool_result_cap: usize,
 ) -> Result<(), HeadlessError> {
     if let Some(path) = &h.output {
         // With `-o` the output is BUFFERED (never streamed to a file) and then
         // written atomically (REQ-H13 reconciled with REQ-H03).
         let mut buf: Vec<u8> = Vec::new();
         if out_json {
-            write_json(&mut buf, outcome)?;
+            write_json(&mut buf, outcome, tool_result_cap)?;
         } else {
             write_text(&mut buf, &mut std::io::stderr(), outcome);
         }
@@ -1657,7 +1662,7 @@ fn write_headless_output(
         let stdout = std::io::stdout();
         let mut out = stdout.lock();
         if out_json {
-            write_json(&mut out, outcome)?;
+            write_json(&mut out, outcome, tool_result_cap)?;
         } else {
             write_text(&mut out, &mut std::io::stderr(), outcome);
         }
@@ -1668,9 +1673,12 @@ fn write_headless_output(
 /// Emits `outcome` in the requested format and returns the process exit code
 /// (shared by `query` and `consult`). An output-write failure is reported to
 /// stderr and mapped to its own exit code.
-fn finish_headless(h: &HeadlessArgs, outcome: &RunOutcome) -> i32 {
+///
+/// `tool_result_cap` is the EFFECTIVE per-tool-result byte cap (spec §11),
+/// forwarded to [`write_headless_output`].
+fn finish_headless(h: &HeadlessArgs, outcome: &RunOutcome, tool_result_cap: usize) -> i32 {
     let out_json = matches!(h.output_format, Some(CliOutputFormat::Json));
-    if let Err(e) = write_headless_output(h, outcome, out_json) {
+    if let Err(e) = write_headless_output(h, outcome, out_json, tool_result_cap) {
         eprintln!("error: {e}");
         return headless_error_exit_code(&e);
     }
@@ -1700,7 +1708,13 @@ fn build_run_log(
         workspace.map(Workspace::logs_dir)
     };
     let dir = logs_dir?;
-    match RunLog::start(&dir, level, limits.log_retention_runs, limits.log_max_bytes) {
+    match RunLog::start(
+        &dir,
+        level,
+        limits.log_retention_runs,
+        limits.log_max_bytes,
+        limits.tool_result_cap,
+    ) {
         Ok(log) => Some(log),
         Err(e) => {
             eprintln!("warning: could not start the run log ({e}); continuing without it");
@@ -2026,6 +2040,10 @@ async fn run_query_subcommand(
         ..
     } = ctx;
 
+    // Effective numeric caps for this run (spec §11) — reused below for the
+    // output tool-result truncation.
+    let limits = resolve_headless_limits(&magi_config.headless);
+
     let backend_label = if provider_kind == "openai" {
         "openai"
     } else {
@@ -2094,7 +2112,7 @@ async fn run_query_subcommand(
         run_log.as_mut(),
     )
     .await;
-    finish_headless(&h, &outcome)
+    finish_headless(&h, &outcome, limits.tool_result_cap)
 }
 
 /// Runs `magi consult`: forces a direct MAGI multi-perspective analysis over the
@@ -2124,6 +2142,10 @@ async fn run_consult_subcommand(
         ..
     } = ctx;
 
+    // Effective numeric caps for this run (spec §11) — reused below for the
+    // output tool-result truncation.
+    let limits = resolve_headless_limits(&magi_config.headless);
+
     let backend_label = if provider_kind == "openai" {
         "openai"
     } else {
@@ -2148,7 +2170,7 @@ async fn run_consult_subcommand(
     // bounds it (an over-cap prompt is rejected inside `run_consult`, REQ-H33).
     let timeout = h.timeout.map(Duration::from_secs);
     let outcome = run_consult(resolved, magi, &prompt, timeout, run_log.as_mut()).await;
-    finish_headless(&h, &outcome)
+    finish_headless(&h, &outcome, limits.tool_result_cap)
 }
 
 #[cfg(test)]

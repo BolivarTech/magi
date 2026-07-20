@@ -121,9 +121,14 @@ struct WireOutcome<'a> {
     error: &'a Option<ErrorPayload>,
 }
 
-/// Trunca `s` a lo sumo a [`TOOL_RESULT_CAP`] bytes, respetando límites de
-/// carácter UTF-8 (nunca parte un carácter multi-byte), y anexa un marcador
+/// Trunca `s` a lo sumo a `cap` bytes, respetando límites de carácter UTF-8
+/// (nunca parte un carácter multi-byte), y anexa un marcador
 /// `…[truncated N bytes]` con `N` = bytes efectivamente descartados.
+///
+/// `cap` es el cap EFECTIVO de esta corrida — el operador puede bajarlo
+/// (nunca subirlo) vía `[headless] tool_result_cap_bytes` en `magi.toml`
+/// (spec §11); [`TOOL_RESULT_CAP`] es solo el valor por-default que
+/// `HeadlessLimits::default()` usa cuando el operador no lo fija.
 ///
 /// Si `s` ya cabe en el cap, se devuelve sin cambios (sin marcador).
 ///
@@ -131,10 +136,13 @@ struct WireOutcome<'a> {
 ///
 /// ```rust,ignore
 /// // Ilustrativo, no un doctest ejecutado.
-/// let short = truncate_result("hola");
+/// let short = truncate_result("hola", 64 * 1024);
 /// assert_eq!(short, "hola");
 /// ```
-pub fn truncate_result(s: &str) -> String {
+pub fn truncate_result(s: &str, cap: usize) -> String {
+    // STUB (TDD Red): ignores the effective cap and always truncates against
+    // the module constant. The Green commit wires `cap` through.
+    let _ = cap;
     if s.len() <= TOOL_RESULT_CAP {
         return s.to_string();
     }
@@ -149,21 +157,21 @@ pub fn truncate_result(s: &str) -> String {
     format!("{kept}{TRUNCATION_MARKER_PREFIX}{dropped}{TRUNCATION_MARKER_SUFFIX}")
 }
 
-/// Devuelve una copia de `tc` con `result` truncado a [`TOOL_RESULT_CAP`].
-fn truncate_tool_call(tc: &ToolCallRecord) -> ToolCallRecord {
+/// Devuelve una copia de `tc` con `result` truncado a `cap` bytes.
+fn truncate_tool_call(tc: &ToolCallRecord, cap: usize) -> ToolCallRecord {
     let mut truncated = tc.clone();
-    truncated.result = truncate_result(&truncated.result);
+    truncated.result = truncate_result(&truncated.result, cap);
     truncated
 }
 
 /// Devuelve una copia de `entry` con `content` truncado y, si tiene
-/// `tool_calls` anidados, cada uno de ellos también truncado.
-fn truncate_transcript_entry(entry: &TranscriptEntry) -> TranscriptEntry {
+/// `tool_calls` anidados, cada uno de ellos también truncado a `cap` bytes.
+fn truncate_transcript_entry(entry: &TranscriptEntry, cap: usize) -> TranscriptEntry {
     let mut truncated = entry.clone();
-    truncated.content = truncate_result(&truncated.content);
+    truncated.content = truncate_result(&truncated.content, cap);
     truncated.tool_calls = truncated
         .tool_calls
-        .map(|calls| calls.iter().map(truncate_tool_call).collect());
+        .map(|calls| calls.iter().map(|tc| truncate_tool_call(tc, cap)).collect());
     truncated
 }
 
@@ -173,13 +181,18 @@ fn truncate_transcript_entry(entry: &TranscriptEntry) -> TranscriptEntry {
 /// `consult`, `applied_caps`, `error` — en ese orden exacto.
 ///
 /// Cada `result` de `tool_calls[]` y cada `content` de `transcript[]` se
-/// truncan a [`TOOL_RESULT_CAP`] antes de serializar (ver [`truncate_result`]).
+/// truncan a `tool_result_cap` (el cap EFECTIVO de esta corrida, spec §11)
+/// antes de serializar (ver [`truncate_result`]).
 ///
 /// # Errors
 ///
 /// Devuelve [`HeadlessError::Io`] si la serialización hacia `out` falla (p.
 /// ej. el `Write` subyacente devuelve un error de E/S).
-pub fn write_json(out: &mut impl Write, o: &RunOutcome) -> Result<(), HeadlessError> {
+pub fn write_json(
+    out: &mut impl Write,
+    o: &RunOutcome,
+    tool_result_cap: usize,
+) -> Result<(), HeadlessError> {
     let wire = WireOutcome {
         schema_version: SCHEMA_VERSION,
         response: &o.response,
@@ -188,8 +201,16 @@ pub fn write_json(out: &mut impl Write, o: &RunOutcome) -> Result<(), HeadlessEr
         usage: &o.usage,
         timings: &o.timings,
         stop_reason: o.stop_reason,
-        tool_calls: o.tool_calls.iter().map(truncate_tool_call).collect(),
-        transcript: o.transcript.iter().map(truncate_transcript_entry).collect(),
+        tool_calls: o
+            .tool_calls
+            .iter()
+            .map(|tc| truncate_tool_call(tc, tool_result_cap))
+            .collect(),
+        transcript: o
+            .transcript
+            .iter()
+            .map(|e| truncate_transcript_entry(e, tool_result_cap))
+            .collect(),
         consult: &o.consult,
         applied_caps: &o.applied_caps,
         error: &o.error,
@@ -518,7 +539,7 @@ mod tests {
         o.tool_calls[0].result = "x".repeat(70_000);
 
         let mut buf = Vec::new();
-        write_json(&mut buf, &o).unwrap();
+        write_json(&mut buf, &o, TOOL_RESULT_CAP).unwrap();
 
         let v: serde_json::Value = serde_json::from_slice(&buf).unwrap();
         assert_eq!(v["schema_version"], 1);
@@ -532,7 +553,7 @@ mod tests {
     fn test_write_json_field_order_matches_contract() {
         let o = RunOutcome::sample();
         let mut buf = Vec::new();
-        write_json(&mut buf, &o).unwrap();
+        write_json(&mut buf, &o, TOOL_RESULT_CAP).unwrap();
         let text = String::from_utf8(buf).unwrap();
 
         assert!(text.starts_with("{\"schema_version\":1"));
@@ -569,7 +590,7 @@ mod tests {
     fn test_write_json_matches_golden_shape() {
         let o = RunOutcome::sample();
         let mut buf = Vec::new();
-        write_json(&mut buf, &o).unwrap();
+        write_json(&mut buf, &o, TOOL_RESULT_CAP).unwrap();
         let produced: serde_json::Value = serde_json::from_slice(&buf).unwrap();
 
         let golden: serde_json::Value =
@@ -626,7 +647,26 @@ mod tests {
     #[test]
     fn test_truncate_result_leaves_short_strings_untouched() {
         let s = "short result";
-        assert_eq!(truncate_result(s), s);
+        assert_eq!(truncate_result(s, TOOL_RESULT_CAP), s);
+    }
+
+    /// REQ-H14, spec §11: el truncado debe respetar el cap EFECTIVO pasado por
+    /// el llamador, no el `TOOL_RESULT_CAP` constante — un operador que baja
+    /// el cap a 16 bytes debe ver un `result` de 20 bytes truncado a ese tope,
+    /// muy por debajo del default de 64 KiB.
+    #[test]
+    fn test_truncate_result_respects_custom_effective_cap() {
+        let small_cap = 16usize;
+        let s = "x".repeat(small_cap + 4);
+
+        let truncated = truncate_result(&s, small_cap);
+
+        assert!(
+            truncated.len() < s.len(),
+            "a custom (smaller) effective cap must truncate, not the module constant: {truncated}"
+        );
+        assert!(truncated.starts_with(&"x".repeat(small_cap)));
+        assert!(truncated.contains("[truncated 4 bytes]"));
     }
 
     /// Un `result` que excede el cap se recorta a `TOOL_RESULT_CAP` y lleva
@@ -634,7 +674,7 @@ mod tests {
     #[test]
     fn test_truncate_result_caps_and_appends_marker() {
         let s = "y".repeat(TOOL_RESULT_CAP + 10);
-        let truncated = truncate_result(&s);
+        let truncated = truncate_result(&s, TOOL_RESULT_CAP);
 
         assert!(truncated.len() <= TOOL_RESULT_CAP + 32);
         assert!(truncated.ends_with("bytes]"));
@@ -649,7 +689,7 @@ mod tests {
         let prefix = "a".repeat(TOOL_RESULT_CAP - 1);
         let s = format!("{prefix}€{}", "b".repeat(50));
 
-        let truncated = truncate_result(&s);
+        let truncated = truncate_result(&s, TOOL_RESULT_CAP);
         let marker_pos = truncated.find(TRUNCATION_MARKER_PREFIX).unwrap();
         let kept = truncated.get(..marker_pos).unwrap();
 

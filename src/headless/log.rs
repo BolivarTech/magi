@@ -141,14 +141,19 @@ impl LogEvent<'_> {
 
     /// Renderiza esta ocurrencia como una línea JSON, dada la verbosidad
     /// **configurada** de un [`RunLog`] (gobierna si el `input` de un
-    /// `ToolCall` va crudo-capado-y-redactado o solo como su longitud).
+    /// `ToolCall` va crudo-capado-y-redactado o solo como su longitud) y el
+    /// cap EFECTIVO `tool_result_cap` (spec §11) aplicado al `input` redactado.
     ///
     /// # Errors
     ///
     /// Devuelve [`HeadlessError::Io`] si la serialización a JSON falla (en la
     /// práctica, nunca para estas estructuras — no llevan claves de mapa
     /// no-string ni floats no-finitos).
-    fn render(&self, configured_level: LogLevel) -> Result<String, HeadlessError> {
+    fn render(
+        &self,
+        configured_level: LogLevel,
+        tool_result_cap: usize,
+    ) -> Result<String, HeadlessError> {
         let ts = current_epoch_millis();
         let serialized = match self {
             LogEvent::Message { level, text } => serde_json::to_string(&MessageLine {
@@ -168,7 +173,13 @@ impl LogEvent<'_> {
                     // Redact BEFORE truncating: redacting the full input first means a
                     // secret straddling the truncation boundary cannot be split into an
                     // un-matchable partial that leaks; then truncate the secret-free result.
-                    (Some(truncate_result(&redact_secret_patterns(input))), None)
+                    (
+                        Some(truncate_result(
+                            &redact_secret_patterns(input),
+                            tool_result_cap,
+                        )),
+                        None,
+                    )
                 } else {
                     (None, Some(input.len()))
                 };
@@ -234,6 +245,9 @@ pub struct RunLog {
     path: PathBuf,
     /// Verbosidad configurada: eventos más verbosos que este nivel se filtran.
     level: LogLevel,
+    /// Cap EFECTIVO (spec §11) aplicado al `input` redactado de un
+    /// `ToolCall` a nivel debug (`[headless] tool_result_cap_bytes`).
+    tool_result_cap: usize,
 }
 
 impl RunLog {
@@ -242,6 +256,8 @@ impl RunLog {
     /// los caps EFECTIVOS `retention_runs`/`max_log_bytes` (spec §11, un
     /// operador puede bajarlos vía `[headless] log_retention`/`log_max_bytes`),
     /// y toca el archivo `run-<ts>-<pid>-<rand>.jsonl` de esta corrida.
+    /// `tool_result_cap` es el cap EFECTIVO aplicado al `input` redactado de
+    /// un `ToolCall` logueado a nivel debug (`[headless] tool_result_cap_bytes`).
     ///
     /// # Errors
     ///
@@ -253,6 +269,7 @@ impl RunLog {
         level: LogLevel,
         retention_runs: usize,
         max_log_bytes: u64,
+        tool_result_cap: usize,
     ) -> Result<Self, HeadlessError> {
         fs::create_dir_all(logs_dir).map_err(|e| HeadlessError::Io(e.to_string()))?;
         prune_retention(logs_dir, retention_runs, max_log_bytes);
@@ -264,7 +281,11 @@ impl RunLog {
             .open(&path)
             .map_err(|e| HeadlessError::Io(e.to_string()))?;
 
-        Ok(Self { path, level })
+        Ok(Self {
+            path,
+            level,
+            tool_result_cap,
+        })
     }
 
     /// Registra `ev` como una línea JSON si pasa el filtro de verbosidad
@@ -284,7 +305,7 @@ impl RunLog {
         if ev.level() > self.level {
             return Ok(());
         }
-        let line = ev.render(self.level)?;
+        let line = ev.render(self.level, self.tool_result_cap)?;
         self.append_line(&line)
     }
 
@@ -424,7 +445,7 @@ mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
 
-    use super::super::limits::{LOG_MAX_BYTES, LOG_RETENTION_RUNS};
+    use super::super::limits::{LOG_MAX_BYTES, LOG_RETENTION_RUNS, TOOL_RESULT_CAP};
     use super::{
         current_epoch_millis, parse_log_timestamp, prune_retention, LogEvent, LogLevel, RunLog,
         LOG_FILENAME_PREFIX, LOG_FILENAME_SUFFIX, TIMESTAMP_WIDTH,
@@ -458,6 +479,7 @@ mod tests {
             LogLevel::Info,
             LOG_RETENTION_RUNS,
             LOG_MAX_BYTES,
+            TOOL_RESULT_CAP,
         )
         .expect("start must succeed");
 
@@ -480,8 +502,14 @@ mod tests {
             touch_log(dir.path(), i);
         }
 
-        let _log = RunLog::start(dir.path(), LogLevel::Info, small_retention, LOG_MAX_BYTES)
-            .expect("start must succeed");
+        let _log = RunLog::start(
+            dir.path(),
+            LogLevel::Info,
+            small_retention,
+            LOG_MAX_BYTES,
+            TOOL_RESULT_CAP,
+        )
+        .expect("start must succeed");
 
         let n = fs::read_dir(dir.path()).expect("read_dir").count();
         assert!(
@@ -531,6 +559,7 @@ mod tests {
             LogLevel::Info,
             LOG_RETENTION_RUNS,
             LOG_MAX_BYTES,
+            TOOL_RESULT_CAP,
         );
         assert!(
             result.is_ok(),
@@ -588,6 +617,7 @@ mod tests {
             LogLevel::Debug,
             LOG_RETENTION_RUNS,
             LOG_MAX_BYTES,
+            TOOL_RESULT_CAP,
         )
         .expect("start");
         log.event(&LogEvent::ToolCall {
@@ -623,6 +653,7 @@ mod tests {
             LogLevel::Info,
             LOG_RETENTION_RUNS,
             LOG_MAX_BYTES,
+            TOOL_RESULT_CAP,
         )
         .expect("start");
         log.event(&LogEvent::ToolCall {
@@ -680,6 +711,7 @@ mod tests {
             LogLevel::Debug,
             LOG_RETENTION_RUNS,
             LOG_MAX_BYTES,
+            TOOL_RESULT_CAP,
         )
         .expect("start");
         log.event(&LogEvent::ToolCall {
@@ -719,6 +751,7 @@ mod tests {
             LogLevel::Debug,
             LOG_RETENTION_RUNS,
             LOG_MAX_BYTES,
+            TOOL_RESULT_CAP,
         )
         .expect("start");
         log.event(&LogEvent::Message {
@@ -742,6 +775,7 @@ mod tests {
             LogLevel::Warn,
             LOG_RETENTION_RUNS,
             LOG_MAX_BYTES,
+            TOOL_RESULT_CAP,
         )
         .expect("start");
         log.event(&LogEvent::Message {
@@ -767,6 +801,7 @@ mod tests {
             LogLevel::Warn,
             LOG_RETENTION_RUNS,
             LOG_MAX_BYTES,
+            TOOL_RESULT_CAP,
         )
         .expect("start");
         log.event(&LogEvent::Message {
