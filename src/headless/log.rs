@@ -32,7 +32,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use rand::random;
 use serde::Serialize;
 
-use super::limits::{LOG_MAX_BYTES, LOG_RETENTION_RUNS};
 use super::output::{redact_secret_patterns, truncate_result};
 use super::HeadlessError;
 
@@ -255,11 +254,8 @@ impl RunLog {
         retention_runs: usize,
         max_log_bytes: u64,
     ) -> Result<Self, HeadlessError> {
-        // STUB (TDD Red): ignores the effective caps and always prunes
-        // against the module constants. The Green commit wires them through.
-        let _ = (retention_runs, max_log_bytes);
         fs::create_dir_all(logs_dir).map_err(|e| HeadlessError::Io(e.to_string()))?;
-        prune_retention(logs_dir, LOG_RETENTION_RUNS, LOG_MAX_BYTES);
+        prune_retention(logs_dir, retention_runs, max_log_bytes);
 
         let path = logs_dir.join(generate_log_file_name());
         OpenOptions::new()
@@ -389,9 +385,10 @@ fn try_prune_one(path: &Path) -> bool {
 /// Poda los `run-*.jsonl` de `dir` hasta que queden a lo sumo
 /// `retention_runs` **y** su tamaño combinado sea a lo sumo `max_bytes`
 /// (REQ-H24/H34). Ambos son los caps EFECTIVOS de esta corrida (spec §11,
-/// `[headless] log_retention`/`log_max_bytes`) — [`LOG_RETENTION_RUNS`] y
-/// [`LOG_MAX_BYTES`] son solo los defaults que `HeadlessLimits::default()`
-/// usa cuando el operador no los fija.
+/// `[headless] log_retention`/`log_max_bytes`) —
+/// [`LOG_RETENTION_RUNS`](super::limits::LOG_RETENTION_RUNS) y
+/// [`LOG_MAX_BYTES`](super::limits::LOG_MAX_BYTES) son solo los defaults que
+/// `HeadlessLimits::default()` usa cuando el operador no los fija.
 ///
 /// Eviction oldest-first: un nombre cuyo timestamp no parsea ordena como el
 /// más viejo (`None < Some`, `Option::Ord`), así que un nombre ajeno/corrupto
@@ -427,10 +424,10 @@ mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
 
+    use super::super::limits::{LOG_MAX_BYTES, LOG_RETENTION_RUNS};
     use super::{
         current_epoch_millis, parse_log_timestamp, prune_retention, LogEvent, LogLevel, RunLog,
-        LOG_FILENAME_PREFIX, LOG_FILENAME_SUFFIX, LOG_MAX_BYTES, LOG_RETENTION_RUNS,
-        TIMESTAMP_WIDTH,
+        LOG_FILENAME_PREFIX, LOG_FILENAME_SUFFIX, TIMESTAMP_WIDTH,
     };
 
     /// Crea un archivo `run-*.jsonl` fake con un timestamp parseable
