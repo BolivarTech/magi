@@ -523,6 +523,38 @@ mod tests {
     }
 
     #[test]
+    fn test_salt_without_wrapped_dek_is_corrupt_not_fresh() {
+        // MAGI re-gate INFO: a `vault_meta` row holding `salt` but NOT
+        // `wrapped_dek` is a half-written/interrupted bootstrap (crashed
+        // between the two inserts of `bootstrap_envelope`'s transaction) —
+        // never a legitimate "fresh, not yet bootstrapped" state, regardless
+        // of how empty the guard tables are. `read_meta_state` used to only
+        // ever look at the `wrapped_dek` row, so a lingering `salt`-only row
+        // fell all the way through to `NoEnvelope` and, with empty guard
+        // tables, reported `Fresh` — masking the corruption.
+        let conn = fresh_conn();
+        let vault = cryptovault::CryptoVault::default();
+        let (salt_fec, _wrapped_fec, _dek) =
+            bootstrap_envelope(&vault, "bootstrap-master-passphrase").expect("bootstrap");
+        conn.execute(
+            "INSERT INTO vault_meta (key, value) VALUES ('salt', ?1)",
+            [&salt_fec],
+        )
+        .expect("insert salt without wrapped_dek");
+
+        let report = diagnose(&conn, false).expect("diagnose ok");
+        assert!(
+            !report.envelope_present,
+            "no wrapped_dek row means no envelope, by definition"
+        );
+        assert_eq!(
+            report.verdict,
+            DiagnoseVerdict::Corrupt,
+            "a salt-only row must never be reported as Fresh"
+        );
+    }
+
+    #[test]
     fn test_names_opt_in_lists_names_never_values() {
         let conn = fresh_conn();
         let dek = MaskedDek::new(Zeroizing::new(vec![7u8; 32])).expect("32B dek");
