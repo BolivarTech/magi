@@ -1627,6 +1627,25 @@ fn exit_code_for_outcome(outcome: &RunOutcome) -> i32 {
     )
 }
 
+/// Finishes a `--no-clobber` write: on `write_result` failure (disk full, IO
+/// error mid-`write_all`), removes the just-created `path` before surfacing
+/// the error, so a failed write never leaves a PARTIAL target file on disk
+/// (MAGI re-gate WARNING — mirrors the tmp+rename branch's own
+/// cleanup-on-rename-failure in [`write_output_atomic`]). The `--no-clobber`
+/// no-TOCTOU guarantee is unaffected: this only runs after the exclusive
+/// `O_CREAT|O_EXCL` create already succeeded.
+///
+/// The `remove_file` result is deliberately ignored — the write error is
+/// already the primary failure to report, and a cleanup that races with
+/// another process/fails is best-effort, not a new error condition.
+fn finish_no_clobber_write(
+    path: &Path,
+    write_result: std::io::Result<()>,
+) -> Result<(), HeadlessError> {
+    let _ = path; // TODO(Red): cleanup not yet implemented.
+    write_result.map_err(|e| HeadlessError::Io(e.to_string()))
+}
+
 /// Writes `contents` to `path` atomically (REQ-H03): with `--no-clobber` an
 /// atomic `O_CREAT|O_EXCL` create that refuses an existing file; otherwise a
 /// temp-file + rename that overwrites in place. The parent directory must exist.
@@ -1657,9 +1676,7 @@ fn write_output_atomic(
             .create_new(true)
             .open(path)
         {
-            Ok(mut f) => f
-                .write_all(contents)
-                .map_err(|e| HeadlessError::Io(e.to_string())),
+            Ok(mut f) => finish_no_clobber_write(path, f.write_all(contents)),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                 Err(HeadlessError::InputInvalid(format!(
                     "output file already exists (--no-clobber): {}",
@@ -3347,6 +3364,51 @@ mod tests {
         let path = tmp.path().join("fresh.txt");
         write_output_atomic(&path, b"data", true).expect("create must succeed");
         assert_eq!(std::fs::read(&path).unwrap(), b"data");
+    }
+
+    #[test]
+    fn test_finish_no_clobber_write_removes_partial_file_on_write_failure() {
+        // MAGI re-gate WARNING (Caspar): a `write_all` failure mid-write under
+        // `--no-clobber` must not leave a truncated target file behind. This
+        // exercises the EXACT cleanup function `write_output_atomic`'s
+        // `no_clobber` branch calls on a `write_all` error — the same code
+        // path production hits, driven with a simulated I/O failure since a
+        // genuine OS-level write failure (disk full / EIO) is not portably
+        // inducible in a unit test. The pass-through wiring from the real
+        // `f.write_all(contents)` call to this function is a one-line call
+        // (`finish_no_clobber_write(path, f.write_all(contents))`), verified
+        // by inspection.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("out.txt");
+        // Simulates the O_CREAT|O_EXCL create having already produced a
+        // (partially written) target file before `write_all` failed.
+        std::fs::write(&path, b"partial").unwrap();
+        assert!(path.exists(), "precondition: the partial file exists");
+
+        let simulated_failure = Err(std::io::Error::other("simulated disk-full mid-write"));
+        let err = finish_no_clobber_write(&path, simulated_failure)
+            .expect_err("a write failure must surface as an error");
+
+        assert!(matches!(err, HeadlessError::Io(_)));
+        assert!(
+            !path.exists(),
+            "a failed write must leave NO partial file on disk"
+        );
+    }
+
+    #[test]
+    fn test_finish_no_clobber_write_leaves_file_intact_on_success() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("out.txt");
+        std::fs::write(&path, b"data").unwrap();
+
+        finish_no_clobber_write(&path, Ok(())).expect("a successful write must not error");
+
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            b"data",
+            "a successful write must leave the file untouched by cleanup"
+        );
     }
 
     #[test]
