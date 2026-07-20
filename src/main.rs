@@ -1689,9 +1689,6 @@ fn finish_headless(h: &HeadlessArgs, outcome: &RunOutcome, tool_result_cap: usiz
 /// the `--log-level` CLI flag wins; else the `[headless] log_level` config
 /// string is parsed; else the default (`info`).
 ///
-/// STUB (TDD Red): ignores `cfg` entirely — only the CLI flag or the default
-/// apply. The Green commit wires `cfg` through via [`LogLevel`]'s `FromStr`.
-///
 /// # Errors
 /// [`HeadlessError::InputInvalid`] if `cfg` is set but is not one of
 /// `error`/`warn`/`info`/`debug` — an unrecognized value is a clear typed
@@ -1700,8 +1697,13 @@ fn resolve_log_level(
     cli: Option<CliLogLevel>,
     cfg: Option<&str>,
 ) -> Result<LogLevel, HeadlessError> {
-    let _ = cfg;
-    Ok(cli.map(CliLogLevel::into_lib).unwrap_or(LogLevel::Info))
+    if let Some(l) = cli {
+        return Ok(l.into_lib());
+    }
+    match cfg {
+        Some(s) => s.parse(),
+        None => Ok(LogLevel::Info),
+    }
 }
 
 /// Starts the JSONL run log for a headless run, or returns `None` when logging
