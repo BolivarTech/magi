@@ -277,6 +277,19 @@ fn is_localhost(base_url: &str) -> bool {
     lower.contains("localhost") || lower.contains("127.0.0.1") || lower.contains("[::1]")
 }
 
+/// Whether the discovered workspace has a `.magi/magi.toml` on disk — the
+/// canonical config-file existence check feeding
+/// `crate::defaults::should_emit_default_notice` (REQ-H16/H17). A `None`
+/// workspace (no `.magi/` discovered at all) means no config file exists.
+///
+/// Fixes a MAGI re-gate finding: the prior call site checked the legacy
+/// loose `<cwd>/magi.toml` path (D-H07 retired that layout) instead of the
+/// canonical `.magi/magi.toml`, so the "no magi.toml — using Ollama
+/// defaults" startup notice fired/suppressed based on the wrong file.
+fn magi_toml_exists(workspace: Option<&Workspace>) -> bool {
+    workspace.is_some_and(|ws| ws.config_path().exists())
+}
+
 /// Resolves the `ANTHROPIC_API_KEY` config: the **consumed environment value**
 /// first, then the vault (REQ-V12/H12) — the OS keyring and `key.txt` are no
 /// longer consulted at all (REQ-V37).
@@ -1219,7 +1232,7 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
     // (never-silent). A present-but-minimal magi.toml does NOT trigger this.
     if crate::defaults::should_emit_default_notice(
         &provider_kind,
-        workspace_root.join("magi.toml").exists(),
+        magi_toml_exists(workspace.as_ref()),
     ) {
         startup_notices.push(crate::defaults::no_config_notice());
     }
