@@ -1821,13 +1821,28 @@ fn resolve_allow_system_override(flag: bool, cfg: Option<bool>) -> bool {
     flag || cfg.unwrap_or(false)
 }
 
+/// Ceiling for the effective `max_input_bytes` cap (MAGI re-gate finding,
+/// REQ-H29): one below `usize::MAX`. `headless::input::read_input_bounded`
+/// widens the cap to `u64` and adds `1` (`max_input_bytes as u64 + 1`) to
+/// distinguish "exactly at the cap" from "over the cap" without reading
+/// past it; if an operator set `[headless] max_input_bytes = usize::MAX`
+/// that `+1` would overflow. Clamped here — the single call site that
+/// builds the effective cap from operator config — rather than in
+/// `input.rs`, which trusts its caller to have already bounded the value.
+const MAX_SAFE_INPUT_BYTES: usize = usize::MAX - 1;
+
 /// Resolves the effective headless numeric caps for this run by applying the
 /// `[headless]` `magi.toml` overrides over the built-in constant defaults
 /// (spec §11). Each unset `[headless]` key keeps its constant default.
+/// `max_input_bytes` is additionally clamped to [`MAX_SAFE_INPUT_BYTES`] so
+/// the downstream `+1` in `read_input_bounded` can never overflow.
 fn resolve_headless_limits(cfg: &HeadlessConfig) -> HeadlessLimits {
     let d = HeadlessLimits::default();
     HeadlessLimits {
-        max_input_bytes: cfg.max_input_bytes.unwrap_or(d.max_input_bytes),
+        max_input_bytes: cfg
+            .max_input_bytes
+            .unwrap_or(d.max_input_bytes)
+            .min(MAX_SAFE_INPUT_BYTES),
         full_auto_max_tool_calls: cfg
             .full_auto_max_tool_calls
             .unwrap_or(d.full_auto_max_tool_calls),
