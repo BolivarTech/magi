@@ -608,9 +608,17 @@ pub async fn run_consult(
 /// its only divergence is that it is not fed back into the agent's answer and does
 /// not appear in `transcript` (it is a runner action, recorded in `tool_calls`).
 ///
+/// # Usage accounting
+/// `RunOutcome.usage` is the sum of every `ResponseChunk::Usage` the provider
+/// reported across the run's turns (`RunObserver::on_usage`, accumulated in
+/// `RunTracker`). It reflects only the MAIN agent-loop tokens: a **proactive**
+/// `consult` tool call invoked during the loop (`--auto`+) runs its 3
+/// magi-core LLM calls through `magi-core`'s own `LlmProvider`, which exposes
+/// no token counts to this layer, so those tokens are **not** included in the
+/// total — the same gap `run_consult` documents for the forced/direct path. A
+/// backend that never reports usage yields `{0, 0}`, never a fabricated value.
+///
 /// # Gaps (documented, never fabricated)
-/// - `usage` is `Usage { 0, 0 }`: the agent/provider do not surface token counts
-///   to this layer.
 /// - `timings.per_turn_ms` is empty: turn boundaries are not observable from
 ///   outside the loop. `total_ms` and (best-effort) `ttfb_ms` are measured.
 pub async fn run_query(
