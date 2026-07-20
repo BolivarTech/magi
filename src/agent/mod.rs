@@ -897,6 +897,11 @@ impl Agent {
         let mut repeat_count = 0;
         // REQ-H22: locks out any further `consult` request once the forced
         // pre-loop injection below has run (success, denial, or "not found").
+        // Defensive/redundant by construction: the injection block runs iff
+        // `config.force_consult`, and sets this to `true` unconditionally, so
+        // when `force_consult` is set this is always `true` by the time the loop
+        // reads it. It is kept explicit (rather than reusing `config.force_consult`
+        // alone) so a future reader sees the "already fired" intent directly.
         let mut forced_consult_done = false;
 
         if config.force_consult {
@@ -1042,7 +1047,13 @@ impl Agent {
                     // not), any further `consult` request for the rest of THIS
                     // run — model-issued or not — is answered but never
                     // re-authorized/re-executed/re-recorded (see the
-                    // `# Forced consult` rustdoc on this method).
+                    // `# Forced consult` rustdoc on this method). Such a blocked
+                    // request still consumed one `max_tool_calls` slot (counted
+                    // at the top of this iteration) and its ToolUse/ToolResult
+                    // stay in the conversation history, but it is deliberately
+                    // absent from the observer audit trail (`on_tool_call` is not
+                    // called), so `RunOutcome.tool_calls` shows exactly the one
+                    // forced consult that actually ran.
                     let result_content =
                         if config.force_consult && forced_consult_done && name == CONSULT_TOOL_NAME
                         {
