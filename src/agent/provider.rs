@@ -2696,6 +2696,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_anthropic_provider_drops_content_events_after_message_stop() {
+        // MAGI re-gate WARNING 1: `AnthropicState` did not mirror `OaiState`'s
+        // post-finalize ghost-content guard (`if self.done { continue }`) — a
+        // misbehaving backend that sends more `content_block_delta` events AFTER
+        // `message_stop` must not leak that text into the assembled message, and
+        // must never trigger a second `MessageDone`.
+        let mut server = Server::new_async().await;
+        let url = server.url();
+        let sse_body = concat!(
+            "event: content_block_delta\n",
+            "data: {\"type\": \"content_block_delta\", \"index\":0, \"delta\": {\"type\": \"text_delta\", \"text\": \"Hello\"}}\n\n",
+            "event: message_stop\n",
+            "data: {\"type\": \"message_stop\"}\n\n",
+            "event: content_block_delta\n",
+            "data: {\"type\": \"content_block_delta\", \"index\":0, \"delta\": {\"type\": \"text_delta\", \"text\": \" ghost\"}}\n\n",
+        );
+        let _m = server
+            .mock("POST", "/messages")
+            .with_status(200)
+            .with_header("content-type", "text/event-stream")
+            .with_body(sse_body)
+            .create_async()
+            .await;
+        let provider = AnthropicProvider::with_base_url("k".into(), "m".into(), url);
+        let mut stream = provider
+            .stream_messages(&[Message::user("hi")], &[], None)
+            .await
+            .unwrap();
+
+        let mut done_count = 0;
+        let mut final_msg = None;
+        let mut saw_ghost_text = false;
+        while let Some(chunk) = stream.next().await {
+            match chunk {
+                Ok(ResponseChunk::MessageDone(msg)) => {
+                    done_count += 1;
+                    final_msg = Some(msg);
+                }
+                Ok(ResponseChunk::TextDelta(t)) if t.contains("ghost") => {
+                    saw_ghost_text = true;
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(done_count, 1, "MessageDone must be emitted exactly once");
+        assert!(
+            !saw_ghost_text,
+            "a content_block_delta arriving after message_stop must not leak a TextDelta"
+        );
+        let msg = final_msg.expect("a MessageDone must still be emitted for the valid turn");
+        assert_eq!(
+            msg.content,
+            vec![Content::Text {
+                text: "Hello".to_string()
+            }],
+            "the assembled message must not include post-message_stop ghost content"
+        );
+    }
+
+    #[tokio::test]
     async fn test_openai_provider_emits_usage_chunk_from_stream_options() {
         let mut server = Server::new_async().await;
         let url = server.url();
