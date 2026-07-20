@@ -785,6 +785,7 @@ mod tests {
     use magi_rs::headless::limits::FULL_AUTO_TIMEOUT_SECS;
     use serde_json::{json, Value};
     use std::collections::VecDeque;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     use magi_core::schema::AgentName;
     use magi_core::test_support::RoutingMockProvider;
@@ -846,6 +847,60 @@ mod tests {
         }
 
         Arc::new(Magi::new(Arc::new(SlowLlm { delay })))
+    }
+
+    /// A MAGI orchestrator whose every perspective blocks for `delay`, and whose
+    /// `complete` future *flips `dropped` to `true` when it is dropped* rather
+    /// than when it returns. Used to distinguish a genuinely **aborted** spawned
+    /// task (its future tree, including the pending `sleep`, is dropped
+    /// immediately) from one that was merely **detached** (a bare dropped
+    /// `JoinHandle` keeps the task running to completion, so `dropped` would stay
+    /// `false` at assertion time).
+    fn slow_droppy_magi(delay: Duration, dropped: Arc<AtomicBool>) -> Arc<Magi> {
+        use magi_core::error::ProviderError;
+        use magi_core::provider::{CompletionConfig, LlmProvider};
+
+        /// Sets its `flag` to `true` on `Drop`, regardless of whether the
+        /// surrounding future ever ran to completion.
+        struct DropFlag(Arc<AtomicBool>);
+
+        impl Drop for DropFlag {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+
+        /// An [`LlmProvider`] that sleeps `delay` on every completion, holding a
+        /// [`DropFlag`] live across the sleep so aborting the enclosing task
+        /// (dropping its future tree) is observable.
+        struct SlowDroppyLlm {
+            /// How long each `complete` call blocks before returning.
+            delay: Duration,
+            /// Flipped to `true` when an in-flight `complete` future is dropped.
+            dropped: Arc<AtomicBool>,
+        }
+
+        #[async_trait]
+        impl LlmProvider for SlowDroppyLlm {
+            async fn complete(
+                &self,
+                _system_prompt: &str,
+                _user_prompt: &str,
+                _config: &CompletionConfig,
+            ) -> Result<String, ProviderError> {
+                let _spy = DropFlag(self.dropped.clone());
+                tokio::time::sleep(self.delay).await;
+                Ok(r#"{"agent":"melchior","verdict":"approve","confidence":0.9,"summary":"s","reasoning":"r","findings":[],"recommendation":"rec"}"#.to_string())
+            }
+            fn name(&self) -> &str {
+                "slow-droppy"
+            }
+            fn model(&self) -> &str {
+                "slow-droppy-model"
+            }
+        }
+
+        Arc::new(Magi::new(Arc::new(SlowDroppyLlm { delay, dropped })))
     }
 
     /// A [`Resolved`] stub with a **forced** consult (`consult = Some(true)`).
@@ -1616,6 +1671,51 @@ mod tests {
         );
         assert!(outcome.consult.is_none(), "rejected input ⇒ no MAGI object");
         assert!(outcome.response.is_none(), "rejected, not truncated");
+    }
+
+    /// Dropping the `run_consult` future itself — NOT via the `--timeout`
+    /// cancellation token — must still abort the spawned 3-perspective MAGI
+    /// analysis (the gap `AbortOnDrop` closes, mirroring `ConsultTool::execute`).
+    /// A dropped future whose spawned task were merely *detached* (a bare
+    /// `JoinHandle` drop) would let the analysis run to its full delay — the
+    /// [`slow_droppy_magi`] double proves the opposite: its `complete` future is
+    /// dropped promptly, well before its (huge) delay could ever elapse.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_run_consult_future_drop_aborts_spawned_analysis() {
+        let dropped = Arc::new(AtomicBool::new(false));
+        // An hour: if the spawned task were merely detached rather than aborted,
+        // `dropped` would still be `false` at every point this test can observe.
+        let magi = slow_droppy_magi(Duration::from_secs(3_600), dropped.clone());
+
+        let started = Instant::now();
+        {
+            let fut = run_consult(
+                resolved_stub(),
+                magi,
+                "should we migrate X to Y?",
+                None,
+                None,
+            );
+            // Poll the future briefly (long enough for the `tokio::spawn` +
+            // first `complete` call to start, nowhere near the 3600s delay)
+            // then drop it without ever reaching a terminal state.
+            let _ = tokio::time::timeout(Duration::from_millis(20), fut).await;
+        }
+        // Give the runtime a tick to actually run the abort and propagate the
+        // drop down through the task's future tree.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let elapsed = started.elapsed();
+
+        assert!(
+            dropped.load(Ordering::SeqCst),
+            "dropping the run_consult future must abort the spawned MAGI \
+             analysis, not merely detach it"
+        );
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "the abort must happen promptly, not after the analysis's 3600s \
+             delay (took {elapsed:?})"
+        );
     }
 
     /// `query --consult` in `--auto` invokes consult **exactly once**, IN-LOOP —
