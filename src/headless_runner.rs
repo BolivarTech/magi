@@ -47,7 +47,7 @@ use magi_rs::headless::types::{
 
 use crate::agent::messages::{Content, Message, Role};
 use crate::agent::{Agent, AgentRunConfig, RunObserver, StreamPiece, MAX_TOOL_CALLS_ERROR};
-use crate::tools::consult::{report_to_consult_json, MAX_QUERY_LEN};
+use crate::tools::consult::{report_to_consult_json, AbortOnDrop, MAX_QUERY_LEN};
 
 /// Buffered capacity of the internal chunk channel; mirrors the interactive TUI
 /// bridge so backpressure behaves identically. The channel is drained
@@ -122,7 +122,15 @@ async fn analyze_direct(
     let magi = Arc::clone(magi);
     let owned = prompt.to_string();
     let handle = tokio::spawn(async move { magi.analyze(&Mode::Analysis, &owned).await });
-    let aborter = handle.abort_handle();
+    // RAII backstop (same primitive as `ConsultTool::execute`, `src/tools/
+    // consult.rs`): aborts the spawned analysis if THIS future is dropped
+    // before the `select!` resolves — e.g. the enclosing `run_consult`/
+    // `run_query` future is dropped outside of the explicit cancel/deadline
+    // arms below. Without it, a dropped `JoinHandle` only detaches the task,
+    // orphaning the three in-flight LLM calls. The explicit arms still call
+    // `.abort()` too (belt-and-suspenders): they fire, and hand back a typed
+    // `Timeout`, before this future itself is dropped by their caller.
+    let abort_guard = AbortOnDrop::new(handle.abort_handle());
 
     // A `None` timeout parks forever, so the deadline arm never fires; the cancel
     // arm still aborts if the enclosing run is cancelled.
@@ -137,11 +145,11 @@ async fn analyze_direct(
     let joined = tokio::select! {
         biased;
         () = cancel.cancelled() => {
-            aborter.abort();
+            abort_guard.abort();
             return Err(ConsultRunError::Timeout);
         }
         () = &mut deadline => {
-            aborter.abort();
+            abort_guard.abort();
             return Err(ConsultRunError::Timeout);
         }
         joined = handle => joined,

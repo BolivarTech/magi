@@ -45,20 +45,24 @@ pub(crate) fn report_to_consult_json(report: &MagiReport) -> Value {
 /// task would keep running and orphan its three in-flight LLM calls. Holding
 /// this guard across the `select!` aborts the task on that drop too, mirroring
 /// the `GroupKiller` backstop the `bash` tool uses for its subprocess.
-struct AbortOnDrop {
+///
+/// `pub(crate)` so [`crate::headless_runner`]'s direct `magi consult` path
+/// (`analyze_direct`) reuses this exact primitive for its own spawned MAGI
+/// analysis rather than duplicating it — same gap, same fix, one guard type.
+pub(crate) struct AbortOnDrop {
     /// Abort handle of the guarded task.
     handle: tokio::task::AbortHandle,
 }
 
 impl AbortOnDrop {
     /// Wraps a task's abort handle so dropping the guard aborts the task.
-    fn new(handle: tokio::task::AbortHandle) -> Self {
+    pub(crate) fn new(handle: tokio::task::AbortHandle) -> Self {
         Self { handle }
     }
 
     /// Aborts the guarded task now. Idempotent: aborting an already-finished or
     /// already-aborted task is a no-op, so `Drop` re-invoking it is harmless.
-    fn abort(&self) {
+    pub(crate) fn abort(&self) {
         self.handle.abort();
     }
 }
