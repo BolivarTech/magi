@@ -117,13 +117,19 @@ pub struct DiagnoseReport {
     pub names: Option<Vec<String>>,
 }
 
-/// The three possible shapes of the `vault_meta` table as seen by a
+/// The four possible shapes of the `vault_meta` table as seen by a
 /// read-only, passphrase-less probe.
 enum MetaState {
     /// The `vault_meta` table itself does not exist (schema corruption).
     TableMissing,
-    /// The table exists but has no `wrapped_dek` row (no envelope yet).
+    /// The table exists and holds NEITHER a `salt` nor a `wrapped_dek` row —
+    /// a legitimate "not yet bootstrapped" candidate.
     NoEnvelope,
+    /// The table exists and holds a `salt` row but no `wrapped_dek` row: a
+    /// half-written bootstrap (crashed between the two inserts of
+    /// `bootstrap_envelope`'s transaction). Always corrupt, regardless of the
+    /// guard tables — never a legitimate fresh state.
+    PartialSaltOnly,
     /// The table exists and has a `wrapped_dek` row; `salt` may still be
     /// absent (itself a corruption signal, handled by the caller).
     Envelope {
@@ -179,10 +185,15 @@ fn read_table_counts(conn: &Connection) -> Result<TableCounts, VaultError> {
 
 /// Reads the `vault_meta` table's shape without ever attempting an unwrap.
 ///
+/// Always reads BOTH the `wrapped_dek` and `salt` rows (never short-circuits
+/// on `wrapped_dek` alone) so a lingering `salt` row with no `wrapped_dek` —
+/// a half-written bootstrap — is classified as [`MetaState::PartialSaltOnly`]
+/// rather than falling through to [`MetaState::NoEnvelope`].
+///
 /// # Errors
 /// [`VaultError::Storage`] on any SQLite failure other than a missing table.
 fn read_meta_state(conn: &Connection) -> Result<MetaState, VaultError> {
-    let wrapped: Option<Vec<u8>> = match conn
+    let wrapped_dek_fec: Option<Vec<u8>> = match conn
         .query_row(
             "SELECT value FROM vault_meta WHERE key = 'wrapped_dek'",
             [],
@@ -194,19 +205,21 @@ fn read_meta_state(conn: &Connection) -> Result<MetaState, VaultError> {
         Err(e) if is_missing_table(&e) => return Ok(MetaState::TableMissing),
         Err(e) => return Err(VaultError::Storage(e.to_string())),
     };
-    let Some(wrapped_dek_fec) = wrapped else {
-        return Ok(MetaState::NoEnvelope);
-    };
     let salt_fec: Option<Vec<u8>> = conn
         .query_row("SELECT value FROM vault_meta WHERE key = 'salt'", [], |r| {
             r.get(0)
         })
         .optional()
         .map_err(|e| VaultError::Storage(e.to_string()))?;
-    Ok(MetaState::Envelope {
-        wrapped_dek_fec,
-        salt_fec,
-    })
+
+    match (wrapped_dek_fec, salt_fec) {
+        (None, None) => Ok(MetaState::NoEnvelope),
+        (None, Some(_)) => Ok(MetaState::PartialSaltOnly),
+        (Some(wrapped_dek_fec), salt_fec) => Ok(MetaState::Envelope {
+            wrapped_dek_fec,
+            salt_fec,
+        }),
+    }
 }
 
 /// Reads every `vault` table `name` (never a `value_blob` — REQ-V09), sorted
@@ -280,6 +293,9 @@ pub fn diagnose(conn: &Connection, include_names: bool) -> Result<DiagnoseReport
     let (envelope_present, fec_ok, verdict) = match meta {
         MetaState::TableMissing => (false, None, DiagnoseVerdict::Corrupt),
         MetaState::NoEnvelope => (false, None, guard_verdict(&counts)),
+        // A salt row with no wrapped_dek is a half-written bootstrap: always
+        // corrupt, regardless of how empty the guard tables are.
+        MetaState::PartialSaltOnly => (false, None, DiagnoseVerdict::Corrupt),
         MetaState::Envelope {
             wrapped_dek_fec,
             salt_fec: None,
