@@ -2256,6 +2256,34 @@ mod tests {
     use crate::agent::messages::Message;
     use magi_rs::vault::MaskedDek;
 
+    /// MAGI re-gate finding (Caspar/Melchior): a substring match on
+    /// `"localhost"`/`"127.0.0.1"` false-matches a hostile hostname that
+    /// merely contains the substring, silently suppressing the cloud-egress
+    /// warning for a non-local backend.
+    #[test]
+    fn test_is_localhost_rejects_hostname_containing_localhost_substring() {
+        assert!(!is_localhost("https://notlocalhost.evil.com"));
+        assert!(!is_localhost("http://127.0.0.1.evil.com/v1"));
+    }
+
+    /// The three canonical local hosts are still recognized (exact host
+    /// match, not substring).
+    #[test]
+    fn test_is_localhost_accepts_canonical_local_hosts() {
+        assert!(is_localhost("http://localhost:11434/v1"));
+        assert!(is_localhost("http://127.0.0.1:11434/v1"));
+        assert!(is_localhost("http://[::1]:11434/v1"));
+    }
+
+    /// Fail-safe direction for a security-egress notice: a `base_url` whose
+    /// host cannot be parsed must be treated as non-local (so the warning is
+    /// shown), never as local (which would silently suppress it).
+    #[test]
+    fn test_is_localhost_treats_unparseable_url_as_non_local() {
+        assert!(!is_localhost("not a url"));
+        assert!(!is_localhost(""));
+    }
+
     /// A `[headless]` config that sets a value overrides the constant default
     /// for every numeric cap (REQ-H08/H12b/H14/H24/H29/H34/H36, spec §11).
     #[test]
