@@ -63,6 +63,16 @@ rpassword = "7.5.4"
 # tool subprocesses to die). Pure-Rust, no own unsafe; `sync` module needs no
 # feature flag. Pinned (minor), no default features.
 tokio-util = { version = "0.7", default-features = false }
+# PathGuard::canonicalize_robust — Windows verbatim (`\\?\C:\...`) and UNC
+# (`\\?\UNC\server\share\...`) canonical forms. A hand-rolled `strip_prefix`
+# only handled the local-disk verbatim shape and produced an invalid,
+# non-absolute path (`UNC\server\share\...`) for the UNC shape; `dunce` is a
+# tiny, dependency-free, no-`unsafe` crate purpose-built for exactly this
+# distinction (see its `is_safe_to_strip_unc`, which only strips
+# `Prefix::VerbatimDisk`, never `VerbatimUNC`). Already present (as a
+# dev-dependency for test fixtures); promoted here for production use, no new
+# transitive dependency introduced.
+dunce = "1.0.5"
 
 [dev-dependencies]
 # RoutingMockProvider for consult tests (no extra runtime deps; reqwest NOT pulled)
@@ -73,9 +83,9 @@ mockito = "1.4"
 tempfile = "3.10"
 tokio-test = "0.4"
 serial_test = "3.0"
-# Canonicalize temp-dir roots in workspace-discovery tests without Windows
-# verbatim `\\?\` prefixes / macOS `/tmp`→`/private/tmp` symlinks (T1 fixtures).
-dunce = "1.0.5"
+# dunce is a regular dependency now (see [dependencies]); test fixtures still
+# use it to canonicalize temp-dir roots without Windows verbatim `\\?\`
+# prefixes / macOS `/tmp`→`/private/tmp` symlinks (T1 fixtures).
 
 [features]
 ## Enable opt-in HNSW ANN index (CP2-A). Off by default; brute-force exact

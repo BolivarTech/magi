@@ -119,18 +119,18 @@ impl PathGuard {
     }
 
     /// Robust canonicalization that handles Windows verbatim paths (UNC prefixes) consistently.
+    ///
+    /// Delegates to the `dunce` crate rather than a hand-rolled prefix strip:
+    /// a naive `strip_prefix(r"\\?\")` is only correct for the local-disk
+    /// verbatim shape (`\\?\C:\...`) — applied to a verbatim-**UNC** canonical
+    /// form (`\\?\UNC\server\share\...`) it produces `UNC\server\share\...`,
+    /// which is missing its leading `\\` and is not a valid absolute path at
+    /// all. `dunce::canonicalize` only strips when the path's prefix is
+    /// `Prefix::VerbatimDisk`, leaving any other verbatim shape (including
+    /// `VerbatimUNC`) untouched, so the returned path is always valid. On
+    /// non-Windows this is a plain passthrough to `std::fs::canonicalize`.
     fn canonicalize_robust(path: &Path) -> io::Result<PathBuf> {
-        let canonical = path.canonicalize()?;
-
-        #[cfg(windows)]
-        {
-            let path_str = canonical.to_string_lossy();
-            if let Some(stripped) = path_str.strip_prefix(r"\\?\") {
-                return Ok(PathBuf::from(stripped));
-            }
-        }
-
-        Ok(canonical)
+        dunce::canonicalize(path)
     }
 }
 
@@ -162,5 +162,83 @@ mod tests {
         // Non-existent safe path with multiple levels
         let new_file = root.join("a/b/c/new_file.txt");
         assert!(guard.validate(&new_file).is_ok());
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn test_canonicalize_robust_preserves_valid_verbatim_unc_form() {
+        // MAGI re-gate finding: the OLD `canonicalize_robust` did an
+        // unconditional `path_str.strip_prefix(r"\\?\")`, which for a
+        // verbatim-UNC canonical form (`\\?\UNC\server\share\file`) produces
+        // `UNC\server\share\file` — missing the leading `\\`, not a valid
+        // absolute path at all (`starts_with`/`starts_with` sandbox checks
+        // downstream would then compare against a malformed path). `dunce`
+        // (which now backs `canonicalize_robust`) only strips the `\\?\`
+        // prefix for `Prefix::VerbatimDisk` (local drives, e.g. `\\?\C:\...`)
+        // and deliberately leaves any other prefix kind — including
+        // `VerbatimUNC` — untouched. This is exercised directly against
+        // `dunce::simplified`, which performs no I/O, since a real UNC path
+        // requires a live network share this environment cannot provide.
+        let unc = Path::new(r"\\?\UNC\server\share\file.txt");
+
+        let simplified = dunce::simplified(unc);
+        assert_eq!(
+            simplified, unc,
+            "a VerbatimUNC path must be left untouched (still valid & absolute)"
+        );
+
+        // What the OLD unconditional strip would have produced, for contrast.
+        let naive_stripped = PathBuf::from(
+            unc.to_string_lossy()
+                .strip_prefix(r"\\?\")
+                .expect("input starts with the verbatim prefix by construction"),
+        );
+        assert_eq!(naive_stripped, Path::new(r"UNC\server\share\file.txt"));
+        assert!(
+            !naive_stripped.to_string_lossy().starts_with(r"\\"),
+            "the old naive strip produces a non-absolute, invalid path for UNC input"
+        );
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn test_validate_accepts_verbatim_prefixed_local_disk_path() {
+        let dir = tempdir().expect("temp dir");
+        // Resolve the temp root once up front (avoids 8.3 short-name
+        // aliasing, which verbatim paths do not expand).
+        let root = dunce::canonicalize(dir.path()).expect("canonicalize root");
+        let guard = PathGuard::new(root.clone()).expect("guard");
+
+        let safe_file = root.join("safe.txt");
+        fs::write(&safe_file, "data").unwrap();
+
+        let verbatim_input = PathBuf::from(format!(r"\\?\{}", safe_file.display()));
+        let validated = guard
+            .validate(&verbatim_input)
+            .expect("a verbatim in-workspace path must validate");
+        assert!(validated.starts_with(&root));
+        assert!(
+            !validated.to_string_lossy().starts_with(r"\\?\"),
+            "the validated path should be in compatible (non-verbatim) form"
+        );
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn test_validate_rejects_verbatim_prefixed_path_outside_workspace() {
+        let dir = tempdir().expect("temp dir");
+        let root = dunce::canonicalize(dir.path()).expect("canonicalize root");
+        let guard = PathGuard::new(root).expect("guard");
+
+        let outside = tempdir().expect("outside temp dir");
+        let outside_root = dunce::canonicalize(outside.path()).expect("canonicalize outside");
+        let outside_file = outside_root.join("secret.txt");
+        fs::write(&outside_file, "nope").unwrap();
+
+        let verbatim_outside = PathBuf::from(format!(r"\\?\{}", outside_file.display()));
+        assert!(
+            guard.validate(&verbatim_outside).is_err(),
+            "a verbatim path entirely outside the workspace must be rejected"
+        );
     }
 }
