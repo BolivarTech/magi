@@ -19,7 +19,8 @@ use crate::agent::Agent;
 // It is DISTINCT from `magi_core::orchestrator::MagiConfig` — the latter is NEVER
 // imported here, avoiding the name collision.
 use crate::config::{
-    resolve_openai_base_url, resolve_openai_model, resolve_provider, HeadlessConfig, MagiConfig,
+    resolve_anthropic_model, resolve_openai_base_url, resolve_openai_model, resolve_provider,
+    HeadlessConfig, MagiConfig,
 };
 use crate::headless_runner::{resolve_run_timeout, run_consult, run_query};
 use crate::memory::clock::SystemClock;
@@ -322,12 +323,17 @@ fn magi_toml_exists(workspace: Option<&Workspace>) -> bool {
 /// the `env > vault` precedence intact even after the live env var is gone.
 /// `secret_store` is `None` for an ephemeral (no-persistence) session, in which
 /// case only the consumed environment value is consulted.
+///
+/// The model is resolved via [`resolve_anthropic_model`] (`env > TOML >
+/// default`, MAGI re-gate fix): `config` is the already-loaded `magi.toml`, so
+/// an `[anthropic] model` there is honored instead of being silently ignored.
 fn discover_config(
+    config: &MagiConfig,
     env_key: Option<&str>,
     secret_store: Option<&SharedSecretStore>,
 ) -> Option<Config> {
+    let model = resolve_anthropic_model(config, env::var("ANTHROPIC_MODEL").ok().as_deref());
     if let Some(key) = env_key {
-        let model = env::var("ANTHROPIC_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string());
         return Some(Config {
             api_key: key.trim().to_string(),
             model,
@@ -337,7 +343,6 @@ fn discover_config(
     let ss = secret_store?;
     let mut guard = ss.lock().unwrap_or_else(|p| p.into_inner());
     let key = guard.get("ANTHROPIC_API_KEY").ok()?;
-    let model = env::var("ANTHROPIC_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string());
     Some(Config {
         // Trim like the env path: a stored/exported key with stray whitespace or
         // a trailing newline would otherwise produce a malformed auth header (401).
@@ -1182,16 +1187,22 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
             MemoryAttachment::Ephemeral => (None, None),
         };
 
-    // REQ-V12/H12: API key discovery happens AFTER the vault is (possibly) open,
-    // env tier sourced from the consumed (scrubbed) value.
-    let config = discover_config(anthropic_key.as_deref(), secret_store.as_ref());
     // Config lives in `.magi/magi.toml` (REQ-H16/H17): load it from the
     // discovered `.magi/`, or fall back to built-in defaults when none exists —
-    // the legacy loose cwd `magi.toml` is never read.
+    // the legacy loose cwd `magi.toml` is never read. Loaded BEFORE
+    // `discover_config` below so the resolved `[anthropic].model` can be honored
+    // there (MAGI re-gate fix) instead of discover_config reading env-only.
     let (magi_config, config_warning) = match workspace.as_ref() {
         Some(ws) => MagiConfig::load(&ws.magi_dir),
         None => (MagiConfig::default(), None),
     };
+    // REQ-V12/H12: API key discovery happens AFTER the vault is (possibly) open,
+    // env tier sourced from the consumed (scrubbed) value.
+    let config = discover_config(
+        &magi_config,
+        anthropic_key.as_deref(),
+        secret_store.as_ref(),
+    );
     let provider_kind = resolve_provider(&magi_config, env::var("MAGI_PROVIDER").ok().as_deref());
 
     // Credentials needed to build per-agent sibling providers (same backend, different
@@ -1991,12 +2002,7 @@ async fn prepare_headless(
     let default_model = if default_provider == "openai" {
         resolve_openai_model(&magi_config, env::var("OPENAI_MODEL").ok().as_deref())
     } else {
-        magi_config
-            .anthropic
-            .model
-            .clone()
-            .or_else(|| env::var("ANTHROPIC_MODEL").ok())
-            .unwrap_or_else(|| DEFAULT_MODEL.to_string())
+        resolve_anthropic_model(&magi_config, env::var("ANTHROPIC_MODEL").ok().as_deref())
     };
     let defaults = ConfigDefaults {
         model: default_model,
@@ -2056,7 +2062,11 @@ async fn prepare_headless(
             resolved.model.clone(),
             None,
         )
-    } else if let Some(cfg) = discover_config(anthropic_key.as_deref(), secret_store.as_ref()) {
+    } else if let Some(cfg) = discover_config(
+        &magi_config,
+        anthropic_key.as_deref(),
+        secret_store.as_ref(),
+    ) {
         let key = cfg.api_key;
         (
             Arc::new(AnthropicProvider::new(key.clone(), resolved.model.clone())),
@@ -2682,19 +2692,53 @@ mod tests {
                 let mut guard = ss.lock().unwrap();
                 guard.set("ANTHROPIC_API_KEY", "sk-from-vault").unwrap();
             }
+            let config = MagiConfig::default();
 
             // Neither consumed env value nor vault: None.
-            assert!(discover_config(None, None).is_none());
+            assert!(discover_config(&config, None, None).is_none());
 
             // Vault only (no consumed env value): vault wins.
-            let cfg = discover_config(None, Some(&ss)).expect("vault key");
+            let cfg = discover_config(&config, None, Some(&ss)).expect("vault key");
             assert_eq!(cfg.api_key, "sk-from-vault");
             assert_eq!(cfg.source, "vault");
 
             // Both present: the consumed env value wins.
-            let cfg = discover_config(Some("sk-from-env"), Some(&ss)).expect("env key");
+            let cfg = discover_config(&config, Some("sk-from-env"), Some(&ss)).expect("env key");
             assert_eq!(cfg.api_key, "sk-from-env");
             assert_eq!(cfg.source, "ENV");
+        });
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_discover_config_model_prefers_env_over_toml_then_falls_back_to_toml() {
+        // MAGI re-gate WARNING fix: `discover_config` previously read only
+        // `ANTHROPIC_MODEL` from the environment and never consulted
+        // `[anthropic].model` at all. It must now resolve via
+        // `resolve_anthropic_model` (env > TOML > default), matching the
+        // precedence `resolve_openai_model` already uses.
+        let ss = vault_fixture();
+        {
+            let mut guard = ss.lock().unwrap();
+            guard.set("ANTHROPIC_API_KEY", "sk-from-vault").unwrap();
+        }
+        let config = MagiConfig {
+            anthropic: crate::config::AnthropicConfig {
+                model: Some("claude-toml-model".into()),
+            },
+            ..Default::default()
+        };
+
+        // No env: the TOML model is honored (was previously ignored entirely).
+        with_var("ANTHROPIC_MODEL", None, || {
+            let cfg = discover_config(&config, None, Some(&ss)).expect("vault key");
+            assert_eq!(cfg.model, "claude-toml-model");
+        });
+
+        // Env set: env wins over TOML.
+        with_var("ANTHROPIC_MODEL", Some("claude-env-model"), || {
+            let cfg = discover_config(&config, None, Some(&ss)).expect("vault key");
+            assert_eq!(cfg.model, "claude-env-model");
         });
     }
 
@@ -2715,9 +2759,12 @@ mod tests {
                     .unwrap();
                 guard.set("OPENAI_API_KEY", "sk-vault-openai\t").unwrap();
             }
+            let config = MagiConfig::default();
             // Vault paths trim.
             assert_eq!(
-                discover_config(None, Some(&ss)).expect("a").api_key,
+                discover_config(&config, None, Some(&ss))
+                    .expect("a")
+                    .api_key,
                 "sk-vault-anthropic"
             );
             assert_eq!(
@@ -2730,7 +2777,7 @@ mod tests {
                 Some("sk-env-openai")
             );
             assert_eq!(
-                discover_config(Some(" sk-env-anthropic "), Some(&ss))
+                discover_config(&config, Some(" sk-env-anthropic "), Some(&ss))
                     .expect("b")
                     .api_key,
                 "sk-env-anthropic"

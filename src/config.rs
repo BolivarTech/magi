@@ -241,14 +241,9 @@ pub fn resolve_openai_model(config: &MagiConfig, env_model: Option<&str>) -> Str
 /// # Returns
 /// Resolved model name; env overrides TOML, both override the built-in default.
 pub fn resolve_anthropic_model(config: &MagiConfig, env_model: Option<&str>) -> String {
-    // TODO(Red): placeholder mirrors the pre-fix headless bug (TOML checked
-    // before env, backwards) so the precedence tests fail for the right
-    // reason. Corrected in the following `fix:` commit.
-    config
-        .anthropic
-        .model
-        .clone()
-        .or_else(|| env_model.map(str::to_string))
+    env_model
+        .map(str::to_string)
+        .or_else(|| config.anthropic.model.clone())
         .unwrap_or_else(|| crate::defaults::DEFAULT_ANTHROPIC_MODEL.into())
 }
 
