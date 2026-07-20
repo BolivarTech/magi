@@ -2453,6 +2453,111 @@ mod tests {
         assert_eq!(usage, Some((0, 0)));
     }
 
+    // ─── Feature D: mid-stream `error` events + truncated-stream finalization ──
+
+    #[tokio::test]
+    async fn test_anthropic_provider_surfaces_mid_stream_error_event() {
+        // Gap 1 (MAGI re-gate): a mid-stream Anthropic `error` event (e.g. the
+        // backend going overloaded) must surface as an Err on the stream — before
+        // the fix it either failed to deserialize or fell through the `_ => {}`
+        // catch-all and was silently swallowed.
+        let mut server = Server::new_async().await;
+        let url = server.url();
+        let sse_body = concat!(
+            "event: message_start\n",
+            "data: {\"type\": \"message_start\", \"message\": {\"id\": \"m\", \"role\": \"assistant\", \"model\": \"x\"}}\n\n",
+            "event: content_block_delta\n",
+            "data: {\"type\": \"content_block_delta\", \"index\": 0, \"delta\": {\"type\": \"text_delta\", \"text\": \"partial\"}}\n\n",
+            "event: error\n",
+            "data: {\"type\": \"error\", \"error\": {\"type\": \"overloaded_error\", \"message\": \"Overloaded\"}}\n\n",
+        );
+        let _m = server
+            .mock("POST", "/messages")
+            .with_status(200)
+            .with_header("content-type", "text/event-stream")
+            .with_body(sse_body)
+            .create_async()
+            .await;
+        let provider = AnthropicProvider::with_base_url("k".into(), "m".into(), url);
+        let mut stream = provider
+            .stream_messages(&[Message::user("hi")], &[], None)
+            .await
+            .unwrap();
+
+        let mut saw_error = false;
+        while let Some(chunk) = stream.next().await {
+            if let Err(e) = chunk {
+                let msg = e.to_string();
+                assert!(
+                    msg.contains("overloaded_error") && msg.contains("Overloaded"),
+                    "error message must surface the Anthropic error type and message, got: {}",
+                    msg
+                );
+                saw_error = true;
+            }
+        }
+        assert!(
+            saw_error,
+            "a mid-stream Anthropic `error` event must surface as Err, not be swallowed"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_anthropic_provider_truncated_stream_flushes_partial_content_as_message_done() {
+        // Gap 2 (MAGI re-gate): the byte source can close mid-turn (dropped
+        // connection, proxy timeout) BEFORE a `message_stop` event ever arrives.
+        // Before the fix the Anthropic stream had no stream-end hook (unlike the
+        // OpenAI provider's `stream::unfold` `None` branch), so every
+        // already-streamed TextDelta's accumulated content silently vanished — no
+        // MessageDone was ever emitted, and the caller (`run_tool_loop`) only saw
+        // "Stream ended without MessageDone", discarding the partial turn.
+        let mut server = Server::new_async().await;
+        let url = server.url();
+        // No message_stop: the mock body ends right after the delta.
+        let sse_body = concat!(
+            "event: message_start\n",
+            "data: {\"type\": \"message_start\", \"message\": {\"id\": \"m\", \"role\": \"assistant\", \"model\": \"x\"}}\n\n",
+            "event: content_block_delta\n",
+            "data: {\"type\": \"content_block_delta\", \"index\": 0, \"delta\": {\"type\": \"text_delta\", \"text\": \"Partial answer\"}}\n\n",
+        );
+        let _m = server
+            .mock("POST", "/messages")
+            .with_status(200)
+            .with_header("content-type", "text/event-stream")
+            .with_body(sse_body)
+            .create_async()
+            .await;
+        let provider = AnthropicProvider::with_base_url("k".into(), "m".into(), url);
+        let mut stream = provider
+            .stream_messages(&[Message::user("hi")], &[], None)
+            .await
+            .unwrap();
+
+        let mut final_msg = None;
+        let mut saw_usage = false;
+        while let Some(chunk) = stream.next().await {
+            match chunk {
+                Ok(ResponseChunk::MessageDone(msg)) => final_msg = Some(msg),
+                Ok(ResponseChunk::Usage { .. }) => saw_usage = true,
+                _ => {}
+            }
+        }
+        let msg = final_msg.expect(
+            "a truncated stream (no message_stop) must still flush a MessageDone with the \
+             partial content instead of silently dropping it",
+        );
+        assert_eq!(
+            msg.content,
+            vec![Content::Text {
+                text: "Partial answer".to_string()
+            }]
+        );
+        assert!(
+            !saw_usage,
+            "no Usage chunk must be fabricated on a truncated stream that never reported usage"
+        );
+    }
+
     #[tokio::test]
     async fn test_openai_provider_emits_usage_chunk_from_stream_options() {
         let mut server = Server::new_async().await;
