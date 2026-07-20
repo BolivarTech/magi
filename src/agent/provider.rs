@@ -1113,6 +1113,18 @@ impl AnthropicState {
     /// finalizing on `message_stop`. Malformed `data:` payloads and lines missing
     /// the `"data: "` prefix are swallowed so one bad event never aborts the
     /// stream (matches the pre-existing behavior).
+    ///
+    /// Once `self.done` is set (the stream was already finalized by a prior
+    /// `message_stop` or by [`AnthropicState::finalize_truncated`]), every
+    /// subsequent event is dropped before it can touch any accumulator — this
+    /// mirrors [`OaiState::process_buffer`]'s post-finalize ghost-content guard
+    /// (MAGI Loop 2 caveat C1) so a misbehaving backend that keeps sending
+    /// `content_block_delta`/`content_block_start` after the turn already
+    /// finalized can never leak a second `TextDelta`/tool chunk or corrupt the
+    /// already-emitted message. Unlike `OaiState`, Anthropic has no trailing
+    /// usage-only event that legitimately arrives after finalization (usage
+    /// rides on `message_start`/`message_delta`, both pre-`message_stop`), so
+    /// the guard is unconditional here.
     fn process_buffer(&mut self) {
         for block in drain_sse_events(&mut self.buffer) {
             for line in block.lines() {
@@ -1122,6 +1134,9 @@ impl AnthropicState {
                 let Ok(event) = serde_json::from_str::<AnthropicSseEvent>(data) else {
                     continue;
                 };
+                if self.done {
+                    continue;
+                }
                 match event {
                     AnthropicSseEvent::MessageStart { message } => {
                         self.current_role = message.role;
@@ -1187,9 +1202,9 @@ impl AnthropicState {
                         self.usage_output_tokens = usage.output_tokens;
                     }
                     AnthropicSseEvent::MessageStop => {
-                        if self.done {
-                            continue;
-                        }
+                        // A duplicate/late message_stop can never reach this arm:
+                        // the top-of-loop `if self.done { continue; }` guard above
+                        // already drops it once the first message_stop set `done`.
                         // Defensively finalize any still-pending tool block in case
                         // content_block_stop was absent.
                         finalize_tool(self.current_tool.take(), &mut self.full_content);
