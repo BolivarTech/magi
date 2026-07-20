@@ -995,132 +995,264 @@ impl Provider for AnthropicProvider {
             ));
         }
 
-        let bytes_stream = response.bytes_stream();
-        let mut buffer: Vec<u8> = Vec::new();
-        let mut full_content: Vec<Content> = Vec::new();
-        let mut current_role = Role::Assistant;
-        // Accumulates (id, name, partial_json) for an in-progress tool_use block.
-        let mut current_tool: Option<(String, String, String)> = None;
-        // Usage totals: input_tokens is known at message_start; output_tokens is
-        // updated (possibly repeatedly) by message_delta and reaches its final
-        // value by message_stop, where the combined ResponseChunk::Usage fires.
-        let mut usage_input_tokens: u64 = 0;
-        let mut usage_output_tokens: u64 = 0;
+        let bytes_stream = response
+            .bytes_stream()
+            .map(|r| {
+                r.map(|b| b.to_vec())
+                    .map_err(|e| anyhow::anyhow!("Network error: {}", e))
+            })
+            .boxed();
 
-        let output_stream = bytes_stream.flat_map(move |chunk_res| {
-            let chunk = match chunk_res {
-                Ok(c) => c,
-                Err(e) => {
-                    return stream::iter(vec![Err(anyhow::anyhow!("Network error: {}", e))]).boxed()
+        let state = AnthropicState {
+            src: bytes_stream,
+            buffer: Vec::new(),
+            full_content: Vec::new(),
+            current_role: Role::Assistant,
+            current_tool: None,
+            usage_input_tokens: 0,
+            usage_output_tokens: 0,
+            usage_seen: false,
+            pending: std::collections::VecDeque::new(),
+            done: false,
+            src_done: false,
+        };
+
+        // Mirrors `OaiState`'s unfold shape: drain any pending chunks first, then
+        // pull more bytes from the source, finalizing on stream-end (`None`) so a
+        // connection that closes without a `message_stop` still flushes whatever
+        // content/tool calls were assembled (Gap 2 fix) instead of silently
+        // dropping them.
+        let output_stream = stream::unfold(state, |mut st| async move {
+            loop {
+                if let Some(item) = st.pending.pop_front() {
+                    return Some((item, st));
                 }
-            };
-            if buffer.len() + chunk.len() > MAX_SSE_BUFFER_BYTES {
-                return stream::iter(vec![Err(anyhow::anyhow!(
-                    "SSE buffer would exceed {} bytes without an event boundary; aborting to avoid OOM (limit: 8 MiB)",
-                    MAX_SSE_BUFFER_BYTES
-                ))])
-                .boxed();
-            }
-            // #3: buffer raw bytes and decode once at each event boundary, so a
-            // multi-byte UTF-8 character split across a network chunk is never
-            // decoded mid-character (the W1 size cap above still applies in bytes).
-            buffer.extend_from_slice(&chunk);
-
-            let mut chunks = Vec::new();
-            for block in drain_sse_events(&mut buffer) {
-                for line in block.lines() {
-                    if let Some(data) = line.strip_prefix("data: ") {
-                        if let Ok(event) = serde_json::from_str::<AnthropicSseEvent>(data) {
-                            match event {
-                                AnthropicSseEvent::MessageStart { message } => {
-                                    current_role = message.role;
-                                    usage_input_tokens =
-                                        message.usage.map(|u| u.input_tokens).unwrap_or(0);
-                                }
-                                AnthropicSseEvent::ContentBlockStart {
-                                    content_block, ..
-                                } => {
-                                    // Defensively finalize any still-open tool before starting a
-                                    // new block, so a missing content_block_stop never drops it (#6).
-                                    finalize_tool(current_tool.take(), &mut full_content);
-                                    // When the block is a tool_use, begin accumulating its input.
-                                    if content_block
-                                        .get("type")
-                                        .and_then(|t| t.as_str())
-                                        == Some("tool_use")
-                                    {
-                                        let id = content_block
-                                            .get("id")
-                                            .and_then(|v| v.as_str())
-                                            .unwrap_or_default()
-                                            .to_string();
-                                        let name = content_block
-                                            .get("name")
-                                            .and_then(|v| v.as_str())
-                                            .unwrap_or_default()
-                                            .to_string();
-                                        current_tool = Some((id, name, String::new()));
-                                    }
-                                }
-                                AnthropicSseEvent::ContentBlockDelta { delta, .. } => match delta {
-                                    AnthropicDelta::TextDelta { text } => {
-                                        if let Some(Content::Text { text: existing }) =
-                                            full_content.last_mut()
-                                        {
-                                            existing.push_str(&text);
-                                        } else {
-                                            full_content.push(Content::Text { text: text.clone() });
-                                        }
-                                        chunks.push(Ok(ResponseChunk::TextDelta(text)));
-                                    }
-                                    AnthropicDelta::InputDelta { partial_json } => {
-                                        // Accumulate into the current tool's JSON buffer and tag the
-                                        // chunk with the in-progress tool id (#6).
-                                        let id = if let Some((id, _, acc)) = current_tool.as_mut() {
-                                            acc.push_str(&partial_json);
-                                            id.clone()
-                                        } else {
-                                            String::new()
-                                        };
-                                        chunks.push(Ok(ResponseChunk::ToolUseInputDelta {
-                                            id,
-                                            input_json: partial_json,
-                                        }));
-                                    }
-                                },
-                                AnthropicSseEvent::ContentBlockStop { .. } => {
-                                    // Finalize the accumulated tool_use block and push it to content.
-                                    finalize_tool(current_tool.take(), &mut full_content);
-                                }
-                                AnthropicSseEvent::MessageDelta { usage, .. } => {
-                                    // Cumulative output-token count; the last value
-                                    // observed before message_stop is authoritative.
-                                    usage_output_tokens = usage.output_tokens;
-                                }
-                                AnthropicSseEvent::MessageStop => {
-                                    // Defensively finalize any still-pending tool block
-                                    // in case content_block_stop was absent.
-                                    finalize_tool(current_tool.take(), &mut full_content);
-                                    chunks.push(Ok(ResponseChunk::Usage {
-                                        input_tokens: usage_input_tokens,
-                                        output_tokens: usage_output_tokens,
-                                    }));
-                                    let msg = Message {
-                                        role: current_role.clone(),
-                                        content: full_content.clone(),
-                                    };
-                                    chunks.push(Ok(ResponseChunk::MessageDone(msg)));
-                                }
-                                _ => {}
-                            }
+                if st.src_done {
+                    return None;
+                }
+                match st.src.next().await {
+                    Some(Ok(chunk)) => {
+                        if st.buffer.len() + chunk.len() > MAX_SSE_BUFFER_BYTES {
+                            st.pending.push_back(Err(anyhow::anyhow!(
+                                "SSE buffer would exceed {} bytes without an event boundary; aborting to avoid OOM (limit: 8 MiB)",
+                                MAX_SSE_BUFFER_BYTES
+                            )));
+                            st.src_done = true;
+                        } else {
+                            // #3: buffer raw bytes and decode once at each event
+                            // boundary, so a multi-byte UTF-8 character split across a
+                            // network chunk is never decoded mid-character (the W1
+                            // size cap above still applies in bytes).
+                            st.buffer.extend_from_slice(&chunk);
+                            st.process_buffer();
                         }
+                    }
+                    Some(Err(e)) => {
+                        // Error already carries the "Network error: …" context from
+                        // the byte-stream map above.
+                        st.pending.push_back(Err(e));
+                        st.src_done = true;
+                    }
+                    None => {
+                        // Stream-end: flush a trailing event that lacks the final
+                        // blank line, then finalize a truncated turn if
+                        // `message_stop` never arrived (Gap 2 fix).
+                        st.src_done = true;
+                        if !st.buffer.is_empty() {
+                            st.buffer.extend_from_slice(b"\n\n");
+                            st.process_buffer();
+                        }
+                        st.finalize_truncated();
                     }
                 }
             }
-            stream::iter(chunks).boxed()
         });
 
         Ok(Box::pin(output_stream))
+    }
+}
+
+/// Streaming state for the Anthropic SSE `unfold`. Owns the byte source and the
+/// accumulators for the in-progress assistant message; mirrors [`OaiState`]'s
+/// shape so both providers share the same stream-end-finalization guarantee.
+struct AnthropicState {
+    /// Boxed byte source derived from `reqwest::Response::bytes_stream()`,
+    /// already mapped to `Vec<u8>`/`anyhow::Error` at the boundary.
+    src: BoxStream<'static, Result<Vec<u8>>>,
+    /// Raw SSE bytes accumulated until an event boundary (`"\n\n"`).
+    buffer: Vec<u8>,
+    /// Assembled content blocks for the final assistant message.
+    full_content: Vec<Content>,
+    /// Role carried by `message_start`; defaults to `Assistant` if the turn is
+    /// truncated before `message_start` ever arrives.
+    current_role: Role,
+    /// Accumulates `(id, name, partial_json)` for an in-progress `tool_use` block.
+    current_tool: Option<(String, String, String)>,
+    /// `message_start.message.usage.input_tokens`, if reported.
+    usage_input_tokens: u64,
+    /// Cumulative `message_delta.usage.output_tokens`, if reported.
+    usage_output_tokens: u64,
+    /// Whether real usage data was observed (a `message_start` with a `usage`
+    /// object, or any `message_delta` event) — distinct from the zero defaults
+    /// left by `#[serde(default)]`. Gates the stream-end `Usage` emission in
+    /// [`AnthropicState::finalize_truncated`] so an abnormal close never
+    /// fabricates a `(0, 0)` usage reading; the well-formed `message_stop` path
+    /// is unaffected and keeps its existing unconditional emission.
+    usage_seen: bool,
+    /// Chunks ready to yield from the stream.
+    pending: std::collections::VecDeque<Result<ResponseChunk>>,
+    /// Whether `MessageDone` was already emitted (idempotent finalize).
+    done: bool,
+    /// Whether the byte source is exhausted.
+    src_done: bool,
+}
+
+impl AnthropicState {
+    /// Drains complete SSE blocks from `buffer`, pushing `TextDelta`/
+    /// `ToolUseInputDelta` chunks, updating usage/content accumulators, and
+    /// finalizing on `message_stop`. Malformed `data:` payloads and lines missing
+    /// the `"data: "` prefix are swallowed so one bad event never aborts the
+    /// stream (matches the pre-existing behavior).
+    fn process_buffer(&mut self) {
+        for block in drain_sse_events(&mut self.buffer) {
+            for line in block.lines() {
+                let Some(data) = line.strip_prefix("data: ") else {
+                    continue;
+                };
+                let Ok(event) = serde_json::from_str::<AnthropicSseEvent>(data) else {
+                    continue;
+                };
+                match event {
+                    AnthropicSseEvent::MessageStart { message } => {
+                        self.current_role = message.role;
+                        if message.usage.is_some() {
+                            self.usage_seen = true;
+                        }
+                        self.usage_input_tokens =
+                            message.usage.map(|u| u.input_tokens).unwrap_or(0);
+                    }
+                    AnthropicSseEvent::ContentBlockStart { content_block, .. } => {
+                        // Defensively finalize any still-open tool before starting a
+                        // new block, so a missing content_block_stop never drops it (#6).
+                        finalize_tool(self.current_tool.take(), &mut self.full_content);
+                        // When the block is a tool_use, begin accumulating its input.
+                        if content_block.get("type").and_then(|t| t.as_str()) == Some("tool_use") {
+                            let id = content_block
+                                .get("id")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or_default()
+                                .to_string();
+                            let name = content_block
+                                .get("name")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or_default()
+                                .to_string();
+                            self.current_tool = Some((id, name, String::new()));
+                        }
+                    }
+                    AnthropicSseEvent::ContentBlockDelta { delta, .. } => match delta {
+                        AnthropicDelta::TextDelta { text } => {
+                            if let Some(Content::Text { text: existing }) =
+                                self.full_content.last_mut()
+                            {
+                                existing.push_str(&text);
+                            } else {
+                                self.full_content.push(Content::Text { text: text.clone() });
+                            }
+                            self.pending.push_back(Ok(ResponseChunk::TextDelta(text)));
+                        }
+                        AnthropicDelta::InputDelta { partial_json } => {
+                            // Accumulate into the current tool's JSON buffer and tag the
+                            // chunk with the in-progress tool id (#6).
+                            let id = if let Some((id, _, acc)) = self.current_tool.as_mut() {
+                                acc.push_str(&partial_json);
+                                id.clone()
+                            } else {
+                                String::new()
+                            };
+                            self.pending.push_back(Ok(ResponseChunk::ToolUseInputDelta {
+                                id,
+                                input_json: partial_json,
+                            }));
+                        }
+                    },
+                    AnthropicSseEvent::ContentBlockStop { .. } => {
+                        // Finalize the accumulated tool_use block and push it to content.
+                        finalize_tool(self.current_tool.take(), &mut self.full_content);
+                    }
+                    AnthropicSseEvent::MessageDelta { usage, .. } => {
+                        // Cumulative output-token count; the last value observed
+                        // before message_stop is authoritative.
+                        self.usage_seen = true;
+                        self.usage_output_tokens = usage.output_tokens;
+                    }
+                    AnthropicSseEvent::MessageStop => {
+                        if self.done {
+                            continue;
+                        }
+                        // Defensively finalize any still-pending tool block in case
+                        // content_block_stop was absent.
+                        finalize_tool(self.current_tool.take(), &mut self.full_content);
+                        // Unconditional (pre-existing behavior, unrelated to
+                        // `usage_seen`): a well-formed `message_stop` always reports
+                        // usage, even a (0, 0) default when the backend omitted it.
+                        self.pending.push_back(Ok(ResponseChunk::Usage {
+                            input_tokens: self.usage_input_tokens,
+                            output_tokens: self.usage_output_tokens,
+                        }));
+                        let msg = Message {
+                            role: self.current_role.clone(),
+                            content: self.full_content.clone(),
+                        };
+                        self.pending.push_back(Ok(ResponseChunk::MessageDone(msg)));
+                        self.done = true;
+                    }
+                    AnthropicSseEvent::Error { error } => {
+                        // Gap 1 fix: a well-formed mid-stream `error` event (e.g.
+                        // "overloaded_error") surfaces as Err instead of being
+                        // swallowed. The message is the API's own description, safe
+                        // to show — no request header/key is echoed.
+                        self.pending.push_back(Err(anyhow::anyhow!(
+                            "Anthropic API error ({}): {}",
+                            error.error_type,
+                            error.message
+                        )));
+                    }
+                    AnthropicSseEvent::Ping => {}
+                }
+            }
+        }
+    }
+
+    /// Finalizes the assembled assistant message when the byte source closes
+    /// without a prior `message_stop` event — a truncated/dropped connection.
+    /// Idempotent via `done` (a no-op once `message_stop` already finalized the
+    /// turn). Mirrors [`OaiState::finalize`]'s stream-end flush (Gap 2 fix):
+    /// without this, a mid-turn disconnect silently dropped every
+    /// already-streamed `TextDelta`/`ToolUseInputDelta`'s accumulated content —
+    /// those chunks had already reached the caller, but no `MessageDone` ever
+    /// followed, so `run_tool_loop` errored with "Stream ended without
+    /// MessageDone" and the assistant's partial turn was lost, not persisted.
+    fn finalize_truncated(&mut self) {
+        if self.done {
+            return;
+        }
+        finalize_tool(self.current_tool.take(), &mut self.full_content);
+        // Unlike the unconditional message_stop emission above, only emit Usage
+        // here when real usage data was actually observed — an abnormal close
+        // must not fabricate a (0, 0) reading.
+        if self.usage_seen {
+            self.pending.push_back(Ok(ResponseChunk::Usage {
+                input_tokens: self.usage_input_tokens,
+                output_tokens: self.usage_output_tokens,
+            }));
+        }
+        let msg = Message {
+            role: self.current_role.clone(),
+            content: self.full_content.clone(),
+        };
+        self.pending.push_back(Ok(ResponseChunk::MessageDone(msg)));
+        self.done = true;
     }
 }
 
