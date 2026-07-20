@@ -478,4 +478,56 @@ mod tests {
         assert_eq!(resolve_magi_override(Some(""), None), None);
         assert_eq!(resolve_magi_override(Some(""), Some("")), None);
     }
+
+    // -------------------------------------------------------------------------
+    // [headless] section tests (spec §11). `HeadlessConfig` already derives
+    // `#[serde(deny_unknown_fields)]`, so these LOCK the existing parsing
+    // contract (documenting, not driving it) rather than being a Red/Green
+    // pair — they still fail if a future edit silently loosens the section.
+    // -------------------------------------------------------------------------
+
+    /// An unknown key inside `[headless]` (e.g. a typo) is a parse ERROR, not
+    /// silent acceptance — `deny_unknown_fields` applies to this section like
+    /// every other `MagiConfig` sub-table.
+    #[test]
+    fn test_headless_section_unknown_field_is_err() {
+        assert!(MagiConfig::from_toml_str("[headless]\nmax_input_byte = 1024").is_err());
+    }
+
+    /// A `[headless]` block with several keys set parses into the matching
+    /// `Option` fields; unset keys stay `None` (resolved to their built-in
+    /// default elsewhere, `main.rs::resolve_headless_limits`/
+    /// `resolve_log_level`/`resolve_allow_system_override`).
+    #[test]
+    fn test_headless_section_parses_configured_keys() {
+        let c = MagiConfig::from_toml_str(
+            "[headless]\n\
+             max_input_bytes = 2048\n\
+             full_auto_max_tool_calls = 30\n\
+             log_retention = 7\n\
+             log_max_bytes = 1048576\n\
+             tool_result_cap_bytes = 4096\n\
+             log_level = \"debug\"\n\
+             timeout_secs = 120\n\
+             allow_system_override = true\n",
+        )
+        .unwrap();
+
+        assert_eq!(c.headless.max_input_bytes, Some(2048));
+        assert_eq!(c.headless.full_auto_max_tool_calls, Some(30));
+        assert_eq!(c.headless.log_retention, Some(7));
+        assert_eq!(c.headless.log_max_bytes, Some(1_048_576));
+        assert_eq!(c.headless.tool_result_cap_bytes, Some(4096));
+        assert_eq!(c.headless.log_level.as_deref(), Some("debug"));
+        assert_eq!(c.headless.timeout_secs, Some(120));
+        assert_eq!(c.headless.allow_system_override, Some(true));
+    }
+
+    /// An absent `[headless]` section parses to all-`None` (every cap falls
+    /// back to its built-in default).
+    #[test]
+    fn test_headless_section_absent_is_all_none() {
+        let c = MagiConfig::from_toml_str("").unwrap();
+        assert_eq!(c.headless, HeadlessConfig::default());
+    }
 }
