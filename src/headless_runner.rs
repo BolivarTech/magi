@@ -952,8 +952,24 @@ mod tests {
             name: String,
             input: Value,
         },
+        /// Like `Tool`, plus a `ResponseChunk::Usage` chunk — exercises
+        /// `RunObserver::on_usage` accumulation on a NON-terminal turn.
+        ToolWithUsage {
+            id: String,
+            name: String,
+            input: Value,
+            input_tokens: u64,
+            output_tokens: u64,
+        },
         /// Emit streamed text plus a matching `MessageDone` (terminal turn).
         Text(String),
+        /// Like `Text`, plus a `ResponseChunk::Usage` chunk — exercises
+        /// `RunObserver::on_usage` accumulation across turns.
+        TextWithUsage {
+            text: String,
+            input_tokens: u64,
+            output_tokens: u64,
+        },
         /// Emit a `MessageDone` with empty content and ZERO `TextDelta` blocks
         /// (a terminal turn with an empty response, for REQ-H23b).
         Empty,
@@ -999,8 +1015,39 @@ mod tests {
                         ResponseChunk::MessageDone(msg),
                     )])))
                 }
+                Some(Turn::ToolWithUsage {
+                    id,
+                    name,
+                    input,
+                    input_tokens,
+                    output_tokens,
+                }) => {
+                    let msg = Message {
+                        role: Role::Assistant,
+                        content: vec![Content::ToolUse { id, name, input }],
+                    };
+                    Ok(Box::pin(stream::iter(vec![
+                        Ok(ResponseChunk::Usage {
+                            input_tokens,
+                            output_tokens,
+                        }),
+                        Ok(ResponseChunk::MessageDone(msg)),
+                    ])))
+                }
                 Some(Turn::Text(text)) => Ok(Box::pin(stream::iter(vec![
                     Ok(ResponseChunk::TextDelta(text.clone())),
+                    Ok(ResponseChunk::MessageDone(Message::assistant(&text))),
+                ]))),
+                Some(Turn::TextWithUsage {
+                    text,
+                    input_tokens,
+                    output_tokens,
+                }) => Ok(Box::pin(stream::iter(vec![
+                    Ok(ResponseChunk::TextDelta(text.clone())),
+                    Ok(ResponseChunk::Usage {
+                        input_tokens,
+                        output_tokens,
+                    }),
                     Ok(ResponseChunk::MessageDone(Message::assistant(&text))),
                 ]))),
                 Some(Turn::Empty) | None => Ok(Box::pin(stream::iter(vec![Ok(
@@ -1080,6 +1127,65 @@ mod tests {
                 input: json!({"same": "input"}),
             })
             .collect()
+    }
+
+    /// The runner sums `RunObserver::on_usage` across every turn into
+    /// `RunOutcome.usage` — a non-terminal tool turn reporting (10, 2) plus a
+    /// terminal turn reporting (5, 3) must total (15, 5), not just the last turn.
+    #[tokio::test]
+    async fn test_run_query_sums_usage_across_turns_into_run_outcome() {
+        let provider = ScriptedProvider::new(vec![
+            Turn::ToolWithUsage {
+                id: "t1".to_string(),
+                name: "edit".to_string(),
+                input: json!({}),
+                input_tokens: 10,
+                output_tokens: 2,
+            },
+            Turn::TextWithUsage {
+                text: "answered".to_string(),
+                input_tokens: 5,
+                output_tokens: 3,
+            },
+        ]);
+        let mut agent = Agent::new(provider);
+        register_echo(&mut agent, "edit");
+
+        let policy = Policy::new(Tier::Auto, 15, None);
+        let outcome = run_query(
+            resolved_stub(),
+            policy,
+            &mut agent,
+            "prompt",
+            None,
+            None,
+            None,
+        )
+        .await;
+
+        assert_eq!(outcome.usage.input_tokens, 15);
+        assert_eq!(outcome.usage.output_tokens, 5);
+    }
+
+    /// A run with no usage-emitting turns (the common case for a backend that
+    /// omits usage) reports `{0, 0}` rather than a fabricated total.
+    #[tokio::test]
+    async fn test_run_query_usage_defaults_to_zero_when_provider_reports_none() {
+        let provider = ScriptedProvider::new(vec![Turn::Text("hi".to_string())]);
+        let mut agent = Agent::new(provider);
+        let policy = Policy::new(Tier::Default, 15, None);
+        let outcome = run_query(
+            resolved_stub(),
+            policy,
+            &mut agent,
+            "prompt",
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(outcome.usage.input_tokens, 0);
+        assert_eq!(outcome.usage.output_tokens, 0);
     }
 
     /// Default tier denies `edit`; the agent still answers, so the run is `Done`
