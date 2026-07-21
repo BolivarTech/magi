@@ -9,6 +9,25 @@ changes and the **patch** position signals backward-compatible fixes.
 
 ## [Unreleased]
 
+## [0.10.1] - 2026-07-20
+
+Release-tooling only — **no changes** to the `magi-rs` runtime, CLI, or library
+behavior. This patch adds prebuilt, ready-to-run binaries to every GitHub release
+so users can download and run without a Rust toolchain.
+
+### Added
+- **Prebuilt release binaries for all supported platforms.** Every `vX.Y.Z` tag
+  now attaches ready-to-run archives to the GitHub release, each built **natively**
+  on its platform (avoiding the `openssl-sys`/bundled-SQLite cross-compile issues):
+  - **Windows x86_64** — `.7z` and `.zip`
+  - **Linux x86_64** — `.7z` (built on glibc 2.35 for wide runtime compatibility)
+  - **Raspberry Pi 5 (aarch64)** — `.7z` (glibc 2.35 ≤ Raspberry Pi OS Bookworm's 2.36)
+  - **macOS universal2** — `.7z` (a single Intel + Apple Silicon binary via `lipo`)
+
+  Each archive contains the binary plus `README.md` and both licenses — download,
+  extract, run. A `workflow_dispatch` trigger lets all targets be dry-run before
+  tagging a release.
+
 ## [0.10.0] - 2026-07-20
 
 **Headless mode — Magi is now invocable non-interactively** as a CI/CD pipeline
