@@ -42,7 +42,10 @@ jobs:
               TAG_VERSION="${GITHUB_REF#refs/tags/v}"
               echo "Git tag version:    $TAG_VERSION"
               if [ "$TAG_VERSION" != "$CARGO_VERSION" ]; then
-                echo "::error::version mismatch — tag says '$TAG_VERSION' but Cargo.toml says '$CARGO_VERSION'. Bump Cargo.toml (and Cargo.lock) or retag; the released binaries would report '$CARGO_VERSION' from `--version` while the release is labelled 'v$TAG_VERSION'."
+                # NOTE: no backticks in this message — inside a double-quoted
+                # string bash would run them as command substitution, which is
+                # exactly what mangled this error on the v0.10.3 run.
+                echo "::error::version mismatch — tag says '$TAG_VERSION' but Cargo.toml says '$CARGO_VERSION'. Bump Cargo.toml (and Cargo.lock) or retag; the released binaries would report '$CARGO_VERSION' from --version while the release is labelled 'v$TAG_VERSION'."
                 exit 1
               fi
               echo "OK: tag and crate version agree ($CARGO_VERSION)."
@@ -51,6 +54,25 @@ jobs:
               echo "Not a tag push ($GITHUB_REF) — dry run, nothing to compare against."
               ;;
           esac
+
+      # The tag/Cargo.toml guard above does NOT catch a stale `Cargo.lock`, which
+      # is what actually broke the v0.10.3 release: two commits bumped only
+      # `Cargo.toml`, leaving the committed lock recording the previous version.
+      # Every `--locked` build then died with "cannot update the lock file", and
+      # `cargo publish` regenerated the lock and aborted on a dirty tree.
+      #
+      # `cargo metadata --locked` re-resolves against the committed lock WITHOUT
+      # compiling, so this costs seconds and fails here instead of five platform
+      # builds later.
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Assert Cargo.lock is in sync with Cargo.toml
+        run: |
+          set -euo pipefail
+          if ! cargo metadata --locked --format-version 1 > /dev/null; then
+            echo "::error::Cargo.lock is out of sync with Cargo.toml. Run 'cargo update -p magi-rs' (or 'cargo check') locally and commit the regenerated Cargo.lock. A version bump in Cargo.toml MUST be committed together with its Cargo.lock."
+            exit 1
+          fi
+          echo "OK: Cargo.lock resolves cleanly under --locked."
 
   ci:
     name: CI

@@ -22,7 +22,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
-      - run: cargo nextest run
+      # `--locked` here is what makes a stale Cargo.lock fail on the main push
+      # that introduced it, instead of silently regenerating the lock and letting
+      # the drift surface days later as a broken release (see the v0.10.3 run,
+      # where every `--locked` platform build and `cargo publish` failed).
+      - run: cargo nextest run --locked
 
   clippy:
     name: Clippy
@@ -35,7 +39,7 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo clippy --all-targets --locked -- -D warnings
 
   fmt:
     name: Format
