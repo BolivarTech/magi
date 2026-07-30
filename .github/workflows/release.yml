@@ -133,9 +133,17 @@ jobs:
             os: windows-latest
             target: x86_64-pc-windows-msvc
           - name: linux-x86_64
-            # Ubuntu 22.04 (glibc 2.35) for the widest runtime compatibility.
+            # Built on Ubuntu 22.04 but LINKED against an old glibc baseline via
+            # `cargo-zigbuild` (zig as cross-linker). Building natively here would
+            # bake in glibc 2.35 symbols, which breaks every enterprise distro:
+            # RHEL/Rocky/Alma/CloudLinux 8 ship 2.28 and RHEL 9 ships 2.34, so a
+            # 2.35 binary dies with "GLIBC_2.34 not found" on all of them.
+            # glibc is forward-compatible, so a 2.17-linked binary is a strict
+            # SUPERSET: it runs on 2.17, 2.28, 2.35, 2.36 alike — one artifact,
+            # no "which download do I need?" for the user.
             os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
+            glibc: '2.17'
           - name: linux-aarch64-rpi5
             # aarch64 built on glibc 2.35 <= Raspberry Pi OS Bookworm's 2.36,
             # so the binary runs on a Pi 5 without a "GLIBC version" error.
@@ -156,8 +164,40 @@ jobs:
             pkg-config libssl-dev \
             libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
             p7zip-full
+      # Only the legs that declare `matrix.glibc` need zig; the others build
+      # natively. `taiki-e/install-action` fetches a prebuilt cargo-zigbuild
+      # instead of compiling it from source (~4 min saved per run).
+      - name: Install zig (old-glibc baseline)
+        if: matrix.glibc != ''
+        run: pip3 install ziglang
+      - uses: taiki-e/install-action@v2
+        if: matrix.glibc != ''
+        with:
+          tool: cargo-zigbuild
+      - name: Build release binary (old-glibc baseline)
+        if: matrix.glibc != ''
+        run: cargo zigbuild --release --locked --bin magi-rs --target ${{ matrix.target }}.${{ matrix.glibc }}
       - name: Build release binary
+        if: matrix.glibc == ''
         run: cargo build --release --locked --bin magi-rs --target ${{ matrix.target }}
+
+      # Proof, not assumption: print the highest glibc symbol version the binary
+      # actually requires. A leg with a baseline MUST NOT exceed it — otherwise
+      # the artifact silently goes back to being unusable on old distros.
+      - name: Verify glibc baseline
+        if: matrix.glibc != ''
+        run: |
+          set -euo pipefail
+          BIN="target/${{ matrix.target }}/release/magi-rs"
+          echo "----- versioned glibc symbols required -----"
+          objdump -T "$BIN" | grep -o 'GLIBC_[0-9.]*' | sort -uV || true
+          MAXV="$(objdump -T "$BIN" | grep -o 'GLIBC_[0-9.]*' | sed 's/GLIBC_//' | sort -uV | tail -1)"
+          echo "highest required: GLIBC_$MAXV (baseline target: ${{ matrix.glibc }})"
+          if [ "$(printf '%s\n%s\n' "$MAXV" "${{ matrix.glibc }}" | sort -V | tail -1)" != "${{ matrix.glibc }}" ]; then
+            echo "::error::binary requires GLIBC_$MAXV, above the ${{ matrix.glibc }} baseline — it will NOT run on old distros."
+            exit 1
+          fi
+          echo "OK: within the ${{ matrix.glibc }} baseline."
 
       - name: Package (Unix — .7z)
         if: runner.os != 'Windows'
