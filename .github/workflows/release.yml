@@ -203,7 +203,13 @@ jobs:
         if: runner.os != 'Windows'
         shell: bash
         run: |
-          STAGE="magi-rs-${{ github.ref_name }}-${{ matrix.name }}"
+          # `ref_name` is a TAG on a real release (`v0.10.3`) but a BRANCH on a
+          # manual dry-run — and branch names here carry a slash (`ci/…`,
+          # `feat/…`), which turns the stage name into a nested path whose parent
+          # does not exist, so `mkdir` fails. Slashes become dashes; on a tag this
+          # is a no-op, so release artifact names are unchanged.
+          REF="${{ github.ref_name }}"
+          STAGE="magi-rs-${REF//\//-}-${{ matrix.name }}"
           mkdir "$STAGE"
           cp "target/${{ matrix.target }}/release/magi-rs" "$STAGE/"
           cp README.md LICENSE-MIT LICENSE-APACHE "$STAGE/"
@@ -214,7 +220,9 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $stage = "magi-rs-${{ github.ref_name }}-${{ matrix.name }}"
+          # Same slash sanitation as the Unix leg — see the comment there.
+          $ref = "${{ github.ref_name }}" -replace '/', '-'
+          $stage = "magi-rs-$ref-${{ matrix.name }}"
           New-Item -ItemType Directory -Path $stage | Out-Null
           Copy-Item "target/${{ matrix.target }}/release/magi-rs.exe" $stage
           Copy-Item README.md, LICENSE-MIT, LICENSE-APACHE $stage
@@ -252,7 +260,9 @@ jobs:
       - name: Create universal binary and package (.7z)
         run: |
           brew install sevenzip
-          STAGE="magi-rs-${{ github.ref_name }}-macos-universal2"
+          # Same slash sanitation as the other two legs — see the Unix comment.
+          REF="${{ github.ref_name }}"
+          STAGE="magi-rs-${REF//\//-}-macos-universal2"
           mkdir "$STAGE"
           lipo -create -output "$STAGE/magi-rs" \
             target/x86_64-apple-darwin/release/magi-rs \
