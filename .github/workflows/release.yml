@@ -12,8 +12,51 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # Fail-closed guard against the version drift that `--version` would otherwise
+  # report as truth: the tag, `Cargo.toml` and the binaries must agree. Runs FIRST
+  # and everything else hangs off it (via `ci`), so a mismatch costs ~10 s instead
+  # of five platform builds.
+  #
+  # Deliberately NOT gated with a job-level `if:` — a skipped job skips its
+  # dependents in GitHub Actions, which would silently disable the whole manual
+  # dry-run. The job always runs; the comparison is what's conditional.
+  version-guard:
+    name: Version guard (tag == Cargo.toml)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Assert the tag matches the crate version
+        run: |
+          set -euo pipefail
+          # First `^version = ` in Cargo.toml is the [package] one: dependency
+          # versions are either indented or inline in a table, never at column 0.
+          CARGO_VERSION="$(grep -m1 '^version = ' Cargo.toml | sed 's/^version = "\(.*\)"/\1/')"
+          if [ -z "$CARGO_VERSION" ]; then
+            echo "::error::could not extract the package version from Cargo.toml"
+            exit 1
+          fi
+          echo "Cargo.toml version: $CARGO_VERSION"
+
+          case "$GITHUB_REF" in
+            refs/tags/v*)
+              TAG_VERSION="${GITHUB_REF#refs/tags/v}"
+              echo "Git tag version:    $TAG_VERSION"
+              if [ "$TAG_VERSION" != "$CARGO_VERSION" ]; then
+                echo "::error::version mismatch — tag says '$TAG_VERSION' but Cargo.toml says '$CARGO_VERSION'. Bump Cargo.toml (and Cargo.lock) or retag; the released binaries would report '$CARGO_VERSION' from `--version` while the release is labelled 'v$TAG_VERSION'."
+                exit 1
+              fi
+              echo "OK: tag and crate version agree ($CARGO_VERSION)."
+              ;;
+            *)
+              echo "Not a tag push ($GITHUB_REF) — dry run, nothing to compare against."
+              ;;
+          esac
+
   ci:
     name: CI
+    # Gated on the version guard so a mismatch blocks EVERY downstream job
+    # (publish/build/build-macos/release all reach back to `ci`).
+    needs: version-guard
     # Windows runner so the vault/keyring-era tests pass (see ci.yml for rationale).
     runs-on: windows-latest
     steps:
@@ -182,6 +225,20 @@ jobs:
           path: dist
       - name: List collected artifacts
         run: ls -lR dist
+      - name: Generate SHA256SUMS
+        run: |
+          set -euo pipefail
+          cd dist
+          # Redirect OUTSIDE the globbed directory, then move it in: writing
+          # straight to ./SHA256SUMS would let the shell create the file before
+          # the glob expands and hash the (empty) checksum file into itself.
+          sha256sum -- * > ../SHA256SUMS
+          mv ../SHA256SUMS .
+          echo "----- SHA256SUMS -----"
+          cat SHA256SUMS
+          # Self-check: verify what we just wrote actually validates, so a broken
+          # checksum file fails the release instead of shipping unverifiable.
+          sha256sum -c --strict SHA256SUMS
       - name: Extract release notes from CHANGELOG
         run: |
           VERSION="${GITHUB_REF#refs/tags/v}"
