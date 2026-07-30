@@ -63,6 +63,47 @@ replaces hand-pushed release tags with a version-driven pipeline.
   failed while packaging, because the branch name was interpolated raw into a
   directory name.
 
+## [0.10.3] - 2026-07-30
+
+Hotfix for a broken release pipeline. Contains everything in 0.10.2, which is the
+release that actually reached users.
+
+### Fixed
+- **Releases could not be built or published: the committed `Cargo.lock` was
+  stale.** The 0.10.2 version bump changed `Cargo.toml` without regenerating the
+  lock, so every `cargo build --locked` failed with `cannot update the lock file`
+  and `cargo publish` aborted on a dirty working tree.
+
+### Added
+- CI guard that re-resolves `Cargo.lock` against `Cargo.toml` and fails in seconds
+  rather than five platform builds later.
+
+### Changed
+- README version and test badges are now generated from crates.io and the CI
+  status instead of being hand-written constants that silently went stale.
+
+## [0.10.2] - 2026-07-30
+
+**Tagged but never published to crates.io** — the release pipeline failed before
+the publish step (see 0.10.3). The git tag and its GitHub release exist, which is
+why crates.io skips from 0.10.1 to 0.10.3. Everything below shipped in 0.10.3.
+
+### Changed
+- **TLS moved from OpenSSL to rustls.** `reqwest` was upgraded 0.11 → 0.13 with
+  `default-features = false`, replacing the transitive `native-tls`/`openssl-sys`
+  dependency. Prior releases dynamically linked `libssl.so.3` and refused to start
+  on any system without OpenSSL 3 (`error while loading shared libraries:
+  libssl.so.3`), which includes RHEL/CentOS/CloudLinux 8. No OpenSSL is linked any
+  more — the Linux binary now needs only core glibc.
+- **Release profile hardened for size and speed:** `lto = true`,
+  `codegen-units = 1` and `strip = true`. Note this also sets
+  **`panic = "abort"`**, so a panic terminates the process immediately instead of
+  unwinding — there is no `catch_unwind` recovery and no unwinding across FFI.
+
+### Added
+- Release guard asserting the git tag matches the `Cargo.toml` version, and a
+  `SHA256SUMS` asset published alongside the platform archives.
+
 ## [0.10.1] - 2026-07-20
 
 Release-tooling only — **no changes** to the `magi-rs` runtime, CLI, or library
