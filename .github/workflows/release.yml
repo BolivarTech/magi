@@ -247,20 +247,24 @@ jobs:
           path: dist
       - name: List collected artifacts
         run: ls -lR dist
-      - name: Generate SHA256SUMS
+      - name: Generate SHA256SUMS.txt
         run: |
           set -euo pipefail
           cd dist
+          # `.txt` rather than the bare GNU convention `SHA256SUMS`: Magi is
+          # Windows-first, and an extensionless file shows up in Explorer as an
+          # unopenable "File". `sha256sum -c` does not care about the name.
+          #
           # Redirect OUTSIDE the globbed directory, then move it in: writing
-          # straight to ./SHA256SUMS would let the shell create the file before
-          # the glob expands and hash the (empty) checksum file into itself.
-          sha256sum -- * > ../SHA256SUMS
-          mv ../SHA256SUMS .
-          echo "----- SHA256SUMS -----"
-          cat SHA256SUMS
+          # straight to ./SHA256SUMS.txt would let the shell create the file
+          # before the glob expands and hash the (empty) checksum file into itself.
+          sha256sum -- * > ../SHA256SUMS.txt
+          mv ../SHA256SUMS.txt .
+          echo "----- SHA256SUMS.txt -----"
+          cat SHA256SUMS.txt
           # Self-check: verify what we just wrote actually validates, so a broken
           # checksum file fails the release instead of shipping unverifiable.
-          sha256sum -c --strict SHA256SUMS
+          sha256sum -c --strict SHA256SUMS.txt
       - name: Extract release notes from CHANGELOG
         run: |
           VERSION="${GITHUB_REF#refs/tags/v}"
