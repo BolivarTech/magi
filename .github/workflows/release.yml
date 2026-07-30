@@ -291,16 +291,24 @@ jobs:
 
       # Archive names come from the gate's version, not from `github.ref_name`:
       # this workflow now runs on a BRANCH, so `ref_name` would be `main`.
-      - name: Package (Unix — .7z)
+      # `.tar.gz` ALONGSIDE `.7z`, not instead of it. `.7z` compresses better, but
+      # `p7zip` is not installed by default on RHEL-family distros, minimal server
+      # images or most containers — so the smaller archive is the one a scripted
+      # install is least likely to be able to open. `tar`/`gzip` are present on
+      # every Unix that can run the binary at all, and Python's stdlib `tarfile`
+      # reads it with no third-party dependency.
+      - name: Package (Unix — .tar.gz + .7z)
         if: runner.os != 'Windows'
         shell: bash
         run: |
+          set -euo pipefail
           STAGE="magi-rs-${{ needs.gate.outputs.tag }}-${{ matrix.name }}"
           mkdir "$STAGE"
           cp "target/${{ matrix.target }}/release/magi-rs" "$STAGE/"
           cp README.md LICENSE-MIT LICENSE-APACHE "$STAGE/"
+          tar -czf "$STAGE.tar.gz" "$STAGE"
           7z a -mx=9 "$STAGE.7z" "$STAGE"
-          echo "Packaged $STAGE.7z"
+          echo "Packaged $STAGE.tar.gz and $STAGE.7z"
 
       - name: Package (Windows — .7z + .zip)
         if: runner.os == 'Windows'
@@ -320,6 +328,7 @@ jobs:
         with:
           name: dist-${{ matrix.name }}
           path: |
+            magi-rs-*.tar.gz
             magi-rs-*.7z
             magi-rs-*.zip
           if-no-files-found: error
@@ -341,8 +350,9 @@ jobs:
         run: |
           cargo build --release --locked --bin magi-rs --target x86_64-apple-darwin
           cargo build --release --locked --bin magi-rs --target aarch64-apple-darwin
-      - name: Create universal binary and package (.7z)
+      - name: Create universal binary and package (.tar.gz + .7z)
         run: |
+          set -euo pipefail
           brew install sevenzip
           STAGE="magi-rs-${{ needs.gate.outputs.tag }}-macos-universal2"
           mkdir "$STAGE"
@@ -351,12 +361,20 @@ jobs:
             target/aarch64-apple-darwin/release/magi-rs
           lipo -info "$STAGE/magi-rs"
           cp README.md LICENSE-MIT LICENSE-APACHE "$STAGE/"
+          # `COPYFILE_DISABLE=1` because macOS `tar` is bsdtar: without it, any
+          # file carrying extended attributes gets a companion AppleDouble entry
+          # (`._magi-rs`) inside the tarball. Harmless on macOS, but it litters
+          # the extracted directory on Linux and would show up in the checksum
+          # manifest as unexplained files.
+          COPYFILE_DISABLE=1 tar -czf "$STAGE.tar.gz" "$STAGE"
           7zz a -mx=9 "$STAGE.7z" "$STAGE"
-          echo "Packaged $STAGE.7z"
+          echo "Packaged $STAGE.tar.gz and $STAGE.7z"
       - uses: actions/upload-artifact@v5
         with:
           name: dist-macos-universal2
-          path: magi-rs-*.7z
+          path: |
+            magi-rs-*.tar.gz
+            magi-rs-*.7z
           if-no-files-found: error
 
   # crates.io comes BEFORE the tag: a publish is irreversible (yank only), so it

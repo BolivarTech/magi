@@ -49,10 +49,20 @@ Every release ships ready-to-run archives on the [Releases page](https://github.
 | Archive | Runs on |
 |---|---|
 | `…-windows-x86_64.zip` (or `.7z`) | Windows 10/11, x64 |
-| `…-linux-x86_64.7z` | Linux x64 with **glibc ≥ 2.35** — Ubuntu 22.04+, Debian 12+ |
-| `…-linux-x86_64-compat.7z` | Linux x64 with **any glibc ≥ 2.17** — RHEL/Rocky/Alma/CloudLinux 8 and 9, Debian 10+, older Ubuntu |
-| `…-linux-aarch64-rpi5.7z` | Raspberry Pi 5 / aarch64, glibc ≥ 2.35 |
-| `…-macos-universal2.7z` | macOS, Intel and Apple Silicon |
+| `…-linux-x86_64.tar.gz` (or `.7z`) | Linux x64 with **glibc ≥ 2.35** — Ubuntu 22.04+, Debian 12+ |
+| `…-linux-x86_64-compat.tar.gz` (or `.7z`) | Linux x64 with **any glibc ≥ 2.17** — RHEL/Rocky/Alma/CloudLinux 8 and 9, Debian 10+, older Ubuntu |
+| `…-linux-aarch64-rpi5.tar.gz` (or `.7z`) | Raspberry Pi 5 / aarch64, glibc ≥ 2.35 |
+| `…-macos-universal2.tar.gz` (or `.7z`) | macOS, Intel and Apple Silicon |
+
+Every platform ships two archives with identical contents. **Prefer `.tar.gz` on
+Unix and `.zip` on Windows** — both open with tools the OS already has:
+
+```bash
+tar -xzf magi-rs-*.tar.gz          # Linux/macOS, no extra package
+```
+
+The `.7z` is smaller but needs `p7zip`, which is *not* installed by default on
+RHEL-family distros, minimal server images or most containers.
 
 **Which Linux build?** Check what your system has:
 
