@@ -35,7 +35,7 @@ crossterm = { version = "0.27", features = ["events"] }
 unicode-width = "0.1"
 
 # Networking
-reqwest = { version = "0.11", features = ["json", "stream"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "rustls", "http2", "charset"] }
 futures = "0.3"
 arboard = "3.3"
 axum = "0.7"
@@ -127,3 +127,9 @@ rustix = { version = "0.38", features = ["fs"] }
 # `forbid(unsafe_code)`; NO raw Win32, NO `windows`-crate calls of our own. Pinned.
 win32job = "2.0.3"
 windows-acl = "0.3"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
