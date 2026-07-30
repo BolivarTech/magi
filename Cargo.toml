@@ -1,6 +1,6 @@
 [package]
 name = "magi-rs"
-version = "0.10.1"
+version = "0.10.2"
 edition = "2021"
 default-run = "magi-rs"
 authors = ["Julian Bolivar <jbolivarg@gmail.com>"]
