@@ -16,10 +16,24 @@ name: Release
 on:
   push:
     branches: [main]
+  # PRs run the GATE ONLY — never a build, never a release. Without this, a PR
+  # that rolls the version backwards or bumps it without a CHANGELOG entry sails
+  # through `ci.yml` (which does not look at versions) and only blows up AFTER
+  # the merge, leaving main on a bad version with a red workflow to clean up.
+  # Validating here moves that feedback to review time, where it belongs.
+  pull_request:
+    branches: [main]
   # Manual dry-run: exercises CI and every platform build/package WITHOUT
   # tagging, publishing or releasing. Use it to validate all targets before
   # committing a version bump.
   workflow_dispatch:
+
+# Serialise release runs. Two merges landing seconds apart would otherwise race
+# to tag and publish; `cancel-in-progress: false` lets the first finish rather
+# than killing a run that may already have published to crates.io.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 env:
   CARGO_TERM_COLOR: always
@@ -35,6 +49,10 @@ jobs:
     outputs:
       version: ${{ steps.gate.outputs.version }}
       tag: ${{ steps.gate.outputs.tag }}
+      # "this ref declares a version never released before" — true on a PR that
+      # bumps, so PR-time checks can key off it.
+      is_new_version: ${{ steps.gate.outputs.is_new_version }}
+      # "…and we are actually allowed to release it" — push to main only.
       should_release: ${{ steps.gate.outputs.should_release }}
     steps:
       # `fetch-depth: 0` because the rollback check needs the FULL tag list;
@@ -66,7 +84,7 @@ jobs:
             exit 1
           fi
 
-          SHOULD=true
+          NEWVER=true
 
           # ROLLBACK PROTECTION. Compare against the highest X.Y.Z ever tagged.
           # `sort -V` orders versions numerically (2.10 > 2.9), which a plain
@@ -87,30 +105,35 @@ jobs:
           elif [ "$V" = "$MAX" ]; then
             # The overwhelmingly common case: most pushes to main do not touch
             # the version. A NO-OP, never a failure.
-            echo "Version $V is already released as v$MAX — this push does not bump it. Nothing to release."
-            SHOULD=false
+            echo "Version $V is already released as v$MAX — this ref does not bump it. Nothing to release."
+            NEWVER=false
           elif [ "$(printf '%s\n%s\n' "$V" "$MAX" | sort -V | head -1)" = "$V" ]; then
+            # Fails on a PR too, which is the whole point of running this job on
+            # pull_request: the rollback is caught at review time, not after merge.
             echo "::error::ROLLBACK BLOCKED — Cargo.toml declares $V but v$MAX is already released. A release version must move forward; bump past $MAX or restore the correct version."
             exit 1
           else
-            echo "New version $V > $MAX — this push will be released as v$V."
+            echo "New version $V > $MAX."
           fi
 
           # Belt and braces: MAX only sees well-formed X.Y.Z tags, so an oddly
           # shaped pre-existing tag could still collide. Never overwrite one.
-          if [ "$SHOULD" = "true" ] && git rev-parse -q --verify "refs/tags/v$V" >/dev/null; then
+          if [ "$NEWVER" = "true" ] && git rev-parse -q --verify "refs/tags/v$V" >/dev/null; then
             echo "::error::tag v$V already exists but is not the highest release — refusing to overwrite it."
             exit 1
           fi
 
-          # A manual dispatch NEVER releases, whatever the version says. It only
-          # exercises the builds.
+          echo "is_new_version=$NEWVER" >> "$GITHUB_OUTPUT"
+
+          # Releasing requires BOTH a new version and a push to main. A PR or a
+          # manual dispatch validates but never tags, publishes or releases.
+          SHOULD="$NEWVER"
           if [ "${{ github.event_name }}" != "push" ]; then
-            echo "Manual dispatch — dry run: builds will run, nothing will be tagged, published or released."
+            echo "Event is '${{ github.event_name }}', not a push to main — validation only, nothing will be tagged, published or released."
             SHOULD=false
           fi
-
           echo "should_release=$SHOULD" >> "$GITHUB_OUTPUT"
+          echo "--> is_new_version=$NEWVER  should_release=$SHOULD"
 
       # A stale `Cargo.lock` is what actually broke the v0.10.3 release: commits
       # bumped `Cargo.toml` alone, so every `--locked` build died with "cannot
@@ -127,10 +150,12 @@ jobs:
           fi
           echo "OK: Cargo.lock resolves cleanly under --locked."
 
-      # Only enforced when actually releasing — an ordinary push to main must not
-      # be blocked for lacking a CHANGELOG entry it does not need.
+      # Keyed on `is_new_version`, NOT `should_release`, so a PR that bumps the
+      # version is told about the missing entry at review time. An ordinary push
+      # or PR that does not touch the version is never blocked for lacking a
+      # CHANGELOG entry it does not need.
       - name: Assert CHANGELOG has an entry for this version
-        if: steps.gate.outputs.should_release == 'true'
+        if: steps.gate.outputs.is_new_version == 'true'
         run: |
           set -euo pipefail
           V="${{ steps.gate.outputs.version }}"
