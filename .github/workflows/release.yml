@@ -1,85 +1,182 @@
 name: Release
 
+# The version in `Cargo.toml` is the SINGLE SOURCE OF TRUTH for a release.
+#
+# Push a version bump to `main` and this workflow validates it, builds every
+# platform, publishes to crates.io and only THEN creates the `vX.Y.Z` tag and the
+# GitHub Release. Pushes that do not change the version are a no-op: the gate
+# reports "already released" and nothing downstream runs.
+#
+# Why the tag is created LAST, not first. The previous design triggered on a tag
+# push, so the tag existed before anything had been compiled — and when the build
+# failed, the tag was left pointing at a broken commit (see v0.10.3, which had to
+# be deleted and re-pushed, and v0.10.2, which is tagged but never reached
+# crates.io). Creating it at the end makes a tag mean exactly one thing: this
+# version built, published and released successfully.
 on:
   push:
-    tags: ['v*']
-  # Manual dry-run: exercises CI + every platform build/package WITHOUT
-  # publishing to crates.io or cutting a GitHub Release (those jobs are gated
-  # to tag pushes below). Use this to validate all targets before tagging.
+    branches: [main]
+  # PRs run the GATE ONLY — never a build, never a release. Without this, a PR
+  # that rolls the version backwards or bumps it without a CHANGELOG entry sails
+  # through `ci.yml` (which does not look at versions) and only blows up AFTER
+  # the merge, leaving main on a bad version with a red workflow to clean up.
+  # Validating here moves that feedback to review time, where it belongs.
+  pull_request:
+    branches: [main]
+  # Manual dry-run: exercises CI and every platform build/package WITHOUT
+  # tagging, publishing or releasing. Use it to validate all targets before
+  # committing a version bump.
   workflow_dispatch:
+
+# Serialise release runs. Two merges landing seconds apart would otherwise race
+# to tag and publish; `cancel-in-progress: false` lets the first finish rather
+# than killing a run that may already have published to crates.io.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # Fail-closed guard against the version drift that `--version` would otherwise
-  # report as truth: the tag, `Cargo.toml` and the binaries must agree. Runs FIRST
-  # and everything else hangs off it (via `ci`), so a mismatch costs ~10 s instead
-  # of five platform builds.
-  #
-  # Deliberately NOT gated with a job-level `if:` — a skipped job skips its
-  # dependents in GitHub Actions, which would silently disable the whole manual
-  # dry-run. The job always runs; the comparison is what's conditional.
-  version-guard:
-    name: Version guard (tag == Cargo.toml)
+  # ── Release gate ──────────────────────────────────────────────────────────
+  # Everything hangs off this job, so a bad bump costs ~15 s instead of five
+  # platform builds. It answers one question: "should this push cut a release,
+  # and is it safe to?"
+  gate:
+    name: Release gate
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.gate.outputs.version }}
+      tag: ${{ steps.gate.outputs.tag }}
+      # "this ref declares a version never released before" — true on a PR that
+      # bumps, so PR-time checks can key off it.
+      is_new_version: ${{ steps.gate.outputs.is_new_version }}
+      # "…and we are actually allowed to release it" — push to main only.
+      should_release: ${{ steps.gate.outputs.should_release }}
     steps:
+      # `fetch-depth: 0` because the rollback check needs the FULL tag list;
+      # the default shallow clone fetches no tags at all and would silently
+      # conclude that nothing has ever been released.
       - uses: actions/checkout@v5
-      - name: Assert the tag matches the crate version
+        with:
+          fetch-depth: 0
+
+      - id: gate
+        name: Resolve version, block rollbacks, decide whether to release
         run: |
           set -euo pipefail
+
           # First `^version = ` in Cargo.toml is the [package] one: dependency
           # versions are either indented or inline in a table, never at column 0.
-          CARGO_VERSION="$(grep -m1 '^version = ' Cargo.toml | sed 's/^version = "\(.*\)"/\1/')"
-          if [ -z "$CARGO_VERSION" ]; then
+          V="$(grep -m1 '^version = ' Cargo.toml | sed 's/^version = "\(.*\)"/\1/')"
+          if [ -z "$V" ]; then
             echo "::error::could not extract the package version from Cargo.toml"
             exit 1
           fi
-          echo "Cargo.toml version: $CARGO_VERSION"
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "tag=v$V"    >> "$GITHUB_OUTPUT"
+          echo "Cargo.toml version: $V"
 
-          case "$GITHUB_REF" in
-            refs/tags/v*)
-              TAG_VERSION="${GITHUB_REF#refs/tags/v}"
-              echo "Git tag version:    $TAG_VERSION"
-              if [ "$TAG_VERSION" != "$CARGO_VERSION" ]; then
-                # NOTE: no backticks in this message — inside a double-quoted
-                # string bash would run them as command substitution, which is
-                # exactly what mangled this error on the v0.10.3 run.
-                echo "::error::version mismatch — tag says '$TAG_VERSION' but Cargo.toml says '$CARGO_VERSION'. Bump Cargo.toml (and Cargo.lock) or retag; the released binaries would report '$CARGO_VERSION' from --version while the release is labelled 'v$TAG_VERSION'."
-                exit 1
-              fi
-              echo "OK: tag and crate version agree ($CARGO_VERSION)."
-              ;;
-            *)
-              echo "Not a tag push ($GITHUB_REF) — dry run, nothing to compare against."
-              ;;
-          esac
+          # Reject anything that is not a plain X.Y.Z before it becomes a tag.
+          if ! printf '%s' "$V" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::version '$V' is not a plain X.Y.Z — refusing to derive a tag from it."
+            exit 1
+          fi
 
-      # The tag/Cargo.toml guard above does NOT catch a stale `Cargo.lock`, which
-      # is what actually broke the v0.10.3 release: two commits bumped only
-      # `Cargo.toml`, leaving the committed lock recording the previous version.
-      # Every `--locked` build then died with "cannot update the lock file", and
-      # `cargo publish` regenerated the lock and aborted on a dirty tree.
-      #
+          NEWVER=true
+
+          # ROLLBACK PROTECTION. Compare against the highest X.Y.Z ever tagged.
+          # `sort -V` orders versions numerically (2.10 > 2.9), which a plain
+          # lexical sort gets wrong.
+          #
+          # The comparison is against MAX and NOT against "does tag vX.Y.Z
+          # exist", deliberately. Asking only whether the tag exists has a hole:
+          # rolling Cargo.toml back to an OLD but already-released version
+          # (0.10.3 -> 0.10.0) finds the tag present and looks like a harmless
+          # no-op, so main would silently sit on a stale version with nobody
+          # told. Ordering against MAX catches it as the rollback it is.
+          MAX="$(git tag -l 'v*' | sed 's/^v//' \
+                 | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1 || true)"
+          echo "highest version released so far: ${MAX:-<none>}"
+
+          if [ -z "$MAX" ]; then
+            echo "No release tags yet — $V will be the first."
+          elif [ "$V" = "$MAX" ]; then
+            # The overwhelmingly common case: most pushes to main do not touch
+            # the version. A NO-OP, never a failure.
+            echo "Version $V is already released as v$MAX — this ref does not bump it. Nothing to release."
+            NEWVER=false
+          elif [ "$(printf '%s\n%s\n' "$V" "$MAX" | sort -V | head -1)" = "$V" ]; then
+            # Fails on a PR too, which is the whole point of running this job on
+            # pull_request: the rollback is caught at review time, not after merge.
+            echo "::error::ROLLBACK BLOCKED — Cargo.toml declares $V but v$MAX is already released. A release version must move forward; bump past $MAX or restore the correct version."
+            exit 1
+          else
+            echo "New version $V > $MAX."
+          fi
+
+          # Belt and braces: MAX only sees well-formed X.Y.Z tags, so an oddly
+          # shaped pre-existing tag could still collide. Never overwrite one.
+          if [ "$NEWVER" = "true" ] && git rev-parse -q --verify "refs/tags/v$V" >/dev/null; then
+            echo "::error::tag v$V already exists but is not the highest release — refusing to overwrite it."
+            exit 1
+          fi
+
+          echo "is_new_version=$NEWVER" >> "$GITHUB_OUTPUT"
+
+          # Releasing requires BOTH a new version and a push to main. A PR or a
+          # manual dispatch validates but never tags, publishes or releases.
+          SHOULD="$NEWVER"
+          if [ "${{ github.event_name }}" != "push" ]; then
+            echo "Event is '${{ github.event_name }}', not a push to main — validation only, nothing will be tagged, published or released."
+            SHOULD=false
+          fi
+          echo "should_release=$SHOULD" >> "$GITHUB_OUTPUT"
+          echo "--> is_new_version=$NEWVER  should_release=$SHOULD"
+
+      # A stale `Cargo.lock` is what actually broke the v0.10.3 release: commits
+      # bumped `Cargo.toml` alone, so every `--locked` build died with "cannot
+      # update the lock file" and `cargo publish` aborted on a dirty tree.
       # `cargo metadata --locked` re-resolves against the committed lock WITHOUT
-      # compiling, so this costs seconds and fails here instead of five platform
-      # builds later.
+      # compiling, so this costs seconds.
       - uses: dtolnay/rust-toolchain@stable
       - name: Assert Cargo.lock is in sync with Cargo.toml
         run: |
           set -euo pipefail
           if ! cargo metadata --locked --format-version 1 > /dev/null; then
-            echo "::error::Cargo.lock is out of sync with Cargo.toml. Run 'cargo update -p magi-rs' (or 'cargo check') locally and commit the regenerated Cargo.lock. A version bump in Cargo.toml MUST be committed together with its Cargo.lock."
+            echo "::error::Cargo.lock is out of sync with Cargo.toml. Run 'cargo update -p magi-rs' (or 'cargo check') locally and commit the regenerated Cargo.lock. A version bump MUST be committed together with its Cargo.lock."
             exit 1
           fi
           echo "OK: Cargo.lock resolves cleanly under --locked."
 
+      # Keyed on `is_new_version`, NOT `should_release`, so a PR that bumps the
+      # version is told about the missing entry at review time. An ordinary push
+      # or PR that does not touch the version is never blocked for lacking a
+      # CHANGELOG entry it does not need.
+      - name: Assert CHANGELOG has an entry for this version
+        if: steps.gate.outputs.is_new_version == 'true'
+        run: |
+          set -euo pipefail
+          V="${{ steps.gate.outputs.version }}"
+          if ! grep -q "^## \[$V\]" CHANGELOG.md; then
+            echo "::error::CHANGELOG.md has no '## [$V]' section. Add one (Keep a Changelog format, e.g. '## [$V] - YYYY-MM-DD') before releasing — the release notes are extracted from it, so without it the release ships with no notes."
+            exit 1
+          fi
+          echo "OK: CHANGELOG.md documents $V."
+
   ci:
     name: CI
-    # Gated on the version guard so a mismatch blocks EVERY downstream job
-    # (publish/build/build-macos/release all reach back to `ci`).
-    needs: version-guard
-    # Windows runner so the vault/keyring-era tests pass (see ci.yml for rationale).
+    # Gated on the release gate so a rollback or a stale lock blocks EVERYTHING
+    # downstream (build / build-macos / publish / release all reach back here).
+    needs: gate
+    # Only for an actual release or a dry-run. `ci.yml` already runs this exact
+    # suite on every push to main and on every PR; without this condition each
+    # ordinary push would run the full Windows test suite TWICE. A no-op push
+    # therefore costs just the ~15 s gate. Note that skipping this job also skips
+    # everything that needs it, which is precisely the desired behaviour.
+    if: needs.gate.outputs.should_release == 'true' || github.event_name == 'workflow_dispatch'
+    # Windows runner so the vault-era tests pass (see ci.yml for rationale).
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v5
@@ -90,52 +187,54 @@ jobs:
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
       - run: cargo fmt --all --check
-      - run: cargo clippy --all-targets -- -D warnings
-      - run: cargo nextest run
-
-  publish:
-    name: Publish to crates.io
-    needs: ci
-    # Tag pushes only — never on a manual dry-run dispatch.
-    if: startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Verify tag matches Cargo.toml version
-        run: |
-          CARGO_VERSION="v$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')"
-          TAG_VERSION="${GITHUB_REF#refs/tags/}"
-          if [ "$CARGO_VERSION" != "$TAG_VERSION" ]; then
-            echo "ERROR: Tag ($TAG_VERSION) does not match Cargo.toml version ($CARGO_VERSION)"
-            exit 1
-          fi
-          echo "Version match: $TAG_VERSION"
-      - run: cargo publish
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+      - run: cargo clippy --all-targets --locked -- -D warnings
+      - run: cargo nextest run --locked
 
   # Native per-platform builds for Windows, Linux x64 and Raspberry Pi 5 (aarch64).
-  # Building natively on each runner avoids the openssl-sys / SQLite cross-compile
-  # pain: TLS uses each OS's native stack (SChannel / OpenSSL / Secure Transport)
-  # and the runner already ships the toolchain and system libraries it needs.
   build:
     name: Build ${{ matrix.name }}
-    needs: ci
+    needs: [gate, ci]
+    # Builds run for a real release AND for a manual dry-run — the whole point of
+    # the dry-run is to exercise them.
+    if: needs.gate.outputs.should_release == 'true' || github.event_name == 'workflow_dispatch'
     strategy:
       # Surface every platform failure in one run; a single failed leg still
-      # fails the job overall, so the `release` job (needs: build) is blocked
-      # and no partial release is published (abort-all policy).
+      # fails the job overall, so `release` (needs: build) is blocked and no
+      # partial release is published (abort-all policy).
       fail-fast: false
       matrix:
         include:
           - name: windows-x86_64
             os: windows-latest
             target: x86_64-pc-windows-msvc
+          # TWO x86_64 Linux artifacts, deliberately. They differ ONLY in which
+          # glibc symbol versions they request; same source, same flags.
+          #
+          #   linux-x86_64         — linked natively against the runner's glibc
+          #                          2.35. The default for a current desktop or
+          #                          server, and the build path that has been
+          #                          shipping since v0.10.0 (no zig in the chain).
+          #   linux-x86_64-compat  — linked against a 2.17 baseline via
+          #                          `cargo-zigbuild`. glibc is forward-compatible,
+          #                          so this one runs EVERYWHERE the other does
+          #                          plus every enterprise distro the 2.35 build
+          #                          cannot: RHEL/Rocky/Alma/CloudLinux 8 (2.28)
+          #                          and RHEL 9 (2.34) both reject a 2.35 binary
+          #                          with "GLIBC_2.34 not found".
+          #
+          # On the perf question that motivates keeping the native one: glibc
+          # dispatches the hot string/memory routines through IFUNC at load time,
+          # so the -compat binary still gets the CPU-optimised `memcpy` on a
+          # modern host. The measurable delta is confined to a few libm routines
+          # rewritten in 2.28+. The native build is kept mainly as the proven,
+          # toolchain-free path — not because -compat is meaningfully slower.
           - name: linux-x86_64
-            # Ubuntu 22.04 (glibc 2.35) for the widest runtime compatibility.
             os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
+          - name: linux-x86_64-compat
+            os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            glibc: '2.17'
           - name: linux-aarch64-rpi5
             # aarch64 built on glibc 2.35 <= Raspberry Pi OS Bookworm's 2.36,
             # so the binary runs on a Pi 5 without a "GLIBC version" error.
@@ -148,22 +247,55 @@ jobs:
         with:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
-      - name: Install Linux build deps (OpenSSL, X11/xcb for arboard, p7zip)
+      - name: Install Linux build deps (p7zip)
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            pkg-config libssl-dev \
-            libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
-            p7zip-full
+          sudo apt-get install -y --no-install-recommends p7zip-full
+
+      # Only the legs that declare `matrix.glibc` need zig; the others build
+      # natively. `taiki-e/install-action` fetches a prebuilt cargo-zigbuild
+      # instead of compiling it from source (~4 min saved per run).
+      - name: Install zig (old-glibc baseline)
+        if: matrix.glibc != ''
+        run: pip3 install ziglang
+      - uses: taiki-e/install-action@v2
+        if: matrix.glibc != ''
+        with:
+          tool: cargo-zigbuild
+      - name: Build release binary (old-glibc baseline)
+        if: matrix.glibc != ''
+        run: cargo zigbuild --release --locked --bin magi-rs --target ${{ matrix.target }}.${{ matrix.glibc }}
       - name: Build release binary
+        if: matrix.glibc == ''
         run: cargo build --release --locked --bin magi-rs --target ${{ matrix.target }}
 
+      # Proof, not assumption: print the highest glibc symbol version the binary
+      # actually requires. A leg with a baseline MUST NOT exceed it — otherwise
+      # the artifact silently goes back to being unusable on old distros, which
+      # is exactly the regression this whole split exists to prevent.
+      - name: Verify glibc baseline
+        if: matrix.glibc != ''
+        run: |
+          set -euo pipefail
+          BIN="target/${{ matrix.target }}/release/magi-rs"
+          echo "----- versioned glibc symbols required -----"
+          objdump -T "$BIN" | grep -o 'GLIBC_[0-9.]*' | sort -uV || true
+          MAXV="$(objdump -T "$BIN" | grep -o 'GLIBC_[0-9.]*' | sed 's/GLIBC_//' | sort -uV | tail -1)"
+          echo "highest required: GLIBC_$MAXV (baseline target: ${{ matrix.glibc }})"
+          if [ "$(printf '%s\n%s\n' "$MAXV" "${{ matrix.glibc }}" | sort -V | tail -1)" != "${{ matrix.glibc }}" ]; then
+            echo "::error::binary requires GLIBC_$MAXV, above the ${{ matrix.glibc }} baseline — it will NOT run on old distros."
+            exit 1
+          fi
+          echo "OK: within the ${{ matrix.glibc }} baseline."
+
+      # Archive names come from the gate's version, not from `github.ref_name`:
+      # this workflow now runs on a BRANCH, so `ref_name` would be `main`.
       - name: Package (Unix — .7z)
         if: runner.os != 'Windows'
         shell: bash
         run: |
-          STAGE="magi-rs-${{ github.ref_name }}-${{ matrix.name }}"
+          STAGE="magi-rs-${{ needs.gate.outputs.tag }}-${{ matrix.name }}"
           mkdir "$STAGE"
           cp "target/${{ matrix.target }}/release/magi-rs" "$STAGE/"
           cp README.md LICENSE-MIT LICENSE-APACHE "$STAGE/"
@@ -174,7 +306,7 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $stage = "magi-rs-${{ github.ref_name }}-${{ matrix.name }}"
+          $stage = "magi-rs-${{ needs.gate.outputs.tag }}-${{ matrix.name }}"
           New-Item -ItemType Directory -Path $stage | Out-Null
           Copy-Item "target/${{ matrix.target }}/release/magi-rs.exe" $stage
           Copy-Item README.md, LICENSE-MIT, LICENSE-APACHE $stage
@@ -193,11 +325,11 @@ jobs:
           if-no-files-found: error
 
   # macOS as a single universal2 (Intel + Apple Silicon) binary via `lipo`:
-  # one download that runs natively on any modern Mac. macOS TLS uses Secure
-  # Transport, so there is no OpenSSL dependency to satisfy.
+  # one download that runs natively on any modern Mac.
   build-macos:
     name: Build macos-universal2
-    needs: ci
+    needs: [gate, ci]
+    if: needs.gate.outputs.should_release == 'true' || github.event_name == 'workflow_dispatch'
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v5
@@ -212,7 +344,7 @@ jobs:
       - name: Create universal binary and package (.7z)
         run: |
           brew install sevenzip
-          STAGE="magi-rs-${{ github.ref_name }}-macos-universal2"
+          STAGE="magi-rs-${{ needs.gate.outputs.tag }}-macos-universal2"
           mkdir "$STAGE"
           lipo -create -output "$STAGE/magi-rs" \
             target/x86_64-apple-darwin/release/magi-rs \
@@ -227,13 +359,38 @@ jobs:
           path: magi-rs-*.7z
           if-no-files-found: error
 
+  # crates.io comes BEFORE the tag: a publish is irreversible (yank only), so it
+  # is the last thing that can genuinely fail. If it does, no tag is created and
+  # the bump can simply be re-pushed.
+  publish:
+    name: Publish to crates.io
+    needs: [gate, ci, build, build-macos]
+    if: needs.gate.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Publish (skip if this version is already on crates.io)
+        run: |
+          set -euo pipefail
+          V="${{ needs.gate.outputs.version }}"
+          # Idempotency: if a previous run published but then failed before
+          # tagging, re-running must not die on "crate version already uploaded".
+          if curl -sf -H 'User-Agent: magi-rs-release-ci' \
+               "https://crates.io/api/v1/crates/magi-rs/$V" > /dev/null; then
+            echo "magi-rs $V is already on crates.io — skipping publish."
+          else
+            cargo publish --locked
+          fi
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+  # Creates the tag AND the GitHub Release, together, as the very last action.
+  # Reaching this job means: CI green, all five archives built, crate published.
   release:
-    name: GitHub Release
-    # Requires crates.io publish AND every platform build to succeed: if any
-    # target fails to compile, this job never runs and no release is cut.
-    needs: [publish, build, build-macos]
-    # Tag pushes only — never on a manual dry-run dispatch.
-    if: startsWith(github.ref, 'refs/tags/v')
+    name: Tag and GitHub Release
+    needs: [gate, publish, build, build-macos]
+    if: needs.gate.outputs.should_release == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -267,20 +424,29 @@ jobs:
           sha256sum -c --strict SHA256SUMS.txt
       - name: Extract release notes from CHANGELOG
         run: |
-          VERSION="${GITHUB_REF#refs/tags/v}"
+          set -euo pipefail
+          VERSION="${{ needs.gate.outputs.version }}"
           awk -v ver="$VERSION" '
             index($0, "## [" ver "]") == 1 { flag = 1; next }
             flag && index($0, "## [") == 1 { flag = 0 }
             flag { print }
           ' CHANGELOG.md > release-notes.md
+          # The gate already proved the section exists, so an empty file here
+          # means the section is present but blank — worth saying out loud.
           if [ ! -s release-notes.md ]; then
-            echo "No CHANGELOG section for $VERSION; falling back to auto-generated notes."
+            echo "::warning::the CHANGELOG section for $VERSION is empty; falling back to auto-generated notes."
           fi
           echo "----- release notes -----"
           cat release-notes.md
-      - name: Create GitHub Release (all platform archives)
+      # `tag_name` on a branch ref makes this action create the tag at the
+      # current SHA and cut the release in one step — so the tag comes into
+      # existence only here, after everything above has succeeded.
+      - name: Create tag and GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ needs.gate.outputs.tag }}
+          name: ${{ needs.gate.outputs.tag }}
+          target_commitish: ${{ github.sha }}
           body_path: release-notes.md
           generate_release_notes: true
           files: dist/*

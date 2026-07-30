@@ -42,10 +42,37 @@ Most AI coding agents are SaaS-bound and tied to a single vendor. Magi is built 
 
 ## Installation
 
+### Prebuilt binaries
+
+Every release ships ready-to-run archives on the [Releases page](https://github.com/BolivarTech/magi/releases) — no Rust toolchain required.
+
+| Archive | Runs on |
+|---|---|
+| `…-windows-x86_64.zip` (or `.7z`) | Windows 10/11, x64 |
+| `…-linux-x86_64.7z` | Linux x64 with **glibc ≥ 2.35** — Ubuntu 22.04+, Debian 12+ |
+| `…-linux-x86_64-compat.7z` | Linux x64 with **any glibc ≥ 2.17** — RHEL/Rocky/Alma/CloudLinux 8 and 9, Debian 10+, older Ubuntu |
+| `…-linux-aarch64-rpi5.7z` | Raspberry Pi 5 / aarch64, glibc ≥ 2.35 |
+| `…-macos-universal2.7z` | macOS, Intel and Apple Silicon |
+
+**Which Linux build?** Check what your system has:
+
+```bash
+ldd --version | head -1
+```
+
+2.35 or newer → either archive works; prefer `linux-x86_64`, built natively. Anything older → use `linux-x86_64-compat`. The two are the same program from the same source; they differ only in the glibc symbol versions they request, and `-compat` runs everywhere the other does. If you pick the wrong one the binary refuses to start with `GLIBC_2.xx not found` — that is the only symptom, and the fix is to download `-compat`.
+
+Verify what you downloaded against the `SHA256SUMS.txt` published alongside it:
+
+```bash
+sha256sum -c --ignore-missing SHA256SUMS.txt      # Linux/macOS
+Get-FileHash .\magi-rs-*.zip -Algorithm SHA256    # Windows
+```
+
 ### Prerequisites
 
-- A Rust toolchain (stable, edition 2021) — install via [rustup](https://rustup.rs/).
-- `ripgrep` (`rg`) on `PATH` for the `grep` tool.
+- A Rust toolchain (stable, edition 2021) — install via [rustup](https://rustup.rs/). **Only needed to build from source**; the prebuilt archives above run as-is.
+- `ripgrep` (`rg`) on `PATH` for the `grep` tool — required either way.
 - An Anthropic API key from [console.anthropic.com](https://console.anthropic.com/) (**recommended**), set via `ANTHROPIC_API_KEY` or stored in the vault (`magi-rs vault set ANTHROPIC_API_KEY`). `/login` (OAuth) also works but is **best-effort** — see [Configuration](#configuration).
 
 ### Build from source
