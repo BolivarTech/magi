@@ -9,6 +9,60 @@ changes and the **patch** position signals backward-compatible fixes.
 
 ## [Unreleased]
 
+## [0.10.4] - 2026-07-30
+
+Release-engineering only — **no changes** to the `magi-rs` runtime, CLI or library
+behavior. This release makes the Linux binary run on enterprise distributions and
+replaces hand-pushed release tags with a version-driven pipeline.
+
+### Added
+- **`linux-x86_64-compat` archive for older Linux distributions.** The existing
+  `linux-x86_64` build is linked against the build host's glibc 2.35, which every
+  RHEL-family distribution rejects — RHEL/Rocky/Alma/CloudLinux 8 ship glibc 2.28
+  and RHEL 9 ships 2.34, so the binary failed to start with
+  `version 'GLIBC_2.34' not found`. The new archive is linked against a **glibc
+  2.17** baseline via `cargo-zigbuild`; since glibc is forward-compatible it runs
+  everywhere the native build does, plus RHEL 7/8/9, Debian 10+ and older Ubuntu.
+  Both are published — see the README for which to download. A build step now
+  verifies the baseline with `objdump` and fails the release if a binary ever
+  exceeds it.
+- **`## Prebuilt binaries` section in the README.** Releases have shipped
+  ready-to-run archives since v0.10.0 without the README ever mentioning them.
+  Documents each archive, how to tell which Linux build you need
+  (`ldd --version`), what the wrong choice looks like, and how to verify a
+  download against `SHA256SUMS.txt`.
+- **Rollback protection on releases.** A version lower than the highest released
+  tag aborts the pipeline instead of producing a backwards release.
+- **`CHANGELOG.md` entry required** for every new version — release notes are
+  extracted from it, so a missing section previously shipped an empty release.
+- **`Cargo.lock` consistency guard**, which catches in seconds the drift that
+  broke the v0.10.3 release.
+
+### Changed
+- **Releases are now driven by the version in `Cargo.toml`, not by a hand-pushed
+  tag.** Pushing a version bump to `main` validates it, builds every platform,
+  publishes to crates.io and only **then** creates the `vX.Y.Z` tag and the GitHub
+  Release. Previously the tag was pushed first, so a failed build left it pointing
+  at a broken commit (v0.10.3 had to be deleted and re-pushed; v0.10.2 is tagged
+  but never reached crates.io). A tag now means the version built on every target,
+  published, and released successfully.
+- The checksum asset is named **`SHA256SUMS.txt`** rather than the extensionless
+  GNU convention — Magi is Windows-first, and Explorer shows an extensionless file
+  as an unopenable "File". `sha256sum -c` is unaffected.
+- Version and CHANGELOG are validated on **pull requests**, so a bad bump fails at
+  review time instead of after the merge.
+- CI actions updated to `@v5` for the Node 24 runtime.
+
+### Fixed
+- **Releases failed outright because the committed `Cargo.lock` was stale.** Two
+  commits bumped `Cargo.toml` alone, so every `--locked` platform build died with
+  `cannot update the lock file` and `cargo publish` aborted on a dirty working
+  tree. `--locked` now also runs in CI, so this drift fails on the push that
+  introduces it rather than days later during a release.
+- Dry-run builds from a branch whose name contains a slash (`ci/…`, `feat/…`)
+  failed while packaging, because the branch name was interpolated raw into a
+  directory name.
+
 ## [0.10.1] - 2026-07-20
 
 Release-tooling only — **no changes** to the `magi-rs` runtime, CLI, or library
