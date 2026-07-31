@@ -1,6 +1,14 @@
 [licenses]
+# `CDLA-Permissive-2.0` cubre UN solo crate: `webpki-root-certs`, el bundle de
+# certificados raíz de Mozilla que llega vía `rustls-platform-verifier` →
+# `reqwest`. Es una licencia de DATOS (Community Data License Agreement,
+# variante permisiva), no de código: permite uso, modificación y redistribución
+# sin copyleft y sin obligaciones más allá de conservar el texto de licencia.
+# Compatible con distribuir bajo `MIT OR Apache-2.0`. Entró con la subida de
+# reqwest a 0.13 y estuvo rompiendo este gate desde entonces.
 allow = ["MIT", "Apache-2.0", "Apache-2.0 WITH LLVM-exception", "BSD-2-Clause",
-         "BSD-3-Clause", "ISC", "0BSD", "BSL-1.0", "Zlib", "Unicode-3.0", "Unlicense", "CC0-1.0"]
+         "BSD-3-Clause", "ISC", "0BSD", "BSL-1.0", "Zlib", "Unicode-3.0", "Unlicense", "CC0-1.0",
+         "CDLA-Permissive-2.0"]
 confidence-threshold = 0.9
 
 [bans]
