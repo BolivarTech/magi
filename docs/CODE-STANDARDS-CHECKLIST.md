@@ -74,8 +74,11 @@ a los de `src/vault/mod.rs` (`deny(missing_docs, missing_docs_in_private_items, 
 | Vulnerabilidades | `cargo audit` | Sin advisories conocidos en el árbol de dependencias. |
 | Licencias | `cargo deny check licenses` | Solo licencias permisivas listadas en
   `deny.toml`. |
-| Secretos | `cargo nextest run --test no_hardcoded_secrets` | Ningún archivo `.rs` bajo
-  `src/` contiene material tipo-clave hardcodeado (`sk-ant-api...`, bloques `-----BEGIN`). |
+| Secretos | `cargo nextest run --test no_hardcoded_secrets` | Ningún `.rs` bajo `src/`
+  lleva material tipo-clave hardcodeado (`sk-ant-api...`, bloques `-----BEGIN`), <!-- allow-secret-scan --> y ninguna
+  doc o config (`.md`/`.toml`/`.yml`/`.yaml`/`.example` en la raíz, `docs/` y `.github/`)
+  lleva además IPs privadas ni rutas absolutas de usuario. Una línea se exime con el
+  marcador `allow-secret-scan`, que aplica solo a esa línea. <!-- allow-secret-scan --> |
 
 Todo hallazgo que no encaje en una categoría de la tabla de gates mecánicos, pero sí en la
 checklist manual de arriba, se reporta como finding de review (Loop 1 / MAGI) — nunca se
