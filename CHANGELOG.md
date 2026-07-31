@@ -9,6 +9,39 @@ changes and the **patch** position signals backward-compatible fixes.
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-07-31
+
+Dependency migration: `magi-core` **1.1.1 → 3.1.0**, a jump across three majors.
+Scope is deliberately narrow — make magi-rs compile and behave correctly on the new
+crate. Adopting what 3.x adds (lineage rotation, provider probe, extraction-failure
+telemetry, the richer report) is the next milestone.
+
+### Changed
+- **`magi-core` upgraded to 3.1.0.** The two API breaks that reached magi-rs:
+  - `ProviderError`'s struct-like variants are `#[non_exhaustive]`, so an external
+    `LlmProvider` can no longer build one directly. 3.1.0 restores external
+    construction through **`ProviderError::external(message, ExternalErrorKind)`**,
+    which produces the dedicated `External { message, kind }` variant rather than
+    impersonating an internal one. The MAGI adapter and the consult test doubles now
+    use it.
+  - **Mage responses must carry the verdict between `<MAGI_VERDICT>` markers.**
+    magi-core 3.0.0 replaced the parser that *searched* a response for a
+    verdict-shaped JSON object with one that reads only what sits between two
+    markers. Searching meant choosing, and choosing could pick wrong — worst case a
+    fabricated verdict in the adversarial seat. Every test double that returned a
+    bare JSON verdict was updated to wrap it, using the crate's `VERDICT_OPEN` /
+    `VERDICT_CLOSE` constants so a future marker change breaks the build instead of
+    silently degrading the fixture.
+- **`CDLA-Permissive-2.0` added to the license allowlist** for `webpki-root-certs`,
+  the Mozilla root bundle pulled in by `rustls-platform-verifier`. It is a data
+  licence, permissive, with no copyleft. This gate had been failing since the
+  reqwest 0.13 upgrade in 0.10.2; the failure predates this release.
+
+### Notes
+- No runtime behaviour of magi-rs itself changed: the TUI, the headless subcommands,
+  the vault and the tool sandbox are untouched. 673 tests pass unchanged.
+- `reqwest` needed no work: magi-rs and magi-core 3.1.0 are both on 0.13.
+
 ## [0.10.4] - 2026-07-30
 
 Release-engineering only — **no changes** to the `magi-rs` runtime, CLI or library
