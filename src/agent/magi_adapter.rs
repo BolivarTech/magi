@@ -8,7 +8,7 @@
 use crate::agent::messages::{Content, Message};
 use crate::agent::provider::Provider;
 use async_trait::async_trait;
-use magi_core::error::ProviderError;
+use magi_core::error::{ExternalErrorKind, ProviderError};
 use magi_core::provider::{CompletionConfig, LlmProvider};
 use std::sync::Arc;
 
@@ -86,9 +86,7 @@ impl LlmProvider for MagiCoreProviderAdapter {
             .inner
             .send_messages(&messages, &[], None)
             .await
-            .map_err(|e| ProviderError::Network {
-                message: e.to_string(),
-            })?;
+            .map_err(|e| ProviderError::external(e.to_string(), ExternalErrorKind::Network))?;
         let text = reply
             .content
             .iter()
@@ -188,7 +186,11 @@ mod tests {
             .complete("s", "u", &CompletionConfig::default())
             .await
         {
-            Err(ProviderError::Network { message }) => assert!(message.contains("401")),
+            Err(ProviderError::External {
+                message,
+                kind: ExternalErrorKind::Network,
+                ..
+            }) => assert!(message.contains("401")),
             other => panic!("expected Network error preserving the message, got {other:?}"),
         }
     }

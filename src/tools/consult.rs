@@ -217,10 +217,11 @@ impl Tool for ConsultTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use magi_core::error::ProviderError;
+    use magi_core::error::{ExternalErrorKind, ProviderError};
     use magi_core::provider::{CompletionConfig, LlmProvider};
     use magi_core::schema::AgentName;
     use magi_core::test_support::RoutingMockProvider;
+    use magi_core::verdict_markers::{VERDICT_CLOSE, VERDICT_OPEN};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
 
@@ -273,9 +274,21 @@ mod tests {
         )
     }
 
+    /// Respuesta canónica de un mage, en el formato que magi-core 3.x exige.
+    ///
+    /// Desde 3.0.0 el veredicto se lee **solo** entre [`VERDICT_OPEN`] y
+    /// [`VERDICT_CLOSE`], cada marcador solo en su línea. Un JSON pelado —el
+    /// formato que servía en 2.x— ya no se parsea y el mage cuenta como fallido.
+    /// Se usan las constantes del crate en vez de literales para que un cambio
+    /// de marcador rompa la compilación en vez de degradar el fixture en silencio.
     fn agent_json(agent: &str) -> String {
-        format!(
+        let verdict = format!(
             r#"{{"agent":"{agent}","verdict":"approve","confidence":0.9,"summary":"s","reasoning":"r","findings":[],"recommendation":"rec"}}"#
+        );
+        format!(
+            "{VERDICT_OPEN}
+{verdict}
+{VERDICT_CLOSE}"
         )
     }
 
@@ -470,21 +483,24 @@ mod tests {
         let p = RoutingMockProvider::new()
             .with_agent_responses(
                 AgentName::Melchior,
-                vec![Err(ProviderError::Network {
-                    message: "down".into(),
-                })],
+                vec![Err(ProviderError::external(
+                    "down",
+                    ExternalErrorKind::Network,
+                ))],
             )
             .with_agent_responses(
                 AgentName::Balthasar,
-                vec![Err(ProviderError::Network {
-                    message: "down".into(),
-                })],
+                vec![Err(ProviderError::external(
+                    "down",
+                    ExternalErrorKind::Network,
+                ))],
             )
             .with_agent_responses(
                 AgentName::Caspar,
-                vec![Err(ProviderError::Network {
-                    message: "down".into(),
-                })],
+                vec![Err(ProviderError::external(
+                    "down",
+                    ExternalErrorKind::Network,
+                ))],
             );
         let tool = ConsultTool::new(Arc::new(Magi::new(Arc::new(p))), false);
         assert!(matches!(

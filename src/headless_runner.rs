@@ -803,6 +803,7 @@ mod tests {
 
     use magi_core::schema::AgentName;
     use magi_core::test_support::RoutingMockProvider;
+    use magi_core::verdict_markers::{VERDICT_CLOSE, VERDICT_OPEN};
 
     use magi_rs::headless::policy::Tier;
     use magi_rs::headless::types::{AppliedCaps, SystemPolicy};
@@ -815,9 +816,16 @@ mod tests {
     /// `RoutingMockProvider` (no network) — deterministic, mirrors the double used
     /// in `consult.rs` so a direct/forced consult yields a non-degraded report.
     fn canned_magi() -> Arc<Magi> {
+        // magi-core 3.x lee el veredicto SOLO entre marcadores; un JSON pelado
+        // (formato válido en 2.x) ya no se parsea y el mage cuenta como fallido.
         fn agent_json(agent: &str) -> String {
-            format!(
+            let verdict = format!(
                 r#"{{"agent":"{agent}","verdict":"approve","confidence":0.9,"summary":"s","reasoning":"r","findings":[],"recommendation":"rec"}}"#
+            );
+            format!(
+                "{VERDICT_OPEN}
+{verdict}
+{VERDICT_CLOSE}"
             )
         }
         let provider = RoutingMockProvider::new()
@@ -850,7 +858,12 @@ mod tests {
                 _config: &CompletionConfig,
             ) -> Result<String, ProviderError> {
                 tokio::time::sleep(self.delay).await;
-                Ok(r#"{"agent":"melchior","verdict":"approve","confidence":0.9,"summary":"s","reasoning":"r","findings":[],"recommendation":"rec"}"#.to_string())
+                Ok(format!(
+                    "{VERDICT_OPEN}
+{}
+{VERDICT_CLOSE}",
+                    r#"{"agent":"melchior","verdict":"approve","confidence":0.9,"summary":"s","reasoning":"r","findings":[],"recommendation":"rec"}"#
+                ))
             }
             fn name(&self) -> &str {
                 "slow"
@@ -904,7 +917,12 @@ mod tests {
             ) -> Result<String, ProviderError> {
                 let _spy = DropFlag(self.dropped.clone());
                 tokio::time::sleep(self.delay).await;
-                Ok(r#"{"agent":"melchior","verdict":"approve","confidence":0.9,"summary":"s","reasoning":"r","findings":[],"recommendation":"rec"}"#.to_string())
+                Ok(format!(
+                    "{VERDICT_OPEN}
+{}
+{VERDICT_CLOSE}",
+                    r#"{"agent":"melchior","verdict":"approve","confidence":0.9,"summary":"s","reasoning":"r","findings":[],"recommendation":"rec"}"#
+                ))
             }
             fn name(&self) -> &str {
                 "slow-droppy"

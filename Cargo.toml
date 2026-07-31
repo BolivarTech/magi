@@ -49,7 +49,7 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 uuid = { version = "1.8", features = ["v4"] }
 
 # MAGI ecosystem
-magi-core = "1.1.1"
+magi-core = "3.1.0"
 instant-distance = { version = "0.6", optional = true }
 
 # Vault MS2 — REQ-V42 layer 1: mlock/VirtualLock via a safe crate (no own unsafe).
@@ -76,7 +76,7 @@ dunce = "1.0.5"
 
 [dev-dependencies]
 # RoutingMockProvider for consult tests (no extra runtime deps; reqwest NOT pulled)
-magi-core = { version = "1.1.1", features = ["test-utils"] }
+magi-core = { version = "3.1.0", features = ["test-utils"] }
 # Mocking for tests
 mockall = "0.12"
 mockito = "1.4"
