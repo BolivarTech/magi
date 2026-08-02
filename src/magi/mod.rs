@@ -21,6 +21,7 @@
     )
 )]
 
+pub mod endpoint;
 pub mod mode;
 pub mod report_anchors;
 

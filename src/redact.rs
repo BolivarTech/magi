@@ -66,43 +66,75 @@ const SCHEME_SEPARATOR: &str = "://";
 /// ```
 #[must_use]
 pub fn redact_url(raw: &str) -> String {
-    // NO volver a `&raw[a..b]`: el bloque de atributos de este módulo incluye
-    // `deny(clippy::string_slice, clippy::indexing_slicing)`, y `str::get` devuelve `Option`
-    // en vez de panicar en una frontera de carácter — que es exactamente la garantía que se
-    // quiere en una función que procesa entrada no confiable.
-    //
-    // Cada `else` cae a redacción TOTAL y no a devolver el original: una URL cuya estructura
-    // no se pudo recorrer es donde un secreto puede estar en un lugar inesperado.
+    match locate_userinfo(raw) {
+        UserinfoLocation::Unparseable => FULLY_REDACTED.to_string(),
+        UserinfoLocation::Absent => raw.to_string(),
+        UserinfoLocation::Found { start, end } => {
+            let (Some(prefix), Some(tail)) = (raw.get(..start), raw.get(end..)) else {
+                return FULLY_REDACTED.to_string();
+            };
+            let mut out = String::with_capacity(raw.len());
+            out.push_str(prefix);
+            out.push_str(FULLY_REDACTED);
+            out.push_str(tail);
+            out
+        }
+    }
+}
+
+/// Dónde cae el `userinfo` de una URL, si es que hay uno.
+///
+/// Se expone porque **dos** módulos necesitan la misma regla de autoridad: este redacta lo que
+/// encuentra y `magi::endpoint` rechaza lo que encuentra si no son los placeholders. Escribir
+/// el recorrido dos veces es cómo se desincronizan (B3), y acá desincronizarse significa que
+/// uno de los dos deja de ver una credencial.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UserinfoLocation {
+    /// La URL no se pudo recorrer. Quien la reciba debe **fallar hacia esconder**: es donde un
+    /// secreto puede estar en un lugar inesperado.
+    Unparseable,
+    /// La autoridad no tiene `@`, así que no hay `userinfo` y no hay nada que ocultar.
+    Absent,
+    /// Rango `[start, end)` del `userinfo`, **sin** incluir el `@` que lo cierra.
+    Found {
+        /// Primer byte del `userinfo`, justo después de `://`.
+        start: usize,
+        /// Byte del `@` que cierra el `userinfo`.
+        end: usize,
+    },
+}
+
+/// Localiza el `userinfo` aplicando la regla de autoridad de RFC 3986.
+///
+/// La regla completa está documentada en [`redact_url`], que es su primer consumidor.
+///
+/// No usa `&raw[a..b]`: el bloque de atributos de este módulo incluye
+/// `deny(clippy::string_slice, clippy::indexing_slicing)`, y `str::get` devuelve `Option` en
+/// vez de panicar en una frontera de carácter — que es la garantía que se quiere en una
+/// función que recorre entrada no confiable.
+#[must_use]
+pub fn locate_userinfo(raw: &str) -> UserinfoLocation {
     let Some(scheme_end) = raw.find(SCHEME_SEPARATOR) else {
-        return FULLY_REDACTED.to_string();
+        return UserinfoLocation::Unparseable;
     };
     let authority_start = scheme_end + SCHEME_SEPARATOR.len();
     let Some(rest) = raw.get(authority_start..) else {
-        return FULLY_REDACTED.to_string();
+        return UserinfoLocation::Unparseable;
     };
     // La autoridad termina en el primer `/`, `?` o `#`; sin ninguno, es todo el resto.
     let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
-    let (Some(authority), Some(tail), Some(prefix)) = (
-        rest.get(..authority_end),
-        rest.get(authority_end..),
-        raw.get(..authority_start),
-    ) else {
-        return FULLY_REDACTED.to_string();
+    let Some(authority) = rest.get(..authority_end) else {
+        return UserinfoLocation::Unparseable;
     };
-
+    // ÚLTIMO `@` de la autoridad: `user:p@ss@host` es una contraseña con `@`, legal en RFC
+    // 3986. Sin `@` no hay userinfo — un `@` en el path no es credencial.
     let Some(at) = authority.rfind('@') else {
-        return raw.to_string();
+        return UserinfoLocation::Absent;
     };
-    let Some(host) = authority.get(at..) else {
-        return FULLY_REDACTED.to_string();
-    };
-
-    let mut out = String::with_capacity(raw.len());
-    out.push_str(prefix);
-    out.push_str(FULLY_REDACTED);
-    out.push_str(host);
-    out.push_str(tail);
-    out
+    UserinfoLocation::Found {
+        start: authority_start,
+        end: authority_start + at,
+    }
 }
 
 /// Texto de error ya redactado. **Su único constructor es [`redact_foreign_error`].**
