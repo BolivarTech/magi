@@ -848,6 +848,50 @@ mod tests {
         assert_eq!(resolve_provider(&MagiConfig::default(), None), "openai");
     }
 
+    /// Fix round 1 (coordinator, 2026-08-02): `resolve_provider` is still the LEGACY
+    /// resolver `main.rs` compares against with `provider_kind == "openai"` (eight call
+    /// sites) — no task in this plan migrates that chain onto `ProviderKind`. A raw
+    /// `"ollama"`/`"openai-compat"` from the new REQ-A01b vocabulary reaching those
+    /// comparisons unmapped silently routes a freshly-`magi init`'d workspace to the
+    /// Anthropic/static branch instead of Ollama — the exact regression this test
+    /// reproduces. `resolve_provider` normalizes onto the legacy label so the two
+    /// vocabularies stay compatible without touching the eight comparison sites.
+    #[test]
+    fn resolve_provider_normalizes_the_new_vocabulary_onto_the_legacy_backend_label() {
+        let ollama = MagiConfig {
+            provider: Some("ollama".into()),
+            ..Default::default()
+        };
+        assert_eq!(resolve_provider(&ollama, None), "openai");
+
+        let openai_compat = MagiConfig {
+            provider: Some("openai-compat".into()),
+            ..Default::default()
+        };
+        assert_eq!(resolve_provider(&openai_compat, None), "openai");
+
+        let anthropic = MagiConfig {
+            provider: Some("anthropic".into()),
+            ..Default::default()
+        };
+        assert_eq!(resolve_provider(&anthropic, None), "anthropic");
+
+        // The env-var path normalizes too: `MAGI_PROVIDER=ollama` must behave the same
+        // as the TOML key, not bypass the shim.
+        assert_eq!(
+            resolve_provider(&MagiConfig::default(), Some("ollama")),
+            "openai"
+        );
+        assert_eq!(
+            resolve_provider(&MagiConfig::default(), Some("openai-compat")),
+            "openai"
+        );
+        assert_eq!(
+            resolve_provider(&MagiConfig::default(), Some("anthropic")),
+            "anthropic"
+        );
+    }
+
     #[test]
     fn test_resolve_openai_base_url_precedence() {
         use crate::defaults::DEFAULT_OPENAI_BASE_URL;

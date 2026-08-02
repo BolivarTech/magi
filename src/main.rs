@@ -3614,21 +3614,13 @@ mod tests {
         // provider `resolve()` already used — no behavior change for the
         // common case.
         //
-        // **Task 1.1 changes what "the config default" IS for a fresh workspace.**
-        // `init_default_workspace()` runs `workspace::init`, which scaffolds
-        // `.magi/magi.toml` via `render_default_magi_toml()` — and that generator now
-        // writes `provider = "ollama"` (the new REQ-A01b vocabulary; the file no
-        // longer parses with the old `"openai"`, see `RENDERED_DEFAULT_PROVIDER`'s doc
-        // comment). `resolve_provider`/this file's `provider_kind == "openai"`
-        // branching is the LEGACY chain Task 1.1 deliberately does not touch — it
-        // still only recognizes the literal `"openai"` — so a freshly-scaffolded
-        // workspace's declared `"ollama"` no longer matches it, and the peek falls to
-        // the Anthropic/static branch instead of the Ollama-first one. This is the
-        // same class of temporary, intermediate-state hole as `MagiConfig::load`'s
-        // (see its doc comment): Task 1.4 migrates this resolution chain onto
-        // `MagiConfig::effective_provider`/`ProviderKind`, which closes it. Until
-        // then, this test asserts the CURRENT (temporarily degraded) reality rather
-        // than papering over it with a workspace built by hand.
+        // `init_default_workspace()` scaffolds `.magi/magi.toml` via
+        // `render_default_magi_toml()`, which declares `provider = "ollama"` (the new
+        // REQ-A01b vocabulary — the file no longer parses with the old `"openai"`).
+        // `resolve_provider` normalizes that onto the legacy `"openai"` backend label
+        // this file's `provider_kind == "openai"` branching still compares against
+        // (`// TASK 4.1:` shim in `src/config.rs`), so a freshly-scaffolded workspace
+        // routes exactly as it did before Task 1.1: Ollama-first, no behavior change.
         with_var("MAGI_PROVIDER", None, || {
             with_var("ANTHROPIC_MODEL", None, || {
                 with_var("OPENAI_MODEL", None, || {
@@ -3645,8 +3637,8 @@ mod tests {
                         .block_on(prepare_headless(&h, None, &cwd, None, None))
                         .expect("prepare_headless must succeed");
 
-                    assert_eq!(ctx.resolved.provider, "ollama");
-                    assert_eq!(ctx.resolved.model, crate::defaults::DEFAULT_ANTHROPIC_MODEL);
+                    assert_eq!(ctx.resolved.provider, "openai");
+                    assert_eq!(ctx.resolved.model, crate::defaults::DEFAULT_OPENAI_MODEL);
                 });
             });
         });
