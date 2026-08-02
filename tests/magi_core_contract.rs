@@ -34,7 +34,7 @@
 //!
 //! Un error de compilación en este archivo **no se arregla acomodando el test**. Se busca el
 //! nombre real en el crate, se corrigen **todas** las apariciones en el plan, y la diferencia
-//! se anota en `docs/MS2-DECISIONS.md` con fecha. Si el símbolo no existe en ninguna forma
+//! se anota en `dev-docs/MS2-DECISIONS.md` con fecha. Si el símbolo no existe en ninguna forma
 //! —como le pasó a `MagiReport::window_rejected`— eso **no se inventa**: se registra como
 //! capacidad ausente y el requerimiento que dependía de ella se replantea con lo que sí hay.
 
