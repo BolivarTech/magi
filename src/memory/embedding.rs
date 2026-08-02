@@ -440,6 +440,40 @@ mod tests {
         );
     }
 
+    /// C1 defense in depth (review round 2): a blank `Some("")` — not just
+    /// `None` — falls back to the Ollama default. `.unwrap_or(DEFAULT)` alone
+    /// (the code before this fix) only catches `None`; `Some("")` sailed
+    /// through unchanged and reached `format!("{}/embeddings", self.base_url)`
+    /// as `"/embeddings"`.
+    #[test]
+    fn effective_base_url_or_default_treats_blank_and_whitespace_as_absent() {
+        for blank in ["", "   "] {
+            let c = EmbeddingConfig {
+                base_url: Some(blank.into()),
+                ..EmbeddingConfig::default()
+            };
+            assert_eq!(
+                effective_base_url_or_default(&c),
+                crate::defaults::DEFAULT_OPENAI_BASE_URL,
+                "blank {blank:?} must fall back to the default"
+            );
+        }
+        let absent = EmbeddingConfig::default();
+        assert_eq!(
+            effective_base_url_or_default(&absent),
+            crate::defaults::DEFAULT_OPENAI_BASE_URL
+        );
+        let declared = EmbeddingConfig {
+            base_url: Some("http://custom:1234/v1/".into()),
+            ..EmbeddingConfig::default()
+        };
+        assert_eq!(
+            effective_base_url_or_default(&declared),
+            "http://custom:1234/v1",
+            "a real value is trimmed of its trailing slash, same as before"
+        );
+    }
+
     fn cfg(base: &str) -> EmbeddingConfig {
         EmbeddingConfig {
             provider: "openai".into(),

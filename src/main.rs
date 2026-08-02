@@ -3644,6 +3644,143 @@ mod tests {
         });
     }
 
+    /// I2 (review round 2): the shim only normalized `default_provider` (the
+    /// `env > TOML > default` winner) — `h.provider` (the CLI `--provider` flag)
+    /// reached `effective_provider`/`resolved.provider` unnormalized. `magi query
+    /// --provider ollama` must still route to the same backend as before Task
+    /// 1.1, not silently build an Anthropic provider because `"ollama" !=
+    /// "openai"`.
+    #[test]
+    fn test_prepare_headless_cli_provider_override_normalizes_the_new_vocabulary() {
+        with_var("MAGI_PROVIDER", None, || {
+            with_var("ANTHROPIC_MODEL", None, || {
+                with_var("OPENAI_MODEL", None, || {
+                    let (_tmp, cwd) = init_default_workspace();
+                    let input = write_envelope(&cwd, "env.json", r#"{"prompt":"hi"}"#);
+
+                    let mut h = base_hargs();
+                    h.input = Some(input);
+                    h.workdir = Some(cwd.clone());
+                    h.no_memory = true;
+                    h.provider = Some("ollama".to_string());
+
+                    let rt = tokio::runtime::Runtime::new().unwrap();
+                    let ctx = rt
+                        .block_on(prepare_headless(&h, None, &cwd, None, None))
+                        .expect("prepare_headless must succeed");
+
+                    assert_eq!(ctx.resolved.provider, "openai");
+                    assert_eq!(ctx.provider_kind, "openai");
+                });
+            });
+        });
+    }
+
+    /// I2: same gap, via the envelope's `provider` field instead of the CLI flag.
+    #[test]
+    fn test_prepare_headless_envelope_provider_override_normalizes_the_new_vocabulary() {
+        with_var("MAGI_PROVIDER", None, || {
+            with_var("ANTHROPIC_MODEL", None, || {
+                with_var("OPENAI_MODEL", None, || {
+                    let (_tmp, cwd) = init_default_workspace();
+                    let input =
+                        write_envelope(&cwd, "env.json", r#"{"prompt":"hi","provider":"ollama"}"#);
+
+                    let mut h = base_hargs();
+                    h.input = Some(input);
+                    h.workdir = Some(cwd.clone());
+                    h.no_memory = true;
+
+                    let rt = tokio::runtime::Runtime::new().unwrap();
+                    let ctx = rt
+                        .block_on(prepare_headless(&h, None, &cwd, None, None))
+                        .expect("prepare_headless must succeed");
+
+                    assert_eq!(ctx.resolved.provider, "openai");
+                    assert_eq!(ctx.provider_kind, "openai");
+                });
+            });
+        });
+    }
+
+    // -------------------------------------------------------------------------
+    // Fix round 2 (coordinator review, 2026-08-02): C1/C2/C3 —
+    // `resolve_effective_embedding_endpoint` (the same four lines
+    // `attach_persistent_memory` used to inline).
+    // -------------------------------------------------------------------------
+
+    /// C1: `[embedding].base_url = ""` used to skip inheritance entirely — the
+    /// old code gated on `base_url.is_none()`, and `Some("")` is `Some`, so it
+    /// reached the embedder as an empty URL instead of inheriting the root.
+    /// `effective_embedding_base_url()`'s own blank-is-absent handling must
+    /// decide this unconditionally.
+    #[test]
+    fn resolve_effective_embedding_endpoint_treats_blank_as_absent_and_inherits_root() {
+        let cfg = MagiConfig::from_toml_str(
+            "base_url = \"http://lan:11434/v1\"\n[embedding]\nbase_url = \"\"\n",
+        )
+        .unwrap();
+        let resolved = resolve_effective_embedding_endpoint(&cfg, None).unwrap();
+        assert_eq!(resolved, "http://lan:11434/v1");
+    }
+
+    /// C2: a malformed template (a literal credential instead of the
+    /// `[user]:[password]` placeholders, REQ-A16c) must be a loud, propagated
+    /// error — never a silent fall-back to the Ollama default that leaves the
+    /// user believing their declared endpoint is in effect.
+    #[test]
+    fn resolve_effective_embedding_endpoint_propagates_a_malformed_template_error() {
+        let cfg =
+            MagiConfig::from_toml_str("[embedding]\nbase_url = \"https://user:hunter2@host/v1\"\n")
+                .unwrap();
+        let err = resolve_effective_embedding_endpoint(&cfg, None).unwrap_err();
+        assert!(!err.contains("hunter2"), "leaked the credential: {err}");
+    }
+
+    /// C3 (positive): a template with real placeholders resolves to the ACTUAL
+    /// credentialed endpoint — never the literal `[user]:[password]` text baked
+    /// into an HTTP client.
+    #[test]
+    fn resolve_effective_embedding_endpoint_resolves_placeholders_against_the_vault() {
+        let ss = vault_fixture();
+        {
+            let mut guard = ss.lock().unwrap();
+            guard.set("EMBEDDING_BASE_URL_USER", "alice").unwrap();
+            guard.set("EMBEDDING_BASE_URL_PASSWORD", "s3cr3t").unwrap();
+        }
+        let cfg = MagiConfig::from_toml_str(
+            "[embedding]\nbase_url = \"https://[user]:[password]@host/v1\"\n",
+        )
+        .unwrap();
+        let resolved = resolve_effective_embedding_endpoint(&cfg, Some(&ss)).unwrap();
+        assert_eq!(resolved, "https://alice:s3cr3t@host/v1");
+    }
+
+    /// C3 (negative): with no vault handle in scope, a template that NEEDS one
+    /// fails loudly — it must never bake the unresolved `[user]:[password]`
+    /// placeholder text into the returned endpoint.
+    #[test]
+    fn resolve_effective_embedding_endpoint_fails_loudly_without_a_vault_for_placeholders() {
+        let cfg = MagiConfig::from_toml_str(
+            "[embedding]\nbase_url = \"https://[user]:[password]@host/v1\"\n",
+        )
+        .unwrap();
+        let err = resolve_effective_embedding_endpoint(&cfg, None).unwrap_err();
+        assert!(
+            !err.contains("[user]") && !err.contains("[password]"),
+            "leaked the unresolved template: {err}"
+        );
+    }
+
+    /// Happy path / regression guard: nothing declared anywhere resolves to the
+    /// built-in Ollama default, same as before this fix.
+    #[test]
+    fn resolve_effective_embedding_endpoint_uses_the_default_when_nothing_declared() {
+        let cfg = MagiConfig::default();
+        let resolved = resolve_effective_embedding_endpoint(&cfg, None).unwrap();
+        assert_eq!(resolved, crate::defaults::DEFAULT_OPENAI_BASE_URL);
+    }
+
     #[test]
     #[serial_test::serial]
     fn test_headless_query_static_provider_returns_response_exit_0() {

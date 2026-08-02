@@ -1420,4 +1420,140 @@ mod tests {
         };
         assert_eq!(declared.effective_tool_result_cap(), above_min);
     }
+    // Fix round 2 (coordinator review, 2026-08-02): I3/I4/I5/m8 — B13 coverage
+    // this task's own new functions shipped without.
+    // -------------------------------------------------------------------------
+
+    /// I3: both range boundaries of `agent_timeout_secs` (§4.9) are accepted; one
+    /// step outside either end is rejected. `validate_agent_timeout` shipped with
+    /// zero tests and an inclusive-both-ends range with nothing pinning the edge.
+    #[test]
+    fn agent_timeout_secs_accepts_both_boundaries_and_rejects_one_step_outside() {
+        for ok in [AGENT_TIMEOUT_MIN_SECS, AGENT_TIMEOUT_MAX_SECS] {
+            let toml = format!("[magi]\nagent_timeout_secs = {ok}\n");
+            assert!(
+                MagiConfig::from_toml_str(&toml).is_ok(),
+                "{ok}s is inside [{AGENT_TIMEOUT_MIN_SECS}, {AGENT_TIMEOUT_MAX_SECS}] and must be accepted"
+            );
+        }
+        for bad in [AGENT_TIMEOUT_MIN_SECS - 1, AGENT_TIMEOUT_MAX_SECS + 1] {
+            let toml = format!("[magi]\nagent_timeout_secs = {bad}\n");
+            assert!(
+                MagiConfig::from_toml_str(&toml).is_err(),
+                "{bad}s is one step outside the range and must be rejected"
+            );
+        }
+    }
+
+    /// I3: the output-cap floor (`min_viable_output_cap()`) itself is accepted;
+    /// one byte below it is rejected. Same "zero tests on a boundary" gap as
+    /// `validate_agent_timeout`.
+    #[test]
+    fn tool_result_cap_bytes_accepts_the_minimum_viable_floor_and_rejects_one_byte_below() {
+        let min = magi_rs::magi::min_viable_output_cap();
+        let ok_toml = format!("tool_result_cap_bytes = {min}\n");
+        assert!(
+            MagiConfig::from_toml_str(&ok_toml).is_ok(),
+            "the floor itself must be accepted"
+        );
+        let bad_toml = format!("tool_result_cap_bytes = {}\n", min - 1);
+        assert!(
+            MagiConfig::from_toml_str(&bad_toml).is_err(),
+            "one byte below the floor must be rejected"
+        );
+    }
+
+    /// I4: `safe_parse_error` keeps line/column (SC-A21g requires a syntax error
+    /// to name a position) but never the offending value — only the source
+    /// EXCERPT needed suppressing to fix the `api_key` leak (see
+    /// `safe_parse_error`'s own doc), not the position.
+    #[test]
+    fn safe_parse_error_keeps_the_position_but_drops_the_offending_value() {
+        // Leading blank line: line 2 (not 1) pins that this is a real computed
+        // position, not a hardcoded "line 1, column 1".
+        let toml = "\napi_key = \"sk-secreto\"\n";
+        let err = MagiConfig::from_toml_str(toml).unwrap_err();
+        let msg = err.to_string();
+        assert!(!msg.contains("sk-secreto"), "leaked the secret: {msg}");
+        assert!(
+            msg.contains("line") && msg.contains("column"),
+            "lost the position: {msg}"
+        );
+        assert!(msg.contains("line 2"), "wrong line: {msg}");
+    }
+
+    /// I5: `effective_provider` is documented "infalible por precondición" — that
+    /// precondition is `validate_vocabulary` having already run. `MagiConfig`'s
+    /// fields are `pub` and it derives `Default`, so nothing at the type level
+    /// stops a caller from skipping `from_toml_str`/`load()` and constructing an
+    /// invalid config directly; the `debug_assert!` is what turns that misuse
+    /// into a loud debug-build panic instead of a silent `Ollama` fallback.
+    #[test]
+    #[should_panic(expected = "validado")]
+    fn effective_provider_panics_in_debug_builds_when_validate_vocabulary_was_skipped() {
+        let cfg = MagiConfig {
+            provider: Some("banana".into()),
+            ..Default::default()
+        };
+        let _ = cfg.effective_provider();
+    }
+
+    /// I5: same precondition, same gap, for `effective_default_mode`.
+    #[test]
+    #[should_panic(expected = "validado")]
+    fn effective_default_mode_panics_in_debug_builds_when_validate_vocabulary_was_skipped() {
+        let cfg = MagiConfig {
+            magi: MagiSectionConfig {
+                default_mode: Some("banana".into()),
+                ..MagiSectionConfig::default()
+            },
+            ..Default::default()
+        };
+        let _ = cfg.effective_default_mode();
+    }
+
+    /// m8: `[magi].base_url = ""` is blank, not a declared override — it must
+    /// inherit the root, not be treated as "the trio declared its own endpoint".
+    #[test]
+    fn magi_base_url_blank_is_treated_as_absent() {
+        let toml = "base_url = \"http://lan:11434/v1\"\n[magi]\nbase_url = \"\"\n";
+        let cfg = MagiConfig::from_toml_str(toml).unwrap();
+        assert_eq!(
+            cfg.effective_magi_base_url().unwrap().as_str(),
+            "http://lan:11434/v1",
+            "blank must inherit the root, not stay blank"
+        );
+        assert!(
+            !cfg.magi_endpoint_diverges(),
+            "a blank override does not count as declaring one (REQ-A12)"
+        );
+    }
+
+    /// m8: a whitespace-only `default_mode` is blank, not a value — same
+    /// blank-is-absent rule as every other vocabulary key.
+    #[test]
+    fn default_mode_whitespace_only_is_treated_as_absent() {
+        let cfg = MagiConfig::from_toml_str("[magi]\ndefault_mode = \"   \"\n").unwrap();
+        assert_eq!(cfg.effective_default_mode(), None);
+    }
+
+    /// m8: `[embedding].base_url`'s OVERRIDE winning over the root was untested —
+    /// the existing coverage only proved inheritance, never that a declared
+    /// embedding-specific endpoint takes precedence over it.
+    #[test]
+    fn embedding_base_url_override_wins_over_root_inheritance() {
+        let toml = "base_url = \"http://lan:11434/v1\"\n\
+                     [embedding]\n\
+                     base_url = \"http://embedding-only:11434/v1\"\n";
+        let cfg = MagiConfig::from_toml_str(toml).unwrap();
+        assert_eq!(
+            cfg.effective_embedding_base_url().unwrap().as_str(),
+            "http://embedding-only:11434/v1"
+        );
+        // The root and [magi] are unaffected by the embedding-only override.
+        assert_eq!(
+            cfg.effective_base_url().unwrap().as_str(),
+            "http://lan:11434/v1"
+        );
+    }
 }
