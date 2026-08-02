@@ -658,10 +658,43 @@ impl MagiConfig {
     }
 }
 
+// TASK 4.1: temporary shim over the legacy `provider_kind == "openai"` string chain
+// (eight comparison sites in `main.rs`). No task in this plan migrates that chain onto
+// `ProviderKind`/`MagiConfig::effective_provider` — the coordinator added that
+// obligation to Task 4.1 on 2026-08-02, which rewrites `main.rs`. This function, and
+// `legacy_backend_label` below, must be deleted once that migration lands; until then
+// they are what keeps the REQ-A01b vocabulary (`ollama`/`openai-compat`/`anthropic`)
+// from silently breaking every `provider_kind == "openai"` comparison the moment a
+// `magi.toml` (or a freshly `magi init`-scaffolded one) declares `"ollama"` instead of
+// the legacy `"openai"`.
+/// Normalizes a REQ-A01b vocabulary value onto the legacy backend label the untouched
+/// `main.rs` string-comparison chain still checks against.
+///
+/// `"ollama"` and `"openai-compat"` both collapse to `"openai"` (main.rs's own
+/// `[openai]`-transport branch, which serves both — see `ProviderKind`'s own doc: the
+/// two providers "comparten el protocolo de completions y se distinguen solo por
+/// capacidad"). `"anthropic"` passes through unchanged. Anything else (including the
+/// legacy `"openai"` itself, or an env var nobody bothered to update) passes through
+/// unchanged too — this is a targeted map for the three new values, not a validator;
+/// `MagiConfig::from_toml_str`'s `validate_vocabulary` is what rejects a genuinely
+/// unrecognized `provider`/`[magi].kind`.
+fn legacy_backend_label(value: &str) -> String {
+    match value {
+        "ollama" | "openai-compat" => "openai".to_string(),
+        other => other.to_string(),
+    }
+}
+
 /// env `MAGI_PROVIDER` > TOML `provider` > `DEFAULT_PROVIDER` (RF-1).
 ///
 /// The no-config default is **Ollama-first** (`"openai"`); Anthropic is opt-in
 /// via `provider="anthropic"` in `magi.toml` or `MAGI_PROVIDER=anthropic`.
+///
+/// **Normalizes onto the legacy backend label** (see [`legacy_backend_label`], `// TASK
+/// 4.1:`) after resolving the `env > TOML > default` precedence, so a `provider =
+/// "ollama"`/`"openai-compat"` — the REQ-A01b vocabulary — and `MAGI_PROVIDER=ollama`
+/// both behave exactly like the legacy `"openai"` did, matching the still-untouched
+/// `provider_kind == "openai"` branching in `main.rs`.
 ///
 /// # Arguments
 /// * `config` - Parsed `MagiConfig` from `magi.toml` (may be default if file absent/invalid).
@@ -670,10 +703,11 @@ impl MagiConfig {
 /// # Returns
 /// Resolved provider name: env overrides TOML; falls back to `DEFAULT_PROVIDER`.
 pub fn resolve_provider(config: &MagiConfig, env_provider: Option<&str>) -> String {
-    env_provider
+    let winner = env_provider
         .map(str::to_string)
         .or_else(|| config.provider.clone())
-        .unwrap_or_else(|| crate::defaults::DEFAULT_PROVIDER.into())
+        .unwrap_or_else(|| crate::defaults::DEFAULT_PROVIDER.into());
+    legacy_backend_label(&winner)
 }
 
 /// env `OPENAI_BASE_URL` > TOML root `base_url` > `DEFAULT_OPENAI_BASE_URL` (RF-2).
