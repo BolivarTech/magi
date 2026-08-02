@@ -39,6 +39,7 @@
 //! capacidad ausente y el requerimiento que dependía de ella se replantea con lo que sí hay.
 
 use std::collections::BTreeMap;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -328,5 +329,48 @@ async fn a_hanging_provider_consumes_one_timeout_window() {
         elapsed < ceiling * 2,
         "un cuelgue consumió {elapsed:?} con techo {ceiling:?}: magi-core empezó a reintentar \
          tras timeout, y el peor caso de REQ-A04 pasa de 2× a 4×",
+    );
+}
+
+/// Cuánto permanece «adentro» cada llamada del doble de solapamiento.
+///
+/// **Medio segundo y no los 150 ms del primer borrador.** El pico solo baja de 3 si un asiento
+/// llega a arrancar después de que otro ya salió, o sea si el scheduler se demora más que este
+/// valor en despachar tres tareas. Con 150 ms eso es improbable pero alcanzable bajo la carga
+/// Argon2 del resto de la suite —este test no está en el grupo `heavy`— y produciría
+/// exactamente el fallo intermitente que `.config/nextest.toml` documenta.
+///
+/// Medio segundo hace la ventana holgada sin debilitar la aserción, que es la dirección
+/// correcta del intercambio: se paga medio segundo una vez, no un guardián que a veces miente.
+const OVERLAP_DWELL: Duration = Duration::from_millis(500);
+
+/// SC-A04e: los tres mages se ejecutan **solapados**, no en serie.
+///
+/// Es lo que sostiene el «**NO** se multiplica por 3» de la fórmula del `--timeout` (REQ-A04):
+/// con despacho paralelo el peor caso de un consult es el del mage más lento, no la suma de
+/// los tres. Si magi-core pasara a despachar en serie, ese peor caso saltaría de 2× a 6× el
+/// techo y el `--timeout` derivado empezaría a cortar consults perfectamente sanos — **sin que
+/// una sola línea de magi-rs cambiara**, que es exactamente el fallo silencioso que este
+/// guardián convierte en una suite rota.
+///
+/// **El pico se afirma en {EXPECTED_SEATS}, no en `>= 2`.** Dos mages solapados y el tercero
+/// en serie ya rompe la fórmula —el peor caso pasa a 4×— y un `>= 2` lo daría por bueno.
+#[tokio::test]
+async fn the_three_mages_execute_concurrently() {
+    let (provider, peak) = support::OverlapCountingProvider::new(OVERLAP_DWELL);
+
+    let magi = MagiBuilder::new(provider)
+        .with_timeout(Duration::from_secs(5))
+        .build()
+        .expect("el builder acepta un solo provider compartido");
+
+    let _ = magi.analyze(&Mode::Analysis, DISPATCHABLE_CONTENT).await;
+
+    let observed = peak.load(Ordering::SeqCst);
+    assert_eq!(
+        observed, EXPECTED_SEATS,
+        "pico de concurrencia = {observed}, esperado {EXPECTED_SEATS}: magi-core dejó de \
+         despachar los tres asientos en paralelo. La fórmula del `--timeout` (REQ-A04) asume \
+         solapamiento total y ahora subestima el peor caso",
     );
 }
