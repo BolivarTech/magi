@@ -564,6 +564,27 @@ impl MagiConfig {
         )
     }
 
+    /// Resuelve el override de una sección (`[magi].base_url`/`[embedding].base_url`)
+    /// contra el mismo endpoint efectivo del sistema, o hereda si no hay override.
+    ///
+    /// Compartida por [`Self::effective_magi_base_url`] y
+    /// [`Self::effective_embedding_base_url`]: las dos aplican **exactamente** la misma
+    /// regla ("propio, vacío-es-ausente, si no herencia") y repetirla en cada una sería
+    /// la clase de duplicación que B3 prohíbe — desincronizarlas cambiaría la regla en
+    /// una sección sin que nadie lo note en la otra.
+    ///
+    /// # Errors
+    /// Ver [`Self::effective_base_url`].
+    fn override_or_inherit_base_url(
+        &self,
+        own: Option<&str>,
+    ) -> Result<EndpointTemplate, EndpointError> {
+        match own.map(str::trim).filter(|s| !s.is_empty()) {
+            Some(own) => EndpointTemplate::parse(own),
+            None => self.effective_base_url(), // herencia, ya validada
+        }
+    }
+
     /// Endpoint del trío: override de `[magi].base_url`, o herencia del sistema.
     ///
     /// # Errors
@@ -572,16 +593,7 @@ impl MagiConfig {
     // Covered by `base_url_inherits_from_root_and_sections_override_it`.
     #[allow(dead_code)]
     pub fn effective_magi_base_url(&self) -> Result<EndpointTemplate, EndpointError> {
-        match self
-            .magi
-            .base_url
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-        {
-            Some(own) => EndpointTemplate::parse(own),
-            None => self.effective_base_url(), // herencia, ya validada
-        }
+        self.override_or_inherit_base_url(self.magi.base_url.as_deref())
     }
 
     /// Endpoint del embedder: override de `[embedding].base_url`, o herencia del sistema
@@ -591,16 +603,7 @@ impl MagiConfig {
     /// # Errors
     /// Ver [`Self::effective_base_url`].
     pub fn effective_embedding_base_url(&self) -> Result<EndpointTemplate, EndpointError> {
-        match self
-            .embedding
-            .base_url
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-        {
-            Some(own) => EndpointTemplate::parse(own),
-            None => self.effective_base_url(), // herencia
-        }
+        self.override_or_inherit_base_url(self.embedding.base_url.as_deref())
     }
 
     /// Loads `<dir>/magi.toml`. Returns `(config, Option<warning>)`. Absent → defaults,
