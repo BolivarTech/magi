@@ -52,6 +52,7 @@ use magi_core::reporting::{ExtractionFailure, InputSize, MagiReport};
 use magi_core::rotation::ProviderProbe;
 use magi_core::schema::{AgentName, AgentOutput, Mode};
 use magi_core::verdict_markers::{VERDICT_CLOSE, VERDICT_OPEN};
+use magi_rs::magi::report_anchors::{CONTRACTUAL_ANCHORS, SECTION_ANCHORS};
 use magi_rs::magi::PROBE_TIMEOUT_SECS;
 
 /// Dobles compartidos de los tests de integración (Task 0.7). Se declara acá porque este es
@@ -374,6 +375,57 @@ async fn the_three_mages_execute_concurrently() {
          despachar los tres asientos en paralelo. La fórmula del `--timeout` (REQ-A04) asume \
          solapamiento total y ahora subestima el peor caso",
     );
+}
+
+/// SPIKE de Task 0.6: qué expone `MagiReport::report` de forma localizable.
+///
+/// Decide el `TruncationLevel` máximo alcanzable, que Task 6.2 consume. Va en Fase 0 y no en
+/// Fase 6 a propósito: el recorte estructural depende de poder ubicar veredicto y hallazgos en
+/// un markdown que genera **otra crate**, y eso es una suposición. Descubrir que no se puede,
+/// con el milestone casi entero encima, dejaría el requerimiento sin salida.
+#[tokio::test]
+async fn report_shape_matches_what_the_truncation_design_assumes() {
+    let provider = Arc::new(support::AdheringTrioProvider);
+    let magi = MagiBuilder::new(provider)
+        .build()
+        .expect("el builder acepta un solo provider compartido");
+    let report = magi
+        .analyze(&Mode::CodeReview, DISPATCHABLE_CONTENT)
+        .await
+        .expect("los tres adhieren, así que hay reporte");
+
+    assert!(
+        !report.report.is_empty(),
+        "un reporte vacío invalidaría cualquier nivel de recorte",
+    );
+
+    // Las anclas se IMPORTAN de producción, no se redeclaran acá. Redeclararlas partiría la
+    // verdad en dos: el spike mediría una cosa y `truncate_report` (Task 6.2) leería otra, y
+    // el desacuerdo aparecería recién cuando un reporte saliera mal recortado.
+    let anchors = SECTION_ANCHORS.expect("el spike concluyó que `Structural` es alcanzable");
+    for anchor in [
+        anchors.verdict_start,
+        anchors.findings_start,
+        anchors.findings_end,
+    ] {
+        assert!(
+            report.report.contains(anchor),
+            "ancla de sección ausente: {anchor:?}. magi-core cambió el render y el nivel \
+             `Structural` de REQ-A11b dejó de ser alcanzable con estas anclas — que es \
+             justamente lo que este guardián existe para avisar antes que un usuario.\n\
+             Reporte observado:\n{}",
+            report.report,
+        );
+    }
+    for anchor in CONTRACTUAL_ANCHORS {
+        assert!(
+            report.report.contains(anchor),
+            "ancla contractual ausente: {anchor:?}. Estas son las que magi-core emite SIEMPRE, \
+             así que su ausencia baja el techo de recorte hasta `Bytes`.\n\
+             Reporte observado:\n{}",
+            report.report,
+        );
+    }
 }
 
 /// Tope defensivo de lo que el mock llega a escribir antes de rendirse.

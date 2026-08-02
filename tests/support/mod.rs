@@ -79,6 +79,93 @@ pub fn marked_verdict() -> String {
     format!("{VERDICT_OPEN}\n{}\n{VERDICT_CLOSE}", valid_verdict_json())
 }
 
+/// Los tres asientos, en minúscula, tal como magi-core los espera en el campo `agent`.
+const SEAT_NAMES: [&str; 3] = ["melchior", "balthasar", "caspar"];
+
+/// Un veredicto **con hallazgos**, emitido a nombre de `agent`.
+///
+/// Dos cosas que este helper existe para resolver, ambas descubiertas ejecutando:
+///
+/// 1. **Los hallazgos no pueden ir vacíos.** El de [`valid_verdict_json`] los trae así, y con
+///    la lista vacía el reporte puede no emitir la sección de hallazgos en absoluto — o sea
+///    que un spike sobre él no podría decidir si esa sección es localizable, que es justo lo
+///    que Task 0.6 tiene que decidir.
+/// 2. **El campo `agent` DEBE coincidir con el asiento que preguntó.** magi-core valida esa
+///    correspondencia y descarta el veredicto que no la cumple: un doble que responde
+///    `"melchior"` a los tres deja `succeeded: 1` y el orquestador aborta con
+///    `InsufficientAgents`. El guardián de reintentos no lo notaba porque solo cuenta
+///    llamadas, así que la restricción quedó invisible hasta que un test miró el reporte.
+#[must_use]
+pub fn verdict_json_with_findings(agent: &str) -> String {
+    format!(
+        r#"{{"agent":"{agent}","verdict":"conditional","confidence":0.85,
+        "summary":"resumen de una linea","reasoning":"razonamiento del mage",
+        "findings":[
+          {{"severity":"critical","title":"Primer hallazgo","detail":"detalle del primero",
+           "file":"src/x.rs","line":42,"category":"logic-error"}},
+          {{"severity":"warning","title":"Segundo hallazgo","detail":"detalle del segundo",
+           "file":"src/y.rs","line":7,"category":"performance"}}
+        ],
+        "recommendation":"lo que recomienda"}}"#
+    )
+}
+
+/// Responde un veredicto válido **a nombre del asiento que preguntó**, con hallazgos.
+///
+/// Los tres asientos comparten la instancia y el doble los discrimina por su system prompt,
+/// que es donde aparece el nombre del mage (REQ-A02). Así el reporte sale con los tres
+/// adhiriendo, que es la condición para que el render exponga todas sus secciones.
+pub struct AdheringTrioProvider;
+
+impl AdheringTrioProvider {
+    /// Deduce el asiento a partir de la **primera línea** de su system prompt.
+    ///
+    /// **Solo el encabezado, nunca el prompt entero, y esto costó un ciclo descubrirlo:**
+    /// los prompts se mencionan entre sí —el de Caspar dice *"Leave happy-path correctness
+    /// analysis to Melchior"*— así que buscar el nombre en todo el texto le asigna a Caspar
+    /// el veredicto de Melchior, magi-core lo rechaza por `agent identity mismatch` y el
+    /// asiento se pierde. La primera línea es `# <Nombre> — <Rol>`, que sí discrimina.
+    ///
+    /// Cae en `melchior` si no reconoce ninguno: un doble no debe fallar en silencio, pero
+    /// tampoco panicar dentro de una tarea del orquestador — el `InsufficientAgents`
+    /// resultante lo delata igual, y con mejor mensaje que un panic en un `spawn`.
+    fn seat_from_prompt(system_prompt: &str) -> &'static str {
+        let header = system_prompt
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .to_lowercase();
+        SEAT_NAMES
+            .into_iter()
+            .find(|seat| header.contains(seat))
+            .unwrap_or("melchior")
+    }
+}
+
+#[async_trait]
+impl LlmProvider for AdheringTrioProvider {
+    async fn complete(
+        &self,
+        system_prompt: &str,
+        _user_prompt: &str,
+        _config: &CompletionConfig,
+    ) -> Result<String, ProviderError> {
+        let seat = Self::seat_from_prompt(system_prompt);
+        Ok(format!(
+            "{VERDICT_OPEN}\n{}\n{VERDICT_CLOSE}",
+            verdict_json_with_findings(seat)
+        ))
+    }
+
+    fn name(&self) -> &str {
+        DOUBLE_PROVIDER_NAME
+    }
+
+    fn model(&self) -> &str {
+        DOUBLE_MODEL_NAME
+    }
+}
+
 /// Devuelve schema inválido en el primer intento de cada asiento y válido en el segundo.
 ///
 /// Sostiene el guardián de SC-A04b: un fallo de validación consume **dos** ventanas de

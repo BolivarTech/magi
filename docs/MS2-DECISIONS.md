@@ -194,3 +194,58 @@ haría que el notice saliera o no por accidente aritmético.
 
 **Tres incoherentes, y la tercera es nueva** — salió de este barrido, no de la spec. Se implementa
 junto con la primera en Task 1.4, que ya emite ese notice.
+
+## Nivel de recorte alcanzable — Task 0.6 (2026-08-02)
+
+**Resultado: `TruncationLevel::Structural`. Task 6.2 implementa los tres niveles.**
+
+El spike `report_shape_matches_what_the_truncation_design_assumes` corrió contra magi-core
+3.1.0 con los tres asientos adhiriendo. El reporte expone **encabezados markdown estables**, así
+que veredicto y hallazgos son localizables y el recorte estructural es implementable — no hace
+falta caer al ancla contractual ni al conteo de bytes.
+
+### Anclas elegidas, y por qué esas
+
+Verificado contra `reporting.rs:795-817` del propio crate, que es lo que decide cuáles son
+**incondicionales**:
+
+| Sección | ¿Siempre presente? |
+|---|---|
+| Caja de veredicto (`MAGI SYSTEM -- VERDICT`) | **sí** (`reporting.rs:633`) |
+| `## Key Findings` | solo si hay hallazgos (`:800`) |
+| `## Dissenting Opinion` | solo si hay disenso (`:805`) |
+| `## Conditions for Approval` | solo si hay condiciones (`:810`) |
+| `## Recommended Actions` | **sí**, y va última (`:815`) |
+
+De ahí:
+
+- `verdict_start = "MAGI SYSTEM -- VERDICT"` — el texto interior de la caja, no la línea de
+  `+===+`, que se repite cuatro veces y no distingue principio de fin.
+- `findings_start = "## Key Findings"` — **puede faltar**, y el consumidor debe distinguir «no
+  hubo hallazgos» de «no pude localizar»: son dos cosas y solo una es una degradación.
+- `findings_end = "## Recommended Actions"` — **no** `## Conditions for Approval`, que es
+  opcional. Anclar el fin en una sección opcional lo dejaría sin definir exactamente en los
+  reportes que no la traen.
+
+### Dónde viven
+
+`src/magi/report_anchors.rs`, **dueño único**. El guardián las **importa** en vez de
+redeclararlas: una copia del lado del test partiría la verdad en dos y el desacuerdo aparecería
+recién cuando un reporte saliera mal recortado.
+
+### Hallazgo lateral: magi-core valida la identidad del asiento
+
+El spike falló primero con `InsufficientAgents { succeeded: 1, required: 2 }`. Causa: el campo
+`agent` del veredicto **debe coincidir con el asiento que preguntó**; magi-core descarta el que
+no lo cumple con `agent identity mismatch`.
+
+Dos consecuencias que valen para todo doble futuro:
+
+1. Un doble compartido por los tres asientos tiene que responder **a nombre de cada uno**.
+2. Discriminar el asiento buscando su nombre en el system prompt **entero no sirve**: los
+   prompts se mencionan entre sí —el de Caspar dice *"Leave happy-path correctness analysis to
+   Melchior"*— así que Caspar recibía el veredicto de Melchior. El discriminante correcto es la
+   **primera línea**, que es `# <Nombre> — <Rol>`.
+
+Ninguno de los guardianes anteriores lo notó porque cuentan llamadas, no veredictos. La
+restricción quedó invisible hasta que un test miró el reporte.

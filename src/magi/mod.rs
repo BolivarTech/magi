@@ -21,6 +21,8 @@
     )
 )]
 
+pub mod report_anchors;
+
 use std::time::Duration;
 
 /// Extremos del rango admisible del techo por mage (§4.9 de la spec).
