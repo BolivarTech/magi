@@ -883,7 +883,11 @@ mod tests {
     /// immediately) from one that was merely **detached** (a bare dropped
     /// `JoinHandle` keeps the task running to completion, so `dropped` would stay
     /// `false` at assertion time).
-    fn slow_droppy_magi(delay: Duration, dropped: Arc<AtomicBool>) -> Arc<Magi> {
+    fn slow_droppy_magi(
+        delay: Duration,
+        entered: Arc<AtomicBool>,
+        dropped: Arc<AtomicBool>,
+    ) -> Arc<Magi> {
         use magi_core::error::ProviderError;
         use magi_core::provider::{CompletionConfig, LlmProvider};
 
@@ -903,6 +907,16 @@ mod tests {
         struct SlowDroppyLlm {
             /// How long each `complete` call blocks before returning.
             delay: Duration,
+            /// Flipped to `true` as soon as a `complete` call is entered.
+            ///
+            /// Exists so the test can wait on the **condition** "the spawned
+            /// analysis has actually started" instead of guessing a duration
+            /// that is long enough for it. Without this signal a caller can
+            /// only poll the outer future for an arbitrary while and hope;
+            /// under CPU contention that guess is what makes the test flaky,
+            /// because dropping before `complete` is entered means no
+            /// [`DropFlag`] was ever constructed and `dropped` can never flip.
+            entered: Arc<AtomicBool>,
             /// Flipped to `true` when an in-flight `complete` future is dropped.
             dropped: Arc<AtomicBool>,
         }
@@ -916,6 +930,9 @@ mod tests {
                 _config: &CompletionConfig,
             ) -> Result<String, ProviderError> {
                 let _spy = DropFlag(self.dropped.clone());
+                // AFTER the guard exists, so observing `entered` guarantees a
+                // `DropFlag` is live and an abort is therefore observable.
+                self.entered.store(true, Ordering::SeqCst);
                 tokio::time::sleep(self.delay).await;
                 Ok(format!(
                     "{VERDICT_OPEN}
@@ -932,7 +949,11 @@ mod tests {
             }
         }
 
-        Arc::new(Magi::new(Arc::new(SlowDroppyLlm { delay, dropped })))
+        Arc::new(Magi::new(Arc::new(SlowDroppyLlm {
+            delay,
+            entered,
+            dropped,
+        })))
     }
 
     /// A [`Resolved`] stub with a **forced** consult (`consult = Some(true)`).
@@ -1714,12 +1735,25 @@ mod tests {
     /// dropped promptly, well before its (huge) delay could ever elapse.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_run_consult_future_drop_aborts_spawned_analysis() {
+        /// Ceiling for each of the two waits below.
+        ///
+        /// Generous on purpose: it is a **failure** deadline, not a measurement.
+        /// The discriminating property is not "under 30s" — it is "does not
+        /// take the analysis's full hour", and 30s settles that decisively
+        /// while leaving room for an arbitrarily loaded CI box. A regression to
+        /// detach-instead-of-abort keeps the flag `false` for 3600s, so it
+        /// still fails, just after a bounded wait.
+        const DEADLINE: Duration = Duration::from_secs(30);
+        /// Gap between polls. Small enough to be prompt, large enough not to
+        /// busy-spin one of the two worker threads.
+        const POLL: Duration = Duration::from_millis(5);
+
+        let entered = Arc::new(AtomicBool::new(false));
         let dropped = Arc::new(AtomicBool::new(false));
         // An hour: if the spawned task were merely detached rather than aborted,
         // `dropped` would still be `false` at every point this test can observe.
-        let magi = slow_droppy_magi(Duration::from_secs(3_600), dropped.clone());
+        let magi = slow_droppy_magi(Duration::from_secs(3_600), entered.clone(), dropped.clone());
 
-        let started = Instant::now();
         {
             let fut = run_consult(
                 resolved_stub(),
@@ -1728,26 +1762,40 @@ mod tests {
                 None,
                 None,
             );
-            // Poll the future briefly (long enough for the `tokio::spawn` +
-            // first `complete` call to start, nowhere near the 3600s delay)
-            // then drop it without ever reaching a terminal state.
-            let _ = tokio::time::timeout(Duration::from_millis(20), fut).await;
-        }
-        // Give the runtime a tick to actually run the abort and propagate the
-        // drop down through the task's future tree.
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        let elapsed = started.elapsed();
+            tokio::pin!(fut);
+            // Drive the future until the spawned analysis has REALLY entered
+            // `complete` — waiting on the condition, never on a duration.
+            //
+            // The previous version polled for a flat 20ms and assumed that was
+            // enough for `tokio::spawn` to get there. Under CPU contention it
+            // is not, and then the future gets dropped before any `DropFlag`
+            // exists — so `dropped` can never flip and the test fails for a
+            // reason that has nothing to do with the behaviour under test.
+            let start_by = Instant::now() + DEADLINE;
+            while !entered.load(Ordering::SeqCst) {
+                assert!(
+                    Instant::now() < start_by,
+                    "the spawned MAGI analysis never reached `complete` within \
+                     {DEADLINE:?}; nothing about abort-vs-detach can be \
+                     concluded from this run"
+                );
+                let _ = tokio::time::timeout(POLL, &mut fut).await;
+            }
+        } // `fut` dropped here, WITHOUT ever reaching a terminal state.
 
-        assert!(
-            dropped.load(Ordering::SeqCst),
-            "dropping the run_consult future must abort the spawned MAGI \
-             analysis, not merely detach it"
-        );
-        assert!(
-            elapsed < Duration::from_secs(2),
-            "the abort must happen promptly, not after the analysis's 3600s \
-             delay (took {elapsed:?})"
-        );
+        // Wait for the abort to propagate down the task's future tree. Again a
+        // condition, not a fixed tick: a starved runtime may need more than one
+        // scheduling quantum, and that is not a defect.
+        let abort_by = Instant::now() + DEADLINE;
+        while !dropped.load(Ordering::SeqCst) {
+            assert!(
+                Instant::now() < abort_by,
+                "dropping the run_consult future must abort the spawned MAGI \
+                 analysis, not merely detach it: {DEADLINE:?} elapsed and the \
+                 in-flight `complete` was still alive"
+            );
+            tokio::time::sleep(POLL).await;
+        }
     }
 
     /// `query --consult` in `--auto` invokes consult **exactly once**, IN-LOOP —

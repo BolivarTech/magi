@@ -1,19 +1,62 @@
 # nextest configuration.
 #
-# Phase 0 pinned Argon2 to OWASP 2025 cost (m=65536 KiB / 64 MiB, t=3, p=4),
-# which makes every crypto/DB test CPU- and memory-heavy. On this 12-core box
-# nextest would otherwise launch up to 12 of them at once and saturate the
-# machine; the DB-concurrency tests (internal writer threads + SQLite's 5s
-# busy_timeout) then fail intermittently under load — a flaky gate, not a real
-# regression (all such tests pass 100% in isolation).
+# ## Por qué existe este archivo
 #
-# Capping the crypto + database test group to 2 concurrent leaves headroom so
-# the DB-concurrency tests are never CPU-starved, keeping the §0.1 gate
-# deterministic. Lower `max-threads` to 1 if any residual flake appears.
+# El vault deriva su KEK con Argon2id a coste OWASP 2025 (m=65536 KiB / 64 MiB,
+# t=3, **p=4**). Ese `p=4` es lo que manda: CADA test que abre un vault o una DB
+# cifrada ocupa **cuatro lanes**, no una. Esta caja tiene 6 cores físicos (12
+# lógicos), así que dos tests pesados en paralelo ya saturan los 6.
+#
+# Sin cap, nextest lanza hasta 12 a la vez => 48 lanes sobre 6 cores. Los tests
+# sensibles al reloj de pared (abortos de tarea, timeouts de tokio, el
+# busy_timeout de 5 s de SQLite) se quedan sin CPU dentro de su presupuesto y
+# fallan de forma intermitente: un gate flaky, no una regresión real — todos
+# pasan al 100 % en aislamiento.
+#
+# ## Por qué el filtro es POR SUBSISTEMA y no por lista de módulos hoja
+#
+# La versión anterior filtraba `test(/utils::crypto::tests::/)`, y ese módulo
+# **se borró en v0.8.0** (Vault MS1) cuando la cripto se movió al crate
+# `cryptovault`. Un filtro de nextest que no matchea nada **no da error**, así
+# que el cap siguió declarado y dejó de aplicarse, en silencio. La carga Argon2
+# había migrado a `vault::envelope`, `vault::master`, `vault::store` y
+# `agent::tests`, ninguno de los cuales estaba nombrado.
+#
+# El síntoma fue exactamente el que el cap existía para prevenir, y reapareció
+# en MS2: `headless_runner::tests::test_run_consult_future_drop_aborts_spawned_analysis`
+# falló bajo carga mientras dos `vault::envelope::tests::test_rekey_*` corrían
+# 77 s cada uno sin throttle.
+#
+# Por eso el filtro ahora nombra **subsistemas enteros** en vez de módulos hoja:
+# renombrar o partir un submódulo dentro de `vault::` ya no lo saca del grupo.
+# Incluye tests baratos (`vault::cli::tests` corre en 35 ms) y ese coste es
+# deliberado: un cap que se cae solo cuando alguien refactoriza es peor que uno
+# levemente ancho.
+#
+# Los cuatro subsistemas cubiertos, con su motivo:
+#   - `vault::`            — deriva KEK (envelope, master, store, diagnose)
+#   - `system::database::` — bootstrap del envelope al abrir la DB
+#   - `agent::tests::`     — abren una DB cifrada real (persistencia, memoria)
+#   - `memory::store::`    — comparte la conexión y la DEK de esa DB
+#
+# ## El coste, medido — no estimado
+#
+# Ampliar el grupo **desacelera** la suite: 275 s -> 419 s (+52 %) en esta caja.
+# La predicción al escribir esto era la contraria —que quitar la sobresuscripción
+# compensaría— y fue errónea: serializar el grupo pesado cuesta más de lo que
+# ahorra en contención. Se paga igual, porque un gate que falla una vez cada
+# tantas corridas obliga a re-correr y a dudar de la evidencia, y eso cuesta más
+# que dos minutos y medio.
+#
+# Si el coste llega a doler, la palanca es `max-threads = 3` (12 lanes sobre 12
+# procesadores lógicos, sin sobresuscripción), NO recortar el filtro: recortarlo
+# reintroduce exactamente la pudrición que documenta la sección anterior.
+#
+# Si aparece flake residual, bajar `max-threads` a 1 antes de tocar el filtro.
 
 [test-groups]
 heavy = { max-threads = 2 }
 
 [[profile.default.overrides]]
-filter = 'test(/utils::crypto::tests::/) | test(/system::database::tests::/)'
+filter = 'test(/vault::/) | test(/system::database::/) | test(/agent::tests::/) | test(/memory::store::/)'
 test-group = "heavy"
