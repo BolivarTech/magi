@@ -1,0 +1,231 @@
+// Author: Julian Bolivar
+// Version: 1.0.0
+// Date: 2026-08-02
+
+//! Guardián de la superficie de API de `magi-core 3.1.0` (Task 0.0, Fase 0 de MS2).
+//!
+//! # Qué prueba, y qué NO
+//!
+//! **No prueba comportamiento.** Prueba que cada símbolo de magi-core que MS2 consume
+//! **existe y tipa con la forma que el plan asume**. Si magi-core lo renombra, le cambia la
+//! aridad, el orden de argumentos o el tipo de un campo, esto **no compila** — que es
+//! exactamente el resultado buscado, y en Fase 0 en vez de en Fase 4.
+//!
+//! # Por qué existe
+//!
+//! El plan TDD de MS2 asumió una superficie de API que nadie había verificado, y la primera
+//! lectura del crate encontró **cinco** suposiciones falsas de un saque: `with_client` no
+//! existe en ningún provider, `OllamaProvider` fija 300 s de timeout de cliente sin override
+//! (lo que lo saca del camino de las completions — D-A07), `RetryConfig` es
+//! `#[non_exhaustive]`, `ClaudeProvider` toma `api_key` **primero**, y `Mode` no tiene ningún
+//! método de parseo. Cinco fallos en un solo pase es la medida de cuánta superficie hay.
+//!
+//! **La lectura no reemplaza a este archivo, lo justifica**: una lectura envejece en cuanto
+//! magi-core publica una versión; el compilador no.
+//!
+//! # Relación con `examples/ms2_contracts.rs`
+//!
+//! Son dos archivos con dos vidas. El *example* cruza los contratos **internos** de magi-rs
+//! entre sí y **se borra** al cerrar la Fase 6, cuando la implementación real lo reemplaza.
+//! Este test cubre la frontera con el **crate externo** y **sobrevive al milestone**: es lo
+//! que hace que un bump a magi-core 3.2.0 rompa la suite en vez de derivar en silencio.
+//!
+//! # Cómo se lee un fallo acá
+//!
+//! Un error de compilación en este archivo **no se arregla acomodando el test**. Se busca el
+//! nombre real en el crate, se corrigen **todas** las apariciones en el plan, y la diferencia
+//! se anota en `docs/MS2-DECISIONS.md` con fecha. Si el símbolo no existe en ninguna forma
+//! —como le pasó a `MagiReport::window_rejected`— eso **no se inventa**: se registra como
+//! capacidad ausente y el requerimiento que dependía de ella se replantea con lo que sí hay.
+
+use std::collections::BTreeMap;
+use std::sync::Arc;
+use std::time::Duration;
+
+use magi_core::orchestrator::{MagiBuilder, MagiConfig as CoreMagiConfig};
+use magi_core::provider::{LlmProvider, RetryConfig, RetryProvider};
+use magi_core::providers::claude::ClaudeProvider;
+use magi_core::providers::ollama::OllamaProvider;
+use magi_core::providers::openai_compat::OpenAiCompatibleProvider;
+use magi_core::reporting::{ExtractionFailure, InputSize, MagiReport};
+use magi_core::rotation::ProviderProbe;
+use magi_core::schema::{AgentName, AgentOutput, Mode};
+use magi_core::verdict_markers::{VERDICT_CLOSE, VERDICT_OPEN};
+
+/// Endpoint sintáctico para construir providers. **Nunca se contacta**: este archivo no hace
+/// I/O, solo type-checking, y un provider se construye sin abrir ninguna conexión.
+const SYNTHETIC_BASE_URL: &str = "http://127.0.0.1:11434/v1";
+
+/// Modelo sintético, del mismo carácter que [`SYNTHETIC_BASE_URL`].
+const SYNTHETIC_MODEL: &str = "guardian-model";
+
+/// Forma de [`MagiReport`] que la Fase 6 consume, **con tipos anotados**.
+///
+/// Las anotaciones no son ceremonia: un `let _ = &r.campo` prueba que el campo existe y nada
+/// más, y toda la telemetría de la Fase 6 **itera** estas estructuras. Un cambio de forma
+/// —`Vec` a `BTreeMap`, `T` a `Option<T>`— compilaría un binding suelto y rompería la fase
+/// entera. Existencia y forma son dos verificaciones distintas.
+///
+/// Nunca se llama: su cuerpo se type-checkea igual, que es todo lo que hace falta.
+/// `MagiReport` es `#[non_exhaustive]`, así que fuera del crate no hay forma de construir uno.
+fn report_shape(r: &MagiReport) {
+    let _: &str = &r.report;
+    let _: bool = r.degraded;
+    // Por ASIENTO y con un `Vec` adentro. Sin anotar el tipo, "nombrar el modelo que no
+    // adhirió" (REQ-A09) parecía imposible desde una clave `AgentName`.
+    let _: &BTreeMap<AgentName, Vec<ExtractionFailure>> = &r.extraction_failures;
+    // **`Option`**, no un valor. REQ-A11 exige el campo SIEMPRE presente en el JSON de
+    // magi-rs, así que el `None` se **mapea**, no se omite: es una traducción nuestra, no un
+    // reflejo del reporte.
+    let _: &Option<InputSize> = &r.input_size;
+    // El sustituto verificado de un `window_rejected` que NO existe en `MagiReport` (vive en
+    // `rotation.rs`, que es MS3). REQ-A11d y SC-A11g se replantearon sobre esto.
+    let _: &BTreeMap<AgentName, String> = &r.failed_agents;
+    // Sostiene SC-A11g: su vacío ES "cero veredictos válidos", que no es un consenso
+    // degradado sino la ausencia de consenso.
+    let _: &Vec<AgentOutput> = &r.agents;
+    // MS3. Acá solo se comprueba que el campo existe; su forma la fija ese milestone.
+    let _ = &r.rotations;
+}
+
+/// Campos de [`ExtractionFailure`] que REQ-A09 exige surface-ar.
+///
+/// `model` es el que no puede faltar: con rotación (MS3) la pregunta accionable es *qué
+/// modelo* no adhiere, no *qué asiento*.
+fn extraction_failure_shape(f: &ExtractionFailure) {
+    let _: &str = &f.model;
+    let _: u8 = f.attempt;
+    let _ = &f.cause;
+}
+
+/// Campos de [`InputSize`], que van los tres al JSON de REQ-A11 sin omitir ninguno.
+fn input_size_shape(s: &InputSize) {
+    let _: usize = s.estimated_tokens;
+    let _: usize = s.warn_threshold;
+    let _: bool = s.exceeded;
+}
+
+/// Métodos de [`MagiBuilder`] que el cableado del trío encadena (Task 4.1).
+///
+/// Encadenados a propósito: cada uno debe devolver `Self` por valor. Si alguno pasara a
+/// `&mut Self`, la cadena deja de compilar acá en vez de en la Fase 4.
+fn builder_surface(b: MagiBuilder, p: Arc<dyn LlmProvider>) -> MagiBuilder {
+    b.with_timeout(Duration::from_secs(90))
+        .with_provider(AgentName::Melchior, p)
+        .with_input_warn_tokens(96_000)
+        .with_retry_disabled()
+}
+
+/// Que un tipo concreto satisfaga [`LlmProvider`], no solo que el trait exista.
+fn assert_is_provider<P: LlmProvider + 'static>(_p: &P) {}
+
+/// Ídem para [`ProviderProbe`], que es un trait **separado** — la composición de REQ-A24
+/// depende de que se pueda implementar uno sin el otro.
+fn assert_is_probe<P: ProviderProbe + 'static>(_p: &P) {}
+
+/// El `match` sobre [`Mode`] es exhaustivo **sin brazo `_`**.
+///
+/// magi-core documenta el enum como deliberadamente cerrado: *"no `#[non_exhaustive]`: a new
+/// mode should break exhaustive matches so consumers revisit their logic"*. Tres funciones de
+/// MS2 lo asumen (`GateThresholds::for_mode`, `CliMode::into_mode`, `normalize_label`), así
+/// que fijarlo acá es aceptar la invitación: si 3.2.0 agrega un modo, **esto** es lo primero
+/// que rompe, en Fase 0, en vez de un `for_mode` devolviendo el umbral equivocado en Fase 3.
+fn mode_is_closed(m: Mode) -> &'static str {
+    match m {
+        Mode::CodeReview => "code-review",
+        Mode::Design => "design",
+        Mode::Analysis => "analysis",
+    }
+}
+
+#[test]
+fn magi_core_api_surface_is_what_the_plan_assumes() {
+    // --- (1) Los tres asientos y los tres modos ------------------------------------------
+    let _seats = [AgentName::Melchior, AgentName::Balthasar, AgentName::Caspar];
+    assert_eq!(mode_is_closed(Mode::CodeReview), "code-review");
+    assert_eq!(mode_is_closed(Mode::Design), "design");
+    assert_eq!(mode_is_closed(Mode::Analysis), "analysis");
+
+    // --- (2) Propiedades de TIPO de las que cuelga el diseño -----------------------------
+    fn assert_clone<T: Clone>() {}
+    fn assert_copy_eq<T: Copy + PartialEq>() {}
+    // Los tres asientos comparten una config de retry y cada `RetryProvider::with_config` la
+    // consume **por valor**: sin `Clone` hay que reconstruirla por asiento y la escala
+    // derivada de REQ-A04 deja de ser una sola cosa.
+    assert_clone::<RetryConfig>();
+    // `GateVerdict::Veto { mode: *mode }` y media docena de `assert_eq!` sobre modos.
+    assert_copy_eq::<Mode>();
+    // La costura de inyección del probe (Task 5.1) es `Arc<dyn ProviderProbe>`. Si el trait
+    // dejara de ser dyn-compatible, la fábrica entera se replantea — mejor saberlo acá.
+    let _: Option<Arc<dyn ProviderProbe>> = None;
+
+    // --- (3) `RetryConfig` es `#[non_exhaustive]` ---------------------------------------
+    // Fuera del crate NO compila ni el literal `RetryConfig { .. }` ni el update funcional
+    // `..default()`. El patrón obligado es `default()` mutable, que es el que magi-core
+    // documenta.
+    let mut retry = RetryConfig::default();
+    retry.operation_budget = Duration::from_secs(54);
+    let _: Duration = retry.operation_budget;
+
+    // --- (4) `Mode` NO tiene método de parseo -------------------------------------------
+    // Lo que existe es `Display` + serde en kebab-case, y por eso MS2 necesita su propio
+    // `ModeExt::parse_config_value` (Task 1.0). Ese trait es de magi-rs y nace en la Fase 1:
+    // nombrarlo acá volvería no-compilable justo al spike cuyo trabajo es impedir eso.
+    let _: String = Mode::CodeReview.to_string();
+    let parsed: Mode = serde_json::from_str(r#""code-review""#).expect("kebab-case");
+    assert_eq!(parsed, Mode::CodeReview);
+
+    // --- (5) Constructores, con su ORDEN DE ARGUMENTOS real ------------------------------
+    // `api_key` PRIMERO en Claude. Los dos parámetros son `impl Into<String>`, así que
+    // invertirlos **compila** y falla en runtime con un 401 — el tipo de defecto que ninguna
+    // revisión encuentra.
+    let _ = ClaudeProvider::new("api-key", SYNTHETIC_MODEL);
+    let _ = ClaudeProvider::with_timeout("api-key", SYNTHETIC_MODEL, Duration::from_secs(27));
+
+    // `Option<String>` en el TERCER parámetro; `None` es el caso Ollama (keyless).
+    let openai = OpenAiCompatibleProvider::new(SYNTHETIC_BASE_URL, SYNTHETIC_MODEL, None)
+        .expect("base_url sintáctica válida");
+    let _ = OpenAiCompatibleProvider::with_timeout(
+        SYNTHETIC_BASE_URL,
+        SYNTHETIC_MODEL,
+        None,
+        Duration::from_secs(27),
+    );
+    assert_is_provider(&openai);
+
+    // `OllamaProvider` sigue existiendo, pero SOLO como sonda: su único constructor fija un
+    // cliente de 300 s sin override, lo que hace imposible la relación de REQ-A04
+    // (`operation_budget + client_timeout <= techo`). Devuelve `Result` porque normaliza la
+    // URL — y esa normalización es la que REQ-A01b obliga a anunciar en un notice.
+    let ollama = OllamaProvider::new(SYNTHETIC_BASE_URL, SYNTHETIC_MODEL)
+        .expect("base_url sintáctica válida");
+    assert_is_provider(&ollama);
+    assert_is_probe(&ollama);
+
+    // --- (6) `RetryProvider` envuelve un `Arc<dyn LlmProvider>` --------------------------
+    // REQ-A03: `MagiBuilder::build()` NO envuelve nada, así que sin esto el trío pierde el
+    // reintento que hoy hereda del adapter — una regresión de resiliencia.
+    let inner: Arc<dyn LlmProvider> = Arc::new(
+        OpenAiCompatibleProvider::new(SYNTHETIC_BASE_URL, SYNTHETIC_MODEL, None)
+            .expect("base_url sintáctica válida"),
+    );
+    let _ = RetryProvider::with_config(inner, RetryConfig::default());
+
+    // --- (7) Config del orquestador: los dos campos que la escala derivada lee ------------
+    let _: Duration = CoreMagiConfig::default().timeout;
+    let _: usize = CoreMagiConfig::default().max_input_len;
+
+    // --- (8) Marcadores de veredicto (contrato 3.0.0) ------------------------------------
+    // Los dobles de test DEBEN emitir el veredicto entre estos marcadores: magi-core borró su
+    // parser de búsqueda, así que un JSON pelado ya no parsea por más válido que sea.
+    assert!(!VERDICT_OPEN.is_empty());
+    assert!(!VERDICT_CLOSE.is_empty());
+
+    // --- (9) Formas que no se pueden instanciar fuera del crate --------------------------
+    // Referenciar el item lo marca como usado; su cuerpo ya se type-checkeó. No hace falta
+    // llamarlo, y no hay `#[allow(dead_code)]` que justificar.
+    let _ = report_shape;
+    let _ = extraction_failure_shape;
+    let _ = input_size_shape;
+    let _ = builder_surface;
+}

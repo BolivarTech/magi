@@ -49,7 +49,20 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 uuid = { version = "1.8", features = ["v4"] }
 
 # MAGI ecosystem
-magi-core = "3.1.0"
+# Features EXPLICITAS: los providers estan detras de feature gates y el default no trae
+# ninguno, asi que sin esto el trio nativo de MS2 (REQ-A01b) no compila. Lo encontro
+# `cargo check --example ms2_contracts`, no una revision.
+#   ollama       -> arrastra openai-compat; solo se usa como SONDA (D-A07)
+#   openai-compat -> transporte de completions de `ollama` Y de `openai-compat`
+#   claude-api   -> ClaudeProvider para kind = anthropic
+# claude-cli NO se habilita: lanza el binario `claude` como subproceso, esquivando el
+# modelo de seguridad del tool `bash`, y rechaza con NestedSession bajo CLAUDECODE (spec §8).
+#
+# Version EXACTA (`=`), no caret. El rustdoc de `RetryConfig` anuncia que 3.2.0 cambia los
+# defaults de retry, que son justo los numeros de los que REQ-A04 deriva su escala: un
+# `cargo update` moveria el piso de una relacion que este milestone hace imposible de romper.
+# El bump a 3.2.0 es trabajo de MS3, con el spike de Task 0.0 corriendo primero.
+magi-core = { version = "=3.1.0", features = ["ollama", "openai-compat", "claude-api"] }
 instant-distance = { version = "0.6", optional = true }
 
 # Vault MS2 — REQ-V42 layer 1: mlock/VirtualLock via a safe crate (no own unsafe).
@@ -75,8 +88,10 @@ tokio-util = { version = "0.7", default-features = false }
 dunce = "1.0.5"
 
 [dev-dependencies]
-# RoutingMockProvider for consult tests (no extra runtime deps; reqwest NOT pulled)
-magi-core = { version = "3.1.0", features = ["test-utils"] }
+# RoutingMockProvider for consult tests. Repite las features de [dependencies] mas
+# `test-utils`: sin la lista completa el dev-dependency resolveria otra combinacion, y la
+# version va fijada con `=` por la misma razon que arriba (defaults de retry en 3.2.0).
+magi-core = { version = "=3.1.0", features = ["ollama", "openai-compat", "claude-api", "test-utils"] }
 # Mocking for tests
 mockall = "0.12"
 mockito = "1.4"
