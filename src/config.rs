@@ -8,6 +8,7 @@
 // Public API of this module is consumed by `main.rs` (Task 6 wiring) and by
 // tests; no items here should be flagged dead_code under any cfg.
 
+use magi_rs::magi::kind::ProviderKind;
 use serde::Deserialize;
 use std::path::Path;
 
@@ -586,5 +587,246 @@ mod tests {
     fn test_headless_section_absent_is_all_none() {
         let c = MagiConfig::from_toml_str("").unwrap();
         assert_eq!(c.headless, HeadlessConfig::default());
+    }
+    // -------------------------------------------------------------------------
+    // Task 1.1: base_url to root + unified provider vocabulary (REQ-A01b, A12, A21)
+    // -------------------------------------------------------------------------
+
+    use magi_core::schema::Mode;
+
+    #[test]
+    fn provider_kind_accepts_the_three_values_and_rejects_the_rest() {
+        assert_eq!(
+            ProviderKind::parse("ollama").unwrap(),
+            Some(ProviderKind::Ollama)
+        );
+        assert_eq!(
+            ProviderKind::parse("openai-compat").unwrap(),
+            Some(ProviderKind::OpenAiCompat)
+        );
+        assert_eq!(
+            ProviderKind::parse("anthropic").unwrap(),
+            Some(ProviderKind::Anthropic)
+        );
+        assert!(ProviderKind::parse("banana").is_err());
+        assert!(
+            ProviderKind::parse("openai").is_err(),
+            "el valor viejo ya no es válido"
+        );
+    }
+
+    /// REQ-A01b: un valor inválido NO se traga — ni siquiera pasando por los resolutores.
+    ///
+    /// Este test existe porque el test de `ProviderKind::parse` **no alcanza**: prueba la
+    /// unidad, y el fallback silencioso vive en el LLAMADOR. Un resolutor con
+    /// `.ok().flatten().unwrap_or(default)` deja pasar `"banana"` como `Ollama` mientras el
+    /// test de la unidad sigue verde.
+    ///
+    /// **Corrección de la ruling del coordinador (2026-08-02).** El plan original probaba
+    /// esto contra `MagiConfig::load(&path)`, pero `load` en Task 1.1 conserva su firma
+    /// externa `(dir: &Path) -> (Self, Option<String>)` (se vuelve falible recién en Task
+    /// 1.4, junto con el cableado de `main.rs`/`Workspace::config_path()` que esa tarea
+    /// posee). La propiedad que este test defiende — que un valor inválido no se convierte
+    /// en un fallback silencioso — se prueba contra `from_toml_str`, que es donde
+    /// `validate_vocabulary()` corre de verdad; `load()` la ejercita indirectamente porque
+    /// llama a `from_toml_str` sobre el contenido del archivo. Task 1.4 agrega la misma
+    /// aserción contra `load()` cuando esa función se vuelve falible.
+    #[test]
+    fn an_invalid_vocabulary_value_is_rejected_at_parse_not_swallowed_by_a_resolver() {
+        for (toml, what) in [
+            ("provider = \"banana\"\n", "provider de raíz"),
+            ("[magi]\nkind = \"banana\"\n", "[magi].kind"),
+            ("[magi]\ndefault_mode = \"banana\"\n", "[magi].default_mode"),
+        ] {
+            assert!(
+                MagiConfig::from_toml_str(toml).is_err(),
+                "{what}: un valor no reconocido debe ser ERROR, nunca un fallback silencioso"
+            );
+        }
+    }
+
+    /// SC-A12g / REQ-A12: regla general — vacío o en blanco es AUSENTE, nunca inválido.
+    #[test]
+    fn blank_string_keys_are_absent_not_invalid() {
+        assert_eq!(ProviderKind::parse("").unwrap(), None);
+        assert_eq!(ProviderKind::parse("   ").unwrap(), None);
+        let toml = "provider = \"\"\nbase_url = \"  \"\n";
+        let cfg = MagiConfig::from_toml_str(toml).expect("vacío no debe romper el parseo");
+        assert_eq!(
+            cfg.effective_provider(),
+            ProviderKind::Ollama,
+            "cae al default built-in"
+        );
+        // `effective_base_url()` devuelve `Result<EndpointTemplate, _>` desde REQ-A16c, así
+        // que el test compara el TEXTO de la plantilla.
+        assert_eq!(
+            cfg.effective_base_url().unwrap().as_str(),
+            crate::defaults::DEFAULT_OPENAI_BASE_URL
+        );
+    }
+
+    /// SC-A02b: `[magi].kind` HEREDA de la raíz cuando no se declara.
+    #[test]
+    fn magi_kind_inherits_from_root_provider_when_absent() {
+        let toml = "provider = \"ollama\"\n[magi]\n";
+        let cfg = MagiConfig::from_toml_str(toml).unwrap();
+        assert_eq!(cfg.effective_magi_kind(), ProviderKind::Ollama);
+
+        let toml = "provider = \"ollama\"\n[magi]\nkind = \"anthropic\"\n";
+        let cfg = MagiConfig::from_toml_str(toml).unwrap();
+        assert_eq!(cfg.effective_magi_kind(), ProviderKind::Anthropic);
+        assert_eq!(
+            cfg.effective_provider(),
+            ProviderKind::Ollama,
+            "el principal no cambia"
+        );
+    }
+
+    /// SC-A21c: herencia y override del endpoint.
+    #[test]
+    fn base_url_inherits_from_root_and_sections_override_it() {
+        let toml = "base_url = \"http://lan:11434/v1\"\n[magi]\n";
+        let cfg = MagiConfig::from_toml_str(toml).unwrap();
+        // Texto de la PLANTILLA: `effective_*_base_url()` devuelve `Result<EndpointTemplate,_>`
+        // desde REQ-A16c.
+        assert_eq!(
+            cfg.effective_magi_base_url().unwrap().as_str(),
+            "http://lan:11434/v1"
+        );
+        assert_eq!(
+            cfg.effective_embedding_base_url().unwrap().as_str(),
+            "http://lan:11434/v1"
+        );
+
+        let toml = "base_url = \"http://lan:11434/v1\"\n[magi]\nbase_url = \"http://otro/v1\"\n";
+        let cfg = MagiConfig::from_toml_str(toml).unwrap();
+        assert_eq!(
+            cfg.effective_magi_base_url().unwrap().as_str(),
+            "http://otro/v1"
+        );
+    }
+
+    /// El campo viejo ya no existe: su presencia es campo desconocido.
+    #[test]
+    fn openai_section_no_longer_accepts_base_url() {
+        let toml = "[openai]\nbase_url = \"http://x/v1\"\n";
+        assert!(MagiConfig::from_toml_str(toml).is_err());
+    }
+
+    /// REQ-A14: las API keys NUNCA viven en `magi.toml`, y `deny_unknown_fields` lo hace
+    /// **mecánico** en vez de una convención que alguien tiene que recordar.
+    #[test]
+    fn an_api_key_anywhere_in_the_toml_is_a_parse_error() {
+        for toml in [
+            "api_key = \"sk-secreto\"\n",
+            "[openai]\napi_key = \"sk-secreto\"\n",
+            "[anthropic]\napi_key = \"sk-secreto\"\n",
+            "[magi]\napi_key = \"sk-secreto\"\n",
+        ] {
+            let err = MagiConfig::from_toml_str(toml)
+                .expect_err("una api_key en el TOML debe ser ERROR, no aceptación silenciosa");
+            assert!(
+                !err.to_string().contains("sk-secreto"),
+                "y el error NO puede repetir el secreto que se está rechazando"
+            );
+        }
+    }
+
+    /// REQ-A15: `default_mode` se resuelve con la misma regla vacío=ausente.
+    ///
+    /// **Devuelve `Option<Mode>`, NO `Result`**: la validación vive en `validate_vocabulary`,
+    /// que corre en `load()`/`from_toml_str()`. Un resolutor que devuelve `Result` invita a
+    /// que el llamador escriba `.ok()` — y eso ya pasó dos veces en este plan.
+    #[test]
+    fn effective_default_mode_follows_the_same_blank_is_absent_rule() {
+        let cfg = MagiConfig::from_toml_str("[magi]\ndefault_mode = \"code-review\"\n").unwrap();
+        assert_eq!(cfg.effective_default_mode(), Some(Mode::CodeReview));
+
+        let cfg = MagiConfig::from_toml_str("[magi]\ndefault_mode = \"\"\n").unwrap();
+        assert_eq!(cfg.effective_default_mode(), None);
+
+        // El valor inválido no llega nunca a este resolutor: muere en el parseo.
+        assert!(MagiConfig::from_toml_str("[magi]\ndefault_mode = \"banana\"\n").is_err());
+    }
+
+    // -------------------------------------------------------------------------
+    // B13: cobertura de las funciones públicas restantes que Task 1.1 produce
+    // (`Interfaces > Produces` del brief), sin test explícito en el Step 1.
+    // -------------------------------------------------------------------------
+
+    /// `seats()` resuelve cada mage a su modelo declarado, o al fallback del backend.
+    #[test]
+    fn seats_resolves_each_mage_to_its_override_or_the_backend_fallback() {
+        let cfg = MagiSectionConfig {
+            melchior_model: Some("custom-melchior".into()),
+            ..MagiSectionConfig::default()
+        };
+        let seats = cfg.seats("backend-default");
+        assert_eq!(seats.len(), 3);
+        assert_eq!(
+            seats[0],
+            (AgentName::Melchior, "custom-melchior".to_string())
+        );
+        assert_eq!(
+            seats[1],
+            (AgentName::Balthasar, "backend-default".to_string())
+        );
+        assert_eq!(seats[2], (AgentName::Caspar, "backend-default".to_string()));
+    }
+
+    /// `fallback_model()` es el modelo del BACKEND, nunca el de un mage — elegir el de
+    /// Melchior lo volvería el default por accidente (ver su rustdoc / Task 4.1).
+    #[test]
+    fn fallback_model_is_the_backend_model_not_any_seats_override() {
+        let cfg = MagiSectionConfig {
+            melchior_model: Some("should-not-win".into()),
+            ..MagiSectionConfig::default()
+        };
+        assert_eq!(cfg.fallback_model("backend-default"), "backend-default");
+    }
+
+    /// `magi_endpoint_diverges()` es true si el trío declara `kind` o `base_url` propios,
+    /// y blanco cuenta como NO declarado (REQ-A12).
+    #[test]
+    fn magi_endpoint_diverges_when_the_trio_declares_its_own_kind_or_base_url() {
+        assert!(!MagiConfig::default().magi_endpoint_diverges());
+
+        let own_kind = MagiConfig::from_toml_str("[magi]\nkind = \"anthropic\"\n").unwrap();
+        assert!(own_kind.magi_endpoint_diverges());
+
+        let own_url =
+            MagiConfig::from_toml_str("[magi]\nbase_url = \"http://other/v1\"\n").unwrap();
+        assert!(own_url.magi_endpoint_diverges());
+
+        let blank = MagiConfig::from_toml_str("[magi]\nkind = \"\"\n").unwrap();
+        assert!(!blank.magi_endpoint_diverges());
+    }
+
+    /// `effective_max_query_bytes()`: declarado gana, ausente cae al built-in.
+    #[test]
+    fn effective_max_query_bytes_falls_back_to_the_built_in_when_absent() {
+        assert_eq!(
+            MagiConfig::default().effective_max_query_bytes(),
+            magi_rs::magi::MAX_QUERY_BYTES
+        );
+
+        let declared = MagiConfig::from_toml_str("[magi]\nmax_query_bytes = 999\n").unwrap();
+        assert_eq!(declared.effective_max_query_bytes(), 999);
+    }
+
+    /// `effective_tool_result_cap()`: declarado gana, ausente cae al built-in.
+    #[test]
+    fn effective_tool_result_cap_falls_back_to_the_built_in_when_absent() {
+        assert_eq!(
+            MagiConfig::default().effective_tool_result_cap(),
+            magi_rs::magi::TOOL_RESULT_CAP_BYTES
+        );
+
+        let above_min = magi_rs::magi::min_viable_output_cap() + 10;
+        let declared = MagiConfig {
+            tool_result_cap_bytes: Some(above_min),
+            ..Default::default()
+        };
+        assert_eq!(declared.effective_tool_result_cap(), above_min);
     }
 }
