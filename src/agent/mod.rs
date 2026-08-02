@@ -921,8 +921,15 @@ impl Agent {
         config: &AgentRunConfig,
         prompt: &str,
     ) -> Result<(String, String)> {
+        // SEQUENTIALITY REQUIRED: this counter — like `repeat_count` just below, and like
+        // the veto counter REQ-A20c adds in MS2 — is a flat local that assumes the
+        // `ToolUse` loop further down dispatches one at a time. Parallelising that loop
+        // breaks all of them at once, and silently: nothing in a `let mut x = 0` says
+        // "sequential". Pinned by `tool_dispatch_is_sequential_within_a_turn`, so the
+        // change breaks the suite instead of surfacing as miscounts under load.
         let mut tool_call_count = 0;
         let mut last_normalized_tool: Option<(String, String)> = None;
+        // SEQUENTIALITY REQUIRED — see the note on `tool_call_count` above.
         let mut repeat_count = 0;
         // REQ-H22: locks out any further `consult` request once the forced
         // pre-loop injection below has run (success, denial, or "not found").
@@ -3079,6 +3086,154 @@ mod tests {
             all_text.contains("use rust"),
             "turn 2's assembled context must contain the promoted preference 'use rust'; \
              got:\n{all_text}"
+        );
+    }
+
+    /// Rendezvous window for [`OverlapProbeTool`].
+    ///
+    /// Under the sequential dispatch this guards, nobody ever arrives, so this window is
+    /// spent in full on every run — that fixed half second is the price of the guarantee.
+    /// It is deliberately generous anyway: if it were too short, a *parallel* loop whose
+    /// second dispatch merely started late would leave the peak at 1 and the test would go
+    /// green with the property already broken. A guardian's false negative is worse than
+    /// its cost.
+    const OVERLAP_RENDEZVOUS: std::time::Duration = std::time::Duration::from_millis(500);
+
+    /// Records the peak number of `execute` calls that were ever in flight at once.
+    struct OverlapProbeTool {
+        /// Executions inside `execute` right now.
+        live: Arc<std::sync::atomic::AtomicUsize>,
+        /// High-water mark of `live`.
+        peak: Arc<std::sync::atomic::AtomicUsize>,
+        /// Total calls so far, which is what decides who waits.
+        ///
+        /// Separate from `live` on purpose: under sequential dispatch the second execution
+        /// also finds `live == 1`, so keying the wait off `live` makes BOTH of them sit
+        /// through the full window and doubles the test's fixed cost for nothing. Only the
+        /// first call needs to offer a window for someone to overlap it.
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+        /// Meeting point between the two executions. See the comment in `execute`.
+        second_arrived: Arc<tokio::sync::Notify>,
+    }
+
+    #[async_trait]
+    impl Tool for OverlapProbeTool {
+        fn name(&self) -> &str {
+            "overlap_probe"
+        }
+        fn description(&self) -> &str {
+            "records overlap between tool executions"
+        }
+        fn input_schema(&self) -> Value {
+            json!({"type": "object", "properties": {}})
+        }
+
+        async fn execute(&self, _args: Value, _cancel: &CancellationToken) -> ToolResult<Value> {
+            use std::sync::atomic::Ordering;
+
+            // SYNCHRONISATION, not a `sleep`. The first execution waits for a second one to
+            // release it. Under SEQUENTIAL dispatch nobody ever does, the timeout expires,
+            // and the peak stays at 1 — detected deterministically. Under PARALLEL dispatch
+            // the second arrives while the first is still inside, so the peak reaches 2.
+            //
+            // A bare `sleep` would invert the failure: if a parallel scheduler took longer
+            // than the window, the two executions would not overlap and the test would pass
+            // green with the loop already parallelised.
+            let ordinal = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+            let now = self.live.fetch_add(1, Ordering::SeqCst) + 1;
+            self.peak.fetch_max(now, Ordering::SeqCst);
+            if ordinal == 1 {
+                let _ =
+                    tokio::time::timeout(OVERLAP_RENDEZVOUS, self.second_arrived.notified()).await;
+            } else {
+                self.second_arrived.notify_waiters();
+            }
+            self.live.fetch_sub(1, Ordering::SeqCst);
+            Ok(json!({"ok": true}))
+        }
+    }
+
+    /// Emits TWO `ToolUse` blocks in one assistant turn, then a plain text turn.
+    struct TwoToolUseProvider {
+        /// Turns served so far; the first is the two-tool turn.
+        turn: Arc<std::sync::Mutex<u32>>,
+    }
+
+    #[async_trait]
+    impl Provider for TwoToolUseProvider {
+        async fn stream_messages(
+            &self,
+            _messages: &[Message],
+            _tools: &[Box<dyn Tool>],
+            _system: Option<&str>,
+        ) -> Result<BoxStream<'static, Result<ResponseChunk>>> {
+            let mut n = self.turn.lock().unwrap();
+            *n += 1;
+            let call = *n;
+            drop(n);
+
+            if call == 1 {
+                let msg = Message {
+                    role: Role::Assistant,
+                    content: vec![
+                        Content::ToolUse {
+                            id: "seq-a".to_string(),
+                            name: "overlap_probe".to_string(),
+                            input: json!({}),
+                        },
+                        Content::ToolUse {
+                            id: "seq-b".to_string(),
+                            name: "overlap_probe".to_string(),
+                            input: json!({}),
+                        },
+                    ],
+                };
+                Ok(Box::pin(stream::iter(vec![Ok(
+                    ResponseChunk::MessageDone(msg),
+                )])))
+            } else {
+                Ok(Box::pin(stream::iter(vec![
+                    Ok(ResponseChunk::TextDelta("done".to_string())),
+                    Ok(ResponseChunk::MessageDone(Message::assistant("done"))),
+                ])))
+            }
+        }
+    }
+
+    /// SC-A20l: two `ToolUse` blocks from the same turn execute ONE AFTER THE OTHER.
+    ///
+    /// `tool_call_count` and `repeat_count` are flat locals whose correctness rests on this
+    /// property, and MS2 adds a third one — the veto counter of REQ-A20c (Task 3.2).
+    /// Parallelising the loop breaks all of them at once, and it would break them silently:
+    /// nothing in their declarations says "sequential", which is why this test exists and
+    /// why each declaration carries a comment pointing here.
+    #[tokio::test]
+    async fn tool_dispatch_is_sequential_within_a_turn() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let live = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+
+        let provider = TwoToolUseProvider {
+            turn: Arc::new(std::sync::Mutex::new(0)),
+        };
+        let mut agent = Agent::new(Arc::new(provider));
+        agent.register_tool(Box::new(OverlapProbeTool {
+            live: Arc::clone(&live),
+            peak: Arc::clone(&peak),
+            calls: Arc::new(AtomicUsize::new(0)),
+            second_arrived: Arc::new(tokio::sync::Notify::new()),
+        }));
+
+        let (chunk_tx, _rx) = tokio::sync::mpsc::channel(64);
+        let _ = agent
+            .query_streaming("two tools", chunk_tx, AgentRunConfig::default())
+            .await;
+
+        assert_eq!(
+            peak.load(Ordering::SeqCst),
+            1,
+            "the tool loop dispatched in parallel: the per-turn counters stop being correct",
         );
     }
 }
