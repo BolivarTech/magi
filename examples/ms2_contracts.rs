@@ -226,8 +226,21 @@ pub enum ModeSource {
 }
 
 /// Error del LIB para un valor de config que no nombra un modo.
+///
+/// **Enum, no unit struct** (corregido en Task 1.0, contra la implementación real): los tests
+/// del vocabulario discriminan con `Err(ModeParseError::Unknown { .. })`, y un unit struct no
+/// admite ese patrón. El stub es normativo para firmas, así que cuando la implementación y él
+/// difieren se corrige ACÁ primero y después se propaga — nunca al revés.
 #[derive(Debug)]
-pub struct ModeParseError;
+pub enum ModeParseError {
+    /// El valor tiene contenido y no es una de las tres etiquetas.
+    Unknown {
+        /// Lo que trajo el archivo.
+        got: String,
+        /// Los tres aceptados, para que el error sea accionable sin abrir la doc.
+        valid: &'static str,
+    },
+}
 
 /// Extensión de `Mode`: es un tipo foráneo y no admite métodos inherentes.
 pub trait ModeExt: Sized {
