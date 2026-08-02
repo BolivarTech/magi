@@ -40,7 +40,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use magi_core::orchestrator::{MagiBuilder, MagiConfig as CoreMagiConfig};
 use magi_core::provider::{LlmProvider, RetryConfig, RetryProvider};
@@ -233,4 +233,100 @@ fn magi_core_api_surface_is_what_the_plan_assumes() {
     let _ = extraction_failure_shape;
     let _ = input_size_shape;
     let _ = builder_surface;
+}
+
+/// Contenido con largo suficiente para que el orquestador despache los tres asientos.
+///
+/// El gate de complejidad de magi-core veta contenido trivial, así que un payload corto haría
+/// que estos guardianes midieran **cero llamadas** y pasaran por la razón equivocada.
+const DISPATCHABLE_CONTENT: &str =
+    "Contenido con largo más que suficiente para que el orquestador despache los tres \
+     asientos en vez de vetar la consulta por trivial, que es lo que haría un payload corto.";
+
+/// Asientos que magi-core despacha por consulta: el trío completo.
+const EXPECTED_SEATS: usize = 3;
+
+/// Intentos por asiento ante un schema inválido — **medido**, no supuesto.
+///
+/// Una sonda sobre magi-core 3.1.0 (2026-08-02) observó los tres asientos con exactamente dos
+/// llamadas cada uno. Es de donde sale el factor 2 de la fórmula del `--timeout` (REQ-A04), y
+/// por eso se afirma el valor exacto en vez de un `>= 2`: ese `>=` pasaba con **un solo**
+/// asiento reintentando, o sea que no distinguía el caso sano del degradado.
+const ATTEMPTS_PER_SEAT: usize = 2;
+
+/// SC-A04b, primera mitad: un fallo de schema consume **DOS** ventanas de `timeout`.
+///
+/// De acá sale el factor 2 de la fórmula del `--timeout` headless (REQ-A04). Si magi-core
+/// dejara de reintentar ante schema inválido, la escala quedaría sobredimensionada y nadie se
+/// enteraría — el consult seguiría funcionando, solo que el `--timeout` derivado pasaría a
+/// cubrir el doble de lo necesario.
+///
+/// **El conteo es POR ASIENTO, y esa es la diferencia entre un guardián y un adorno.** Con un
+/// contador global, `total >= 2` pasa con tres mages llamando una vez cada uno — o sea
+/// **aunque magi-core no reintente jamás**. El system prompt discrimina asientos porque cada
+/// mage recibe el suyo (REQ-A02).
+#[tokio::test]
+async fn schema_retry_consumes_two_timeout_windows_per_seat() {
+    let ceiling = Duration::from_secs(2);
+    let provider = Arc::new(support::SchemaFailsOnceProvider::new(
+        Duration::from_millis(100),
+    ));
+    let magi = MagiBuilder::new(provider.clone())
+        .with_timeout(ceiling)
+        .build()
+        .expect("el builder acepta un solo provider compartido");
+
+    let started = Instant::now();
+    let _ = magi.analyze(&Mode::Analysis, DISPATCHABLE_CONTENT).await;
+    let elapsed = started.elapsed();
+
+    let by_seat = provider.calls_by_seat();
+    // Solo los CONTEOS en los mensajes: las claves son los system prompts completos, o sea
+    // ~30 KB que volverían ilegible cualquier fallo. El conteo es el dato; la clave, el medio.
+    let counts: Vec<usize> = by_seat.values().copied().collect();
+
+    assert_eq!(
+        by_seat.len(),
+        EXPECTED_SEATS,
+        "se esperaban {EXPECTED_SEATS} asientos con system prompts distintos y hubo \
+         {}: o magi-core dejó de despachar el trío completo, o dejó de darle a cada mage su \
+         propio system prompt (REQ-A02) — que es lo que hace discriminable este conteo",
+        by_seat.len(),
+    );
+    assert!(
+        counts.iter().all(|n| *n == ATTEMPTS_PER_SEAT),
+        "cada asiento debe consumir exactamente {ATTEMPTS_PER_SEAT} intentos ante schema \
+         inválido; se observaron {counts:?}. Menos ⇒ magi-core dejó de reintentar y el factor \
+         2 de REQ-A04 sobredimensiona la escala. Más ⇒ el peor caso ya no es 2× el techo y la \
+         fórmula del `--timeout` subestima",
+    );
+    assert!(
+        elapsed < ceiling * 3,
+        "el peor caso superó 2× el techo ({elapsed:?} con techo {ceiling:?})",
+    );
+}
+
+/// SC-A04b, segunda mitad: un provider **colgado** consume UNA sola ventana.
+///
+/// Es la asimetría que hace correcta la fórmula: un timeout del provider **no** dispara el
+/// reintento correctivo de schema, así que ese camino cuesta 1×, no 2×. Si magi-core empezara
+/// a reintentar también tras un timeout, el peor caso por mage saltaría de 2× a 4× y el
+/// `--timeout` derivado empezaría a cortar consults sanos.
+#[tokio::test]
+async fn a_hanging_provider_consumes_one_timeout_window() {
+    let ceiling = Duration::from_millis(300);
+    let magi = MagiBuilder::new(Arc::new(support::HangingProvider))
+        .with_timeout(ceiling)
+        .build()
+        .expect("el builder acepta un solo provider compartido");
+
+    let started = Instant::now();
+    let _ = magi.analyze(&Mode::Analysis, DISPATCHABLE_CONTENT).await;
+    let elapsed = started.elapsed();
+
+    assert!(
+        elapsed < ceiling * 2,
+        "un cuelgue consumió {elapsed:?} con techo {ceiling:?}: magi-core empezó a reintentar \
+         tras timeout, y el peor caso de REQ-A04 pasa de 2× a 4×",
+    );
 }
