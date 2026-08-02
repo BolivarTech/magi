@@ -6,4 +6,5 @@
 //! para fuzzing, cobertura y tests, además del binario `main.rs`.
 pub mod headless;
 pub mod magi;
+pub mod redact;
 pub mod vault;
