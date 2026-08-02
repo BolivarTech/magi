@@ -52,6 +52,7 @@ use magi_core::reporting::{ExtractionFailure, InputSize, MagiReport};
 use magi_core::rotation::ProviderProbe;
 use magi_core::schema::{AgentName, AgentOutput, Mode};
 use magi_core::verdict_markers::{VERDICT_CLOSE, VERDICT_OPEN};
+use magi_rs::magi::PROBE_TIMEOUT_SECS;
 
 /// Dobles compartidos de los tests de integración (Task 0.7). Se declara acá porque este es
 /// su primer consumidor: un módulo bajo `tests/` que nadie declara **no es un target de
@@ -372,5 +373,80 @@ async fn the_three_mages_execute_concurrently() {
         "pico de concurrencia = {observed}, esperado {EXPECTED_SEATS}: magi-core dejó de \
          despachar los tres asientos en paralelo. La fórmula del `--timeout` (REQ-A04) asume \
          solapamiento total y ahora subestima el peor caso",
+    );
+}
+
+/// Tope defensivo de lo que el mock llega a escribir antes de rendirse.
+///
+/// El cuerpo pretende ser **sin fin**, pero un bucle literalmente infinito convierte un
+/// guardián fallido en un test **colgado**, que es el peor resultado: no reporta, bloquea la
+/// suite y hay que ir a buscarlo. 64 MiB es 64× el cap de 1 MiB de magi-core, así que si el
+/// lector corta —que es lo que se verifica— nunca se alcanza.
+const MOCK_ENDLESS_BODY_LIMIT: usize = 64 * 1024 * 1024;
+
+/// Tamaño de cada trozo que escribe el mock.
+const MOCK_CHUNK_BYTES: usize = 8 * 1024;
+
+/// REQ-A16b — **satisfecho POR magi-core, verificado acá.**
+///
+/// `OllamaProvider::window()` hace su propio HTTP y magi-core ya acota el cuerpo:
+/// `MAX_SHOW_BODY_BYTES = 1 MiB`, leído con `read_probe_body`, y su rustdoc dice que el
+/// cuerpo es *"untrusted"* y queda *"bounded"* — o sea que corta **mientras lee**, que es
+/// exactamente lo que el requerimiento pide.
+///
+/// **Por eso magi-rs NO implementa su propio `read_capped`**: sería reimplementar una guarda
+/// existente, que es lo que R-A02 prohíbe. Lo que sí corresponde es un guardián de que la
+/// propiedad siga siendo cierta. La constante es `pub(crate)`, así que no se puede afirmar
+/// sobre ella — se afirma sobre el **comportamiento**, que además es lo que importa.
+///
+/// El cuerpo se emite en trozos y no como un `String` gigante: el punto es que el lector
+/// corte **durante** la lectura, y un cuerpo finito-y-grande no distingue «cortó al leer» de
+/// «alojó todo y después midió».
+///
+/// Si este test **falla**, magi-core dejó de capear y REQ-A16b pasa a ser responsabilidad de
+/// magi-rs — y el guardián lo dijo antes de que lo dijera un endpoint hostil en producción.
+#[tokio::test]
+async fn magi_core_rejects_an_endless_probe_body_instead_of_accumulating_it() {
+    let mut server = mockito::Server::new_async().await;
+    let mock = server
+        .mock("POST", "/api/show")
+        .with_status(200)
+        .with_chunked_body(|writer| {
+            // Un JSON que nunca cierra: empieza plausible y no termina jamás.
+            writer.write_all(br#"{"model_info":{"llama.context_length":"#)?;
+            let chunk = [b'1'; MOCK_CHUNK_BYTES];
+            let mut written = 0usize;
+            while written < MOCK_ENDLESS_BODY_LIMIT {
+                // Cuando el lector corta y suelta la conexión, esto devuelve `Err` y el
+                // callback termina solo. Ese `?` ES el final esperado del mock.
+                writer.write_all(&chunk)?;
+                written += MOCK_CHUNK_BYTES;
+            }
+            Ok(())
+        })
+        .create_async()
+        .await;
+
+    let probe = OllamaProvider::new(server.url(), SYNTHETIC_MODEL).expect("base_url del mock");
+
+    let started = Instant::now();
+    let window = probe.window().await;
+    let elapsed = started.elapsed();
+
+    // PRIMERO que el mock se haya golpeado, y esto no es ceremonia: la aserción de abajo
+    // acepta `Err(_)`, así que pasaría igual si la petición nunca hubiera llegado —una URL
+    // mal armada, una conexión rechazada— y el guardián estaría certificando un cap que
+    // nunca ejercitó. Es la misma vacuidad que hace inútil a un `any(>= 2)`.
+    mock.assert_async().await;
+
+    assert!(
+        matches!(window, Ok(None) | Err(_)),
+        "un cuerpo sin fin debe degradar a no-medido o a error, nunca completar con un valor: \
+         magi-core dejó de acotar el cuerpo del probe y REQ-A16b pasó a ser nuestro",
+    );
+    assert!(
+        elapsed < Duration::from_secs(PROBE_TIMEOUT_SECS),
+        "tardó {elapsed:?}: debe cortar POR TAMAÑO mientras lee, no acumular hasta que expire \
+         un timeout. Contra un endpoint hostil la diferencia es entre 1 MiB y memoria sin cota",
     );
 }

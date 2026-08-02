@@ -124,3 +124,73 @@ fase Red de su tarea dueña:
 **Ninguno pertenece a la Fase 0**, así que la fase abre. Se corrigen **contra el stub primero**
 (`examples/ms2_contracts.rs` es normativo para firmas), y recién después se propaga al plan —
 nunca al revés.
+
+## Los cuatro residuales del gate MAGI — Task 0.5 (2026-08-02)
+
+### (0) La dependencia de mock HTTP: se usa `mockito`, NO se agrega `wiremock`
+
+**Desviación deliberada del plan.** Task 0.5 prescribía agregar `wiremock = "=0.6.2"` y lo
+justificaba diciendo que sería *"la única dependencia de servidor HTTP del milestone"*. Eso es
+**falso**: `mockito = "1.4"` (resuelta a 1.7.2) ya está en `[dev-dependencies]` y la usan
+`src/agent/provider.rs` y `src/memory/embedding.rs`.
+
+B14 pide preferir lo existente y justificar lo nuevo, así que la pregunta correcta no es *"cuál
+mock es mejor"* sino *"¿el que ya está alcanza?"*. Alcanza:
+`mockito::Mock::with_chunked_body` toma un `impl Fn(&mut dyn io::Write) -> io::Result<()>`, o
+sea que el cuerpo se escribe en trozos desde un callback y puede no terminar nunca — que es
+exactamente la capacidad por la que el plan elegía `wiremock` sobre `httpmock`.
+
+Agregar un segundo servidor HTTP de prueba habría sumado un árbol de transitivas entero para
+una capacidad ya disponible. **Cero dependencias nuevas en esta tarea.**
+
+### (1b) `kind = ollama` NO usa `OllamaProvider` para completions (D-A07)
+
+Verificado contra magi-core 3.1.0 (`src/providers/ollama.rs`): constructor único `new`, con el
+timeout de cliente fijo en `DEFAULT_CLIENT_TIMEOUT` (300 s), sin `with_timeout` ni
+`with_client`. Cumplir REQ-A04 —`operation_budget + client_timeout <= techo`— es **imposible**
+con ese tipo contra un techo de 90 s, y el propio crate documenta la consecuencia: con el
+cliente por encima del techo del agente, el techo corta primero y **ningún reintento llega a
+correr**.
+
+Por eso las completions van por `OpenAiCompatibleProvider::with_timeout` con `api_key = None`, y
+`OllamaProvider` queda **solo como sonda** (D-B07). Se registra acá, y no solo en un comentario
+de Task 4.1, para que se audite como desviación **deliberada** del mapeo obvio nombre-a-nombre y
+no como un parche que aparece leyendo el diff.
+
+### (2) `magi init` sobre un `.magi/` existente: sin cambios
+
+Verificado en `src/system/workspace.rs`: `place_magi_dir` construye el árbol en un hermano
+temporal y lo mueve con `rename_no_replace`, devolviendo `HeadlessError::Aborted` si el destino
+ya existe. O sea que v0.10.0 **ya se niega a sobrescribir y a anidar**.
+
+MS2 **no toca** ese comportamiento; solo cambia **qué TOML escribe** cuando sí crea el
+directorio. Se declara en el `--help` y en el CHANGELOG: *"`magi init` nunca sobrescribe un
+`.magi/` existente"*.
+
+### (3) Detección de un `magi.toml` de v0.10.x: no hay detección, hay nota incondicional
+
+**Se acepta el mensaje genérico, explícitamente.** La pasada de migración conoce los dos
+patrones de v0.11.0; sostener una segunda generación duplicaría deuda temporal por un salto que
+el usuario hace en dos comandos. Todo error de configuración —de sintaxis o de campo
+desconocido— incluye **siempre** la línea *"si venís de v0.10.x, migrá primero a v0.11.0"*.
+
+### (4) El ratio de "cerca" de SC-A24i
+
+`STALE_NOTICE_RATIO = 0.8`, fijado en Task 0.1. La comparación se hace **en tokens** vía
+`bytes_to_tokens_est`, porque el cap está en bytes y la ventana en tokens; contrastarlos directo
+haría que el notice saliera o no por accidente aritmético.
+
+### (5) Barrido de combinaciones incoherentes, que la spec delega al plan
+
+| Combinación | ¿Incoherente? | Dónde se detecta |
+|---|---|---|
+| `provider = "anthropic"` + `base_url` de Ollama | **sí** | al cargar (REQ-A12c) |
+| `kind = "ollama"` + endpoint autenticado | **sí** | primer uso, 401/403 traducido (Task 4.4) |
+| `kind = "anthropic"` + `[magi].base_url` declarado | **sí** | al cargar: Anthropic ignora `base_url`, mismo notice que el caso 1 |
+| `retry_disabled = true` + `agent_timeout_secs` alto | no | elección de latencia válida, documentada en la rustdoc de magi-core |
+| `default_mode` + `untrusted_content` | no | **se complementan**: la marca exige modo declarado y `default_mode` es una vía de declararlo |
+| `[magi.complexity]` en cero + `auto_approve = true` | no | el operador apagó el gate y auto-aprueba: coherente, aunque caro |
+| Modelos por mage iguales entre sí | no en MS2 | sin rotación no hay diversidad de linaje que romper; **pasa a ser incoherente en MS3** |
+
+**Tres incoherentes, y la tercera es nueva** — salió de este barrido, no de la spec. Se implementa
+junto con la primera en Task 1.4, que ya emite ese notice.
