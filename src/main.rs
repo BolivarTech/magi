@@ -1481,8 +1481,23 @@ async fn attach_persistent_memory(
     // successfully. The embedding key may be the dummy `"ollama"` for the local
     // Ollama server (it ignores auth).
     if let Ok(vstore) = vstore_result {
+        // Task 1.1 (REQ-A21): `[embedding].base_url` is now optional and, when
+        // absent, inherits the root `base_url` — a value `OpenAiCompatibleEmbedder`
+        // cannot see on its own (it only receives `&EmbeddingConfig`, not
+        // `&MagiConfig`). Resolve the EFFECTIVE endpoint here and bake it into the
+        // config handed to the embedder, so the actual HTTP client and the
+        // "sending to X" notice below never disagree about where data goes. A
+        // template parse error (REQ-A16c) leaves `base_url` as-is; the embedder's
+        // own constructor falls back to the Ollama default in that case (see its
+        // doc comment).
+        let mut embedding_cfg = magi_config.embedding.clone();
+        if embedding_cfg.base_url.is_none() {
+            if let Ok(inherited) = magi_config.effective_embedding_base_url() {
+                embedding_cfg.base_url = Some(inherited.as_str().to_string());
+            }
+        }
         // W1: new() returns Result; a failure degrades to text-only persistence.
-        match OpenAiCompatibleEmbedder::new(&magi_config.embedding, embed_key) {
+        match OpenAiCompatibleEmbedder::new(&embedding_cfg, embed_key) {
             Err(err) => {
                 notices.push(format!(
                     "embedding client init failed ({err}); \
@@ -1510,15 +1525,25 @@ async fn attach_persistent_memory(
 
                 // CP2-AG/AJ: warn when the distiller will send memory batches to a
                 // cloud embedding endpoint (non-localhost).
-                if magi_config.memory.distill_enabled
-                    && !is_localhost(&magi_config.embedding.base_url)
-                {
-                    notices.push(format!(
-                        "Memory distiller will send bounded memory batches \
-                         (≤ {} tokens) to {} — set distill_enabled = false \
-                         in [memory] for zero cloud memory egress.",
-                        magi_config.memory.distill_max_batch_tokens, magi_config.embedding.base_url,
-                    ));
+                //
+                // Task 1.1 (REQ-A21): `embedding.base_url` is now `Option<String>` and
+                // may be absent (inheriting the root `base_url`), so the EFFECTIVE
+                // endpoint — declared or inherited — comes from
+                // `MagiConfig::effective_embedding_base_url`, not the raw field. A
+                // template parse error (REQ-A16c: a literal credential instead of the
+                // `[user]:[password]` placeholders) degrades to skipping this notice —
+                // it is informational, and `load()` does not yet fail closed on a bad
+                // template (that validation is not part of Task 1.1's scope).
+                if let Ok(embedding_url) = magi_config.effective_embedding_base_url() {
+                    if magi_config.memory.distill_enabled && !is_localhost(embedding_url.as_str()) {
+                        notices.push(format!(
+                            "Memory distiller will send bounded memory batches \
+                             (≤ {} tokens) to {} — set distill_enabled = false \
+                             in [memory] for zero cloud memory egress.",
+                            magi_config.memory.distill_max_batch_tokens,
+                            embedding_url.as_str(),
+                        ));
+                    }
                 }
             }
         }
@@ -3588,6 +3613,22 @@ mod tests {
         // effective-provider peek must fall back to the SAME config-default
         // provider `resolve()` already used — no behavior change for the
         // common case.
+        //
+        // **Task 1.1 changes what "the config default" IS for a fresh workspace.**
+        // `init_default_workspace()` runs `workspace::init`, which scaffolds
+        // `.magi/magi.toml` via `render_default_magi_toml()` — and that generator now
+        // writes `provider = "ollama"` (the new REQ-A01b vocabulary; the file no
+        // longer parses with the old `"openai"`, see `RENDERED_DEFAULT_PROVIDER`'s doc
+        // comment). `resolve_provider`/this file's `provider_kind == "openai"`
+        // branching is the LEGACY chain Task 1.1 deliberately does not touch — it
+        // still only recognizes the literal `"openai"` — so a freshly-scaffolded
+        // workspace's declared `"ollama"` no longer matches it, and the peek falls to
+        // the Anthropic/static branch instead of the Ollama-first one. This is the
+        // same class of temporary, intermediate-state hole as `MagiConfig::load`'s
+        // (see its doc comment): Task 1.4 migrates this resolution chain onto
+        // `MagiConfig::effective_provider`/`ProviderKind`, which closes it. Until
+        // then, this test asserts the CURRENT (temporarily degraded) reality rather
+        // than papering over it with a workspace built by hand.
         with_var("MAGI_PROVIDER", None, || {
             with_var("ANTHROPIC_MODEL", None, || {
                 with_var("OPENAI_MODEL", None, || {
@@ -3604,8 +3645,8 @@ mod tests {
                         .block_on(prepare_headless(&h, None, &cwd, None, None))
                         .expect("prepare_headless must succeed");
 
-                    assert_eq!(ctx.resolved.provider, "openai");
-                    assert_eq!(ctx.resolved.model, crate::defaults::DEFAULT_OPENAI_MODEL);
+                    assert_eq!(ctx.resolved.provider, "ollama");
+                    assert_eq!(ctx.resolved.model, crate::defaults::DEFAULT_ANTHROPIC_MODEL);
                 });
             });
         });

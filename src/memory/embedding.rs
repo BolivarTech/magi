@@ -158,7 +158,20 @@ impl OpenAiCompatibleEmbedder {
             .map_err(|_| EmbeddingError::Network)?;
         Ok(Self {
             client,
-            base_url: cfg.base_url.trim_end_matches('/').to_string(),
+            // `cfg.base_url` is `Option<String>` since Task 1.1 (REQ-A21): absent means
+            // "inherit the root `base_url`". This constructor only ever sees an
+            // `EmbeddingConfig` in isolation — it has no access to the root value to
+            // inherit from — so it falls back to the same Ollama default the field
+            // itself used to carry before it became optional. Callers that need real
+            // inheritance (the root `base_url` may differ from the Ollama default)
+            // must resolve it first via `MagiConfig::effective_embedding_base_url` and
+            // pass a config with `base_url` already populated; `main.rs` does this.
+            base_url: cfg
+                .base_url
+                .as_deref()
+                .unwrap_or(crate::defaults::DEFAULT_OPENAI_BASE_URL)
+                .trim_end_matches('/')
+                .to_string(),
             model: cfg.model.clone(),
             configured_dim: cfg.dim,
             detected_dim: AtomicUsize::new(0),
@@ -382,7 +395,14 @@ impl OpenAiCompatibleEmbedder {
     ) -> Self {
         Self {
             client,
-            base_url: cfg.base_url.trim_end_matches('/').to_string(),
+            // See the matching comment in `new` — `base_url` is `Option<String>` since
+            // Task 1.1 (REQ-A21); this test-only constructor falls back the same way.
+            base_url: cfg
+                .base_url
+                .as_deref()
+                .unwrap_or(crate::defaults::DEFAULT_OPENAI_BASE_URL)
+                .trim_end_matches('/')
+                .to_string(),
             model: cfg.model.clone(),
             configured_dim: cfg.dim,
             detected_dim: AtomicUsize::new(0),
@@ -423,7 +443,7 @@ mod tests {
     fn cfg(base: &str) -> EmbeddingConfig {
         EmbeddingConfig {
             provider: "openai".into(),
-            base_url: base.into(),
+            base_url: Some(base.into()),
             model: "nomic-embed-text".into(),
             dim: 3,
             query_prefix: "search_query: ".into(),
@@ -554,7 +574,7 @@ mod tests {
         let emb = OpenAiCompatibleEmbedder::new(
             &EmbeddingConfig {
                 dim: 0, // autodetect
-                base_url: server.url(),
+                base_url: Some(server.url()),
                 ..Default::default()
             },
             None,
@@ -592,7 +612,7 @@ mod tests {
         // Port 1 is almost always closed and the OS refuses immediately.
         let emb = OpenAiCompatibleEmbedder::new(
             &EmbeddingConfig {
-                base_url: "http://127.0.0.1:1".into(),
+                base_url: Some("http://127.0.0.1:1".into()),
                 ..Default::default()
             },
             None,
@@ -644,7 +664,7 @@ mod tests {
         let emb = OpenAiCompatibleEmbedder::new(
             &EmbeddingConfig {
                 dim: 0, // autodetect
-                base_url: server.url(),
+                base_url: Some(server.url()),
                 ..Default::default()
             },
             None,
@@ -708,7 +728,7 @@ mod tests {
             .unwrap();
         let emb = OpenAiCompatibleEmbedder::new_with_client(
             &EmbeddingConfig {
-                base_url,
+                base_url: Some(base_url),
                 ..Default::default()
             },
             None,
@@ -740,7 +760,7 @@ mod tests {
         let emb = OpenAiCompatibleEmbedder::new(
             &EmbeddingConfig {
                 dim: 0, // autodetect
-                base_url: server.url(),
+                base_url: Some(server.url()),
                 ..Default::default()
             },
             None,
@@ -813,7 +833,7 @@ mod tests {
         let emb = OpenAiCompatibleEmbedder::new(
             &EmbeddingConfig {
                 dim: 0,
-                base_url: server.url(),
+                base_url: Some(server.url()),
                 ..Default::default()
             },
             None,

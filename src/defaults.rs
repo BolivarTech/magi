@@ -10,6 +10,14 @@
 use std::path::{Path, PathBuf};
 
 /// Default provider when no `magi.toml`/env is present (RF-1).
+///
+/// **Still `"openai"`, not the new `ProviderKind` vocabulary's `"ollama"`.** This
+/// constant feeds the CURRENT principal-provider resolution chain
+/// (`resolve_provider`/`main.rs`'s `provider_kind == "openai"` branching), which Task
+/// 1.1 does not touch. Task 1.4 is what migrates that chain onto
+/// `MagiConfig::effective_provider`/`ProviderKind` and flips this value to `"ollama"` —
+/// see `.superpowers/sdd/claude-plan-tdd/task-1.4-brief.md`. Until then this constant
+/// and [`RENDERED_DEFAULT_PROVIDER`] deliberately disagree; see that constant's doc.
 pub const DEFAULT_PROVIDER: &str = "openai";
 /// Default OpenAI-compatible base URL — local Ollama (RF-2).
 pub const DEFAULT_OPENAI_BASE_URL: &str = "http://localhost:11434/v1";
@@ -24,6 +32,19 @@ pub const DEFAULT_ANTHROPIC_MODEL: &str = "claude-sonnet-4-6";
 /// Default embedding model (Ollama-first, local). Single source of truth — also
 /// re-exported by `memory::config::d::emb_model` so both resolve identically.
 pub const DEFAULT_EMBEDDING_MODEL: &str = "nomic-embed-text-v2-moe:latest";
+
+/// Value of `provider` that [`render_default_magi_toml`] emits (Task 1.1, REQ-A01b).
+///
+/// **Temporarily distinct from [`DEFAULT_PROVIDER`]** (which stays `"openai"` until
+/// Task 1.4 — see that constant's doc). Task 1.1 makes `MagiConfig::from_toml_str`
+/// validate the provider vocabulary, and `"openai"` is no longer a valid value in that
+/// vocabulary (`ollama` | `openai-compat` | `anthropic`), so the generated `magi.toml`
+/// has to declare one that is. `"ollama"` is the Ollama-first default the rest of the
+/// generated file already assumes (endpoint, models). Not folded into `DEFAULT_PROVIDER`
+/// itself — that constant still drives the CURRENT, untouched
+/// `resolve_provider`/`main.rs` resolution chain, and changing its value here would
+/// change that chain's behavior too, which is explicitly Task 1.4's change to make.
+pub const RENDERED_DEFAULT_PROVIDER: &str = "ollama";
 
 // ── Headless mode constants ───────────────────────────────────────────────────
 //
@@ -92,12 +113,18 @@ pub fn render_default_magi_toml() -> String {
         "# Edit to customize, or set provider = \"anthropic\" to use Anthropic instead."
     )
     .unwrap();
-    writeln!(out, "provider = \"{}\"", DEFAULT_PROVIDER).unwrap();
+    // `RENDERED_DEFAULT_PROVIDER` ("ollama"), NOT `DEFAULT_PROVIDER` ("openai") — see
+    // both constants' doc comments. `from_toml_str` now validates the provider
+    // vocabulary (REQ-A01b) and `"openai"` is no longer one of its three values, so
+    // this generated file must declare a value the new validation accepts.
+    writeln!(out, "provider = \"{}\"", RENDERED_DEFAULT_PROVIDER).unwrap();
+    // `base_url` moved to the ROOT in Task 1.1 (REQ-A21) — it used to live under
+    // `[openai]`, which no longer accepts it (`deny_unknown_fields`).
+    writeln!(out, "base_url = \"{}\"", DEFAULT_OPENAI_BASE_URL).unwrap();
     writeln!(out).unwrap();
 
     // ── [openai] ─────────────────────────────────────────────────────────────
     writeln!(out, "[openai]").unwrap();
-    writeln!(out, "base_url = \"{}\"", DEFAULT_OPENAI_BASE_URL).unwrap();
     writeln!(out, "model    = \"{}\"", DEFAULT_OPENAI_MODEL).unwrap();
     writeln!(out).unwrap();
 
@@ -362,10 +389,15 @@ pub fn render_default_magi_toml() -> String {
     )
     .unwrap();
     writeln!(out, "[embedding]").unwrap();
+    // `emb.base_url` is `Option<String>` and `EmbeddingConfig::default()` leaves it
+    // `None` (REQ-A21, so it can inherit the root `base_url`) — the display text for
+    // the generated file's active essential line comes from
+    // `memory::config::d::emb_base_url()`, which wraps the same
+    // `DEFAULT_OPENAI_BASE_URL` constant instead of a duplicated literal (B3).
     writeln!(
         out,
         "base_url = \"{}\"   # Ollama default; point elsewhere for cloud",
-        emb.base_url
+        crate::memory::config::d::emb_base_url()
     )
     .unwrap();
     writeln!(
@@ -488,7 +520,8 @@ mod tests {
 
     #[test]
     fn test_render_default_magi_toml_interpolates_and_parses() {
-        // S-12: rendered from constants (DRY) and valid TOML with provider="openai".
+        // S-12: rendered from constants (DRY) and valid TOML with provider="ollama"
+        // (Task 1.1: `RENDERED_DEFAULT_PROVIDER`, not the legacy `DEFAULT_PROVIDER`).
         // Active [memory] and [embedding] sections must parse into real config values.
         let s = render_default_magi_toml();
         assert!(s.contains(DEFAULT_OPENAI_BASE_URL));
@@ -497,7 +530,8 @@ mod tests {
         assert!(s.contains(DEFAULT_MAGI_BALTHASAR));
         assert!(s.contains(DEFAULT_MAGI_CASPAR));
         let parsed = crate::config::MagiConfig::from_toml_str(&s).unwrap();
-        assert_eq!(parsed.provider.as_deref(), Some("openai"));
+        assert_eq!(parsed.provider.as_deref(), Some(RENDERED_DEFAULT_PROVIDER));
+        assert_eq!(parsed.base_url.as_deref(), Some(DEFAULT_OPENAI_BASE_URL));
         assert_eq!(
             parsed.magi.melchior_model.as_deref(),
             Some(DEFAULT_MAGI_MELCHIOR)
@@ -545,8 +579,8 @@ mod tests {
             .expect("render_default_magi_toml() must produce valid TOML");
         assert_eq!(
             parsed.provider.as_deref(),
-            Some("openai"),
-            "parsed provider must be 'openai'"
+            Some(RENDERED_DEFAULT_PROVIDER),
+            "parsed provider must be the value magi_init/render_default_magi_toml emits"
         );
         assert_eq!(
             parsed.memory.mode, "selective",

@@ -8,20 +8,150 @@
 // Public API of this module is consumed by `main.rs` (Task 6 wiring) and by
 // tests; no items here should be flagged dead_code under any cfg.
 
-use magi_rs::magi::kind::ProviderKind;
+mod migrate;
+
+use magi_core::schema::{AgentName, Mode};
+use magi_rs::magi::endpoint::{EndpointError, EndpointTemplate};
+use magi_rs::magi::kind::{ProviderKind, ProviderKindParseError};
+use magi_rs::magi::mode::{ModeExt, ModeParseError};
+use magi_rs::magi::{min_viable_output_cap, AGENT_TIMEOUT_MAX_SECS, AGENT_TIMEOUT_MIN_SECS};
 use serde::Deserialize;
 use std::path::Path;
+
+/// Errores de configuración de `magi.toml` (Task 1.1, REQ-A01b/A04/A11b/A21b).
+///
+/// Vive en el **bin** (no en `magi_rs::magi`) porque es específico de la FORMA del TOML;
+/// los tipos de error de vocabulario puro (`ProviderKindParseError`, `ModeParseError`)
+/// viven en el lib y se absorben acá con `From`, que es la dirección correcta de la
+/// dependencia (el lib no puede conocer un tipo del bin).
+#[derive(Debug, thiserror::Error)]
+pub enum ConfigError {
+    /// `provider` o `[magi].kind` traen un valor presente y no reconocido.
+    #[error("provider desconocido: {got:?} (válidos: {valid})")]
+    UnknownProviderKind {
+        /// Lo que trajo el archivo.
+        got: String,
+        /// Los tres valores aceptados, para que el error sea accionable.
+        valid: &'static str,
+    },
+
+    /// `[magi].default_mode` trae un valor presente y no reconocido.
+    #[error("modo desconocido: {got:?} (válidos: {valid})")]
+    UnknownMode {
+        /// Lo que trajo el archivo.
+        got: String,
+        /// Las tres etiquetas aceptadas, para que el error sea accionable.
+        valid: &'static str,
+    },
+
+    /// El archivo trae patrones de migración de v0.11.0 (REQ-A21b). El texto ya viene
+    /// renderizado por [`migrate::render_migration_error`] — nombra cada incompatibilidad
+    /// y su corrección.
+    #[error("{0}")]
+    NeedsMigration(String),
+
+    /// El TOML no parsea, o el archivo no se pudo leer.
+    #[error("{0}")]
+    Parse(String),
+
+    /// `[magi].agent_timeout_secs` cae fuera del rango admisible de §4.9.
+    #[error(
+        "agent_timeout_secs = {got} fuera de rango [{min}, {max}]: por debajo de {min}s no \
+         entra una generación legítima; por encima de {max}s el peor caso de un consult \
+         (2 intentos por mage) supera los 4 minutos. No se recorta al extremo — se rechaza."
+    )]
+    AgentTimeoutOutOfRange {
+        /// El valor declarado.
+        got: u64,
+        /// Piso del rango admisible (§4.9).
+        min: u64,
+        /// Techo del rango admisible (§4.9).
+        max: u64,
+    },
+
+    /// `tool_result_cap_bytes` cae por debajo del mínimo viable (REQ-A11b).
+    #[error(
+        "tool_result_cap_bytes = {got} es menor que el mínimo viable ({min}): por debajo de \
+         ese umbral ni la marca de recorte entra, y el cap configurado se ignora en \
+         silencio en vez de aplicarse."
+    )]
+    OutputCapTooSmall {
+        /// El valor declarado.
+        got: usize,
+        /// El mínimo viable ([`magi_rs::magi::min_viable_output_cap`]).
+        min: usize,
+    },
+}
+
+impl From<ProviderKindParseError> for ConfigError {
+    fn from(e: ProviderKindParseError) -> Self {
+        Self::UnknownProviderKind {
+            got: e.got,
+            valid: e.valid,
+        }
+    }
+}
+
+impl From<ModeParseError> for ConfigError {
+    fn from(e: ModeParseError) -> Self {
+        match e {
+            ModeParseError::Unknown { got, valid } => Self::UnknownMode { got, valid },
+        }
+    }
+}
+
+/// Extrae un mensaje de error de parseo **sin la línea ofensora** (B11/REQ-A16).
+///
+/// **`toml::de::Error`'s `Display` reproduce el TEXTO CRUDO del archivo alrededor del
+/// error** — para `api_key = "sk-secreto"\n` (rechazado por `deny_unknown_fields`, REQ-A14)
+/// el `Display` completo es:
+///
+/// ```text
+/// TOML parse error at line 1, column 1
+///   |
+/// 1 | api_key = "sk-secreto"
+///   | ^^^^^^^
+/// unknown field `api_key`, expected `provider`
+/// ```
+///
+/// — el secreto que se está rechazando queda impreso en el propio mensaje de error. Esto
+/// se descubrió corriendo `an_api_key_anywhere_in_the_toml_is_a_parse_error`: el
+/// `.map_err(|e| ConfigError::Parse(e.to_string()))?` original (calcado del cuerpo que
+/// paso a paso pega el brief de esta tarea) usaba el `Display` completo, y el test falló
+/// contra el propio código que la spec pidió transcribir — B9/REQ-A00c exige rechazar eso,
+/// no transcribirlo. `toml::de::Error::message()` da el mensaje semántico SIN el extracto
+/// de la fuente; para el mismo caso es solo `"unknown field \`api_key\`, expected
+/// \`provider\`"` — el NOMBRE del campo rechazado, nunca su valor, porque
+/// `deny_unknown_fields` rechaza la clave antes de mirar el tipo del valor.
+///
+/// **Trade-off aceptado:** `message()` no incluye línea/columna, así que un error de
+/// sintaxis genuino (no relacionado con un secreto) pierde esa ubicación. Se prefiere
+/// igual: seguridad es una de las cinco categorías que nunca se difieren como residual,
+/// y una discrepancia de tipo en un campo NO-secreto (p. ej. `agent_timeout_secs = "x"`)
+/// también podría, en principio, ecoar un valor en `message()` — cerrar el camino de raíz
+/// (nunca mostrar el extracto de fuente) es más robusto que enumerar campos "seguros".
+fn safe_parse_error(e: &toml::de::Error) -> String {
+    e.message().to_string()
+}
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MagiConfig {
     pub provider: Option<String>,
+    /// Endpoint por defecto DEL SISTEMA (REQ-A21): lo usan el agente principal, el trío y
+    /// el embedder salvo que su propia sección lo overridee. Ausente ⇒ el built-in.
+    /// **BREAKING**: hasta v0.11.0 esta clave vivía en `[openai].base_url`, que ya no
+    /// existe — ver [`ConfigError::NeedsMigration`].
+    pub base_url: Option<String>,
+    /// Cap de SALIDA del reporte, en las TRES rutas (TUI, `magi query`, consult headless
+    /// — REQ-A11b). Ausente ⇒ [`magi_rs::magi::TOOL_RESULT_CAP_BYTES`].
+    pub tool_result_cap_bytes: Option<usize>,
     #[serde(default)]
     pub openai: OpenAiConfig,
     #[serde(default)]
     pub anthropic: AnthropicConfig,
     #[serde(default)]
-    pub magi: MagiModelsConfig,
+    pub magi: MagiSectionConfig,
     #[serde(default)]
     pub memory: crate::memory::config::MemoryConfig,
     #[serde(default)]
@@ -56,10 +186,16 @@ pub struct HeadlessConfig {
     pub allow_system_override: Option<bool>,
 }
 
+/// `[openai]` section. Shared by `provider = "ollama"` and `provider = "openai-compat"` —
+/// the two providers speak the same Chat-Completions transport and are distinguished only
+/// by capability (only `ollama` is probeable, REQ-A24), not by config shape.
+///
+/// **`base_url` no longer lives here** — it moved to the root of `MagiConfig` (REQ-A21).
+/// A `magi.toml` that still declares `[openai].base_url` fails to parse
+/// (`deny_unknown_fields`); see [`ConfigError::NeedsMigration`].
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OpenAiConfig {
-    pub base_url: Option<String>,
     pub model: Option<String>,
 }
 
@@ -69,11 +205,28 @@ pub struct AnthropicConfig {
     pub model: Option<String>,
 }
 
-/// Per-agent MAGI model overrides (`[magi]` section). All optional; absent ⇒ each
-/// agent shares the principal provider's model (backward compatible with v0.4.0).
+/// Sub-tabla `[magi.complexity]`. Ausente ⇒ built-ins; un modo en `0` ⇒ ese modo nunca se
+/// veta; un modo ausente dentro de una tabla presente ⇒ su built-in, **no cero** (REQ-A20b).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ComplexityConfig {
+    /// Largo mínimo (caracteres) para despachar un consult autorruteado en `CodeReview`.
+    /// Ausente ⇒ el built-in de la librería.
+    pub code_review: Option<usize>,
+    /// Ver [`Self::code_review`], para `Design`.
+    pub design: Option<usize>,
+    /// Ver [`Self::code_review`], para `Analysis`. **No hereda el "no vacío" del ejemplo
+    /// de magi-core** (REQ-A20): `Analysis` es el default de toda invocación sin modo, así
+    /// que un umbral de 1 apagaría el gate en el camino autónomo más común.
+    pub analysis: Option<usize>,
+}
+
+/// Tabla `[magi]`. Renombrada desde `MagiModelsConfig` porque ya no contiene solo modelos
+/// — Task 1.1 le agrega el resto del vocabulario del trío (kind, endpoint, modo, gate de
+/// complejidad, timeouts) que la spec de MS2 le atribuye a esta sección.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct MagiModelsConfig {
+pub struct MagiSectionConfig {
     /// Override model for Melchior (the Scientist). `None` ⇒ principal model.
     pub melchior_model: Option<String>,
     /// Override model for Balthasar (the Pragmatist). `None` ⇒ principal model.
@@ -88,34 +241,380 @@ pub struct MagiModelsConfig {
     /// user-initiated and requires no approval regardless of this flag.
     #[serde(default = "default_auto_approve")]
     pub auto_approve: bool,
+
+    /// Provider del trío; ausente ⇒ **hereda** el de raíz (REQ-A01b). No es una
+    /// heurística: la herencia lee un valor declarado, no adivina uno observado.
+    pub kind: Option<String>,
+    /// Endpoint del trío; ausente ⇒ hereda el de raíz (REQ-A21).
+    pub base_url: Option<String>,
+    /// Modo fijo para toda invocación sin `--mode`; saltea la inferencia (REQ-A07).
+    pub default_mode: Option<String>,
+    /// Declara que el contenido bajo análisis NO es confiable (REQ-A07d). Con esto
+    /// activo, omitir el modo es **error**, no inferencia.
+    pub untrusted_content: Option<bool>,
+    /// Cap de entrada DE MAGI-RS, previo a magi-core (REQ-A11b). Ausente ⇒
+    /// [`magi_rs::magi::MAX_QUERY_BYTES`].
+    pub max_query_bytes: Option<usize>,
+    /// Techo por mage; las dos capas internas de reintento se derivan de él
+    /// (REQ-A04/A15). Debe caer en `[AGENT_TIMEOUT_MIN_SECS, AGENT_TIMEOUT_MAX_SECS]`.
+    pub agent_timeout_secs: Option<u64>,
+    /// Umbral de aviso de tamaño; ausente ⇒ se mide por probe, o el default de
+    /// magi-core (REQ-A15/A24b).
+    pub input_warn_tokens: Option<usize>,
+    /// Desactiva el reintento de transporte (REQ-A15).
+    pub retry_disabled: Option<bool>,
+    /// Umbrales del gate de complejidad por modo; ausente ⇒ built-ins (REQ-A20b).
+    pub complexity: Option<ComplexityConfig>,
 }
 
-impl Default for MagiModelsConfig {
+impl MagiSectionConfig {
+    /// Los tres asientos con su modelo resuelto: el declarado, o el del backend.
+    ///
+    /// # Arguments
+    /// * `fallback` - Modelo del backend, usado por cualquier asiento sin override.
+    // Narrow allow: consumed by the trio construction in Task 4.1, not this task.
+    // Covered by `seats_resolves_each_mage_to_its_override_or_the_backend_fallback`.
+    #[allow(dead_code)]
+    #[must_use]
+    pub fn seats(&self, fallback: &str) -> Vec<(AgentName, String)> {
+        vec![
+            (
+                AgentName::Melchior,
+                self.melchior_model
+                    .clone()
+                    .unwrap_or_else(|| fallback.into()),
+            ),
+            (
+                AgentName::Balthasar,
+                self.balthasar_model
+                    .clone()
+                    .unwrap_or_else(|| fallback.into()),
+            ),
+            (
+                AgentName::Caspar,
+                self.caspar_model.clone().unwrap_or_else(|| fallback.into()),
+            ),
+        ]
+    }
+
+    /// Modelo del **fallback del builder** — el que magi-core usaría para un agente sin
+    /// override (ver Task 4.1).
+    ///
+    /// Es el del backend, no el de ningún mage: elegir el de Melchior lo volvería el
+    /// default por accidente. Con los tres asientos overrideados nunca se usa, y por eso
+    /// mismo conviene que sea una decisión escrita.
+    ///
+    /// # Arguments
+    /// * `backend_model` - Modelo por defecto del backend resuelto.
+    // Narrow allow: consumed by the trio construction in Task 4.1, not this task.
+    // Covered by `fallback_model_is_the_backend_model_not_any_seats_override`.
+    #[allow(dead_code)]
+    #[must_use]
+    pub fn fallback_model<'a>(&self, backend_model: &'a str) -> &'a str {
+        backend_model
+    }
+}
+
+impl Default for MagiSectionConfig {
     fn default() -> Self {
         Self {
             melchior_model: None,
             balthasar_model: None,
             caspar_model: None,
             auto_approve: default_auto_approve(),
+            kind: None,
+            base_url: None,
+            default_mode: None,
+            untrusted_content: None,
+            max_query_bytes: None,
+            agent_timeout_secs: None,
+            input_warn_tokens: None,
+            retry_disabled: None,
+            complexity: None,
         }
     }
 }
 
-/// Default value for [`MagiModelsConfig::auto_approve`]: `false` (require
+/// Default value for [`MagiSectionConfig::auto_approve`]: `false` (require
 /// explicit approval before each autonomous MAGI consensus launch).
 fn default_auto_approve() -> bool {
     false
 }
 
 impl MagiConfig {
-    /// Parse a `magi.toml` string. Malformed TOML or unknown fields -> `Err` (RF-1).
-    pub fn from_toml_str(s: &str) -> Result<Self, toml::de::Error> {
-        toml::from_str(s)
+    /// Parsea un `magi.toml` desde texto, **validando el vocabulario** igual que
+    /// [`Self::load`] (REQ-A01b).
+    ///
+    /// **Valida a propósito, aunque sea el helper que más usan los tests.** Un
+    /// `from_toml_str` que deserializa sin validar dejaría que los tests construyan
+    /// configuraciones que `load()` jamás aceptaría — la suite ejercitaría un camino que
+    /// producción no tiene, la misma clase de brecha que un resolutor `.ok().flatten()`
+    /// que se traga un valor inválido.
+    ///
+    /// # Errors
+    /// [`ConfigError::NeedsMigration`] si el archivo trae patrones de v0.11.0 (stub: hasta
+    /// Task 1.3 nunca ocurre — ver [`migrate`]); [`ConfigError::Parse`] si el TOML no
+    /// parsea; [`ConfigError::UnknownProviderKind`] / [`ConfigError::UnknownMode`] si
+    /// `provider`, `[magi].kind` o `[magi].default_mode` traen un valor presente y no
+    /// reconocido; [`ConfigError::AgentTimeoutOutOfRange`] /
+    /// [`ConfigError::OutputCapTooSmall`] si esos números caen fuera de su rango.
+    pub fn from_toml_str(s: &str) -> Result<Self, ConfigError> {
+        // La pasada de migración va PRIMERO, igual que en `load()` (Task 1.4). Sin esto
+        // los tests ejercitarían un camino de error que producción no tiene: un
+        // `magi.toml` de v0.11.0 daría acá el `unknown field` pelado de serde, mientras
+        // el usuario real recibe el mensaje guiado.
+        let found = migrate::detect_migrations(s);
+        if !found.is_empty() {
+            return Err(ConfigError::NeedsMigration(
+                migrate::render_migration_error(&found),
+            ));
+        }
+        let cfg: Self = toml::from_str(s).map_err(|e| ConfigError::Parse(safe_parse_error(&e)))?;
+        cfg.validate_vocabulary()?;
+        Ok(cfg)
+    }
+
+    /// Valida TODO el vocabulario del archivo y sus rangos numéricos. Se llama desde
+    /// [`Self::from_toml_str`] (y por lo tanto desde `load()`), **antes** de que cualquier
+    /// `effective_*()` pueda tragarse un valor inválido y caer al default en silencio.
+    ///
+    /// # Errors
+    /// Ver [`Self::from_toml_str`].
+    ///
+    /// **Por qué la validación va acá y no en los resolutores.** Un resolutor que hace
+    /// `parse(s).ok().flatten().unwrap_or(default)` **se come el error**: `provider =
+    /// "banana"` se convertiría en `Ollama` en silencio, que es exactamente el fallback
+    /// silencioso que REQ-A01b prohíbe. Validando al cargar, para cuando los resolutores
+    /// corren ya no queda nada inválido que tragarse.
+    fn validate_vocabulary(&self) -> Result<(), ConfigError> {
+        ProviderKind::parse(self.provider.as_deref().unwrap_or_default())?;
+        ProviderKind::parse(self.magi.kind.as_deref().unwrap_or_default())?;
+        <Mode as ModeExt>::parse_config_value(
+            self.magi.default_mode.as_deref().unwrap_or_default(),
+        )?;
+        self.validate_agent_timeout()?;
+        self.validate_output_cap()?;
+        Ok(())
+    }
+
+    /// `agent_timeout_secs` fuera del rango de §4.9 es **error de configuración**.
+    ///
+    /// # Errors
+    /// [`ConfigError::AgentTimeoutOutOfRange`] con el valor, el rango y el porqué.
+    ///
+    /// **No se recorta al extremo, se rechaza** — mismo criterio que la ventana del probe
+    /// (REQ-A16b): recortar convierte un valor que el operador escribió mal en uno
+    /// plausible, y después el sistema se comporta distinto de lo que dice el archivo.
+    ///
+    /// Existe porque sin esto REQ-A04 sería **rompible desde `magi.toml`**: con un techo
+    /// por debajo del piso absoluto de la derivación, los pisos internos ganan y la suma
+    /// supera el techo. "Imposible por construcción" solo es cierto si el rango de entrada
+    /// está acotado.
+    fn validate_agent_timeout(&self) -> Result<(), ConfigError> {
+        let Some(secs) = self.magi.agent_timeout_secs else {
+            return Ok(()); // ausente ⇒ el default built-in, ya válido
+        };
+        if (AGENT_TIMEOUT_MIN_SECS..=AGENT_TIMEOUT_MAX_SECS).contains(&secs) {
+            return Ok(());
+        }
+        Err(ConfigError::AgentTimeoutOutOfRange {
+            got: secs,
+            min: AGENT_TIMEOUT_MIN_SECS,
+            max: AGENT_TIMEOUT_MAX_SECS,
+        })
+    }
+
+    /// Rechaza un cap de salida por debajo del mínimo viable (REQ-A11b).
+    ///
+    /// # Errors
+    /// [`ConfigError::OutputCapTooSmall`] con el valor recibido y el mínimo.
+    fn validate_output_cap(&self) -> Result<(), ConfigError> {
+        let Some(cap) = self.tool_result_cap_bytes else {
+            return Ok(());
+        };
+        let min = min_viable_output_cap();
+        if cap < min {
+            return Err(ConfigError::OutputCapTooSmall { got: cap, min });
+        }
+        Ok(())
+    }
+
+    /// Provider efectivo del agente principal: clave de raíz, o el default built-in.
+    ///
+    /// **Infalible por precondición:** [`Self::validate_vocabulary`] ya corrió en
+    /// [`Self::from_toml_str`]/`load()`, así que el único `None` posible es el de
+    /// ausente-o-vacío.
+    // Narrow allow: the CURRENT principal-provider path still resolves via the legacy
+    // `resolve_provider`/`DEFAULT_PROVIDER` chain (untouched in this task, see
+    // `resolve_openai_base_url`'s doc comment); this accessor is consumed once that
+    // chain migrates onto `ProviderKind` in Fase 4. Covered by
+    // `blank_string_keys_are_absent_not_invalid` and `magi_kind_inherits_from_root_provider_when_absent`.
+    #[allow(dead_code)]
+    #[must_use]
+    pub fn effective_provider(&self) -> ProviderKind {
+        ProviderKind::parse(self.provider.as_deref().unwrap_or_default())
+            .unwrap_or(None)
+            .unwrap_or(ProviderKind::Ollama)
+    }
+
+    /// Modo declarado en `[magi].default_mode`, o `None` si está ausente/vacío (REQ-A15).
+    ///
+    /// **Devuelve `Option`, no `Result`, a propósito.** Con `Result`, cada llamador
+    /// terminaría escribiendo `.ok().flatten()` y tragándose el `ConfigError` —
+    /// convirtiendo un `default_mode = "banana"` en "no hay modo declarado, inferilo". Un
+    /// valor inválido muere en `load()`/`from_toml_str()`; para cuando alguien llama acá,
+    /// la única respuesta posible ya es "sí, este modo" o "no hay ninguno".
+    ///
+    /// Misma precondición que [`Self::effective_provider`].
+    // Narrow allow: consumed by mode routing in Fase 2, not this task. Covered by
+    // `effective_default_mode_follows_the_same_blank_is_absent_rule`.
+    #[allow(dead_code)]
+    #[must_use]
+    pub fn effective_default_mode(&self) -> Option<Mode> {
+        <Mode as ModeExt>::parse_config_value(self.magi.default_mode.as_deref().unwrap_or_default())
+            .unwrap_or(None)
+    }
+
+    /// `kind` del trío: declarado, o **heredado** del principal (REQ-A01b).
+    ///
+    /// La herencia NO es heurística: una heurística adivina a partir de un dato observado
+    /// (p. ej. el puerto); la herencia lee un valor declarado. No hay nada que adivinar mal.
+    ///
+    /// Misma precondición que [`Self::effective_provider`].
+    // Narrow allow: consumed by the native trio construction in Fase 4, not this task.
+    // Covered by `magi_kind_inherits_from_root_provider_when_absent`.
+    #[allow(dead_code)]
+    #[must_use]
+    pub fn effective_magi_kind(&self) -> ProviderKind {
+        ProviderKind::parse(self.magi.kind.as_deref().unwrap_or_default())
+            .unwrap_or(None)
+            .unwrap_or_else(|| self.effective_provider())
+    }
+
+    /// `true` si el trío corre en un endpoint o un kind distintos del principal.
+    ///
+    /// **Se decide sobre lo DECLARADO, no comparando URLs resueltas.** Dos plantillas
+    /// distintas pueden resolver al mismo host —una con credenciales del vault y otra sin
+    /// ellas— y comparar el resultado diría "no divergen" sobre una configuración que sí
+    /// lo hace. Lo que importa acá es la intención del operador.
+    // Narrow allow: consumed by the REQ-A07c divergence notice in Fase 4, not this
+    // task. Covered by `magi_endpoint_diverges_when_the_trio_declares_its_own_kind_or_base_url`.
+    #[allow(dead_code)]
+    #[must_use]
+    pub fn magi_endpoint_diverges(&self) -> bool {
+        let declara_url = self
+            .magi
+            .base_url
+            .as_deref()
+            .is_some_and(|s| !s.trim().is_empty());
+        let declara_kind = self
+            .magi
+            .kind
+            .as_deref()
+            .is_some_and(|s| !s.trim().is_empty());
+        declara_url || declara_kind
+    }
+
+    /// Cap de ENTRADA de magi-rs, previo al `max_input_len` de magi-core (REQ-A11b).
+    ///
+    /// Criterio del número: **costo, no capacidad**. magi-core ya saltea los modelos donde
+    /// el prompt no entra, así que esto no protege al modelo — acota el gasto, y el
+    /// payload se paga por tres porque va a los tres mages.
+    // Narrow allow: consumed by the consult tool's input cap in a later fase, not this
+    // task. Covered by `effective_max_query_bytes_falls_back_to_the_built_in_when_absent`.
+    #[allow(dead_code)]
+    #[must_use]
+    pub fn effective_max_query_bytes(&self) -> usize {
+        self.magi
+            .max_query_bytes
+            .unwrap_or(magi_rs::magi::MAX_QUERY_BYTES)
+    }
+
+    /// Cap de SALIDA del reporte, en las TRES rutas (REQ-A11b).
+    ///
+    /// **Vive en la raíz y no en `[headless]`**: bajo `[headless]` cubriría solo el modo
+    /// por lotes y dejaría suelto el interactivo, que es justo donde el reporte se
+    /// re-envía en cada turno de una sesión larga. Un cap que protege el caso barato y no
+    /// el caro protege el caso equivocado.
+    // Narrow allow: consumed by the three-route output-cap wiring in Fase 6, not this
+    // task. Covered by `effective_tool_result_cap_falls_back_to_the_built_in_when_absent`.
+    #[allow(dead_code)]
+    #[must_use]
+    pub fn effective_tool_result_cap(&self) -> usize {
+        self.tool_result_cap_bytes
+            .unwrap_or(magi_rs::magi::TOOL_RESULT_CAP_BYTES)
+    }
+
+    /// Endpoint del sistema: raíz declarada, o el default built-in.
+    ///
+    /// Devuelve la PLANTILLA, no un `&str` ya usable: resolver credenciales exige el
+    /// vault, y ese es el único camino a un endpoint utilizable (REQ-A16c).
+    ///
+    /// # Errors
+    /// [`EndpointError`] si el valor declarado no es una plantilla válida (credencial
+    /// literal, placeholder desconocido, o URL irrecorrible). Ver
+    /// [`magi_rs::magi::endpoint::EndpointTemplate::parse`].
+    pub fn effective_base_url(&self) -> Result<EndpointTemplate, EndpointError> {
+        EndpointTemplate::parse(
+            self.base_url
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .unwrap_or(crate::defaults::DEFAULT_OPENAI_BASE_URL),
+        )
+    }
+
+    /// Endpoint del trío: override de `[magi].base_url`, o herencia del sistema.
+    ///
+    /// # Errors
+    /// Ver [`Self::effective_base_url`].
+    // Narrow allow: consumed by the native trio construction in Fase 4, not this task.
+    // Covered by `base_url_inherits_from_root_and_sections_override_it`.
+    #[allow(dead_code)]
+    pub fn effective_magi_base_url(&self) -> Result<EndpointTemplate, EndpointError> {
+        match self
+            .magi
+            .base_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            Some(own) => EndpointTemplate::parse(own),
+            None => self.effective_base_url(), // herencia, ya validada
+        }
+    }
+
+    /// Endpoint del embedder: override de `[embedding].base_url`, o herencia del sistema
+    /// (REQ-A21 — cambio de comportamiento respecto de v0.11.0, ver
+    /// [`crate::memory::config::EmbeddingConfig::base_url`]).
+    ///
+    /// # Errors
+    /// Ver [`Self::effective_base_url`].
+    pub fn effective_embedding_base_url(&self) -> Result<EndpointTemplate, EndpointError> {
+        match self
+            .embedding
+            .base_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            Some(own) => EndpointTemplate::parse(own),
+            None => self.effective_base_url(), // herencia
+        }
     }
 
     /// Loads `<dir>/magi.toml`. Returns `(config, Option<warning>)`. Absent → defaults,
     /// no warning. Malformed/unknown-field → defaults + a warning string (main.rs
     /// surfaces it as a startup notice — no panic, no silent stderr-only loss).
+    ///
+    /// **Firma sin cambios en Task 1.1** — se vuelve falible en Task 1.4, junto con el
+    /// cableado de `Workspace::config_path()` y los dos call sites de `main.rs`. Los
+    /// internos sí cambian: `Self::from_toml_str` ahora devuelve `Result<Self,
+    /// ConfigError>` en vez de `Result<Self, toml::de::Error>`, y por lo tanto un
+    /// `provider`/`[magi].kind`/`[magi].default_mode` inválido cae hoy en el MISMO camino
+    /// que un TOML malformado (defaults + warning) — no en un error fatal. Ese hueco es
+    /// deliberado y temporal: se cierra en Task 1.4, que hace `load()` falible y agrega su
+    /// propia cobertura de esta misma propiedad contra `load()`.
     ///
     /// Joins `dir` with the literal filename `magi.toml`. Callers should pass a
     /// canonical directory (e.g., from `env::current_dir()?`) so the resolution
@@ -174,9 +673,19 @@ pub fn resolve_provider(config: &MagiConfig, env_provider: Option<&str>) -> Stri
         .unwrap_or_else(|| crate::defaults::DEFAULT_PROVIDER.into())
 }
 
-/// env `OPENAI_BASE_URL` > TOML `[openai].base_url` > `DEFAULT_OPENAI_BASE_URL` (RF-2).
+/// env `OPENAI_BASE_URL` > TOML root `base_url` > `DEFAULT_OPENAI_BASE_URL` (RF-2).
 ///
 /// The no-config default points at local Ollama (`http://localhost:11434/v1`).
+///
+/// **Sigue siendo el resolutor "legacy" del provider principal actual** (el que
+/// construye `build_openai_provider` en `main.rs`), no el nuevo trío nativo de MS2 —
+/// que se cablea en una fase posterior. Por eso lee el campo `base_url` de raíz
+/// directamente en vez de pasar por [`MagiConfig::effective_base_url`]: esa función
+/// valida la plantilla contra REQ-A16c (placeholders `[user]:[password]`) y exige
+/// resolverla contra el vault, y este resolutor infalible (`-> String`) no tiene ni el
+/// vault ni un canal de error para eso todavía. La resolución de placeholders para ESTE
+/// call site queda para la tarea que efectivamente cablee el vault en la construcción
+/// del provider — ver el informe de Task 1.1.
 ///
 /// # Arguments
 /// * `config` - Parsed `MagiConfig`.
@@ -187,7 +696,7 @@ pub fn resolve_provider(config: &MagiConfig, env_provider: Option<&str>) -> Stri
 pub fn resolve_openai_base_url(config: &MagiConfig, env_base_url: Option<&str>) -> String {
     env_base_url
         .map(str::to_string)
-        .or_else(|| config.openai.base_url.clone())
+        .or_else(|| config.base_url.clone())
         .unwrap_or_else(|| crate::defaults::DEFAULT_OPENAI_BASE_URL.into())
 }
 
@@ -254,14 +763,14 @@ mod tests {
 
     #[test]
     fn test_parses_full_config() {
+        // `provider = "openai"` and `[openai].base_url` are both v0.11.0 shapes (Task
+        // 1.1 breaks both, REQ-A21/A01b) — the root-level `base_url` and the
+        // `ollama`/`openai-compat`/`anthropic` vocabulary replace them.
         let c = MagiConfig::from_toml_str(
-            "provider = \"openai\"\n[openai]\nbase_url = \"http://localhost:11434/v1\"\nmodel = \"phi4-mini\"\n[anthropic]\nmodel = \"claude-sonnet-4-6\"\n",
+            "provider = \"ollama\"\nbase_url = \"http://localhost:11434/v1\"\n[openai]\nmodel = \"phi4-mini\"\n[anthropic]\nmodel = \"claude-sonnet-4-6\"\n",
         ).unwrap();
-        assert_eq!(c.provider.as_deref(), Some("openai"));
-        assert_eq!(
-            c.openai.base_url.as_deref(),
-            Some("http://localhost:11434/v1")
-        );
+        assert_eq!(c.provider.as_deref(), Some("ollama"));
+        assert_eq!(c.base_url.as_deref(), Some("http://localhost:11434/v1"));
         assert_eq!(c.openai.model.as_deref(), Some("phi4-mini"));
         assert_eq!(c.anthropic.model.as_deref(), Some("claude-sonnet-4-6"));
     }
@@ -298,10 +807,13 @@ mod tests {
 
     #[test]
     fn test_load_reads_file() {
+        // Task 1.1: `"openai"` is no longer a valid `provider` value (REQ-A01b) —
+        // `"anthropic"` exercises the same "a real value round-trips through load()"
+        // property without depending on the retired vocabulary.
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("magi.toml"), "provider = \"openai\"").unwrap();
+        std::fs::write(dir.path().join("magi.toml"), "provider = \"anthropic\"").unwrap();
         let (c, warn) = MagiConfig::load(dir.path());
-        assert_eq!(c.provider.as_deref(), Some("openai"));
+        assert_eq!(c.provider.as_deref(), Some("anthropic"));
         assert!(warn.is_none());
     }
 
@@ -336,11 +848,9 @@ mod tests {
     #[test]
     fn test_resolve_openai_base_url_precedence() {
         use crate::defaults::DEFAULT_OPENAI_BASE_URL;
+        // `base_url` moved from `[openai]` to root in Task 1.1 (REQ-A21).
         let c = MagiConfig {
-            openai: OpenAiConfig {
-                base_url: Some("http://toml/v1".into()),
-                model: None,
-            },
+            base_url: Some("http://toml/v1".into()),
             ..Default::default()
         };
         assert_eq!(
@@ -370,7 +880,6 @@ mod tests {
         // S-3: env/TOML still win
         let c = MagiConfig {
             openai: OpenAiConfig {
-                base_url: None,
                 model: Some("phi4-mini".into()),
             },
             ..Default::default()
@@ -427,7 +936,7 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
-    // Task 1: MagiModelsConfig parsing tests (S-1, S-2, S-3)
+    // Task 1: MagiSectionConfig parsing tests (S-1, S-2, S-3)
     // -------------------------------------------------------------------------
 
     #[test]
@@ -446,7 +955,7 @@ mod tests {
     fn test_absent_magi_section_is_default() {
         // S-2
         let c = MagiConfig::from_toml_str("provider = \"anthropic\"").unwrap();
-        assert_eq!(c.magi, MagiModelsConfig::default());
+        assert_eq!(c.magi, MagiSectionConfig::default());
     }
 
     #[test]
@@ -459,7 +968,7 @@ mod tests {
 
     /// Default `[magi]` section (absent or empty) must have `auto_approve = false`.
     ///
-    /// RED: fails until `auto_approve` is added to `MagiModelsConfig`.
+    /// Historical: added when `auto_approve` first landed on this section (now `MagiSectionConfig`).
     #[test]
     fn test_magi_auto_approve_defaults_to_false() {
         let c = MagiConfig::from_toml_str("").unwrap();
@@ -477,7 +986,7 @@ mod tests {
 
     /// `[magi] auto_approve = true` must parse to `true`.
     ///
-    /// RED: fails until `auto_approve` is added to `MagiModelsConfig`.
+    /// Historical: added when `auto_approve` first landed on this section (now `MagiSectionConfig`).
     #[test]
     fn test_magi_auto_approve_true_parses() {
         let c = MagiConfig::from_toml_str("[magi]\nauto_approve = true").unwrap();
@@ -588,6 +1097,7 @@ mod tests {
         let c = MagiConfig::from_toml_str("").unwrap();
         assert_eq!(c.headless, HeadlessConfig::default());
     }
+
     // -------------------------------------------------------------------------
     // Task 1.1: base_url to root + unified provider vocabulary (REQ-A01b, A12, A21)
     // -------------------------------------------------------------------------

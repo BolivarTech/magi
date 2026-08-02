@@ -6,7 +6,7 @@
 //! and the static-path notice. Isolates the `magi_core::schema::AgentName`
 //! coupling and the `"{backend}-{agent}"` naming so `main.rs` stays thin glue.
 
-use crate::config::{resolve_magi_override, MagiModelsConfig};
+use crate::config::{resolve_magi_override, MagiSectionConfig};
 use magi_core::schema::AgentName;
 
 /// Env-var model overrides for the three MAGI agents. Named fields (no positional
@@ -54,7 +54,7 @@ fn default_magi_model(agent: AgentName) -> &'static str {
 /// * `env`           - Env-var overrides per agent.
 pub fn resolve_magi_adapter_specs(
     backend_label: &str,
-    cfg: &MagiModelsConfig,
+    cfg: &MagiSectionConfig,
     env: &MagiEnvModels,
 ) -> Vec<MagiAdapterSpec> {
     [
@@ -107,12 +107,12 @@ pub fn static_override_notice(is_static: bool, has_overrides: bool) -> Option<St
 mod tests {
     use super::*;
 
-    fn cfg(m: Option<&str>, b: Option<&str>, c: Option<&str>) -> MagiModelsConfig {
-        MagiModelsConfig {
+    fn cfg(m: Option<&str>, b: Option<&str>, c: Option<&str>) -> MagiSectionConfig {
+        MagiSectionConfig {
             melchior_model: m.map(str::to_string),
             balthasar_model: b.map(str::to_string),
             caspar_model: c.map(str::to_string),
-            auto_approve: false,
+            ..MagiSectionConfig::default()
         }
     }
 
@@ -121,7 +121,7 @@ mod tests {
         // S-5: trigger false
         let specs = resolve_magi_adapter_specs(
             "anthropic",
-            &MagiModelsConfig::default(),
+            &MagiSectionConfig::default(),
             &MagiEnvModels::default(),
         );
         assert!(specs.is_empty());
@@ -181,7 +181,7 @@ mod tests {
         use crate::defaults::{DEFAULT_MAGI_BALTHASAR, DEFAULT_MAGI_CASPAR, DEFAULT_MAGI_MELCHIOR};
         let specs = resolve_magi_adapter_specs(
             "openai",
-            &MagiModelsConfig::default(),
+            &MagiSectionConfig::default(),
             &MagiEnvModels::default(),
         );
         assert_eq!(specs.len(), 3);
@@ -198,7 +198,7 @@ mod tests {
         // S-5: anthropic + no overrides → 0 specs (share principal; no Ollama defaults)
         let specs = resolve_magi_adapter_specs(
             "anthropic",
-            &MagiModelsConfig::default(),
+            &MagiSectionConfig::default(),
             &MagiEnvModels::default(),
         );
         assert!(specs.is_empty());

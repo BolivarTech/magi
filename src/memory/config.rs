@@ -347,9 +347,17 @@ pub struct EmbeddingConfig {
     /// Provider kind; reuses the OpenAI-compatible path. Default `"openai"`.
     #[serde(default = "d::emb_provider")]
     pub provider: String,
-    /// Endpoint base URL. Default local Ollama `"http://localhost:11434/v1"`.
-    #[serde(default = "d::emb_base_url")]
-    pub base_url: String,
+    /// Endpoint base URL. `None` ⇒ **inherits** the root `base_url` of `magi.toml`
+    /// (REQ-A21), which itself falls back to the Ollama default when absent.
+    ///
+    /// **Was a plain `String` with a default through v0.11.0** — that meant this field
+    /// ALWAYS had a value and could never distinguish "not declared" from "declared as
+    /// the Ollama default," so it silently pinned the embedder to `localhost:11434`
+    /// even when the root `base_url` pointed elsewhere. `Option<String>` is what makes
+    /// the inheritance representable: absent here means "ask the root," not "use the
+    /// Ollama default directly." Not a breaking change on its own — a file that
+    /// declares `[embedding].base_url` keeps meaning exactly what it said.
+    pub base_url: Option<String>,
     /// Embedding model id. Default `"nomic-embed-text-v2-moe:latest"` (see
     /// [`crate::defaults::DEFAULT_EMBEDDING_MODEL`] — single source of truth).
     #[serde(default = "d::emb_model")]
@@ -372,7 +380,11 @@ impl EmbeddingConfig {
     /// misconfigured values as a startup notice rather than a runtime failure.
     ///
     /// # Rules
-    /// - `base_url` must be non-empty (a missing URL would silently fail every embed request).
+    /// - `base_url` has **no non-empty check**: it is now `Option<String>` (REQ-A21),
+    ///   and `None`/blank both resolve through `MagiConfig::effective_embedding_base_url`,
+    ///   which treats blank exactly like absent (falls back to the inherited/default
+    ///   endpoint). A blank `Some("")` here can never reach an embed request as an
+    ///   empty URL, so there is nothing left for this validator to catch.
     /// - `model` must be non-empty (required by every openai-compat `/embeddings` call).
     /// - `provider` must be non-empty (the route dispatcher key; empty = ambiguous).
     /// - `dim = 0` is **valid** and means autodetect from the first response.
@@ -380,11 +392,6 @@ impl EmbeddingConfig {
     /// # Errors
     /// Returns `Err(MemoryError::Config(_))` on the first invalid field found.
     pub fn validate(&self) -> Result<(), MemoryError> {
-        if self.base_url.is_empty() {
-            return Err(MemoryError::Config(
-                "embedding.base_url must not be empty".into(),
-            ));
-        }
         if self.model.is_empty() {
             return Err(MemoryError::Config(
                 "embedding.model must not be empty".into(),
@@ -417,7 +424,14 @@ impl Default for EmbeddingConfig {
     fn default() -> Self {
         Self {
             provider: d::emb_provider(),
-            base_url: d::emb_base_url(),
+            // `None`, NOT `Some(d::emb_base_url())`: a whole-struct default (no
+            // `[embedding]` section at all) must be indistinguishable from a
+            // partially-declared section where `base_url` was simply omitted — both
+            // have to inherit the root `base_url` (REQ-A21). Serde already gives a
+            // missing `Option<String>` field `None` for free when `[embedding]` IS
+            // present but this key is absent from it; hard-coding `Some(...)` here
+            // would make the two cases disagree.
+            base_url: None,
             model: d::emb_model(),
             dim: d::emb_dim(),
             query_prefix: d::query_prefix(),
@@ -430,7 +444,11 @@ impl Default for EmbeddingConfig {
 /// `serde(default = ...)` and `Default`, so a bare config and a partial section
 /// resolve identically (single source of truth). Constants are centralized in
 /// `crate::defaults` in the refactor pass.
-mod d {
+///
+/// `pub(crate)`, not private: `emb_base_url` is reused by
+/// `crate::defaults::render_default_magi_toml` (Task 1.1) to show the effective
+/// `[embedding]` default without duplicating the `DEFAULT_OPENAI_BASE_URL` literal (B3).
+pub(crate) mod d {
     pub fn mode() -> String {
         "selective".into()
     }
@@ -530,8 +548,14 @@ mod d {
     pub fn emb_provider() -> String {
         "openai".into()
     }
+    /// The text shown as the `[embedding]` default in generated `magi.toml` (Task 1.1,
+    /// B3): references [`crate::defaults::DEFAULT_OPENAI_BASE_URL`] instead of
+    /// duplicating the literal, so the two values agree by construction rather than by
+    /// coincidence. **No longer wired into [`super::EmbeddingConfig::default`]** — that
+    /// field is `None` so it can inherit the root `base_url` (REQ-A21); this function's
+    /// only remaining consumer is `crate::defaults::render_default_magi_toml`.
     pub fn emb_base_url() -> String {
-        "http://localhost:11434/v1".into()
+        crate::defaults::DEFAULT_OPENAI_BASE_URL.into()
     }
     pub fn emb_model() -> String {
         crate::defaults::DEFAULT_EMBEDDING_MODEL.into()
@@ -1101,7 +1125,8 @@ mod tests {
 
     #[test]
     fn test_absent_memory_section_uses_documented_defaults() {
-        let c = MagiConfig::from_toml_str("provider = \"openai\"").unwrap();
+        // Task 1.1: `"openai"` is no longer a valid `provider` value (REQ-A01b).
+        let c = MagiConfig::from_toml_str("provider = \"anthropic\"").unwrap();
         assert_eq!(c.memory.mode, "selective");
         assert_eq!(c.memory.chars_per_token, 3.5);
         assert_eq!(c.memory.safety_margin_ratio, 0.1);
@@ -1123,16 +1148,22 @@ mod tests {
 
     // ── H2: EmbeddingConfig::validate() ─────────────────────────────────────────
 
-    /// H2: `EmbeddingConfig::validate()` rejects an empty `base_url`.
+    /// Task 1.1 (REQ-A21): `base_url` became `Option<String>` so it can inherit the
+    /// root `base_url`. `validate()` no longer has an empty-`base_url` rule to enforce —
+    /// `None` is now the ordinary "not declared, inherit" state, and `Some(String::new())`
+    /// degrades harmlessly through `MagiConfig::effective_embedding_base_url`'s own
+    /// blank-is-absent handling (it never reaches an embed request as an empty URL).
+    /// This test replaces the old H2 "rejects an empty base_url" guard with the
+    /// corresponding positive assertion: absence is valid, not an error.
     #[test]
-    fn test_embedding_validate_rejects_empty_base_url() {
+    fn test_embedding_validate_accepts_absent_base_url() {
         let cfg = EmbeddingConfig {
-            base_url: String::new(),
+            base_url: None,
             ..EmbeddingConfig::default()
         };
         assert!(
-            matches!(cfg.validate(), Err(MemoryError::Config(_))),
-            "H2: empty base_url must be rejected"
+            cfg.validate().is_ok(),
+            "an absent base_url must validate — it means \"inherit the root\", not \"missing\""
         );
     }
 
