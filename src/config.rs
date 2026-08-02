@@ -10,13 +10,14 @@
 
 mod migrate;
 
+use std::path::Path;
+
 use magi_core::schema::{AgentName, Mode};
 use magi_rs::magi::endpoint::{EndpointError, EndpointTemplate};
 use magi_rs::magi::kind::{ProviderKind, ProviderKindParseError};
 use magi_rs::magi::mode::{ModeExt, ModeParseError};
 use magi_rs::magi::{min_viable_output_cap, AGENT_TIMEOUT_MAX_SECS, AGENT_TIMEOUT_MIN_SECS};
 use serde::Deserialize;
-use std::path::Path;
 
 /// Errores de configuración de `magi.toml` (Task 1.1, REQ-A01b/A04/A11b/A21b).
 ///
@@ -124,14 +125,50 @@ impl From<ModeParseError> for ConfigError {
 /// \`provider\`"` — el NOMBRE del campo rechazado, nunca su valor, porque
 /// `deny_unknown_fields` rechaza la clave antes de mirar el tipo del valor.
 ///
-/// **Trade-off aceptado:** `message()` no incluye línea/columna, así que un error de
-/// sintaxis genuino (no relacionado con un secreto) pierde esa ubicación. Se prefiere
-/// igual: seguridad es una de las cinco categorías que nunca se difieren como residual,
-/// y una discrepancia de tipo en un campo NO-secreto (p. ej. `agent_timeout_secs = "x"`)
-/// también podría, en principio, ecoar un valor en `message()` — cerrar el camino de raíz
-/// (nunca mostrar el extracto de fuente) es más robusto que enumerar campos "seguros".
-fn safe_parse_error(e: &toml::de::Error) -> String {
-    e.message().to_string()
+/// **La posición SE RECUPERA (fix round 2, I4) — solo el extracto quedaba prohibido.**
+/// `message()` también descarta línea/columna, y SC-A21g exige que un error de
+/// sintaxis nombre una posición. `toml::de::Error::span()` da el rango de BYTES del
+/// error sin ningún contenido — se recorre `raw` contando saltos de línea hasta ese
+/// byte (nunca se rebana ni se imprime `raw`), así que la posición no puede
+/// reintroducir el leak que esta función existe para evitar.
+///
+/// Seguridad sigue siendo una de las cinco categorías que nunca se difieren como
+/// residual, y una discrepancia de tipo en un campo NO-secreto (p. ej.
+/// `agent_timeout_secs = "x"`) también podría, en principio, ecoar un valor en
+/// `message()` — cerrar el camino de raíz (nunca mostrar el extracto de fuente) sigue
+/// siendo más robusto que enumerar campos "seguros"; eso no cambia acá.
+fn safe_parse_error(e: &toml::de::Error, raw: &str) -> String {
+    let message = e.message();
+    match e.span() {
+        Some(span) => {
+            let (line, column) = line_col_of(raw, span.start);
+            format!("{message} (line {line}, column {column})")
+        }
+        None => message.to_string(),
+    }
+}
+
+/// Posición 1-indexada `(línea, columna)` del byte `offset` en `raw`.
+///
+/// **Nunca devuelve nada de lo que hay EN `raw`** — solo cuenta caracteres y saltos
+/// de línea hasta `offset`, así que no puede reintroducir el extracto de fuente que
+/// [`safe_parse_error`] existe para suprimir. Sin `indexing_slicing`/`string_slice`:
+/// recorre por `char_indices()`, nunca rebana `raw` por posición.
+fn line_col_of(raw: &str, offset: usize) -> (usize, usize) {
+    let mut line = 1usize;
+    let mut column = 1usize;
+    for (idx, ch) in raw.char_indices() {
+        if idx >= offset {
+            break;
+        }
+        if ch == '\n' {
+            line += 1;
+            column = 1;
+        } else {
+            column += 1;
+        }
+    }
+    (line, column)
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
@@ -369,7 +406,8 @@ impl MagiConfig {
                 migrate::render_migration_error(&found),
             ));
         }
-        let cfg: Self = toml::from_str(s).map_err(|e| ConfigError::Parse(safe_parse_error(&e)))?;
+        let cfg: Self =
+            toml::from_str(s).map_err(|e| ConfigError::Parse(safe_parse_error(&e, s)))?;
         cfg.validate_vocabulary()?;
         Ok(cfg)
     }
@@ -452,6 +490,15 @@ impl MagiConfig {
     #[allow(dead_code)]
     #[must_use]
     pub fn effective_provider(&self) -> ProviderKind {
+        // I5 (review round 2): restored. `MagiConfig`'s fields are `pub` and it
+        // derives `Default`, so `MagiConfig { provider: Some("banana".into()),
+        // ..Default::default() }` compiles and, without this, would silently
+        // return `Ollama` — the precondition this function's own doc calls
+        // "infalible por precondición" is exactly what this checks.
+        debug_assert!(
+            self.validate_vocabulary().is_ok(),
+            "load() debe haber validado"
+        );
         ProviderKind::parse(self.provider.as_deref().unwrap_or_default())
             .unwrap_or(None)
             .unwrap_or(ProviderKind::Ollama)
@@ -471,6 +518,12 @@ impl MagiConfig {
     #[allow(dead_code)]
     #[must_use]
     pub fn effective_default_mode(&self) -> Option<Mode> {
+        // I5 (review round 2): restored — same precondition/rationale as
+        // `effective_provider`'s `debug_assert!`.
+        debug_assert!(
+            self.validate_vocabulary().is_ok(),
+            "load() debe haber validado"
+        );
         <Mode as ModeExt>::parse_config_value(self.magi.default_mode.as_deref().unwrap_or_default())
             .unwrap_or(None)
     }
@@ -667,6 +720,19 @@ impl MagiConfig {
 // from silently breaking every `provider_kind == "openai"` comparison the moment a
 // `magi.toml` (or a freshly `magi init`-scaffolded one) declares `"ollama"` instead of
 // the legacy `"openai"`.
+//
+// `pub(crate)`: `main.rs`'s `prepare_headless` also needs it directly, to normalize
+// `effective_provider`/`resolved.provider` — the CLI `--provider`/envelope `provider`
+// paths (review round 2, I2), which don't go through `resolve_provider` at all.
+//
+// m9 (review round 2): this shim is ALSO why `MAGI_PROVIDER=openai` still works —
+// `legacy_backend_label`'s `other => other.to_string()` arm passes it through
+// unchanged, since it's already the legacy label. Meanwhile `provider = "openai"` in
+// the TOML is a hard parse error (`validate_vocabulary` only ever sees the TOML, never
+// the env var). That asymmetry is intentional and required for the shim to keep old
+// env-var habits working, but it is exactly the kind of thing that should NOT survive
+// past the shim's own lifetime — retire this note along with the two functions below
+// when Task 4.1 lands.
 /// Normalizes a REQ-A01b vocabulary value onto the legacy backend label the untouched
 /// `main.rs` string-comparison chain still checks against.
 ///
@@ -678,7 +744,7 @@ impl MagiConfig {
 /// unchanged too — this is a targeted map for the three new values, not a validator;
 /// `MagiConfig::from_toml_str`'s `validate_vocabulary` is what rejects a genuinely
 /// unrecognized `provider`/`[magi].kind`.
-fn legacy_backend_label(value: &str) -> String {
+pub(crate) fn legacy_backend_label(value: &str) -> String {
     match value {
         "ollama" | "openai-compat" => "openai".to_string(),
         other => other.to_string(),
@@ -1420,6 +1486,8 @@ mod tests {
         };
         assert_eq!(declared.effective_tool_result_cap(), above_min);
     }
+
+    // -------------------------------------------------------------------------
     // Fix round 2 (coordinator review, 2026-08-02): I3/I4/I5/m8 — B13 coverage
     // this task's own new functions shipped without.
     // -------------------------------------------------------------------------

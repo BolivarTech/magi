@@ -19,8 +19,8 @@ use crate::agent::Agent;
 // It is DISTINCT from `magi_core::orchestrator::MagiConfig` — the latter is NEVER
 // imported here, avoiding the name collision.
 use crate::config::{
-    resolve_anthropic_model, resolve_openai_base_url, resolve_openai_model, resolve_provider,
-    HeadlessConfig, MagiConfig,
+    legacy_backend_label, resolve_anthropic_model, resolve_openai_base_url, resolve_openai_model,
+    resolve_provider, HeadlessConfig, MagiConfig,
 };
 use crate::headless_runner::{resolve_run_timeout, run_consult, run_query};
 use crate::memory::clock::SystemClock;
@@ -50,10 +50,12 @@ use magi_rs::headless::resolution::{
 };
 use magi_rs::headless::types::{ErrorKind, RunOutcome, StopReason};
 use magi_rs::headless::HeadlessError;
+use magi_rs::magi::endpoint::Scope;
 use magi_rs::vault::{
     check_strength, create_passphrase, diagnose, format_diagnose_report, harden_process,
     rekey_envelope, resolve_passphrase, run_vault_cmd, strip_trailing_newline, wire,
-    PassphrasePrompt, SecretStore, TtyIo, TtyPrompt, VaultCmd, VaultError, PASSPHRASE_ENV,
+    PassphrasePrompt, SecretEntry, SecretStore, TtyIo, TtyPrompt, VaultCmd, VaultError,
+    PASSPHRASE_ENV,
 };
 use std::env;
 use std::io::Write as _;
@@ -1319,6 +1321,7 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
                 concrete_store,
                 &magi_config,
                 embed_key,
+                secret_store.as_ref(),
                 &mut startup_notices,
             )
             .await?;
@@ -1436,14 +1439,100 @@ fn build_magi_orchestrator(
     })?))
 }
 
+/// A [`SecretStore`] that always reports "not found" — every method fails or
+/// returns empty (review round 2, C3).
+///
+/// Used by [`resolve_effective_embedding_endpoint`] when no real vault handle is
+/// in scope. `EndpointTemplate::resolve` only ever calls `get()` when the template
+/// actually declares `[user]:[password]` placeholders — a plain URL with no
+/// credentials resolves without touching the vault at all (see its own doc
+/// comment: "el caso común no paga ni un lookup"). So substituting this stub for a
+/// real vault is exactly the right defense: the common, credential-free case is
+/// unaffected, and a template that genuinely needs a vault entry fails LOUDLY
+/// (a typed [`EndpointError::MissingVaultEntry`](magi_rs::magi::endpoint::EndpointError)
+/// instead of baking unresolved placeholder text into an HTTP client.
+struct NoVaultInScope;
+
+impl SecretStore for NoVaultInScope {
+    fn set(&mut self, name: &str, _value: &str) -> Result<(), VaultError> {
+        Err(VaultError::SecretNotFound(name.to_string()))
+    }
+    fn get(&mut self, name: &str) -> Result<Zeroizing<String>, VaultError> {
+        Err(VaultError::SecretNotFound(name.to_string()))
+    }
+    fn remove(&mut self, name: &str) -> Result<(), VaultError> {
+        Err(VaultError::SecretNotFound(name.to_string()))
+    }
+    fn list(&mut self) -> Result<Vec<SecretEntry>, VaultError> {
+        Ok(Vec::new())
+    }
+    fn contains(&mut self, _name: &str) -> Result<bool, VaultError> {
+        Ok(false)
+    }
+}
+
+/// Resolves the embedder's EFFECTIVE endpoint — declared, or inherited from the
+/// root `base_url` — into a URL an HTTP client can use directly, with any
+/// `[user]:[password]` credentials substituted from the vault (REQ-A16c).
+///
+/// Review round 2 (C1/C2/C3): the code this replaces (a) gated inheritance on
+/// `base_url.is_none()`, so a blank `Some("")` skipped it and reached the embedder
+/// as an empty URL (C1); (b) discarded `effective_embedding_base_url`'s `Err` via
+/// `if let Ok`, so a malformed template (e.g. a literal credential) silently fell
+/// back to the Ollama default with no error and no notice (C2); (c) baked the
+/// unresolved TEMPLATE text — including a literal `[user]:[password]` placeholder
+/// — into the HTTP client instead of a resolved endpoint (C3). This function
+/// propagates every error instead of swallowing one, and resolves against
+/// `secret_store` when one is in scope; when it is not, resolution is attempted
+/// against [`NoVaultInScope`], which fails only when the template genuinely needs
+/// a vault entry — so this still fails LOUDLY rather than silently using
+/// unresolved placeholder text.
+///
+/// # Errors
+/// A human-readable message naming the problem: an invalid template
+/// (`effective_embedding_base_url`'s own [`EndpointError`](magi_rs::magi::endpoint::EndpointError)),
+/// or a vault entry the template needs that the current session cannot supply.
+fn resolve_effective_embedding_endpoint(
+    magi_config: &MagiConfig,
+    secret_store: Option<&SharedSecretStore>,
+) -> Result<String, String> {
+    let template = magi_config
+        .effective_embedding_base_url()
+        .map_err(|e| format!("embedding base_url is invalid: {e}"))?;
+
+    let resolution = match secret_store {
+        Some(ss) => {
+            let mut guard = ss.lock().unwrap_or_else(|p| p.into_inner());
+            template.resolve(&mut *guard, Scope::Embedding)
+        }
+        None => template.resolve(&mut NoVaultInScope, Scope::Embedding),
+    };
+
+    let resolved = resolution.map_err(|e| {
+        if secret_store.is_some() {
+            format!("embedding base_url credential error: {e}")
+        } else {
+            format!(
+                "embedding base_url needs vault-stored credentials, but no vault is open \
+                 this session: {e}"
+            )
+        }
+    })?;
+
+    Ok(resolved.as_str().to_string())
+}
+
 /// Wires an opened encrypted store into `agent` as persistent message memory
 /// plus the tiered-memory subsystem (Task 12), appending any non-fatal notices
 /// to `notices`. Shared by the TUI launch and the headless `query` path so the
 /// memory wiring lives in exactly one place (DRY).
 ///
 /// `embed_key` is the already-resolved `OPENAI_API_KEY` for the embedder
-/// (`env > vault`); the caller resolves it so this helper stays free of the
-/// secret-store plumbing.
+/// (`env > vault`); the caller resolves it so this helper stays free of most
+/// secret-store plumbing. `secret_store` (review round 2, C3) is still needed
+/// here — not just the resolved key — because [`resolve_effective_embedding_endpoint`]
+/// may need to substitute `[user]:[password]` credentials into the embedding
+/// `base_url` itself, which is a different secret than the API key.
 ///
 /// # Errors
 /// Propagates a fatal session-store error from `list_sessions`/`create_session`;
@@ -1454,6 +1543,7 @@ async fn attach_persistent_memory(
     concrete_store: EncryptedSqliteMemory,
     magi_config: &MagiConfig,
     embed_key: Option<String>,
+    secret_store: Option<&SharedSecretStore>,
     notices: &mut Vec<String>,
 ) -> anyhow::Result<()> {
     // Build the vector store from the shared connection + masked DEK. Errors
@@ -1484,20 +1574,21 @@ async fn attach_persistent_memory(
         // Task 1.1 (REQ-A21): `[embedding].base_url` is now optional and, when
         // absent, inherits the root `base_url` — a value `OpenAiCompatibleEmbedder`
         // cannot see on its own (it only receives `&EmbeddingConfig`, not
-        // `&MagiConfig`). Resolve the EFFECTIVE endpoint here and bake it into the
-        // config handed to the embedder, so the actual HTTP client and the
-        // "sending to X" notice below never disagree about where data goes. A
-        // template parse error (REQ-A16c) leaves `base_url` as-is; the embedder's
-        // own constructor falls back to the Ollama default in that case (see its
-        // doc comment).
-        let mut embedding_cfg = magi_config.embedding.clone();
-        if embedding_cfg.base_url.is_none() {
-            if let Ok(inherited) = magi_config.effective_embedding_base_url() {
-                embedding_cfg.base_url = Some(inherited.as_str().to_string());
-            }
-        }
-        // W1: new() returns Result; a failure degrades to text-only persistence.
-        match OpenAiCompatibleEmbedder::new(&embedding_cfg, embed_key) {
+        // `&MagiConfig`). Resolve the EFFECTIVE, CREDENTIAL-RESOLVED endpoint here
+        // (review round 2, C1/C2/C3 — see `resolve_effective_embedding_endpoint`'s
+        // own doc) and bake it into the config handed to the embedder, so the
+        // actual HTTP client and the "sending to X" notice below never disagree
+        // about where data goes. Any error — a malformed template or a vault
+        // entry the endpoint needs but this session can't supply — degrades to
+        // text-only persistence with a notice, same as an embedder construction
+        // failure (REQ-29): it is never silently swallowed.
+        let embedder_result = resolve_effective_embedding_endpoint(magi_config, secret_store)
+            .and_then(|url| {
+                let mut cfg = magi_config.embedding.clone();
+                cfg.base_url = Some(url);
+                OpenAiCompatibleEmbedder::new(&cfg, embed_key).map_err(|e| e.to_string())
+            });
+        match embedder_result {
             Err(err) => {
                 notices.push(format!(
                     "embedding client init failed ({err}); \
@@ -1887,6 +1978,11 @@ struct HeadlessContext {
     tier: Tier,
     /// The already-resolved embedding key (`env > vault`), for persistence.
     embed_key: Option<String>,
+    /// The vault handle wired over `memory`, if one unlocked (review round 2,
+    /// C3): `attach_persistent_memory` needs the LIVE handle, not just a
+    /// resolved key, to substitute `[user]:[password]` credentials into the
+    /// embedding `base_url` itself.
+    secret_store: Option<SharedSecretStore>,
     /// The started run log, if logging is enabled.
     run_log: Option<RunLog>,
     /// Effective headless numeric caps for this run (spec §11), resolved once in
@@ -2064,11 +2160,18 @@ async fn prepare_headless(
     // `model` still overrides `defaults.model` unconditionally inside
     // `resolve()`, and a neither-set envelope still falls back to the
     // config-default provider's default model exactly as before.
-    let effective_provider = h
-        .provider
-        .clone()
-        .or_else(|| envelope.provider.clone())
-        .unwrap_or_else(|| default_provider.clone());
+    // I2 (review round 2): `default_provider` was already normalized (it comes
+    // from `resolve_provider`), but `h.provider`/`envelope.provider` were not —
+    // `magi query --provider ollama` or an envelope `{"provider":"ollama"}`
+    // reached this comparison unmapped. `legacy_backend_label` is idempotent on
+    // an already-normalized value, so wrapping the whole precedence chain is
+    // safe for the `default_provider` fallback too.
+    let effective_provider = legacy_backend_label(
+        &h.provider
+            .clone()
+            .or_else(|| envelope.provider.clone())
+            .unwrap_or_else(|| default_provider.clone()),
+    );
     let default_model = if effective_provider == "openai" {
         resolve_openai_model(&magi_config, env::var("OPENAI_MODEL").ok().as_deref())
     } else {
@@ -2106,13 +2209,20 @@ async fn prepare_headless(
         h.allow_system_override,
         magi_config.headless.allow_system_override,
     );
-    let resolved = resolve_params(
+    let mut resolved = resolve_params(
         envelope,
         &defaults,
         &overrides,
         operator_ceiling,
         allow_system_override,
     );
+    // I2 (review round 2): same gap as `effective_provider` above —
+    // `resolve_params` applies the SAME override>envelope>defaults precedence
+    // over `h.provider`/`envelope.provider`/`default_provider`, and only the
+    // last of those was normalized. Mutating in place means `provider_kind`
+    // below AND `ctx.resolved.provider` (read directly by callers/tests) both
+    // see the normalized value.
+    resolved.provider = legacy_backend_label(&resolved.provider);
 
     // Build the principal provider from the resolved model/provider + keys.
     let provider_kind = resolved.provider.clone();
@@ -2174,6 +2284,7 @@ async fn prepare_headless(
         prompt,
         tier,
         embed_key,
+        secret_store,
         run_log,
         limits,
     })
@@ -2229,6 +2340,7 @@ async fn run_query_subcommand(
         prompt,
         tier,
         embed_key,
+        secret_store,
         memory,
         mut run_log,
         limits,
@@ -2267,9 +2379,15 @@ async fn run_query_subcommand(
     if !h.no_memory {
         if let Some(store) = memory {
             let mut notices = Vec::new();
-            if let Err(e) =
-                attach_persistent_memory(&mut agent, store, &magi_config, embed_key, &mut notices)
-                    .await
+            if let Err(e) = attach_persistent_memory(
+                &mut agent,
+                store,
+                &magi_config,
+                embed_key,
+                secret_store.as_ref(),
+                &mut notices,
+            )
+            .await
             {
                 eprintln!("error: {e}");
                 return 1;

@@ -158,20 +158,7 @@ impl OpenAiCompatibleEmbedder {
             .map_err(|_| EmbeddingError::Network)?;
         Ok(Self {
             client,
-            // `cfg.base_url` is `Option<String>` since Task 1.1 (REQ-A21): absent means
-            // "inherit the root `base_url`". This constructor only ever sees an
-            // `EmbeddingConfig` in isolation — it has no access to the root value to
-            // inherit from — so it falls back to the same Ollama default the field
-            // itself used to carry before it became optional. Callers that need real
-            // inheritance (the root `base_url` may differ from the Ollama default)
-            // must resolve it first via `MagiConfig::effective_embedding_base_url` and
-            // pass a config with `base_url` already populated; `main.rs` does this.
-            base_url: cfg
-                .base_url
-                .as_deref()
-                .unwrap_or(crate::defaults::DEFAULT_OPENAI_BASE_URL)
-                .trim_end_matches('/')
-                .to_string(),
+            base_url: effective_base_url_or_default(cfg),
             model: cfg.model.clone(),
             configured_dim: cfg.dim,
             detected_dim: AtomicUsize::new(0),
@@ -369,6 +356,29 @@ impl EmbeddingProvider for OpenAiCompatibleEmbedder {
 
 // ─── Private helpers ──────────────────────────────────────────────────────────
 
+/// Resolves `cfg.base_url` for construction: blank or absent falls back to the
+/// Ollama default (review round 2, C1 defense in depth; m6 — shared by `new` and
+/// `new_with_client` to remove the ≥3-line duplicate B3 flags).
+///
+/// This constructor only ever sees an `EmbeddingConfig` in isolation — it has no
+/// access to the root `base_url` to inherit from — so a genuinely absent OR
+/// blank value falls back to the same Ollama default the field itself carried
+/// before it became optional (`Option<String>`, Task 1.1/REQ-A21). Callers that
+/// need real root inheritance resolve it first via
+/// `MagiConfig::effective_embedding_base_url` and hand this constructor a config
+/// with `base_url` already populated (`main.rs` does this); this is the second,
+/// defensive layer for any other caller — including a future one — that hands an
+/// isolated `EmbeddingConfig` straight through with a blank `Some("")`.
+fn effective_base_url_or_default(cfg: &EmbeddingConfig) -> String {
+    cfg.base_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(crate::defaults::DEFAULT_OPENAI_BASE_URL)
+        .trim_end_matches('/')
+        .to_string()
+}
+
 /// Prepends `prefix` to `text`, reusing the allocation when the prefix is empty.
 // Narrow allow: called by embed_documents/embed_query; both are dead_code in this task.
 #[allow(dead_code)]
@@ -395,14 +405,7 @@ impl OpenAiCompatibleEmbedder {
     ) -> Self {
         Self {
             client,
-            // See the matching comment in `new` — `base_url` is `Option<String>` since
-            // Task 1.1 (REQ-A21); this test-only constructor falls back the same way.
-            base_url: cfg
-                .base_url
-                .as_deref()
-                .unwrap_or(crate::defaults::DEFAULT_OPENAI_BASE_URL)
-                .trim_end_matches('/')
-                .to_string(),
+            base_url: effective_base_url_or_default(cfg),
             model: cfg.model.clone(),
             configured_dim: cfg.dim,
             detected_dim: AtomicUsize::new(0),
