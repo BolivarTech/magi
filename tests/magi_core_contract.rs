@@ -52,6 +52,11 @@ use magi_core::rotation::ProviderProbe;
 use magi_core::schema::{AgentName, AgentOutput, Mode};
 use magi_core::verdict_markers::{VERDICT_CLOSE, VERDICT_OPEN};
 
+/// Dobles compartidos de los tests de integración (Task 0.7). Se declara acá porque este es
+/// su primer consumidor: un módulo bajo `tests/` que nadie declara **no es un target de
+/// build**, así que ni `cargo check` ni `clippy --all-targets` lo compilarían.
+mod support;
+
 /// Endpoint sintáctico para construir providers. **Nunca se contacta**: este archivo no hace
 /// I/O, solo type-checking, y un provider se construye sin abrir ninguna conexión.
 const SYNTHETIC_BASE_URL: &str = "http://127.0.0.1:11434/v1";
