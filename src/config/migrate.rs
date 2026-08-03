@@ -311,6 +311,77 @@ mod tests {
         );
     }
 
+    /// SC-A21d: el mensaje se valida contra los CUATRO archivos reales de v0.11.0.
+    ///
+    /// Un fixture escrito a mano prueba que el mensaje **se emite**; solo uno real prueba que
+    /// **alcanza**. Los cuatro fueron generados o derivados del binario publicado de v0.11.0
+    /// y verificados contra él — ver `tests/fixtures/v0.11.0/README.md`.
+    ///
+    /// Los cuatro comparten las mismas dos incompatibilidades porque las tres variantes se
+    /// derivan del `default.toml` canónico sin agregar ni quitar claves migrables.
+    #[test]
+    fn every_real_v0_11_0_fixture_reports_its_own_incompatibilities() {
+        for (name, toml) in [
+            (
+                "default",
+                include_str!("../../tests/fixtures/v0.11.0/default.toml"),
+            ),
+            (
+                "with-models",
+                include_str!("../../tests/fixtures/v0.11.0/with-models.toml"),
+            ),
+            (
+                "full",
+                include_str!("../../tests/fixtures/v0.11.0/full.toml"),
+            ),
+            (
+                "with-credentials",
+                include_str!("../../tests/fixtures/v0.11.0/with-credentials.toml"),
+            ),
+        ] {
+            let found = detect_migrations(toml);
+            assert_eq!(
+                found.len(),
+                2,
+                "{name}: esperaba provider + [openai].base_url"
+            );
+            let rendered = render_migration_error(&found);
+            assert!(rendered.contains(PROVIDER_KEY), "{name}: nombra provider");
+            assert!(rendered.contains(BASE_URL_KEY), "{name}: nombra base_url");
+        }
+    }
+
+    /// SC-A21e sobre el archivo REAL: la credencial del fixture nunca llega al mensaje.
+    ///
+    /// El test de arriba usa un TOML inline; éste usa el archivo commiteado, que es el que
+    /// un usuario tendría. Son distintos a propósito: el inline fija la regla, éste fija que
+    /// la regla sobrevive al archivo de verdad.
+    #[test]
+    fn the_real_credentials_fixture_never_leaks_its_secret() {
+        let toml = include_str!("../../tests/fixtures/v0.11.0/with-credentials.toml");
+        let rendered = render_migration_error(&detect_migrations(toml));
+        assert!(
+            !rendered.contains("s3cr3t"),
+            "la credencial del fixture no puede aparecer en el mensaje"
+        );
+        assert!(
+            rendered.contains("host"),
+            "el host sí, para que sea accionable"
+        );
+    }
+
+    /// SC-A21d, segunda mitad: **lo que el mensaje propone parsea sin error en v0.12.0**.
+    ///
+    /// Es la parte que hace útil al mensaje y la que más fácil se pudre: el TOML mínimo es un
+    /// literal, así que nada lo ata al schema salvo este test. Si una tarea posterior cambia
+    /// una clave, el consejo que le damos al usuario trabado deja de funcionar — y sin esto,
+    /// en silencio.
+    #[test]
+    fn the_minimal_config_the_error_hands_out_actually_parses_today() {
+        super::super::MagiConfig::from_toml_str(MINIMAL_VALID_CONFIG)
+            .expect("el magi.toml mínimo que el error propone debe parsear en v0.12.0");
+    }
+
     /// `line_of` devuelve 0 cuando el patrón no aparece en el texto.
     #[test]
     fn line_of_returns_zero_when_needle_is_absent() {

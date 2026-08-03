@@ -33,7 +33,7 @@ cd <tmp>/genfix && <tmp>/magi-v11/bin/magi-rs.exe --init-config
 | `default.toml` | Salida **verbatim** de `magi-rs --init-config` (4769 bytes). Canónico. |
 | `with-models.toml` | `default.toml` con los tres modelos por mage cambiados a valores no built-in. |
 | `full.toml` | `default.toml` con cinco knobs avanzados de `[memory]` y `[embedding]` descomentados. |
-| `with-credentials.toml` | `default.toml` con `[openai].base_url = "https://user:s3cr3t@host/v1"`. |
+| `with-credentials.toml` | `default.toml` con `[openai].base_url = "https://user:s3cr3t@host/v1"`, más un comentario TOML al final de esa línea con el marcador del escáner de secretos (ver abajo). |
 
 Las tres variantes se derivan de `default.toml` agregando o modificando **solo claves que el
 schema de v0.11.0 acepta** — verificado contra `git show v0.11.0:src/config.rs` y
@@ -63,9 +63,17 @@ construcción.
 ## `with-credentials.toml` contiene un secreto a propósito
 
 Lleva `s3cr3t` embebido en la `base_url`. Es exactamente lo que `tests/no_hardcoded_secrets.rs`
-busca, así que necesita una exención explícita en ese escáner. La exención es **acotada a este
-archivo**: el punto del fixture es que una credencial en una `base_url` se **redacte** en el
-mensaje de error, así que el escáner tiene que seguir vigilando todo lo demás.
+busca, así que necesita una exención explícita en ese escáner.
+
+La exención es **por línea, no por directorio**: el marcador `allow-secret-scan` va como
+comentario TOML al final de la línea de `base_url`, y `tests/fixtures` se **agregó** a los
+directorios que el escáner recorre. Excluir el directorio habría sido más simple y peor — los
+fixtures son justo la clase de archivo donde alguien pega una credencial real sin querer
+mientras los genera, así que la superficie tiene que quedar vigilada salvo en la línea donde el
+secreto es deliberado.
+
+El comentario **no altera lo que v0.11.0 parsea** —es un comentario TOML— y el archivo se
+re-verificó con el binario de v0.11.0 **después** de agregarlo, no antes.
 
 ## Regenerarlos
 
