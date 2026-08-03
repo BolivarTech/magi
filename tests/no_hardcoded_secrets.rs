@@ -211,7 +211,15 @@ fn test_no_hardcoded_secrets_in_source_tree() {
 #[test]
 fn test_no_hardcoded_secrets_in_documentation() {
     let mut hits = Vec::new();
-    for dir in ["docs", ".github"] {
+    // `tests/fixtures` holds committed sample `magi.toml` files (the v0.11.0
+    // migration fixtures, REQ-A21c). Fixtures are exactly the kind of file that
+    // can accidentally carry a real credential someone pasted while generating
+    // them, so this surface gets the same strict scan as `docs`/`.github` —
+    // the one deliberate exception (a synthetic credential in
+    // `with-credentials.toml`, needed to exercise the migration-error
+    // redaction path) is exempted line-by-line via `ALLOW_MARKER`, not by
+    // excluding the directory.
+    for dir in ["docs", ".github", "tests/fixtures"] {
         scan(Path::new(dir), &DOC_EXTENSIONS, false, true, &mut hits);
     }
     // La raíz va por lista explícita, NO recorriendo el directorio: ahí conviven

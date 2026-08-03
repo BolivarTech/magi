@@ -2097,7 +2097,7 @@ const MAX_SAFE_INPUT_BYTES: usize = usize::MAX - 1;
 /// (spec §11). Each unset `[headless]` key keeps its constant default.
 /// `max_input_bytes` is additionally clamped to [`MAX_SAFE_INPUT_BYTES`] so
 /// the downstream `+1` in `read_input_bounded` can never overflow.
-fn resolve_headless_limits(cfg: &HeadlessConfig) -> HeadlessLimits {
+fn resolve_headless_limits(cfg: &HeadlessConfig, tool_result_cap: usize) -> HeadlessLimits {
     let d = HeadlessLimits::default();
     HeadlessLimits {
         max_input_bytes: cfg
@@ -2109,7 +2109,10 @@ fn resolve_headless_limits(cfg: &HeadlessConfig) -> HeadlessLimits {
             .unwrap_or(d.full_auto_max_tool_calls),
         log_retention_runs: cfg.log_retention.unwrap_or(d.log_retention_runs),
         log_max_bytes: cfg.log_max_bytes.unwrap_or(d.log_max_bytes),
-        tool_result_cap: cfg.tool_result_cap_bytes.unwrap_or(d.tool_result_cap),
+        // Llega por parámetro y no desde `cfg`: la clave subió de `[headless]` al nivel raíz
+        // (Task 1.3, tercer patrón de REQ-A21b), así que la resuelve `MagiConfig` y esta
+        // función ya no la puede leer de su propia sección.
+        tool_result_cap,
         full_auto_timeout_secs: cfg.timeout_secs.unwrap_or(d.full_auto_timeout_secs),
     }
 }
@@ -2203,7 +2206,10 @@ async fn prepare_headless(
     // Resolved BEFORE reading input so the effective `max_input_bytes` (an
     // operator-lowered `[headless]` cap, spec §11) governs the read itself
     // rather than only the later ceiling — never the module constant alone.
-    let limits = resolve_headless_limits(&magi_config.headless);
+    let limits = resolve_headless_limits(
+        &magi_config.headless,
+        magi_config.effective_tool_result_cap(),
+    );
 
     // Read + parse the (bounded) input into an envelope (REQ-H03/H10/H29).
     let bytes = match read_headless_input(h.input.as_deref(), limits.max_input_bytes) {
@@ -2614,11 +2620,10 @@ mod tests {
             full_auto_max_tool_calls: Some(30),
             log_retention: Some(7),
             log_max_bytes: Some(1024),
-            tool_result_cap_bytes: Some(4096),
             timeout_secs: Some(120),
             ..Default::default()
         };
-        let limits = resolve_headless_limits(&cfg);
+        let limits = resolve_headless_limits(&cfg, 4096);
         assert_eq!(limits.max_input_bytes, 2048);
         assert_eq!(limits.full_auto_max_tool_calls, 30);
         assert_eq!(limits.log_retention_runs, 7);
@@ -2630,7 +2635,10 @@ mod tests {
     /// An empty `[headless]` config keeps every built-in constant default.
     #[test]
     fn test_resolve_headless_limits_defaults_when_unset() {
-        let limits = resolve_headless_limits(&HeadlessConfig::default());
+        let limits = resolve_headless_limits(
+            &HeadlessConfig::default(),
+            HeadlessLimits::default().tool_result_cap,
+        );
         assert_eq!(limits, HeadlessLimits::default());
     }
 
@@ -2646,7 +2654,7 @@ mod tests {
             max_input_bytes: Some(usize::MAX),
             ..Default::default()
         };
-        let limits = resolve_headless_limits(&cfg);
+        let limits = resolve_headless_limits(&cfg, HeadlessLimits::default().tool_result_cap);
         assert_eq!(
             limits.max_input_bytes,
             usize::MAX - 1,
@@ -2661,7 +2669,7 @@ mod tests {
             max_input_bytes: Some(2048),
             ..Default::default()
         };
-        let limits = resolve_headless_limits(&cfg);
+        let limits = resolve_headless_limits(&cfg, HeadlessLimits::default().tool_result_cap);
         assert_eq!(limits.max_input_bytes, 2048);
     }
 

@@ -5,19 +5,17 @@
 //! Pasada de validación PREVIA al parseo, para reportar todas las incompatibilidades de
 //! migración de un `magi.toml` de v0.11.0 juntas (REQ-A21b).
 //!
-//! # Stub (Task 1.1)
+//! `deny_unknown_fields` **aborta en la PRIMERA clave desconocida**, así que "todas juntas"
+//! es imposible de lograr desde el error de serde. Esta pasada lee el TOML como documento
+//! genérico **antes** de deserializar, junta los patrones conocidos y emite un solo mensaje.
+//! Sin ella el usuario paga dos ciclos de editar-arrancar-fallar.
 //!
-//! Esta tarea nace el módulo y las FIRMAS que `MagiConfig::from_toml_str` consume —
-//! `detect_migrations` y `render_migration_error` — porque esa función las llama en su
-//! cuerpo y una fase no puede consumir un símbolo que otra posterior produce. La
-//! DETECCIÓN real de los tres patrones de v0.11.0 (`provider = "openai"`,
-//! `[openai].base_url`, `[headless].tool_result_cap_bytes`) es trabajo de Task 1.3.
+//! # Deuda técnica con fecha
 //!
-//! Hasta entonces, [`detect_migrations`] siempre devuelve una colección vacía —
-//! comportamiento equivalente a "sin migraciones pendientes" — así que la rama de
-//! migración de `from_toml_str` nunca dispara todavía, y [`render_migration_error`] es
-//! inalcanzable en la práctica (se define solo porque el cuerpo de `from_toml_str` la
-//! nombra).
+//! **Se retira en v0.13.0 (MS3)**, cuando la migración deje de ser el caso común. Duplica un
+//! poco de conocimiento del schema —los patrones son sobre la forma **vieja**, que ya no está
+//! en el código— y esa duplicación se acepta a conciencia: es acotada a tres patrones y está
+//! cubierta por tests contra archivos reales de v0.11.0.
 
 #![deny(missing_docs)]
 #![deny(clippy::missing_docs_in_private_items)]
@@ -36,10 +34,90 @@
     )
 )]
 
+use magi_rs::redact::redact_url;
+use toml::Value;
+
+/// Clave raíz del proveedor en `magi.toml`.
+const PROVIDER_KEY: &str = "provider";
+
+/// Valor de `provider` en v0.11.0 que dejó de existir en v0.12.0.
+///
+/// **No se auto-migra, y es deliberado.** `"openai"` era ambiguo —podía significar un Ollama
+/// local sin credencial o un endpoint autenticado— y partir esa ambigüedad es la mitad del
+/// punto del cambio. Elegir por el usuario sería adivinar exactamente lo que D-A01 prohíbe.
+const PROVIDER_V0_11_0: &str = "openai";
+
+/// Sección `[openai]` de v0.11.0; desde v0.12.0 `base_url` no vive ahí.
+const OPENAI_SECTION: &str = "openai";
+
+/// Sección `[headless]` de v0.11.0; desde v0.12.0 `tool_result_cap_bytes` sube a raíz.
+const HEADLESS_SECTION: &str = "headless";
+
+/// Clave `base_url`, que en v0.11.0 vivía dentro de `[openai]`.
+const BASE_URL_KEY: &str = "base_url";
+
+/// Clave `tool_result_cap_bytes`, que en v0.11.0 vivía dentro de `[headless]`.
+const TOOL_RESULT_CAP_BYTES_KEY: &str = "tool_result_cap_bytes";
+
+/// Etiqueta mostrada para `[openai].base_url`.
+const OPENAI_BASE_URL_LABEL: &str = "[openai].base_url";
+
+/// Etiqueta mostrada para `[headless].tool_result_cap_bytes`.
+const HEADLESS_CAP_LABEL: &str = "[headless].tool_result_cap_bytes";
+
+/// Versión de origen de la migración.
+const VERSION_FROM: &str = "v0.11.0";
+
+/// Versión destino de la migración.
+const VERSION_TO: &str = "v0.12.0";
+
+/// Corrección para `provider = "openai"`: nombra las dos opciones y el criterio para elegir.
+const PROVIDER_CORRECTION: &str = "provider = \"ollama\"        # si apunta a un daemon Ollama local, sin credencial\n           provider = \"openai-compat\" # para OpenAI, Groq, OpenRouter y demás endpoints autenticados";
+
+/// Prefijo de la corrección de `[openai].base_url`, antes del valor redactado.
+const BASE_URL_CORRECTION_PREFIX: &str = "base_url = \"";
+
+/// Sufijo de la corrección de `[openai].base_url`, tras el valor redactado.
+///
+/// Dice que el valor está **redactado**: con credenciales embebidas, redactar gana sobre
+/// listo-para-pegar (SC-A21e). Un mensaje de migración que filtra una credencial al terminal,
+/// al scrollback y a los logs de CI es peor problema que una línea que hay que completar.
+const BASE_URL_CORRECTION_SUFFIX: &str =
+    "\"   # al nivel raíz, arriba de toda sección. Valor redactado: copiá el real del archivo viejo.";
+
+/// Prefijo de la corrección de `[headless].tool_result_cap_bytes`.
+const CAP_CORRECTION_PREFIX: &str = "tool_result_cap_bytes = ";
+
+/// Sufijo de la corrección de `[headless].tool_result_cap_bytes`.
+const CAP_CORRECTION_SUFFIX: &str =
+    "   # al nivel raíz: ahora gobierna las TRES rutas (TUI, magi query y consult headless).";
+
+/// Nota incondicional sobre el salto desde v0.10.x.
+///
+/// **No hay detección de v0.10.x**: la pasada solo conoce los patrones de v0.11.0. Un archivo
+/// de v0.10.x puede traer además incompatibilidades anteriores que nadie auditó, y recibiría
+/// el error genérico justo cuando más ayuda necesita. Sostener dos generaciones duplicaría la
+/// deuda por un salto que el usuario hace en dos pasos.
+const V0_10_X_NOTE: &str =
+    "Si venís de v0.10.x, migrá primero a v0.11.0 y después a v0.12.0: esta pasada solo conoce\nlos patrones de v0.11.0.";
+
+/// Consejo de backup, en el cuerpo del error y no solo en el CHANGELOG.
+///
+/// Quien tropieza con este error llegó **arrancando el binario**, no leyendo notas de release.
+/// Es el único momento en que todavía puede hacer la copia — o sea, antes de editar.
+const BACKUP_ADVISORY: &str =
+    "Guardá una copia de tu magi.toml ANTES de editarlo: la migración es de una vía.";
+
+/// Un `magi.toml` mínimo y válido de v0.12.0, listo para pegar.
+///
+/// **Va en el cuerpo del error y no en `docs/magi.toml.example`**: quien instaló con
+/// `cargo install` o bajó un binario del release NO tiene el archivo de ejemplo, y sin
+/// bandera de escape (REQ-A23) este mensaje es la única defensa. Son seis líneas.
+const MINIMAL_VALID_CONFIG: &str = "provider = \"ollama\"\nbase_url = \"http://localhost:11434/v1\"\n\n[openai]\nmodel = \"kimi-k2.6:cloud\"\n";
+
 /// Una incompatibilidad de migración detectada, con su corrección.
 ///
-/// El shape es el contrato que comparten `from_toml_str` y `render_migration_error`;
-/// Task 1.3 le da cuerpo real a quien lo produce ([`detect_migrations`]).
+/// El shape es el contrato que comparten `from_toml_str` y [`render_migration_error`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Migration {
     /// Clave afectada, tal como aparece en el archivo (p. ej. `"[openai].base_url"`).
@@ -50,30 +128,110 @@ pub struct Migration {
     pub correction: String,
 }
 
-/// Detecta los patrones de migración conocidos de v0.11.0 en un `magi.toml` crudo.
+/// Detecta los tres patrones de migración de v0.11.0 en un `magi.toml` crudo.
 ///
-/// **Stub (Task 1.1): siempre devuelve vacío**, para que `from_toml_str` compile y se
-/// comporte como "sin migraciones pendientes" mientras Task 1.3 no aterriza la detección
-/// real de los tres patrones (`provider = "openai"`, `[openai].base_url`,
-/// `[headless].tool_result_cap_bytes`).
+/// Los patrones son `provider = "openai"` en la raíz, `[openai].base_url` y
+/// `[headless].tool_result_cap_bytes`.
+///
+/// Devuelve vacío si el documento **no parsea como TOML**: sin estructura no hay dónde
+/// buscar, y rescatarlo por búsqueda textual daría consejos sobre una forma que nadie sabe
+/// cuál es (SC-A21g). Un archivo sintácticamente roto recibe su error de sintaxis, con línea
+/// y columna, no consejo de migración.
+///
+/// Reporta **solo lo que ese archivo tiene mal**: un archivo a medio migrar recibe únicamente
+/// la corrección que le falta (SC-A21h). Repetir una que el usuario ya aplicó lo haría dudar
+/// de si la aplicó bien, que es el estado mental opuesto al que este mensaje busca.
 #[must_use]
-pub fn detect_migrations(_raw: &str) -> Vec<Migration> {
-    Vec::new()
+pub fn detect_migrations(raw: &str) -> Vec<Migration> {
+    let Ok(doc) = raw.parse::<Value>() else {
+        return Vec::new();
+    };
+
+    let mut found = Vec::new();
+
+    if let Some(provider) = doc.get(PROVIDER_KEY).and_then(Value::as_str) {
+        if provider.trim() == PROVIDER_V0_11_0 {
+            found.push(Migration {
+                key: PROVIDER_KEY,
+                line: line_of(raw, PROVIDER_KEY),
+                correction: PROVIDER_CORRECTION.to_owned(),
+            });
+        }
+    }
+
+    if let Some(url) = doc
+        .get(OPENAI_SECTION)
+        .and_then(Value::as_table)
+        .and_then(|t| t.get(BASE_URL_KEY))
+        .and_then(Value::as_str)
+    {
+        found.push(Migration {
+            key: OPENAI_BASE_URL_LABEL,
+            line: line_of(raw, BASE_URL_KEY),
+            correction: format!(
+                "{BASE_URL_CORRECTION_PREFIX}{}{BASE_URL_CORRECTION_SUFFIX}",
+                redact_url(url)
+            ),
+        });
+    }
+
+    if let Some(cap) = doc
+        .get(HEADLESS_SECTION)
+        .and_then(Value::as_table)
+        .and_then(|t| t.get(TOOL_RESULT_CAP_BYTES_KEY))
+    {
+        found.push(Migration {
+            key: HEADLESS_CAP_LABEL,
+            line: line_of(raw, TOOL_RESULT_CAP_BYTES_KEY),
+            correction: format!("{CAP_CORRECTION_PREFIX}{cap}{CAP_CORRECTION_SUFFIX}"),
+        });
+    }
+
+    found
+}
+
+/// Número de línea 1-indexado donde **empieza** una clave `needle`, o 0 si no aparece.
+///
+/// Compara contra el inicio de la línea ya recortada, no con `contains`: un `contains` haría
+/// match con la clave mencionada dentro de un comentario, y el archivo por defecto de v0.11.0
+/// está lleno de comentarios que nombran sus propias claves. Es solo para el mensaje — una
+/// línea equivocada confunde, pero no cambia qué se detectó.
+fn line_of(raw: &str, needle: &str) -> usize {
+    raw.lines()
+        .position(|line| line.trim_start().starts_with(needle))
+        .map_or(0, |idx| idx + 1)
 }
 
 /// Renderiza el error de migración completo a partir de las incompatibilidades halladas.
 ///
-/// **Stub (Task 1.1): inalcanzable en la práctica.** [`detect_migrations`] siempre
-/// devuelve vacío en esta tarea, así que `from_toml_str` nunca entra a la rama que
-/// llamaría a esta función. Se define ahora porque esa rama ya nombra la función en su
-/// cuerpo; Task 1.3 implementa el mensaje real (con el consejo de backup, el TOML mínimo
-/// válido para pegar, y la nota incondicional sobre el salto desde v0.10.x).
+/// El mensaje es **autocontenido** y no manda al usuario a ningún archivo del repo: incluye
+/// cada corrección, el consejo de backup, un `magi.toml` mínimo válido para pegar, y la nota
+/// incondicional sobre v0.10.x. Quien instaló por `cargo install` o bajó un binario **no
+/// tiene** el árbol de fuentes, y mandarlo ahí lo deja igual de trabado que sin mensaje.
 #[must_use]
 pub fn render_migration_error(found: &[Migration]) -> String {
-    format!(
-        "magi.toml necesita migración ({} patrón(es) detectado(s))",
-        found.len()
-    )
+    let mut out = format!(
+        "error: .magi/magi.toml no es compatible con magi-rs {VERSION_TO} (viene de {VERSION_FROM})\n\n"
+    );
+
+    for m in found {
+        if m.line == 0 {
+            out.push_str(&format!("  {}\n           {}\n\n", m.key, m.correction));
+        } else {
+            out.push_str(&format!(
+                "  línea {}  {}\n           {}\n\n",
+                m.line, m.key, m.correction
+            ));
+        }
+    }
+
+    out.push_str(BACKUP_ADVISORY);
+    out.push_str("\n\nUn magi.toml mínimo y válido de v0.12.0:\n\n");
+    out.push_str(MINIMAL_VALID_CONFIG);
+    out.push('\n');
+    out.push_str(V0_10_X_NOTE);
+    out.push('\n');
+    out
 }
 
 /// Tests unitarios de detección y renderizado de migraciones.

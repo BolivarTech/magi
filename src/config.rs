@@ -211,8 +211,12 @@ pub struct HeadlessConfig {
     pub log_retention: Option<usize>,
     /// Total log-dir byte ceiling (REQ-H24). Overrides `LOG_MAX_BYTES`.
     pub log_max_bytes: Option<u64>,
-    /// Cap on each tool result in the output (REQ-H14). Overrides `TOOL_RESULT_CAP`.
-    pub tool_result_cap_bytes: Option<usize>,
+    // `tool_result_cap_bytes` YA NO VIVE ACÁ (Task 1.3, tercer patrón de migración de
+    // REQ-A21b): subió al nivel raíz porque bajo `[headless]` cubría el modo por lotes y
+    // dejaba suelto el interactivo, que es justo donde el reporte se re-envía en cada turno
+    // de una sesión larga. Un cap que protege el caso barato y no el caro protege el caso
+    // equivocado. Un archivo que todavía la declare acá recibe el error de migración guiado,
+    // no un `unknown field` pelado — ver `detect_migrations`.
     /// Default log level (REQ-H24): `error`|`warn`|`info`|`debug`. Overrides `"info"`.
     pub log_level: Option<String>,
     /// Default wall-clock timeout secs for tool-executing tiers (REQ-H36).
@@ -593,9 +597,9 @@ impl MagiConfig {
     /// por lotes y dejaría suelto el interactivo, que es justo donde el reporte se
     /// re-envía en cada turno de una sesión larga. Un cap que protege el caso barato y no
     /// el caro protege el caso equivocado.
-    // Narrow allow: consumed by the three-route output-cap wiring in Fase 6, not this
-    // task. Covered by `effective_tool_result_cap_falls_back_to_the_built_in_when_absent`.
-    #[allow(dead_code)]
+    // El `allow(dead_code)` que esto tenía se retiró en Task 1.3: `resolve_headless_limits`
+    // ya lo consume. Fase 6 sigue debiendo la aplicación en las OTRAS dos rutas (TUI y el
+    // tool loop de `magi query`), que es su alcance real.
     #[must_use]
     pub fn effective_tool_result_cap(&self) -> usize {
         self.tool_result_cap_bytes
@@ -1180,7 +1184,6 @@ mod tests {
              full_auto_max_tool_calls = 30\n\
              log_retention = 7\n\
              log_max_bytes = 1048576\n\
-             tool_result_cap_bytes = 4096\n\
              log_level = \"debug\"\n\
              timeout_secs = 120\n\
              allow_system_override = true\n",
@@ -1191,7 +1194,6 @@ mod tests {
         assert_eq!(c.headless.full_auto_max_tool_calls, Some(30));
         assert_eq!(c.headless.log_retention, Some(7));
         assert_eq!(c.headless.log_max_bytes, Some(1_048_576));
-        assert_eq!(c.headless.tool_result_cap_bytes, Some(4096));
         assert_eq!(c.headless.log_level.as_deref(), Some("debug"));
         assert_eq!(c.headless.timeout_secs, Some(120));
         assert_eq!(c.headless.allow_system_override, Some(true));
