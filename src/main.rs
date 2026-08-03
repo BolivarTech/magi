@@ -343,8 +343,16 @@ impl Args {
 
     /// `true` if `--untrusted-content` was declared on whichever headless subcommand
     /// this parse holds; `false` if there is no subcommand (REQ-A07d).
-    // Narrow allow: consumed by the guard in Task 2.4, not this task.
-    // Covered by `untrusted_content_is_declarable_where_the_threat_lives`.
+    ///
+    /// Production reads the flag straight off `HeadlessArgs.untrusted_content`
+    /// once the subcommand is already destructured out of `args.command`
+    /// (`run_consult_subcommand`, which OR-s it with the envelope's own
+    /// `untrusted_content` field and `[magi].untrusted_content` — any one
+    /// surface can raise the guard, REQ-A07d) — unlike `mode_of_consult`, there
+    /// is no need to read this one before `.take()`. This top-level accessor
+    /// stays as the CLI-parsing-level assertion surface: covered by
+    /// `untrusted_content_is_declarable_where_the_threat_lives` and
+    /// `mode_and_untrusted_content_are_absent_without_a_subcommand`.
     #[allow(dead_code)]
     fn untrusted_content(&self) -> bool {
         match &self.command {
@@ -2247,6 +2255,14 @@ struct HeadlessContext {
     /// Effective headless numeric caps for this run (spec §11), resolved once in
     /// `prepare_headless` and reused by both dispatchers.
     limits: HeadlessLimits,
+    /// The envelope's own `mode` field, already resolved to a [`Mode`] (REQ-A07c).
+    /// Extracted from `envelope` here, before `resolve_params` consumes it by
+    /// value below — `run_query_subcommand` ignores this field (`..`); only
+    /// `run_consult_subcommand` merges it with the CLI-level `--mode`.
+    env_mode: Option<Mode>,
+    /// The envelope's own `untrusted_content` field (REQ-A07d), defaulting to
+    /// `false` when absent. Same extraction-order note as [`Self::env_mode`].
+    env_untrusted_content: bool,
 }
 
 /// Resolves the effective `allow_system_override` gate (REQ-H12b, spec §11):
@@ -2414,6 +2430,19 @@ async fn prepare_headless(
         }
     };
     let prompt = envelope.prompt.clone();
+    // Extracted BEFORE `resolve_params(envelope, ...)` below consumes `envelope`
+    // by value — an invalid `mode` string here is presente-y-no-reconocido
+    // (REQ-A12), so it fails this run closed rather than being silently
+    // dropped (`resolved_mode()` never got a production caller before this,
+    // so an invalid envelope `mode` was previously accepted and ignored).
+    let env_mode = match envelope.resolved_mode() {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return Err(2);
+        }
+    };
+    let env_untrusted_content = envelope.untrusted_content.unwrap_or(false);
 
     // Per-field defaults (toml/built-in), then resolution with the CLI
     // overrides and the operator cost ceiling (REQ-H12/H12b).
@@ -2572,6 +2601,8 @@ async fn prepare_headless(
         secret_store,
         run_log,
         limits,
+        env_mode,
+        env_untrusted_content,
     })
 }
 
@@ -2715,7 +2746,10 @@ async fn run_query_subcommand(
 /// `explicit_mode` is the caller's `Args::mode_of_consult()` (REQ-A07c): it must
 /// be read from the top-level `Args` **before** `args.command.take()` empties
 /// `self.command`, which is why it arrives as an already-resolved parameter
-/// instead of being re-derived from `h` in here.
+/// instead of being re-derived from `h` in here. It is merged with the
+/// envelope's own `mode` field (`ctx.env_mode`), CLI winning ties — the same
+/// override-over-envelope precedence `resolve_params` already uses for
+/// `model`/`provider` above.
 async fn run_consult_subcommand(
     h: HeadlessArgs,
     explicit_mode: Option<Mode>,
@@ -2739,6 +2773,8 @@ async fn run_consult_subcommand(
         prompt,
         mut run_log,
         limits,
+        env_mode,
+        env_untrusted_content,
         ..
     } = ctx;
 
@@ -2748,9 +2784,19 @@ async fn run_consult_subcommand(
         "anthropic"
     };
     // Explicit `--mode` (already resolved by the caller via
-    // `Args::mode_of_consult()`) wins at zero cost; its absence classifies over
-    // the PRINCIPAL provider (REQ-A07c) — `provider` cloned before it is
-    // consumed below, since `build_magi_orchestrator` needs its own owned handle.
+    // `Args::mode_of_consult()`), or the envelope's own `mode` field — wins at
+    // zero cost; its absence classifies over the PRINCIPAL provider (REQ-A07c)
+    // — `provider` cloned before it is consumed below, since
+    // `build_magi_orchestrator` needs its own owned handle.
+    let explicit_mode = explicit_mode.or(env_mode);
+    // `[magi].default_mode` (REQ-A15): fixes the lens for every invocation that
+    // does not declare one, without touching this call site again.
+    let configured_mode = magi_config.effective_default_mode();
+    // Three surfaces can raise the guard (REQ-A07d): the CLI flag, the
+    // envelope field, and the operator's `magi.toml` — any one activates it.
+    let untrusted_content = h.untrusted_content
+        || env_untrusted_content
+        || magi_config.magi.untrusted_content.unwrap_or(false);
     let classifier = crate::agent::mode_classifier::ProviderClassifier::new(
         provider.clone(),
         Arc::new(crate::agent::mode_classifier::ProcessNoticeSink::default()),
@@ -2780,6 +2826,8 @@ async fn run_consult_subcommand(
         timeout,
         explicit_mode,
         &classifier,
+        configured_mode,
+        untrusted_content,
         run_log.as_mut(),
     )
     .await;

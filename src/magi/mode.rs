@@ -71,14 +71,14 @@ pub enum ModeSource {
 /// - `Inferred` proviene de una llamada de clasificación sobre el contenido.
 /// - `Default` es el modo `Analysis` cuando ninguna fuente aportó nada.
 ///
-/// Su único consumidor de PRODUCCIÓN será [`resolve_mode_guarded`] (Task 2.4, en curso).
+/// Su único consumidor de producción es [`resolve_mode_guarded`], que decide **si** hace
+/// falta clasificar (y paga esa llamada) antes de invocar a esta función con el resultado.
 /// Cubierta hoy por `explicit_beats_configured_beats_agent_beats_inferred_beats_default`,
 /// `higher_precedence_wins_when_same_mode_arrives_from_two_levels`,
 /// `a_prompt_injection_cannot_pick_the_mode`, `echo_classifier_with_a_valid_label_yields_inferred`
-/// y `a_failed_classification_falls_to_default_never_to_inferred` (Task 2.3).
-// RED (Task 2.4, en curso): `resolve_mode_guarded` todavía no la consume — su cuerpo es un
-// stub deliberadamente incorrecto (ver más abajo) hasta el commit `feat:` de esta tarea.
-#[allow(dead_code)]
+/// y `a_failed_classification_falls_to_default_never_to_inferred` (Task 2.3), más
+/// `the_unguarded_resolver_stays_private` (Task 2.4), que fija que subirle la visibilidad
+/// reabre el agujero.
 fn resolve_mode(
     explicit: Option<Mode>,
     configured: Option<Mode>,
@@ -169,22 +169,32 @@ pub async fn resolve_mode_guarded(
     classifier: Option<&dyn ModeClassifier>,
     content: &str,
 ) -> Result<ModeResolution, ModeError> {
-    // RED (Task 2.4, en curso): stub DELIBERADAMENTE incorrecto — no aplica la guarda ni la
-    // precedencia real, solo hace que la firma compile para que los tests de esta fase fallen
-    // por ASERCIÓN (el comportamiento que falta), no por error de compilación. El cuerpo real
-    // llega en el commit `feat:` de este mismo ciclo Red-Green.
-    let _ = (
-        explicit,
-        configured,
-        agent_chosen,
-        untrusted,
-        classifier,
-        content,
-    );
+    if untrusted && explicit.is_none() && configured.is_none() && agent_chosen.is_none() {
+        return Err(ModeError::UntrustedContentRequiresExplicitMode);
+    }
+
+    // Cortocircuito: con un modo ya declarado por cualquiera de las tres vías, clasificar
+    // sería pagar una llamada que SC-A07g prohíbe — `resolve_mode` le daría la misma
+    // precedencia igual, pero solo después de haber pagado el costo que evitamos acá.
+    let (inferred, classification_attempted) =
+        if explicit.is_some() || configured.is_some() || agent_chosen.is_some() {
+            (None, false)
+        } else if let Some(c) = classifier {
+            // Desde acá el intento OCURRE, complete o no — y eso es lo que
+            // `classification_attempted` registra: una clasificación que expira deja
+            // `Default`, pero el contenido YA salió (REQ-A11d).
+            (c.classify(content).await, true)
+        } else {
+            // Sin clasificador (ruta sin agente, p. ej. el principal caído): no hay a quién
+            // preguntarle, y eso cae a `Default` SIN intento, nunca a un `Inferred` fabricado.
+            (None, false)
+        };
+
+    let (mode, source) = resolve_mode(explicit, configured, agent_chosen, inferred);
     Ok(ModeResolution {
-        mode: Mode::Analysis,
-        source: ModeSource::Default,
-        classification_attempted: false,
+        mode,
+        source,
+        classification_attempted,
     })
 }
 

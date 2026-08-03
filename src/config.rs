@@ -530,9 +530,10 @@ impl MagiConfig {
     /// la única respuesta posible ya es "sí, este modo" o "no hay ninguno".
     ///
     /// Misma precondición que [`Self::effective_provider`].
-    // Narrow allow: consumed by mode routing in Fase 2, not this task. Covered by
-    // `effective_default_mode_follows_the_same_blank_is_absent_rule`.
-    #[allow(dead_code)]
+    ///
+    /// Consumed in production by `run_consult_subcommand` (`main.rs`, REQ-A15):
+    /// the `Configured` level of `resolve_mode_guarded`'s five-level precedence.
+    /// Covered by `effective_default_mode_follows_the_same_blank_is_absent_rule`.
     #[must_use]
     pub fn effective_default_mode(&self) -> Option<Mode> {
         // I5 (review round 2): restored — same precondition/rationale as

@@ -44,7 +44,7 @@ use magi_rs::headless::types::{
     ErrorKind, ErrorPayload, RunOutcome, StopReason, Timings, ToolCallRecord, TranscriptEntry,
     Usage,
 };
-use magi_rs::magi::mode::ModeClassifier;
+use magi_rs::magi::mode::{resolve_mode_guarded, ModeClassifier, ModeError};
 
 use crate::agent::messages::{Content, Message, Role};
 use crate::agent::{Agent, AgentRunConfig, RunObserver, StreamPiece, MAX_TOOL_CALLS_ERROR};
@@ -82,6 +82,10 @@ const CONSULT_INPUT_INVALID_MESSAGE: &str = "consult prompt is empty or exceeds 
 enum ConsultRunError {
     /// The prompt was empty or exceeded [`MAX_QUERY_LEN`] (→ `input_invalid`).
     InputInvalid,
+    /// `untrusted_content` was active and no mode was declared by any surface
+    /// (→ `input_invalid`, REQ-A07d/REQ-A07r): the run fails closed instead of
+    /// classifying the hostile content.
+    UntrustedContentRequiresMode(ModeError),
     /// The consult was cancelled by the `--timeout` deadline (→ `timeout`).
     Timeout,
     /// The MAGI orchestrator failed or panicked; the message is sanitized before
@@ -97,14 +101,22 @@ enum ConsultRunError {
 /// hang, never a propagated error).
 ///
 /// This is a narrower resolution than the full five-level gate
-/// (`resolve_mode_guarded`, Task 2.4): the direct consult path has no agent and
-/// no tool-loop, so the `Configured`/`AgentChosen` levels and the
-/// `untrusted_content` guard do not apply here — only "a human declared it" vs.
-/// "classify it".
+/// ([`resolve_mode_guarded`]): it only expresses "a human declared it" vs.
+/// "classify it", with no `Configured`/`AgentChosen` level and no
+/// `untrusted_content` guard. [`analyze_direct`] no longer calls this directly
+/// — it goes through `resolve_mode_guarded` so the direct consult path also
+/// honors `[magi].default_mode` and `untrusted_content` (REQ-A07d/A15) — but
+/// this narrower helper stays `pub(crate)` because `main.rs`'s CLI-level test
+/// coverage (`run_consult_cli`, SC-A07f/g) still calls it directly, to observe
+/// a classification-call count without standing up a full `Arc<Magi>`
+/// orchestrator.
 ///
-/// `pub(crate)`, not private: `main.rs`'s CLI-level test coverage
-/// (`run_consult_cli`, SC-A07f/g) calls this directly rather than standing up a
-/// full `Arc<Magi>` orchestrator just to observe a classification-call count.
+/// `#[cfg(test)]`: with `analyze_direct` now going through
+/// `resolve_mode_guarded` directly, production has no remaining caller — only
+/// the `run_consult_cli` test does. Gating it keeps that narrower assertion
+/// alive without leaving a `pub(crate)` item with zero non-test callers (which
+/// `clippy -D warnings` would flag as dead code in a release build).
+#[cfg(test)]
 pub(crate) async fn resolve_direct_mode(
     explicit: Option<Mode>,
     classifier: &dyn ModeClassifier,
@@ -134,14 +146,26 @@ pub(crate) async fn resolve_direct_mode(
 /// - `explicit_mode` — the lens declared by a human (`--mode`/the envelope
 ///   field), if any. Wins outright, at zero classification cost (REQ-A07c,
 ///   SC-A07g).
-/// - `classifier` — consulted **only** when `explicit_mode` is `None`, via
-///   [`resolve_direct_mode`] (REQ-A07c, SC-A07f).
+/// - `classifier` — consulted **only** when neither `explicit_mode` nor
+///   `configured_mode` is set, via [`resolve_mode_guarded`] (REQ-A07c, SC-A07f).
+/// - `configured_mode` — `[magi].default_mode`, if declared; wins over the
+///   classification level, below `explicit_mode` (REQ-A15/SC-A07k).
+/// - `untrusted_content` — REQ-A07d's guard: with this `true` and neither
+///   `explicit_mode` nor `configured_mode` declared, the run fails closed
+///   ([`ConsultRunError::UntrustedContentRequiresMode`]) instead of
+///   classifying — no autonomous agent runs this path, so there is no
+///   `agent_chosen` level here (REQ-A07/A07d only name five levels, and the
+///   direct consult path never sees the third one).
 ///
 /// # Errors
 /// - [`ConsultRunError::InputInvalid`] if `prompt` is empty or exceeds
 ///   [`MAX_QUERY_LEN`].
+/// - [`ConsultRunError::UntrustedContentRequiresMode`] if `untrusted_content`
+///   is `true` and neither `explicit_mode` nor `configured_mode` was declared
+///   (REQ-A07d/REQ-A07r).
 /// - [`ConsultRunError::Timeout`] if cancelled or the deadline elapsed.
 /// - [`ConsultRunError::Runtime`] if the MAGI analysis failed or panicked.
+#[allow(clippy::too_many_arguments)] // pre-existing shape; REQ-A07d adds two params to it
 async fn analyze_direct(
     magi: &Arc<Magi>,
     prompt: &str,
@@ -149,12 +173,27 @@ async fn analyze_direct(
     timeout: Option<Duration>,
     explicit_mode: Option<Mode>,
     classifier: &dyn ModeClassifier,
+    configured_mode: Option<Mode>,
+    untrusted_content: bool,
 ) -> Result<Value, ConsultRunError> {
     if prompt.trim().is_empty() || prompt.len() > MAX_QUERY_LEN {
         return Err(ConsultRunError::InputInvalid);
     }
 
-    let mode = resolve_direct_mode(explicit_mode, classifier, prompt).await;
+    // The direct consult path has no agent and no tool-loop, so there is no
+    // `agent_chosen` level to feed in (`None`, third argument) — only "a human
+    // declared it" (explicit/configured) vs. "classify it" (REQ-A07c).
+    let resolution = resolve_mode_guarded(
+        explicit_mode,
+        configured_mode,
+        None,
+        untrusted_content,
+        Some(classifier),
+        prompt,
+    )
+    .await
+    .map_err(ConsultRunError::UntrustedContentRequiresMode)?;
+    let mode = resolution.mode;
 
     let magi = Arc::clone(magi);
     let owned = prompt.to_string();
@@ -215,6 +254,13 @@ fn consult_error_outcome(
     let payload = match err {
         ConsultRunError::InputInvalid => ErrorPayload {
             message: CONSULT_INPUT_INVALID_MESSAGE.to_string(),
+            kind: ErrorKind::InputInvalid,
+        },
+        // Same `input_invalid` family as the cap check above: `untrusted_content`
+        // without a declared mode is a configuration problem, not a runtime one
+        // (REQ-A07d/REQ-A07r) — `ModeError`'s `Display` already names the fix.
+        ConsultRunError::UntrustedContentRequiresMode(e) => ErrorPayload {
+            message: e.to_string(),
             kind: ErrorKind::InputInvalid,
         },
         ConsultRunError::Timeout => ErrorPayload {
@@ -485,9 +531,11 @@ fn build_transcript(
 /// - `timeout` — optional wall-clock ceiling (REQ-H36).
 /// - `explicit_mode` — the lens declared by a human (`--mode`/the envelope
 ///   field); `None` triggers exactly one classification call, never more
-///   (REQ-A07c, SC-A07f/g — see [`resolve_direct_mode`]).
+///   (REQ-A07c, SC-A07f/g).
 /// - `classifier` — the principal-provider classifier consulted only when
-///   `explicit_mode` is `None`.
+///   neither `explicit_mode` nor `configured_mode` is set.
+/// - `configured_mode` — `[magi].default_mode`, if declared (REQ-A15).
+/// - `untrusted_content` — REQ-A07d's guard; see [`analyze_direct`].
 /// - `run_log` — optional JSONL run log; the terminal summary is recorded
 ///   best-effort.
 ///
@@ -495,6 +543,7 @@ fn build_transcript(
 /// - `usage` is `Usage { 0, 0 }`: `magi-core` does not surface token counts here.
 /// - `timings.per_turn_ms` is empty and `ttfb_ms` is `None`: the direct consult is
 ///   a single buffered analysis, not a streamed turn sequence.
+#[allow(clippy::too_many_arguments)] // pre-existing shape; REQ-A07d adds two params to it
 pub async fn run_consult(
     resolved: Resolved,
     magi: Arc<Magi>,
@@ -502,6 +551,8 @@ pub async fn run_consult(
     timeout: Option<Duration>,
     explicit_mode: Option<Mode>,
     classifier: &dyn ModeClassifier,
+    configured_mode: Option<Mode>,
+    untrusted_content: bool,
     mut run_log: Option<&mut RunLog>,
 ) -> RunOutcome {
     // A fresh token: the direct consult has no enclosing agent run to inherit a
@@ -509,7 +560,17 @@ pub async fn run_consult(
     // own `timeout` deadline elapses.
     let cancel = CancellationToken::new();
     let run_start = Instant::now();
-    let result = analyze_direct(&magi, prompt, &cancel, timeout, explicit_mode, classifier).await;
+    let result = analyze_direct(
+        &magi,
+        prompt,
+        &cancel,
+        timeout,
+        explicit_mode,
+        classifier,
+        configured_mode,
+        untrusted_content,
+    )
+    .await;
     let total_ms = elapsed_ms(run_start);
 
     let (response, consult, stop_reason, error) = match result {
@@ -1732,6 +1793,8 @@ mod tests {
             Some(Mode::Analysis),
             &NeverClassifier,
             None,
+            false,
+            None,
         )
         .await;
 
@@ -1765,6 +1828,8 @@ mod tests {
             None,
             Some(Mode::Analysis),
             &NeverClassifier,
+            None,
+            false,
             None,
         )
         .await;
@@ -1818,6 +1883,8 @@ mod tests {
                 None,
                 Some(Mode::Analysis),
                 &NeverClassifier,
+                None,
+                false,
                 None,
             );
             tokio::pin!(fut);
