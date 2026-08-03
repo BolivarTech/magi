@@ -76,26 +76,111 @@ pub fn render_migration_error(found: &[Migration]) -> String {
     )
 }
 
+/// Tests unitarios de detección y renderizado de migraciones.
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// El stub nunca reporta nada, para ningún input: `from_toml_str` no debe tomar la
-    /// rama de migración todavía. Task 1.3 reemplaza esta cobertura por la real, contra
-    /// fixtures de v0.11.0.
+    /// SC-A21: las DOS incompatibilidades se reportan juntas.
     #[test]
-    fn the_stub_reports_no_migrations_for_any_input() {
-        assert!(detect_migrations("").is_empty());
+    fn a_v0_11_0_config_reports_both_incompatibilities_at_once() {
+        let toml = include_str!("../../tests/fixtures/v0.11.0/default.toml");
+        let found = detect_migrations(toml);
+        assert_eq!(found.len(), 2, "esperaba provider + [openai].base_url");
+        let rendered = render_migration_error(&found);
+        assert!(rendered.contains("provider"));
+        assert!(rendered.contains("base_url"));
         assert!(
-            detect_migrations("provider = \"openai\"\n[openai]\nbase_url = \"x\"\n").is_empty()
+            rendered.contains("ollama") && rendered.contains("openai-compat"),
+            "debe decir CÓMO elegir entre los dos"
         );
     }
 
-    /// El mensaje de fallback sigue siendo un texto no vacío incluso con la lista vacía,
-    /// para que un llamador que lo invoque por error (no debería ocurrir todavía) no
-    /// obtenga una cadena vacía silenciosa.
+    /// SC-A21h: un archivo a medio migrar recibe SOLO lo que le falta.
     #[test]
-    fn the_stub_render_never_returns_an_empty_string() {
-        assert!(!render_migration_error(&[]).is_empty());
+    fn a_partially_migrated_file_reports_only_what_is_missing() {
+        let toml = "provider = \"openai\"\nbase_url = \"http://x/v1\"\n[openai]\nmodel = \"m\"\n";
+        let found = detect_migrations(toml);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].key, "provider");
+    }
+
+    /// SC-A21e: con credenciales embebidas, REDACTAR gana sobre listo-para-pegar.
+    #[test]
+    fn embedded_credentials_are_redacted_in_the_migration_message() {
+        let toml = "[openai]\nbase_url = \"https://user:s3cr3t@host/v1\"\n";
+        let rendered = render_migration_error(&detect_migrations(toml));
+        assert!(
+            !rendered.contains("s3cr3t"),
+            "la credencial NO puede aparecer"
+        );
+        assert!(
+            rendered.contains("host"),
+            "el host sí, es lo que hace accionable el mensaje"
+        );
+        assert!(
+            rendered.contains("redactad"),
+            "y el mensaje debe decir que está redactado"
+        );
+    }
+
+    /// SC-A21g: un TOML sintácticamente roto NO recibe consejo de migración.
+    #[test]
+    fn a_syntactically_broken_toml_gets_a_syntax_error_not_migration_advice() {
+        let toml = "provider = \"sin cerrar\n[magi]\n";
+        assert!(
+            detect_migrations(toml).is_empty(),
+            "sin estructura no hay dónde buscar patrones; la pasada no rescata por grep"
+        );
+    }
+
+    /// SC-A21f: un TOML vacío parsea y no dispara nada.
+    #[test]
+    fn an_empty_toml_is_valid_and_triggers_no_migration() {
+        assert!(detect_migrations("").is_empty());
+        assert!(detect_migrations("   \n\n  ").is_empty());
+    }
+
+    /// SC-A21i: el salto desde v0.10.x se declara no soportado, en TODO error de config.
+    #[test]
+    fn every_config_error_mentions_the_v0_10_x_path() {
+        let rendered = render_migration_error(&detect_migrations(include_str!(
+            "../../tests/fixtures/v0.11.0/default.toml"
+        )));
+        assert!(
+            rendered.contains("v0.11.0"),
+            "no hay detección de v0.10.x: hay una nota incondicional"
+        );
+    }
+
+    /// `line_of` devuelve 0 cuando el patrón no aparece en el texto.
+    #[test]
+    fn line_of_returns_zero_when_needle_is_absent() {
+        assert_eq!(line_of("foo\nbar\n", "baz"), 0);
+    }
+
+    /// `line_of` devuelve el número de línea en base 1.
+    #[test]
+    fn line_of_returns_one_indexed_line_number() {
+        assert_eq!(line_of("foo\nbar\nbaz", "bar"), 2);
+    }
+
+    /// Detecta el tercer patrón: `[headless].tool_result_cap_bytes`.
+    #[test]
+    fn headless_tool_result_cap_bytes_is_detected() {
+        let toml = "[headless]\ntool_result_cap_bytes = 4096\n";
+        let found = detect_migrations(toml);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].key, "[headless].tool_result_cap_bytes");
+        assert!(found[0].correction.contains("tool_result_cap_bytes"));
+    }
+
+    /// Los tres patrones viejos en un mismo archivo se reportan todos juntos.
+    #[test]
+    fn all_three_patterns_together_are_reported() {
+        let toml = "provider = \"openai\"\n[openai]\nbase_url = \"http://x/v1\"\n\
+                    [headless]\ntool_result_cap_bytes = 2048\n";
+        let found = detect_migrations(toml);
+        assert_eq!(found.len(), 3);
     }
 }
