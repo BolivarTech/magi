@@ -2733,9 +2733,14 @@ async fn run_consult_subcommand(
     } else {
         "anthropic"
     };
-    // RED phase (Task 2.3): classifier wiring lands in the `feat:` commit that
-    // follows this one, together with `resolve_direct_mode` and the
-    // `analyze_direct`/`run_consult` signature change.
+    // Explicit `--mode` wins at zero cost; its absence classifies over the
+    // PRINCIPAL provider (REQ-A07c) — cloned before `provider` is consumed
+    // below, since `build_magi_orchestrator` needs its own owned handle.
+    let explicit_mode = h.mode.map(CliMode::into_mode);
+    let classifier = crate::agent::mode_classifier::ProviderClassifier::new(
+        provider.clone(),
+        Arc::new(crate::agent::mode_classifier::ProcessNoticeSink::default()),
+    );
     let magi = match build_magi_orchestrator(
         provider,
         backend_label,
@@ -2754,7 +2759,16 @@ async fn run_consult_subcommand(
     // The consult path has no tier tool-gate; only an explicit `--timeout`
     // bounds it (an over-cap prompt is rejected inside `run_consult`, REQ-H33).
     let timeout = h.timeout.map(Duration::from_secs);
-    let outcome = run_consult(resolved, magi, &prompt, timeout, run_log.as_mut()).await;
+    let outcome = run_consult(
+        resolved,
+        magi,
+        &prompt,
+        timeout,
+        explicit_mode,
+        &classifier,
+        run_log.as_mut(),
+    )
+    .await;
     finish_headless(&h, &outcome, limits.tool_result_cap)
 }
 

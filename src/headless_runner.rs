@@ -89,12 +89,32 @@ enum ConsultRunError {
     Runtime(String),
 }
 
-// RED phase (Task 2.3): `resolve_direct_mode` is added in the `feat:` commit
-// that follows this one. `analyze_direct`/`run_consult` below still carry
-// their pre-Task-2.3 signatures (no `explicit_mode`/`classifier`), so the
-// updated test call sites (7 positional args) and `main.rs`'s
-// `run_consult_cli` (which calls `resolve_direct_mode`) fail to compile —
-// the expected Red failure.
+/// Resolves the effective mode for a **direct** `magi consult` (REQ-A07c): a
+/// declared `--mode`/envelope value wins outright, at zero classification cost
+/// (SC-A07g); its absence costs exactly one classification call (SC-A07f),
+/// which itself fails open to [`Mode::Analysis`] on any error, timeout, or
+/// unrecognized reply ([`ModeClassifier::classify`] documents this — never a
+/// hang, never a propagated error).
+///
+/// This is a narrower resolution than the full five-level gate
+/// (`resolve_mode_guarded`, Task 2.4): the direct consult path has no agent and
+/// no tool-loop, so the `Configured`/`AgentChosen` levels and the
+/// `untrusted_content` guard do not apply here — only "a human declared it" vs.
+/// "classify it".
+///
+/// `pub(crate)`, not private: `main.rs`'s CLI-level test coverage
+/// (`run_consult_cli`, SC-A07f/g) calls this directly rather than standing up a
+/// full `Arc<Magi>` orchestrator just to observe a classification-call count.
+pub(crate) async fn resolve_direct_mode(
+    explicit: Option<Mode>,
+    classifier: &dyn ModeClassifier,
+    content: &str,
+) -> Mode {
+    match explicit {
+        Some(mode) => mode,
+        None => classifier.classify(content).await.unwrap_or(Mode::Analysis),
+    }
+}
 
 /// Runs `prompt` directly through the 3-perspective MAGI consensus, off the agent
 /// tool-loop (REQ-H21), honoring the same input cap ([`MAX_QUERY_LEN`], REQ-H33)
@@ -111,6 +131,11 @@ enum ConsultRunError {
 /// - `prompt` — the decision/content to analyze.
 /// - `cancel` — cooperative cancellation fired by the enclosing run's deadline.
 /// - `timeout` — optional wall-clock ceiling for this consult specifically.
+/// - `explicit_mode` — the lens declared by a human (`--mode`/the envelope
+///   field), if any. Wins outright, at zero classification cost (REQ-A07c,
+///   SC-A07g).
+/// - `classifier` — consulted **only** when `explicit_mode` is `None`, via
+///   [`resolve_direct_mode`] (REQ-A07c, SC-A07f).
 ///
 /// # Errors
 /// - [`ConsultRunError::InputInvalid`] if `prompt` is empty or exceeds
@@ -122,14 +147,18 @@ async fn analyze_direct(
     prompt: &str,
     cancel: &CancellationToken,
     timeout: Option<Duration>,
+    explicit_mode: Option<Mode>,
+    classifier: &dyn ModeClassifier,
 ) -> Result<Value, ConsultRunError> {
     if prompt.trim().is_empty() || prompt.len() > MAX_QUERY_LEN {
         return Err(ConsultRunError::InputInvalid);
     }
 
+    let mode = resolve_direct_mode(explicit_mode, classifier, prompt).await;
+
     let magi = Arc::clone(magi);
     let owned = prompt.to_string();
-    let handle = tokio::spawn(async move { magi.analyze(&Mode::Analysis, &owned).await });
+    let handle = tokio::spawn(async move { magi.analyze(&mode, &owned).await });
     // RAII backstop (same primitive as `ConsultTool::execute`, `src/tools/
     // consult.rs`): aborts the spawned analysis if THIS future is dropped
     // before the `select!` resolves — e.g. the enclosing `run_consult`/
@@ -467,6 +496,11 @@ fn build_transcript(
 /// - `magi` — shared MAGI orchestrator (same one wired for the `consult` tool).
 /// - `prompt` — the decision/content to analyze.
 /// - `timeout` — optional wall-clock ceiling (REQ-H36).
+/// - `explicit_mode` — the lens declared by a human (`--mode`/the envelope
+///   field); `None` triggers exactly one classification call, never more
+///   (REQ-A07c, SC-A07f/g — see [`resolve_direct_mode`]).
+/// - `classifier` — the principal-provider classifier consulted only when
+///   `explicit_mode` is `None`.
 /// - `run_log` — optional JSONL run log; the terminal summary is recorded
 ///   best-effort.
 ///
@@ -479,6 +513,8 @@ pub async fn run_consult(
     magi: Arc<Magi>,
     prompt: &str,
     timeout: Option<Duration>,
+    explicit_mode: Option<Mode>,
+    classifier: &dyn ModeClassifier,
     mut run_log: Option<&mut RunLog>,
 ) -> RunOutcome {
     // A fresh token: the direct consult has no enclosing agent run to inherit a
@@ -486,7 +522,7 @@ pub async fn run_consult(
     // own `timeout` deadline elapses.
     let cancel = CancellationToken::new();
     let run_start = Instant::now();
-    let result = analyze_direct(&magi, prompt, &cancel, timeout).await;
+    let result = analyze_direct(&magi, prompt, &cancel, timeout, explicit_mode, classifier).await;
     let total_ms = elapsed_ms(run_start);
 
     let (response, consult, stop_reason, error) = match result {
