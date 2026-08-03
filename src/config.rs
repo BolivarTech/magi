@@ -1522,8 +1522,11 @@ mod tests {
         assert!(MagiConfig::from_toml_str(toml).is_err());
     }
 
-    /// REQ-A14: las API keys NUNCA viven en `magi.toml`, y `deny_unknown_fields` lo hace
-    /// **mecánico** en vez de una convención que alguien tiene que recordar.
+    /// SC-A12 / REQ-A14: un campo desconocido es ERROR DE PARSEO, no aceptación silenciosa.
+    ///
+    /// Las API keys NUNCA viven en `magi.toml`, y `deny_unknown_fields` lo hace **mecánico**
+    /// en vez de una convención que alguien tiene que recordar. Cierra SC-A12 con el caso que
+    /// más importa: el campo mal escrito que además sería un secreto.
     #[test]
     fn an_api_key_anywhere_in_the_toml_is_a_parse_error() {
         for toml in [

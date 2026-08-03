@@ -329,7 +329,7 @@ pub fn min_viable_output_cap() -> usize {
 mod tests {
     use super::*;
 
-    /// REQ-A04: la escala se cumple POR CONSTRUCCIÓN para cualquier techo del rango.
+    /// SC-A04 / REQ-A04: la escala se cumple POR CONSTRUCCIÓN para cualquier techo del rango.
     #[test]
     fn derived_scale_satisfies_invariant_across_the_whole_admissible_range() {
         // Arranca en el PISO ABSOLUTO, no en el mínimo de §4.9: el punto de quiebre está
