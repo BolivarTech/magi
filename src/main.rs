@@ -104,14 +104,20 @@ fn parse_secret_arg(s: &str) -> Result<SecretArg, std::convert::Infallible> {
     Ok(SecretArg(Zeroizing::new(s.to_string())))
 }
 
-/// clap value-parser that always fails, used to retire `--init-config` (REQ-A22) with a
-/// message naming `magi init` instead of clap's generic `unexpected argument`.
+/// Message shown when `--init-config` is used (REQ-A22): the flag is retired, and this
+/// names the replacement instead of doing anything else. Mirrors
+/// `tui::init_config_retired_message` for the TUI `/init-config` slash command.
 ///
-/// # Errors
-/// Always — this is the mechanism, not an edge case: `--init-config` no longer has a
-/// working code path, so parsing it must fail every time it is passed.
-fn reject_init_config(_value: &str) -> Result<String, String> {
-    Err("`--init-config` was retired; run `magi init` instead".to_string())
+/// **Why this exists instead of a clap value-parser (fix round 2, coordinator,
+/// 2026-08-03, m4/m5).** An earlier version kept `init_config` as an
+/// always-failing-value-parser `Option<String>` specifically so clap itself would
+/// reject the flag. That backfired: clap's own rejection renders `error: invalid
+/// value 'retired' for '--init-config <INIT_CONFIG>': ...` — a message whose entire
+/// purpose is to not make the user think, opening with a synthetic token (`retired`)
+/// they never typed. `init_config` is a plain `bool` again; `run` checks it and prints
+/// THIS message, before any other startup work, then exits.
+fn init_config_retired_message() -> String {
+    "`--init-config` was retired; run `magi init` instead.".to_string()
 }
 
 #[derive(Parser, Debug)]
@@ -121,23 +127,18 @@ struct Args {
     #[arg(short, long)]
     logout: bool,
 
-    /// RETIRED (REQ-A22): `magi init` is the only scaffolder now. Kept as a hidden
-    /// flag definition — not removed outright — purely so clap itself rejects it with
-    /// a message pointing at the replacement, instead of a bare `unexpected argument`
-    /// that turns a one-line migration into a search (the flag shipped for three
-    /// releases and is documented in `CLAUDE.md`). `default_missing_value` is what
-    /// lets a bare `--init-config` (no `=value`) reach `reject_init_config` at all;
-    /// that value-parser then fails unconditionally, so this field can never actually
-    /// hold `Some(_)` at runtime — nothing reads it past parsing.
-    #[allow(dead_code)]
-    #[arg(
-        long,
-        hide = true,
-        num_args = 0..=1,
-        default_missing_value = "retired",
-        value_parser = reject_init_config
-    )]
-    init_config: Option<String>,
+    /// RETIRED (REQ-A22): `magi init` is the only scaffolder now. A plain, hidden
+    /// `bool` — `run` checks it FIRST, before any other startup work, and prints
+    /// [`init_config_retired_message`] instead of doing anything else. Not a clap
+    /// `value_parser` trick (fix round 2, coordinator, 2026-08-03, m4/m5): that
+    /// rendered clap's own synthetic `error: invalid value 'retired' for
+    /// '--init-config <INIT_CONFIG>': ...`, defeating the point of a message meant to
+    /// not make the user think. Still hidden from `--help` (`hide = true`) so the
+    /// retired flag doesn't invite new use — the flag shipped for three releases and
+    /// is documented in `CLAUDE.md`, so silently un-recognizing it would turn a
+    /// one-line migration into a search.
+    #[arg(long, hide = true)]
+    init_config: bool,
 
     /// Master passphrase (precedence: -p > MAGI_PASSPHRASE > interactive
     /// prompt). Global: also applies to the `vault` subcommand (REQ-V04).
@@ -1054,6 +1055,16 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
     } = secrets;
 
     let mut args = Args::parse();
+
+    // REQ-A22 (fix round 2, coordinator, 2026-08-03): `--init-config` is retired.
+    // Checked FIRST, before ANY other startup work (workspace/legacy-layout
+    // detection, process hardening, subcommand dispatch, `-p`/`--logout`) — the
+    // whole point of this message is to be the only thing the user sees.
+    if args.init_config {
+        eprintln!("{}", init_config_retired_message());
+        return Ok(ExitCode::FAILURE);
+    }
+
     // Fold the `-p` CLI flag and the consumed `MAGI_PASSPHRASE` into ONE flag,
     // `-p` winning (precedence `-p` > `MAGI_PASSPHRASE`, REQ-H37): after the env
     // scrub there is no live env var left, so the captured value carries the env
@@ -1127,13 +1138,6 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
         return Ok(exit_code(run_logout(passphrase_flag, &workspace_root)));
     }
 
-    // REQ-A22: `--init-config` was retired — `magi init` is the only scaffolder now.
-    // Reaching here with the flag set is unreachable in practice (its value-parser,
-    // `reject_init_config`, always fails clap's own parse), so there is no runtime
-    // branch to keep. The TUI `/init-config` slash command is retired too (fix round
-    // 1, coordinator, 2026-08-02): it now shows `tui::init_config_retired_message()`
-    // instead of calling `write_default_config`, which had no remaining caller once
-    // both surfaces were retired and was removed from `defaults.rs`.
     // ── TUI path ─────────────────────────────────────────────────────────
     let mut startup_notices: Vec<String> = hardening_warnings
         .iter()
