@@ -735,6 +735,14 @@ pub async fn run_query(
         // exactly one IN-LOOP consult (see the `# Forced consult` rustdoc
         // above) rather than the pre-refactor post-loop pass.
         force_consult: resolved.consult == Some(true),
+        // MS2 (Task 3.2): gate_thresholds/mode_config/gate_telemetry are not
+        // wired to the resolved headless config yet — that lands with the
+        // task that threads `[magi.complexity]`/`[magi]` mode config into the
+        // runner. Until then this run gets the same built-in-gate-active,
+        // no-inference-config, no-telemetry defaults `AgentRunConfig::default`
+        // already gives every other unconfigured caller — purely additive,
+        // nothing here changes behavior.
+        ..AgentRunConfig::default()
     };
 
     let (chunk_tx, mut chunk_rx) =

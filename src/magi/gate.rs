@@ -134,6 +134,35 @@ pub fn evaluate(content: &str, mode: &Mode, thresholds: &GateThresholds) -> Gate
     }
 }
 
+/// Destino de la telemetría del gate (REQ-A20, SC-A20h).
+///
+/// **Separado del `RunObserver` a propósito.** El observer es opcional por
+/// diseño (`None` en la TUI, que es justo la superficie que más consults
+/// autorrutea), así que colgar de él una señal que SC-A20h exige *siempre*
+/// registrada la volvería condicional a la superficie. Este trait lo
+/// implementan las dos: el runner headless (bin) enrutándolo a su run log
+/// estructurado, la TUI (bin) a un buffer acotado en memoria. Solo el trait y
+/// [`NoGateTelemetry`] viven acá, en el lib — misma frontera que separa
+/// `ModeParseError` de `ConfigError`.
+pub trait GateTelemetry: Send + Sync {
+    /// Registra UNA evaluación: modo, largo del contenido, umbral aplicado y
+    /// si vetó (SC-A20h). El umbral aplicado viaja SIEMPRE, incluso en la
+    /// línea que despacha: sin el número del lado que pasa, calibrar los
+    /// built-ins no tiene con qué comparar.
+    fn on_gate_evaluation(&self, mode: &Mode, chars: usize, threshold: usize, vetoed: bool);
+}
+
+/// Sink nulo: cero registro, comportamiento idéntico al de antes de que este
+/// campo existiera. Es lo que usa el `Default` de la config de corrida del
+/// agente (`AgentRunConfig`, en el binario), así que el campo es puramente
+/// aditivo: ninguna ruta que no lo cablea explícitamente cambia de
+/// comportamiento.
+pub struct NoGateTelemetry;
+
+impl GateTelemetry for NoGateTelemetry {
+    fn on_gate_evaluation(&self, _mode: &Mode, _chars: usize, _threshold: usize, _vetoed: bool) {}
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

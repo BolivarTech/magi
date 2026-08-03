@@ -26,7 +26,9 @@ use anyhow::Result;
 use futures::StreamExt;
 use magi_core::schema::Mode;
 use magi_rs::magi::gate::{evaluate, GateTelemetry, GateThresholds, GateVerdict, NoGateTelemetry};
-use magi_rs::magi::mode::{agent_chosen_mode, input_for_dispatch, resolve_mode_guarded, ModeConfig};
+use magi_rs::magi::mode::{
+    agent_chosen_mode, input_for_dispatch, resolve_mode_guarded, ModeConfig,
+};
 use sha2::{Digest, Sha256};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -156,6 +158,48 @@ fn log_gate(config: &AgentRunConfig, mode: &Mode, chars: usize, threshold: usize
     config
         .gate_telemetry
         .on_gate_evaluation(mode, chars, threshold, vetoed);
+}
+
+/// Updates the identical-3x-call dedup guard for ONE real invocation of
+/// `name`/`input`.
+///
+/// Factored out of [`Agent::run_tool_loop`]'s per-tool accounting so the
+/// generic path and `consult`'s genuine-dispatch path
+/// (`Agent::dispatch_consult_through_gate`'s `GateVerdict::Dispatch` arm)
+/// apply EXACTLY the same tracking instead of two copies that can drift.
+///
+/// **Deliberately NOT called for a `consult` call the gate arbitrates** (a
+/// veto, or an already-closed door, REQ-A20c): a burst of identical trivial
+/// content is exactly what produces repeated vetoes, and this guard firing on
+/// top of that would abort the whole turn with a hard error instead of the
+/// gate's own graceful, non-error terminal rule.
+///
+/// # Errors
+/// "Repetitive tool call detected" once three consecutive identical calls are
+/// seen, unless `disable_repetitive_guard` is set (REQ-H08, soft guard only —
+/// no hard barrier is affected).
+fn track_repetition(
+    name: &str,
+    input: &serde_json::Value,
+    last_normalized_tool: &mut Option<(String, String)>,
+    repeat_count: &mut i32,
+    disable_repetitive_guard: bool,
+) -> Result<()> {
+    let normalized_input = Agent::normalize_input(input, 0)?;
+    if let Some((ref last_name, ref last_norm_input)) = *last_normalized_tool {
+        if last_name == name && last_norm_input == &normalized_input {
+            *repeat_count += 1;
+            // REQ-H08: `--full-auto` silences this SOFT guard (only). No hard
+            // barrier is affected.
+            if *repeat_count >= 3 && !disable_repetitive_guard {
+                return Err(anyhow::anyhow!("Repetitive tool call detected"));
+            }
+        } else {
+            *repeat_count = 0;
+        }
+    }
+    *last_normalized_tool = Some((name.to_string(), normalized_input));
+    Ok(())
 }
 
 /// Observes an agent run from **outside** the tool loop, for the headless runner.
@@ -992,6 +1036,15 @@ impl Agent {
     /// [`resolve_mode_guarded`] (`untrusted_content` active with no declared
     /// mode) — the same fail-closed behavior the rest of the run already
     /// applies to a malformed turn.
+    ///
+    /// `last_normalized_tool`/`repeat_count` are passed through so a GENUINE
+    /// dispatch (only) can join the same identical-call dedup guard every
+    /// other tool gets — see `track_repetition`'s rustdoc for why a veto or an
+    /// already-closed door must NOT touch them.
+    // Established local convention for this exact shape (turn-scoped
+    // dispatch state threaded through a helper): `headless_runner.rs:168/546`
+    // and `tui/mod.rs:552` carry the identical allow+comment pattern.
+    #[allow(clippy::too_many_arguments)]
     async fn dispatch_consult_through_gate(
         &mut self,
         id: &str,
@@ -999,6 +1052,8 @@ impl Agent {
         config: &AgentRunConfig,
         chunk_tx: &tokio::sync::mpsc::Sender<StreamPiece>,
         consecutive_vetoes: &mut u8,
+        last_normalized_tool: &mut Option<(String, String)>,
+        repeat_count: &mut i32,
     ) -> Result<Content> {
         if *consecutive_vetoes >= MAX_CONSECUTIVE_VETOES {
             // REQ-A20c: the door already closed this turn. Not even the gate
@@ -1063,9 +1118,26 @@ impl Agent {
                     config.gate_thresholds.for_mode(&res.mode),
                     false,
                 );
+                // A GENUINE dispatch is a real tool execution like any other,
+                // so it joins the same dedup guard (keyed off the ORIGINAL
+                // model input, not the mode-injected copy) — three identical
+                // real analyses are still caught.
+                track_repetition(
+                    CONSULT_TOOL_NAME,
+                    input,
+                    last_normalized_tool,
+                    repeat_count,
+                    config.disable_repetitive_guard,
+                )?;
                 let tool_input = input_for_dispatch(input, &res);
                 Ok(self
-                    .authorize_and_execute_tool(id, CONSULT_TOOL_NAME, &tool_input, config, chunk_tx)
+                    .authorize_and_execute_tool(
+                        id,
+                        CONSULT_TOOL_NAME,
+                        &tool_input,
+                        config,
+                        chunk_tx,
+                    )
                     .await)
             }
         }
@@ -1295,20 +1367,37 @@ impl Agent {
                         return Err(anyhow::anyhow!(MAX_TOOL_CALLS_ERROR));
                     }
 
-                    let normalized_input = Self::normalize_input(input, 0)?;
-                    if let Some((ref last_name, ref last_norm_input)) = last_normalized_tool {
-                        if last_name == name && last_norm_input == &normalized_input {
-                            repeat_count += 1;
-                            // REQ-H08: `--full-auto` silences this SOFT guard (only).
-                            // No hard barrier is affected.
-                            if repeat_count >= 3 && !config.disable_repetitive_guard {
-                                return Err(anyhow::anyhow!("Repetitive tool call detected"));
-                            }
-                        } else {
-                            repeat_count = 0;
-                        }
+                    // REQ-H22: once the forced consult has run, any further
+                    // `consult` request — model-issued or not — is locked out
+                    // for the rest of THIS run (see below). That lock, not the
+                    // gate, is what handles it, so it is excluded from
+                    // `is_gate_arbitrated_consult`.
+                    let is_forced_lock =
+                        config.force_consult && forced_consult_done && name == CONSULT_TOOL_NAME;
+                    // MS2 (REQ-A20c): a `consult` call the GATE arbitrates
+                    // (vetoed, or the door already closed this turn) does NOT
+                    // participate in the generic 3x-identical dedup guard
+                    // below. A burst of identical trivial content is exactly
+                    // what produces repeated vetoes, and letting the dedup
+                    // guard ALSO fire on it would abort the WHOLE TURN with
+                    // "Repetitive tool call detected" — a hard error — instead
+                    // of the gate's own graceful, non-error terminal rule
+                    // (REQ-A20c/SC-A20c: a veto is never an error). A GENUINE
+                    // dispatch still goes through the same dedup tracking any
+                    // other tool gets — see `dispatch_consult_through_gate`'s
+                    // `GateVerdict::Dispatch` arm — so three identical real
+                    // analyses are still caught.
+                    let is_gate_arbitrated_consult = name == CONSULT_TOOL_NAME && !is_forced_lock;
+
+                    if !is_gate_arbitrated_consult {
+                        track_repetition(
+                            name,
+                            input,
+                            &mut last_normalized_tool,
+                            &mut repeat_count,
+                            config.disable_repetitive_guard,
+                        )?;
                     }
-                    last_normalized_tool = Some((name.clone(), normalized_input));
 
                     // REQ-H22: once the forced consult has run (successfully or
                     // not), any further `consult` request for the rest of THIS
@@ -1321,36 +1410,36 @@ impl Agent {
                     // absent from the observer audit trail (`on_tool_call` is not
                     // called), so `RunOutcome.tool_calls` shows exactly the one
                     // forced consult that actually ran.
-                    let result_content =
-                        if config.force_consult && forced_consult_done && name == CONSULT_TOOL_NAME
-                        {
-                            Content::ToolResult {
-                                tool_use_id: id.clone(),
-                                content: CONSULT_ALREADY_FORCED_MESSAGE.to_string(),
-                                is_error: true,
-                            }
-                        } else if name == CONSULT_TOOL_NAME {
-                            // REQ-A20: this is the model's OWN request (the
-                            // `ToolUse` loop), which is exactly the call site the
-                            // complexity gate is meant to see. The forced
-                            // pre-loop injection above never reaches this branch
-                            // — it calls `authorize_and_execute_tool` directly,
-                            // a few lines up, bypassing the gate entirely. Two
-                            // distinct call sites to the SAME tool is the whole
-                            // property REQ-A20 rests on; see
-                            // `dispatch_consult_through_gate`'s rustdoc.
-                            self.dispatch_consult_through_gate(
-                                id,
-                                input,
-                                config,
-                                chunk_tx,
-                                &mut consecutive_vetoes,
-                            )
-                            .await?
-                        } else {
-                            self.authorize_and_execute_tool(id, name, input, config, chunk_tx)
-                                .await
-                        };
+                    let result_content = if is_forced_lock {
+                        Content::ToolResult {
+                            tool_use_id: id.clone(),
+                            content: CONSULT_ALREADY_FORCED_MESSAGE.to_string(),
+                            is_error: true,
+                        }
+                    } else if is_gate_arbitrated_consult {
+                        // REQ-A20: this is the model's OWN request (the
+                        // `ToolUse` loop), which is exactly the call site the
+                        // complexity gate is meant to see. The forced
+                        // pre-loop injection above never reaches this branch
+                        // — it calls `authorize_and_execute_tool` directly, a
+                        // few lines up, bypassing the gate entirely. Two
+                        // distinct call sites to the SAME tool is the whole
+                        // property REQ-A20 rests on; see
+                        // `dispatch_consult_through_gate`'s rustdoc.
+                        self.dispatch_consult_through_gate(
+                            id,
+                            input,
+                            config,
+                            chunk_tx,
+                            &mut consecutive_vetoes,
+                            &mut last_normalized_tool,
+                            &mut repeat_count,
+                        )
+                        .await?
+                    } else {
+                        self.authorize_and_execute_tool(id, name, input, config, chunk_tx)
+                            .await
+                    };
                     tool_results.push(result_content);
                 }
             }
@@ -3825,7 +3914,9 @@ mod tests {
                     Ok(ResponseChunk::MessageDone(Message::assistant("done"))),
                 ]))),
                 Exit::Cancelled => Err(anyhow::anyhow!("provider aborted: cancelled by timeout")),
-                Exit::Error => Err(anyhow::anyhow!("provider aborted: simulated upstream failure")),
+                Exit::Error => Err(anyhow::anyhow!(
+                    "provider aborted: simulated upstream failure"
+                )),
             }
         }
     }
@@ -4127,9 +4218,10 @@ mod tests {
         assert!(out.consult_disabled_for_rest_of_turn);
 
         let long = "x".repeat(magi_rs::magi::GATE_ANALYSIS + 5);
+        let long_slice = [long.as_str()];
         let (closed_door, clean_session) = tokio::join!(
             run_turn_with_two_tooluse_blocks(&["trivial", "trivial"]),
-            run_turn_with_consults(&[long.as_str()]),
+            run_turn_with_consults(&long_slice),
         );
         assert!(closed_door.unwrap().consult_disabled_for_rest_of_turn);
         assert!(
