@@ -257,14 +257,26 @@ mod tests {
     }
 
     /// SC-A07n / SC-A07o: los dos avisos, cada uno UNA vez — con sink INYECTADO.
-    #[tokio::test]
+    ///
+    /// Reloj PAUSADO (m2, revisión Task 2.3): el provider de 30s nunca corre en
+    /// tiempo real — cada `classify` se lanza en su propia tarea y
+    /// `tokio::time::advance` salta directo más allá del techo de
+    /// [`CLASSIFY_TIMEOUT_SECS`], que es lo único que este test necesita
+    /// observar. Con reloj real esto costaba ~18s (3 llamadas × 6s) en cada
+    /// corrida de la suite.
+    #[tokio::test(start_paused = true)]
     async fn the_two_notices_fire_once_each() {
         let sink = Arc::new(RecordingNoticeSink::default());
-        let classifier =
-            ProviderClassifier::new(slow_provider(Duration::from_secs(30)), sink.clone());
+        let classifier = Arc::new(ProviderClassifier::new(
+            slow_provider(Duration::from_secs(30)),
+            sink.clone(),
+        ));
 
         for _ in 0..3 {
-            let _ = classifier.classify("x").await;
+            let classifier = Arc::clone(&classifier);
+            let handle = tokio::spawn(async move { classifier.classify("x").await });
+            tokio::time::advance(Duration::from_secs(CLASSIFY_TIMEOUT_SECS + 1)).await;
+            let _ = handle.await.expect("the classify task must not panic");
         }
 
         assert_eq!(
@@ -329,16 +341,31 @@ mod tests {
 
     /// El aislamiento es real: dos tests no se contaminan aunque corran en
     /// cualquier orden (B13).
-    #[tokio::test]
+    ///
+    /// Reloj PAUSADO (m2): mismo motivo que `the_two_notices_fire_once_each` —
+    /// dos clasificaciones contra un provider de 30s no necesitan tiempo real
+    /// para probar el aislamiento del sink.
+    #[tokio::test(start_paused = true)]
     async fn two_independent_sinks_do_not_share_state() {
         let a = Arc::new(RecordingNoticeSink::default());
         let b = Arc::new(RecordingNoticeSink::default());
-        let _ = ProviderClassifier::new(slow_provider(Duration::from_secs(30)), a.clone())
-            .classify("x")
-            .await;
-        let _ = ProviderClassifier::new(slow_provider(Duration::from_secs(30)), b.clone())
-            .classify("x")
-            .await;
+
+        let handle_a = tokio::spawn(async move {
+            ProviderClassifier::new(slow_provider(Duration::from_secs(30)), a.clone())
+                .classify("x")
+                .await;
+            a
+        });
+        let handle_b = tokio::spawn(async move {
+            ProviderClassifier::new(slow_provider(Duration::from_secs(30)), b.clone())
+                .classify("x")
+                .await;
+            b
+        });
+        tokio::time::advance(Duration::from_secs(CLASSIFY_TIMEOUT_SECS + 1)).await;
+        let a = handle_a.await.expect("classifier `a` task must not panic");
+        let b = handle_b.await.expect("classifier `b` task must not panic");
+
         assert_eq!(a.count_matching("expiró"), 1);
         assert_eq!(
             b.count_matching("expiró"),

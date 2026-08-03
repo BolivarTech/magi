@@ -397,19 +397,6 @@ fn log_event(run_log: Option<&mut &mut RunLog>, event: &LogEvent<'_>) {
     }
 }
 
-/// Concatenates the `Text` blocks of `msg` into a single string (tool-use /
-/// tool-result blocks contribute no text).
-fn join_text(msg: &Message) -> String {
-    msg.content
-        .iter()
-        .filter_map(|c| match c {
-            Content::Text { text } => Some(text.as_str()),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join("")
-}
-
 /// Projects the finished conversation `history` into the normalized transcript
 /// the output contract fixes (REQ-H14): one entry per user/assistant turn, with
 /// an assistant turn's `ToolUse` blocks folded into its `tool_calls` (resolved
@@ -436,7 +423,7 @@ fn build_transcript(
                 }
                 transcript.push(TranscriptEntry {
                     role: ROLE_USER.to_string(),
-                    content: join_text(msg),
+                    content: msg.concat_text(),
                     tool_calls: None,
                 });
             }
@@ -466,7 +453,7 @@ fn build_transcript(
                 let tool_calls = if calls.is_empty() { None } else { Some(calls) };
                 transcript.push(TranscriptEntry {
                     role: ROLE_ASSISTANT.to_string(),
-                    content: join_text(msg),
+                    content: msg.concat_text(),
                     tool_calls,
                 });
             }

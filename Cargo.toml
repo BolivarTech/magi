@@ -88,6 +88,14 @@ tokio-util = { version = "0.7", default-features = false }
 dunce = "1.0.5"
 
 [dev-dependencies]
+# `test-util` unlocks `tokio::time::{pause, advance}` for a virtual/paused clock.
+# Task 2.3 review (m2): two `mode_classifier` tests exercised the real
+# `CLASSIFY_TIMEOUT_SECS`/30s doubles with a live sleep (~30s of real wall clock
+# across the two); a paused clock advances past the same timers instantly.
+# Dev-only: Cargo unifies this with the pinned `tokio = "1.36"` main dependency
+# for test builds, and it never reaches a release binary (dev-dependencies are
+# not part of the release dependency graph).
+tokio = { version = "1.36", features = ["test-util"] }
 # RoutingMockProvider for consult tests. Repite las features de [dependencies] mas
 # `test-utils`: sin la lista completa el dev-dependency resolveria otra combinacion, y la
 # version va fijada con `=` por la misma razon que arriba (defaults de retry en 3.2.0).

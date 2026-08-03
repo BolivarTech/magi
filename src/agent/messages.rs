@@ -63,10 +63,17 @@ impl Message {
     /// Concatenates every `Content::Text` block of this message, in order.
     ///
     /// `ToolUse`/`ToolResult` blocks contribute nothing: a caller that needs
-    /// those iterates `content` directly. Shared by every reader that only
-    /// wants the plain-text reply (the MAGI adapter, `headless_runner::join_text`,
-    /// the mode classifier) so the same five-line filter/join is not
-    /// re-derived at each call site.
+    /// those iterates `content` directly. Shared by the mode classifier
+    /// (`agent::mode_classifier::ProviderClassifier::classify`) and
+    /// `headless_runner::build_transcript`, so the same five-line filter/join
+    /// is not re-derived at each call site.
+    ///
+    /// `agent::magi_adapter::MagiCoreProviderAdapter::complete` still carries
+    /// its own inline copy of this same logic, deliberately **not** migrated:
+    /// `src/agent/magi_adapter.rs` is deleted outright in Task 4.1 (native MAGI
+    /// providers replace the adapter), so migrating it now would be work
+    /// thrown away two phases from now. This is the one duplicate this crate
+    /// currently accepts, and it has a scheduled removal.
     #[must_use]
     pub fn concat_text(&self) -> String {
         self.content

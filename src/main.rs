@@ -327,10 +327,13 @@ impl Args {
     /// Extracts the `--mode` declared on whichever headless subcommand this parse
     /// holds (`query` or `consult`); `None` if there is no subcommand, or the
     /// subcommand carries no `--mode` (REQ-A07).
-    // Narrow allow: consumed by mode resolution in Task 2.3/2.4, not this task.
-    // Covered by `every_surface_accepts_an_explicit_mode` and
-    // `cli_mode_casing_matches_the_shared_mode_vocabulary`.
-    #[allow(dead_code)]
+    ///
+    /// Consumed in production by `run()`, which reads it **before**
+    /// `args.command.take()` (that `.take()` would otherwise empty `self.command`
+    /// and make this always return `None`) and forwards the result into
+    /// `run_consult_subcommand` as `explicit_mode`. Also covered by
+    /// `every_surface_accepts_an_explicit_mode` and
+    /// `cli_mode_casing_matches_the_shared_mode_vocabulary`.
     fn mode_of_consult(&self) -> Option<Mode> {
         match &self.command {
             Some(TopCmd::Query(h)) | Some(TopCmd::Consult(h)) => h.mode.map(CliMode::into_mode),
@@ -1225,6 +1228,10 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
     // material exists.
     let hardening_warnings = harden_process();
 
+    // Read BEFORE `args.command.take()` below empties `args.command` — after
+    // that point `mode_of_consult()` would always answer `None` (REQ-A07c).
+    let explicit_consult_mode = args.mode_of_consult();
+
     match args.command.take() {
         // REQ-H32: intercepted BEFORE `run_vault_subcommand` so a diagnose
         // never resolves a passphrase or opens/unlocks the vault.
@@ -1258,6 +1265,7 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
             return Ok(exit_code(
                 run_consult_subcommand(
                     h,
+                    explicit_consult_mode,
                     passphrase_flag,
                     &workspace_root,
                     anthropic_key,
@@ -2703,8 +2711,14 @@ async fn run_query_subcommand(
 /// Runs `magi consult`: forces a direct MAGI multi-perspective analysis over the
 /// prompt (no agent tool-loop) via [`run_consult`], then emits the structured
 /// outcome. Returns the process exit code (REQ-H02/H21/H33).
+///
+/// `explicit_mode` is the caller's `Args::mode_of_consult()` (REQ-A07c): it must
+/// be read from the top-level `Args` **before** `args.command.take()` empties
+/// `self.command`, which is why it arrives as an already-resolved parameter
+/// instead of being re-derived from `h` in here.
 async fn run_consult_subcommand(
     h: HeadlessArgs,
+    explicit_mode: Option<Mode>,
     passphrase_flag: Option<Zeroizing<String>>,
     cwd: &Path,
     anthropic_key: Option<String>,
@@ -2733,10 +2747,10 @@ async fn run_consult_subcommand(
     } else {
         "anthropic"
     };
-    // Explicit `--mode` wins at zero cost; its absence classifies over the
-    // PRINCIPAL provider (REQ-A07c) — cloned before `provider` is consumed
-    // below, since `build_magi_orchestrator` needs its own owned handle.
-    let explicit_mode = h.mode.map(CliMode::into_mode);
+    // Explicit `--mode` (already resolved by the caller via
+    // `Args::mode_of_consult()`) wins at zero cost; its absence classifies over
+    // the PRINCIPAL provider (REQ-A07c) — `provider` cloned before it is
+    // consumed below, since `build_magi_orchestrator` needs its own owned handle.
     let classifier = crate::agent::mode_classifier::ProviderClassifier::new(
         provider.clone(),
         Arc::new(crate::agent::mode_classifier::ProcessNoticeSink::default()),
@@ -4724,7 +4738,7 @@ mod tests {
             h.no_memory = true;
 
             let rt = tokio::runtime::Runtime::new().unwrap();
-            let code = rt.block_on(run_consult_subcommand(h, None, &cwd, None, None));
+            let code = rt.block_on(run_consult_subcommand(h, None, None, &cwd, None, None));
             assert_eq!(
                 code, 2,
                 "an over-cap consult prompt ⇒ exit 2 (rejected, not truncated)"
