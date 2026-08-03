@@ -7,7 +7,7 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use magi_core::schema::Mode;
-use magi_rs::magi::mode::{normalize_label, ModeClassifier, ModeError};
+use magi_rs::magi::mode::{normalize_label, resolve_mode_guarded, ModeClassifier, ModeError};
 use magi_rs::vault::{SecretStore, VaultError};
 use ratatui::{
     backend::{Backend, CrosstermBackend},
@@ -158,13 +158,13 @@ fn split_leading_token(s: &str) -> Option<(&str, &str)> {
 ///
 /// # Errors
 /// See [`TuiConsultParseError`]'s variants.
-// Narrow allow: consumed by the real `/consult` dispatch once mode resolution is
-// wired in (Task 2.3/2.4) — this task only wires ACCEPTANCE, not dispatch; the
-// handler still runs `Mode::Analysis` unconditionally. Covered by
-// `every_surface_accepts_an_explicit_mode` and
-// `untrusted_content_is_declarable_where_the_threat_lives` (in `main.rs`), plus the
-// edge-case tests in this module's `tests`.
-#[allow(dead_code)]
+///
+/// Consumed in production by the `KeyCode::Enter` handler in [`run_app`] (REQ-A07d): it
+/// replaces the older `parse_consult_command`, which only stripped the `/consult ` prefix
+/// and left any `--mode design` text embedded in the query — the flag never worked and
+/// silently polluted the prompt. Also covered by `every_surface_accepts_an_explicit_mode` and
+/// `untrusted_content_is_declarable_where_the_threat_lives` (in `main.rs`), plus the
+/// edge-case tests in this module's `tests`.
 pub(crate) fn parse_tui_consult(trimmed: &str) -> Result<TuiConsultCommand, TuiConsultParseError> {
     let mut rest =
         parse_consult_command(trimmed).ok_or(TuiConsultParseError::NotAConsultCommand)?;
@@ -194,26 +194,39 @@ pub(crate) fn parse_tui_consult(trimmed: &str) -> Result<TuiConsultCommand, TuiC
 }
 
 /// Resolves the effective mode for a parsed `/consult` command and hands back the
-/// (already flag-stripped) query alongside it — the pair `UiEvent::Consult`'s handler
-/// will pass to `Magi::analyze` once wired (fix round 1, in progress).
+/// (already flag-stripped) query alongside it — the exact pair the `UiEvent::Consult`
+/// handler passes to `Magi::analyze` (REQ-A07d).
+///
+/// Extracted into its own function, same precedent as `handle_login`/`handle_logout`
+/// above: the full TUI event loop is intractable to test directly, so the logic that
+/// decides the mode is tested here as a plain `async fn`.
+///
+/// `agent_chosen` is always `None`: `/consult` is a human-written command, never something
+/// the agent routed to on its own, so there is no third level to feed in. `untrusted` comes
+/// from the OPERATOR's `magi.toml` only — never from this command line, because
+/// [`parse_tui_consult`] already rejects `--untrusted-content` here (SC-A07t): a human
+/// already chose the content, so the surface never carries the mark.
 ///
 /// # Errors
 /// [`ModeError::UntrustedContentRequiresExplicitMode`] if the operator declared
 /// `untrusted_content = true` in `[magi]` and neither `cmd.mode` nor `default_mode` names a
-/// lens.
-// RED (fix round 1, en curso): stub DELIBERADAMENTE incorrecto — ignora `default_mode`,
-// `untrusted_content` y el clasificador, y siempre corre `Analysis`. Compila para que los
-// tests nuevos fallen por ASERCIÓN, no por error de compilación. El cuerpo real y el cableado
-// a `UiEvent::Consult` llegan en el commit `fix:` de este mismo ciclo.
-#[allow(dead_code)]
+/// lens (REQ-A07r) — the classification level is exactly what that configuration blocks.
 async fn resolve_tui_consult_mode(
     cmd: TuiConsultCommand,
     default_mode: Option<Mode>,
     untrusted_content: bool,
     classifier: &dyn ModeClassifier,
 ) -> Result<(Mode, String), ModeError> {
-    let _ = (default_mode, untrusted_content, classifier);
-    Ok((Mode::Analysis, cmd.query))
+    let resolution = resolve_mode_guarded(
+        cmd.mode,
+        default_mode,
+        None,
+        untrusted_content,
+        Some(classifier),
+        &cmd.query,
+    )
+    .await?;
+    Ok((resolution.mode, cmd.query))
 }
 
 /// Braille spinner frames for the "thinking" activity indicator.
@@ -263,8 +276,13 @@ pub enum UiEvent {
     Clear,
     Login,
     Logout,
-    /// Trigger a forced MAGI multi-perspective analysis with the given question.
-    Consult(String),
+    /// Trigger a forced MAGI multi-perspective analysis. `mode` is the explicit
+    /// `--mode` declared on the command, if any (REQ-A07b); `None` lets
+    /// `resolve_tui_consult_mode` fall back to `[magi].default_mode` or classify.
+    Consult {
+        query: String,
+        mode: Option<Mode>,
+    },
     Quit,
 }
 
@@ -525,12 +543,22 @@ impl App {
     }
 }
 
+/// # Parameters (REQ-A07d additions over the pre-MS2 signature)
+/// - `mode_classifier` — consulted by `resolve_tui_consult_mode` only when `/consult` has
+///   no explicit `--mode` and no `[magi].default_mode` is set (REQ-A07c).
+/// - `default_mode` — `[magi].default_mode`, resolved once at startup (REQ-A15).
+/// - `untrusted_content` — `[magi].untrusted_content` only; the TUI never exposes this as a
+///   command-line flag (REQ-A07d/SC-A07t).
+#[allow(clippy::too_many_arguments)] // pre-existing shape; REQ-A07d adds three params to it
 pub async fn run_tui_ext(
     agent: Agent,
     startup_notices: Vec<String>,
     consult: Option<std::sync::Arc<magi_core::orchestrator::Magi>>,
     magi_auto_approve: bool,
     secret_store: Option<SharedSecretStore>,
+    mode_classifier: Arc<dyn ModeClassifier>,
+    default_mode: Option<Mode>,
+    untrusted_content: bool,
 ) -> anyhow::Result<()> {
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |panic_info| {
@@ -613,7 +641,7 @@ pub async fn run_tui_ext(
                 UiEvent::Clear => {
                     runner_agent.clear_history();
                 }
-                UiEvent::Consult(query) => {
+                UiEvent::Consult { query, mode } => {
                     let magi = match consult_magi_runner.as_ref() {
                         Some(m) => m.clone(),
                         None => {
@@ -626,7 +654,8 @@ pub async fn run_tui_ext(
                         }
                     };
                     // Cap forced /consult input too (the tool path caps in execute; this
-                    // direct path bypasses it) — reject before any model call.
+                    // direct path bypasses it) — reject before any model call, INCLUDING a
+                    // classification call.
                     if query.len() > crate::tools::consult::MAX_QUERY_LEN {
                         let _ = response_tx
                             .send(AgentResponse::Error(format!(
@@ -637,6 +666,23 @@ pub async fn run_tui_ext(
                             .await;
                         continue;
                     }
+                    // REQ-A07d: fails closed if the operator declared
+                    // `untrusted_content = true` and neither `--mode` nor
+                    // `default_mode` named a lens — before any model call.
+                    let (mode, query) = match resolve_tui_consult_mode(
+                        TuiConsultCommand { mode, query },
+                        default_mode,
+                        untrusted_content,
+                        mode_classifier.as_ref(),
+                    )
+                    .await
+                    {
+                        Ok(resolved) => resolved,
+                        Err(e) => {
+                            let _ = response_tx.send(AgentResponse::Error(e.to_string())).await;
+                            continue;
+                        }
+                    };
                     let _ = response_tx
                         .send(AgentResponse::Info(
                             "MAGI deliberating — 3 model calls…".to_string(),
@@ -645,9 +691,7 @@ pub async fn run_tui_ext(
                     // MAGI FIX: joined spawn (awaited inline → serial, no finalize-order
                     // regression) isolates a panic in magi-core's analyze into a recoverable
                     // JoinError so the runner survives (see plan Task 6 iteration-3).
-                    let join =
-                        tokio::spawn(async move { magi.analyze(&Mode::Analysis, &query).await })
-                            .await;
+                    let join = tokio::spawn(async move { magi.analyze(&mode, &query).await }).await;
                     match join {
                         Ok(Ok(report)) => {
                             let body = if report.degraded {
@@ -1056,20 +1100,67 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Re
                                 app.cursor_position = 0;
                                 let trimmed = input.trim();
                                 if !trimmed.is_empty() {
-                                    if let Some(query) = parse_consult_command(trimmed) {
-                                        if query.is_empty() {
+                                    // REQ-A07b: `parse_tui_consult` replaces the older
+                                    // `parse_consult_command` here — that one only stripped
+                                    // the `/consult ` prefix, so `--mode design` in
+                                    // `/consult --mode design <question>` fell straight
+                                    // through into the query text instead of being read as
+                                    // a flag, and the analysis always ran `Analysis`
+                                    // regardless. `parse_consult_command` stays (used
+                                    // internally by `parse_tui_consult` and by its own
+                                    // pre-existing test) but is no longer this call site's
+                                    // parser.
+                                    match parse_tui_consult(trimmed) {
+                                        Ok(cmd) => {
+                                            if cmd.query.is_empty() {
+                                                app.push_message(
+                                                    "Usage: /consult [--mode <code-review|design|analysis>] <question> — forces MAGI multi-perspective analysis (3 model calls)"
+                                                        .to_string(),
+                                                );
+                                            } else {
+                                                let echoed = match cmd.mode {
+                                                    Some(m) => {
+                                                        format!(
+                                                            "User: /consult --mode {m} {}",
+                                                            cmd.query
+                                                        )
+                                                    }
+                                                    None => format!("User: /consult {}", cmd.query),
+                                                };
+                                                app.push_message(echoed);
+                                                let _ = app
+                                                    .event_tx
+                                                    .send(UiEvent::Consult {
+                                                        query: cmd.query,
+                                                        mode: cmd.mode,
+                                                    })
+                                                    .await;
+                                            }
+                                            continue;
+                                        }
+                                        Err(TuiConsultParseError::NotAConsultCommand) => {
+                                            // Not a `/consult` line at all — fall through to
+                                            // the other command checks below, unchanged.
+                                        }
+                                        Err(TuiConsultParseError::MissingModeValue) => {
                                             app.push_message(
-                                                "Usage: /consult <question> — forces MAGI multi-perspective analysis (3 model calls)"
+                                                "System: --mode needs a value (code-review, design, or analysis)"
                                                     .to_string(),
                                             );
-                                        } else {
-                                            app.push_message(format!("User: /consult {query}"));
-                                            let _ = app
-                                                .event_tx
-                                                .send(UiEvent::Consult(query.to_string()))
-                                                .await;
+                                            continue;
                                         }
-                                        continue;
+                                        Err(TuiConsultParseError::UnknownMode(bad)) => {
+                                            app.push_message(format!(
+                                                "System: unknown mode {bad:?} (valid: code-review, design, analysis)"
+                                            ));
+                                            continue;
+                                        }
+                                        Err(TuiConsultParseError::UnsupportedFlag(flag)) => {
+                                            app.push_message(format!(
+                                                "System: unsupported flag {flag:?} for /consult"
+                                            ));
+                                            continue;
+                                        }
                                     }
                                     if parse_toggle_show_thinking(trimmed) {
                                         let verbose = app.toggle_show_thinking();
@@ -1972,8 +2063,9 @@ mod tests {
     // -------------------------------------------------------------------
 
     /// Doble de [`ModeClassifier`] que PANICS si se lo invoca — la forma más fuerte
-    /// de probar "cero llamadas de clasificación": un contador en 0 podría ocultar
-    /// un bug donde se llama pero se descarta el resultado; este no deja esa salida.
+    /// de probar "cero llamadas de clasificación": un `CountingClassifier` en 0
+    /// podría ocultar un bug donde se llama pero se descarta el resultado; este no
+    /// deja esa salida.
     struct NeverClassifier;
 
     #[async_trait::async_trait]

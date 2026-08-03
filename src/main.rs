@@ -1507,6 +1507,18 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
         )?)
     };
 
+    // Cloned BEFORE `Agent::new(provider)` consumes it below — same pattern as
+    // `run_consult_subcommand`'s own classifier construction. REQ-A07d: the TUI's
+    // explicit `/consult` needs the same `resolve_mode_guarded` classifier/config
+    // pair the direct headless `magi consult` path already has.
+    let tui_mode_classifier: Arc<dyn magi_rs::magi::mode::ModeClassifier> =
+        Arc::new(crate::agent::mode_classifier::ProviderClassifier::new(
+            provider.clone(),
+            Arc::new(crate::agent::mode_classifier::ProcessNoticeSink::default()),
+        ));
+    let tui_default_mode = magi_config.effective_default_mode();
+    let tui_untrusted_content = magi_config.magi.untrusted_content.unwrap_or(false);
+
     let mut agent = Agent::new(provider);
 
     match memory_store {
@@ -1561,6 +1573,9 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
         consult_magi,
         magi_config.magi.auto_approve,
         secret_store,
+        tui_mode_classifier,
+        tui_default_mode,
+        tui_untrusted_content,
     )
     .await?;
     Ok(ExitCode::SUCCESS)
