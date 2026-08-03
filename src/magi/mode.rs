@@ -10,6 +10,7 @@
 //! bloque no depende de nada y la Fase 1 ya lo consume (`config.rs` valida `default_mode`),
 //! así que nacer en la Fase 2 dejaría la Fase 1 sin compilar.
 
+use async_trait::async_trait;
 use magi_core::schema::Mode;
 
 /// Las tres etiquetas válidas, en el texto que se le muestra al usuario en un error.
@@ -48,6 +49,41 @@ pub enum ModeSource {
     Inferred,
     /// `Analysis`, porque no hubo ninguno de los anteriores.
     Default,
+}
+
+/// Resuelve el modo efectivo a partir de las cinco fuentes posibles.
+///
+/// La única puerta pública será `resolve_mode_guarded` (Task 2.1). Mantener esta función
+/// privada evita que algún call site olvide aplicar la marca de contenido no confiable,
+/// dejando inerte la guarda de `untrusted_content`.
+///
+/// El orden refleja tanto **precedencia** como **costo**:
+/// - `Explicit` gana sobre todo: un humano lo declaró (`--mode`).
+/// - `Configured` fija la lente: un `default_mode` declarado impide que el agente la cambie.
+/// - `AgentChosen` está por encima de `Inferred` porque no costó llamada al modelo: el agente
+///   eligió mientras razonaba.
+/// - `Inferred` proviene de una llamada de clasificación sobre el contenido.
+/// - `Default` es el modo `Analysis` cuando ninguna fuente aportó nada.
+// Narrow allow: su unico consumidor de PRODUCCION es `resolve_mode_guarded`, que nace en
+// Task 2.4 — esta funcion es deliberadamente privada (ver el rustdoc de arriba) y publicarla
+// para satisfacer al linter seria abrir justo la puerta trasera que ese rustdoc explica.
+// Cubierta hoy por `explicit_beats_configured_beats_agent_beats_inferred_beats_default`,
+// `higher_precedence_wins_when_same_mode_arrives_from_two_levels`,
+// `a_prompt_injection_cannot_pick_the_mode` y `echo_classifier_with_a_valid_label_yields_inferred`.
+#[allow(dead_code)]
+fn resolve_mode(
+    explicit: Option<Mode>,
+    configured: Option<Mode>,
+    agent_chosen: Option<Mode>,
+    inferred: Option<Mode>,
+) -> (Mode, ModeSource) {
+    match (explicit, configured, agent_chosen, inferred) {
+        (Some(m), _, _, _) => (m, ModeSource::Explicit),
+        (None, Some(m), _, _) => (m, ModeSource::Configured),
+        (None, None, Some(m), _) => (m, ModeSource::AgentChosen),
+        (None, None, None, Some(m)) => (m, ModeSource::Inferred),
+        (None, None, None, None) => (Mode::Analysis, ModeSource::Default),
+    }
 }
 
 /// Un valor de configuración presente que no nombra ningún modo.
@@ -150,6 +186,20 @@ impl ModeExt for Mode {
                 valid: VALID_MODE_LABELS,
             })
     }
+}
+
+/// Clasificador inyectable de contenido en un modo.
+///
+/// Permite testear la resolución sin red ni modelo real. Implementaciones reales harán una
+/// llamada de clasificación; los dobles de test devuelven un valor prefijado.
+#[cfg_attr(test, mockall::automock)]
+#[async_trait]
+pub trait ModeClassifier: Send + Sync {
+    /// Clasifica el contenido en uno de los tres modos.
+    ///
+    /// Devuelve `None` ante CUALQUIER fallo —expiración, error de red, etiqueta no
+    /// reconocida—, y el llamador traduce ese `None` a `Analysis`/`Default`.
+    async fn classify(&self, content: &str) -> Option<Mode>;
 }
 
 #[cfg(test)]
