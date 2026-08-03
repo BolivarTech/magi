@@ -103,9 +103,10 @@ impl Workspace {
     }
 
     /// Ruta del subdirectorio de logs (`.magi/logs`).
-    // Narrow allow: consumed by the MS2 headless log writer; not yet used in
-    // production (T11 only needs `db_path`).
-    #[allow(dead_code)]
+    ///
+    /// Consumida por `main.rs`'s `build_run_log` (fix round 2, coordinator,
+    /// 2026-08-03: the `#[allow(dead_code)]` this carried was already stale — the
+    /// caller had arrived and nobody removed it).
     #[must_use]
     pub fn logs_dir(&self) -> PathBuf {
         self.magi_dir.join(LOGS_DIR_NAME)
