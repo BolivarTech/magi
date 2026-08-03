@@ -553,6 +553,56 @@ fn is_wrong_passphrase(e: &anyhow::Error) -> bool {
 /// (decision of plan 1). Never wipes: no branch of this function deletes
 /// `db_path` (REQ-V35) — a wrong passphrase only ever produces a retryable
 /// error.
+/// Wraps low-level warnings — [`harden_process`]'s best-effort hardening failures and
+/// `MaskedDek::warnings`'s mlock diagnostics — as `Resolution` [`Notice`]s.
+///
+/// Never `Info`: an mlock/dump-suppression failure is a security-posture regression,
+/// not diagnostic noise, so it must survive [`magi_rs::notices::NOTICE_MAX_INFO`]'s
+/// cap unconditionally.
+fn low_level_warning_notices(warnings: &[String]) -> Vec<Notice> {
+    warnings
+        .iter()
+        .map(|w| Notice::resolution(format!("warning: {w}")))
+        .collect()
+}
+
+/// Wraps the raw `String`s [`open_tui_memory`] and `attach_persistent_memory` push
+/// into their `&mut Vec<String>` buffer as `Resolution` [`Notice`]s.
+///
+/// Both helpers keep the `Vec<String>` signature on purpose: they are shared with the
+/// headless `query` path (REQ-H), which has no startup list to render a tier into —
+/// see the `notices` module doc for why that is the correct scope boundary. `run()`
+/// bridges the gap HERE, at the one place that does render a startup list.
+///
+/// The tier is always `Resolution`, never `Info` — deliberately conservative in ONE
+/// direction. These are messages `run()` did not author (it cannot read the intent
+/// behind an arbitrary string produced by a helper it calls), so a per-message
+/// classification would be a guess, and the two ways to guess wrong are not
+/// symmetric: defaulting to `Info` risks `NOTICE_MAX_INFO`'s cap silently dropping a
+/// real warning (e.g. "running WITHOUT persistence") — exactly what the cap must
+/// never do to a signal. Defaulting to `Resolution` risks a merely-diagnostic message
+/// (e.g. the memory diagnostics summary) surviving the cap when it didn't need to —
+/// noise, not a lost signal. Between the two failure directions, this picks the one
+/// that costs nothing important.
+fn wrap_helper_notices(texts: Vec<String>) -> Vec<Notice> {
+    texts.into_iter().map(Notice::resolution).collect()
+}
+
+/// The "no persistence at all" warning shown when the TUI reaches the end of the
+/// memory-attach sequence with no store to attach.
+///
+/// Extracted (rather than inlined at its one call site) so the test pinning that this
+/// exact message tiers above `Info` exercises the real call site, not a copy of it.
+fn no_persistence_notice() -> Notice {
+    Notice::resolution(
+        "WARNING: this session runs WITHOUT persistence — your conversation and \
+         project knowledge will NOT be saved (any existing on-disk database is left \
+         untouched). Provide the vault passphrase (-p, MAGI_PASSPHRASE, or the \
+         interactive prompt) to restore persistence."
+            .to_string(),
+    )
+}
+
 fn open_tui_memory(
     db_path: &std::path::Path,
     passphrase_flag: Option<Zeroizing<String>>,
@@ -1140,10 +1190,15 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
     }
 
     // ── TUI path ─────────────────────────────────────────────────────────
-    let mut startup_notices: Vec<String> = hardening_warnings
-        .iter()
-        .map(|w| format!("warning: {w}"))
-        .collect();
+    // Task 1.5: every source below pushes a `Notice`, never a bare `String` — the
+    // tier decides both print ORDER (`Blocking` first) and whether `NOTICE_MAX_INFO`
+    // can ever trim it. `open_tui_memory` and `attach_persistent_memory` keep their
+    // `&mut Vec<String>` signature: they are shared with the headless `query` path
+    // (REQ-H), which has no startup list to render a tier into (see `notices`
+    // module doc for why that boundary is deliberate, not unfinished). `run()`
+    // bridges the gap at the one place that DOES render a startup list, via
+    // `wrap_helper_notices`.
+    let mut startup_notices: Vec<Notice> = low_level_warning_notices(&hardening_warnings);
 
     // Discover the unified `.magi/` state directory (walk-up, nearest ancestor,
     // REQ-H16). A discovery error degrades to no-persistence with a notice
@@ -1152,61 +1207,61 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
     let workspace = match crate::system::workspace::discover(&workspace_root) {
         Ok(ws) => ws,
         Err(e) => {
-            startup_notices.push(format!(
+            startup_notices.push(Notice::resolution(format!(
                 "WARNING: could not resolve the .magi/ state directory ({e}); \
                  running WITHOUT persistence for this session."
-            ));
+            )));
             None
         }
     };
 
     let mut prompt = TtyPrompt;
+    let mut open_memory_notices: Vec<String> = Vec::new();
     let attachment = match workspace.as_ref() {
         Some(ws) => open_tui_memory(
             &ws.db_path(),
             passphrase_flag,
             &mut prompt,
-            &mut startup_notices,
+            &mut open_memory_notices,
         ),
         None => {
-            startup_notices.push(
+            startup_notices.push(Notice::resolution(
                 "WARNING: no .magi/ state directory found — running WITHOUT \
                  persistence. Run `magi init` to create one and enable saved \
                  history (any existing on-disk database is left untouched)."
                     .to_string(),
-            );
+            ));
             MemoryAttachment::Ephemeral
         }
     };
+    startup_notices.extend(wrap_helper_notices(open_memory_notices));
 
     let (memory_store, secret_store): (Option<EncryptedSqliteMemory>, Option<SharedSecretStore>) =
         match attachment {
             MemoryAttachment::Encrypted(store) => match store.data_key() {
                 Ok(dek) => {
-                    for w in dek.warnings() {
-                        startup_notices.push(format!("warning: {w}"));
-                    }
+                    startup_notices.extend(low_level_warning_notices(dek.warnings()));
                     match wire(store.shared_conn(), dek) {
                         Ok(vstore) => (
                             Some(store),
                             Some(Arc::new(Mutex::new(vstore)) as SharedSecretStore),
                         ),
                         Err(e) => {
-                            startup_notices.push(format!(
+                            startup_notices.push(Notice::resolution(format!(
                                 "WARNING: could not open the secret vault ({e}); \
                                  ANTHROPIC_API_KEY/OPENAI_API_KEY must come from the \
                                  environment this session."
-                            ));
+                            )));
                             (Some(store), None)
                         }
                     }
                 }
                 Err(e) => {
-                    startup_notices.push(format!(
+                    startup_notices.push(Notice::resolution(format!(
                         "WARNING: could not derive the vault key ({e}); \
                          ANTHROPIC_API_KEY/OPENAI_API_KEY must come from the \
                          environment this session."
-                    ));
+                    )));
                     (Some(store), None)
                 }
             },
@@ -1286,20 +1341,23 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
 
     // Notices shown when the TUI starts — the provider banner plus any persistence,
     // reset, or vault warnings that would otherwise be lost to pre-TUI stderr.
-    startup_notices.push(provider_info);
+    startup_notices.push(Notice::info(provider_info));
     // REQ-A12b/A12c: notices for resolutions that didn't come straight from what was
     // written in `magi.toml` (a blank `provider`, an inherited non-default embedder
     // endpoint, an Anthropic/base_url incoherence) — surfaced the same way the old
     // malformed-config warning used to be, but `load()` no longer needs a *malformed*
     // branch here: that path is now fatal and propagated by the `?` above.
-    startup_notices.extend(config_notices);
+    // `config_notices` stays `Vec<String>` (produced by `config::resolution_notices`,
+    // out of this task's file list) — tiered `Resolution` here, which by name IS what
+    // these are: "the config resolved differently than the file appears to say."
+    startup_notices.extend(config_notices.into_iter().map(Notice::resolution));
     // B1: surface invalid memory-config values as a startup notice (never panic).
     if let Err(e) = magi_config.memory.validate() {
-        startup_notices.push(format!("memory config warning: {e}"));
+        startup_notices.push(Notice::resolution(format!("memory config warning: {e}")));
     }
     // H2: surface invalid embedding-config values alongside memory-config (never panic).
     if let Err(e) = magi_config.embedding.validate() {
-        startup_notices.push(format!("embedding config warning: {e}"));
+        startup_notices.push(Notice::resolution(format!("embedding config warning: {e}")));
     }
     // RF-9: when there is no magi.toml at all, make the Ollama-first default visible
     // (never-silent). A present-but-minimal magi.toml does NOT trigger this.
@@ -1307,7 +1365,7 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
         &provider_kind,
         magi_toml_exists(workspace.as_ref()),
     ) {
-        startup_notices.push(crate::defaults::no_config_notice());
+        startup_notices.push(Notice::info(crate::defaults::no_config_notice()));
     }
 
     // Build the MAGI orchestrator over the resolved backend. With no per-agent
@@ -1332,7 +1390,9 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
             },
         );
         if let Some(notice) = static_override_notice(true, !specs.is_empty()) {
-            startup_notices.push(notice);
+            // The trio the user configured is not buildable — a request the user
+            // made is unavailable, which is exactly the `Blocking` tier's definition.
+            startup_notices.push(Notice::blocking(notice));
         }
         None
     } else {
@@ -1354,25 +1414,21 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
             // headless `query` path, DRY). The embedding key is resolved here
             // (env > vault) so the helper stays free of the secret-store plumbing.
             let embed_key = resolve_openai_key(openai_key.as_deref(), secret_store.as_ref());
+            let mut attach_notices: Vec<String> = Vec::new();
             attach_persistent_memory(
                 &mut agent,
                 concrete_store,
                 &magi_config,
                 embed_key,
                 secret_store.as_ref(),
-                &mut startup_notices,
+                &mut attach_notices,
             )
             .await?;
+            startup_notices.extend(wrap_helper_notices(attach_notices));
         }
         None => {
             // #7: surface the no-persistence state in the TUI, not just pre-TUI stderr.
-            startup_notices.push(
-                "WARNING: this session runs WITHOUT persistence — your conversation and \
-                 project knowledge will NOT be saved (any existing on-disk database is left \
-                 untouched). Provide the vault passphrase (-p, MAGI_PASSPHRASE, or the \
-                 interactive prompt) to restore persistence."
-                    .to_string(),
-            );
+            startup_notices.push(no_persistence_notice());
         }
     }
 
@@ -1400,7 +1456,7 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
 
     crate::tui::run_tui_ext(
         agent,
-        startup_notices,
+        render_notices(startup_notices),
         consult_magi,
         magi_config.magi.auto_approve,
         secret_store,
@@ -2617,8 +2673,8 @@ async fn run_consult_subcommand(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use magi_rs::notices::NoticeTier;
     use crate::agent::messages::Message;
+    use magi_rs::notices::NoticeTier;
     use magi_rs::vault::MaskedDek;
 
     /// MAGI re-gate finding (Caspar/Melchior): a substring match on
@@ -3347,7 +3403,9 @@ mod tests {
                     n.text
                 );
             }
-            assert!(notices.iter().any(|n| n.text.contains("WITHOUT persistence")));
+            assert!(notices
+                .iter()
+                .any(|n| n.text.contains("WITHOUT persistence")));
         });
     }
 

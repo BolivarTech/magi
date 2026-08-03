@@ -36,6 +36,115 @@
     )
 )]
 
+use std::collections::HashSet;
+
+/// Prioridad de un notice de arranque.
+///
+/// **El orden de declaración del enum ES el orden de impresión**: el `derive(Ord)` no
+/// es decorativo — [`render_notices`] ordena con `sort_by_key(|n| n.tier)` y depende de
+/// que `Blocking < Resolution < Info` en ese sentido exacto.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum NoticeTier {
+    /// Algo que el usuario pidió NO está disponible. Acción requerida.
+    Blocking,
+    /// La config se resolvió distinto de lo que el archivo parece decir. Sorprende.
+    Resolution,
+    /// Diagnóstico. Útil, nunca urgente.
+    Info,
+}
+
+/// Un notice de arranque, con la prioridad que decide su lugar en la lista final.
+///
+/// **Toda fuente empuja `Notice`, no `String`** — antes de esta tarea, varias fuentes de
+/// `main.rs` empujaban `String` planos a una lista compartida mientras el diseño de
+/// tiers vivía solo en la spec, así que el orden no podía aplicarse a nada real.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Notice {
+    /// Prioridad — gobierna el orden de impresión y si el tope de [`render_notices`]
+    /// puede alcanzarlo.
+    pub tier: NoticeTier,
+    /// Texto a mostrar, ya formateado por quien lo construyó.
+    pub text: String,
+}
+
+impl Notice {
+    /// Construye un notice `Blocking`: algo que el usuario pidió no está disponible.
+    pub fn blocking(text: impl Into<String>) -> Self {
+        Self {
+            tier: NoticeTier::Blocking,
+            text: text.into(),
+        }
+    }
+
+    /// Construye un notice `Resolution`: la config se resolvió distinto de lo escrito.
+    pub fn resolution(text: impl Into<String>) -> Self {
+        Self {
+            tier: NoticeTier::Resolution,
+            text: text.into(),
+        }
+    }
+
+    /// Construye un notice `Info`: diagnóstico, nunca urgente.
+    pub fn info(text: impl Into<String>) -> Self {
+        Self {
+            tier: NoticeTier::Info,
+            text: text.into(),
+        }
+    }
+}
+
+/// Cuántos `Info` sobreviven al tope de [`render_notices`].
+///
+/// 5: con diez fuentes posibles, media pantalla es lo que alguien lee de verdad al
+/// arrancar. No es una medición — es el mismo tipo de número elegido a mano que los
+/// umbrales del gate de complejidad (REQ-A20), y se dice para no fingir lo contrario.
+pub const NOTICE_MAX_INFO: usize = 5;
+
+/// Ordena por tier (`Blocking` primero), deduplica por texto exacto, y recorta solo los
+/// `Info` que excedan [`NOTICE_MAX_INFO`].
+///
+/// # Contrato
+/// - **Orden**: `Blocking` → `Resolution` → `Info`. El `sort_by_key` es estable, así que
+///   dos notices del mismo tier conservan el orden en que se pasaron.
+/// - **Dedup**: dos notices con el mismo `text` colapsan en uno solo — el trío puede
+///   emitir el mismo aviso de normalización de `base_url` tres veces (una por asiento),
+///   y el usuario no necesita leerlo tres veces. Se aplica DESPUÉS de ordenar, así que
+///   sobrevive la primera aparición en orden de tier.
+/// - **Tope**: `Blocking` y `Resolution` NUNCA se recortan — el tope existe para el
+///   ruido de diagnóstico, no para lo accionable ni lo sorprendente. Cuando recorta, la
+///   última línea del resultado dice cuántos `Info` se omitieron.
+///
+/// Complejidad: `O(n log n)` por el sort más `O(n)` por el dedup (un `HashSet` de
+/// textos ya vistos) — aceptable porque `n` es la cantidad de notices de UN arranque
+/// (un puñado de fuentes, nunca miles).
+pub fn render_notices(notices: Vec<Notice>) -> Vec<String> {
+    let mut sorted = notices;
+    sorted.sort_by_key(|n| n.tier);
+
+    let mut seen_text = HashSet::with_capacity(sorted.len());
+    let deduped = sorted
+        .into_iter()
+        .filter(|n| seen_text.insert(n.text.clone()));
+
+    let mut info_seen = 0usize;
+    let mut dropped = 0usize;
+    let mut out = Vec::new();
+    for n in deduped {
+        if n.tier == NoticeTier::Info {
+            info_seen += 1;
+            if info_seen > NOTICE_MAX_INFO {
+                dropped += 1;
+                continue;
+            }
+        }
+        out.push(n.text);
+    }
+    if dropped > 0 {
+        out.push(format!("… {dropped} more diagnostic notice(s) omitted"));
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -48,7 +157,10 @@ mod tests {
             Notice::blocking("el trío no es construible: falta OPENAI_API_KEY"),
             Notice::resolution("`[embedding].base_url` heredó la raíz"),
         ]);
-        assert!(out[0].contains("no es construible"), "primero lo que exige acción");
+        assert!(
+            out[0].contains("no es construible"),
+            "primero lo que exige acción"
+        );
         assert!(out[1].contains("heredó"));
         assert!(out[2].contains("ventana medida"));
     }
@@ -63,9 +175,15 @@ mod tests {
         v.push(Notice::resolution("r1"));
 
         let out = render_notices(v);
-        assert!(out.iter().any(|n| n.contains("b1")), "Blocking NUNCA se recorta");
+        assert!(
+            out.iter().any(|n| n.contains("b1")),
+            "Blocking NUNCA se recorta"
+        );
         assert!(out.iter().any(|n| n.contains("r1")), "Resolution tampoco");
-        assert_eq!(out.iter().filter(|n| n.starts_with('d')).count(), NOTICE_MAX_INFO);
+        assert_eq!(
+            out.iter().filter(|n| n.starts_with('d')).count(),
+            NOTICE_MAX_INFO
+        );
         assert!(out.last().unwrap().contains('3'), "dice cuántos omitió");
     }
 
