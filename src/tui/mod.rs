@@ -1666,11 +1666,28 @@ mod tests {
 
     #[test]
     fn test_parse_init_config_command() {
-        // S-13
+        // S-13. The command is still RECOGNIZED after retirement (REQ-A22) — only what
+        // happens once recognized changes (see `test_init_config_retired_message_...`).
+        // A literal `parse_init_config` returning `false` would fall through to being
+        // sent to the agent as a normal chat message, which is worse than a clear
+        // retirement notice.
         assert!(parse_init_config("/init-config"));
         assert!(parse_init_config("  /init-config  "));
         assert!(!parse_init_config("/init-configurator"));
         assert!(!parse_init_config("/help"));
+    }
+
+    /// SC-A22: `/init-config` was retired (REQ-A22) — mirrors `reject_init_config` in
+    /// `main.rs` for the CLI flag. Retiring is not muting: a message pointing at the
+    /// replacement, not a silent fall-through to "send this text to the agent".
+    #[test]
+    fn test_init_config_retired_message_points_at_magi_init() {
+        let msg = init_config_retired_message();
+        assert!(
+            msg.contains("magi init"),
+            "a message that doesn't name the replacement turns a one-line migration \
+             into a search: {msg}"
+        );
     }
 
     #[test]
