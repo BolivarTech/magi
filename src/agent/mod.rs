@@ -233,6 +233,26 @@ fn track_repetition(
     Ok(())
 }
 
+/// Forwards ONE `piece` to `chunk_tx`, mapping a dropped receiver (the UI
+/// closed the connection mid-stream) to the SAME error every send site in
+/// [`Agent::run_tool_loop`] previously produced independently.
+///
+/// Factored out once REQ-A20's `NO_CONSENSUS_MARK` send (SC-A20k) would
+/// have made this a THIRD copy of the identical six-line pattern —
+/// `TextDelta` and `ReasoningDelta` already each had their own (B3).
+///
+/// # Errors
+/// Returns an error if the receiver has been dropped.
+async fn send_or_closed_err(
+    chunk_tx: &tokio::sync::mpsc::Sender<StreamPiece>,
+    piece: StreamPiece,
+) -> Result<()> {
+    chunk_tx
+        .send(piece)
+        .await
+        .map_err(|_| anyhow::anyhow!("TUI connection closed during streaming"))
+}
+
 /// Observes an agent run from **outside** the tool loop, for the headless runner.
 ///
 /// Absent ([`AgentRunConfig::observer`] is `None`) ⇒ the interactive tool loop
@@ -1393,25 +1413,13 @@ impl Agent {
                         let sanitized = Self::sanitize_text(&delta);
                         turn_text_blocks += 1;
                         full_text.push_str(&sanitized);
-                        if chunk_tx
-                            .send(StreamPiece::Content(sanitized))
-                            .await
-                            .is_err()
-                        {
-                            return Err(anyhow::anyhow!("TUI connection closed during streaming"));
-                        }
+                        send_or_closed_err(chunk_tx, StreamPiece::Content(sanitized)).await?;
                     }
                     ResponseChunk::ReasoningDelta(delta) => {
                         // Forwarded for live display only — NOT added to `full_text`,
                         // so the persisted assistant message excludes the thinking.
                         let sanitized = Self::sanitize_text(&delta);
-                        if chunk_tx
-                            .send(StreamPiece::Reasoning(sanitized))
-                            .await
-                            .is_err()
-                        {
-                            return Err(anyhow::anyhow!("TUI connection closed during streaming"));
-                        }
+                        send_or_closed_err(chunk_tx, StreamPiece::Reasoning(sanitized)).await?;
                     }
                     ResponseChunk::MessageDone(msg) => {
                         last_message = Some(msg);
@@ -1582,13 +1590,11 @@ impl Agent {
                 // reach the screen.
                 if answering_without_consensus {
                     final_text.push_str(NO_CONSENSUS_MARK);
-                    if chunk_tx
-                        .send(StreamPiece::Content(NO_CONSENSUS_MARK.to_string()))
-                        .await
-                        .is_err()
-                    {
-                        return Err(anyhow::anyhow!("TUI connection closed during streaming"));
-                    }
+                    send_or_closed_err(
+                        chunk_tx,
+                        StreamPiece::Content(NO_CONSENSUS_MARK.to_string()),
+                    )
+                    .await?;
                 }
                 return Ok((full_text, final_text));
             }
