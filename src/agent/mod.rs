@@ -29,6 +29,13 @@ use magi_rs::magi::gate::{evaluate, GateTelemetry, GateThresholds, GateVerdict, 
 use magi_rs::magi::mode::{
     agent_chosen_mode, input_for_dispatch, resolve_mode_guarded, ModeConfig,
 };
+// Test-only: `read_resolved_mode` is the inverse of `input_for_dispatch` /
+// `inject_resolved_mode` and has no production caller in this module — only
+// `a_forced_consult_carries_a_resolved_mode_into_execute` reads it back to
+// assert what was actually injected. `ConsultTool::execute` (a different
+// module) is the production reader.
+#[cfg(test)]
+use magi_rs::magi::mode::read_resolved_mode;
 use sha2::{Digest, Sha256};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -3636,19 +3643,39 @@ mod tests {
     /// production code dispatches to.
     struct CountingConsultTool {
         calls: Arc<std::sync::atomic::AtomicUsize>,
+        /// `Some` only for [`Self::new_recording`] — records the args of the
+        /// MOST RECENT `execute` call, so a test can check not just *that*
+        /// the tool was dispatched but *what* it was dispatched with (e.g.
+        /// whether a resolved mode was injected).
+        last_args: Option<Arc<std::sync::Mutex<Option<Value>>>>,
     }
 
     impl CountingConsultTool {
         /// Builds a fresh double and returns it alongside a handle to its
         /// call counter.
         fn new() -> (Self, Arc<std::sync::atomic::AtomicUsize>) {
+            let (tool, calls, _) = Self::new_recording();
+            (tool, calls)
+        }
+
+        /// Like [`Self::new`], plus a handle to the args of the most recent
+        /// `execute` call.
+        fn new_recording() -> (
+            Self,
+            Arc<std::sync::atomic::AtomicUsize>,
+            Arc<std::sync::Mutex<Option<Value>>>,
+        ) {
             use std::sync::atomic::AtomicUsize;
+            use std::sync::Mutex;
             let calls = Arc::new(AtomicUsize::new(0));
+            let last_args = Arc::new(Mutex::new(None));
             (
                 Self {
                     calls: calls.clone(),
+                    last_args: Some(last_args.clone()),
                 },
                 calls,
+                last_args,
             )
         }
     }
@@ -3671,9 +3698,12 @@ mod tests {
                 "required": ["query"]
             })
         }
-        async fn execute(&self, _args: Value, _cancel: &CancellationToken) -> ToolResult<Value> {
+        async fn execute(&self, args: Value, _cancel: &CancellationToken) -> ToolResult<Value> {
             use std::sync::atomic::Ordering;
             self.calls.fetch_add(1, Ordering::SeqCst);
+            if let Some(last_args) = &self.last_args {
+                *last_args.lock().unwrap() = Some(args);
+            }
             Ok(json!({"report": "ok", "degraded": false}))
         }
     }
@@ -4278,5 +4308,44 @@ mod tests {
             "the model's own request for the SAME trivial content must be vetoed: it enters \
              through the ToolUse loop, which the gate DOES see"
         );
+    }
+
+    /// MS2 (REQ-A20/REQ-A07d), review finding I1: the forced pre-loop
+    /// injection (REQ-H22) must ALSO resolve and inject a mode before
+    /// dispatching, not just the model-issued `ToolUse` path
+    /// (`dispatch_consult_through_gate`) — REQ-A20 forbids ever vetoing it,
+    /// but that is not license to skip resolution. The call-site test above
+    /// only counts invocations; this checks WHICH mode actually reached
+    /// `execute`, so a regression that stops injecting on this path (falling
+    /// back silently to `ConsultTool`'s own `Mode::Analysis` default) fails
+    /// here even though the tool still runs exactly once.
+    #[tokio::test]
+    async fn a_forced_consult_carries_a_resolved_mode_into_execute() {
+        let (tool, _calls, last_args) = CountingConsultTool::new_recording();
+        let mut agent = Agent::new(Arc::new(MockProvider));
+        agent.register_tool(Box::new(tool));
+        let (tx, _rx) = tokio::sync::mpsc::channel(64);
+        let config = AgentRunConfig {
+            force_consult: true,
+            ..AgentRunConfig::default()
+        };
+        agent.query_streaming("trivial", tx, config).await.unwrap();
+
+        let args = last_args
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("the forced consult must have dispatched to execute");
+        let (mode, source) = read_resolved_mode(&args).expect(
+            "the forced path must inject a resolved (Mode, ModeSource) before dispatch, \
+             exactly like the model-issued path — reading `ConsultTool`'s own fallback \
+             instead is precisely the divergence REQ-A07d exists to close",
+        );
+        assert_eq!(
+            mode,
+            Mode::Analysis,
+            "no default_mode/agent choice here ⇒ Default level"
+        );
+        assert_eq!(source, magi_rs::magi::mode::ModeSource::Default);
     }
 }
