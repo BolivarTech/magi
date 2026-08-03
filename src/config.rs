@@ -781,17 +781,26 @@ impl MagiConfig {
         // contener un secreto (una credencial literal es error de config, ya rechazado
         // por `load()` antes de llegar acá), así que pasarla por `redact_url` sería
         // redundante *y* mal tipado.
-        let Ok(root) = self.effective_base_url() else {
-            return out; // infalible en la práctica: `load()` ya validó — ver su doc.
-        };
-        if root.as_str() != crate::defaults::DEFAULT_OPENAI_BASE_URL
-            && self.embedding.base_url.is_none()
-        {
-            out.push(format!(
-                "notice: el embedder hereda `base_url = {}` de la raíz; declaralo en \
-                 [embedding] si querés otro",
-                root.as_str(),
-            ));
+        //
+        // m2 (fix round 2, coordinator, 2026-08-03): `if let`, NO `let … else { return
+        // out }`. Antes, un `effective_base_url()` fallido cortaba TODA la función —
+        // incluidos los dos chequeos de Anthropic de más abajo, que no dependen de
+        // esta plantilla — apoyado en que "`load()` ya validó". Esa garantía es real
+        // HOY pero vive en `load()`, una función distinta: un futuro llamador de
+        // `resolution_notices()`, o un reorden dentro de `load()`, produciría cero
+        // avisos de Anthropic en silencio. Acotar el `if let` a este único bloque
+        // cuesta cero y elimina el acoplamiento — ver
+        // `a_failed_root_base_url_does_not_swallow_the_anthropic_notices`.
+        if let Ok(root) = self.effective_base_url() {
+            if root.as_str() != crate::defaults::DEFAULT_OPENAI_BASE_URL
+                && self.embedding.base_url.is_none()
+            {
+                out.push(format!(
+                    "notice: el embedder hereda `base_url = {}` de la raíz; declaralo en \
+                     [embedding] si querés otro",
+                    root.as_str(),
+                ));
+            }
         }
 
         // REQ-A12c: con `anthropic`, el `base_url` de raíz NO se usa para el agente
