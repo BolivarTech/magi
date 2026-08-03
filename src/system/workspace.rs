@@ -858,10 +858,10 @@ mod tests {
     /// aislado) trae la forma v0.12.0 — `base_url` en la raíz, `provider` con el
     /// vocabulario nuevo, SIN `[openai].base_url` — y, la aserción que lo ata todo,
     /// el archivo que escribe PARSEA a través de la MISMA validación
-    /// (`MagiConfig::from_toml_str`) que el binario aplica en cada arranque. Sin esto
-    /// `magi init` podría escribir un `magi.toml` que el propio binario rechaza en el
-    /// arranque siguiente — la peor experiencia de primer uso posible, y justo lo que
-    /// la migración de este milestone existe para prevenir.
+    /// (`MagiConfig::load`, NO `from_toml_str`) que el binario aplica en cada
+    /// arranque. Sin esto `magi init` podría escribir un `magi.toml` que el propio
+    /// binario rechaza en el arranque siguiente — la peor experiencia de primer uso
+    /// posible, y justo lo que la migración de este milestone existe para prevenir.
     #[test]
     fn magi_init_scaffolds_a_magi_toml_the_binary_can_read_back() {
         let tmp = tempfile::tempdir().unwrap();
@@ -885,8 +885,18 @@ mod tests {
         }
 
         // La aserción que lo ata todo: el output del scaffolder pasa por la MISMA
-        // validación que el binario aplica en cada arranque.
-        let parsed = crate::config::MagiConfig::from_toml_str(&raw)
+        // validación que el binario aplica en cada arranque — `MagiConfig::load`, NO
+        // `from_toml_str`. `load` es estrictamente más estricta: además del vocabulario
+        // y los rangos, valida las TRES plantillas de `base_url` con
+        // `EndpointTemplate::parse` (REQ-A16c/SC-A16d). `from_toml_str` no lo hace a
+        // propósito (sus propios tests de plantilla malformada dependen de que no lo
+        // haga), así que solo `load` prueba lo que el binario realmente aplica en cada
+        // arranque. Fix round 2 (coordinator, 2026-08-03, I1): con `from_toml_str` acá,
+        // un `base_url` sin esquema (p. ej. "localhost:11434/v1") habría dejado este
+        // test en verde mientras todo `magi init` real moría con
+        // `EndpointError::Unparseable` en el arranque siguiente — el fallo de primer
+        // uso exacto que este test existe para prevenir.
+        let (parsed, _notices) = crate::config::MagiConfig::load(&ws.config_path())
             .expect("magi init nunca debe escribir un magi.toml que el binario rechace");
 
         assert!(

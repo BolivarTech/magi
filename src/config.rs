@@ -1747,6 +1747,17 @@ mod tests {
             "ausente: default silencioso"
         );
 
+        // m6 (fix round 2, coordinator, 2026-08-03) / SC-A21f: un archivo PRESENTE
+        // pero vacío o con solo espacios también es silencioso — todo campo de raíz
+        // es opcional, así que un TOML en blanco es un TOML válido que declara cero
+        // cosas. `from_toml_str("")` y `detect_migrations("")` ya estaban cubiertas
+        // por separado; esto es lo único que faltaba: `load()` de punta a punta
+        // contra un ARCHIVO real, que es lo que su propia rustdoc cita como cubierto.
+        std::fs::write(&path, "   \n").unwrap();
+        let (cfg, notices) = MagiConfig::load(&path).expect("en blanco: default silencioso");
+        assert_eq!(cfg, MagiConfig::default());
+        assert!(notices.is_empty());
+
         std::fs::write(&path, "provdier = \"x\"").unwrap();
         let err = MagiConfig::load(&path).expect_err("presente y roto: FATAL");
         assert!(err.to_string().contains("magi.toml"));
@@ -1782,9 +1793,26 @@ mod tests {
                 }
             };
             let msg = err.to_string();
+            // m3 (fix round 2, coordinator, 2026-08-03): la contraseña ya estaba
+            // cubierta; el USUARIO no lo estaba — y esta prueba vive en `config.rs`,
+            // así que una regresión en `EndpointError::LiteralCredential` (que solo
+            // lleva `&'static str`, nunca el valor recibido) no la vería el módulo
+            // que la obligación nombra si solo pineamos la mitad.
             assert!(
                 !msg.contains("s3cr3t"),
-                "{scope}: filtró la credencial: {msg}"
+                "{scope}: filtró la contraseña: {msg}"
+            );
+            assert!(!msg.contains("alice"), "{scope}: filtró el usuario: {msg}");
+            // Y no alcanza con "no filtra": el mensaje tiene que ser ACCIONABLE —
+            // nombrar el placeholder correcto y el comando de vault, no solo decir
+            // "credencial inválida".
+            assert!(
+                msg.contains("[user]") && msg.contains("[password]"),
+                "{scope}: no nombra el placeholder: {msg}"
+            );
+            assert!(
+                msg.contains("magi-rs vault set"),
+                "{scope}: no nombra el comando para arreglarlo: {msg}"
             );
         }
     }
@@ -1850,5 +1878,40 @@ mod tests {
         std::fs::write(&path, "provider = \"ollama\"\n").unwrap();
         let (_, notices) = MagiConfig::load(&path).unwrap();
         assert!(!notices.iter().any(|n| n.contains("no se usa")));
+    }
+
+    /// m2 (fix round 2, coordinator, 2026-08-03): un `effective_base_url()` fallido NO
+    /// debe silenciar los avisos de incoherencia de Anthropic que le siguen.
+    ///
+    /// `resolution_notices()` solo corre hoy dentro de `load()`, DESPUÉS de que
+    /// `load()` ya validó las tres plantillas — así que en producción
+    /// `effective_base_url()` nunca falla acá. Pero esa garantía vive en `load()`, una
+    /// función DISTINTA: si `resolution_notices()` alguna vez se llama desde otro
+    /// lado, o si `load()` se reordena, el `let Ok(root) = … else { return out }`
+    /// original cortaría TODA la función en el primer `?` implícito — incluidos los
+    /// dos chequeos de Anthropic que nada tienen que ver con `effective_base_url()` —
+    /// sin ninguna señal de que se perdió cobertura.
+    ///
+    /// Se llama a `resolution_notices()` DIRECTAMENTE (acceso de `mod tests` al
+    /// privado del módulo padre), no a través de `load()`: es la única forma de poner
+    /// a esta función bajo la precondición que su propio `else` dice que nunca
+    /// ocurre, sin duplicar la validación de `load()` en el test.
+    #[test]
+    fn a_failed_root_base_url_does_not_swallow_the_anthropic_notices() {
+        let cfg = MagiConfig::from_toml_str(
+            "provider = \"anthropic\"\nbase_url = \"https://alice:s3cr3t@host/v1\"\n",
+        )
+        .unwrap();
+        // Precondición del test: la plantilla de raíz SÍ falla (credencial literal),
+        // así que `resolution_notices()` corre exactamente bajo la condición que su
+        // propio comentario decía "infalible en la práctica".
+        assert!(cfg.effective_base_url().is_err());
+
+        let notices = cfg.resolution_notices();
+        assert!(
+            notices.iter().any(|n| n.contains("NO se usa")),
+            "el aviso de incoherencia de Anthropic no debe depender de que la \
+             plantilla de raíz haya parseado: {notices:?}"
+        );
     }
 }
