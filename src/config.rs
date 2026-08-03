@@ -883,10 +883,13 @@ mod tests {
 
     #[test]
     fn test_load_missing_file_is_default_no_warning() {
+        // Task 1.4: `load` takes a FILE path now, not a directory, and returns
+        // `Result<(Self, Vec<String>), ConfigError>`.
         let dir = tempfile::tempdir().unwrap();
-        let (c, warn) = MagiConfig::load(dir.path());
+        let path = dir.path().join("magi.toml");
+        let (c, notices) = MagiConfig::load(&path).unwrap();
         assert_eq!(c, MagiConfig::default());
-        assert!(warn.is_none());
+        assert!(notices.is_empty());
     }
 
     #[test]
@@ -894,22 +897,18 @@ mod tests {
         // Task 1.1: `"openai"` is no longer a valid `provider` value (REQ-A01b) —
         // `"anthropic"` exercises the same "a real value round-trips through load()"
         // property without depending on the retired vocabulary.
+        //
+        // NOT asserting `notices.is_empty()`: `provider = "anthropic"` with no declared
+        // `base_url` is exactly SC-A12d's sub-case (b) — the built-in Ollama default is
+        // still sitting there, unused by the principal provider, and REQ-A12c requires a
+        // notice about it. `silent_resolutions_are_announced_as_notices` and
+        // `anthropic_flags_both_the_declared_and_the_defaulted_base_url` cover that
+        // notice directly; this test's only job is the round-trip.
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("magi.toml"), "provider = \"anthropic\"").unwrap();
-        let (c, warn) = MagiConfig::load(dir.path());
+        let path = dir.path().join("magi.toml");
+        std::fs::write(&path, "provider = \"anthropic\"").unwrap();
+        let (c, _notices) = MagiConfig::load(&path).unwrap();
         assert_eq!(c.provider.as_deref(), Some("anthropic"));
-        assert!(warn.is_none());
-    }
-
-    #[test]
-    fn test_load_malformed_yields_default_plus_warning() {
-        // RF-1 + MAGI: malformed config does not crash; returns defaults AND a
-        // human-facing warning (main.rs surfaces it as a TUI startup notice).
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("magi.toml"), "provdier = \"x\"").unwrap();
-        let (c, warn) = MagiConfig::load(dir.path());
-        assert_eq!(c, MagiConfig::default());
-        assert!(warn.unwrap().contains("magi.toml"));
     }
 
     #[test]
@@ -1036,14 +1035,14 @@ mod tests {
     }
 
     #[test]
-    fn test_load_unreadable_file_yields_default_plus_warning() {
-        // A directory named `magi.toml` makes read_to_string fail with a
-        // non-NotFound error → must surface a warning, not be treated as absent.
+    fn test_load_unreadable_file_is_fatal() {
+        // A directory named `magi.toml` makes read_to_string fail with a non-NotFound
+        // error → REQ-A23: must be FATAL, never degrade to defaults + warning.
         let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir(dir.path().join("magi.toml")).unwrap();
-        let (c, warn) = MagiConfig::load(dir.path());
-        assert_eq!(c, MagiConfig::default());
-        assert!(warn.unwrap().contains("magi.toml"));
+        let path = dir.path().join("magi.toml");
+        std::fs::create_dir(&path).unwrap();
+        let err = MagiConfig::load(&path).expect_err("unreadable magi.toml must be fatal");
+        assert!(err.to_string().contains("magi.toml"));
     }
 
     // -------------------------------------------------------------------------
@@ -1585,5 +1584,149 @@ mod tests {
             cfg.effective_base_url().unwrap().as_str(),
             "http://lan:11434/v1"
         );
+    }
+
+    // -------------------------------------------------------------------------
+    // Task 1.4: `load` fallible, resolution notices, `--init-config` retirement
+    // -------------------------------------------------------------------------
+
+    /// REQ-A01b a través del camino de PRODUCCIÓN, no solo del parser.
+    ///
+    /// Complemento obligatorio de
+    /// `an_invalid_vocabulary_value_is_rejected_at_parse_not_swallowed_by_a_resolver`
+    /// (Task 1.1): aquel prueba `from_toml_str`, éste prueba que `load()` ya no degrada
+    /// el error a defaults-más-warning — que es exactamente lo que hacía entre el cierre
+    /// de Task 1.1 y el de ésta (hueco intermedio conocido, ver ORDER-FIXES ruptura #8).
+    #[test]
+    fn an_invalid_vocabulary_value_is_fatal_through_load_not_degraded_to_defaults() {
+        for (toml, what) in [
+            ("provider = \"banana\"\n", "provider de raíz"),
+            ("[magi]\nkind = \"banana\"\n", "[magi].kind"),
+            ("[magi]\ndefault_mode = \"banana\"\n", "[magi].default_mode"),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("magi.toml");
+            std::fs::write(&path, toml).unwrap();
+            assert!(
+                MagiConfig::load(&path).is_err(),
+                "{what}: por load() también debe ser ERROR, nunca defaults + warning"
+            );
+        }
+    }
+
+    /// REQ-A23: presente y no parsea ⇒ FATAL. Ausente ⇒ default silencioso.
+    #[test]
+    fn a_present_but_broken_config_is_fatal_while_an_absent_one_is_silent() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("magi.toml");
+
+        assert!(
+            MagiConfig::load(&path).is_ok(),
+            "ausente: default silencioso"
+        );
+
+        std::fs::write(&path, "provdier = \"x\"").unwrap();
+        let err = MagiConfig::load(&path).expect_err("presente y roto: FATAL");
+        assert!(err.to_string().contains("magi.toml"));
+    }
+
+    /// SEGUNDA OBLIGACIÓN heredada de Task 1.1: SC-A16d, fallo CERRADO ante una
+    /// credencial literal en `base_url` — en las TRES secciones que pueden declararla,
+    /// no solo la que el camino del embedder (`attach_persistent_memory`) ya cubría
+    /// degradando a un notice + memoria en texto plano (lo que SC-A16d prohíbe).
+    ///
+    /// Afirma las DOS mitades que el requerimiento pide: que el arranque falla, y que
+    /// el mensaje no repite el valor de la credencial encontrada.
+    #[test]
+    fn a_literal_credential_in_any_base_url_scope_fails_closed_at_load() {
+        for (toml, scope) in [
+            ("base_url = \"https://alice:s3cr3t@host/v1\"\n", "raíz"),
+            (
+                "[magi]\nbase_url = \"https://alice:s3cr3t@host/v1\"\n",
+                "[magi]",
+            ),
+            (
+                "[embedding]\nbase_url = \"https://alice:s3cr3t@host/v1\"\n",
+                "[embedding]",
+            ),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("magi.toml");
+            std::fs::write(&path, toml).unwrap();
+            let err = match MagiConfig::load(&path) {
+                Err(e) => e,
+                Ok(_) => {
+                    panic!("{scope}: load() debió fallar ante una credencial literal en base_url")
+                }
+            };
+            let msg = err.to_string();
+            assert!(
+                !msg.contains("s3cr3t"),
+                "{scope}: filtró la credencial: {msg}"
+            );
+        }
+    }
+
+    /// REQ-A12b: las resoluciones silenciosas se anuncian.
+    #[test]
+    fn silent_resolutions_are_announced_as_notices() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("magi.toml");
+
+        std::fs::write(&path, "provider = \"\"\n").unwrap();
+        let (_, notices) = MagiConfig::load(&path).unwrap();
+        assert!(notices.iter().any(|n| n.contains("provider")));
+
+        std::fs::write(&path, "base_url = \"http://lan:11434/v1\"\n").unwrap();
+        let (_, notices) = MagiConfig::load(&path).unwrap();
+        assert!(
+            notices.iter().any(|n| n.contains("embedder")),
+            "el embedder hereda un base_url NO-default: hay que decirlo"
+        );
+
+        std::fs::write(&path, "base_url = \"http://localhost:11434/v1\"\n").unwrap();
+        let (_, notices) = MagiConfig::load(&path).unwrap();
+        assert!(
+            !notices.iter().any(|n| n.contains("embedder")),
+            "heredar el DEFAULT no es sorprendente: sería ruido en cada arranque"
+        );
+    }
+
+    /// SC-A12d: combinación incoherente detectada AL CARGAR, en sus DOS sub-casos.
+    #[test]
+    fn anthropic_flags_both_the_declared_and_the_defaulted_base_url() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("magi.toml");
+
+        // (b) default de Ollama sentado ahí — el caso que un guard `is_some()` NO cubría.
+        std::fs::write(&path, "provider = \"anthropic\"\n").unwrap();
+        let (_, notices) = MagiConfig::load(&path).unwrap();
+        assert!(
+            notices.iter().any(|n| n.contains("por defecto de Ollama")),
+            "sin base_url declarado el default sigue ahí, y parece un olvido de migración"
+        );
+
+        // (a) declarado explícitamente — el usuario cree que se usa.
+        std::fs::write(
+            &path,
+            "provider = \"anthropic\"\nbase_url = \"http://x/v1\"\n",
+        )
+        .unwrap();
+        let (_, notices) = MagiConfig::load(&path).unwrap();
+        assert!(notices.iter().any(|n| n.contains("NO se usa")));
+
+        // Y el mismo caso un nivel abajo, en el trío.
+        std::fs::write(
+            &path,
+            "[magi]\nkind = \"anthropic\"\nbase_url = \"http://x/v1\"\n",
+        )
+        .unwrap();
+        let (_, notices) = MagiConfig::load(&path).unwrap();
+        assert!(notices.iter().any(|n| n.contains("[magi].base_url")));
+
+        // Sin Anthropic no hay nada que avisar.
+        std::fs::write(&path, "provider = \"ollama\"\n").unwrap();
+        let (_, notices) = MagiConfig::load(&path).unwrap();
+        assert!(!notices.iter().any(|n| n.contains("no se usa")));
     }
 }

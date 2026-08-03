@@ -2898,13 +2898,20 @@ mod tests {
         assert_eq!(resolve_provider(&MagiConfig::default(), None), "openai");
     }
 
+    /// SC-A22: `--init-config` was retired (REQ-A22) — clap must reject it, and the
+    /// message must point at the replacement rather than a bare `unexpected argument`
+    /// that turns a one-line migration into a search.
     #[test]
-    fn test_args_parses_init_config_flag() {
+    fn init_config_flag_is_retired_with_a_pointer_to_magi_init() {
         use clap::Parser;
-        let a = Args::parse_from(["magi-rs", "--init-config"]);
-        assert!(a.init_config);
-        let b = Args::parse_from(["magi-rs"]);
-        assert!(!b.init_config);
+        let parsed = Args::try_parse_from(["magi-rs", "--init-config"]);
+        let err = parsed.expect_err("the flag was retired");
+        assert!(
+            err.to_string().contains("magi init"),
+            "a bare `unexpected argument` turns a one-line migration into a search: {err}"
+        );
+        // The default (flag absent) path is unaffected.
+        assert!(Args::try_parse_from(["magi-rs"]).is_ok());
     }
 
     #[test]
