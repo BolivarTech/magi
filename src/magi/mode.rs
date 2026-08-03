@@ -5,8 +5,11 @@
 //! Vocabulario de modos: de dónde salió el modo efectivo y cómo se lee de un texto.
 //!
 //! Acá vive **solo lo puro** —entra un `&str`, sale un `Mode`—: el vocabulario, la
-//! normalización cerrada, la resolución en **cinco** niveles y el trait del clasificador.
-//! La guarda de `untrusted_content` y el clasificador real llegan después.
+//! normalización cerrada, la resolución en **cinco** niveles, el trait del clasificador y la
+//! guarda de `untrusted_content` (`resolve_mode_guarded`, la única puerta pública). El
+//! clasificador REAL —el que habla con el provider principal— vive en
+//! `src/agent/mode_classifier.rs` (bin), porque necesita `agent::provider::Provider`, que
+//! este módulo del lib no puede ver.
 //!
 //! El vocabulario nació antes que la resolución, y la partición fue por **madurez de
 //! dependencia**, no por tema: no depende de nada y la Fase 1 ya lo consumía (`config.rs`
@@ -55,9 +58,10 @@ pub enum ModeSource {
 
 /// Resuelve el modo efectivo a partir de las cinco fuentes posibles.
 ///
-/// La única puerta pública será `resolve_mode_guarded` (Task 2.4). Mantener esta función
-/// privada evita que algún call site olvide aplicar la marca de contenido no confiable,
-/// dejando inerte la guarda de `untrusted_content`.
+/// La única puerta pública es [`resolve_mode_guarded`]. Mantener esta función privada evita
+/// que algún call site olvide aplicar la marca de contenido no confiable, dejando inerte la
+/// guarda de `untrusted_content`: publicarla daría a cada superficie una puerta trasera a la
+/// marca, y bastaría un olvido para dejarla apagada justo ahí.
 ///
 /// El orden refleja tanto **precedencia** como **costo**:
 /// - `Explicit` gana sobre todo: un humano lo declaró (`--mode`).
@@ -66,13 +70,14 @@ pub enum ModeSource {
 ///   eligió mientras razonaba.
 /// - `Inferred` proviene de una llamada de clasificación sobre el contenido.
 /// - `Default` es el modo `Analysis` cuando ninguna fuente aportó nada.
-// Narrow allow: su unico consumidor de PRODUCCION es `resolve_mode_guarded`, que nace en
-// Task 2.4 — esta funcion es deliberadamente privada (ver el rustdoc de arriba) y publicarla
-// para satisfacer al linter seria abrir justo la puerta trasera que ese rustdoc explica.
-// Cubierta hoy por `explicit_beats_configured_beats_agent_beats_inferred_beats_default`,
-// `higher_precedence_wins_when_same_mode_arrives_from_two_levels`,
-// `a_prompt_injection_cannot_pick_the_mode`, `echo_classifier_with_a_valid_label_yields_inferred`
-// y `a_failed_classification_falls_to_default_never_to_inferred` (Task 2.3).
+///
+/// Su único consumidor de PRODUCCIÓN será [`resolve_mode_guarded`] (Task 2.4, en curso).
+/// Cubierta hoy por `explicit_beats_configured_beats_agent_beats_inferred_beats_default`,
+/// `higher_precedence_wins_when_same_mode_arrives_from_two_levels`,
+/// `a_prompt_injection_cannot_pick_the_mode`, `echo_classifier_with_a_valid_label_yields_inferred`
+/// y `a_failed_classification_falls_to_default_never_to_inferred` (Task 2.3).
+// RED (Task 2.4, en curso): `resolve_mode_guarded` todavía no la consume — su cuerpo es un
+// stub deliberadamente incorrecto (ver más abajo) hasta el commit `feat:` de esta tarea.
 #[allow(dead_code)]
 fn resolve_mode(
     explicit: Option<Mode>,
@@ -87,6 +92,100 @@ fn resolve_mode(
         (None, None, None, Some(m)) => (m, ModeSource::Inferred),
         (None, None, None, None) => (Mode::Analysis, ModeSource::Default),
     }
+}
+
+/// Falla de [`resolve_mode_guarded`] cuando el contenido es hostil y ninguna vía DECLARADA
+/// (humano, config o agente) fijó el modo — la única salida restante sería clasificar, que
+/// es justo lo que la marca `untrusted_content` bloquea (REQ-A07d/REQ-A07r).
+///
+/// Registered plan debt (progress.md #13, verificado contra el código: `ModeError` no existía
+/// en `src/magi/mode.rs` antes de esta tarea, así que la ausencia de `Display`/`Error` era
+/// real, no un falso positivo): deriva `thiserror::Error` en vez de solo `Debug`, porque los
+/// llamadores (headless, la TUI) necesitan un mensaje accionable, no solo la variante.
+#[derive(Debug, thiserror::Error)]
+pub enum ModeError {
+    /// La marca está activa y no hay modo explícito, configurado ni elegido por el agente.
+    #[error(
+        "untrusted content requires an explicit mode: pass --mode, set [magi].default_mode, \
+         or let the agent choose one via the consult tool's input schema"
+    )]
+    UntrustedContentRequiresExplicitMode,
+}
+
+/// El resultado COMPLETO de resolver el modo — incluida la señal de privacidad (REQ-A11d).
+///
+/// **Por qué el resolutor devuelve si INTENTÓ clasificar, en vez de que cada llamador lo
+/// re-derive.** Re-derivarlo es el origen de un falso negativo: una clasificación
+/// intentada-y-fallida deja `ModeSource::Default`, pero el contenido YA salió hacia el
+/// provider principal. El único que sabe con certeza si la llamada ocurrió es quien la hizo;
+/// ese conocimiento viaja en el retorno o se pierde.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ModeResolution {
+    /// El modo efectivo.
+    pub mode: Mode,
+    /// De qué nivel salió.
+    pub source: ModeSource,
+    /// `true` si la llamada de clasificación SE HIZO, complete o no. Es la señal que un
+    /// futuro `RunContext`/`divergence_notice` (REQ-A07p) consumirá para saber si el
+    /// contenido llegó a salir hacia el provider principal.
+    pub classification_attempted: bool,
+}
+
+/// La ÚNICA puerta pública a la resolución de modo (REQ-A07d).
+///
+/// Es `async` porque la clasificación vive **adentro**: no recibe un `inferred` ya calculado,
+/// porque eso obligaría a llamar al clasificador ANTES de esta función, y con la marca activa
+/// el contenido saldría hacia el provider principal antes de que la guarda pudiera
+/// rechazarlo. Plegar la llamada acá hace ese orden inexpresable.
+///
+/// **La guarda va PRIMERO, antes de clasificar.** Con `untrusted` activo y ninguna vía
+/// declarada (`explicit`/`configured`/`agent_chosen`), la función retorna `Err` sin tocar el
+/// clasificador — el contenido nunca sale hacia el provider principal.
+///
+/// **`agent_chosen` es un parámetro APARTE de `explicit`, y esa separación es la corrección
+/// de REQ-A07d.** Mientras la elección del agente entraba por `explicit`, satisfacía la
+/// guarda por su cuenta — el bypass que este requerimiento existe para cerrar. La lente
+/// elegida por el agente no es el contenido eligiéndola: bloquearla no compra seguridad (un
+/// agente comprometido al punto de elegir mal la lente puede directamente no consultar, o
+/// mentir en el reporte) y mataría SC-A07d, que es requerimiento duro.
+///
+/// **Cortocircuito, no evaluación ansiosa:** si ya hay un modo por una vía declarada, el
+/// clasificador nunca se invoca — `Option::is_none()` se evalúa antes de cualquier `.await`,
+/// que es lo que hace que declarar el modo cueste cero llamadas (SC-A07g).
+///
+/// Precedencia: `explicit` > `configured` > `agent_chosen` > clasificación > `Analysis`.
+///
+/// # Errors
+/// [`ModeError::UntrustedContentRequiresExplicitMode`] si `untrusted` es `true` y no hay modo
+/// declarado (humano o config) ni elegido por el agente.
+pub async fn resolve_mode_guarded(
+    explicit: Option<Mode>,
+    configured: Option<Mode>,
+    // NIVEL 3, y va en su PROPIO parámetro — no reutiliza `explicit`. Mientras la elección
+    // del agente entraba por `explicit`, satisfacía la guarda de `untrusted_content` por su
+    // cuenta: ese era el bypass que este parámetro separado cierra.
+    agent_chosen: Option<Mode>,
+    untrusted: bool,
+    classifier: Option<&dyn ModeClassifier>,
+    content: &str,
+) -> Result<ModeResolution, ModeError> {
+    // RED (Task 2.4, en curso): stub DELIBERADAMENTE incorrecto — no aplica la guarda ni la
+    // precedencia real, solo hace que la firma compile para que los tests de esta fase fallen
+    // por ASERCIÓN (el comportamiento que falta), no por error de compilación. El cuerpo real
+    // llega en el commit `feat:` de este mismo ciclo Red-Green.
+    let _ = (
+        explicit,
+        configured,
+        agent_chosen,
+        untrusted,
+        classifier,
+        content,
+    );
+    Ok(ModeResolution {
+        mode: Mode::Analysis,
+        source: ModeSource::Default,
+        classification_attempted: false,
+    })
 }
 
 // `normalize_label` y `ModeExt::parse_config_value` NO se definen en esta tarea: nacen en la del
@@ -469,5 +568,228 @@ mod tests {
                 "todo fallo de clasificación debe caer a Analysis/Default"
             );
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Task 2.4 — `resolve_mode_guarded` y la guarda de `untrusted_content`
+    // -----------------------------------------------------------------------
+
+    /// Doble de [`ModeClassifier`] que CUENTA invocaciones y siempre devuelve `label`.
+    ///
+    /// Las aserciones de esta sección no son solo "¿qué modo salió?" sino "¿se llamó al
+    /// clasificador, o no?": SC-A07r exige que la guarda bloquee ANTES de intentar
+    /// clasificar, y SC-A07u/SC-A07d exigen que la elección del agente cueste CERO llamadas
+    /// aunque haya un clasificador disponible. Un `EchoClassifier`/`StubClassifier` no
+    /// expone ese conteo, así que hace falta un doble propio.
+    struct CountingClassifier {
+        /// Invocaciones acumuladas de `classify`.
+        calls: std::sync::atomic::AtomicUsize,
+        /// Etiqueta que esta invocación siempre "clasifica".
+        label: Mode,
+    }
+
+    impl CountingClassifier {
+        /// Crea un contador en cero que envuelve `label` como respuesta fija.
+        fn wrapping(label: Mode) -> Self {
+            Self {
+                calls: std::sync::atomic::AtomicUsize::new(0),
+                label,
+            }
+        }
+
+        /// Cuántas veces se invocó `classify` hasta ahora.
+        fn calls(&self) -> usize {
+            self.calls.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait]
+    impl ModeClassifier for CountingClassifier {
+        async fn classify(&self, _content: &str) -> Option<Mode> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Some(self.label)
+        }
+    }
+
+    /// SC-A07r: con la marca activa, omitir el modo es ERROR — y el contenido NUNCA sale
+    /// hacia el clasificador.
+    #[tokio::test]
+    async fn untrusted_content_without_a_declared_mode_fails_closed() {
+        let counting = CountingClassifier::wrapping(Mode::Design);
+        let err = resolve_mode_guarded(None, None, None, true, Some(&counting), "contenido hostil")
+            .await
+            .expect_err("debe fallar cerrado");
+        assert!(matches!(
+            err,
+            ModeError::UntrustedContentRequiresExplicitMode
+        ));
+        assert!(
+            err.to_string().contains("--mode"),
+            "el error debe decir cómo arreglarlo"
+        );
+        assert_eq!(
+            counting.calls(),
+            0,
+            "la guarda va ANTES de clasificar: un Err después de mandar el contenido \
+             protegería la telemetría, no la privacidad"
+        );
+    }
+
+    /// SC-A07r: con modo declarado por cualquier vía, la marca no estorba — y no se clasifica.
+    #[tokio::test]
+    async fn untrusted_content_with_a_declared_mode_runs_normally() {
+        let counting = CountingClassifier::wrapping(Mode::Design);
+
+        let res = resolve_mode_guarded(
+            Some(Mode::CodeReview),
+            None,
+            None,
+            true,
+            Some(&counting),
+            "x",
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            (res.mode, res.source),
+            (Mode::CodeReview, ModeSource::Explicit)
+        );
+
+        let res = resolve_mode_guarded(
+            None,
+            Some(Mode::CodeReview),
+            None,
+            true,
+            Some(&counting),
+            "x",
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            (res.mode, res.source),
+            (Mode::CodeReview, ModeSource::Configured)
+        );
+        assert!(!res.classification_attempted);
+
+        assert_eq!(
+            counting.calls(),
+            0,
+            "modo declarado ⇒ cero llamadas (SC-A07g)"
+        );
+    }
+
+    /// SC-A07u/SC-A07d: con la marca activa, la elección del AGENTE alcanza — bloquea el
+    /// nivel 4 (clasificación), no el nivel 3 (agente).
+    #[tokio::test]
+    async fn untrusted_content_still_lets_the_agent_pick_the_lens() {
+        let counting = CountingClassifier::wrapping(Mode::Design);
+        let res = resolve_mode_guarded(
+            None,
+            None,
+            Some(Mode::CodeReview),
+            true,
+            Some(&counting),
+            "x",
+        )
+        .await
+        .expect("el agente eligió: no hay clasificación que bloquear");
+
+        assert_eq!(
+            (res.mode, res.source),
+            (Mode::CodeReview, ModeSource::AgentChosen)
+        );
+        assert_eq!(
+            counting.calls(),
+            0,
+            "cero llamadas: el agente ya había elegido"
+        );
+        assert!(!res.classification_attempted);
+    }
+
+    /// SC-A07w: `default_mode` le gana al agente — la perilla del operador para fijar la
+    /// lente.
+    #[tokio::test]
+    async fn configured_default_mode_beats_the_agent() {
+        let res = resolve_mode_guarded(
+            None,
+            Some(Mode::CodeReview),
+            Some(Mode::Design),
+            false,
+            None,
+            "x",
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            (res.mode, res.source),
+            (Mode::CodeReview, ModeSource::Configured)
+        );
+    }
+
+    /// Sin la marca, la inferencia sigue siendo el camino normal — y
+    /// `classification_attempted` dice la verdad en las DOS salidas posibles de la
+    /// clasificación (etiqueta válida, o fallo que cae a `Default`).
+    #[tokio::test]
+    async fn without_the_flag_inference_remains_the_default_path() {
+        let res = resolve_mode_guarded(
+            None,
+            None,
+            None,
+            false,
+            Some(&EchoClassifier::new("code-review")),
+            "x",
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            (res.mode, res.source),
+            (Mode::CodeReview, ModeSource::Inferred)
+        );
+        assert!(res.classification_attempted);
+
+        // Clasificación INTENTADA y fallida: cae a Default, pero `attempted` queda en true —
+        // el contenido YA salió, y esa es la señal que una futura divergencia de endpoint
+        // (REQ-A11d) necesitará.
+        let res = resolve_mode_guarded(
+            None,
+            None,
+            None,
+            false,
+            Some(&StubClassifier::with(ClassifyOutcome::Timeout)),
+            "x",
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            (res.mode, res.source),
+            (Mode::Analysis, ModeSource::Default)
+        );
+        assert!(
+            res.classification_attempted,
+            "se intentó: ModeSource::Default no lo sabe, esto sí"
+        );
+
+        // Sin clasificador (ruta sin agente): Default, y NO se intentó.
+        let res = resolve_mode_guarded(None, None, None, false, None, "x")
+            .await
+            .unwrap();
+        assert_eq!(res.source, ModeSource::Default);
+        assert!(!res.classification_attempted);
+    }
+
+    /// Que `resolve_mode` siga siendo privado es lo que hace la guarda inevadible.
+    ///
+    /// No es un test de comportamiento — es el recordatorio de que subirle la visibilidad
+    /// reabre el agujero: una superficie que intentara el atajo directo a `resolve_mode` no
+    /// fallaría un test, directamente no compilaría desde afuera de este módulo. Vive acá
+    /// porque desde afuera ni siquiera se puede nombrar la función.
+    // The whole point of this test is naming `resolve_mode`'s exact private
+    // signature (four `Option<Mode>` params) to pin it — factoring it into a
+    // `type` alias would only hide the very shape being asserted.
+    #[allow(clippy::type_complexity)]
+    #[test]
+    fn the_unguarded_resolver_stays_private() {
+        let _: fn(Option<Mode>, Option<Mode>, Option<Mode>, Option<Mode>) -> (Mode, ModeSource) =
+            resolve_mode;
     }
 }

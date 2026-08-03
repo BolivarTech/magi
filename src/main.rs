@@ -3053,6 +3053,243 @@ mod tests {
                 "y cómo evitarlo, vía [magi].default_mode: {help}"
             );
         }
+
+        // -------------------------------------------------------------------
+        // Task 2.4 — `resolve_mode_guarded` y la guarda de `untrusted_content`,
+        // reasignados de Task 2.2 (ver la nota de cabecera de este módulo).
+        // -------------------------------------------------------------------
+
+        /// Lo observable de resolver el modo de un consult AUTORRUTEADO —
+        /// suficiente para las cuatro pruebas heredadas (SC-A07d/u/v/w).
+        ///
+        /// **No levanta un `Agent`/`ConsultTool` real.** Exercita
+        /// `resolve_mode_guarded` — la pieza de producción que un dispatch real
+        /// usará — con la MISMA combinación de parámetros que ese dispatch le
+        /// pasaría para un consult autorruteado por el agente (sin modo humano
+        /// declarado; la ruta autónoma no tiene ese nivel). Cablear el tool loop
+        /// entero (inyectar el modo resuelto en `ConsultTool::execute`, el
+        /// contador de vetos del gate) es Task 3.2's job — su propio bloque de
+        /// plan declara ahí, no acá, que `ConsultTool::execute` pasa a recibir el
+        /// par `(Mode, ModeSource)` ya resuelto. Levantar esa maquinaria acá
+        /// duplicaría el trabajo de esa tarea y arriesgaría romper los ~15 tests
+        /// existentes de `tools::consult` que llaman `execute` sin inyección.
+        struct AgentTurnOutcome {
+            /// El modo efectivo resuelto.
+            mode: Mode,
+            /// De qué nivel salió.
+            mode_source: magi_rs::magi::mode::ModeSource,
+            /// Invocaciones al clasificador durante esta resolución.
+            classification_calls: usize,
+            /// `true` si la resolución fue `Ok` (nada la bloqueó).
+            consult_ran: bool,
+        }
+
+        /// SC-A07d: el agente que decide consultar también decide la lente, vía
+        /// el `mode` de su propio `input_schema` — cero llamadas de
+        /// clasificación.
+        ///
+        /// # Errors
+        /// Nunca, en este caso: `untrusted = false`.
+        async fn run_turn_with_agent_chosen_mode(
+            chosen: Mode,
+        ) -> Result<AgentTurnOutcome, magi_rs::magi::mode::ModeError> {
+            // Etiqueta señuelo: si `Design` termina siendo el modo resuelto, el
+            // test descubre que la clasificación corrió cuando no debía.
+            let counting = CountingClassifier::new(Mode::Design);
+            let res = magi_rs::magi::mode::resolve_mode_guarded(
+                None,
+                None,
+                Some(chosen),
+                false,
+                Some(&counting),
+                "contenido de prueba",
+            )
+            .await?;
+            Ok(AgentTurnOutcome {
+                mode: res.mode,
+                mode_source: res.source,
+                classification_calls: counting.calls(),
+                consult_ran: true,
+            })
+        }
+
+        /// SC-A07u: con `untrusted_content` activo, la elección del agente sigue
+        /// alcanzando — la marca bloquea la CLASIFICACIÓN (nivel 4), no la
+        /// elección del agente (nivel 3).
+        ///
+        /// # Errors
+        /// Nunca, en este caso: el agente ya eligió, así que la guarda no se
+        /// dispara.
+        async fn run_turn_with_untrusted_and_agent_chosen_mode(
+            chosen: Mode,
+        ) -> Result<AgentTurnOutcome, magi_rs::magi::mode::ModeError> {
+            let counting = CountingClassifier::new(Mode::Design);
+            let res = magi_rs::magi::mode::resolve_mode_guarded(
+                None,
+                None,
+                Some(chosen),
+                true,
+                Some(&counting),
+                "contenido de prueba",
+            )
+            .await?;
+            Ok(AgentTurnOutcome {
+                mode: res.mode,
+                mode_source: res.source,
+                classification_calls: counting.calls(),
+                consult_ran: true,
+            })
+        }
+
+        /// SC-A07v: sin modo elegido por el agente y sin ninguna otra
+        /// declaración, la marca falla cerrado — `AgentChosen` ausente no es
+        /// `Explicit`.
+        ///
+        /// # Errors
+        /// [`magi_rs::magi::mode::ModeError::UntrustedContentRequiresExplicitMode`]
+        /// siempre: es justo lo que este test verifica.
+        async fn run_turn_with_untrusted_and_no_mode_at_all(
+        ) -> Result<AgentTurnOutcome, magi_rs::magi::mode::ModeError> {
+            let counting = CountingClassifier::new(Mode::Design);
+            let res = magi_rs::magi::mode::resolve_mode_guarded(
+                None,
+                None,
+                None,
+                true,
+                Some(&counting),
+                "contenido de prueba",
+            )
+            .await?;
+            Ok(AgentTurnOutcome {
+                mode: res.mode,
+                mode_source: res.source,
+                classification_calls: counting.calls(),
+                consult_ran: true,
+            })
+        }
+
+        /// SC-A07w: `default_mode` le gana al agente — la perilla del operador
+        /// para fijar la lente por encima de lo que el agente elegiría.
+        ///
+        /// # Errors
+        /// Nunca, en este caso: `untrusted = false`.
+        async fn run_turn_with_default_mode_and_agent_choice(
+            configured: Mode,
+            agent_choice: Mode,
+        ) -> Result<AgentTurnOutcome, magi_rs::magi::mode::ModeError> {
+            let counting = CountingClassifier::new(Mode::Design);
+            let res = magi_rs::magi::mode::resolve_mode_guarded(
+                None,
+                Some(configured),
+                Some(agent_choice),
+                false,
+                Some(&counting),
+                "contenido de prueba",
+            )
+            .await?;
+            Ok(AgentTurnOutcome {
+                mode: res.mode,
+                mode_source: res.source,
+                classification_calls: counting.calls(),
+                consult_ran: true,
+            })
+        }
+
+        /// SC-A07d — Task 2.4 (reasignado de 2.2). Verifica que el agente que
+        /// decide consultar también decide la lente — el modo llega desde el
+        /// `input_schema` (REQ-A07b), sin llamada de clasificación.
+        #[tokio::test]
+        async fn the_agent_that_decides_to_consult_also_picks_the_lens() {
+            let out = run_turn_with_agent_chosen_mode(Mode::CodeReview)
+                .await
+                .unwrap();
+            assert_eq!(out.mode, Mode::CodeReview);
+            // `AgentChosen`, NO `Inferred`: mientras compartieron etiqueta, la
+            // guarda de `untrusted_content` no podía distinguir "lo eligió el
+            // agente" de "lo dijo el contenido", y terminaba bloqueando los dos.
+            assert_eq!(
+                out.mode_source,
+                magi_rs::magi::mode::ModeSource::AgentChosen,
+                "la eligió el agente, no un default"
+            );
+            assert_eq!(
+                out.classification_calls, 0,
+                "por el schema del tool: cero llamadas extra"
+            );
+        }
+
+        /// SC-A07u — Task 2.4 (reasignado de 2.2). La marca NO le saca la lente
+        /// al agente — bloquea el nivel 4, no el 3.
+        #[tokio::test]
+        async fn untrusted_content_does_not_take_the_lens_away_from_the_agent() {
+            let out = run_turn_with_untrusted_and_agent_chosen_mode(Mode::CodeReview)
+                .await
+                .unwrap();
+            assert!(
+                out.consult_ran,
+                "el agente eligió la lente: no hay clasificación que bloquear"
+            );
+            assert_eq!(
+                out.mode_source,
+                magi_rs::magi::mode::ModeSource::AgentChosen
+            );
+            assert_eq!(out.classification_calls, 0);
+        }
+
+        /// SC-A07v — Task 2.4 (reasignado de 2.2). Pero el agente NO satisface
+        /// la guarda por su cuenta.
+        #[tokio::test]
+        async fn the_agent_alone_does_not_satisfy_the_untrusted_guard() {
+            // Sin modo elegido por el agente y sin declaración: la única salida
+            // sería la clasificación, que es lo que la marca bloquea.
+            let out = run_turn_with_untrusted_and_no_mode_at_all().await;
+            assert!(out.is_err(), "`AgentChosen` ausente no es `Explicit`");
+        }
+
+        /// SC-A07w — Task 2.4 (reasignado de 2.2). `default_mode` le gana al
+        /// agente — la perilla del operador para fijar la lente.
+        #[tokio::test]
+        async fn configured_default_mode_beats_the_agents_choice() {
+            let out = run_turn_with_default_mode_and_agent_choice(Mode::CodeReview, Mode::Design)
+                .await
+                .unwrap();
+            assert_eq!(out.mode, Mode::CodeReview, "gana la config, no el agente");
+            assert_eq!(out.mode_source, magi_rs::magi::mode::ModeSource::Configured);
+        }
+
+        /// SC-A07t: el envelope JSON declara la marca — es el consumidor de un
+        /// gate automatizado, la superficie donde más importa (REQ-A07d/A19).
+        /// Sin esta superficie la protección no existiría donde vive la
+        /// amenaza.
+        #[tokio::test]
+        async fn the_json_envelope_carries_the_flag() {
+            let env = parse_input(br#"{"prompt":"x","untrusted_content":true}"#, None)
+                .expect("valid envelope");
+            assert_eq!(env.untrusted_content, Some(true));
+
+            // Misma resolución que `run_consult_subcommand` aplica en
+            // producción: el `mode` del envelope como explícito, su
+            // `untrusted_content` como la marca — sin modo declarado, la marca
+            // debe fallar cerrado antes de clasificar.
+            let explicit = env
+                .resolved_mode()
+                .expect("no hay etiqueta de modo que rechazar en este envelope");
+            let untrusted = env.untrusted_content.unwrap_or(false);
+            let err = magi_rs::magi::mode::resolve_mode_guarded(
+                explicit,
+                None,
+                None,
+                untrusted,
+                None,
+                &env.prompt,
+            )
+            .await
+            .expect_err("sin modo declarado, la marca del envelope debe fallar cerrado");
+            assert!(matches!(
+                err,
+                magi_rs::magi::mode::ModeError::UntrustedContentRequiresExplicitMode
+            ));
+        }
     }
 
     /// MAGI re-gate finding (Caspar/Melchior): a substring match on
