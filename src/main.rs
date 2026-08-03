@@ -2930,20 +2930,28 @@ mod tests {
         assert_eq!(resolve_provider(&MagiConfig::default(), None), "openai");
     }
 
-    /// SC-A22: `--init-config` was retired (REQ-A22) — clap must reject it, and the
-    /// message must point at the replacement rather than a bare `unexpected argument`
-    /// that turns a one-line migration into a search.
+    /// SC-A22: `--init-config` was retired (REQ-A22). Fix round 2 (coordinator,
+    /// 2026-08-03, m4/m5): the flag must parse CLEANLY as a plain bool — no clap-level
+    /// rejection — because a clap `value_parser` error over a synthetic
+    /// `default_missing_value` renders `error: invalid value 'retired' for
+    /// '--init-config <INIT_CONFIG>': ...`, a message whose entire purpose is to not
+    /// make the user think, opening with a token they never typed. The retirement
+    /// message is `run`'s job now, printed at runtime before anything else — this test
+    /// pins the EXACT text the user sees, not just that "magi init" appears somewhere
+    /// in whatever clap happened to render.
     #[test]
-    fn init_config_flag_is_retired_with_a_pointer_to_magi_init() {
+    fn init_config_flag_shows_a_clean_retirement_message_not_a_synthetic_clap_error() {
         use clap::Parser;
-        let parsed = Args::try_parse_from(["magi-rs", "--init-config"]);
-        let err = parsed.expect_err("the flag was retired");
-        assert!(
-            err.to_string().contains("magi init"),
-            "a bare `unexpected argument` turns a one-line migration into a search: {err}"
+        let args = Args::try_parse_from(["magi-rs", "--init-config"])
+            .expect("the flag must still parse — clap-level rejection is what this fixes");
+        assert!(args.init_config);
+        assert_eq!(
+            init_config_retired_message(),
+            "`--init-config` was retired; run `magi init` instead."
         );
         // The default (flag absent) path is unaffected.
-        assert!(Args::try_parse_from(["magi-rs"]).is_ok());
+        let default_args = Args::try_parse_from(["magi-rs"]).expect("default parse");
+        assert!(!default_args.init_config);
     }
 
     #[test]
