@@ -44,6 +44,7 @@ use magi_rs::headless::types::{
     ErrorKind, ErrorPayload, RunOutcome, StopReason, Timings, ToolCallRecord, TranscriptEntry,
     Usage,
 };
+use magi_rs::magi::mode::ModeClassifier;
 
 use crate::agent::messages::{Content, Message, Role};
 use crate::agent::{Agent, AgentRunConfig, RunObserver, StreamPiece, MAX_TOOL_CALLS_ERROR};
@@ -87,6 +88,13 @@ enum ConsultRunError {
     /// use (→ `runtime`).
     Runtime(String),
 }
+
+// RED phase (Task 2.3): `resolve_direct_mode` is added in the `feat:` commit
+// that follows this one. `analyze_direct`/`run_consult` below still carry
+// their pre-Task-2.3 signatures (no `explicit_mode`/`classifier`), so the
+// updated test call sites (7 positional args) and `main.rs`'s
+// `run_consult_cli` (which calls `resolve_direct_mode`) fail to compile —
+// the expected Red failure.
 
 /// Runs `prompt` directly through the 3-perspective MAGI consensus, off the agent
 /// tool-loop (REQ-H21), honoring the same input cap ([`MAX_QUERY_LEN`], REQ-H33)
@@ -811,6 +819,20 @@ mod tests {
     use crate::agent::provider::{Provider, ResponseChunk};
     use crate::tools::consult::ConsultTool;
     use crate::tools::{Tool, ToolResult};
+
+    /// A [`ModeClassifier`] double for tests that pass an explicit mode and
+    /// therefore must never reach the classification branch of
+    /// [`resolve_direct_mode`] (SC-A07g): panicking here turns a silent
+    /// regression (calling the classifier when it should have been skipped)
+    /// into a failing test instead of a mystery extra provider call.
+    struct NeverClassifier;
+
+    #[async_trait]
+    impl ModeClassifier for NeverClassifier {
+        async fn classify(&self, _content: &str) -> Option<Mode> {
+            panic!("explicit mode must skip classification entirely (SC-A07g)");
+        }
+    }
 
     /// A canned MAGI orchestrator whose three perspectives all approve, over a
     /// `RoutingMockProvider` (no network) — deterministic, mirrors the double used
@@ -1684,6 +1706,8 @@ mod tests {
             canned_magi(),
             "should we migrate X to Y?",
             None,
+            Some(Mode::Analysis),
+            &NeverClassifier,
             None,
         )
         .await;
@@ -1711,7 +1735,16 @@ mod tests {
     #[tokio::test]
     async fn test_run_consult_over_cap_is_input_invalid_not_truncated() {
         let big = "x".repeat(MAX_QUERY_LEN + 1);
-        let outcome = run_consult(resolved_stub(), canned_magi(), &big, None, None).await;
+        let outcome = run_consult(
+            resolved_stub(),
+            canned_magi(),
+            &big,
+            None,
+            Some(Mode::Analysis),
+            &NeverClassifier,
+            None,
+        )
+        .await;
 
         assert_eq!(outcome.stop_reason, StopReason::Error);
         let err = outcome
@@ -1760,6 +1793,8 @@ mod tests {
                 magi,
                 "should we migrate X to Y?",
                 None,
+                Some(Mode::Analysis),
+                &NeverClassifier,
                 None,
             );
             tokio::pin!(fut);

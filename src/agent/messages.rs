@@ -59,4 +59,23 @@ impl Message {
             }],
         }
     }
+
+    /// Concatenates every `Content::Text` block of this message, in order.
+    ///
+    /// `ToolUse`/`ToolResult` blocks contribute nothing: a caller that needs
+    /// those iterates `content` directly. Shared by every reader that only
+    /// wants the plain-text reply (the MAGI adapter, `headless_runner::join_text`,
+    /// the mode classifier) so the same five-line filter/join is not
+    /// re-derived at each call site.
+    #[must_use]
+    pub fn concat_text(&self) -> String {
+        self.content
+            .iter()
+            .filter_map(|c| match c {
+                Content::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("")
+    }
 }

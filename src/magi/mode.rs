@@ -71,7 +71,8 @@ pub enum ModeSource {
 // para satisfacer al linter seria abrir justo la puerta trasera que ese rustdoc explica.
 // Cubierta hoy por `explicit_beats_configured_beats_agent_beats_inferred_beats_default`,
 // `higher_precedence_wins_when_same_mode_arrives_from_two_levels`,
-// `a_prompt_injection_cannot_pick_the_mode` y `echo_classifier_with_a_valid_label_yields_inferred`.
+// `a_prompt_injection_cannot_pick_the_mode`, `echo_classifier_with_a_valid_label_yields_inferred`
+// y `a_failed_classification_falls_to_default_never_to_inferred` (Task 2.3).
 #[allow(dead_code)]
 fn resolve_mode(
     explicit: Option<Mode>,
@@ -407,6 +408,66 @@ mod tests {
     impl ModeClassifier for EchoClassifier {
         async fn classify(&self, _content: &str) -> Option<Mode> {
             normalize_label(self.label)
+        }
+    }
+
+    /// Las tres formas en que una clasificación real puede no producir un modo,
+    /// para el doble [`StubClassifier`] (REQ-A07c/REQ-A07h).
+    #[derive(Clone)]
+    enum ClassifyOutcome {
+        /// El techo de la llamada expiró.
+        Timeout,
+        /// El provider devolvió un error (red, autenticación, etc.).
+        NetworkError,
+        /// El provider respondió, pero con algo que no es una de las tres
+        /// etiquetas — prosa, JSON, una etiqueta inventada.
+        Unrecognized(String),
+    }
+
+    /// Doble de [`ModeClassifier`] que simula cada fallo posible sin red ni
+    /// modelo real: las tres formas convergen en `None`, que es exactamente lo
+    /// que [`ModeClassifier::classify`] documenta.
+    struct StubClassifier {
+        /// El resultado que esta invocación simula.
+        outcome: ClassifyOutcome,
+    }
+
+    impl StubClassifier {
+        /// Crea un doble que producirá `outcome` en su próxima clasificación.
+        const fn with(outcome: ClassifyOutcome) -> Self {
+            Self { outcome }
+        }
+    }
+
+    #[async_trait]
+    impl ModeClassifier for StubClassifier {
+        async fn classify(&self, _content: &str) -> Option<Mode> {
+            match &self.outcome {
+                ClassifyOutcome::Timeout | ClassifyOutcome::NetworkError => None,
+                ClassifyOutcome::Unrecognized(raw) => normalize_label(raw),
+            }
+        }
+    }
+
+    /// SC-A07h: una clasificación fallida cae a `Default`, NUNCA a `Inferred`.
+    ///
+    /// Las tres causas de fallo —techo expirado, error del provider, etiqueta no
+    /// reconocida— tienen que converger en el mismo resultado observable: decir
+    /// "inferido" sobre algo que se cayó al default sería telemetría que miente.
+    #[tokio::test]
+    async fn a_failed_classification_falls_to_default_never_to_inferred() {
+        for outcome in [
+            ClassifyOutcome::Timeout,
+            ClassifyOutcome::NetworkError,
+            ClassifyOutcome::Unrecognized("security-audit".to_string()),
+        ] {
+            let classifier = StubClassifier::with(outcome);
+            let inferred = classifier.classify("lo que sea").await;
+            assert_eq!(
+                resolve_mode(None, None, None, inferred),
+                (Mode::Analysis, ModeSource::Default),
+                "todo fallo de clasificación debe caer a Analysis/Default"
+            );
         }
     }
 }

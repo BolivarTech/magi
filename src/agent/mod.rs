@@ -3,6 +3,7 @@
 pub mod magi_adapter;
 pub mod magi_wiring;
 pub mod messages;
+pub mod mode_classifier;
 pub mod provider;
 
 use crate::agent::messages::{Content, Message, Role};

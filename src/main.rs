@@ -234,11 +234,12 @@ impl CliMode {
     /// enums with different owners — clap owns the CLI vocabulary, magi-core owns the
     /// domain one — and they can diverge one day. The exhaustive `match` is what turns
     /// that divergence into a compile error instead of a silent mistranslation.
-    // Narrow allow: consumed by mode resolution in Task 2.3/2.4, not this task — this
-    // task only wires ACCEPTANCE of `--mode` across the four surfaces, not its dispatch.
-    // Covered by `every_surface_accepts_an_explicit_mode` and
-    // `cli_mode_casing_matches_the_shared_mode_vocabulary`.
-    #[allow(dead_code)]
+    ///
+    /// Consumed in production by `run_consult_subcommand` (Task 2.3, REQ-A07c): the
+    /// direct `magi consult` path resolves its explicit `--mode` through this before
+    /// falling back to classification. Also covered by
+    /// `every_surface_accepts_an_explicit_mode` and
+    /// `cli_mode_casing_matches_the_shared_mode_vocabulary`.
     #[must_use]
     fn into_mode(self) -> Mode {
         match self {
@@ -2732,6 +2733,9 @@ async fn run_consult_subcommand(
     } else {
         "anthropic"
     };
+    // RED phase (Task 2.3): classifier wiring lands in the `feat:` commit that
+    // follows this one, together with `resolve_direct_mode` and the
+    // `analyze_direct`/`run_consult` signature change.
     let magi = match build_magi_orchestrator(
         provider,
         backend_label,
@@ -2766,18 +2770,22 @@ mod tests {
     /// `cargo nextest run mode_surfaces` selects exactly this group.
     ///
     /// Registered plan debt: the task brief's Step 1 code block pasted nine test
-    /// bodies under this heading, but Steps 2/4 both say `PASS (3 tests)`. The other
-    /// six (`the_agent_that_decides_to_consult_also_picks_the_lens`,
+    /// bodies under this heading, but Steps 2/4 both say `PASS (3 tests)`. Four of
+    /// the other six (`the_agent_that_decides_to_consult_also_picks_the_lens`,
     /// `untrusted_content_does_not_take_the_lens_away_from_the_agent`,
     /// `the_agent_alone_does_not_satisfy_the_untrusted_guard`,
-    /// `configured_default_mode_beats_the_agents_choice`,
-    /// `omitting_the_mode_costs_one_call_and_declaring_it_costs_none`,
-    /// `the_consult_help_names_the_extra_call_and_how_to_avoid_it`) call helper
-    /// functions that exist nowhere in the repo and exercise behavior that needs
-    /// `resolve_mode_guarded`/`ModeResolution` (Task 2.4) or the classification call
-    /// (Task 2.3) — both explicitly out of scope here. `src/tools/consult.rs`'s
-    /// `execute` still hardcodes `Mode::Analysis`, confirming no live path can
-    /// produce `ModeSource::AgentChosen` or count classification calls yet. The
+    /// `configured_default_mode_beats_the_agents_choice`) call helper functions
+    /// that exist nowhere in the repo and exercise behavior that needs
+    /// `resolve_mode_guarded`/`ModeResolution` (Task 2.4) — still out of scope
+    /// here; `src/tools/consult.rs`'s `execute` still hardcodes `Mode::Analysis`,
+    /// confirming no live path can produce `ModeSource::AgentChosen` yet.
+    ///
+    /// The other two — `omitting_the_mode_costs_one_call_and_declaring_it_costs_none`
+    /// and `the_consult_help_names_the_extra_call_and_how_to_avoid_it` — are
+    /// Task 2.3's own: the direct `magi consult` path (`headless_runner::
+    /// resolve_direct_mode`) now performs exactly the classification call REQ-A07c
+    /// describes, so they are implemented below with the `run_consult_cli` /
+    /// `render_help` helpers this heading used to say did not exist. The
     /// coordinator confirmed this reassignment; see the task report for the full
     /// six-way mapping to Task 2.3/2.4.
     mod mode_surfaces {
@@ -2897,6 +2905,125 @@ mod tests {
             let a = Args::parse_from(["magi-rs"]);
             assert_eq!(a.mode_of_consult(), None);
             assert!(!a.untrusted_content());
+        }
+
+        /// Doble de [`magi_rs::magi::mode::ModeClassifier`] que cuenta cuántas
+        /// veces se invoca y siempre devuelve `label` — para SC-A07f/g, donde lo
+        /// que importa es el CONTEO, no el contenido de la respuesta simulada.
+        struct CountingClassifier {
+            /// Invocaciones acumuladas de `classify`.
+            calls: std::sync::atomic::AtomicUsize,
+            /// Etiqueta que esta invocación siempre "clasifica".
+            label: Mode,
+        }
+
+        impl CountingClassifier {
+            /// Crea un contador en cero que clasificará como `label`.
+            fn new(label: Mode) -> Self {
+                Self {
+                    calls: std::sync::atomic::AtomicUsize::new(0),
+                    label,
+                }
+            }
+
+            /// Cuántas veces se invocó `classify` hasta ahora.
+            fn calls(&self) -> usize {
+                self.calls.load(std::sync::atomic::Ordering::SeqCst)
+            }
+        }
+
+        #[async_trait::async_trait]
+        impl magi_rs::magi::mode::ModeClassifier for CountingClassifier {
+            async fn classify(&self, _content: &str) -> Option<Mode> {
+                self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Some(self.label)
+            }
+        }
+
+        /// Parsea `args` como si fueran argv, y resuelve el modo del `consult`
+        /// DIRECTO exactamente como lo hace `run_consult_subcommand` en
+        /// producción: lo explícito (`--mode`) gana sin costo; su ausencia pasa
+        /// por `classifier` (REQ-A07c, `headless_runner::resolve_direct_mode`).
+        ///
+        /// No construye un `Arc<Magi>` real: SC-A07f/g solo necesitan el conteo
+        /// de llamadas de clasificación y el modo resuelto, no un reporte MAGI
+        /// completo — levantar los tres mages para observar un contador sería
+        /// pagar el costo que el propio gate existe para evitar.
+        async fn run_consult_cli(
+            args: &[&str],
+            classifier: &dyn magi_rs::magi::mode::ModeClassifier,
+            content: &str,
+        ) -> Mode {
+            use clap::Parser;
+
+            let a = Args::parse_from(args);
+            let explicit = a.mode_of_consult();
+            crate::headless_runner::resolve_direct_mode(explicit, classifier, content).await
+        }
+
+        /// Renderiza el `--help` largo de un subcomando headless (`"query"`/
+        /// `"consult"`), para verificar que el texto de ayuda documenta el costo
+        /// de omitir `--mode` (REQ-A19, SC-A07i) sin tener que lanzar el binario.
+        fn render_help(subcommand: &str) -> String {
+            use clap::CommandFactory;
+
+            let mut cmd = Args::command();
+            let sub = cmd
+                .find_subcommand_mut(subcommand)
+                .unwrap_or_else(|| panic!("no such subcommand: {subcommand}"));
+            sub.render_long_help().to_string()
+        }
+
+        /// Task 2.3 (reasignado de 2.2, ver nota de la cabecera del módulo) —
+        /// SC-A07f/g: omitir `--mode` en el `consult` DIRECTO cuesta EXACTAMENTE
+        /// una llamada de clasificación; declararlo cuesta CERO.
+        #[tokio::test]
+        async fn omitting_the_mode_costs_one_call_and_declaring_it_costs_none() {
+            let counting = CountingClassifier::new(Mode::CodeReview);
+            let mode = run_consult_cli(&["magi-rs", "consult"], &counting, "algo").await;
+            assert_eq!(
+                mode,
+                Mode::CodeReview,
+                "sin --mode, se usa lo que devolvió la clasificación"
+            );
+            assert_eq!(
+                counting.calls(),
+                1,
+                "sin --mode, se clasifica exactamente una vez"
+            );
+
+            let counting = CountingClassifier::new(Mode::CodeReview);
+            let mode = run_consult_cli(
+                &["magi-rs", "consult", "--mode", "design"],
+                &counting,
+                "algo",
+            )
+            .await;
+            assert_eq!(mode, Mode::Design, "lo explícito se usa tal cual");
+            assert_eq!(
+                counting.calls(),
+                0,
+                "declarado ⇒ cero llamadas de clasificación"
+            );
+        }
+
+        /// Task 2.3 (reasignado de 2.2) — SC-A07i: el `--help` de `consult` dice
+        /// que omitir `--mode` agrega una llamada al modelo, y cómo evitarlo.
+        ///
+        /// Un help que no lo dijera sería documentar una mentira hasta que esta
+        /// tarea hiciera cierto el costo que describe — de ahí que este test no
+        /// pudiera existir antes de Task 2.3.
+        #[test]
+        fn the_consult_help_names_the_extra_call_and_how_to_avoid_it() {
+            let help = render_help("consult");
+            assert!(
+                help.contains("extra model call"),
+                "el --help debe nombrar el costo de omitir --mode: {help}"
+            );
+            assert!(
+                help.contains("default_mode"),
+                "y cómo evitarlo, vía [magi].default_mode: {help}"
+            );
         }
     }
 
