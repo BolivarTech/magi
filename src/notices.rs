@@ -47,7 +47,12 @@ use std::collections::HashSet;
 pub enum NoticeTier {
     /// Algo que el usuario pidió NO está disponible. Acción requerida.
     Blocking,
-    /// La config se resolvió distinto de lo que el archivo parece decir. Sorprende.
+    /// La config se resolvió distinto de lo que el archivo parece decir — o un
+    /// diagnóstico de bajo nivel que no llega a bloquear pero tampoco es ruido:
+    /// hardening/vault (mlock, dump suppression), un fallo al abrir o derivar la
+    /// clave del vault, o la pérdida de persistencia. Ninguno de estos casos exige
+    /// una acción inmediata como `Blocking`, pero todos sorprenden lo suficiente
+    /// como para sobrevivir siempre al tope de [`NOTICE_MAX_INFO`].
     Resolution,
     /// Diagnóstico. Útil, nunca urgente.
     Info,
@@ -198,5 +203,65 @@ mod tests {
             Notice::resolution(n),
         ]);
         assert_eq!(out.len(), 1, "tres asientos, un aviso");
+    }
+
+    /// Caso borde vacío (B13): nada que ordenar, deduplicar ni recortar — nunca panica,
+    /// y sin `Info` que recortar no hay línea de "omitidos".
+    #[test]
+    fn empty_input_renders_to_an_empty_list() {
+        let out = render_notices(vec![]);
+        assert!(out.is_empty());
+    }
+
+    /// Frontera exacta del tope: `info_seen > NOTICE_MAX_INFO` es estricto, así que
+    /// exactamente `NOTICE_MAX_INFO` notices `Info` no disparan NINGÚN recorte. Solo el
+    /// caso por-encima-del-tope estaba cubierto antes de este test; el off-by-one en la
+    /// frontera es el defecto clásico de este tipo de guard.
+    #[test]
+    fn exactly_the_cap_worth_of_info_drops_nothing() {
+        let v: Vec<Notice> = (0..NOTICE_MAX_INFO)
+            .map(|i| Notice::info(format!("d{i}")))
+            .collect();
+        let out = render_notices(v);
+        assert_eq!(
+            out.len(),
+            NOTICE_MAX_INFO,
+            "ninguno se recorta en la frontera exacta"
+        );
+        assert!(
+            !out.iter().any(|n| n.contains("omitted")),
+            "sin recorte no hay línea de omitidos: {out:?}"
+        );
+    }
+
+    /// La propiedad señal-vs-ruido que el módulo existe para garantizar: mismo texto,
+    /// tiers distintos — sobrevive el más severo (`Blocking`), no el `Info`.
+    ///
+    /// Con texto IDÉNTICO, cuál sobrevivió no se puede leer directo del `String` de
+    /// salida (son el mismo string). Se prueba por su EFECTO en el tope: se agregan
+    /// exactamente `NOTICE_MAX_INFO` rellenos `Info` distintos, que por sí solos no
+    /// disparan ningún recorte (ver el test de frontera exacta arriba). Si el
+    /// duplicado sobreviviera como `Info` en vez de `Blocking`, sumaría un `Info`
+    /// más y SÍ dispararía el recorte. Que no lo dispare, y que el texto duplicado
+    /// siga presente, es la prueba de que sobrevivió el `Blocking` — que nunca
+    /// cuenta contra el tope.
+    #[test]
+    fn cross_tier_duplicate_text_keeps_the_more_severe_tier() {
+        let dup_text = "el trío no es construible: falta OPENAI_API_KEY";
+        let mut v: Vec<Notice> = (0..NOTICE_MAX_INFO)
+            .map(|i| Notice::info(format!("filler{i}")))
+            .collect();
+        v.push(Notice::info(dup_text));
+        v.push(Notice::blocking(dup_text));
+
+        let out = render_notices(v);
+        assert!(
+            out.iter().any(|n| n.contains(dup_text)),
+            "el duplicado debe sobrevivir (bajo el tier Blocking): {out:?}"
+        );
+        assert!(
+            !out.iter().any(|n| n.contains("omitted")),
+            "si sobreviviera el Info, se pasaría del tope y algo se recortaría: {out:?}"
+        );
     }
 }
