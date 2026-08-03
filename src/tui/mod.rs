@@ -7,7 +7,7 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use magi_core::schema::Mode;
-use magi_rs::magi::mode::normalize_label;
+use magi_rs::magi::mode::{normalize_label, ModeClassifier, ModeError};
 use magi_rs::vault::{SecretStore, VaultError};
 use ratatui::{
     backend::{Backend, CrosstermBackend},
@@ -191,6 +191,29 @@ pub(crate) fn parse_tui_consult(trimmed: &str) -> Result<TuiConsultCommand, TuiC
         mode,
         query: rest.to_string(),
     })
+}
+
+/// Resolves the effective mode for a parsed `/consult` command and hands back the
+/// (already flag-stripped) query alongside it — the pair `UiEvent::Consult`'s handler
+/// will pass to `Magi::analyze` once wired (fix round 1, in progress).
+///
+/// # Errors
+/// [`ModeError::UntrustedContentRequiresExplicitMode`] if the operator declared
+/// `untrusted_content = true` in `[magi]` and neither `cmd.mode` nor `default_mode` names a
+/// lens.
+// RED (fix round 1, en curso): stub DELIBERADAMENTE incorrecto — ignora `default_mode`,
+// `untrusted_content` y el clasificador, y siempre corre `Analysis`. Compila para que los
+// tests nuevos fallen por ASERCIÓN, no por error de compilación. El cuerpo real y el cableado
+// a `UiEvent::Consult` llegan en el commit `fix:` de este mismo ciclo.
+#[allow(dead_code)]
+async fn resolve_tui_consult_mode(
+    cmd: TuiConsultCommand,
+    default_mode: Option<Mode>,
+    untrusted_content: bool,
+    classifier: &dyn ModeClassifier,
+) -> Result<(Mode, String), ModeError> {
+    let _ = (default_mode, untrusted_content, classifier);
+    Ok((Mode::Analysis, cmd.query))
 }
 
 /// Braille spinner frames for the "thinking" activity indicator.
@@ -1941,6 +1964,99 @@ mod tests {
             super::parse_tui_consult("hello"),
             Err(super::TuiConsultParseError::NotAConsultCommand)
         );
+    }
+
+    // -------------------------------------------------------------------
+    // resolve_tui_consult_mode — REQ-A07d, fix round 1 (`/consult`'s own
+    // dispatch, not just its acceptance).
+    // -------------------------------------------------------------------
+
+    /// Doble de [`ModeClassifier`] que PANICS si se lo invoca — la forma más fuerte
+    /// de probar "cero llamadas de clasificación": un contador en 0 podría ocultar
+    /// un bug donde se llama pero se descarta el resultado; este no deja esa salida.
+    struct NeverClassifier;
+
+    #[async_trait::async_trait]
+    impl ModeClassifier for NeverClassifier {
+        async fn classify(&self, _content: &str) -> Option<Mode> {
+            panic!("classifier must not be called when a mode is already declared");
+        }
+    }
+
+    /// Doble que siempre devuelve una etiqueta fija, para el camino de inferencia.
+    struct FixedClassifier(Mode);
+
+    #[async_trait::async_trait]
+    impl ModeClassifier for FixedClassifier {
+        async fn classify(&self, _content: &str) -> Option<Mode> {
+            Some(self.0)
+        }
+    }
+
+    /// SC-A07b (mitad TUI) — Fix round 1. Antes de este fix, el handler de
+    /// `UiEvent::Consult` corría `Mode::Analysis` sin condición y la entrada del
+    /// loop usaba `parse_consult_command`, que no entendía `--mode` en absoluto:
+    /// `/consult --mode design ¿esto o aquello?` dejaba el texto `--mode design`
+    /// DENTRO de la pregunta y de todos modos analizaba en `Analysis`. Este test
+    /// fija las dos mitades del arreglo: el modo resuelto es `Design`, y la query
+    /// que llegaría a `Magi::analyze` ya no contiene el flag.
+    #[tokio::test]
+    async fn an_explicit_mode_reaches_analyze_as_declared_and_strips_the_flag_from_the_query() {
+        let cmd = super::parse_tui_consult("/consult --mode design ¿esto o aquello?").unwrap();
+        let (mode, query) = super::resolve_tui_consult_mode(cmd, None, false, &NeverClassifier)
+            .await
+            .unwrap();
+        assert_eq!(
+            mode,
+            Mode::Design,
+            "el --mode explícito debe ganar, nunca Analysis por defecto"
+        );
+        assert_eq!(query, "¿esto o aquello?");
+        assert!(
+            !query.contains("--mode"),
+            "el flag no debe sobrevivir en el texto que llega a analyze: {query:?}"
+        );
+    }
+
+    /// SC-A07k (mitad TUI): `[magi].default_mode` le gana a la clasificación —
+    /// sin `--mode` en el comando, si el operador declaró un default, se usa ESE
+    /// y el clasificador nunca se invoca.
+    #[tokio::test]
+    async fn configured_default_mode_wins_without_classifying() {
+        let cmd = super::parse_tui_consult("/consult ¿esto o aquello?").unwrap();
+        let (mode, query) =
+            super::resolve_tui_consult_mode(cmd, Some(Mode::CodeReview), false, &NeverClassifier)
+                .await
+                .unwrap();
+        assert_eq!(mode, Mode::CodeReview);
+        assert_eq!(query, "¿esto o aquello?");
+    }
+
+    /// Sin `--mode` y sin `default_mode`, el clasificador SÍ se consulta y su
+    /// respuesta se usa — el camino de inferencia sigue vivo en esta superficie.
+    #[tokio::test]
+    async fn without_mode_or_config_the_classifier_is_consulted() {
+        let cmd = super::parse_tui_consult("/consult ¿esto o aquello?").unwrap();
+        let (mode, _query) =
+            super::resolve_tui_consult_mode(cmd, None, false, &FixedClassifier(Mode::Design))
+                .await
+                .unwrap();
+        assert_eq!(mode, Mode::Design);
+    }
+
+    /// SC-A07r (mitad TUI): el operador declaró `untrusted_content = true` en su
+    /// `magi.toml` y ni `--mode` ni `default_mode` nombran una lente — falla
+    /// cerrado, sin clasificar.
+    #[tokio::test]
+    async fn operator_declared_untrusted_content_fails_closed_without_a_mode() {
+        let cmd = super::parse_tui_consult("/consult ¿esto o aquello?").unwrap();
+        let err = super::resolve_tui_consult_mode(cmd, None, true, &NeverClassifier)
+            .await
+            .expect_err("sin modo declarado, la marca del operador debe fallar cerrado");
+        assert!(matches!(
+            err,
+            ModeError::UntrustedContentRequiresExplicitMode
+        ));
     }
 
     #[test]
