@@ -437,4 +437,29 @@ mod tests {
             "http://localhost:11434/v1"
         );
     }
+
+    /// Sin `://` no hay autoridad que recorrer: `locate_userinfo` devuelve `Unparseable` y
+    /// `parse` lo propaga como [`EndpointError::Unparseable`], en vez de asumir "sin credencial".
+    ///
+    /// Cubre el brazo `UserinfoLocation::Unparseable => Err(EndpointError::Unparseable)` de
+    /// `EndpointTemplate::parse`, que no tenía ningún caso de prueba: verificado leyendo
+    /// `locate_userinfo` (`src/redact.rs`) — el primer `let Some(scheme_end) = raw.find("://")
+    /// else { return Unparseable }` es alcanzable con cualquier texto que no contenga `"://"`.
+    #[test]
+    fn a_url_without_a_scheme_separator_is_rejected_as_unparseable() {
+        let err = EndpointTemplate::parse("localhost:11434/v1").unwrap_err();
+        assert!(
+            matches!(err, EndpointError::Unparseable),
+            "esperaba Unparseable, salió {err:?}"
+        );
+    }
+
+    /// El `Display` de la plantilla emite exactamente lo que guarda — es el mismo texto que
+    /// `as_str()`, así que un consumidor que haga `format!("{tpl}")` ve la plantilla completa.
+    #[test]
+    fn display_renders_the_same_text_as_as_str() {
+        let tpl = EndpointTemplate::parse("https://[user]:[password]@host/v1").unwrap();
+        assert_eq!(format!("{tpl}"), tpl.as_str());
+        assert_eq!(tpl.to_string(), "https://[user]:[password]@host/v1");
+    }
 }
