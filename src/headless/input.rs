@@ -18,12 +18,14 @@ use std::collections::HashSet;
 use std::fmt;
 use std::io::Read;
 
+use magi_core::schema::Mode;
 use serde::de::{
     self, DeserializeSeed, Deserializer, Error as _, IgnoredAny, MapAccess, SeqAccess, Visitor,
 };
 
 use super::limits::MAX_JSON_DEPTH;
 use super::HeadlessError;
+use crate::magi::mode::{ModeExt, ModeParseError};
 
 /// Mensaje de error cuando el anidamiento JSON supera [`MAX_JSON_DEPTH`].
 ///
@@ -514,6 +516,37 @@ mod tests {
 
         let j = parse_input(br#"{"foo":1}"#, None).unwrap(); // objeto sin prompt => texto
         assert_eq!(j.prompt, r#"{"foo":1}"#);
+    }
+
+    /// El envelope recoge `mode`/`untrusted_content` igual que sus otros campos
+    /// opcionales, y `resolved_mode` valida el string crudo (REQ-A07/A07c/A07d).
+    #[test]
+    fn test_parse_input_carries_mode_and_untrusted_content() {
+        let e = parse_input(
+            br#"{"prompt":"x","mode":"design","untrusted_content":true}"#,
+            None,
+        )
+        .unwrap();
+        assert_eq!(e.mode.as_deref(), Some("design"));
+        assert_eq!(e.resolved_mode().unwrap(), Some(Mode::Design));
+        assert_eq!(e.untrusted_content, Some(true));
+
+        // Ausentes ⇒ `None`, sin inventar un default.
+        let bare = parse_input(br#"{"prompt":"x"}"#, None).unwrap();
+        assert_eq!(bare.mode, None);
+        assert_eq!(bare.resolved_mode().unwrap(), None);
+        assert_eq!(bare.untrusted_content, None);
+    }
+
+    /// Un `mode` presente y no reconocido es un error tipado, no un `None`
+    /// silencioso — misma regla que un valor de configuración (REQ-A07c).
+    #[test]
+    fn test_envelope_resolved_mode_rejects_an_unknown_label() {
+        let e = parse_input(br#"{"prompt":"x","mode":"banana"}"#, None).unwrap();
+        assert!(matches!(
+            e.resolved_mode(),
+            Err(ModeParseError::Unknown { .. })
+        ));
     }
 
     /// La prioridad de deny-unknown depende de la presencia de `prompt`

@@ -39,6 +39,7 @@ use crate::tools::write::FileWriteTool;
 use clap::Parser;
 use cryptovault::CryptoVault;
 use magi_core::orchestrator::{Magi, MagiBuilder};
+use magi_core::schema::Mode;
 use magi_rs::headless::exit::exit_code as headless_exit_code;
 use magi_rs::headless::input::{parse_input, read_input_bounded, InputFormat};
 use magi_rs::headless::limits::{HeadlessLimits, NORMAL_MAX_TOOL_CALLS};
@@ -2676,6 +2677,123 @@ mod tests {
     use crate::agent::messages::Message;
     use magi_rs::notices::NoticeTier;
     use magi_rs::vault::MaskedDek;
+
+    /// Task 2.2 — `--mode` and `--untrusted-content` across the four surfaces
+    /// (REQ-A07/A07b/A07c/A07d). Named `mode_surfaces` so
+    /// `cargo nextest run mode_surfaces` selects exactly this group.
+    ///
+    /// Registered plan debt: the task brief's Step 1 code block pasted nine test
+    /// bodies under this heading, but Steps 2/4 both say `PASS (3 tests)`. The other
+    /// six (`the_agent_that_decides_to_consult_also_picks_the_lens`,
+    /// `untrusted_content_does_not_take_the_lens_away_from_the_agent`,
+    /// `the_agent_alone_does_not_satisfy_the_untrusted_guard`,
+    /// `configured_default_mode_beats_the_agents_choice`,
+    /// `omitting_the_mode_costs_one_call_and_declaring_it_costs_none`,
+    /// `the_consult_help_names_the_extra_call_and_how_to_avoid_it`) call helper
+    /// functions that exist nowhere in the repo and exercise behavior that needs
+    /// `resolve_mode_guarded`/`ModeResolution` (Task 2.4) or the classification call
+    /// (Task 2.3) — both explicitly out of scope here. `src/tools/consult.rs`'s
+    /// `execute` still hardcodes `Mode::Analysis`, confirming no live path can
+    /// produce `ModeSource::AgentChosen` or count classification calls yet. The
+    /// coordinator confirmed this reassignment; see the task report for the full
+    /// six-way mapping to Task 2.3/2.4.
+    mod mode_surfaces {
+        use super::*;
+
+        /// SC-A07b: lo explícito gana en las cuatro superficies.
+        #[test]
+        fn every_surface_accepts_an_explicit_mode() {
+            use clap::Parser;
+
+            let a = Args::parse_from(["magi-rs", "consult", "--mode", "design"]);
+            assert!(matches!(a.mode_of_consult(), Some(Mode::Design)));
+
+            let env = parse_input(br#"{"prompt":"x","mode":"design"}"#, None)
+                .expect("valid envelope");
+            assert_eq!(env.resolved_mode().unwrap(), Some(Mode::Design));
+
+            assert_eq!(
+                crate::tui::parse_tui_consult("/consult --mode design ¿esto o aquello?")
+                    .unwrap()
+                    .mode,
+                Some(Mode::Design)
+            );
+        }
+
+        /// SC-A07q: `default_mode` inválido es error de configuración.
+        #[test]
+        fn an_invalid_default_mode_is_a_config_error() {
+            // El valor inválido muere en el PARSEO. `effective_default_mode` devuelve
+            // `Option`, no `Result`, justamente para que ningún llamador pueda escribir
+            // `.ok()` (B9) — y por eso el test tampoco puede encadenarlo con `.and_then`.
+            assert!(MagiConfig::from_toml_str("[magi]\ndefault_mode = \"banana\"\n").is_err());
+
+            let cfg = MagiConfig::from_toml_str("[magi]\ndefault_mode = \"\"\n").unwrap();
+            assert_eq!(
+                cfg.effective_default_mode(),
+                None,
+                "vacío es AUSENTE, no inválido"
+            );
+        }
+
+        /// SC-A07t: `untrusted_content` en tres superficies; la TUI no la tiene.
+        #[test]
+        fn untrusted_content_is_declarable_where_the_threat_lives() {
+            use clap::Parser;
+
+            assert!(
+                Args::parse_from(["magi-rs", "consult", "--untrusted-content"])
+                    .untrusted_content()
+            );
+
+            let env = parse_input(br#"{"prompt":"x","untrusted_content":true}"#, None)
+                .expect("valid envelope");
+            assert_eq!(
+                env.untrusted_content,
+                Some(true),
+                "el envelope es el consumidor de un gate automatizado: no puede faltar"
+            );
+
+            assert!(
+                crate::tui::parse_tui_consult("/consult --untrusted-content x").is_err(),
+                "la TUI no expone la marca: ahí hay un humano que eligió el contenido"
+            );
+        }
+
+        /// Defect #12 (registered plan debt), verified empirically rather than by
+        /// reading clap's source alone: clap's default `ValueEnum` kebab-casing for
+        /// `CodeReview`/`Design`/`Analysis` must round-trip through the SAME three
+        /// labels `normalize_label` accepts, or the same word would be valid in
+        /// `magi.toml` and rejected on the command line.
+        #[test]
+        fn cli_mode_casing_matches_the_shared_mode_vocabulary() {
+            use clap::Parser;
+
+            for (flag_value, expected) in [
+                ("code-review", Mode::CodeReview),
+                ("design", Mode::Design),
+                ("analysis", Mode::Analysis),
+            ] {
+                let a = Args::parse_from(["magi-rs", "consult", "--mode", flag_value]);
+                assert_eq!(
+                    a.mode_of_consult(),
+                    Some(expected),
+                    "clap value {flag_value:?} must map onto the shared vocabulary"
+                );
+            }
+        }
+
+        /// Edge case: no subcommand at all ⇒ neither accessor panics or fabricates a
+        /// value; both report the "nothing declared" answer.
+        #[test]
+        fn mode_and_untrusted_content_are_absent_without_a_subcommand() {
+            use clap::Parser;
+
+            let a = Args::parse_from(["magi-rs"]);
+            assert_eq!(a.mode_of_consult(), None);
+            assert!(!a.untrusted_content());
+        }
+    }
 
     /// MAGI re-gate finding (Caspar/Melchior): a substring match on
     /// `"localhost"`/`"127.0.0.1"` false-matches a hostile hostname that

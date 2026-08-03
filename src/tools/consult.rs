@@ -366,11 +366,30 @@ mod tests {
         assert_eq!(schema["type"], "object");
         assert_eq!(schema["properties"]["query"]["type"], "string");
         assert_eq!(schema["required"][0], "query");
+        // `required` names ONLY `query`: `mode` must stay optional so an agent that
+        // doesn't pick a lens still gets to consult (REQ-A07/A07b).
+        assert_eq!(schema["required"].as_array().unwrap().len(), 1);
         let lower = tool.description().to_lowercase();
         assert!(!lower.is_empty());
         assert!(lower.contains("trade-off"));
         assert!(lower.contains("perspective") || lower.contains("perspectives"));
         assert!(lower.contains("decision") || lower.contains("decisions"));
+    }
+
+    /// REQ-A07b: the tool exposes `mode` in its own input schema so an agent that
+    /// decides to consult can also pick the lens, from the same three-label
+    /// vocabulary `magi_rs::magi::mode::normalize_label` accepts. No behavior change
+    /// to `execute` — it still hardcodes `Mode::Analysis`; wiring the declared value
+    /// into dispatch is Task 2.3/2.4's job, not this one's.
+    #[test]
+    fn test_consult_tool_schema_exposes_an_optional_mode_lens() {
+        let tool = dummy_tool();
+        let schema = tool.input_schema();
+        assert_eq!(schema["properties"]["mode"]["type"], "string");
+        assert_eq!(
+            schema["properties"]["mode"]["enum"],
+            json!(["code-review", "design", "analysis"])
+        );
     }
 
     #[tokio::test]

@@ -1782,6 +1782,55 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_tui_consult_accepts_an_explicit_mode_and_keeps_the_query() {
+        let cmd = super::parse_tui_consult("/consult --mode design ¿esto o aquello?").unwrap();
+        assert_eq!(cmd.mode, Some(Mode::Design));
+        assert_eq!(cmd.query, "¿esto o aquello?");
+    }
+
+    #[test]
+    fn test_parse_tui_consult_accepts_a_bare_consult_with_no_mode() {
+        let cmd = super::parse_tui_consult("/consult").unwrap();
+        assert_eq!(cmd.mode, None);
+        assert_eq!(cmd.query, "");
+    }
+
+    #[test]
+    fn test_parse_tui_consult_rejects_untrusted_content() {
+        assert_eq!(
+            super::parse_tui_consult("/consult --untrusted-content x"),
+            Err(super::TuiConsultParseError::UnsupportedFlag(
+                "--untrusted-content".to_string()
+            )),
+            "la TUI no expone la marca: ahí hay un humano que eligió el contenido"
+        );
+    }
+
+    #[test]
+    fn test_parse_tui_consult_rejects_mode_without_a_value() {
+        assert_eq!(
+            super::parse_tui_consult("/consult --mode"),
+            Err(super::TuiConsultParseError::MissingModeValue)
+        );
+    }
+
+    #[test]
+    fn test_parse_tui_consult_rejects_an_unknown_mode_label() {
+        assert_eq!(
+            super::parse_tui_consult("/consult --mode banana query"),
+            Err(super::TuiConsultParseError::UnknownMode("banana".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_parse_tui_consult_rejects_a_non_consult_line() {
+        assert_eq!(
+            super::parse_tui_consult("hello"),
+            Err(super::TuiConsultParseError::NotAConsultCommand)
+        );
+    }
+
+    #[test]
     fn test_push_notice_stores_with_warning_prefix() {
         // AgentResponse::Notice must be rendered with the ⚠ prefix so it is
         // visually distinct from model Content (REQ-29 / D1/D2 routing).
