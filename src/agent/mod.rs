@@ -24,6 +24,9 @@ use crate::system::database::MemoryStore;
 use crate::tools::Tool;
 use anyhow::Result;
 use futures::StreamExt;
+use magi_core::schema::Mode;
+use magi_rs::magi::gate::{evaluate, GateTelemetry, GateThresholds, GateVerdict, NoGateTelemetry};
+use magi_rs::magi::mode::{agent_chosen_mode, input_for_dispatch, resolve_mode_guarded, ModeConfig};
 use sha2::{Digest, Sha256};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -91,6 +94,69 @@ const FORCED_CONSULT_TOOL_USE_ID: &str = "forced-consult";
 /// one), so it gets this message, but the tool is never re-executed.
 const CONSULT_ALREADY_FORCED_MESSAGE: &str =
     "consult already ran once for this forced query; no further invocations";
+
+/// Consecutive vetoes that close `consult` for the rest of the TURN (REQ-A20c).
+///
+/// **The exact sequence, spelled out because "the second veto is terminal" reads
+/// two ways and the trace is not obvious:**
+///
+/// | Call | Counter on entry | What happens |
+/// |---|---|---|
+/// | 1st, trivial | 0 | EVALUATED, vetoed ⇒ counter 1 |
+/// | 2nd, trivial | 1 | EVALUATED, vetoed ⇒ counter 2 |
+/// | 3rd onward | 2 | NOT evaluated: the door is closed and the result says so |
+///
+/// So: two vetoes actually occur, and starting from the third call the door is
+/// closed. The second is not rejected sight-unseen — it is evaluated, vetoed,
+/// and that is the last one. `1` here would block the second call WITHOUT
+/// evaluating it, which is one fewer veto than the spec describes.
+const MAX_CONSECUTIVE_VETOES: u8 = 2;
+
+/// Text returned to the agent after a veto (REQ-A20e).
+///
+/// **Does not reveal the threshold**: saying how many characters are missing is
+/// a direct invitation to pad the content until it passes, which would produce
+/// exactly the expensive consult the gate exists to avoid, plus the cost of the
+/// padding.
+fn veto_message(mode: &Mode) -> String {
+    format!(
+        "This content does not warrant a three-perspective consensus in {mode} mode: it is \
+         too short. Retrying with the same content gives the same result — answer directly \
+         instead."
+    )
+}
+
+/// SECOND veto: also says the door closed for the rest of the turn (REQ-A20f).
+fn veto_message_terminal(mode: &Mode) -> String {
+    format!(
+        "{} And this is the second veto this turn: `consult` is now disabled for the rest \
+         of it. The next turn starts clean.",
+        veto_message(mode)
+    )
+}
+
+/// Calls made AFTER the door already closed: not even re-evaluated. Same rule
+/// as the other two messages — never names the threshold.
+fn consult_disabled_message() -> String {
+    "`consult` is disabled for the rest of this turn (two consecutive vetoes). Answer \
+     directly; the next turn starts clean."
+        .to_string()
+}
+
+/// Records ONE gate evaluation (REQ-A20 telemetry, SC-A20h).
+///
+/// **Not an `eprintln!`**: this is telemetry to calibrate thresholds, not a
+/// user-facing message — mixing the two channels would make the interactive
+/// path noisy.
+fn log_gate(config: &AgentRunConfig, mode: &Mode, chars: usize, threshold: usize, vetoed: bool) {
+    // The APPLIED threshold travels in the line (SC-A20h). Without it the
+    // telemetry cannot do the one thing it exists for: with `[magi.complexity]`
+    // configurable, "vetoed at 40 chars" does not say whether the threshold was
+    // 50 or 500, and calibrating is exactly comparing the two numbers.
+    config
+        .gate_telemetry
+        .on_gate_evaluation(mode, chars, threshold, vetoed);
+}
 
 /// Observes an agent run from **outside** the tool loop, for the headless runner.
 ///
@@ -207,6 +273,29 @@ pub struct AgentRunConfig {
     /// [`Agent::run_tool_loop`] for the full authorization/at-most-once
     /// contract.
     pub force_consult: bool,
+    /// Complexity-gate thresholds for an autonomous `consult` (REQ-A20/A20b).
+    /// [`AgentRunConfig::default`] uses [`GateThresholds::builtin`] — the gate
+    /// is ACTIVE by default (REQ-A20b): a security-relevant gate that turns
+    /// itself off by omission is a gate that's effectively off. Only
+    /// [`Agent::dispatch_consult_through_gate`] (the model-issued `ToolUse`
+    /// path) ever evaluates this; the forced pre-loop injection above
+    /// (REQ-H22) never does — see that method's rustdoc for why that
+    /// call-site distinction IS REQ-A20's contract.
+    pub gate_thresholds: GateThresholds,
+    /// Mode resolution inputs the funnel needs without re-reading `magi.toml`
+    /// per turn (REQ-A07/A07c/A07d). [`AgentRunConfig::default`] leaves both
+    /// fields at their least-surprising value — no configured default mode,
+    /// `untrusted_content` off — so an unconfigured run keeps inferring/
+    /// defaulting exactly as it did before this field existed.
+    pub mode_config: ModeConfig,
+    /// Sink for the gate's telemetry (REQ-A20, SC-A20h). **Deliberately
+    /// separate from [`RunObserver`]**: the observer is `None` in the TUI —
+    /// the surface that autonomously routes to `consult` the most — so a
+    /// signal SC-A20h requires *always* recorded cannot depend on it.
+    /// [`AgentRunConfig::default`] installs [`NoGateTelemetry`] (zero
+    /// recording), so this field is purely additive: no existing run changes
+    /// behavior by having it.
+    pub gate_telemetry: Arc<dyn GateTelemetry>,
 }
 
 impl Default for AgentRunConfig {
@@ -218,6 +307,9 @@ impl Default for AgentRunConfig {
             cancel: CancellationToken::new(),
             system: None,
             force_consult: false,
+            gate_thresholds: GateThresholds::builtin(),
+            mode_config: ModeConfig::default(),
+            gate_telemetry: Arc::new(NoGateTelemetry),
         }
     }
 }
@@ -855,6 +947,130 @@ impl Agent {
         }
     }
 
+    /// Runs a model-issued `consult` request through the complexity gate
+    /// (REQ-A20), producing the `ToolResult` to fold into the turn.
+    ///
+    /// # The call-site distinction this method IS
+    ///
+    /// This is called **only** from the `ToolUse` loop in [`Self::run_tool_loop`]
+    /// — the model deciding, on its own, to invoke `consult`. The forced
+    /// pre-loop injection (REQ-H22) calls [`Self::authorize_and_execute_tool`]
+    /// directly and never reaches this method at all. That is the entire
+    /// mechanism behind REQ-A20's "the gate vetoes the autonomous route, never
+    /// an explicit one": `/consult` (TUI), `magi consult` (CLI) and a forced
+    /// consult all bypass the gate structurally, by never calling this method,
+    /// not by any flag this method could check. If a future refactor ever
+    /// unifies the two call sites "to simplify", an explicit consult starts
+    /// getting vetoed — see `a_forced_injection_bypasses_the_gate_while_a_model_choice_does_not`.
+    ///
+    /// # Outcomes
+    /// - The door is already closed this turn (`consecutive_vetoes >=
+    ///   [`MAX_CONSECUTIVE_VETOES`]`): not even re-evaluated, zero model calls.
+    /// - [`GateVerdict::Veto`]: `consecutive_vetoes` increments; zero model
+    ///   calls; the result names the mode and, on the second veto, that the
+    ///   door is now closed for the rest of the turn (REQ-A20c).
+    /// - [`GateVerdict::Dispatch`]: `consecutive_vetoes` resets to `0` (a
+    ///   dispatched consult spends three model calls — the exact cost the gate
+    ///   exists to avoid — so resetting on it never opens a padding shortcut),
+    ///   and the resolved `(Mode, ModeSource)` is injected into a CLONED input
+    ///   (`magi_rs::magi::mode::input_for_dispatch`) before the real dispatch,
+    ///   so [`ConsultTool`](crate::tools::consult::ConsultTool) reads the same
+    ///   mode the gate just evaluated instead of re-resolving it.
+    ///
+    /// There is deliberately **no anti-mode-shopping guard**: the agent can
+    /// choose the mode via the tool's `input_schema` (REQ-A07b), so a veto
+    /// under `Design` (higher threshold) followed by a retry under `Analysis`
+    /// (lower) that then dispatches is not evasion — the built-in thresholds
+    /// say a shorter `Analysis` is legitimately enough for that lens, and the
+    /// gate's own `Dispatch` verdict says so. A guard here would second-guess
+    /// the gate's own configuration, and the plain reset-on-success rule
+    /// already covers the case that matters: a mode change that fails to pass
+    /// is still a `Veto` (counts, and closes the door on the second one).
+    ///
+    /// # Errors
+    /// Propagates [`magi_rs::magi::mode::ModeError`] from
+    /// [`resolve_mode_guarded`] (`untrusted_content` active with no declared
+    /// mode) — the same fail-closed behavior the rest of the run already
+    /// applies to a malformed turn.
+    async fn dispatch_consult_through_gate(
+        &mut self,
+        id: &str,
+        input: &serde_json::Value,
+        config: &AgentRunConfig,
+        chunk_tx: &tokio::sync::mpsc::Sender<StreamPiece>,
+        consecutive_vetoes: &mut u8,
+    ) -> Result<Content> {
+        if *consecutive_vetoes >= MAX_CONSECUTIVE_VETOES {
+            // REQ-A20c: the door already closed this turn. Not even the gate
+            // itself runs again — zero model calls, same as a fresh veto.
+            return Ok(Content::ToolResult {
+                tool_use_id: id.to_string(),
+                content: consult_disabled_message(),
+                is_error: false,
+            });
+        }
+
+        let query = input
+            .get("query")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        // Explicit (level 1) is never populated here: there is no human on the
+        // autonomous route. `classifier: None` — this call site never infers
+        // (REQ-A07d); the agent already had its chance to pick a mode via its
+        // own `mode` argument (`agent_chosen_mode`), which is level 3, not a
+        // classification call.
+        let res = resolve_mode_guarded(
+            None,
+            config.mode_config.default_mode,
+            agent_chosen_mode(input),
+            config.mode_config.untrusted_content,
+            None,
+            query,
+        )
+        .await?;
+
+        match evaluate(query, &res.mode, &config.gate_thresholds) {
+            GateVerdict::Veto { mode } => {
+                *consecutive_vetoes += 1;
+                log_gate(
+                    config,
+                    &mode,
+                    query.chars().count(),
+                    config.gate_thresholds.for_mode(&mode),
+                    true,
+                );
+                let content = if *consecutive_vetoes >= MAX_CONSECUTIVE_VETOES {
+                    veto_message_terminal(&mode)
+                } else {
+                    veto_message(&mode)
+                };
+                Ok(Content::ToolResult {
+                    tool_use_id: id.to_string(),
+                    content,
+                    is_error: false,
+                })
+            }
+            GateVerdict::Dispatch => {
+                // A dispatched consult already spends three model calls, so
+                // resetting here never opens a "pad it until it passes"
+                // shortcut (REQ-A20c) — that cost IS what the gate exists to
+                // avoid, so paying it buys the reset honestly.
+                *consecutive_vetoes = 0;
+                log_gate(
+                    config,
+                    &res.mode,
+                    query.chars().count(),
+                    config.gate_thresholds.for_mode(&res.mode),
+                    false,
+                );
+                let tool_input = input_for_dispatch(input, &res);
+                Ok(self
+                    .authorize_and_execute_tool(id, CONSULT_TOOL_NAME, &tool_input, config, chunk_tx)
+                    .await)
+            }
+        }
+    }
+
     /// Inner tool-loop shared by the `selective` and `load_all` execution paths.
     ///
     /// Streams provider responses and dispatches tool use until the model produces
@@ -932,6 +1148,15 @@ impl Agent {
         let mut last_normalized_tool: Option<(String, String)> = None;
         // SEQUENTIALITY REQUIRED — see the note on `tool_call_count` above.
         let mut repeat_count = 0;
+        // SEQUENTIALITY REQUIRED — see the note on `tool_call_count` above. This
+        // is the third counter that note already promised: MS2's veto counter
+        // (REQ-A20c). Same flat local, same lifetime (the turn: born on entry,
+        // gone on exit via any of the four return paths, no `Drop` to write),
+        // same pin (`tool_dispatch_is_sequential_within_a_turn`). It does NOT
+        // live on `Agent` or on `ConsultTool` (an `Arc` shared across
+        // sessions) — putting it there would let a turn vetoed in one session
+        // disable `consult` in another.
+        let mut consecutive_vetoes: u8 = 0;
         // REQ-H22: locks out any further `consult` request once the forced
         // pre-loop injection below has run (success, denial, or "not found").
         // Defensive/redundant by construction: the injection block runs iff
@@ -1104,6 +1329,24 @@ impl Agent {
                                 content: CONSULT_ALREADY_FORCED_MESSAGE.to_string(),
                                 is_error: true,
                             }
+                        } else if name == CONSULT_TOOL_NAME {
+                            // REQ-A20: this is the model's OWN request (the
+                            // `ToolUse` loop), which is exactly the call site the
+                            // complexity gate is meant to see. The forced
+                            // pre-loop injection above never reaches this branch
+                            // — it calls `authorize_and_execute_tool` directly,
+                            // a few lines up, bypassing the gate entirely. Two
+                            // distinct call sites to the SAME tool is the whole
+                            // property REQ-A20 rests on; see
+                            // `dispatch_consult_through_gate`'s rustdoc.
+                            self.dispatch_consult_through_gate(
+                                id,
+                                input,
+                                config,
+                                chunk_tx,
+                                &mut consecutive_vetoes,
+                            )
+                            .await?
                         } else {
                             self.authorize_and_execute_tool(id, name, input, config, chunk_tx)
                                 .await
@@ -3235,6 +3478,718 @@ mod tests {
             peak.load(Ordering::SeqCst),
             1,
             "the tool loop dispatched in parallel: the per-turn counters stop being correct",
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Task 3.2 — veto counter and the terminal rule (REQ-A20c)
+    //
+    // Five tests inherited from Task 3.1 (its Step 1 pasted them alongside its
+    // own three pure ones), plus one written here to close SC-A20i, which the
+    // reassigned five leave unnamed. `run_turn_with_autonomous_consults`
+    // (PLURAL) is an orphan nobody defines in the plan — writing it is part of
+    // this task's own Step 1, same as `agent_after_turn_ending_in` and
+    // `run_turn_with_consults_on`, neither of which any prior task names.
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// The observable outcome of a turn, for the gate's tests.
+    ///
+    /// `tool_calls_counted` and `exit` are NOT in the plan's pasted contract
+    /// block (`examples/ms2_contracts.rs`'s normative stub only lists
+    /// `veto_count`/`consult_disabled_for_rest_of_turn`/`magi_calls`/
+    /// `gate_log`) even though `a_veto_still_consumes_the_turn_budget` reads
+    /// both — registered plan debt #7, verified against the code before
+    /// adding these two fields.
+    struct TurnOutcome {
+        /// Vetoes that were actually EVALUATED and cut short (derived from
+        /// `gate_log`, which only grows on a real evaluation — a call made
+        /// after the door already closed never reaches `evaluate` at all).
+        veto_count: usize,
+        /// Whether the terminal rule (REQ-A20c) closed `consult` for the rest
+        /// of the turn. Derived by replaying `gate_log` through the SAME
+        /// reset-on-dispatch / increment-on-veto state machine
+        /// `dispatch_consult_through_gate` runs in production, so it reflects
+        /// the state at the END of the turn — a dispatch in the middle
+        /// re-opens the door, exactly like SC-A20m requires.
+        consult_disabled_for_rest_of_turn: bool,
+        /// Real invocations of the `consult` double's `execute` — zero
+        /// whenever the gate vetoed (SC-A20).
+        magi_calls: usize,
+        /// Lines the gate's telemetry sink recorded, in order (SC-A20h).
+        gate_log: Vec<String>,
+        /// How many `consult` calls the turn actually accounted for before
+        /// terminating — vetoes, disabled-door continuations and dispatches
+        /// all count (SC-A20f): every processed call produces exactly one
+        /// `Content::ToolResult`, so counting those (not raw `ToolUse`
+        /// blocks, which an overflowing call still leaves in history before
+        /// erroring) gives the count `max_tool_calls` actually saw.
+        tool_calls_counted: usize,
+        /// How the run ended.
+        exit: Exit,
+    }
+
+    /// Exit paths of a turn, for [`the_counter_dies_with_the_turn_on_every_exit_path`].
+    ///
+    /// `PartialEq`/`Eq` beyond the plan's pasted `#[derive(Debug, Clone,
+    /// Copy)]`: `a_veto_still_consumes_the_turn_budget` asserts
+    /// `out.exit == Exit::MaxToolCalls` via `assert_eq!`, which needs it.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Exit {
+        FinalAnswer,
+        MaxToolCalls,
+        Cancelled,
+        Error,
+    }
+
+    /// Test double standing in for `ConsultTool`: counts genuine invocations
+    /// without calling any model, registered under [`CONSULT_TOOL_NAME`] so
+    /// the gate's call-site distinction is exercised against the SAME name
+    /// production code dispatches to.
+    struct CountingConsultTool {
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl CountingConsultTool {
+        /// Builds a fresh double and returns it alongside a handle to its
+        /// call counter.
+        fn new() -> (Self, Arc<std::sync::atomic::AtomicUsize>) {
+            use std::sync::atomic::AtomicUsize;
+            let calls = Arc::new(AtomicUsize::new(0));
+            (
+                Self {
+                    calls: calls.clone(),
+                },
+                calls,
+            )
+        }
+    }
+
+    #[async_trait]
+    impl Tool for CountingConsultTool {
+        fn name(&self) -> &str {
+            CONSULT_TOOL_NAME
+        }
+        fn description(&self) -> &str {
+            "test double standing in for consult"
+        }
+        fn input_schema(&self) -> Value {
+            json!({
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"},
+                    "mode": {"type": "string"}
+                },
+                "required": ["query"]
+            })
+        }
+        async fn execute(&self, _args: Value, _cancel: &CancellationToken) -> ToolResult<Value> {
+            use std::sync::atomic::Ordering;
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(json!({"report": "ok", "degraded": false}))
+        }
+    }
+
+    /// Test double for [`GateTelemetry`]: records every line the sink
+    /// receives, in the exact format `log_gate` writes (SC-A20h).
+    struct RecordingGateTelemetry {
+        lines: Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl GateTelemetry for RecordingGateTelemetry {
+        fn on_gate_evaluation(&self, mode: &Mode, chars: usize, threshold: usize, vetoed: bool) {
+            self.lines.lock().unwrap().push(format!(
+                "gate {mode} chars={chars} threshold={threshold} {}",
+                if vetoed { "veto" } else { "dispatch" }
+            ));
+        }
+    }
+
+    /// Emits ONE `ToolUse` of `consult` per entry of `script`, one PER TURN
+    /// (a separate `stream_messages` call each), then a plain-text turn once
+    /// `script` is exhausted so the loop ends normally.
+    struct SequentialConsultProvider {
+        script: Vec<String>,
+        turn: std::sync::Mutex<usize>,
+    }
+
+    impl SequentialConsultProvider {
+        fn new(contents: &[&str]) -> Self {
+            Self {
+                script: contents.iter().map(|s| (*s).to_string()).collect(),
+                turn: std::sync::Mutex::new(0),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Provider for SequentialConsultProvider {
+        async fn stream_messages(
+            &self,
+            _messages: &[Message],
+            _tools: &[Box<dyn Tool>],
+            _system: Option<&str>,
+        ) -> Result<BoxStream<'static, Result<ResponseChunk>>> {
+            let mut n = self.turn.lock().unwrap();
+            let idx = *n;
+            *n += 1;
+            drop(n);
+
+            if let Some(q) = self.script.get(idx) {
+                let msg = Message {
+                    role: Role::Assistant,
+                    content: vec![Content::ToolUse {
+                        id: format!("seq-consult-{idx}"),
+                        name: CONSULT_TOOL_NAME.to_string(),
+                        input: json!({"query": q}),
+                    }],
+                };
+                Ok(Box::pin(stream::iter(vec![Ok(
+                    ResponseChunk::MessageDone(msg),
+                )])))
+            } else {
+                Ok(Box::pin(stream::iter(vec![
+                    Ok(ResponseChunk::TextDelta("done".to_string())),
+                    Ok(ResponseChunk::MessageDone(Message::assistant("done"))),
+                ])))
+            }
+        }
+    }
+
+    /// Emits ALL of `contents` as separate `ToolUse` blocks within the SAME
+    /// assistant turn (one `stream_messages` call), then a plain-text turn
+    /// (SC-A20i).
+    struct AllAtOnceConsultProvider {
+        script: Vec<String>,
+        served: std::sync::Mutex<bool>,
+    }
+
+    impl AllAtOnceConsultProvider {
+        fn new(contents: &[&str]) -> Self {
+            Self {
+                script: contents.iter().map(|s| (*s).to_string()).collect(),
+                served: std::sync::Mutex::new(false),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Provider for AllAtOnceConsultProvider {
+        async fn stream_messages(
+            &self,
+            _messages: &[Message],
+            _tools: &[Box<dyn Tool>],
+            _system: Option<&str>,
+        ) -> Result<BoxStream<'static, Result<ResponseChunk>>> {
+            let mut served = self.served.lock().unwrap();
+            if !*served {
+                *served = true;
+                drop(served);
+                let content = self
+                    .script
+                    .iter()
+                    .enumerate()
+                    .map(|(i, q)| Content::ToolUse {
+                        id: format!("batch-consult-{i}"),
+                        name: CONSULT_TOOL_NAME.to_string(),
+                        input: json!({"query": q}),
+                    })
+                    .collect();
+                let msg = Message {
+                    role: Role::Assistant,
+                    content,
+                };
+                Ok(Box::pin(stream::iter(vec![Ok(
+                    ResponseChunk::MessageDone(msg),
+                )])))
+            } else {
+                Ok(Box::pin(stream::iter(vec![
+                    Ok(ResponseChunk::TextDelta("done".to_string())),
+                    Ok(ResponseChunk::MessageDone(Message::assistant("done"))),
+                ])))
+            }
+        }
+    }
+
+    /// Emits ONE `ToolUse` per `(query, mode)` pair, one per turn — the
+    /// `mode` travels in the tool input exactly as the agent's own choice via
+    /// the `input_schema` would (REQ-A07b, `agent_chosen_mode`).
+    struct ScriptedModeConsultProvider {
+        script: Vec<(String, Mode)>,
+        turn: std::sync::Mutex<usize>,
+    }
+
+    impl ScriptedModeConsultProvider {
+        fn new(pairs: &[(&str, Mode)]) -> Self {
+            Self {
+                script: pairs.iter().map(|(q, m)| ((*q).to_string(), *m)).collect(),
+                turn: std::sync::Mutex::new(0),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Provider for ScriptedModeConsultProvider {
+        async fn stream_messages(
+            &self,
+            _messages: &[Message],
+            _tools: &[Box<dyn Tool>],
+            _system: Option<&str>,
+        ) -> Result<BoxStream<'static, Result<ResponseChunk>>> {
+            let mut n = self.turn.lock().unwrap();
+            let idx = *n;
+            *n += 1;
+            drop(n);
+
+            if let Some((q, m)) = self.script.get(idx) {
+                let msg = Message {
+                    role: Role::Assistant,
+                    content: vec![Content::ToolUse {
+                        id: format!("mode-consult-{idx}"),
+                        name: CONSULT_TOOL_NAME.to_string(),
+                        input: json!({"query": q, "mode": m.to_string()}),
+                    }],
+                };
+                Ok(Box::pin(stream::iter(vec![Ok(
+                    ResponseChunk::MessageDone(msg),
+                )])))
+            } else {
+                Ok(Box::pin(stream::iter(vec![
+                    Ok(ResponseChunk::TextDelta("done".to_string())),
+                    Ok(ResponseChunk::MessageDone(Message::assistant("done"))),
+                ])))
+            }
+        }
+    }
+
+    /// Emits one vetoable `ToolUse` per entry of `contents` (closing the door
+    /// after two, if `contents` has at least two trivial entries), then
+    /// concludes the turn according to `exit` — all four exit paths converge
+    /// on the SAME provider so `agent_after_turn_ending_in` can drive them
+    /// uniformly.
+    struct ClosingTurnProvider {
+        contents: Vec<String>,
+        exit: Exit,
+        turn: std::sync::Mutex<usize>,
+    }
+
+    impl ClosingTurnProvider {
+        fn new(contents: &[&str], exit: Exit) -> Self {
+            Self {
+                contents: contents.iter().map(|s| (*s).to_string()).collect(),
+                exit,
+                turn: std::sync::Mutex::new(0),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Provider for ClosingTurnProvider {
+        async fn stream_messages(
+            &self,
+            _messages: &[Message],
+            _tools: &[Box<dyn Tool>],
+            _system: Option<&str>,
+        ) -> Result<BoxStream<'static, Result<ResponseChunk>>> {
+            let mut n = self.turn.lock().unwrap();
+            let idx = *n;
+            *n += 1;
+            drop(n);
+
+            let q = if idx < self.contents.len() {
+                Some(self.contents[idx].clone())
+            } else if matches!(self.exit, Exit::MaxToolCalls) {
+                // Keep hammering the (already closed) door so the CAP — not
+                // an early final answer — is what ends this turn.
+                self.contents.last().cloned()
+            } else {
+                None
+            };
+
+            if let Some(q) = q {
+                let msg = Message {
+                    role: Role::Assistant,
+                    content: vec![Content::ToolUse {
+                        id: format!("closing-{idx}"),
+                        name: CONSULT_TOOL_NAME.to_string(),
+                        input: json!({"query": q}),
+                    }],
+                };
+                return Ok(Box::pin(stream::iter(vec![Ok(
+                    ResponseChunk::MessageDone(msg),
+                )])));
+            }
+
+            match self.exit {
+                Exit::FinalAnswer | Exit::MaxToolCalls => Ok(Box::pin(stream::iter(vec![
+                    Ok(ResponseChunk::TextDelta("done".to_string())),
+                    Ok(ResponseChunk::MessageDone(Message::assistant("done"))),
+                ]))),
+                Exit::Cancelled => Err(anyhow::anyhow!("provider aborted: cancelled by timeout")),
+                Exit::Error => Err(anyhow::anyhow!("provider aborted: simulated upstream failure")),
+            }
+        }
+    }
+
+    /// Shared core: runs one turn on `agent` with a freshly wired gate-log
+    /// sink and `consult` double, and assembles the [`TurnOutcome`].
+    async fn run_and_observe(
+        agent: &mut Agent,
+        config: AgentRunConfig,
+        magi_calls: &Arc<std::sync::atomic::AtomicUsize>,
+        gate_log_sink: &Arc<std::sync::Mutex<Vec<String>>>,
+    ) -> anyhow::Result<TurnOutcome> {
+        use std::sync::atomic::Ordering;
+
+        let (tx, _rx) = tokio::sync::mpsc::channel(64);
+        let result = agent.query_streaming("start", tx, config).await;
+
+        let exit = match &result {
+            Ok(_) => Exit::FinalAnswer,
+            Err(e) if e.to_string() == MAX_TOOL_CALLS_ERROR => Exit::MaxToolCalls,
+            Err(e) if e.to_string().contains("cancelled") => Exit::Cancelled,
+            Err(_) => Exit::Error,
+        };
+
+        let gate_log = gate_log_sink.lock().unwrap().clone();
+        let veto_count = gate_log.iter().filter(|l| l.ends_with("veto")).count();
+        let mut running = 0usize;
+        for line in &gate_log {
+            if line.ends_with("veto") {
+                running += 1;
+            } else {
+                running = 0;
+            }
+        }
+        let consult_disabled_for_rest_of_turn = running >= usize::from(MAX_CONSECUTIVE_VETOES);
+
+        let tool_calls_counted = agent
+            .history()
+            .iter()
+            .flat_map(|m| &m.content)
+            .filter(|c| matches!(c, Content::ToolResult { .. }))
+            .count();
+
+        Ok(TurnOutcome {
+            veto_count,
+            consult_disabled_for_rest_of_turn,
+            magi_calls: magi_calls.load(Ordering::SeqCst),
+            gate_log,
+            tool_calls_counted,
+            exit,
+        })
+    }
+
+    /// Corre UN turno con los contenidos dados como consults autorruteados,
+    /// uno por turno (SC-A20f/SC-A20m).
+    async fn run_turn_with_consults(contents: &[&str]) -> anyhow::Result<TurnOutcome> {
+        let provider = SequentialConsultProvider::new(contents);
+        let (tool, magi_calls) = CountingConsultTool::new();
+        let mut agent = Agent::new(Arc::new(provider));
+        agent.register_tool(Box::new(tool));
+        let gate_log_sink = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let config = AgentRunConfig {
+            gate_telemetry: Arc::new(RecordingGateTelemetry {
+                lines: gate_log_sink.clone(),
+            }),
+            ..AgentRunConfig::default()
+        };
+        run_and_observe(&mut agent, config, &magi_calls, &gate_log_sink).await
+    }
+
+    /// Igual, pero emitiendo los `ToolUse` en UN solo bloque de respuesta
+    /// (SC-A20i).
+    async fn run_turn_with_two_tooluse_blocks(contents: &[&str]) -> anyhow::Result<TurnOutcome> {
+        let provider = AllAtOnceConsultProvider::new(contents);
+        let (tool, magi_calls) = CountingConsultTool::new();
+        let mut agent = Agent::new(Arc::new(provider));
+        agent.register_tool(Box::new(tool));
+        let gate_log_sink = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let config = AgentRunConfig {
+            gate_telemetry: Arc::new(RecordingGateTelemetry {
+                lines: gate_log_sink.clone(),
+            }),
+            ..AgentRunConfig::default()
+        };
+        run_and_observe(&mut agent, config, &magi_calls, &gate_log_sink).await
+    }
+
+    /// Corre un turno con un único consult autorruteado.
+    async fn run_turn_with_autonomous_consult(content: &str) -> anyhow::Result<TurnOutcome> {
+        run_turn_with_consults(&[content]).await
+    }
+
+    /// **PLURAL** — an orphan the plan names in several tasks but nobody
+    /// defines (the pre-flight sweep listed it as such); writing it is this
+    /// task's own Step 1. Each `(query, mode)` pair is dispatched on its OWN
+    /// turn, with `mode` carried in the tool input as the AGENT's own choice
+    /// (`agent_chosen_mode`), not a human `--mode`.
+    async fn run_turn_with_autonomous_consults(
+        pairs: &[(&str, Mode)],
+    ) -> anyhow::Result<TurnOutcome> {
+        let provider = ScriptedModeConsultProvider::new(pairs);
+        let (tool, magi_calls) = CountingConsultTool::new();
+        let mut agent = Agent::new(Arc::new(provider));
+        agent.register_tool(Box::new(tool));
+        let gate_log_sink = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let config = AgentRunConfig {
+            gate_telemetry: Arc::new(RecordingGateTelemetry {
+                lines: gate_log_sink.clone(),
+            }),
+            ..AgentRunConfig::default()
+        };
+        run_and_observe(&mut agent, config, &magi_calls, &gate_log_sink).await
+    }
+
+    /// Ends a FIRST turn via each of the four exit paths, closing the door
+    /// with two consecutive vetoes beforehand whenever `contents` has (at
+    /// least) two trivial entries — so all four scenarios genuinely close the
+    /// door before concluding, not just the ones that happen to need it.
+    /// Returns the `Agent` wrapped for reuse across a SECOND turn
+    /// ([`run_turn_with_consults_on`]).
+    async fn agent_after_turn_ending_in(
+        exit: Exit,
+        contents: &[&str],
+    ) -> tokio::sync::Mutex<Agent> {
+        let provider = ClosingTurnProvider::new(contents, exit);
+        let (tool, _calls) = CountingConsultTool::new();
+        let mut agent = Agent::new(Arc::new(provider));
+        agent.register_tool(Box::new(tool));
+
+        let max_tool_calls = if matches!(exit, Exit::MaxToolCalls) {
+            contents.len()
+        } else {
+            DEFAULT_MAX_TOOL_CALLS
+        };
+        let config = AgentRunConfig {
+            max_tool_calls,
+            ..AgentRunConfig::default()
+        };
+        let (tx, _rx) = tokio::sync::mpsc::channel(64);
+        let _ = agent.query_streaming("first turn", tx, config).await;
+        tokio::sync::Mutex::new(agent)
+    }
+
+    /// Runs a FRESH turn on an `Agent` reused from [`agent_after_turn_ending_in`],
+    /// with its own provider/tool/telemetry, so a stale counter from the prior
+    /// turn would be the only thing that could make this one see it.
+    async fn run_turn_with_consults_on(
+        agent: &tokio::sync::Mutex<Agent>,
+        contents: &[&str],
+    ) -> anyhow::Result<TurnOutcome> {
+        let mut guard = agent.lock().await;
+        let provider = SequentialConsultProvider::new(contents);
+        guard.set_provider(Arc::new(provider));
+        let (tool, magi_calls) = CountingConsultTool::new();
+        guard.register_or_replace_tool(Box::new(tool));
+        let gate_log_sink = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let config = AgentRunConfig {
+            gate_telemetry: Arc::new(RecordingGateTelemetry {
+                lines: gate_log_sink.clone(),
+            }),
+            ..AgentRunConfig::default()
+        };
+        run_and_observe(&mut guard, config, &magi_calls, &gate_log_sink).await
+    }
+
+    /// SC-A20 / SC-A20c: the gate vetoes the autonomous route without erroring.
+    #[tokio::test]
+    async fn the_gate_vetoes_the_autonomous_route_without_erroring() {
+        let outcome = run_turn_with_autonomous_consult("trivial").await;
+        assert!(
+            outcome.is_ok(),
+            "the veto comes back as a normal ToolResult, not an error"
+        );
+        assert_eq!(outcome.unwrap().magi_calls, 0, "zero model calls");
+    }
+
+    /// SC-A20e: the veto message discourages retrying and never names the
+    /// threshold.
+    #[tokio::test]
+    async fn the_veto_message_discourages_retry_without_naming_the_threshold() {
+        let msg = veto_message(&Mode::Analysis);
+        assert!(
+            msg.to_lowercase().contains("same result"),
+            "must say retrying is pointless"
+        );
+        assert!(
+            !msg.contains(&magi_rs::magi::GATE_ANALYSIS.to_string()),
+            "revealing how many characters are missing is a direct invitation to pad content"
+        );
+    }
+
+    /// SC-A20f / SC-A20m: two CONSECUTIVE vetoes are terminal; a success in
+    /// between resets.
+    #[tokio::test]
+    async fn two_consecutive_vetoes_are_terminal_but_a_success_resets() {
+        let out = run_turn_with_consults(&["trivial", "tambien trivial"])
+            .await
+            .unwrap();
+        assert!(out.consult_disabled_for_rest_of_turn);
+
+        let long = "x".repeat(magi_rs::magi::GATE_ANALYSIS + 10);
+        let out = run_turn_with_consults(&["trivial", &long, "trivial otra vez"])
+            .await
+            .unwrap();
+        assert!(
+            !out.consult_disabled_for_rest_of_turn,
+            "veto → runs → veto is not a loop: it's a turn with one trivial question and \
+             one that genuinely warranted consensus"
+        );
+    }
+
+    /// A veto does NOT loosen the turn's caps. Complements SC-A20f from the
+    /// other side: SC-A20f pins that the consult PATH closes on the second
+    /// veto; this pins that the WHOLE TURN stays capped in the meantime —
+    /// every processed call (veto, disabled continuation, or dispatch)
+    /// consumes exactly one `max_tool_calls` slot.
+    #[tokio::test]
+    async fn a_veto_still_consumes_the_turn_budget() {
+        // Many more invocations than `max_tool_calls`, all vetoable.
+        let script: Vec<(&str, Mode)> = vec![("x", Mode::Analysis); 40];
+        let out = run_turn_with_autonomous_consults(&script).await.unwrap();
+
+        assert!(
+            out.tool_calls_counted >= usize::from(MAX_CONSECUTIVE_VETOES),
+            "each veto counts as an invocation: max_tool_calls counts what the model asked for"
+        );
+        // TERMINATION, not a lower bound: 40 vetoable invocations against a
+        // `max_tool_calls` of 15 MUST end exactly at the cap.
+        assert_eq!(out.exit, Exit::MaxToolCalls);
+        assert_eq!(
+            out.tool_calls_counted, DEFAULT_MAX_TOOL_CALLS,
+            "all 15 were consumed: vetoes AND denials count alike"
+        );
+    }
+
+    /// SC-A20g: the counter dies with the turn, through all FOUR exit paths.
+    #[tokio::test]
+    async fn the_counter_dies_with_the_turn_on_every_exit_path() {
+        for exit in [
+            Exit::FinalAnswer,
+            Exit::MaxToolCalls,
+            Exit::Cancelled,
+            Exit::Error,
+        ] {
+            let agent = agent_after_turn_ending_in(exit, &["trivial", "trivial"]).await;
+            let out = run_turn_with_consults_on(&agent, &["trivial"])
+                .await
+                .unwrap();
+            assert!(
+                !out.consult_disabled_for_rest_of_turn,
+                "turn {exit:?}: must not persist"
+            );
+        }
+    }
+
+    /// SC-A20h: every evaluation is logged — in EVERY surface, with or
+    /// without an observer.
+    #[tokio::test]
+    async fn every_gate_evaluation_is_logged() {
+        let long = "x".repeat(magi_rs::magi::GATE_ANALYSIS + 1);
+        let log = run_turn_with_consults(&["trivial", &long])
+            .await
+            .unwrap()
+            .gate_log;
+        // Exercised WITHOUT an observer, which is the TUI's configuration:
+        // the gate's telemetry cannot depend on a channel the highest-traffic
+        // surface does not have.
+        assert!(
+            !log.is_empty(),
+            "without a RunObserver the telemetry must still be recorded — that coupling was \
+             the bug"
+        );
+        assert_eq!(log.len(), 2, "both the veto and the pass get recorded");
+        assert!(log[0].contains("analysis") && log[0].contains("veto"));
+        assert!(
+            log[0].contains(&magi_rs::magi::GATE_ANALYSIS.to_string()),
+            "SC-A20h requires the APPLIED threshold: the length alone doesn't say which side \
+             it fell on, and calibrating is exactly comparing the two"
+        );
+        assert!(
+            log[1].contains(&magi_rs::magi::GATE_ANALYSIS.to_string()),
+            "also on the line that dispatches: one side alone doesn't calibrate anything"
+        );
+    }
+
+    /// SC-A20i: several `ToolUse` blocks in the SAME turn count exactly like
+    /// separate turns, and two concurrent sessions never contaminate each
+    /// other — proven by actually running them concurrently, not just
+    /// asserted from the shape of the code.
+    #[tokio::test]
+    async fn multiple_tooluse_blocks_in_one_turn_count_like_separate_turns() {
+        let out = run_turn_with_two_tooluse_blocks(&["trivial", "tambien trivial"])
+            .await
+            .unwrap();
+        assert_eq!(
+            out.veto_count, 2,
+            "both blocks of the same turn get evaluated and vetoed"
+        );
+        assert!(out.consult_disabled_for_rest_of_turn);
+
+        let long = "x".repeat(magi_rs::magi::GATE_ANALYSIS + 5);
+        let (closed_door, clean_session) = tokio::join!(
+            run_turn_with_two_tooluse_blocks(&["trivial", "trivial"]),
+            run_turn_with_consults(&[long.as_str()]),
+        );
+        assert!(closed_door.unwrap().consult_disabled_for_rest_of_turn);
+        assert!(
+            !clean_session.unwrap().consult_disabled_for_rest_of_turn,
+            "the other session never even noticed"
+        );
+    }
+
+    /// Task 3.2's namesake test. `authorize_and_execute_tool` (the forced
+    /// consult injection, REQ-H22) and the `ToolUse` loop (the model's own
+    /// choice) are two DISTINCT entrances to the same `consult` tool, and
+    /// only the second passes through the complexity gate (REQ-A20). A prior
+    /// attempt at this test (Task 3.1) simulated both sides with hardcoded
+    /// literals and could not fail under any change — see the `#[cfg(test)]`
+    /// comment in `src/magi/gate.rs` naming this task as the gap's owner.
+    /// This drives BOTH real call sites against a real `Agent`.
+    #[tokio::test]
+    async fn a_forced_injection_bypasses_the_gate_while_a_model_choice_does_not() {
+        use std::sync::atomic::Ordering;
+
+        // (a) FORCED: `force_consult = true` injects consult via
+        // `authorize_and_execute_tool` directly, BEFORE the loop even starts —
+        // never touching `dispatch_consult_through_gate`. Trivial content
+        // that would be vetoed anywhere else must still dispatch here.
+        let (forced_tool, forced_calls) = CountingConsultTool::new();
+        let mut forced_agent = Agent::new(Arc::new(MockProvider));
+        forced_agent.register_tool(Box::new(forced_tool));
+        let (tx, _rx) = tokio::sync::mpsc::channel(64);
+        let forced_config = AgentRunConfig {
+            force_consult: true,
+            ..AgentRunConfig::default()
+        };
+        forced_agent
+            .query_streaming("trivial", tx, forced_config)
+            .await
+            .unwrap();
+        assert_eq!(
+            forced_calls.load(Ordering::SeqCst),
+            1,
+            "the forced injection must dispatch even though its content is trivial: REQ-A20 \
+             forbids vetoing it — it never reaches the gate at all"
+        );
+
+        // (b) MODEL-ISSUED: the SAME trivial content, requested by the model
+        // through the ordinary `ToolUse` loop, DOES reach the gate and gets
+        // vetoed.
+        let (model_tool, model_calls) = CountingConsultTool::new();
+        let provider = SequentialConsultProvider::new(&["trivial"]);
+        let mut model_agent = Agent::new(Arc::new(provider));
+        model_agent.register_tool(Box::new(model_tool));
+        let (tx2, _rx2) = tokio::sync::mpsc::channel(64);
+        model_agent
+            .query_streaming("start", tx2, AgentRunConfig::default())
+            .await
+            .unwrap();
+        assert_eq!(
+            model_calls.load(Ordering::SeqCst),
+            0,
+            "the model's own request for the SAME trivial content must be vetoed: it enters \
+             through the ToolUse loop, which the gate DOES see"
         );
     }
 }

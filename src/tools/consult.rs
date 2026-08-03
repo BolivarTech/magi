@@ -11,6 +11,7 @@ use async_trait::async_trait;
 use magi_core::orchestrator::Magi;
 use magi_core::reporting::MagiReport;
 use magi_core::schema::Mode;
+use magi_rs::magi::mode::read_resolved_mode;
 use serde_json::{json, Value};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
@@ -76,6 +77,29 @@ impl Drop for AbortOnDrop {
 /// Notice emitted in the TUI when the `consult` tool is auto-approved.
 /// Visible to the user so they know the 3-LLM consensus was launched.
 const AUTO_LAUNCH_NOTICE: &str = "launched MAGI multi-perspective consensus — awaiting evaluation…";
+
+/// Resolves the mode to dispatch with (MS2, REQ-A20/REQ-A07d): reads what the
+/// agent's tool loop already resolved and injected under the reserved
+/// `__resolved_mode`/`__resolved_mode_source` keys
+/// (`magi_rs::magi::mode::inject_resolved_mode`) instead of re-resolving it here
+/// — a tool that could disagree with the gate that evaluated the same call
+/// would reopen exactly the divergence REQ-A07d closes.
+///
+/// Falls back to [`Mode::Analysis`] when the keys are **absent**. This is a
+/// deliberate, narrow back-compat default, not a re-resolution of untrusted
+/// input: every call that goes through the real tool loop (`Agent::run_tool_loop`
+/// via `Agent::dispatch_consult_through_gate`) always injects the pair before
+/// dispatching, so this fallback is reached only by a caller that invokes
+/// [`ConsultTool::execute`] directly without going through the loop — exactly
+/// what this module's own pre-MS2 tests do, and precisely the unconditional
+/// `Mode::Analysis` this tool used before MS2. Wiring `ConsultTool` fully into
+/// `ConsultToolCfg` (a later task) can tighten this to a hard error once every
+/// production caller is confirmed to inject.
+fn resolved_or_default_mode(args: &Value) -> Mode {
+    read_resolved_mode(args)
+        .map(|(mode, _source)| mode)
+        .unwrap_or(Mode::Analysis)
+}
 
 /// Tool wrapping a `magi_core::Magi`. `execute` runs the 3-perspective consensus
 /// (implemented in Task 4) and returns the verbatim report. The `description` is
@@ -183,11 +207,12 @@ impl Tool for ConsultTool {
                 MAX_QUERY_LEN
             )));
         }
+        let mode = resolved_or_default_mode(&args);
         let magi = self.magi.clone();
         let q = query.to_string();
         // Joined spawn isolates a panic in magi-core's analyze into a recoverable
         // JoinError instead of unwinding into the agent tool loop.
-        let handle = tokio::spawn(async move { magi.analyze(&Mode::Analysis, &q).await });
+        let handle = tokio::spawn(async move { magi.analyze(&mode, &q).await });
         // RAII backstop: aborts the spawned analysis if this `execute` future is
         // dropped before the `select!` resolves — a dropped tool call would
         // otherwise orphan the three in-flight LLM calls. The abort handle is
@@ -501,6 +526,35 @@ mod tests {
         assert!(
             !ran_to_completion.load(Ordering::SeqCst),
             "aborted task must not have reached its completion store"
+        );
+    }
+
+    /// MS2 (REQ-A20/REQ-A07d): the resolved mode injected by the agent's tool
+    /// loop wins over the `Mode::Analysis` fallback — happy path (injected) and
+    /// the two edge cases (absent, corrupt) that must degrade to the default.
+    #[test]
+    fn resolved_or_default_mode_prefers_the_injected_pair_over_the_fallback() {
+        assert_eq!(
+            resolved_or_default_mode(&json!({
+                "query": "x",
+                "__resolved_mode": "code-review",
+                "__resolved_mode_source": "explicit",
+            })),
+            Mode::CodeReview,
+            "an injected resolution must win over the Analysis fallback"
+        );
+        assert_eq!(
+            resolved_or_default_mode(&json!({"query": "x"})),
+            Mode::Analysis,
+            "absent injection falls back to the pre-MS2 unconditional default"
+        );
+        assert_eq!(
+            resolved_or_default_mode(&json!({
+                "query": "x",
+                "__resolved_mode": "not-a-mode",
+            })),
+            Mode::Analysis,
+            "a corrupt injection is treated the same as an absent one"
         );
     }
 

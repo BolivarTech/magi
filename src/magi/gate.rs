@@ -205,6 +205,15 @@ mod tests {
         );
     }
 
+    /// SC-A20h: `NoGateTelemetry` es el sink por defecto — un no-op verificable,
+    /// no una promesa de trait sin implementación de referencia.
+    #[test]
+    fn no_gate_telemetry_is_a_silent_no_op() {
+        let sink = NoGateTelemetry;
+        sink.on_gate_evaluation(&Mode::Analysis, 42, GATE_ANALYSIS, true);
+        sink.on_gate_evaluation(&Mode::Design, 0, GATE_DESIGN, false);
+    }
+
     // NOTA HONESTA: la propiedad de REQ-A20 "el gate ve el ruteo AUTÓNOMO
     // (`ToolUse`) y NO la inyección forzada (`authorize_and_execute_tool`)" es
     // DELIBERADAMENTE intestable desde este módulo. Los dos call sites viven en

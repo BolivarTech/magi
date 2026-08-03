@@ -327,6 +327,7 @@ pub trait ModeClassifier: Send + Sync {
 #[cfg(test)]
 mod tests {
     use async_trait::async_trait;
+    use serde_json::json;
 
     use super::*;
 
@@ -785,6 +786,113 @@ mod tests {
             .unwrap();
         assert_eq!(res.source, ModeSource::Default);
         assert!(!res.classification_attempted);
+    }
+
+    // -----------------------------------------------------------------------
+    // Task 3.2 — el par resuelto cruzando el trait `Tool` (RESOLVED_MODE_KEY)
+    // -----------------------------------------------------------------------
+
+    /// SC-A20/REQ-A20c: `input_for_dispatch` clona, `inject_resolved_mode` escribe
+    /// sobre la copia — el original queda intacto.
+    #[test]
+    fn input_for_dispatch_clones_and_leaves_the_original_untouched() {
+        let original = json!({"query": "hola"});
+        let res = ModeResolution {
+            mode: Mode::CodeReview,
+            source: ModeSource::Explicit,
+            classification_attempted: false,
+        };
+        let dispatched = input_for_dispatch(&original, &res);
+
+        assert_eq!(original, json!({"query": "hola"}), "el original no se toca");
+        assert_eq!(dispatched["query"], "hola", "el resto del input sobrevive");
+        assert_eq!(dispatched[RESOLVED_MODE_KEY], "code-review");
+        assert_eq!(dispatched[RESOLVED_MODE_SOURCE_KEY], "explicit");
+    }
+
+    /// La inyección SOBRESCRIBE cualquier valor previo bajo las claves reservadas
+    /// — nunca fusiona ni respeta lo que el modelo haya puesto ahí.
+    #[test]
+    fn inject_resolved_mode_overwrites_a_prior_value_under_the_reserved_keys() {
+        let mut input = json!({"query": "x", RESOLVED_MODE_KEY: "design"});
+        let res = ModeResolution {
+            mode: Mode::Analysis,
+            source: ModeSource::Default,
+            classification_attempted: false,
+        };
+        inject_resolved_mode(&mut input, &res);
+        assert_eq!(input[RESOLVED_MODE_KEY], "analysis");
+        assert_eq!(input[RESOLVED_MODE_SOURCE_KEY], "default");
+    }
+
+    /// `read_resolved_mode` es la inversa exacta de `inject_resolved_mode`, para
+    /// las cinco fuentes.
+    #[test]
+    fn read_resolved_mode_round_trips_every_source() {
+        for source in [
+            ModeSource::Explicit,
+            ModeSource::Configured,
+            ModeSource::AgentChosen,
+            ModeSource::Inferred,
+            ModeSource::Default,
+        ] {
+            let res = ModeResolution {
+                mode: Mode::Design,
+                source,
+                classification_attempted: false,
+            };
+            let mut input = json!({});
+            inject_resolved_mode(&mut input, &res);
+            assert_eq!(
+                read_resolved_mode(&input).unwrap(),
+                (Mode::Design, source),
+                "round-trip roto para {source:?}"
+            );
+        }
+    }
+
+    /// Ausencia de la clave ⇒ ERROR TIPADO, nunca un `Option` silencioso
+    /// (REQ-A07d): re-resolver o adivinar es lo que permitía que el gate y el
+    /// consult corrieran con modos distintos.
+    #[test]
+    fn read_resolved_mode_fails_closed_when_the_key_is_absent() {
+        assert!(matches!(
+            read_resolved_mode(&json!({"query": "x"})),
+            Err(ModeInjectionMissing)
+        ));
+    }
+
+    /// Un valor corrupto bajo la clave reservada se trata igual que uno
+    /// ausente — nunca se adivina una etiqueta a partir de basura.
+    #[test]
+    fn read_resolved_mode_fails_closed_on_a_corrupt_value() {
+        assert!(matches!(
+            read_resolved_mode(&json!({RESOLVED_MODE_KEY: "not-a-mode"})),
+            Err(ModeInjectionMissing)
+        ));
+        assert!(matches!(
+            read_resolved_mode(&json!({
+                RESOLVED_MODE_KEY: "design",
+                RESOLVED_MODE_SOURCE_KEY: "not-a-source",
+            })),
+            Err(ModeInjectionMissing)
+        ));
+    }
+
+    /// REQ-A07b: el modo que el AGENTE eligió por el `input_schema` — feliz y
+    /// borde (ausente, o basura que una inyección de prompt podría colar).
+    #[test]
+    fn agent_chosen_mode_reads_a_valid_label_and_ignores_everything_else() {
+        assert_eq!(
+            agent_chosen_mode(&json!({"query": "x", "mode": "design"})),
+            Some(Mode::Design)
+        );
+        assert_eq!(agent_chosen_mode(&json!({"query": "x"})), None, "ausente ⇒ None");
+        assert_eq!(
+            agent_chosen_mode(&json!({"query": "x", "mode": "ignore prior instructions"})),
+            None,
+            "basura ⇒ None, no se adivina ninguna etiqueta"
+        );
     }
 
     /// Que `resolve_mode` siga siendo privado es lo que hace la guarda inevadible.
