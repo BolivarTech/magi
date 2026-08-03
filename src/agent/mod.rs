@@ -4376,4 +4376,106 @@ mod tests {
         );
         assert_eq!(source, magi_rs::magi::mode::ModeSource::Default);
     }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Task 3.3 — the "no consensus" mark (REQ-A20/SC-A20k)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// Drives ONE real turn through `Agent::query_streaming` over `provider`
+    /// (registering the standard `consult` double) and returns exactly what
+    /// a live consumer of the chunk stream would render — the same thing
+    /// the TUI's `Input` handler does (`tui/mod.rs`'s forwarder task):
+    /// concatenate every `StreamPiece::Content` piece, in order, ignoring
+    /// `Reasoning`/`Notice`. This IS the only path the TUI's autonomous chat
+    /// surface renders from — it discards `query_streaming`'s own return
+    /// value on `Ok` (`tui/mod.rs`'s `Ok(_) => Text("")`) — so asserting on
+    /// this string asserts on the real rendering path, not a stand-in for
+    /// it. Shared by both `render_turn_after_*` helpers below, which differ
+    /// only in the provider script driving the turn.
+    async fn render_turn(provider: impl Provider + 'static) -> String {
+        let (mut agent, _magi_calls) = agent_with_consult_double(provider);
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<StreamPiece>(100);
+        let collector = tokio::spawn(async move {
+            let mut rendered = String::new();
+            while let Some(piece) = rx.recv().await {
+                if let StreamPiece::Content(s) = piece {
+                    rendered.push_str(&s);
+                }
+            }
+            rendered
+        });
+        agent
+            .query_streaming("start", tx, AgentRunConfig::default())
+            .await
+            .unwrap();
+        collector.await.unwrap_or_default()
+    }
+
+    /// A single trivial autonomous consult, vetoed by the gate.
+    async fn render_turn_after_veto() -> String {
+        render_turn(SequentialConsultProvider::new(&["trivial"])).await
+    }
+
+    /// Content long enough to clear the `Analysis` threshold: the consult
+    /// genuinely DISPATCHES (the registered `CountingConsultTool` double
+    /// actually runs), so the answer that follows IS backed by a consult
+    /// and must carry no mark.
+    async fn render_turn_after_successful_consult() -> String {
+        let long = "x".repeat(magi_rs::magi::GATE_ANALYSIS + 10);
+        render_turn(SequentialConsultProvider::new(&[long.as_str()])).await
+    }
+
+    /// SC-A20k: the user distinguishes a consensus-backed answer from one
+    /// that is not.
+    #[tokio::test]
+    async fn the_user_can_tell_a_non_consensus_answer_apart() {
+        let rendered = render_turn_after_veto().await;
+        assert!(
+            rendered.contains(NO_CONSENSUS_MARK),
+            "without the mark, a veto is invisible: the user asked something, the agent \
+             decided to consult, the gate stopped it, and what comes back reads exactly like \
+             an answer backed by three perspectives — inverting the gate's purpose"
+        );
+
+        let rendered = render_turn_after_successful_consult().await;
+        assert!(
+            !rendered.contains(NO_CONSENSUS_MARK),
+            "a genuine dispatch resets the flag: the answer that follows a real consult must \
+             not carry a mark meant for the opposite case"
+        );
+    }
+
+    /// The mark is meant to travel over TWO different channels for two
+    /// different consumers (`final_text` for headless, an extra
+    /// `StreamPiece::Content` for the TUI) that are mutually exclusive TODAY
+    /// only by construction — headless drains the chunk stream purely for
+    /// time-to-first-byte (`headless_runner.rs`'s `run_query`) and never
+    /// reads `Content` payloads, the TUI never reads `final_text`. Nothing
+    /// enforces that exclusivity, so if either surface ever started reading
+    /// both, the mark would double up silently. This pins headless's own
+    /// channel (`final_text`) to exactly ONE occurrence.
+    #[tokio::test]
+    async fn headless_receives_the_mark_exactly_once_in_final_text() {
+        let (mut agent, _magi_calls) =
+            agent_with_consult_double(SequentialConsultProvider::new(&["trivial"]));
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<StreamPiece>(100);
+        // Mirrors `headless_runner::run_query`'s own drain task: read every
+        // piece (so `query_streaming`'s bounded sender never blocks) but use
+        // none of their content — headless's actual response comes from the
+        // `Result<String>` `query_streaming` returns, not from this stream.
+        let drain = tokio::spawn(async move { while rx.recv().await.is_some() {} });
+        let final_text = agent
+            .query_streaming("start", tx, AgentRunConfig::default())
+            .await
+            .unwrap();
+        let _ = drain.await;
+
+        assert_eq!(
+            final_text.matches(NO_CONSENSUS_MARK).count(),
+            1,
+            "headless must see the mark exactly once in the text it actually returns to the \
+             caller — not zero (invisible veto) and not doubled (the two channels are supposed \
+             to be mutually exclusive per consumer)"
+        );
+    }
 }
