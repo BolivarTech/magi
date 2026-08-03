@@ -23,6 +23,117 @@ use magi_core::schema::Mode;
 
 use super::{GATE_ANALYSIS, GATE_CODE_REVIEW, GATE_DESIGN};
 
+/// Umbrales efectivos del gate, uno por modo (REQ-A20b).
+///
+/// Existe como tipo propio —y no como tres `usize` sueltos— porque el punto de la
+/// granularidad por modo es que **apagar uno no apague los otros**: con parámetros
+/// posicionales del mismo tipo, un swap silencioso en un call site rompe exactamente esa
+/// propiedad sin romper la compilación.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GateThresholds {
+    /// Umbral de `code-review`, en caracteres.
+    pub code_review: usize,
+    /// Umbral de `design`, en caracteres.
+    pub design: usize,
+    /// Umbral de `analysis` — el modo por defecto, y por eso el que NO puede quedar
+    /// efectivamente apagado por accidente (SC-A20j).
+    pub analysis: usize,
+}
+
+impl GateThresholds {
+    /// Los built-ins de §4.9, sin config de por medio.
+    #[must_use]
+    pub const fn builtin() -> Self {
+        Self {
+            code_review: GATE_CODE_REVIEW,
+            design: GATE_DESIGN,
+            analysis: GATE_ANALYSIS,
+        }
+    }
+
+    /// Resuelve la tabla `[magi.complexity]` contra los built-ins.
+    ///
+    /// **Tabla ausente ⇒ built-ins** (el gate sigue vivo: un feature de seguridad que se
+    /// apaga solo por omitir una sección es un feature apagado). **Clave ausente DENTRO de
+    /// una tabla presente ⇒ su built-in, no cero**: `Option::unwrap_or` por clave, nunca
+    /// `Default` sobre la struct entera, que colapsaría los tres a `0` y desactivaría el
+    /// gate completo con solo declarar `[magi.complexity]` vacía.
+    ///
+    /// **Toma piezas sueltas, NO `&ComplexityConfig`.** Este módulo vive en el lib y
+    /// `ComplexityConfig` en el bin (`src/config.rs`): tomar la struct ataría un módulo
+    /// puro a la forma del TOML y lo volvería incompilable desde el lib. Desarmar la tabla
+    /// es trabajo de `config.rs`'s `gate_thresholds_from`, que ya la tiene en la mano.
+    #[must_use]
+    pub fn from_overrides(o: GateOverrides) -> Self {
+        let GateOverrides {
+            code_review,
+            design,
+            analysis,
+        } = o;
+        let b = Self::builtin();
+        Self {
+            code_review: code_review.unwrap_or(b.code_review),
+            design: design.unwrap_or(b.design),
+            analysis: analysis.unwrap_or(b.analysis),
+        }
+    }
+
+    /// Umbral del modo pedido. `0` significa "este modo nunca se veta" (lo interpreta
+    /// [`evaluate`], no esta función).
+    #[must_use]
+    pub const fn for_mode(&self, mode: &Mode) -> usize {
+        match mode {
+            Mode::CodeReview => self.code_review,
+            Mode::Design => self.design,
+            Mode::Analysis => self.analysis,
+        }
+    }
+}
+
+/// Overrides de `[magi.complexity]`, con NOMBRE por campo.
+///
+/// Tres posicionales del mismo tipo (`Option<usize>`, `Option<usize>`, `Option<usize>`)
+/// son exactamente el swap silencioso que el rustdoc de [`GateThresholds`] condena.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct GateOverrides {
+    /// Override de `code_review`; ausente ⇒ su built-in.
+    pub code_review: Option<usize>,
+    /// Override de `design`; ausente ⇒ su built-in.
+    pub design: Option<usize>,
+    /// Override de `analysis`; ausente ⇒ su built-in.
+    pub analysis: Option<usize>,
+}
+
+/// Resultado de evaluar el gate (REQ-A20).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GateVerdict {
+    /// El contenido amerita el consenso: se despacha.
+    Dispatch,
+    /// Por debajo del umbral de su modo: NO se lanza ninguna llamada al modelo.
+    Veto {
+        /// Modo con el que se evaluó, para el registro de telemetría (SC-A20h).
+        mode: Mode,
+    },
+}
+
+/// Evalúa si un consult **autorruteado** amerita despacharse.
+///
+/// **100 % puro:** sin async, sin I/O, sin llamadas al modelo. Se evalúa en el embudo del
+/// agente, no dentro de `ConsultTool::execute` — ver REQ-A20 para por qué no se usa
+/// `MagiBuilder::with_complexity_gate`.
+///
+/// Mide **caracteres**, no bytes (`content.chars().count()`, O(n) sobre el contenido, sin
+/// bucles anidados): un umbral en bytes trataría distinto al mismo texto en otro idioma.
+#[must_use]
+pub fn evaluate(content: &str, mode: &Mode, thresholds: &GateThresholds) -> GateVerdict {
+    let threshold = thresholds.for_mode(mode);
+    if threshold == 0 || content.chars().count() >= threshold {
+        GateVerdict::Dispatch
+    } else {
+        GateVerdict::Veto { mode: *mode }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -54,10 +165,15 @@ mod tests {
     #[test]
     fn the_gate_covers_analysis_the_default_mode() {
         let t = GateThresholds::builtin();
-        assert!(
-            GATE_ANALYSIS > 1,
-            "un umbral de 1 apagaría el gate justo en el camino autónomo más común"
-        );
+        // `const` y no `assert!` suelto: es una comparación entre dos constantes, así que
+        // clippy (`assertions_on_constants`) exige evaluarla en compilación — misma forma
+        // que ya usa `mod.rs`'s `plan_values_fall_inside_their_documented_ranges`.
+        const {
+            assert!(
+                GATE_ANALYSIS > 1,
+                "un umbral de 1 apagaría el gate justo en el camino autónomo más común"
+            );
+        }
         assert_eq!(
             evaluate("trivial", &Mode::Analysis, &t),
             GateVerdict::Veto {

@@ -971,6 +971,34 @@ pub fn resolve_anthropic_model(config: &MagiConfig, env_model: Option<&str>) -> 
         .unwrap_or_else(|| crate::defaults::DEFAULT_ANTHROPIC_MODEL.into())
 }
 
+/// Arma los umbrales del gate de complejidad desde `[magi.complexity]` (REQ-A20b).
+///
+/// **Vive acá, y no en `magi_rs::magi::gate` — moved from Task 1.1 (ver
+/// `.superpowers/sdd/claude-plan-tdd/ORDER-FIXES.md`, #1).** `gate.rs` vive en el lib y no
+/// puede conocer la forma del TOML; desarmar `[magi.complexity]` en piezas sueltas
+/// (`GateOverrides`) es trabajo de este módulo, que ya tiene la tabla en la mano.
+///
+/// Tabla ausente ⇒ `GateOverrides::default()` ⇒ los tres built-ins de
+/// [`GateThresholds::builtin`] (el gate no se apaga por omitir la sección).
+// Narrow allow: consumed by the TUI/`magi query`/`magi consult` autonomous-routing
+// wiring in Tasks 3.2/3.3, not this task. Covered by
+// `gate_thresholds_from_reads_the_complexity_table_and_falls_back_to_builtins`.
+#[allow(dead_code)]
+#[must_use]
+pub fn gate_thresholds_from(config: &MagiConfig) -> GateThresholds {
+    let overrides = config
+        .magi
+        .complexity
+        .as_ref()
+        .map(|c| GateOverrides {
+            code_review: c.code_review,
+            design: c.design,
+            analysis: c.analysis,
+        })
+        .unwrap_or_default();
+    GateThresholds::from_overrides(overrides)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
