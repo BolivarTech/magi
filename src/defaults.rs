@@ -12,12 +12,18 @@ use std::path::{Path, PathBuf};
 /// Default provider when no `magi.toml`/env is present (RF-1).
 ///
 /// **Still `"openai"`, not the new `ProviderKind` vocabulary's `"ollama"`.** This
-/// constant feeds the CURRENT principal-provider resolution chain
-/// (`resolve_provider`/`main.rs`'s `provider_kind == "openai"` branching), which Task
-/// 1.1 does not touch. Task 1.4 is what migrates that chain onto
-/// `MagiConfig::effective_provider`/`ProviderKind` and flips this value to `"ollama"` —
-/// see `.superpowers/sdd/claude-plan-tdd/task-1.4-brief.md`. Until then this constant
-/// and [`RENDERED_DEFAULT_PROVIDER`] deliberately disagree; see that constant's doc.
+/// constant feeds the LEGACY principal-provider resolution chain
+/// (`resolve_provider`/`main.rs`'s `provider_kind == "openai"` branching, eight call
+/// sites). Migrating that chain onto `MagiConfig::effective_provider`/`ProviderKind` —
+/// and, as part of it, flipping this value to `"ollama"` — is explicitly Task 4.1's
+/// scope (coordinator ruling, 2026-08-02; see
+/// `.superpowers/sdd/claude-plan-tdd/ORDER-FIXES.md`), not Task 1.4's: `resolve_provider`
+/// already normalizes the REQ-A01b vocabulary onto this legacy label via
+/// `legacy_backend_label` (see that function's own `// TASK 4.1:` comment), so the eight
+/// comparison sites keep working unmodified regardless of this constant's value. Task 1.4
+/// reuses [`RENDERED_DEFAULT_PROVIDER`] (already `"ollama"`) where it needs to name the
+/// EFFECTIVE default to the user, rather than flip this one. This constant and
+/// [`RENDERED_DEFAULT_PROVIDER`] deliberately disagree; see that constant's doc.
 pub const DEFAULT_PROVIDER: &str = "openai";
 /// Default OpenAI-compatible base URL — local Ollama (RF-2).
 pub const DEFAULT_OPENAI_BASE_URL: &str = "http://localhost:11434/v1";
@@ -33,17 +39,20 @@ pub const DEFAULT_ANTHROPIC_MODEL: &str = "claude-sonnet-4-6";
 /// re-exported by `memory::config::d::emb_model` so both resolve identically.
 pub const DEFAULT_EMBEDDING_MODEL: &str = "nomic-embed-text-v2-moe:latest";
 
-/// Value of `provider` that [`render_default_magi_toml`] emits (Task 1.1, REQ-A01b).
+/// Value of `provider` that [`render_default_magi_toml`] emits (Task 1.1, REQ-A01b), and
+/// also the value Task 1.4 interpolates into `MagiConfig`'s "provider is blank" startup
+/// notice (`crate::config::MagiConfig::load`).
 ///
-/// **Temporarily distinct from [`DEFAULT_PROVIDER`]** (which stays `"openai"` until
-/// Task 1.4 — see that constant's doc). Task 1.1 makes `MagiConfig::from_toml_str`
-/// validate the provider vocabulary, and `"openai"` is no longer a valid value in that
-/// vocabulary (`ollama` | `openai-compat` | `anthropic`), so the generated `magi.toml`
-/// has to declare one that is. `"ollama"` is the Ollama-first default the rest of the
-/// generated file already assumes (endpoint, models). Not folded into `DEFAULT_PROVIDER`
-/// itself — that constant still drives the CURRENT, untouched
-/// `resolve_provider`/`main.rs` resolution chain, and changing its value here would
-/// change that chain's behavior too, which is explicitly Task 1.4's change to make.
+/// **Deliberately distinct from [`DEFAULT_PROVIDER`], which stays `"openai"` — this is
+/// NOT the "flip DEFAULT_PROVIDER to ollama" migration that constant's doc once
+/// anticipated.** That migration would touch the eight `provider_kind == "openai"`
+/// comparison sites in `main.rs`, which Task 4.1 owns (see
+/// `.superpowers/sdd/claude-plan-tdd/ORDER-FIXES.md`) — out of scope here. `"ollama"` is
+/// the REQ-A01b-vocabulary value that names the SAME effective default
+/// (`MagiConfig::effective_provider()` already falls back to `ProviderKind::Ollama`), so
+/// reusing this constant for the notice is accurate without touching that chain. Not
+/// folded into `DEFAULT_PROVIDER` itself — that constant still drives the CURRENT,
+/// untouched `resolve_provider`/`main.rs` resolution chain.
 pub const RENDERED_DEFAULT_PROVIDER: &str = "ollama";
 
 // ── Headless mode constants ───────────────────────────────────────────────────

@@ -82,6 +82,15 @@ pub enum ConfigError {
         /// El mínimo viable ([`magi_rs::magi::min_viable_output_cap`]).
         min: usize,
     },
+
+    /// Una `base_url` (raíz, `[magi]` o `[embedding]`) no es una plantilla válida:
+    /// trae una credencial literal en vez de los placeholders `[user]:[password]`, un
+    /// placeholder desconocido, o no se pudo recorrer (REQ-A16c, SC-A16d).
+    ///
+    /// El texto nunca repite el valor ofensor — lo garantiza el `Display` de
+    /// [`EndpointError`] en el que se apoya, no este `#[error]`.
+    #[error("{0}")]
+    Endpoint(#[from] EndpointError),
 }
 
 impl From<ProviderKindParseError> for ConfigError {
@@ -650,9 +659,11 @@ impl MagiConfig {
     ///
     /// # Errors
     /// Ver [`Self::effective_base_url`].
-    // Narrow allow: consumed by the native trio construction in Fase 4, not this task.
-    // Covered by `base_url_inherits_from_root_and_sections_override_it`.
-    #[allow(dead_code)]
+    ///
+    /// Consumida por [`Self::load`] (Task 1.4) para validar que la plantilla del trío
+    /// sea usable ANTES de que el arranque termine — cierra SC-A16d también para
+    /// `[magi].base_url`, no solo para la raíz y el embedder. La construcción real del
+    /// trío nativo sobre este valor sigue siendo Fase 4; acá solo se valida.
     pub fn effective_magi_base_url(&self) -> Result<EndpointTemplate, EndpointError> {
         self.override_or_inherit_base_url(self.magi.base_url.as_deref())
     }
@@ -667,55 +678,163 @@ impl MagiConfig {
         self.override_or_inherit_base_url(self.embedding.base_url.as_deref())
     }
 
-    /// Loads `<dir>/magi.toml`. Returns `(config, Option<warning>)`. Absent → defaults,
-    /// no warning. Malformed/unknown-field → defaults + a warning string (main.rs
-    /// surfaces it as a startup notice — no panic, no silent stderr-only loss).
+    /// Carga `magi.toml` desde su **ruta** (no su directorio) — Task 1.4 consume
+    /// finalmente `Workspace::config_path()` (REQ-A22b).
     ///
-    /// **Firma sin cambios en Task 1.1** — se vuelve falible en Task 1.4, junto con el
-    /// cableado de `Workspace::config_path()` y los dos call sites de `main.rs`. Los
-    /// internos sí cambian: `Self::from_toml_str` ahora devuelve `Result<Self,
-    /// ConfigError>` en vez de `Result<Self, toml::de::Error>`, y por lo tanto un
-    /// `provider`/`[magi].kind`/`[magi].default_mode` inválido cae hoy en el MISMO camino
-    /// que un TOML malformado (defaults + warning) — no en un error fatal. Ese hueco es
-    /// deliberado y temporal: se cierra en Task 1.4, que hace `load()` falible y agrega su
-    /// propia cobertura de esta misma propiedad contra `load()`.
+    /// Un archivo **ausente** devuelve los defaults built-in, `Ok`, sin notices. Un
+    /// archivo **vacío o con solo espacios** también: todo campo de raíz es opcional, así
+    /// que un TOML vacío es un TOML válido que declara cero cosas (SC-A21f).
     ///
-    /// Joins `dir` with the literal filename `magi.toml`. Callers should pass a
-    /// canonical directory (e.g., from `env::current_dir()?`) so the resolution
-    /// is reproducible across the process lifetime. Relative paths are accepted
-    /// but their meaning depends on the current working directory at call time;
-    /// if the process later changes `cwd`, a relative `dir` will resolve
-    /// against a different absolute location.
+    /// **Cambio de comportamiento respecto de v0.11.0 (REQ-A23).** Ahí un archivo roto
+    /// producía *warning + defaults* — con `base_url` mudándose a raíz, ese camino
+    /// descartaría el archivo entero en silencio y el usuario correría con defaults
+    /// creyendo que su config aplica. Un `magi.toml` **presente** que no parsea, que
+    /// declara un `provider`/`[magi].kind`/`[magi].default_mode` no reconocido, o que
+    /// declara una `base_url` (raíz, `[magi]` o `[embedding]`) con una credencial literal
+    /// en vez de los placeholders de REQ-A16c, **termina el proceso** — nunca degrada a
+    /// defaults en silencio.
+    ///
+    /// # Errors
+    /// - [`ConfigError::NeedsMigration`] si el archivo trae patrones de v0.11.0.
+    /// - [`ConfigError::Parse`] si existe y no parsea, o no se pudo leer.
+    /// - [`ConfigError::UnknownProviderKind`] / [`ConfigError::UnknownMode`] si
+    ///   `provider`, `[magi].kind` o `[magi].default_mode` traen un valor presente y no
+    ///   reconocido.
+    /// - [`ConfigError::AgentTimeoutOutOfRange`] / [`ConfigError::OutputCapTooSmall`] si
+    ///   esos números caen fuera de su rango.
+    /// - [`ConfigError::Endpoint`] si la `base_url` de raíz, `[magi]` o `[embedding]` trae
+    ///   una credencial literal, un placeholder desconocido, o no se pudo recorrer
+    ///   (SC-A16d) — antes de esto, SOLO el camino del embedder
+    ///   (`main.rs::attach_persistent_memory`) veía este error, y lo degradaba a un
+    ///   notice + memoria en texto plano en vez de detener el arranque.
     ///
     /// # Arguments
-    /// * `dir` - Directory in which to look for `magi.toml`. Recommended to be
-    ///   canonical/absolute so subsequent code paths cannot drift.
+    /// * `path` - Ruta del archivo `magi.toml`. Recomendado absoluta/canónica (p. ej.
+    ///   `Workspace::config_path()`) para que la resolución sea reproducible.
     ///
     /// # Returns
-    /// `(MagiConfig, Option<String>)` — the parsed config (or defaults on any
-    /// error path) and an optional human-readable warning to surface in the UI.
-    pub fn load(dir: &Path) -> (Self, Option<String>) {
-        let path = dir.join("magi.toml");
-        match std::fs::read_to_string(&path) {
-            Ok(s) => match Self::from_toml_str(&s) {
-                Ok(c) => (c, None),
-                Err(e) => (
-                    Self::default(),
-                    Some(format!(
-                        "Note: {} is invalid and was ignored ({e}); using defaults.",
-                        path.display()
-                    )),
-                ),
-            },
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (Self::default(), None),
-            Err(e) => (
-                Self::default(),
-                Some(format!(
-                    "Note: {} could not be read ({e}); using defaults.",
+    /// `(MagiConfig, Vec<String>)` — la config parseada y los notices de REQ-A12b/A12c
+    /// sobre resoluciones que no salieron de lo escrito en el archivo.
+    pub fn load(path: &Path) -> Result<(Self, Vec<String>), ConfigError> {
+        let raw = match std::fs::read_to_string(path) {
+            Ok(s) => s,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok((Self::default(), Vec::new()));
+            }
+            Err(e) => {
+                return Err(ConfigError::Parse(format!(
+                    "{}: could not be read ({e})",
                     path.display()
-                )),
-            ),
+                )))
+            }
+        };
+
+        // Delega TODA la validación de forma+vocabulario a `from_toml_str` (migración,
+        // parseo seguro vía `safe_parse_error`, vocabulario, rangos numéricos) — repetirla
+        // acá duplicaría exactamente la lógica que esa función centraliza (B3) y, peor,
+        // volvería a filtrar la línea ofensora de un TOML malformado por el `Display`
+        // crudo de `toml::de::Error` (ver la doc de `safe_parse_error`).
+        let cfg = Self::from_toml_str(&raw).map_err(|e| attach_path(e, path))?;
+
+        // REQ-A16c/SC-A16d: una `base_url` con una credencial literal, un placeholder
+        // desconocido, o una URL irrecorrible detiene el arranque ACÁ, en las TRES
+        // secciones que pueden declararla. `from_toml_str` NO valida esto a propósito:
+        // sus propios tests (`resolve_effective_*_endpoint_propagates_a_malformed_
+        // template_error`) construyen una plantilla malformada y observan el error en el
+        // punto de RESOLUCIÓN, no en el de parseo — moverlo ahí los rompería. La
+        // validación de endpoints vive en el límite de producción, `load()`.
+        cfg.effective_base_url()?;
+        cfg.effective_magi_base_url()?;
+        cfg.effective_embedding_base_url()?;
+
+        let notices = cfg.resolution_notices();
+        Ok((cfg, notices))
+    }
+
+    /// Notices de REQ-A12b/A12c: toda resolución que no salga de lo escrito en el
+    /// archivo se anuncia, para que el usuario no tenga que adivinar qué terminó
+    /// aplicando. Llamada únicamente desde [`Self::load`], sobre una config que ya pasó
+    /// `validate_vocabulary` y la validación de endpoints — así que sus `effective_*()`
+    /// internos nunca pueden fallar acá.
+    fn resolution_notices(&self) -> Vec<String> {
+        let mut out = Vec::new();
+
+        if self
+            .provider
+            .as_deref()
+            .is_some_and(|s| s.trim().is_empty())
+        {
+            out.push(format!(
+                "notice: `provider` está vacío; se usa el default `{}`",
+                // `RENDERED_DEFAULT_PROVIDER`: el valor de la vocabulario NUEVA de
+                // REQ-A01b que nombra el default efectivo (`effective_provider()` cae a
+                // `ProviderKind::Ollama` cuando `provider` está ausente/vacío). NO
+                // `DEFAULT_PROVIDER` — esa constante sigue siendo la etiqueta LEGACY
+                // ("openai") que alimenta la cadena `resolve_provider`/`main.rs`
+                // (`provider_kind == "openai"`), sin tocar en esta tarea; mostrarla acá
+                // le diría al usuario que declare un valor que REQ-A01b ya no acepta.
+                crate::defaults::RENDERED_DEFAULT_PROVIDER,
+            ));
         }
+
+        // La PLANTILLA se muestra por su texto y **no se redacta**: por REQ-A16c no puede
+        // contener un secreto (una credencial literal es error de config, ya rechazado
+        // por `load()` antes de llegar acá), así que pasarla por `redact_url` sería
+        // redundante *y* mal tipado.
+        let Ok(root) = self.effective_base_url() else {
+            return out; // infalible en la práctica: `load()` ya validó — ver su doc.
+        };
+        if root.as_str() != crate::defaults::DEFAULT_OPENAI_BASE_URL
+            && self.embedding.base_url.is_none()
+        {
+            out.push(format!(
+                "notice: el embedder hereda `base_url = {}` de la raíz; declaralo en \
+                 [embedding] si querés otro",
+                root.as_str(),
+            ));
+        }
+
+        // REQ-A12c: con `anthropic`, el `base_url` de raíz NO se usa para el agente
+        // principal — Anthropic tiene su propio endpoint. Hay DOS sub-casos y ambos
+        // avisan, por razones distintas:
+        //
+        //   (a) el usuario DECLARÓ un base_url  => cree que se usa, y no se usa
+        //   (b) quedó el default de Ollama      => parece un olvido de migración
+        if self.effective_provider() == ProviderKind::Anthropic {
+            let declared = self.base_url.is_some();
+            out.push(if declared {
+                "notice: con `provider = \"anthropic\"` el `base_url` de raíz NO se usa para el \
+                 agente principal (Anthropic usa su propio endpoint); solo aplica a [magi] y \
+                 [embedding] si lo heredan"
+                    .to_string()
+            } else {
+                "notice: `provider = \"anthropic\"` con el `base_url` por defecto de Ollama. Ese \
+                 valor NO se usa para el agente principal; si querías Ollama, corregí `provider`"
+                    .to_string()
+            });
+        }
+
+        // Misma incoherencia un nivel abajo: el trío en Anthropic con su propio
+        // base_url declarado, que tampoco se usa.
+        if self.effective_magi_kind() == ProviderKind::Anthropic && self.magi.base_url.is_some() {
+            out.push(
+                "notice: con `[magi].kind = \"anthropic\"` el `[magi].base_url` NO se usa: \
+                 Anthropic usa su propio endpoint"
+                    .to_string(),
+            );
+        }
+
+        out
+    }
+}
+
+/// Prefija un [`ConfigError::Parse`] con la ruta del archivo ofensor; las demás
+/// variantes ya son autocontenidas (nombran el campo, el valor, o el rango) y no
+/// necesitan la ruta para ser accionables.
+fn attach_path(e: ConfigError, path: &Path) -> ConfigError {
+    match e {
+        ConfigError::Parse(msg) => ConfigError::Parse(format!("{}: {msg}", path.display())),
+        other => other,
     }
 }
 

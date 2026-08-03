@@ -104,6 +104,16 @@ fn parse_secret_arg(s: &str) -> Result<SecretArg, std::convert::Infallible> {
     Ok(SecretArg(Zeroizing::new(s.to_string())))
 }
 
+/// clap value-parser that always fails, used to retire `--init-config` (REQ-A22) with a
+/// message naming `magi init` instead of clap's generic `unexpected argument`.
+///
+/// # Errors
+/// Always — this is the mechanism, not an edge case: `--init-config` no longer has a
+/// working code path, so parsing it must fail every time it is passed.
+fn reject_init_config(_value: &str) -> Result<String, String> {
+    Err("`--init-config` was retired; run `magi init` instead".to_string())
+}
+
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
@@ -111,9 +121,23 @@ struct Args {
     #[arg(short, long)]
     logout: bool,
 
-    /// Write a default magi.toml to the workspace and exit (refuses to overwrite).
-    #[arg(long)]
-    init_config: bool,
+    /// RETIRED (REQ-A22): `magi init` is the only scaffolder now. Kept as a hidden
+    /// flag definition — not removed outright — purely so clap itself rejects it with
+    /// a message pointing at the replacement, instead of a bare `unexpected argument`
+    /// that turns a one-line migration into a search (the flag shipped for three
+    /// releases and is documented in `CLAUDE.md`). `default_missing_value` is what
+    /// lets a bare `--init-config` (no `=value`) reach `reject_init_config` at all;
+    /// that value-parser then fails unconditionally, so this field can never actually
+    /// hold `Some(_)` at runtime — nothing reads it past parsing.
+    #[allow(dead_code)]
+    #[arg(
+        long,
+        hide = true,
+        num_args = 0..=1,
+        default_missing_value = "retired",
+        value_parser = reject_init_config
+    )]
+    init_config: Option<String>,
 
     /// Master passphrase (precedence: -p > MAGI_PASSPHRASE > interactive
     /// prompt). Global: also applies to the `vault` subcommand (REQ-V04).
@@ -1103,19 +1127,11 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
         return Ok(exit_code(run_logout(passphrase_flag, &workspace_root)));
     }
 
-    if args.init_config {
-        match crate::defaults::write_default_config(&workspace_root) {
-            Ok(path) => {
-                println!("Wrote default config to {}", path.display());
-                return Ok(ExitCode::SUCCESS);
-            }
-            Err(e) => {
-                eprintln!("{e}");
-                return Ok(ExitCode::FAILURE);
-            }
-        }
-    }
-
+    // REQ-A22: `--init-config` was retired — `magi init` is the only scaffolder now.
+    // Reaching here with the flag set is unreachable in practice (its value-parser,
+    // `reject_init_config`, always fails clap's own parse), so there is no runtime
+    // branch to keep; `write_default_config` remains in use by the TUI `/init-config`
+    // slash command.
     // ── TUI path ─────────────────────────────────────────────────────────
     let mut startup_notices: Vec<String> = hardening_warnings
         .iter()
@@ -1195,9 +1211,14 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
     // the legacy loose cwd `magi.toml` is never read. Loaded BEFORE
     // `discover_config` below so the resolved `[anthropic].model` can be honored
     // there (MAGI re-gate fix) instead of discover_config reading env-only.
-    let (magi_config, config_warning) = match workspace.as_ref() {
-        Some(ws) => MagiConfig::load(&ws.magi_dir),
-        None => (MagiConfig::default(), None),
+    //
+    // Task 1.4/REQ-A23: `load` is now fallible — a present-but-broken magi.toml (bad
+    // parse, unknown vocabulary, or a literal credential in any `base_url`) TERMINATES
+    // the process via `?` instead of silently degrading to defaults, which is exactly
+    // what v0.11.0 did and what SC-A16d/REQ-A23 forbid now.
+    let (magi_config, config_notices) = match workspace.as_ref() {
+        Some(ws) => MagiConfig::load(&ws.config_path())?,
+        None => (MagiConfig::default(), Vec::new()),
     };
     // REQ-V12/H12: API key discovery happens AFTER the vault is (possibly) open,
     // env tier sourced from the consumed (scrubbed) value.
@@ -1259,11 +1280,12 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
     // Notices shown when the TUI starts — the provider banner plus any persistence,
     // reset, or vault warnings that would otherwise be lost to pre-TUI stderr.
     startup_notices.push(provider_info);
-    // MAGI fix f: surface malformed/unreadable magi.toml in the TUI rather than
-    // losing it to pre-TUI stderr — same path as the persistence/reset notices.
-    if let Some(w) = config_warning {
-        startup_notices.push(w);
-    }
+    // REQ-A12b/A12c: notices for resolutions that didn't come straight from what was
+    // written in `magi.toml` (a blank `provider`, an inherited non-default embedder
+    // endpoint, an Anthropic/base_url incoherence) — surfaced the same way the old
+    // malformed-config warning used to be, but `load()` no longer needs a *malformed*
+    // branch here: that path is now fatal and propagated by the `?` above.
+    startup_notices.extend(config_notices);
     // B1: surface invalid memory-config values as a startup notice (never panic).
     if let Err(e) = magi_config.memory.validate() {
         startup_notices.push(format!("memory config warning: {e}"));
@@ -2194,13 +2216,22 @@ async fn prepare_headless(
         Some(Arc::new(Mutex::new(vstore)) as SharedSecretStore)
     });
 
-    // Config lives in `.magi/magi.toml`; absent ⇒ built-in defaults.
-    let (magi_config, cfg_warn) = match workspace.as_ref() {
-        Some(ws) => MagiConfig::load(&ws.magi_dir),
-        None => (MagiConfig::default(), None),
+    // Config lives in `.magi/magi.toml`; absent ⇒ built-in defaults. Task 1.4/REQ-A23:
+    // `load` is fallible now — a present-but-broken magi.toml (bad parse, unknown
+    // vocabulary, or a literal credential in any `base_url`) fails this run closed
+    // instead of silently degrading to defaults.
+    let (magi_config, cfg_notices) = match workspace.as_ref() {
+        Some(ws) => match MagiConfig::load(&ws.config_path()) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("error: {e}");
+                return Err(1);
+            }
+        },
+        None => (MagiConfig::default(), Vec::new()),
     };
-    if let Some(w) = cfg_warn {
-        eprintln!("warning: {w}");
+    for n in &cfg_notices {
+        eprintln!("{n}");
     }
 
     // Resolved BEFORE reading input so the effective `max_input_bytes` (an

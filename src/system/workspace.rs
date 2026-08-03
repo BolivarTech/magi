@@ -91,9 +91,12 @@ impl Workspace {
     }
 
     /// Ruta del archivo de configuración (`.magi/magi.toml`).
-    // Narrow allow: consumed by the MS2 headless wiring (config load); `db_path`
-    // is already used by `magi init` (T11) but this accessor is not yet.
-    #[allow(dead_code)]
+    ///
+    /// Consumida por `magi_toml_exists` (`main.rs`, el notice RF-9 de "sin
+    /// magi.toml") y, desde Task 1.4, por los dos call sites de
+    /// `crate::config::MagiConfig::load` (TUI y headless) — reemplazando el
+    /// `dir.join("magi.toml")` que esos call sites rehacían, duplicando el
+    /// `CONFIG_FILE_NAME` que este módulo ya define.
     #[must_use]
     pub fn config_path(&self) -> PathBuf {
         self.magi_dir.join(CONFIG_FILE_NAME)
