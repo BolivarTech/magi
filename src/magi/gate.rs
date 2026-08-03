@@ -205,57 +205,16 @@ mod tests {
         );
     }
 
-    /// Resultado observable de simular un turno, mínimo a propósito para este test.
-    ///
-    /// **No levanta un `Agent`/`ConsultTool`/`run_tool_loop` real.** Cablear el gate
-    /// adentro del tool loop (y el contador de vetos que lo acompaña, REQ-A20c) es trabajo
-    /// de Task 3.2 — su propio bloque de plan declara ahí, no acá, que `ConsultTool::execute`
-    /// pasa a recibir el modo ya resuelto. Levantar esa maquinaria acá duplicaría ese
-    /// trabajo y arriesgaría los tests existentes de `tools::consult` que llaman `execute`
-    /// sin inyección — mismo criterio que ya aplicó `AgentTurnOutcome` (Task 2.4,
-    /// `main.rs`) para `resolve_mode_guarded`, documentado ahí en detalle.
-    struct GateTurnOutcome {
-        /// `true` si el consult efectivamente se despachó.
-        consult_ran: bool,
-    }
-
-    /// Simula la inyección FORZADA (`authorize_and_execute_tool`): el gate nunca corre —
-    /// lo pidió el usuario o un comando explícito, y REQ-A20 dice que eso nunca se veta.
-    async fn run_turn_with_forced_consult(_content: &str) -> GateTurnOutcome {
-        GateTurnOutcome { consult_ran: true }
-    }
-
-    /// Simula el ruteo AUTÓNOMO (bucle de `ToolUse` del modelo): el gate SÍ se evalúa,
-    /// con `Analysis` —el modo por defecto de toda invocación sin uno declarado— y los
-    /// umbrales built-in.
-    async fn run_turn_with_autonomous_consult(content: &str) -> GateTurnOutcome {
-        let verdict = evaluate(content, &Mode::Analysis, &GateThresholds::builtin());
-        GateTurnOutcome {
-            consult_ran: matches!(verdict, GateVerdict::Dispatch),
-        }
-    }
-
-    /// El gate ve el ruteo AUTÓNOMO y no la inyección forzada — y eso es una posición de
-    /// call site, no un flag, así que sin test no lo defiende nada.
-    ///
-    /// `authorize_and_execute_tool` (inyección forzada) y el bucle de `ToolUse` (elección
-    /// del modelo) son dos entradas distintas al mismo tool. El gate cuelga de la segunda.
-    /// Si un día alguien unifica los dos caminos "para simplificar", `/consult` explícito
-    /// empieza a vetarse — que es exactamente lo que REQ-A20 prohíbe.
-    #[tokio::test]
-    async fn a_forced_injection_bypasses_the_gate_while_a_model_choice_does_not() {
-        let trivial = "x";
-
-        let forced = run_turn_with_forced_consult(trivial).await;
-        assert!(
-            forced.consult_ran,
-            "el consult inyectado NUNCA se vetea: lo pidió el usuario"
-        );
-
-        let chosen = run_turn_with_autonomous_consult(trivial).await;
-        assert!(
-            !chosen.consult_ran,
-            "el autorruteado sí, y por eso el gate existe"
-        );
-    }
+    // NOTA HONESTA: la propiedad de REQ-A20 "el gate ve el ruteo AUTÓNOMO
+    // (`ToolUse`) y NO la inyección forzada (`authorize_and_execute_tool`)" es
+    // DELIBERADAMENTE intestable desde este módulo. Los dos call sites viven en
+    // `agent/mod.rs`, no acá — `gate.rs` solo expone `evaluate`, que no sabe ni
+    // puede saber quién la invocó. Un test escrito acá solo puede SIMULAR los
+    // dos call sites con literales, y una simulación de eso es exactamente lo
+    // que hace falso el test: hace pasar "el gate corre en el sitio correcto"
+    // por "escribí `true` en un lado y llamé `evaluate` en el otro", que no
+    // ejercita ninguna distinción real. El test real —el que efectivamente
+    // dispara `authorize_and_execute_tool` y el bucle de `ToolUse` contra un
+    // `Agent` de verdad— es obligación de Task 3.2, que es quien cablea el gate
+    // dentro de esos dos call sites.
 }
