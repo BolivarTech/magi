@@ -14,6 +14,7 @@ use std::path::Path;
 
 use magi_core::schema::{AgentName, Mode};
 use magi_rs::magi::endpoint::{EndpointError, EndpointTemplate};
+use magi_rs::magi::gate::{GateOverrides, GateThresholds};
 use magi_rs::magi::kind::{ProviderKind, ProviderKindParseError};
 use magi_rs::magi::mode::{ModeExt, ModeParseError};
 use magi_rs::magi::{min_viable_output_cap, AGENT_TIMEOUT_MAX_SECS, AGENT_TIMEOUT_MIN_SECS};
@@ -973,6 +974,39 @@ pub fn resolve_anthropic_model(config: &MagiConfig, env_model: Option<&str>) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -------------------------------------------------------------------------
+    // Task 3.1: `gate_thresholds_from` — desarma `[magi.complexity]` en
+    // `GateThresholds` (REQ-A20b). `gate.rs` vive en el lib y no puede conocer la
+    // forma del TOML; esta función es la única que la desarma.
+    // -------------------------------------------------------------------------
+
+    /// La tabla puebla los umbrales declarados y hereda el built-in en los
+    /// ausentes DENTRO de una tabla presente; sin tabla, los tres built-ins.
+    #[test]
+    fn gate_thresholds_from_reads_the_complexity_table_and_falls_back_to_builtins() {
+        let with_table =
+            MagiConfig::from_toml_str("[magi.complexity]\ncode_review = 50\nanalysis = 0\n")
+                .unwrap();
+        let t = gate_thresholds_from(&with_table);
+        assert_eq!(t.code_review, 50, "declarado: se usa el valor del archivo");
+        assert_eq!(
+            t.design,
+            GateThresholds::builtin().design,
+            "ausente DENTRO de la tabla: su built-in, no cero"
+        );
+        assert_eq!(
+            t.analysis, 0,
+            "0 declarado se preserva: es la vía de apagar ESE modo"
+        );
+
+        let without_table = MagiConfig::default();
+        assert_eq!(
+            gate_thresholds_from(&without_table),
+            GateThresholds::builtin(),
+            "tabla ausente ⇒ built-ins: el gate no se apaga por omitir la sección"
+        );
+    }
 
     #[test]
     fn test_parses_full_config() {
