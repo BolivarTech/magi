@@ -3899,6 +3899,93 @@ mod tests {
         assert_eq!(resolved, crate::defaults::DEFAULT_OPENAI_BASE_URL);
     }
 
+    // -------------------------------------------------------------------------
+    // Fix round 3 (coordinator review, 2026-08-02): L1/L2/S1 —
+    // `resolve_effective_principal_endpoint`, the SAME C1/C2/C3 cluster on the
+    // principal-provider path (the old `resolve_openai_base_url`, removed).
+    // -------------------------------------------------------------------------
+
+    /// L1: a blank root `base_url` is absent, not a value — falls to the
+    /// built-in default, same rule as everywhere else (REQ-A12).
+    #[test]
+    fn resolve_effective_principal_endpoint_treats_blank_root_base_url_as_absent() {
+        let cfg = MagiConfig::from_toml_str("base_url = \"\"\n").unwrap();
+        let resolved = resolve_effective_principal_endpoint(&cfg, None, None).unwrap();
+        assert_eq!(resolved.as_str(), crate::defaults::DEFAULT_OPENAI_BASE_URL);
+    }
+
+    /// L1: a blank `OPENAI_BASE_URL` env var is ALSO absent, not a value — the
+    /// old `resolve_openai_base_url` returned it unconditionally
+    /// (`env_base_url.map(str::to_string)`, no blank check), so an
+    /// exported-but-unfilled CI variable short-circuited past the TOML/default
+    /// fallback and the principal provider was built with an empty base URL.
+    #[test]
+    fn resolve_effective_principal_endpoint_treats_blank_env_override_as_absent() {
+        let cfg = MagiConfig::from_toml_str("base_url = \"http://lan:11434/v1\"\n").unwrap();
+        let resolved = resolve_effective_principal_endpoint(&cfg, Some(""), None).unwrap();
+        assert_eq!(
+            resolved.as_str(),
+            "http://lan:11434/v1",
+            "blank env must fall through to the TOML value, not short-circuit past it"
+        );
+    }
+
+    /// L2/C2: a malformed template (a literal credential instead of the
+    /// `[user]:[password]` placeholders, REQ-A16c) is a loud, propagated error —
+    /// never a silent fall-back, and the error never repeats the credential.
+    #[test]
+    fn resolve_effective_principal_endpoint_propagates_a_malformed_template_error() {
+        let cfg =
+            MagiConfig::from_toml_str("base_url = \"https://user:hunter2@host/v1\"\n").unwrap();
+        let err = resolve_effective_principal_endpoint(&cfg, None, None).unwrap_err();
+        assert!(!err.contains("hunter2"), "leaked the credential: {err}");
+    }
+
+    /// L2/C3 (positive): a template with real placeholders resolves to the
+    /// ACTUAL credentialed endpoint via the ROOT vault scope
+    /// (`BASE_URL_USER`/`BASE_URL_PASSWORD`) — never the literal
+    /// `[user]:[password]` text reaching `build_openai_provider`.
+    #[test]
+    fn resolve_effective_principal_endpoint_resolves_placeholders_against_the_vault() {
+        let ss = vault_fixture();
+        {
+            let mut guard = ss.lock().unwrap();
+            guard.set("BASE_URL_USER", "alice").unwrap();
+            guard.set("BASE_URL_PASSWORD", "s3cr3t").unwrap();
+        }
+        let cfg = MagiConfig::from_toml_str("base_url = \"https://[user]:[password]@host/v1\"\n")
+            .unwrap();
+        let resolved = resolve_effective_principal_endpoint(&cfg, None, Some(&ss)).unwrap();
+        assert_eq!(resolved.as_str(), "https://alice:s3cr3t@host/v1");
+    }
+
+    /// L2/C3 (negative): with no vault handle in scope, a template that NEEDS
+    /// one fails loudly — it must never bake the unresolved `[user]:[password]`
+    /// placeholder text into the returned endpoint.
+    #[test]
+    fn resolve_effective_principal_endpoint_fails_loudly_without_a_vault_for_placeholders() {
+        let cfg = MagiConfig::from_toml_str("base_url = \"https://[user]:[password]@host/v1\"\n")
+            .unwrap();
+        let err = resolve_effective_principal_endpoint(&cfg, None, None).unwrap_err();
+        assert!(
+            !err.contains("[user]") && !err.contains("[password]"),
+            "leaked the unresolved template: {err}"
+        );
+    }
+
+    /// S1: `openai_provider_info` — the TUI/stderr-visible startup notice — never
+    /// echoes a credential, even when handed a fully vault-resolved URL that
+    /// contains a real one. `redact_url` (Task 1.2) is what makes this true;
+    /// this test proves the call site actually uses it, not just that the
+    /// redactor itself works (that's covered in `src/redact.rs`).
+    #[test]
+    fn openai_provider_info_never_echoes_a_credential() {
+        let info = openai_provider_info("https://alice:s3cr3t@host/v1", "some-model");
+        assert!(!info.contains("s3cr3t"), "leaked the credential: {info}");
+        assert!(info.contains("host"), "the host must stay: {info}");
+        assert!(info.contains("some-model"));
+    }
+
     #[test]
     #[serial_test::serial]
     fn test_headless_query_static_provider_returns_response_exit_0() {
