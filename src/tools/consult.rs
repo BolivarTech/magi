@@ -131,6 +131,13 @@ impl Tool for ConsultTool {
                 "query": {
                     "type": "string",
                     "description": "The decision or content to analyze from three perspectives."
+                },
+                "mode": {
+                    "type": "string",
+                    "enum": ["code-review", "design", "analysis"],
+                    "description": "Optional lens for the analysis (pick the one that \
+                        matches what you're asking about). Omit to let the caller's \
+                        configured/inferred lens apply instead."
                 }
             },
             "required": ["query"]

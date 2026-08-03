@@ -7,6 +7,7 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use magi_core::schema::Mode;
+use magi_rs::magi::mode::normalize_label;
 use magi_rs::vault::{SecretStore, VaultError};
 use ratatui::{
     backend::{Backend, CrosstermBackend},
@@ -91,6 +92,99 @@ pub(crate) fn parse_consult_command(trimmed: &str) -> Option<&str> {
         return Some("");
     }
     Some(rest.strip_prefix(' ')?.trim())
+}
+
+/// Flag that declares an explicit `--mode` on the TUI's `/consult` (REQ-A07b).
+const TUI_MODE_FLAG: &str = "--mode";
+
+/// Why `/consult`'s flags failed to parse (REQ-A07b/A07d).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum TuiConsultParseError {
+    /// The line was not a `/consult` command at all.
+    NotAConsultCommand,
+    /// `--mode` appeared with no value after it.
+    MissingModeValue,
+    /// The `--mode` value does not name one of the three valid modes.
+    UnknownMode(String),
+    /// Any other `--flag`-shaped leading token — in particular
+    /// `--untrusted-content`: the TUI never exposes that mark (SC-A07t) because a
+    /// human already chose the content here, so the classification guard it would
+    /// gate doesn't apply.
+    UnsupportedFlag(String),
+}
+
+/// A parsed `/consult` command (REQ-A07b): the explicit mode, if any, and the
+/// free-text query with the recognized flags stripped out.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TuiConsultCommand {
+    /// Explicit mode declared with `--mode`; `None` when omitted.
+    pub mode: Option<Mode>,
+    /// The query text, with any recognized leading flags removed.
+    pub query: String,
+}
+
+/// Splits `s` into its first whitespace-delimited token and the (left-trimmed)
+/// remainder, or `None` if `s` is empty after trimming leading whitespace.
+///
+/// `O(n)` in `s.len()`: a single forward scan for the first whitespace byte.
+fn split_leading_token(s: &str) -> Option<(&str, &str)> {
+    let s = s.trim_start();
+    if s.is_empty() {
+        return None;
+    }
+    match s.find(char::is_whitespace) {
+        Some(i) => Some((&s[..i], s[i..].trim_start())),
+        None => Some((s, "")),
+    }
+}
+
+/// Parses `/consult [--mode <value>] <query>` — the only flag this surface
+/// exposes (REQ-A07b). Any other `--flag`-shaped leading token is rejected,
+/// `--untrusted-content` included: that mark belongs to the surfaces a gate
+/// automates (CLI, envelope), never to the TUI, where a human already chose the
+/// content (REQ-A07d/SC-A07t).
+///
+/// `--mode`'s value is validated with the same closed, model-output
+/// normalization as an inferred label ([`normalize_label`]) rather than the
+/// config rule: a human typing at a prompt is closer to that case than to a
+/// `magi.toml` value, and reusing it avoids a third, slightly different
+/// acceptance rule for the same three labels.
+///
+/// # Errors
+/// See [`TuiConsultParseError`]'s variants.
+// Narrow allow: consumed by the real `/consult` dispatch once mode resolution is
+// wired in (Task 2.3/2.4) — this task only wires ACCEPTANCE, not dispatch; the
+// handler still runs `Mode::Analysis` unconditionally. Covered by
+// `every_surface_accepts_an_explicit_mode` and
+// `untrusted_content_is_declarable_where_the_threat_lives` (in `main.rs`), plus the
+// edge-case tests in this module's `tests`.
+#[allow(dead_code)]
+pub(crate) fn parse_tui_consult(trimmed: &str) -> Result<TuiConsultCommand, TuiConsultParseError> {
+    let mut rest =
+        parse_consult_command(trimmed).ok_or(TuiConsultParseError::NotAConsultCommand)?;
+    let mut mode = None;
+
+    while let Some((token, after)) = split_leading_token(rest) {
+        if token == TUI_MODE_FLAG {
+            let (value, after_value) =
+                split_leading_token(after).ok_or(TuiConsultParseError::MissingModeValue)?;
+            mode = Some(
+                normalize_label(value)
+                    .ok_or_else(|| TuiConsultParseError::UnknownMode(value.to_string()))?,
+            );
+            rest = after_value;
+            continue;
+        }
+        if token.starts_with("--") {
+            return Err(TuiConsultParseError::UnsupportedFlag(token.to_string()));
+        }
+        break;
+    }
+
+    Ok(TuiConsultCommand {
+        mode,
+        query: rest.to_string(),
+    })
 }
 
 /// Braille spinner frames for the "thinking" activity indicator.
@@ -1818,7 +1912,9 @@ mod tests {
     fn test_parse_tui_consult_rejects_an_unknown_mode_label() {
         assert_eq!(
             super::parse_tui_consult("/consult --mode banana query"),
-            Err(super::TuiConsultParseError::UnknownMode("banana".to_string()))
+            Err(super::TuiConsultParseError::UnknownMode(
+                "banana".to_string()
+            ))
         );
     }
 

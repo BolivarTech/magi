@@ -206,6 +206,49 @@ impl CliLogLevel {
     }
 }
 
+/// Mode selector for `--mode` (REQ-A07).
+///
+/// Defect #12 (registered plan debt): verified against `clap_derive-4.6.4`'s
+/// `ValueEnum` derive (`DEFAULT_CASING = CasingStyle::Kebab`, `src/item.rs`)
+/// rather than assumed — the default kebab-casing of these three variant
+/// names already produces `code-review`/`design`/`analysis`, exactly the
+/// vocabulary [`crate::magi::mode::normalize_label`] accepts, so no
+/// `#[value(name = "...")]` override is needed. A test below
+/// (`cli_mode_casing_matches_the_shared_mode_vocabulary`) pins this so a
+/// future clap upgrade that changes the default can't silently desync the
+/// two vocabularies.
+#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+enum CliMode {
+    /// Code review: correctness, security, edge cases.
+    CodeReview,
+    /// Design: architecture, approach selection.
+    Design,
+    /// General analysis (default).
+    Analysis,
+}
+
+impl CliMode {
+    /// Converts the clap variant to magi-core's `Mode`.
+    ///
+    /// Explicit conversion, not a generic `From` or `#[serde(into)]`: these are two
+    /// enums with different owners — clap owns the CLI vocabulary, magi-core owns the
+    /// domain one — and they can diverge one day. The exhaustive `match` is what turns
+    /// that divergence into a compile error instead of a silent mistranslation.
+    // Narrow allow: consumed by mode resolution in Task 2.3/2.4, not this task — this
+    // task only wires ACCEPTANCE of `--mode` across the four surfaces, not its dispatch.
+    // Covered by `every_surface_accepts_an_explicit_mode` and
+    // `cli_mode_casing_matches_the_shared_mode_vocabulary`.
+    #[allow(dead_code)]
+    #[must_use]
+    fn into_mode(self) -> Mode {
+        match self {
+            Self::CodeReview => Mode::CodeReview,
+            Self::Design => Mode::Design,
+            Self::Analysis => Mode::Analysis,
+        }
+    }
+}
+
 /// Flags shared by the `query` and `consult` headless subcommands
 /// (REQ-H03/H04/H05/H07/H08/H12/H36). `--consult` is only meaningful for
 /// `query` (`consult` already forces the multi-perspective pass); on `consult`
@@ -265,6 +308,46 @@ struct HeadlessArgs {
     /// (REQ-H08/H12b).
     #[arg(long)]
     max_tool_calls: Option<u32>,
+    /// Consult lens; omitted ⇒ INFERRED with an extra model call (REQ-A07c).
+    ///
+    /// Declaring it avoids that call. See also `[magi].default_mode`, which fixes
+    /// the lens for every invocation without touching any call site.
+    #[arg(long, value_enum)]
+    mode: Option<CliMode>,
+    /// Declares that the content under analysis is NOT trustworthy (REQ-A07d).
+    ///
+    /// With this flag set, omitting `--mode` is an ERROR instead of an inference:
+    /// no path lets the content itself steer the lens it is reviewed under.
+    #[arg(long)]
+    untrusted_content: bool,
+}
+
+impl Args {
+    /// Extracts the `--mode` declared on whichever headless subcommand this parse
+    /// holds (`query` or `consult`); `None` if there is no subcommand, or the
+    /// subcommand carries no `--mode` (REQ-A07).
+    // Narrow allow: consumed by mode resolution in Task 2.3/2.4, not this task.
+    // Covered by `every_surface_accepts_an_explicit_mode` and
+    // `cli_mode_casing_matches_the_shared_mode_vocabulary`.
+    #[allow(dead_code)]
+    fn mode_of_consult(&self) -> Option<Mode> {
+        match &self.command {
+            Some(TopCmd::Query(h)) | Some(TopCmd::Consult(h)) => h.mode.map(CliMode::into_mode),
+            _ => None,
+        }
+    }
+
+    /// `true` if `--untrusted-content` was declared on whichever headless subcommand
+    /// this parse holds; `false` if there is no subcommand (REQ-A07d).
+    // Narrow allow: consumed by the guard in Task 2.4, not this task.
+    // Covered by `untrusted_content_is_declarable_where_the_threat_lives`.
+    #[allow(dead_code)]
+    fn untrusted_content(&self) -> bool {
+        match &self.command {
+            Some(TopCmd::Query(h)) | Some(TopCmd::Consult(h)) => h.untrusted_content,
+            _ => false,
+        }
+    }
 }
 
 /// Top-level subcommands beyond the default TUI launch.
@@ -2708,8 +2791,8 @@ mod tests {
             let a = Args::parse_from(["magi-rs", "consult", "--mode", "design"]);
             assert!(matches!(a.mode_of_consult(), Some(Mode::Design)));
 
-            let env = parse_input(br#"{"prompt":"x","mode":"design"}"#, None)
-                .expect("valid envelope");
+            let env =
+                parse_input(br#"{"prompt":"x","mode":"design"}"#, None).expect("valid envelope");
             assert_eq!(env.resolved_mode().unwrap(), Some(Mode::Design));
 
             assert_eq!(
@@ -2742,8 +2825,7 @@ mod tests {
             use clap::Parser;
 
             assert!(
-                Args::parse_from(["magi-rs", "consult", "--untrusted-content"])
-                    .untrusted_content()
+                Args::parse_from(["magi-rs", "consult", "--untrusted-content"]).untrusted_content()
             );
 
             let env = parse_input(br#"{"prompt":"x","untrusted_content":true}"#, None)
@@ -3811,6 +3893,8 @@ mod tests {
             model: None,
             provider: None,
             max_tool_calls: None,
+            mode: None,
+            untrusted_content: false,
         }
     }
 

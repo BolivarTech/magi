@@ -167,6 +167,8 @@ mod tests {
             provider: None,
             max_tool_calls: None,
             consult: None,
+            mode: None,
+            untrusted_content: None,
         }
     }
 

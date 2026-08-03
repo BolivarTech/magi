@@ -76,6 +76,39 @@ pub struct Envelope {
     pub max_tool_calls: Option<u32>,
     /// Si forzar una pasada MAGI multiperspectiva (REQ-H22).
     pub consult: Option<bool>,
+    /// Modo explícito propuesto por el caller (REQ-A07/A07c). `None` si el campo
+    /// está ausente; el contenido (ausente/en blanco vs. presente-y-no-reconocido)
+    /// se valida en [`Envelope::resolved_mode`], no acá — este parser sólo recoge
+    /// el string crudo, igual que hace con `system`/`model`/`provider`.
+    pub mode: Option<String>,
+    /// Declara que el `prompt` bajo análisis NO es confiable (REQ-A07d): con esto
+    /// activo, omitir el modo pasa a ser error en vez de inferencia. `None` si el
+    /// campo está ausente — la superficie que sí necesita esta marca es
+    /// justamente esta (el envelope es el consumidor de un gate automatizado).
+    pub untrusted_content: Option<bool>,
+}
+
+impl Envelope {
+    /// Resuelve el campo `mode` del envelope a un [`Mode`] (REQ-A07c).
+    ///
+    /// Mismo tratamiento que un valor de configuración
+    /// ([`ModeExt::parse_config_value`]): ausente o en blanco ⇒ `Ok(None)`;
+    /// presente y no reconocido ⇒ `Err`. El campo lo declaró un humano o un
+    /// sistema integrador escribiendo el envelope, no un modelo — por eso pasa
+    /// por la validación de configuración y no por
+    /// `magi_rs::magi::mode::normalize_label`, que es la normalización abierta a
+    /// formato pensada para texto de salida de un LLM.
+    ///
+    /// # Errors
+    /// [`ModeParseError::Unknown`] si `mode` trae contenido y no nombra ninguno
+    /// de los tres modos válidos.
+    // Narrow allow: consumido por la resolución real del modo en Task 2.3/2.4 — esta
+    // tarea sólo agrega el campo y su parseo, no lo conecta al despacho. Cubierta por
+    // `every_surface_accepts_an_explicit_mode`.
+    #[allow(dead_code)]
+    pub fn resolved_mode(&self) -> Result<Option<Mode>, ModeParseError> {
+        <Mode as ModeExt>::parse_config_value(self.mode.as_deref().unwrap_or_default())
+    }
 }
 
 /// Resultado del recorrido del mapa top-level antes de la decisión final.
@@ -102,6 +135,8 @@ fn text_envelope(text: &str) -> Envelope {
         provider: None,
         max_tool_calls: None,
         consult: None,
+        mode: None,
+        untrusted_content: None,
     }
 }
 
@@ -261,6 +296,8 @@ impl<'de> Visitor<'de> for EnvelopeVisitor {
         let mut provider: Option<String> = None;
         let mut max_tool_calls: Option<u32> = None;
         let mut consult: Option<bool> = None;
+        let mut mode: Option<String> = None;
+        let mut untrusted_content: Option<bool> = None;
         let mut unknown_seen = false;
 
         while let Some(key) = map.next_key::<String>()? {
@@ -277,6 +314,8 @@ impl<'de> Visitor<'de> for EnvelopeVisitor {
                 "provider" => provider = map.next_value::<Option<String>>()?,
                 "max_tool_calls" => max_tool_calls = map.next_value::<Option<u32>>()?,
                 "consult" => consult = map.next_value::<Option<bool>>()?,
+                "mode" => mode = map.next_value::<Option<String>>()?,
+                "untrusted_content" => untrusted_content = map.next_value::<Option<bool>>()?,
                 // Campo desconocido: su valor se consume con el seed que cuenta
                 // profundidad (NUNCA `IgnoredAny` plano — cerraría bajo 128).
                 _ => {
@@ -305,6 +344,8 @@ impl<'de> Visitor<'de> for EnvelopeVisitor {
                         provider,
                         max_tool_calls,
                         consult,
+                        mode,
+                        untrusted_content,
                     }))
                 }
             }
