@@ -125,13 +125,21 @@ const MAX_CONSECUTIVE_VETOES: u8 = 2;
 /// consult, because the complexity gate vetoed it and the model answered
 /// directly instead (REQ-A20/SC-A20k).
 ///
-/// **Same visual weight as `[DEGRADED: ...]`** (`tui/mod.rs`'s marker for a
-/// consult that ran with fewer than three responding mages) — but a
-/// DIFFERENT condition, and the two must stay separate: `[DEGRADED: ...]`
-/// means a consult ran and came back thin; this mark means no consult ran
-/// at all. Folding the two together would be a semantic bug — a reader of
-/// `[DEGRADED: ...]` would conclude the trio was consulted, when it never
-/// was.
+/// **Same visual WEIGHT as `[DEGRADED: ...]`** (`tui/mod.rs`'s marker for a
+/// consult that ran with fewer than three responding mages) — a bracketed,
+/// all-caps, `NO_CONSENSUS_MARK_SEPARATOR`-blank-line-separated marker, not
+/// folded into running prose — but a DIFFERENT condition and a DIFFERENT
+/// PLACEMENT, and both distinctions matter:
+/// - Condition: `[DEGRADED: ...]` means a consult ran and came back thin;
+///   this mark means no consult ran at all. Folding the two together would
+///   be a semantic bug — a reader of `[DEGRADED: ...]` would conclude the
+///   trio was consulted, when it never was.
+/// - Placement: `[DEGRADED: ...]` PREPENDS, because it is a caveat about the
+///   report that follows — the reader needs it before the content it
+///   qualifies. This mark APPENDS, because it annotates the answer just
+///   given — there is no "report" to prefix, only a direct answer whose
+///   provenance the reader needs to know AFTER reading it. Same weight,
+///   different placement, for that reason — not an oversight.
 ///
 /// Without it a veto is invisible to the user: they asked something, the
 /// agent decided to consult, the gate stopped it, and what comes back is an
@@ -144,6 +152,19 @@ const MAX_CONSECUTIVE_VETOES: u8 = 2;
 /// [`Agent::run_tool_loop`].
 pub const NO_CONSENSUS_MARK: &str =
     "[NO CONSENSUS: answered directly — the three-model consult did not run]";
+
+/// Separates the answer from [`NO_CONSENSUS_MARK`] when it is appended
+/// (REQ-A20/SC-A20k, fix round 1/I1).
+///
+/// Mirrors the blank line `[DEGRADED: ...]` already uses to separate itself
+/// from the report it prepends (`tui/mod.rs:699`'s `"{}\n\n{}"`) — a marker
+/// concatenated straight onto the last word of an answer defeats the whole
+/// point of a feature whose only job is letting a human tell the two kinds
+/// of answer apart. A named `const` (not an inline `"\n\n"` at each call
+/// site) because the literal is used twice — the `final_text` append and
+/// the `StreamPiece::Content` send — and B3 treats a twice-repeated literal
+/// as a constant.
+const NO_CONSENSUS_MARK_SEPARATOR: &str = "\n\n";
 
 /// Text returned to the agent after a veto (REQ-A20e).
 ///
@@ -1589,10 +1610,13 @@ impl Agent {
                 // this extra send the mark would reach headless but never
                 // reach the screen.
                 if answering_without_consensus {
+                    final_text.push_str(NO_CONSENSUS_MARK_SEPARATOR);
                     final_text.push_str(NO_CONSENSUS_MARK);
                     send_or_closed_err(
                         chunk_tx,
-                        StreamPiece::Content(NO_CONSENSUS_MARK.to_string()),
+                        StreamPiece::Content(format!(
+                            "{NO_CONSENSUS_MARK_SEPARATOR}{NO_CONSENSUS_MARK}"
+                        )),
                     )
                     .await?;
                 }
@@ -4510,11 +4534,20 @@ mod tests {
     #[tokio::test]
     async fn the_user_can_tell_a_non_consensus_answer_apart() {
         let rendered = render_turn_after_veto().await;
+        // Not just `.contains()`: a marker concatenated straight onto the
+        // last word of the answer ("...done[NO CONSENSUS: ...]") would also
+        // satisfy `.contains()` while defeating the entire point of a mark
+        // meant for a human to visually tell two kinds of answer apart —
+        // fix round 1/I1's own catch. `ends_with` pins the SEPARATOR is
+        // actually there, not just the mark somewhere in the string.
+        let expected_suffix = format!("{NO_CONSENSUS_MARK_SEPARATOR}{NO_CONSENSUS_MARK}");
         assert!(
-            rendered.contains(NO_CONSENSUS_MARK),
-            "without the mark, a veto is invisible: the user asked something, the agent \
-             decided to consult, the gate stopped it, and what comes back reads exactly like \
-             an answer backed by three perspectives — inverting the gate's purpose"
+            rendered.ends_with(&expected_suffix),
+            "without the mark AND its blank-line separator, a veto is either invisible (no \
+             mark) or unreadable (mark run into the answer's last word) — the user asked \
+             something, the agent decided to consult, the gate stopped it, and what comes back \
+             must read as two visually distinct pieces, exactly like `[DEGRADED: ...]` does for \
+             its own report; got: {rendered:?}"
         );
 
         let rendered = render_turn_after_successful_consult().await;
