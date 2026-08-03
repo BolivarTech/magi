@@ -51,6 +51,7 @@ use magi_rs::headless::resolution::{
 use magi_rs::headless::types::{ErrorKind, RunOutcome, StopReason};
 use magi_rs::headless::HeadlessError;
 use magi_rs::magi::endpoint::{EndpointTemplate, ResolvedEndpoint, Scope};
+use magi_rs::notices::{render_notices, Notice};
 use magi_rs::redact::redact_url;
 use magi_rs::vault::{
     check_strength, create_passphrase, diagnose, format_diagnose_report, harden_process,
@@ -2616,6 +2617,7 @@ async fn run_consult_subcommand(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use magi_rs::notices::NoticeTier;
     use crate::agent::messages::Message;
     use magi_rs::vault::MaskedDek;
 
@@ -3282,6 +3284,70 @@ mod tests {
                     panic!("the second (correct) attempt must recover the store")
                 }
             }
+        });
+    }
+
+    /// Addition 2 (coordinator ruling, 2026-08-03, Task 1.5): the module-level
+    /// `notices` tests already pin that `render_notices` never trims `Resolution`/
+    /// `Blocking` under the cap — what they can't see is whether `run()` itself
+    /// files a genuinely important message under `Info` in the first place. Names
+    /// the concrete, known-critical messages instead of re-testing the tiering
+    /// machinery: a future edit that reclassifies one of these downward to `Info`
+    /// breaks THIS test, not just a generic property.
+    ///
+    /// Covers the hardening/vault family (REQ-V42 mlock diagnostics — never
+    /// diagnostic noise, always a security-posture regression) and the fixed
+    /// "no persistence at all" warning.
+    #[test]
+    fn known_critical_startup_messages_tier_above_info() {
+        let hardening =
+            low_level_warning_notices(&["could not set RLIMIT_CORE=0: EPERM".to_string()]);
+        assert_eq!(hardening.len(), 1);
+        assert_ne!(
+            hardening[0].tier,
+            NoticeTier::Info,
+            "a hardening warning must never degrade to Info: {}",
+            hardening[0].text
+        );
+        assert!(hardening[0].text.contains("RLIMIT_CORE"));
+
+        let np = no_persistence_notice();
+        assert_ne!(
+            np.tier,
+            NoticeTier::Info,
+            "the no-persistence warning must never degrade to Info: {}",
+            np.text
+        );
+        assert!(np.text.contains("WITHOUT persistence"));
+    }
+
+    /// Same guarantee for the family of messages [`open_tui_memory`] produces — the
+    /// concrete scenario mirrors
+    /// `test_open_tui_memory_degrades_to_ephemeral_when_no_tty_and_no_passphrase_on_first_run`
+    /// (no TTY, no passphrase, first run), fed through the SAME wrapper `run()`
+    /// uses so the two can never disagree.
+    #[test]
+    #[serial_test::serial]
+    fn open_tui_memory_notices_never_degrade_to_info() {
+        with_var(PASSPHRASE_ENV, None, || {
+            let tmp = tempfile::tempdir().unwrap();
+            let db_path = tmp.path().join("absent.db");
+            let mut prompt = FakePrompt::non_interactive();
+            let mut texts = Vec::new();
+            let attachment = open_tui_memory(&db_path, None, &mut prompt, &mut texts);
+            assert!(matches!(attachment, MemoryAttachment::Ephemeral));
+
+            let notices = wrap_helper_notices(texts);
+            assert!(!notices.is_empty());
+            for n in &notices {
+                assert_ne!(
+                    n.tier,
+                    NoticeTier::Info,
+                    "helper-produced notice degraded to Info: {}",
+                    n.text
+                );
+            }
+            assert!(notices.iter().any(|n| n.text.contains("WITHOUT persistence")));
         });
     }
 
