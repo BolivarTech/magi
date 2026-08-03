@@ -87,14 +87,18 @@ const AUTO_LAUNCH_NOTICE: &str = "launched MAGI multi-perspective consensus — 
 ///
 /// Falls back to [`Mode::Analysis`] when the keys are **absent**. This is a
 /// deliberate, narrow back-compat default, not a re-resolution of untrusted
-/// input: every call that goes through the real tool loop (`Agent::run_tool_loop`
-/// via `Agent::dispatch_consult_through_gate`) always injects the pair before
-/// dispatching, so this fallback is reached only by a caller that invokes
-/// [`ConsultTool::execute`] directly without going through the loop — exactly
-/// what this module's own pre-MS2 tests do, and precisely the unconditional
-/// `Mode::Analysis` this tool used before MS2. Wiring `ConsultTool` fully into
-/// `ConsultToolCfg` (a later task) can tighten this to a hard error once every
-/// production caller is confirmed to inject.
+/// input: **both** real production dispatch paths in `Agent::run_tool_loop`
+/// inject the pair before calling [`ConsultTool::execute`] — the model-issued
+/// `ToolUse` route (`Agent::dispatch_consult_through_gate`) and the forced
+/// pre-loop injection (REQ-H22's `config.force_consult` block, which resolves
+/// and injects too, just without ever evaluating the gate: REQ-A20 forbids
+/// vetoing a forced consult, but it still needs a resolved mode). So this
+/// fallback is reached only by a caller that invokes [`ConsultTool::execute`]
+/// directly without going through the loop — exactly what this module's own
+/// pre-MS2 tests do, and precisely the unconditional `Mode::Analysis` this
+/// tool used before MS2. Wiring `ConsultTool` fully into `ConsultToolCfg` (a
+/// later task) can tighten this to a hard error once every production caller
+/// is confirmed to inject.
 fn resolved_or_default_mode(args: &Value) -> Mode {
     read_resolved_mode(args)
         .map(|(mode, _source)| mode)

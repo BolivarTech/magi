@@ -234,14 +234,17 @@ mod tests {
         );
     }
 
-    /// SC-A20h: `NoGateTelemetry` es el sink por defecto — un no-op verificable,
-    /// no una promesa de trait sin implementación de referencia.
-    #[test]
-    fn no_gate_telemetry_is_a_silent_no_op() {
-        let sink = NoGateTelemetry;
-        sink.on_gate_evaluation(&Mode::Analysis, 42, GATE_ANALYSIS, true);
-        sink.on_gate_evaluation(&Mode::Design, 0, GATE_DESIGN, false);
-    }
+    // NOTA HONESTA sobre `NoGateTelemetry`: no hay una aserción posible contra
+    // un no-op. Un test anterior aquí llamaba `on_gate_evaluation` dos veces
+    // sin afirmar nada — no podía fallar bajo ningún cambio (mismo defecto
+    // que Task 3.1 encontró y corrigió en su propia simulación, señalado por
+    // el review de esta tarea: I2). El contrato de `NoGateTelemetry` ES el
+    // cuerpo vacío de `on_gate_evaluation`, arriba — se verifica leyéndolo,
+    // no ejecutándolo. Lo que SÍ es observable y SÍ está testeado en
+    // `agent/mod.rs` es que `AgentRunConfig::default()` instala
+    // `NoGateTelemetry` y que un run sin `gate_telemetry` explícito no
+    // registra nada (`every_gate_evaluation_is_logged` prueba el caso
+    // opuesto, con `RecordingGateTelemetry`, que sí puede fallar).
 
     // NOTA HONESTA (cerrada por Task 3.2): la propiedad de REQ-A20 "el gate ve
     // el ruteo AUTÓNOMO (`ToolUse`) y NO la inyección forzada

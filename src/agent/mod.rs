@@ -1253,6 +1253,34 @@ impl Agent {
                 // stability contract with `headless_runner::run_query`.
                 return Err(anyhow::anyhow!(MAX_TOOL_CALLS_ERROR));
             }
+            // MS2 (REQ-A20/REQ-A07d), fix round 1 (I1): this call site must
+            // ALSO resolve and inject the mode, mirroring
+            // `dispatch_consult_through_gate` MINUS the gate evaluation —
+            // REQ-A20 forbids ever vetoing a forced (user-requested) consult,
+            // but it still needs a resolved mode injected before dispatch.
+            // Without this, `ConsultTool::execute` silently falls back to
+            // `Mode::Analysis` for EVERY forced consult in production —
+            // harmless only by coincidence today (that fallback IS what
+            // resolution currently produces), and a latent divergence bug
+            // the moment a later task wires `default_mode` from `magi.toml`
+            // into `AgentRunConfig`: the forced route would keep ignoring it
+            // silently, no error, no test, no notice. Pinned by
+            // `a_forced_consult_carries_a_resolved_mode_into_execute`.
+            //
+            // `agent_chosen` is `None` explicitly, not derived from `input`:
+            // there is no agent choosing on this route — it is a runner
+            // injection, not a model-issued call — so there is nothing to
+            // read a `mode` field out of.
+            let forced_res = resolve_mode_guarded(
+                None,
+                config.mode_config.default_mode,
+                None,
+                config.mode_config.untrusted_content,
+                None,
+                prompt,
+            )
+            .await?;
+            let tool_input = input_for_dispatch(&input, &forced_res);
             // Deliberately NOT seeding `last_normalized_tool` here: this is a
             // runner injection, not a model-issued call, so it must not count
             // toward the model's own 3x-identical repetitive-call guard below
@@ -1262,7 +1290,7 @@ impl Agent {
                 .authorize_and_execute_tool(
                     FORCED_CONSULT_TOOL_USE_ID,
                     CONSULT_TOOL_NAME,
-                    &input,
+                    &tool_input,
                     config,
                     chunk_tx,
                 )
