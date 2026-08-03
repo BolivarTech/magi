@@ -4,11 +4,13 @@
 
 //! Vocabulario de modos: de dónde salió el modo efectivo y cómo se lee de un texto.
 //!
-//! Acá vive **solo lo puro** —entra un `&str`, sale un `Mode`—. La resolución en cuatro
-//! niveles, la guarda de `untrusted_content` y el trait del clasificador los agrega Task 2.1
-//! a este mismo archivo. La partición es por **madurez de dependencia**, no por tema: este
-//! bloque no depende de nada y la Fase 1 ya lo consume (`config.rs` valida `default_mode`),
-//! así que nacer en la Fase 2 dejaría la Fase 1 sin compilar.
+//! Acá vive **solo lo puro** —entra un `&str`, sale un `Mode`—: el vocabulario, la
+//! normalización cerrada, la resolución en **cinco** niveles y el trait del clasificador.
+//! La guarda de `untrusted_content` y el clasificador real llegan después.
+//!
+//! El vocabulario nació antes que la resolución, y la partición fue por **madurez de
+//! dependencia**, no por tema: no depende de nada y la Fase 1 ya lo consumía (`config.rs`
+//! valida `default_mode`), así que nacer en la Fase 2 habría dejado la Fase 1 sin compilar.
 
 use async_trait::async_trait;
 use magi_core::schema::Mode;
@@ -53,7 +55,7 @@ pub enum ModeSource {
 
 /// Resuelve el modo efectivo a partir de las cinco fuentes posibles.
 ///
-/// La única puerta pública será `resolve_mode_guarded` (Task 2.1). Mantener esta función
+/// La única puerta pública será `resolve_mode_guarded` (Task 2.4). Mantener esta función
 /// privada evita que algún call site olvide aplicar la marca de contenido no confiable,
 /// dejando inerte la guarda de `untrusted_content`.
 ///
@@ -85,6 +87,10 @@ fn resolve_mode(
         (None, None, None, None) => (Mode::Analysis, ModeSource::Default),
     }
 }
+
+// `normalize_label` y `ModeExt::parse_config_value` NO se definen en esta tarea: nacen en la del
+// VOCABULARIO, que es la que ya poblo este archivo en Fase 1. Esta tarea los CONSUME. Estuvieron
+// duplicados en las dos y eso creaba dos definiciones que podian divergir.
 
 /// Un valor de configuración presente que no nombra ningún modo.
 #[derive(Debug, thiserror::Error)]
@@ -192,6 +198,12 @@ impl ModeExt for Mode {
 ///
 /// Permite testear la resolución sin red ni modelo real. Implementaciones reales harán una
 /// llamada de clasificación; los dobles de test devuelven un valor prefijado.
+// `automock` genera `MockModeClassifier`, que hoy no consume nadie: el doble de esta tarea es
+// `EchoClassifier`, escrito a mano porque necesita una sola respuesta fija. El mock configurable
+// lo consumen Tasks 2.3/2.4, donde hay que guionar varias respuestas por test.
+// Se deja `mockall::automock` calificado y NO `use mockall::automock` (la convencion de fs.rs/
+// git.rs) a proposito: mockall es dev-dependency y la forma calificada dentro del `cfg_attr` no
+// necesita un import de nivel superior que habria que gatear por `cfg(test)`.
 #[cfg_attr(test, mockall::automock)]
 #[async_trait]
 pub trait ModeClassifier: Send + Sync {
@@ -246,25 +258,40 @@ mod tests {
         );
     }
 
-    /// SC-A07l: la normalización absorbe FORMATO, no CONTENIDO.
+    /// SC-A07l: la normalización absorbe FORMATO, nunca CONTENIDO.
+    ///
+    /// Fusiona dos tests que cubrían la misma propiedad con fixtures distintos. Ninguno era
+    /// superconjunto del otro —el viejo tenía el par separado por ESPACIO (`"design analysis"`)
+    /// y el nuevo el separado por COMA— así que consolidar quedándose con uno habría borrado
+    /// cobertura en silencio. Acá va la UNIÓN.
+    ///
+    /// Las formas de rechazo importan por separado porque son ataques distintos: prosa que
+    /// MENCIONA una etiqueta, un JSON que la ENVUELVE, dos etiquetas juntas (con y sin coma),
+    /// una etiqueta ENTRECOMILLADA, y una etiqueta que no existe. Si cualquiera pasara, una
+    /// inyección de prompt podría elegir la lente.
     #[test]
     fn label_normalization_absorbs_format_but_not_content() {
         for ok in [
             "code-review",
-            "  Code-Review\n",
+            "code-review
+",
+            " Code-Review ",
+            "  Code-Review
+",
             "CODE-REVIEW",
-            "\tcode-review ",
+            "	code-review ",
         ] {
             assert_eq!(
                 normalize_label(ok),
                 Some(Mode::CodeReview),
-                "debía aceptar {ok:?}"
+                "debía aceptar el formato {ok:?}"
             );
         }
         for bad in [
             "el modo apropiado seria code-review",
             "{\"mode\": \"design\"}",
             "code-review, design",
+            "design analysis",
             "security-audit",
             "\"design\"",
         ] {
@@ -310,34 +337,6 @@ mod tests {
         assert_eq!(
             resolve_mode(None, None, None, inferred),
             (Mode::Design, ModeSource::Inferred)
-        );
-    }
-
-    /// SC-A07l: el exact-match absorbe FORMATO, no CONTENIDO.
-    #[test]
-    fn label_normalization_absorbs_format_but_not_prose() {
-        for raw in [
-            "code-review",
-            "code-review\n",
-            " Code-Review ",
-            "CODE-REVIEW",
-        ] {
-            assert_eq!(
-                normalize_label(raw),
-                Some(Mode::CodeReview),
-                "formato: {raw:?}"
-            );
-        }
-        assert_eq!(
-            normalize_label("el modo apropiado seria code-review"),
-            None,
-            "prosa que CONTIENE una etiqueta no es la etiqueta: ahí la inyección deja de \
-             estar contenida"
-        );
-        assert_eq!(
-            normalize_label("design analysis"),
-            None,
-            "dos etiquetas tampoco"
         );
     }
 
