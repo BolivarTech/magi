@@ -854,6 +854,56 @@ mod tests {
         assert!(matches!(init(tmp.path()), Err(HeadlessError::Aborted)));
     }
 
+    /// SC-A02d: el scaffold REAL de `magi init` (no solo `render_default_magi_toml`
+    /// aislado) trae la forma v0.12.0 — `base_url` en la raíz, `provider` con el
+    /// vocabulario nuevo, SIN `[openai].base_url` — y, la aserción que lo ata todo,
+    /// el archivo que escribe PARSEA a través de la MISMA validación
+    /// (`MagiConfig::from_toml_str`) que el binario aplica en cada arranque. Sin esto
+    /// `magi init` podría escribir un `magi.toml` que el propio binario rechaza en el
+    /// arranque siguiente — la peor experiencia de primer uso posible, y justo lo que
+    /// la migración de este milestone existe para prevenir.
+    #[test]
+    fn magi_init_scaffolds_a_magi_toml_the_binary_can_read_back() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = init(tmp.path()).expect("init");
+        let raw = std::fs::read_to_string(ws.config_path()).unwrap();
+
+        // Chequeado por separado, ANTES del parseo: `OpenAiConfig` ya no tiene un campo
+        // `base_url` (REQ-A21), así que una regresión acá no dejaría una clave suelta —
+        // haría fallar el parseo de más abajo con un `unknown field` genérico. Esta
+        // aserción textual falla con un mensaje que nombra la causa, en vez de un
+        // panic de parseo que hay que interpretar.
+        let raw_value: toml::Value = raw
+            .parse()
+            .expect("el magi.toml escaneado debe ser TOML válido");
+        if let Some(openai) = raw_value.get("openai") {
+            assert!(
+                openai.get("base_url").is_none(),
+                "[openai].base_url se mudó a la raíz en REQ-A21; el scaffolder no debe \
+                 emitirlo"
+            );
+        }
+
+        // La aserción que lo ata todo: el output del scaffolder pasa por la MISMA
+        // validación que el binario aplica en cada arranque.
+        let parsed = crate::config::MagiConfig::from_toml_str(&raw)
+            .expect("magi init nunca debe escribir un magi.toml que el binario rechace");
+
+        assert!(
+            parsed.base_url.is_some(),
+            "base_url debe estar declarado en la raíz (REQ-A21)"
+        );
+        assert!(
+            matches!(
+                parsed.provider.as_deref(),
+                Some("ollama") | Some("openai-compat") | Some("anthropic")
+            ),
+            "provider debe ser uno de los tres valores del vocabulario REQ-A01b, se \
+             obtuvo {:?}",
+            parsed.provider
+        );
+    }
+
     #[test]
     #[cfg(unix)]
     fn test_init_sets_restrictive_permissions() {

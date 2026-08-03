@@ -1524,6 +1524,9 @@ mod tests {
 
     /// `magi_endpoint_diverges()` es true si el trío declara `kind` o `base_url` propios,
     /// y blanco cuenta como NO declarado (REQ-A12).
+    ///
+    /// SC-A02c (mitad "ausente"): `kind = ""` se trata como ausente y hereda — el `blank`
+    /// de abajo. La otra mitad (`kind = "banana"` ⇒ trío no construible) cierra en Fase 4.
     #[test]
     fn magi_endpoint_diverges_when_the_trio_declares_its_own_kind_or_base_url() {
         assert!(!MagiConfig::default().magi_endpoint_diverges());
