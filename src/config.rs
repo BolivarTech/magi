@@ -483,9 +483,13 @@ impl MagiConfig {
     /// [`Self::from_toml_str`]/`load()`, así que el único `None` posible es el de
     /// ausente-o-vacío.
     // Narrow allow: the CURRENT principal-provider path still resolves via the legacy
-    // `resolve_provider`/`DEFAULT_PROVIDER` chain (untouched in this task, see
-    // `resolve_openai_base_url`'s doc comment); this accessor is consumed once that
-    // chain migrates onto `ProviderKind` in Fase 4. Covered by
+    // `resolve_provider`/`DEFAULT_PROVIDER` chain (untouched in this task). Fix round 3
+    // (L1/L2/S1, 2026-08-02) moved the principal `base_url` resolver itself onto
+    // `effective_base_url()` + vault resolution — see `main.rs`'s
+    // `resolve_effective_principal_endpoint`, which replaced the old
+    // `resolve_openai_base_url` (removed, it bypassed both blank-is-absent and
+    // credential resolution). This accessor (`effective_provider`) is consumed once
+    // the STRING-COMPARISON chain migrates onto `ProviderKind` in Fase 4. Covered by
     // `blank_string_keys_are_absent_not_invalid` and `magi_kind_inherits_from_root_provider_when_absent`.
     #[allow(dead_code)]
     #[must_use]
@@ -776,33 +780,6 @@ pub fn resolve_provider(config: &MagiConfig, env_provider: Option<&str>) -> Stri
     legacy_backend_label(&winner)
 }
 
-/// env `OPENAI_BASE_URL` > TOML root `base_url` > `DEFAULT_OPENAI_BASE_URL` (RF-2).
-///
-/// The no-config default points at local Ollama (`http://localhost:11434/v1`).
-///
-/// **Sigue siendo el resolutor "legacy" del provider principal actual** (el que
-/// construye `build_openai_provider` en `main.rs`), no el nuevo trío nativo de MS2 —
-/// que se cablea en una fase posterior. Por eso lee el campo `base_url` de raíz
-/// directamente en vez de pasar por [`MagiConfig::effective_base_url`]: esa función
-/// valida la plantilla contra REQ-A16c (placeholders `[user]:[password]`) y exige
-/// resolverla contra el vault, y este resolutor infalible (`-> String`) no tiene ni el
-/// vault ni un canal de error para eso todavía. La resolución de placeholders para ESTE
-/// call site queda para la tarea que efectivamente cablee el vault en la construcción
-/// del provider — ver el informe de Task 1.1.
-///
-/// # Arguments
-/// * `config` - Parsed `MagiConfig`.
-/// * `env_base_url` - Value of `OPENAI_BASE_URL` env var, if set.
-///
-/// # Returns
-/// Resolved OpenAI-compatible base URL.
-pub fn resolve_openai_base_url(config: &MagiConfig, env_base_url: Option<&str>) -> String {
-    env_base_url
-        .map(str::to_string)
-        .or_else(|| config.base_url.clone())
-        .unwrap_or_else(|| crate::defaults::DEFAULT_OPENAI_BASE_URL.into())
-}
-
 /// Resolves a per-agent MAGI model override. Precedence: env (non-empty) > TOML
 /// (non-empty) > `None`. A blank/whitespace value (env or TOML) is treated as
 /// unset and falls through to the next level. `None` means the agent uses the
@@ -992,29 +969,12 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_resolve_openai_base_url_precedence() {
-        use crate::defaults::DEFAULT_OPENAI_BASE_URL;
-        // `base_url` moved from `[openai]` to root in Task 1.1 (REQ-A21).
-        let c = MagiConfig {
-            base_url: Some("http://toml/v1".into()),
-            ..Default::default()
-        };
-        assert_eq!(
-            resolve_openai_base_url(&c, Some("http://env/v1")),
-            "http://env/v1"
-        );
-        assert_eq!(resolve_openai_base_url(&c, None), "http://toml/v1");
-        // S-1: no config → Ollama
-        assert_eq!(
-            resolve_openai_base_url(&MagiConfig::default(), None),
-            DEFAULT_OPENAI_BASE_URL
-        );
-        assert_eq!(
-            resolve_openai_base_url(&MagiConfig::default(), None),
-            "http://localhost:11434/v1"
-        );
-    }
+    // `test_resolve_openai_base_url_precedence` removed (fix round 3, L1/L2/S1):
+    // `resolve_openai_base_url` — the function it tested — bypassed blank-is-absent
+    // and credential resolution entirely, and was removed in favor of `main.rs`'s
+    // `resolve_effective_principal_endpoint` (which reuses
+    // `MagiConfig::effective_base_url` and is covered where it lives, alongside
+    // `resolve_effective_embedding_endpoint`).
 
     #[test]
     fn test_resolve_openai_model_defaults() {

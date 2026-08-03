@@ -19,8 +19,8 @@ use crate::agent::Agent;
 // It is DISTINCT from `magi_core::orchestrator::MagiConfig` — the latter is NEVER
 // imported here, avoiding the name collision.
 use crate::config::{
-    legacy_backend_label, resolve_anthropic_model, resolve_openai_base_url, resolve_openai_model,
-    resolve_provider, HeadlessConfig, MagiConfig,
+    legacy_backend_label, resolve_anthropic_model, resolve_openai_model, resolve_provider,
+    HeadlessConfig, MagiConfig,
 };
 use crate::headless_runner::{resolve_run_timeout, run_consult, run_query};
 use crate::memory::clock::SystemClock;
@@ -50,7 +50,8 @@ use magi_rs::headless::resolution::{
 };
 use magi_rs::headless::types::{ErrorKind, RunOutcome, StopReason};
 use magi_rs::headless::HeadlessError;
-use magi_rs::magi::endpoint::Scope;
+use magi_rs::magi::endpoint::{EndpointTemplate, ResolvedEndpoint, Scope};
+use magi_rs::redact::redact_url;
 use magi_rs::vault::{
     check_strength, create_passphrase, diagnose, format_diagnose_report, harden_process,
     rekey_envelope, resolve_passphrase, run_vault_cmd, strip_trailing_newline, wire,
@@ -1218,11 +1219,19 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
             // rather than silently defaulting to an insecure constant.
             let api_key = resolve_openai_key(openai_key.as_deref(), secret_store.as_ref())
                 .unwrap_or_else(|| "ollama".to_string());
-            let base_url =
-                resolve_openai_base_url(&magi_config, env::var("OPENAI_BASE_URL").ok().as_deref());
+            // Fix round 3 (L1/L2/S1): resolves blank-is-absent + vault credentials,
+            // never the raw template — see `resolve_effective_principal_endpoint`'s
+            // own doc for what this replaces and why.
+            let resolved_base_url = resolve_effective_principal_endpoint(
+                &magi_config,
+                env::var("OPENAI_BASE_URL").ok().as_deref(),
+                secret_store.as_ref(),
+            )
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+            let base_url = resolved_base_url.as_str().to_string();
             let model =
                 resolve_openai_model(&magi_config, env::var("OPENAI_MODEL").ok().as_deref());
-            let info = format!("OpenAI-compatible ({base_url}) Model: {model}");
+            let info = openai_provider_info(&base_url, &model);
             let model_label = model.clone();
             oai_creds = Some((base_url.clone(), api_key.clone()));
             (
@@ -1471,9 +1480,46 @@ impl SecretStore for NoVaultInScope {
     }
 }
 
+/// Resolves an already-parsed [`EndpointTemplate`] into a real, credential-
+/// substituted [`ResolvedEndpoint`] against `secret_store` (REQ-A16c) — shared
+/// by every `base_url` consumer (fix round 3, L2/C3; B3: this used to be
+/// duplicated between the embedding path and the principal-provider path).
+///
+/// Resolves against `secret_store` when one is in scope; when it is not,
+/// resolution is attempted against [`NoVaultInScope`], which fails only when
+/// the template genuinely needs a vault entry — so a credential-free URL still
+/// succeeds without a vault, and a template that DOES need one fails LOUDLY
+/// instead of silently using unresolved placeholder text.
+///
+/// # Errors
+/// A human-readable message naming the vault entry the template needs that the
+/// current session cannot supply.
+fn resolve_template(
+    template: &EndpointTemplate,
+    scope: Scope,
+    secret_store: Option<&SharedSecretStore>,
+) -> Result<ResolvedEndpoint, String> {
+    let resolution = match secret_store {
+        Some(ss) => {
+            let mut guard = ss.lock().unwrap_or_else(|p| p.into_inner());
+            template.resolve(&mut *guard, scope)
+        }
+        None => template.resolve(&mut NoVaultInScope, scope),
+    };
+    resolution.map_err(|e| {
+        if secret_store.is_some() {
+            format!("base_url credential error: {e}")
+        } else {
+            format!(
+                "base_url needs vault-stored credentials, but no vault is open this \
+                 session: {e}"
+            )
+        }
+    })
+}
+
 /// Resolves the embedder's EFFECTIVE endpoint — declared, or inherited from the
-/// root `base_url` — into a URL an HTTP client can use directly, with any
-/// `[user]:[password]` credentials substituted from the vault (REQ-A16c).
+/// root `base_url` — into a URL an HTTP client can use directly.
 ///
 /// Review round 2 (C1/C2/C3): the code this replaces (a) gated inheritance on
 /// `base_url.is_none()`, so a blank `Some("")` skipped it and reached the embedder
@@ -1482,11 +1528,11 @@ impl SecretStore for NoVaultInScope {
 /// back to the Ollama default with no error and no notice (C2); (c) baked the
 /// unresolved TEMPLATE text — including a literal `[user]:[password]` placeholder
 /// — into the HTTP client instead of a resolved endpoint (C3). This function
-/// propagates every error instead of swallowing one, and resolves against
-/// `secret_store` when one is in scope; when it is not, resolution is attempted
-/// against [`NoVaultInScope`], which fails only when the template genuinely needs
-/// a vault entry — so this still fails LOUDLY rather than silently using
-/// unresolved placeholder text.
+/// propagates every error instead of swallowing one.
+///
+/// Returns a plain `String`, not a [`ResolvedEndpoint`] — this is the one
+/// remaining boundary of that shape in the codebase (parked, review round 3);
+/// [`resolve_effective_principal_endpoint`] keeps the redacting type instead.
 ///
 /// # Errors
 /// A human-readable message naming the problem: an invalid template
@@ -1499,27 +1545,63 @@ fn resolve_effective_embedding_endpoint(
     let template = magi_config
         .effective_embedding_base_url()
         .map_err(|e| format!("embedding base_url is invalid: {e}"))?;
+    resolve_template(&template, Scope::Embedding, secret_store).map(|r| r.as_str().to_string())
+}
 
-    let resolution = match secret_store {
-        Some(ss) => {
-            let mut guard = ss.lock().unwrap_or_else(|p| p.into_inner());
-            template.resolve(&mut *guard, Scope::Embedding)
-        }
-        None => template.resolve(&mut NoVaultInScope, Scope::Embedding),
+/// Resolves the PRINCIPAL provider's effective endpoint: `OPENAI_BASE_URL` (if
+/// non-blank) overrides the root `base_url` (declared or inherited-to-default via
+/// [`MagiConfig::effective_base_url`]), then substitutes any `[user]:[password]`
+/// credentials from the vault — mirroring [`resolve_effective_embedding_endpoint`]
+/// for the OTHER `base_url` consumer (fix round 3, L1/L2/S1).
+///
+/// This replaces the old `resolve_openai_base_url` (`config.rs`, removed), which
+/// had three defects this function does not: (L1) `env_base_url.map(str::to_string)`
+/// returned an env value UNCONDITIONALLY, so `OPENAI_BASE_URL=""` (an
+/// exported-but-unfilled CI variable) short-circuited past the TOML/default
+/// fallback instead of being treated as absent (REQ-A12); (L2) it returned the
+/// raw, unresolved template text — a `base_url` with `[user]:[password]`
+/// placeholders reached `build_openai_provider` and `oai_creds` verbatim,
+/// exactly like the embedder did before C3; (S1) callers formatted that raw
+/// text directly into a user-visible notice, so a LITERAL credential (not just
+/// an unresolved placeholder) printed to the TUI and stderr unredacted. This
+/// function's blank-is-absent check runs on the env value BEFORE it can win the
+/// precedence, and its `Result<ResolvedEndpoint, _>` return keeps the
+/// redacting-capable type all the way to the call site — callers redact with
+/// [`redact_url`] before ever putting the value in a notice (S1), and use
+/// [`ResolvedEndpoint::as_str`] only for the actual HTTP client / `oai_creds`.
+///
+/// # Errors
+/// Ver [`resolve_template`]; additionally, an invalid `OPENAI_BASE_URL` or root
+/// `base_url` template (a literal credential, an unknown placeholder, or an
+/// unparseable URL).
+fn resolve_effective_principal_endpoint(
+    magi_config: &MagiConfig,
+    env_base_url: Option<&str>,
+    secret_store: Option<&SharedSecretStore>,
+) -> Result<ResolvedEndpoint, String> {
+    let template = match env_base_url.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(env_val) => EndpointTemplate::parse(env_val)
+            .map_err(|e| format!("OPENAI_BASE_URL is invalid: {e}"))?,
+        None => magi_config
+            .effective_base_url()
+            .map_err(|e| format!("base_url is invalid: {e}"))?,
     };
+    resolve_template(&template, Scope::Root, secret_store)
+}
 
-    let resolved = resolution.map_err(|e| {
-        if secret_store.is_some() {
-            format!("embedding base_url credential error: {e}")
-        } else {
-            format!(
-                "embedding base_url needs vault-stored credentials, but no vault is open \
-                 this session: {e}"
-            )
-        }
-    })?;
-
-    Ok(resolved.as_str().to_string())
+/// Builds the OpenAI-compatible provider's user-visible startup notice, with
+/// `base_url` REDACTED (S1, fix round 3): the value handed to this function may
+/// be a fully vault-resolved endpoint containing a real credential.
+///
+/// Pure and separately testable — `run()` (the TUI entry point) is not easily
+/// unit-testable end to end, and "does the notice ever contain the secret" is
+/// exactly the property that needs a test, not just a manual read of the code.
+#[must_use]
+fn openai_provider_info(base_url: &str, model: &str) -> String {
+    format!(
+        "OpenAI-compatible ({}) Model: {model}",
+        redact_url(base_url)
+    )
 }
 
 /// Wires an opened encrypted store into `agent` as persistent message memory
@@ -2234,8 +2316,19 @@ async fn prepare_headless(
     ) = if provider_kind == "openai" {
         let api_key = resolve_openai_key(openai_key.as_deref(), secret_store.as_ref())
             .unwrap_or_else(|| "ollama".to_string());
-        let base_url =
-            resolve_openai_base_url(&magi_config, env::var("OPENAI_BASE_URL").ok().as_deref());
+        // Fix round 3 (L1/L2/S1): see `resolve_effective_principal_endpoint`'s doc.
+        let resolved_base_url = match resolve_effective_principal_endpoint(
+            &magi_config,
+            env::var("OPENAI_BASE_URL").ok().as_deref(),
+            secret_store.as_ref(),
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("error: {e}");
+                return Err(1);
+            }
+        };
+        let base_url = resolved_base_url.as_str().to_string();
         oai_creds = Some((base_url.clone(), api_key.clone()));
         (
             build_openai_provider(&base_url, &api_key, &resolved.model),
