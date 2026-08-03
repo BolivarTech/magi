@@ -121,6 +121,30 @@ const CONSULT_ALREADY_FORCED_MESSAGE: &str =
 /// evaluating it, which is one fewer veto than the spec describes.
 const MAX_CONSECUTIVE_VETOES: u8 = 2;
 
+/// Marks a final answer that did NOT come from the three-perspective
+/// consult, because the complexity gate vetoed it and the model answered
+/// directly instead (REQ-A20/SC-A20k).
+///
+/// **Same visual weight as `[DEGRADED: ...]`** (`tui/mod.rs`'s marker for a
+/// consult that ran with fewer than three responding mages) — but a
+/// DIFFERENT condition, and the two must stay separate: `[DEGRADED: ...]`
+/// means a consult ran and came back thin; this mark means no consult ran
+/// at all. Folding the two together would be a semantic bug — a reader of
+/// `[DEGRADED: ...]` would conclude the trio was consulted, when it never
+/// was.
+///
+/// Without it a veto is invisible to the user: they asked something, the
+/// agent decided to consult, the gate stopped it, and what comes back is an
+/// ordinary model answer — indistinguishable from one backed by three
+/// perspectives, which inverts the gate's whole purpose (saving three model
+/// calls, not letting the user believe they happened). After the terminal
+/// rule (REQ-A20c) this matters more: the second veto disables `consult`
+/// for the REST of the turn, so every remaining answer in that turn carries
+/// this mark too — see `answering_without_consensus` in
+/// [`Agent::run_tool_loop`].
+pub const NO_CONSENSUS_MARK: &str =
+    "[NO CONSENSUS: answered directly — the three-model consult did not run]";
+
 /// Text returned to the agent after a veto (REQ-A20e).
 ///
 /// **Does not reveal the threshold**: saying how many characters are missing is
@@ -1015,18 +1039,27 @@ impl Agent {
     /// getting vetoed — see `a_forced_injection_bypasses_the_gate_while_a_model_choice_does_not`.
     ///
     /// # Outcomes
+    /// Every branch also updates `*answering_without_consensus` — REQ-A20's
+    /// [`NO_CONSENSUS_MARK`], not just the veto counter, tracks whether the
+    /// NEXT answer in this turn is backed by a real consult:
     /// - The door is already closed this turn (`consecutive_vetoes >=
-    ///   [`MAX_CONSECUTIVE_VETOES`]`): not even re-evaluated, zero model calls.
+    ///   [`MAX_CONSECUTIVE_VETOES`]`): not even re-evaluated, zero model calls,
+    ///   `*answering_without_consensus = true` (already was, by construction —
+    ///   see below — but set explicitly so this branch does not silently rely
+    ///   on that invariant holding).
     /// - [`GateVerdict::Veto`]: `consecutive_vetoes` increments; zero model
     ///   calls; the result names the mode and, on the second veto, that the
-    ///   door is now closed for the rest of the turn (REQ-A20c).
+    ///   door is now closed for the rest of the turn (REQ-A20c);
+    ///   `*answering_without_consensus = true`.
     /// - [`GateVerdict::Dispatch`]: `consecutive_vetoes` resets to `0` (a
     ///   dispatched consult spends three model calls — the exact cost the gate
     ///   exists to avoid — so resetting on it never opens a padding shortcut),
     ///   and the resolved `(Mode, ModeSource)` is injected into a CLONED input
     ///   (`magi_rs::magi::mode::input_for_dispatch`) before the real dispatch,
     ///   so [`ConsultTool`](crate::tools::consult::ConsultTool) reads the same
-    ///   mode the gate just evaluated instead of re-resolving it.
+    ///   mode the gate just evaluated instead of re-resolving it;
+    ///   `*answering_without_consensus = false` — a genuine consult ran, so
+    ///   whatever the model says next IS backed by consensus.
     ///
     /// There is deliberately **no anti-mode-shopping guard**: the agent can
     /// choose the mode via the tool's `input_schema` (REQ-A07b), so a veto
@@ -1059,12 +1092,16 @@ impl Agent {
         config: &AgentRunConfig,
         chunk_tx: &tokio::sync::mpsc::Sender<StreamPiece>,
         consecutive_vetoes: &mut u8,
+        answering_without_consensus: &mut bool,
         last_normalized_tool: &mut Option<(String, String)>,
         repeat_count: &mut i32,
     ) -> Result<Content> {
         if *consecutive_vetoes >= MAX_CONSECUTIVE_VETOES {
             // REQ-A20c: the door already closed this turn. Not even the gate
             // itself runs again — zero model calls, same as a fresh veto.
+            // Explicit rather than relying on it already being `true` from
+            // the veto that closed the door (see this method's rustdoc).
+            *answering_without_consensus = true;
             return Ok(Content::ToolResult {
                 tool_use_id: id.to_string(),
                 content: consult_disabled_message(),
@@ -1094,6 +1131,7 @@ impl Agent {
         match evaluate(query, &res.mode, &config.gate_thresholds) {
             GateVerdict::Veto { mode } => {
                 *consecutive_vetoes += 1;
+                *answering_without_consensus = true;
                 log_gate(
                     config,
                     &mode,
@@ -1118,6 +1156,7 @@ impl Agent {
                 // shortcut (REQ-A20c) — that cost IS what the gate exists to
                 // avoid, so paying it buys the reset honestly.
                 *consecutive_vetoes = 0;
+                *answering_without_consensus = false;
                 log_gate(
                     config,
                     &res.mode,
@@ -1236,6 +1275,20 @@ impl Agent {
         // sessions) — putting it there would let a turn vetoed in one session
         // disable `consult` in another.
         let mut consecutive_vetoes: u8 = 0;
+        // REQ-A20/SC-A20k: whether the NEXT answer produced in this turn is
+        // backed by a genuine three-model consult. Same lifetime, same flat
+        // local, same reasoning as `consecutive_vetoes` right above (turn-
+        // scoped, dies on any of the four exit paths, no `Drop`) — it is
+        // flipped in lockstep with that counter, inside
+        // `dispatch_consult_through_gate`: `true` on a veto or an
+        // already-closed door, `false` on a genuine dispatch. Read at the
+        // terminal (no-tool) turn below to decide whether the answer about
+        // to be returned needs `NO_CONSENSUS_MARK`. It intentionally does
+        // NOT describe the turn's history (a turn that vetoed, then
+        // dispatched, then answered is NOT marked — the dispatch reset it,
+        // exactly like `consecutive_vetoes`), only the response being given
+        // right now.
+        let mut answering_without_consensus = false;
         // REQ-H22: locks out any further `consult` request once the forced
         // pre-loop injection below has run (success, denial, or "not found").
         // Defensive/redundant by construction: the injection block runs iff
@@ -1467,6 +1520,7 @@ impl Agent {
                             config,
                             chunk_tx,
                             &mut consecutive_vetoes,
+                            &mut answering_without_consensus,
                             &mut last_normalized_tool,
                             &mut repeat_count,
                         )
@@ -1504,7 +1558,7 @@ impl Agent {
                 // Extract final text from MessageDone content — matches the
                 // pre-refactor return path used by both the selective and load_all
                 // branches (distinct from `full_text` which is delta-accumulated).
-                let final_text = response
+                let mut final_text = response
                     .content
                     .iter()
                     .rev()
@@ -1516,6 +1570,26 @@ impl Agent {
                         }
                     })
                     .unwrap_or_default();
+                // REQ-A20/SC-A20k: this answer is not backed by a real
+                // consult (a veto, or the door already closed this turn) —
+                // mark it on BOTH channels a caller might read it from.
+                // `final_text` is what headless (`run_query`) actually uses
+                // as the response; the TUI's autonomous chat path instead
+                // renders purely from `StreamPiece::Content` forwarded
+                // during the loop above and discards this return value
+                // entirely (`tui/mod.rs`'s `Ok(_) => Text("")`), so without
+                // this extra send the mark would reach headless but never
+                // reach the screen.
+                if answering_without_consensus {
+                    final_text.push_str(NO_CONSENSUS_MARK);
+                    if chunk_tx
+                        .send(StreamPiece::Content(NO_CONSENSUS_MARK.to_string()))
+                        .await
+                        .is_err()
+                    {
+                        return Err(anyhow::anyhow!("TUI connection closed during streaming"));
+                    }
+                }
                 return Ok((full_text, final_text));
             }
         }
