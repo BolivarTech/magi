@@ -3693,6 +3693,34 @@ mod tests {
         }
     }
 
+    /// Builds a fresh `AgentRunConfig` wired with a [`RecordingGateTelemetry`]
+    /// sink, alongside the sink itself (to read `gate_log` back after the
+    /// run). Factored out because every `run_turn_with_*` helper below needs
+    /// exactly this pair.
+    fn config_with_gate_log() -> (AgentRunConfig, Arc<std::sync::Mutex<Vec<String>>>) {
+        let gate_log_sink = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let config = AgentRunConfig {
+            gate_telemetry: Arc::new(RecordingGateTelemetry {
+                lines: gate_log_sink.clone(),
+            }),
+            ..AgentRunConfig::default()
+        };
+        (config, gate_log_sink)
+    }
+
+    /// Builds an `Agent` over `provider` with a fresh [`CountingConsultTool`]
+    /// double registered, alongside a handle to its call counter. Factored out
+    /// because every `run_turn_with_*` helper below needs exactly this pair,
+    /// differing only in which `Provider` double drives the turn.
+    fn agent_with_consult_double(
+        provider: impl Provider + 'static,
+    ) -> (Agent, Arc<std::sync::atomic::AtomicUsize>) {
+        let (tool, magi_calls) = CountingConsultTool::new();
+        let mut agent = Agent::new(Arc::new(provider));
+        agent.register_tool(Box::new(tool));
+        (agent, magi_calls)
+    }
+
     /// Emits ONE `ToolUse` of `consult` per entry of `script`, one PER TURN
     /// (a separate `stream_messages` call each), then a plain-text turn once
     /// `script` is exhausted so the loop ends normally.
@@ -3973,34 +4001,18 @@ mod tests {
     /// Corre UN turno con los contenidos dados como consults autorruteados,
     /// uno por turno (SC-A20f/SC-A20m).
     async fn run_turn_with_consults(contents: &[&str]) -> anyhow::Result<TurnOutcome> {
-        let provider = SequentialConsultProvider::new(contents);
-        let (tool, magi_calls) = CountingConsultTool::new();
-        let mut agent = Agent::new(Arc::new(provider));
-        agent.register_tool(Box::new(tool));
-        let gate_log_sink = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let config = AgentRunConfig {
-            gate_telemetry: Arc::new(RecordingGateTelemetry {
-                lines: gate_log_sink.clone(),
-            }),
-            ..AgentRunConfig::default()
-        };
+        let (mut agent, magi_calls) =
+            agent_with_consult_double(SequentialConsultProvider::new(contents));
+        let (config, gate_log_sink) = config_with_gate_log();
         run_and_observe(&mut agent, config, &magi_calls, &gate_log_sink).await
     }
 
     /// Igual, pero emitiendo los `ToolUse` en UN solo bloque de respuesta
     /// (SC-A20i).
     async fn run_turn_with_two_tooluse_blocks(contents: &[&str]) -> anyhow::Result<TurnOutcome> {
-        let provider = AllAtOnceConsultProvider::new(contents);
-        let (tool, magi_calls) = CountingConsultTool::new();
-        let mut agent = Agent::new(Arc::new(provider));
-        agent.register_tool(Box::new(tool));
-        let gate_log_sink = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let config = AgentRunConfig {
-            gate_telemetry: Arc::new(RecordingGateTelemetry {
-                lines: gate_log_sink.clone(),
-            }),
-            ..AgentRunConfig::default()
-        };
+        let (mut agent, magi_calls) =
+            agent_with_consult_double(AllAtOnceConsultProvider::new(contents));
+        let (config, gate_log_sink) = config_with_gate_log();
         run_and_observe(&mut agent, config, &magi_calls, &gate_log_sink).await
     }
 
@@ -4017,17 +4029,9 @@ mod tests {
     async fn run_turn_with_autonomous_consults(
         pairs: &[(&str, Mode)],
     ) -> anyhow::Result<TurnOutcome> {
-        let provider = ScriptedModeConsultProvider::new(pairs);
-        let (tool, magi_calls) = CountingConsultTool::new();
-        let mut agent = Agent::new(Arc::new(provider));
-        agent.register_tool(Box::new(tool));
-        let gate_log_sink = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let config = AgentRunConfig {
-            gate_telemetry: Arc::new(RecordingGateTelemetry {
-                lines: gate_log_sink.clone(),
-            }),
-            ..AgentRunConfig::default()
-        };
+        let (mut agent, magi_calls) =
+            agent_with_consult_double(ScriptedModeConsultProvider::new(pairs));
+        let (config, gate_log_sink) = config_with_gate_log();
         run_and_observe(&mut agent, config, &magi_calls, &gate_log_sink).await
     }
 
@@ -4041,10 +4045,8 @@ mod tests {
         exit: Exit,
         contents: &[&str],
     ) -> tokio::sync::Mutex<Agent> {
-        let provider = ClosingTurnProvider::new(contents, exit);
-        let (tool, _calls) = CountingConsultTool::new();
-        let mut agent = Agent::new(Arc::new(provider));
-        agent.register_tool(Box::new(tool));
+        let (mut agent, _calls) =
+            agent_with_consult_double(ClosingTurnProvider::new(contents, exit));
 
         let max_tool_calls = if matches!(exit, Exit::MaxToolCalls) {
             contents.len()
@@ -4068,17 +4070,10 @@ mod tests {
         contents: &[&str],
     ) -> anyhow::Result<TurnOutcome> {
         let mut guard = agent.lock().await;
-        let provider = SequentialConsultProvider::new(contents);
-        guard.set_provider(Arc::new(provider));
         let (tool, magi_calls) = CountingConsultTool::new();
+        guard.set_provider(Arc::new(SequentialConsultProvider::new(contents)));
         guard.register_or_replace_tool(Box::new(tool));
-        let gate_log_sink = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let config = AgentRunConfig {
-            gate_telemetry: Arc::new(RecordingGateTelemetry {
-                lines: gate_log_sink.clone(),
-            }),
-            ..AgentRunConfig::default()
-        };
+        let (config, gate_log_sink) = config_with_gate_log();
         run_and_observe(&mut guard, config, &magi_calls, &gate_log_sink).await
     }
 
