@@ -1130,8 +1130,10 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
     // REQ-A22: `--init-config` was retired — `magi init` is the only scaffolder now.
     // Reaching here with the flag set is unreachable in practice (its value-parser,
     // `reject_init_config`, always fails clap's own parse), so there is no runtime
-    // branch to keep; `write_default_config` remains in use by the TUI `/init-config`
-    // slash command.
+    // branch to keep. The TUI `/init-config` slash command is retired too (fix round
+    // 1, coordinator, 2026-08-02): it now shows `tui::init_config_retired_message()`
+    // instead of calling `write_default_config`, which had no remaining caller once
+    // both surfaces were retired and was removed from `defaults.rs`.
     // ── TUI path ─────────────────────────────────────────────────────────
     let mut startup_notices: Vec<String> = hardening_warnings
         .iter()
@@ -1395,7 +1397,6 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
         agent,
         startup_notices,
         consult_magi,
-        workspace_root,
         magi_config.magi.auto_approve,
         secret_store,
     )

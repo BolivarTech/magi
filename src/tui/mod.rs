@@ -115,10 +115,23 @@ pub(crate) fn parse_toggle_show_thinking(trimmed: &str) -> bool {
     trimmed.trim() == "/toggle-show-thinking"
 }
 
-/// True if `trimmed` is the `/init-config` command (scaffolds a default magi.toml
-/// from inside the TUI). Mirrors `parse_toggle_show_thinking`.
+/// True if `trimmed` is the `/init-config` command. Mirrors `parse_toggle_show_thinking`.
+///
+/// **Still recognized after retirement (REQ-A22)** — only what happens once recognized
+/// changed, from scaffolding a `magi.toml` to showing [`init_config_retired_message`].
+/// Making this return `false` instead would fall through to sending the literal text
+/// `/init-config` to the agent as a chat message, which is a worse outcome than a clear
+/// retirement notice.
 pub(crate) fn parse_init_config(trimmed: &str) -> bool {
     trimmed.trim() == "/init-config"
+}
+
+/// Message shown when `/init-config` is used (REQ-A22, SC-A22): the command is
+/// retired, and this names the replacement instead of silently doing nothing or
+/// falling through to being sent to the agent — same treatment as `reject_init_config`
+/// in `main.rs` for the CLI `--init-config` flag.
+pub(crate) fn init_config_retired_message() -> String {
+    "System: /init-config was retired; run `magi init` instead.".to_string()
 }
 
 /// Events that can happen in the UI.
@@ -393,7 +406,6 @@ pub async fn run_tui_ext(
     agent: Agent,
     startup_notices: Vec<String>,
     consult: Option<std::sync::Arc<magi_core::orchestrator::Magi>>,
-    workspace_root: std::path::PathBuf,
     magi_auto_approve: bool,
     secret_store: Option<SharedSecretStore>,
 ) -> anyhow::Result<()> {
@@ -661,7 +673,7 @@ pub async fn run_tui_ext(
     });
 
     let app = App::new(event_tx, response_rx, approval_rx);
-    let res = run_app(&mut terminal, app, workspace_root).await;
+    let res = run_app(&mut terminal, app).await;
 
     let _ = disable_raw_mode();
     let _ = execute!(
@@ -677,11 +689,7 @@ pub async fn run_tui_ext(
     Ok(())
 }
 
-async fn run_app<B: Backend>(
-    terminal: &mut Terminal<B>,
-    mut app: App,
-    workspace_root: std::path::PathBuf,
-) -> io::Result<()> {
+async fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Result<()> {
     loop {
         terminal.draw(|f| ui(f, &mut app))?;
 
@@ -953,16 +961,7 @@ async fn run_app<B: Backend>(
                                         continue;
                                     }
                                     if parse_init_config(trimmed) {
-                                        match crate::defaults::write_default_config(&workspace_root)
-                                        {
-                                            Ok(path) => app.push_message(format!(
-                                                "System: wrote default magi.toml to {}",
-                                                path.display()
-                                            )),
-                                            Err(e) => app.push_message(format!(
-                                                "System: could not write magi.toml ({e})"
-                                            )),
-                                        }
+                                        app.push_message(init_config_retired_message());
                                         continue;
                                     }
                                     match trimmed {
@@ -1010,7 +1009,7 @@ async fn run_app<B: Backend>(
                                                     .to_string(),
                                             );
                                             app.push_message(
-                                                "  /init-config    - Write a default magi.toml to the workspace"
+                                                "  (run `magi init` from a shell to scaffold .magi/ and its magi.toml)"
                                                     .to_string(),
                                             );
                                             continue;
