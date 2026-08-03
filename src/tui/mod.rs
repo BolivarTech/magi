@@ -150,6 +150,12 @@ fn split_leading_token(s: &str) -> Option<(&str, &str)> {
 /// `magi.toml` value, and reusing it avoids a third, slightly different
 /// acceptance rule for the same three labels.
 ///
+/// A REPEATED `--mode` is last-value-wins (each occurrence overwrites the
+/// previous one) — a DELIBERATE mirror of clap's own default behavior for a
+/// non-multiple arg (`HeadlessArgs.mode: Option<CliMode>` on the CLI surface
+/// behaves identically), not an oversight, despite this parser otherwise
+/// failing closed on every unrecognized `--flag`.
+///
 /// # Errors
 /// See [`TuiConsultParseError`]'s variants.
 // Narrow allow: consumed by the real `/consult` dispatch once mode resolution is
@@ -1887,6 +1893,17 @@ mod tests {
         let cmd = super::parse_tui_consult("/consult").unwrap();
         assert_eq!(cmd.mode, None);
         assert_eq!(cmd.query, "");
+    }
+
+    /// m2: pins last-value-wins on a repeated `--mode` as a DECISION, not an oversight —
+    /// this parser fails closed on everything else it doesn't recognize, so a reader
+    /// needs a test (and the rustdoc line above `parse_tui_consult`) to tell the two
+    /// apart. Mirrors clap's own behavior for a non-multiple arg.
+    #[test]
+    fn test_parse_tui_consult_last_mode_flag_wins_on_repeat() {
+        let cmd = super::parse_tui_consult("/consult --mode design --mode analysis query").unwrap();
+        assert_eq!(cmd.mode, Some(Mode::Analysis));
+        assert_eq!(cmd.query, "query");
     }
 
     #[test]

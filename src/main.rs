@@ -2784,23 +2784,42 @@ mod tests {
         use super::*;
 
         /// SC-A07b: lo explícito gana en las cuatro superficies.
+        ///
+        /// m1 fix: las TRES etiquetas por las TRES superficies (CLI, envelope, TUI), no solo
+        /// `"design"`. Con una sola etiqueta cubierta, `"code-review"` podía divergir entre el
+        /// CLI y `normalize_label` sin que ningún test de este grupo lo viera — el mismo bug
+        /// sería válido en `magi.toml` y rechazado en la línea de comandos, o al revés.
         #[test]
         fn every_surface_accepts_an_explicit_mode() {
             use clap::Parser;
 
-            let a = Args::parse_from(["magi-rs", "consult", "--mode", "design"]);
-            assert!(matches!(a.mode_of_consult(), Some(Mode::Design)));
+            for (label, expected) in [
+                ("code-review", Mode::CodeReview),
+                ("design", Mode::Design),
+                ("analysis", Mode::Analysis),
+            ] {
+                let a = Args::parse_from(["magi-rs", "consult", "--mode", label]);
+                assert_eq!(
+                    a.mode_of_consult(),
+                    Some(expected),
+                    "CLI surface, label {label:?}"
+                );
 
-            let env =
-                parse_input(br#"{"prompt":"x","mode":"design"}"#, None).expect("valid envelope");
-            assert_eq!(env.resolved_mode().unwrap(), Some(Mode::Design));
+                let env_json = format!(r#"{{"prompt":"x","mode":"{label}"}}"#);
+                let env = parse_input(env_json.as_bytes(), None).expect("valid envelope");
+                assert_eq!(
+                    env.resolved_mode().unwrap(),
+                    Some(expected),
+                    "envelope surface, label {label:?}"
+                );
 
-            assert_eq!(
-                crate::tui::parse_tui_consult("/consult --mode design ¿esto o aquello?")
-                    .unwrap()
-                    .mode,
-                Some(Mode::Design)
-            );
+                let tui_line = format!("/consult --mode {label} ¿esto o aquello?");
+                assert_eq!(
+                    crate::tui::parse_tui_consult(&tui_line).unwrap().mode,
+                    Some(expected),
+                    "TUI surface, label {label:?}"
+                );
+            }
         }
 
         /// SC-A07q: `default_mode` inválido es error de configuración.
@@ -2842,25 +2861,29 @@ mod tests {
             );
         }
 
-        /// Defect #12 (registered plan debt), verified empirically rather than by
-        /// reading clap's source alone: clap's default `ValueEnum` kebab-casing for
-        /// `CodeReview`/`Design`/`Analysis` must round-trip through the SAME three
-        /// labels `normalize_label` accepts, or the same word would be valid in
-        /// `magi.toml` and rejected on the command line.
+        /// Defect #12 (registered plan debt) + m1 fix: the earlier version compared clap's
+        /// kebab-casing against HARDCODED literals typed by hand, which catches a clap-derive
+        /// casing regression but would NOT catch `normalize_label`'s accepted vocabulary
+        /// drifting away from those same three strings — the two sides could still diverge
+        /// without this test noticing. The property that actually matters, and that survives
+        /// either side changing, is "whatever clap emits, the shared vocabulary accepts": this
+        /// reads the value straight from `ValueEnum::to_possible_value` (clap's own answer for
+        /// what a variant parses from) and feeds THAT into `normalize_label`, never a literal.
         #[test]
         fn cli_mode_casing_matches_the_shared_mode_vocabulary() {
-            use clap::Parser;
+            use clap::ValueEnum;
 
-            for (flag_value, expected) in [
-                ("code-review", Mode::CodeReview),
-                ("design", Mode::Design),
-                ("analysis", Mode::Analysis),
-            ] {
-                let a = Args::parse_from(["magi-rs", "consult", "--mode", flag_value]);
+            for variant in CliMode::value_variants() {
+                let clap_emitted = variant
+                    .to_possible_value()
+                    .expect("a derived ValueEnum always has a possible value")
+                    .get_name()
+                    .to_string();
                 assert_eq!(
-                    a.mode_of_consult(),
-                    Some(expected),
-                    "clap value {flag_value:?} must map onto the shared vocabulary"
+                    magi_rs::magi::mode::normalize_label(&clap_emitted),
+                    Some(variant.into_mode()),
+                    "clap's own emitted value {clap_emitted:?} must be accepted by the shared \
+                     vocabulary"
                 );
             }
         }
