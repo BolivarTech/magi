@@ -243,16 +243,15 @@ mod tests {
         sink.on_gate_evaluation(&Mode::Design, 0, GATE_DESIGN, false);
     }
 
-    // NOTA HONESTA: la propiedad de REQ-A20 "el gate ve el ruteo AUTÓNOMO
-    // (`ToolUse`) y NO la inyección forzada (`authorize_and_execute_tool`)" es
-    // DELIBERADAMENTE intestable desde este módulo. Los dos call sites viven en
-    // `agent/mod.rs`, no acá — `gate.rs` solo expone `evaluate`, que no sabe ni
-    // puede saber quién la invocó. Un test escrito acá solo puede SIMULAR los
-    // dos call sites con literales, y una simulación de eso es exactamente lo
-    // que hace falso el test: hace pasar "el gate corre en el sitio correcto"
-    // por "escribí `true` en un lado y llamé `evaluate` en el otro", que no
-    // ejercita ninguna distinción real. El test real —el que efectivamente
-    // dispara `authorize_and_execute_tool` y el bucle de `ToolUse` contra un
-    // `Agent` de verdad— es obligación de Task 3.2, que es quien cablea el gate
-    // dentro de esos dos call sites.
+    // NOTA HONESTA (cerrada por Task 3.2): la propiedad de REQ-A20 "el gate ve
+    // el ruteo AUTÓNOMO (`ToolUse`) y NO la inyección forzada
+    // (`authorize_and_execute_tool`)" era DELIBERADAMENTE intestable desde este
+    // módulo — los dos call sites viven en `agent/mod.rs`, no acá; `gate.rs`
+    // solo expone `evaluate`, que no sabe ni puede saber quién la invocó. Un
+    // test escrito acá solo podía SIMULAR los dos call sites con literales, y
+    // una simulación de eso era exactamente lo que hacía falso al test
+    // anterior (borrado en Task 3.1 por esa razón). El test real, que dispara
+    // `authorize_and_execute_tool` y el bucle de `ToolUse` contra un `Agent` de
+    // verdad, ahora vive en `agent::tests::
+    // a_forced_injection_bypasses_the_gate_while_a_model_choice_does_not`.
 }
