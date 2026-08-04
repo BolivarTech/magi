@@ -1934,6 +1934,27 @@ fn build_native_provider(
     })
 }
 
+// Solo test (I2, fix round 2): rastro de qué wireó la ÚLTIMA llamada a
+// `build_magi_orchestrator` EN ESTE HILO — (asiento, modelo resuelto, envuelto-en-
+// RetryProvider). Existe para que un test pueda afirmar contra la función REAL en vez
+// de reconstruir su lógica de wiring en un `MagiBuilder` propio (que es exactamente lo
+// que dejaba pasar sin ver que el envoltorio de producción desapareciera). No cambia
+// la firma de `build_magi_orchestrator` — cada test de este archivo corre en su PROPIO
+// hilo (el harness de `#[test]` los spawnea así por diseño), así que el thread-local
+// aísla una llamada de otra sin coordinación extra.
+#[cfg(test)]
+thread_local! {
+    static SEAT_WIRING_TRACE: std::cell::RefCell<Vec<(AgentName, String, bool)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Solo test: el rastro que dejó la ÚLTIMA llamada a `build_magi_orchestrator` en
+/// este hilo. Ver [`SEAT_WIRING_TRACE`].
+#[cfg(test)]
+fn seat_wiring_trace() -> Vec<(AgentName, String, bool)> {
+    SEAT_WIRING_TRACE.with(|t| t.borrow().clone())
+}
+
 /// Construye el trío MAGI con los providers NATIVOS de magi-core (REQ-A01).
 ///
 /// Desaparece el adapter y con él el doblado del system prompt: cada mage recibe su
@@ -2018,6 +2039,12 @@ fn build_magi_orchestrator(
     // Los TRES asientos se construyen primero, para poder reportar TODOS los que fallen.
     let mut failures: Vec<(AgentName, SeatError)> = Vec::new();
     let mut seats: Vec<(AgentName, Arc<dyn LlmProvider>)> = Vec::new();
+
+    // Solo test (I2, fix round 2): limpia el rastro de la llamada ANTERIOR en este
+    // hilo antes de empezar — `seat_wiring_trace()` de un test debe ver SOLO lo que
+    // ESTA llamada wireó.
+    #[cfg(test)]
+    SEAT_WIRING_TRACE.with(|t| t.borrow_mut().clear());
 
     for (seat, toml_or_backend_model) in cfg.magi.seats(backend_model) {
         // `MAGI_MODEL_<AGENT>` gana sobre lo que `seats()` ya resolvió (TOML, o el
@@ -5776,6 +5803,55 @@ mod tests {
                     "{seat:?}: el system prompt se dobló dentro del turno de usuario"
                 );
             }
+        }
+
+        /// I2 (fix round 2, IMPORTANT): SC-A03 y SC-A05 (más abajo) afirmaban contra
+        /// un `MagiBuilder` propio, envuelto en su PROPIO `RetryProvider` — borrar el
+        /// envoltorio real de `build_magi_orchestrator` los dejaba en verde igual,
+        /// mientras su comentario decía "sin el envoltorio, este test se pone rojo".
+        /// Esa afirmación era falsa.
+        ///
+        /// Esta prueba llama a la función REAL, con `ollama` (keyless, sin credencial
+        /// ni red necesaria para CONSTRUIR — solo arma el cliente HTTP, no lo usa), y
+        /// lee `seat_wiring_trace()` — el rastro que `build_magi_orchestrator` deja
+        /// SOLO en builds de test, en la MISMA rama que hace el wrap real. Si alguien
+        /// borra el `RetryProvider::with_config(...)` de producción sin tocar el
+        /// rastro, el conteo dejaría de coincidir con lo que `seats.push` produce y
+        /// esta prueba cae. No es downcasting en runtime — `LlmProvider` es un trait
+        /// foráneo de magi-core sin `Any` (R-A01 prohíbe tocar esa crate) — así que es
+        /// la aproximación más fuerte alcanzable sin modificarla.
+        #[test]
+        fn build_magi_orchestrator_wires_three_distinct_seats_each_wrapped_in_retry() {
+            let cfg = MagiConfig::from_toml_str("provider = \"ollama\"\n").unwrap();
+            let mut notices = Vec::new();
+            let magi = build_magi_orchestrator(
+                &cfg,
+                ProviderKind::Ollama,
+                &test_endpoints(),
+                None,
+                None,
+                &MagiEnvModelOverrides::default(),
+                &mut notices,
+            )
+            .expect("ollama es keyless: debe construir sin credenciales ni red");
+            drop(magi);
+
+            let trace = seat_wiring_trace();
+            assert_eq!(trace.len(), 3, "los tres asientos deben quedar wireados");
+            let seats: std::collections::HashSet<AgentName> =
+                trace.iter().map(|(s, _, _)| *s).collect();
+            assert_eq!(
+                seats.len(),
+                3,
+                "los tres asientos wireados deben ser DISTINTOS entre sí"
+            );
+            for expected in [AgentName::Melchior, AgentName::Balthasar, AgentName::Caspar] {
+                assert!(seats.contains(&expected), "falta el asiento {expected:?}");
+            }
+            assert!(
+                trace.iter().all(|(_, _, wrapped)| *wrapped),
+                "los tres asientos deben quedar envueltos en RetryProvider (REQ-A03): {trace:?}"
+            );
         }
 
         /// SC-A02: ninguna ruta de producción implementa `LlmProvider` a través de un
