@@ -1595,6 +1595,10 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
             consult: consult_magi,
             consult_unavailable_message,
             magi_auto_approve: magi_config.magi.auto_approve,
+            // M1 fix: threads `[magi].agent_timeout_secs` through to the
+            // post-`/login` trio rebuild, which used to hardcode the
+            // built-in default regardless of this config.
+            agent_timeout_secs: magi_config.magi.agent_timeout_secs,
         },
         secret_store,
         crate::tui::TuiMagiRuntimeConfig {

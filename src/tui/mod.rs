@@ -708,6 +708,14 @@ pub struct TuiMagiRuntimeConfig {
 /// - `magi_auto_approve` — whether the registered `consult` tool
 ///   auto-approves an autonomous invocation, mirrored into every rebuilt
 ///   `ConsultTool` after `/login` (I-5).
+/// - `agent_timeout_secs` — `[magi].agent_timeout_secs` as read from config,
+///   UNRESOLVED (may be `None`). Fed to [`post_login_agent_timeout_secs`] on
+///   every post-`/login` rebuild, which applies the SAME precedence
+///   `build_magi_orchestrator` (`main.rs`) already uses at startup. Before
+///   this field existed, the rebuild ignored config entirely and hardcoded
+///   [`magi_rs::magi::AGENT_TIMEOUT_SECS`] — a configured ceiling silently
+///   stopped applying after a `/login` even though it kept being honored
+///   everywhere else in the process.
 pub struct TuiConsultWiring {
     /// The live orchestrator, or `None` if the trio failed to build.
     pub consult: Option<std::sync::Arc<magi_core::orchestrator::Magi>>,
@@ -715,6 +723,29 @@ pub struct TuiConsultWiring {
     pub consult_unavailable_message: Option<String>,
     /// Whether the registered `consult` tool auto-approves.
     pub magi_auto_approve: bool,
+    /// `[magi].agent_timeout_secs`, unresolved; see
+    /// [`post_login_agent_timeout_secs`].
+    pub agent_timeout_secs: Option<u64>,
+}
+
+/// Resolves the wall-clock ceiling used to rebuild the MAGI trio's native
+/// `ClaudeProvider` after `/login` (I-5) — the SAME precedence
+/// `build_magi_orchestrator` (`main.rs`) already uses at startup:
+/// `cfg.magi.agent_timeout_secs.unwrap_or(AGENT_TIMEOUT_SECS)`.
+///
+/// Extracted from the `/login` event handler for the same reason as
+/// [`handle_login`]/[`handle_trio_rebuild_failure`] above: the full TUI
+/// event loop is intractable to drive in a test, so the ceiling-selection
+/// decision is tested here as a plain `fn`.
+fn post_login_agent_timeout_secs(configured: Option<u64>) -> u64 {
+    // FIXME(M1, red): still ignores `configured` — the rebuild handler
+    // hardcoded `magi_rs::magi::AGENT_TIMEOUT_SECS` unconditionally, and this
+    // extraction faithfully preserves that behavior so the defect is
+    // observable through a test instead of buried in an untestable event
+    // loop. `post_login_rebuild_ceiling_honors_a_configured_agent_timeout`
+    // pins the fix this leaves undone.
+    let _ = configured;
+    magi_rs::magi::AGENT_TIMEOUT_SECS
 }
 
 /// # Parameters (REQ-A07d additions over the pre-MS2 signature)
@@ -735,6 +766,7 @@ pub async fn run_tui_ext(
         consult,
         consult_unavailable_message,
         magi_auto_approve,
+        agent_timeout_secs: configured_agent_timeout_secs,
     } = consult_wiring;
     let TuiMagiRuntimeConfig {
         mode_classifier,
@@ -970,18 +1002,23 @@ pub async fn run_tui_ext(
                                             // every other native seat. Single-shared-provider shape,
                                             // matching the `Magi::new` path this replaces (no
                                             // per-agent overrides on the OAuth-login rebuild).
-                                            let ceiling = std::time::Duration::from_secs(
-                                                magi_rs::magi::AGENT_TIMEOUT_SECS,
+                                            // M1 fix: the ceiling comes from
+                                            // `configured_agent_timeout_secs`
+                                            // (`[magi].agent_timeout_secs`),
+                                            // not the hardcoded built-in — see
+                                            // `post_login_agent_timeout_secs`.
+                                            let agent_timeout_secs = post_login_agent_timeout_secs(
+                                                configured_agent_timeout_secs,
                                             );
                                             let client_timeout =
                                                 magi_rs::magi::derive_client_timeout(
-                                                    ceiling.as_secs(),
+                                                    agent_timeout_secs,
                                                 );
                                             let mut retry =
                                                 magi_core::provider::RetryConfig::default();
                                             retry.operation_budget =
                                                 magi_rs::magi::derive_operation_budget(
-                                                    ceiling.as_secs(),
+                                                    agent_timeout_secs,
                                                 );
                                             match magi_core::providers::claude::ClaudeProvider::with_timeout(
                                                 api_key,
@@ -2008,6 +2045,48 @@ mod tests {
             safe.as_str().contains("evil.example.com"),
             "the host stays visible — only the userinfo is redacted: {}",
             safe.as_str()
+        );
+    }
+
+    /// M1: a configured `[magi].agent_timeout_secs` must survive a
+    /// post-`/login` MAGI trio rebuild instead of silently reverting to the
+    /// built-in default — everywhere else in the process (in particular
+    /// `build_magi_orchestrator`'s startup build) it keeps being honored.
+    ///
+    /// `CONFIGURED_CEILING_SECS` is deliberately distinguishable from
+    /// `magi_rs::magi::AGENT_TIMEOUT_SECS` (90s): a test that only checked
+    /// "some value came back" would still pass if the rebuild kept ignoring
+    /// config, so the assertion pins the DIRECTION — the resolved ceiling
+    /// must equal the value the operator configured, not the built-in.
+    #[test]
+    fn post_login_rebuild_ceiling_honors_a_configured_agent_timeout() {
+        const CONFIGURED_CEILING_SECS: u64 = 45;
+        assert_ne!(
+            CONFIGURED_CEILING_SECS,
+            magi_rs::magi::AGENT_TIMEOUT_SECS,
+            "the fixture must differ from the built-in default, or this test \
+             cannot tell a fixed rebuild from a still-broken one"
+        );
+
+        assert_eq!(
+            post_login_agent_timeout_secs(Some(CONFIGURED_CEILING_SECS)),
+            CONFIGURED_CEILING_SECS,
+            "a configured [magi].agent_timeout_secs must survive a /login \
+             rebuild (M1) instead of silently reverting to the built-in \
+             default"
+        );
+    }
+
+    /// Companion to the test above: absence of `[magi].agent_timeout_secs`
+    /// must still fall back to the built-in default, matching
+    /// `build_magi_orchestrator`'s own `unwrap_or(AGENT_TIMEOUT_SECS)`
+    /// precedence — the fix must not turn `None` into a panic or a zero
+    /// ceiling.
+    #[test]
+    fn post_login_rebuild_ceiling_falls_back_to_the_builtin_when_unconfigured() {
+        assert_eq!(
+            post_login_agent_timeout_secs(None),
+            magi_rs::magi::AGENT_TIMEOUT_SECS
         );
     }
 
