@@ -581,6 +581,18 @@ impl OpenAiCompatibleProvider {
     }
 }
 
+#[cfg(test)]
+impl OpenAiCompatibleProvider {
+    /// Test-only accessor exposing the real `reqwest::Client` this provider
+    /// built (SC-A19 fix round 1). Hands back the actual client — never a
+    /// fabricated stand-in — so a test can inspect its `Debug` output, which
+    /// is the only way to observe `reqwest::Client`'s total-timeout
+    /// configuration: the type exposes no public getter for it.
+    fn client_for_test(&self) -> &reqwest::Client {
+        &self.client
+    }
+}
+
 /// Constructs an OpenAI-compatible provider as a trait object. Single
 /// construction site for [`OpenAiSettings`], reused by the principal backend and
 /// by per-agent MAGI overrides (same endpoint/key, different model) — RF-8.
@@ -2875,18 +2887,119 @@ mod tests {
     // what the migration discarded in spec §3 would have broken (`LlmProvider`
     // is request/response, has no streaming, and no tool calling).
     //
+    // The "no total-request timeout" property is pinned TWICE, deliberately,
+    // by two tests that prove different things (fix round 1 — the original
+    // single stalling-socket test only caught a regression SHORTER than its
+    // 2s stall, missing exactly the realistic shape: someone re-adding a 30s
+    // or 300s total timeout, the latter being what D-A07 rejected outright
+    // for magi-core's `OllamaProvider`):
+    //   - `the_principal_providers_client_carries_no_total_timeout_marker`
+    //     pins the CLIENT'S CONFIGURATION, instantly and for a timeout of any
+    //     duration, via `reqwest::Client`'s `Debug` output.
+    //   - `the_principal_provider_has_no_total_request_timeout` (below) pins
+    //     that nothing else in the CALL PATH imposes a deadline either — a
+    //     real stalling socket, not just client config.
+    //
     // The third SC-A19 property — a malformed `data:` line must not abort the
     // stream — is already pinned above by `test_openai_swallows_malformed_line`
     // (predates this task). It is intentionally not duplicated here; see
     // task-4.2-report.md for the revert-and-retest evidence that it is not
     // vacuous.
 
-    /// Mid-response stall used to pin that the client has no total-request
-    /// timeout. Long enough that a total-request timeout added to
-    /// [`OpenAiCompatibleProvider::new`] by a future regression — of any
-    /// duration shorter than this — turns the stall into a hard `Err`; short
+    /// The literal marker `reqwest::Client`'s `Debug` impl emits when (and
+    /// only when) a total-request timeout is set via
+    /// `ClientBuilder::timeout(...)`.
+    ///
+    /// This is NOT the string `"timeout"`. `Client`'s `Debug` impl
+    /// (`async_impl/client.rs:2727`) delegates to `ClientRef::fmt_fields`
+    /// (`:2957`), which prints the total timeout via
+    /// `RequestConfig<TotalTimeout>::fmt_as_field` (`config.rs:60`) — and that
+    /// helper uses `std::any::type_name::<TotalTimeout>()` as the field NAME,
+    /// not a hardcoded string. `ClientBuilder`'s own `Debug` impl is a
+    /// DIFFERENT code path (`Config::fmt_fields`, `client.rs:2772`) that does
+    /// print the literal field `"timeout"` — but `OpenAiCompatibleProvider`
+    /// holds a built `Client`, never a `ClientBuilder`, so that path is not
+    /// what these tests exercise.
+    ///
+    /// Verified empirically (not just read) against the pinned
+    /// `reqwest = 0.13.4` (see `Cargo.lock`) by probing
+    /// `format!("{:?}", client)` on three clients:
+    /// - plain `Client::new()`: no timeout-shaped field at all.
+    /// - `.timeout(Duration::from_secs(30))`:
+    ///   `reqwest::config::TotalTimeout: 30s`.
+    /// - `.connect_timeout(Duration::from_secs(7))`: no field at all —
+    ///   `ClientRef` (what `Client`'s `Debug` reads) has no
+    ///   `connect_timeout` field; only `ClientBuilder`'s `Debug` shows it.
+    ///
+    /// That last point is why this needle cannot collide: `connect_timeout`
+    /// never appears in a `Client`'s `Debug` output at all, and the only
+    /// other timeout-shaped field `ClientRef` can print — `read_timeout`
+    /// (`client.rs:2988`, unused by this provider) — is a different token
+    /// than `TotalTimeout` and cannot match it as a substring.
+    const TOTAL_TIMEOUT_DEBUG_MARKER: &str = "reqwest::config::TotalTimeout";
+
+    /// Positive-control timeout for
+    /// [`the_principal_providers_client_carries_no_total_timeout_marker`].
+    /// The exact duration is immaterial to what the control proves (any
+    /// `Some(_)` total timeout must surface the marker) — `30` is chosen to
+    /// echo the realistic regression shape named in the fix-round-1 finding
+    /// (a re-added `.timeout(Duration::from_secs(30))`).
+    const POSITIVE_CONTROL_TIMEOUT: Duration = Duration::from_secs(30);
+
+    #[test]
+    fn the_principal_providers_client_carries_no_total_timeout_marker() {
+        // SC-A19 fix round 1: the 2s stalling-socket test below only proves
+        // the absence of a timeout SHORTER than its stall. A regression that
+        // reintroduces a 30s or 300s total timeout — the latter being
+        // precisely what D-A07 rejected for magi-core's `OllamaProvider` —
+        // sails straight through it. `reqwest::Client` exposes no public
+        // timeout getter, but its `Debug` impl only ever prints
+        // `TOTAL_TIMEOUT_DEBUG_MARKER` when a total timeout is actually set
+        // (see that constant's rustdoc for the verified mechanism), so the
+        // property is observable instantly and deterministically, for a
+        // timeout of ANY duration, with no wall-clock at all.
+        let client = OpenAiCompatibleProvider::new(OpenAiSettings {
+            base_url: "http://127.0.0.1:1".into(),
+            api_key: "k".into(),
+            model: "m".into(),
+        });
+        let debug = format!("{:?}", client.client_for_test());
+        assert!(
+            !debug.contains(TOTAL_TIMEOUT_DEBUG_MARKER),
+            "the principal provider's client must carry no total-request \
+             timeout marker, got: {debug}"
+        );
+
+        // Positive control (mandatory, same test): prove the marker DOES
+        // surface for a client that legitimately carries a total timeout.
+        // Without this, a future reqwest release that stops emitting the
+        // field would make the assertion above pass for the wrong reason —
+        // silently switching the guardrail off, exactly the failure mode
+        // this project's spec condemns repeatedly. With the control, that
+        // release breaks this test instead of the guardrail going dark.
+        let with_timeout = reqwest::Client::builder()
+            .timeout(POSITIVE_CONTROL_TIMEOUT)
+            .build()
+            .expect("build a client with a total timeout for the positive control");
+        let control_debug = format!("{with_timeout:?}");
+        assert!(
+            control_debug.contains(TOTAL_TIMEOUT_DEBUG_MARKER),
+            "positive control: a client built WITH .timeout(...) must show \
+             the marker in its Debug output, got: {control_debug}"
+        );
+    }
+
+    /// Mid-response stall used to pin that nothing in the call path — beyond
+    /// the client configuration already pinned by
+    /// [`the_principal_providers_client_carries_no_total_timeout_marker`] —
+    /// imposes a deadline on a slow-arriving SSE stream. Long enough that a
+    /// deadline shorter than this turns the stall into a hard `Err`; short
     /// enough not to bloat `cargo nextest`'s wall-clock (this box already
-    /// starves under load, see `CLAUDE.local.md`).
+    /// starves under load, see `CLAUDE.local.md`). This constant deliberately
+    /// stays short — widening it to also catch a 30s/300s-shaped regression
+    /// would pay real wall-clock on every suite run forever; that shape is
+    /// instead covered, for free and deterministically, by the sibling
+    /// `Debug`-marker test above.
     const NO_TIMEOUT_STALL: Duration = Duration::from_secs(2);
 
     /// Spawns a one-shot raw TCP server on an ephemeral loopback port that
@@ -2943,11 +3056,15 @@ mod tests {
     async fn the_principal_provider_has_no_total_request_timeout() {
         // SC-A19 / REQ-A19b: the client must still tolerate a stall before the
         // first SSE byte — exactly what local Ollama's cold-load looks like
-        // (`OpenAiCompatibleProvider::new` rustdoc). `reqwest::Client` exposes
-        // no timeout getter, so this is pinned behaviourally rather than by
-        // reading a field back: a total-request timeout shorter than the stall
-        // would surface as an `Err` here (verified by temporarily reintroducing
-        // one — see task-4.2-report.md for the red output).
+        // (`OpenAiCompatibleProvider::new` rustdoc). This proves the CALL PATH
+        // imposes no deadline shorter than NO_TIMEOUT_STALL end-to-end (a real
+        // socket, real send_messages() drive) — it is NOT the test that pins
+        // "no total timeout of any duration"; that is
+        // `the_principal_providers_client_carries_no_total_timeout_marker`
+        // above, which checks the client's actual configuration and is not
+        // bounded by wall-clock. A total-request timeout shorter than the
+        // stall would surface as an `Err` here (verified by temporarily
+        // reintroducing one — see task-4.2-report.md for the red output).
         let base_url = spawn_stalling_sse_server().await;
         let p = OpenAiCompatibleProvider::new(OpenAiSettings {
             base_url,
