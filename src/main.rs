@@ -1508,34 +1508,14 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
     // `input_warn_tokens` puede derivarse de la ventana de los MAGES (REQ-A24b) y el
     // arranque anuncia los tres estados de medición (REQ-A24c). Nunca bloquea ni falla el
     // arranque: cada sonda falla abierta dentro de `probe_models`/`orchestrate_probes`.
-    let probe_backend_model = resolve_backend_model(&magi_config, provider_kind).to_string();
-    let probe_seats = magi_config.magi.seats(&probe_backend_model);
-    let probe_trio_models: Vec<&str> = probe_seats.iter().map(|(_, m)| m.as_str()).collect();
-    let (probe_principal, probe_trio) = orchestrate_probes(
+    let warn_tokens = probe_and_report(
         &magi_config,
         &endpoints,
         provider_kind,
-        &probe_backend_model,
-        &probe_trio_models,
         &OllamaProbeFactory,
+        &mut startup_notices,
     )
     .await;
-    startup_notices.push(Notice::info(format!(
-        "{probe_backend_model}: {}",
-        probe_notice(&probe_principal.unwrap_or(Measurement::NotMeasuredThisTime))
-    )));
-    if let Some(min_window) = min_mage_window(&probe_trio) {
-        if let Some(n) =
-            stale_composition_notice(min_window, magi_config.effective_max_query_bytes())
-        {
-            startup_notices.push(Notice::resolution(n));
-        }
-    }
-    // REQ-A24b: lo explícito (`[magi].input_warn_tokens`) gana sobre lo medido.
-    let warn_tokens = magi_config
-        .magi
-        .input_warn_tokens
-        .or_else(|| derive_warn_tokens(&probe_trio));
 
     // Task 4.3 (REQ-A06/SC-A06b): el notice de arranque y la respuesta que un futuro
     // `/consult` verá comparten el MISMO texto, construido una sola vez acá —
@@ -1851,6 +1831,26 @@ fn resolve_backend_model(cfg: &MagiConfig, kind: ProviderKind) -> &str {
 /// pasarle una tabla que incluyera al principal dejaría que un principal de ventana chica
 /// bajara el umbral que REQ-A24b define sobre los MAGES.
 ///
+/// **Resuelve el modelo del principal y el del trío POR SEPARADO, cada uno con SU PROPIO
+/// kind — fix round 1 (finding Logic+Structure).** La primera versión de esta función
+/// recibía `backend_model`/`trio_models` ya resueltos por el LLAMADOR, y los dos call
+/// sites (`run()`/`prepare_headless()`) los resolvían con `resolve_backend_model(cfg,
+/// principal_kind)` — el kind del PRINCIPAL — para los DOS grupos. Eso da la respuesta
+/// correcta solo cuando el trío no diverge (ahí `magi_kind == principal_kind` por
+/// herencia trivial) y se rompe exactamente cuando `[magi].kind` declara un kind DISTINTO
+/// del principal: un asiento del trío sin override propio terminaba heredando el modelo
+/// de la SECCIÓN DEL PRINCIPAL (`[anthropic].model` con el principal en `anthropic`, por
+/// ejemplo) en vez del modelo de SU PROPIA sección (`[openai].model` con el trío en
+/// `ollama`). El síntoma usual es una degradación silenciosa a *no medido*; el peor caso
+/// es que ese nombre coincida con un modelo real del endpoint del trío y el probe mida la
+/// ventana de un modelo AJENO, envenenando `input_warn_tokens` con un número sin relación
+/// con lo que el trío realmente ejecuta. Resolver ACÁ ADENTRO, con el mismo
+/// `resolve_magi_kind` que ya usaba la rama divergente para el KIND, cierra el hueco por
+/// construcción: no hay manera de que esta función y `build_magi_orchestrator` (que hace
+/// exactamente esta misma resolución de kind+modelo) terminen viendo un modelo distinto
+/// para la misma config — la duplicación entre los dos call sites es precisamente por qué
+/// el bug existía DOS veces (B3).
+///
 /// **Nunca bloquea ni falla el arranque**: cada sonda individual falla abierta dentro de
 /// `probe_models` (REQ-A24), y un `[magi].kind` inválido acá degrada el TRÍO entero a *no
 /// medido* en vez de propagar un error — `build_magi_orchestrator`, llamado después con la
@@ -1860,21 +1860,27 @@ fn resolve_backend_model(cfg: &MagiConfig, kind: ProviderKind) -> &str {
 /// El `kind` va por GRUPO, no global: con el trío en `ollama` y el principal en
 /// `anthropic`, sondear el principal con el kind del trío pediría `/api/show` a un
 /// endpoint que no lo tiene.
+///
+/// Devuelve el modelo del PRINCIPAL además de sus mediciones — el llamador ([`probe_and_report`])
+/// lo necesita para nombrar el notice de arranque (REQ-A24c) sin resolverlo una segunda vez.
 async fn orchestrate_probes(
     cfg: &MagiConfig,
     endpoints: &ResolvedEndpoints,
     principal_kind: ProviderKind,
-    backend_model: &str,
-    trio_models: &[&str],
     factory: &dyn ProbeFactory,
-) -> (Option<Measurement>, BTreeMap<String, Measurement>) {
+) -> (String, Option<Measurement>, BTreeMap<String, Measurement>) {
+    let principal_model = resolve_backend_model(cfg, principal_kind).to_string();
+
     if !cfg.magi_endpoint_diverges() {
         // Mismo endpoint y mismo kind (`magi_endpoint_diverges() == false` implica
         // `[magi].kind`/`[magi].base_url` ausentes, así que el trío hereda
-        // `principal_kind` trivialmente — no hace falta `resolve_magi_kind` acá): UNA
-        // tanda para no sondear cuatro veces lo mismo.
-        let mut all = trio_models.to_vec();
-        all.push(backend_model);
+        // `principal_kind` trivialmente — el fallback del trío es EXACTAMENTE el mismo
+        // modelo que el del principal, sin ambigüedad posible): UNA tanda para no sondear
+        // cuatro veces lo mismo.
+        let trio_seats = cfg.magi.seats(&principal_model);
+        let trio_models: Vec<&str> = trio_seats.iter().map(|(_, m)| m.as_str()).collect();
+        let mut all = trio_models.clone();
+        all.push(principal_model.as_str());
         let measured = probe_models(principal_kind, &endpoints.root, &all, factory).await;
         // Re-proyecta la tabla del TRÍO desde `measured`: una sonda, dos vistas — el
         // principal nunca entra en lo que se devuelve como tabla del trío.
@@ -1890,43 +1896,98 @@ async fn orchestrate_probes(
                 )
             })
             .collect();
-        (measured.get(backend_model).cloned(), trio_only)
+        let principal_measurement = measured.get(principal_model.as_str()).cloned();
+        (principal_model, principal_measurement, trio_only)
     } else {
         match resolve_magi_kind(cfg, principal_kind) {
             Ok(magi_kind) => {
+                // FIX round 1: el fallback del trío sale de `resolve_backend_model(cfg,
+                // magi_kind)` — el kind DEL TRÍO, ya resuelto arriba — NUNCA de
+                // `principal_kind`. Un `[openai].model`/`[anthropic].model` es una
+                // propiedad de la SECCIÓN, y la sección la elige el kind de CADA grupo,
+                // no el del principal.
+                let trio_model = resolve_backend_model(cfg, principal_kind).to_string();
+                let trio_seats = cfg.magi.seats(&trio_model);
+                let trio_models: Vec<&str> = trio_seats.iter().map(|(_, m)| m.as_str()).collect();
+
                 // `join!`, no dos `.await` en fila: en serie el peor caso de arranque
                 // sería DOS techos; la propiedad exigida (SC-A24k, un nivel más arriba,
                 // entre TANDAS en vez de entre sondas de una tanda) es que siga siendo
                 // UNO.
                 //
-                // `principal_models` ligado a una variable (no `&[backend_model]` inline):
-                // el array temporal de un slice literal no vive más allá de la expresión
-                // que lo crea, y `tokio::join!` expande sus dos brazos en un solo `match`
-                // que los mantiene vivos más allá de esa expresión — E0716 sin este `let`.
-                let principal_models = [backend_model];
+                // `principal_models` ligado a una variable (no `&[...]` inline): el array
+                // temporal de un slice literal no vive más allá de la expresión que lo
+                // crea, y `tokio::join!` expande sus dos brazos en un solo `match` que los
+                // mantiene vivos más allá de esa expresión — E0716 sin este `let`.
+                let principal_models = [principal_model.as_str()];
                 let (principal, trio) = tokio::join!(
                     probe_models(principal_kind, &endpoints.root, &principal_models, factory),
-                    probe_models(magi_kind, &endpoints.magi, trio_models, factory),
+                    probe_models(magi_kind, &endpoints.magi, &trio_models, factory),
                 );
-                (principal.get(backend_model).cloned(), trio)
+                let principal_measurement = principal.get(principal_model.as_str()).cloned();
+                (principal_model, principal_measurement, trio)
             }
             Err(_) => {
                 // `[magi].kind` inválido: `build_magi_orchestrator` lo reporta con su
                 // propio error tipado cuando construya el trío de verdad. Acá no hay un
-                // `ProviderKind` válido con el que sondear el trío, así que degrada TODO
-                // el trío a *no medido* sin adivinar uno — el principal se sondea solo,
-                // porque su kind sí es válido por construcción (`principal_kind` ya
-                // llega resuelto).
+                // `ProviderKind` válido con el que resolver ni el kind ni el modelo del
+                // trío, así que degrada TODO el trío a *no medido* sin adivinar ninguno de
+                // los dos — el principal se sondea solo, porque su kind y su modelo sí son
+                // válidos por construcción (`principal_kind` ya llega resuelto).
+                let principal_models = [principal_model.as_str()];
                 let principal =
-                    probe_models(principal_kind, &endpoints.root, &[backend_model], factory).await;
-                let trio = trio_models
-                    .iter()
-                    .map(|m| ((*m).to_string(), Measurement::NotMeasuredThisTime))
+                    probe_models(principal_kind, &endpoints.root, &principal_models, factory).await;
+                // Los TRES asientos, nombrados con el modelo del PRINCIPAL únicamente para
+                // que la tabla devuelta tenga tres claves plausibles — nunca se sondea con
+                // ese nombre acá, así que el nombre no puede envenenar nada: los tres
+                // valores son `NotMeasuredThisTime` por construcción, no por sondeo.
+                let trio_seats = cfg.magi.seats(&principal_model);
+                let trio = trio_seats
+                    .into_iter()
+                    .map(|(_, m)| (m, Measurement::NotMeasuredThisTime))
                     .collect();
-                (principal.get(backend_model).cloned(), trio)
+                let principal_measurement = principal.get(principal_model.as_str()).cloned();
+                (principal_model, principal_measurement, trio)
             }
         }
     }
+}
+
+/// Sondea el principal y el trío, empuja los notices resultantes a `notices`, y deriva
+/// `input_warn_tokens` (REQ-A24b/SC-A24e: lo declarado en `[magi].input_warn_tokens` gana
+/// sobre lo medido).
+///
+/// **El bloque COMPLETO que Task 5.2 tenía duplicado entre `run()` y `prepare_headless()`
+/// — fix round 1, B3.** La duplicación es precisamente por qué el finding
+/// Logic+Structure de este round existía DOS veces en vez de una: cada call site tenía su
+/// propia copia de la resolución de `backend_model`/`trio_models`, y solo una de las dos
+/// copias necesitaba estar mal para que el bug apareciera. Con una única función que hace
+/// el sondeo, arma los notices y deriva el umbral, los dos call sites quedan reducidos a
+/// una llamada — y una prueba contra esta función ejercita EXACTAMENTE lo que los dos call
+/// sites reales invocan, cerrando el hueco que dejaba pasar el finding original (los tests
+/// de la ronda 0 armaban `trio_models` a mano en vez de pasar por la resolución real).
+async fn probe_and_report(
+    cfg: &MagiConfig,
+    endpoints: &ResolvedEndpoints,
+    principal_kind: ProviderKind,
+    factory: &dyn ProbeFactory,
+    notices: &mut Vec<Notice>,
+) -> Option<usize> {
+    let (principal_model, principal_measurement, trio) =
+        orchestrate_probes(cfg, endpoints, principal_kind, factory).await;
+    notices.push(Notice::info(format!(
+        "{principal_model}: {}",
+        probe_notice(&principal_measurement.unwrap_or(Measurement::NotMeasuredThisTime))
+    )));
+    if let Some(min_window) = min_mage_window(&trio) {
+        if let Some(n) = stale_composition_notice(min_window, cfg.effective_max_query_bytes()) {
+            notices.push(Notice::resolution(n));
+        }
+    }
+    // REQ-A24b/SC-A24e: lo explícito (`[magi].input_warn_tokens`) gana sobre lo medido.
+    cfg.magi
+        .input_warn_tokens
+        .or_else(|| derive_warn_tokens(&trio))
 }
 
 /// Caracteres de digest que se muestran en el notice de arranque (REQ-A24c).
@@ -3560,34 +3621,15 @@ async fn prepare_headless(
 
     // REQ-A24/A24b/A24c (Task 5.2): mismo sondeo que la TUI, ver el comentario de `run()`
     // — nunca bloquea ni falla el arranque headless.
-    let probe_backend_model = resolve_backend_model(&magi_config, provider_kind).to_string();
-    let probe_seats = magi_config.magi.seats(&probe_backend_model);
-    let probe_trio_models: Vec<&str> = probe_seats.iter().map(|(_, m)| m.as_str()).collect();
-    let (probe_principal, probe_trio) = orchestrate_probes(
+    let mut trio_notices: Vec<Notice> = Vec::new();
+    let warn_tokens = probe_and_report(
         &magi_config,
         &endpoints,
         provider_kind,
-        &probe_backend_model,
-        &probe_trio_models,
         &OllamaProbeFactory,
+        &mut trio_notices,
     )
     .await;
-    let mut trio_notices: Vec<Notice> = Vec::new();
-    trio_notices.push(Notice::info(format!(
-        "{probe_backend_model}: {}",
-        probe_notice(&probe_principal.unwrap_or(Measurement::NotMeasuredThisTime))
-    )));
-    if let Some(min_window) = min_mage_window(&probe_trio) {
-        if let Some(n) =
-            stale_composition_notice(min_window, magi_config.effective_max_query_bytes())
-        {
-            trio_notices.push(Notice::resolution(n));
-        }
-    }
-    let warn_tokens = magi_config
-        .magi
-        .input_warn_tokens
-        .or_else(|| derive_warn_tokens(&probe_trio));
     let consult_magi = build_magi_orchestrator(
         &magi_config,
         provider_kind,
@@ -7535,7 +7577,8 @@ mod tests {
         }
 
         /// `MagiConfig` cuyo `[magi]` declara `base_url` propio (y opcionalmente `kind`) —
-        /// el par de campos que `magi_endpoint_diverges()` mira.
+        /// el par de campos que `magi_endpoint_diverges()` mira. Sin modelo de sección
+        /// propio: quien necesite uno usa [`cfg_diverging_with_models`].
         fn cfg_diverging(kind: Option<&str>) -> MagiConfig {
             MagiConfig {
                 magi: crate::config::MagiSectionConfig {
@@ -7544,6 +7587,45 @@ mod tests {
                     ..crate::config::MagiSectionConfig::default()
                 },
                 ..MagiConfig::default()
+            }
+        }
+
+        /// `MagiConfig` con SECCIONES distintas y nombrables (`[openai].model`,
+        /// `[anthropic].model`), sin ningún override por asiento (`melchior_model` etc. —
+        /// los tres heredan el fallback). Es la fixture del finding de fix round 1: sin
+        /// nombres de sección propios y controlables, no hay forma de distinguir "el trío
+        /// sondeó SU modelo" de "el trío sondeó el del principal" — los dos casos se ven
+        /// idénticos si las dos secciones comparten el mismo nombre.
+        fn cfg_with_distinct_section_models(
+            openai_model: &str,
+            anthropic_model: &str,
+        ) -> MagiConfig {
+            MagiConfig {
+                openai: crate::config::OpenAiConfig {
+                    model: Some(openai_model.to_string()),
+                },
+                anthropic: crate::config::AnthropicConfig {
+                    model: Some(anthropic_model.to_string()),
+                },
+                ..MagiConfig::default()
+            }
+        }
+
+        /// Como [`cfg_diverging`], pero con las DOS secciones nombrables también — la
+        /// fixture que ejercita el finding de fix round 1 con el trío en un endpoint Y un
+        /// kind distintos del principal a la vez.
+        fn cfg_diverging_with_models(
+            kind: Option<&str>,
+            openai_model: &str,
+            anthropic_model: &str,
+        ) -> MagiConfig {
+            MagiConfig {
+                magi: crate::config::MagiSectionConfig {
+                    base_url: Some("http://magi-host:11434/v1".to_string()),
+                    kind: kind.map(str::to_string),
+                    ..crate::config::MagiSectionConfig::default()
+                },
+                ..cfg_with_distinct_section_models(openai_model, anthropic_model)
             }
         }
 
@@ -7625,6 +7707,29 @@ mod tests {
             );
         }
 
+        /// `MagiConfig` con el trío en el MISMO endpoint/kind que el principal (rama
+        /// compartida de `orchestrate_probes`), pero con los CUATRO nombres — principal +
+        /// tres mages — distintos y controlables por el test.
+        fn cfg_with_four_distinct_models(
+            principal: &str,
+            melchior: &str,
+            balthasar: &str,
+            caspar: &str,
+        ) -> MagiConfig {
+            MagiConfig {
+                openai: crate::config::OpenAiConfig {
+                    model: Some(principal.to_string()),
+                },
+                magi: crate::config::MagiSectionConfig {
+                    melchior_model: Some(melchior.to_string()),
+                    balthasar_model: Some(balthasar.to_string()),
+                    caspar_model: Some(caspar.to_string()),
+                    ..crate::config::MagiSectionConfig::default()
+                },
+                ..MagiConfig::default()
+            }
+        }
+
         // ---- orchestrate_probes: rama compartida --------------------------------------
 
         /// SC-A24 / REQ-A24: endpoint y kind compartidos ⇒ UNA tanda (una sonda por
@@ -7638,17 +7743,11 @@ mod tests {
                 ("balthasar", 200_000),
                 ("caspar", 256_000),
             ]);
-            let cfg = MagiConfig::default();
-            let (principal, trio) = orchestrate_probes(
-                &cfg,
-                &test_endpoints(),
-                ProviderKind::Ollama,
-                "principal",
-                &["melchior", "balthasar", "caspar"],
-                &factory,
-            )
-            .await;
+            let cfg = cfg_with_four_distinct_models("principal", "melchior", "balthasar", "caspar");
+            let (principal_model, principal, trio) =
+                orchestrate_probes(&cfg, &test_endpoints(), ProviderKind::Ollama, &factory).await;
 
+            assert_eq!(principal_model, "principal");
             assert!(matches!(
                 principal,
                 Some(Measurement::Measured { window: 4_096, .. })
@@ -7681,16 +7780,9 @@ mod tests {
                 ("balthasar", 512_000),
                 ("caspar", 256_000),
             ]);
-            let cfg = MagiConfig::default();
-            let (_principal, trio) = orchestrate_probes(
-                &cfg,
-                &test_endpoints(),
-                ProviderKind::Ollama,
-                "principal",
-                &["melchior", "balthasar", "caspar"],
-                &factory,
-            )
-            .await;
+            let cfg = cfg_with_four_distinct_models("principal", "melchior", "balthasar", "caspar");
+            let (_principal_model, _principal, trio) =
+                orchestrate_probes(&cfg, &test_endpoints(), ProviderKind::Ollama, &factory).await;
 
             let derived = derive_warn_tokens(&trio).expect("los tres mages midieron");
             #[allow(
@@ -7718,16 +7810,9 @@ mod tests {
         #[tokio::test]
         async fn the_probe_runs_once_and_the_threshold_stays_put() {
             let factory = MappedProbeFactory::new(&[("principal", 128_000), ("m", 256_000)]);
-            let cfg = MagiConfig::default();
-            let (_principal, trio) = orchestrate_probes(
-                &cfg,
-                &test_endpoints(),
-                ProviderKind::Ollama,
-                "principal",
-                &["m"],
-                &factory,
-            )
-            .await;
+            let cfg = cfg_with_four_distinct_models("principal", "m", "m", "m");
+            let (_principal_model, _principal, trio) =
+                orchestrate_probes(&cfg, &test_endpoints(), ProviderKind::Ollama, &factory).await;
             let calls_after_the_startup_probe = factory.calls();
             assert!(
                 calls_after_the_startup_probe > 0,
@@ -7752,31 +7837,103 @@ mod tests {
         // ---- orchestrate_probes: rama divergente --------------------------------------
 
         /// SC-A24k (un nivel más arriba, entre TANDAS): endpoint divergente ⇒ DOS
-        /// llamadas independientes, cada una con su kind y su endpoint propios.
+        /// llamadas independientes, cada una con su kind y su endpoint propios. Principal
+        /// Y trío en `ollama` (el ÚNICO kind medible) a propósito, con los tres asientos
+        /// del trío overrideados a un modelo propio — es la única forma de que el
+        /// principal y el trío midan ventanas DISTINTAS mientras los dos son medibles: si
+        /// compartieran kind Y ningún asiento tuviera override, resolverían a la MISMA
+        /// sección por diseño (ver `a_diverging_trio_kind_probes_its_own_section_model_
+        /// not_the_principals`, que sí cruza de sección).
         #[tokio::test]
         async fn diverging_endpoint_probes_the_trio_separately_with_its_own_kind() {
             let factory = MappedProbeFactory::new(&[("principal", 64_000), ("m", 128_000)]);
-            let cfg = cfg_diverging(Some("ollama"));
-            let (principal, trio) = orchestrate_probes(
-                &cfg,
-                &diverging_endpoints(),
-                ProviderKind::Ollama,
-                "principal",
-                &["m"],
-                &factory,
-            )
-            .await;
+            let cfg = MagiConfig {
+                openai: crate::config::OpenAiConfig {
+                    model: Some("principal".to_string()),
+                },
+                magi: crate::config::MagiSectionConfig {
+                    base_url: Some("http://magi-host:11434/v1".to_string()),
+                    kind: Some("ollama".to_string()),
+                    melchior_model: Some("m".to_string()),
+                    balthasar_model: Some("m".to_string()),
+                    caspar_model: Some("m".to_string()),
+                    ..crate::config::MagiSectionConfig::default()
+                },
+                ..MagiConfig::default()
+            };
+            let (principal_model, principal, trio) =
+                orchestrate_probes(&cfg, &diverging_endpoints(), ProviderKind::Ollama, &factory)
+                    .await;
+            assert_eq!(principal_model, "principal");
             assert!(matches!(
                 principal,
                 Some(Measurement::Measured { window: 64_000, .. })
             ));
-            assert!(matches!(
-                trio["m"],
-                Measurement::Measured {
-                    window: 128_000,
-                    ..
-                }
-            ));
+            assert!(
+                trio.values().all(|m| matches!(
+                    m,
+                    Measurement::Measured {
+                        window: 128_000,
+                        ..
+                    }
+                )),
+                "los tres asientos overrideados a \"m\" deben medir la ventana de \"m\""
+            );
+        }
+
+        /// **Fix round 1 — finding Logic+Structure.** Reproduce el bug EXACTO reportado:
+        /// principal en `anthropic` (lee `[anthropic].model`), trío en `ollama`
+        /// (`[magi].kind` declarado, divergiendo — lee `[openai].model`), y NINGÚN asiento
+        /// con override propio (`melchior_model`/`balthasar_model`/`caspar_model`
+        /// ausentes), así que los tres heredan el fallback. El fallback correcto es
+        /// `[openai].model` — la sección DEL KIND DEL TRÍO — nunca `[anthropic].model`,
+        /// que es la sección del PRINCIPAL.
+        ///
+        /// Antes de este fix, los dos call sites (`run()`/`prepare_headless()`) resolvían
+        /// el fallback del trío con `resolve_backend_model(cfg, principal_kind)` — el
+        /// kind del PRINCIPAL, no el del trío — así que un trío en `ollama` con el
+        /// principal en `anthropic` intentaba sondear el NOMBRE de `[anthropic].model`
+        /// contra el endpoint del trío.
+        ///
+        /// Los dos modelos se mapean a ventanas DISTINTAS (`claude-test` → 999 999,
+        /// `qwen-test` → 128 000) para que el bug, si reaparece, se vea como un NÚMERO
+        /// EQUIVOCADO — envenenando `input_warn_tokens` con la ventana de un modelo ajeno
+        /// — en vez de solo una degradación a "no medido", que sería más fácil de pasar
+        /// por alto en una revisión superficial.
+        #[tokio::test]
+        async fn a_diverging_trio_kind_probes_its_own_section_model_not_the_principals() {
+            let factory = MappedProbeFactory::new(&[
+                ("claude-test", 999_999), // [anthropic].model — la sección del PRINCIPAL
+                ("qwen-test", 128_000),   // [openai].model — la sección REAL del trío
+            ]);
+            let cfg = cfg_diverging_with_models(Some("ollama"), "qwen-test", "claude-test");
+
+            let (principal_model, _principal, trio) = orchestrate_probes(
+                &cfg,
+                &diverging_endpoints(),
+                ProviderKind::Anthropic,
+                &factory,
+            )
+            .await;
+
+            assert_eq!(
+                principal_model, "claude-test",
+                "el principal SÍ debe resolver su propia sección — esto no es lo que falla"
+            );
+            assert!(
+                trio.values().all(|m| matches!(
+                    m,
+                    Measurement::Measured {
+                        window: 128_000,
+                        ..
+                    }
+                )),
+                "el trío debe sondear qwen-test (SU sección, [openai].model bajo kind \
+                 ollama) — nunca claude-test (la del principal): de lo contrario mediría \
+                 999999 (la ventana de un modelo ajeno) o degradaría a \
+                 NotMeasuredThisTime si claude-test no existiera en el endpoint real, y en \
+                 ningún caso el umbral derivado tendría relación con el trío. Trío: {trio:?}"
+            );
         }
 
         /// Un `[magi].kind` inválido no propaga error ni panica: degrada el TRÍO entero a
@@ -7784,17 +7941,12 @@ mod tests {
         /// el error tipado cuando construya el trío de verdad con la MISMA config.
         #[tokio::test]
         async fn an_invalid_magi_kind_degrades_the_trio_without_guessing() {
-            let factory = MappedProbeFactory::new(&[("principal", 64_000), ("m", 128_000)]);
-            let cfg = cfg_diverging(Some("banana"));
-            let (principal, trio) = orchestrate_probes(
-                &cfg,
-                &diverging_endpoints(),
-                ProviderKind::Ollama,
-                "principal",
-                &["m"],
-                &factory,
-            )
-            .await;
+            let factory = MappedProbeFactory::new(&[("principal", 64_000)]);
+            let cfg = cfg_diverging_with_models(Some("banana"), "principal", "irrelevant");
+            let (principal_model, principal, trio) =
+                orchestrate_probes(&cfg, &diverging_endpoints(), ProviderKind::Ollama, &factory)
+                    .await;
+            assert_eq!(principal_model, "principal");
             assert!(
                 matches!(
                     principal,
@@ -7802,7 +7954,75 @@ mod tests {
                 ),
                 "el principal SÍ se sondea: su kind es válido por construcción"
             );
-            assert!(matches!(trio["m"], Measurement::NotMeasuredThisTime));
+            assert!(
+                trio.values()
+                    .all(|m| matches!(m, Measurement::NotMeasuredThisTime)),
+                "los tres asientos degradan sin adivinar ningún modelo"
+            );
+        }
+
+        // ---- probe_and_report: consolidación del bloque duplicado (fix round 1, B3) ---
+
+        /// SC-A24e: lo DECLARADO en `[magi].input_warn_tokens` gana sobre lo MEDIDO —
+        /// antes sin test propio (un `Option::or_else` inline en cada call site); ahora
+        /// que el bloque es una función compartida, es una aserción barata.
+        #[tokio::test]
+        async fn declared_input_warn_tokens_beats_the_measured_threshold() {
+            let factory = MappedProbeFactory::new(&[
+                ("principal", 128_000),
+                ("melchior", 128_000),
+                ("balthasar", 128_000),
+                ("caspar", 128_000),
+            ]);
+            let mut cfg =
+                cfg_with_four_distinct_models("principal", "melchior", "balthasar", "caspar");
+            cfg.magi.input_warn_tokens = Some(999);
+            let mut notices = Vec::new();
+            let warn_tokens = probe_and_report(
+                &cfg,
+                &test_endpoints(),
+                ProviderKind::Ollama,
+                &factory,
+                &mut notices,
+            )
+            .await;
+            assert_eq!(
+                warn_tokens,
+                Some(999),
+                "lo declarado gana aunque el probe SÍ midió algo distinto"
+            );
+        }
+
+        /// SC-A24e (el otro lado): sin declarar nada, el umbral sale de lo MEDIDO.
+        #[tokio::test]
+        async fn absent_input_warn_tokens_falls_back_to_the_measured_threshold() {
+            let factory = MappedProbeFactory::new(&[
+                ("principal", 4_096),
+                ("melchior", 128_000),
+                ("balthasar", 128_000),
+                ("caspar", 128_000),
+            ]);
+            let cfg = cfg_with_four_distinct_models("principal", "melchior", "balthasar", "caspar");
+            let mut notices = Vec::new();
+            let warn_tokens = probe_and_report(
+                &cfg,
+                &test_endpoints(),
+                ProviderKind::Ollama,
+                &factory,
+                &mut notices,
+            )
+            .await;
+            #[allow(
+                clippy::cast_precision_loss,
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss
+            )]
+            let expected = (128_000.0 * magi_rs::magi::WARN_WINDOW_FRACTION) as usize;
+            assert_eq!(warn_tokens, Some(expected));
+            assert!(
+                notices.iter().any(|n| n.text.contains("principal")),
+                "el notice del principal se empujó a la lista compartida"
+            );
         }
 
         // ---- resolve_magi_kind ---------------------------------------------------------
