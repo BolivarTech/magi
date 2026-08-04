@@ -1483,8 +1483,12 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
     // polished per-surface unavailable-trio behavior (REQ-A06, `trio_unavailable_message`,
     // conditional tool registration); this keeps the failure typed and non-silent (B9)
     // without pre-empting that task's contract.
-    let endpoints = resolve_endpoints(&magi_config, secret_store.as_ref())
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let endpoints = resolve_endpoints(
+        &magi_config,
+        env::var("OPENAI_BASE_URL").ok().as_deref(),
+        secret_store.as_ref(),
+    )
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
     let creds = EnvVaultCredentials {
         magi_config: &magi_config,
         anthropic_env: anthropic_key.as_deref(),
@@ -1493,6 +1497,7 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
     };
     let consult_magi: Option<Arc<Magi>> = match build_magi_orchestrator(
         &magi_config,
+        provider_kind,
         &endpoints,
         Some(&creds),
         None,
@@ -1653,6 +1658,31 @@ struct ResolvedEndpoints {
     embedding: ResolvedEndpoint,
 }
 
+/// La plantilla efectiva de la raíz: `OPENAI_BASE_URL` (si no está vacía) sobre lo
+/// declarado/heredado en `magi.toml`.
+///
+/// Extraída (fix round 2, I1) para que [`resolve_effective_principal_endpoint`] Y
+/// [`resolve_endpoints`] apliquen EXACTAMENTE la misma capa de env — antes de este
+/// fix, solo el principal la veía, así que `OPENAI_BASE_URL` movía al agente
+/// conversacional sin mover al trío cuando `[magi].base_url` estaba ausente
+/// (heredando).
+///
+/// # Errors
+/// Un `OPENAI_BASE_URL` o `base_url` de raíz que no es una plantilla válida.
+fn effective_root_template(
+    magi_config: &MagiConfig,
+    env_base_url: Option<&str>,
+) -> Result<EndpointTemplate, String> {
+    match env_base_url.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(env_val) => {
+            EndpointTemplate::parse(env_val).map_err(|e| format!("OPENAI_BASE_URL is invalid: {e}"))
+        }
+        None => magi_config
+            .effective_base_url()
+            .map_err(|e| format!("base_url is invalid: {e}")),
+    }
+}
+
 /// El paso de arranque: tras abrir el vault, ANTES del probe y del trío.
 ///
 /// Falla CERRADO: un placeholder sin entrada detiene el proceso nombrando la entrada y
@@ -1660,18 +1690,36 @@ struct ResolvedEndpoints {
 /// garantía de [`resolve_template`], que ya la implementa para los otros dos
 /// consumidores de `base_url` (el principal y el embedder).
 ///
+/// `env_base_url` es `OPENAI_BASE_URL` — la MISMA variable que ya movía al principal
+/// (ver [`effective_root_template`]). El embedder sigue heredando solo de TOML vía
+/// `effective_embedding_base_url()`, sin tocar en este fix: no tiene consumidor de
+/// producción todavía (`ResolvedEndpoints.embedding` sigue `#[allow(dead_code)]`) y
+/// el hallazgo del review fue específicamente sobre el trío.
+///
 /// # Errors
 /// Un mensaje ya legible (ver [`resolve_template`]) del primer endpoint irresoluble.
 fn resolve_endpoints(
     magi_config: &MagiConfig,
+    env_base_url: Option<&str>,
     secret_store: Option<&SharedSecretStore>,
 ) -> Result<ResolvedEndpoints, String> {
-    let root_tpl = magi_config
-        .effective_base_url()
-        .map_err(|e| format!("base_url is invalid: {e}"))?;
-    let magi_tpl = magi_config
-        .effective_magi_base_url()
-        .map_err(|e| format!("magi base_url is invalid: {e}"))?;
+    let root_tpl = effective_root_template(magi_config, env_base_url)?;
+
+    // El trío hereda la MISMA raíz efectiva (con su capa de env) cuando no declara la
+    // propia — nunca `effective_magi_base_url()` a secas, que solo ve TOML.
+    let magi_tpl = match magi_config
+        .magi
+        .base_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        Some(own) => {
+            EndpointTemplate::parse(own).map_err(|e| format!("magi base_url is invalid: {e}"))?
+        }
+        None => root_tpl.clone(),
+    };
+
     let embedding_tpl = magi_config
         .effective_embedding_base_url()
         .map_err(|e| format!("embedding base_url is invalid: {e}"))?;
@@ -1911,6 +1959,12 @@ fn build_native_provider(
 ///   construir y su causa.
 fn build_magi_orchestrator(
     cfg: &MagiConfig,
+    // El `ProviderKind` YA RESUELTO del principal (env `MAGI_PROVIDER` > TOML >
+    // default — `resolve_effective_provider_kind`), no `cfg.effective_provider()`
+    // (fix round 2, I1): antes, un `[magi].kind` ausente heredaba releyendo `provider`
+    // de TOML por su cuenta, así que `MAGI_PROVIDER` movía al principal sin mover al
+    // trío. Este parámetro es lo que hace que la herencia vea la MISMA decisión.
+    principal_kind: ProviderKind,
     // Endpoints YA RESUELTOS. El builder no conoce el vault: la resolución es un paso
     // nombrado de `main.rs` (tras abrir el vault, antes del probe y del trío), y
     // `resolve_endpoints` es el único productor de `ResolvedEndpoints`.
@@ -1925,11 +1979,15 @@ fn build_magi_orchestrator(
     env_overrides: &MagiEnvModelOverrides,
     notices: &mut Vec<Notice>,
 ) -> Result<Arc<Magi>, TrioError> {
-    let raw_kind = cfg.magi.kind.as_deref().unwrap_or_default();
-    if let Err(e) = ProviderKind::parse(raw_kind) {
-        return Err(TrioError::UnknownKind(e.got));
-    }
-    let kind = cfg.effective_magi_kind();
+    // `[magi].kind` ausente/vacío hereda `principal_kind` — el YA RESUELTO, no
+    // `cfg.effective_provider()` (TOML-only). Presente-y-no-reconocido sigue siendo
+    // error tipado, con su propio `ProviderKind::parse` (misma razón que antes: no
+    // depender de que `validate_vocabulary` ya haya corrido).
+    let kind = match ProviderKind::parse(cfg.magi.kind.as_deref().unwrap_or_default()) {
+        Ok(Some(k)) => k,
+        Ok(None) => principal_kind,
+        Err(e) => return Err(TrioError::UnknownKind(e.got)),
+    };
     // El trío usa el endpoint YA RESUELTO que `main.rs` produjo — no re-resuelve ni lee
     // la plantilla.
     let base = &endpoints.magi;
@@ -2164,13 +2222,7 @@ fn resolve_effective_principal_endpoint(
     env_base_url: Option<&str>,
     secret_store: Option<&SharedSecretStore>,
 ) -> Result<ResolvedEndpoint, String> {
-    let template = match env_base_url.map(str::trim).filter(|s| !s.is_empty()) {
-        Some(env_val) => EndpointTemplate::parse(env_val)
-            .map_err(|e| format!("OPENAI_BASE_URL is invalid: {e}"))?,
-        None => magi_config
-            .effective_base_url()
-            .map_err(|e| format!("base_url is invalid: {e}"))?,
-    };
+    let template = effective_root_template(magi_config, env_base_url)?;
     resolve_template(&template, Scope::Root, secret_store)
 }
 
@@ -2995,7 +3047,11 @@ async fn prepare_headless(
     // principal provider's own availability — see the TUI `run()` block's own
     // comment for why. Built ONCE here (the shared prelude), not by each dispatcher:
     // `run_query_subcommand` and `run_consult_subcommand` need the identical result.
-    let endpoints = match resolve_endpoints(&magi_config, secret_store.as_ref()) {
+    let endpoints = match resolve_endpoints(
+        &magi_config,
+        env::var("OPENAI_BASE_URL").ok().as_deref(),
+        secret_store.as_ref(),
+    ) {
         Ok(e) => e,
         Err(e) => {
             eprintln!("error: {e}");
@@ -3011,6 +3067,7 @@ async fn prepare_headless(
     let mut trio_notices: Vec<Notice> = Vec::new();
     let consult_magi = build_magi_orchestrator(
         &magi_config,
+        provider_kind,
         &endpoints,
         Some(&creds),
         None,
@@ -5760,6 +5817,7 @@ mod tests {
                 matches!(
                     build_magi_orchestrator(
                         &cfg_with_kind("banana"),
+                        ProviderKind::Ollama,
                         &test_endpoints(),
                         None,
                         None,
@@ -5776,6 +5834,7 @@ mod tests {
             assert!(
                 build_magi_orchestrator(
                     &cfg_with_kind(""),
+                    ProviderKind::Ollama,
                     &test_endpoints(),
                     Some(&c),
                     None,
@@ -5785,6 +5844,53 @@ mod tests {
                 .is_ok(),
                 "un kind vacío hereda del principal en vez de fallar"
             );
+        }
+
+        /// I1 (fix round 2, IMPORTANT): un `[magi].kind` ausente debe heredar el
+        /// `ProviderKind` YA RESUELTO del principal (`principal_kind`, que ya vio
+        /// `MAGI_PROVIDER`) — no releer `provider` de TOML por su cuenta vía
+        /// `cfg.effective_provider()`. Si no, `MAGI_PROVIDER=anthropic` mueve al
+        /// agente conversacional pero deja el trío en el `provider` que dice el
+        /// archivo.
+        ///
+        /// Señal observable: el TOML dice `provider = "ollama"` (keyless — CUALQUIER
+        /// credencial, incluida ninguna, construye), pero `principal_kind` pasado es
+        /// `Anthropic` y no se da ninguna credencial. Si la herencia relee TOML (el
+        /// bug), el trío construye igual porque Ollama no exige nada; si hereda
+        /// `principal_kind` de verdad, falla pidiendo `ANTHROPIC_API_KEY`.
+        #[test]
+        fn a_blank_magi_kind_inherits_the_resolved_principal_kind_not_a_toml_only_read() {
+            let cfg = MagiConfig::from_toml_str("provider = \"ollama\"\n").unwrap();
+            let mut notices = Vec::new();
+            let err = match build_magi_orchestrator(
+                &cfg,
+                ProviderKind::Anthropic,
+                &test_endpoints(),
+                None,
+                None,
+                &MagiEnvModelOverrides::default(),
+                &mut notices,
+            ) {
+                Ok(_) => panic!(
+                    "el trío heredó \"ollama\" de TOML en vez del ProviderKind::Anthropic \
+                     ya resuelto del principal"
+                ),
+                Err(e) => e,
+            };
+            match err {
+                TrioError::SeatUnbuildable { seats } => {
+                    assert_eq!(seats.len(), 3);
+                    assert!(seats.iter().all(|(_, cause)| matches!(
+                        cause,
+                        SeatError::MissingCredential {
+                            var: "ANTHROPIC_API_KEY"
+                        }
+                    )));
+                }
+                other => {
+                    panic!("esperaba SeatUnbuildable (Anthropic sin credencial), salió {other:?}")
+                }
+            }
         }
 
         /// SC-A05b / SC-A05c: los asientos caídos se nombran, y TODOS de una.
@@ -5798,6 +5904,7 @@ mod tests {
             // it is not — `match` avoids that bound entirely.
             let err = match build_magi_orchestrator(
                 &cfg_openai_compat_without_credentials(),
+                ProviderKind::OpenAiCompat,
                 &test_endpoints(),
                 None,
                 None,
@@ -5829,6 +5936,7 @@ mod tests {
             let mut notices = Vec::new();
             let err = match build_magi_orchestrator(
                 &cfg_with_only_caspar_unbuildable(),
+                ProviderKind::Anthropic,
                 &test_endpoints(),
                 Some(&c),
                 None,
@@ -5977,7 +6085,8 @@ mod tests {
         #[test]
         fn resolve_endpoints_resolves_the_three_fields_from_the_same_root_when_none_diverge() {
             let cfg = MagiConfig::default();
-            let resolved = resolve_endpoints(&cfg, None).expect("sin placeholders, sin vault");
+            let resolved =
+                resolve_endpoints(&cfg, None, None).expect("sin placeholders, sin vault");
             assert_eq!(
                 resolved.root.as_str(),
                 crate::defaults::DEFAULT_OPENAI_BASE_URL
@@ -6002,10 +6111,39 @@ mod tests {
                  base_url = \"http://trio:11434/v1\"\n",
             )
             .unwrap();
-            let resolved = resolve_endpoints(&cfg, None).unwrap();
+            let resolved = resolve_endpoints(&cfg, None, None).unwrap();
             assert_eq!(resolved.root.as_str(), "http://root:11434/v1");
             assert_eq!(resolved.magi.as_str(), "http://trio:11434/v1");
             assert_eq!(resolved.embedding.as_str(), "http://root:11434/v1");
+        }
+
+        /// I1 (fix round 2, IMPORTANT): `resolve_endpoints` debe ver la MISMA capa
+        /// `OPENAI_BASE_URL` que ya aplicaba `resolve_effective_principal_endpoint` —
+        /// si no, el env var mueve al agente conversacional pero deja al trío
+        /// apuntando al `base_url` de TOML/default cuando `[magi].base_url` está
+        /// ausente (heredando).
+        #[test]
+        fn resolve_endpoints_honors_openai_base_url_for_the_inherited_trio_endpoint() {
+            let cfg = MagiConfig::default(); // sin base_url propio, sin [magi].base_url
+            let resolved = resolve_endpoints(&cfg, Some("http://otherhost:9999/v1"), None).unwrap();
+            assert_eq!(resolved.root.as_str(), "http://otherhost:9999/v1");
+            assert_eq!(
+                resolved.magi.as_str(),
+                "http://otherhost:9999/v1",
+                "el trío hereda la raíz YA resuelta con su capa de env, no una \
+                 recalculada solo de TOML"
+            );
+        }
+
+        /// Un `[magi].base_url` PROPIO sigue ganándole al env var de la raíz — el env
+        /// solo llena el hueco de la herencia, no pisa una declaración explícita.
+        #[test]
+        fn resolve_endpoints_lets_a_declared_trio_base_url_win_over_the_root_env_override() {
+            let cfg =
+                MagiConfig::from_toml_str("[magi]\nbase_url = \"http://trio:11434/v1\"\n").unwrap();
+            let resolved = resolve_endpoints(&cfg, Some("http://otherhost:9999/v1"), None).unwrap();
+            assert_eq!(resolved.root.as_str(), "http://otherhost:9999/v1");
+            assert_eq!(resolved.magi.as_str(), "http://trio:11434/v1");
         }
 
         #[test]
@@ -6115,6 +6253,7 @@ mod tests {
             assert!(
                 build_magi_orchestrator(
                     &backend_only,
+                    ProviderKind::Anthropic,
                     &endpoints,
                     Some(&c),
                     None,
@@ -6131,6 +6270,7 @@ mod tests {
             assert!(
                 build_magi_orchestrator(
                     &toml_override_invalid,
+                    ProviderKind::Anthropic,
                     &endpoints,
                     Some(&c),
                     None,
@@ -6150,6 +6290,7 @@ mod tests {
             assert!(
                 build_magi_orchestrator(
                     &toml_override_invalid,
+                    ProviderKind::Anthropic,
                     &endpoints,
                     Some(&c),
                     None,
