@@ -50,7 +50,8 @@ use magi_rs::magi::mode::{resolve_mode_guarded, ModeClassifier, ModeError};
 use crate::agent::messages::{Content, Message, Role};
 use crate::agent::{Agent, AgentRunConfig, RunObserver, StreamPiece, MAX_TOOL_CALLS_ERROR};
 use crate::tools::consult::{
-    explain_magi_error, report_to_consult_json, AbortOnDrop, MAX_QUERY_LEN,
+    annotate_report_text, explain_magi_error, report_to_consult_json, AbortOnDrop, RunContext,
+    Truncated, TruncationLevel, MAX_QUERY_LEN,
 };
 
 /// Buffered capacity of the internal chunk channel; mirrors the interactive TUI
@@ -267,7 +268,34 @@ async fn analyze_direct(
     };
 
     match joined {
-        Ok(Ok(report)) => Ok(report_to_consult_json(&report, runtime.kind)),
+        Ok(Ok(report)) => {
+            // The annotation (REQ-A12c) is applied BEFORE wrapping in `Truncated` —
+            // `report_to_consult_json` renders `truncated.text` verbatim, so the
+            // annotation step has to happen here, not inside it.
+            let truncated = Truncated {
+                text: annotate_report_text(&report, runtime.kind),
+                // No truncation logic exists yet (`truncate_report` is a later
+                // task's job); this is the untruncated report, honestly labeled.
+                level: TruncationLevel::None,
+            };
+            // `resolution` already carries the REAL `classification_attempted`
+            // signal from `resolve_mode_guarded` above, unlike `ConsultTool::
+            // execute`'s call site, which only has mode+source round-tripped
+            // through the tool-call input.
+            let ctx = RunContext {
+                // Placeholder until `MagiConfig`/`TimeoutDecision` are threaded to
+                // this call site (a later wiring task) — this function does not
+                // hold either today.
+                endpoint_divergence: false,
+                timeout_below_formula: false,
+            };
+            Ok(report_to_consult_json(
+                &report,
+                &truncated,
+                &resolution,
+                &ctx,
+            ))
+        }
         Ok(Err(e)) => Err(ConsultRunError::Runtime(explain_magi_error(
             &e,
             runtime.kind,

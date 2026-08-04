@@ -6,16 +6,19 @@
 //! The agent routes here only for genuine multi-perspective decisions; trivial
 //! or factual lookups are answered directly.
 
+use crate::config::MagiConfig;
 use crate::tools::{Tool, ToolError, ToolResult};
 use async_trait::async_trait;
 use magi_core::error::MagiError;
-use magi_core::orchestrator::Magi;
-use magi_core::reporting::MagiReport;
-use magi_core::schema::Mode;
+use magi_core::orchestrator::{Magi, MagiConfig as CoreMagiConfig};
+use magi_core::reporting::{ExtractionFailure, InputSize, MagiReport};
+use magi_core::schema::{AgentName, Mode};
 use magi_rs::magi::kind::ProviderKind;
-use magi_rs::magi::mode::read_resolved_mode;
+use magi_rs::magi::mode::{read_resolved_mode, ModeResolution, ModeSource};
+use magi_rs::magi::TimeoutDecision;
 use magi_rs::redact::redact_foreign_error;
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
@@ -156,22 +159,329 @@ pub(crate) fn annotate_report_text(report: &MagiReport, kind: ProviderKind) -> S
     text
 }
 
+/// How much of a report's markdown survived an output-size recort (REQ-A11b).
+///
+/// **Not a boolean.** A boolean would only answer *"was it truncated?"*, which is the
+/// less useful question: a consumer needs to know **what guarantee it is looking at**.
+/// With [`Self::Structural`] it can trust the verdict and at least one finding survived;
+/// with [`Self::Bytes`] it knows only that the first N bytes did, and anything else may
+/// be missing.
+///
+/// The actual recort logic (`truncate_report`) is a later task's job — this module only
+/// needs the vocabulary because [`Truncated`] is part of [`report_to_consult_json`]'s
+/// contract, so every caller of it (this task's two production call sites included) has
+/// to be able to name a level even before real truncation exists — hence [`Self::None`]
+/// being the only level anything currently produces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TruncationLevel {
+    /// The report was not truncated.
+    None,
+    // Narrow allow (matches `MagiConfig::effective_max_query_bytes` in `config.rs`):
+    // these three variants have no producer yet — `truncate_report` is a later task's
+    // job. They are exercised directly by `report_truncated_names_the_level_applied`.
+    /// The verdict and at least one finding were located and kept.
+    #[allow(dead_code)]
+    Structural,
+    /// A magi-core contractual anchor was used instead of locating sections.
+    #[allow(dead_code)]
+    Anchored,
+    /// Only the first N bytes survived; anything past that may be missing.
+    #[allow(dead_code)]
+    Bytes,
+}
+
+/// The report text paired with the [`TruncationLevel`] that produced it.
+///
+/// A struct, not a `(String, TruncationLevel)` tuple, and every field read by name: the
+/// two values have to travel **together**, because a caller free to pass the level
+/// separately from the text could put `Bytes` next to text that was never actually cut
+/// — and then `report_truncated` in the JSON would be asserting a guarantee about text
+/// it does not describe.
+#[derive(Debug, Clone)]
+pub(crate) struct Truncated {
+    /// The (possibly annotated, possibly recorted) text that reaches `"report"` in the
+    /// JSON — never the raw [`MagiReport::report`] on its own.
+    pub(crate) text: String,
+    /// The guarantee `text` carries.
+    pub(crate) level: TruncationLevel,
+}
+
+/// Per-run signals that belong in THIS run's own JSON output, never a startup notice
+/// (REQ-A11d) — a batch consumer parsing yesterday's output never sees today's stderr.
+///
+/// `schema_version` does not move for this telemetry (REQ-A08b): magi-rs is pre-1.0 and
+/// the crate version is already the compatibility signal. That is exactly why the SHAPE
+/// has to stay stable instead — a field that appears only on some runs is precisely the
+/// instability a consumer with no in-band version signal cannot absorb.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct RunContext {
+    /// `true` when the trio ran on an endpoint different from the principal provider
+    /// **and** mode classification was attempted — i.e. the content went out to the
+    /// principal first.
+    pub(crate) endpoint_divergence: bool,
+    /// `true` when an explicit `--timeout` landed below the formula's minimum
+    /// (SC-A04d).
+    pub(crate) timeout_below_formula: bool,
+}
+
+impl RunContext {
+    /// Builds the context at the point where all three inputs are actually available —
+    /// **before** launching the consult, not while rendering: by render time, why the
+    /// run was routed the way it was is no longer at hand.
+    ///
+    /// Takes [`ModeResolution::classification_attempted`], NOT [`ModeSource`]: a
+    /// classification that is attempted and then expires still resolves to
+    /// [`ModeSource::Default`], but the content has ALREADY gone out to the principal
+    /// provider — and that is exactly the run where declaring the data-flow matters
+    /// most, not least. Deriving `endpoint_divergence` from the resulting `source`
+    /// instead of the attempt flag would give a false negative right where something
+    /// went wrong.
+    // Narrow allow: not yet called from production. Both current call sites
+    // (`ConsultTool::execute`, `headless_runner::analyze_direct`) build `RunContext`
+    // directly as an honest placeholder — neither holds a `MagiConfig` +
+    // `TimeoutDecision` pair yet. Wiring this in is deferred to a later task (see
+    // this task's report). Exercised directly by its own unit tests.
+    #[allow(dead_code)]
+    #[must_use]
+    pub(crate) fn build(cfg: &MagiConfig, res: &ModeResolution, timeout: &TimeoutDecision) -> Self {
+        Self {
+            endpoint_divergence: res.classification_attempted && cfg.magi_endpoint_diverges(),
+            timeout_below_formula: timeout.below_formula,
+        }
+    }
+}
+
+/// The typed shape of "none of the three mages produced a verdict" (SC-A11g).
+///
+/// **Never surfaced as an empty report marked `degraded`.** `degraded` describes a
+/// *weakened* consensus (two out of three, say); using it for the zero-verdict case
+/// would be a lie — it is not a weaker consensus, it is the absence of one, and a
+/// consumer that only inspects the JSON's shape cannot tell the two apart unless the
+/// zero-verdict case gets its own type.
+// Narrow allow: not yet constructed from production. Translating this into a
+// `ToolError`/`ConsultRunError` at a real call site is deferred to a later task —
+// this predicate's own rustdoc says so explicitly ("prometer una impl que ninguna
+// tarea escribe" — this task does not invent one). Exercised directly by its own
+// unit tests.
+#[allow(dead_code)]
+#[derive(Debug, thiserror::Error)]
+#[error("no mage produced a verdict: {causes}")]
+pub(crate) struct AllMagesFailed {
+    /// Every known cause, joined — see [`guard_all_failed`] for how it is built.
+    pub(crate) causes: String,
+}
+
+/// Guards against emitting a report where **zero** mages produced a verdict.
+///
+/// # Why `agents.is_empty()`, not `failed_agents.len() == 3`
+///
+/// [`MagiReport::failed_agents`] only records a seat that failed to **execute** —
+/// network, credential, timeout. A seat that DID respond but whose output could not be
+/// **extracted** (verdict outside the sentinel markers, invalid schema, or one that
+/// exhausted its corrective retry) lands in [`MagiReport::extraction_failures`] too —
+/// and, per magi-core's own dispatch, the failed-to-extract case also lands in
+/// `failed_agents` alongside it (verified against `orchestrator.rs::dispatch_no_rotation`,
+/// magi-core 3.1.0). `report.agents` is the one field that is empty in **every** case a
+/// seat ends up without a verdict, regardless of which way it lost it — so it is the
+/// only field this predicate can trust.
+///
+/// # Errors
+/// [`AllMagesFailed`] naming every known cause, drawn from BOTH `failed_agents`
+/// (execution failures) and `extraction_failures` (adherence failures) — a message that
+/// only walked `failed_agents` could come back empty in exactly the case this guard
+/// exists to catch.
+// Narrow allow: not yet called from production for the same reason as
+// `AllMagesFailed` above.
+#[allow(dead_code)]
+pub(crate) fn guard_all_failed(report: &MagiReport) -> Result<(), AllMagesFailed> {
+    if !report.agents.is_empty() {
+        return Ok(());
+    }
+    let mut causes: Vec<String> = report
+        .failed_agents
+        .iter()
+        .map(|(seat, why)| format!("{seat:?}: {why}"))
+        .collect();
+    causes.extend(report.extraction_failures.iter().map(|(seat, fs)| {
+        let last = fs.last().map_or_else(
+            || "no detail".to_string(),
+            |f| format!("{} attempt {} — {:?}", f.model, f.attempt, f.cause),
+        );
+        format!("{seat:?}: verdict not extractable ({last})")
+    }));
+    if causes.is_empty() {
+        causes.push("no mage produced a verdict and magi-core reported no cause".to_string());
+    }
+    Err(AllMagesFailed {
+        causes: causes.join("; "),
+    })
+}
+
+/// Stable JSON labels for the effective mode. Kebab-case, matching how magi-core itself
+/// serializes [`Mode`] — this is wire contract, never `Debug`, which would change
+/// silently if a variant got renamed.
+#[must_use]
+fn mode_label(m: Mode) -> &'static str {
+    match m {
+        Mode::CodeReview => "code-review",
+        Mode::Design => "design",
+        Mode::Analysis => "analysis",
+    }
+}
+
+/// See [`mode_label`]. `Configured` keeps its own label instead of collapsing into
+/// `explicit`: it shares the semantics (someone chose it, so classification is skipped)
+/// but not the provenance, and that difference is what makes an odd verdict auditable —
+/// `explicit` sends a reader to the command, `configured` sends them to `magi.toml`.
+#[must_use]
+fn source_label(s: ModeSource) -> &'static str {
+    match s {
+        ModeSource::Explicit => "explicit",
+        ModeSource::Configured => "configured",
+        ModeSource::AgentChosen => "agent-chosen",
+        ModeSource::Inferred => "inferred",
+        ModeSource::Default => "default",
+    }
+}
+
+/// See [`mode_label`]. Names the LEVEL, not a boolean: the consumer needs to know what
+/// guarantee it has, not merely whether truncation happened (SC-A11h).
+#[must_use]
+fn truncation_label(l: TruncationLevel) -> &'static str {
+    match l {
+        TruncationLevel::None => "none",
+        TruncationLevel::Structural => "structural",
+        TruncationLevel::Anchored => "anchored",
+        TruncationLevel::Bytes => "bytes",
+    }
+}
+
+/// Single source of the lowercase seat key shared by [`failures_json`] and
+/// [`failed_agents_json`] (B3) — one casing convention for an `AgentName`-keyed JSON
+/// object, not two that could quietly diverge.
+#[must_use]
+fn seat_key(seat: AgentName) -> String {
+    format!("{seat:?}").to_lowercase()
+}
+
+/// `extraction_failures`, keyed by lowercase seat name — ALWAYS present, even when
+/// empty (REQ-A10). An empty map is a positive certificate that every seat adhered to
+/// the verdict contract on every attempt; omitting it would make that certificate
+/// indistinguishable from "this version doesn't report it".
+#[must_use]
+fn failures_json(f: &BTreeMap<AgentName, Vec<ExtractionFailure>>) -> Value {
+    let mut out = serde_json::Map::new();
+    for (seat, failures) in f {
+        out.insert(
+            seat_key(*seat),
+            Value::Array(
+                failures
+                    .iter()
+                    .map(|x| {
+                        json!({
+                            "model": x.model,
+                            "attempt": x.attempt,
+                            "cause": format!("{:?}", x.cause),
+                        })
+                    })
+                    .collect(),
+            ),
+        );
+    }
+    Value::Object(out)
+}
+
+/// `failed_agents`, keyed the SAME way as [`failures_json`] (see [`seat_key`]) — built
+/// by hand rather than serialized straight through `report.failed_agents`, so the two
+/// maps cannot end up on different casings for what is the same kind of key.
+#[must_use]
+fn failed_agents_json(agents: &BTreeMap<AgentName, String>) -> Value {
+    let mut out = serde_json::Map::new();
+    for (seat, cause) in agents {
+        out.insert(seat_key(*seat), Value::String(cause.clone()));
+    }
+    Value::Object(out)
+}
+
+/// `input_size` with its three sub-keys ALWAYS present (SC-A10c).
+///
+/// `None` from magi-core is neither omitted nor emitted as `null`: it reports what the
+/// pipeline actually APPLIED — magi-core's own default as the threshold, and `exceeded`
+/// evaluated against that — never a bare "I don't know" that a consumer could confuse
+/// with an unmeasured `0`.
+#[must_use]
+fn input_size_json(s: Option<&InputSize>) -> Value {
+    match s {
+        Some(v) => json!({
+            "estimated_tokens": v.estimated_tokens,
+            "warn_threshold": v.warn_threshold,
+            "exceeded": v.exceeded,
+        }),
+        None => json!({
+            "estimated_tokens": 0,
+            "warn_threshold": CoreMagiConfig::default().input_warn_tokens,
+            "exceeded": false,
+        }),
+    }
+}
+
 /// Builds the stable `consult` JSON object from a finished MAGI report.
 ///
-/// Single source of truth for the `{report, degraded}` shape shared by the
-/// tool-loop [`ConsultTool::execute`] path and the headless direct/forced
-/// consult path (REQ-H21/H22) — so the on-the-wire shape never drifts between
-/// the two entry points.
+/// Single source of truth for the shape shared by the tool-loop [`ConsultTool::execute`]
+/// path and the headless direct/forced consult path (REQ-H21/H22, REQ-A11c) — so the
+/// on-the-wire shape never drifts between the two entry points.
+///
+/// `schema_version` does not move for this telemetry (REQ-A08b), which is exactly why
+/// every field below — and every sub-key of `input_size` — is always present: a field
+/// or sub-key that appears only on some runs is the instability a version-less consumer
+/// cannot absorb.
 ///
 /// # Parameters
-/// * `report` - The finished multi-perspective consensus report.
-/// * `kind` - the `ProviderKind` the trio ran under — feeds
-///   [`annotate_report_text`] (REQ-A12c).
+/// * `report` - the finished multi-perspective consensus report.
+/// * `truncated` - the report text actually surfaced, paired with the guarantee it
+///   carries — see [`Truncated`] for why the two travel together. Callers that also
+///   annotate the text (REQ-A12c, [`annotate_report_text`]) must do so **before**
+///   building this value: this function renders `truncated.text` verbatim.
+/// * `res` - the resolved mode, its source, and whether classification was attempted.
+/// * `ctx` - the per-run signals that belong in this run's own output (REQ-A11d).
 ///
 /// # Returns
-/// A JSON object `{"report": <markdown, possibly annotated>, "degraded": <bool>}`.
-pub(crate) fn report_to_consult_json(report: &MagiReport, kind: ProviderKind) -> Value {
-    json!({ "report": annotate_report_text(report, kind), "degraded": report.degraded })
+/// A JSON object with `report`, `degraded`, `mode`, `mode_source`,
+/// `extraction_failures`, `input_size`, `report_truncated`, `endpoint_divergence`,
+/// `timeout_below_formula` and `failed_agents` — every key always present.
+pub(crate) fn report_to_consult_json(
+    report: &MagiReport,
+    truncated: &Truncated,
+    res: &ModeResolution,
+    ctx: &RunContext,
+) -> Value {
+    json!({
+        // The (possibly annotated, possibly truncated) text — never the raw report:
+        // text and level travel together in `truncated`, so `report_truncated` can
+        // never assert a guarantee about text it does not describe.
+        "report": truncated.text,
+        "degraded": report.degraded,
+        "mode": mode_label(res.mode),
+        "mode_source": source_label(res.source),
+        // Always present, even when empty: an empty map is the positive certificate
+        // that all three seats adhered to the contract (REQ-A10).
+        "extraction_failures": failures_json(&report.extraction_failures),
+        // Always present WITH its sub-keys: an object that is always there but whose
+        // contents vary is the same instability one level down (SC-A10c).
+        "input_size": input_size_json(report.input_size.as_ref()),
+        "report_truncated": truncation_label(truncated.level),
+        // REQ-A11d: what affects how THIS run reads goes in THIS run's JSON, not a
+        // notice — a batch consumer never sees stderr from a process that already
+        // exited.
+        "endpoint_divergence": ctx.endpoint_divergence,
+        // SC-A04d: whoever sets an explicit `--timeout` is running in a pipeline, i.e.
+        // exactly who is LEAST likely to read stderr. The warning travels here too.
+        "timeout_below_formula": ctx.timeout_below_formula,
+        // Typed, never collapsed into `degraded`: `failed_agents`, NOT `window_rejected`
+        // — the latter does not exist on `MagiReport` (verified against magi-core
+        // 3.1.0; rotation-only telemetry, unreachable in MS2 without `FallbackPool`).
+        "failed_agents": failed_agents_json(&report.failed_agents),
+    })
 }
 
 /// Explica —AGREGANDO al mensaje de `err`, nunca reemplazándolo— un
@@ -283,16 +593,16 @@ impl Drop for AbortOnDrop {
 /// Visible to the user so they know the 3-LLM consensus was launched.
 const AUTO_LAUNCH_NOTICE: &str = "launched MAGI multi-perspective consensus — awaiting evaluation…";
 
-/// Resolves the mode to dispatch with (MS2, REQ-A20/REQ-A07d): reads what the
-/// agent's tool loop already resolved and injected under the reserved
+/// Resolves the (mode, source) pair to dispatch with (MS2, REQ-A20/REQ-A07d/REQ-A08):
+/// reads what the agent's tool loop already resolved and injected under the reserved
 /// `__resolved_mode`/`__resolved_mode_source` keys
 /// (`magi_rs::magi::mode::inject_resolved_mode`) instead of re-resolving it here
 /// — a tool that could disagree with the gate that evaluated the same call
 /// would reopen exactly the divergence REQ-A07d closes.
 ///
-/// Falls back to [`Mode::Analysis`] when the keys are **absent**. This is a
-/// deliberate, narrow back-compat default, not a re-resolution of untrusted
-/// input: **both** real production dispatch paths in `Agent::run_tool_loop`
+/// Falls back to `(`[`Mode::Analysis`]`, `[`ModeSource::Default`]`)` when the keys are
+/// **absent**. This is a deliberate, narrow back-compat default, not a re-resolution of
+/// untrusted input: **both** real production dispatch paths in `Agent::run_tool_loop`
 /// inject the pair before calling [`ConsultTool::execute`] — the model-issued
 /// `ToolUse` route (`Agent::dispatch_consult_through_gate`) and the forced
 /// pre-loop injection (REQ-H22's `config.force_consult` block, which resolves
@@ -301,13 +611,12 @@ const AUTO_LAUNCH_NOTICE: &str = "launched MAGI multi-perspective consensus — 
 /// fallback is reached only by a caller that invokes [`ConsultTool::execute`]
 /// directly without going through the loop — exactly what this module's own
 /// pre-MS2 tests do, and precisely the unconditional `Mode::Analysis` this
-/// tool used before MS2. Wiring `ConsultTool` fully into `ConsultToolCfg` (a
-/// later task) can tighten this to a hard error once every production caller
-/// is confirmed to inject.
-fn resolved_or_default_mode(args: &Value) -> Mode {
-    read_resolved_mode(args)
-        .map(|(mode, _source)| mode)
-        .unwrap_or(Mode::Analysis)
+/// tool used before MS2 (the source half is new in Task 6.1, needed to name
+/// `mode_source` in [`report_to_consult_json`]'s output). Wiring `ConsultTool`
+/// fully into `ConsultToolCfg` (a later task) can tighten this to a hard error
+/// once every production caller is confirmed to inject.
+fn resolved_mode_and_source(args: &Value) -> (Mode, ModeSource) {
+    read_resolved_mode(args).unwrap_or((Mode::Analysis, ModeSource::Default))
 }
 
 /// Tool wrapping a `magi_core::Magi`. `execute` runs the 3-perspective consensus
@@ -439,7 +748,7 @@ impl Tool for ConsultTool {
                 MAX_QUERY_LEN
             )));
         }
-        let mode = resolved_or_default_mode(&args);
+        let (mode, source) = resolved_mode_and_source(&args);
         let magi = self.magi.clone();
         let q = query.to_string();
         // Joined spawn isolates a panic in magi-core's analyze into a recoverable
@@ -476,7 +785,33 @@ impl Tool for ConsultTool {
                 }
             },
         };
-        Ok(report_to_consult_json(&report, self.kind))
+        // The annotation (REQ-A12c) is applied BEFORE wrapping in `Truncated` — the new
+        // `report_to_consult_json` renders `truncated.text` verbatim, so the annotation
+        // step has to happen here, not inside it, or the keyless-auth hint this file
+        // already surfaces end-to-end (see `a_keyless_auth_failure_reaches_the_
+        // consult_report_end_to_end`) would silently stop reaching the user.
+        let truncated = Truncated {
+            text: annotate_report_text(&report, self.kind),
+            // No truncation logic exists yet (`truncate_report` is a later task's job);
+            // this is the untruncated report, honestly labeled as such.
+            level: TruncationLevel::None,
+        };
+        let res = ModeResolution {
+            mode,
+            source,
+            // Not yet threaded through the injected resolution: `inject_resolved_mode`
+            // only round-trips mode+source today. Inert here — this call site builds
+            // `RunContext` directly rather than via `RunContext::build`, so this field
+            // is not read. Wiring it end-to-end is left to a later task.
+            classification_attempted: false,
+        };
+        let ctx = RunContext {
+            // Placeholder until `MagiConfig`/`TimeoutDecision` are threaded to this call
+            // site (a later wiring task) — this tool does not hold either today.
+            endpoint_divergence: false,
+            timeout_below_formula: false,
+        };
+        Ok(report_to_consult_json(&report, &truncated, &res, &ctx))
     }
 }
 
@@ -485,9 +820,9 @@ mod tests {
     use super::*;
     use magi_core::error::{ExternalErrorKind, ProviderError};
     use magi_core::provider::{CompletionConfig, LlmProvider};
-    use magi_core::schema::AgentName;
     use magi_core::test_support::RoutingMockProvider;
     use magi_core::verdict_markers::{VERDICT_CLOSE, VERDICT_OPEN};
+    use magi_rs::magi::{resolve_run_timeout, AGENT_TIMEOUT_SECS};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
 
@@ -1070,31 +1405,32 @@ mod tests {
         );
     }
 
-    /// MS2 (REQ-A20/REQ-A07d): the resolved mode injected by the agent's tool
-    /// loop wins over the `Mode::Analysis` fallback — happy path (injected) and
-    /// the two edge cases (absent, corrupt) that must degrade to the default.
+    /// MS2 (REQ-A20/REQ-A07d/REQ-A08): the resolved (mode, source) pair injected by
+    /// the agent's tool loop wins over the `(Analysis, Default)` fallback — happy path
+    /// (injected) and the two edge cases (absent, corrupt) that must degrade to the
+    /// default pair.
     #[test]
-    fn resolved_or_default_mode_prefers_the_injected_pair_over_the_fallback() {
+    fn resolved_mode_and_source_prefers_the_injected_pair_over_the_fallback() {
         assert_eq!(
-            resolved_or_default_mode(&json!({
+            resolved_mode_and_source(&json!({
                 "query": "x",
                 "__resolved_mode": "code-review",
                 "__resolved_mode_source": "explicit",
             })),
-            Mode::CodeReview,
-            "an injected resolution must win over the Analysis fallback"
+            (Mode::CodeReview, ModeSource::Explicit),
+            "an injected resolution must win over the (Analysis, Default) fallback"
         );
         assert_eq!(
-            resolved_or_default_mode(&json!({"query": "x"})),
-            Mode::Analysis,
+            resolved_mode_and_source(&json!({"query": "x"})),
+            (Mode::Analysis, ModeSource::Default),
             "absent injection falls back to the pre-MS2 unconditional default"
         );
         assert_eq!(
-            resolved_or_default_mode(&json!({
+            resolved_mode_and_source(&json!({
                 "query": "x",
                 "__resolved_mode": "not-a-mode",
             })),
-            Mode::Analysis,
+            (Mode::Analysis, ModeSource::Default),
             "a corrupt injection is treated the same as an absent one"
         );
     }
@@ -1130,5 +1466,395 @@ mod tests {
                 .unwrap_err(),
             ToolError::ExecutionError(_)
         ));
+    }
+
+    // -----------------------------------------------------------------------
+    // Task 6.1 (REQ-A08b/A09/A10/A11c/A11d/A11g/A11h) — telemetry:
+    // `report_to_consult_json`, `RunContext::build`, `guard_all_failed`.
+    // -----------------------------------------------------------------------
+
+    /// Builds a real `MagiReport` via `Deserialize` — the only way to construct one
+    /// outside magi-core, since the struct is `#[non_exhaustive]` with no public
+    /// constructor and `Magi::analyze()` cannot be coaxed into returning `Ok` with an
+    /// empty `agents` (its own `min_agents` gate rejects that before a report is ever
+    /// built — verified against `orchestrator.rs::dispatch_no_rotation`, magi-core
+    /// 3.1.0). `agents`/`consensus`/`banner` are minimal-but-valid filler except where
+    /// a specific test cares about them.
+    fn report_fixture(
+        agents: Value,
+        failed_agents: Value,
+        extraction_failures: Value,
+        input_size: Value,
+        degraded: bool,
+        report_text: &str,
+    ) -> MagiReport {
+        serde_json::from_value(json!({
+            "agents": agents,
+            "consensus": {
+                "consensus": "GO (0-0)",
+                "consensus_verdict": "reject",
+                "confidence": 0.0,
+                "score": 0.0,
+                "agent_count": 0,
+                "votes": {},
+                "majority_summary": "",
+                "dissent": [],
+                "findings": [],
+                "conditions": [],
+                "recommendations": {},
+            },
+            "banner": "",
+            "report": report_text,
+            "degraded": degraded,
+            "failed_agents": failed_agents,
+            "extraction_failures": extraction_failures,
+            "input_size": input_size,
+        }))
+        .expect("fixture matches MagiReport's Deserialize shape")
+    }
+
+    /// One minimal, validly-shaped `AgentOutput` JSON literal (B4: named once, not
+    /// repeated per test).
+    fn agent_output_json(seat: &str) -> Value {
+        json!({
+            "agent": seat, "verdict": "approve", "confidence": 0.9,
+            "summary": "s", "reasoning": "r", "findings": [], "recommendation": "rec",
+        })
+    }
+
+    /// A report where nothing went wrong: no extraction failures, no execution
+    /// failures, input under threshold. `agents` is irrelevant to
+    /// `report_to_consult_json` (it never reads that field), so it stays empty here —
+    /// tests that DO care about `agents` (`guard_all_failed`) build their own fixture.
+    fn clean_report() -> MagiReport {
+        report_fixture(
+            json!([]),
+            json!({}),
+            json!({}),
+            json!({ "estimated_tokens": 10, "warn_threshold": 150_000, "exceeded": false }),
+            false,
+            "a clean consensus report",
+        )
+    }
+
+    /// A report with an extraction failure on Caspar AND an input-size overage —
+    /// "failures and excess". SC-A09c/A10b/A10c want this to yield the SAME JSON
+    /// shape as `clean_report` despite carrying more data; SC-A08 wants a named,
+    /// typed failure to read off it.
+    fn report_with_failures_and_excess() -> MagiReport {
+        report_fixture(
+            json!([]),
+            json!({}),
+            json!({
+                "caspar": [
+                    { "model": "some-model", "attempt": 1, "cause": "missing-markers" },
+                ],
+            }),
+            json!({ "estimated_tokens": 999_999, "warn_threshold": 100, "exceeded": true }),
+            true,
+            "a degraded consensus report",
+        )
+    }
+
+    /// A report where Caspar failed to EXECUTE (network/credential/timeout) — as
+    /// opposed to the extraction failure above. SC-A11f's `failed_agents` case.
+    fn report_with_one_failed_mage() -> MagiReport {
+        report_fixture(
+            json!([]),
+            json!({ "caspar": "timeout: agent timed out after 90s" }),
+            json!({}),
+            Value::Null,
+            true,
+            "a degraded consensus report",
+        )
+    }
+
+    /// A report where ALL THREE seats end up without a verdict — some by execution
+    /// failure, some by extraction failure. `guard_all_failed`'s target case.
+    fn report_with_all_three_failed() -> MagiReport {
+        report_fixture(
+            json!([]),
+            json!({
+                "melchior": "network: connection refused",
+                "balthasar": "timeout: agent timed out after 90s",
+            }),
+            json!({
+                "caspar": [
+                    { "model": "some-model", "attempt": 1, "cause": "missing-markers" },
+                    { "model": "some-model", "attempt": 2, "cause": "unterminated" },
+                ],
+            }),
+            Value::Null,
+            true,
+            "",
+        )
+    }
+
+    /// A report where two of three seats succeeded (`agents` non-empty) —
+    /// `guard_all_failed`'s happy path.
+    fn report_with_two_successes() -> MagiReport {
+        report_fixture(
+            json!([
+                agent_output_json("melchior"),
+                agent_output_json("balthasar")
+            ]),
+            json!({}),
+            json!({}),
+            Value::Null,
+            true,
+            "a degraded but valid consensus report",
+        )
+    }
+
+    /// Local double: the report's own text, unmodified — no truncation logic exists
+    /// yet, so every caller in this module today passes `TruncationLevel::None`.
+    fn untruncated(r: &MagiReport) -> Truncated {
+        Truncated {
+            text: r.report.clone(),
+            level: TruncationLevel::None,
+        }
+    }
+
+    /// Local double: a fixed mode resolution. `classification_attempted` mirrors
+    /// `source == Inferred` — the only one of the fixed sources these tests use that
+    /// actually implies a classification call was made.
+    fn res_of(mode: Mode, source: ModeSource) -> ModeResolution {
+        ModeResolution {
+            mode,
+            source,
+            classification_attempted: source == ModeSource::Inferred,
+        }
+    }
+
+    /// Local double: a `RunContext` with nothing to report.
+    fn ctx_plain() -> RunContext {
+        RunContext {
+            endpoint_divergence: false,
+            timeout_below_formula: false,
+        }
+    }
+
+    /// Local double: a `RunContext` declaring endpoint divergence.
+    fn ctx_with_divergent_endpoint() -> RunContext {
+        RunContext {
+            endpoint_divergence: true,
+            timeout_below_formula: false,
+        }
+    }
+
+    /// SC-A09b: the JSON grows with the new telemetry fields. `schema_version`
+    /// (`src/headless/output.rs`, an unrelated module) does not move for it
+    /// (REQ-A08b) — verified structurally by this task simply never touching that
+    /// file; its `SCHEMA_VERSION` constant is private with no public accessor this
+    /// module could assert against.
+    #[test]
+    fn the_json_grows_while_schema_version_stays() {
+        let r = clean_report();
+        let v = report_to_consult_json(
+            &r,
+            &untruncated(&r),
+            &res_of(Mode::CodeReview, ModeSource::Inferred),
+            &ctx_plain(),
+        );
+        for key in [
+            "report",
+            "degraded",
+            "mode",
+            "mode_source",
+            "extraction_failures",
+            "input_size",
+            "report_truncated",
+        ] {
+            assert!(v.get(key).is_some(), "missing {key}");
+        }
+        assert_eq!(v["mode_source"], "inferred");
+    }
+
+    /// SC-A09c / SC-A10b / SC-A10c: the shape does NOT vary with the outcome.
+    #[test]
+    fn the_shape_does_not_vary_with_the_outcome() {
+        let clean_r = clean_report();
+        let noisy_r = report_with_failures_and_excess();
+        let clean = report_to_consult_json(
+            &clean_r,
+            &untruncated(&clean_r),
+            &res_of(Mode::Analysis, ModeSource::Default),
+            &ctx_plain(),
+        );
+        let noisy = report_to_consult_json(
+            &noisy_r,
+            &untruncated(&noisy_r),
+            &res_of(Mode::Analysis, ModeSource::Default),
+            &ctx_plain(),
+        );
+        let keys_of = |v: &Value| -> Vec<String> {
+            let mut ks: Vec<String> = v.as_object().unwrap().keys().cloned().collect();
+            ks.sort();
+            ks
+        };
+        assert_eq!(keys_of(&clean), keys_of(&noisy));
+        assert_eq!(keys_of(&clean["input_size"]), keys_of(&noisy["input_size"]));
+
+        assert!(
+            clean["extraction_failures"].as_object().unwrap().is_empty(),
+            "empty is a POSITIVE CERTIFICATE: omitting it would destroy the signal"
+        );
+        assert!(!clean["input_size"]["exceeded"].as_bool().unwrap());
+        assert!(
+            !clean["input_size"]["warn_threshold"].is_null(),
+            "never null to mean 'I don't know': report what was APPLIED"
+        );
+    }
+
+    /// SC-A08: a non-adhering model is NAMED, with its attempt and a typed cause.
+    #[test]
+    fn a_non_adhering_model_is_named_with_attempt_and_typed_cause() {
+        let r = report_with_failures_and_excess();
+        let v = report_to_consult_json(
+            &r,
+            &untruncated(&r),
+            &res_of(Mode::Analysis, ModeSource::Default),
+            &ctx_plain(),
+        );
+        let f = &v["extraction_failures"]["caspar"][0];
+        assert!(
+            f["model"].is_string(),
+            "with rotation the question is WHICH MODEL, not which seat"
+        );
+        assert!(f["attempt"].is_number());
+        assert!(f["cause"].is_string());
+    }
+
+    /// SC-A11f: endpoint divergence and a failed seat both travel in THIS run's own
+    /// output, not a process-wide notice.
+    #[test]
+    fn per_run_signals_travel_in_the_runs_own_output() {
+        let diverged_r = clean_report();
+        let diverged = report_to_consult_json(
+            &diverged_r,
+            &untruncated(&diverged_r),
+            &res_of(Mode::Analysis, ModeSource::Inferred),
+            &ctx_with_divergent_endpoint(),
+        );
+        assert_eq!(
+            diverged["endpoint_divergence"], true,
+            "a single once-per-process notice does not serve someone auditing a \
+             thousand runs afterwards"
+        );
+
+        let failed_r = report_with_one_failed_mage();
+        let failed = report_to_consult_json(
+            &failed_r,
+            &untruncated(&failed_r),
+            &res_of(Mode::Analysis, ModeSource::Default),
+            &ctx_plain(),
+        );
+        assert!(
+            failed["failed_agents"]
+                .as_object()
+                .unwrap()
+                .contains_key("caspar"),
+            "typed with its cause, not collapsed into `degraded`"
+        );
+    }
+
+    /// SC-A11h: `report_truncated` names the LEVEL applied, never a boolean.
+    #[test]
+    fn report_truncated_names_the_level_applied() {
+        for (level, expected) in [
+            (TruncationLevel::None, "none"),
+            (TruncationLevel::Structural, "structural"),
+            (TruncationLevel::Anchored, "anchored"),
+            (TruncationLevel::Bytes, "bytes"),
+        ] {
+            let r = clean_report();
+            let v = report_to_consult_json(
+                &r,
+                &Truncated {
+                    text: r.report.clone(),
+                    level,
+                },
+                &res_of(Mode::Analysis, ModeSource::Default),
+                &ctx_plain(),
+            );
+            assert_eq!(v["report_truncated"], expected);
+        }
+    }
+
+    /// Local double: a resolution with only the attempt flag varied — the one field
+    /// these `RunContext::build` tests exercise.
+    fn resolution(attempted: bool) -> ModeResolution {
+        ModeResolution {
+            mode: Mode::Analysis,
+            source: ModeSource::Default,
+            classification_attempted: attempted,
+        }
+    }
+
+    /// SC-A11f: `endpoint_divergence` is populated where the decision is actually
+    /// made — `RunContext::build`, fed by the REAL `crate::config::MagiConfig` and
+    /// the REAL `magi_rs::magi::resolve_run_timeout`.
+    #[test]
+    fn endpoint_divergence_is_populated_where_the_decision_is_made() {
+        let diverged = MagiConfig::from_toml_str(
+            "base_url = \"http://a/v1\"\n[magi]\nbase_url = \"http://b/v1\"\n",
+        )
+        .expect("valid toml");
+        let dec = resolve_run_timeout(None, AGENT_TIMEOUT_SECS);
+
+        let ctx = RunContext::build(&diverged, &resolution(true), &dec);
+        assert!(ctx.endpoint_divergence);
+
+        let ctx = RunContext::build(&diverged, &resolution(false), &dec);
+        assert!(
+            !ctx.endpoint_divergence,
+            "without classification the content never went out to the principal"
+        );
+
+        let same =
+            MagiConfig::from_toml_str("base_url = \"http://a/v1\"\n[magi]\n").expect("valid toml");
+        let ctx = RunContext::build(&same, &resolution(true), &dec);
+        assert!(
+            !ctx.endpoint_divergence,
+            "same endpoint: there is no divergence to declare"
+        );
+    }
+
+    /// SC-A11f (the case the naive predicate would lose): classification ATTEMPTED
+    /// and FAILED.
+    ///
+    /// This is what distinguishes "attempted" from `ModeSource::Inferred`. A
+    /// classification that expires leaves `ModeSource::Default`, but the content has
+    /// ALREADY gone out to the principal provider — and that is the run where
+    /// declaring the data-flow matters most, not least.
+    #[test]
+    fn a_failed_classification_still_declares_the_endpoint_divergence() {
+        let diverged = MagiConfig::from_toml_str(
+            "base_url = \"http://a/v1\"\n[magi]\nbase_url = \"http://b/v1\"\n",
+        )
+        .expect("valid toml");
+        let dec = resolve_run_timeout(None, AGENT_TIMEOUT_SECS);
+
+        let ctx = RunContext::build(&diverged, &resolution(true), &dec);
+        assert!(
+            ctx.endpoint_divergence,
+            "hanging the signal off ModeSource::Inferred would give a false negative here"
+        );
+    }
+
+    /// SC-A11g: zero verdicts is a TYPED ERROR, never a degraded report.
+    #[test]
+    fn guard_all_failed_names_every_known_cause_when_nothing_produced_a_verdict() {
+        let err = guard_all_failed(&report_with_all_three_failed())
+            .expect_err("no agent produced a verdict");
+        assert!(err.causes.contains("Melchior"), "{}", err.causes);
+        assert!(err.causes.contains("Balthasar"), "{}", err.causes);
+        assert!(err.causes.contains("Caspar"), "{}", err.causes);
+    }
+
+    /// Happy path (B13): at least one verdict ⇒ the guard passes.
+    #[test]
+    fn guard_all_failed_passes_when_at_least_one_agent_produced_a_verdict() {
+        assert!(guard_all_failed(&report_with_two_successes()).is_ok());
     }
 }
