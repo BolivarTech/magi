@@ -16,8 +16,8 @@ use crate::agent::Agent;
 // It is DISTINCT from `magi_core::orchestrator::MagiConfig` — the latter is NEVER
 // imported here, avoiding the name collision.
 use crate::config::{
-    resolve_anthropic_model, resolve_effective_provider_kind, resolve_openai_model, HeadlessConfig,
-    MagiConfig,
+    resolve_anthropic_model, resolve_effective_provider_kind, resolve_magi_override,
+    resolve_openai_model, HeadlessConfig, MagiConfig,
 };
 use crate::headless_runner::{resolve_run_timeout, run_consult, run_query};
 use crate::memory::clock::SystemClock;
@@ -1496,6 +1496,7 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
         &endpoints,
         Some(&creds),
         None,
+        &MagiEnvModelOverrides::from_env(),
         &mut startup_notices,
     ) {
         Ok(magi) => Some(magi),
@@ -1746,6 +1747,44 @@ enum TrioError {
     Builder(SafeErrorText),
 }
 
+/// Overrides de modelo por asiento vía `MAGI_MODEL_MELCHIOR`/`BALTHASAR`/`CASPAR`.
+///
+/// Restaurado, fix round 1 (coordinador, 2026-08-03): retirado por error en la Task
+/// 4.1 junto con `agent::magi_wiring` (su único llamador de producción, parte de la
+/// máquina de adapters retirada) — pero R-A03 solo admite las tres rupturas
+/// declaradas en REQ-A21/A22/A23, y esta capacidad nunca fue una de ellas. Silencio
+/// más R-A03 significa que la capacidad se queda.
+#[derive(Debug, Clone, Default)]
+struct MagiEnvModelOverrides {
+    /// `MAGI_MODEL_MELCHIOR`.
+    melchior: Option<String>,
+    /// `MAGI_MODEL_BALTHASAR`.
+    balthasar: Option<String>,
+    /// `MAGI_MODEL_CASPAR`.
+    caspar: Option<String>,
+}
+
+impl MagiEnvModelOverrides {
+    /// El override de ESTE proceso para `seat`, si `MAGI_MODEL_<AGENT>` está seteada.
+    fn for_seat(&self, seat: AgentName) -> Option<&str> {
+        match seat {
+            AgentName::Melchior => self.melchior.as_deref(),
+            AgentName::Balthasar => self.balthasar.as_deref(),
+            AgentName::Caspar => self.caspar.as_deref(),
+        }
+    }
+
+    /// Lee las tres variables de entorno UNA vez, al arrancar (mismo momento que el
+    /// resto de la resolución `env > TOML > default` de este archivo).
+    fn from_env() -> Self {
+        Self {
+            melchior: env::var("MAGI_MODEL_MELCHIOR").ok(),
+            balthasar: env::var("MAGI_MODEL_BALTHASAR").ok(),
+            caspar: env::var("MAGI_MODEL_CASPAR").ok(),
+        }
+    }
+}
+
 /// Normaliza una raíz de Ollama a la forma OpenAI-compat (`…/v1`), idempotente, **y
 /// avisa cuando tuvo que tocar algo**.
 ///
@@ -1868,6 +1907,12 @@ fn build_magi_orchestrator(
     endpoints: &ResolvedEndpoints,
     creds: Option<&dyn Credentials>,
     warn_tokens: Option<usize>,
+    // Restaurado, fix round 1 (coordinador, 2026-08-03): R-A03 solo admite las tres
+    // rupturas declaradas en REQ-A21/A22/A23, y `MAGI_MODEL_*` no es ninguna de
+    // ellas. Se layerea SOBRE el resultado de `cfg.magi.seats(backend_model)` (que ya
+    // resuelve TOML-o-backend) vía `resolve_magi_override`, dando la cadena completa
+    // `env > TOML > backend` sin duplicar esa resolución.
+    env_overrides: &MagiEnvModelOverrides,
     notices: &mut Vec<Notice>,
 ) -> Result<Arc<Magi>, TrioError> {
     let raw_kind = cfg.magi.kind.as_deref().unwrap_or_default();
@@ -1906,7 +1951,15 @@ fn build_magi_orchestrator(
     let mut failures: Vec<(AgentName, SeatError)> = Vec::new();
     let mut seats: Vec<(AgentName, Arc<dyn LlmProvider>)> = Vec::new();
 
-    for (seat, model) in cfg.magi.seats(backend_model) {
+    for (seat, toml_or_backend_model) in cfg.magi.seats(backend_model) {
+        // `MAGI_MODEL_<AGENT>` gana sobre lo que `seats()` ya resolvió (TOML, o el
+        // backend si no había override) — `resolve_magi_override` trata el valor
+        // entrante como "lo que gana si no hay env", así que pasarle el resultado de
+        // `seats()` como su `toml_model` da exactamente `env > TOML > backend` sin
+        // reimplementar esa cadena una segunda vez.
+        let env_model = env_overrides.for_seat(seat);
+        let model = resolve_magi_override(Some(&toml_or_backend_model), env_model)
+            .unwrap_or(toml_or_backend_model);
         match build_native_provider(kind, base, &model, creds, client_timeout, notices) {
             // REQ-A03: `MagiBuilder::build()` NO envuelve nada, así que sin esto se
             // pierde el reintento que el trío heredaba del adapter.
@@ -2951,6 +3004,7 @@ async fn prepare_headless(
         &endpoints,
         Some(&creds),
         None,
+        &MagiEnvModelOverrides::from_env(),
         &mut trio_notices,
     );
     for n in render_notices(trio_notices) {
@@ -5699,6 +5753,7 @@ mod tests {
                         &test_endpoints(),
                         None,
                         None,
+                        &MagiEnvModelOverrides::default(),
                         &mut notices,
                     ),
                     Err(TrioError::UnknownKind(_))
@@ -5714,6 +5769,7 @@ mod tests {
                     &test_endpoints(),
                     Some(&c),
                     None,
+                    &MagiEnvModelOverrides::default(),
                     &mut notices,
                 )
                 .is_ok(),
@@ -5735,6 +5791,7 @@ mod tests {
                 &test_endpoints(),
                 None,
                 None,
+                &MagiEnvModelOverrides::default(),
                 &mut notices,
             ) {
                 Ok(_) => panic!("sin credencial el trío no es construible"),
@@ -5765,6 +5822,7 @@ mod tests {
                 &test_endpoints(),
                 Some(&c),
                 None,
+                &MagiEnvModelOverrides::default(),
                 &mut notices,
             ) {
                 Ok(_) => panic!("un asiento caído basta para que el trío no sea construible"),
