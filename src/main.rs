@@ -6030,6 +6030,29 @@ mod tests {
             );
         }
 
+        /// C1 (fix round 2, CRITICAL, Security): el aviso de normalización interpola el
+        /// endpoint YA RESUELTO (post-sustitución de placeholders REQ-A16c) — si trae
+        /// credenciales, deben llegar redactadas al TEXTO del aviso, aunque el `root`
+        /// devuelto para el provider real las siga llevando intactas (el provider SÍ
+        /// las necesita: `api_key = None` para Ollama no cubre `userinfo` en la URL).
+        #[test]
+        fn openai_compat_root_redacts_credentials_in_the_notice_but_not_in_the_root() {
+            let (root, notice) = openai_compat_root("https://realuser:realpass@ollama.lan:11434");
+            assert_eq!(
+                root, "https://realuser:realpass@ollama.lan:11434/v1",
+                "el ROOT real es lo que el provider necesita para autenticar"
+            );
+            let notice = notice.expect("sin /v1, debe avisar");
+            assert!(
+                !notice.contains("realuser") && !notice.contains("realpass"),
+                "la credencial no debe llegar al aviso: {notice}"
+            );
+            assert!(
+                notice.contains("ollama.lan"),
+                "el host sí debe seguir visible: {notice}"
+            );
+        }
+
         #[test]
         fn env_vault_credentials_resolves_openai_and_anthropic_from_env() {
             let cfg = MagiConfig::default();
