@@ -733,19 +733,17 @@ pub struct TuiConsultWiring {
 /// `build_magi_orchestrator` (`main.rs`) already uses at startup:
 /// `cfg.magi.agent_timeout_secs.unwrap_or(AGENT_TIMEOUT_SECS)`.
 ///
+/// **Fixes M1**: before this fix the rebuild handler hardcoded
+/// [`magi_rs::magi::AGENT_TIMEOUT_SECS`] unconditionally, so a configured
+/// `[magi].agent_timeout_secs` silently stopped applying after a `/login`
+/// even though it kept being honored everywhere else in the process.
+///
 /// Extracted from the `/login` event handler for the same reason as
 /// [`handle_login`]/[`handle_trio_rebuild_failure`] above: the full TUI
 /// event loop is intractable to drive in a test, so the ceiling-selection
 /// decision is tested here as a plain `fn`.
 fn post_login_agent_timeout_secs(configured: Option<u64>) -> u64 {
-    // FIXME(M1, red): still ignores `configured` — the rebuild handler
-    // hardcoded `magi_rs::magi::AGENT_TIMEOUT_SECS` unconditionally, and this
-    // extraction faithfully preserves that behavior so the defect is
-    // observable through a test instead of buried in an untestable event
-    // loop. `post_login_rebuild_ceiling_honors_a_configured_agent_timeout`
-    // pins the fix this leaves undone.
-    let _ = configured;
-    magi_rs::magi::AGENT_TIMEOUT_SECS
+    configured.unwrap_or(magi_rs::magi::AGENT_TIMEOUT_SECS)
 }
 
 /// # Parameters (REQ-A07d additions over the pre-MS2 signature)
