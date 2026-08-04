@@ -49,7 +49,9 @@ use magi_rs::magi::mode::{resolve_mode_guarded, ModeClassifier, ModeError};
 
 use crate::agent::messages::{Content, Message, Role};
 use crate::agent::{Agent, AgentRunConfig, RunObserver, StreamPiece, MAX_TOOL_CALLS_ERROR};
-use crate::tools::consult::{report_to_consult_json, AbortOnDrop, MAX_QUERY_LEN};
+use crate::tools::consult::{
+    explain_magi_error, report_to_consult_json, AbortOnDrop, MAX_QUERY_LEN,
+};
 
 /// Buffered capacity of the internal chunk channel; mirrors the interactive TUI
 /// bridge so backpressure behaves identically. The channel is drained
@@ -235,7 +237,7 @@ async fn analyze_direct(
 
     match joined {
         Ok(Ok(report)) => Ok(report_to_consult_json(&report, kind)),
-        Ok(Err(e)) => Err(ConsultRunError::Runtime(e.to_string())),
+        Ok(Err(e)) => Err(ConsultRunError::Runtime(explain_magi_error(&e, kind))),
         Err(join_err) => Err(ConsultRunError::Runtime(format!(
             "consult crashed: {join_err}"
         ))),

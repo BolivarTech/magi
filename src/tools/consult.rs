@@ -8,11 +8,13 @@
 
 use crate::tools::{Tool, ToolError, ToolResult};
 use async_trait::async_trait;
+use magi_core::error::MagiError;
 use magi_core::orchestrator::Magi;
 use magi_core::reporting::MagiReport;
 use magi_core::schema::Mode;
 use magi_rs::magi::kind::ProviderKind;
 use magi_rs::magi::mode::read_resolved_mode;
+use magi_rs::redact::redact_foreign_error;
 use serde_json::{json, Value};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
@@ -54,11 +56,29 @@ pub(crate) const MAX_QUERY_LEN: usize = 8192;
 /// [`keyless_auth_explanation`] y el reporte de esta tarea.**
 const PROVIDER_AUTH_ERROR_MARKER: &str = "auth error: ";
 
-/// Explicación fija para un asiento cuya causa matchea [`PROVIDER_AUTH_ERROR_MARKER`]
-/// bajo un kind keyless (REQ-A12c).
-const KEYLESS_AUTH_EXPLANATION: &str = "El endpoint rechazó la petición por autenticación, pero \
-     `[magi].kind = \"ollama\"` es keyless y nunca envía credencial. Si tu endpoint la \
-     exige, usá `kind = \"openai-compat\"` y declará la clave por env o vault.";
+/// El núcleo REUTILIZABLE de la explicación keyless (REQ-A12c, B3) — UNA sola
+/// redacción, consumida por los DOS caminos alcanzables de este archivo:
+/// [`keyless_auth_explanation`] (evidencia POSITIVA: el marcador
+/// [`PROVIDER_AUTH_ERROR_MARKER`] presente en la causa de UN asiento, vía
+/// `MagiReport::failed_agents`) y [`explain_magi_error`] (SIN evidencia de status —
+/// solo "0 de 3 asientos corrieron bajo un kind keyless", vía
+/// `MagiError::InsufficientAgents`). Fix round 3: antes había una sola redacción con
+/// una apertura ya diagnosticada ("el endpoint rechazó..."), correcta para el primer
+/// camino pero una afirmación no respaldada en el segundo. En vez de escribir una
+/// segunda redacción (que B3 prohíbe — dos textos que pueden divergir con el tiempo),
+/// esta constante se recortó al núcleo que es VERDADERO en los dos casos, y cada
+/// llamador antepone su PROPIA frase de encuadre según la evidencia que realmente
+/// tiene.
+///
+/// **Deliberadamente en modo CONDICIONAL** ("si tu endpoint LA EXIGE...", nunca "tu
+/// endpoint LA EXIGIÓ"): por sí sola, ya sirve para el camino SIN evidencia
+/// ([`explain_magi_error`]) sin necesitar edición — REQ-A12c pide nombrar la
+/// configuración como **causa PROBABLE**, no demostrada ("no se pide una validación
+/// imposible... se exige que el fallo inevitable llegue explicado"), y ese registro es
+/// el que tiene que sobrevivir en las dos superficies.
+const KEYLESS_AUTH_EXPLANATION: &str = "`[magi].kind = \"ollama\"` es keyless y nunca envía \
+     credencial. Si tu endpoint la exige, usá `kind = \"openai-compat\"` y declará la \
+     clave por env o vault.";
 
 /// Traduce la causa de UN asiento —tal como aparece en `MagiReport::failed_agents`— a
 /// un error de configuración accionable, cuando esa causa es una autenticación
@@ -118,7 +138,14 @@ fn annotate_report_text(report: &MagiReport, kind: ProviderKind) -> String {
     let mut text = report.report.clone();
     for (agent, cause) in &report.failed_agents {
         if let Some(explanation) = keyless_auth_explanation(cause, kind) {
-            text.push_str(&format!("\n\n**{agent:?}**: {explanation}"));
+            // La apertura "rechazado por autenticación" es una AFIRMACIÓN, y acá está
+            // respaldada: `keyless_auth_explanation` solo devolvió `Some` porque
+            // `cause` (la causa REAL de este asiento) contenía
+            // `PROVIDER_AUTH_ERROR_MARKER` — evidencia positiva. `explain_magi_error`
+            // (abajo) no tiene esa evidencia y por eso NO usa esta misma apertura.
+            text.push_str(&format!(
+                "\n\n**{agent:?}** rechazado por autenticación: {explanation}"
+            ));
         }
     }
     text
@@ -140,6 +167,69 @@ fn annotate_report_text(report: &MagiReport, kind: ProviderKind) -> String {
 /// A JSON object `{"report": <markdown, possibly annotated>, "degraded": <bool>}`.
 pub(crate) fn report_to_consult_json(report: &MagiReport, kind: ProviderKind) -> Value {
     json!({ "report": annotate_report_text(report, kind), "degraded": report.degraded })
+}
+
+/// Explica —AGREGANDO al mensaje de `err`, nunca reemplazándolo— un
+/// `MagiError::InsufficientAgents` cuando el kind efectivo es keyless (REQ-A12c,
+/// SC-A12f, fix round 3).
+///
+/// # Por qué existe: la ventana de `keyless_auth_explanation` excluye justo el
+/// escenario que REQ-A12c describe
+///
+/// `keyless_auth_explanation` solo ve una causa cuando `Magi::analyze()` devuelve
+/// `Ok(MagiReport)`, y eso exige `successful.len() >= min_agents` (2). Verificado
+/// contra `orchestrator.rs::dispatch_no_rotation` (magi-core 3.1.0, líneas
+/// 1058-1065): `if successful.len() < min_agents { return
+/// Err(MagiError::InsufficientAgents { succeeded, required }) }` — el mapa `failed`,
+/// YA completo con cada causa en ese punto, se descarta ahí mismo; `MagiReport` nunca
+/// llega a construirse. Como el trío de MS2 comparte UN `base_url`/`kind` entre los
+/// tres asientos (sin rotación, R-A06), un `kind` mal elegido —exactamente el
+/// escenario de SC-A12f, `kind = "ollama"` contra un endpoint que exige
+/// autenticación— rechaza a LOS TRES por igual: 0 de 3 exitosos, este camino, no el
+/// otro.
+///
+/// # Por qué esto SÍ alcanza sin la causa por asiento
+///
+/// REQ-A12c pide nombrar la configuración como **causa PROBABLE** ("no se pide una
+/// validación imposible... se exige que el fallo inevitable llegue explicado"), no
+/// una demostrada. La combinación "cero asientos completaron" + "el kind efectivo es
+/// keyless" ya es, por sí sola, evidencia suficiente para ese umbral — sin necesitar
+/// el código de status que este camino nunca tiene. Por esto el guard de kind sigue
+/// siendo obligatorio acá también: bajo un kind CON credencial, un fallo total dice
+/// tan poco sobre configuración como cualquier otro outage, y ofrecer la pista mandaría
+/// al usuario al archivo equivocado — el mismo daño que
+/// [`keyless_auth_explanation`] evita del otro lado.
+///
+/// # Parameters
+/// * `err` - el error que devolvió `Magi::analyze()`.
+/// * `kind` - el `ProviderKind` bajo el que corría el trío.
+///
+/// # Returns
+/// El `Display` de `err` (redactado — B11, ver abajo), con la pista keyless
+/// AGREGADA (nunca en su lugar) cuando `err` es `InsufficientAgents` y `kind` es
+/// `Ollama`. En cualquier otro caso, solo el `Display` de `err`.
+#[must_use]
+pub(crate) fn explain_magi_error(err: &MagiError, kind: ProviderKind) -> String {
+    // B11 — `redact_foreign_error`, NUNCA `redact_url`, y la diferencia importa acá:
+    // `redact_url` asume que TODA la entrada es una URL y redacta por completo
+    // cualquier cosa que no pueda recorrer como tal (`locate_userinfo` devuelve
+    // `Unparseable` ante cualquier string sin `://`) — aplicado acá habría reducido
+    // CADA mensaje de `MagiError` sin URL (p. ej. "insufficient agents: 0 succeeded,
+    // 2 required") a `"***"`, un bug real que atrapó
+    // `explain_magi_error_preserves_a_url_free_underlying_message` la primera vez que
+    // se corrió este test (ver el reporte de esta tarea). `redact_foreign_error`
+    // recorre PROSA buscando URLs EMBEBIDAS y redacta solo esas, dejando el resto
+    // intacto — la misma primitiva que `build_native_provider::to_seat` ya usa para
+    // el mismo problema: un `Display` foráneo que PODRÍA traer una URL, no que ES una.
+    // `MagiError` es `#[non_exhaustive]`, así que una variante futura sí podría
+    // interpolar una URL; se redacta siempre, no solo para las variantes de hoy.
+    let base = redact_foreign_error(err);
+    match (err, kind) {
+        (MagiError::InsufficientAgents { .. }, ProviderKind::Ollama) => {
+            format!("{base} — posible causa: {KEYLESS_AUTH_EXPLANATION}")
+        }
+        _ => base.to_string(),
+    }
 }
 
 /// RAII backstop that aborts a spawned task when the guard is dropped.
@@ -366,7 +456,9 @@ impl Tool for ConsultTool {
             }
             joined = handle => match joined {
                 Ok(Ok(report)) => report,
-                Ok(Err(e)) => return Err(ToolError::ExecutionError(e.to_string())),
+                Ok(Err(e)) => {
+                    return Err(ToolError::ExecutionError(explain_magi_error(&e, self.kind)))
+                }
                 Err(join_err) => {
                     return Err(ToolError::ExecutionError(format!(
                         "consult crashed: {join_err}"
@@ -607,6 +699,167 @@ mod tests {
         assert!(
             !report.contains("keyless"),
             "openai-compat carries a credential: no reinterpretation: {report}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Task 4.4 (fix round 3) — REQ-A12c/SC-A12f: the total-failure window
+    // -----------------------------------------------------------------------
+
+    /// All three seats fail on a REAL `ProviderError::Auth` — the case
+    /// `keyless_auth_explanation`/`annotate_report_text` CANNOT see (0 of 3
+    /// succeeded < `min_agents` 2 ⇒ `Magi::analyze()` returns `Err`, and
+    /// `MagiReport`/`failed_agents` is never constructed). This is the scenario
+    /// SC-A12f actually describes: a `kind` mismatch rejects every seat identically
+    /// because they share one `base_url`/`kind` (no rotation, R-A06).
+    fn magi_all_fail_with_auth_errors() -> Arc<Magi> {
+        let mk = || {
+            magi_core::providers::claude::ClaudeProvider::map_status_to_error(
+                401,
+                "x",
+                vec![],
+                None,
+            )
+        };
+        let provider = RoutingMockProvider::new()
+            .with_agent_responses(AgentName::Melchior, vec![Err(mk())])
+            .with_agent_responses(AgentName::Balthasar, vec![Err(mk())])
+            .with_agent_responses(AgentName::Caspar, vec![Err(mk())]);
+        Arc::new(Magi::new(Arc::new(provider)))
+    }
+
+    /// SC-A12f: on the total-failure path (`MagiError::InsufficientAgents`, no
+    /// per-agent cause available), a keyless kind is enough on its own to name the
+    /// configuration as a **probable** cause — REQ-A12c's own words ("causa
+    /// probable", not demostrada). The hint is ADDED to the underlying message, never
+    /// in its place.
+    #[test]
+    fn explain_magi_error_adds_a_probable_cause_hint_for_insufficient_agents_under_a_keyless_kind()
+    {
+        let err = MagiError::InsufficientAgents {
+            succeeded: 0,
+            required: 2,
+        };
+        let msg = explain_magi_error(&err, ProviderKind::Ollama);
+        assert!(
+            msg.contains("insufficient agents") || msg.contains("0 succeeded"),
+            "the underlying message must survive, not be replaced: {msg}"
+        );
+        assert!(
+            msg.contains("keyless") && msg.contains("openai-compat"),
+            "the probable-cause hint must be added: {msg}"
+        );
+        // Register check: this path has NO per-agent evidence, so it must not borrow
+        // the confident opening `annotate_report_text` uses when it DOES have
+        // evidence (`PROVIDER_AUTH_ERROR_MARKER` present in a real cause).
+        assert!(
+            !msg.contains("rechazado por autenticación"),
+            "no per-agent evidence here: must not claim auth was the cause: {msg}"
+        );
+    }
+
+    /// SC-A12f: under a kind that carries a credential, a total failure says nothing
+    /// about configuration — the hint must NOT appear, or it would send the user to
+    /// the wrong file (same guard [`keyless_auth_explanation`] enforces).
+    #[test]
+    fn explain_magi_error_never_adds_the_hint_under_a_credentialed_kind() {
+        let err = MagiError::InsufficientAgents {
+            succeeded: 0,
+            required: 2,
+        };
+        for kind in [ProviderKind::OpenAiCompat, ProviderKind::Anthropic] {
+            let msg = explain_magi_error(&err, kind);
+            assert!(
+                !msg.contains("keyless"),
+                "kind {kind:?} carries a credential: no hint: {msg}"
+            );
+        }
+    }
+
+    /// Edge case (B13): the hint is specific to `InsufficientAgents` — a DIFFERENT
+    /// `MagiError` variant, even under `ollama`, gets no hint, because "input too
+    /// large" says nothing about authentication.
+    #[test]
+    fn explain_magi_error_never_adds_the_hint_for_a_different_magi_error_variant() {
+        let err = MagiError::InputTooLarge {
+            size: 10_000,
+            max: 5_000,
+        };
+        let msg = explain_magi_error(&err, ProviderKind::Ollama);
+        assert!(!msg.contains("keyless"), "{msg}");
+        assert!(msg.contains("10000") || msg.contains("5000"), "{msg}");
+    }
+
+    /// Regression: `explain_magi_error` must use `redact_foreign_error`, NEVER
+    /// `redact_url`, on the underlying message. An earlier version of this function
+    /// used `redact_url`, which assumes its ENTIRE input is a URL and fully redacts
+    /// anything it cannot parse as one (`locate_userinfo` returns `Unparseable` for
+    /// any string without `://`) — applied to a `MagiError` message with no embedded
+    /// URL (the common case: "insufficient agents: 0 succeeded, 2 required" has none),
+    /// that reduced the entire diagnostic to a bare `"***"`. This test caught that the
+    /// first time it ran; it stays here so a future edit can't silently reintroduce
+    /// the wrong primitive.
+    #[test]
+    fn explain_magi_error_preserves_a_url_free_underlying_message_verbatim() {
+        let err = MagiError::InsufficientAgents {
+            succeeded: 0,
+            required: 2,
+        };
+        let msg = explain_magi_error(&err, ProviderKind::OpenAiCompat);
+        assert_eq!(
+            msg,
+            err.to_string(),
+            "a URL-free message must survive unredacted, verbatim: {msg}"
+        );
+    }
+
+    /// SC-A12f, end to end: a TOTAL failure (0 of 3 seats) under `ollama` reaches the
+    /// user through the ACTUAL `ConsultTool::execute` path, not just the pure
+    /// `explain_magi_error` predicate — this is the wiring proof for the window
+    /// `annotate_report_text` cannot cover.
+    #[tokio::test]
+    async fn a_total_seat_failure_under_ollama_surfaces_the_keyless_hint_through_consult_tool_execute(
+    ) {
+        let tool = ConsultTool::new(magi_all_fail_with_auth_errors(), false)
+            .with_kind(ProviderKind::Ollama);
+        let err = tool
+            .execute(
+                json!({"query": "should we migrate X to Y?"}),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect_err("0 of 3 succeed ⇒ Err(InsufficientAgents)");
+        let msg = match err {
+            ToolError::ExecutionError(m) => m,
+            other => panic!("expected ExecutionError, got {other:?}"),
+        };
+        assert!(
+            msg.contains("keyless") && msg.contains("openai-compat"),
+            "the probable-cause hint must reach the user: {msg}"
+        );
+    }
+
+    /// Same total failure, but under a kind that carries a credential: the hint must
+    /// NOT appear — this is the negative case that proves the guard is real (an
+    /// unconditional hint would pass the positive test above too).
+    #[tokio::test]
+    async fn a_total_seat_failure_under_openai_compat_does_not_surface_the_keyless_hint() {
+        let tool = ConsultTool::new(magi_all_fail_with_auth_errors(), false)
+            .with_kind(ProviderKind::OpenAiCompat);
+        let err = tool
+            .execute(
+                json!({"query": "should we migrate X to Y?"}),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect_err("0 of 3 succeed ⇒ Err(InsufficientAgents)");
+        let msg = match err {
+            ToolError::ExecutionError(m) => m,
+            other => panic!("expected ExecutionError, got {other:?}"),
+        };
+        assert!(
+            !msg.contains("keyless"),
+            "openai-compat carries a credential: no hint: {msg}"
         );
     }
 
