@@ -6,7 +6,10 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
+use magi_core::error::MagiError;
+use magi_core::reporting::MagiReport;
 use magi_core::schema::Mode;
+use magi_rs::magi::kind::ProviderKind;
 use magi_rs::magi::mode::{normalize_label, resolve_mode_guarded, ModeClassifier, ModeError};
 use magi_rs::redact::redact_foreign_error;
 use magi_rs::vault::{SecretStore, VaultError};
@@ -98,6 +101,59 @@ const CONSULT_UNAVAILABLE_FALLBACK: &str =
 /// like two unrelated problems to the user.
 fn consult_unavailable_response(reason: &str) -> AgentResponse {
     AgentResponse::Error(reason.to_string())
+}
+
+/// The `/consult` response BODY for a successful `MagiReport` (REQ-A12c, SC-A12f, fix
+/// round 4, finding 2).
+///
+/// **Before this fix, `UiEvent::Consult` built its body from `report.report` directly
+/// — bypassing `annotate_report_text` entirely.** A human typing `/consult` is
+/// arguably the most direct "first use" surface REQ-A12c describes, and they got NONE
+/// of this task's keyless-auth guidance: a partial failure (`degraded = true`) with a
+/// seat rejected on auth under a keyless kind rendered as an unexplained `[DEGRADED:
+/// …]` banner over the raw report, same as any other partial failure.
+///
+/// Reuses [`crate::tools::consult::annotate_report_text`] — the SAME function
+/// `ConsultTool::execute`/`analyze_direct` already call — so the TUI never carries its
+/// own, fourth copy of this wording (B3). The `[DEGRADED: …]` banner is TUI-only
+/// presentation (it is not part of the JSON `report`/`degraded` shape the other two
+/// surfaces emit) and stays here, prepended to the shared annotated text.
+///
+/// Extracted from the `UiEvent::Consult` handler for the same reason as
+/// [`consult_unavailable_response`]/[`handle_login`]: the full TUI event loop is
+/// intractable to drive in a test.
+fn tui_consult_success_body(report: &MagiReport, kind: ProviderKind) -> String {
+    let annotated = crate::tools::consult::annotate_report_text(report, kind);
+    if report.degraded {
+        format!(
+            "[DEGRADED: fewer than 3 agents responded — consensus may be unreliable]\n\n{annotated}"
+        )
+    } else {
+        annotated
+    }
+}
+
+/// The `/consult` response BODY for a failed `Magi::analyze()` call (REQ-A12c,
+/// SC-A12f, fix round 4, finding 2).
+///
+/// **Before this fix, `UiEvent::Consult` sent a hardcoded generic string** — "MAGI
+/// consult failed — check your provider/credentials and try again." — on EVERY
+/// failure, including a total failure (`MagiError::InsufficientAgents`) under a
+/// keyless kind, where [`crate::tools::consult::explain_magi_error`] would have named
+/// the configuration as a probable cause. Reuses that SAME function — the one
+/// `ConsultTool::execute`/`analyze_direct` already call — so the hint reads
+/// identically on all three surfaces (B3), never a fourth wording.
+///
+/// `explain_magi_error` already redacts the underlying `err` via
+/// `redact_foreign_error` before this function ever sees it (B11) — nothing here
+/// needs to redact again.
+///
+/// Extracted for the same reason as [`tui_consult_success_body`].
+fn tui_consult_error_body(err: &MagiError, kind: ProviderKind) -> String {
+    format!(
+        "MAGI consult failed: {}",
+        crate::tools::consult::explain_magi_error(err, kind)
+    )
 }
 
 /// Handles a failed post-`/login` MAGI trio rebuild (I4, fix round 2).
@@ -617,7 +673,11 @@ impl App {
 /// - `default_mode` — `[magi].default_mode`, resolved once at startup (REQ-A15).
 /// - `untrusted_content` — `[magi].untrusted_content` only; the TUI never exposes this as a
 ///   command-line flag (REQ-A07d/SC-A07t).
-#[allow(clippy::too_many_arguments)] // pre-existing shape; REQ-A07d adds three params to it
+/// - `magi_kind` (REQ-A12c, fix round 4) — the `ProviderKind` the trio runs under.
+///   Feeds [`tui_consult_success_body`]/[`tui_consult_error_body`] so the explicit
+///   `/consult` command gets the SAME keyless-auth guidance
+///   `ConsultTool`/headless already have.
+#[allow(clippy::too_many_arguments)] // pre-existing shape; REQ-A07d/REQ-A12c add params to it
 pub async fn run_tui_ext(
     agent: Agent,
     startup_notices: Vec<String>,
@@ -628,6 +688,7 @@ pub async fn run_tui_ext(
     mode_classifier: Arc<dyn ModeClassifier>,
     default_mode: Option<Mode>,
     untrusted_content: bool,
+    magi_kind: ProviderKind,
 ) -> anyhow::Result<()> {
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |panic_info| {
@@ -768,27 +829,24 @@ pub async fn run_tui_ext(
                     let join = tokio::spawn(async move { magi.analyze(&mode, &query).await }).await;
                     match join {
                         Ok(Ok(report)) => {
-                            let body = if report.degraded {
-                                format!(
-                                    "[DEGRADED: fewer than 3 agents responded — consensus may be unreliable]\n\n{}",
-                                    report.report
-                                )
-                            } else {
-                                report.report
-                            };
+                            // REQ-A12c/SC-A12f (fix round 4, finding 2): routed through
+                            // the SAME `annotate_report_text` `ConsultTool`/headless use
+                            // — see `tui_consult_success_body`'s own doc for what this
+                            // replaces.
+                            let body = tui_consult_success_body(&report, magi_kind);
                             // Sanitize the verbatim report (LLM-generated) before rendering —
                             // strips ANSI escapes / control chars, matching the TextDelta path.
                             let body = crate::agent::Agent::sanitize_text(&body);
                             let _ = response_tx.send(AgentResponse::Text(body)).await;
                         }
                         Ok(Err(e)) => {
-                            eprintln!("[consult] analyze failed: {e}");
-                            let _ = response_tx
-                                .send(AgentResponse::Error(
-                                    "MAGI consult failed — check your provider/credentials and try again."
-                                        .to_string(),
-                                ))
-                                .await;
+                            // REQ-A12c/SC-A12f (fix round 4, finding 2): routed through
+                            // the SAME `explain_magi_error` `ConsultTool`/headless use —
+                            // see `tui_consult_error_body`'s own doc. `body` is already
+                            // redacted (B11) before either use below.
+                            let body = tui_consult_error_body(&e, magi_kind);
+                            eprintln!("[consult] analyze failed: {body}");
+                            let _ = response_tx.send(AgentResponse::Error(body)).await;
                         }
                         Err(join_err) => {
                             eprintln!("[consult] analyze panicked: {join_err}");
@@ -1707,6 +1765,21 @@ fn ui(f: &mut Frame, app: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use magi_core::providers::claude::ClaudeProvider;
+    use magi_core::schema::AgentName;
+    use magi_core::test_support::RoutingMockProvider;
+    use magi_core::verdict_markers::{VERDICT_CLOSE, VERDICT_OPEN};
+
+    /// Canonical mage response (magi-core 3.x verdict-marker contract) — same shape
+    /// `src/tools/consult.rs`'s own `agent_json` builds, needed here to drive a REAL
+    /// `Magi::analyze()` for the fix-round-4 tests below (a `MagiReport` cannot be
+    /// hand-constructed: it is `#[non_exhaustive]`).
+    fn agent_json(agent: &str) -> String {
+        let verdict = format!(
+            r#"{{"agent":"{agent}","verdict":"approve","confidence":0.9,"summary":"s","reasoning":"r","findings":[],"recommendation":"rec"}}"#
+        );
+        format!("{VERDICT_OPEN}\n{verdict}\n{VERDICT_CLOSE}")
+    }
 
     /// Builds an in-memory [`SharedSecretStore`] fixture for the
     /// `handle_login`/`handle_logout` regression tests (MAGI run 8, Balthasar
@@ -1902,6 +1975,105 @@ mod tests {
     #[test]
     fn test_consult_unavailable_fallback_is_non_empty() {
         assert!(!CONSULT_UNAVAILABLE_FALLBACK.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // Fix round 4, finding 2 — REQ-A12c/SC-A12f: the TUI's explicit `/consult`
+    // routed through the same annotation/explanation as ConsultTool/headless.
+    // -----------------------------------------------------------------------
+
+    /// SC-A12f: a partial failure (one seat rejected on auth) reaches the TUI's
+    /// `/consult` body with the SAME keyless-auth explanation `ConsultTool`/headless
+    /// already surface — not the raw, unexplained report `UiEvent::Consult` rendered
+    /// before this fix.
+    #[tokio::test]
+    async fn tui_consult_success_body_carries_the_keyless_hint_when_a_seat_fails_on_auth() {
+        let auth_err = ClaudeProvider::map_status_to_error(401, "x", vec![], None);
+        let provider = RoutingMockProvider::new()
+            .with_agent_responses(AgentName::Melchior, vec![Ok(agent_json("melchior"))])
+            .with_agent_responses(AgentName::Balthasar, vec![Ok(agent_json("balthasar"))])
+            .with_agent_responses(AgentName::Caspar, vec![Err(auth_err)]);
+        let magi = magi_core::orchestrator::Magi::new(Arc::new(provider));
+        let report = magi
+            .analyze(&Mode::Analysis, "should we migrate X to Y?")
+            .await
+            .expect("2 of 3 succeed ⇒ Ok, degraded");
+
+        let body = tui_consult_success_body(&report, ProviderKind::Ollama);
+        assert!(body.contains("DEGRADED"), "{body}");
+        assert!(
+            body.contains("keyless") && body.contains("openai-compat"),
+            "the explanation must reach the TUI body: {body}"
+        );
+    }
+
+    /// SC-A12f negative control: the same partial failure under a credentialed kind
+    /// renders WITHOUT the hint — proving the guard, not just the annotation call,
+    /// survives on this surface.
+    #[tokio::test]
+    async fn tui_consult_success_body_omits_the_hint_under_a_credentialed_kind() {
+        let auth_err = ClaudeProvider::map_status_to_error(401, "x", vec![], None);
+        let provider = RoutingMockProvider::new()
+            .with_agent_responses(AgentName::Melchior, vec![Ok(agent_json("melchior"))])
+            .with_agent_responses(AgentName::Balthasar, vec![Ok(agent_json("balthasar"))])
+            .with_agent_responses(AgentName::Caspar, vec![Err(auth_err)]);
+        let magi = magi_core::orchestrator::Magi::new(Arc::new(provider));
+        let report = magi
+            .analyze(&Mode::Analysis, "should we migrate X to Y?")
+            .await
+            .expect("2 of 3 succeed ⇒ Ok, degraded");
+
+        let body = tui_consult_success_body(&report, ProviderKind::OpenAiCompat);
+        assert!(
+            !body.contains("keyless"),
+            "openai-compat carries a credential: no hint: {body}"
+        );
+    }
+
+    /// SC-A12f: a TOTAL failure (0 of 3 seats) under a keyless kind carries the
+    /// probable-cause hint in the TUI's error body — not the hardcoded generic
+    /// string `UiEvent::Consult` sent unconditionally before this fix.
+    #[tokio::test]
+    async fn tui_consult_error_body_carries_the_keyless_hint_on_total_failure_under_a_keyless_kind()
+    {
+        let mk = || ClaudeProvider::map_status_to_error(401, "x", vec![], None);
+        let provider = RoutingMockProvider::new()
+            .with_agent_responses(AgentName::Melchior, vec![Err(mk())])
+            .with_agent_responses(AgentName::Balthasar, vec![Err(mk())])
+            .with_agent_responses(AgentName::Caspar, vec![Err(mk())]);
+        let magi = magi_core::orchestrator::Magi::new(Arc::new(provider));
+        let err = magi
+            .analyze(&Mode::Analysis, "should we migrate X to Y?")
+            .await
+            .expect_err("0 of 3 succeed ⇒ Err(InsufficientAgents)");
+
+        let body = tui_consult_error_body(&err, ProviderKind::Ollama);
+        assert!(
+            body.contains("keyless") && body.contains("openai-compat"),
+            "the probable-cause hint must reach the TUI body: {body}"
+        );
+    }
+
+    /// SC-A12f negative control: the same total failure under a credentialed kind
+    /// gets no hint — the guard is real, not the hint being unconditional.
+    #[tokio::test]
+    async fn tui_consult_error_body_omits_the_hint_under_a_credentialed_kind() {
+        let mk = || ClaudeProvider::map_status_to_error(401, "x", vec![], None);
+        let provider = RoutingMockProvider::new()
+            .with_agent_responses(AgentName::Melchior, vec![Err(mk())])
+            .with_agent_responses(AgentName::Balthasar, vec![Err(mk())])
+            .with_agent_responses(AgentName::Caspar, vec![Err(mk())]);
+        let magi = magi_core::orchestrator::Magi::new(Arc::new(provider));
+        let err = magi
+            .analyze(&Mode::Analysis, "should we migrate X to Y?")
+            .await
+            .expect_err("0 of 3 succeed ⇒ Err(InsufficientAgents)");
+
+        let body = tui_consult_error_body(&err, ProviderKind::OpenAiCompat);
+        assert!(
+            !body.contains("keyless"),
+            "openai-compat carries a credential: no hint: {body}"
+        );
     }
 
     #[tokio::test]

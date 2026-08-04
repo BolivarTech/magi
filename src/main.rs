@@ -1598,6 +1598,7 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
         tui_mode_classifier,
         tui_default_mode,
         tui_untrusted_content,
+        magi_config.effective_magi_kind(),
     )
     .await?;
     Ok(ExitCode::SUCCESS)
@@ -2968,6 +2969,21 @@ struct HeadlessContext {
     /// The envelope's own `untrusted_content` field (REQ-A07d), defaulting to
     /// `false` when absent. Same extraction-order note as [`Self::env_mode`].
     env_untrusted_content: bool,
+    /// The REQ-A07p/SC-A07p endpoint-divergence notice for THIS run, if it applies —
+    /// fix round 4. Already `eprintln!`'d to stderr by `prepare_headless` (same
+    /// immediate-print convention as `cfg_notices`/`trio_notices` just above it), and
+    /// ALSO kept here for the same reason `provider_kind` above is kept on the
+    /// struct: `prepare_headless` cannot be driven from a unit test in any way that
+    /// captures its stderr (this is a real process resource, global and not
+    /// parallel-test-safe to redirect), so a test asserts on this field directly
+    /// instead — see `test_prepare_headless_carries_the_divergence_notice_when_it_applies`.
+    ///
+    /// `#[allow(dead_code)]`, same as `provider_kind` above and for the identical
+    /// reason: no dispatcher's PRODUCTION code reads it back off `ctx` (both destructure
+    /// `HeadlessContext` with `..`) — it exists purely so a test can assert against the
+    /// real `prepare_headless` output instead of a hand-rolled stand-in.
+    #[allow(dead_code)]
+    divergence_notice: Option<Notice>,
 }
 
 /// Resolves the effective `allow_system_override` gate (REQ-H12b, spec §11):
@@ -3316,6 +3332,21 @@ async fn prepare_headless(
         &MagiEnvModelOverrides::from_env(),
         &mut trio_notices,
     );
+    // REQ-A07p/SC-A07p (fix round 4, finding 1): headless is the surface this notice
+    // matters MOST for, not least — REQ-A07c/SC-A07f describe exactly this path (a
+    // scripted `magi consult` without `--mode` pays the classification call this
+    // notice warns about), and there is no human watching a TUI here to notice it
+    // otherwise. Computed via the SAME `divergence_notice` `push_divergence_notice`
+    // calls for the TUI (B3 — one predicate, two surfaces, never a second copy),
+    // pushed into `trio_notices` so it renders through the same tier/dedup pass as
+    // everything else printed below, and kept on `HeadlessContext` separately so
+    // `test_prepare_headless_carries_the_divergence_notice_when_it_applies` can
+    // assert against it without capturing stderr.
+    let headless_divergence_notice =
+        divergence_notice(&magi_config, magi_config.effective_default_mode().is_none());
+    if let Some(n) = headless_divergence_notice.clone() {
+        trio_notices.push(n);
+    }
     for n in render_notices(trio_notices) {
         eprintln!("{n}");
     }
@@ -3350,6 +3381,7 @@ async fn prepare_headless(
         limits,
         env_mode,
         env_untrusted_content,
+        divergence_notice: headless_divergence_notice,
     })
 }
 
@@ -6939,8 +6971,22 @@ mod tests {
             );
         }
 
-        /// SC-A07p (cableado): el aviso no solo se PRODUCE, se EMITE — llega al
-        /// vector que la TUI efectivamente imprime.
+        /// SC-A07p (cableado, superficie TUI): el aviso no solo se PRODUCE, se EMITE
+        /// — llega al vector que `run()` (la TUI) efectivamente imprime.
+        ///
+        /// **Alcance declarado, a propósito (fix round 4): esto cubre SOLO la TUI.**
+        /// El brief original de esta tarea pedía "el vector que la TUI **y el
+        /// headless** imprimen" (`task-4.4-brief.md:41`); una revisión encontró que
+        /// este test (y su mensaje de aserción) habían recortado esa cobertura a
+        /// solo la TUI sin que ningún reporte de ronda lo dijera — un requisito
+        /// achicado en silencio dentro del texto de un test, que es exactamente el
+        /// modo en que un hueco se vuelve invisible. El headless YA NO comparte este
+        /// test: tiene el suyo propio,
+        /// `test_prepare_headless_carries_the_divergence_notice_when_it_applies`,
+        /// más abajo, porque `prepare_headless` no puede probarse llamando a
+        /// `push_divergence_notice` directo (esa función no es su única llamadora;
+        /// `prepare_headless` tiene su PROPIO call site — ver ese test para la
+        /// prueba real de que ESE call site existe).
         ///
         /// Va aparte del test anterior a propósito, como pide el brief de esta
         /// tarea: aquel verifica el PREDICADO; este verifica el EMPUJE al vector.
@@ -6952,7 +6998,7 @@ mod tests {
         /// dejaría al usuario sin el aviso — es el modo de fallo exacto de un
         /// "definido pero no cableado" que ya ocurrió una vez en este plan (Task 4.3).
         #[test]
-        fn the_divergence_notice_reaches_the_startup_notices() {
+        fn the_divergence_notice_reaches_the_tui_startup_notices() {
             let cfg = cfg_with_endpoints("http://a/v1", Some("http://b/v1"));
             let mut notices: Vec<Notice> = Vec::new();
             push_divergence_notice(&cfg, true, &mut notices);
@@ -6960,8 +7006,84 @@ mod tests {
                 notices
                     .iter()
                     .any(|n| n.text.contains("provider principal")),
-                "el aviso tiene que estar en el vector que la TUI imprime: {notices:?}"
+                "el aviso tiene que estar en el vector que la TUI imprime \
+                 (superficie TUI únicamente — ver \
+                 test_prepare_headless_carries_the_divergence_notice_when_it_applies \
+                 para la superficie headless): {notices:?}"
             );
+        }
+
+        /// SC-A07p (cableado, superficie HEADLESS) — fix round 4, finding 1.
+        ///
+        /// **Esto es lo que faltaba, sin ningún test que lo cubriera.**
+        /// `push_divergence_notice` solo tenía UN call site de producción, dentro de
+        /// `run()` (la TUI); `prepare_headless` —el preludio compartido de
+        /// `magi query` y `magi consult`— nunca lo invocaba. REQ-A07c es
+        /// explícitamente sobre la ruta headless: un pipeline con `magi consult` sin
+        /// `--mode` es SC-A07f, y ese pipeline no tiene una TUI en la que el aviso
+        /// pudiera aparecer. Cablear solo la superficie interactiva —donde hay un
+        /// humano mirando— e ignorar la automatizada invertía la prioridad que la
+        /// propia spec fija.
+        ///
+        /// **Por qué este test dirige el `MagiConfig` a mano, no `push_divergence_
+        /// notice` directo.** `prepare_headless` es una función real, con I/O real
+        /// (`.magi/` descubierto, `magi.toml` leído del disco), así que a diferencia
+        /// del test de la TUI de arriba —que no puede evitar llamar a
+        /// `push_divergence_notice` DIRECTO porque `run()` no es testeable en
+        /// absoluto— ACÁ sí se puede manejar la función real de punta a punta:
+        /// `init_default_workspace`/`write_envelope`/`base_hargs` (ya usados por
+        /// `test_prepare_headless_cli_provider_override_normalizes_the_new_vocabulary`
+        /// arriba) son exactamente el arnés que hace esto posible con `--no-memory`,
+        /// sin vault real.
+        ///
+        /// `HeadlessContext::divergence_notice` existe SOLO para que este test pueda
+        /// afirmar contra el resultado sin capturar stderr del proceso (un recurso
+        /// global, no seguro para una suite de tests en paralelo) — mismo motivo que
+        /// ya justifica el campo `provider_kind` de la misma struct.
+        #[test]
+        fn test_prepare_headless_carries_the_divergence_notice_when_it_applies() {
+            with_var("MAGI_PROVIDER", None, || {
+                with_var("ANTHROPIC_MODEL", None, || {
+                    with_var("OPENAI_MODEL", None, || {
+                        let tmp = tempfile::tempdir().unwrap();
+                        let cwd = dunce::canonicalize(tmp.path()).unwrap();
+                        crate::system::workspace::init(&cwd).expect("init .magi/");
+                        // Diverge (root vs. [magi].base_url distintos) y NO declara
+                        // `default_mode` ⇒ inferencia activa: las dos condiciones de
+                        // `divergence_notice` (SC-A07p).
+                        std::fs::write(
+                            cwd.join(".magi/magi.toml"),
+                            "base_url = \"http://a:11434/v1\"\n\
+                             [magi]\n\
+                             base_url = \"http://b:11434/v1\"\n",
+                        )
+                        .unwrap();
+                        let input = write_envelope(&cwd, "env.json", r#"{"prompt":"hi"}"#);
+
+                        let mut h = base_hargs();
+                        h.input = Some(input);
+                        h.workdir = Some(cwd.clone());
+                        h.no_memory = true;
+
+                        let rt = tokio::runtime::Runtime::new().unwrap();
+                        let ctx = rt
+                            .block_on(prepare_headless(&h, None, &cwd, None, None))
+                            .expect("prepare_headless must succeed");
+
+                        let notice = ctx.divergence_notice.expect(
+                            "diverging config + active inference ⇒ Some — the headless \
+                             prelude must call divergence_notice, same as run() does \
+                             for the TUI (REQ-A07c/SC-A07f: headless is the surface \
+                             this notice matters most for)",
+                        );
+                        assert!(
+                            notice.text.contains("provider principal"),
+                            "{}",
+                            notice.text
+                        );
+                    });
+                });
+            });
         }
 
         /// Precondición de `divergence_notice`: `load()` ya validó las dos

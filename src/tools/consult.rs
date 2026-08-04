@@ -134,7 +134,12 @@ fn keyless_auth_explanation(cause: &str, kind: ProviderKind) -> Option<&'static 
 ///
 /// El nombre del asiento (`AgentName`, vía `{agent:?}`) es seguro — no es texto de un
 /// tercero.
-fn annotate_report_text(report: &MagiReport, kind: ProviderKind) -> String {
+///
+/// `pub(crate)` (fix round 4, finding 2): además de [`report_to_consult_json`]
+/// (`ConsultTool::execute`, `analyze_direct`), el `/consult` explícito de la TUI
+/// (`src/tui/mod.rs::tui_consult_success_body`) llama esto directo — es la MISMA
+/// anotación en las tres superficies (B3), nunca una cuarta redacción independiente.
+pub(crate) fn annotate_report_text(report: &MagiReport, kind: ProviderKind) -> String {
     let mut text = report.report.clone();
     for (agent, cause) in &report.failed_agents {
         if let Some(explanation) = keyless_auth_explanation(cause, kind) {
@@ -208,6 +213,11 @@ pub(crate) fn report_to_consult_json(report: &MagiReport, kind: ProviderKind) ->
 /// El `Display` de `err` (redactado — B11, ver abajo), con la pista keyless
 /// AGREGADA (nunca en su lugar) cuando `err` es `InsufficientAgents` y `kind` es
 /// `Ollama`. En cualquier otro caso, solo el `Display` de `err`.
+///
+/// Consumida por `ConsultTool::execute`, `analyze_direct` (headless), Y —desde el fix
+/// round 4, finding 2— el `/consult` explícito de la TUI
+/// (`src/tui/mod.rs::tui_consult_error_body`): las tres superficies comparten esta
+/// única función en vez de cada una escribiendo su propia traducción (B3).
 #[must_use]
 pub(crate) fn explain_magi_error(err: &MagiError, kind: ProviderKind) -> String {
     // B11 — `redact_foreign_error`, NUNCA `redact_url`, y la diferencia importa acá:
