@@ -1585,6 +1585,7 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
         &mut agent,
         consult_magi.as_ref(),
         magi_config.magi.auto_approve,
+        magi_config.effective_magi_kind(),
     );
 
     crate::tui::run_tui_ext(
@@ -1751,12 +1752,18 @@ fn resolve_endpoints(
 /// el llamador reporta los tres asientos caídos de una vez y necesita distinguir
 /// credencial-faltante de fallo de transporte sin parsear texto.
 ///
-/// Variantes separadas porque las tres se diagnostican distinto: la credencial la
-/// arregla el operador en su config o su vault, el transporte es del entorno, y el HTTP
-/// **puede ser configuración disfrazada** — un 401 bajo un kind keyless (`ollama`) es
-/// casi siempre `kind` mal elegido, no una credencial mala (Task 4.4,
-/// `explain_keyless_auth_failure`, compara el `status` acá contra el `ProviderKind`; de
-/// ahí que sea una variante propia y no un `Transport` con el código adentro del texto).
+/// **Ya NO tiene una variante `Http`.** La tuvo brevemente (Task 4.4, ronda 1),
+/// anticipando que `build_native_provider` capturaría un `ProviderError::Http` real en
+/// el primer uso del asiento. Verificado que eso nunca ocurre:
+/// `OpenAiCompatibleProvider::with_timeout`/`from_authority` (magi-core 3.1.0) no hacen
+/// ninguna petición HTTP en construcción — su único modo de fallo es
+/// `ProviderError::Network`, vía `client_build_error`. La variante quedaba
+/// permanentemente sin constructor de producción, así que se retiró en la ronda 2 en
+/// vez de arrastrar un `#[allow(dead_code)]` que no protegía nada real. La traducción
+/// del 401/403 keyless (REQ-A12c) ahora opera sobre la causa YA RENDERIZADA de
+/// `MagiReport::failed_agents` — ver `tools::consult::keyless_auth_explanation` — que
+/// es de donde un 401 real SÍ es alcanzable; los detalles y su alcance genuino están en
+/// el reporte de esta tarea.
 #[derive(Debug, thiserror::Error)]
 enum SeatError {
     /// El kind exige credencial y no hay ninguna resuelta.
@@ -1765,99 +1772,11 @@ enum SeatError {
         /// Nombre de la variable/entrada de vault esperada.
         var: &'static str,
     },
-    /// Un status HTTP recibido en el primer uso del asiento (Task 4.4 lo traduce).
-    ///
-    /// `build_native_provider` nunca la construye (no hace ninguna petición HTTP en
-    /// construcción, solo valida y arma el cliente) — la produce el punto que atrapa
-    /// el `ProviderError::Http` del PRIMER USO real del provider, que es Task 4.4
-    /// (`explain_keyless_auth_failure`). La variante existe ahora porque `SeatError`
-    /// es el tipo compartido entre las dos tareas. Cubierta por
-    /// `seat_error_variants_have_a_readable_display`.
-    #[allow(dead_code)]
-    #[error("el endpoint respondió {status}")]
-    Http {
-        /// El status recibido.
-        status: u16,
-    },
     /// El cliente HTTP no se pudo construir. `SafeErrorText`, no `String`: el texto de
     /// un error foráneo puede llevar la URL con credenciales, y este tipo solo se
     /// construye pasando por [`redact_foreign_error`].
     #[error("no se pudo construir el cliente HTTP: {0}")]
     Transport(SafeErrorText),
-}
-
-/// Los dos status que un endpoint **keyless** nunca debería producir por sí mismo — si
-/// los produce, es porque exige una autenticación que un `ollama` (keyless por
-/// definición, REQ-A01b) nunca envía. `401` = Unauthorized, `403` = Forbidden; el RFC
-/// 9110 los distingue (credencial ausente/mala vs. credencial válida sin permiso) pero
-/// para este diagnóstico la causa raíz es la misma en los dos: el `kind` declarado no
-/// coincide con lo que el endpoint realmente exige.
-// `#[allow(dead_code)]`: mismo motivo que el de `SeatError::Http` — solo
-// `explain_keyless_auth_failure` la consume, y esa función tampoco tiene hoy un
-// llamador de producción (ver su rustdoc, sección "Nota de alcance").
-#[allow(dead_code)]
-const KEYLESS_AUTH_STATUSES: [u16; 2] = [401, 403];
-
-/// Traduce un 401/403 bajo un kind **keyless** a un error de configuración accionable
-/// (REQ-A12c, SC-A12f).
-///
-/// Devuelve `None` para cualquier otra combinación: bajo un kind que SÍ lleva
-/// credencial (`openai-compat`/`anthropic`), un 401 puede ser una credencial
-/// genuinamente mala, y reinterpretarlo como error de configuración mandaría al usuario
-/// a revisar el archivo equivocado — "un modelo que peca de MÁS seguridad... es la
-/// dirección buena de fallo" no aplica acá: sería un diagnóstico ACTIVAMENTE
-/// incorrecto, no un guard de más.
-///
-/// **Es la salida de lo que NO se puede detectar al cargar** (REQ-A12c): saber si una
-/// `base_url` exige autenticación requiere preguntárselo al servidor; lo exigible no es
-/// adivinar eso al parsear `magi.toml`, sino que el fallo inevitable —cuando ocurre—
-/// llegue explicado en vez de como un 401 crudo.
-///
-/// # Parameters
-/// * `err` - la causa tipada capturada en el punto que la produjo.
-/// * `kind` - el `ProviderKind` bajo el que corría el asiento que falló.
-///
-/// # Returns
-/// `Some(mensaje)` accionable cuando `err` es `Http{401|403}` y `kind` es `Ollama`;
-/// `None` en cualquier otro caso (el llamador cae a `err.to_string()`).
-///
-/// # Nota de alcance — NO WIRED en producción (ver el reporte de esta tarea)
-///
-/// Esta función es **pura, correcta y probada** contra su propio contrato, pero no
-/// tiene hoy un llamador de producción que le entregue un `SeatError::Http` real:
-/// `Magi::analyze()` (magi-core 3.1.0, único punto de entrada de un consult) nunca
-/// devuelve una causa tipada por asiento — colapsa cada fallo en un `String` dentro de
-/// `MagiReport::failed_agents` o, si TODOS fallan, en `MagiError::InsufficientAgents
-/// {succeeded, required}`, sin código de status en ningún lado. Y
-/// `build_native_provider`/`OpenAiCompatibleProvider::with_timeout` nunca hacen una
-/// petición HTTP en construcción (solo validan y arman el cliente; su único modo de
-/// fallo es `ProviderError::Network`), así que tampoco pueden producir un `Http` real.
-/// Reconstruirlo parseando el `String` de `failed_agents` sería exactamente "volver a
-/// parsear texto, que es justamente lo que `SeatError` dejó de ser" — el propio
-/// argumento del brief de esta tarea contra esa vía. `SeatError::Http` sigue
-/// `#[allow(dead_code)]` en producción a propósito: nada lo construye todavía.
-// Mismo `#[allow(dead_code)]` que `SeatError::Http`/`KEYLESS_AUTH_STATUSES`, y el mismo
-// motivo: sin un `SeatError::Http` real que capturar, esta función queda sin llamador
-// de producción hasta que exista uno (ver la sección "Nota de alcance" arriba). Está
-// cubierta por sus propios tests (`mod tests::divergence_and_keyless_auth`), que sí la
-// invocan bajo `cfg(test)`.
-#[allow(dead_code)]
-#[must_use]
-fn explain_keyless_auth_failure(err: &SeatError, kind: ProviderKind) -> Option<String> {
-    match (err, kind) {
-        (SeatError::Http { status }, ProviderKind::Ollama)
-            if KEYLESS_AUTH_STATUSES.contains(status) =>
-        {
-            Some(
-                "El endpoint rechazó la petición por autenticación, pero \
-                 `[magi].kind = \"ollama\"` es keyless y nunca envía credencial. Si tu \
-                 endpoint la exige, usá `kind = \"openai-compat\"` y declará la clave \
-                 por env o vault."
-                    .to_string(),
-            )
-        }
-        _ => None,
-    }
 }
 
 /// Renderiza UN `(asiento, causa)` como `"Melchior: falta la credencial …"`.
@@ -2385,16 +2304,20 @@ fn build_magi_orchestrator(
 /// nunca con un `execute` que falla en el primer uso: eso gastaría una vuelta del tool
 /// loop (y una llamada al modelo) para descubrir algo que ya se sabía al arrancar,
 /// además de invitar al modelo principal a rutear hacia algo que no puede correr.
+/// `kind` - el `ProviderKind` bajo el que corre el trío (REQ-A12c): construction-time,
+/// vía `ConsultTool::with_kind`, así `ConsultTool::execute` no tiene que volver a
+/// resolverlo en cada llamada. Determina si un 401/403 de `MagiReport::failed_agents`
+/// se explica como configuración keyless — ver `tools::consult::keyless_auth_explanation`.
 fn register_consult_tool_if_available(
     agent: &mut Agent,
     consult_magi: Option<&Arc<Magi>>,
     auto_approve: bool,
+    kind: ProviderKind,
 ) {
     if let Some(magi) = consult_magi {
-        agent.register_tool(Box::new(crate::tools::consult::ConsultTool::new(
-            magi.clone(),
-            auto_approve,
-        )));
+        agent.register_tool(Box::new(
+            crate::tools::consult::ConsultTool::new(magi.clone(), auto_approve).with_kind(kind),
+        ));
     }
 }
 
@@ -3530,6 +3453,7 @@ async fn run_query_subcommand(
         &mut agent,
         consult_magi.as_ref(),
         magi_config.magi.auto_approve,
+        magi_config.effective_magi_kind(),
     );
 
     let policy = Policy::new(tier, resolved.max_tool_calls, h.timeout);
@@ -3619,6 +3543,7 @@ async fn run_consult_subcommand(
     let outcome = run_consult(
         resolved,
         magi,
+        magi_config.effective_magi_kind(),
         &prompt,
         timeout,
         explicit_mode,
@@ -6573,12 +6498,15 @@ mod tests {
 
         #[test]
         fn seat_error_variants_have_a_readable_display() {
-            assert!(SeatError::Http { status: 401 }.to_string().contains("401"));
             assert!(SeatError::MissingCredential {
                 var: "OPENAI_API_KEY"
             }
             .to_string()
             .contains("OPENAI_API_KEY"));
+            let transport = SeatError::Transport(redact_foreign_error(&std::io::Error::other(
+                "connection refused",
+            )));
+            assert!(transport.to_string().contains("connection refused"));
         }
 
         #[test]
@@ -6767,7 +6695,12 @@ mod tests {
                         var: "OPENAI_API_KEY",
                     },
                 ),
-                (AgentName::Caspar, SeatError::Http { status: 401 }),
+                (
+                    AgentName::Caspar,
+                    SeatError::Transport(redact_foreign_error(&std::io::Error::other(
+                        "connection refused",
+                    ))),
+                ),
             ]);
             let text = err.to_string();
             assert!(
@@ -6775,7 +6708,7 @@ mod tests {
                 "el primer asiento debe nombrarse con su causa: {text}"
             );
             assert!(
-                text.contains("Caspar") && text.contains("401"),
+                text.contains("Caspar") && text.contains("connection refused"),
                 "el segundo asiento debe nombrarse con su causa: {text}"
             );
         }
@@ -6797,7 +6730,12 @@ mod tests {
                         var: "OPENAI_API_KEY",
                     },
                 ),
-                (AgentName::Caspar, SeatError::Http { status: 401 }),
+                (
+                    AgentName::Caspar,
+                    SeatError::Transport(redact_foreign_error(&std::io::Error::other(
+                        "connection refused",
+                    ))),
+                ),
             ]);
             let msg = trio_unavailable_message(&err);
             assert!(msg.contains("Melchior"), "{msg}");
@@ -6807,7 +6745,7 @@ mod tests {
                 msg.matches("OPENAI_API_KEY").count() >= 2,
                 "las dos causas de credencial deben aparecer, no colapsarse: {msg}"
             );
-            assert!(msg.contains("401"), "{msg}");
+            assert!(msg.contains("connection refused"), "{msg}");
             assert!(
                 msg.contains("vault set"),
                 "debe decir CÓMO habilitarlo: {msg}"
@@ -6873,14 +6811,24 @@ mod tests {
             let magi: Arc<Magi> = Arc::new(Magi::new(Arc::new(RoutingMockProvider::new())));
 
             let mut agent_with_trio = Agent::new(Arc::new(StaticProvider));
-            register_consult_tool_if_available(&mut agent_with_trio, Some(&magi), false);
+            register_consult_tool_if_available(
+                &mut agent_with_trio,
+                Some(&magi),
+                false,
+                ProviderKind::Ollama,
+            );
             assert!(
                 agent_with_trio.has_tool("consult"),
                 "a buildable trio must register the tool"
             );
 
             let mut agent_without_trio = Agent::new(Arc::new(StaticProvider));
-            register_consult_tool_if_available(&mut agent_without_trio, None, false);
+            register_consult_tool_if_available(
+                &mut agent_without_trio,
+                None,
+                false,
+                ProviderKind::Ollama,
+            );
             assert!(
                 !agent_without_trio.has_tool("consult"),
                 "an unbuildable trio must never register a tool the model could \
@@ -7039,93 +6987,8 @@ mod tests {
             let _ = divergence_notice(&cfg, true);
         }
 
-        /// SC-A12f: un 401 bajo un kind KEYLESS llega explicado, no crudo — y el
-        /// mismo status bajo un kind CON credencial no se reinterpreta.
-        #[test]
-        fn a_401_under_a_keyless_kind_names_the_configuration_as_the_cause() {
-            let msg = explain_keyless_auth_failure(
-                &SeatError::Http { status: 401 },
-                ProviderKind::Ollama,
-            )
-            .expect("bajo ollama un 401 SIEMPRE es configuración");
-            assert!(
-                msg.contains("keyless") && msg.contains("openai-compat"),
-                "debe nombrar la causa y la salida: {msg}"
-            );
-
-            assert_eq!(
-                explain_keyless_auth_failure(
-                    &SeatError::Http { status: 401 },
-                    ProviderKind::OpenAiCompat
-                ),
-                None,
-                "ahí un 401 puede ser una credencial mala de verdad: no se reinterpreta"
-            );
-        }
-
-        /// Caso borde de B13: 403 se trata igual que 401 bajo `ollama` (los dos son
-        /// "el endpoint exige auth que este kind nunca envía"), y NINGÚN otro kind
-        /// —incluido `anthropic`— lo reinterpreta.
-        #[test]
-        fn a_403_under_ollama_is_explained_the_same_way_as_a_401() {
-            assert!(
-                explain_keyless_auth_failure(
-                    &SeatError::Http { status: 403 },
-                    ProviderKind::Ollama
-                )
-                .is_some(),
-                "403 bajo ollama es la misma configuración mal elegida que 401"
-            );
-            assert_eq!(
-                explain_keyless_auth_failure(
-                    &SeatError::Http { status: 403 },
-                    ProviderKind::Anthropic
-                ),
-                None
-            );
-        }
-
-        /// Caso borde de B13: un status HTTP que no es 401/403 no se reinterpreta
-        /// bajo NINGÚN kind, ni siquiera `ollama` — no es evidencia de una
-        /// autenticación exigida.
-        #[test]
-        fn a_non_auth_status_under_ollama_is_never_reinterpreted() {
-            assert_eq!(
-                explain_keyless_auth_failure(
-                    &SeatError::Http { status: 500 },
-                    ProviderKind::Ollama
-                ),
-                None
-            );
-        }
-
-        /// Caso borde de B13: las otras dos variantes de `SeatError` —que ya son sus
-        /// propios diagnósticos tipados— nunca se reinterpretan como un problema de
-        /// autenticación keyless.
-        #[test]
-        fn non_http_seat_errors_are_never_reinterpreted() {
-            assert_eq!(
-                explain_keyless_auth_failure(
-                    &SeatError::MissingCredential {
-                        var: "OPENAI_API_KEY"
-                    },
-                    ProviderKind::Ollama
-                ),
-                None
-            );
-            let transport = SeatError::Transport(redact_foreign_error(&std::io::Error::other(
-                "connection refused",
-            )));
-            assert_eq!(
-                explain_keyless_auth_failure(&transport, ProviderKind::Ollama),
-                None
-            );
-        }
-
-        /// R6 (Task 1.2b, `planning/claude-plan-tdd.md` ~L3160): cierre de los dos
-        /// caminos que ese plan marcó como naciendo con el trío nativo en Fase 4 —
-        /// ahí nombrados `seat_unbuildable_message` (= `trio_unavailable_message` en
-        /// el código real) y `explain_keyless_auth_failure`.
+        /// R6 (Task 1.2b, `planning/claude-plan-tdd.md` ~L3160): cierre de los caminos
+        /// de credencial que ese plan marcó como naciendo con el trío nativo en Fase 4.
         ///
         /// **No es el mismo test que el plan describe, y no puede serlo.** El plan
         /// imaginaba un único canario en `src/magi/endpoint.rs` (lib) cubriendo los
@@ -7133,16 +6996,23 @@ mod tests {
         /// tipos del crate BIN (`mod config;`/`main.rs`) — ninguno de los dos
         /// aparece en la lista `pub mod` de `src/lib.rs` (`headless, magi, notices,
         /// redact, vault`), así que un test del crate LIB no puede nombrarlos, y
-        /// `divergence_notice`/`explain_keyless_auth_failure` tampoco pudieron vivir
-        /// en `src/magi/mode.rs` por la misma razón (ver el reporte de esta tarea).
-        /// Los caminos 1/3/4 se prueban ACÁ, en el bin, que es donde viven de
-        /// verdad; los caminos 2/5 (`openai_compat_root`, el aviso de
-        /// incoherencia de Anthropic en `resolution_notices()`) ya tienen su propia
-        /// cobertura desde Task 1.2b/4.1
-        /// (`openai_compat_root_redacts_credentials_in_the_notice_but_not_in_the_root`
-        /// acá mismo, y las pruebas de `config.rs` sobre la rama de Anthropic).
+        /// `divergence_notice` tampoco pudo vivir en `src/magi/mode.rs` por la misma
+        /// razón (ver el reporte de esta tarea).
+        ///
+        /// **Camino 4 se movió**, y con él su cobertura: la ronda 2 de esta tarea
+        /// retiró `explain_keyless_auth_failure(&SeatError, ProviderKind)` — nunca
+        /// tuvo un llamador de producción real — y la reemplazó por
+        /// `tools::consult::keyless_auth_explanation(&str, ProviderKind)`, que opera
+        /// sobre la causa YA RENDERIZADA de `MagiReport::failed_agents` y vive en
+        /// `src/tools/consult.rs`, donde también está su propia cobertura de no-leak
+        /// (`keyless_auth_explanation_never_echoes_the_raw_cause`). Acá se prueban
+        /// los caminos que SÍ siguen siendo de este archivo: 1
+        /// (`divergence_notice`) y 3 (`trio_unavailable_message`). El camino 2
+        /// (`openai_compat_root`) y el 5 (el aviso de incoherencia de Anthropic en
+        /// `resolution_notices()`) ya tienen su propia cobertura desde Task
+        /// 1.2b/4.1.
         #[test]
-        fn no_notice_or_error_path_reachable_from_this_crate_leaks_a_credential() {
+        fn no_notice_or_error_path_in_this_file_leaks_a_credential() {
             const CANARY: &str = "c4n4ry-s3cr3t";
 
             // Camino 1 — `divergence_notice`: opera sobre la PLANTILLA
@@ -7168,16 +7038,6 @@ mod tests {
                 )],
             };
             assert!(!trio_unavailable_message(&err).contains(CANARY));
-
-            // Camino 4 — `explain_keyless_auth_failure`: su mensaje es texto FIJO
-            // que no interpola nada del `SeatError` recibido (ni `status`, ni
-            // ningún otro campo), así que no hay canario que pudiera colarse.
-            let msg = explain_keyless_auth_failure(
-                &SeatError::Http { status: 401 },
-                ProviderKind::Ollama,
-            )
-            .unwrap();
-            assert!(!msg.contains(CANARY));
         }
     }
 }

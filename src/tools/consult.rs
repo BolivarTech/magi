@@ -11,6 +11,7 @@ use async_trait::async_trait;
 use magi_core::orchestrator::Magi;
 use magi_core::reporting::MagiReport;
 use magi_core::schema::Mode;
+use magi_rs::magi::kind::ProviderKind;
 use magi_rs::magi::mode::read_resolved_mode;
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -21,6 +22,108 @@ use tokio_util::sync::CancellationToken;
 /// consult path ([`crate::headless_runner`]) apply the same cap (REQ-H33).
 pub(crate) const MAX_QUERY_LEN: usize = 8192;
 
+/// El prefijo ESTABLE con el que magi-core renderiza la causa de un asiento cuando el
+/// fallo fue de autenticación — el `Display` de `ProviderError::Auth` (magi-core 3.1.0,
+/// `error.rs`: `#[error("auth error: {message}")]`) (REQ-A12c, SC-A12f).
+///
+/// **Por qué esto, y no `ExternalErrorKind::Auth`.** `ExternalErrorKind` (`error.rs`,
+/// junto a `ProviderError::external`) es para providers de TERCEROS implementados
+/// FUERA de magi-core — su propia rustdoc lo dice: *"Failure reported by an LlmProvider
+/// implemented OUTSIDE this crate"*, y su único constructor alcanzable desde otro crate
+/// es `ProviderError::external(...)`. REQ-A01 prohíbe que magi-rs implemente
+/// `LlmProvider`, así que esa vía es ESTRUCTURALMENTE inalcanzable para el trío nativo.
+/// Lo que el trío SÍ produce, verificado leyendo las dos implementaciones nativas y sus
+/// propios tests: `OpenAiCompatibleProvider::map_status_to_error` (magi-core
+/// `src/providers/openai_compat.rs:278-289`) y `ClaudeProvider::map_status_to_error`
+/// (`src/providers/claude.rs:239-254`) mapean AMBAS 401 y 403 a
+/// `ProviderError::Auth{message}` — no a `ProviderError::Http`. Pineado por
+/// `map_status_to_error_maps_401_and_403_to_auth` en `openai_compat.rs` y por
+/// `map_status_to_error_maps_401_to_auth`/`_403_to_auth` en `claude.rs`.
+///
+/// **Dónde vive esta cadena, exactamente — y dónde NO llega.** `MagiError::Provider`
+/// tiene `#[error(transparent)]`, así que su `Display` delega íntegro al de
+/// `ProviderError`. `dispatch_one_agent` (magi-core `orchestrator.rs:1298-1304`)
+/// construye la causa del PRIMER intento con
+/// `MagiError::Provider(provider_err).to_string()` — sin ningún prefijo adicional en
+/// el caso común (sin reintento, que solo se dispara ante `Validation`/
+/// `Deserialization`, nunca ante un error de provider) — y esa cadena es exactamente lo
+/// que termina en `MagiReport::failed_agents`. `.contains(...)`, no un prefijo exacto,
+/// porque el camino de reintento SÍ antepone `"retry-failed: "`.
+///
+/// **El alcance real de esta detección es MÁS ANGOSTO de lo que parece — ver
+/// [`keyless_auth_explanation`] y el reporte de esta tarea.**
+const PROVIDER_AUTH_ERROR_MARKER: &str = "auth error: ";
+
+/// Explicación fija para un asiento cuya causa matchea [`PROVIDER_AUTH_ERROR_MARKER`]
+/// bajo un kind keyless (REQ-A12c).
+const KEYLESS_AUTH_EXPLANATION: &str = "El endpoint rechazó la petición por autenticación, pero \
+     `[magi].kind = \"ollama\"` es keyless y nunca envía credencial. Si tu endpoint la \
+     exige, usá `kind = \"openai-compat\"` y declará la clave por env o vault.";
+
+/// Traduce la causa de UN asiento —tal como aparece en `MagiReport::failed_agents`— a
+/// un error de configuración accionable, cuando esa causa es una autenticación
+/// rechazada BAJO un kind keyless (REQ-A12c, SC-A12f).
+///
+/// Devuelve `None` para cualquier otra combinación: bajo un kind que SÍ lleva
+/// credencial (`openai-compat`/`anthropic`), un 401/403 puede ser una credencial
+/// genuinamente mala, y reinterpretarlo como error de configuración mandaría al
+/// usuario a revisar el archivo equivocado — un diagnóstico ACTIVAMENTE incorrecto,
+/// no un guard de más.
+///
+/// **No interpola `cause` en el resultado.** El mensaje es texto fijo: no hay nada
+/// derivado de la causa —de un TERCERO, por definición no confiable (B11)— en la
+/// salida, así que no hay superficie de fuga que redactar. Cubierto por
+/// `keyless_auth_explanation_never_echoes_the_raw_cause`.
+///
+/// # Alcance real — LEER ANTES DE ASUMIR QUE ESTO CUBRE TODO 401 KEYLESS
+///
+/// `failed_agents` solo existe cuando `Magi::analyze()` devuelve `Ok(MagiReport)`, y
+/// eso exige `successful.len() >= min_agents` — 2, el default de `ConsensusConfig`
+/// que REQ-A15 prohíbe exponer (`consensus.rs`: `impl Default for ConsensusConfig`).
+/// Verificado contra `orchestrator.rs::dispatch_no_rotation` (magi-core 3.1.0,
+/// líneas 1058-1065): cuando MENOS de `min_agents` asientos tienen éxito, la función
+/// devuelve `Err(MagiError::InsufficientAgents{succeeded, required})` — **y el mapa
+/// `failed` que sí tenía cada causa, incluida una de autenticación, se descarta ahí
+/// mismo**; nunca llega a construirse un `MagiReport`, así que esta función nunca
+/// llega a invocarse para esos asientos.
+///
+/// Como el trío de MS2 comparte UN `base_url`/`kind` entre los tres asientos (sin
+/// rotación, R-A06), un `kind` mal elegido —el escenario que REQ-A12c describe— rechaza
+/// a LOS TRES asientos por igual: 0 de 3 exitosos, `Err(InsufficientAgents{succeeded: 0,
+/// required: 2})`, y esta función nunca ve la causa. El caso donde SÍ la ve —exactamente
+/// 2 de 3 exitosos, degradado pero `Ok`— es real y esta función lo cubre genuinamente,
+/// pero es el caso MENOS probable de "kind mal elegido", no el más. Documentado con
+/// evidencia completa en el reporte de esta tarea (ronda 2).
+#[must_use]
+fn keyless_auth_explanation(cause: &str, kind: ProviderKind) -> Option<&'static str> {
+    (kind == ProviderKind::Ollama && cause.contains(PROVIDER_AUTH_ERROR_MARKER))
+        .then_some(KEYLESS_AUTH_EXPLANATION)
+}
+
+/// Añade, al final del texto ya renderizado por magi-core, una nota por cada asiento
+/// de `failed_agents` cuya causa se reconoce como autenticación rechazada bajo un kind
+/// keyless (REQ-A12c) — en vez de dejar esa causa completamente invisible, que es lo
+/// que pasa hoy: `report_format.rs` (magi-core) no la incluye en `report.report`/
+/// `report.banner`, y nada en magi-rs la leía antes de esta tarea.
+///
+/// **Alcance deliberadamente angosto.** Solo agrega una línea cuando
+/// [`keyless_auth_explanation`] reconoce el patrón — no vuelca las demás causas de
+/// `failed_agents` sin traducir. Surfacing general de `failed_agents` (REQ-A09/A11d)
+/// es una responsabilidad de una tarea posterior (Task 6.1, telemetría); esta función
+/// no se adelanta a esa forma para no competir con su diseño.
+///
+/// El nombre del asiento (`AgentName`, vía `{agent:?}`) es seguro — no es texto de un
+/// tercero.
+fn annotate_report_text(report: &MagiReport, kind: ProviderKind) -> String {
+    let mut text = report.report.clone();
+    for (agent, cause) in &report.failed_agents {
+        if let Some(explanation) = keyless_auth_explanation(cause, kind) {
+            text.push_str(&format!("\n\n**{agent:?}**: {explanation}"));
+        }
+    }
+    text
+}
+
 /// Builds the stable `consult` JSON object from a finished MAGI report.
 ///
 /// Single source of truth for the `{report, degraded}` shape shared by the
@@ -30,11 +133,13 @@ pub(crate) const MAX_QUERY_LEN: usize = 8192;
 ///
 /// # Parameters
 /// * `report` - The finished multi-perspective consensus report.
+/// * `kind` - the `ProviderKind` the trio ran under — feeds
+///   [`annotate_report_text`] (REQ-A12c).
 ///
 /// # Returns
-/// A JSON object `{"report": <markdown>, "degraded": <bool>}`.
-pub(crate) fn report_to_consult_json(report: &MagiReport) -> Value {
-    json!({ "report": report.report, "degraded": report.degraded })
+/// A JSON object `{"report": <markdown, possibly annotated>, "degraded": <bool>}`.
+pub(crate) fn report_to_consult_json(report: &MagiReport, kind: ProviderKind) -> Value {
+    json!({ "report": annotate_report_text(report, kind), "degraded": report.degraded })
 }
 
 /// RAII backstop that aborts a spawned task when the guard is dropped.
@@ -115,6 +220,12 @@ pub struct ConsultTool {
     /// auto-approved (no `ApprovalRequest` emitted). The explicit `/consult`
     /// TUI command path is NEVER gated regardless of this flag.
     auto_approve: bool,
+    /// The `ProviderKind` the trio runs under (REQ-A12c) — feeds
+    /// [`keyless_auth_explanation`] via [`report_to_consult_json`]. Defaults to
+    /// [`ProviderKind::OpenAiCompat`] (see [`Self::new`]), under which the
+    /// explanation never applies — a caller that does not care about this
+    /// feature does not need to call [`Self::with_kind`].
+    kind: ProviderKind,
 }
 
 impl ConsultTool {
@@ -127,7 +238,9 @@ impl ConsultTool {
     ///   TUI notice). Default is `false` — the agent asks before each launch.
     ///
     /// # Returns
-    /// A new `ConsultTool` instance with a routing-tuned description.
+    /// A new `ConsultTool` instance with a routing-tuned description and `kind`
+    /// defaulted to [`ProviderKind::OpenAiCompat`] — call [`Self::with_kind`] to
+    /// declare the trio's real kind when REQ-A12c's explanation should apply.
     pub fn new(magi: Arc<Magi>, auto_approve: bool) -> Self {
         Self {
             magi,
@@ -138,7 +251,22 @@ impl ConsultTool {
                 trivial, factual, or lookup questions — answer those directly."
                 .to_string(),
             auto_approve,
+            // Neutral: `keyless_auth_explanation` only ever fires under `Ollama`, so
+            // this default is equivalent to the feature being off until declared.
+            kind: ProviderKind::OpenAiCompat,
         }
+    }
+
+    /// Declares the `ProviderKind` the trio runs under (REQ-A12c).
+    ///
+    /// Builder-style (`self` by value) so production call sites read as
+    /// `ConsultTool::new(magi, auto_approve).with_kind(kind)` without a second
+    /// mutable binding, and so the ~13 existing test call sites that do not care
+    /// about this feature do not need to change at all.
+    #[must_use]
+    pub fn with_kind(mut self, kind: ProviderKind) -> Self {
+        self.kind = kind;
+        self
     }
 }
 
@@ -246,7 +374,7 @@ impl Tool for ConsultTool {
                 }
             },
         };
-        Ok(report_to_consult_json(&report))
+        Ok(report_to_consult_json(&report, self.kind))
     }
 }
 
@@ -334,6 +462,152 @@ mod tests {
             .with_agent_responses(AgentName::Balthasar, vec![Ok(agent_json("balthasar"))])
             .with_agent_responses(AgentName::Caspar, vec![Ok(agent_json("caspar"))]);
         Arc::new(Magi::new(Arc::new(provider)))
+    }
+
+    /// Two seats succeed, one fails on a REAL `ProviderError::Auth` (magi-core's own
+    /// `ClaudeProvider::map_status_to_error(401, ..)` — public, not hand-rolled) —
+    /// the ONE case genuinely reachable via `MagiReport::failed_agents`
+    /// (`min_agents = 2`, `ConsensusConfig::default()`, verified in
+    /// `keyless_auth_explanation`'s own rustdoc). Caspar is the failing seat so the
+    /// tests below can assert on its name specifically.
+    fn magi_caspar_fails_with_auth_error() -> Arc<Magi> {
+        let auth_err = magi_core::providers::claude::ClaudeProvider::map_status_to_error(
+            401,
+            "x",
+            vec![],
+            None,
+        );
+        let provider = RoutingMockProvider::new()
+            .with_agent_responses(AgentName::Melchior, vec![Ok(agent_json("melchior"))])
+            .with_agent_responses(AgentName::Balthasar, vec![Ok(agent_json("balthasar"))])
+            .with_agent_responses(AgentName::Caspar, vec![Err(auth_err)]);
+        Arc::new(Magi::new(Arc::new(provider)))
+    }
+
+    // -----------------------------------------------------------------------
+    // Task 4.4 (fix round 2) — REQ-A12c/SC-A12f: the keyless-auth translation
+    // -----------------------------------------------------------------------
+
+    /// SC-A12f: a real `ProviderError::Auth` rendering — as magi-core itself
+    /// produces and pins it, not a hand-rolled string — is recognized as a keyless
+    /// auth failure under `ollama`.
+    ///
+    /// **Positive control (mandatory per this task's fix-round-1 review).** Both
+    /// `OpenAiCompatibleProvider::map_status_to_error` (magi-core
+    /// `src/providers/openai_compat.rs:280`) and `ClaudeProvider::map_status_to_error`
+    /// (`src/providers/claude.rs:247`) map 401/403 to `ProviderError::Auth` — the
+    /// same enum variant, same crate, same `Display`. `ClaudeProvider`'s mapper is
+    /// `pub fn` (the OpenAI-compat one is `pub(crate)`, unreachable from here), so
+    /// it is used to construct the REAL value; the contract pinned by this test
+    /// (`ProviderError::Auth`'s `"auth error: "` `Display` prefix) is a property of
+    /// `error.rs`, shared identically by both providers regardless of which one
+    /// built the value. If a future magi-core release changes that wording, THIS
+    /// test goes red — not silently false forever.
+    #[test]
+    fn keyless_auth_explanation_recognizes_a_real_provider_error_auth_rendering() {
+        let provider_err = magi_core::providers::claude::ClaudeProvider::map_status_to_error(
+            401,
+            "x",
+            vec![],
+            None,
+        );
+        // The exact composition `dispatch_one_agent` performs on a first-attempt
+        // provider failure (magi-core `orchestrator.rs:1298-1304`):
+        // `MagiError::Provider(provider_err).to_string()`.
+        let cause = magi_core::error::MagiError::Provider(provider_err).to_string();
+        assert_eq!(
+            keyless_auth_explanation(&cause, ProviderKind::Ollama),
+            Some(KEYLESS_AUTH_EXPLANATION),
+            "a real magi-core auth rendering must be recognized: {cause:?}"
+        );
+    }
+
+    /// SC-A12f: under a kind that DOES carry a credential, the same real rendering
+    /// is left alone — a 401 there can be a genuinely bad credential, and
+    /// reinterpreting it would send the user to the wrong file.
+    #[test]
+    fn keyless_auth_explanation_does_not_reinterpret_under_a_credentialed_kind() {
+        let provider_err = magi_core::providers::claude::ClaudeProvider::map_status_to_error(
+            401,
+            "x",
+            vec![],
+            None,
+        );
+        let cause = magi_core::error::MagiError::Provider(provider_err).to_string();
+        for kind in [ProviderKind::OpenAiCompat, ProviderKind::Anthropic] {
+            assert_eq!(
+                keyless_auth_explanation(&cause, kind),
+                None,
+                "kind {kind:?} carries a credential: a 401 there is not reinterpreted"
+            );
+        }
+    }
+
+    /// Edge case (B13): a cause that is NOT an auth failure (e.g. a timeout) is
+    /// never reinterpreted, even under `ollama`.
+    #[test]
+    fn keyless_auth_explanation_ignores_causes_without_the_auth_marker() {
+        let cause = "timeout: agent timed out after 90s";
+        assert_eq!(keyless_auth_explanation(cause, ProviderKind::Ollama), None);
+    }
+
+    /// B11: the explanation is FIXED text — it never echoes `cause`, so a secret
+    /// that somehow ended up in third-party diagnostic text cannot reach the
+    /// surfaced message through this function.
+    #[test]
+    fn keyless_auth_explanation_never_echoes_the_raw_cause() {
+        const CANARY: &str = "c4n4ry-s3cr3t";
+        let cause = format!("{PROVIDER_AUTH_ERROR_MARKER}token={CANARY}");
+        let explanation =
+            keyless_auth_explanation(&cause, ProviderKind::Ollama).expect("marker present");
+        assert!(!explanation.contains(CANARY), "{explanation}");
+    }
+
+    /// SC-A12f, end to end: a seat that fails on auth under `ollama` reaches the
+    /// user through the ACTUAL `ConsultTool::execute` → `report_to_consult_json`
+    /// path, not just the pure predicate. This is the wiring proof: a correct
+    /// `keyless_auth_explanation` nobody calls from `execute` would pass every test
+    /// above and still leave the user looking at the raw "auth error: x" text.
+    #[tokio::test]
+    async fn a_keyless_auth_failure_reaches_the_consult_report_end_to_end() {
+        let tool = ConsultTool::new(magi_caspar_fails_with_auth_error(), false)
+            .with_kind(ProviderKind::Ollama);
+        let out = tool
+            .execute(
+                json!({"query": "should we migrate X to Y?"}),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("2 of 3 succeed ⇒ Ok, degraded");
+        assert_eq!(out["degraded"], json!(true));
+        let report = out["report"].as_str().expect("report string");
+        assert!(report.contains("Caspar"), "{report}");
+        assert!(
+            report.contains("keyless") && report.contains("openai-compat"),
+            "the explanation must reach the surfaced report: {report}"
+        );
+    }
+
+    /// Same failing seat, but under a kind that carries a credential: the raw
+    /// cause reaches the report (nothing hides it), but it is NEVER reinterpreted
+    /// as a keyless-configuration problem.
+    #[tokio::test]
+    async fn a_keyless_auth_failure_is_not_annotated_under_a_credentialed_kind() {
+        let tool = ConsultTool::new(magi_caspar_fails_with_auth_error(), false)
+            .with_kind(ProviderKind::OpenAiCompat);
+        let out = tool
+            .execute(
+                json!({"query": "should we migrate X to Y?"}),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("2 of 3 succeed ⇒ Ok, degraded");
+        assert_eq!(out["degraded"], json!(true));
+        let report = out["report"].as_str().expect("report string");
+        assert!(
+            !report.contains("keyless"),
+            "openai-compat carries a credential: no reinterpretation: {report}"
+        );
     }
 
     /// `ConsultTool` with `auto_approve = false` (default) MUST require approval.

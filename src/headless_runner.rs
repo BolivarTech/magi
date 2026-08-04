@@ -44,6 +44,7 @@ use magi_rs::headless::types::{
     ErrorKind, ErrorPayload, RunOutcome, StopReason, Timings, ToolCallRecord, TranscriptEntry,
     Usage,
 };
+use magi_rs::magi::kind::ProviderKind;
 use magi_rs::magi::mode::{resolve_mode_guarded, ModeClassifier, ModeError};
 
 use crate::agent::messages::{Content, Message, Role};
@@ -165,9 +166,10 @@ pub(crate) async fn resolve_direct_mode(
 ///   (REQ-A07d/REQ-A07r).
 /// - [`ConsultRunError::Timeout`] if cancelled or the deadline elapsed.
 /// - [`ConsultRunError::Runtime`] if the MAGI analysis failed or panicked.
-#[allow(clippy::too_many_arguments)] // pre-existing shape; REQ-A07d adds two params to it
+#[allow(clippy::too_many_arguments)] // pre-existing shape; REQ-A07d/REQ-A12c add params to it
 async fn analyze_direct(
     magi: &Arc<Magi>,
+    kind: ProviderKind,
     prompt: &str,
     cancel: &CancellationToken,
     timeout: Option<Duration>,
@@ -232,7 +234,7 @@ async fn analyze_direct(
     };
 
     match joined {
-        Ok(Ok(report)) => Ok(report_to_consult_json(&report)),
+        Ok(Ok(report)) => Ok(report_to_consult_json(&report, kind)),
         Ok(Err(e)) => Err(ConsultRunError::Runtime(e.to_string())),
         Err(join_err) => Err(ConsultRunError::Runtime(format!(
             "consult crashed: {join_err}"
@@ -527,6 +529,8 @@ fn build_transcript(
 /// - `resolved` — effective run parameters; supplies `model`/`provider`/
 ///   `applied_caps` for the output.
 /// - `magi` — shared MAGI orchestrator (same one wired for the `consult` tool).
+/// - `kind` — the `ProviderKind` the trio runs under (REQ-A12c); feeds
+///   [`report_to_consult_json`] via [`analyze_direct`].
 /// - `prompt` — the decision/content to analyze.
 /// - `timeout` — optional wall-clock ceiling (REQ-H36).
 /// - `explicit_mode` — the lens declared by a human (`--mode`/the envelope
@@ -543,10 +547,11 @@ fn build_transcript(
 /// - `usage` is `Usage { 0, 0 }`: `magi-core` does not surface token counts here.
 /// - `timings.per_turn_ms` is empty and `ttfb_ms` is `None`: the direct consult is
 ///   a single buffered analysis, not a streamed turn sequence.
-#[allow(clippy::too_many_arguments)] // pre-existing shape; REQ-A07d adds two params to it
+#[allow(clippy::too_many_arguments)] // pre-existing shape; REQ-A07d/REQ-A12c add params to it
 pub async fn run_consult(
     resolved: Resolved,
     magi: Arc<Magi>,
+    kind: ProviderKind,
     prompt: &str,
     timeout: Option<Duration>,
     explicit_mode: Option<Mode>,
@@ -562,6 +567,7 @@ pub async fn run_consult(
     let run_start = Instant::now();
     let result = analyze_direct(
         &magi,
+        kind,
         prompt,
         &cancel,
         timeout,
@@ -1796,6 +1802,7 @@ mod tests {
         let outcome = run_consult(
             resolved_stub(),
             canned_magi(),
+            ProviderKind::OpenAiCompat,
             "should we migrate X to Y?",
             None,
             Some(Mode::Analysis),
@@ -1832,6 +1839,7 @@ mod tests {
         let outcome = run_consult(
             resolved_stub(),
             canned_magi(),
+            ProviderKind::OpenAiCompat,
             &big,
             None,
             Some(Mode::Analysis),
@@ -1887,6 +1895,7 @@ mod tests {
             let fut = run_consult(
                 resolved_stub(),
                 magi,
+                ProviderKind::OpenAiCompat,
                 "should we migrate X to Y?",
                 None,
                 Some(Mode::Analysis),
