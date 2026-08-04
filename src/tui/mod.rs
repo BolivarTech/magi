@@ -76,6 +76,30 @@ fn handle_logout(store: Option<&SharedSecretStore>) -> AgentResponse {
     }
 }
 
+/// Fallback text for a `/consult` issued with no trio available AND no precomputed
+/// reason (Task 4.3, REQ-A06/SC-A06b).
+///
+/// Structurally unreachable given `run()`'s invariant — `consult` is `None` if and
+/// only if building the MAGI trio failed, and that failure always produces a message
+/// via `trio_unavailable_message` — kept anyway so a future change to that invariant
+/// degrades to a generic-but-honest reply instead of silently sending nothing (B9).
+const CONSULT_UNAVAILABLE_FALLBACK: &str =
+    "MAGI consult is unavailable for this session: no trio was built.";
+
+/// The `/consult` response when no MAGI trio is available for this session (Task 4.3,
+/// REQ-A06, SC-A06b).
+///
+/// Extracted from the `UiEvent::Consult` handler for the same reason as
+/// [`handle_login`]/[`handle_trio_rebuild_failure`]: the full TUI event loop is
+/// intractable to drive in a test, so the exact text this arm sends is verified here
+/// as a plain `fn`. `reason` must be the SAME text already pushed to the startup
+/// notices (via `trio_unavailable_message` in `main.rs`) — never a second,
+/// independently-worded message, or the notice and the `/consult` reply would look
+/// like two unrelated problems to the user.
+fn consult_unavailable_response(reason: &str) -> AgentResponse {
+    AgentResponse::Error(reason.to_string())
+}
+
 /// Handles a failed post-`/login` MAGI trio rebuild (I4, fix round 2).
 ///
 /// Extracted from the `/login` event handler for the same reason as
@@ -582,6 +606,12 @@ impl App {
 }
 
 /// # Parameters (REQ-A07d additions over the pre-MS2 signature)
+///
+/// - `consult_unavailable_message` (Task 4.3, REQ-A06/SC-A06b) — the SAME text
+///   already pushed to `startup_notices` when `consult` is `None` because the MAGI
+///   trio failed to build. Read only when a `/consult` is issued with no trio
+///   available, so a later `/consult` echoes the exact reason the startup notice
+///   already gave instead of a second, independently-worded message.
 /// - `mode_classifier` — consulted by `resolve_tui_consult_mode` only when `/consult` has
 ///   no explicit `--mode` and no `[magi].default_mode` is set (REQ-A07c).
 /// - `default_mode` — `[magi].default_mode`, resolved once at startup (REQ-A15).
@@ -592,6 +622,7 @@ pub async fn run_tui_ext(
     agent: Agent,
     startup_notices: Vec<String>,
     consult: Option<std::sync::Arc<magi_core::orchestrator::Magi>>,
+    consult_unavailable_message: Option<String>,
     magi_auto_approve: bool,
     secret_store: Option<SharedSecretStore>,
     mode_classifier: Arc<dyn ModeClassifier>,
@@ -683,11 +714,16 @@ pub async fn run_tui_ext(
                     let magi = match consult_magi_runner.as_ref() {
                         Some(m) => m.clone(),
                         None => {
-                            let _ = response_tx
-                                .send(AgentResponse::Error(
-                                    "consult requires a configured LLM provider — run /login or set a provider.".to_string(),
-                                ))
-                                .await;
+                            // REQ-A06/SC-A06b: echoes the SAME text the startup
+                            // notice already gave — never a second, independently-
+                            // worded message (`consult_unavailable_message` is
+                            // `None` only if the trio built fine, in which case
+                            // this arm is unreachable; the fallback exists so a
+                            // reachability change never sends silence, B9).
+                            let reason = consult_unavailable_message
+                                .as_deref()
+                                .unwrap_or(CONSULT_UNAVAILABLE_FALLBACK);
+                            let _ = response_tx.send(consult_unavailable_response(reason)).await;
                             continue;
                         }
                     };
@@ -1847,6 +1883,25 @@ mod tests {
             "the host stays visible — only the userinfo is redacted: {}",
             safe.as_str()
         );
+    }
+
+    /// SC-A06b: the TUI's `/consult`-without-a-trio reply is verbatim `reason`,
+    /// wrapped as an error — never a re-worded summary of it.
+    #[test]
+    fn test_consult_unavailable_response_echoes_the_reason_verbatim() {
+        let reason = "El consenso MAGI no está disponible — no se pudieron construir \
+                       estos asientos:\n  Melchior: falta la credencial OPENAI_API_KEY";
+        match consult_unavailable_response(reason) {
+            AgentResponse::Error(text) => assert_eq!(text, reason),
+            other => panic!("expected AgentResponse::Error, got {other:?}"),
+        }
+    }
+
+    /// B9: the structurally-unreachable no-message case still answers with SOME
+    /// honest text instead of the empty string / a panic.
+    #[test]
+    fn test_consult_unavailable_fallback_is_non_empty() {
+        assert!(!CONSULT_UNAVAILABLE_FALLBACK.is_empty());
     }
 
     #[tokio::test]

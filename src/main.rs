@@ -1495,6 +1495,12 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
         openai_env: openai_key.as_deref(),
         secret_store: secret_store.as_ref(),
     };
+    // Task 4.3 (REQ-A06/SC-A06b): el notice de arranque y la respuesta que un futuro
+    // `/consult` verá comparten el MISMO texto, construido una sola vez acá —
+    // `trio_unavailable_for_tui` es lo que hace esa igualdad verificable en vez de
+    // depender de que este sitio y `run_tui_ext` construyan el mismo `String` por su
+    // cuenta.
+    let mut consult_unavailable_message: Option<String> = None;
     let consult_magi: Option<Arc<Magi>> = match build_magi_orchestrator(
         &magi_config,
         provider_kind,
@@ -1506,7 +1512,9 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
     ) {
         Ok(magi) => Some(magi),
         Err(e) => {
-            startup_notices.push(Notice::blocking(format!("MAGI trio unavailable: {e}")));
+            let (notice, msg) = trio_unavailable_for_tui(&e);
+            startup_notices.push(notice);
+            consult_unavailable_message = Some(msg);
             None
         }
     };
@@ -1564,17 +1572,17 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
         workspace_root.clone(),
     )?));
     agent.register_tool(Box::new(BashTool::new(workspace_root.clone())?));
-    if let Some(ref magi) = consult_magi {
-        agent.register_tool(Box::new(crate::tools::consult::ConsultTool::new(
-            magi.clone(),
-            magi_config.magi.auto_approve,
-        )));
-    }
+    register_consult_tool_if_available(
+        &mut agent,
+        consult_magi.as_ref(),
+        magi_config.magi.auto_approve,
+    );
 
     crate::tui::run_tui_ext(
         agent,
         render_notices(startup_notices),
         consult_magi,
+        consult_unavailable_message,
         magi_config.magi.auto_approve,
         secret_store,
         tui_mode_classifier,
@@ -1769,6 +1777,22 @@ enum SeatError {
     Transport(SafeErrorText),
 }
 
+/// Renderiza UN `(asiento, causa)` como `"Melchior: falta la credencial …"`.
+///
+/// Primitiva única de formateo compartida entre el `Display` de
+/// [`TrioError::SeatUnbuildable`] (abajo) y [`trio_unavailable_message`] (Task 4.3,
+/// B3): antes de esta función existían dos redacciones independientes de la misma
+/// información — el `Display` derivado por `thiserror` reducía `seats` a un conteo
+/// (`seats.len()`) mientras que el mensaje accionable de arranque sí nombraba asiento
+/// y causa. Cualquier `{e}`/`.to_string()` FUTURO sobre un `TrioError` — no solo los
+/// tres sitios que Task 4.3 audita a mano — heredaba la versión pobre en silencio.
+/// `cause` usa su `Display` (`thiserror`), que ya pasa por [`redact_foreign_error`]
+/// donde corresponde (`SeatError::Transport`), así que esta función no necesita su
+/// propia redacción.
+fn format_seat_failure(seat: &AgentName, cause: &SeatError) -> String {
+    format!("{seat:?}: {cause}")
+}
+
 /// Por qué el trío no se pudo construir (REQ-A06).
 #[derive(Debug, thiserror::Error)]
 enum TrioError {
@@ -1776,7 +1800,15 @@ enum TrioError {
     /// tres comparten credencial y endpoint, así que cuando uno falla por
     /// configuración lo normal es que fallen los tres — reportar de a uno obliga a
     /// tres arranques para descubrir un problema único.
-    #[error("asientos no construibles: {}", seats.len())]
+    ///
+    /// El `Display` nombra CADA asiento y su causa (fix round, Task 4.3 review de
+    /// 4.1): un `#[error("…", seats.len())]` que solo cuenta ("3") es exactamente el
+    /// defecto que motivó esta tarea — un usuario sin `OPENAI_API_KEY` veía
+    /// literalmente "asientos no construibles: 3", sin decir cuál asiento ni por qué.
+    #[error(
+        "asientos no construibles: {}",
+        seats.iter().map(|(s, c)| format_seat_failure(s, c)).collect::<Vec<_>>().join("; ")
+    )]
     SeatUnbuildable {
         /// Asiento y causa, uno por cada fallo.
         seats: Vec<(AgentName, SeatError)>,
@@ -1793,6 +1825,39 @@ enum TrioError {
     /// citar la `base_url` con credenciales.
     #[error("magi-core rechazó la construcción: {0}")]
     Builder(SafeErrorText),
+}
+
+/// Mensaje único y accionable para las tres superficies (REQ-A06, SC-A05b/SC-A05c).
+///
+/// Uno solo para que el notice de arranque, la respuesta de la TUI y el error headless
+/// digan **lo mismo**: si divergen, el usuario cree estar ante tres problemas
+/// distintos. Reusa [`format_seat_failure`] (B3) en vez de re-derivar su propio
+/// resumen de `seats` — la única diferencia con el `Display` de `TrioError` es el
+/// separador (uno por línea acá, para lectura humana en una lista de asientos; `"; "`
+/// en el `Display` técnico, pensado para una sola línea de log/encadenamiento).
+#[must_use]
+fn trio_unavailable_message(err: &TrioError) -> String {
+    match err {
+        TrioError::SeatUnbuildable { seats } => {
+            let detail = seats
+                .iter()
+                .map(|(seat, cause)| format!("  {}", format_seat_failure(seat, cause)))
+                .collect::<Vec<_>>()
+                .join("\n");
+            format!(
+                "El consenso MAGI no está disponible — no se pudieron construir estos \
+                 asientos:\n{detail}\n\nRevisá la credencial del backend declarado en \
+                 `[magi]`, o guardala con `magi-rs vault set`."
+            )
+        }
+        TrioError::UnknownKind(k) => format!(
+            "El consenso MAGI no está disponible: `[magi].kind = \"{k}\"` no se reconoce. \
+             Valores válidos: ollama, openai-compat, anthropic."
+        ),
+        TrioError::NoSeats | TrioError::Builder(_) => {
+            "El consenso MAGI no está disponible: el trío no se pudo construir.".to_string()
+        }
+    }
 }
 
 /// Overrides de modelo por asiento vía `MAGI_MODEL_MELCHIOR`/`BALTHASAR`/`CASPAR`.
@@ -2130,6 +2195,43 @@ fn build_magi_orchestrator(
         .build()
         .map(Arc::new)
         .map_err(|e| TrioError::Builder(redact_foreign_error(&e)))
+}
+
+/// Registra el tool `consult` en `agent` SOLO SI el trío se construyó (REQ-A06,
+/// SC-A06a).
+///
+/// Compartida entre la TUI (`run`) y `magi query` (`run_query_subcommand`, B3): antes
+/// de esta función cada una tenía su propia copia del mismo `if let Some(...) {
+/// register_tool(...) }`, dos sitios que podían divergir con el tiempo sin que nada lo
+/// impidiera.
+///
+/// **Cuando el trío no es construible, el tool NO se registra** — nunca a medias, y
+/// nunca con un `execute` que falla en el primer uso: eso gastaría una vuelta del tool
+/// loop (y una llamada al modelo) para descubrir algo que ya se sabía al arrancar,
+/// además de invitar al modelo principal a rutear hacia algo que no puede correr.
+fn register_consult_tool_if_available(
+    agent: &mut Agent,
+    consult_magi: Option<&Arc<Magi>>,
+    auto_approve: bool,
+) {
+    if let Some(magi) = consult_magi {
+        agent.register_tool(Box::new(crate::tools::consult::ConsultTool::new(
+            magi.clone(),
+            auto_approve,
+        )));
+    }
+}
+
+/// Construye el par (notice de arranque, mensaje de `/consult`) para la TUI cuando el
+/// trío no es construible (REQ-A06, SC-A06b).
+///
+/// Existe para que la propiedad "el notice de arranque y la respuesta de `/consult`
+/// dicen EXACTAMENTE lo mismo" sea verificable con un test en vez de depender de que
+/// dos sitios de `run()` construyan el mismo `String` por su cuenta y se mantengan en
+/// sincronía a mano.
+fn trio_unavailable_for_tui(err: &TrioError) -> (Notice, String) {
+    let msg = trio_unavailable_message(err);
+    (Notice::blocking(msg.clone()), msg)
 }
 
 /// A [`SecretStore`] that always reports "not found" — every method fails or
@@ -3208,12 +3310,13 @@ async fn run_query_subcommand(
 
     // Task 4.1: the trio is built ONCE, in `prepare_headless` (the shared prelude) —
     // this dispatcher only converts its `Result` to the `Option` the tool-registration
-    // call below expects. Task 4.3 owns surfacing the `Err` case per REQ-A06; the
-    // non-silent stderr line here is the minimum until then (B9).
+    // call below expects. Task 4.3 (REQ-A06): `trio_unavailable_message` renders the
+    // SAME actionable text the TUI notice/`/consult` reply use, naming every failed
+    // seat and its cause — not the bare failure count a plain `{e}` would print.
     let consult_magi: Option<Arc<Magi>> = match consult_magi {
         Ok(m) => Some(m),
         Err(e) => {
-            eprintln!("note: MAGI trio unavailable: {e}");
+            eprintln!("note: {}", trio_unavailable_message(&e));
             None
         }
     };
@@ -3247,12 +3350,11 @@ async fn run_query_subcommand(
         eprintln!("error: {e}");
         return 1;
     }
-    if let Some(ref magi) = consult_magi {
-        agent.register_tool(Box::new(crate::tools::consult::ConsultTool::new(
-            magi.clone(),
-            magi_config.magi.auto_approve,
-        )));
-    }
+    register_consult_tool_if_available(
+        &mut agent,
+        consult_magi.as_ref(),
+        magi_config.magi.auto_approve,
+    );
 
     let policy = Policy::new(tier, resolved.max_tool_calls, h.timeout);
     let timeout = resolve_run_timeout(&policy, limits.full_auto_timeout_secs);
@@ -3324,10 +3426,13 @@ async fn run_consult_subcommand(
     // forced `magi consult` needs a LIVE trio unconditionally, so an unbuildable one
     // fails this run closed exactly as it did before (REQ-A06's polished per-surface
     // message is Task 4.3's own contract).
+    // REQ-A06/SC-A06c: a forced `magi consult` with no buildable trio fails CLOSED —
+    // returned BEFORE `run_consult`/`magi.analyze()` is ever reached, so no MAGI
+    // object and no verdict-shaped output is ever produced for this run.
     let magi = match consult_magi {
         Ok(m) => m,
         Err(e) => {
-            eprintln!("error: {e}");
+            eprintln!("error: {}", trio_unavailable_message(&e));
             return 1;
         }
     };
@@ -6444,6 +6549,216 @@ mod tests {
                 .is_ok(),
                 "env debe ganarle a un override de TOML inválido"
             );
+        }
+    }
+
+    /// Task 4.3 — REQ-A06/SC-A06: comportamiento por superficie cuando el trío no es
+    /// construible. `trio_construction` (arriba) ya cubre que
+    /// `build_magi_orchestrator` reporte TODOS los asientos caídos (SC-A05b/SC-A05c);
+    /// este módulo cubre lo que Task 4.3 agrega — que esa información REALMENTE
+    /// llegue al usuario en cada superficie, y no solo que el tipo la lleve.
+    mod trio_unavailable_surfaces {
+        use super::*;
+        use magi_core::test_support::RoutingMockProvider;
+
+        fn seat_unbuildable(seats: Vec<(AgentName, SeatError)>) -> TrioError {
+            TrioError::SeatUnbuildable { seats }
+        }
+
+        /// La primitiva de formateo compartida nombra el asiento Y la causa — no un
+        /// conteo. Reusada tanto por `Display` como por `trio_unavailable_message`.
+        #[test]
+        fn format_seat_failure_names_the_seat_and_the_cause() {
+            let text = format_seat_failure(
+                &AgentName::Melchior,
+                &SeatError::MissingCredential {
+                    var: "OPENAI_API_KEY",
+                },
+            );
+            assert!(text.contains("Melchior"), "{text}");
+            assert!(text.contains("OPENAI_API_KEY"), "{text}");
+        }
+
+        /// R2 (obligación heredada de Task 4.1): el `Display` de `SeatUnbuildable` NO
+        /// se queda en un conteo — un `{e}`/`.to_string()` futuro que no pase por
+        /// `trio_unavailable_message` sigue nombrando cada asiento y su causa.
+        #[test]
+        fn seat_unbuildable_display_names_every_seat_not_just_a_count() {
+            let err = seat_unbuildable(vec![
+                (
+                    AgentName::Melchior,
+                    SeatError::MissingCredential {
+                        var: "OPENAI_API_KEY",
+                    },
+                ),
+                (AgentName::Caspar, SeatError::Http { status: 401 }),
+            ]);
+            let text = err.to_string();
+            assert!(
+                text.contains("Melchior") && text.contains("OPENAI_API_KEY"),
+                "el primer asiento debe nombrarse con su causa: {text}"
+            );
+            assert!(
+                text.contains("Caspar") && text.contains("401"),
+                "el segundo asiento debe nombrarse con su causa: {text}"
+            );
+        }
+
+        /// SC-A05b + SC-A05c juntas: el mensaje único nombra CADA asiento caído, su
+        /// causa, y los reporta TODOS en una sola corrida (no solo el primero).
+        #[test]
+        fn trio_unavailable_message_names_every_failed_seat_and_its_cause() {
+            let err = seat_unbuildable(vec![
+                (
+                    AgentName::Melchior,
+                    SeatError::MissingCredential {
+                        var: "OPENAI_API_KEY",
+                    },
+                ),
+                (
+                    AgentName::Balthasar,
+                    SeatError::MissingCredential {
+                        var: "OPENAI_API_KEY",
+                    },
+                ),
+                (AgentName::Caspar, SeatError::Http { status: 401 }),
+            ]);
+            let msg = trio_unavailable_message(&err);
+            assert!(msg.contains("Melchior"), "{msg}");
+            assert!(msg.contains("Balthasar"), "{msg}");
+            assert!(msg.contains("Caspar"), "{msg}");
+            assert!(
+                msg.matches("OPENAI_API_KEY").count() >= 2,
+                "las dos causas de credencial deben aparecer, no colapsarse: {msg}"
+            );
+            assert!(msg.contains("401"), "{msg}");
+            assert!(
+                msg.contains("vault set"),
+                "debe decir CÓMO habilitarlo: {msg}"
+            );
+        }
+
+        /// `UnknownKind` nombra el valor inválido Y el vocabulario válido.
+        #[test]
+        fn trio_unavailable_message_unknown_kind_names_the_bad_value_and_the_vocabulary() {
+            let msg = trio_unavailable_message(&TrioError::UnknownKind("banana".to_string()));
+            assert!(msg.contains("banana"), "{msg}");
+            assert!(
+                msg.contains("ollama")
+                    && msg.contains("openai-compat")
+                    && msg.contains("anthropic"),
+                "{msg}"
+            );
+        }
+
+        /// `NoSeats` y `Builder` comparten el mismo texto genérico — ninguno de los
+        /// dos es alcanzable por la ruta de producción real hoy (ver sus propios
+        /// rustdocs), pero el `match` exhaustivo de `trio_unavailable_message` los
+        /// cubre igual, y ambos deben producir texto no vacío y accionable.
+        #[test]
+        fn trio_unavailable_message_no_seats_and_builder_share_the_same_generic_text() {
+            let no_seats_msg = trio_unavailable_message(&TrioError::NoSeats);
+            let cause = redact_foreign_error(&std::io::Error::other("boom"));
+            let builder_msg = trio_unavailable_message(&TrioError::Builder(cause));
+            assert_eq!(no_seats_msg, builder_msg);
+            assert!(!no_seats_msg.is_empty());
+        }
+
+        /// SC-A06b, el invariante central: el notice de arranque y la respuesta que
+        /// un futuro `/consult` da son el MISMO string — no dos redacciones
+        /// independientes que puedan divergir.
+        #[test]
+        fn trio_unavailable_for_tui_notice_and_reply_are_the_same_text_and_blocking_tier() {
+            let err = seat_unbuildable(vec![(
+                AgentName::Melchior,
+                SeatError::MissingCredential {
+                    var: "OPENAI_API_KEY",
+                },
+            )]);
+            let (notice, msg) = trio_unavailable_for_tui(&err);
+            assert_eq!(
+                notice.text, msg,
+                "notice y respuesta deben ser el MISMO texto"
+            );
+            assert_eq!(
+                notice.tier,
+                NoticeTier::Blocking,
+                "el trío no construible exige acción — no es un Resolution ni un Info"
+            );
+        }
+
+        /// SC-A06a: un consult que no puede correr NO se registra — ni con el trío
+        /// ausente (invita al modelo a rutear hacia algo destinado a fallar) ni,
+        /// simétricamente, se OMITE cuando el trío sí construyó (regresión: el
+        /// helper compartido entre la TUI y `magi query` no debe apagar el tool en
+        /// el caso feliz).
+        #[test]
+        fn register_consult_tool_if_available_registers_when_buildable_and_omits_it_otherwise() {
+            let magi: Arc<Magi> = Arc::new(Magi::new(Arc::new(RoutingMockProvider::new())));
+
+            let mut agent_with_trio = Agent::new(Arc::new(StaticProvider));
+            register_consult_tool_if_available(&mut agent_with_trio, Some(&magi), false);
+            assert!(
+                agent_with_trio.has_tool("consult"),
+                "a buildable trio must register the tool"
+            );
+
+            let mut agent_without_trio = Agent::new(Arc::new(StaticProvider));
+            register_consult_tool_if_available(&mut agent_without_trio, None, false);
+            assert!(
+                !agent_without_trio.has_tool("consult"),
+                "an unbuildable trio must never register a tool the model could \
+                 route to and only then discover it cannot run (SC-A06a)"
+            );
+        }
+
+        /// SC-A06c: un `magi consult` forzado con un trío no construible falla
+        /// CERRADO — código de salida distinto de cero, y SIN escribir ningún
+        /// archivo de salida (la corrida vuelve antes de que exista un `Magi` con
+        /// el que llamar a `analyze`, así que ningún veredicto puede fabricarse).
+        #[test]
+        #[serial_test::serial]
+        fn a_forced_consult_fails_closed_when_the_trio_is_unbuildable() {
+            with_var("MAGI_PROVIDER", None, || {
+                with_var("OPENAI_API_KEY", None, || {
+                    let tmp = tempfile::tempdir().unwrap();
+                    let cwd = dunce::canonicalize(tmp.path()).unwrap();
+                    crate::system::workspace::init(&cwd).expect("init .magi/");
+                    // openai-compat exige OPENAI_API_KEY para el trío (nunca para el
+                    // agente principal, que cae al dummy "ollama") — sin la variable,
+                    // los TRES asientos fallan por credencial faltante.
+                    std::fs::write(
+                        cwd.join(".magi/magi.toml"),
+                        "provider = \"openai-compat\"\n",
+                    )
+                    .unwrap();
+
+                    let prompt = cwd.join("q.txt");
+                    std::fs::write(&prompt, b"should we do X or Y given these constraints?")
+                        .unwrap();
+                    let out = cwd.join("out.json");
+
+                    let mut h = base_hargs();
+                    h.input = Some(prompt);
+                    h.output = Some(out.clone());
+                    h.workdir = Some(cwd.clone());
+                    h.no_memory = true;
+
+                    let rt = tokio::runtime::Runtime::new().unwrap();
+                    let code = rt.block_on(run_consult_subcommand(h, None, None, &cwd, None, None));
+
+                    assert_ne!(
+                        code, 0,
+                        "an unbuildable trio must fail a forced consult closed, never exit 0"
+                    );
+                    assert!(
+                        !out.exists(),
+                        "no output was ever written — the run returns BEFORE any \
+                         MAGI object exists, so no verdict-shaped report can ever \
+                         be fabricated (SC-A06, no_surface_ever_fabricates_a_verdict)"
+                    );
+                });
+            });
         }
     }
 }
