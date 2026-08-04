@@ -53,8 +53,15 @@ use magi_rs::headless::resolution::{
 use magi_rs::headless::types::{ErrorKind, RunOutcome, StopReason};
 use magi_rs::headless::HeadlessError;
 use magi_rs::magi::endpoint::{EndpointTemplate, ResolvedEndpoint, Scope};
-use magi_rs::magi::kind::ProviderKind;
-use magi_rs::magi::{derive_client_timeout, derive_operation_budget, AGENT_TIMEOUT_SECS};
+use magi_rs::magi::kind::{ProviderKind, ProviderKindParseError};
+use magi_rs::magi::probe::{
+    derive_warn_tokens, min_mage_window, probe_models, Measurement, OllamaProbeFactory,
+    ProbeFactory,
+};
+use magi_rs::magi::{
+    bytes_to_tokens_est, derive_client_timeout, derive_operation_budget, AGENT_TIMEOUT_SECS,
+    CHARS_PER_TOKEN_EST, STALE_NOTICE_RATIO,
+};
 use magi_rs::notices::{render_notices, Notice};
 use magi_rs::redact::{redact_foreign_error, redact_url, SafeErrorText};
 use magi_rs::vault::{
@@ -63,6 +70,7 @@ use magi_rs::vault::{
     PassphrasePrompt, SecretEntry, SecretStore, TtyIo, TtyPrompt, VaultCmd, VaultError,
     PASSPHRASE_ENV,
 };
+use std::collections::BTreeMap;
 use std::env;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -1495,6 +1503,40 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
         openai_env: openai_key.as_deref(),
         secret_store: secret_store.as_ref(),
     };
+
+    // REQ-A24/A24b/A24c (Task 5.2): mide el principal y el trío ANTES de construirlo, así
+    // `input_warn_tokens` puede derivarse de la ventana de los MAGES (REQ-A24b) y el
+    // arranque anuncia los tres estados de medición (REQ-A24c). Nunca bloquea ni falla el
+    // arranque: cada sonda falla abierta dentro de `probe_models`/`orchestrate_probes`.
+    let probe_backend_model = resolve_backend_model(&magi_config, provider_kind).to_string();
+    let probe_seats = magi_config.magi.seats(&probe_backend_model);
+    let probe_trio_models: Vec<&str> = probe_seats.iter().map(|(_, m)| m.as_str()).collect();
+    let (probe_principal, probe_trio) = orchestrate_probes(
+        &magi_config,
+        &endpoints,
+        provider_kind,
+        &probe_backend_model,
+        &probe_trio_models,
+        &OllamaProbeFactory,
+    )
+    .await;
+    startup_notices.push(Notice::info(format!(
+        "{probe_backend_model}: {}",
+        probe_notice(&probe_principal.unwrap_or(Measurement::NotMeasuredThisTime))
+    )));
+    if let Some(min_window) = min_mage_window(&probe_trio) {
+        if let Some(n) =
+            stale_composition_notice(min_window, magi_config.effective_max_query_bytes())
+        {
+            startup_notices.push(Notice::resolution(n));
+        }
+    }
+    // REQ-A24b: lo explícito (`[magi].input_warn_tokens`) gana sobre lo medido.
+    let warn_tokens = magi_config
+        .magi
+        .input_warn_tokens
+        .or_else(|| derive_warn_tokens(&probe_trio));
+
     // Task 4.3 (REQ-A06/SC-A06b): el notice de arranque y la respuesta que un futuro
     // `/consult` verá comparten el MISMO texto, construido una sola vez acá —
     // `trio_unavailable_for_tui` es lo que hace esa igualdad verificable en vez de
@@ -1506,7 +1548,7 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
         provider_kind,
         &endpoints,
         Some(&creds),
-        None,
+        warn_tokens,
         &MagiEnvModelOverrides::from_env(),
         &mut startup_notices,
     ) {
@@ -1666,14 +1708,14 @@ impl Credentials for EnvVaultCredentials<'_> {
 struct ResolvedEndpoints {
     /// `base_url` de raíz — agente principal.
     ///
-    /// Task 4.1: producción todavía no LEE este campo (el provider principal sigue
-    /// resolviendo su propio endpoint vía `resolve_effective_principal_endpoint`, sin
-    /// tocar en esta tarea — B3 quedó pendiente de una unificación deliberadamente
-    /// diferida para no ampliar el diff de una tarea ya grande). Se resuelve igual,
+    /// Task 4.1: el provider principal en sí sigue resolviendo su propio endpoint vía
+    /// `resolve_effective_principal_endpoint` (B3 queda pendiente de una unificación
+    /// deliberadamente diferida). Task 5.2 le agrega un consumidor real distinto: es el
+    /// endpoint contra el que `orchestrate_probes` sondea el modelo principal (REQ-A24),
+    /// así que el `#[allow(dead_code)]` que tenía se retira acá. Se resuelve igual,
     /// fail-closed, porque `resolve_endpoints` es EL paso de arranque para los tres
     /// endpoints a la vez — dejar este afuera lo volvería dos pasos. Cubierto por
     /// `resolve_endpoints_resolves_the_three_fields_from_the_same_root_when_none_diverge`.
-    #[allow(dead_code)]
     root: ResolvedEndpoint,
     /// `[magi].base_url` u herencia — el trío y su probe. El único campo que
     /// `build_magi_orchestrator` lee hoy.
@@ -1754,6 +1796,203 @@ fn resolve_endpoints(
         root: resolve_template(&root_tpl, Scope::Root, secret_store)?,
         magi: resolve_template(&magi_tpl, Scope::Magi, secret_store)?,
         embedding: resolve_template(&embedding_tpl, Scope::Embedding, secret_store)?,
+    })
+}
+
+/// Resuelve el `kind` efectivo del trío: declarado, o el YA RESUELTO del principal
+/// (`principal_kind`, NO `cfg.effective_magi_kind()`/`cfg.effective_provider()` — esos dos
+/// accessors son TOML-only e ignorarían `MAGI_PROVIDER`).
+///
+/// Compartida entre [`build_magi_orchestrator`] (construcción real) y
+/// [`orchestrate_probes`] (sondeo, REQ-A24, Task 5.2) para que las dos vean SIEMPRE el
+/// mismo kind (B3): sin esto, un `MAGI_PROVIDER` que mueve al principal sin declarar
+/// `[magi].kind` haría que el probe midiera un backend distinto del que el trío realmente
+/// termina usando — exactamente el bug que el parámetro `principal_kind` de
+/// `build_magi_orchestrator` ya existe para evitar en la construcción real.
+///
+/// # Errors
+/// [`ProviderKindParseError`] si `[magi].kind` está presente y no se reconoce.
+fn resolve_magi_kind(
+    cfg: &MagiConfig,
+    principal_kind: ProviderKind,
+) -> Result<ProviderKind, ProviderKindParseError> {
+    Ok(
+        ProviderKind::parse(cfg.magi.kind.as_deref().unwrap_or_default())?
+            .unwrap_or(principal_kind),
+    )
+}
+
+/// Modelo del BACKEND para `kind`: el que hereda un asiento del trío sin override propio,
+/// Y el modelo que se sondea como "modelo principal" (REQ-A24). `[openai]` sirve a
+/// `ollama` Y a `openai-compat` porque comparten protocolo de completions (REQ-A01b).
+///
+/// Compartida entre [`build_magi_orchestrator`] y [`orchestrate_probes`] (B3, Task 5.2) —
+/// antes de esta extracción, sondear el modelo correcto en el arranque habría exigido
+/// repetir esta misma resolución en el call site.
+fn resolve_backend_model(cfg: &MagiConfig, kind: ProviderKind) -> &str {
+    match kind {
+        ProviderKind::Ollama | ProviderKind::OpenAiCompat => cfg
+            .openai
+            .model
+            .as_deref()
+            .unwrap_or(crate::defaults::DEFAULT_OPENAI_MODEL),
+        ProviderKind::Anthropic => cfg
+            .anthropic
+            .model
+            .as_deref()
+            .unwrap_or(crate::defaults::DEFAULT_ANTHROPIC_MODEL),
+    }
+}
+
+/// Orquesta las sondas del principal y del trío (REQ-A24, Task 5.2): una tanda si
+/// comparten endpoint y kind, dos en `join!` si divergen — y la tabla del trío devuelta
+/// está SIEMPRE re-proyectada para que la ventana del principal jamás contamine
+/// [`derive_warn_tokens`] (SC-A24j): esa función toma el mínimo de lo que recibe, así que
+/// pasarle una tabla que incluyera al principal dejaría que un principal de ventana chica
+/// bajara el umbral que REQ-A24b define sobre los MAGES.
+///
+/// **Nunca bloquea ni falla el arranque**: cada sonda individual falla abierta dentro de
+/// `probe_models` (REQ-A24), y un `[magi].kind` inválido acá degrada el TRÍO entero a *no
+/// medido* en vez de propagar un error — `build_magi_orchestrator`, llamado después con la
+/// MISMA config, es quien reporta ese `[magi].kind` inválido con su error tipado; este
+/// sondeo solo necesita un mejor esfuerzo, nunca la última palabra.
+///
+/// El `kind` va por GRUPO, no global: con el trío en `ollama` y el principal en
+/// `anthropic`, sondear el principal con el kind del trío pediría `/api/show` a un
+/// endpoint que no lo tiene.
+async fn orchestrate_probes(
+    cfg: &MagiConfig,
+    endpoints: &ResolvedEndpoints,
+    principal_kind: ProviderKind,
+    backend_model: &str,
+    trio_models: &[&str],
+    factory: &dyn ProbeFactory,
+) -> (Option<Measurement>, BTreeMap<String, Measurement>) {
+    if !cfg.magi_endpoint_diverges() {
+        // Mismo endpoint y mismo kind (`magi_endpoint_diverges() == false` implica
+        // `[magi].kind`/`[magi].base_url` ausentes, así que el trío hereda
+        // `principal_kind` trivialmente — no hace falta `resolve_magi_kind` acá): UNA
+        // tanda para no sondear cuatro veces lo mismo.
+        let mut all = trio_models.to_vec();
+        all.push(backend_model);
+        let measured = probe_models(principal_kind, &endpoints.root, &all, factory).await;
+        // Re-proyecta la tabla del TRÍO desde `measured`: una sonda, dos vistas — el
+        // principal nunca entra en lo que se devuelve como tabla del trío.
+        let trio_only: BTreeMap<String, Measurement> = trio_models
+            .iter()
+            .map(|m| {
+                (
+                    (*m).to_string(),
+                    measured
+                        .get(*m)
+                        .cloned()
+                        .unwrap_or(Measurement::NotMeasuredThisTime),
+                )
+            })
+            .collect();
+        (measured.get(backend_model).cloned(), trio_only)
+    } else {
+        match resolve_magi_kind(cfg, principal_kind) {
+            Ok(magi_kind) => {
+                // `join!`, no dos `.await` en fila: en serie el peor caso de arranque
+                // sería DOS techos; la propiedad exigida (SC-A24k, un nivel más arriba,
+                // entre TANDAS en vez de entre sondas de una tanda) es que siga siendo
+                // UNO.
+                //
+                // `principal_models` ligado a una variable (no `&[backend_model]` inline):
+                // el array temporal de un slice literal no vive más allá de la expresión
+                // que lo crea, y `tokio::join!` expande sus dos brazos en un solo `match`
+                // que los mantiene vivos más allá de esa expresión — E0716 sin este `let`.
+                let principal_models = [backend_model];
+                let (principal, trio) = tokio::join!(
+                    probe_models(principal_kind, &endpoints.root, &principal_models, factory),
+                    probe_models(magi_kind, &endpoints.magi, trio_models, factory),
+                );
+                (principal.get(backend_model).cloned(), trio)
+            }
+            Err(_) => {
+                // `[magi].kind` inválido: `build_magi_orchestrator` lo reporta con su
+                // propio error tipado cuando construya el trío de verdad. Acá no hay un
+                // `ProviderKind` válido con el que sondear el trío, así que degrada TODO
+                // el trío a *no medido* sin adivinar uno — el principal se sondea solo,
+                // porque su kind sí es válido por construcción (`principal_kind` ya
+                // llega resuelto).
+                let principal =
+                    probe_models(principal_kind, &endpoints.root, &[backend_model], factory).await;
+                let trio = trio_models
+                    .iter()
+                    .map(|m| ((*m).to_string(), Measurement::NotMeasuredThisTime))
+                    .collect();
+                (principal.get(backend_model).cloned(), trio)
+            }
+        }
+    }
+}
+
+/// Caracteres de digest que se muestran en el notice de arranque (REQ-A24c).
+///
+/// 12: alcanza para distinguir manifiestos sin ser ruido — el digest completo son 64 hex
+/// (`DIGEST_HEX_LEN` en `magi::probe`, ya validado ahí antes de llegar acá), y mostrarlo
+/// entero en una línea de arranque es ruido: es un identificador, no un secreto que valga
+/// la pena ver completo.
+///
+/// Se recorta con `chars().take(..)`, NUNCA con `&d[..N]`: el digest ya viene validado
+/// como 64 hex ASCII (REQ-A16b) y el slice por bytes sería seguro hoy, pero el invariante
+/// del proyecto es "prohibido byte-indexar sin verificación", sin excepciones por
+/// conveniencia — una excepción justificada hoy es la que alguien copia mañana a un campo
+/// que no es ASCII.
+const DIGEST_PREVIEW_LEN: usize = 12;
+
+/// Renderiza el notice de arranque del probe (REQ-A24c). Tres estados, no dos — ver
+/// [`Measurement`]: *medido*, *no medible* (el endpoint no ofrece introspección, no es un
+/// fallo) y *no medido esta vez* (el caso común de un daemon frío en el primer arranque).
+fn probe_notice(m: &Measurement) -> String {
+    match m {
+        Measurement::Measured { window, digest } => {
+            let d = digest.as_deref().map_or_else(
+                || "digest no resuelto".to_string(),
+                |d| {
+                    format!(
+                        "digest {}…",
+                        d.chars().take(DIGEST_PREVIEW_LEN).collect::<String>()
+                    )
+                },
+            );
+            format!("probe: ventana {window} tokens, {d}")
+        }
+        Measurement::NotMeasurable => {
+            "probe: este endpoint no ofrece introspección de modelos (no es un fallo)".into()
+        }
+        Measurement::NotMeasuredThisTime => {
+            "probe: no medido esta vez (el daemon puede estar frío); el arranque siguiente \
+             probablemente mida"
+                .into()
+        }
+    }
+}
+
+/// Avisa cuando `max_query_bytes` queda CERCA de la ventana medida de los MAGES
+/// (SC-A24i/REQ-A24) — nunca de la del principal, que no recibe ese payload.
+///
+/// Compara en TOKENS, no bytes contra tokens: `max_query_bytes` está en bytes y
+/// `window_tokens` en tokens, y contrastarlos directo haría que el notice saliera o no
+/// por accidente aritmético. El mensaje nombra el estimador para que quien lo lee sepa
+/// que el número convertido es una aproximación, no una medición.
+fn stale_composition_notice(window_tokens: usize, max_query_bytes: usize) -> Option<String> {
+    let cap_tokens = bytes_to_tokens_est(max_query_bytes);
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss
+    )]
+    let threshold = (window_tokens as f64 * STALE_NOTICE_RATIO) as usize;
+    (cap_tokens > threshold).then(|| {
+        format!(
+            "notice: `max_query_bytes` ({max_query_bytes} B ≈ {cap_tokens} tokens a \
+             {CHARS_PER_TOKEN_EST} chars/token) está cerca de la ventana medida \
+             ({window_tokens} tokens); si cambiás a un modelo de ventana menor, el aviso \
+             de tamaño puede dejar de dispararse — reiniciá magi-rs tras el cambio"
+        )
     })
 }
 
@@ -2134,9 +2373,10 @@ fn seat_wiring_trace() -> Vec<(AgentName, String, bool)> {
 /// para que un aviso emitido en el camino de error **también** llegue al usuario: un
 /// fallo de asiento y una URL rara suelen ser el mismo problema visto de dos lados.
 ///
-/// `warn_tokens` entra por PARÁMETRO y no se resuelve adentro: lo produce el probe, que
-/// es Fase 5, y esta función es Fase 4. Con `None` cae al default de magi-core — el
-/// comportamiento de v0.11.0.
+/// `warn_tokens` entra por PARÁMETRO y no se resuelve adentro: lo produce el probe
+/// (`orchestrate_probes`/`derive_warn_tokens`, Task 5.2), llamado por el call site ANTES
+/// de esta función. Con `None` cae al default de magi-core — el comportamiento de
+/// v0.11.0, que sigue siendo el resultado cuando el probe no midió nada medible.
 ///
 /// # Errors
 /// - [`TrioError::UnknownKind`] si `[magi].kind` trae un valor no reconocido. Se valida
@@ -2171,32 +2411,19 @@ fn build_magi_orchestrator(
 ) -> Result<Arc<Magi>, TrioError> {
     // `[magi].kind` ausente/vacío hereda `principal_kind` — el YA RESUELTO, no
     // `cfg.effective_provider()` (TOML-only). Presente-y-no-reconocido sigue siendo
-    // error tipado, con su propio `ProviderKind::parse` (misma razón que antes: no
-    // depender de que `validate_vocabulary` ya haya corrido).
-    let kind = match ProviderKind::parse(cfg.magi.kind.as_deref().unwrap_or_default()) {
-        Ok(Some(k)) => k,
-        Ok(None) => principal_kind,
-        Err(e) => return Err(TrioError::UnknownKind(e.got)),
-    };
+    // error tipado. Task 5.2: extraído a `resolve_magi_kind`, compartido con
+    // `orchestrate_probes` (B3) — antes cada uno tenía su propia copia de esta misma
+    // regla, con el riesgo de que un probe midiera un kind distinto del que el trío
+    // realmente termina usando.
+    let kind = resolve_magi_kind(cfg, principal_kind).map_err(|e| TrioError::UnknownKind(e.got))?;
     // El trío usa el endpoint YA RESUELTO que `main.rs` produjo — no re-resuelve ni lee
     // la plantilla.
     let base = &endpoints.magi;
 
     // Modelo del BACKEND: el que hereda un asiento sin modelo propio, y el del
-    // fallback del builder. Sale de la sección del kind — `[openai]` sirve a `ollama`
-    // Y a `openai-compat` porque comparten el protocolo de completions (REQ-A01b).
-    let backend_model: &str = match kind {
-        ProviderKind::Ollama | ProviderKind::OpenAiCompat => cfg
-            .openai
-            .model
-            .as_deref()
-            .unwrap_or(crate::defaults::DEFAULT_OPENAI_MODEL),
-        ProviderKind::Anthropic => cfg
-            .anthropic
-            .model
-            .as_deref()
-            .unwrap_or(crate::defaults::DEFAULT_ANTHROPIC_MODEL),
-    };
+    // fallback del builder. Task 5.2: extraído a `resolve_backend_model`, compartido con
+    // `orchestrate_probes` (B3).
+    let backend_model: &str = resolve_backend_model(cfg, kind);
     let ceiling = Duration::from_secs(cfg.magi.agent_timeout_secs.unwrap_or(AGENT_TIMEOUT_SECS));
 
     // `RetryConfig` es `#[non_exhaustive]`: fuera del crate NO hay literal ni
@@ -3330,13 +3557,43 @@ async fn prepare_headless(
         openai_env: openai_key.as_deref(),
         secret_store: secret_store.as_ref(),
     };
+
+    // REQ-A24/A24b/A24c (Task 5.2): mismo sondeo que la TUI, ver el comentario de `run()`
+    // — nunca bloquea ni falla el arranque headless.
+    let probe_backend_model = resolve_backend_model(&magi_config, provider_kind).to_string();
+    let probe_seats = magi_config.magi.seats(&probe_backend_model);
+    let probe_trio_models: Vec<&str> = probe_seats.iter().map(|(_, m)| m.as_str()).collect();
+    let (probe_principal, probe_trio) = orchestrate_probes(
+        &magi_config,
+        &endpoints,
+        provider_kind,
+        &probe_backend_model,
+        &probe_trio_models,
+        &OllamaProbeFactory,
+    )
+    .await;
     let mut trio_notices: Vec<Notice> = Vec::new();
+    trio_notices.push(Notice::info(format!(
+        "{probe_backend_model}: {}",
+        probe_notice(&probe_principal.unwrap_or(Measurement::NotMeasuredThisTime))
+    )));
+    if let Some(min_window) = min_mage_window(&probe_trio) {
+        if let Some(n) =
+            stale_composition_notice(min_window, magi_config.effective_max_query_bytes())
+        {
+            trio_notices.push(Notice::resolution(n));
+        }
+    }
+    let warn_tokens = magi_config
+        .magi
+        .input_warn_tokens
+        .or_else(|| derive_warn_tokens(&probe_trio));
     let consult_magi = build_magi_orchestrator(
         &magi_config,
         provider_kind,
         &endpoints,
         Some(&creds),
-        None,
+        warn_tokens,
         &MagiEnvModelOverrides::from_env(),
         &mut trio_notices,
     );
@@ -7171,6 +7428,457 @@ mod tests {
                 )],
             };
             assert!(!trio_unavailable_message(&err).contains(CANARY));
+        }
+    }
+
+    /// Task 5.2 — notices del probe (REQ-A24c), el aviso de composición staleness
+    /// (SC-A24i), y `orchestrate_probes` (REQ-A24/SC-A24j/SC-A24k), la función que decide
+    /// cuántas tandas de sondeo lanzar y garantiza que la tabla del trío nunca incluye al
+    /// principal.
+    mod probe_orchestration {
+        use super::*;
+        use async_trait::async_trait;
+        use magi_core::rotation::ProviderProbe;
+        use magi_rs::magi::probe::ProbeSeat;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        /// Sonda que devuelve SIEMPRE la misma ventana, sin digest, sin I/O real.
+        struct FixedWindowProbe {
+            window: usize,
+        }
+
+        #[async_trait]
+        impl ProviderProbe for FixedWindowProbe {
+            async fn window(&self) -> Result<Option<usize>, ProviderError> {
+                Ok(Some(self.window))
+            }
+            async fn digest(&self) -> Result<Option<String>, ProviderError> {
+                Ok(None)
+            }
+        }
+
+        /// Doble de `ProbeFactory` con ventana FIJA por modelo (mapa `modelo -> ventana`).
+        /// Un modelo AUSENTE del mapa degrada a `Unbuildable` — nunca panica, nunca inventa
+        /// una ventana. No reusa los dobles privados de `magi::probe::tests` (viven en otro
+        /// módulo y no se exportan) — R-A04 exige la misma costura de inyección acá.
+        struct MappedProbeFactory {
+            windows: BTreeMap<&'static str, usize>,
+            /// Cuántas veces se llamó a `probe_for` — para pinnear SC-A24h: releer un
+            /// snapshot ya capturado nunca debe volver a tocar la fábrica.
+            calls: AtomicUsize,
+        }
+
+        impl MappedProbeFactory {
+            fn new(pairs: &[(&'static str, usize)]) -> Self {
+                Self {
+                    windows: pairs.iter().copied().collect(),
+                    calls: AtomicUsize::new(0),
+                }
+            }
+
+            fn calls(&self) -> usize {
+                self.calls.load(Ordering::SeqCst)
+            }
+        }
+
+        impl ProbeFactory for MappedProbeFactory {
+            fn probe_for(
+                &self,
+                kind: ProviderKind,
+                _base_url: &ResolvedEndpoint,
+                model: &str,
+            ) -> ProbeSeat {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                if !kind.is_probeable() {
+                    return ProbeSeat::NotProbeable;
+                }
+                match self.windows.get(model) {
+                    Some(&window) => ProbeSeat::Ready(Arc::new(FixedWindowProbe { window })),
+                    None => ProbeSeat::Unbuildable(redact_foreign_error(&std::io::Error::other(
+                        "modelo no mapeado en el doble de test",
+                    ))),
+                }
+            }
+        }
+
+        /// Endpoint de prueba compartido: una `base_url` plana sin placeholders, así que
+        /// resolverla no necesita un vault real (mismo patrón que `trio_construction`).
+        fn test_endpoints() -> ResolvedEndpoints {
+            let tpl = EndpointTemplate::parse("http://localhost:11434/v1").unwrap();
+            ResolvedEndpoints {
+                root: tpl.resolve(&mut NoVaultInScope, Scope::Root).unwrap(),
+                magi: tpl.resolve(&mut NoVaultInScope, Scope::Magi).unwrap(),
+                embedding: tpl.resolve(&mut NoVaultInScope, Scope::Embedding).unwrap(),
+            }
+        }
+
+        /// Endpoints DIVERGENTES: el trío en un host distinto del principal, para ejercitar
+        /// la rama `join!` de `orchestrate_probes`.
+        fn diverging_endpoints() -> ResolvedEndpoints {
+            let root = EndpointTemplate::parse("http://root-host:11434/v1")
+                .unwrap()
+                .resolve(&mut NoVaultInScope, Scope::Root)
+                .unwrap();
+            let magi = EndpointTemplate::parse("http://magi-host:11434/v1")
+                .unwrap()
+                .resolve(&mut NoVaultInScope, Scope::Magi)
+                .unwrap();
+            let embedding = EndpointTemplate::parse("http://localhost:11434/v1")
+                .unwrap()
+                .resolve(&mut NoVaultInScope, Scope::Embedding)
+                .unwrap();
+            ResolvedEndpoints {
+                root,
+                magi,
+                embedding,
+            }
+        }
+
+        /// `MagiConfig` cuyo `[magi]` declara `base_url` propio (y opcionalmente `kind`) —
+        /// el par de campos que `magi_endpoint_diverges()` mira.
+        fn cfg_diverging(kind: Option<&str>) -> MagiConfig {
+            MagiConfig {
+                magi: crate::config::MagiSectionConfig {
+                    base_url: Some("http://magi-host:11434/v1".to_string()),
+                    kind: kind.map(str::to_string),
+                    ..crate::config::MagiSectionConfig::default()
+                },
+                ..MagiConfig::default()
+            }
+        }
+
+        // ---- probe_notice / stale_composition_notice (contrato del brief, Step 1) -----
+
+        /// SC-A24f: el arranque en frío se explica, no se confunde con una falla.
+        #[test]
+        fn the_notice_distinguishes_the_three_measurement_states() {
+            assert!(probe_notice(&Measurement::Measured {
+                window: 128_000,
+                digest: Some("ab".repeat(32)),
+            })
+            .contains("128000"));
+            assert!(probe_notice(&Measurement::NotMeasurable).contains("no ofrece"));
+            let cold = probe_notice(&Measurement::NotMeasuredThisTime);
+            assert!(
+                cold.contains("esta vez") && cold.contains("siguiente"),
+                "debe anticipar que el próximo arranque probablemente mida"
+            );
+        }
+
+        /// El digest se muestra truncado: es un identificador, no un secreto, pero 64 hex
+        /// es ruido.
+        #[test]
+        fn the_digest_is_shown_truncated() {
+            let n = probe_notice(&Measurement::Measured {
+                window: 1000,
+                digest: Some("ab".repeat(32)),
+            });
+            assert!(!n.contains(&"ab".repeat(32)));
+        }
+
+        /// Borde: una ventana medida SIN digest (p. ej. `/api/tags` no lo resolvió) sigue
+        /// reportando la ventana — no se pierde información que sí se tiene.
+        #[test]
+        fn a_measured_window_without_a_digest_still_reports_the_window() {
+            let n = probe_notice(&Measurement::Measured {
+                window: 128_000,
+                digest: None,
+            });
+            assert!(n.contains("128000"));
+            assert!(n.contains("digest no resuelto"));
+        }
+
+        /// SC-A24i: se avisa, y la comparación es EN TOKENS — no bytes contra tokens.
+        #[test]
+        fn a_max_query_close_to_the_measured_window_is_flagged_after_unit_conversion() {
+            let window_tokens = 100_000_usize;
+            // Un cap en BYTES que, convertido, queda justo por encima del 80 % de la
+            // ventana.
+            let close_bytes =
+                ((window_tokens as f64 * STALE_NOTICE_RATIO * CHARS_PER_TOKEN_EST) as usize) + 8;
+            let n = stale_composition_notice(window_tokens, close_bytes).expect("debe avisar");
+            assert!(
+                n.contains("tokens") && n.contains("chars/token"),
+                "el notice debe nombrar el estimador: es una aproximación, no una medición"
+            );
+
+            assert!(
+                stale_composition_notice(window_tokens, close_bytes / 10).is_none(),
+                "con holgura amplia no hay riesgo que anunciar"
+            );
+        }
+
+        /// El bug que este par de funciones existe para evitar: comparar bytes contra
+        /// tokens.
+        #[test]
+        fn comparing_raw_bytes_against_a_token_window_would_be_meaningless() {
+            let window_tokens = 128_000_usize;
+            // No un literal suelto: el test sigue al valor real.
+            let cap_bytes = magi_rs::magi::MAX_QUERY_BYTES;
+            assert!(
+                cap_bytes > window_tokens,
+                "en crudo el cap 'supera' la ventana..."
+            );
+            assert!(
+                bytes_to_tokens_est(cap_bytes) < window_tokens,
+                "...pero convertido NO la supera: sin conversión el notice saldría siempre"
+            );
+        }
+
+        // ---- orchestrate_probes: rama compartida --------------------------------------
+
+        /// SC-A24 / REQ-A24: endpoint y kind compartidos ⇒ UNA tanda (una sonda por
+        /// modelo único, principal incluido), y la tabla del trío devuelta NUNCA incluye
+        /// al principal.
+        #[tokio::test]
+        async fn shared_endpoint_probes_once_and_the_trio_table_excludes_the_principal() {
+            let factory = MappedProbeFactory::new(&[
+                ("principal", 4_096),
+                ("melchior", 128_000),
+                ("balthasar", 200_000),
+                ("caspar", 256_000),
+            ]);
+            let cfg = MagiConfig::default();
+            let (principal, trio) = orchestrate_probes(
+                &cfg,
+                &test_endpoints(),
+                ProviderKind::Ollama,
+                "principal",
+                &["melchior", "balthasar", "caspar"],
+                &factory,
+            )
+            .await;
+
+            assert!(matches!(
+                principal,
+                Some(Measurement::Measured { window: 4_096, .. })
+            ));
+            assert_eq!(trio.len(), 3, "solo los TRES mages, nunca el principal");
+            assert!(!trio.contains_key("principal"));
+            assert!(matches!(
+                trio["melchior"],
+                Measurement::Measured {
+                    window: 128_000,
+                    ..
+                }
+            ));
+            assert_eq!(
+                factory.calls(),
+                4,
+                "una tanda: las 4 sondas (principal + 3 mages) se piden juntas"
+            );
+        }
+
+        /// SC-A24j — la propiedad central de esta tarea: un principal de ventana CHICA no
+        /// baja el umbral derivado de los mages, porque `derive_warn_tokens` nunca ve su
+        /// medición — `orchestrate_probes` la excluye de la tabla del trío por
+        /// construcción, no por convención en el llamador.
+        #[tokio::test]
+        async fn a_small_principal_never_lowers_the_mage_derived_threshold() {
+            let factory = MappedProbeFactory::new(&[
+                ("principal", 2_048), // la ventana MÁS CHICA de todo el proceso
+                ("melchior", 1_000_000),
+                ("balthasar", 512_000),
+                ("caspar", 256_000),
+            ]);
+            let cfg = MagiConfig::default();
+            let (_principal, trio) = orchestrate_probes(
+                &cfg,
+                &test_endpoints(),
+                ProviderKind::Ollama,
+                "principal",
+                &["melchior", "balthasar", "caspar"],
+                &factory,
+            )
+            .await;
+
+            let derived = derive_warn_tokens(&trio).expect("los tres mages midieron");
+            #[allow(
+                clippy::cast_precision_loss,
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss
+            )]
+            let expected_from_caspar = (256_000.0 * magi_rs::magi::WARN_WINDOW_FRACTION) as usize;
+            assert_eq!(
+                derived, expected_from_caspar,
+                "el mínimo de los MAGES (Caspar, 256k) manda — NUNCA el del principal (2k), \
+                 que sería un umbral absurdamente bajo si se hubiera colado"
+            );
+        }
+
+        /// SC-A24h: el umbral derivado de un snapshot de arranque es ESTABLE. La garantía
+        /// completa de la spec ("el probe corre UNA vez por proceso") es estructural — un
+        /// único call site en `run()`/`prepare_headless()`, antes de que arranque el loop
+        /// de turnos — y eso no es algo que un test de unidad pueda ejercitar sin levantar
+        /// el proceso entero. Lo que SÍ es verificable acá, y es la mitad de la propiedad
+        /// que un test de unidad puede pinnear: releer el MISMO snapshot ya capturado es
+        /// una operación pura y determinista que nunca vuelve a tocar la fábrica de
+        /// sondas — si algo en el proceso "refrescara" el umbral por las dudas, esto lo
+        /// delataría por un conteo de llamadas que sube solo.
+        #[tokio::test]
+        async fn the_probe_runs_once_and_the_threshold_stays_put() {
+            let factory = MappedProbeFactory::new(&[("principal", 128_000), ("m", 256_000)]);
+            let cfg = MagiConfig::default();
+            let (_principal, trio) = orchestrate_probes(
+                &cfg,
+                &test_endpoints(),
+                ProviderKind::Ollama,
+                "principal",
+                &["m"],
+                &factory,
+            )
+            .await;
+            let calls_after_the_startup_probe = factory.calls();
+            assert!(
+                calls_after_the_startup_probe > 0,
+                "la sonda debió correr al menos una vez en el arranque"
+            );
+
+            // Dos "lecturas" del mismo snapshot, como dos consultas sucesivas dentro de la
+            // MISMA sesión — nada acá vuelve a invocar `orchestrate_probes`.
+            let warn_at_startup = derive_warn_tokens(&trio);
+            let warn_for_a_later_query = derive_warn_tokens(&trio);
+            assert_eq!(
+                warn_at_startup, warn_for_a_later_query,
+                "el umbral derivado del snapshot de arranque no cambia solo"
+            );
+            assert_eq!(
+                factory.calls(),
+                calls_after_the_startup_probe,
+                "derivar el umbral de un snapshot ya capturado NUNCA vuelve a tocar la sonda"
+            );
+        }
+
+        // ---- orchestrate_probes: rama divergente --------------------------------------
+
+        /// SC-A24k (un nivel más arriba, entre TANDAS): endpoint divergente ⇒ DOS
+        /// llamadas independientes, cada una con su kind y su endpoint propios.
+        #[tokio::test]
+        async fn diverging_endpoint_probes_the_trio_separately_with_its_own_kind() {
+            let factory = MappedProbeFactory::new(&[("principal", 64_000), ("m", 128_000)]);
+            let cfg = cfg_diverging(Some("ollama"));
+            let (principal, trio) = orchestrate_probes(
+                &cfg,
+                &diverging_endpoints(),
+                ProviderKind::Ollama,
+                "principal",
+                &["m"],
+                &factory,
+            )
+            .await;
+            assert!(matches!(
+                principal,
+                Some(Measurement::Measured { window: 64_000, .. })
+            ));
+            assert!(matches!(
+                trio["m"],
+                Measurement::Measured {
+                    window: 128_000,
+                    ..
+                }
+            ));
+        }
+
+        /// Un `[magi].kind` inválido no propaga error ni panica: degrada el TRÍO entero a
+        /// *no medido*, sin adivinar un kind — `build_magi_orchestrator` es quien reporta
+        /// el error tipado cuando construya el trío de verdad con la MISMA config.
+        #[tokio::test]
+        async fn an_invalid_magi_kind_degrades_the_trio_without_guessing() {
+            let factory = MappedProbeFactory::new(&[("principal", 64_000), ("m", 128_000)]);
+            let cfg = cfg_diverging(Some("banana"));
+            let (principal, trio) = orchestrate_probes(
+                &cfg,
+                &diverging_endpoints(),
+                ProviderKind::Ollama,
+                "principal",
+                &["m"],
+                &factory,
+            )
+            .await;
+            assert!(
+                matches!(
+                    principal,
+                    Some(Measurement::Measured { window: 64_000, .. })
+                ),
+                "el principal SÍ se sondea: su kind es válido por construcción"
+            );
+            assert!(matches!(trio["m"], Measurement::NotMeasuredThisTime));
+        }
+
+        // ---- resolve_magi_kind ---------------------------------------------------------
+
+        /// `[magi].kind` ausente hereda el YA RESUELTO del principal — no
+        /// `cfg.effective_provider()`/`cfg.effective_magi_kind()` (TOML-only), que
+        /// ignorarían `MAGI_PROVIDER`.
+        #[test]
+        fn resolve_magi_kind_inherits_the_resolved_principal_when_absent() {
+            let cfg = MagiConfig::default();
+            assert_eq!(
+                resolve_magi_kind(&cfg, ProviderKind::Anthropic).unwrap(),
+                ProviderKind::Anthropic,
+                "hereda lo YA RESUELTO, no cfg.effective_provider() (que daría Ollama)"
+            );
+        }
+
+        /// `[magi].kind` declarado gana sobre el principal.
+        #[test]
+        fn resolve_magi_kind_prefers_the_declared_value_over_the_principal() {
+            let cfg = cfg_diverging(Some("anthropic"));
+            assert_eq!(
+                resolve_magi_kind(&cfg, ProviderKind::Ollama).unwrap(),
+                ProviderKind::Anthropic
+            );
+        }
+
+        /// `[magi].kind` no reconocido es error TIPADO, no un fallback silencioso.
+        #[test]
+        fn resolve_magi_kind_rejects_an_unknown_value() {
+            let cfg = cfg_diverging(Some("banana"));
+            let err = resolve_magi_kind(&cfg, ProviderKind::Ollama).unwrap_err();
+            assert_eq!(err.got, "banana");
+        }
+
+        // ---- resolve_backend_model ------------------------------------------------------
+
+        /// `[openai].model` para `ollama`/`openai-compat`, `[anthropic].model` para
+        /// `anthropic` — `[openai]` sirve a los dos primeros porque comparten protocolo.
+        #[test]
+        fn resolve_backend_model_picks_the_section_matching_the_kind() {
+            let cfg = MagiConfig {
+                openai: crate::config::OpenAiConfig {
+                    model: Some("qwen-test".to_string()),
+                },
+                anthropic: crate::config::AnthropicConfig {
+                    model: Some("claude-test".to_string()),
+                },
+                ..MagiConfig::default()
+            };
+            assert_eq!(
+                resolve_backend_model(&cfg, ProviderKind::Ollama),
+                "qwen-test"
+            );
+            assert_eq!(
+                resolve_backend_model(&cfg, ProviderKind::OpenAiCompat),
+                "qwen-test"
+            );
+            assert_eq!(
+                resolve_backend_model(&cfg, ProviderKind::Anthropic),
+                "claude-test"
+            );
+        }
+
+        /// Borde: ambos ausentes ⇒ los defaults built-in del crate, no un `panic`/`unwrap`.
+        #[test]
+        fn resolve_backend_model_falls_back_to_the_built_in_defaults_when_absent() {
+            let cfg = MagiConfig::default();
+            assert_eq!(
+                resolve_backend_model(&cfg, ProviderKind::Ollama),
+                crate::defaults::DEFAULT_OPENAI_MODEL
+            );
+            assert_eq!(
+                resolve_backend_model(&cfg, ProviderKind::Anthropic),
+                crate::defaults::DEFAULT_ANTHROPIC_MODEL
+            );
         }
     }
 }
