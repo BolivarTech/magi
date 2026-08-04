@@ -572,6 +572,30 @@ impl Agent {
         }
     }
 
+    /// Removes the tool named `name`, if registered. A no-op if absent.
+    ///
+    /// The counterpart to [`Self::register_or_replace_tool`] for the case where
+    /// there is nothing safe to replace it WITH: when a provider-bound tool's
+    /// backing provider fails to rebuild (e.g. a post-`/login` MAGI trio rebuild
+    /// error), leaving the OLD registration in place would let the agent keep
+    /// routing to it — against credentials that may already be stale or rotated
+    /// — while the user was told the rebuild failed. Removing it degrades to
+    /// "tool unavailable" instead of "tool silently using the wrong thing".
+    pub fn remove_tool(&mut self, name: &str) {
+        self.tools.retain(|t| t.name() != name);
+    }
+
+    /// Returns `true` if a tool named `name` is currently registered.
+    ///
+    /// Introspection helper alongside [`Self::register_or_replace_tool`] and
+    /// [`Self::remove_tool`] — lets a caller (or a test, e.g. the `tui`
+    /// module's post-`/login` rebuild-failure coverage) verify a
+    /// registration change without reaching into the private `tools` field.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn has_tool(&self, name: &str) -> bool {
+        self.tools.iter().any(|t| t.name() == name)
+    }
+
 
     /// Normalizes tool input recursively to detect semantically identical calls.
     pub fn normalize_input(val: &serde_json::Value, depth: usize) -> Result<String> {

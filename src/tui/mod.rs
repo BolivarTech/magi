@@ -8,6 +8,7 @@ use crossterm::{
 };
 use magi_core::schema::Mode;
 use magi_rs::magi::mode::{normalize_label, resolve_mode_guarded, ModeClassifier, ModeError};
+use magi_rs::redact::redact_foreign_error;
 use magi_rs::vault::{SecretStore, VaultError};
 use ratatui::{
     backend::{Backend, CrosstermBackend},
@@ -1692,6 +1693,119 @@ mod tests {
             AgentResponse::Info(msg) => assert!(msg.to_lowercase().contains("no stored session")),
             other => panic!("expected an Info notice, got {other:?}"),
         }
+    }
+
+    /// A [`magi_core::provider::LlmProvider`] double never actually called in
+    /// the `handle_trio_rebuild_failure` tests below — it exists only so
+    /// `Magi::new` has something to wrap into an `Arc<Magi>` fixture.
+    struct UnusedProvider;
+
+    #[async_trait::async_trait]
+    impl magi_core::provider::LlmProvider for UnusedProvider {
+        async fn complete(
+            &self,
+            _system_prompt: &str,
+            _user_prompt: &str,
+            _config: &magi_core::provider::CompletionConfig,
+        ) -> Result<String, magi_core::error::ProviderError> {
+            Err(magi_core::error::ProviderError::external(
+                "unused in this test",
+                magi_core::error::ExternalErrorKind::Network,
+            ))
+        }
+        fn name(&self) -> &str {
+            "unused"
+        }
+        fn model(&self) -> &str {
+            "unused"
+        }
+    }
+
+    /// A no-op [`crate::tools::Tool`] double standing in for the real
+    /// `consult` tool — cheap to register/remove without a real `Magi`.
+    struct NamedTool(&'static str);
+
+    #[async_trait::async_trait]
+    impl crate::tools::Tool for NamedTool {
+        fn name(&self) -> &str {
+            self.0
+        }
+        fn description(&self) -> &str {
+            "test double"
+        }
+        fn input_schema(&self) -> serde_json::Value {
+            serde_json::json!({})
+        }
+        async fn execute(
+            &self,
+            _input: serde_json::Value,
+            _cancel: &tokio_util::sync::CancellationToken,
+        ) -> crate::tools::ToolResult<serde_json::Value> {
+            Ok(serde_json::Value::Null)
+        }
+    }
+
+    /// I4 (fix round 2): a failed rebuild clears BOTH `consult_magi_runner`
+    /// and the registered `consult` tool — leaving either one pointed at the
+    /// pre-failure state would let something keep routing against
+    /// credentials that no longer match what was just written to the vault.
+    #[test]
+    fn test_handle_trio_rebuild_failure_clears_runner_and_removes_tool() {
+        let mut consult_magi_runner = Some(Arc::new(magi_core::orchestrator::Magi::new(
+            Arc::new(UnusedProvider),
+        )));
+        let mut runner_agent = Agent::new(Arc::new(crate::agent::provider::StaticProvider));
+        runner_agent.register_tool(Box::new(NamedTool("consult")));
+        runner_agent.register_tool(Box::new(NamedTool("bash")));
+
+        let e = magi_core::error::ProviderError::external(
+            "boom",
+            magi_core::error::ExternalErrorKind::Network,
+        );
+        let _ = handle_trio_rebuild_failure(&e, &mut consult_magi_runner, &mut runner_agent);
+
+        assert!(
+            consult_magi_runner.is_none(),
+            "a failed rebuild must not leave the OLD Magi handle in place"
+        );
+        assert!(
+            !runner_agent.has_tool("consult"),
+            "the stale consult tool must be gone"
+        );
+        assert!(
+            runner_agent.has_tool("bash"),
+            "an unrelated tool must survive"
+        );
+    }
+
+    /// I4 (fix round 2): the returned text is redacted — `e`'s `Display` can
+    /// carry a URL (a foreign `ProviderError`'s message is third-party text
+    /// this crate does not author), and the credential in it must not reach
+    /// the user-facing error banner.
+    #[test]
+    fn test_handle_trio_rebuild_failure_redacts_the_error_text() {
+        let mut consult_magi_runner = Some(Arc::new(magi_core::orchestrator::Magi::new(
+            Arc::new(UnusedProvider),
+        )));
+        let mut runner_agent = Agent::new(Arc::new(crate::agent::provider::StaticProvider));
+
+        let e = magi_core::error::ProviderError::external(
+            "connect to https://svc-user:s3cr3t-pass@evil.example.com/v1 failed",
+            magi_core::error::ExternalErrorKind::Network,
+        );
+        let safe =
+            handle_trio_rebuild_failure(&e, &mut consult_magi_runner, &mut runner_agent);
+
+        assert!(
+            !safe.as_str().contains("s3cr3t-pass"),
+            "the credential must not survive redaction: {}",
+            safe.as_str()
+        );
+        assert!(
+            safe.as_str().contains("evil.example.com"),
+            "the host stays visible — only the userinfo is redacted: {}",
+            safe.as_str()
+        );
     }
 
     #[tokio::test]
