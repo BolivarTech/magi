@@ -76,6 +76,43 @@ fn handle_logout(store: Option<&SharedSecretStore>) -> AgentResponse {
     }
 }
 
+/// Handles a failed post-`/login` MAGI trio rebuild (I4, fix round 2).
+///
+/// Extracted from the `/login` event handler for the same reason as
+/// [`handle_login`]/[`handle_logout`]: the full TUI event loop is intractable
+/// to test directly, so the logic that decides what happens on a rebuild
+/// failure is tested here as a plain `fn`.
+///
+/// Two things must happen together, and both are about not lying to the
+/// user by omission:
+///
+/// - **The error text is redacted.** `e` is a foreign [`ProviderError`] from
+///   magi-core — its `Display` can cite the endpoint URL, and magi-core does
+///   not know this crate's redaction rule (REQ-A16c). Every other foreign-
+///   error surface in this codebase routes through [`redact_foreign_error`]
+///   for exactly this reason; this one must too.
+/// - **Nothing keeps using the OLD credentials.** By the time this runs,
+///   [`handle_login`] already wrote a NEW key to the vault, so the running
+///   session and the vault now disagree about what the current credential
+///   is. Leaving `consult_magi_runner` and the registered `consult` tool
+///   pointed at whatever built successfully before this attempt — possibly
+///   nothing, possibly a stale provider from an earlier session — would let
+///   consult keep answering under a diverged credential while the user was
+///   told the rebuild failed. Dropping both makes the direct `/consult` path
+///   and the autonomous tool path fail closed the same way an unconfigured
+///   trio always does (REQ-A06), instead of silently using the wrong thing.
+///
+/// [`ProviderError`]: magi_core::error::ProviderError
+fn handle_trio_rebuild_failure(
+    e: &magi_core::error::ProviderError,
+    consult_magi_runner: &mut Option<Arc<magi_core::orchestrator::Magi>>,
+    runner_agent: &mut Agent,
+) -> magi_rs::redact::SafeErrorText {
+    *consult_magi_runner = None;
+    runner_agent.remove_tool("consult");
+    redact_foreign_error(e)
+}
+
 /// Different interaction modes for the TUI.
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub enum AppMode {
@@ -825,10 +862,15 @@ pub async fn run_tui_ext(
                                                     consult_magi_runner = Some(new_magi);
                                                 }
                                                 Err(e) => {
+                                                    let safe = handle_trio_rebuild_failure(
+                                                        &e,
+                                                        &mut consult_magi_runner,
+                                                        &mut runner_agent,
+                                                    );
                                                     let _ = response_tx
                                                         .send(AgentResponse::Error(format!(
                                                             "logged in, but the MAGI trio could \
-                                                             not be rebuilt: {e}"
+                                                             not be rebuilt: {safe}"
                                                         )))
                                                         .await;
                                                 }
@@ -1751,9 +1793,9 @@ mod tests {
     /// credentials that no longer match what was just written to the vault.
     #[test]
     fn test_handle_trio_rebuild_failure_clears_runner_and_removes_tool() {
-        let mut consult_magi_runner = Some(Arc::new(magi_core::orchestrator::Magi::new(
-            Arc::new(UnusedProvider),
-        )));
+        let mut consult_magi_runner = Some(Arc::new(magi_core::orchestrator::Magi::new(Arc::new(
+            UnusedProvider,
+        ))));
         let mut runner_agent = Agent::new(Arc::new(crate::agent::provider::StaticProvider));
         runner_agent.register_tool(Box::new(NamedTool("consult")));
         runner_agent.register_tool(Box::new(NamedTool("bash")));
@@ -1784,17 +1826,16 @@ mod tests {
     /// the user-facing error banner.
     #[test]
     fn test_handle_trio_rebuild_failure_redacts_the_error_text() {
-        let mut consult_magi_runner = Some(Arc::new(magi_core::orchestrator::Magi::new(
-            Arc::new(UnusedProvider),
-        )));
+        let mut consult_magi_runner = Some(Arc::new(magi_core::orchestrator::Magi::new(Arc::new(
+            UnusedProvider,
+        ))));
         let mut runner_agent = Agent::new(Arc::new(crate::agent::provider::StaticProvider));
 
         let e = magi_core::error::ProviderError::external(
             "connect to https://svc-user:s3cr3t-pass@evil.example.com/v1 failed",
             magi_core::error::ExternalErrorKind::Network,
         );
-        let safe =
-            handle_trio_rebuild_failure(&e, &mut consult_magi_runner, &mut runner_agent);
+        let safe = handle_trio_rebuild_failure(&e, &mut consult_magi_runner, &mut runner_agent);
 
         assert!(
             !safe.as_str().contains("s3cr3t-pass"),

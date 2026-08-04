@@ -596,7 +596,6 @@ impl Agent {
         self.tools.iter().any(|t| t.name() == name)
     }
 
-
     /// Normalizes tool input recursively to detect semantically identical calls.
     pub fn normalize_input(val: &serde_json::Value, depth: usize) -> Result<String> {
         const MAX_DEPTH: usize = 10;
