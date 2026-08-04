@@ -278,6 +278,29 @@ pub async fn probe_models(
         .collect()
 }
 
+/// Ventana **mínima** medida entre los mages, SIN aplicar la fracción de aviso
+/// (REQ-A24b). Un mage no medible se **omite** del mínimo en vez de bajarlo — si ninguno
+/// es medible, devuelve `None`.
+///
+/// Separada de [`derive_warn_tokens`] (Task 5.2) para que el notice de composición
+/// staleness (SC-A24i, `main.rs::stale_composition_notice`) pueda comparar
+/// `max_query_bytes` contra el número CRUDO de la ventana: aplicarle la fracción de aviso
+/// ahí también desplazaría el umbral de ESE notice sin que REQ-A24b lo pida — SC-A24i
+/// compara contra la ventana **medida**, no contra un umbral ya reducido.
+///
+/// # Complejidad
+/// Una pasada `O(n)` sobre los mages, sin anidar.
+#[must_use]
+pub fn min_mage_window(mages: &BTreeMap<String, Measurement>) -> Option<usize> {
+    mages
+        .values()
+        .filter_map(|m| match m {
+            Measurement::Measured { window, .. } => Some(*window),
+            Measurement::NotMeasurable | Measurement::NotMeasuredThisTime => None,
+        })
+        .min()
+}
+
 /// Deriva `input_warn_tokens` del **mínimo** de las ventanas medidas de los mages (REQ-A24b).
 ///
 /// **De los MAGES, no del principal**: `input_warn_tokens` gobierna el input que reciben los
@@ -290,13 +313,7 @@ pub async fn probe_models(
 /// devuelve `None` y el llamador cae al nivel siguiente (clave declarada, después default).
 #[must_use]
 pub fn derive_warn_tokens(mages: &BTreeMap<String, Measurement>) -> Option<usize> {
-    let min = mages
-        .values()
-        .filter_map(|m| match m {
-            Measurement::Measured { window, .. } => Some(*window),
-            Measurement::NotMeasurable | Measurement::NotMeasuredThisTime => None,
-        })
-        .min()?;
+    let min = min_mage_window(mages)?;
     #[allow(
         clippy::cast_precision_loss,
         clippy::cast_possible_truncation,
@@ -1031,6 +1048,46 @@ mod tests {
             None,
             "sin ninguno medible se cae al nivel siguiente"
         );
+    }
+
+    /// Task 5.2 (SC-A24i): `min_mage_window` es el número CRUDO, sin la fracción de aviso
+    /// — distinto de `derive_warn_tokens`, que le aplica `WARN_WINDOW_FRACTION`. El notice
+    /// de composición staleness necesita compararse contra la ventana MEDIDA, no contra un
+    /// umbral ya reducido.
+    #[test]
+    fn min_mage_window_returns_the_raw_minimum_unmeasurable_omitted() {
+        let mages = BTreeMap::from([
+            (
+                "melchior".to_string(),
+                Measurement::Measured {
+                    window: 1_000_000,
+                    digest: None,
+                },
+            ),
+            (
+                "balthasar".to_string(),
+                Measurement::Measured {
+                    window: 128_000,
+                    digest: None,
+                },
+            ),
+            ("caspar".to_string(), Measurement::NotMeasurable),
+        ]);
+        assert_eq!(
+            min_mage_window(&mages),
+            Some(128_000),
+            "el mínimo CRUDO, sin fracción — distinto del umbral derivado"
+        );
+    }
+
+    /// Task 5.2 (borde): ningún mage medible ⇒ `None`, igual que `derive_warn_tokens`.
+    #[test]
+    fn min_mage_window_is_none_when_nothing_is_measured() {
+        let mages = BTreeMap::from([
+            ("a".to_string(), Measurement::NotMeasurable),
+            ("b".to_string(), Measurement::NotMeasuredThisTime),
+        ]);
+        assert_eq!(min_mage_window(&mages), None);
     }
 
     /// Dedup: cuatro modelos pedidos, dos distintos ⇒ DOS sondas construidas, DOS entradas
