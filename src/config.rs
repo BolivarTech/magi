@@ -562,9 +562,10 @@ impl MagiConfig {
     /// distintas pueden resolver al mismo host —una con credenciales del vault y otra sin
     /// ellas— y comparar el resultado diría "no divergen" sobre una configuración que sí
     /// lo hace. Lo que importa acá es la intención del operador.
-    // Narrow allow: consumed by the REQ-A07c divergence notice in Fase 4, not this
-    // task. Covered by `magi_endpoint_diverges_when_the_trio_declares_its_own_kind_or_base_url`.
-    #[allow(dead_code)]
+    ///
+    /// Task 4.4: consumida en producción por `divergence_notice` (`main.rs`, REQ-A07p) —
+    /// el `#[allow(dead_code)]` que tenía se retiró acá porque ya hay un llamador real.
+    /// Covered by `magi_endpoint_diverges_when_the_trio_declares_its_own_kind_or_base_url`.
     #[must_use]
     pub fn magi_endpoint_diverges(&self) -> bool {
         let declara_url = self

@@ -1530,6 +1530,15 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
         ));
     let tui_default_mode = magi_config.effective_default_mode();
     let tui_untrusted_content = magi_config.magi.untrusted_content.unwrap_or(false);
+    // REQ-A07p/SC-A07p: `tui_default_mode.is_none()` IS "will this session infer the
+    // mode" — the same signal `divergence_notice` needs, already computed above; reusing
+    // it (instead of calling `effective_default_mode()` a second time) is B3, not just
+    // convenience.
+    push_divergence_notice(
+        &magi_config,
+        tui_default_mode.is_none(),
+        &mut startup_notices,
+    );
 
     let mut agent = Agent::new(provider);
 
@@ -1777,6 +1786,80 @@ enum SeatError {
     Transport(SafeErrorText),
 }
 
+/// Los dos status que un endpoint **keyless** nunca debería producir por sí mismo — si
+/// los produce, es porque exige una autenticación que un `ollama` (keyless por
+/// definición, REQ-A01b) nunca envía. `401` = Unauthorized, `403` = Forbidden; el RFC
+/// 9110 los distingue (credencial ausente/mala vs. credencial válida sin permiso) pero
+/// para este diagnóstico la causa raíz es la misma en los dos: el `kind` declarado no
+/// coincide con lo que el endpoint realmente exige.
+// `#[allow(dead_code)]`: mismo motivo que el de `SeatError::Http` — solo
+// `explain_keyless_auth_failure` la consume, y esa función tampoco tiene hoy un
+// llamador de producción (ver su rustdoc, sección "Nota de alcance").
+#[allow(dead_code)]
+const KEYLESS_AUTH_STATUSES: [u16; 2] = [401, 403];
+
+/// Traduce un 401/403 bajo un kind **keyless** a un error de configuración accionable
+/// (REQ-A12c, SC-A12f).
+///
+/// Devuelve `None` para cualquier otra combinación: bajo un kind que SÍ lleva
+/// credencial (`openai-compat`/`anthropic`), un 401 puede ser una credencial
+/// genuinamente mala, y reinterpretarlo como error de configuración mandaría al usuario
+/// a revisar el archivo equivocado — "un modelo que peca de MÁS seguridad... es la
+/// dirección buena de fallo" no aplica acá: sería un diagnóstico ACTIVAMENTE
+/// incorrecto, no un guard de más.
+///
+/// **Es la salida de lo que NO se puede detectar al cargar** (REQ-A12c): saber si una
+/// `base_url` exige autenticación requiere preguntárselo al servidor; lo exigible no es
+/// adivinar eso al parsear `magi.toml`, sino que el fallo inevitable —cuando ocurre—
+/// llegue explicado en vez de como un 401 crudo.
+///
+/// # Parameters
+/// * `err` - la causa tipada capturada en el punto que la produjo.
+/// * `kind` - el `ProviderKind` bajo el que corría el asiento que falló.
+///
+/// # Returns
+/// `Some(mensaje)` accionable cuando `err` es `Http{401|403}` y `kind` es `Ollama`;
+/// `None` en cualquier otro caso (el llamador cae a `err.to_string()`).
+///
+/// # Nota de alcance — NO WIRED en producción (ver el reporte de esta tarea)
+///
+/// Esta función es **pura, correcta y probada** contra su propio contrato, pero no
+/// tiene hoy un llamador de producción que le entregue un `SeatError::Http` real:
+/// `Magi::analyze()` (magi-core 3.1.0, único punto de entrada de un consult) nunca
+/// devuelve una causa tipada por asiento — colapsa cada fallo en un `String` dentro de
+/// `MagiReport::failed_agents` o, si TODOS fallan, en `MagiError::InsufficientAgents
+/// {succeeded, required}`, sin código de status en ningún lado. Y
+/// `build_native_provider`/`OpenAiCompatibleProvider::with_timeout` nunca hacen una
+/// petición HTTP en construcción (solo validan y arman el cliente; su único modo de
+/// fallo es `ProviderError::Network`), así que tampoco pueden producir un `Http` real.
+/// Reconstruirlo parseando el `String` de `failed_agents` sería exactamente "volver a
+/// parsear texto, que es justamente lo que `SeatError` dejó de ser" — el propio
+/// argumento del brief de esta tarea contra esa vía. `SeatError::Http` sigue
+/// `#[allow(dead_code)]` en producción a propósito: nada lo construye todavía.
+// Mismo `#[allow(dead_code)]` que `SeatError::Http`/`KEYLESS_AUTH_STATUSES`, y el mismo
+// motivo: sin un `SeatError::Http` real que capturar, esta función queda sin llamador
+// de producción hasta que exista uno (ver la sección "Nota de alcance" arriba). Está
+// cubierta por sus propios tests (`mod tests::divergence_and_keyless_auth`), que sí la
+// invocan bajo `cfg(test)`.
+#[allow(dead_code)]
+#[must_use]
+fn explain_keyless_auth_failure(err: &SeatError, kind: ProviderKind) -> Option<String> {
+    match (err, kind) {
+        (SeatError::Http { status }, ProviderKind::Ollama)
+            if KEYLESS_AUTH_STATUSES.contains(status) =>
+        {
+            Some(
+                "El endpoint rechazó la petición por autenticación, pero \
+                 `[magi].kind = \"ollama\"` es keyless y nunca envía credencial. Si tu \
+                 endpoint la exige, usá `kind = \"openai-compat\"` y declará la clave \
+                 por env o vault."
+                    .to_string(),
+            )
+        }
+        _ => None,
+    }
+}
+
 /// Renderiza UN `(asiento, causa)` como `"Melchior: falta la credencial …"`.
 ///
 /// Primitiva única de formateo compartida entre el `Display` de
@@ -1895,6 +1978,99 @@ impl MagiEnvModelOverrides {
             balthasar: env::var("MAGI_MODEL_BALTHASAR").ok(),
             caspar: env::var("MAGI_MODEL_CASPAR").ok(),
         }
+    }
+}
+
+/// Anuncia que el contenido pasa por el provider principal ANTES que por el trío
+/// (REQ-A07c/REQ-A07p, SC-A07p), cuando eso es efectivamente lo que va a pasar.
+///
+/// Sale **solo** cuando el trío diverge del principal (`cfg.magi_endpoint_diverges()`)
+/// **y** `inference_active` es `true`: con todo en el mismo endpoint no hay divergencia
+/// que reportar, y con la inferencia inactiva (`[magi].default_mode` declarado) el
+/// contenido nunca sale hacia el principal para clasificarse — el notice sería ruido en
+/// los dos casos.
+///
+/// **Divergencia respecto del Step 3 del brief de esta tarea — probada por el propio
+/// test que el brief entregó, no solo argumentada.** El pseudocódigo original
+/// RECALCULABA `will_attempt_classification` puertas adentro (`cfg.effective_default_mode
+/// ().is_none()`), IGNORANDO por completo el parámetro `inference_active`. Con el `cfg`
+/// idéntico en las dos últimas aserciones de `endpoint_divergence_is_announced_only_
+/// when_it_actually_diverges` — la única diferencia es `true` vs. `false` en el segundo
+/// argumento — un recálculo interno habría dado el MISMO resultado en ambas llamadas,
+/// contradiciendo la tercera aserción (`divergence_notice(&cfg, false).is_none()`). El
+/// parámetro tiene que ser la ÚNICA fuente para ese lado del gate; recalcularlo puertas
+/// adentro no es una variación de estilo, es un bug que el propio test del brief hace
+/// visible en cuanto se ejecuta.
+///
+/// # Parameters
+/// * `cfg` - la configuración ya cargada (post [`MagiConfig::load`]); ver la nota de
+///   infalibilidad más abajo sobre por qué sus dos `effective_*_base_url()` no fallan en
+///   producción.
+/// * `inference_active` - `true` cuando ESTA sesión puede llegar a clasificar el modo por
+///   contenido — el llamador ya lo sabe (lo necesita para otras decisiones de la misma
+///   corrida, como si vale la pena avisar del costo de REQ-A07c) y se recibe en vez de
+///   volver a derivarlo acá, precisamente para que esta función no tenga una segunda
+///   opinión sobre algo que el llamador ya resolvió.
+///
+/// # Returns
+/// `Some(Notice)` (tier `Resolution`) cuando la divergencia y la inferencia coinciden;
+/// `None` en cualquier otro caso.
+#[must_use]
+fn divergence_notice(cfg: &MagiConfig, inference_active: bool) -> Option<Notice> {
+    if !(cfg.magi_endpoint_diverges() && inference_active) {
+        return None;
+    }
+
+    // INFALIBLE POR PRECONDICIÓN, mismo patrón que `MagiConfig::effective_provider`/
+    // `effective_default_mode`: `MagiConfig::load()` ya llamó
+    // `effective_base_url()?`/`effective_magi_base_url()?` antes de devolver este `cfg`
+    // (ver `config.rs::load`), así que un `Err` acá solo puede pasar si alguien construyó
+    // el `MagiConfig` a mano saltándose `load()` — un bug de quien llama, no una entrada
+    // de usuario. El `debug_assert!` lo convierte en un panic ruidoso en debug/test.
+    //
+    // Pero NO se propaga con `.ok()?` (el patrón que el brief de esta tarea marca como ya
+    // [CRITICAL] una vez en este gate): en un build de RELEASE, sin `debug_assertions`,
+    // eso tragaría el error en silencio y haría desaparecer este aviso de PRIVACIDAD
+    // exactamente cuando algo ya salió mal. En su lugar, si la resolución alguna vez
+    // fallara pese a la precondición, el notice se emite IGUAL, con el texto del error en
+    // el lugar del endpoint — la propiedad que importa es que la EMISIÓN de este aviso
+    // nunca dependa silenciosamente de si el parseo tuvo éxito.
+    let magi_url = cfg.effective_magi_base_url();
+    let root_url = cfg.effective_base_url();
+    debug_assert!(magi_url.is_ok(), "load() debe haber validado");
+    debug_assert!(root_url.is_ok(), "load() debe haber validado");
+
+    // `EndpointTemplate::as_str()`, NUNCA un endpoint resuelto: la plantilla no puede
+    // contener un secreto por construcción (REQ-A16c — `EndpointTemplate::parse` rechaza
+    // credenciales literales) así que este texto no necesita pasar por `redact_url`.
+    // `EndpointError::to_string()` tampoco: sus variantes citan solo nombres de entrada de
+    // vault (`&'static str`) y texto fijo, nunca el valor recibido (ver
+    // `magi/endpoint.rs::EndpointError`) — verificado leyendo el tipo, no asumido.
+    let magi_text = magi_url.map_or_else(|e| e.to_string(), |t| t.as_str().to_string());
+    let root_text = root_url.map_or_else(|e| e.to_string(), |t| t.as_str().to_string());
+
+    Some(Notice::resolution(format!(
+        "notice: el trío corre en {magi_text} pero la inferencia de modo manda el \
+         contenido PRIMERO al provider principal ({root_text}). Declará \
+         `[magi].default_mode` para evitar ese paso."
+    )))
+}
+
+/// Empuja el aviso de [`divergence_notice`] a `notices` cuando aplica (SC-A07p,
+/// cableado).
+///
+/// Factorizada aparte de `divergence_notice` para darle a la ESCRITURA misma —no solo al
+/// predicado— un punto que un test pueda invocar directo: `run()`, dueño real de
+/// `startup_notices`, abre el vault, descubre el workspace real y usa un TTY real, así
+/// que no se puede manejar desde un test unitario (mismo límite que
+/// `MagiConfig::resolution_notices`'s propio test en `config.rs` ya documenta y resuelve
+/// llamando a la función directamente). Esta es la ÚNICA línea que `run()` ejecuta para
+/// esto, así que confirmar que el diff la invoca ahí es una revisión de una línea, no de
+/// todo `run()` — el modo de fallo que esto existe para cerrar (`divergence_notice`
+/// correcta pero nunca llamada) ya ocurrió una vez en este plan (Task 4.3).
+fn push_divergence_notice(cfg: &MagiConfig, inference_active: bool, notices: &mut Vec<Notice>) {
+    if let Some(n) = divergence_notice(cfg, inference_active) {
+        notices.push(n);
     }
 }
 
@@ -6759,6 +6935,249 @@ mod tests {
                     );
                 });
             });
+        }
+    }
+
+    /// Task 4.4 — REQ-A07p/SC-A07p (aviso de divergencia de endpoint) y
+    /// REQ-A12c/SC-A12f (traducción del 401 keyless).
+    mod divergence_and_keyless_auth {
+        use super::*;
+
+        /// Construye un `MagiConfig` con `base_url` de raíz y, opcionalmente, un
+        /// override propio de `[magi].base_url` — el único par de campos que
+        /// `magi_endpoint_diverges()` mira.
+        fn cfg_with_endpoints(root: &str, magi_override: Option<&str>) -> MagiConfig {
+            MagiConfig {
+                base_url: Some(root.to_string()),
+                magi: crate::config::MagiSectionConfig {
+                    base_url: magi_override.map(str::to_string),
+                    ..crate::config::MagiSectionConfig::default()
+                },
+                ..MagiConfig::default()
+            }
+        }
+
+        /// SC-A07p: la divergencia de endpoint se avisa, y SOLO cuando hay
+        /// divergencia Y la inferencia está activa.
+        ///
+        /// **Divergencia respecto del pseudocódigo del brief, y por qué está probada
+        /// acá y no solo argumentada en el rustdoc de `divergence_notice`.** El brief
+        /// recalculaba `will_attempt_classification` puertas adentro de la función,
+        /// ignorando el segundo parámetro. Con el `cfg` IDÉNTICO en las últimas dos
+        /// aserciones —difieren solo en `true`/`false`— un recálculo interno habría
+        /// dado el mismo resultado en las dos, y la tercera aserción de este test
+        /// (`divergence_notice(&cfg, false).is_none()`) habría fallado. Este test es
+        /// la evidencia ejecutable de por qué la implementación usa el parámetro
+        /// tal cual, sin recalcularlo.
+        #[test]
+        fn endpoint_divergence_is_announced_only_when_it_actually_diverges_and_inference_is_active()
+        {
+            let cfg = cfg_with_endpoints("http://a/v1", Some("http://b/v1"));
+            let n = divergence_notice(&cfg, true).expect("hay divergencia con inferencia activa");
+            assert!(
+                n.text.contains("provider principal"),
+                "debe decir por dónde pasa el contenido primero: {}",
+                n.text
+            );
+            assert_eq!(n.tier, NoticeTier::Resolution);
+
+            assert!(
+                divergence_notice(&cfg_with_endpoints("http://a/v1", None), true).is_none(),
+                "mismo endpoint (el trío hereda): no hay divergencia que anunciar"
+            );
+            assert!(
+                divergence_notice(&cfg, false).is_none(),
+                "sin inferencia activa el contenido no pasa por el principal"
+            );
+        }
+
+        /// SC-A07p (cableado): el aviso no solo se PRODUCE, se EMITE — llega al
+        /// vector que la TUI efectivamente imprime.
+        ///
+        /// Va aparte del test anterior a propósito, como pide el brief de esta
+        /// tarea: aquel verifica el PREDICADO; este verifica el EMPUJE al vector.
+        /// `run()` (dueño real de `startup_notices`) no es unit-testeable — abre el
+        /// vault, descubre el workspace y usa un TTY reales — así que este test
+        /// llama a `push_divergence_notice` directamente: es la MISMA función, y la
+        /// ÚNICA, que `run()` invoca para esto (una línea, trivial de auditar contra
+        /// el diff). Una función correcta que nadie llama pasaría el test anterior y
+        /// dejaría al usuario sin el aviso — es el modo de fallo exacto de un
+        /// "definido pero no cableado" que ya ocurrió una vez en este plan (Task 4.3).
+        #[test]
+        fn the_divergence_notice_reaches_the_startup_notices() {
+            let cfg = cfg_with_endpoints("http://a/v1", Some("http://b/v1"));
+            let mut notices: Vec<Notice> = Vec::new();
+            push_divergence_notice(&cfg, true, &mut notices);
+            assert!(
+                notices
+                    .iter()
+                    .any(|n| n.text.contains("provider principal")),
+                "el aviso tiene que estar en el vector que la TUI imprime: {notices:?}"
+            );
+        }
+
+        /// Precondición de `divergence_notice`: `load()` ya validó las dos
+        /// plantillas antes de devolver un `MagiConfig`, así que en producción
+        /// `effective_magi_base_url()`/`effective_base_url()` nunca fallan acá.
+        /// Mismo patrón que `MagiConfig::effective_provider`/`effective_default_mode`
+        /// (`config.rs`): construir el `MagiConfig` a mano, saltándose `load()`, es
+        /// lo único que puede violar esa precondición, y el `debug_assert!` lo
+        /// convierte en un panic ruidoso en vez de un `Ollama`/`None` silencioso.
+        #[test]
+        #[should_panic(expected = "validado")]
+        fn divergence_notice_panics_in_debug_builds_when_the_endpoint_template_is_invalid() {
+            // Credencial literal: `EndpointTemplate::parse` la rechaza (REQ-A16c), así
+            // que `effective_magi_base_url()` falla — la precondición que `load()`
+            // normalmente garantiza, violada a propósito.
+            let cfg = MagiConfig {
+                magi: crate::config::MagiSectionConfig {
+                    base_url: Some("https://user:pass@host/v1".to_string()),
+                    ..crate::config::MagiSectionConfig::default()
+                },
+                ..MagiConfig::default()
+            };
+            let _ = divergence_notice(&cfg, true);
+        }
+
+        /// SC-A12f: un 401 bajo un kind KEYLESS llega explicado, no crudo — y el
+        /// mismo status bajo un kind CON credencial no se reinterpreta.
+        #[test]
+        fn a_401_under_a_keyless_kind_names_the_configuration_as_the_cause() {
+            let msg = explain_keyless_auth_failure(
+                &SeatError::Http { status: 401 },
+                ProviderKind::Ollama,
+            )
+            .expect("bajo ollama un 401 SIEMPRE es configuración");
+            assert!(
+                msg.contains("keyless") && msg.contains("openai-compat"),
+                "debe nombrar la causa y la salida: {msg}"
+            );
+
+            assert_eq!(
+                explain_keyless_auth_failure(
+                    &SeatError::Http { status: 401 },
+                    ProviderKind::OpenAiCompat
+                ),
+                None,
+                "ahí un 401 puede ser una credencial mala de verdad: no se reinterpreta"
+            );
+        }
+
+        /// Caso borde de B13: 403 se trata igual que 401 bajo `ollama` (los dos son
+        /// "el endpoint exige auth que este kind nunca envía"), y NINGÚN otro kind
+        /// —incluido `anthropic`— lo reinterpreta.
+        #[test]
+        fn a_403_under_ollama_is_explained_the_same_way_as_a_401() {
+            assert!(
+                explain_keyless_auth_failure(
+                    &SeatError::Http { status: 403 },
+                    ProviderKind::Ollama
+                )
+                .is_some(),
+                "403 bajo ollama es la misma configuración mal elegida que 401"
+            );
+            assert_eq!(
+                explain_keyless_auth_failure(
+                    &SeatError::Http { status: 403 },
+                    ProviderKind::Anthropic
+                ),
+                None
+            );
+        }
+
+        /// Caso borde de B13: un status HTTP que no es 401/403 no se reinterpreta
+        /// bajo NINGÚN kind, ni siquiera `ollama` — no es evidencia de una
+        /// autenticación exigida.
+        #[test]
+        fn a_non_auth_status_under_ollama_is_never_reinterpreted() {
+            assert_eq!(
+                explain_keyless_auth_failure(
+                    &SeatError::Http { status: 500 },
+                    ProviderKind::Ollama
+                ),
+                None
+            );
+        }
+
+        /// Caso borde de B13: las otras dos variantes de `SeatError` —que ya son sus
+        /// propios diagnósticos tipados— nunca se reinterpretan como un problema de
+        /// autenticación keyless.
+        #[test]
+        fn non_http_seat_errors_are_never_reinterpreted() {
+            assert_eq!(
+                explain_keyless_auth_failure(
+                    &SeatError::MissingCredential {
+                        var: "OPENAI_API_KEY"
+                    },
+                    ProviderKind::Ollama
+                ),
+                None
+            );
+            let transport = SeatError::Transport(redact_foreign_error(&std::io::Error::other(
+                "connection refused",
+            )));
+            assert_eq!(
+                explain_keyless_auth_failure(&transport, ProviderKind::Ollama),
+                None
+            );
+        }
+
+        /// R6 (Task 1.2b, `planning/claude-plan-tdd.md` ~L3160): cierre de los dos
+        /// caminos que ese plan marcó como naciendo con el trío nativo en Fase 4 —
+        /// ahí nombrados `seat_unbuildable_message` (= `trio_unavailable_message` en
+        /// el código real) y `explain_keyless_auth_failure`.
+        ///
+        /// **No es el mismo test que el plan describe, y no puede serlo.** El plan
+        /// imaginaba un único canario en `src/magi/endpoint.rs` (lib) cubriendo los
+        /// cinco caminos desde un solo lugar. Pero `MagiConfig` y `SeatError` son
+        /// tipos del crate BIN (`mod config;`/`main.rs`) — ninguno de los dos
+        /// aparece en la lista `pub mod` de `src/lib.rs` (`headless, magi, notices,
+        /// redact, vault`), así que un test del crate LIB no puede nombrarlos, y
+        /// `divergence_notice`/`explain_keyless_auth_failure` tampoco pudieron vivir
+        /// en `src/magi/mode.rs` por la misma razón (ver el reporte de esta tarea).
+        /// Los caminos 1/3/4 se prueban ACÁ, en el bin, que es donde viven de
+        /// verdad; los caminos 2/5 (`openai_compat_root`, el aviso de
+        /// incoherencia de Anthropic en `resolution_notices()`) ya tienen su propia
+        /// cobertura desde Task 1.2b/4.1
+        /// (`openai_compat_root_redacts_credentials_in_the_notice_but_not_in_the_root`
+        /// acá mismo, y las pruebas de `config.rs` sobre la rama de Anthropic).
+        #[test]
+        fn no_notice_or_error_path_reachable_from_this_crate_leaks_a_credential() {
+            const CANARY: &str = "c4n4ry-s3cr3t";
+
+            // Camino 1 — `divergence_notice`: opera sobre la PLANTILLA
+            // (`EndpointTemplate::as_str()`), que por construcción (REQ-A16c) no
+            // puede contener un secreto — un literal ahí es rechazado al parsear,
+            // nunca aceptado y mostrado. Se usa el placeholder, no un canario
+            // literal, precisamente porque un canario literal no podría existir en
+            // este campo (probado por el test de arriba).
+            let cfg = cfg_with_endpoints("http://a/v1", Some("https://[user]:[password]@b/v1"));
+            let notice = divergence_notice(&cfg, true).expect("diverge con inferencia activa");
+            assert!(!notice.text.contains(CANARY));
+
+            // Camino 3 — `trio_unavailable_message`: la causa foránea pasa por
+            // `redact_foreign_error` ANTES de convertirse en `SeatError::Transport`
+            // (ver `build_native_provider::to_seat`); acá se ejercita la MISMA
+            // composición, directo sobre el tipo.
+            let foreign =
+                std::io::Error::other(format!("connect to https://alice:{CANARY}@host/v1"));
+            let err = TrioError::SeatUnbuildable {
+                seats: vec![(
+                    AgentName::Melchior,
+                    SeatError::Transport(redact_foreign_error(&foreign)),
+                )],
+            };
+            assert!(!trio_unavailable_message(&err).contains(CANARY));
+
+            // Camino 4 — `explain_keyless_auth_failure`: su mensaje es texto FIJO
+            // que no interpola nada del `SeatError` recibido (ni `status`, ni
+            // ningún otro campo), así que no hay canario que pudiera colarse.
+            let msg = explain_keyless_auth_failure(
+                &SeatError::Http { status: 401 },
+                ProviderKind::Ollama,
+            )
+            .unwrap();
+            assert!(!msg.contains(CANARY));
         }
     }
 }
