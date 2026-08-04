@@ -1793,6 +1793,15 @@ impl MagiEnvModelOverrides {
 /// aceptaba) pegaría contra `/chat/completions` en la raíz y daría 404 en el primer
 /// uso. Devuelve el aviso en vez de aplicarlo callado — una normalización silenciosa
 /// hace que la `base_url` efectiva difiera de la escrita sin que nadie lo sepa.
+///
+/// **El `root` devuelto y el texto del aviso NO comparten la misma URL** (fix round 2,
+/// C1, REQ-A16c camino #2): `base_url` acá ya es el endpoint RESUELTO — post
+/// sustitución de placeholders — así que puede traer una credencial real. El `root`
+/// la necesita intacta (es lo que arma el cliente HTTP); el aviso es texto que
+/// termina en la lista de arranque de la TUI y en stderr de headless, así que pasa
+/// por [`redact_url`] antes de interpolarse. Dos usos, dos reglas — de ahí que la
+/// función construya el aviso a partir de `normalized` pero redacte una COPIA para
+/// el texto, en vez de redactar `normalized` en el lugar.
 fn openai_compat_root(base_url: &str) -> (String, Option<String>) {
     let trimmed = base_url.trim_end_matches('/');
     if trimmed.rsplit('/').next() == Some("v1") {
@@ -1800,9 +1809,10 @@ fn openai_compat_root(base_url: &str) -> (String, Option<String>) {
     } else {
         let normalized = format!("{trimmed}/v1");
         let notice = format!(
-            "notice: `base_url` de Ollama sin sufijo `/v1`; se usa `{normalized}` para \
+            "notice: `base_url` de Ollama sin sufijo `/v1`; se usa `{}` para \
              las completions. Declaralo explícito para que la configuración diga lo \
-             que pasa."
+             que pasa.",
+            redact_url(&normalized)
         );
         (normalized, Some(notice))
     }
