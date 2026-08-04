@@ -312,7 +312,7 @@ mod tests {
     use std::time::Instant;
 
     use async_trait::async_trait;
-    use magi_core::error::ProviderError;
+    use magi_core::error::{ExternalErrorKind, ProviderError};
     use zeroize::Zeroizing;
 
     use super::*;
@@ -326,6 +326,18 @@ mod tests {
     /// Vault que nunca debería consultarse: las URLs de estos tests no traen placeholders,
     /// así que `EndpointTemplate::resolve` no llega a pedir ninguna entrada (caso "Absent"
     /// de `locate_userinfo` — ver `src/magi/endpoint.rs`).
+    ///
+    /// # Exclusión de cobertura documentada (REQ-A00, revisión tarea 5.1 / F2)
+    ///
+    /// Los cinco métodos de este `impl` aparecen como funciones NO CUBIERTAS en
+    /// `cargo llvm-cov`, y es estructural, no un hueco: `EndpointTemplate::resolve` solo
+    /// puede llamar a `SecretStore::get`, y únicamente en la rama
+    /// `UserinfoLocation::Found` — cuando la URL trae un placeholder `[user]`/`[password]`
+    /// sin sustituir. Ninguna fixture de este módulo usa una URL con placeholders (todas
+    /// resuelven por la rama `Absent`, que retorna antes de tocar el vault), así que ni
+    /// siquiera `get` se ejecuta en la práctica. `set`, `remove`, `list` y `contains` no
+    /// los invoca ningún camino de `resolve`, con o sin placeholder: existen solo porque
+    /// `SecretStore` es el trait completo y un doble tiene que implementarlo entero.
     struct NoSecrets;
 
     impl SecretStore for NoSecrets {
@@ -372,6 +384,13 @@ mod tests {
         digest: Option<String>,
         /// Demora artificial antes de que `window()` resuelva.
         delay: Duration,
+        /// Si `true`, `window()` devuelve un `ProviderError::External` REAL en vez de
+        /// `Ok(self.window)` — distinto de un timeout: acá la sonda SÍ contestó, y lo que
+        /// contestó fue un fallo tipado (F1, revisión tarea 5.1).
+        window_fails: bool,
+        /// Ídem para `digest()`, independiente de `window_fails`: un digest que falla no
+        /// debe tirar una ventana ya medida con éxito.
+        digest_fails: bool,
         /// Dónde registrar cuánto tardó `window()` en resolver — incluida la cancelación.
         timings: Arc<Mutex<BTreeMap<String, Duration>>>,
     }
@@ -423,10 +442,22 @@ mod tests {
             if !self.delay.is_zero() {
                 tokio::time::sleep(self.delay).await;
             }
+            if self.window_fails {
+                return Err(ProviderError::external(
+                    "stub: synthetic window failure",
+                    ExternalErrorKind::Network,
+                ));
+            }
             Ok(self.window)
         }
 
         async fn digest(&self) -> Result<Option<String>, ProviderError> {
+            if self.digest_fails {
+                return Err(ProviderError::external(
+                    "stub: synthetic digest failure",
+                    ExternalErrorKind::Network,
+                ));
+            }
             Ok(self.digest.clone())
         }
     }
@@ -447,6 +478,12 @@ mod tests {
         /// `Ready` — para ejercitar los brazos `NotProbeable`/`Unbuildable` de `probe_models`
         /// tal como los vería con la fábrica real, sin depender de un servidor.
         seat_override: Option<SeatOverride>,
+        /// Si `true`, toda sonda `Ready` que esta fábrica construye falla `window()` con un
+        /// `ProviderError` real (F1, revisión tarea 5.1) — distinto de `seat_override`, que
+        /// nunca llega a construir un `StubProbe`.
+        window_error: bool,
+        /// Ídem para `digest()`.
+        digest_error: bool,
         /// Cuántas veces se llamó a `probe_for` — una por modelo ÚNICO pedido, nunca por
         /// duplicado (SC del dedup).
         built: Arc<AtomicUsize>,
@@ -478,6 +515,8 @@ mod tests {
                 slow: None,
                 derive_per_model: false,
                 seat_override: None,
+                window_error: false,
+                digest_error: false,
                 built: Arc::new(AtomicUsize::new(0)),
                 timings: Arc::new(Mutex::new(BTreeMap::new())),
             }
@@ -492,6 +531,8 @@ mod tests {
                 slow: None,
                 derive_per_model: false,
                 seat_override: None,
+                window_error: false,
+                digest_error: false,
                 built: Arc::new(AtomicUsize::new(0)),
                 timings: Arc::new(Mutex::new(BTreeMap::new())),
             }
@@ -506,6 +547,8 @@ mod tests {
                 slow: Some((slow_model.to_string(), delay)),
                 derive_per_model: false,
                 seat_override: None,
+                window_error: false,
+                digest_error: false,
                 built: Arc::new(AtomicUsize::new(0)),
                 timings: Arc::new(Mutex::new(BTreeMap::new())),
             }
@@ -520,6 +563,8 @@ mod tests {
                 slow: None,
                 derive_per_model: true,
                 seat_override: None,
+                window_error: false,
+                digest_error: false,
                 built: Arc::new(AtomicUsize::new(0)),
                 timings: Arc::new(Mutex::new(BTreeMap::new())),
             }
@@ -533,6 +578,8 @@ mod tests {
                 slow: None,
                 derive_per_model: false,
                 seat_override: Some(SeatOverride::NotProbeable),
+                window_error: false,
+                digest_error: false,
                 built: Arc::new(AtomicUsize::new(0)),
                 timings: Arc::new(Mutex::new(BTreeMap::new())),
             }
@@ -546,6 +593,47 @@ mod tests {
                 slow: None,
                 derive_per_model: false,
                 seat_override: Some(SeatOverride::Unbuildable),
+                window_error: false,
+                digest_error: false,
+                built: Arc::new(AtomicUsize::new(0)),
+                timings: Arc::new(Mutex::new(BTreeMap::new())),
+            }
+        }
+
+        /// Toda sonda arma un `Ready`, pero `window()` devuelve un `ProviderError::External`
+        /// REAL —no un timeout—. Hasta la revisión de la tarea 5.1 ningún doble distinguía
+        /// "no hubo tiempo" de "el provider respondió que no puede": los dos colapsan al
+        /// mismo [`Measurement::NotMeasuredThisTime`], pero por caminos de código
+        /// distintos dentro de `probe_models` (`tokio::time::timeout` expirando vs.
+        /// `Result::ok()` descartando un `Err` interno), y solo el primero tenía cobertura.
+        fn erroring_window() -> Self {
+            Self {
+                default_window: None,
+                default_digest: None,
+                slow: None,
+                derive_per_model: false,
+                seat_override: None,
+                window_error: true,
+                digest_error: false,
+                built: Arc::new(AtomicUsize::new(0)),
+                timings: Arc::new(Mutex::new(BTreeMap::new())),
+            }
+        }
+
+        /// `window()` mide `window` con normalidad; `digest()` devuelve un
+        /// `ProviderError::External` real. Distinto de
+        /// [`Self::measuring`] con un digest de formato inválido (ya cubierto por
+        /// `a_malformed_body_degrades_without_panicking`): acá el provider FALLA la
+        /// petición, no responde un valor que no pasa `validate_digest`.
+        fn erroring_digest(window: usize) -> Self {
+            Self {
+                default_window: Some(window),
+                default_digest: None,
+                slow: None,
+                derive_per_model: false,
+                seat_override: None,
+                window_error: false,
+                digest_error: true,
                 built: Arc::new(AtomicUsize::new(0)),
                 timings: Arc::new(Mutex::new(BTreeMap::new())),
             }
@@ -562,6 +650,14 @@ mod tests {
         ///
         /// Si `model` nunca llegó a pedirse — un test que llama esto sobre un modelo que no
         /// midió tiene un error en el propio test, no algo que degradar.
+        ///
+        /// # Exclusión de cobertura documentada (REQ-A00, revisión tarea 5.1 / F2)
+        ///
+        /// La closure de pánico de abajo aparece como función NO CUBIERTA en
+        /// `cargo llvm-cov`, y es deliberado: ningún test de este módulo llama a
+        /// `elapsed_of` sobre un modelo que no se haya medido, así que el camino de pánico
+        /// nunca se toma. Un test que sí lo tomara estaría demostrando un bug del propio
+        /// test, no del código de producción — no hay nada que ejercitar acá.
         fn elapsed_of(&self, model: &str) -> Duration {
             *self
                 .timings
@@ -605,9 +701,59 @@ mod tests {
                 window,
                 digest,
                 delay,
+                window_fails: self.window_error,
+                digest_fails: self.digest_error,
                 timings: Arc::clone(&self.timings),
             }))
         }
+    }
+
+    /// SC-A16b (borde, revisión tarea 5.1 / F1): 63 caracteres es UN MENOS que el mínimo
+    /// válido — el borde real de la validación, distinto de la cadena de 3 caracteres que
+    /// `a_malformed_body_degrades_without_panicking` ya cubre (esa solo prueba "muy corto").
+    #[test]
+    fn validate_digest_rejects_sixty_three_hex_chars() {
+        let short = "a".repeat(DIGEST_HEX_LEN - 1);
+        assert_eq!(validate_digest(Some(short)), None);
+    }
+
+    /// SC-A16b (borde): 65 caracteres es UNO MÁS que el máximo válido.
+    #[test]
+    fn validate_digest_rejects_sixty_five_hex_chars() {
+        let long = "a".repeat(DIGEST_HEX_LEN + 1);
+        assert_eq!(validate_digest(Some(long)), None);
+    }
+
+    /// SC-A16b: el contrato exige minúscula explícitamente (REQ-A16b) — hexadecimal en
+    /// mayúscula, aunque representa el mismo valor, se rechaza igual que cualquier otra
+    /// cosa que no matchee byte a byte.
+    #[test]
+    fn validate_digest_rejects_uppercase_hex() {
+        let upper = "A".repeat(DIGEST_HEX_LEN);
+        assert_eq!(validate_digest(Some(upper)), None);
+    }
+
+    /// SC-A16b: la longitud exacta NO alcanza sola — un carácter fuera de `[0-9a-f]` en la
+    /// posición 64 también se rechaza. `'g'` es el primer carácter ASCII después de `'f'`,
+    /// así que es el vecino más cercano al rango válido.
+    #[test]
+    fn validate_digest_rejects_a_non_hex_character_at_the_exact_length() {
+        let mut bad = "a".repeat(DIGEST_HEX_LEN - 1);
+        bad.push('g');
+        assert_eq!(
+            bad.len(),
+            DIGEST_HEX_LEN,
+            "el test debe seguir probando el borde exacto"
+        );
+        assert_eq!(validate_digest(Some(bad)), None);
+    }
+
+    /// SC-A16b (feliz, borde exacto): exactamente 64 hex en minúscula pasa tal cual, sin
+    /// modificar el valor — el caso de éxito que los cuatro rechazos de arriba delimitan.
+    #[test]
+    fn validate_digest_accepts_exactly_sixty_four_lowercase_hex() {
+        let valid = "f".repeat(DIGEST_HEX_LEN);
+        assert_eq!(validate_digest(Some(valid.clone())), Some(valid));
     }
 
     /// SC-A24 / SC-A24b: se mide lo medible; no medible NO es un fallo.
@@ -638,9 +784,18 @@ mod tests {
     }
 
     /// SC-A16b: fuera de rango degrada a NO MEDIDO, nunca al extremo del rango.
+    ///
+    /// `PROBE_WINDOW_MIN - 1` es el borde REAL de la validación — distinto de `1`, que solo
+    /// prueba "muy chico" sin tocar el límite exacto que `(PROBE_WINDOW_MIN..=PROBE_WINDOW_MAX)`
+    /// evalúa.
     #[tokio::test]
     async fn an_out_of_range_window_degrades_instead_of_being_clamped() {
-        for absurd in [1_usize, PROBE_WINDOW_MAX + 1, 999_999_999_999] {
+        for absurd in [
+            1_usize,
+            PROBE_WINDOW_MIN - 1,
+            PROBE_WINDOW_MAX + 1,
+            999_999_999_999,
+        ] {
             let m = probe_models(
                 ProviderKind::Ollama,
                 &test_endpoint(),
@@ -651,6 +806,27 @@ mod tests {
             assert!(
                 matches!(m["m"], Measurement::NotMeasuredThisTime),
                 "recortar al extremo convertiría un dato basura en uno plausible (ventana {absurd})"
+            );
+        }
+    }
+
+    /// SC-A16b (bordes inclusivos): `PROBE_WINDOW_MIN` y `PROBE_WINDOW_MAX` en persona se
+    /// ACEPTAN tal cual — el rango es `[MIN, MAX]`, no `(MIN, MAX)`, y el test anterior solo
+    /// prueba el lado del rechazo. Sin este, un `<` que debiera ser `<=` (o viceversa) en
+    /// `(PROBE_WINDOW_MIN..=PROBE_WINDOW_MAX).contains(&w)` pasaría la suite igual.
+    #[tokio::test]
+    async fn the_window_range_boundaries_are_accepted_inclusive() {
+        for edge in [PROBE_WINDOW_MIN, PROBE_WINDOW_MAX] {
+            let m = probe_models(
+                ProviderKind::Ollama,
+                &test_endpoint(),
+                &["m"],
+                &StubProbes::measuring(edge, "a".repeat(64)),
+            )
+            .await;
+            assert!(
+                matches!(m["m"], Measurement::Measured { window, .. } if window == edge),
+                "el rango es cerrado: {edge} debe aceptarse sin degradar (borde de PROBE_WINDOW_MIN/MAX)"
             );
         }
     }
@@ -679,6 +855,56 @@ mod tests {
                 assert!(
                     digest.is_none(),
                     "un digest que no es 64 hex se descarta, la ventana sobrevive"
+                );
+            }
+            other => panic!("esperaba Measured, salió {other:?}"),
+        }
+    }
+
+    /// SC-A24d (extensión, revisión tarea 5.1 / F1): un `ProviderError` REAL en `window()`
+    /// degrada exactamente igual que un timeout. Hasta ahora `StubProbe` solo podía
+    /// resolver con éxito o demorarse hasta expirar el `tokio::time::timeout` de
+    /// `probe_models`; el brazo donde la sonda SÍ contesta y lo que contesta es un `Err`
+    /// tipado —`.and_then(|r| r.ok().flatten())` descartando ese `Err`, no un `Elapsed`—
+    /// nunca se había ejercitado.
+    #[tokio::test]
+    async fn a_genuine_provider_error_on_window_degrades_like_a_timeout() {
+        let m = probe_models(
+            ProviderKind::Ollama,
+            &test_endpoint(),
+            &["m"],
+            &StubProbes::erroring_window(),
+        )
+        .await;
+        assert!(
+            matches!(m["m"], Measurement::NotMeasuredThisTime),
+            "un ProviderError real en window() debe fallar abierto, igual que un timeout"
+        );
+    }
+
+    /// SC-A24d (extensión, revisión tarea 5.1 / F1): un `ProviderError` REAL en `digest()`
+    /// no tira la ventana ya medida con éxito — mismo principio de "un campo fuera de
+    /// rango/roto no contamina el otro" que `a_malformed_body_degrades_without_panicking`
+    /// ya prueba para un digest de FORMATO inválido, acá aplicado a un digest que falla
+    /// EXPLÍCITAMENTE con un error tipado.
+    #[tokio::test]
+    async fn a_genuine_provider_error_on_digest_leaves_the_window_intact() {
+        let m = probe_models(
+            ProviderKind::Ollama,
+            &test_endpoint(),
+            &["m"],
+            &StubProbes::erroring_digest(128_000),
+        )
+        .await;
+        match &m["m"] {
+            Measurement::Measured { window, digest } => {
+                assert_eq!(
+                    *window, 128_000,
+                    "la ventana medida con éxito debe sobrevivir"
+                );
+                assert!(
+                    digest.is_none(),
+                    "un digest que falla degrada solo, sin arrastrar la ventana"
                 );
             }
             other => panic!("esperaba Measured, salió {other:?}"),

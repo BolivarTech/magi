@@ -439,7 +439,7 @@ const MOCK_ENDLESS_BODY_LIMIT: usize = 64 * 1024 * 1024;
 /// Tamaño de cada trozo que escribe el mock.
 const MOCK_CHUNK_BYTES: usize = 8 * 1024;
 
-/// REQ-A16b — **satisfecho POR magi-core, verificado acá.**
+/// REQ-A16b / SC-A16c — **satisfecho POR magi-core, verificado acá.**
 ///
 /// `OllamaProvider::window()` hace su propio HTTP y magi-core ya acota el cuerpo:
 /// `MAX_SHOW_BODY_BYTES = 1 MiB`, leído con `read_probe_body`, y su rustdoc dice que el
