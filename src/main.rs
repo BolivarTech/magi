@@ -19,7 +19,7 @@ use crate::config::{
     resolve_anthropic_model, resolve_effective_provider_kind, resolve_magi_override,
     resolve_openai_model, HeadlessConfig, MagiConfig,
 };
-use crate::headless_runner::{resolve_run_timeout, run_consult, run_query};
+use crate::headless_runner::{resolve_run_timeout, run_consult, run_query, MagiRuntimeParams};
 use crate::memory::clock::SystemClock;
 use crate::memory::embedding::OpenAiCompatibleEmbedder;
 use crate::memory::store::SqliteVectorStore;
@@ -1591,14 +1591,18 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
     crate::tui::run_tui_ext(
         agent,
         render_notices(startup_notices),
-        consult_magi,
-        consult_unavailable_message,
-        magi_config.magi.auto_approve,
+        crate::tui::TuiConsultWiring {
+            consult: consult_magi,
+            consult_unavailable_message,
+            magi_auto_approve: magi_config.magi.auto_approve,
+        },
         secret_store,
-        tui_mode_classifier,
-        tui_default_mode,
-        tui_untrusted_content,
-        magi_config.effective_magi_kind(),
+        crate::tui::TuiMagiRuntimeConfig {
+            mode_classifier: tui_mode_classifier,
+            default_mode: tui_default_mode,
+            untrusted_content: tui_untrusted_content,
+            magi_kind: magi_config.effective_magi_kind(),
+        },
     )
     .await?;
     Ok(ExitCode::SUCCESS)
@@ -3572,16 +3576,19 @@ async fn run_consult_subcommand(
     // The consult path has no tier tool-gate; only an explicit `--timeout`
     // bounds it (an over-cap prompt is rejected inside `run_consult`, REQ-H33).
     let timeout = h.timeout.map(Duration::from_secs);
+    let runtime = MagiRuntimeParams {
+        kind: magi_config.effective_magi_kind(),
+        classifier: &classifier,
+        configured_mode,
+        untrusted_content,
+    };
     let outcome = run_consult(
         resolved,
         magi,
-        magi_config.effective_magi_kind(),
         &prompt,
         timeout,
         explicit_mode,
-        &classifier,
-        configured_mode,
-        untrusted_content,
+        &runtime,
         run_log.as_mut(),
     )
     .await;

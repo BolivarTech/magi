@@ -131,6 +131,48 @@ pub(crate) async fn resolve_direct_mode(
     }
 }
 
+/// Session-scoped MAGI parameters that travel together, unchanged, through
+/// every direct-consult call site (REQ-A07c/REQ-A12c): how to pick the mode
+/// when none is declared for this specific call, and how to explain the
+/// trio's provider kind once a result (or failure) comes back.
+///
+/// Bundled because [`analyze_direct`] and [`run_consult`] both thread these
+/// four values straight from the caller's already-resolved configuration to
+/// two different call sites: `classifier`/`configured_mode`/
+/// `untrusted_content` feed [`resolve_mode_guarded`] verbatim, and `kind`
+/// feeds [`report_to_consult_json`]/[`explain_magi_error`] on the way back
+/// out. None of the four is call-specific the way `explicit_mode` is (that
+/// one stays its own parameter) — grouping only the values that are constant
+/// for the lifetime of a run removes the parameter-count pressure both
+/// functions used to carry (B3).
+///
+/// # Fields
+/// - `kind` — the [`ProviderKind`] the trio runs under; feeds
+///   [`report_to_consult_json`]/[`explain_magi_error`] for provider-specific
+///   guidance (REQ-A12c).
+/// - `classifier` — consulted **only** when neither a call's `explicit_mode`
+///   nor `configured_mode` is set, via [`resolve_mode_guarded`] (REQ-A07c).
+/// - `configured_mode` — `[magi].default_mode`, if declared; wins over the
+///   classification level, below a call's `explicit_mode` (REQ-A15).
+/// - `untrusted_content` — REQ-A07d's guard: with this `true` and no mode
+///   declared by any other level, the run fails closed
+///   ([`ConsultRunError::UntrustedContentRequiresMode`]) instead of
+///   classifying hostile content.
+///
+/// `pub(crate)`, same reasoning as [`resolve_direct_mode`] above: constructed
+/// from `main.rs`'s `run_consult_subcommand`, which builds it from its own
+/// already-resolved `classifier`/`configured_mode`/`untrusted_content`.
+pub(crate) struct MagiRuntimeParams<'a> {
+    /// The `ProviderKind` the trio runs under (REQ-A12c).
+    pub(crate) kind: ProviderKind,
+    /// Consulted only when no mode was declared by any other level (REQ-A07c).
+    pub(crate) classifier: &'a dyn ModeClassifier,
+    /// `[magi].default_mode`, if declared (REQ-A15).
+    pub(crate) configured_mode: Option<Mode>,
+    /// REQ-A07d's guard against classifying untrusted content.
+    pub(crate) untrusted_content: bool,
+}
+
 /// Runs `prompt` directly through the 3-perspective MAGI consensus, off the agent
 /// tool-loop (REQ-H21), honoring the same input cap ([`MAX_QUERY_LEN`], REQ-H33)
 /// and the `--timeout`/cancellation plumbing of the enclosing run (REQ-H36).
@@ -149,36 +191,25 @@ pub(crate) async fn resolve_direct_mode(
 /// - `explicit_mode` — the lens declared by a human (`--mode`/the envelope
 ///   field), if any. Wins outright, at zero classification cost (REQ-A07c,
 ///   SC-A07g).
-/// - `classifier` — consulted **only** when neither `explicit_mode` nor
-///   `configured_mode` is set, via [`resolve_mode_guarded`] (REQ-A07c, SC-A07f).
-/// - `configured_mode` — `[magi].default_mode`, if declared; wins over the
-///   classification level, below `explicit_mode` (REQ-A15/SC-A07k).
-/// - `untrusted_content` — REQ-A07d's guard: with this `true` and neither
-///   `explicit_mode` nor `configured_mode` declared, the run fails closed
-///   ([`ConsultRunError::UntrustedContentRequiresMode`]) instead of
-///   classifying — no autonomous agent runs this path, so there is no
-///   `agent_chosen` level here (REQ-A07/A07d only name five levels, and the
-///   direct consult path never sees the third one).
+/// - `runtime` — the session-scoped [`MagiRuntimeParams`] (mode classifier,
+///   `[magi].default_mode`, the `untrusted_content` guard, and the provider
+///   `kind`); see its rustdoc for how each field is used.
 ///
 /// # Errors
 /// - [`ConsultRunError::InputInvalid`] if `prompt` is empty or exceeds
 ///   [`MAX_QUERY_LEN`].
-/// - [`ConsultRunError::UntrustedContentRequiresMode`] if `untrusted_content`
-///   is `true` and neither `explicit_mode` nor `configured_mode` was declared
-///   (REQ-A07d/REQ-A07r).
+/// - [`ConsultRunError::UntrustedContentRequiresMode`] if
+///   `runtime.untrusted_content` is `true` and neither `explicit_mode` nor
+///   `runtime.configured_mode` was declared (REQ-A07d/REQ-A07r).
 /// - [`ConsultRunError::Timeout`] if cancelled or the deadline elapsed.
 /// - [`ConsultRunError::Runtime`] if the MAGI analysis failed or panicked.
-#[allow(clippy::too_many_arguments)] // pre-existing shape; REQ-A07d/REQ-A12c add params to it
 async fn analyze_direct(
     magi: &Arc<Magi>,
-    kind: ProviderKind,
     prompt: &str,
     cancel: &CancellationToken,
     timeout: Option<Duration>,
     explicit_mode: Option<Mode>,
-    classifier: &dyn ModeClassifier,
-    configured_mode: Option<Mode>,
-    untrusted_content: bool,
+    runtime: &MagiRuntimeParams<'_>,
 ) -> Result<Value, ConsultRunError> {
     if prompt.trim().is_empty() || prompt.len() > MAX_QUERY_LEN {
         return Err(ConsultRunError::InputInvalid);
@@ -189,10 +220,10 @@ async fn analyze_direct(
     // declared it" (explicit/configured) vs. "classify it" (REQ-A07c).
     let resolution = resolve_mode_guarded(
         explicit_mode,
-        configured_mode,
+        runtime.configured_mode,
         None,
-        untrusted_content,
-        Some(classifier),
+        runtime.untrusted_content,
+        Some(runtime.classifier),
         prompt,
     )
     .await
@@ -236,8 +267,11 @@ async fn analyze_direct(
     };
 
     match joined {
-        Ok(Ok(report)) => Ok(report_to_consult_json(&report, kind)),
-        Ok(Err(e)) => Err(ConsultRunError::Runtime(explain_magi_error(&e, kind))),
+        Ok(Ok(report)) => Ok(report_to_consult_json(&report, runtime.kind)),
+        Ok(Err(e)) => Err(ConsultRunError::Runtime(explain_magi_error(
+            &e,
+            runtime.kind,
+        ))),
         Err(join_err) => Err(ConsultRunError::Runtime(format!(
             "consult crashed: {join_err}"
         ))),
@@ -531,17 +565,14 @@ fn build_transcript(
 /// - `resolved` — effective run parameters; supplies `model`/`provider`/
 ///   `applied_caps` for the output.
 /// - `magi` — shared MAGI orchestrator (same one wired for the `consult` tool).
-/// - `kind` — the `ProviderKind` the trio runs under (REQ-A12c); feeds
-///   [`report_to_consult_json`] via [`analyze_direct`].
 /// - `prompt` — the decision/content to analyze.
 /// - `timeout` — optional wall-clock ceiling (REQ-H36).
 /// - `explicit_mode` — the lens declared by a human (`--mode`/the envelope
 ///   field); `None` triggers exactly one classification call, never more
 ///   (REQ-A07c, SC-A07f/g).
-/// - `classifier` — the principal-provider classifier consulted only when
-///   neither `explicit_mode` nor `configured_mode` is set.
-/// - `configured_mode` — `[magi].default_mode`, if declared (REQ-A15).
-/// - `untrusted_content` — REQ-A07d's guard; see [`analyze_direct`].
+/// - `runtime` — the session-scoped [`MagiRuntimeParams`] (mode classifier,
+///   `[magi].default_mode`, the `untrusted_content` guard, and the `kind`
+///   that feeds [`report_to_consult_json`] via [`analyze_direct`]).
 /// - `run_log` — optional JSONL run log; the terminal summary is recorded
 ///   best-effort.
 ///
@@ -549,17 +580,13 @@ fn build_transcript(
 /// - `usage` is `Usage { 0, 0 }`: `magi-core` does not surface token counts here.
 /// - `timings.per_turn_ms` is empty and `ttfb_ms` is `None`: the direct consult is
 ///   a single buffered analysis, not a streamed turn sequence.
-#[allow(clippy::too_many_arguments)] // pre-existing shape; REQ-A07d/REQ-A12c add params to it
 pub async fn run_consult(
     resolved: Resolved,
     magi: Arc<Magi>,
-    kind: ProviderKind,
     prompt: &str,
     timeout: Option<Duration>,
     explicit_mode: Option<Mode>,
-    classifier: &dyn ModeClassifier,
-    configured_mode: Option<Mode>,
-    untrusted_content: bool,
+    runtime: &MagiRuntimeParams<'_>,
     mut run_log: Option<&mut RunLog>,
 ) -> RunOutcome {
     // A fresh token: the direct consult has no enclosing agent run to inherit a
@@ -567,18 +594,7 @@ pub async fn run_consult(
     // own `timeout` deadline elapses.
     let cancel = CancellationToken::new();
     let run_start = Instant::now();
-    let result = analyze_direct(
-        &magi,
-        kind,
-        prompt,
-        &cancel,
-        timeout,
-        explicit_mode,
-        classifier,
-        configured_mode,
-        untrusted_content,
-    )
-    .await;
+    let result = analyze_direct(&magi, prompt, &cancel, timeout, explicit_mode, runtime).await;
     let total_ms = elapsed_ms(run_start);
 
     let (response, consult, stop_reason, error) = match result {
@@ -1804,13 +1820,15 @@ mod tests {
         let outcome = run_consult(
             resolved_stub(),
             canned_magi(),
-            ProviderKind::OpenAiCompat,
             "should we migrate X to Y?",
             None,
             Some(Mode::Analysis),
-            &NeverClassifier,
-            None,
-            false,
+            &MagiRuntimeParams {
+                kind: ProviderKind::OpenAiCompat,
+                classifier: &NeverClassifier,
+                configured_mode: None,
+                untrusted_content: false,
+            },
             None,
         )
         .await;
@@ -1841,13 +1859,15 @@ mod tests {
         let outcome = run_consult(
             resolved_stub(),
             canned_magi(),
-            ProviderKind::OpenAiCompat,
             &big,
             None,
             Some(Mode::Analysis),
-            &NeverClassifier,
-            None,
-            false,
+            &MagiRuntimeParams {
+                kind: ProviderKind::OpenAiCompat,
+                classifier: &NeverClassifier,
+                configured_mode: None,
+                untrusted_content: false,
+            },
             None,
         )
         .await;
@@ -1892,18 +1912,24 @@ mod tests {
         // An hour: if the spawned task were merely detached rather than aborted,
         // `dropped` would still be `false` at every point this test can observe.
         let magi = slow_droppy_magi(Duration::from_secs(3_600), entered.clone(), dropped.clone());
+        // Named binding (not an inline temporary): `fut` below is driven across
+        // several statements before it is ever awaited, so the borrowed
+        // `MagiRuntimeParams` must outlive the statement that creates `fut`.
+        let runtime = MagiRuntimeParams {
+            kind: ProviderKind::OpenAiCompat,
+            classifier: &NeverClassifier,
+            configured_mode: None,
+            untrusted_content: false,
+        };
 
         {
             let fut = run_consult(
                 resolved_stub(),
                 magi,
-                ProviderKind::OpenAiCompat,
                 "should we migrate X to Y?",
                 None,
                 Some(Mode::Analysis),
-                &NeverClassifier,
-                None,
-                false,
+                &runtime,
                 None,
             );
             tokio::pin!(fut);

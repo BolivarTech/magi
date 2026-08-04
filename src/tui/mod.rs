@@ -661,35 +661,88 @@ impl App {
     }
 }
 
-/// # Parameters (REQ-A07d additions over the pre-MS2 signature)
+/// Session-scoped MAGI mode/reporting parameters for the TUI's whole run
+/// (REQ-A07c/REQ-A12c) — the owned counterpart of `headless_runner`'s
+/// `MagiRuntimeParams`, used everywhere `/consult` is resolved instead of a
+/// borrowed reference: `run_tui_ext`'s event loop lives inside a
+/// `tokio::spawn`'d `'static` task, so the classifier must be owned
+/// (`Arc<dyn ModeClassifier>`), not borrowed.
 ///
-/// - `consult_unavailable_message` (Task 4.3, REQ-A06/SC-A06b) — the SAME text
-///   already pushed to `startup_notices` when `consult` is `None` because the MAGI
-///   trio failed to build. Read only when a `/consult` is issued with no trio
-///   available, so a later `/consult` echoes the exact reason the startup notice
-///   already gave instead of a second, independently-worded message.
-/// - `mode_classifier` — consulted by `resolve_tui_consult_mode` only when `/consult` has
-///   no explicit `--mode` and no `[magi].default_mode` is set (REQ-A07c).
-/// - `default_mode` — `[magi].default_mode`, resolved once at startup (REQ-A15).
-/// - `untrusted_content` — `[magi].untrusted_content` only; the TUI never exposes this as a
-///   command-line flag (REQ-A07d/SC-A07t).
-/// - `magi_kind` (REQ-A12c, fix round 4) — the `ProviderKind` the trio runs under.
-///   Feeds [`tui_consult_success_body`]/[`tui_consult_error_body`] so the explicit
+/// # Fields
+/// - `mode_classifier` — consulted by [`resolve_tui_consult_mode`] only when
+///   `/consult` has no explicit `--mode` and no `[magi].default_mode` is set
+///   (REQ-A07c).
+/// - `default_mode` — `[magi].default_mode`, resolved once at startup
+///   (REQ-A15).
+/// - `untrusted_content` — `[magi].untrusted_content` only; the TUI never
+///   exposes this as a command-line flag (REQ-A07d/SC-A07t).
+/// - `magi_kind` (REQ-A12c) — the [`ProviderKind`] the trio runs under. Feeds
+///   [`tui_consult_success_body`]/[`tui_consult_error_body`] so the explicit
 ///   `/consult` command gets the SAME keyless-auth guidance
 ///   `ConsultTool`/headless already have.
-#[allow(clippy::too_many_arguments)] // pre-existing shape; REQ-A07d/REQ-A12c add params to it
+pub struct TuiMagiRuntimeConfig {
+    /// Consulted only when `/consult` declares no mode and none is
+    /// configured (REQ-A07c).
+    pub mode_classifier: Arc<dyn ModeClassifier>,
+    /// `[magi].default_mode`, resolved once at startup (REQ-A15).
+    pub default_mode: Option<Mode>,
+    /// `[magi].untrusted_content` (REQ-A07d/SC-A07t).
+    pub untrusted_content: bool,
+    /// The `ProviderKind` the trio runs under (REQ-A12c).
+    pub magi_kind: ProviderKind,
+}
+
+/// The MAGI `consult` tool's wiring for the TUI's whole run: whether a live
+/// trio is available, what to tell the user when it is not, and how the
+/// tool auto-approves — the same three values consulted both at startup and
+/// again on every post-`/login` trio rebuild (I-5).
+///
+/// # Fields
+/// - `consult` — the live orchestrator, or `None` if the trio failed to
+///   build at startup (REQ-A06).
+/// - `consult_unavailable_message` (Task 4.3, REQ-A06/SC-A06b) — the SAME
+///   text already pushed to `startup_notices` when `consult` is `None`.
+///   Read only when a `/consult` is issued with no trio available, so a
+///   later `/consult` echoes the exact reason the startup notice already
+///   gave instead of a second, independently-worded message.
+/// - `magi_auto_approve` — whether the registered `consult` tool
+///   auto-approves an autonomous invocation, mirrored into every rebuilt
+///   `ConsultTool` after `/login` (I-5).
+pub struct TuiConsultWiring {
+    /// The live orchestrator, or `None` if the trio failed to build.
+    pub consult: Option<std::sync::Arc<magi_core::orchestrator::Magi>>,
+    /// Echoed verbatim by a `/consult` issued with no trio available.
+    pub consult_unavailable_message: Option<String>,
+    /// Whether the registered `consult` tool auto-approves.
+    pub magi_auto_approve: bool,
+}
+
+/// # Parameters (REQ-A07d additions over the pre-MS2 signature)
+///
+/// - `consult_wiring` — the [`TuiConsultWiring`] bundle: the live trio (if
+///   any), its unavailability message, and the tool's auto-approve flag.
+/// - `magi_runtime` — the [`TuiMagiRuntimeConfig`] bundle: the mode
+///   classifier, `[magi].default_mode`, the `untrusted_content` guard, and
+///   the trio's `ProviderKind`.
 pub async fn run_tui_ext(
     agent: Agent,
     startup_notices: Vec<String>,
-    consult: Option<std::sync::Arc<magi_core::orchestrator::Magi>>,
-    consult_unavailable_message: Option<String>,
-    magi_auto_approve: bool,
+    consult_wiring: TuiConsultWiring,
     secret_store: Option<SharedSecretStore>,
-    mode_classifier: Arc<dyn ModeClassifier>,
-    default_mode: Option<Mode>,
-    untrusted_content: bool,
-    magi_kind: ProviderKind,
+    magi_runtime: TuiMagiRuntimeConfig,
 ) -> anyhow::Result<()> {
+    let TuiConsultWiring {
+        consult,
+        consult_unavailable_message,
+        magi_auto_approve,
+    } = consult_wiring;
+    let TuiMagiRuntimeConfig {
+        mode_classifier,
+        default_mode,
+        untrusted_content,
+        magi_kind,
+    } = magi_runtime;
+
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |panic_info| {
         let _ = disable_raw_mode();
