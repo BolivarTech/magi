@@ -5997,5 +5997,77 @@ mod tests {
             assert_eq!(c.openai(), None);
             assert_eq!(c.anthropic(), None);
         }
+
+        /// Restaura la cobertura de precedencia que el trío siempre tuvo para los
+        /// overrides por asiento: `MAGI_MODEL_<AGENT>` (env) > `[magi].<agent>_model`
+        /// (TOML) > el modelo del backend. Fix round 1 (coordinador, 2026-08-03):
+        /// R-A03 solo admite las tres rupturas declaradas en REQ-A21/A22/A23, y
+        /// `MAGI_MODEL_*` no es ninguna de ellas — quitar la capacidad al retirar el
+        /// adapter fue una ruptura NO declarada, así que se restaura acá.
+        ///
+        /// Usa la validez del alias de Caspar como señal observable — mismo truco que
+        /// `cfg_with_only_caspar_unbuildable` — en vez de inspeccionar estado interno:
+        /// un modelo inválido hace que ESE asiento falle a construir, así que "¿cuál
+        /// modelo ganó?" se lee de si el trío construye o no, sin necesitar red real.
+        #[test]
+        fn env_model_override_wins_over_toml_which_wins_over_the_backend_model() {
+            let backend_only = MagiConfig::from_toml_str(
+                "provider = \"anthropic\"\n[anthropic]\nmodel = \"claude-sonnet-4-6\"\n",
+            )
+            .unwrap();
+            let toml_override_invalid = cfg_with_only_caspar_unbuildable();
+            let c = creds();
+            let endpoints = test_endpoints();
+
+            // Ni TOML ni env: el modelo del BACKEND (válido) alcanza.
+            let mut notices = Vec::new();
+            assert!(
+                build_magi_orchestrator(
+                    &backend_only,
+                    &endpoints,
+                    Some(&c),
+                    None,
+                    &MagiEnvModelOverrides::default(),
+                    &mut notices,
+                )
+                .is_ok(),
+                "sin overrides, el modelo del backend debe alcanzar"
+            );
+
+            // Override de TOML inválido, SIN env: el TOML se aplica de verdad (y por
+            // eso falla) — no "se ignora silenciosamente".
+            let mut notices = Vec::new();
+            assert!(
+                build_magi_orchestrator(
+                    &toml_override_invalid,
+                    &endpoints,
+                    Some(&c),
+                    None,
+                    &MagiEnvModelOverrides::default(),
+                    &mut notices,
+                )
+                .is_err(),
+                "el override de TOML debe aplicarse, aunque sea inválido"
+            );
+
+            // El MISMO TOML inválido, pero con env override VÁLIDO: env gana.
+            let env_overrides = MagiEnvModelOverrides {
+                caspar: Some("claude-opus-4-7".to_string()),
+                ..MagiEnvModelOverrides::default()
+            };
+            let mut notices = Vec::new();
+            assert!(
+                build_magi_orchestrator(
+                    &toml_override_invalid,
+                    &endpoints,
+                    Some(&c),
+                    None,
+                    &env_overrides,
+                    &mut notices,
+                )
+                .is_ok(),
+                "env debe ganarle a un override de TOML inválido"
+            );
+        }
     }
 }

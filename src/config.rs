@@ -871,14 +871,36 @@ pub fn resolve_effective_provider_kind(
     Ok(config.effective_provider())
 }
 
-// Task 4.1: `resolve_magi_override` (the `MAGI_MODEL_MELCHIOR`/`BALTHASAR`/`CASPAR` env-var
-// per-agent override resolver) is REMOVED, not just retired-and-kept — its only production
-// caller was `agent::magi_wiring::resolve_magi_adapter_specs`, deleted along with the retired
-// adapter machinery it served. `build_magi_orchestrator`'s native-provider construction
-// (`main.rs`) takes no env-override parameter at all: per-agent overrides are TOML-only now
-// (`[magi].melchior_model` etc., via `MagiSectionConfig::seats`), matching the vocabulary
-// REQ-A15 actually exposes. **This is a genuine behavior change, not an oversight**: the three
-// `MAGI_MODEL_*` env vars no longer have any effect. Flagged prominently in the task report.
+/// Resolves a per-agent MAGI model override. Precedence: env (non-empty) > TOML
+/// (non-empty) > `None`. A blank/whitespace value (env or TOML) is treated as
+/// unset and falls through to the next level. `None` means the agent uses the
+/// backend's model (RF-2, S-4, S-5).
+///
+/// Restored fix round 1 (coordinator, 2026-08-03): Task 4.1 deleted this along with
+/// `agent::magi_wiring` (its only caller, the retired per-agent-adapter machinery) on
+/// the reasoning that the native trio's `build_magi_orchestrator` had no env-override
+/// parameter in the brief's pasted signature. That reasoning does not survive R-A03:
+/// "las únicas rupturas admitidas son las declaradas en REQ-A21, REQ-A22 y REQ-A23" —
+/// three, not four — and `MAGI_MODEL_*` appears nowhere in `spec-behavior.md` as an
+/// authorized removal. Silence plus R-A03 means the capability stays. `main.rs`'s
+/// `build_magi_orchestrator` now takes an env-override parameter and calls this for
+/// each seat, layered on top of [`MagiSectionConfig::seats`]'s TOML-or-backend
+/// resolution — giving the full `env > TOML > backend's model` chain.
+///
+/// # Arguments
+/// * `toml_model` - The `[magi].<agent>_model` value, if present.
+/// * `env_model`  - The `MAGI_MODEL_<AGENT>` env value, if present.
+///
+/// # Returns
+/// `Some(model)` when an effective override exists; `None` otherwise.
+pub fn resolve_magi_override(toml_model: Option<&str>, env_model: Option<&str>) -> Option<String> {
+    fn non_empty(s: Option<&str>) -> Option<String> {
+        s.map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    }
+    non_empty(env_model).or_else(|| non_empty(toml_model))
+}
 
 /// env `OPENAI_MODEL` > TOML `[openai].model` > `DEFAULT_OPENAI_MODEL` (RF-3).
 /// No longer fallible: the openai path has a built-in default (Ollama-first).
@@ -1244,10 +1266,44 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
-    // Task 2 used to have `resolve_magi_override` precedence tests here (S-4, S-5).
-    // Removed in Task 4.1 along with the function itself — see the removal note above
-    // `resolve_openai_model`: the `MAGI_MODEL_*` env-var per-agent override path has no
-    // production caller left once `agent::magi_wiring` is deleted.
+    // Task 2 / restored fix round 1: resolve_magi_override precedence tests (S-4, S-5).
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_resolve_magi_override_env_wins_over_toml() {
+        // S-4: env > TOML
+        assert_eq!(
+            resolve_magi_override(Some("toml-model"), Some("env-model")),
+            Some("env-model".to_string())
+        );
+    }
+
+    #[test]
+    fn test_resolve_magi_override_toml_when_no_env() {
+        // S-4: TOML when env absent
+        assert_eq!(
+            resolve_magi_override(Some("toml-model"), None),
+            Some("toml-model".to_string())
+        );
+    }
+
+    #[test]
+    fn test_resolve_magi_override_none_when_both_absent() {
+        // S-4: none ⇒ principal model
+        assert_eq!(resolve_magi_override(None, None), None);
+    }
+
+    #[test]
+    fn test_resolve_magi_override_empty_string_is_unset() {
+        // S-5: empty (env or TOML) is treated as unset, falls through precedence
+        assert_eq!(
+            resolve_magi_override(Some("toml"), Some("   ")),
+            Some("toml".to_string())
+        );
+        assert_eq!(resolve_magi_override(Some(""), None), None);
+        assert_eq!(resolve_magi_override(Some(""), Some("")), None);
+    }
+
     // -------------------------------------------------------------------------
     // [headless] section tests (spec §11). `HeadlessConfig` already derives
     // `#[serde(deny_unknown_fields)]`, so these LOCK the existing parsing
