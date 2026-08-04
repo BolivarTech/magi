@@ -1906,7 +1906,7 @@ async fn orchestrate_probes(
                 // `principal_kind`. Un `[openai].model`/`[anthropic].model` es una
                 // propiedad de la SECCIÓN, y la sección la elige el kind de CADA grupo,
                 // no el del principal.
-                let trio_model = resolve_backend_model(cfg, principal_kind).to_string();
+                let trio_model = resolve_backend_model(cfg, magi_kind).to_string();
                 let trio_seats = cfg.magi.seats(&trio_model);
                 let trio_models: Vec<&str> = trio_seats.iter().map(|(_, m)| m.as_str()).collect();
 
