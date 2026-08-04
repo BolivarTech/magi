@@ -1282,6 +1282,8 @@ mod tests {
     use mockito::Server;
     use serde_json::json;
     use std::sync::{Arc, Mutex};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
 
     #[test]
     fn test_parse_tool_input_empty_is_object() {
@@ -2863,5 +2865,114 @@ mod tests {
         let body = captured.lock().unwrap().clone().expect("request captured");
         let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(parsed["stream_options"]["include_usage"], true);
+    }
+
+    // ─── SC-A19: the principal provider survived the adapter removal ─────────
+    //
+    // Task 4.1 removed `src/agent/magi_adapter.rs` and rebuilt the MAGI trio on
+    // magi-core's native providers. These tests pin that the retirement did NOT
+    // drag the *principal* `OpenAiCompatibleProvider` along with it — exactly
+    // what the migration discarded in spec §3 would have broken (`LlmProvider`
+    // is request/response, has no streaming, and no tool calling).
+    //
+    // The third SC-A19 property — a malformed `data:` line must not abort the
+    // stream — is already pinned above by `test_openai_swallows_malformed_line`
+    // (predates this task). It is intentionally not duplicated here; see
+    // task-4.2-report.md for the revert-and-retest evidence that it is not
+    // vacuous.
+
+    /// Mid-response stall used to pin that the client has no total-request
+    /// timeout. Long enough that a total-request timeout added to
+    /// [`OpenAiCompatibleProvider::new`] by a future regression — of any
+    /// duration shorter than this — turns the stall into a hard `Err`; short
+    /// enough not to bloat `cargo nextest`'s wall-clock (this box already
+    /// starves under load, see `CLAUDE.local.md`).
+    const NO_TIMEOUT_STALL: Duration = Duration::from_secs(2);
+
+    /// Spawns a one-shot raw TCP server on an ephemeral loopback port that
+    /// speaks just enough HTTP/1.1 to satisfy `reqwest`: it writes response
+    /// headers immediately, stalls for [`NO_TIMEOUT_STALL`] BEFORE writing any
+    /// SSE body byte — mirroring the cold-load scenario documented on
+    /// `OpenAiCompatibleProvider::new` ("Ollama can spend tens of seconds on
+    /// cold-load before the first SSE event arrives") — then finishes the
+    /// stream and closes. `mockito::Server` (used by every other test in this
+    /// module) serves its mock body immediately and cannot inject a mid-response
+    /// stall, so this fixture needs a real socket.
+    ///
+    /// Returns the `http://127.0.0.1:<port>` base URL once the listener is
+    /// bound and ready to accept a connection.
+    async fn spawn_stalling_sse_server() -> String {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind an ephemeral loopback port for the stall fixture");
+        let addr = listener
+            .local_addr()
+            .expect("a bound listener exposes its local address");
+        tokio::spawn(async move {
+            let Ok((socket, _)) = listener.accept().await else {
+                return;
+            };
+            let (mut reader, mut writer) = socket.into_split();
+            // Drain and discard the request concurrently with writing the
+            // response: the client's request write must never block on this
+            // fixture reading it. O(request size) — bounded by one small JSON
+            // test message, never more than a few hundred bytes.
+            tokio::spawn(async move {
+                let mut sink = [0u8; 4096];
+                while matches!(reader.read(&mut sink).await, Ok(n) if n > 0) {}
+            });
+            let head =
+                "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n";
+            if writer.write_all(head.as_bytes()).await.is_err() || writer.flush().await.is_err() {
+                return;
+            }
+            sleep(NO_TIMEOUT_STALL).await;
+            let body = concat!(
+                "data: {\"choices\":[{\"delta\":{\"content\":\"post-stall\"},",
+                "\"finish_reason\":\"stop\"}]}\n\n",
+                "data: [DONE]\n\n",
+            );
+            let _ = writer.write_all(body.as_bytes()).await;
+            let _ = writer.flush().await;
+            let _ = writer.shutdown().await;
+        });
+        format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn the_principal_provider_has_no_total_request_timeout() {
+        // SC-A19 / REQ-A19b: the client must still tolerate a stall before the
+        // first SSE byte — exactly what local Ollama's cold-load looks like
+        // (`OpenAiCompatibleProvider::new` rustdoc). `reqwest::Client` exposes
+        // no timeout getter, so this is pinned behaviourally rather than by
+        // reading a field back: a total-request timeout shorter than the stall
+        // would surface as an `Err` here (verified by temporarily reintroducing
+        // one — see task-4.2-report.md for the red output).
+        let base_url = spawn_stalling_sse_server().await;
+        let p = OpenAiCompatibleProvider::new(OpenAiSettings {
+            base_url,
+            api_key: "k".into(),
+            model: "m".into(),
+        });
+        let result = p.send_messages(&[Message::user("hi")], &[], None).await;
+        assert!(
+            result.is_ok(),
+            "a {:?} stall before the first SSE byte must not abort the stream: {:?}",
+            NO_TIMEOUT_STALL,
+            result.err()
+        );
+        assert_eq!(
+            result.expect("checked is_ok above").content,
+            vec![Content::Text {
+                text: "post-stall".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn the_principal_provider_kept_its_tool_call_slot_cap() {
+        // SC-A19: retiring the adapter must not have changed the anti-OOM
+        // ceiling on streamed tool-call indices (Task 5 / RF-8).
+        assert_eq!(MAX_TOOL_CALL_SLOTS, 64);
     }
 }
