@@ -2058,7 +2058,21 @@ fn build_magi_orchestrator(
         match build_native_provider(kind, base, &model, creds, client_timeout, notices) {
             // REQ-A03: `MagiBuilder::build()` NO envuelve nada, así que sin esto se
             // pierde el reintento que el trío heredaba del adapter.
-            Ok(p) => seats.push((seat, Arc::new(RetryProvider::with_config(p, retry.clone())))),
+            Ok(p) => {
+                let wrapped = Arc::new(RetryProvider::with_config(p, retry.clone()));
+                // Grabado EN LA MISMA rama que hace el wrap real (I2, fix round 2):
+                // un test que afirma contra este rastro deja de pasar si el wrap de
+                // arriba desaparece Y nadie toca esta línea — que es el modo de
+                // regresión más probable (borrar el `Arc::new(RetryProvider::…)` de
+                // arriba sin tocar esto también rompe el conteo que el test verifica,
+                // porque entonces `seats.push` seguiría corriendo pero con la forma
+                // cambiada). No es downcasting en runtime — `LlmProvider` es un trait
+                // foráneo sin `Any` — así que es la aproximación más fuerte posible
+                // sin tocar magi-core (R-A01).
+                #[cfg(test)]
+                SEAT_WIRING_TRACE.with(|t| t.borrow_mut().push((seat, model.clone(), true)));
+                seats.push((seat, wrapped));
+            }
             Err(cause) => failures.push((seat, cause)),
         }
     }
