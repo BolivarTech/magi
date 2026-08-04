@@ -28,6 +28,8 @@
     )
 )]
 
+use std::fmt;
+
 /// Los tres valores aceptados, en el texto que se muestra en un error.
 ///
 /// Una `const` y no un literal repetido (B4): el mensaje de error y la documentación tienen
@@ -104,6 +106,21 @@ impl ProviderKind {
     }
 }
 
+impl fmt::Display for ProviderKind {
+    /// El inverso exacto de [`Self::parse`]: `ProviderKind::parse(&k.to_string()) ==
+    /// Ok(Some(k))` para cualquier `k`. Task 4.1 lo necesita para renderizar de vuelta al
+    /// vocabulario declarado (p. ej. al construir el `provider` por defecto que alimenta la
+    /// resolución headless `env > TOML > default`), sin repetir los tres literales de
+    /// `parse` en un segundo lugar (B3).
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Ollama => "ollama",
+            Self::OpenAiCompat => "openai-compat",
+            Self::Anthropic => "anthropic",
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -160,5 +177,18 @@ mod tests {
         assert!(ProviderKind::Ollama.is_probeable());
         assert!(!ProviderKind::OpenAiCompat.is_probeable());
         assert!(!ProviderKind::Anthropic.is_probeable());
+    }
+
+    /// `Display` es el inverso exacto de `parse` para los tres valores — Task 4.1 depende
+    /// de este roundtrip para renderizar el vocabulario de vuelta a texto.
+    #[test]
+    fn display_round_trips_through_parse_for_the_three_values() {
+        for kind in [
+            ProviderKind::Ollama,
+            ProviderKind::OpenAiCompat,
+            ProviderKind::Anthropic,
+        ] {
+            assert_eq!(ProviderKind::parse(&kind.to_string()).unwrap(), Some(kind));
+        }
     }
 }

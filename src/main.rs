@@ -10,17 +10,14 @@ mod system;
 mod tools;
 mod tui;
 
-use crate::agent::magi_wiring::{
-    resolve_magi_adapter_specs, static_override_notice, MagiEnvModels,
-};
 use crate::agent::provider::{build_openai_provider, AnthropicProvider, Provider, StaticProvider};
 use crate::agent::Agent;
 // NOTE: this `MagiConfig` is the magi-rs TOML config (`crate::config::MagiConfig`).
 // It is DISTINCT from `magi_core::orchestrator::MagiConfig` — the latter is NEVER
 // imported here, avoiding the name collision.
 use crate::config::{
-    legacy_backend_label, resolve_anthropic_model, resolve_openai_model, resolve_provider,
-    HeadlessConfig, MagiConfig,
+    resolve_anthropic_model, resolve_effective_provider_kind, resolve_openai_model, HeadlessConfig,
+    MagiConfig,
 };
 use crate::headless_runner::{resolve_run_timeout, run_consult, run_query};
 use crate::memory::clock::SystemClock;
@@ -38,8 +35,12 @@ use crate::tools::read::FileReadTool;
 use crate::tools::write::FileWriteTool;
 use clap::Parser;
 use cryptovault::CryptoVault;
+use magi_core::error::ProviderError;
 use magi_core::orchestrator::{Magi, MagiBuilder};
-use magi_core::schema::Mode;
+use magi_core::provider::{LlmProvider, RetryConfig, RetryProvider};
+use magi_core::providers::claude::ClaudeProvider;
+use magi_core::providers::openai_compat::OpenAiCompatibleProvider;
+use magi_core::schema::{AgentName, Mode};
 use magi_rs::headless::exit::exit_code as headless_exit_code;
 use magi_rs::headless::input::{parse_input, read_input_bounded, InputFormat};
 use magi_rs::headless::limits::{HeadlessLimits, NORMAL_MAX_TOOL_CALLS};
@@ -52,8 +53,10 @@ use magi_rs::headless::resolution::{
 use magi_rs::headless::types::{ErrorKind, RunOutcome, StopReason};
 use magi_rs::headless::HeadlessError;
 use magi_rs::magi::endpoint::{EndpointTemplate, ResolvedEndpoint, Scope};
+use magi_rs::magi::kind::ProviderKind;
+use magi_rs::magi::{derive_client_timeout, derive_operation_budget, AGENT_TIMEOUT_SECS};
 use magi_rs::notices::{render_notices, Notice};
-use magi_rs::redact::redact_url;
+use magi_rs::redact::{redact_foreign_error, redact_url, SafeErrorText};
 use magi_rs::vault::{
     check_strength, create_passphrase, diagnose, format_diagnose_report, harden_process,
     rekey_envelope, resolve_passphrase, run_vault_cmd, strip_trailing_newline, wire,
@@ -1390,14 +1393,22 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
         anthropic_key.as_deref(),
         secret_store.as_ref(),
     );
-    let provider_kind = resolve_provider(&magi_config, env::var("MAGI_PROVIDER").ok().as_deref());
+    // Task 4.1: replaces `resolve_provider`/`legacy_backend_label` — the vocabulary is
+    // unified now, so there is nothing left to normalize a raw `ProviderKind` onto.
+    let provider_kind =
+        resolve_effective_provider_kind(&magi_config, env::var("MAGI_PROVIDER").ok().as_deref())
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
 
-    // Credentials needed to build per-agent sibling providers (same backend, different
-    // model) for MAGI per-agent overrides. Set inside the openai branch.
-    let mut oai_creds: Option<(String, String)> = None; // (base_url, api_key)
-
-    let (provider, provider_info, model_label): (Arc<dyn Provider>, String, String) =
-        if provider_kind == "openai" {
+    // Task 4.1: no longer carries a `model_label` third element — that was only ever
+    // read by the retired adapter-naming machinery (`MagiCoreProviderAdapter`'s display
+    // name); the native trio resolves its OWN per-seat models from `magi_config`
+    // directly (`build_magi_orchestrator`), independent of the principal's model.
+    let (provider, provider_info): (Arc<dyn Provider>, String) = match provider_kind {
+        // `Ollama` and `OpenAiCompat` share the `[openai]`-transport branch: they
+        // speak the same Chat-Completions protocol and differ only in capability
+        // (probeability), never in how the PRINCIPAL provider is built (D-A07 is
+        // about the native trio, not this untouched path).
+        ProviderKind::Ollama | ProviderKind::OpenAiCompat => {
             // env > vault (REQ-V12); falls back to the local-Ollama dummy so a
             // real OpenAI/Groq/OpenRouter endpoint still fails loudly with 401
             // rather than silently defaulting to an insecure constant.
@@ -1416,29 +1427,25 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
             let model =
                 resolve_openai_model(&magi_config, env::var("OPENAI_MODEL").ok().as_deref());
             let info = openai_provider_info(&base_url, &model);
-            let model_label = model.clone();
-            oai_creds = Some((base_url.clone(), api_key.clone()));
-            (
-                build_openai_provider(&base_url, &api_key, &model),
-                info,
-                model_label,
-            )
-        } else if let Some(ref c) = config {
-            (
-                Arc::new(AnthropicProvider::new(c.api_key.clone(), c.model.clone())),
-                format!("Magi API ({}) Model: {}", c.source, c.model),
-                c.model.clone(),
-            )
-        } else {
-            (
-                Arc::new(StaticProvider),
-                "Static Mode: no API key found. Set ANTHROPIC_API_KEY or run \
-                 `magi-rs vault set ANTHROPIC_API_KEY` (recommended). /login \
-                 (OAuth) is best-effort and may be rate-limited."
-                    .to_string(),
-                "static".to_string(),
-            )
-        };
+            (build_openai_provider(&base_url, &api_key, &model), info)
+        }
+        ProviderKind::Anthropic => {
+            if let Some(ref c) = config {
+                (
+                    Arc::new(AnthropicProvider::new(c.api_key.clone(), c.model.clone())),
+                    format!("Magi API ({}) Model: {}", c.source, c.model),
+                )
+            } else {
+                (
+                    Arc::new(StaticProvider),
+                    "Static Mode: no API key found. Set ANTHROPIC_API_KEY or run \
+                     `magi-rs vault set ANTHROPIC_API_KEY` (recommended). /login \
+                     (OAuth) is best-effort and may be rate-limited."
+                        .to_string(),
+                )
+            }
+        }
+    };
 
     // Notices shown when the TUI starts — the provider banner plus any persistence,
     // reset, or vault warnings that would otherwise be lost to pre-TUI stderr.
@@ -1463,48 +1470,39 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
     // RF-9: when there is no magi.toml at all, make the Ollama-first default visible
     // (never-silent). A present-but-minimal magi.toml does NOT trigger this.
     if crate::defaults::should_emit_default_notice(
-        &provider_kind,
+        provider_kind,
         magi_toml_exists(workspace.as_ref()),
     ) {
         startup_notices.push(Notice::info(crate::defaults::no_config_notice()));
     }
 
-    // Build the MAGI orchestrator over the resolved backend. With no per-agent
-    // overrides this is the v0.4.0 path (`Magi::new`, single shared adapter).
-    // With overrides, build one adapter per overridden agent (same backend
-    // creds, different model) via `MagiBuilder::with_provider`.
-    let backend_label = if provider_kind == "openai" {
-        "openai"
-    } else {
-        "anthropic"
+    // Build the MAGI trio with magi-core's NATIVE providers (REQ-A01) — independent
+    // of the principal provider's own availability: a trio using a keyless `ollama`
+    // kind can be perfectly buildable even when the principal fell back to
+    // `StaticProvider` for lack of an Anthropic key, and vice versa. Task 4.3 owns the
+    // polished per-surface unavailable-trio behavior (REQ-A06, `trio_unavailable_message`,
+    // conditional tool registration); this keeps the failure typed and non-silent (B9)
+    // without pre-empting that task's contract.
+    let endpoints = resolve_endpoints(&magi_config, secret_store.as_ref())
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let creds = EnvVaultCredentials {
+        magi_config: &magi_config,
+        anthropic_env: anthropic_key.as_deref(),
+        openai_env: openai_key.as_deref(),
+        secret_store: secret_store.as_ref(),
     };
-    let consult_magi: Option<Arc<Magi>> = if provider.is_static() {
-        // No backend to build adapters; surface a non-silent notice if the user
-        // configured [magi] overrides anyway (RF-10, S-13).
-        let specs = resolve_magi_adapter_specs(
-            backend_label,
-            &magi_config.magi,
-            &MagiEnvModels {
-                melchior: env::var("MAGI_MODEL_MELCHIOR").ok(),
-                balthasar: env::var("MAGI_MODEL_BALTHASAR").ok(),
-                caspar: env::var("MAGI_MODEL_CASPAR").ok(),
-            },
-        );
-        if let Some(notice) = static_override_notice(true, !specs.is_empty()) {
-            // The trio the user configured is not buildable — a request the user
-            // made is unavailable, which is exactly the `Blocking` tier's definition.
-            startup_notices.push(Notice::blocking(notice));
+    let consult_magi: Option<Arc<Magi>> = match build_magi_orchestrator(
+        &magi_config,
+        &endpoints,
+        Some(&creds),
+        None,
+        &mut startup_notices,
+    ) {
+        Ok(magi) => Some(magi),
+        Err(e) => {
+            startup_notices.push(Notice::blocking(format!("MAGI trio unavailable: {e}")));
+            None
         }
-        None
-    } else {
-        Some(build_magi_orchestrator(
-            provider.clone(),
-            backend_label,
-            &model_label,
-            &magi_config,
-            oai_creds,
-            config.as_ref().map(|c| c.api_key.clone()),
-        )?)
     };
 
     // Cloned BEFORE `Agent::new(provider)` consumes it below — same pattern as
@@ -1581,71 +1579,395 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
-/// Builds the MAGI orchestrator over `provider` (the resolved principal
-/// backend), honoring per-agent model overrides from `[magi]`/`MAGI_MODEL_*`
-/// by constructing a sibling provider (same backend credentials, different
-/// model) for each overridden agent. Shared by the TUI launch and the headless
-/// `query`/`consult` paths (DRY).
+/// Credenciales de terceros resueltas `env > vault` (REQ-A12), reducidas a lo que el
+/// trío nativo necesita: una API key por backend que la exige (`openai-compat`,
+/// `anthropic`). `ollama` es keyless y nunca las consulta.
 ///
-/// `oai_creds` (openai `(base_url, api_key)`) and `anthropic_key` are the
-/// credential sources for sibling providers; the one matching `backend_label`
-/// is `Some` for a live backend, matching how the principal provider was built.
+/// Aparte del endpoint y no redundante con él: [`ResolvedEndpoint`] puede traer
+/// `userinfo` (autenticación del proxy o del servidor que sirve el modelo), mientras
+/// que la API key del backend va en un header (`Authorization: Bearer` / `x-api-key`).
+/// Dos credenciales, dos destinos.
+trait Credentials {
+    /// La API key para el transporte OpenAI-compat (`OPENAI_API_KEY`).
+    fn openai(&self) -> Option<String>;
+    /// La API key de Anthropic (`ANTHROPIC_API_KEY`).
+    fn anthropic(&self) -> Option<String>;
+}
+
+/// Puente entre la resolución `env > vault` ya existente ([`discover_config`],
+/// [`resolve_openai_key`]) y el trait [`Credentials`] que pide el trío nativo.
+///
+/// Reusa esas dos funciones en vez de reimplementar la precedencia una tercera vez
+/// (B3): `discover_config` también resuelve el modelo Anthropic, que acá se descarta —
+/// barato, y evita una copia más de las mismas cuatro líneas "env recortado, o
+/// `vault.get(NAME)` recortado".
+struct EnvVaultCredentials<'a> {
+    /// Config ya cargada — `discover_config` la necesita para el modelo Anthropic
+    /// (descartado acá), aunque esta vista solo pida la clave.
+    magi_config: &'a MagiConfig,
+    /// `ANTHROPIC_API_KEY` ya leída (y scrubbeada) del entorno al arrancar.
+    anthropic_env: Option<&'a str>,
+    /// `OPENAI_API_KEY` ya leída (y scrubbeada) del entorno al arrancar.
+    openai_env: Option<&'a str>,
+    /// El vault abierto esta sesión, si lo hay.
+    secret_store: Option<&'a SharedSecretStore>,
+}
+
+impl Credentials for EnvVaultCredentials<'_> {
+    fn openai(&self) -> Option<String> {
+        resolve_openai_key(self.openai_env, self.secret_store)
+    }
+    fn anthropic(&self) -> Option<String> {
+        discover_config(self.magi_config, self.anthropic_env, self.secret_store).map(|c| c.api_key)
+    }
+}
+
+/// Los tres endpoints del proceso, resueltos de una vez.
+///
+/// El símbolo nace acá (`main.rs`), no en `config.rs`: Task 4.1 es su primer
+/// consumidor (ORDER-FIXES.md #7/#8 — un símbolo se escribe en la tarea que primero lo
+/// consume) y necesita [`SharedSecretStore`]/[`NoVaultInScope`], que ya son privados de
+/// este archivo y de este archivo únicamente — moverlo a `config.rs` obligaría a
+/// exportarlos o a reimplementar el mismo patrón "vault opcional, plantilla sin
+/// resolver nunca llega a un cliente HTTP" una segunda vez.
+struct ResolvedEndpoints {
+    /// `base_url` de raíz — agente principal.
+    ///
+    /// Task 4.1: producción todavía no LEE este campo (el provider principal sigue
+    /// resolviendo su propio endpoint vía `resolve_effective_principal_endpoint`, sin
+    /// tocar en esta tarea — B3 quedó pendiente de una unificación deliberadamente
+    /// diferida para no ampliar el diff de una tarea ya grande). Se resuelve igual,
+    /// fail-closed, porque `resolve_endpoints` es EL paso de arranque para los tres
+    /// endpoints a la vez — dejar este afuera lo volvería dos pasos. Cubierto por
+    /// `resolve_endpoints_resolves_the_three_fields_from_the_same_root_when_none_diverge`.
+    #[allow(dead_code)]
+    root: ResolvedEndpoint,
+    /// `[magi].base_url` u herencia — el trío y su probe. El único campo que
+    /// `build_magi_orchestrator` lee hoy.
+    magi: ResolvedEndpoint,
+    /// `[embedding].base_url` u herencia — el embedder. Mismo caso que `root`: sin
+    /// consumidor de producción todavía (`resolve_effective_embedding_endpoint`
+    /// sigue resolviendo el suyo por separado), cubierto por el mismo test.
+    #[allow(dead_code)]
+    embedding: ResolvedEndpoint,
+}
+
+/// El paso de arranque: tras abrir el vault, ANTES del probe y del trío.
+///
+/// Falla CERRADO: un placeholder sin entrada detiene el proceso nombrando la entrada y
+/// el comando (`magi-rs vault set …`), nunca sustituye vacío (SC-A16f) — hereda esa
+/// garantía de [`resolve_template`], que ya la implementa para los otros dos
+/// consumidores de `base_url` (el principal y el embedder).
 ///
 /// # Errors
-/// Propagates a `MagiBuilder::build` failure (a misconfigured per-agent adapter)
-/// as an `anyhow` error so the caller can surface it.
-fn build_magi_orchestrator(
-    provider: Arc<dyn Provider>,
-    backend_label: &str,
-    model_label: &str,
+/// Un mensaje ya legible (ver [`resolve_template`]) del primer endpoint irresoluble.
+fn resolve_endpoints(
     magi_config: &MagiConfig,
-    oai_creds: Option<(String, String)>,
-    anthropic_key: Option<String>,
-) -> anyhow::Result<Arc<Magi>> {
-    let env_models = MagiEnvModels {
-        melchior: env::var("MAGI_MODEL_MELCHIOR").ok(),
-        balthasar: env::var("MAGI_MODEL_BALTHASAR").ok(),
-        caspar: env::var("MAGI_MODEL_CASPAR").ok(),
-    };
-    let specs = resolve_magi_adapter_specs(backend_label, &magi_config.magi, &env_models);
+    secret_store: Option<&SharedSecretStore>,
+) -> Result<ResolvedEndpoints, String> {
+    let root_tpl = magi_config
+        .effective_base_url()
+        .map_err(|e| format!("base_url is invalid: {e}"))?;
+    let magi_tpl = magi_config
+        .effective_magi_base_url()
+        .map_err(|e| format!("magi base_url is invalid: {e}"))?;
+    let embedding_tpl = magi_config
+        .effective_embedding_base_url()
+        .map_err(|e| format!("embedding base_url is invalid: {e}"))?;
+    Ok(ResolvedEndpoints {
+        root: resolve_template(&root_tpl, Scope::Root, secret_store)?,
+        magi: resolve_template(&magi_tpl, Scope::Magi, secret_store)?,
+        embedding: resolve_template(&embedding_tpl, Scope::Embedding, secret_store)?,
+    })
+}
 
-    // Builds a sibling provider on the SAME backend with a different model,
-    // from whichever credential source matches `backend_label`.
-    let build_sibling = |model: &str| -> Option<Arc<dyn Provider>> {
-        if backend_label == "openai" {
-            oai_creds
-                .as_ref()
-                .map(|(b, k)| build_openai_provider(b, k, model))
-        } else {
-            anthropic_key.as_ref().map(|k| {
-                Arc::new(AnthropicProvider::new(k.clone(), model.to_string())) as Arc<dyn Provider>
-            })
-        }
-    };
+/// Por qué un asiento del trío no se pudo construir — tipado, no `String` (REQ-A05b):
+/// el llamador reporta los tres asientos caídos de una vez y necesita distinguir
+/// credencial-faltante de fallo de transporte sin parsear texto.
+///
+/// Variantes separadas porque las tres se diagnostican distinto: la credencial la
+/// arregla el operador en su config o su vault, el transporte es del entorno, y el HTTP
+/// **puede ser configuración disfrazada** — un 401 bajo un kind keyless (`ollama`) es
+/// casi siempre `kind` mal elegido, no una credencial mala (Task 4.4,
+/// `explain_keyless_auth_failure`, compara el `status` acá contra el `ProviderKind`; de
+/// ahí que sea una variante propia y no un `Transport` con el código adentro del texto).
+#[derive(Debug, thiserror::Error)]
+enum SeatError {
+    /// El kind exige credencial y no hay ninguna resuelta.
+    #[error("falta la credencial {var} para este backend")]
+    MissingCredential {
+        /// Nombre de la variable/entrada de vault esperada.
+        var: &'static str,
+    },
+    /// Un status HTTP recibido en el primer uso del asiento (Task 4.4 lo traduce).
+    ///
+    /// `build_native_provider` nunca la construye (no hace ninguna petición HTTP en
+    /// construcción, solo valida y arma el cliente) — la produce el punto que atrapa
+    /// el `ProviderError::Http` del PRIMER USO real del provider, que es Task 4.4
+    /// (`explain_keyless_auth_failure`). La variante existe ahora porque `SeatError`
+    /// es el tipo compartido entre las dos tareas. Cubierta por
+    /// `seat_error_variants_have_a_readable_display`.
+    #[allow(dead_code)]
+    #[error("el endpoint respondió {status}")]
+    Http {
+        /// El status recibido.
+        status: u16,
+    },
+    /// El cliente HTTP no se pudo construir. `SafeErrorText`, no `String`: el texto de
+    /// un error foráneo puede llevar la URL con credenciales, y este tipo solo se
+    /// construye pasando por [`redact_foreign_error`].
+    #[error("no se pudo construir el cliente HTTP: {0}")]
+    Transport(SafeErrorText),
+}
 
-    let default_adapter = crate::agent::magi_adapter::MagiCoreProviderAdapter::new(
-        provider,
-        backend_label,
-        model_label,
-    );
-    if specs.is_empty() {
-        // v0.4.0 path — a single shared adapter.
-        return Ok(Arc::new(Magi::new(Arc::new(default_adapter))));
+/// Por qué el trío no se pudo construir (REQ-A06).
+#[derive(Debug, thiserror::Error)]
+enum TrioError {
+    /// Uno o más asientos declarados fallaron. Se listan **todos**, no el primero: los
+    /// tres comparten credencial y endpoint, así que cuando uno falla por
+    /// configuración lo normal es que fallen los tres — reportar de a uno obliga a
+    /// tres arranques para descubrir un problema único.
+    #[error("asientos no construibles: {}", seats.len())]
+    SeatUnbuildable {
+        /// Asiento y causa, uno por cada fallo.
+        seats: Vec<(AgentName, SeatError)>,
+    },
+    /// `[magi].kind` trae un valor que no está en el vocabulario.
+    #[error("`[magi].kind` no reconocido: {0}")]
+    UnknownKind(String),
+    /// No se declaró ningún asiento. Distinto de `SeatUnbuildable`: acá no falló
+    /// ninguno, simplemente no había ninguno que construir.
+    #[error("no hay asientos declarados para el trío")]
+    NoSeats,
+    /// `MagiBuilder::build()` rechazó la configuración. `SafeErrorText`, no `String`:
+    /// el mensaje viene de magi-core, que no conoce nuestra regla de redacción y puede
+    /// citar la `base_url` con credenciales.
+    #[error("magi-core rechazó la construcción: {0}")]
+    Builder(SafeErrorText),
+}
+
+/// Normaliza una raíz de Ollama a la forma OpenAI-compat (`…/v1`), idempotente, **y
+/// avisa cuando tuvo que tocar algo**.
+///
+/// Existe porque `OllamaProvider` hacía esto adentro y ya no está en el camino (D-A07):
+/// sin la normalización, una `base_url = "http://localhost:11434"` (que v0.11.0
+/// aceptaba) pegaría contra `/chat/completions` en la raíz y daría 404 en el primer
+/// uso. Devuelve el aviso en vez de aplicarlo callado — una normalización silenciosa
+/// hace que la `base_url` efectiva difiera de la escrita sin que nadie lo sepa.
+fn openai_compat_root(base_url: &str) -> (String, Option<String>) {
+    let trimmed = base_url.trim_end_matches('/');
+    if trimmed.rsplit('/').next() == Some("v1") {
+        (trimmed.to_string(), None)
+    } else {
+        let normalized = format!("{trimmed}/v1");
+        let notice = format!(
+            "notice: `base_url` de Ollama sin sufijo `/v1`; se usa `{normalized}` para \
+             las completions. Declaralo explícito para que la configuración diga lo \
+             que pasa."
+        );
+        (normalized, Some(notice))
     }
-    let mut builder = MagiBuilder::new(Arc::new(default_adapter));
-    for spec in &specs {
-        if let Some(sibling) = build_sibling(&spec.model) {
-            let adapter = crate::agent::magi_adapter::MagiCoreProviderAdapter::new(
-                sibling,
-                spec.adapter_name.clone(),
-                spec.model.clone(),
-            );
-            builder = builder.with_provider(spec.agent, Arc::new(adapter));
+}
+
+/// Construye UN provider nativo de magi-core según el `kind` declarado (REQ-A01b).
+///
+/// **`ollama` NO usa el tipo `OllamaProvider` de magi-core para las completions** (D-A07):
+/// verificado contra magi-core 3.1.0 — su único constructor fija 300 s de timeout de
+/// cliente sin override, incompatible con REQ-A04 (`operation_budget + client_timeout
+/// <= techo`). Las completions van por el transporte OpenAI-compat keyless contra
+/// `…/v1`; `OllamaProvider` queda solo como sonda (Fase 5).
+///
+/// **`ollama` es keyless**: una `base_url` autenticada bajo este kind no falla acá —
+/// falla en el primer uso con un 401, que Task 4.4 traduce.
+///
+/// # Errors
+/// [`SeatError::MissingCredential`] si el kind exige credencial y no hay ninguna
+/// resuelta; [`SeatError::Transport`] si el cliente HTTP no se pudo construir.
+fn build_native_provider(
+    kind: ProviderKind,
+    base_url: &ResolvedEndpoint,
+    model: &str,
+    creds: Option<&dyn Credentials>,
+    client_timeout: Duration,
+    notices: &mut Vec<Notice>,
+) -> Result<Arc<dyn LlmProvider>, SeatError> {
+    // `redact_foreign_error`, NO `to_string()`: el mensaje lo arma magi-core, que no
+    // conoce nuestra regla de redacción y puede citar la `base_url`.
+    let to_seat = |e: ProviderError| SeatError::Transport(redact_foreign_error(&e));
+
+    Ok(match kind {
+        // `api_key = None` ⇒ sin header `Authorization`, que es lo que Ollama espera.
+        ProviderKind::Ollama => {
+            // `.as_str()`, no `.to_string()` (Melchior, loop 32): `base_url` es un
+            // newtype y `with_timeout` toma `impl Into<String>` — `&str` ya lo
+            // satisface sin el paso intermedio.
+            let (root, notice) = openai_compat_root(base_url.as_str());
+            if let Some(n) = notice {
+                notices.push(Notice::resolution(n));
+            }
+            Arc::new(
+                OpenAiCompatibleProvider::with_timeout(root, model, None, client_timeout)
+                    .map_err(to_seat)?,
+            )
+        }
+        ProviderKind::OpenAiCompat => {
+            let key = creds
+                .and_then(|c| c.openai())
+                .ok_or(SeatError::MissingCredential {
+                    var: "OPENAI_API_KEY",
+                })?;
+            Arc::new(
+                OpenAiCompatibleProvider::with_timeout(
+                    base_url.as_str(),
+                    model,
+                    Some(key),
+                    client_timeout,
+                )
+                .map_err(to_seat)?,
+            )
+        }
+        ProviderKind::Anthropic => {
+            let key = creds
+                .and_then(|c| c.anthropic())
+                .ok_or(SeatError::MissingCredential {
+                    var: "ANTHROPIC_API_KEY",
+                })?;
+            Arc::new(ClaudeProvider::with_timeout(key, model, client_timeout).map_err(to_seat)?)
+        }
+    })
+}
+
+/// Construye el trío MAGI con los providers NATIVOS de magi-core (REQ-A01).
+///
+/// Desaparece el adapter y con él el doblado del system prompt: cada mage recibe su
+/// prompt por el canal propio del provider.
+///
+/// `notices` recibe los avisos no fatales de construcción (p. ej. la normalización de
+/// una `base_url` de Ollama sin `/v1`). Se pasa por parámetro y no se devuelve aparte
+/// para que un aviso emitido en el camino de error **también** llegue al usuario: un
+/// fallo de asiento y una URL rara suelen ser el mismo problema visto de dos lados.
+///
+/// `warn_tokens` entra por PARÁMETRO y no se resuelve adentro: lo produce el probe, que
+/// es Fase 5, y esta función es Fase 4. Con `None` cae al default de magi-core — el
+/// comportamiento de v0.11.0.
+///
+/// # Errors
+/// - [`TrioError::UnknownKind`] si `[magi].kind` trae un valor no reconocido. Se valida
+///   ACÁ con su propio `ProviderKind::parse`, no vía `cfg.effective_magi_kind()`: ese
+///   accessor asume que `validate_vocabulary` ya corrió y se traga un valor no
+///   reconocido cayendo a la herencia — precondición correcta para su resto de
+///   llamadores, pero exactamente la que este punto necesita NO asumir para poder
+///   reportar el error.
+/// - [`TrioError::SeatUnbuildable`] con **todos** los asientos que no se pudieron
+///   construir y su causa.
+fn build_magi_orchestrator(
+    cfg: &MagiConfig,
+    // Endpoints YA RESUELTOS. El builder no conoce el vault: la resolución es un paso
+    // nombrado de `main.rs` (tras abrir el vault, antes del probe y del trío), y
+    // `resolve_endpoints` es el único productor de `ResolvedEndpoints`.
+    endpoints: &ResolvedEndpoints,
+    creds: Option<&dyn Credentials>,
+    warn_tokens: Option<usize>,
+    notices: &mut Vec<Notice>,
+) -> Result<Arc<Magi>, TrioError> {
+    let raw_kind = cfg.magi.kind.as_deref().unwrap_or_default();
+    if let Err(e) = ProviderKind::parse(raw_kind) {
+        return Err(TrioError::UnknownKind(e.got));
+    }
+    let kind = cfg.effective_magi_kind();
+    // El trío usa el endpoint YA RESUELTO que `main.rs` produjo — no re-resuelve ni lee
+    // la plantilla.
+    let base = &endpoints.magi;
+
+    // Modelo del BACKEND: el que hereda un asiento sin modelo propio, y el del
+    // fallback del builder. Sale de la sección del kind — `[openai]` sirve a `ollama`
+    // Y a `openai-compat` porque comparten el protocolo de completions (REQ-A01b).
+    let backend_model: &str = match kind {
+        ProviderKind::Ollama | ProviderKind::OpenAiCompat => cfg
+            .openai
+            .model
+            .as_deref()
+            .unwrap_or(crate::defaults::DEFAULT_OPENAI_MODEL),
+        ProviderKind::Anthropic => cfg
+            .anthropic
+            .model
+            .as_deref()
+            .unwrap_or(crate::defaults::DEFAULT_ANTHROPIC_MODEL),
+    };
+    let ceiling = Duration::from_secs(cfg.magi.agent_timeout_secs.unwrap_or(AGENT_TIMEOUT_SECS));
+
+    // `RetryConfig` es `#[non_exhaustive]`: fuera del crate NO hay literal ni
+    // `..default()` — se construye con `default()` y se ajusta por campo.
+    let mut retry = RetryConfig::default();
+    retry.operation_budget = derive_operation_budget(ceiling.as_secs());
+    let client_timeout = derive_client_timeout(ceiling.as_secs());
+
+    // Los TRES asientos se construyen primero, para poder reportar TODOS los que fallen.
+    let mut failures: Vec<(AgentName, SeatError)> = Vec::new();
+    let mut seats: Vec<(AgentName, Arc<dyn LlmProvider>)> = Vec::new();
+
+    for (seat, model) in cfg.magi.seats(backend_model) {
+        match build_native_provider(kind, base, &model, creds, client_timeout, notices) {
+            // REQ-A03: `MagiBuilder::build()` NO envuelve nada, así que sin esto se
+            // pierde el reintento que el trío heredaba del adapter.
+            Ok(p) => seats.push((seat, Arc::new(RetryProvider::with_config(p, retry.clone())))),
+            Err(cause) => failures.push((seat, cause)),
         }
     }
-    Ok(Arc::new(builder.build().map_err(|e| {
-        anyhow::anyhow!("MAGI builder failed: {e}")
-    })?))
+
+    if !failures.is_empty() {
+        return Err(TrioError::SeatUnbuildable { seats: failures });
+    }
+    if seats.is_empty() {
+        // Inalcanzable hoy — `seats()` siempre devuelve los tres — pero la variante
+        // existe para el `match` exhaustivo de Task 4.3 y no depende de esa
+        // invariante interna para ser correcta.
+        return Err(TrioError::NoSeats);
+    }
+
+    // El FALLBACK del builder se construye APARTE, y el nombre importa: NO es el
+    // "provider principal" de magi-rs (el del agente conversacional, que este
+    // milestone no toca). Con los tres asientos overrideados este provider nunca se
+    // usa, y justamente por eso conviene que sea una decisión escrita.
+    //
+    // `&mut sink` descartable: el aviso de normalización ya salió en el bucle de
+    // asientos con la MISMA `base_url`. Empujarlo de nuevo lo duplicaría en pantalla
+    // (y `render_notices` lo dedupería igual, pero no vale la pena construirlo dos
+    // veces).
+    let mut sink: Vec<Notice> = Vec::new();
+    let fallback_provider = build_native_provider(
+        kind,
+        base,
+        cfg.magi.fallback_model(backend_model),
+        creds,
+        client_timeout,
+        &mut sink,
+    )
+    .map_err(|e| TrioError::Builder(redact_foreign_error(&e)))?;
+
+    let mut builder = MagiBuilder::new(Arc::new(RetryProvider::with_config(
+        fallback_provider,
+        retry.clone(),
+    )))
+    .with_timeout(ceiling);
+
+    // REQ-A15: las OTRAS DOS claves expuestas también se cablean. Declararlas en el
+    // TOML sin conectarlas las volvería decorativas.
+    if let Some(warn) = warn_tokens {
+        builder = builder.with_input_warn_tokens(warn);
+    }
+    if cfg.magi.retry_disabled.unwrap_or(false) {
+        builder = builder.with_retry_disabled();
+    }
+
+    for (seat, provider) in seats {
+        builder = builder.with_provider(seat, provider);
+    }
+
+    builder
+        .build()
+        .map(Arc::new)
+        .map_err(|e| TrioError::Builder(redact_foreign_error(&e)))
 }
 
 /// A [`SecretStore`] that always reports "not found" — every method fails or
@@ -2244,14 +2566,25 @@ struct HeadlessContext {
     magi_config: MagiConfig,
     /// The resolved principal LLM provider.
     provider: Arc<dyn Provider>,
-    /// The resolved provider kind (`"openai"`/`"anthropic"`/…).
-    provider_kind: String,
-    /// The effective model label for MAGI adapter naming.
-    model_label: String,
-    /// Captured OpenAI `(base_url, api_key)` for sibling MAGI providers.
-    oai_creds: Option<(String, String)>,
-    /// Captured Anthropic key for sibling MAGI providers.
-    anthropic_key_for_siblings: Option<String>,
+    /// The resolved provider kind (Task 4.1: `ProviderKind`, not the retired legacy
+    /// `"openai"`/`"anthropic"` label — the vocabulary is unified now).
+    ///
+    /// Not read by either dispatcher's production code anymore: `run_query_subcommand`/
+    /// `run_consult_subcommand` used to derive `backend_label` from it for the retired
+    /// per-agent adapter machinery, and that whole path is gone. Kept on the struct
+    /// (rather than dropped as a local in `prepare_headless`) because it verifies a
+    /// property `ctx.resolved.provider` alone cannot: that the raw string actually
+    /// PARSED into the REQ-A01b vocabulary, not just that it equals some literal —
+    /// `test_prepare_headless_cli_provider_override_normalizes_the_new_vocabulary` and
+    /// its envelope-field sibling below assert on it directly.
+    #[allow(dead_code)]
+    provider_kind: ProviderKind,
+    /// The MAGI trio built with native providers (REQ-A01), or why it couldn't be
+    /// (REQ-A06). Built ONCE here — both `run_query_subcommand` and
+    /// `run_consult_subcommand` need the exact same result, so this is the shared
+    /// prelude's job, same as the provider/config/vault resolution above it. Task 4.3
+    /// owns the polished per-surface behavior over the `Err` case.
+    consult_magi: Result<Arc<Magi>, TrioError>,
     /// The resolved effective run parameters (model/provider/caps/consult).
     resolved: Resolved,
     /// The resolved user prompt.
@@ -2461,8 +2794,22 @@ async fn prepare_headless(
 
     // Per-field defaults (toml/built-in), then resolution with the CLI
     // overrides and the operator cost ceiling (REQ-H12/H12b).
-    let default_provider =
-        resolve_provider(&magi_config, env::var("MAGI_PROVIDER").ok().as_deref());
+    //
+    // Task 4.1: replaces `resolve_provider`/`legacy_backend_label` — the vocabulary is
+    // unified now (REQ-A01b), so `MAGI_PROVIDER` gets the same explicit-error
+    // treatment as `provider`/`[magi].kind` in the TOML instead of a permissive
+    // pass-through onto a legacy label.
+    let default_provider_kind = match resolve_effective_provider_kind(
+        &magi_config,
+        env::var("MAGI_PROVIDER").ok().as_deref(),
+    ) {
+        Ok(k) => k,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return Err(1);
+        }
+    };
+    let default_provider = default_provider_kind.to_string();
     // MAGI re-gate WARNING (Caspar): `default_model` must be computed for the
     // EFFECTIVE provider, not the config-default one. `resolve()` below
     // applies the envelope's `provider` and `model` overrides INDEPENDENTLY
@@ -2478,22 +2825,29 @@ async fn prepare_headless(
     // `model` still overrides `defaults.model` unconditionally inside
     // `resolve()`, and a neither-set envelope still falls back to the
     // config-default provider's default model exactly as before.
-    // I2 (review round 2): `default_provider` was already normalized (it comes
-    // from `resolve_provider`), but `h.provider`/`envelope.provider` were not —
-    // `magi query --provider ollama` or an envelope `{"provider":"ollama"}`
-    // reached this comparison unmapped. `legacy_backend_label` is idempotent on
-    // an already-normalized value, so wrapping the whole precedence chain is
-    // safe for the `default_provider` fallback too.
-    let effective_provider = legacy_backend_label(
-        &h.provider
-            .clone()
-            .or_else(|| envelope.provider.clone())
-            .unwrap_or_else(|| default_provider.clone()),
-    );
-    let default_model = if effective_provider == "openai" {
-        resolve_openai_model(&magi_config, env::var("OPENAI_MODEL").ok().as_deref())
-    } else {
-        resolve_anthropic_model(&magi_config, env::var("ANTHROPIC_MODEL").ok().as_deref())
+    //
+    // Task 4.1: `h.provider`/`envelope.provider` are validated against the SAME
+    // vocabulary as `MAGI_PROVIDER` above — a garbage `--provider` value now fails
+    // closed here instead of silently reaching `provider_kind == "openai"` unmapped
+    // (the gap `legacy_backend_label`'s idempotent pass-through used to paper over).
+    let effective_provider_kind = match h.provider.as_deref().or(envelope.provider.as_deref()) {
+        Some(raw) => match ProviderKind::parse(raw) {
+            Ok(Some(k)) => k,
+            Ok(None) => default_provider_kind, // blank ⇒ absent, falls to the default
+            Err(e) => {
+                eprintln!("error: {e}");
+                return Err(1);
+            }
+        },
+        None => default_provider_kind,
+    };
+    let default_model = match effective_provider_kind {
+        ProviderKind::Ollama | ProviderKind::OpenAiCompat => {
+            resolve_openai_model(&magi_config, env::var("OPENAI_MODEL").ok().as_deref())
+        }
+        ProviderKind::Anthropic => {
+            resolve_anthropic_model(&magi_config, env::var("ANTHROPIC_MODEL").ok().as_deref())
+        }
     };
     let defaults = ConfigDefaults {
         model: default_model,
@@ -2527,64 +2881,81 @@ async fn prepare_headless(
         h.allow_system_override,
         magi_config.headless.allow_system_override,
     );
-    let mut resolved = resolve_params(
+    let resolved = resolve_params(
         envelope,
         &defaults,
         &overrides,
         operator_ceiling,
         allow_system_override,
     );
-    // I2 (review round 2): same gap as `effective_provider` above —
-    // `resolve_params` applies the SAME override>envelope>defaults precedence
-    // over `h.provider`/`envelope.provider`/`default_provider`, and only the
-    // last of those was normalized. Mutating in place means `provider_kind`
-    // below AND `ctx.resolved.provider` (read directly by callers/tests) both
-    // see the normalized value.
-    resolved.provider = legacy_backend_label(&resolved.provider);
+    // Task 4.1: no more `legacy_backend_label` mutation — `resolved.provider` already
+    // carries the unified REQ-A01b vocabulary end to end (whatever `h.provider`/
+    // `envelope.provider`/`defaults.provider` actually said), and `provider_kind`
+    // (below, used to build the ACTUAL provider) is the peek computed above from the
+    // SAME override>envelope>default precedence, so the two never disagree about
+    // which backend wins.
+    let provider_kind = effective_provider_kind;
 
     // Build the principal provider from the resolved model/provider + keys.
-    let provider_kind = resolved.provider.clone();
-    let mut oai_creds: Option<(String, String)> = None;
-    let (provider, model_label, anthropic_key_for_siblings): (
-        Arc<dyn Provider>,
-        String,
-        Option<String>,
-    ) = if provider_kind == "openai" {
-        let api_key = resolve_openai_key(openai_key.as_deref(), secret_store.as_ref())
-            .unwrap_or_else(|| "ollama".to_string());
-        // Fix round 3 (L1/L2/S1): see `resolve_effective_principal_endpoint`'s doc.
-        let resolved_base_url = match resolve_effective_principal_endpoint(
-            &magi_config,
-            env::var("OPENAI_BASE_URL").ok().as_deref(),
-            secret_store.as_ref(),
-        ) {
-            Ok(r) => r,
-            Err(e) => {
-                eprintln!("error: {e}");
-                return Err(1);
+    let provider: Arc<dyn Provider> = match provider_kind {
+        ProviderKind::Ollama | ProviderKind::OpenAiCompat => {
+            let api_key = resolve_openai_key(openai_key.as_deref(), secret_store.as_ref())
+                .unwrap_or_else(|| "ollama".to_string());
+            // Fix round 3 (L1/L2/S1): see `resolve_effective_principal_endpoint`'s doc.
+            let resolved_base_url = match resolve_effective_principal_endpoint(
+                &magi_config,
+                env::var("OPENAI_BASE_URL").ok().as_deref(),
+                secret_store.as_ref(),
+            ) {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    return Err(1);
+                }
+            };
+            let base_url = resolved_base_url.as_str().to_string();
+            build_openai_provider(&base_url, &api_key, &resolved.model)
+        }
+        ProviderKind::Anthropic => {
+            match discover_config(
+                &magi_config,
+                anthropic_key.as_deref(),
+                secret_store.as_ref(),
+            ) {
+                Some(cfg) => Arc::new(AnthropicProvider::new(cfg.api_key, resolved.model.clone())),
+                None => Arc::new(StaticProvider),
             }
-        };
-        let base_url = resolved_base_url.as_str().to_string();
-        oai_creds = Some((base_url.clone(), api_key.clone()));
-        (
-            build_openai_provider(&base_url, &api_key, &resolved.model),
-            resolved.model.clone(),
-            None,
-        )
-    } else if let Some(cfg) = discover_config(
-        &magi_config,
-        anthropic_key.as_deref(),
-        secret_store.as_ref(),
-    ) {
-        let key = cfg.api_key;
-        (
-            Arc::new(AnthropicProvider::new(key.clone(), resolved.model.clone())),
-            resolved.model.clone(),
-            Some(key),
-        )
-    } else {
-        (Arc::new(StaticProvider), "static".to_string(), None)
+        }
     };
+
+    // Build the MAGI trio with native providers (REQ-A01), independent of the
+    // principal provider's own availability — see the TUI `run()` block's own
+    // comment for why. Built ONCE here (the shared prelude), not by each dispatcher:
+    // `run_query_subcommand` and `run_consult_subcommand` need the identical result.
+    let endpoints = match resolve_endpoints(&magi_config, secret_store.as_ref()) {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return Err(1);
+        }
+    };
+    let creds = EnvVaultCredentials {
+        magi_config: &magi_config,
+        anthropic_env: anthropic_key.as_deref(),
+        openai_env: openai_key.as_deref(),
+        secret_store: secret_store.as_ref(),
+    };
+    let mut trio_notices: Vec<Notice> = Vec::new();
+    let consult_magi = build_magi_orchestrator(
+        &magi_config,
+        &endpoints,
+        Some(&creds),
+        None,
+        &mut trio_notices,
+    );
+    for n in render_notices(trio_notices) {
+        eprintln!("{n}");
+    }
 
     let embed_key = resolve_openai_key(openai_key.as_deref(), secret_store.as_ref());
     let run_log = match build_run_log(
@@ -2606,9 +2977,7 @@ async fn prepare_headless(
         magi_config,
         provider,
         provider_kind,
-        model_label,
-        oai_creds,
-        anthropic_key_for_siblings,
+        consult_magi,
         resolved,
         prompt,
         tier,
@@ -2663,10 +3032,7 @@ async fn run_query_subcommand(
         workdir,
         magi_config,
         provider,
-        provider_kind,
-        model_label,
-        oai_creds,
-        anthropic_key_for_siblings,
+        consult_magi,
         resolved,
         prompt,
         tier,
@@ -2678,29 +3044,15 @@ async fn run_query_subcommand(
         ..
     } = ctx;
 
-    let backend_label = if provider_kind == "openai" {
-        "openai"
-    } else {
-        "anthropic"
-    };
-    // MAGI orchestrator for a forced/proactive `consult`; none over a static
-    // provider (no live backend to drive the three perspectives).
-    let consult_magi: Option<Arc<Magi>> = if provider.is_static() {
-        None
-    } else {
-        match build_magi_orchestrator(
-            provider.clone(),
-            backend_label,
-            &model_label,
-            &magi_config,
-            oai_creds,
-            anthropic_key_for_siblings,
-        ) {
-            Ok(m) => Some(m),
-            Err(e) => {
-                eprintln!("error: {e}");
-                return 1;
-            }
+    // Task 4.1: the trio is built ONCE, in `prepare_headless` (the shared prelude) —
+    // this dispatcher only converts its `Result` to the `Option` the tool-registration
+    // call below expects. Task 4.3 owns surfacing the `Err` case per REQ-A06; the
+    // non-silent stderr line here is the minimum until then (B9).
+    let consult_magi: Option<Arc<Magi>> = match consult_magi {
+        Ok(m) => Some(m),
+        Err(e) => {
+            eprintln!("note: MAGI trio unavailable: {e}");
+            None
         }
     };
 
@@ -2780,10 +3132,7 @@ async fn run_consult_subcommand(
     let HeadlessContext {
         magi_config,
         provider,
-        provider_kind,
-        model_label,
-        oai_creds,
-        anthropic_key_for_siblings,
+        consult_magi,
         resolved,
         prompt,
         mut run_log,
@@ -2793,16 +3142,9 @@ async fn run_consult_subcommand(
         ..
     } = ctx;
 
-    let backend_label = if provider_kind == "openai" {
-        "openai"
-    } else {
-        "anthropic"
-    };
     // Explicit `--mode` (already resolved by the caller via
     // `Args::mode_of_consult()`), or the envelope's own `mode` field — wins at
-    // zero cost; its absence classifies over the PRINCIPAL provider (REQ-A07c)
-    // — `provider` cloned before it is consumed below, since
-    // `build_magi_orchestrator` needs its own owned handle.
+    // zero cost; its absence classifies over the PRINCIPAL provider (REQ-A07c).
     let explicit_mode = explicit_mode.or(env_mode);
     // `[magi].default_mode` (REQ-A15): fixes the lens for every invocation that
     // does not declare one, without touching this call site again.
@@ -2813,17 +3155,14 @@ async fn run_consult_subcommand(
         || env_untrusted_content
         || magi_config.magi.untrusted_content.unwrap_or(false);
     let classifier = crate::agent::mode_classifier::ProviderClassifier::new(
-        provider.clone(),
+        provider,
         Arc::new(crate::agent::mode_classifier::ProcessNoticeSink::default()),
     );
-    let magi = match build_magi_orchestrator(
-        provider,
-        backend_label,
-        &model_label,
-        &magi_config,
-        oai_creds,
-        anthropic_key_for_siblings,
-    ) {
+    // Task 4.1: the trio is built ONCE, in `prepare_headless` (the shared prelude); a
+    // forced `magi consult` needs a LIVE trio unconditionally, so an unbuildable one
+    // fails this run closed exactly as it did before (REQ-A06's polished per-surface
+    // message is Task 4.3's own contract).
+    let magi = match consult_magi {
         Ok(m) => m,
         Err(e) => {
             eprintln!("error: {e}");
@@ -3651,23 +3990,29 @@ mod tests {
         Arc::new(Mutex::new(store)) as SharedSecretStore
     }
 
+    /// Wiring smoke test (Task 6, updated Task 4.1): env > TOML > default
+    /// (Ollama-first). Pure resolution; no side effects. `resolve_provider` (the
+    /// legacy-label-normalizing shim this test used to exercise) is retired — the
+    /// unified `resolve_effective_provider_kind` is covered directly in
+    /// `config.rs`'s own tests; this one just pins that `main.rs` sees the SAME
+    /// resolution its callers depend on.
     #[test]
-    fn test_resolve_provider_wiring() {
-        // Wiring smoke test (Task 6): env > TOML > default "openai" (Ollama-first).
-        // Pure resolution; no side effects. The real branching in main() is
-        // covered by integration with this same helper.
-        use crate::config::{resolve_provider, MagiConfig};
+    fn test_resolve_effective_provider_kind_wiring() {
         assert_eq!(
-            resolve_provider(
+            resolve_effective_provider_kind(
                 &MagiConfig {
                     provider: Some("anthropic".into()),
                     ..Default::default()
                 },
-                Some("openai")
-            ),
-            "openai"
+                Some("ollama")
+            )
+            .unwrap(),
+            ProviderKind::Ollama
         );
-        assert_eq!(resolve_provider(&MagiConfig::default(), None), "openai");
+        assert_eq!(
+            resolve_effective_provider_kind(&MagiConfig::default(), None).unwrap(),
+            ProviderKind::Ollama
+        );
     }
 
     /// SC-A22: `--init-config` was retired (REQ-A22). Fix round 2 (coordinator,
@@ -4689,12 +5034,12 @@ mod tests {
         // common case.
         //
         // `init_default_workspace()` scaffolds `.magi/magi.toml` via
-        // `render_default_magi_toml()`, which declares `provider = "ollama"` (the new
-        // REQ-A01b vocabulary — the file no longer parses with the old `"openai"`).
-        // `resolve_provider` normalizes that onto the legacy `"openai"` backend label
-        // this file's `provider_kind == "openai"` branching still compares against
-        // (`// TASK 4.1:` shim in `src/config.rs`), so a freshly-scaffolded workspace
-        // routes exactly as it did before Task 1.1: Ollama-first, no behavior change.
+        // `render_default_magi_toml()`, which declares `provider = "ollama"` (REQ-A01b).
+        // Task 4.1 retired the `resolve_provider`/`legacy_backend_label` shim that used
+        // to normalize this onto the legacy `"openai"` string — with the vocabulary
+        // unified end to end, `resolved.provider` now shows the value the file
+        // actually says, `"ollama"`, not a translation of it. The ROUTING stays
+        // Ollama-first either way; only the string representation changed.
         with_var("MAGI_PROVIDER", None, || {
             with_var("ANTHROPIC_MODEL", None, || {
                 with_var("OPENAI_MODEL", None, || {
@@ -4711,19 +5056,20 @@ mod tests {
                         .block_on(prepare_headless(&h, None, &cwd, None, None))
                         .expect("prepare_headless must succeed");
 
-                    assert_eq!(ctx.resolved.provider, "openai");
+                    assert_eq!(ctx.resolved.provider, "ollama");
+                    assert_eq!(ctx.provider_kind, ProviderKind::Ollama);
                     assert_eq!(ctx.resolved.model, crate::defaults::DEFAULT_OPENAI_MODEL);
                 });
             });
         });
     }
 
-    /// I2 (review round 2): the shim only normalized `default_provider` (the
-    /// `env > TOML > default` winner) — `h.provider` (the CLI `--provider` flag)
-    /// reached `effective_provider`/`resolved.provider` unnormalized. `magi query
-    /// --provider ollama` must still route to the same backend as before Task
-    /// 1.1, not silently build an Anthropic provider because `"ollama" !=
-    /// "openai"`.
+    /// I2 (review round 2), updated Task 4.1: the retired shim only normalized
+    /// `default_provider` (the `env > TOML > default` winner) — `h.provider` (the CLI
+    /// `--provider` flag) reached `effective_provider`/`resolved.provider`
+    /// unnormalized. `magi query --provider ollama` must still route to the Ollama
+    /// backend, now via `ProviderKind::parse` validating the SAME value directly
+    /// instead of a legacy-label pass-through.
     #[test]
     fn test_prepare_headless_cli_provider_override_normalizes_the_new_vocabulary() {
         with_var("MAGI_PROVIDER", None, || {
@@ -4743,14 +5089,15 @@ mod tests {
                         .block_on(prepare_headless(&h, None, &cwd, None, None))
                         .expect("prepare_headless must succeed");
 
-                    assert_eq!(ctx.resolved.provider, "openai");
-                    assert_eq!(ctx.provider_kind, "openai");
+                    assert_eq!(ctx.resolved.provider, "ollama");
+                    assert_eq!(ctx.provider_kind, ProviderKind::Ollama);
                 });
             });
         });
     }
 
-    /// I2: same gap, via the envelope's `provider` field instead of the CLI flag.
+    /// I2, updated Task 4.1: same gap, via the envelope's `provider` field instead of
+    /// the CLI flag.
     #[test]
     fn test_prepare_headless_envelope_provider_override_normalizes_the_new_vocabulary() {
         with_var("MAGI_PROVIDER", None, || {
@@ -4770,8 +5117,8 @@ mod tests {
                         .block_on(prepare_headless(&h, None, &cwd, None, None))
                         .expect("prepare_headless must succeed");
 
-                    assert_eq!(ctx.resolved.provider, "openai");
-                    assert_eq!(ctx.provider_kind, "openai");
+                    assert_eq!(ctx.resolved.provider, "ollama");
+                    assert_eq!(ctx.provider_kind, ProviderKind::Ollama);
                 });
             });
         });
@@ -5038,11 +5385,617 @@ mod tests {
             h.no_memory = true;
 
             let rt = tokio::runtime::Runtime::new().unwrap();
-            let code = rt.block_on(run_consult_subcommand(h, None, None, &cwd, None, None));
+            // Task 4.1: `run_consult_subcommand` needs a LIVE MAGI trio unconditionally
+            // (a forced consult has nowhere else to go) — `init_static_workspace`'s
+            // `provider = "anthropic"` with NO key used to still "build" a trio under
+            // the retired adapter (it wrapped whatever principal provider existed,
+            // `StaticProvider` included, without checking credentials at all). The
+            // native trio checks its OWN credentials for real (REQ-A05b), so it
+            // correctly refuses to build here without one. A fake key is enough — it
+            // is only ever used to satisfy `ClaudeProvider::with_timeout`'s
+            // constructor (which never makes a network call); `analyze_direct`
+            // (`src/headless_runner.rs`) rejects the oversized prompt BEFORE
+            // `magi.analyze()` is ever reached, so this stays real-network-free
+            // (R-A04).
+            let code = rt.block_on(run_consult_subcommand(
+                h,
+                None,
+                None,
+                &cwd,
+                Some("sk-ant-test-fake-key".to_string()),
+                None,
+            ));
             assert_eq!(
                 code, 2,
                 "an over-cap consult prompt ⇒ exit 2 (rejected, not truncated)"
             );
         });
+    }
+
+    /// Task 4.1 — construcción del trío con providers nativos.
+    ///
+    /// SC-A01, SC-A02, SC-A03, SC-A05, SC-A05b, SC-A05c cerradas acá. SC-A04 ya está
+    /// cerrada por `magi::mod::derived_scale_satisfies_invariant_across_the_whole_
+    /// admissible_range` (Fase 0/1) — no es territorio de esta tarea, así que no se
+    /// duplica. SC-A06 (comportamiento por superficie cuando el trío no es
+    /// construible: mensaje accionable en la TUI, `consult` ausente del registro,
+    /// headless cerrado) queda **SIN TEST propio acá**: es el contrato completo de
+    /// Task 4.3 (`trio_unavailable_message`), que aún no existe — ver el reporte de
+    /// esta tarea.
+    mod trio_construction {
+        use super::*;
+        use magi_core::error::ExternalErrorKind;
+        use magi_core::provider::CompletionConfig;
+        use magi_core::test_support::valid_verdict_for_current_agent;
+        use std::time::Instant;
+
+        /// Endpoint de prueba: una `base_url` plana sin placeholders, así que
+        /// resolverla no necesita un vault real — `NoVaultInScope` (ya en
+        /// producción) alcanza.
+        fn test_endpoints() -> ResolvedEndpoints {
+            let tpl = EndpointTemplate::parse("http://localhost:11434/v1").unwrap();
+            ResolvedEndpoints {
+                root: tpl.resolve(&mut NoVaultInScope, Scope::Root).unwrap(),
+                magi: tpl.resolve(&mut NoVaultInScope, Scope::Magi).unwrap(),
+                embedding: tpl.resolve(&mut NoVaultInScope, Scope::Embedding).unwrap(),
+            }
+        }
+
+        /// Credenciales fijas de prueba, sin env ni vault detrás.
+        struct FixedCreds {
+            openai: Option<String>,
+            anthropic: Option<String>,
+        }
+        impl Credentials for FixedCreds {
+            fn openai(&self) -> Option<String> {
+                self.openai.clone()
+            }
+            fn anthropic(&self) -> Option<String> {
+                self.anthropic.clone()
+            }
+        }
+        fn creds() -> FixedCreds {
+            FixedCreds {
+                openai: Some("test-openai-key".to_string()),
+                anthropic: Some("claude-test-key".to_string()),
+            }
+        }
+
+        fn cfg_openai_compat_without_credentials() -> MagiConfig {
+            MagiConfig::from_toml_str("provider = \"openai-compat\"\n").unwrap()
+        }
+
+        /// Solo Caspar tiene un modelo que no resuelve a un alias Claude válido; los
+        /// otros dos heredan el modelo del backend (`[anthropic].model`, válido). La
+        /// falla de UN asiento sin tocar los otros dos necesita un eje que varíe por
+        /// asiento — un modelo inválido es el único que `build_native_provider` tiene
+        /// (la credencial y el endpoint son compartidos por los tres).
+        ///
+        /// El string NO puede contener la subcadena `"claude-"` en ningún lado:
+        /// `resolve_claude_alias` (magi-core) acepta CUALQUIER modelo que la
+        /// contenga como passthrough — `"not-a-real-claude-alias"` la contiene
+        /// (`…real-`**`claude-`**`alias`) y por eso resolvía OK, no era el fixture
+        /// roto que este test necesitaba.
+        fn cfg_with_only_caspar_unbuildable() -> MagiConfig {
+            MagiConfig::from_toml_str(
+                "provider = \"anthropic\"\n\
+                 [anthropic]\n\
+                 model = \"claude-sonnet-4-6\"\n\
+                 [magi]\n\
+                 caspar_model = \"totally-bogus-alias\"\n",
+            )
+            .unwrap()
+        }
+
+        /// Construida a mano, saltando la validación de `from_toml_str`
+        /// (`validate_vocabulary`) A PROPÓSITO: un `kind` inválido nunca llega a
+        /// `build_magi_orchestrator` por la ruta de producción real (`load()`/
+        /// `from_toml_str()` ya lo rechazan antes), pero la función igual debe
+        /// reportarlo — defensa en profundidad, ver el rustdoc de
+        /// `build_magi_orchestrator` sobre por qué NO usa
+        /// `cfg.effective_magi_kind()` para esto.
+        fn cfg_with_kind(kind: &str) -> MagiConfig {
+            MagiConfig {
+                provider: Some("ollama".to_string()),
+                magi: crate::config::MagiSectionConfig {
+                    kind: Some(kind.to_string()),
+                    ..crate::config::MagiSectionConfig::default()
+                },
+                ..MagiConfig::default()
+            }
+        }
+
+        /// Contenido por encima de cualquier mínimo interno de magi-core — no es el
+        /// gate de complejidad de REQ-A20 (`Magi::analyze` acá no lo usa: `[NO usar
+        /// MagiBuilder::with_complexity_gate]`, decisión de la spec), es
+        /// simplemente "no vacío y realista".
+        fn content_above_gate() -> String {
+            "x".repeat(300)
+        }
+
+        /// Verdict válido y ATRIBUIDO al agente correcto — `parse_validate_and_check`
+        /// de magi-core rechaza un verdict cuyo campo `"agent"` no coincide con a
+        /// quién se despachó (`AgentIdentity`), así que no alcanza con
+        /// `valid_verdict_for_current_agent()` fuera de un scope de
+        /// `CURRENT_AGENT_IDENTITY` — ese task-local es privado de magi-core y solo
+        /// está activo DURANTE el despacho real, no al construir la respuesta de
+        /// antemano para un `RoutingMockProvider`.
+        fn verdict_for(agent: AgentName) -> String {
+            let name = serde_json::to_value(agent)
+                .ok()
+                .and_then(|v| v.as_str().map(str::to_owned))
+                .unwrap_or_else(|| "melchior".to_string());
+            format!(
+                "{}\n{{\"agent\":\"{name}\",\"verdict\":\"approve\",\"confidence\":0.9,\
+                 \"summary\":\"ok\",\"reasoning\":\"r\",\"recommendation\":\"go\",\
+                 \"findings\":[]}}\n{}",
+                magi_core::verdict_markers::VERDICT_OPEN,
+                magi_core::verdict_markers::VERDICT_CLOSE,
+            )
+        }
+
+        /// Provider de prueba que graba el system/user prompt que recibió. Cada
+        /// asiento del trío recibe su PROPIA instancia (no compartida): magi-core
+        /// enruta por asignación (`MagiBuilder::with_provider`), no por identidad de
+        /// tarea, así que no hace falta leer `CURRENT_AGENT_IDENTITY` (privado de
+        /// magi-core) para saber "para quién" es esta llamada — la instancia YA lo
+        /// sabe, por construcción.
+        struct CapturingProvider {
+            captured: std::sync::Mutex<Option<(String, String)>>,
+        }
+        impl CapturingProvider {
+            fn new() -> Arc<Self> {
+                Arc::new(Self {
+                    captured: std::sync::Mutex::new(None),
+                })
+            }
+            fn system_prompt(&self) -> String {
+                self.captured
+                    .lock()
+                    .unwrap()
+                    .clone()
+                    .map(|(s, _)| s)
+                    .unwrap_or_default()
+            }
+            fn user_prompt(&self) -> String {
+                self.captured
+                    .lock()
+                    .unwrap()
+                    .clone()
+                    .map(|(_, u)| u)
+                    .unwrap_or_default()
+            }
+        }
+        #[async_trait::async_trait]
+        impl LlmProvider for CapturingProvider {
+            async fn complete(
+                &self,
+                system_prompt: &str,
+                user_prompt: &str,
+                _config: &CompletionConfig,
+            ) -> Result<String, ProviderError> {
+                *self.captured.lock().unwrap() =
+                    Some((system_prompt.to_string(), user_prompt.to_string()));
+                Ok(valid_verdict_for_current_agent())
+            }
+            fn name(&self) -> &str {
+                "capturing"
+            }
+            fn model(&self) -> &str {
+                "capturing"
+            }
+        }
+
+        struct CapturedTrio {
+            melchior: Arc<CapturingProvider>,
+            balthasar: Arc<CapturingProvider>,
+            caspar: Arc<CapturingProvider>,
+        }
+        impl CapturedTrio {
+            fn system_prompt_of(&self, seat: AgentName) -> String {
+                match seat {
+                    AgentName::Melchior => self.melchior.system_prompt(),
+                    AgentName::Balthasar => self.balthasar.system_prompt(),
+                    AgentName::Caspar => self.caspar.system_prompt(),
+                }
+            }
+            fn user_prompt_of(&self, seat: AgentName) -> String {
+                match seat {
+                    AgentName::Melchior => self.melchior.user_prompt(),
+                    AgentName::Balthasar => self.balthasar.user_prompt(),
+                    AgentName::Caspar => self.caspar.user_prompt(),
+                }
+            }
+        }
+
+        /// Construye un trío EXACTAMENTE con la forma que `build_magi_orchestrator`
+        /// arma el suyo — cada asiento con su PROPIO provider vía
+        /// `MagiBuilder::with_provider()`, sin un adapter que doble el prompt — para
+        /// verificar SC-A01. No pasa por `build_magi_orchestrator` en sí: ese
+        /// construye providers HTTP reales (`OpenAiCompatibleProvider`/
+        /// `ClaudeProvider`) para los que no hay punto de inyección de un test
+        /// double, y llamarlo golpearía la red (prohibido, R-A04). Esta función
+        /// prueba la MISMA forma de construcción con providers de prueba en su
+        /// lugar — junto con SC-A02 (que fija que ningún adapter de folding existe
+        /// en producción), cierran la propiedad end to end.
+        async fn build_trio_with_capturing_providers() -> CapturedTrio {
+            let melchior = CapturingProvider::new();
+            let balthasar = CapturingProvider::new();
+            let caspar = CapturingProvider::new();
+            let magi = MagiBuilder::new(melchior.clone() as Arc<dyn LlmProvider>)
+                .with_provider(AgentName::Melchior, melchior.clone())
+                .with_provider(AgentName::Balthasar, balthasar.clone())
+                .with_provider(AgentName::Caspar, caspar.clone())
+                .build()
+                .expect("test trio should build");
+            let _ = magi.analyze(&Mode::Analysis, &content_above_gate()).await;
+            CapturedTrio {
+                melchior,
+                balthasar,
+                caspar,
+            }
+        }
+
+        /// SC-A01: el system prompt llega ÍNTEGRO por el canal del provider, nunca
+        /// doblado dentro del turno de usuario. Es la propiedad que dejó de
+        /// sostenerse cuando el trío pasaba por `MagiCoreProviderAdapter` (retirado
+        /// esta misma tarea): ese adapter concatenaba `"{system}\n\n{user}"` antes
+        /// de llegar a un `Provider` de magi-rs de un solo canal. Nada en
+        /// `build_native_provider`/`build_magi_orchestrator` hace eso — devuelven el
+        /// provider nativo DIRECTO, sin envoltorio.
+        #[tokio::test]
+        async fn each_mage_receives_its_system_prompt_in_the_providers_own_channel() {
+            let captured = build_trio_with_capturing_providers().await;
+            for seat in [AgentName::Melchior, AgentName::Balthasar, AgentName::Caspar] {
+                let system = captured.system_prompt_of(seat);
+                let user = captured.user_prompt_of(seat);
+                assert!(!system.is_empty(), "{seat:?}: no recibió system prompt");
+                assert!(
+                    !user.contains(&system),
+                    "{seat:?}: el system prompt se dobló dentro del turno de usuario"
+                );
+            }
+        }
+
+        /// SC-A02: ninguna ruta de producción implementa `LlmProvider` a través de un
+        /// adapter que doble el prompt.
+        ///
+        /// NO se grepea el patrón crudo `"impl LlmProvider for"` sobre TODO `src/`:
+        /// los test doubles de ESTE MISMO archivo (`CapturingProvider` arriba) también
+        /// lo implementan, así que ese grep tendría un falso positivo por diseño en
+        /// cuanto existiera un solo test double — que es justamente lo que esta tarea
+        /// necesita para probar SC-A01/SC-A03/SC-A05 sin red real (R-A04). Lo que
+        /// SC-A02 pide en realidad — "la adaptación del prompt no sobrevive" — se
+        /// verifica por la AUSENCIA de una CONSTRUCCIÓN del tipo concreto retirado
+        /// (su llamada de constructor, `::new`), no por un grep ciego del trait ni
+        /// por la ausencia del NOMBRE — el nombre sigue apareciendo, a propósito, en
+        /// comentarios que documentan qué se retiró y por qué (este mismo archivo,
+        /// `agent/messages.rs`, `tui/mod.rs`).
+        #[test]
+        fn no_production_path_implements_llm_provider_via_a_folding_adapter() {
+            // Built at RUNTIME, in two pieces: written as one literal it would match
+            // grep's OWN needle on THIS line, in THIS file — a self-referential false
+            // positive that would make the test permanently red the moment it exists.
+            let needle = format!("{}{}", "MagiCoreProviderAdapter", "::new");
+            let out = std::process::Command::new("grep")
+                .args(["-rl", &needle, "src/"])
+                .current_dir(env!("CARGO_MANIFEST_DIR"))
+                .output()
+                .expect("grep must run");
+            assert!(
+                String::from_utf8_lossy(&out.stdout).trim().is_empty(),
+                "the retired adapter type must never be CONSTRUCTED again in src/"
+            );
+        }
+
+        /// SC-A02c: `kind` inválido ⇒ trío no construible; vacío ⇒ hereda.
+        #[test]
+        fn an_unknown_kind_makes_the_trio_unbuildable_while_a_blank_one_inherits() {
+            let mut notices = Vec::new();
+            assert!(
+                matches!(
+                    build_magi_orchestrator(
+                        &cfg_with_kind("banana"),
+                        &test_endpoints(),
+                        None,
+                        None,
+                        &mut notices,
+                    ),
+                    Err(TrioError::UnknownKind(_))
+                ),
+                "un kind no reconocido debe reportarse tipado, no adivinarse"
+            );
+
+            let c = creds();
+            let mut notices = Vec::new();
+            assert!(
+                build_magi_orchestrator(
+                    &cfg_with_kind(""),
+                    &test_endpoints(),
+                    Some(&c),
+                    None,
+                    &mut notices,
+                )
+                .is_ok(),
+                "un kind vacío hereda del principal en vez de fallar"
+            );
+        }
+
+        /// SC-A05b / SC-A05c: los asientos caídos se nombran, y TODOS de una.
+        ///
+        /// El fixture usa `kind = "openai-compat"` a propósito: `ollama` es keyless,
+        /// así que nunca produce `MissingCredential` y el test no probaría nada.
+        #[test]
+        fn unbuildable_seats_are_named_all_at_once() {
+            let mut notices = Vec::new();
+            // `.expect_err()` needs the `Ok` side (`Arc<Magi>`) to be `Debug`, which
+            // it is not — `match` avoids that bound entirely.
+            let err = match build_magi_orchestrator(
+                &cfg_openai_compat_without_credentials(),
+                &test_endpoints(),
+                None,
+                None,
+                &mut notices,
+            ) {
+                Ok(_) => panic!("sin credencial el trío no es construible"),
+                Err(e) => e,
+            };
+            match err {
+                TrioError::SeatUnbuildable { seats } => {
+                    assert_eq!(
+                        seats.len(),
+                        3,
+                        "los tres comparten credencial: reportar de a uno obliga a tres arranques"
+                    );
+                    assert!(seats
+                        .iter()
+                        .all(|(_, cause)| matches!(cause, SeatError::MissingCredential { .. })));
+                }
+                other => panic!("esperaba SeatUnbuildable, salió {other:?}"),
+            }
+        }
+
+        /// Asientos parciales: 1 de 3 caídos también se reporta completo, y SOLO ese.
+        #[test]
+        fn a_partial_seat_failure_names_exactly_the_seats_that_failed() {
+            let c = creds();
+            let mut notices = Vec::new();
+            let err = match build_magi_orchestrator(
+                &cfg_with_only_caspar_unbuildable(),
+                &test_endpoints(),
+                Some(&c),
+                None,
+                &mut notices,
+            ) {
+                Ok(_) => panic!("un asiento caído basta para que el trío no sea construible"),
+                Err(e) => e,
+            };
+            match err {
+                TrioError::SeatUnbuildable { seats } => {
+                    assert_eq!(seats.len(), 1);
+                    assert_eq!(seats[0].0, AgentName::Caspar);
+                }
+                other => panic!("esperaba SeatUnbuildable, salió {other:?}"),
+            }
+        }
+
+        /// SC-A03: un fallo transitorio se reintenta y el mage responde. Prueba que
+        /// `build_magi_orchestrator` envuelve cada asiento en `RetryProvider`
+        /// (REQ-A03): sin el envoltorio, `MagiBuilder::build()` no reintenta nada y
+        /// este test se pone rojo.
+        ///
+        /// Usa `RoutingMockProvider` de magi-core (feature `test-utils`, ya
+        /// habilitada) en vez de un contador propio: enruta por asiento vía
+        /// `CURRENT_AGENT_IDENTITY`, así que UNA sola instancia compartida entre los
+        /// tres asientos no confunde las respuestas de uno con las de otro bajo el
+        /// despacho PARALELO real de magi-core (verificado, SC-A04e) — un contador
+        /// compartido ingenuo sí lo haría, y por eso este test no afirma un conteo
+        /// total de intentos: con tres asientos despachando en paralelo, cada uno
+        /// con su propio `RetryProvider`, el número total de llamadas depende del
+        /// entrelazado exacto y no es la propiedad que REQ-A03 promete. Lo que sí
+        /// promete — y lo que este test afirma — es que los tres asientos
+        /// SOBREVIVEN su fallo inicial y el consenso queda completo.
+        #[tokio::test]
+        async fn a_transient_failure_is_retried_and_the_mage_answers() {
+            let transient = || Err(ProviderError::external("boom", ExternalErrorKind::Network));
+            let shared = Arc::new(
+                magi_core::test_support::RoutingMockProvider::new()
+                    .with_agent_responses(
+                        AgentName::Melchior,
+                        vec![transient(), Ok(verdict_for(AgentName::Melchior))],
+                    )
+                    .with_agent_responses(
+                        AgentName::Balthasar,
+                        vec![transient(), Ok(verdict_for(AgentName::Balthasar))],
+                    )
+                    .with_agent_responses(
+                        AgentName::Caspar,
+                        vec![transient(), Ok(verdict_for(AgentName::Caspar))],
+                    ),
+            );
+            let retry = RetryConfig::default();
+            let wrap = || {
+                Arc::new(RetryProvider::with_config(
+                    shared.clone() as Arc<dyn LlmProvider>,
+                    retry.clone(),
+                )) as Arc<dyn LlmProvider>
+            };
+            let magi = MagiBuilder::new(wrap())
+                .with_provider(AgentName::Melchior, wrap())
+                .with_provider(AgentName::Balthasar, wrap())
+                .with_provider(AgentName::Caspar, wrap())
+                .build()
+                .expect("test trio should build");
+
+            let report = magi
+                .analyze(&Mode::Analysis, &content_above_gate())
+                .await
+                .expect("responde pese al fallo transitorio de cada asiento");
+            assert!(!report.degraded, "y el consenso quedó completo");
+        }
+
+        /// Provider que agota su presupuesto de reintentos SIEMPRE fallando —
+        /// "cuelga" en el sentido de REQ-A05: nunca produce un veredicto utilizable,
+        /// así que el ÚNICO camino de salida es que `RetryProvider` abandone por
+        /// presupuesto agotado, nunca que el proveedor "se resuelva solo".
+        struct AlwaysFailingProvider {
+            calls: std::sync::atomic::AtomicUsize,
+        }
+        #[async_trait::async_trait]
+        impl LlmProvider for AlwaysFailingProvider {
+            async fn complete(
+                &self,
+                _s: &str,
+                _u: &str,
+                _c: &CompletionConfig,
+            ) -> Result<String, ProviderError> {
+                self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                Err(ProviderError::external("hangs", ExternalErrorKind::Timeout))
+            }
+            fn name(&self) -> &str {
+                "always-failing"
+            }
+            fn model(&self) -> &str {
+                "always-failing"
+            }
+        }
+
+        /// SC-A05: un provider que nunca produce un veredicto abandona con una razón
+        /// TIPADA, y lo hace bien ANTES de agotar el techo por mage — un corte opaco
+        /// del techo externo no distingue "colgado" de "lento". Usa un
+        /// `operation_budget` chico en vez del derivado de `AGENT_TIMEOUT_SECS`
+        /// (90 s): la propiedad bajo prueba es la FORMA del abandono (temprano,
+        /// tipado), no el valor exacto del presupuesto derivado — eso ya lo prueba
+        /// `derived_scale_satisfies_invariant_across_the_whole_admissible_range` en
+        /// `magi/mod.rs`, exhaustivamente, sin gastar segundos reales de reloj.
+        /// `max_retries` alto (50) es lo que hace la señal inequívoca: si el
+        /// presupuesto NO estuviera acotando el abandono, agotar 50 reintentos a
+        /// 20 ms cada uno tomaría ~1 s — muy por encima del margen que este test
+        /// tolera.
+        #[tokio::test]
+        async fn a_hanging_provider_abandons_before_the_ceiling() {
+            let inner = Arc::new(AlwaysFailingProvider {
+                calls: std::sync::atomic::AtomicUsize::new(0),
+            });
+            // `RetryConfig` is `#[non_exhaustive]`: build from `default()` and adjust
+            // per field, same as `build_magi_orchestrator` itself.
+            let mut retry = RetryConfig::default();
+            retry.operation_budget = Duration::from_millis(60);
+            retry.base_delay = Duration::ZERO;
+            retry.max_retries = 50;
+            let provider = RetryProvider::with_config(inner as Arc<dyn LlmProvider>, retry);
+
+            let started = Instant::now();
+            let err = provider
+                .complete("s", "u", &CompletionConfig::default())
+                .await
+                .expect_err("debe abandonar");
+            let elapsed = started.elapsed();
+
+            assert!(
+                matches!(err, ProviderError::RetryAbandoned { .. }),
+                "el abandono debe nombrar su causa (RetryAbandoned), no ser un corte mudo: {err}"
+            );
+            assert!(
+                elapsed < Duration::from_millis(500),
+                "abandonó mucho antes de lo que tomarían 50 reintentos reales: {elapsed:?}"
+            );
+        }
+
+        /// `resolve_endpoints`: los tres campos se resuelven de una — cubre el
+        /// `root` y el `embedding` que `build_magi_orchestrator` no toca (solo usa
+        /// `.magi`), que de otro modo quedarían sin lector.
+        #[test]
+        fn resolve_endpoints_resolves_the_three_fields_from_the_same_root_when_none_diverge() {
+            let cfg = MagiConfig::default();
+            let resolved = resolve_endpoints(&cfg, None).expect("sin placeholders, sin vault");
+            assert_eq!(
+                resolved.root.as_str(),
+                crate::defaults::DEFAULT_OPENAI_BASE_URL
+            );
+            assert_eq!(
+                resolved.magi.as_str(),
+                crate::defaults::DEFAULT_OPENAI_BASE_URL
+            );
+            assert_eq!(
+                resolved.embedding.as_str(),
+                crate::defaults::DEFAULT_OPENAI_BASE_URL
+            );
+        }
+
+        /// El trío puede divergir del endpoint de raíz; el embedder, sin override,
+        /// hereda la raíz igual que siempre.
+        #[test]
+        fn resolve_endpoints_lets_the_trio_diverge_from_the_root() {
+            let cfg = MagiConfig::from_toml_str(
+                "base_url = \"http://root:11434/v1\"\n\
+                 [magi]\n\
+                 base_url = \"http://trio:11434/v1\"\n",
+            )
+            .unwrap();
+            let resolved = resolve_endpoints(&cfg, None).unwrap();
+            assert_eq!(resolved.root.as_str(), "http://root:11434/v1");
+            assert_eq!(resolved.magi.as_str(), "http://trio:11434/v1");
+            assert_eq!(resolved.embedding.as_str(), "http://root:11434/v1");
+        }
+
+        #[test]
+        fn seat_error_variants_have_a_readable_display() {
+            assert!(SeatError::Http { status: 401 }.to_string().contains("401"));
+            assert!(SeatError::MissingCredential {
+                var: "OPENAI_API_KEY"
+            }
+            .to_string()
+            .contains("OPENAI_API_KEY"));
+        }
+
+        #[test]
+        fn trio_error_no_seats_has_a_readable_display() {
+            assert!(!TrioError::NoSeats.to_string().is_empty());
+        }
+
+        #[test]
+        fn openai_compat_root_normalizes_a_missing_v1_suffix_and_says_so() {
+            let (root, notice) = openai_compat_root("http://localhost:11434");
+            assert_eq!(root, "http://localhost:11434/v1");
+            assert!(notice.is_some());
+
+            let (root, notice) = openai_compat_root("http://localhost:11434/v1");
+            assert_eq!(root, "http://localhost:11434/v1");
+            assert!(notice.is_none(), "ya normalizado: sin aviso");
+
+            let (root, _) = openai_compat_root("http://localhost:11434/v1/");
+            assert_eq!(
+                root, "http://localhost:11434/v1",
+                "idempotente ante una barra final"
+            );
+        }
+
+        #[test]
+        fn env_vault_credentials_resolves_openai_and_anthropic_from_env() {
+            let cfg = MagiConfig::default();
+            let c = EnvVaultCredentials {
+                magi_config: &cfg,
+                anthropic_env: Some("sk-ant-test"),
+                openai_env: Some("sk-oai-test"),
+                secret_store: None,
+            };
+            assert_eq!(c.openai().as_deref(), Some("sk-oai-test"));
+            assert_eq!(c.anthropic().as_deref(), Some("sk-ant-test"));
+        }
+
+        #[test]
+        fn env_vault_credentials_is_none_without_env_or_vault() {
+            let cfg = MagiConfig::default();
+            let c = EnvVaultCredentials {
+                magi_config: &cfg,
+                anthropic_env: None,
+                openai_env: None,
+                secret_store: None,
+            };
+            assert_eq!(c.openai(), None);
+            assert_eq!(c.anthropic(), None);
+        }
     }
 }

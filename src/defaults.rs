@@ -7,22 +7,22 @@
 //! (e.g. `qwen3-max` never existed; `qwen3.6` appeared). Refresh per release; users
 //! override via `magi.toml`/env. All default literals live HERE, in one place.
 
-/// Default provider when no `magi.toml`/env is present (RF-1).
+/// Default provider when no `magi.toml`/env is present (RF-1, REQ-A01b).
 ///
-/// **Still `"openai"`, not the new `ProviderKind` vocabulary's `"ollama"`.** This
-/// constant feeds the LEGACY principal-provider resolution chain
-/// (`resolve_provider`/`main.rs`'s `provider_kind == "openai"` branching, eight call
-/// sites). Migrating that chain onto `MagiConfig::effective_provider`/`ProviderKind` —
-/// and, as part of it, flipping this value to `"ollama"` — is explicitly Task 4.1's
-/// scope (coordinator ruling, 2026-08-02; see
-/// `.superpowers/sdd/claude-plan-tdd/ORDER-FIXES.md`), not Task 1.4's: `resolve_provider`
-/// already normalizes the REQ-A01b vocabulary onto this legacy label via
-/// `legacy_backend_label` (see that function's own `// TASK 4.1:` comment), so the eight
-/// comparison sites keep working unmodified regardless of this constant's value. Task 1.4
-/// reuses [`RENDERED_DEFAULT_PROVIDER`] (already `"ollama"`) where it needs to name the
-/// EFFECTIVE default to the user, rather than flip this one. This constant and
-/// [`RENDERED_DEFAULT_PROVIDER`] deliberately disagree; see that constant's doc.
-pub const DEFAULT_PROVIDER: &str = "openai";
+/// **`"ollama"` — the REQ-A01b vocabulary value, not the retired legacy `"openai"`
+/// label.** Task 4.1 flips this (it was `"openai"` through v0.11.0-era code, feeding the
+/// now-retired `resolve_provider`/`legacy_backend_label` shim and `main.rs`'s
+/// `provider_kind == "openai"` string chain): with that chain migrated onto
+/// `ProviderKind` in the same task, there is nothing left to normalize onto, so this
+/// constant can finally name the REAL default instead of a translation of it.
+///
+/// Also the single source of truth [`render_default_magi_toml`] emits for `provider =`
+/// and the value `MagiConfig`'s "provider is blank" startup notice interpolates —
+/// collapsed from the formerly separate `RENDERED_DEFAULT_PROVIDER` constant (Task 4.1),
+/// which existed ONLY because this constant used to disagree with it (B3: two constants
+/// holding the same string is exactly the kind of accidental-coincidence duplication
+/// REQ-A21b already flagged once, for `emb_base_url()`/`DEFAULT_OPENAI_BASE_URL`).
+pub const DEFAULT_PROVIDER: &str = "ollama";
 /// Default OpenAI-compatible base URL — local Ollama (RF-2).
 pub const DEFAULT_OPENAI_BASE_URL: &str = "http://localhost:11434/v1";
 /// Default principal model on the openai path (RF-3).
@@ -36,22 +36,6 @@ pub const DEFAULT_ANTHROPIC_MODEL: &str = "claude-sonnet-4-6";
 /// Default embedding model (Ollama-first, local). Single source of truth — also
 /// re-exported by `memory::config::d::emb_model` so both resolve identically.
 pub const DEFAULT_EMBEDDING_MODEL: &str = "nomic-embed-text-v2-moe:latest";
-
-/// Value of `provider` that [`render_default_magi_toml`] emits (Task 1.1, REQ-A01b), and
-/// also the value Task 1.4 interpolates into `MagiConfig`'s "provider is blank" startup
-/// notice (`crate::config::MagiConfig::load`).
-///
-/// **Deliberately distinct from [`DEFAULT_PROVIDER`], which stays `"openai"` — this is
-/// NOT the "flip DEFAULT_PROVIDER to ollama" migration that constant's doc once
-/// anticipated.** That migration would touch the eight `provider_kind == "openai"`
-/// comparison sites in `main.rs`, which Task 4.1 owns (see
-/// `.superpowers/sdd/claude-plan-tdd/ORDER-FIXES.md`) — out of scope here. `"ollama"` is
-/// the REQ-A01b-vocabulary value that names the SAME effective default
-/// (`MagiConfig::effective_provider()` already falls back to `ProviderKind::Ollama`), so
-/// reusing this constant for the notice is accurate without touching that chain. Not
-/// folded into `DEFAULT_PROVIDER` itself — that constant still drives the CURRENT,
-/// untouched `resolve_provider`/`main.rs` resolution chain.
-pub const RENDERED_DEFAULT_PROVIDER: &str = "ollama";
 
 // ── Headless mode constants ───────────────────────────────────────────────────
 //
@@ -124,11 +108,9 @@ pub fn render_default_magi_toml() -> String {
         "# Edit to customize, or set provider = \"anthropic\" to use Anthropic instead."
     )
     .unwrap();
-    // `RENDERED_DEFAULT_PROVIDER` ("ollama"), NOT `DEFAULT_PROVIDER` ("openai") — see
-    // both constants' doc comments. `from_toml_str` now validates the provider
-    // vocabulary (REQ-A01b) and `"openai"` is no longer one of its three values, so
-    // this generated file must declare a value the new validation accepts.
-    writeln!(out, "provider = \"{}\"", RENDERED_DEFAULT_PROVIDER).unwrap();
+    // `DEFAULT_PROVIDER` is `"ollama"` (Task 4.1 flipped it) — the REQ-A01b vocabulary
+    // value `from_toml_str`'s vocabulary validation actually accepts.
+    writeln!(out, "provider = \"{}\"", DEFAULT_PROVIDER).unwrap();
     // `base_url` moved to the ROOT in Task 1.1 (REQ-A21) — it used to live under
     // `[openai]`, which no longer accepts it (`deny_unknown_fields`).
     writeln!(out, "base_url = \"{}\"", DEFAULT_OPENAI_BASE_URL).unwrap();
@@ -464,11 +446,24 @@ fn toml_f64(v: f64) -> String {
 }
 
 /// Whether to emit the no-config Ollama-defaults startup notice (RF-9): only when
-/// the resolved backend is the openai (Ollama) default AND no `magi.toml` exists.
-/// Prevents a misleading "using Ollama defaults" notice under `MAGI_PROVIDER=anthropic`
-/// with no file.
-pub fn should_emit_default_notice(provider_kind: &str, magi_toml_exists: bool) -> bool {
-    provider_kind == "openai" && !magi_toml_exists
+/// the resolved backend speaks the `[openai]`-transport path (`Ollama` or
+/// `OpenAiCompat` — REQ-A01b, they share the same `DEFAULT_OPENAI_*` constants this
+/// notice interpolates) AND no `magi.toml` exists. Prevents a misleading "using Ollama
+/// defaults" notice under `MAGI_PROVIDER=anthropic` with no file.
+///
+/// Task 4.1: took `&str` (compared against the legacy `"openai"` label) before the
+/// vocabulary unification; now takes [`ProviderKind`] directly — the eighth and last of
+/// the `provider_kind == "openai"` sites the migration retires.
+#[must_use]
+pub fn should_emit_default_notice(
+    provider_kind: magi_rs::magi::kind::ProviderKind,
+    magi_toml_exists: bool,
+) -> bool {
+    use magi_rs::magi::kind::ProviderKind;
+    matches!(
+        provider_kind,
+        ProviderKind::Ollama | ProviderKind::OpenAiCompat
+    ) && !magi_toml_exists
 }
 
 #[cfg(test)]
@@ -477,7 +472,7 @@ mod tests {
 
     #[test]
     fn test_default_constants_are_the_ollama_first_profile() {
-        assert_eq!(DEFAULT_PROVIDER, "openai");
+        assert_eq!(DEFAULT_PROVIDER, "ollama");
         assert_eq!(DEFAULT_OPENAI_BASE_URL, "http://localhost:11434/v1");
         assert_eq!(DEFAULT_OPENAI_MODEL, "kimi-k2.6:cloud");
         assert_eq!(DEFAULT_MAGI_MELCHIOR, "qwen3.5:397b-cloud");
@@ -488,11 +483,16 @@ mod tests {
 
     #[test]
     fn test_should_emit_default_notice_only_for_openai_without_file() {
-        // Notice is for the no-config Ollama default ONLY: openai backend + no magi.toml.
-        assert!(should_emit_default_notice("openai", false));
-        assert!(!should_emit_default_notice("openai", true)); // file present
-        assert!(!should_emit_default_notice("anthropic", false)); // env opt-in to anthropic, no file
-        assert!(!should_emit_default_notice("anthropic", true));
+        use magi_rs::magi::kind::ProviderKind;
+        // Notice is for the no-config Ollama default ONLY: [openai]-transport + no magi.toml.
+        assert!(should_emit_default_notice(ProviderKind::Ollama, false));
+        assert!(should_emit_default_notice(
+            ProviderKind::OpenAiCompat,
+            false
+        ));
+        assert!(!should_emit_default_notice(ProviderKind::Ollama, true)); // file present
+        assert!(!should_emit_default_notice(ProviderKind::Anthropic, false)); // env opt-in, no file
+        assert!(!should_emit_default_notice(ProviderKind::Anthropic, true));
     }
 
     #[test]
@@ -508,8 +508,7 @@ mod tests {
 
     #[test]
     fn test_render_default_magi_toml_interpolates_and_parses() {
-        // S-12: rendered from constants (DRY) and valid TOML with provider="ollama"
-        // (Task 1.1: `RENDERED_DEFAULT_PROVIDER`, not the legacy `DEFAULT_PROVIDER`).
+        // S-12: rendered from constants (DRY) and valid TOML with provider="ollama".
         // Active [memory] and [embedding] sections must parse into real config values.
         let s = render_default_magi_toml();
         assert!(s.contains(DEFAULT_OPENAI_BASE_URL));
@@ -518,7 +517,7 @@ mod tests {
         assert!(s.contains(DEFAULT_MAGI_BALTHASAR));
         assert!(s.contains(DEFAULT_MAGI_CASPAR));
         let parsed = crate::config::MagiConfig::from_toml_str(&s).unwrap();
-        assert_eq!(parsed.provider.as_deref(), Some(RENDERED_DEFAULT_PROVIDER));
+        assert_eq!(parsed.provider.as_deref(), Some(DEFAULT_PROVIDER));
         assert_eq!(parsed.base_url.as_deref(), Some(DEFAULT_OPENAI_BASE_URL));
         assert_eq!(
             parsed.magi.melchior_model.as_deref(),
@@ -556,7 +555,7 @@ mod tests {
             .expect("render_default_magi_toml() must produce valid TOML");
         assert_eq!(
             parsed.provider.as_deref(),
-            Some(RENDERED_DEFAULT_PROVIDER),
+            Some(DEFAULT_PROVIDER),
             "parsed provider must be the value magi_init/render_default_magi_toml emits"
         );
         assert_eq!(

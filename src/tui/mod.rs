@@ -768,28 +768,70 @@ pub async fn run_tui_ext(
                                                 dyn crate::agent::provider::Provider,
                                             > = std::sync::Arc::new(
                                                 crate::agent::provider::AnthropicProvider::new(
-                                                    api_key,
+                                                    api_key.clone(),
                                                     model.clone(),
                                                 ),
                                             );
-                                            runner_agent.set_provider(provider_arc.clone());
-                                            // I-5 + MAGI: rebuild the consult orchestrator over the new
-                                            // provider so BOTH the forced /consult handle and the
-                                            // registered auto-path tool use the new credentials
-                                            // (register_or_replace adds it if it was absent, e.g. after
-                                            // a static -> login transition).
-                                            let new_magi = std::sync::Arc::new(magi_core::orchestrator::Magi::new(
-                                                std::sync::Arc::new(crate::agent::magi_adapter::MagiCoreProviderAdapter::new(
-                                                    provider_arc, "anthropic", model,
-                                                )),
-                                            ));
-                                            runner_agent.register_or_replace_tool(Box::new(
-                                                crate::tools::consult::ConsultTool::new(
-                                                    new_magi.clone(),
-                                                    magi_auto_approve,
-                                                ),
-                                            ));
-                                            consult_magi_runner = Some(new_magi);
+                                            runner_agent.set_provider(provider_arc);
+                                            // I-5 + MAGI, updated Task 4.1: rebuild the consult
+                                            // orchestrator over the new credentials so BOTH the
+                                            // forced /consult handle and the registered auto-path
+                                            // tool use them (register_or_replace adds it if it was
+                                            // absent, e.g. after a static -> login transition).
+                                            // Native `ClaudeProvider` (REQ-A01) replaces the retired
+                                            // `MagiCoreProviderAdapter` — it gets the system prompt
+                                            // through its OWN channel instead of folded into the
+                                            // user turn — wrapped in `RetryProvider` (REQ-A03) like
+                                            // every other native seat. Single-shared-provider shape,
+                                            // matching the `Magi::new` path this replaces (no
+                                            // per-agent overrides on the OAuth-login rebuild).
+                                            let ceiling = std::time::Duration::from_secs(
+                                                magi_rs::magi::AGENT_TIMEOUT_SECS,
+                                            );
+                                            let client_timeout =
+                                                magi_rs::magi::derive_client_timeout(
+                                                    ceiling.as_secs(),
+                                                );
+                                            let mut retry =
+                                                magi_core::provider::RetryConfig::default();
+                                            retry.operation_budget =
+                                                magi_rs::magi::derive_operation_budget(
+                                                    ceiling.as_secs(),
+                                                );
+                                            match magi_core::providers::claude::ClaudeProvider::with_timeout(
+                                                api_key,
+                                                model,
+                                                client_timeout,
+                                            ) {
+                                                Ok(native) => {
+                                                    let wrapped: std::sync::Arc<
+                                                        dyn magi_core::provider::LlmProvider,
+                                                    > = std::sync::Arc::new(
+                                                        magi_core::provider::RetryProvider::with_config(
+                                                            std::sync::Arc::new(native),
+                                                            retry,
+                                                        ),
+                                                    );
+                                                    let new_magi = std::sync::Arc::new(
+                                                        magi_core::orchestrator::Magi::new(wrapped),
+                                                    );
+                                                    runner_agent.register_or_replace_tool(Box::new(
+                                                        crate::tools::consult::ConsultTool::new(
+                                                            new_magi.clone(),
+                                                            magi_auto_approve,
+                                                        ),
+                                                    ));
+                                                    consult_magi_runner = Some(new_magi);
+                                                }
+                                                Err(e) => {
+                                                    let _ = response_tx
+                                                        .send(AgentResponse::Error(format!(
+                                                            "logged in, but the MAGI trio could \
+                                                             not be rebuilt: {e}"
+                                                        )))
+                                                        .await;
+                                                }
+                                            }
                                             if was_static {
                                                 runner_agent.clear_history();
                                             }

@@ -68,12 +68,11 @@ impl Message {
     /// `headless_runner::build_transcript`, so the same five-line filter/join
     /// is not re-derived at each call site.
     ///
-    /// `agent::magi_adapter::MagiCoreProviderAdapter::complete` still carries
-    /// its own inline copy of this same logic, deliberately **not** migrated:
-    /// `src/agent/magi_adapter.rs` is deleted outright in Task 4.1 (native MAGI
-    /// providers replace the adapter), so migrating it now would be work
-    /// thrown away two phases from now. This is the one duplicate this crate
-    /// currently accepts, and it has a scheduled removal.
+    /// `agent::magi_adapter::MagiCoreProviderAdapter::complete` used to carry its own
+    /// inline copy of this same logic. Task 4.1 deleted `src/agent/magi_adapter.rs`
+    /// outright — native MAGI providers (`magi_core::providers::*`) replace the
+    /// adapter entirely, so the duplicate this doc used to schedule for removal is
+    /// simply gone now, not migrated.
     #[must_use]
     pub fn concat_text(&self) -> String {
         self.content

@@ -323,9 +323,6 @@ impl MagiSectionConfig {
     ///
     /// # Arguments
     /// * `fallback` - Modelo del backend, usado por cualquier asiento sin override.
-    // Narrow allow: consumed by the trio construction in Task 4.1, not this task.
-    // Covered by `seats_resolves_each_mage_to_its_override_or_the_backend_fallback`.
-    #[allow(dead_code)]
     #[must_use]
     pub fn seats(&self, fallback: &str) -> Vec<(AgentName, String)> {
         vec![
@@ -349,7 +346,7 @@ impl MagiSectionConfig {
     }
 
     /// Modelo del **fallback del builder** — el que magi-core usaría para un agente sin
-    /// override (ver Task 4.1).
+    /// override.
     ///
     /// Es el del backend, no el de ningún mage: elegir el de Melchior lo volvería el
     /// default por accidente. Con los tres asientos overrideados nunca se usa, y por eso
@@ -357,9 +354,6 @@ impl MagiSectionConfig {
     ///
     /// # Arguments
     /// * `backend_model` - Modelo por defecto del backend resuelto.
-    // Narrow allow: consumed by the trio construction in Task 4.1, not this task.
-    // Covered by `fallback_model_is_the_backend_model_not_any_seats_override`.
-    #[allow(dead_code)]
     #[must_use]
     pub fn fallback_model<'a>(&self, backend_model: &'a str) -> &'a str {
         backend_model
@@ -496,16 +490,11 @@ impl MagiConfig {
     /// **Infalible por precondición:** [`Self::validate_vocabulary`] ya corrió en
     /// [`Self::from_toml_str`]/`load()`, así que el único `None` posible es el de
     /// ausente-o-vacío.
-    // Narrow allow: the CURRENT principal-provider path still resolves via the legacy
-    // `resolve_provider`/`DEFAULT_PROVIDER` chain (untouched in this task). Fix round 3
-    // (L1/L2/S1, 2026-08-02) moved the principal `base_url` resolver itself onto
-    // `effective_base_url()` + vault resolution — see `main.rs`'s
-    // `resolve_effective_principal_endpoint`, which replaced the old
-    // `resolve_openai_base_url` (removed, it bypassed both blank-is-absent and
-    // credential resolution). This accessor (`effective_provider`) is consumed once
-    // the STRING-COMPARISON chain migrates onto `ProviderKind` in Fase 4. Covered by
-    // `blank_string_keys_are_absent_not_invalid` and `magi_kind_inherits_from_root_provider_when_absent`.
-    #[allow(dead_code)]
+    ///
+    /// Task 4.1: consumida en producción por `resolve_effective_provider_kind` (backend
+    /// del agente principal) y por `build_magi_orchestrator`/`effective_magi_kind` (kind
+    /// del trío, vía herencia). Cubierta por `blank_string_keys_are_absent_not_invalid` y
+    /// `magi_kind_inherits_from_root_provider_when_absent`.
     #[must_use]
     pub fn effective_provider(&self) -> ProviderKind {
         // I5 (review round 2): restored. `MagiConfig`'s fields are `pub` and it
@@ -553,9 +542,13 @@ impl MagiConfig {
     /// (p. ej. el puerto); la herencia lee un valor declarado. No hay nada que adivinar mal.
     ///
     /// Misma precondición que [`Self::effective_provider`].
-    // Narrow allow: consumed by the native trio construction in Fase 4, not this task.
-    // Covered by `magi_kind_inherits_from_root_provider_when_absent`.
-    #[allow(dead_code)]
+    ///
+    /// Task 4.1: consumida en producción por `build_magi_orchestrator` (`main.rs`),
+    /// DESPUÉS de que éste valide por su cuenta el `kind` crudo — el `.unwrap_or(None)`
+    /// de acá se traga un valor no reconocido igual que `effective_provider`, así que
+    /// `build_magi_orchestrator` no puede depender de este accessor para reportar su
+    /// error tipado de kind inválido; lo hace ANTES, con su propio `ProviderKind::parse`.
+    /// Covered by `magi_kind_inherits_from_root_provider_when_absent`.
     #[must_use]
     pub fn effective_magi_kind(&self) -> ProviderKind {
         ProviderKind::parse(self.magi.kind.as_deref().unwrap_or_default())
@@ -768,14 +761,10 @@ impl MagiConfig {
         {
             out.push(format!(
                 "notice: `provider` está vacío; se usa el default `{}`",
-                // `RENDERED_DEFAULT_PROVIDER`: el valor de la vocabulario NUEVA de
-                // REQ-A01b que nombra el default efectivo (`effective_provider()` cae a
-                // `ProviderKind::Ollama` cuando `provider` está ausente/vacío). NO
-                // `DEFAULT_PROVIDER` — esa constante sigue siendo la etiqueta LEGACY
-                // ("openai") que alimenta la cadena `resolve_provider`/`main.rs`
-                // (`provider_kind == "openai"`), sin tocar en esta tarea; mostrarla acá
-                // le diría al usuario que declare un valor que REQ-A01b ya no acepta.
-                crate::defaults::RENDERED_DEFAULT_PROVIDER,
+                // `DEFAULT_PROVIDER` ya es el valor del vocabulario REQ-A01b ("ollama"),
+                // el mismo al que cae `effective_provider()` cuando `provider` está
+                // ausente/vacío (Task 4.1 colapsó la constante legacy separada).
+                crate::defaults::DEFAULT_PROVIDER,
             ));
         }
 
@@ -849,90 +838,47 @@ fn attach_path(e: ConfigError, path: &Path) -> ConfigError {
     }
 }
 
-// TASK 4.1: temporary shim over the legacy `provider_kind == "openai"` string chain
-// (eight comparison sites in `main.rs`). No task in this plan migrates that chain onto
-// `ProviderKind`/`MagiConfig::effective_provider` — the coordinator added that
-// obligation to Task 4.1 on 2026-08-02, which rewrites `main.rs`. This function, and
-// `legacy_backend_label` below, must be deleted once that migration lands; until then
-// they are what keeps the REQ-A01b vocabulary (`ollama`/`openai-compat`/`anthropic`)
-// from silently breaking every `provider_kind == "openai"` comparison the moment a
-// `magi.toml` (or a freshly `magi init`-scaffolded one) declares `"ollama"` instead of
-// the legacy `"openai"`.
-//
-// `pub(crate)`: `main.rs`'s `prepare_headless` also needs it directly, to normalize
-// `effective_provider`/`resolved.provider` — the CLI `--provider`/envelope `provider`
-// paths (review round 2, I2), which don't go through `resolve_provider` at all.
-//
-// m9 (review round 2): this shim is ALSO why `MAGI_PROVIDER=openai` still works —
-// `legacy_backend_label`'s `other => other.to_string()` arm passes it through
-// unchanged, since it's already the legacy label. Meanwhile `provider = "openai"` in
-// the TOML is a hard parse error (`validate_vocabulary` only ever sees the TOML, never
-// the env var). That asymmetry is intentional and required for the shim to keep old
-// env-var habits working, but it is exactly the kind of thing that should NOT survive
-// past the shim's own lifetime — retire this note along with the two functions below
-// when Task 4.1 lands.
-/// Normalizes a REQ-A01b vocabulary value onto the legacy backend label the untouched
-/// `main.rs` string-comparison chain still checks against.
+/// Backend efectivo del agente principal: env `MAGI_PROVIDER` > TOML `provider` >
+/// `DEFAULT_PROVIDER` (RF-1, REQ-A01b).
 ///
-/// `"ollama"` and `"openai-compat"` both collapse to `"openai"` (main.rs's own
-/// `[openai]`-transport branch, which serves both — see `ProviderKind`'s own doc: the
-/// two providers "comparten el protocolo de completions y se distinguen solo por
-/// capacidad"). `"anthropic"` passes through unchanged. Anything else (including the
-/// legacy `"openai"` itself, or an env var nobody bothered to update) passes through
-/// unchanged too — this is a targeted map for the three new values, not a validator;
-/// `MagiConfig::from_toml_str`'s `validate_vocabulary` is what rejects a genuinely
-/// unrecognized `provider`/`[magi].kind`.
-pub(crate) fn legacy_backend_label(value: &str) -> String {
-    match value {
-        "ollama" | "openai-compat" => "openai".to_string(),
-        other => other.to_string(),
-    }
-}
-
-/// env `MAGI_PROVIDER` > TOML `provider` > `DEFAULT_PROVIDER` (RF-1).
+/// Task 4.1: retira el shim `legacy_backend_label`/`resolve_provider` que normalizaba el
+/// vocabulario nuevo (`ollama`/`openai-compat`/`anthropic`) sobre la etiqueta legacy
+/// `"openai"` para que la cadena `provider_kind == "openai"` de `main.rs` siguiera
+/// funcionando sin tocarla. Con esa cadena migrada a `ProviderKind` (misma tarea), ya no
+/// hay nada que normalizar: el vocabulario es único de punta a punta.
 ///
-/// The no-config default is **Ollama-first** (`"openai"`); Anthropic is opt-in
-/// via `provider="anthropic"` in `magi.toml` or `MAGI_PROVIDER=anthropic`.
-///
-/// **Normalizes onto the legacy backend label** (see [`legacy_backend_label`], `// TASK
-/// 4.1:`) after resolving the `env > TOML > default` precedence, so a `provider =
-/// "ollama"`/`"openai-compat"` — the REQ-A01b vocabulary — and `MAGI_PROVIDER=ollama`
-/// both behave exactly like the legacy `"openai"` did, matching the still-untouched
-/// `provider_kind == "openai"` branching in `main.rs`.
+/// **`MAGI_PROVIDER` recibe el mismo tratamiento que `provider`/`[magi].kind` en el TOML**:
+/// un valor presente y no reconocido es un error explícito (REQ-A01b), no un fallback
+/// silencioso — a diferencia del shim retirado, que dejaba pasar cualquier env var vieja
+/// sin verificarla. Vacío o en blanco se trata como ausente (REQ-A12).
 ///
 /// # Arguments
 /// * `config` - Parsed `MagiConfig` from `magi.toml` (may be default if file absent/invalid).
 /// * `env_provider` - Value of `MAGI_PROVIDER` env var, if set.
 ///
-/// # Returns
-/// Resolved provider name: env overrides TOML; falls back to `DEFAULT_PROVIDER`.
-pub fn resolve_provider(config: &MagiConfig, env_provider: Option<&str>) -> String {
-    let winner = env_provider
-        .map(str::to_string)
-        .or_else(|| config.provider.clone())
-        .unwrap_or_else(|| crate::defaults::DEFAULT_PROVIDER.into());
-    legacy_backend_label(&winner)
+/// # Errors
+/// [`ProviderKindParseError`] si `MAGI_PROVIDER` está presente y no es uno de los tres
+/// valores del vocabulario.
+pub fn resolve_effective_provider_kind(
+    config: &MagiConfig,
+    env_provider: Option<&str>,
+) -> Result<ProviderKind, ProviderKindParseError> {
+    if let Some(raw) = env_provider {
+        if let Some(kind) = ProviderKind::parse(raw)? {
+            return Ok(kind);
+        }
+    }
+    Ok(config.effective_provider())
 }
 
-/// Resolves a per-agent MAGI model override. Precedence: env (non-empty) > TOML
-/// (non-empty) > `None`. A blank/whitespace value (env or TOML) is treated as
-/// unset and falls through to the next level. `None` means the agent uses the
-/// principal provider's model (RF-2, S-4, S-5).
-///
-/// # Arguments
-/// * `toml_model` - The `[magi].<agent>_model` value, if present.
-/// * `env_model`  - The `MAGI_MODEL_<AGENT>` env value, if present.
-///
-/// # Returns
-/// `Some(model)` when an effective override exists; `None` otherwise.
-pub fn resolve_magi_override(toml_model: Option<&str>, env_model: Option<&str>) -> Option<String> {
-    fn non_empty(s: Option<&str>) -> Option<String> {
-        s.map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_string)
-    }
-    non_empty(env_model).or_else(|| non_empty(toml_model))
-}
+// Task 4.1: `resolve_magi_override` (the `MAGI_MODEL_MELCHIOR`/`BALTHASAR`/`CASPAR` env-var
+// per-agent override resolver) is REMOVED, not just retired-and-kept — its only production
+// caller was `agent::magi_wiring::resolve_magi_adapter_specs`, deleted along with the retired
+// adapter machinery it served. `build_magi_orchestrator`'s native-provider construction
+// (`main.rs`) takes no env-override parameter at all: per-agent overrides are TOML-only now
+// (`[magi].melchior_model` etc., via `MagiSectionConfig::seats`), matching the vocabulary
+// REQ-A15 actually exposes. **This is a genuine behavior change, not an oversight**: the three
+// `MAGI_MODEL_*` env vars no longer have any effect. Flagged prominently in the task report.
 
 /// env `OPENAI_MODEL` > TOML `[openai].model` > `DEFAULT_OPENAI_MODEL` (RF-3).
 /// No longer fallible: the openai path has a built-in default (Ollama-first).
@@ -1102,64 +1048,53 @@ mod tests {
         assert_eq!(c.provider.as_deref(), Some("anthropic"));
     }
 
+    /// Task 4.1: replaces `test_resolve_provider_precedence` (deleted along with the
+    /// retired `resolve_provider`/`legacy_backend_label` shim). Same env > TOML > default
+    /// precedence, expressed directly in the REQ-A01b vocabulary — no more legacy label
+    /// to normalize onto.
     #[test]
-    fn test_resolve_provider_precedence() {
-        use crate::defaults::DEFAULT_PROVIDER;
+    fn test_resolve_effective_provider_kind_precedence() {
         let c = MagiConfig {
             provider: Some("anthropic".into()),
             ..Default::default()
         };
-        assert_eq!(resolve_provider(&c, Some("openai")), "openai"); // env wins
-        assert_eq!(resolve_provider(&c, None), "anthropic"); // TOML
-                                                             // S-1: no config → DEFAULT_PROVIDER ("openai")
         assert_eq!(
-            resolve_provider(&MagiConfig::default(), None),
-            DEFAULT_PROVIDER
+            resolve_effective_provider_kind(&c, Some("ollama")).unwrap(),
+            ProviderKind::Ollama, // env wins
         );
-        assert_eq!(resolve_provider(&MagiConfig::default(), None), "openai");
+        assert_eq!(
+            resolve_effective_provider_kind(&c, None).unwrap(),
+            ProviderKind::Anthropic, // TOML
+        );
+        // S-1: no config, no env → the built-in default (Ollama-first).
+        assert_eq!(
+            resolve_effective_provider_kind(&MagiConfig::default(), None).unwrap(),
+            ProviderKind::Ollama,
+        );
     }
 
-    /// Fix round 1 (coordinator, 2026-08-02): `resolve_provider` is still the LEGACY
-    /// resolver `main.rs` compares against with `provider_kind == "openai"` (eight call
-    /// sites) — no task in this plan migrates that chain onto `ProviderKind`. A raw
-    /// `"ollama"`/`"openai-compat"` from the new REQ-A01b vocabulary reaching those
-    /// comparisons unmapped silently routes a freshly-`magi init`'d workspace to the
-    /// Anthropic/static branch instead of Ollama — the exact regression this test
-    /// reproduces. `resolve_provider` normalizes onto the legacy label so the two
-    /// vocabularies stay compatible without touching the eight comparison sites.
+    /// Task 4.1: `MAGI_PROVIDER` gets the SAME explicit-error treatment as `provider`/
+    /// `[magi].kind` in the TOML — an unrecognized value is never a silent fallback
+    /// (REQ-A01b). The retired shim used to let ANY old env-var value pass through
+    /// unchecked; that asymmetry does not survive the migration.
     #[test]
-    fn resolve_provider_normalizes_the_new_vocabulary_onto_the_legacy_backend_label() {
-        let ollama = MagiConfig {
-            provider: Some("ollama".into()),
-            ..Default::default()
-        };
-        assert_eq!(resolve_provider(&ollama, None), "openai");
+    fn an_unrecognized_env_provider_is_a_configuration_error() {
+        let err =
+            resolve_effective_provider_kind(&MagiConfig::default(), Some("banana")).unwrap_err();
+        assert!(err.to_string().contains("banana"));
+    }
 
-        let openai_compat = MagiConfig {
-            provider: Some("openai-compat".into()),
-            ..Default::default()
-        };
-        assert_eq!(resolve_provider(&openai_compat, None), "openai");
-
-        let anthropic = MagiConfig {
+    /// SC-A12g / REQ-A12: a blank `MAGI_PROVIDER` is treated as ABSENT, not invalid —
+    /// falls through to the TOML/default the same as an unset env var.
+    #[test]
+    fn a_blank_env_provider_falls_through_to_the_toml_default() {
+        let c = MagiConfig {
             provider: Some("anthropic".into()),
             ..Default::default()
         };
-        assert_eq!(resolve_provider(&anthropic, None), "anthropic");
-
-        // The env-var path normalizes too: `MAGI_PROVIDER=ollama` must behave the same
-        // as the TOML key, not bypass the shim.
         assert_eq!(
-            resolve_provider(&MagiConfig::default(), Some("ollama")),
-            "openai"
-        );
-        assert_eq!(
-            resolve_provider(&MagiConfig::default(), Some("openai-compat")),
-            "openai"
-        );
-        assert_eq!(
-            resolve_provider(&MagiConfig::default(), Some("anthropic")),
-            "anthropic"
+            resolve_effective_provider_kind(&c, Some("   ")).unwrap(),
+            ProviderKind::Anthropic,
         );
     }
 
@@ -1309,44 +1244,10 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
-    // Task 2: resolve_magi_override precedence tests (S-4, S-5)
-    // -------------------------------------------------------------------------
-
-    #[test]
-    fn test_resolve_magi_override_env_wins_over_toml() {
-        // S-4: env > TOML
-        assert_eq!(
-            resolve_magi_override(Some("toml-model"), Some("env-model")),
-            Some("env-model".to_string())
-        );
-    }
-
-    #[test]
-    fn test_resolve_magi_override_toml_when_no_env() {
-        // S-4: TOML when env absent
-        assert_eq!(
-            resolve_magi_override(Some("toml-model"), None),
-            Some("toml-model".to_string())
-        );
-    }
-
-    #[test]
-    fn test_resolve_magi_override_none_when_both_absent() {
-        // S-4: none ⇒ principal model
-        assert_eq!(resolve_magi_override(None, None), None);
-    }
-
-    #[test]
-    fn test_resolve_magi_override_empty_string_is_unset() {
-        // S-5: empty (env or TOML) is treated as unset, falls through precedence
-        assert_eq!(
-            resolve_magi_override(Some("toml"), Some("   ")),
-            Some("toml".to_string())
-        );
-        assert_eq!(resolve_magi_override(Some(""), None), None);
-        assert_eq!(resolve_magi_override(Some(""), Some("")), None);
-    }
-
+    // Task 2 used to have `resolve_magi_override` precedence tests here (S-4, S-5).
+    // Removed in Task 4.1 along with the function itself — see the removal note above
+    // `resolve_openai_model`: the `MAGI_MODEL_*` env-var per-agent override path has no
+    // production caller left once `agent::magi_wiring` is deleted.
     // -------------------------------------------------------------------------
     // [headless] section tests (spec §11). `HeadlessConfig` already derives
     // `#[serde(deny_unknown_fields)]`, so these LOCK the existing parsing
