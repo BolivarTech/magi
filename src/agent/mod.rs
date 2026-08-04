@@ -572,6 +572,7 @@ impl Agent {
         }
     }
 
+
     /// Normalizes tool input recursively to detect semantically identical calls.
     pub fn normalize_input(val: &serde_json::Value, depth: usize) -> Result<String> {
         const MAX_DEPTH: usize = 10;
@@ -3098,6 +3099,50 @@ mod tests {
         assert!(
             approval_rx.try_recv().is_err(),
             "safe tool must NOT emit an ApprovalRequest (no-prompt guarantee)"
+        );
+    }
+
+    /// I4 (fix round 2): `remove_tool` drops the named registration and leaves
+    /// an unrelated one untouched. This is the counterpart to
+    /// `register_or_replace_tool` for when a provider-bound tool's backing
+    /// provider fails to rebuild (e.g. a failed post-`/login` MAGI trio
+    /// rebuild) and there is nothing safe to replace it WITH — the caller
+    /// needs to make it disappear, not swap it.
+    #[test]
+    fn remove_tool_drops_the_named_tool_and_leaves_others_untouched() {
+        let (tool_a, _executed_a) = TrackingTool::new("keep_me", true);
+        let (tool_b, _executed_b) = TrackingTool::new("drop_me", true);
+        let mut agent = Agent::new(Arc::new(crate::agent::provider::StaticProvider));
+        agent.register_tool(Box::new(tool_a));
+        agent.register_tool(Box::new(tool_b));
+
+        agent.remove_tool("drop_me");
+
+        assert!(
+            agent.tools.iter().any(|t| t.name() == "keep_me"),
+            "removing one tool must not touch an unrelated registration"
+        );
+        assert!(
+            !agent.tools.iter().any(|t| t.name() == "drop_me"),
+            "the named tool must be gone after remove_tool"
+        );
+    }
+
+    /// I4 (fix round 2): removing a name that was never registered is a
+    /// harmless no-op, not a panic — the caller (a login-rebuild failure
+    /// handler) must be able to call it unconditionally.
+    #[test]
+    fn remove_tool_on_an_absent_name_is_a_harmless_no_op() {
+        let (tool_a, _executed_a) = TrackingTool::new("keep_me", true);
+        let mut agent = Agent::new(Arc::new(crate::agent::provider::StaticProvider));
+        agent.register_tool(Box::new(tool_a));
+
+        agent.remove_tool("never_registered");
+
+        assert_eq!(
+            agent.tools.len(),
+            1,
+            "removing an absent name must change nothing"
         );
     }
 
