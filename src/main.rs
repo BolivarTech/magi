@@ -5805,9 +5805,25 @@ mod tests {
         /// de llegar a un `Provider` de magi-rs de un solo canal. Nada en
         /// `build_native_provider`/`build_magi_orchestrator` hace eso — devuelven el
         /// provider nativo DIRECTO, sin envoltorio.
+        ///
+        /// **Nota honesta (fix round 2, I2)**: esta prueba NO llama a
+        /// `build_magi_orchestrator` — no puede: esa función siempre construye
+        /// providers HTTP reales (`OpenAiCompatibleProvider`/`ClaudeProvider`), sin
+        /// ningún punto de inyección para un doble, así que invocarla golpearía la
+        /// red (prohibido, R-A04). Y aunque pudiera, `build_magi_orchestrator` NO
+        /// determina el CONTENIDO del system prompt — eso lo decide
+        /// `agent_factory.create_agents_with_prompts` de magi-core, a partir de
+        /// `AgentName` y `Mode`, después de que el trío ya está construido. Introspectar
+        /// esa función no puede probar nada sobre distinción de prompts: es
+        /// estructuralmente la función equivocada para esta propiedad. Lo que SÍ
+        /// prueba esta función (SC-A03, más abajo) es que `build_magi_orchestrator`
+        /// wireó tres asientos DISTINTOS vía `.with_provider()` — el patrón exacto que
+        /// esta prueba también usa, y el que hace que magi-core le entregue una
+        /// persona distinta a cada uno.
         #[tokio::test]
         async fn each_mage_receives_its_system_prompt_in_the_providers_own_channel() {
             let captured = build_trio_with_capturing_providers().await;
+            let mut system_prompts = Vec::new();
             for seat in [AgentName::Melchior, AgentName::Balthasar, AgentName::Caspar] {
                 let system = captured.system_prompt_of(seat);
                 let user = captured.user_prompt_of(seat);
@@ -5816,7 +5832,23 @@ mod tests {
                     !user.contains(&system),
                     "{seat:?}: el system prompt se dobló dentro del turno de usuario"
                 );
+                system_prompts.push(system);
             }
+            // I2 (fix round 2): la propiedad que la tarea existe para restaurar es
+            // DISTINCIÓN entre asientos, no solo "no vacío" — tres prompts idénticos
+            // pasaban las aserciones de arriba sin decir nada falso.
+            assert_ne!(
+                system_prompts[0], system_prompts[1],
+                "Melchior y Balthasar recibieron el MISMO system prompt"
+            );
+            assert_ne!(
+                system_prompts[0], system_prompts[2],
+                "Melchior y Caspar recibieron el MISMO system prompt"
+            );
+            assert_ne!(
+                system_prompts[1], system_prompts[2],
+                "Balthasar y Caspar recibieron el MISMO system prompt"
+            );
         }
 
         /// I2 (fix round 2, IMPORTANT): SC-A03 y SC-A05 (más abajo) afirmaban contra
@@ -6045,10 +6077,23 @@ mod tests {
             }
         }
 
-        /// SC-A03: un fallo transitorio se reintenta y el mage responde. Prueba que
-        /// `build_magi_orchestrator` envuelve cada asiento en `RetryProvider`
-        /// (REQ-A03): sin el envoltorio, `MagiBuilder::build()` no reintenta nada y
-        /// este test se pone rojo.
+        /// SC-A03: un fallo transitorio se reintenta y el mage responde.
+        ///
+        /// **Corrección honesta (fix round 2, I2)**: la afirmación anterior de este
+        /// comentario — "sin el envoltorio, este test se pone rojo" — era FALSA.
+        /// Este test arma su PROPIO `RetryProvider` sobre un doble, así que borrar el
+        /// `RetryProvider::with_config(...)` real de `build_magi_orchestrator` no lo
+        /// afecta en absoluto: no hay forma de inyectar un doble DENTRO de esa
+        /// función (siempre construye `OpenAiCompatibleProvider`/`ClaudeProvider`
+        /// reales, sin punto de inyección), así que probar el comportamiento DINÁMICO
+        /// del reintento (que efectivamente reintenta y el mage responde) sin red real
+        /// exige un doble por fuera de esa función. Lo que SÍ prueba la función real
+        /// —que efectivamente envuelve cada asiento en `RetryProvider`— lo prueba
+        /// `build_magi_orchestrator_wires_three_distinct_seats_each_wrapped_in_retry`
+        /// (arriba), vía el rastro que esa función deja en test. Las dos pruebas
+        /// juntas cierran REQ-A03: una confirma que el WRAP existe en la función real,
+        /// la otra confirma que ESE WRAP (misma forma, mismo `RetryConfig` derivado)
+        /// efectivamente reintenta y sobrevive un fallo transitorio.
         ///
         /// Usa `RoutingMockProvider` de magi-core (feature `test-utils`, ya
         /// habilitada) en vez de un contador propio: enruta por asiento vía
@@ -6139,6 +6184,15 @@ mod tests {
         /// presupuesto NO estuviera acotando el abandono, agotar 50 reintentos a
         /// 20 ms cada uno tomaría ~1 s — muy por encima del margen que este test
         /// tolera.
+        ///
+        /// **Nota honesta (fix round 2, I2)**: igual que SC-A03, este test arma su
+        /// PROPIO `RetryProvider` sobre un doble — no hay forma de inyectar un doble
+        /// dentro de `build_magi_orchestrator` (siempre construye providers HTTP
+        /// reales). El comportamiento DINÁMICO del abandono se prueba acá, contra un
+        /// `RetryConfig` con la MISMA forma que la función real deriva; que la
+        /// función real efectivamente aplica esa forma (envuelve cada asiento) lo
+        /// prueba `build_magi_orchestrator_wires_three_distinct_seats_each_wrapped_
+        /// in_retry`, arriba.
         #[tokio::test]
         async fn a_hanging_provider_abandons_before_the_ceiling() {
             let inner = Arc::new(AlwaysFailingProvider {
