@@ -3866,10 +3866,14 @@ async fn run_consult_subcommand(
     let untrusted_content = h.untrusted_content
         || env_untrusted_content
         || magi_config.magi.untrusted_content.unwrap_or(false);
-    let classifier = crate::agent::mode_classifier::ProviderClassifier::new(
-        provider,
-        Arc::new(crate::agent::mode_classifier::ProcessNoticeSink::default()),
-    );
+    // Fix round 2 (SC-A04d): ONE process-level notice sink, shared by the mode
+    // classifier's own notices AND the --timeout-below-formula warning below —
+    // one stderr output path, not two, and dedup is per-key so sharing cannot
+    // suppress one notice because the other already fired.
+    let notice_sink: Arc<dyn crate::agent::mode_classifier::NoticeSink> =
+        Arc::new(crate::agent::mode_classifier::ProcessNoticeSink::default());
+    let classifier =
+        crate::agent::mode_classifier::ProviderClassifier::new(provider, Arc::clone(&notice_sink));
     // Task 4.1: the trio is built ONCE, in `prepare_headless` (the shared prelude); a
     // forced `magi consult` needs a LIVE trio unconditionally, so an unbuildable one
     // fails this run closed exactly as it did before (REQ-A06's polished per-surface
@@ -3888,12 +3892,14 @@ async fn run_consult_subcommand(
     // The consult path has no tier tool-gate; only an explicit `--timeout`
     // bounds it (an over-cap prompt is rejected inside `run_consult`, REQ-H33).
     let timeout = h.timeout.map(Duration::from_secs);
-    // Fix round 1, Finding 1 (SC-A04d): computed PURELY for its `below_formula`
-    // telemetry flag — `timeout` above (the value actually ENFORCED) is
-    // deliberately left untouched. Wiring `resolve_run_timeout`'s full behavioral
-    // prescription (defaulting `--timeout` when absent to the derived minimum,
-    // emitting its own stderr warning) is a larger, separate, pre-existing gap
-    // this fix round does not close — see this task's report.
+    // Fix round 1, Finding 1 (SC-A04d): `timeout` above (the value actually
+    // ENFORCED) is deliberately left untouched — `resolve_run_timeout`'s OTHER
+    // behavioral half (defaulting `--timeout` when absent to the derived
+    // minimum) is a larger, separate, pre-existing gap this fix round does not
+    // close — see this task's report. Its `.below_formula` flag (the JSON
+    // telemetry) and its `.warning` (the stderr notice, emitted by `analyze_
+    // direct` via `runtime.notice_sink` — fix round 2) ARE both wired from the
+    // `TimeoutDecision` below.
     let timeout_decision = magi_rs::magi::resolve_run_timeout(
         h.timeout,
         magi_config
@@ -3908,6 +3914,7 @@ async fn run_consult_subcommand(
         untrusted_content,
         magi_config: &magi_config,
         timeout_decision,
+        notice_sink: notice_sink.as_ref(),
     };
     let outcome = run_consult(
         resolved,

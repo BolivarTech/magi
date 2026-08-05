@@ -187,6 +187,11 @@ pub(crate) enum TruncationLevel {
     // there was for `RunContext`'s fields: locating a verdict/finding in magi-core's
     // markdown output is Task 6.2's actual feature, not a two-line fix. They are
     // exercised directly by `report_truncated_names_the_level_applied`.
+    //
+    // Fix round 2: this suppression is TRACKED, not indefinite. If Task 6.2 lands
+    // and `truncate_report` exists but this `#[allow(dead_code)]` is still here,
+    // that is itself a finding at Task 6.2's close — the whole point of naming
+    // Task 6.2 above is so the next reader can check that exact condition.
     /// The verdict and at least one finding were located and kept.
     #[allow(dead_code)]
     Structural,

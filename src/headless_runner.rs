@@ -49,12 +49,20 @@ use magi_rs::magi::mode::{resolve_mode_guarded, ModeClassifier, ModeError};
 use magi_rs::magi::TimeoutDecision;
 
 use crate::agent::messages::{Content, Message, Role};
+use crate::agent::mode_classifier::NoticeSink;
 use crate::agent::{Agent, AgentRunConfig, RunObserver, StreamPiece, MAX_TOOL_CALLS_ERROR};
 use crate::config::MagiConfig;
 use crate::tools::consult::{
     annotate_report_text, explain_magi_error, report_to_consult_json, AbortOnDrop, RunContext,
     Truncated, TruncationLevel, MAX_QUERY_LEN,
 };
+
+/// Dedup key for [`NoticeSink::once`] — the SC-A04d warning, distinct from the
+/// mode-classifier's `classify.cost`/`classify.timeout` keys (`agent::mode_
+/// classifier`) even though production shares one [`NoticeSink`] instance across
+/// both: dedup is per-key, so sharing the sink cannot suppress one notice because
+/// the other already fired.
+const NOTICE_TIMEOUT_BELOW_FORMULA: &str = "timeout.below_formula";
 
 /// Buffered capacity of the internal chunk channel; mirrors the interactive TUI
 /// bridge so backpressure behaves identically. The channel is drained
@@ -173,6 +181,13 @@ pub(crate) async fn resolve_direct_mode(
 ///   call already takes: this struct exists to make the JSON's telemetry
 ///   honest, not to change which timeout is actually enforced (a larger,
 ///   separate, pre-existing gap — see this fix round's report).
+/// - `notice_sink` — where [`analyze_direct`] emits `timeout_decision.warning`
+///   (fix round 2, SC-A04d's other half: the JSON flag alone isn't the whole
+///   requirement — a human running the command by hand needs the same fact on
+///   stderr). Production shares ONE [`ProcessNoticeSink`](crate::agent::
+///   mode_classifier::ProcessNoticeSink) instance with the mode classifier's own
+///   notices (`run_consult_subcommand`) rather than opening a second output
+///   path — dedup is per-key, so the two notices cannot suppress each other.
 ///
 /// `pub(crate)`, same reasoning as [`resolve_direct_mode`] above: constructed
 /// from `main.rs`'s `run_consult_subcommand`, which builds it from its own
@@ -190,6 +205,8 @@ pub(crate) struct MagiRuntimeParams<'a> {
     pub(crate) magi_config: &'a MagiConfig,
     /// Feeds `RunContext::build`'s `timeout_below_formula` (SC-A04d).
     pub(crate) timeout_decision: TimeoutDecision,
+    /// Where `timeout_decision.warning` is emitted, if present (SC-A04d).
+    pub(crate) notice_sink: &'a dyn NoticeSink,
 }
 
 /// Runs `prompt` directly through the 3-perspective MAGI consensus, off the agent
@@ -214,6 +231,12 @@ pub(crate) struct MagiRuntimeParams<'a> {
 ///   `[magi].default_mode`, the `untrusted_content` guard, and the provider
 ///   `kind`); see its rustdoc for how each field is used.
 ///
+/// # SC-A04d's warning
+/// If `runtime.timeout_decision.warning` is `Some`, it is emitted via `runtime.
+/// notice_sink` **before** anything else runs — the warning is about the
+/// operator's `--timeout` choice, independent of whether THIS particular query
+/// turns out to be valid, so it fires even on the `InputInvalid` path below.
+///
 /// # Errors
 /// - [`ConsultRunError::InputInvalid`] if `prompt` is empty or exceeds
 ///   [`MAX_QUERY_LEN`].
@@ -230,6 +253,14 @@ async fn analyze_direct(
     explicit_mode: Option<Mode>,
     runtime: &MagiRuntimeParams<'_>,
 ) -> Result<Value, ConsultRunError> {
+    // SC-A04d: the value is obeyed either way (REQ-A04, `timeout` above is never
+    // overridden) — this is the human-facing half of the same fact `RunContext.
+    // timeout_below_formula` already reports in the JSON (REQ-A11d covers the
+    // pipeline consumer; this covers whoever runs the command by hand).
+    if let Some(w) = &runtime.timeout_decision.warning {
+        runtime.notice_sink.once(NOTICE_TIMEOUT_BELOW_FORMULA, w);
+    }
+
     if prompt.trim().is_empty() || prompt.len() > MAX_QUERY_LEN {
         return Err(ConsultRunError::InputInvalid);
     }
@@ -966,7 +997,7 @@ mod tests {
     use futures::stream::{self, BoxStream};
     use magi_rs::headless::limits::FULL_AUTO_TIMEOUT_SECS;
     use serde_json::{json, Value};
-    use std::collections::VecDeque;
+    use std::collections::{BTreeSet, VecDeque};
     use std::sync::atomic::{AtomicBool, Ordering};
 
     use magi_core::schema::AgentName;
@@ -1017,6 +1048,45 @@ mod tests {
             effective_secs: magi_rs::magi::AGENT_TIMEOUT_SECS,
             warning: None,
             below_formula: false,
+        }
+    }
+
+    /// Sink double: records emitted messages in memory instead of touching
+    /// stderr, so [`analyze_direct`]'s SC-A04d warning (fix round 2) can be
+    /// observed without redirecting real process stderr — which nextest's
+    /// parallel execution makes unsafe to do globally, and no dependency in
+    /// this crate does per-test (B14: no new one added for this). Mirrors
+    /// `agent::mode_classifier`'s private test double of the same name — one
+    /// per module rather than a cross-module test-only export (B13).
+    #[derive(Default)]
+    struct RecordingNoticeSink {
+        /// Keys already emitted, for the dedup (same contract as
+        /// [`crate::agent::mode_classifier::ProcessNoticeSink`]).
+        seen: Mutex<BTreeSet<&'static str>>,
+        /// The messages that WERE emitted, in order.
+        messages: Mutex<Vec<String>>,
+    }
+
+    impl NoticeSink for RecordingNoticeSink {
+        fn once(&self, key: &'static str, msg: &str) {
+            let mut seen = self.seen.lock().unwrap_or_else(PoisonError::into_inner);
+            if seen.insert(key) {
+                self.messages
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .push(msg.to_string());
+            }
+        }
+    }
+
+    impl RecordingNoticeSink {
+        /// Every message emitted, joined — enough for a `contains`/`is_empty`
+        /// assertion without exposing the `Vec` itself.
+        fn emitted(&self) -> String {
+            self.messages
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .join("\n")
         }
     }
 
@@ -1888,6 +1958,7 @@ mod tests {
     #[tokio::test]
     async fn test_run_consult_direct_runs_three_perspectives_and_populates_consult() {
         let cfg = MagiConfig::default();
+        let sink = RecordingNoticeSink::default();
         let outcome = run_consult(
             resolved_stub(),
             canned_magi(),
@@ -1901,6 +1972,7 @@ mod tests {
                 untrusted_content: false,
                 magi_config: &cfg,
                 timeout_decision: neutral_timeout_decision(),
+                notice_sink: &sink,
             },
             None,
         )
@@ -1935,6 +2007,7 @@ mod tests {
             "base_url = \"http://a/v1\"\n[magi]\nbase_url = \"http://b/v1\"\n",
         )
         .expect("valid toml");
+        let sink = RecordingNoticeSink::default();
         let outcome = run_consult(
             resolved_stub(),
             canned_magi(),
@@ -1949,6 +2022,7 @@ mod tests {
                 untrusted_content: false,
                 magi_config: &diverged,
                 timeout_decision: neutral_timeout_decision(),
+                notice_sink: &sink,
             },
             None,
         )
@@ -1971,6 +2045,7 @@ mod tests {
             "base_url = \"http://a/v1\"\n[magi]\nbase_url = \"http://b/v1\"\n",
         )
         .expect("valid toml");
+        let sink = RecordingNoticeSink::default();
         let outcome = run_consult(
             resolved_stub(),
             canned_magi(),
@@ -1984,6 +2059,7 @@ mod tests {
                 untrusted_content: false,
                 magi_config: &diverged,
                 timeout_decision: neutral_timeout_decision(),
+                notice_sink: &sink,
             },
             None,
         )
@@ -2010,6 +2086,7 @@ mod tests {
             decision.below_formula,
             "test setup: this must actually trigger the formula check"
         );
+        let sink = RecordingNoticeSink::default();
 
         let outcome = run_consult(
             resolved_stub(),
@@ -2024,6 +2101,7 @@ mod tests {
                 untrusted_content: false,
                 magi_config: &cfg,
                 timeout_decision: decision,
+                notice_sink: &sink,
             },
             None,
         )
@@ -2033,12 +2111,126 @@ mod tests {
         assert_eq!(consult["timeout_below_formula"], true);
     }
 
+    /// Fix round 2 (SC-A04d's other half): the warning reaches a REAL `analyze_
+    /// direct` run's `notice_sink`, not just the JSON flag. Driven through
+    /// `run_consult` with a REAL `TimeoutDecision` from `resolve_run_timeout`,
+    /// exactly like the JSON-flag test above — a hand-built `TimeoutDecision`
+    /// asserted against in isolation would prove nothing about whether
+    /// `analyze_direct` actually reads `runtime.notice_sink`.
+    #[tokio::test]
+    async fn sc_a04d_warning_reaches_the_notice_sink_from_a_real_run() {
+        let cfg = MagiConfig::default();
+        let ceiling = magi_rs::magi::AGENT_TIMEOUT_SECS;
+        let decision = magi_rs::magi::resolve_run_timeout(Some(1), ceiling);
+        assert!(
+            decision.below_formula && decision.warning.is_some(),
+            "test setup: this must actually trigger the warning"
+        );
+        let sink = RecordingNoticeSink::default();
+
+        let _outcome = run_consult(
+            resolved_stub(),
+            canned_magi(),
+            "should we migrate X to Y?",
+            None,
+            Some(Mode::Analysis),
+            &MagiRuntimeParams {
+                kind: ProviderKind::OpenAiCompat,
+                classifier: &NeverClassifier,
+                configured_mode: None,
+                untrusted_content: false,
+                magi_config: &cfg,
+                timeout_decision: decision,
+                notice_sink: &sink,
+            },
+            None,
+        )
+        .await;
+
+        assert!(
+            sink.emitted().contains("--timeout"),
+            "the human-facing warning must reach the sink: {}",
+            sink.emitted()
+        );
+    }
+
+    /// The negative case, in both directions the spec names: a `--timeout` AT OR
+    /// ABOVE the formula, and an ABSENT `--timeout`, must emit NOTHING. Without
+    /// this, a sink that always fires (an unconditional `eprintln!` regardless of
+    /// `decision.warning`) would pass the positive test above too.
+    #[tokio::test]
+    async fn sc_a04d_warning_stays_silent_at_or_above_the_formula_and_when_absent() {
+        let cfg = MagiConfig::default();
+        let ceiling = magi_rs::magi::AGENT_TIMEOUT_SECS;
+
+        let generous = magi_rs::magi::resolve_run_timeout(Some(100_000), ceiling);
+        assert!(
+            !generous.below_formula && generous.warning.is_none(),
+            "test setup: this must NOT trigger the formula check"
+        );
+        let sink_generous = RecordingNoticeSink::default();
+        run_consult(
+            resolved_stub(),
+            canned_magi(),
+            "should we migrate X to Y?",
+            None,
+            Some(Mode::Analysis),
+            &MagiRuntimeParams {
+                kind: ProviderKind::OpenAiCompat,
+                classifier: &NeverClassifier,
+                configured_mode: None,
+                untrusted_content: false,
+                magi_config: &cfg,
+                timeout_decision: generous,
+                notice_sink: &sink_generous,
+            },
+            None,
+        )
+        .await;
+        assert!(
+            sink_generous.emitted().is_empty(),
+            "a --timeout at/above the formula must emit nothing: {}",
+            sink_generous.emitted()
+        );
+
+        let absent = magi_rs::magi::resolve_run_timeout(None, ceiling);
+        assert!(
+            absent.warning.is_none(),
+            "test setup: no --timeout, no warning"
+        );
+        let sink_absent = RecordingNoticeSink::default();
+        run_consult(
+            resolved_stub(),
+            canned_magi(),
+            "should we migrate X to Y?",
+            None,
+            Some(Mode::Analysis),
+            &MagiRuntimeParams {
+                kind: ProviderKind::OpenAiCompat,
+                classifier: &NeverClassifier,
+                configured_mode: None,
+                untrusted_content: false,
+                magi_config: &cfg,
+                timeout_decision: absent,
+                notice_sink: &sink_absent,
+            },
+            None,
+        )
+        .await;
+        assert!(
+            sink_absent.emitted().is_empty(),
+            "an absent --timeout must emit nothing: {}",
+            sink_absent.emitted()
+        );
+    }
+
     /// `magi consult` over `MAX_QUERY_LEN` is rejected as `input_invalid` (exit 2),
     /// NOT truncated: `consult`/`response` stay `None` (REQ-H33).
     #[tokio::test]
     async fn test_run_consult_over_cap_is_input_invalid_not_truncated() {
         let big = "x".repeat(MAX_QUERY_LEN + 1);
         let cfg = MagiConfig::default();
+        let sink = RecordingNoticeSink::default();
         let outcome = run_consult(
             resolved_stub(),
             canned_magi(),
@@ -2052,6 +2244,7 @@ mod tests {
                 untrusted_content: false,
                 magi_config: &cfg,
                 timeout_decision: neutral_timeout_decision(),
+                notice_sink: &sink,
             },
             None,
         )
@@ -2102,6 +2295,7 @@ mod tests {
         // `MagiRuntimeParams` (and the `MagiConfig` it borrows) must outlive the
         // statement that creates `fut`.
         let cfg = MagiConfig::default();
+        let sink = RecordingNoticeSink::default();
         let runtime = MagiRuntimeParams {
             kind: ProviderKind::OpenAiCompat,
             classifier: &NeverClassifier,
@@ -2109,6 +2303,7 @@ mod tests {
             untrusted_content: false,
             magi_config: &cfg,
             timeout_decision: neutral_timeout_decision(),
+            notice_sink: &sink,
         };
 
         {
