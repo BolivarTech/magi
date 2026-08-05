@@ -1,16 +1,17 @@
 # magi-rs configuration — reference example.
 #
-# The values below ARE the built-in defaults: what magi-rs uses with no
-# `magi.toml` and no env vars. `magi init` scaffolds exactly this profile into
-# `.magi/`. To use Anthropic instead, set provider = "anthropic" (or
+# This file documents EVERY available key, with the reasoning behind each one.
+# `magi init` writes a shorter starting file carrying only the built-in
+# defaults, so this is a reference rather than a copy of what the tool
+# generates. To use Anthropic instead, set provider = "anthropic" (or
 # MAGI_PROVIDER=anthropic).
 #
-# Copy this file to `.magi/magi.toml` and edit. That file is gitignored; only
-# `docs/magi.toml.example` is tracked.
+# Copy what you need into `.magi/magi.toml` and edit. That file is gitignored;
+# only `docs/magi.toml.example` is tracked.
 #
-# API keys NEVER live here: they travel by env (ANTHROPIC_API_KEY /
-# OPENAI_API_KEY) or in the vault (`magi-rs vault set NAME`). An unknown field
-# is a PARSE ERROR, and a file that exists but does not parse is FATAL.
+# Credentials NEVER live here: they travel by env (the Anthropic and OpenAI
+# credential env vars) or in the vault (`magi-rs vault set NAME`). An unknown
+# field is a PARSE ERROR, and a file that exists but does not parse is FATAL.
 provider = "ollama"          # ollama | openai-compat | anthropic
 
 # System-wide DEFAULT endpoint: used by the main agent, the trio and the embedder
@@ -57,7 +58,7 @@ auto_approve = false
 
 # Overrides the endpoint for the trio only. Commented out means it inherits the root
 # value above.
-# base_url = "http://192.168.0.30:11434/v1"
+# base_url = "http://remote-host:11434/v1"
 
 # Sets the mode for invocations that do not pass `--mode`. Declaring it counts as
 # declared, so the classification call is skipped: a pipeline running bulk consults
