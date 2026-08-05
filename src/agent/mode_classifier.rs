@@ -121,8 +121,8 @@ impl ModeClassifier for ProviderClassifier {
         );
 
         let prompt = format!(
-            "Clasificá el contenido delimitado en exactamente una de estas etiquetas: \
-             code-review, design, analysis. Respondé SOLO la etiqueta.\n\
+            "Classify the delimited content into exactly one of these labels: \
+             code-review, design, analysis. Respond with ONLY the label.\n\
              {CONTENT_OPEN}\n{content}\n{CONTENT_CLOSE}"
         );
         let msgs = [Message::user(&prompt)];
