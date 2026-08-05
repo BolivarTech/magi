@@ -1,49 +1,46 @@
-// Author: Julian Bolivar
-// Version: 1.0.0
-// Date: 2026-08-04
+// Author: Julian Bolivar Version: 1.0.0 Date: 2026-08-04
 
-//! Medición de ventanas de contexto y digest del modelo, por composición sobre
-//! `ProviderProbe` (REQ-A24).
+//! Measurement of context windows and model digest, composed over `ProviderProbe` (REQ-A24).
 //!
-//! # Por composición, no por migración
+//! # By composition, not by migration
 //!
-//! `ProviderProbe` es un trait **separado** de `LlmProvider`: se construye un
-//! `OllamaProvider` de magi-core **solo** para llamarle `.window()` y `.digest()`, nunca
-//! para generar. magi-rs sigue completando con su propio `Provider` — D-A07 y R-A02 quedan
-//! intactos. Solo `ollama` es medible (`ProviderKind::is_probeable`); `openai-compat` y
-//! `anthropic` no ofrecen introspección y degradan a [`Measurement::NotMeasurable`].
+//! `ProviderProbe` is a trait **separate** from `LlmProvider`: an `OllamaProvider` from magi-
+//! core is built **only** to call `.window()` and `.digest()` on it, never to generate. magi-rs
+//! still completes with its own `Provider` — D-A07 and R-A02 remain intact. Only `ollama` is
+//! measurable (`ProviderKind::is_probeable`); `openai-compat` and `anthropic` offer no
+//! introspection and degrade to [`Measurement::NotMeasurable`].
 //!
-//! # El cap de tamaño del cuerpo (REQ-A16b / SC-A16c) — satisfecho POR COMPOSICIÓN
+//! # The body-size cap (REQ-A16b / SC-A16c) — satisfied BY COMPOSITION
 //!
-//! REQ-A16b exige que un cuerpo de respuesta del probe se lea bajo un cap que corte
-//! **mientras lee**, no que se verifique sobre un buffer ya alojado entero. Este módulo NO
-//! implementa ese cap, y no es un descuido: `OllamaProvider::window()`/`.digest()` hacen su
-//! propia petición HTTP dentro de magi-core y le devuelven a este módulo un
-//! `Result<Option<T>, ProviderError>` **ya resuelto** — el cuerpo crudo nunca cruza la
-//! frontera de la composición, así que no hay nada que magi-rs pueda capar sin reimplementar
-//! el transporte entero (lo que R-A02 prohíbe).
+//! REQ-A16b requires that a probe response body be read under a cap that cuts off
+//! **while reading**, not by verifying it against a buffer already fully allocated. This module
+//! DOES NOT
+//! implement that cap, and it is not an oversight: `OllamaProvider::window()`/`.digest()` make
+//! their own HTTP request inside magi-core and return to this module a `Result<Option<T>,
+//! ProviderError>` **already resolved** — the raw body never crosses the composition boundary,
+//! so there is nothing magi-rs can cap without reimplementing the entire transport (which R-A02
+//! forbids).
 //!
-//! magi-core ya lo hace: `read_probe_body` corta a `MAX_SHOW_BODY_BYTES` (1 MiB) **durante**
-//! la lectura, no después. La propiedad está verificada, no solo leída, por
-//! `tests/magi_core_contract.rs::magi_core_rejects_an_endless_probe_body_instead_of_accumulating_it`,
-//! que golpea un servidor real con un cuerpo sin fin y confirma que el lector corta por
-//! tamaño en vez de agotar memoria o esperar un timeout. Si esa dependencia dejara de
-//! capar, ese test lo dice antes que un endpoint hostil en producción.
+//! magi-core already does it: `read_probe_body` caps at `MAX_SHOW_BODY_BYTES` (1 MiB)
+//! **during** reading, not afterwards. The property is verified, not just read, by `tests/magi_
+//! core_contract.rs::magi_core_rejects_an_endless_probe_body_instead_of_accumulating_it`, which
+//! hits a real server with an endless body and confirms that the reader cuts by size instead of
+//! exhausting memory or waiting for a timeout. If that dependency stopped capping, that test
+//! would say so before a hostile endpoint in production.
 //!
-//! Lo que sí es responsabilidad de este módulo, y está implementado acá, es **validar los
-//! VALORES ya resueltos**: una ventana fuera de `[PROBE_WINDOW_MIN, PROBE_WINDOW_MAX]` o un
-//! digest que no son exactamente 64 hex en minúscula degradan a *no medido*, nunca se usan
-//! tal cual ni se recortan al extremo del rango.
+//! What is indeed this module's responsibility, and is implemented here, is **validating the
+//! ALREADY-RESOLVED VALUES**: a window outside `[PROBE_WINDOW_MIN, PROBE_WINDOW_MAX]` or a
+//! digest that is not exactly 64 lowercase hex characters degrades to *not measured*, never
+//! being used as-is nor clipped to the range boundary.
 //!
-//! # `ProbeError` no se define en este archivo
+//! # `ProbeError` is not defined in this file
 //!
-//! El encabezado de la tarea lista `ProbeError` como símbolo a definir acá, pero ningún
-//! camino de este diseño necesita un tipo de error: `probe_for` devuelve [`ProbeSeat`] (no
-//! `Result`), `probe_models` devuelve un `BTreeMap` (no `Result`), y `derive_warn_tokens`
-//! devuelve `Option<usize>` (no `Result`) — el probe **falla abierto en todas partes**, así
-//! que no hay un canal de error que propagar. Fabricar un tipo sin ningún caller solo para
-//! completar la lista habría violado la regla de no inventar símbolos sin consumidor; se
-//! documenta acá en vez de crearlo en silencio.
+//! The task header lists `ProbeError` as a symbol to define here, but no path in this design
+//! needs an error type: `probe_for` returns [`ProbeSeat`] (not `Result`), `probe_models`
+//! returns a `BTreeMap` (not `Result`), and `derive_warn_tokens` returns `Option<usize>` (not
+//! `Result`) — the probe **fails open everywhere**, so there is no error channel to propagate.
+//! Fabricating a type with no caller just to complete the list would have violated the rule of
+//! not inventing symbols without a consumer; it is documented here instead of silently created.
 
 #![deny(missing_docs)]
 #![deny(clippy::missing_docs_in_private_items)]
@@ -74,101 +71,101 @@ use crate::magi::kind::ProviderKind;
 use crate::magi::{PROBE_TIMEOUT_SECS, PROBE_WINDOW_MAX, PROBE_WINDOW_MIN, WARN_WINDOW_FRACTION};
 use crate::redact::{redact_foreign_error, SafeErrorText};
 
-/// Longitud exacta de un digest SHA-256 en hexadecimal (REQ-A16b).
+/// Exact length of a SHA-256 digest in hexadecimal (REQ-A16b).
 ///
-/// SHA-256 produce 32 bytes; en hexadecimal eso son EXACTAMENTE 64 caracteres. No es una
-/// elección de diseño: es el tamaño de una huella SHA-256, y magi-core valida por el mismo
-/// número en `parse_tags_digest`. Documentado en vez de repetido como literal (B4).
+/// SHA-256 produces 32 bytes; in hexadecimal that is EXACTLY 64 characters. It is not a design
+/// choice: it is the size of a SHA-256 fingerprint, and magi-core validates by the same number
+/// in `parse_tags_digest`. Documented instead of repeated as a literal (B4).
 const DIGEST_HEX_LEN: usize = 64;
 
-/// Resultado de medir un modelo (REQ-A24c). **Tres estados, no dos.**
+/// Result of measuring a model (REQ-A24c). **Three states, not two.**
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Measurement {
-    /// Medido: ventana en tokens (dentro de `[PROBE_WINDOW_MIN, PROBE_WINDOW_MAX]`) y digest
-    /// si se pudo resolver y validar.
+    /// Measured: window in tokens (within `[PROBE_WINDOW_MIN, PROBE_WINDOW_MAX]`) and digest if
+    /// it could be resolved and validated.
     Measured {
-        /// Ventana de contexto, ya validada contra el rango de REQ-A16b.
+        /// Context window, already validated against the range in REQ-A16b.
         window: usize,
-        /// SHA256 del manifiesto — 64 hex en minúscula — o `None` si no se pudo resolver o
-        /// no pasó la validación de formato.
+        /// SHA256 of the manifest — 64 lowercase hex — or `None` if it could not be resolved or
+        /// did not pass format validation.
         digest: Option<String>,
     },
-    /// El endpoint no ofrece introspección (`openai-compat`, `anthropic`). Definitivo y
-    /// esperado (SC-A24b) — **no es un fallo**.
+    /// The endpoint offers no introspection (`openai-compat`, `anthropic`). Definitive and
+    /// expected (SC-A24b) — **it is not a failure**.
     NotMeasurable,
-    /// El endpoint SÍ ofrece introspección pero esta vez no contestó a tiempo, devolvió algo
-    /// fuera de rango, o la sonda no se pudo construir.
+    /// The endpoint DOES offer introspection but this time did not answer in time, returned
+    /// something out of range, or the probe could not be built.
     ///
-    /// Es el caso común del **primer arranque** con un daemon Ollama frío. Sin distinguirlo
-    /// de [`Self::NotMeasurable`], un "ventana desconocida" en el estreno se leería como
-    /// *"esto no funciona"* cuando en realidad es *"todavía no cargó"*.
+    /// It is the common case of the **first start** with a cold Ollama daemon. Without
+    /// distinguishing it from [`Self::NotMeasurable`], an "unknown window" on the first run
+    /// would read as
+    /// *"this doesn't work"* when in reality it is *"it hasn't loaded yet"*.
     NotMeasuredThisTime,
 }
 
-/// Qué salió de intentar armar una sonda para un `(endpoint, modelo)`. **Tres estados, no
-/// dos**: un `kind` no medible y una sonda que no se pudo construir tienen consecuencias
-/// distintas, y colapsarlos afirmaría algo falso sobre la capacidad del servidor cuando lo
-/// que falló fue nuestra configuración.
+/// What came out of trying to build a probe for an `(endpoint, model)`. **Three states, not
+/// two**: a non-measurable `kind` and a probe that could not be built have different
+/// consequences, and collapsing them would assert something false about the server's capability
+/// when what failed was our configuration.
 pub enum ProbeSeat {
-    /// Lista para sondear.
+    /// Ready to probe.
     Ready(Arc<dyn ProviderProbe>),
-    /// El `kind` no ofrece probe. Definitivo (SC-A24b) — **no es un fallo**.
+    /// The `kind` offers no probe. Definitive (SC-A24b) — **it is not a failure**.
     NotProbeable,
-    /// El `kind` SÍ es medible pero la sonda no se pudo construir (URL malformada, cliente
-    /// HTTP). Arreglable: es un problema de nuestra config, no una afirmación sobre el
-    /// servidor. El texto ya viene redactado — nunca puede contener la credencial resuelta
-    /// del endpoint que se intentó sondear (B11).
+    /// The `kind` IS measurable but the probe could not be built (malformed URL, HTTP client).
+    /// Fixable: it is a problem with our config, not a statement about the server. The text is
+    /// already drafted — it can never contain the resolved credential of the endpoint that was
+    /// being probed (B11).
     Unbuildable(SafeErrorText),
 }
 
-/// Fábrica de sondas — la costura de inyección que R-A04 exige (sin red real en los tests
-/// de este módulo, salvo el que verifica la construcción real contra un servidor de prueba).
+/// Probe factory — the injection seam that R-A04 requires (no real network in this module's
+/// tests, except the one that verifies real construction against a test server).
 ///
-/// `probe_models` no construye un `OllamaProvider` adentro: lo pide a través de este trait,
-/// así que un test puede sustituir la sonda por un doble determinista.
+/// `probe_models` does not build an `OllamaProvider` inside: it requests it through this trait,
+/// so a test can substitute the probe with a deterministic double.
 pub trait ProbeFactory: Send + Sync {
-    /// Arma la sonda para un `(endpoint, modelo)`.
+    /// Builds the probe for an `(endpoint, model)`.
     ///
-    /// Toma `&ResolvedEndpoint`, no `&str`: es el newtype cuyo único constructor es
-    /// `EndpointTemplate::resolve`, así que una `base_url` con placeholders sin sustituir no
-    /// puede llegar hasta acá por construcción — la resolución ocurre en el arranque, después
-    /// de abrir el vault y antes de sondear o de construir el trío.
+    /// Takes `&ResolvedEndpoint`, not `&str`: it is the newtype whose only constructor is
+    /// `EndpointTemplate::resolve`, so a `base_url` with placeholders left unreplaced cannot
+    /// reach here by construction — resolution happens at startup, after opening the vault and
+    /// before probing or building the trio.
     fn probe_for(&self, kind: ProviderKind, base_url: &ResolvedEndpoint, model: &str) -> ProbeSeat;
 }
 
-/// Producción: `OllamaProvider` **solo como sonda**, nunca para completions (D-A07).
+/// Production: `OllamaProvider` **only as a probe**, never for completions (D-A07).
 ///
-/// La `base_url` se le pasa tal cual, con su `/v1` si lo trae: `OllamaProvider::new` acepta
-/// las dos formas (con y sin `/v1`) y normaliza internamente — las peticiones de probe salen
-/// siempre contra la RAÍZ del daemon (`{root}/api/show`, `{root}/api/tags`), nunca bajo
-/// `/v1`. Verificado por el test
-/// `the_real_factory_probes_the_daemon_root_not_the_v1_prefix` de este módulo (no es un
-/// intra-doc link porque vive en `#[cfg(test)]`, fuera del árbol que `cargo doc` recorre)
-/// contra un servidor de prueba real, no solo leído contra el código de magi-core.
+/// The `base_url` is passed as-is, with its `/v1` if it has one: `OllamaProvider::new` accepts
+/// both forms (with and without `/v1`) and normalizes internally — probe requests always go
+/// against the ROOT of the daemon (`{root}/api/show`, `{root}/api/tags`), never under `/v1`.
+/// Verified by the test `the_real_factory_probes_the_daemon_root_not_the_v1_prefix` in this
+/// module (not an intra-doc link because it lives in `#[cfg(test)]`, outside the tree `cargo
+/// doc` walks) against a real test server, not just read against magi-core's code.
 pub struct OllamaProbeFactory;
 
 impl ProbeFactory for OllamaProbeFactory {
     fn probe_for(&self, kind: ProviderKind, base_url: &ResolvedEndpoint, model: &str) -> ProbeSeat {
-        // Dos respuestas distintas, nunca colapsadas en un `Option`: un kind no medible y una
-        // URL malformada bajo un kind medible tienen causas y remedios distintos.
+        // Two different answers, never collapsed into an `Option`: a non-measurable kind and a
+        // malformed URL under a measurable kind have different causes and different remedies.
         if !kind.is_probeable() {
             return ProbeSeat::NotProbeable;
         }
         match OllamaProvider::new(base_url.as_str(), model) {
             Ok(provider) => ProbeSeat::Ready(Arc::new(provider)),
-            // `redact_foreign_error`, no `e.to_string()` crudo: `base_url` es la URL YA
-            // RESUELTA (REQ-A16c), y un error de otro crate que la interpolara filtraría la
-            // credencial real a quien sea que termine mostrando esta razón (B11).
+            // `redact_foreign_error`, not raw `e.to_string()`: `base_url` is the ALREADY-
+            // RESOLVED URL (REQ-A16c), and an error from another crate that interpolated it
+            // would leak the real credential to whoever ends up showing this reason (B11).
             Err(e) => ProbeSeat::Unbuildable(redact_foreign_error(&e)),
         }
     }
 }
 
-/// Acepta un digest solo si es EXACTAMENTE 64 caracteres hexadecimales en minúscula
-/// (REQ-A16b). Cualquier otra cosa se descarta — la ventana medida sobrevive igual.
+/// Accepts a digest only if it is EXACTLY 64 lowercase hexadecimal characters (REQ-A16b).
+/// Anything else is discarded — the measured window survives just the same.
 ///
-/// No byte-indexa nada: `str::bytes()` es un iterador total sobre los bytes de una cadena
-/// UTF-8 válida, nunca panica en un borde de carácter (a diferencia de `&s[a..b]`).
+/// It does not byte-index anything: `str::bytes()` is a total iterator over the bytes of a
+/// valid UTF-8 string, never panicking on a character boundary (unlike `&s[a..b]`).
 fn validate_digest(raw: Option<String>) -> Option<String> {
     raw.filter(|d| {
         d.len() == DIGEST_HEX_LEN
@@ -177,27 +174,29 @@ fn validate_digest(raw: Option<String>) -> Option<String> {
     })
 }
 
-/// Mide los modelos indicados, por composición sobre [`ProviderProbe`] (REQ-A24).
+/// Measures the indicated models, composed over [`ProviderProbe`] (REQ-A24).
 ///
-/// **Falla abierto, sin excepción**: error, timeout, esquema inesperado o endpoint que nunca
-/// contesta degradan a [`Measurement::NotMeasuredThisTime`]. El techo es **por sonda**
-/// (SC-A24k): con un plazo compartido, una sonda lenta consumiría el presupuesto de las
-/// demás y las dejaría sin medir sin que ninguna haya fallado.
+/// **Fails open, without exception**: error, timeout, unexpected scheme, or an endpoint that
+/// never
+/// answers degrades to [`Measurement::NotMeasuredThisTime`]. The ceiling is **per probe**
+/// (SC-A24k): with a shared deadline, a slow probe would consume the budget of the others and
+/// leave them unmeasured without any of them having failed.
 ///
-/// **Dedup por `(endpoint, modelo)`.** En el caso por defecto el trío hereda el endpoint de
-/// raíz y puede compartir modelo con el principal, así que sondear cuatro veces lo mismo
-/// cuadruplica el costo de arranque por el mismo número cuatro veces. La clave es el modelo
-/// bajo el `base_url` recibido — el llamador ya fija un solo endpoint por llamada, así que
-/// deduplicar por modelo dentro de esa llamada es deduplicar por el par completo.
+/// **Dedup by `(endpoint, model)`.** In the default case the trio inherits the root endpoint
+/// and
+/// may share a model with the main one, so probing the same thing four times quadruples the
+/// startup cost for the same number four times. The key is the model under the received
+/// `base_url` — the caller already fixes a single endpoint per call, so deduplicating by model
+/// within that call is deduplicating by the full pair.
 ///
-/// El mapa devuelto tiene una entrada por modelo **pedido**, no por sonda emitida: los
-/// duplicados de `models` comparten el resultado de la única sonda que se lanzó.
+/// The returned map has one entry per **requested** model, not per probe emitted: duplicates in
+/// `models` share the result of the single probe that was launched.
 ///
-/// # Complejidad
+/// # Complexity
 ///
-/// Dos pasadas O(n) sobre `models` (deduplicar, y volver a expandir al final), sin ninguna
-/// anidada: cada modelo único dispara como máximo dos peticiones HTTP (`window`, `digest`),
-/// todas concurrentes vía [`futures::future::join_all`].
+/// Two `O(n)` passes over `models` (deduplicate, and re-expand at the end), with no nested
+/// pass: each unique model triggers at most two HTTP requests (`window`, `digest`), all
+/// concurrent via [`futures::future::join_all`].
 pub async fn probe_models(
     kind: ProviderKind,
     base_url: &ResolvedEndpoint,
@@ -217,20 +216,19 @@ pub async fn probe_models(
     let futures = unique.into_iter().map(|model| async move {
         let probe = match factory.probe_for(kind, base_url, model) {
             ProbeSeat::Ready(p) => p,
-            // Capacidad que el endpoint no ofrece: definitivo, y NO es un fallo (SC-A24b).
+            // Capability the endpoint does not offer: definitive, and NOT a failure (SC-A24b).
             ProbeSeat::NotProbeable => return (model.to_string(), Measurement::NotMeasurable),
-            // Nuestra config, no su capacidad: arreglable, así que *no medido ESTA VEZ*.
+            // Our config, not its capability: fixable, so *not measured THIS TIME*.
             ProbeSeat::Unbuildable(_) => {
                 return (model.to_string(), Measurement::NotMeasuredThisTime)
             }
         };
 
-        // DOS techos independientes, no uno compartido entre `window` y `digest`: son dos
-        // peticiones HTTP distintas que NO valen lo mismo. La ventana alimenta
-        // `input_warn_tokens`; el digest solo decora un notice. Con un `timeout` envolviendo
-        // a las dos, un digest lento tiraría a la basura una ventana perfectamente buena —
-        // el mismo error de "plazo compartido" que SC-A24k prohíbe entre sondas, un nivel
-        // más abajo.
+        // TWO independent ceilings, not one shared between `window` and `digest`: they are two
+        // distinct HTTP requests that are NOT worth the same. The window feeds
+        // `input_warn_tokens`; the digest only decorates a notice. With a `timeout` wrapping
+        // both, a slow digest would throw away a perfectly good window — the same "shared
+        // deadline" error that SC-A24k forbids among probes, one level lower.
         let window = tokio::time::timeout(deadline, probe.window())
             .await
             .ok()
@@ -238,8 +236,9 @@ pub async fn probe_models(
 
         let value = match window {
             Some(w) if (PROBE_WINDOW_MIN..=PROBE_WINDOW_MAX).contains(&w) => {
-                // Si la ventana no salió, ni se pide el digest: ahorra una petición en el
-                // caso que más importa, que es el endpoint lento o caído.
+                // If the window did not come through, the digest is not even requested: it
+                // saves one request in the case that matters most, which is the slow or down
+                // endpoint.
                 let digest = tokio::time::timeout(deadline, probe.digest())
                     .await
                     .ok()
@@ -249,8 +248,9 @@ pub async fn probe_models(
                     digest: validate_digest(digest),
                 }
             }
-            // Fuera de rango degrada a NO MEDIDO, nunca al extremo: un valor recortado se
-            // usaría como si fuera real, y *no medido* tiene un camino previsto y auditable.
+            // Out of range degrades to NOT MEASURED, never to the extreme: a clipped value
+            // would be used as if it were real, and *not measured* has a planned and auditable
+            // path.
             _ => Measurement::NotMeasuredThisTime,
         };
         (model.to_string(), value)
@@ -261,9 +261,9 @@ pub async fn probe_models(
         .into_iter()
         .collect();
 
-    // Re-expandir: cada modelo PEDIDO recibe el resultado de su sonda, compartido si hubo
-    // duplicados. El llamador ve una entrada por modelo pedido, no por sonda emitida — y el
-    // `BTreeMap` de salida dedup-ea por construcción, así que pedir `[a, a, b]` da `{a, b}`.
+    // Re-expand: each REQUESTED model receives its probe's result, shared if there were
+    // duplicates. The caller sees one entry per requested model, not per emitted probe — and
+    // the output `BTreeMap` dedups by construction, so requesting `[a, a, b]` yields `{a, b}`.
     models
         .iter()
         .map(|m| {
@@ -278,18 +278,18 @@ pub async fn probe_models(
         .collect()
 }
 
-/// Ventana **mínima** medida entre los mages, SIN aplicar la fracción de aviso
-/// (REQ-A24b). Un mage no medible se **omite** del mínimo en vez de bajarlo — si ninguno
-/// es medible, devuelve `None`.
+/// **Minimum** window measured among the mages, WITHOUT applying the warning fraction
+/// (REQ-A24b). A non-measurable mage is **omitted** from the minimum instead of lowering it —
+/// if none are measurable, returns `None`.
 ///
-/// Separada de [`derive_warn_tokens`] (Task 5.2) para que el notice de composición
-/// staleness (SC-A24i, `main.rs::stale_composition_notice`) pueda comparar
-/// `max_query_bytes` contra el número CRUDO de la ventana: aplicarle la fracción de aviso
-/// ahí también desplazaría el umbral de ESE notice sin que REQ-A24b lo pida — SC-A24i
-/// compara contra la ventana **medida**, no contra un umbral ya reducido.
+/// Separated from [`derive_warn_tokens`] (Task 5.2) so that the stale-composition notice
+/// (SC-A24i, `main.rs::stale_composition_notice`) can compare `max_query_bytes` against the RAW
+/// window number: applying the warning fraction there as well would shift the threshold of THAT
+/// notice without REQ-A24b asking for it — SC-A24i compares against the **measured** window,
+/// not against an already-reduced threshold.
 ///
-/// # Complejidad
-/// Una pasada `O(n)` sobre los mages, sin anidar.
+/// # Complexity
+/// One `O(n)` pass over the mages, with no nesting.
 #[must_use]
 pub fn min_mage_window(mages: &BTreeMap<String, Measurement>) -> Option<usize> {
     mages
@@ -301,16 +301,18 @@ pub fn min_mage_window(mages: &BTreeMap<String, Measurement>) -> Option<usize> {
         .min()
 }
 
-/// Deriva `input_warn_tokens` del **mínimo** de las ventanas medidas de los mages (REQ-A24b).
+/// Derives `input_warn_tokens` from the **minimum** of the measured windows of the mages
+/// (REQ-A24b).
 ///
-/// **De los MAGES, no del principal**: `input_warn_tokens` gobierna el input que reciben los
-/// tres mages, y el modelo principal no recibe ese payload. Con un principal de ventana
-/// grande y mages de ventana menor, derivarlo del principal daría un umbral que nunca
-/// dispara — es responsabilidad del LLAMADOR pasar acá solo la tabla del trío, nunca la que
-/// incluye al principal.
+/// **From the MAGES, not the main one**: `input_warn_tokens` governs the input received by the
+/// three mages, and the main model does not receive that payload. With a main model of large
+/// window and mages of smaller window, deriving it from the main one would give a threshold
+/// that never fires — it is the CALLER's responsibility to pass in only the trio's table here,
+/// never the one that includes the main model.
 ///
-/// Un mage no medible se **omite** del mínimo en vez de bajarlo. Si ninguno es medible,
-/// devuelve `None` y el llamador cae al nivel siguiente (clave declarada, después default).
+/// A non-measurable mage is **omitted** from the minimum instead of lowering it. If none are
+/// measurable, returns `None` and the caller falls back to the next level (declared key, then
+/// default).
 #[must_use]
 pub fn derive_warn_tokens(mages: &BTreeMap<String, Measurement>) -> Option<usize> {
     let min = min_mage_window(mages)?;
@@ -336,25 +338,25 @@ mod tests {
     use crate::magi::endpoint::{EndpointTemplate, Scope};
     use crate::vault::{SecretEntry, SecretStore, VaultError};
 
-    /// Endpoint sintáctico compartido por los tests que no dependen de un valor concreto:
-    /// `StubProbes` nunca hace I/O, así que nunca se contacta de verdad.
+    /// Syntactic endpoint shared by tests that do not depend on a concrete value: `StubProbes`
+    /// never does I/O, so it is never actually contacted.
     const SYNTHETIC_BASE_URL: &str = "http://localhost:11434/v1";
 
-    /// Vault que nunca debería consultarse: las URLs de estos tests no traen placeholders,
-    /// así que `EndpointTemplate::resolve` no llega a pedir ninguna entrada (caso "Absent"
-    /// de `locate_userinfo` — ver `src/magi/endpoint.rs`).
+    /// Vault that should never be queried: these tests' URLs carry no placeholders, so
+    /// `EndpointTemplate::resolve` never gets to request any entry ("Absent" case of
+    /// `locate_userinfo` — see `src/magi/endpoint.rs`).
     ///
-    /// # Exclusión de cobertura documentada (REQ-A00, revisión tarea 5.1 / F2)
+    /// # Documented coverage exclusion (REQ-A00, task 5.1 review / F2)
     ///
-    /// Los cinco métodos de este `impl` aparecen como funciones NO CUBIERTAS en
-    /// `cargo llvm-cov`, y es estructural, no un hueco: `EndpointTemplate::resolve` solo
-    /// puede llamar a `SecretStore::get`, y únicamente en la rama
-    /// `UserinfoLocation::Found` — cuando la URL trae un placeholder `[user]`/`[password]`
-    /// sin sustituir. Ninguna fixture de este módulo usa una URL con placeholders (todas
-    /// resuelven por la rama `Absent`, que retorna antes de tocar el vault), así que ni
-    /// siquiera `get` se ejecuta en la práctica. `set`, `remove`, `list` y `contains` no
-    /// los invoca ningún camino de `resolve`, con o sin placeholder: existen solo porque
-    /// `SecretStore` es el trait completo y un doble tiene que implementarlo entero.
+    /// The five methods of this `impl` appear as UNCOVERED functions in `cargo llvm-cov`, and
+    /// it is structural, not a gap: `EndpointTemplate::resolve` can only call
+    /// `SecretStore::get`, and only in the `UserinfoLocation::Found` branch — when the URL
+    /// carries a `[user]`/`[password]` placeholder left unreplaced. No fixture in this module
+    /// uses a URL with placeholders (they all resolve through the `Absent` branch, which
+    /// returns before touching the vault), so not even `get` runs in practice. `set`, `remove`,
+    /// `list`, and `contains` are not invoked by any path in `resolve`, with or without
+    /// placeholder: they exist only because `SecretStore` is the full trait and a double has to
+    /// implement it in full.
     struct NoSecrets;
 
     impl SecretStore for NoSecrets {
@@ -375,9 +377,9 @@ mod tests {
         }
     }
 
-    /// Parsea y resuelve una `base_url` de fixture, sin placeholders. Falla el test (no
-    /// degrada) si la fixture está mal formada: un helper de test que degradara en silencio
-    /// escondería un fixture roto detrás de un resultado que parece válido.
+    /// Parses and resolves a fixture `base_url`, without placeholders. The test fails (does not
+    /// degrade) if the fixture is malformed: a test helper that silently degraded would hide a
+    /// broken fixture behind a result that looks valid.
     fn resolved(raw: &str) -> ResolvedEndpoint {
         EndpointTemplate::parse(raw)
             .expect("fixture de test bien formada")
@@ -385,48 +387,48 @@ mod tests {
             .expect("fixture de test sin placeholders")
     }
 
-    /// El endpoint compartido de los tests que no ejercitan I/O real.
+    /// The shared endpoint for tests that do not exercise real I/O.
     fn test_endpoint() -> ResolvedEndpoint {
         resolved(SYNTHETIC_BASE_URL)
     }
 
-    /// Doble de [`ProviderProbe`] configurable — nunca construido directamente por un test,
-    /// solo a través de [`StubProbes`].
+    /// Configurable [`ProviderProbe`] double — never built directly by a test, only through
+    /// [`StubProbes`].
     struct StubProbe {
-        /// El nombre por el que este `StubProbe` fue pedido, para registrar su timing.
+        /// The name by which this `StubProbe` was requested, to record its timing.
         model: String,
-        /// Lo que devuelve `window()`, ya "medido" por el doble.
+        /// What `window()` returns, already "measured" by the double.
         window: Option<usize>,
-        /// Lo que devuelve `digest()`, ya "medido" por el doble.
+        /// What `digest()` returns, already "measured" by the double.
         digest: Option<String>,
-        /// Demora artificial antes de que `window()` resuelva.
+        /// Artificial delay before `window()` resolves.
         delay: Duration,
-        /// Si `true`, `window()` devuelve un `ProviderError::External` REAL en vez de
-        /// `Ok(self.window)` — distinto de un timeout: acá la sonda SÍ contestó, y lo que
-        /// contestó fue un fallo tipado (F1, revisión tarea 5.1).
+        /// If `true`, `window()` returns a REAL `ProviderError::External` instead of
+        /// `Ok(self.window)` — different from a timeout: here the probe DID answer, and what it
+        /// answered was a typed error (F1, task 5.1 review).
         window_fails: bool,
-        /// Ídem para `digest()`, independiente de `window_fails`: un digest que falla no
-        /// debe tirar una ventana ya medida con éxito.
+        /// Same for `digest()`, independent of `window_fails`: a failing digest must not bring
+        /// down a window already measured successfully.
         digest_fails: bool,
-        /// Dónde registrar cuánto tardó `window()` en resolver — incluida la cancelación.
+        /// Where to record how long `window()` took to resolve — including cancellation.
         timings: Arc<Mutex<BTreeMap<String, Duration>>>,
     }
 
-    /// Registra en `Drop` cuánto vivió la llamada a `window()`, tanto si terminó normal como
-    /// si `tokio::time::timeout` la canceló al expirar el techo — es la única forma honesta
-    /// de medir "la sonda lenta agotó SU techo completo" (SC-A24k), porque una cancelación
-    /// nunca llega al final del cuerpo de la función que canceló.
+    /// Records in `Drop` how long the call to `window()` lived, whether it finished normally or
+    /// `tokio::time::timeout` cancelled it when the ceiling expired — it is the only honest way
+    /// to measure "the slow probe exhausted ITS full ceiling" (SC-A24k), because a cancellation
+    /// never reaches the end of the body of the function that was cancelled.
     struct TimingGuard {
-        /// El modelo bajo el cual registrar el tiempo transcurrido.
+        /// The model under which to record the elapsed time.
         model: String,
-        /// Cuándo arrancó, en el reloj de tokio — así respeta el reloj pausado de los tests.
+        /// When it started, on tokio's clock — so it respects the paused clock of the tests.
         start: tokio::time::Instant,
-        /// El mismo mapa compartido que expone [`StubProbes::elapsed_of`].
+        /// The same shared map exposed by [`StubProbes::elapsed_of`].
         timings: Arc<Mutex<BTreeMap<String, Duration>>>,
     }
 
     impl TimingGuard {
-        /// Arranca el cronómetro para `model`.
+        /// Starts the stopwatch for `model`.
         fn new(model: String, timings: Arc<Mutex<BTreeMap<String, Duration>>>) -> Self {
             Self {
                 model,
@@ -445,9 +447,9 @@ mod tests {
         }
     }
 
-    /// Una razón de `Unbuildable` ya redactada, para `StubProbes::always_unbuildable`. El
-    /// único constructor de `SafeErrorText` es `redact_foreign_error`, así que un doble que
-    /// necesite producir una no puede simplemente envolver un `String`.
+    /// An already-drafted reason for `Unbuildable`, for `StubProbes::always_unbuildable`. The
+    /// only constructor of `SafeErrorText` is `redact_foreign_error`, so a double that needs to
+    /// produce one cannot simply wrap a `String`.
     fn unbuildable_reason() -> SafeErrorText {
         redact_foreign_error(&std::io::Error::other("stub: construcción rechazada"))
     }
@@ -479,52 +481,52 @@ mod tests {
         }
     }
 
-    /// Fábrica de [`StubProbe`]s — la costura de inyección de R-A04: sin ella, todo test de
-    /// `probe_models` necesitaría un servidor HTTP real.
+    /// Factory of [`StubProbe`]s — the injection seam of R-A04: without it, every test of
+    /// `probe_models` would need a real HTTP server.
     struct StubProbes {
-        /// Ventana que emite toda sonda que no sea la "lenta" ni derive la suya (modo
+        /// Window emitted by every probe that is not the "slow" one nor derives its own (mode
         /// `derive_per_model`).
         default_window: Option<usize>,
-        /// Digest que emite toda sonda en el mismo caso que `default_window`.
+        /// Digest emitted by every probe in the same case as `default_window`.
         default_digest: Option<String>,
-        /// El modelo con demora artificial, y cuánta — si hay uno.
+        /// The model with the artificial delay, and how much — if there is one.
         slow: Option<(String, Duration)>,
-        /// En vez de un valor fijo, deriva una ventana distinta por modelo (test de dedup).
+        /// Instead of a fixed value, derives a different window per model (dedup test).
         derive_per_model: bool,
-        /// Si está presente, `probe_for` devuelve ESTE asiento en vez de construir uno
-        /// `Ready` — para ejercitar los brazos `NotProbeable`/`Unbuildable` de `probe_models`
-        /// tal como los vería con la fábrica real, sin depender de un servidor.
+        /// If present, `probe_for` returns THIS seat instead of building a `Ready` one — to
+        /// exercise the `NotProbeable`/`Unbuildable` arms of `probe_models` exactly as it would
+        /// see them with the real factory, without depending on a server.
         seat_override: Option<SeatOverride>,
-        /// Si `true`, toda sonda `Ready` que esta fábrica construye falla `window()` con un
-        /// `ProviderError` real (F1, revisión tarea 5.1) — distinto de `seat_override`, que
-        /// nunca llega a construir un `StubProbe`.
+        /// If `true`, every `Ready` probe this factory builds fails `window()` with a real
+        /// `ProviderError` (F1, task 5.1 review) — different from `seat_override`, which never
+        /// gets to build a `StubProbe`.
         window_error: bool,
-        /// Ídem para `digest()`.
+        /// Same for `digest()`.
         digest_error: bool,
-        /// Cuántas veces se llamó a `probe_for` — una por modelo ÚNICO pedido, nunca por
-        /// duplicado (SC del dedup).
+        /// How many times `probe_for` was called — one per UNIQUE requested model, never per
+        /// duplicate (SC of the dedup).
         built: Arc<AtomicUsize>,
-        /// Cuánto tardó `window()` de cada modelo, incluida cancelación por timeout.
+        /// How long `window()` took for each model, including cancellation by timeout.
         timings: Arc<Mutex<BTreeMap<String, Duration>>>,
     }
 
-    /// Qué asiento no-`Ready` debe devolver `probe_for`, cuando `StubProbes` está configurada
-    /// para eso. Existe para ejercitar los brazos de `probe_models` que la fábrica real
-    /// produce (`ProbeSeat::NotProbeable`, `ProbeSeat::Unbuildable`) sin depender de un
-    /// servidor: `StubProbes::measuring`/`without_window`/`one_slow`/`counting` siempre
-    /// devuelven `Ready`, así que ninguno de esos otros dobles ejercita esta rama.
+    /// Which non-`Ready` seat `probe_for` should return, when `StubProbes` is configured for
+    /// that. It exists to exercise the arms of `probe_models` that the real factory produces
+    /// (`ProbeSeat::NotProbeable`, `ProbeSeat::Unbuildable`) without depending on a server:
+    /// `StubProbes::measuring`/`without_window`/`one_slow`/`counting` always return `Ready`, so
+    /// none of those other doubles exercise this branch.
     #[derive(Clone, Copy)]
     enum SeatOverride {
-        /// Fuerza `ProbeSeat::NotProbeable` — el caso de una fábrica cuya idea de "medible"
-        /// difiere de la del `kind` que `probe_models` ya verificó.
+        /// Forces `ProbeSeat::NotProbeable` — the case of a factory whose idea of "measurable"
+        /// differs from that of the `kind` that `probe_models` already checked.
         NotProbeable,
-        /// Fuerza `ProbeSeat::Unbuildable` — el caso de una URL medible que no se pudo
-        /// convertir en cliente HTTP.
+        /// Forces `ProbeSeat::Unbuildable` — the case of a measurable URL that could not be
+        /// turned into an HTTP client.
         Unbuildable,
     }
 
     impl StubProbes {
-        /// Toda sonda mide la misma ventana y el mismo digest.
+        /// Every probe measures the same window and the same digest.
         fn measuring(window: usize, digest: String) -> Self {
             Self {
                 default_window: Some(window),
@@ -539,7 +541,7 @@ mod tests {
             }
         }
 
-        /// Toda sonda responde `window: None` — el caso de un `/api/show` sin
+        /// Every probe answers `window: None` — the case of an `/api/show` without
         /// `*.context_length`.
         fn without_window() -> Self {
             Self {
@@ -555,8 +557,8 @@ mod tests {
             }
         }
 
-        /// `slow_model` demora `delay` antes de resolver; el resto mide una ventana fija de
-        /// inmediato.
+        /// `slow_model` delays `delay` before resolving; the rest measure a fixed window
+        /// immediately.
         fn one_slow(slow_model: &str, delay: Duration) -> Self {
             Self {
                 default_window: Some(128_000),
@@ -571,8 +573,8 @@ mod tests {
             }
         }
 
-        /// Cada modelo mide una ventana DISTINTA, derivada de su propio nombre — para
-        /// distinguir sondas de distintos modelos sin depender de un contador externo.
+        /// Each model measures a DIFFERENT window, derived from its own name — to distinguish
+        /// probes of different models without relying on an external counter.
         fn counting() -> Self {
             Self {
                 default_window: None,
@@ -587,7 +589,7 @@ mod tests {
             }
         }
 
-        /// `probe_for` devuelve `ProbeSeat::NotProbeable` para todo modelo pedido.
+        /// `probe_for` returns `ProbeSeat::NotProbeable` for every requested model.
         fn always_not_probeable() -> Self {
             Self {
                 default_window: None,
@@ -602,7 +604,7 @@ mod tests {
             }
         }
 
-        /// `probe_for` devuelve `ProbeSeat::Unbuildable` para todo modelo pedido.
+        /// `probe_for` returns `ProbeSeat::Unbuildable` for every requested model.
         fn always_unbuildable() -> Self {
             Self {
                 default_window: None,
@@ -617,12 +619,13 @@ mod tests {
             }
         }
 
-        /// Toda sonda arma un `Ready`, pero `window()` devuelve un `ProviderError::External`
-        /// REAL —no un timeout—. Hasta la revisión de la tarea 5.1 ningún doble distinguía
-        /// "no hubo tiempo" de "el provider respondió que no puede": los dos colapsan al
-        /// mismo [`Measurement::NotMeasuredThisTime`], pero por caminos de código
-        /// distintos dentro de `probe_models` (`tokio::time::timeout` expirando vs.
-        /// `Result::ok()` descartando un `Err` interno), y solo el primero tenía cobertura.
+        /// Every probe builds a `Ready`, but `window()` returns a REAL
+        /// `ProviderError::External` —not a timeout—. Until the task 5.1 review no double
+        /// distinguished "there was no time" from "the provider answered that it cannot": the
+        /// two collapse to the same [`Measurement::NotMeasuredThisTime`], but via different
+        /// code paths inside `probe_models` (`tokio::time::timeout` expiring vs.
+        /// `Result::ok().flatten()` discarding that internal `Err`), and only the first had
+        /// coverage.
         fn erroring_window() -> Self {
             Self {
                 default_window: None,
@@ -637,11 +640,11 @@ mod tests {
             }
         }
 
-        /// `window()` mide `window` con normalidad; `digest()` devuelve un
-        /// `ProviderError::External` real. Distinto de
-        /// [`Self::measuring`] con un digest de formato inválido (ya cubierto por
-        /// `a_malformed_body_degrades_without_panicking`): acá el provider FALLA la
-        /// petición, no responde un valor que no pasa `validate_digest`.
+        /// `window()` measures `window` normally; `digest()` returns a real
+        /// `ProviderError::External`. Different from [`Self::measuring`] with an invalid-format
+        /// digest (already covered by `a_malformed_body_degrades_without_panicking`): here the
+        /// provider FAILS the request, not responding with a value that does not pass
+        /// `validate_digest`.
         fn erroring_digest(window: usize) -> Self {
             Self {
                 default_window: Some(window),
@@ -656,25 +659,25 @@ mod tests {
             }
         }
 
-        /// Cuántas sondas distintas se construyeron — una por modelo único pedido.
+        /// How many distinct probes were built — one per unique requested model.
         fn probes_built(&self) -> usize {
             self.built.load(Ordering::SeqCst)
         }
 
-        /// Cuánto tardó en resolver (o ser cancelada) la sonda de `model`.
+        /// How long the probe for `model` took to resolve (or be cancelled).
         ///
         /// # Panics
         ///
-        /// Si `model` nunca llegó a pedirse — un test que llama esto sobre un modelo que no
-        /// midió tiene un error en el propio test, no algo que degradar.
+        /// If `model` was never requested — a test that calls this on a model that was not
+        /// measured has a bug in the test itself, not something to degrade.
         ///
-        /// # Exclusión de cobertura documentada (REQ-A00, revisión tarea 5.1 / F2)
+        /// # Documented coverage exclusion (REQ-A00, task 5.1 review / F2)
         ///
-        /// La closure de pánico de abajo aparece como función NO CUBIERTA en
-        /// `cargo llvm-cov`, y es deliberado: ningún test de este módulo llama a
-        /// `elapsed_of` sobre un modelo que no se haya medido, así que el camino de pánico
-        /// nunca se toma. Un test que sí lo tomara estaría demostrando un bug del propio
-        /// test, no del código de producción — no hay nada que ejercitar acá.
+        /// The panic closure below appears as an UNCOVERED function in `cargo llvm-cov`, and it
+        /// is deliberate: no test in this module calls `elapsed_of` on a model that was not
+        /// measured, so the panic path is never taken. A test that did take it would be
+        /// demonstrating a bug in the test itself, not in production code — there is nothing to
+        /// exercise here.
         fn elapsed_of(&self, model: &str) -> Duration {
             *self
                 .timings
@@ -706,8 +709,8 @@ mod tests {
                 .filter(|(slow_model, _)| slow_model == model)
                 .map_or(Duration::ZERO, |(_, d)| *d);
             let (window, digest) = if self.derive_per_model {
-                // Determinista y distinto entre modelos de nombre distinto: alcanza para
-                // `assert_ne!` sin necesitar un generador aleatorio en un test.
+                // Deterministic and different between models of different name: enough for
+                // `assert_ne!` without needing a random generator in a test.
                 let derived = PROBE_WINDOW_MIN + model.bytes().map(usize::from).sum::<usize>();
                 (Some(derived), None)
             } else {
@@ -725,34 +728,35 @@ mod tests {
         }
     }
 
-    /// SC-A16b (borde, revisión tarea 5.1 / F1): 63 caracteres es UN MENOS que el mínimo
-    /// válido — el borde real de la validación, distinto de la cadena de 3 caracteres que
-    /// `a_malformed_body_degrades_without_panicking` ya cubre (esa solo prueba "muy corto").
+    /// SC-A16b (edge, task 5.1 review / F1): 63 characters is ONE LESS than the valid minimum —
+    /// the real edge of the validation, different from the 3-character string that
+    /// `a_malformed_body_degrades_without_panicking` already covers (that one only tests "very
+    /// short").
     #[test]
     fn validate_digest_rejects_sixty_three_hex_chars() {
         let short = "a".repeat(DIGEST_HEX_LEN - 1);
         assert_eq!(validate_digest(Some(short)), None);
     }
 
-    /// SC-A16b (borde): 65 caracteres es UNO MÁS que el máximo válido.
+    /// SC-A16b (edge): 65 characters is ONE MORE than the valid maximum.
     #[test]
     fn validate_digest_rejects_sixty_five_hex_chars() {
         let long = "a".repeat(DIGEST_HEX_LEN + 1);
         assert_eq!(validate_digest(Some(long)), None);
     }
 
-    /// SC-A16b: el contrato exige minúscula explícitamente (REQ-A16b) — hexadecimal en
-    /// mayúscula, aunque representa el mismo valor, se rechaza igual que cualquier otra
-    /// cosa que no matchee byte a byte.
+    /// SC-A16b: the contract explicitly requires lowercase (REQ-A16b) — uppercase hexadecimal,
+    /// although it represents the same value, is rejected just like anything else that does not
+    /// match byte for byte.
     #[test]
     fn validate_digest_rejects_uppercase_hex() {
         let upper = "A".repeat(DIGEST_HEX_LEN);
         assert_eq!(validate_digest(Some(upper)), None);
     }
 
-    /// SC-A16b: la longitud exacta NO alcanza sola — un carácter fuera de `[0-9a-f]` en la
-    /// posición 64 también se rechaza. `'g'` es el primer carácter ASCII después de `'f'`,
-    /// así que es el vecino más cercano al rango válido.
+    /// SC-A16b: the exact length is NOT enough on its own — a character outside `[0-9a-f]` at
+    /// position 64 is also rejected. `'g'` is the first ASCII character after `'f'`, so it is
+    /// the closest neighbor to the valid range.
     #[test]
     fn validate_digest_rejects_a_non_hex_character_at_the_exact_length() {
         let mut bad = "a".repeat(DIGEST_HEX_LEN - 1);
@@ -765,15 +769,15 @@ mod tests {
         assert_eq!(validate_digest(Some(bad)), None);
     }
 
-    /// SC-A16b (feliz, borde exacto): exactamente 64 hex en minúscula pasa tal cual, sin
-    /// modificar el valor — el caso de éxito que los cuatro rechazos de arriba delimitan.
+    /// SC-A16b (happy, exact edge): exactly 64 lowercase hex passes as-is, without modifying
+    /// the value — the success case bounded by the four rejections above.
     #[test]
     fn validate_digest_accepts_exactly_sixty_four_lowercase_hex() {
         let valid = "f".repeat(DIGEST_HEX_LEN);
         assert_eq!(validate_digest(Some(valid.clone())), Some(valid));
     }
 
-    /// SC-A24 / SC-A24b: se mide lo medible; no medible NO es un fallo.
+    /// SC-A24 / SC-A24b: what is measurable is measured; not measurable is NOT a failure.
     #[tokio::test]
     async fn ollama_is_measured_and_the_others_are_not_a_failure() {
         let m = probe_models(
@@ -785,8 +789,8 @@ mod tests {
         .await;
         assert!(matches!(m["m"], Measurement::Measured { .. }));
 
-        // Sin red: el kind no medible se resuelve en `probe_models` mismo, antes de tocar
-        // la fábrica, así que ni siquiera se construye un socket.
+        // No network: the non-measurable kind is resolved inside `probe_models` itself, before
+        // touching the factory, so not even a socket is built.
         let m = probe_models(
             ProviderKind::Anthropic,
             &test_endpoint(),
@@ -800,11 +804,11 @@ mod tests {
         );
     }
 
-    /// SC-A16b: fuera de rango degrada a NO MEDIDO, nunca al extremo del rango.
+    /// SC-A16b: out of range degrades to NOT MEASURED, never to the range boundary.
     ///
-    /// `PROBE_WINDOW_MIN - 1` es el borde REAL de la validación — distinto de `1`, que solo
-    /// prueba "muy chico" sin tocar el límite exacto que `(PROBE_WINDOW_MIN..=PROBE_WINDOW_MAX)`
-    /// evalúa.
+    /// `PROBE_WINDOW_MIN - 1` is the REAL edge of the validation — different from `1`, which
+    /// only tests "very small" without touching the exact limit that
+    /// `(PROBE_WINDOW_MIN..=PROBE_WINDOW_MAX)` evaluates.
     #[tokio::test]
     async fn an_out_of_range_window_degrades_instead_of_being_clamped() {
         for absurd in [
@@ -827,10 +831,11 @@ mod tests {
         }
     }
 
-    /// SC-A16b (bordes inclusivos): `PROBE_WINDOW_MIN` y `PROBE_WINDOW_MAX` en persona se
-    /// ACEPTAN tal cual — el rango es `[MIN, MAX]`, no `(MIN, MAX)`, y el test anterior solo
-    /// prueba el lado del rechazo. Sin este, un `<` que debiera ser `<=` (o viceversa) en
-    /// `(PROBE_WINDOW_MIN..=PROBE_WINDOW_MAX).contains(&w)` pasaría la suite igual.
+    /// SC-A16b (inclusive edges): `PROBE_WINDOW_MIN` and `PROBE_WINDOW_MAX` themselves are
+    /// ACCEPTED as-is — the range is `[MIN, MAX]`, not `(MIN, MAX)`, and the previous test only
+    /// exercises the rejection side. Without this one, a `<` that should be `<=` (or vice
+    /// versa) in `(PROBE_WINDOW_MIN..=PROBE_WINDOW_MAX).contains(&w)` would pass the suite
+    /// anyway.
     #[tokio::test]
     async fn the_window_range_boundaries_are_accepted_inclusive() {
         for edge in [PROBE_WINDOW_MIN, PROBE_WINDOW_MAX] {
@@ -848,7 +853,7 @@ mod tests {
         }
     }
 
-    /// SC-A24d: respuesta malformada degrada, no rompe.
+    /// SC-A24d: malformed response degrades, does not break.
     #[tokio::test]
     async fn a_malformed_body_degrades_without_panicking() {
         let m = probe_models(
@@ -878,12 +883,11 @@ mod tests {
         }
     }
 
-    /// SC-A24d (extensión, revisión tarea 5.1 / F1): un `ProviderError` REAL en `window()`
-    /// degrada exactamente igual que un timeout. Hasta ahora `StubProbe` solo podía
-    /// resolver con éxito o demorarse hasta expirar el `tokio::time::timeout` de
-    /// `probe_models`; el brazo donde la sonda SÍ contesta y lo que contesta es un `Err`
-    /// tipado —`.and_then(|r| r.ok().flatten())` descartando ese `Err`, no un `Elapsed`—
-    /// nunca se había ejercitado.
+    /// SC-A24d (extension, task 5.1 review / F1): a REAL `ProviderError` in `window()` degrades
+    /// exactly the same as a timeout. Until now `StubProbe` could only resolve successfully or
+    /// delay until the `tokio::time::timeout` of `probe_models` expired; the arm where the
+    /// probe DID answer and what it answered was a typed `Err` —`.and_then(|r|
+    /// r.ok().flatten())` discarding that `Err`, not an `Elapsed`— had never been exercised.
     #[tokio::test]
     async fn a_genuine_provider_error_on_window_degrades_like_a_timeout() {
         let m = probe_models(
@@ -899,11 +903,11 @@ mod tests {
         );
     }
 
-    /// SC-A24d (extensión, revisión tarea 5.1 / F1): un `ProviderError` REAL en `digest()`
-    /// no tira la ventana ya medida con éxito — mismo principio de "un campo fuera de
-    /// rango/roto no contamina el otro" que `a_malformed_body_degrades_without_panicking`
-    /// ya prueba para un digest de FORMATO inválido, acá aplicado a un digest que falla
-    /// EXPLÍCITAMENTE con un error tipado.
+    /// SC-A24d (extension, task 5.1 review / F1): a REAL `ProviderError` in `digest()` does not
+    /// bring down the window already measured successfully — same principle of "one out-of-
+    /// range/broken field does not contaminate the other" that
+    /// `a_malformed_body_degrades_without_panicking` already proves for an invalid-FORMAT
+    /// digest, here applied to a digest that EXPLICITLY fails with a typed error.
     #[tokio::test]
     async fn a_genuine_provider_error_on_digest_leaves_the_window_intact() {
         let m = probe_models(
@@ -928,13 +932,13 @@ mod tests {
         }
     }
 
-    /// SC-A24c / SC-A24k: techo POR SONDA — una lenta no arrastra a las otras.
+    /// SC-A24c / SC-A24k: ceiling PER PROBE — a slow one does not drag the others down.
     ///
-    /// Corre con el reloj de tokio PAUSADO: el techo real es de varios segundos, y un test
-    /// que durmiera de verdad esa duración sería exactamente el defecto que este proyecto ya
-    /// diagnosticó dos veces bajo carga (`nextest` en paralelo). `probe_models` no hace
-    /// `tokio::spawn`, así que las cuatro sondas viven en la misma tarea y el auto-avance del
-    /// reloj pausado las destraba a todas sin bloquear un solo hilo real.
+    /// Runs with the tokio clock PAUSED: the real ceiling is several seconds, and a test that
+    /// actually slept that long would be exactly the defect this project already diagnosed
+    /// twice under load (`nextest` in parallel). `probe_models` does not `tokio::spawn`, so the
+    /// four probes live in the same task and the paused clock's auto-advance unblocks all of
+    /// them without blocking a single real thread.
     #[tokio::test(start_paused = true)]
     async fn a_slow_probe_does_not_starve_the_others() {
         let started = Instant::now();
@@ -959,7 +963,8 @@ mod tests {
             3,
             "con plazo compartido, la lenta habría dejado a las otras sin presupuesto"
         );
-        // El techo es POR SONDA: la lenta consumió el suyo entero sin recortar el de nadie.
+        // The ceiling is PER PROBE: the slow one consumed its whole own without cutting anyone
+        // else's.
         assert!(
             stub.elapsed_of("a") >= Duration::from_secs(PROBE_TIMEOUT_SECS),
             "la sonda lenta debe agotar SU techo completo, no una fracción compartida"
@@ -972,12 +977,12 @@ mod tests {
         }
     }
 
-    /// Regresión de estructura: `probe_models` maneja `ProbeSeat::NotProbeable` devuelto POR
-    /// LA FÁBRICA, no solo el atajo de `kind.is_probeable() == false` de la línea de arriba.
-    /// Con `StubProbes::measuring`/`without_window`/`one_slow`/`counting` la fábrica SIEMPRE
-    /// arma `Ready`, así que ninguno de esos dobles ejercita este brazo — solo lo hace una
-    /// fábrica cuya noción de "medible" difiere de la del `kind`, que es exactamente lo que
-    /// haría la real si algún día `is_probeable()` y `probe_for` se desincronizan.
+    /// Structural regression: `probe_models` handles `ProbeSeat::NotProbeable` returned BY THE
+    /// FACTORY, not only the shortcut for `kind.is_probeable() == false` from the line above.
+    /// With `StubProbes::measuring`/`without_window`/`one_slow`/`counting` the factory ALWAYS
+    /// builds `Ready`, so none of those doubles exercise this arm — only a factory whose notion
+    /// of "measurable" differs from that of the `kind` does, which is exactly what the real one
+    /// would do if someday `is_probeable()` and `probe_for` drift out of sync.
     #[tokio::test]
     async fn a_seat_reported_not_probeable_mid_stream_is_not_a_failure() {
         let m = probe_models(
@@ -990,9 +995,9 @@ mod tests {
         assert!(matches!(m["m"], Measurement::NotMeasurable));
     }
 
-    /// Ídem para `ProbeSeat::Unbuildable`: es el camino que la fábrica REAL toma cuando el
-    /// `kind` es medible pero la URL no arma un cliente — arreglable, así que degrada a *no
-    /// medido esta vez*, no a *no medible*.
+    /// Same for `ProbeSeat::Unbuildable`: it is the path the REAL factory takes when the `kind`
+    /// is measurable but the URL cannot build a client — fixable, so it degrades to *not
+    /// measured this time*, not to *not measurable*.
     #[tokio::test]
     async fn an_unbuildable_seat_degrades_to_not_measured_this_time() {
         let m = probe_models(
@@ -1005,7 +1010,7 @@ mod tests {
         assert!(matches!(m["m"], Measurement::NotMeasuredThisTime));
     }
 
-    /// SC-A24j: el umbral sale del MÍNIMO de los mages, no del principal.
+    /// SC-A24j: the threshold comes from the MINIMUM of the mages, not the main one.
     #[test]
     fn the_warn_threshold_comes_from_the_minimum_mage_window() {
         let mages = BTreeMap::from([
@@ -1039,7 +1044,7 @@ mod tests {
         assert!(derived < 128_000, "una fracción, nunca la ventana entera");
     }
 
-    /// SC-A24j (regresión): un mage no medible se OMITE del mínimo, no lo baja.
+    /// SC-A24j (regression): a non-measurable mage is OMITTED from the minimum, not lowered.
     #[test]
     fn an_unmeasurable_mage_is_omitted_from_the_minimum() {
         let none = BTreeMap::from([("m".to_string(), Measurement::NotMeasuredThisTime)]);
@@ -1050,10 +1055,10 @@ mod tests {
         );
     }
 
-    /// Task 5.2 (SC-A24i): `min_mage_window` es el número CRUDO, sin la fracción de aviso
-    /// — distinto de `derive_warn_tokens`, que le aplica `WARN_WINDOW_FRACTION`. El notice
-    /// de composición staleness necesita compararse contra la ventana MEDIDA, no contra un
-    /// umbral ya reducido.
+    /// Task 5.2 (SC-A24i): `min_mage_window` is the RAW number, without the warning fraction —
+    /// different from `derive_warn_tokens`, which applies `WARN_WINDOW_FRACTION` to it. The
+    /// stale-composition notice needs to compare against the MEASURED window, not against an
+    /// already-reduced threshold.
     #[test]
     fn min_mage_window_returns_the_raw_minimum_unmeasurable_omitted() {
         let mages = BTreeMap::from([
@@ -1080,7 +1085,7 @@ mod tests {
         );
     }
 
-    /// Task 5.2 (borde): ningún mage medible ⇒ `None`, igual que `derive_warn_tokens`.
+    /// Task 5.2 (edge): no measurable mage ⇒ `None`, just like `derive_warn_tokens`.
     #[test]
     fn min_mage_window_is_none_when_nothing_is_measured() {
         let mages = BTreeMap::from([
@@ -1090,9 +1095,9 @@ mod tests {
         assert_eq!(min_mage_window(&mages), None);
     }
 
-    /// Dedup: cuatro modelos pedidos, dos distintos ⇒ DOS sondas construidas, DOS entradas
-    /// en el mapa devuelto (el mapa dedup-ea por clave; pedir `[a, a, b, a]` da `{a, b}` — no
-    /// hay forma de que produzca cuatro entradas para tres nombres distintos).
+    /// Dedup: four models requested, two distinct ⇒ TWO probes built, TWO entries in the
+    /// returned map (the map dedups by key; requesting `[a, a, b, a]` yields `{a, b}` — there
+    /// is no way it can produce four entries for three distinct names).
     #[tokio::test]
     async fn identical_endpoint_and_model_are_probed_once_and_shared() {
         let counting = StubProbes::counting();
@@ -1106,8 +1111,8 @@ mod tests {
 
         assert_eq!(counting.probes_built(), 2, "solo dos modelos distintos");
         assert_eq!(m.len(), 2, "el mapa dedup-ea por clave");
-        // Las tres entradas de "a" comparten el resultado de la ÚNICA sonda de "a", y eso se
-        // ve contra el conteo de arriba — comparar `m["a"] == m["a"]` sería tautológico.
+        // The three entries of "a" share the result of the ONLY probe of "a", and that is
+        // checked against the count above — comparing `m["a"] == m["a"]` would be tautological.
         assert_ne!(
             m["a"], m["b"],
             "sondas de modelos distintos dan resultados distintos"
@@ -1115,16 +1120,16 @@ mod tests {
         assert!(matches!(m["a"], Measurement::Measured { .. }));
     }
 
-    /// Regresión de D-A07/R-A02: la fábrica REAL sondea la RAÍZ del daemon (`/api/show`),
-    /// nunca bajo el prefijo `/v1` de las completions.
+    /// D-A07/R-A02 regression: the REAL factory probes the ROOT of the daemon (`/api/show`),
+    /// never under the `/v1` prefix of completions.
     ///
-    /// `StubProbes` cubre el comportamiento de `probe_models` y NO la construcción real de
-    /// la sonda: si `OllamaProbeFactory` empezara a pegarle a `/v1/api/show`, ningún otro
-    /// test de este módulo lo vería. `ProviderProbe` no expone la URL que usa internamente
-    /// (por diseño — ver `magi_core::providers::provider_url`), así que la única forma
-    /// honesta de fijar esta propiedad es ejercitarla contra un servidor real: si el mock
-    /// registrado en `/api/show` nunca es golpeado, `mock.assert_async()` hace fallar el
-    /// test en vez de dejar pasar una URL equivocada en silencio.
+    /// `StubProbes` covers the behavior of `probe_models` and NOT the real construction of the
+    /// probe: if `OllamaProbeFactory` started hitting `/v1/api/show`, no other test in this
+    /// module would see it. `ProviderProbe` does not expose the URL it uses internally (by
+    /// design — see `magi_core::providers::provider_url`), so the only honest way to pin down
+    /// this property is to exercise it against a real server: if the mock registered at
+    /// `/api/show` is never hit, `mock.assert_async()` makes the test fail instead of letting a
+    /// wrong URL pass in silence.
     #[tokio::test]
     async fn the_real_factory_probes_the_daemon_root_not_the_v1_prefix() {
         let mut server = mockito::Server::new_async().await;
@@ -1160,15 +1165,14 @@ mod tests {
         );
     }
 
-    /// B11: cuando `OllamaProvider::new` rechaza la URL (acá, por esquema — `ftp` no es
-    /// `http`/`https`), la fábrica real reporta `Unbuildable` con una razón ya pasada por
-    /// `redact_foreign_error`, nunca `e.to_string()` crudo. No hay una credencial que filtrar
-    /// en ESTE caso puntual (el rechazo de esquema de magi-core solo cita el nombre del
-    /// esquema, nunca la URL completa — verificado contra `providers/provider_url.rs`), pero
-    /// la propiedad que importa acá es de PLOMERÍA: que el camino de error pasa por el
-    /// redactor y no por un `.to_string()` directo, así que un error futuro de magi-core que
-    /// SÍ interpole una URL con credenciales queda cubierto por construcción, no por
-    /// vigilancia.
+    /// B11: when `OllamaProvider::new` rejects the URL (here, by scheme — `ftp` is not
+    /// `http`/`https`), the real factory reports `Unbuildable` with a reason already passed
+    /// through `redact_foreign_error`, never raw `e.to_string()`. There is no credential to
+    /// leak in THIS particular case (magi-core's scheme rejection only cites the scheme name,
+    /// never the full URL — verified against `providers/provider_url.rs`), but the property
+    /// that matters here is PLUMBING: that the error path goes through the redactor and not
+    /// through a direct `.to_string()`, so a future magi-core error that DOES interpolate a URL
+    /// with credentials is covered by construction, not by vigilance.
     #[test]
     fn the_real_factory_redacts_the_reason_when_construction_fails() {
         let bad = resolved("ftp://host/v1");
