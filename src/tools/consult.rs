@@ -2320,11 +2320,14 @@ mod tests {
         )
     }
 
-    /// SC-A11e (`Anchored`)/SC-A11h: the verdict and the mark survive, but the
-    /// promise stops there — "no findings" (this fixture) and "could not locate"
-    /// both degrade to this same level, which is the point: the consumer only
-    /// needs to know it does NOT have guarantee (b), not which of the two caused
-    /// it (`report_anchors::SectionAnchors::findings_start`'s own rustdoc).
+    /// SC-A11e (`Anchored`)/SC-A11h/SC-A11i: the verdict and the mark survive,
+    /// but the promise stops there — "no findings" (this fixture) and "could not
+    /// locate" both degrade to this same level, which is the point: the consumer
+    /// only needs to know it does NOT have guarantee (b), not which of the two
+    /// caused it (`report_anchors::SectionAnchors::findings_start`'s own
+    /// rustdoc). SC-A11i specifically: the sections could not be fully located
+    /// (no findings), but the contractual anchor COULD — so the level lands on
+    /// `Anchored`, one step down, never straight to `Bytes`.
     #[test]
     fn anchored_level_keeps_only_the_verdict_when_there_were_no_findings() {
         let anchors = SECTION_ANCHORS.expect("this test assumes Anchored is reachable");
