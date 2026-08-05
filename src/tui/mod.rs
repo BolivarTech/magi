@@ -120,33 +120,92 @@ fn tui_consult_size_check(query: &str, max_query_bytes: usize) -> Result<(), Age
         .map_err(|e| AgentResponse::Error(e.to_string()))
 }
 
-/// The `/consult` response BODY for a successful `MagiReport` (REQ-A12c, SC-A12f, fix
-/// round 4, finding 2).
+/// The `[DEGRADED: ...]` banner text (REQ-A12c, SC-A12f, fix round 4, finding 2) —
+/// TUI-only presentation, not part of the JSON `report`/`degraded` shape the other
+/// two surfaces emit (see [`tui_consult_success_body`]'s own doc).
 ///
-/// **Before this fix, `UiEvent::Consult` built its body from `report.report` directly
-/// — bypassing `annotate_report_text` entirely.** A human typing `/consult` is
-/// arguably the most direct "first use" surface REQ-A12c describes, and they got NONE
-/// of this task's keyless-auth guidance: a partial failure (`degraded = true`) with a
-/// seat rejected on auth under a keyless kind rendered as an unexplained `[DEGRADED:
-/// …]` banner over the raw report, same as any other partial failure.
+/// A named `const` rather than an inline literal (B3/B4): [`tui_consult_success_body`]
+/// needs it standalone (never pre-joined to the report) so a caller that has to
+/// truncate can reserve room for it BEFORE cutting the report — see
+/// [`tui_consult_success_reply`] for why that ordering is the entire point of a fix
+/// applied in this task.
+const DEGRADED_BANNER: &str =
+    "[DEGRADED: fewer than 3 agents responded — consensus may be unreliable]";
+
+/// The `/consult` response BODY pieces for a successful `MagiReport` (REQ-A12c,
+/// SC-A12f, fix round 4, finding 2; restructured in a later fix — see below).
+///
+/// **Before the fix round 4 changes, `UiEvent::Consult` built its body from
+/// `report.report` directly — bypassing `annotate_report_text` entirely.** A human
+/// typing `/consult` is arguably the most direct "first use" surface REQ-A12c
+/// describes, and they got NONE of this task's keyless-auth guidance: a partial
+/// failure (`degraded = true`) with a seat rejected on auth under a keyless kind
+/// rendered as an unexplained `[DEGRADED: …]` banner over the raw report, same as
+/// any other partial failure.
 ///
 /// Reuses [`crate::tools::consult::annotate_report_text`] — the SAME function
 /// `ConsultTool::execute`/`analyze_direct` already call — so the TUI never carries its
-/// own, fourth copy of this wording (B3). The `[DEGRADED: …]` banner is TUI-only
-/// presentation (it is not part of the JSON `report`/`degraded` shape the other two
-/// surfaces emit) and stays here, prepended to the shared annotated text.
+/// own, fourth copy of this wording (B3).
+///
+/// **Returns the banner and the annotated report SEPARATE, not pre-joined.** A prior
+/// version of this function returned one already-joined `String`
+/// (`banner + "\n\n" + annotated`), and the production call site truncated THAT whole
+/// string with [`crate::tools::consult::truncate_report`]. That function's three
+/// levels all cut the kept region starting from the verdict anchor onward — which
+/// sits AFTER a pre-joined banner — so a sufficiently long degraded report silently
+/// lost its banner on truncation: a thin, unreliable consensus rendered
+/// indistinguishable from a full-strength one, which is worse than an obviously
+/// broken reply because there is nothing telling the user to distrust it. Keeping the
+/// pieces separate lets [`tui_consult_success_reply`] reserve room for the banner
+/// BEFORE truncating the report, instead of after.
 ///
 /// Extracted from the `UiEvent::Consult` handler for the same reason as
 /// [`consult_unavailable_response`]/[`handle_login`]: the full TUI event loop is
 /// intractable to drive in a test.
-fn tui_consult_success_body(report: &MagiReport, kind: ProviderKind) -> String {
-    let annotated = crate::tools::consult::annotate_report_text(report, kind);
-    if report.degraded {
-        format!(
-            "[DEGRADED: fewer than 3 agents responded — consensus may be unreliable]\n\n{annotated}"
-        )
-    } else {
-        annotated
+struct ConsultSuccessBody {
+    /// The caveat that must survive any truncation applied afterward — present
+    /// only when `report.degraded`.
+    banner: Option<&'static str>,
+    /// The annotated report text (REQ-A12c) — never the raw `MagiReport::report`
+    /// on its own.
+    annotated: String,
+}
+
+fn tui_consult_success_body(report: &MagiReport, kind: ProviderKind) -> ConsultSuccessBody {
+    ConsultSuccessBody {
+        banner: report.degraded.then_some(DEGRADED_BANNER),
+        annotated: crate::tools::consult::annotate_report_text(report, kind),
+    }
+}
+
+/// The truncation-safe `/consult` reply for a successful `MagiReport` — the exact
+/// combination `UiEvent::Consult`'s success arm performs (fix: see
+/// [`tui_consult_success_body`]'s own doc for the defect this replaces).
+///
+/// When [`ConsultSuccessBody::banner`] is present, `cap` is applied via
+/// [`crate::tools::consult::truncate_report_with_preserved_prefix`], which reserves
+/// room for the banner FIRST and truncates the report under whatever remains — the
+/// banner is the highest-value text in the reply (it says how much to trust
+/// everything below it) and is never the thing sacrificed to fit the cap. Without a
+/// banner this is exactly [`crate::tools::consult::truncate_report`] on the annotated
+/// text, unchanged from before this fix.
+///
+/// Extracted from the `UiEvent::Consult` handler for the same reason as every other
+/// `tui_consult_*` helper in this file: the full TUI event loop is intractable to
+/// drive in a test, so the exact bytes the user receives are verified here instead.
+fn tui_consult_success_reply(
+    report: &MagiReport,
+    kind: ProviderKind,
+    cap: usize,
+) -> crate::tools::consult::Truncated {
+    let pieces = tui_consult_success_body(report, kind);
+    match pieces.banner {
+        Some(banner) => crate::tools::consult::truncate_report_with_preserved_prefix(
+            banner,
+            &pieces.annotated,
+            cap,
+        ),
+        None => crate::tools::consult::truncate_report(&pieces.annotated, cap),
     }
 }
 
@@ -703,7 +762,10 @@ impl App {
 ///   the headless direct path enforce (SC-A11c).
 /// - `tool_result_cap` (REQ-A11b) — `MagiConfig::effective_tool_result_cap()`,
 ///   resolved once at startup. Bounds the explicit `/consult` command's body via
-///   `crate::tools::consult::truncate_report` before it reaches the terminal.
+///   [`tui_consult_success_reply`] before it reaches the terminal — which reserves
+///   room for the `[DEGRADED: ...]` banner ahead of the report, rather than handing
+///   the whole joined string to `crate::tools::consult::truncate_report` the way a
+///   prior fix did (see [`tui_consult_success_body`]'s own doc).
 pub struct TuiMagiRuntimeConfig {
     /// Consulted only when `/consult` declares no mode and none is
     /// configured (REQ-A07c).
@@ -937,18 +999,23 @@ pub async fn run_tui_ext(
                     match join {
                         Ok(Ok(report)) => {
                             // REQ-A12c/SC-A12f (fix round 4, finding 2): routed through
-                            // the SAME `annotate_report_text` `ConsultTool`/headless use
-                            // — see `tui_consult_success_body`'s own doc for what this
-                            // replaces.
-                            let body = tui_consult_success_body(&report, magi_kind);
+                            // the SAME `annotate_report_text` `ConsultTool`/headless use.
                             // REQ-A11b/SC-A11d: bounds the reply the same way the other
                             // two routes bound their `report` field — this is the TUI's
                             // OTHER consult surface (the explicit command, not the
                             // agent-routed tool), and a wall of text is worth capping on
                             // its own merits even though this reply never re-enters
                             // `runner_agent`'s history the way a `ToolResult` would.
+                            //
+                            // `tui_consult_success_reply` reserves room for the
+                            // `[DEGRADED: ...]` banner BEFORE truncating the report —
+                            // see its own doc (and `tui_consult_success_body`'s) for the
+                            // defect this replaces: a plain `truncate_report` on the
+                            // already-joined banner+report string could cut the banner
+                            // away on a long degraded report, leaving a thin consensus
+                            // rendered as if it were full-strength.
                             let truncated =
-                                crate::tools::consult::truncate_report(&body, tool_result_cap);
+                                tui_consult_success_reply(&report, magi_kind, tool_result_cap);
                             // Sanitize the verbatim report (LLM-generated) before rendering —
                             // strips ANSI escapes / control chars, matching the TextDelta path.
                             let body = crate::agent::Agent::sanitize_text(&truncated.text);
@@ -2187,7 +2254,16 @@ mod tests {
             .await
             .expect("2 of 3 succeed ⇒ Ok, degraded");
 
-        let body = tui_consult_success_body(&report, ProviderKind::Ollama);
+        // Driven through `tui_consult_success_reply` — the actual function the
+        // production call site invokes — under the default output cap, so this is
+        // the real production path with truncation simply not engaging (the report
+        // is well under `TOOL_RESULT_CAP_BYTES`).
+        let body = tui_consult_success_reply(
+            &report,
+            ProviderKind::Ollama,
+            magi_rs::magi::TOOL_RESULT_CAP_BYTES,
+        )
+        .text;
         assert!(body.contains("DEGRADED"), "{body}");
         assert!(
             body.contains("keyless") && body.contains("openai-compat"),
@@ -2211,10 +2287,166 @@ mod tests {
             .await
             .expect("2 of 3 succeed ⇒ Ok, degraded");
 
-        let body = tui_consult_success_body(&report, ProviderKind::OpenAiCompat);
+        let body = tui_consult_success_reply(
+            &report,
+            ProviderKind::OpenAiCompat,
+            magi_rs::magi::TOOL_RESULT_CAP_BYTES,
+        )
+        .text;
         assert!(
             !body.contains("keyless"),
             "openai-compat carries a credential: no hint: {body}"
+        );
+    }
+
+    /// Builds a real, DEGRADED `MagiReport` (2 of 3 seats succeed, one fails on
+    /// an ordinary network error unrelated to auth so no keyless-auth hint noise
+    /// enters the assertions below) via `Magi::analyze` — the same construction
+    /// [`tui_consult_success_body_carries_the_keyless_hint_when_a_seat_fails_on_auth`]
+    /// uses, factored out because the three tests below all need one.
+    async fn degraded_report_fixture() -> MagiReport {
+        let provider = RoutingMockProvider::new()
+            .with_agent_responses(AgentName::Melchior, vec![Ok(agent_json("melchior"))])
+            .with_agent_responses(AgentName::Balthasar, vec![Ok(agent_json("balthasar"))])
+            .with_agent_responses(
+                AgentName::Caspar,
+                vec![Err(magi_core::error::ProviderError::external(
+                    "unreachable",
+                    magi_core::error::ExternalErrorKind::Network,
+                ))],
+            );
+        let magi = magi_core::orchestrator::Magi::new(Arc::new(provider));
+        let report = magi
+            .analyze(&Mode::Analysis, "should we migrate X to Y?")
+            .await
+            .expect("2 of 3 succeed ⇒ Ok, degraded");
+        assert!(report.degraded, "test setup: this report must be degraded");
+        report
+    }
+
+    /// Task 6.2 fix (disclosed defect): a DEGRADED report long enough to trigger
+    /// real truncation must still carry the `[DEGRADED: ...]` banner in the
+    /// final, capped reply produced by [`tui_consult_success_reply`] — the exact
+    /// function the production `UiEvent::Consult` success arm calls.
+    ///
+    /// **RED, before this fix:** the production arm instead called
+    /// `tui_consult_success_body` (which JOINED the banner onto the report
+    /// BEFORE returning) followed by a bare `crate::tools::consult::
+    /// truncate_report` on that joined string. `truncate_report`'s three levels
+    /// all cut the kept region starting at the verdict anchor onward — which
+    /// sits AFTER a pre-joined banner — so a long enough degraded report
+    /// silently lost the ONE piece of text that tells the user how much to
+    /// trust everything below it. Confirmed red against that exact two-step
+    /// call by temporarily reverting this fix: the assertion below failed with
+    /// `truncated.text` containing the truncation mark but NOT "DEGRADED".
+    #[tokio::test]
+    async fn degraded_banner_survives_truncation_on_the_production_path() {
+        let report = degraded_report_fixture().await;
+
+        // Tiny enough to force real truncation of a genuine `MagiReport`, but
+        // comfortably above the floor `truncate_report_with_preserved_prefix`
+        // needs to guarantee BOTH the banner and some report content survive
+        // (75 bytes reserved for the banner + 38 for `mark_overhead()` = 113).
+        const CAP: usize = 300;
+        let out = tui_consult_success_reply(&report, ProviderKind::Ollama, CAP);
+
+        assert!(
+            out.text.len() <= CAP,
+            "must not exceed the configured cap: {} > {CAP}: {}",
+            out.text.len(),
+            out.text
+        );
+        assert!(
+            out.text.contains(magi_rs::magi::TRUNCATION_MARK),
+            "test setup: the report must actually have been truncated for this \
+             test to exercise anything: {}",
+            out.text
+        );
+        assert!(
+            out.text.starts_with(DEGRADED_BANNER),
+            "the banner must survive truncation, and lead the reply: {}",
+            out.text
+        );
+    }
+
+    /// Negative direction (B13): a NON-degraded report must never grow a
+    /// banner. Without this, an unconditional prepend of `DEGRADED_BANNER`
+    /// would pass the positive test above while silently mislabeling every
+    /// full-strength consensus as degraded.
+    #[tokio::test]
+    async fn non_degraded_report_never_grows_a_banner_even_when_truncated() {
+        let provider = RoutingMockProvider::new()
+            .with_agent_responses(AgentName::Melchior, vec![Ok(agent_json("melchior"))])
+            .with_agent_responses(AgentName::Balthasar, vec![Ok(agent_json("balthasar"))])
+            .with_agent_responses(AgentName::Caspar, vec![Ok(agent_json("caspar"))]);
+        let magi = magi_core::orchestrator::Magi::new(Arc::new(provider));
+        let report = magi
+            .analyze(&Mode::Analysis, "should we migrate X to Y?")
+            .await
+            .expect("3 of 3 succeed ⇒ Ok, not degraded");
+        assert!(
+            !report.degraded,
+            "test setup: this report must NOT be degraded"
+        );
+
+        // Same tiny cap as the positive test, so truncation fires here too —
+        // proving the absence of a banner is not just an artifact of an
+        // untruncated reply.
+        const CAP: usize = 300;
+        let out = tui_consult_success_reply(&report, ProviderKind::Ollama, CAP);
+
+        assert!(
+            out.text.len() <= CAP,
+            "must not exceed the configured cap: {} > {CAP}",
+            out.text.len()
+        );
+        assert!(
+            out.text.contains(magi_rs::magi::TRUNCATION_MARK),
+            "test setup: the report must actually have been truncated for this \
+             test to exercise anything: {}",
+            out.text
+        );
+        assert!(
+            !out.text.contains("DEGRADED"),
+            "a full-strength consensus must never render with a DEGRADED \
+             banner: {}",
+            out.text
+        );
+    }
+
+    /// Boundary case (B13): a degraded report capped EXACTLY at the smallest
+    /// value where `truncate_report_with_preserved_prefix` still guarantees
+    /// both the banner and real report content — `DEGRADED_BANNER.len() + 2`
+    /// (the `"\n\n"` join) reserved for the banner, plus `mark_overhead()` for
+    /// the report's own truncation mark. One byte below this, the report side
+    /// has no budget left even for its mark and the whole combined text is
+    /// returned untruncated instead (documented on
+    /// `truncate_report_with_preserved_prefix`'s own rustdoc) — exercising
+    /// exactly at the floor is where an off-by-one in the reserved-budget
+    /// arithmetic would show up.
+    #[tokio::test]
+    async fn degraded_banner_survives_truncation_exactly_at_the_viable_floor() {
+        let report = degraded_report_fixture().await;
+
+        let cap = DEGRADED_BANNER.len() + 2 + magi_rs::magi::mark_overhead();
+        let out = tui_consult_success_reply(&report, ProviderKind::Ollama, cap);
+
+        assert!(
+            out.text.len() <= cap,
+            "must not exceed the configured cap: {} > {cap}: {}",
+            out.text.len(),
+            out.text
+        );
+        assert!(
+            out.text.starts_with(DEGRADED_BANNER),
+            "the banner must survive truncation exactly at the viable floor: {}",
+            out.text
+        );
+        assert!(
+            out.text.contains(magi_rs::magi::TRUNCATION_MARK),
+            "at this floor the report side has room for nothing but its own \
+             mark: {}",
+            out.text
         );
     }
 

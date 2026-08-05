@@ -256,6 +256,88 @@ pub(crate) fn truncate_report(report: &str, cap: usize) -> Truncated {
     }
 }
 
+/// Bytes the `"\n\n"` separator between a preserved prefix (e.g. the TUI's
+/// `[DEGRADED: ...]` banner) and the report text that follows it adds to the
+/// combined length.
+///
+/// Same shape as [`magi_rs::magi::TRUNCATION_SEPARATOR_LEN`] —
+/// kept as its OWN constant rather than reused, because it reserves budget
+/// for a DIFFERENT join (prefix-to-report, not mark-to-kept-text): the two
+/// separators are free to diverge, and folding them into one constant would
+/// let a future change to either silently mis-budget the other (B4).
+const PREFIX_SEPARATOR_LEN: usize = 2;
+
+/// Truncates `report` to `cap`, reserving room so `prefix` survives the cut
+/// UNCONDITIONALLY (fix: the TUI's `[DEGRADED: ...]` banner was silently
+/// dropped by [`truncate_report`] alone — its three levels all cut the kept
+/// region starting from the verdict anchor onward, which sits AFTER a
+/// banner that was being joined ahead of the report BEFORE truncation; a
+/// sufficiently long degraded report therefore rendered with NO caveat at
+/// all, indistinguishable from a full-strength consensus).
+///
+/// `prefix` is reserved from `cap` FIRST — `prefix.len() + PREFIX_SEPARATOR_LEN`
+/// bytes — and [`truncate_report`] is applied to `report` ALONE under
+/// whatever budget remains. The highest-value text (the caveat that
+/// qualifies everything below it) is never the thing sacrificed to make
+/// room for report content.
+///
+/// An empty `prefix` is treated as "no prefix at all": the call degenerates
+/// to plain [`truncate_report`] rather than joining an empty string with a
+/// spurious blank line, so this function is a strict superset of
+/// [`truncate_report`]'s behavior, not a parallel implementation of it.
+///
+/// # Arithmetic
+///
+/// Whenever `cap` leaves a remaining budget of at least
+/// [`mark_overhead`] bytes after reserving the prefix, the returned text is
+/// **exactly** `prefix + "\n\n" + <report truncated to that remaining
+/// budget>`: each of [`truncate_report`]'s three levels bounds its own
+/// output to the cap it was given (`cap.checked_sub(mark_overhead())` per
+/// level), so the combined result never exceeds `cap`.
+///
+/// Below that floor — `cap` too tiny to hold the prefix and still leave
+/// room for `truncate_report`'s own mark — this degrades the SAME way
+/// [`truncate_report`] itself degrades when its `cap` is below
+/// [`magi_rs::magi::min_viable_output_cap`]: the full, untruncated
+/// `prefix + "\n\n" + report`, labeled [`TruncationLevel::None`] truthfully
+/// (nothing WAS truncated) rather than a fragment that claims to respect a
+/// cap it does not. For the project's own banner this floor sits at 113
+/// bytes (`75` reserved for the banner + `38` for `mark_overhead()`), well
+/// below [`TOOL_RESULT_CAP_BYTES`]'s default and unreachable at that
+/// default; it is documented here because this function accepts an
+/// arbitrary `prefix`, not only the banner.
+///
+/// # Parameters
+/// * `prefix` - text that must survive the cut whole; meant for a short,
+///   one-line caveat, never the bulk of the reply.
+/// * `report` - the (already-annotated) report text to bound.
+/// * `cap` - the byte budget the combined `prefix + report` output must
+///   respect.
+#[must_use]
+pub(crate) fn truncate_report_with_preserved_prefix(
+    prefix: &str,
+    report: &str,
+    cap: usize,
+) -> Truncated {
+    if prefix.is_empty() {
+        return truncate_report(report, cap);
+    }
+    let prefix_reserved = prefix.len() + PREFIX_SEPARATOR_LEN;
+    match cap.checked_sub(prefix_reserved) {
+        Some(remaining) => {
+            let truncated = truncate_report(report, remaining);
+            Truncated {
+                text: format!("{prefix}\n\n{}", truncated.text),
+                level: truncated.level,
+            }
+        }
+        None => Truncated {
+            text: format!("{prefix}\n\n{report}"),
+            level: TruncationLevel::None,
+        },
+    }
+}
+
 /// El prefijo ESTABLE con el que magi-core renderiza la causa de un asiento cuando el
 /// fallo fue de autenticación — el `Display` de `ProviderError::Auth` (magi-core 3.1.0,
 /// `error.rs`: `#[error("auth error: {message}")]`) (REQ-A12c, SC-A12f).
@@ -2400,6 +2482,107 @@ mod tests {
         assert_eq!(
             out.text, report,
             "an unenforceable cap must not truncate mid-report"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // `truncate_report_with_preserved_prefix` — the TUI `[DEGRADED: ...]`
+    // banner fix: a prefix reserved from `cap` BEFORE `truncate_report` runs
+    // on the report alone, so the prefix is never the thing sacrificed to
+    // make room.
+    // -----------------------------------------------------------------------
+
+    /// An empty prefix degenerates to plain `truncate_report` — no spurious
+    /// leading separator, no different budgeting. Proves the function is a
+    /// strict superset of `truncate_report`, not a parallel reimplementation
+    /// that could silently diverge from it (B3).
+    #[test]
+    fn preserved_prefix_with_an_empty_prefix_matches_plain_truncate_report() {
+        let report = "y".repeat(1_000);
+        for cap in [10, 50, TOOL_RESULT_CAP_BYTES] {
+            let expected = truncate_report(&report, cap);
+            let actual = truncate_report_with_preserved_prefix("", &report, cap);
+            assert_eq!(actual.level, expected.level, "cap={cap}");
+            assert_eq!(actual.text, expected.text, "cap={cap}");
+        }
+    }
+
+    /// Happy path: a report too large for `cap` on its own still yields a
+    /// combined `prefix + report` that (a) starts with the prefix intact and
+    /// (b) never exceeds `cap` — the two properties the TUI banner fix
+    /// exists to guarantee together.
+    #[test]
+    fn preserved_prefix_survives_truncation_and_the_combined_text_respects_the_cap() {
+        let prefix = "[DEGRADED: fewer than 3 agents responded]";
+        let report = report_with_no_recognizable_structure(TOOL_RESULT_CAP_BYTES);
+        let cap = 300;
+        assert!(
+            prefix.len() + 2 + report.len() > cap,
+            "test setup: the combined text must actually exceed cap"
+        );
+
+        let out = truncate_report_with_preserved_prefix(prefix, &report, cap);
+        assert!(out.text.len() <= cap, "{}", out.text.len());
+        assert!(
+            out.text.starts_with(prefix),
+            "the prefix must survive whole: {}",
+            out.text
+        );
+        assert!(
+            out.text.contains(TRUNCATION_MARK),
+            "the report side must still carry its own truncation mark: {}",
+            out.text
+        );
+    }
+
+    /// A report that already fits under `cap` (after reserving room for the
+    /// prefix) is returned intact, `TruncationLevel::None`, no mark — mirrors
+    /// `truncate_report_is_a_op_when_the_report_already_fits`'s own guarantee,
+    /// now with a prefix in the mix.
+    #[test]
+    fn preserved_prefix_is_a_no_op_when_the_combined_text_already_fits() {
+        let prefix = "[DEGRADED: fewer than 3 agents responded]";
+        let report = "short report";
+        let out = truncate_report_with_preserved_prefix(prefix, report, TOOL_RESULT_CAP_BYTES);
+        assert_eq!(out.level, TruncationLevel::None);
+        assert_eq!(out.text, format!("{prefix}\n\n{report}"));
+        assert!(!out.text.contains(TRUNCATION_MARK));
+    }
+
+    /// Boundary (B13): `cap` set EXACTLY to `prefix.len() + 2 + mark_overhead()`
+    /// — the smallest cap that still leaves the report side enough room for
+    /// its own mark. One byte below this is covered by the next test; this
+    /// one proves the arithmetic does not off-by-one at the floor itself.
+    #[test]
+    fn preserved_prefix_survives_exactly_at_the_viable_floor() {
+        let prefix = "[DEGRADED: fewer than 3 agents responded]";
+        let report = report_with_no_recognizable_structure(TOOL_RESULT_CAP_BYTES);
+        let cap = prefix.len() + 2 + mark_overhead();
+
+        let out = truncate_report_with_preserved_prefix(prefix, &report, cap);
+        assert!(out.text.len() <= cap, "{}", out.text.len());
+        assert!(out.text.starts_with(prefix));
+        assert!(out.text.contains(TRUNCATION_MARK));
+    }
+
+    /// Below the viable floor — `cap` too small to hold the prefix and still
+    /// leave the report side room for its own mark — this degrades the SAME
+    /// way `truncate_report` itself degrades when handed an unenforceable cap:
+    /// the full, untruncated `prefix + report`, honestly labeled `None` rather
+    /// than a fragment that lies about respecting `cap` (documented on
+    /// `truncate_report_with_preserved_prefix`'s own rustdoc).
+    #[test]
+    fn preserved_prefix_below_the_viable_floor_returns_everything_whole_instead_of_lying() {
+        let prefix = "[DEGRADED: fewer than 3 agents responded]";
+        let report = "y".repeat(1_000);
+        let cap = prefix.len(); // no room even for the separator, let alone a mark
+
+        let out = truncate_report_with_preserved_prefix(prefix, &report, cap);
+        assert_eq!(out.level, TruncationLevel::None);
+        assert_eq!(
+            out.text,
+            format!("{prefix}\n\n{report}"),
+            "an unenforceable cap must not silently drop the prefix either"
         );
     }
 
