@@ -3835,6 +3835,21 @@ async fn run_query_subcommand(
     finish_headless(&h, &outcome, limits.tool_result_cap)
 }
 
+/// Resolves the wall-clock deadline actually enforced for a `magi consult` run
+/// (SC-A04d's behavioral half, Task 6.2 Step 3c). An explicit `--timeout` is
+/// obeyed verbatim — even below the formula's minimum, with `decision.warning`
+/// carrying the heads-up (already wired by Task 6.1); its ABSENCE now falls back
+/// to the formula-derived minimum instead of leaving the run unbounded.
+///
+/// `magi_rs::magi::resolve_run_timeout` already resolves and exhaustively tests
+/// `effective_secs` for both cases — this is a one-line seam so the call site
+/// reads as a single, auditable step instead of inlining `Duration::from_secs`
+/// at the point of use.
+#[must_use]
+fn consult_deadline(decision: &magi_rs::magi::TimeoutDecision) -> Duration {
+    Duration::from_secs(decision.effective_secs)
+}
+
 /// Runs `magi consult`: forces a direct MAGI multi-perspective analysis over the
 /// prompt (no agent tool-loop) via [`run_consult`], then emits the structured
 /// outcome. Returns the process exit code (REQ-H02/H21/H33).
@@ -3906,17 +3921,15 @@ async fn run_consult_subcommand(
         }
     };
 
-    // The consult path has no tier tool-gate; only an explicit `--timeout`
+    // The consult path has no tier tool-gate; only its wall-clock deadline
     // bounds it (an over-cap prompt is rejected inside `run_consult`, REQ-H33).
-    let timeout = h.timeout.map(Duration::from_secs);
-    // Fix round 1, Finding 1 (SC-A04d): `timeout` above (the value actually
-    // ENFORCED) is deliberately left untouched — `resolve_run_timeout`'s OTHER
-    // behavioral half (defaulting `--timeout` when absent to the derived
-    // minimum) is a larger, separate, pre-existing gap this fix round does not
-    // close — see this task's report. Its `.below_formula` flag (the JSON
-    // telemetry) and its `.warning` (the stderr notice, emitted by `analyze_
-    // direct` via `runtime.notice_sink` — fix round 2) ARE both wired from the
-    // `TimeoutDecision` below.
+    // `TimeoutDecision` resolves BOTH halves of SC-A04d now (Task 6.2, Step 3c):
+    // `.effective_secs` is what actually gets enforced below — an explicit
+    // `--timeout` is obeyed verbatim, and its ABSENCE no longer parks the run
+    // forever (the pre-6.2 gap: `h.timeout.map(...)` produced `None` and
+    // `analyze_direct`'s deadline arm never fired). `.below_formula`/`.warning`
+    // — the JSON telemetry and the stderr notice, emitted by `analyze_direct`
+    // via `runtime.notice_sink` — were already wired by Task 6.1.
     let timeout_decision = magi_rs::magi::resolve_run_timeout(
         h.timeout,
         magi_config
@@ -3924,6 +3937,7 @@ async fn run_consult_subcommand(
             .agent_timeout_secs
             .unwrap_or(magi_rs::magi::AGENT_TIMEOUT_SECS),
     );
+    let timeout = Some(consult_deadline(&timeout_decision));
     let runtime = MagiRuntimeParams {
         kind: magi_config.effective_magi_kind(),
         classifier: &classifier,
@@ -6170,6 +6184,53 @@ mod tests {
                 "an over-cap consult prompt ⇒ exit 2 (rejected, not truncated)"
             );
         });
+    }
+
+    /// SC-A04d (the half Task 6.1 deferred, Task 6.2 Step 3c): an ABSENT
+    /// `--timeout` no longer leaves a `magi consult` run unbounded — it falls
+    /// back to the formula-derived minimum instead of `None` (which, threaded
+    /// into `analyze_direct`'s `deadline` arm, parks forever).
+    ///
+    /// A true end-to-end wall-clock test of this specific fix is impractical:
+    /// even the LOWEST configurable `agent_timeout_secs` (30, §4.9's floor)
+    /// yields a formula minimum of `headless_consult_timeout_secs(30)` ≈ 78s, so
+    /// actually waiting for the deadline to fire would make this test far slower
+    /// than the suite's budget tolerates. `resolve_run_timeout` itself is already
+    /// exhaustively unit-tested in `src/magi/mod.rs` (the arithmetic); this pins
+    /// the ONE-LINE wiring seam at the `magi consult` call site instead —
+    /// `consult_deadline` is exactly the expression `run_consult_subcommand` now
+    /// uses to build `timeout`, so a regression back to `h.timeout.map(...)`
+    /// (which silently drops this branch) fails this test, not a 78s-plus wait.
+    #[test]
+    fn consult_deadline_falls_back_to_the_formula_minimum_when_absent() {
+        let ceiling = magi_rs::magi::AGENT_TIMEOUT_SECS;
+        let decision = magi_rs::magi::resolve_run_timeout(None, ceiling);
+        let deadline = consult_deadline(&decision);
+        assert_eq!(
+            deadline,
+            Duration::from_secs(magi_rs::magi::headless_consult_timeout_secs(ceiling)),
+            "an absent --timeout must fall back to the formula-derived minimum"
+        );
+        assert!(
+            deadline.as_secs() > 0,
+            "must never resolve to an unbounded (None) run"
+        );
+    }
+
+    /// SC-A04d: an explicit `--timeout` is obeyed VERBATIM, even below the
+    /// formula's minimum — the flag is the operator's own wall-clock cap, not an
+    /// invariant `consult_deadline` is entitled to override (the warning that
+    /// this choice may starve a schema retry is Task 6.1's `.warning`, already
+    /// wired to both stderr and the JSON).
+    #[test]
+    fn consult_deadline_obeys_an_explicit_timeout_even_below_the_formula() {
+        let ceiling = magi_rs::magi::AGENT_TIMEOUT_SECS;
+        let decision = magi_rs::magi::resolve_run_timeout(Some(1), ceiling);
+        assert_eq!(
+            consult_deadline(&decision),
+            Duration::from_secs(1),
+            "the operator's explicit value must be obeyed even under the formula's minimum"
+        );
     }
 
     /// Task 4.1 — construcción del trío con providers nativos.
