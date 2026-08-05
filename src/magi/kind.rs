@@ -2,14 +2,14 @@
 // Version: 1.0.0
 // Date: 2026-08-02
 
-//! Vocabulario de providers: los tres valores que nombran un backend concreto (REQ-A01b).
+//! Provider vocabulary: the three values that name a specific backend (REQ-A01b).
 //!
-//! # Por qué vive en el LIB y no en `config.rs`
+//! # Why it lives in the LIB and not in `config.rs`
 //!
-//! `probe_models` y `ProbeFactory` lo toman por parámetro y viven en el lib, así que dejarlo
-//! en el bin los volvería incompilables. Y no es una concesión de empaquetado: es un enum
-//! cerrado de tres variantes con su parser, o sea vocabulario **del dominio**, no de la forma
-//! del TOML.
+//! `probe_models` and `ProbeFactory` take it as a parameter and live in the lib, so leaving it
+//! in the bin would make them fail to compile. And it is not a packaging concession: it is an enum
+//! closed to three variants with its parser, that is, **domain** vocabulary, not the shape
+//! of the TOML.
 
 #![deny(missing_docs)]
 #![deny(clippy::missing_docs_in_private_items)]
@@ -30,59 +30,59 @@
 
 use std::fmt;
 
-/// Los tres valores aceptados, en el texto que se muestra en un error.
+/// The three accepted values, in the text shown in an error.
 ///
-/// Una `const` y no un literal repetido (B4): el mensaje de error y la documentación tienen
-/// que nombrar el mismo conjunto.
+/// A `const` and not a repeated literal (B4): the error message and the documentation must
+/// name the same set.
 pub const VALID_PROVIDER_KINDS: &str = "ollama, openai-compat, anthropic";
 
-/// Provider concreto de magi-core (REQ-A01b).
+/// Concrete magi-core provider (REQ-A01b).
 ///
-/// **Vocabulario ÚNICO**: la clave `provider` de raíz y `[magi].kind` toman los mismos tres
-/// valores, y el segundo **hereda** del primero cuando no se declara.
+/// **SINGLE vocabulary**: the root `provider` key and `[magi].kind` accept the same three
+/// values, and the second **inherits** from the first when not declared.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProviderKind {
-    /// Ollama: keyless, y el ÚNICO medible (`/api/show` + `/api/tags`).
+    /// Ollama: keyless, and the ONLY measurable one (`/api/show` + `/api/tags`).
     ///
-    /// **No usa el tipo `OllamaProvider` de magi-core para las completions** (D-A07): su único
-    /// constructor fija 300 s de timeout de cliente sin override, lo que hace imposible
-    /// cumplir la escala de REQ-A04. Las completions van por el transporte OpenAI-compat
-    /// keyless contra `…/v1`; `OllamaProvider` queda solo como sonda.
+    /// **Does not use the `OllamaProvider` type from magi-core for completions** (D-A07): its only
+    /// constructor sets a 300 s client timeout with no override, which makes it impossible to
+    /// meet the scale of REQ-A04. Completions go through the keyless OpenAI-compat transport
+    /// against `…/v1`; `OllamaProvider` is used only as a probe.
     Ollama,
-    /// OpenAI, Groq, OpenRouter — cualquier Chat Completions. Con token, sin probe.
+    /// OpenAI, Groq, OpenRouter — any Chat Completions. With token, no probe.
     OpenAiCompat,
-    /// Anthropic Messages. Con token, sin probe.
+    /// Anthropic Messages. With token, no probe.
     Anthropic,
 }
 
-/// Un valor de `provider` o `kind` presente que no nombra ningún backend.
+/// A present `provider` or `kind` value that does not name any backend.
 ///
-/// **`ProviderKindParseError` y NO `ConfigError`**: este enum vive en el lib y `ConfigError` en
-/// `config.rs`, que es del bin. Devolver el error del bin desde el lib invierte la dirección de
-/// la dependencia y no compila; `config.rs` lo absorbe con un `From`.
+/// **`ProviderKindParseError` and NOT `ConfigError`**: this enum lives in the lib and `ConfigError`
+/// in `config.rs`, which belongs to the bin. Returning the bin's error from the lib reverses the
+/// direction of the dependency and does not compile; `config.rs` absorbs it with a `From`.
 #[derive(Debug, thiserror::Error)]
 #[error("unknown provider: {got:?} (valid: {valid})")]
 pub struct ProviderKindParseError {
-    /// Lo que trajo el archivo.
+    /// What the file brought in.
     pub got: String,
-    /// Los tres aceptados, para que el error sea accionable sin abrir la doc.
+    /// The three accepted ones, so the error is actionable without opening the docs.
     pub valid: &'static str,
 }
 
 impl ProviderKind {
-    /// Parsea un valor de configuración.
+    /// Parses a configuration value.
     ///
     /// # Errors
     ///
-    /// [`ProviderKindParseError`] si el valor está **presente y no se reconoce**.
+    /// [`ProviderKindParseError`] if the value is **present and not recognized**.
     ///
-    /// Un valor **vacío o en blanco** devuelve `Ok(None)` — se trata como **ausente** (REQ-A12),
-    /// porque una variable exportada y sin llenar en un script de CI es indistinguible de no
-    /// haberla definido, y romper el arranque por eso castiga un accidente cotidiano. Un valor
-    /// presente y no reconocido sí es un error: el usuario quiso decir algo y lo dijo mal.
+    /// An **empty or blank** value returns `Ok(None)` — it is treated as **absent** (REQ-A12),
+    /// because an exported variable left empty in a CI script is indistinguishable from never
+    /// having defined it, and breaking startup for that would punish an everyday accident. A
+    /// present and unrecognized value is an error: the user meant to say something and said it wrong.
     ///
-    /// Recorta espacios **ASCII**, igual que `ModeExt::parse_config_value`, para que las dos
-    /// claves de vocabulario del archivo se lean con la misma regla.
+    /// Trims **ASCII** whitespace, just like `ModeExt::parse_config_value`, so the two
+    /// vocabulary keys in the file are read with the same rule.
     pub fn parse(raw: &str) -> Result<Option<Self>, ProviderKindParseError> {
         match raw.trim_matches(|c: char| c.is_ascii_whitespace()) {
             "" => Ok(None),
@@ -96,10 +96,10 @@ impl ProviderKind {
         }
     }
 
-    /// Si este provider expone introspección de modelos (REQ-A24).
+    /// Whether this provider exposes model introspection (REQ-A24).
     ///
-    /// Es una diferencia de **capacidad**, no de vocabulario: `ollama` y `openai-compat`
-    /// comparten el protocolo de completions y se distinguen solo en que uno es medible.
+    /// It is a difference of **capability**, not vocabulary: `ollama` and `openai-compat`
+    /// share the completions protocol and differ only in that one is measurable.
     #[must_use]
     pub const fn is_probeable(self) -> bool {
         matches!(self, Self::Ollama)
@@ -107,11 +107,11 @@ impl ProviderKind {
 }
 
 impl fmt::Display for ProviderKind {
-    /// El inverso exacto de [`Self::parse`]: `ProviderKind::parse(&k.to_string()) ==
-    /// Ok(Some(k))` para cualquier `k`. Task 4.1 lo necesita para renderizar de vuelta al
-    /// vocabulario declarado (p. ej. al construir el `provider` por defecto que alimenta la
-    /// resolución headless `env > TOML > default`), sin repetir los tres literales de
-    /// `parse` en un segundo lugar (B3).
+    /// The exact inverse of [`Self::parse`]: `ProviderKind::parse(&k.to_string()) ==
+    /// Ok(Some(k))` for any `k`. Task 4.1 needs it to render back to the
+    /// declared vocabulary (e.g., when building the default `provider` that feeds the
+    /// headless resolution `env > TOML > default`), without repeating the three literals from
+    /// `parse` in a second place (B3).
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Self::Ollama => "ollama",
@@ -125,7 +125,7 @@ impl fmt::Display for ProviderKind {
 mod tests {
     use super::*;
 
-    /// REQ-A01b: los tres valores del vocabulario, y nada más.
+    /// REQ-A01b: the three vocabulary values, and nothing else.
     #[test]
     fn the_three_vocabulary_values_are_accepted_and_the_rest_are_not() {
         assert_eq!(
@@ -143,11 +143,11 @@ mod tests {
         assert!(ProviderKind::parse("banana").is_err());
     }
 
-    /// El valor de v0.11.0 ya no es válido: es la mitad de la ruptura de REQ-A21.
+    /// The v0.11.0 value is no longer valid: it is half of the REQ-A21 break.
     ///
-    /// `"openai"` era ambiguo —podía ser Ollama o un endpoint autenticado— y esa ambigüedad es
-    /// justo lo que el vocabulario nuevo parte. **No se auto-migra**: elegir por el usuario
-    /// sería adivinar exactamente lo que D-A01 prohíbe.
+    /// `"openai"` was ambiguous — it could be Ollama or an authenticated endpoint — and that ambiguity is
+    /// exactly what the new vocabulary removes. **It is not auto-migrated**: choosing for the user
+    /// would be guessing exactly what D-A01 forbids.
     #[test]
     fn the_old_openai_value_is_rejected_rather_than_guessed() {
         let err = ProviderKind::parse("openai").unwrap_err();
@@ -158,20 +158,20 @@ mod tests {
         );
     }
 
-    /// SC-A12g / REQ-A12: vacío o en blanco es AUSENTE, nunca inválido.
+    /// SC-A12g / REQ-A12: empty or blank is ABSENT, never invalid.
     #[test]
     fn a_blank_value_is_absent_rather_than_invalid() {
         assert_eq!(ProviderKind::parse("").unwrap(), None);
         assert_eq!(ProviderKind::parse("   ").unwrap(), None);
         assert_eq!(ProviderKind::parse("\t\n").unwrap(), None);
-        // Y el valor rodeado de espacios sigue siendo válido.
+        // And the value surrounded by spaces remains valid.
         assert_eq!(
             ProviderKind::parse("  ollama  ").unwrap(),
             Some(ProviderKind::Ollama)
         );
     }
 
-    /// REQ-A24: solo Ollama es medible, y eso es capacidad, no vocabulario.
+    /// REQ-A24: only Ollama is measurable, and that is capability, not vocabulary.
     #[test]
     fn only_ollama_exposes_model_introspection() {
         assert!(ProviderKind::Ollama.is_probeable());
@@ -179,8 +179,8 @@ mod tests {
         assert!(!ProviderKind::Anthropic.is_probeable());
     }
 
-    /// `Display` es el inverso exacto de `parse` para los tres valores — Task 4.1 depende
-    /// de este roundtrip para renderizar el vocabulario de vuelta a texto.
+    /// `Display` is the exact inverse of `parse` for the three values — Task 4.1 depends
+    /// on this roundtrip to render the vocabulary back to text.
     #[test]
     fn display_round_trips_through_parse_for_the_three_values() {
         for kind in [
