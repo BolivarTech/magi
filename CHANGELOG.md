@@ -9,6 +9,119 @@ changes and the **patch** position signals backward-compatible fixes.
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-08-05
+
+Adoption release: magi-rs now uses what `magi-core` 3.1.0 already offered. The MAGI
+trio is built on the crate's native providers and the in-tree adapter is gone, consult
+modes actually route, the model gets measured when the endpoint allows it, and the
+crate's telemetry reaches the output. The dependency itself is unchanged.
+
+Configuration takes a **breaking reshape** in one cut: `base_url` moves to the root as
+a system-wide default, `provider = "openai"` splits into two values, and a `magi.toml`
+that exists but does not parse now stops the process instead of falling back. Startup
+prints a guided migration error naming every incompatibility in the file at once.
+
+### Breaking
+
+- **`base_url` moves to the root of `magi.toml`** and becomes the system-wide default,
+  used by the main agent, the MAGI trio and the embedder. **`[openai].base_url` no
+  longer exists.** Each consumer may override it with its own key; precedence per
+  consumer is its own env var, then its own section, then the root, then the built-in
+  default. The previous shape had no way to give the trio or the embedder an endpoint
+  of their own, which is exactly what this release needed.
+- **`provider = "openai"` splits into `ollama` and `openai-compat`.** They share the
+  completions protocol and the same `[openai]` section for the model; they differ in
+  that only `ollama` is measurable, because it exposes endpoints for context window and
+  weights digest. This is deliberately **not** auto-migrated: `"openai"` was ambiguous,
+  that ambiguity is what is being split, and choosing for the user would be guessing.
+- **`[headless].tool_result_cap_bytes` moves to the root** as `tool_result_cap_bytes`,
+  because it now bounds output on all three routes — the TUI, `magi query` and
+  `magi consult` — not just the headless one.
+- **A `magi.toml` that exists and does not parse is now fatal.** It used to warn and
+  continue on built-in defaults. Writing a config file is declaring an intent; when that
+  intent cannot be honoured, carrying on with something else is worse than stopping. An
+  **absent** file is still a silent default, and an **empty** one parses as valid and
+  yields defaults.
+- **Startup emits a guided migration error** that names every incompatibility in the
+  file at once, with the corrected lines ready to paste, reporting only what that file
+  actually has wrong. When a `base_url` carries embedded credentials the printed line is
+  **redacted** and the message says so — redaction wins over paste-ready. Migrating
+  straight from 0.10.x is **not supported**: go through 0.11.0 first.
+- **`--init-config` and `/init-config` are retired.** `magi init` is the only scaffolder
+  and it writes into `.magi/`. The retired flag reports where to go instead of failing
+  with an unknown-argument error.
+- **The `--output-format json` object of `magi consult` grows fields** — `mode`,
+  `mode_source`, `extraction_failures`, `input_size`, `failed_agents`,
+  `report_truncated` — while **`schema_version` deliberately stays at 1**. The project
+  is pre-1.0, so the crate version already signals breakage; a consumer should tolerate
+  new fields and pin the crate version.
+
+### Added
+
+- **The MAGI trio runs on `magi-core`'s native providers.** Each mage now receives its
+  own system prompt through the provider's own channel instead of having it folded into
+  the user turn, and each is wrapped in the crate's retry. A seat that cannot be built
+  is named with its cause, and several failed seats are reported together in one run.
+- **Consult modes route.** The mode was hardcoded; it now resolves through five levels —
+  explicit flag, configured `[magi].default_mode`, the agent's own choice, inference,
+  and `analysis` as the final default — with the effective mode and its source reported
+  in the output. `--mode` is available on `magi query` and `magi consult`, and
+  `/consult` accepts it in the TUI.
+- **A startup probe measures the model** when the endpoint supports it, reading context
+  window and weights digest, and derives the input-size warning threshold from the
+  smallest window across the trio. It fails open: any error, timeout or unreadable value
+  degrades to not-measured and never blocks startup. Three states stay distinct —
+  measured, not measurable, and not measured this time, the last being the ordinary case
+  of a cold daemon on a first run.
+- **`magi-core`'s telemetry is surfaced**: which model failed to adhere to the verdict
+  contract and why, and how large the input was. An empty failure list is reported as a
+  positive certificate of adherence rather than as silence.
+- **Credentials no longer belong in `magi.toml`.** A `base_url` may carry `[user]` and
+  `[password]` placeholders, resolved from the vault in memory at use time. A literal
+  credential in the file is a configuration error, and a missing vault entry fails
+  closed, naming the entry and the command that creates it.
+- **A complexity gate**, active by default, can veto a consult the agent routed on its
+  own. Explicit `/consult` and `magi consult` are never vetoed. The veto is not an
+  error: it returns to the agent as an ordinary result, and the user's answer carries a
+  mark saying no consensus ran.
+- **The consult input cap is configurable** and defaults to a size that fits a real
+  review diff, replacing a fixed 8 KiB limit. It **rejects rather than truncates**: a
+  silently shortened payload would produce a verdict indistinguishable from a legitimate
+  one.
+- **The consult report is bounded on output**, and when it is cut the result names which
+  of three levels was applied instead of reporting a bare boolean — a consumer needs to
+  know what guarantee it holds, not merely that something was removed.
+- New configuration keys: `[magi].default_mode`, `[magi].kind`, `[magi].base_url`,
+  `[magi].untrusted_content`, `[magi].max_query_bytes`, `[magi].agent_timeout_secs`,
+  `[magi].input_warn_tokens`, `[magi].retry_disabled`, and the `[magi.complexity]`
+  table.
+
+### Changed
+
+- **`[embedding].base_url` becomes optional and inherits the root `base_url`** when
+  absent. Anyone who pointed the agent at a remote endpoint and expected the embedder to
+  stay local must now declare `[embedding].base_url` explicitly.
+- **Omitting `--mode` costs one extra model call**, which classifies the content before
+  the three mages run. Declaring `--mode`, or setting `[magi].default_mode`, avoids it
+  entirely.
+- **User-facing output is English throughout.** Some of it had been Spanish.
+
+### Fixed
+
+- **The trio rebuild after a successful `/login` ignored `[magi].agent_timeout_secs`**,
+  falling back to the built-in ceiling. The configured value was honoured everywhere
+  else, and silently not there.
+- **The degraded-consensus banner survives output truncation.** A long degraded report
+  could lose it and render as though the consensus had been full strength.
+- **A `401` or `403` from a provider configured as keyless is explained** as a probable
+  configuration cause, suggesting `openai-compat`, instead of surfacing raw.
+
+### Notes
+
+- 969 tests pass. Line coverage is 90.13 %.
+- `magi-core` stays at 3.1.0. Lineage rotation, the fallback pool and the context guard
+  are the next milestone.
+
 ## [0.11.0] - 2026-07-31
 
 Dependency migration: `magi-core` **1.1.1 → 3.1.0**, a jump across three majors.

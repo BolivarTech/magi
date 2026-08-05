@@ -1,190 +1,108 @@
 # magi-rs configuration — reference example.
 #
-# NOTE: as of v0.6.0 the values below ARE the built-in defaults — what magi-rs
-# uses with NO `magi.toml` and no env vars (Ollama-first: provider = "openai",
-# http://localhost:11434/v1, kimi-k2.6:cloud + the qwen3.5 / gpt-oss / deepseek
-# trio). Running `magi-rs --init-config` or the `/init-config` TUI command
-# generates exactly this profile. To use Anthropic instead, set
-# provider = "anthropic" (or MAGI_PROVIDER=anthropic).
+# The values below ARE the built-in defaults: what magi-rs uses with no
+# `magi.toml` and no env vars. `magi init` scaffolds exactly this profile into
+# `.magi/`. To use Anthropic instead, set provider = "anthropic" (or
+# MAGI_PROVIDER=anthropic).
 #
-# Copy this file to `magi.toml` (per-workspace) and edit. `magi.toml` is
-# gitignored; only `docs/magi.toml.example` is tracked.
+# Copy this file to `.magi/magi.toml` and edit. That file is gitignored; only
+# `docs/magi.toml.example` is tracked.
 #
-# IMPORTANT: API keys NEVER live in this file. They come from environment
-# variables (ANTHROPIC / OPENAI credential env vars), the OS keyring, or
-# `key.txt` (for the Anthropic key). This file holds non-secret runtime
-# configuration only. Placing credential fields (or any other unknown field) in
-# this file is a PARSE ERROR under `deny_unknown_fields`, not silent
-# acceptance — magi-rs will reject the TOML at startup and fall back to
-# defaults with a surfaced warning.
-#
-# Precedence for every setting: env var > magi.toml > built-in default.
+# API keys NEVER live here: they travel by env (ANTHROPIC_API_KEY /
+# OPENAI_API_KEY) or in the vault (`magi-rs vault set NAME`). An unknown field
+# is a PARSE ERROR, and a file that exists but does not parse is FATAL.
+provider = "ollama"          # ollama | openai-compat | anthropic
 
-# Which provider backend to use. Default when omitted: "openai" (Ollama-first).
-#   - "openai"    — any OpenAI-compatible Chat Completions endpoint
-#                   (Ollama [default], OpenAI, Groq, OpenRouter, …)
-#   - "anthropic" — Anthropic Messages API (opt-in as of v0.6.0)
-provider = "openai"
+# System-wide DEFAULT endpoint: used by the main agent, the trio and the embedder
+# unless their own section overrides it.
+# Precedence per consumer: its own env var > its own section > this value > built-in.
+#
+# BREAKING: this key lived at [openai].base_url until v0.11.0 and NO LONGER EXISTS there.
+base_url = "http://localhost:11434/v1"
+#   With an authenticated endpoint, NEVER a literal credential: use placeholders that
+#   resolve from the vault IN MEMORY. A literal value is a configuration error.
+#     base_url = "https://[user]:[password]@host/v1"
+#     magi-rs vault set BASE_URL_USER  /  magi-rs vault set BASE_URL_PASSWORD
+
+# Bounds the consult report that enters the history. This matters most in an interactive
+# session, where the report is re-sent to the model on every subsequent turn, so its cost
+# is paid per turn rather than once. BREAKING: this key lived under [headless] until
+# v0.11.0.
+# tool_result_cap_bytes = 65536
 
 [openai]
-# OpenAI-compatible base URL. Examples:
-#   http://localhost:11434/v1       (Ollama, local, dummy auth token accepted)
-#   https://api.openai.com/v1       (OpenAI)
-#   https://api.groq.com/openai/v1  (Groq)
-#   https://openrouter.ai/api/v1    (OpenRouter)
-base_url = "http://localhost:11434/v1"
-
-# Model name. Built-in default when omitted: "kimi-k2.6:cloud" (env OPENAI_MODEL
-# and this field both override it). NOTE: the default is an Ollama tag — point
-# `base_url` at a non-Ollama service and you MUST set a model that exists there.
+# Model for `ollama` AND for `openai-compat`: they share the completions protocol.
 model = "kimi-k2.6:cloud"
 
 [anthropic]
-# Anthropic model to use when `provider = "anthropic"`. Optional — when
-# omitted, magi-rs falls back to its built-in default (claude-sonnet-4-6).
 model = "claude-sonnet-4-6"
 
-# ---------------------------------------------------------------------------
-# [magi] — per-agent model selection (opt-in; absent = all three share the
-# principal model above, identical to v0.4.0 behavior).
-#
-# Why: the three MAGI perspectives reach a stronger consensus when they have
-# genuine lineage diversity — different model families reason and fail
-# differently, so agreement across them is more meaningful. Overrides reuse the
-# principal provider's base_url + credentials and change ONLY the model name, so
-# true cross-family diversity (e.g. Qwen + GPT + DeepSeek) requires the principal
-# to be an Ollama-style endpoint serving all three families. With an Anthropic
-# principal you can still vary across Anthropic models (tier diversity).
-#
-# Note: the Ollama cloud catalog models are all reasoning ("thinking") models, so
-# at the Maximum tier the diversity is by LINEAGE (Alibaba / OpenAI / DeepSeek),
-# each distinct from the others and from a typical principal (e.g. Moonshot kimi).
-#
-# Precedence per agent: MAGI_MODEL_<AGENT> env var > this section > principal model.
-# A blank value is treated as unset.
-#
-# Suggested tiers (served via one Ollama OpenAI-compatible endpoint):
-#   Tier      Melchior            Balthasar           Caspar                 VRAM
-#   Light     qwen3.6:27b         gpt-oss:20b         deepseek-r1:8b         16-24 GB
-#   Balanced  qwen3.6:35b-a3b     gpt-oss:20b         deepseek-r1:32b        48-64 GB
-#   Maximum   qwen3.5:397b-cloud  gpt-oss:120b-cloud  deepseek-v4-pro:cloud  Cloud
-#
-# (Qwen 3.6 is local-only — no :cloud tag — so Maximum uses qwen3.5:397b-cloud, the
-#  flagship Qwen on Ollama cloud. Tags verified on ollama.com, 2026-06.)
-#
-# [magi]
-# melchior_model  = "qwen3.6:27b"    # Scientist  (Alibaba)  — theoretical analysis
-# balthasar_model = "gpt-oss:20b"    # Pragmatist (OpenAI)   — practical trade-offs
-# caspar_model    = "deepseek-r1:8b" # Critic     (DeepSeek) — adversarial review
-#
-# auto_approve = false
-#   false (default) — the agent asks for approval before each autonomous MAGI
-#                     consensus launch triggered by the main LLM in its tool loop.
-#   true            — auto-approve autonomous launches; the TUI announces the launch
-#                     so you know the 3-LLM consensus is running (takes seconds to
-#                     minutes depending on the model tier).
-#   Note: the explicit /consult TUI command is ALWAYS user-initiated and is never
-#   gated — this flag only affects auto-routing in the agent tool loop.
+# ===========================================================================
+# [magi] — the council of three perspectives
+# ===========================================================================
+[magi]
+melchior_model  = "qwen3.5:397b-cloud"     # Scientist  — theoretical analysis
+balthasar_model = "kimi-k2.6:cloud"        # Pragmatist — practical trade-offs
+caspar_model    = "glm-5.2:cloud"          # Critic     — adversarial review
 
-# ---------------------------------------------------------------------------
-# [memory] — tiered memory subsystem (opt-in; absent = all defaults below).
-# Default mode is "selective" (embedding-indexed retrieval under a bounded
-# context). Set mode = "load_all" to reproduce the v0.6.0 "load all history"
-# behavior (the benchmark control). All values below ARE the built-in defaults.
-# NO secrets here — deny_unknown_fields rejects credential fields and unknown keys.
-#
-# [memory]
-# mode = "selective"                  # selective | load_all
-# context_budget_tokens = 8000        # assembled-context token budget
-# response_headroom_tokens = 1024     # tokens reserved for the reply
-# safety_margin_ratio = 0.1           # fraction of budget held back (heuristic guard)
-# chars_per_token = 3.5               # token heuristic; es ~3.5, code ~3, CJK ~2
-# oversized_turn_policy = "truncate"  # truncate | error
-# top_k = 12                          # retrieval candidates
-# weight_similarity = 1.0             # reranker weights
-# weight_recency = 0.3
-# weight_salience = 0.5
-# default_salience = 0.3              # base salience at write
-# preference_salience = 1.0           # protected floor for preferences
-# protect_salience_threshold = 0.9    # >= never evicted by decay
-# decay_half_life_days = 30.0         # wall-clock recency half-life
-# access_saturation_cap = 50          # bound on access-reinforcement
-# forget_strength_threshold = 0.1     # below this strength => forgettable
-# evicted_retention_days = -1         # -1 archive | 0 hard-delete now | N>0 after N days
-# max_records = 50000                 # hard ceiling on active records (0 = opt-out)
-# supersede_similarity_threshold = 0.85
-# distill_every_n_turns = 20          # 0 = on-demand / session-close only
-# distill_on_session_close = true
-# distill_enabled = true              # false = zero memory egress for distillation
-# distill_max_batch_tokens = 4000     # distiller per-run payload cap (privacy)
-# supersede_max_candidate_pairs = 50  # distiller hard-supersession pair cap
-# profile_max_tokens = 1024           # always-injected preference profile bound
-# reembed_batch_size = 32             # lazy re-embed throttle
-# max_evictions_per_pass = 1000       # clock-jump guard
-# migration_throttle_batch = 256      # lazy migration batch size
-# seed = 42                           # determinism
-# index = "exact"                     # exact (default) | ann (needs the `ann` build feature)
-# salience_markers = ["prefer", "preference", "always", "never", "remember"]
+# When `false`, the agent asks before each autonomous launch. When `true`, it
+# auto-approves and announces it. The explicit `/consult` command is never gated.
+# Either way a consult costs three LLM calls.
+auto_approve = false
 
-# ---------------------------------------------------------------------------
-# [embedding] — embedding provider (OpenAI-compatible, Ollama-first).
-# The embedding provider key is read from the environment ONLY (dummy
-# "ollama" is fine for the local Ollama server); it NEVER lives in this file.
-#
-# [embedding]
-# provider = "openai"
-# base_url = "http://localhost:11434/v1"   # Ollama default; point elsewhere for cloud
-# model = "nomic-embed-text-v2-moe:latest"
-# dim = 0                                  # 0 = autodetect from the first response (default); set to e.g. 768 to pin the dimension
-# query_prefix = "search_query: "          # nomic-embed-text-v2-moe asymmetric prefixes
-# document_prefix = "search_document: "
+# Declare only when the trio runs on a different backend than the main agent. Omitted
+# means it INHERITS the root `provider`. Only `ollama` is measurable, because it exposes
+# endpoints for context-window and weights-digest probing.
+# kind = "ollama"
 
-# ---------------------------------------------------------------------------
-# [headless] — numeric caps and gates for the non-interactive `magi init`/
-# `query`/`consult` subcommands (opt-in; absent = all built-in defaults
-# below). Every key is OPTIONAL and OVERRIDES its module-constant default;
-# an unset key keeps the default. Unknown keys are a PARSE ERROR under
-# deny_unknown_fields, same as every other section in this file. All values
-# below ARE the built-in defaults (spec §11) except where noted.
-#
-# [headless]
-# max_input_bytes = 10485760
-#   Cap on -i/stdin input bytes read (REQ-H29, anti-DoS). An operator may only
-#   LOWER this below the 10 MiB default; it is never a source of extra budget
-#   for an untrusted caller.
-#
-# full_auto_max_tool_calls = 50
-#   Elevated tool-call ceiling under --full-auto (REQ-H08). A hard backstop,
-#   not infinite — silencing the repetitive-call soft guard under --full-auto
-#   only permits legitimate repeats up to this cap.
-#
-# log_retention = 50
-#   Keep at most the last N run-log files under ./.magi/logs/ (REQ-H34),
-#   pruned best-effort at the start of every run.
-#
-# log_max_bytes = 536870912
-#   Total run-log directory byte ceiling (512 MiB, REQ-H24), pruned
-#   oldest-first alongside the count-based retention above — whichever limit
-#   is hit first triggers pruning.
-#
-# tool_result_cap_bytes = 65536
-#   Cap on each tool result/transcript entry in the JSON output and on the
-#   debug-level redacted tool input in the run log (REQ-H14), 64 KiB, with a
-#   "…[truncated N bytes]" marker appended when exceeded.
-#
-# log_level = "info"
-#   Default run-log verbosity when --log-level is not passed on the CLI:
-#   "error" | "warn" | "info" | "debug". Only "debug" includes the redacted,
-#   capped raw tool input in the log; other levels log only its length.
-#
-# timeout_secs = 900
-#   Default wall-clock ceiling (seconds) for --auto/--full-auto runs when
-#   --timeout is not passed (REQ-H36). Every tool-executing tier always
-#   carries SOME wall-clock ceiling; this is what fills it in.
-#
-# allow_system_override = false
-#   SECURITY GATE (REQ-H12b): whether an envelope's `system` field may
-#   override the operator's system prompt. Effective value is
-#   `--allow-system-override flag OR this config value` — never weaker than
-#   either source alone. Leave false unless the caller supplying prompts is
-#   trusted; a caller-controlled system prompt is a prompt-injection vector.
+# Overrides the endpoint for the trio only. Commented out means it inherits the root
+# value above.
+# base_url = "http://192.168.0.30:11434/v1"
+
+# Sets the mode for invocations that do not pass `--mode`. Declaring it counts as
+# declared, so the classification call is skipped: a pipeline running bulk consults
+# pays zero classifications without touching its call sites. Omitted means the mode is
+# inferred, which costs one extra model call. Valid values: `analysis`, `design`,
+# `code-review`.
+# default_mode = "analysis"
+
+# Declare this when the consult acts as a gate over content you do not control. It
+# requires the mode to be declared rather than inferred, removing the classification
+# call as an injection surface.
+# untrusted_content = false
+
+# The input cap of magi-rs itself, applied before magi-core sees the payload. It rejects,
+# never truncates: a silently shortened payload would produce a verdict
+# indistinguishable from a legitimate one. The size is chosen by cost, not capacity,
+# because the payload is sent to all three mages and therefore paid for three times.
+max_query_bytes = 262144
+
+# The per-mage timeout ceiling. The two internal timeout layers are DERIVED from this
+# value and are not configurable separately, so no combination can break the relation
+# between them.
+agent_timeout_secs = 90
+
+# Omitted means the threshold is MEASURED by the probe when the endpoint allows it, and
+# otherwise falls back to the built-in default.
+# input_warn_tokens = 150000
+
+# Omitted keeps the retry the trio inherits from magi-core.
+# retry_disabled = false
+
+# Values are the minimum content length, in CHARACTERS, for the agent to dispatch a
+# consult on its own. Characters and not bytes on purpose: a byte threshold would treat
+# the same text differently depending on the language it is written in. Explicit
+# `/consult` and `magi consult` are NEVER vetoed. Setting a value to `0` disables the
+# veto for that mode. These thresholds are a starting point, not an empirical
+# calibration.
+[magi.complexity]
+code_review = 200
+design      = 500
+analysis    = 120
+
+[embedding]
+model = "nomic-embed-text-v2-moe:latest"
+dim   = 0
+# Overrides the embedding endpoint. Commented out means it inherits the root `base_url`.
+# BREAKING: until v0.11.0 this key always carried its own value, so it never inherited.
+# base_url = "..."
