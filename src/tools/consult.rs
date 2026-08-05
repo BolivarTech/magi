@@ -16,7 +16,7 @@ use magi_core::schema::{AgentName, Mode};
 use magi_rs::magi::kind::ProviderKind;
 use magi_rs::magi::mode::{read_resolved_mode, ModeResolution, ModeSource};
 use magi_rs::magi::TimeoutDecision;
-use magi_rs::redact::redact_foreign_error;
+use magi_rs::redact::{redact_foreign_error, redact_foreign_text};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -316,6 +316,19 @@ fn seat_key(seat: AgentName) -> String {
 /// empty (REQ-A10). An empty map is a positive certificate that every seat adhered to
 /// the verdict contract on every attempt; omitting it would make that certificate
 /// indistinguishable from "this version doesn't report it".
+///
+/// **`model` and `cause` are safe to interpolate verbatim — verified against magi-core
+/// 3.1.0, not assumed (fix round 3):**
+/// - `model` is `agent.provider_model().to_string()` — the CONFIGURED model identifier
+///   for the seat (`orchestrator.rs::dispatch_one_agent`), never text derived from a
+///   network/provider error. Not third-party free text.
+/// - `cause: ExtractionFailureCause` is `#[non_exhaustive]` but every variant is a
+///   **fieldless** unit case (`verdict_markers.rs`) — `format!("{:?}", x.cause)` can
+///   only ever produce one of a fixed, closed set of Debug strings (`"MissingMarkers"`,
+///   …, `"Other"`). There is structurally no way for it to carry a URL or a credential.
+///
+/// Contrast [`failed_agents_json`], whose `cause` is genuinely third-party free text and
+/// DOES need redaction.
 #[must_use]
 fn failures_json(f: &BTreeMap<AgentName, Vec<ExtractionFailure>>) -> Value {
     let mut out = serde_json::Map::new();
@@ -342,11 +355,28 @@ fn failures_json(f: &BTreeMap<AgentName, Vec<ExtractionFailure>>) -> Value {
 /// `failed_agents`, keyed the SAME way as [`failures_json`] (see [`seat_key`]) — built
 /// by hand rather than serialized straight through `report.failed_agents`, so the two
 /// maps cannot end up on different casings for what is the same kind of key.
+///
+/// **`cause` is redacted before it enters the JSON (B11, fix round 3, CRITICAL).** Unlike
+/// [`failures_json`]'s `cause`, this one is genuinely third-party free text: verified
+/// against `orchestrator.rs::dispatch_one_agent` (magi-core 3.1.0), it is literally
+/// `MagiError::Provider(e).to_string()`, a `format!("timeout: …")`, or a
+/// `format!("retry-failed: …")` wrapping either — none of which magi-rs controls the
+/// content of. Under REQ-A16c a `base_url` may carry `[user]:[password]` placeholders
+/// substituted with real vault credentials in memory, so an ordinary connection failure
+/// (wrong port, TLS mismatch, a DNS blip — nothing attacker-driven) can render that
+/// resolved, credential-bearing URL straight into this string via reqwest/hyper's own
+/// `Display`. `redact_foreign_text` is the SAME positional redaction `explain_magi_error`
+/// already applies to foreign error text elsewhere in this file (B3: one redaction path,
+/// not two) — it just takes the already-formatted `&str` this field already is, instead
+/// of a `&dyn Error` there is none of here.
 #[must_use]
 fn failed_agents_json(agents: &BTreeMap<AgentName, String>) -> Value {
     let mut out = serde_json::Map::new();
     for (seat, cause) in agents {
-        out.insert(seat_key(*seat), Value::String(cause.clone()));
+        out.insert(
+            seat_key(*seat),
+            Value::String(redact_foreign_text(cause).as_str().to_string()),
+        );
     }
     Value::Object(out)
 }
@@ -1613,7 +1643,9 @@ mod tests {
         assert_eq!(v["mode_source"], "inferred");
     }
 
-    /// SC-A09c / SC-A10b / SC-A10c: the shape does NOT vary with the outcome.
+    /// SC-A09 / SC-A09c / SC-A10b / SC-A10c: the shape does NOT vary with the
+    /// outcome, and a clean run's empty `extraction_failures` is the positive
+    /// certificate SC-A09 asks for.
     #[test]
     fn the_shape_does_not_vary_with_the_outcome() {
         let clean_r = clean_report();
@@ -1698,6 +1730,47 @@ mod tests {
                 .unwrap()
                 .contains_key("caspar"),
             "typed with its cause, not collapsed into `degraded`"
+        );
+    }
+
+    /// SC-A13 / B11 (fix round 3, CRITICAL): a `cause` string reaching `failed_
+    /// agents` is THIRD-PARTY text — magi-core's own `ProviderError` rendering,
+    /// e.g. `MagiError::Provider(e).to_string()` (verified against `orchestrator.
+    /// rs::dispatch_one_agent`) — and an ordinary connection failure against a
+    /// `[user]:[password]`-substituted `base_url` (REQ-A16c) can embed LIVE
+    /// credentials in exactly this string. `failed_agents_json` must redact it
+    /// before it ever reaches the JSON. A test that redacts a benign string
+    /// proves nothing about this: the credential must actually be present in the
+    /// input and actually absent from the output.
+    #[test]
+    fn a_credential_bearing_cause_never_reaches_the_json() {
+        const CANARY: &str = "hunter2-s3cr3t";
+        let r = report_fixture(
+            json!([]),
+            json!({
+                "caspar": format!(
+                    "network error: connect to https://user:{CANARY}@host:8443/v1 failed"
+                ),
+            }),
+            json!({}),
+            Value::Null,
+            true,
+            "a degraded consensus report",
+        );
+        let v = report_to_consult_json(
+            &r,
+            &untruncated(&r),
+            &res_of(Mode::Analysis, ModeSource::Default),
+            &ctx_plain(),
+        );
+        let rendered = v.to_string();
+        assert!(
+            !rendered.contains(CANARY),
+            "credential leaked into the consult JSON: {rendered}"
+        );
+        assert!(
+            rendered.contains("host:8443"),
+            "the host must survive redaction — still accionable: {rendered}"
         );
     }
 

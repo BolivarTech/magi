@@ -137,7 +137,8 @@ pub fn locate_userinfo(raw: &str) -> UserinfoLocation {
     }
 }
 
-/// Texto de error ya redactado. **Su único constructor es [`redact_foreign_error`].**
+/// Texto de error ya redactado. **Sus únicos constructores son [`redact_foreign_error`] y
+/// [`redact_foreign_text`].**
 ///
 /// Es lo que impide que un `String` sin redactar llegue a un error de dominio: sin el newtype
 /// el camino sin redactar queda a un `.into()` de distancia, y la defensa vuelve a depender de
@@ -174,20 +175,32 @@ fn ends_embedded_url(c: char) -> bool {
     c.is_whitespace() || matches!(c, '"' | '\'' | '<' | '>' | '`' | ',' | ';' | ')')
 }
 
-/// Redacta las URLs **embebidas en la prosa de un error foráneo**, conservando el resto.
+/// Redacta las URLs **embebidas en cualquier prosa de un TERCERO**, conservando el resto —
+/// el motor detrás de [`redact_foreign_error`], expuesto directamente para llamadores que no
+/// tienen un `&dyn Error` que envolver.
 ///
-/// # Por qué hace falta, y por qué una lista de sitios no alcanza
+/// # Por qué existe SEPARADA de [`redact_foreign_error`] (fix round 3, hallazgo CRÍTICO)
+///
+/// `redact_foreign_error` toma `&dyn Error` porque su primer consumidor (`explain_magi_error`)
+/// tenía uno a mano. Pero la lógica entera opera sobre el `String` que produce `err.to_string()`
+/// — nada de lo que sigue usa el `Error` en sí. Un segundo llamador con texto de un tercero que
+/// **ya es `String`** (p. ej. `MagiReport::failed_agents`, cuyo valor es literalmente
+/// `MagiError::Provider(e).to_string()` armado por magi-core, verificado contra
+/// `orchestrator.rs::dispatch_one_agent`) no tiene un `Error` que envolver — envolverlo en un
+/// `impl Error` de un solo uso para satisfacer una firma sería un workaround que deja intacto
+/// el hueco real: el día que alguien tenga un `String` foráneo y no un `Error`, va a escribir
+/// ESE `.to_string()` sin pasar por acá, exactamente el defecto que este fix cierra.
+///
+/// # Por qué hace falta redactar esto, y por qué una lista de sitios no alcanza
 ///
 /// Los `format!` que escribimos nosotros se pueden enumerar y auditar. Este camino no: el
 /// texto lo arma **otra crate** con la URL que le pasamos, así que ninguna revisión de
-/// nuestros formateadores lo ve. Todo `map_err` que convierta un error foráneo en texto pasa
-/// por acá.
+/// nuestros formateadores lo ve. Todo `String` que empaquete un error foráneo pasa por acá.
 ///
 /// No es una segunda implementación de [`redact_url`]: barre las URLs del mensaje y le aplica
 /// a cada una **la misma regla posicional**.
 #[must_use]
-pub fn redact_foreign_error(err: &dyn Error) -> SafeErrorText {
-    let raw = err.to_string();
+pub fn redact_foreign_text(raw: &str) -> SafeErrorText {
     let mut out = String::with_capacity(raw.len());
     let mut cursor = 0usize;
 
@@ -224,6 +237,16 @@ pub fn redact_foreign_error(err: &dyn Error) -> SafeErrorText {
         out.push_str(rest);
     }
     SafeErrorText(out)
+}
+
+/// Redacta las URLs **embebidas en la prosa de un error foráneo**, conservando el resto.
+///
+/// Envoltorio de [`redact_foreign_text`] sobre `err.to_string()` — ver su rustdoc para el
+/// porqué de la separación. Se mantiene por compatibilidad con los llamadores que sí tienen un
+/// `&dyn Error` (`explain_magi_error`).
+#[must_use]
+pub fn redact_foreign_error(err: &dyn Error) -> SafeErrorText {
+    redact_foreign_text(&err.to_string())
 }
 
 #[cfg(test)]
@@ -321,5 +344,31 @@ mod tests {
         assert!(!safe.as_str().contains("a:b"), "primera: {}", safe.as_str());
         assert!(!safe.as_str().contains("c:d"), "segunda: {}", safe.as_str());
         assert!(safe.as_str().contains("one") && safe.as_str().contains("two"));
+    }
+
+    /// Fix round 3: [`redact_foreign_text`] es el motor `&str` que
+    /// [`redact_foreign_error`] envuelve — se prueba DIRECTO, sin pasar por un
+    /// `&dyn Error`, para el llamador que ya tiene un `String` foráneo (p. ej.
+    /// `MagiReport::failed_agents`, que ES `MagiError::Provider(e).to_string()`).
+    #[test]
+    fn redact_foreign_text_redacts_a_string_with_no_error_to_wrap() {
+        let raw = "network error: connect to https://user:hunter2@host:8443/v1 failed";
+        let safe = redact_foreign_text(raw);
+        assert!(
+            !safe.as_str().contains("hunter2"),
+            "filtró: {}",
+            safe.as_str()
+        );
+        assert!(safe.as_str().contains("host:8443"), "sigue accionable");
+    }
+
+    /// Edge case (B13): sin URL adentro, pasa intacto — mismo contrato que
+    /// [`redact_foreign_error`] sobre el mismo texto.
+    #[test]
+    fn redact_foreign_text_leaves_url_free_text_alone() {
+        assert_eq!(
+            redact_foreign_text("connection reset by peer").as_str(),
+            "connection reset by peer"
+        );
     }
 }
