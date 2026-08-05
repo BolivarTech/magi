@@ -1913,7 +1913,10 @@ mod tests {
         // Sin Anthropic no hay nada que avisar.
         std::fs::write(&path, "provider = \"ollama\"\n").unwrap();
         let (_, notices) = MagiConfig::load(&path).unwrap();
-        assert!(!notices.iter().any(|n| n.contains("not used")));
+        // Needle must match production's actual casing ("NOT used", line ~1902 above) —
+        // the lowercase "not used" this assertion used before never matches, so it was
+        // vacuously true regardless of whether the code was correct.
+        assert!(!notices.iter().any(|n| n.contains("NOT used")));
     }
 
     /// m2 (fix round 2, coordinator, 2026-08-03): un `effective_base_url()` fallido NO

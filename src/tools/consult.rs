@@ -2386,6 +2386,72 @@ mod tests {
         assert!(out.text.len() <= TOOL_RESULT_CAP_BYTES);
     }
 
+    /// Builds a report where the verdict + first-finding region GENUINELY EXISTS —
+    /// unlike [`report_with_only_the_anchor`] — but the text between `verdict_start`
+    /// and `findings_start` alone is twice `cap`, so no `cap`'s worth of budget can
+    /// ever reach `findings_start`. Distinguishes the BUDGET-driven cause of
+    /// `Anchored` from the ABSENT-findings cause the sibling test below covers.
+    fn report_with_findings_beyond_the_budget(cap: usize) -> String {
+        let anchors =
+            SECTION_ANCHORS.expect("this fixture assumes Structural/Anchored are reachable");
+        // 2x cap guarantees the offset of `findings_start` from `verdict_start` alone
+        // exceeds `cap - mark_overhead()`, however small `mark_overhead()` is.
+        let long_verdict_body = "z".repeat(cap * 2);
+        format!(
+            "preamble\n\n{}\n{long_verdict_body}\n\n{}\n- first finding\n\n{}\n- do X",
+            anchors.verdict_start, anchors.findings_start, anchors.findings_end,
+        )
+    }
+
+    /// SC-A11e (`Anchored`, the BUDGET-driven cause — B13 edge case). Pins the
+    /// `Structural` -> `Anchored` downgrade: `keep_verdict_and_first_finding`
+    /// successfully locates and slices the verdict-through-`findings_end` region
+    /// (`Some`), but `head_chars` cuts it to `budget` BEFORE reaching
+    /// `findings_start`, so `kept_has_first_finding` correctly reports `false` on
+    /// the RESULT — the level steps down rather than claiming guarantee (b)
+    /// dishonestly. This is a DIFFERENT cause of `Anchored` than
+    /// `anchored_level_keeps_only_the_verdict_when_there_were_no_findings` (findings
+    /// genuinely absent from the whole report): here they exist, they are just too
+    /// far from the verdict to survive the cut. Without the `kept_has_first_finding`
+    /// check — i.e. if `truncate_report` returned `Structural` whenever
+    /// `keep_verdict_and_first_finding` returns `Some`, regardless of content — this
+    /// test goes red: it would observe `Structural` where it asserts `Anchored`.
+    #[test]
+    fn insufficient_budget_downgrades_structural_to_anchored_even_when_findings_exist() {
+        let anchors = SECTION_ANCHORS.expect("this test assumes Structural/Anchored are reachable");
+        let report = report_with_findings_beyond_the_budget(TOOL_RESULT_CAP_BYTES);
+        assert!(
+            report.contains(anchors.findings_start),
+            "test setup: findings genuinely exist in the SOURCE report — this is the \
+             budget-driven cause of Anchored, not the absent-findings cause"
+        );
+        assert!(
+            report.len() > TOOL_RESULT_CAP_BYTES,
+            "test setup: the fixture must actually exceed the cap"
+        );
+        let out = truncate_report(&report, TOOL_RESULT_CAP_BYTES);
+        assert_eq!(
+            out.level,
+            TruncationLevel::Anchored,
+            "the kept slice was cut before reaching findings_start, so guarantee (b) \
+             cannot be honestly claimed even though the SOURCE report has findings"
+        );
+        assert!(
+            !out.text.contains(anchors.findings_start),
+            "confirms the cut genuinely landed before the finding, proving THIS is the \
+             budget-driven downgrade and not some other path to Anchored"
+        );
+        assert!(
+            out.text.contains(anchors.verdict_start),
+            "guarantee (a): the verdict block"
+        );
+        assert!(
+            out.text.contains(TRUNCATION_MARK),
+            "guarantee (c): the truncation mark"
+        );
+        assert!(out.text.len() <= TOOL_RESULT_CAP_BYTES);
+    }
+
     /// A report where findings genuinely never rendered — magi-core omits the
     /// section entirely when there are none (`report_anchors::SectionAnchors::
     /// findings_start`'s own rustdoc) — still exposes the verdict and the

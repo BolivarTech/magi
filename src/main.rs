@@ -2024,7 +2024,7 @@ fn probe_notice(m: &Measurement) -> String {
                     )
                 },
             );
-            format!("probe: ventana {window} tokens, {d}")
+            format!("probe: window {window} tokens, {d}")
         }
         Measurement::NotMeasurable => {
             "probe: this endpoint does not offer model introspection (not a failure)".into()
