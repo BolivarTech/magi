@@ -15,17 +15,246 @@ use magi_core::reporting::{ExtractionFailure, InputSize, MagiReport};
 use magi_core::schema::{AgentName, Mode};
 use magi_rs::magi::kind::ProviderKind;
 use magi_rs::magi::mode::{read_resolved_mode, ModeResolution, ModeSource};
-use magi_rs::magi::TimeoutDecision;
+use magi_rs::magi::report_anchors::{CONTRACTUAL_ANCHORS, SECTION_ANCHORS};
+use magi_rs::magi::{
+    mark_overhead, TimeoutDecision, MAX_QUERY_BYTES, TOOL_RESULT_CAP_BYTES, TRUNCATION_MARK,
+};
 use magi_rs::redact::{redact_foreign_error, redact_foreign_text};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
-/// Reject oversized consult input before incurring 3 model calls.
-/// `pub(crate)` so the forced `/consult` TUI path and the headless direct/forced
-/// consult path ([`crate::headless_runner`]) apply the same cap (REQ-H33).
-pub(crate) const MAX_QUERY_LEN: usize = 8192;
+/// Por qué la entrada de un consult no es aceptable (REQ-A11b).
+///
+/// Dos variantes, no una: una consulta vacía y una sobredimensionada son fallos
+/// distintos (gasto puro vs. costo real) y el mensaje debe distinguirlos.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub(crate) enum ConsultInputError {
+    /// Consulta vacía o con solo espacios. Llamar a tres modelos con esto es gasto
+    /// puro, sin ninguna posibilidad de un veredicto útil.
+    #[error("query must not be empty")]
+    Empty,
+    /// Por encima del cap configurado. **Rechaza, NUNCA trunca** (REQ-A11b): un
+    /// payload recortado en silencio produce un veredicto indistinguible de uno
+    /// legítimo.
+    #[error("query too large ({size} bytes; max {cap})")]
+    TooLarge {
+        /// Tamaño recibido, en bytes.
+        size: usize,
+        /// El cap efectivo, para que el mensaje diga por cuánto se pasó.
+        cap: usize,
+    },
+}
+
+/// Verifica el tamaño de entrada de un consult (REQ-A11b). **El cap único de las
+/// tres rutas de entrada** — [`ConsultTool::execute`], la ruta directa headless
+/// (`crate::headless_runner::analyze_direct`) y el `/consult` explícito de la TUI
+/// (`crate::tui`) llaman a esta MISMA función con el cap efectivo que cada una
+/// resolvió de `MagiConfig::effective_max_query_bytes`, en vez de tres copias
+/// paralelas que podrían divergir (SC-A11c, B3).
+///
+/// **Rechaza, nunca trunca.** El criterio del número es COSTO, no capacidad:
+/// magi-core ya saltea los modelos donde el prompt no entra, así que magi-rs no
+/// tiene que proteger al modelo. Lo que sí debe acotar es el gasto: el payload va
+/// a los tres mages, así que se paga por tres.
+///
+/// # Parameters
+/// * `query` - el contenido a validar antes de gastar ninguna llamada al modelo.
+/// * `cap` - el límite efectivo en bytes (`MagiConfig::effective_max_query_bytes`).
+///
+/// # Errors
+/// [`ConsultInputError::Empty`] si `query` es vacía o solo espacios;
+/// [`ConsultInputError::TooLarge`] con el tamaño y el límite si supera `cap`.
+pub(crate) fn check_query_size(query: &str, cap: usize) -> Result<(), ConsultInputError> {
+    if query.trim().is_empty() {
+        return Err(ConsultInputError::Empty);
+    }
+    if query.len() > cap {
+        return Err(ConsultInputError::TooLarge {
+            size: query.len(),
+            cap,
+        });
+    }
+    Ok(())
+}
+
+/// ¿Sobrevivió al recorte el ancla del primer hallazgo?
+///
+/// Es la comprobación que convierte [`TruncationLevel::Structural`] de intención en
+/// hecho: se afirma sobre el TEXTO RESULTANTE (`kept`), no sobre si el intento de
+/// localizar las anclas tuvo éxito — la misma disciplina que SC-A11e exige de sus
+/// propias aserciones. `SECTION_ANCHORS` puede legítimamente no aparecer en el
+/// reporte original cuando no hubo hallazgos (`report_anchors::SectionAnchors::
+/// findings_start`); en ese caso esta función también devuelve `false`, y el
+/// llamador baja a [`TruncationLevel::Anchored`] en vez de afirmar una garantía que
+/// el texto no cumple — "no hubo hallazgos" y "no se pudo localizar" quedan
+/// indistinguibles para este chequeo, pero el resultado (bajar de nivel) es
+/// correcto en los dos casos.
+#[must_use]
+fn kept_has_first_finding(kept: &str) -> bool {
+    SECTION_ANCHORS.is_some_and(|a| kept.contains(a.findings_start))
+}
+
+/// Recorta a lo sumo `cap` bytes de `s`, cortando en frontera de CARÁCTER.
+///
+/// `char_indices` da el índice INICIAL de cada carácter, así que comparar contra el
+/// inicio dejaría pasar un carácter multi-byte que EMPIEZA antes del cap y TERMINA
+/// después — el resultado excedería el límite hasta en 3 bytes (el ancho máximo de
+/// un carácter UTF-8 menos uno). Se compara el FIN del carácter (`i + c.len_utf8()`),
+/// nunca su inicio, y el resultado se construye con `.collect()` sobre `char`s
+/// completos — nunca con un slice de bytes — así que no hay forma de que produzca
+/// una frontera inválida.
+///
+/// # Complejidad
+/// O(n) en el número de caracteres de `s` hasta alcanzar `cap` — un solo recorrido,
+/// sin retroceso.
+#[must_use]
+fn head_chars(s: &str, cap: usize) -> String {
+    s.char_indices()
+        .take_while(|(i, c)| i + c.len_utf8() <= cap)
+        .map(|(_, c)| c)
+        .collect()
+}
+
+/// Agrega la marca de recorte al texto conservado, para que la pérdida sea visible
+/// en la superficie de texto igual que `report_truncated` la hace visible en el
+/// JSON (B9 — un recorte silencioso es indistinguible de un reporte completo).
+#[must_use]
+fn mark(kept: String) -> String {
+    format!("{kept}\n\n{TRUNCATION_MARK}")
+}
+
+/// Conserva veredicto + hallazgos, si las secciones se pueden localizar.
+///
+/// Usa las anclas que el spike de Task 0.6 dejó en [`SECTION_ANCHORS`]
+/// (`report_anchors.rs`, dueño único). Devuelve `None` cuando la lista está
+/// vacía —el spike concluyó que no hay estructura estable— o cuando el ancla de
+/// veredicto no aparece en `report`; en los dos casos el llamador baja de nivel.
+///
+/// El corte del extremo derecho va en la TERCERA ancla (`findings_end`, `"##
+/// Recommended Actions"`), no en la segunda (`findings_start`): la región tiene
+/// que ABARCAR la sección de hallazgos, no terminar justo donde empieza — cortar
+/// ahí devolvería el veredicto y nada más, mientras esta función promete
+/// "veredicto Y primer hallazgo". Si `findings_end` no aparece (reporte sin esa
+/// sección, caso no observado en producción pero no descartable), se conserva
+/// hasta el final del reporte en vez de fallar.
+///
+/// El presupuesto de la marca ([`mark_overhead`]) se descuenta ACÁ, que es donde
+/// se conoce: el llamador concatena [`TRUNCATION_MARK`] después de esta función,
+/// así que recortar a `cap` exacto y luego concatenar excedería el cap en
+/// `mark_overhead()` bytes.
+#[must_use]
+fn keep_verdict_and_first_finding(report: &str, cap: usize) -> Option<String> {
+    let anchors = SECTION_ANCHORS?; // sin anclas: este nivel no aplica
+    let start = report.find(anchors.verdict_start)?;
+    let end = report
+        .get(start..)
+        .and_then(|s| s.find(anchors.findings_end))
+        .map_or(report.len(), |i| start + i);
+    let slice = report.get(start..end)?;
+    if slice.is_empty() {
+        return None;
+    }
+    let budget = cap.checked_sub(mark_overhead())?; // cap ridículo ⇒ este nivel no aplica
+    Some(head_chars(slice, budget))
+}
+
+/// Conserva desde el primer ancla CONTRACTUAL de magi-core.
+///
+/// Un ancla contractual (`report_anchors::CONTRACTUAL_ANCHORS`) es estable POR
+/// DEFINICIÓN — magi-core la emite siempre —, a diferencia del formato de
+/// secciones que es estable por costumbre. De ahí que este nivel vaya después del
+/// estructural pero antes del conteo de bytes: es el fallback para un reporte
+/// donde `findings_start` no aparece porque no hubo hallazgos, o donde la región
+/// de hallazgos no sobrevivió al recorte.
+#[must_use]
+fn keep_contractual_anchor(report: &str, cap: usize) -> Option<String> {
+    let start = CONTRACTUAL_ANCHORS.iter().find_map(|a| report.find(a))?;
+    let budget = cap.checked_sub(mark_overhead())?; // ver `keep_verdict_and_first_finding`
+    Some(head_chars(report.get(start..)?, budget))
+}
+
+/// Último recurso: los primeros `cap` bytes del reporte, sin buscar ninguna
+/// estructura. Devuelve `None` solo cuando `cap` es demasiado chico para dejarle
+/// lugar a la marca — `MagiConfig::effective_tool_result_cap` ya rechaza esa
+/// configuración al cargar (`ConfigError::OutputCapTooSmall`), así que este
+/// camino es defensa en profundidad para un `cap` construido a mano (tests, u
+/// otro llamador futuro), no una ruta alcanzable desde `magi.toml`.
+#[must_use]
+fn keep_bytes(report: &str, cap: usize) -> Option<String> {
+    let budget = cap.checked_sub(mark_overhead())?;
+    Some(head_chars(report, budget))
+}
+
+/// Recorta el reporte al cap, eligiendo el nivel más alto que la forma permita
+/// (REQ-A11b, Task 6.2 — completa lo que [`TruncationLevel`] dejó pendiente).
+///
+/// Tres niveles, de más a menos garantía — cada uno se intenta SOLO si el
+/// anterior no es viable, y el nivel devuelto (`Truncated::level`, expuesto en el
+/// JSON vía `truncation_label`) dice CUÁL se usó, para que el consumidor sepa qué
+/// garantía tiene enfrente en vez de deducirla (SC-A11e/SC-A11h):
+/// - [`TruncationLevel::Structural`] — veredicto + al menos el primer hallazgo.
+/// - [`TruncationLevel::Anchored`] — solo el veredicto; el hallazgo es best-effort.
+/// - [`TruncationLevel::Bytes`] — únicamente los primeros N bytes; nada más
+///   garantizado.
+///
+/// El nivel `Structural` se AFIRMA sobre el RESULTADO, no sobre el intento:
+/// recortar a `cap` puede cortar justo antes del primer hallazgo, y devolver
+/// `Structural` ahí sería prometer una garantía que el texto no cumple — el
+/// consumidor confiaría en un hallazgo que no está. Si el hallazgo no sobrevivió,
+/// se baja de nivel en vez de mentir.
+///
+/// # Parameters
+/// * `report` - el texto YA ANOTADO (REQ-A12c, [`annotate_report_text`]) que se
+///   quiere acotar. Los llamadores deben anotar ANTES de truncar: este función
+///   nunca ve el hint keyless-auth si se invierte el orden.
+/// * `cap` - el límite de bytes efectivo (`MagiConfig::effective_tool_result_cap`).
+///
+/// # Returns
+/// El texto que sobrevivió (con [`TRUNCATION_MARK`] ya aplicada si hubo recorte)
+/// y el nivel de garantía alcanzado. `report.len() <= cap` devuelve el reporte
+/// intacto con [`TruncationLevel::None`] — nunca agrega la marca cuando no
+/// truncó nada.
+#[must_use]
+pub(crate) fn truncate_report(report: &str, cap: usize) -> Truncated {
+    if report.len() <= cap {
+        return Truncated {
+            text: report.to_string(),
+            level: TruncationLevel::None,
+        };
+    }
+    if let Some(kept) = keep_verdict_and_first_finding(report, cap) {
+        if kept_has_first_finding(&kept) {
+            return Truncated {
+                text: mark(kept),
+                level: TruncationLevel::Structural,
+            };
+        }
+    }
+    if let Some(kept) = keep_contractual_anchor(report, cap) {
+        return Truncated {
+            text: mark(kept),
+            level: TruncationLevel::Anchored,
+        };
+    }
+    match keep_bytes(report, cap) {
+        Some(kept) => Truncated {
+            text: mark(kept),
+            level: TruncationLevel::Bytes,
+        },
+        // `cap` demasiado chico incluso para la marca — inalcanzable vía
+        // `magi.toml` (`ConfigError::OutputCapTooSmall` lo rechaza al cargar),
+        // pero un `cap` construido a mano SÍ puede llegar acá. Devolver el
+        // reporte intacto, honestamente marcado `None`, es preferible a un
+        // fragmento roto que mienta sobre respetar el cap.
+        None => Truncated {
+            text: report.to_string(),
+            level: TruncationLevel::None,
+        },
+    }
+}
 
 /// El prefijo ESTABLE con el que magi-core renderiza la causa de un asiento cuando el
 /// fallo fue de autenticación — el `Display` de `ProviderError::Auth` (magi-core 3.1.0,
@@ -167,39 +396,20 @@ pub(crate) fn annotate_report_text(report: &MagiReport, kind: ProviderKind) -> S
 /// with [`Self::Bytes`] it knows only that the first N bytes did, and anything else may
 /// be missing.
 ///
-/// The actual recort logic (`truncate_report`) is a later task's job — this module only
-/// needs the vocabulary because [`Truncated`] is part of [`report_to_consult_json`]'s
-/// contract, so every caller of it (this task's two production call sites included) has
-/// to be able to name a level even before real truncation exists — hence [`Self::None`]
-/// being the only level anything currently produces.
+/// [`truncate_report`] chooses among the four variants, from most to least
+/// guarantee — see its own rustdoc for how each level is selected and what it
+/// promises. [`Self::None`] is what any caller still gets when the report already
+/// fits under the cap.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TruncationLevel {
     /// The report was not truncated.
     None,
-    // Narrow allow (matches `MagiConfig::effective_max_query_bytes` in `config.rs`) —
-    // kept deliberately, unlike the ones this fix round removed elsewhere in this
-    // file: those were unjustified (a hardcoded lie, or a guard for an unreachable
-    // state). This one is different in kind, not just in degree — these three
-    // variants are REQUIRED by `Truncated`'s own field type (the normative interface
-    // for this task), but their only possible producer, `truncate_report`, is
-    // Task 6.2's job by the plan's own module boundary (`examples/ms2_contracts.rs`
-    // scopes it there explicitly). There is no cheap wiring available here the way
-    // there was for `RunContext`'s fields: locating a verdict/finding in magi-core's
-    // markdown output is Task 6.2's actual feature, not a two-line fix. They are
-    // exercised directly by `report_truncated_names_the_level_applied`.
-    //
-    // Fix round 2: this suppression is TRACKED, not indefinite. If Task 6.2 lands
-    // and `truncate_report` exists but this `#[allow(dead_code)]` is still here,
-    // that is itself a finding at Task 6.2's close — the whole point of naming
-    // Task 6.2 above is so the next reader can check that exact condition.
-    /// The verdict and at least one finding were located and kept.
-    #[allow(dead_code)]
+    /// The verdict and at least one finding were located and kept
+    /// ([`truncate_report`]'s first, highest-guarantee level).
     Structural,
     /// A magi-core contractual anchor was used instead of locating sections.
-    #[allow(dead_code)]
     Anchored,
     /// Only the first N bytes survived; anything past that may be missing.
-    #[allow(dead_code)]
     Bytes,
 }
 
@@ -642,6 +852,21 @@ pub struct ConsultTool {
     /// correctness should not depend on an invariant elsewhere in the codebase never
     /// changing, and a future change that makes it real needs no further plumbing.
     magi_endpoint_diverges: bool,
+    /// Effective input cap (`MagiConfig::effective_max_query_bytes`, REQ-A11b),
+    /// checked by [`check_query_size`] before any model call. Defaults to
+    /// [`MAX_QUERY_BYTES`] (see [`Self::new`]); call [`Self::with_max_query_bytes`]
+    /// to declare an operator-configured value.
+    max_query_bytes: usize,
+    /// Effective output cap (`MagiConfig::effective_tool_result_cap`, REQ-A11b),
+    /// applied to the annotated report via [`truncate_report`] before it becomes
+    /// this call's `ToolResult` — the string that re-enters the conversation
+    /// history and gets re-sent on every subsequent turn of the session, which is
+    /// why this one call site bounds BOTH the TUI's auto-routed consult and the
+    /// headless `magi query` tool loop (`Agent::authorize_and_execute_tool`
+    /// serializes every tool's `Value` result the same way, for every caller).
+    /// Defaults to [`TOOL_RESULT_CAP_BYTES`]; call [`Self::with_output_cap`] to
+    /// declare an operator-configured value.
+    output_cap: usize,
 }
 
 impl ConsultTool {
@@ -673,6 +898,12 @@ impl ConsultTool {
             // Safe default: "no divergence" until a caller declares otherwise via
             // `Self::with_magi_endpoint_diverges`, mirroring `kind`'s own default.
             magi_endpoint_diverges: false,
+            // Built-ins until a caller declares an operator-configured value via
+            // `Self::with_max_query_bytes`/`Self::with_output_cap` — the ~13
+            // existing test call sites that do not care about either cap keep
+            // working unchanged, same reasoning as `kind`'s default above.
+            max_query_bytes: MAX_QUERY_BYTES,
+            output_cap: TOOL_RESULT_CAP_BYTES,
         }
     }
 
@@ -694,6 +925,22 @@ impl ConsultTool {
     #[must_use]
     pub fn with_magi_endpoint_diverges(mut self, diverges: bool) -> Self {
         self.magi_endpoint_diverges = diverges;
+        self
+    }
+
+    /// Declares the effective input cap (`MagiConfig::effective_max_query_bytes`,
+    /// REQ-A11b). Same builder shape as [`Self::with_kind`], for the same reason.
+    #[must_use]
+    pub fn with_max_query_bytes(mut self, cap: usize) -> Self {
+        self.max_query_bytes = cap;
+        self
+    }
+
+    /// Declares the effective output cap (`MagiConfig::effective_tool_result_cap`,
+    /// REQ-A11b). Same builder shape as [`Self::with_kind`], for the same reason.
+    #[must_use]
+    pub fn with_output_cap(mut self, cap: usize) -> Self {
+        self.output_cap = cap;
         self
     }
 }
@@ -755,18 +1002,11 @@ impl Tool for ConsultTool {
             .get("query")
             .and_then(|v| v.as_str())
             .ok_or_else(|| ToolError::InvalidArguments("missing 'query' string".to_string()))?;
-        if query.trim().is_empty() {
-            return Err(ToolError::InvalidArguments(
-                "query must not be empty".to_string(),
-            ));
-        }
-        if query.len() > MAX_QUERY_LEN {
-            return Err(ToolError::InvalidArguments(format!(
-                "query too large ({} bytes; max {})",
-                query.len(),
-                MAX_QUERY_LEN
-            )));
-        }
+        // SC-A11c: the SAME `check_query_size` the direct headless path and the
+        // TUI's explicit `/consult` call, so the three routes reject with the
+        // same limit instead of three copies that could drift apart.
+        check_query_size(query, self.max_query_bytes)
+            .map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
         let (mode, source) = resolved_mode_and_source(&args);
         let magi = self.magi.clone();
         let q = query.to_string();
@@ -804,17 +1044,17 @@ impl Tool for ConsultTool {
                 }
             },
         };
-        // The annotation (REQ-A12c) is applied BEFORE wrapping in `Truncated` — the new
-        // `report_to_consult_json` renders `truncated.text` verbatim, so the annotation
-        // step has to happen here, not inside it, or the keyless-auth hint this file
-        // already surfaces end-to-end (see `a_keyless_auth_failure_reaches_the_
-        // consult_report_end_to_end`) would silently stop reaching the user.
-        let truncated = Truncated {
-            text: annotate_report_text(&report, self.kind),
-            // No truncation logic exists yet (`truncate_report` is a later task's job);
-            // this is the untruncated report, honestly labeled as such.
-            level: TruncationLevel::None,
-        };
+        // The annotation (REQ-A12c) is applied BEFORE truncating — `report_to_consult_json`
+        // renders `truncated.text` verbatim, so the annotation step has to happen here,
+        // not inside `truncate_report`, or the keyless-auth hint this file already
+        // surfaces end-to-end (see `a_keyless_auth_failure_reaches_the_
+        // consult_report_end_to_end`) would silently stop reaching the user, and a
+        // report cut right at the annotation boundary could drop it either way.
+        let annotated = annotate_report_text(&report, self.kind);
+        // REQ-A11b/SC-A11d: bounds the string that becomes this call's `ToolResult` —
+        // the text re-sent on every subsequent turn of the session — with the same
+        // truncation-level vocabulary the JSON exposes via `report_truncated`.
+        let truncated = truncate_report(&annotated, self.output_cap);
         // `classification_attempted: false` is a PROVEN invariant here, not a
         // placeholder (fix round 1, Finding 1). `Tool::execute` is reachable from
         // production through exactly two funnel call sites —
@@ -1340,8 +1580,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_execute_oversized_query_is_invalid_arguments() {
+        // REQ-A11b raised the default cap from the old 8 KiB `MAX_QUERY_LEN` to
+        // `MAX_QUERY_BYTES` (256 KiB, SC-A11): a 9 KiB string that used to be
+        // rejected now legitimately fits, so the fixture must genuinely exceed
+        // the cap this tool now enforces.
         let tool = ConsultTool::new(magi_all_ok(), false);
-        let big = "x".repeat(9000);
+        let big = "x".repeat(MAX_QUERY_BYTES + 1);
         assert!(matches!(
             tool.execute(json!({"query": big}), &CancellationToken::new())
                 .await
@@ -1908,5 +2152,278 @@ mod tests {
              stay false even with magi_endpoint_diverges declared true"
         );
         assert_eq!(out["timeout_below_formula"], false);
+    }
+
+    // -----------------------------------------------------------------------
+    // Task 6.2 (REQ-A11b) — the unified input cap and the output truncation
+    // levels: `check_query_size`, `truncate_report`, `head_chars`.
+    // -----------------------------------------------------------------------
+
+    /// SC-A11b: an empty (or whitespace-only) query is rejected — spending three
+    /// model calls on nothing to analyze is pure waste.
+    #[test]
+    fn check_query_size_rejects_an_empty_or_whitespace_only_query() {
+        assert_eq!(check_query_size("   ", 100), Err(ConsultInputError::Empty));
+        assert_eq!(check_query_size("", 100), Err(ConsultInputError::Empty));
+    }
+
+    /// SC-A11: the raised default cap lets a realistic review diff through — with
+    /// the old 8 KiB `MAX_QUERY_LEN` this would have been rejected outright.
+    #[test]
+    fn a_realistic_diff_now_goes_through() {
+        let diff = "x".repeat(200 * 1024);
+        assert!(
+            check_query_size(&diff, MAX_QUERY_BYTES).is_ok(),
+            "with the old 8 KiB cap this would have been rejected: ~50k tokens \
+             against a real review diff"
+        );
+    }
+
+    /// SC-A11b: over the cap is REJECTED — with the exact size/cap named, never
+    /// silently truncated (a silently truncated payload produces a verdict
+    /// indistinguishable from a legitimate one, per this function's own rustdoc).
+    #[test]
+    fn check_query_size_rejects_over_the_cap_and_names_the_amount() {
+        let over = "x".repeat(101);
+        assert_eq!(
+            check_query_size(&over, 100),
+            Err(ConsultInputError::TooLarge {
+                size: 101,
+                cap: 100
+            })
+        );
+        // Exactly at the cap is accepted — the boundary is inclusive.
+        assert_eq!(check_query_size(&"x".repeat(100), 100), Ok(()));
+    }
+
+    /// SC-A11c: `ConsultTool::execute` rejects with ITS configured cap — the same
+    /// function the other two routes call, not a re-derived copy.
+    #[tokio::test]
+    async fn execute_rejects_a_query_over_its_configured_input_cap() {
+        let tool = ConsultTool::new(magi_all_ok(), false).with_max_query_bytes(50);
+        let err = tool
+            .execute(json!({"query": "x".repeat(51)}), &CancellationToken::new())
+            .await
+            .expect_err("51 bytes over a 50-byte cap must reject");
+        assert!(matches!(err, ToolError::InvalidArguments(_)));
+        // Edge case (B13): exactly at the cap must proceed, not reject.
+        let ok = tool
+            .execute(json!({"query": "x".repeat(50)}), &CancellationToken::new())
+            .await;
+        assert!(
+            ok.is_ok(),
+            "exactly at the configured cap must be accepted, not rejected"
+        );
+    }
+
+    /// UTF-8 boundary safety (project invariant): `head_chars` never splits a
+    /// multi-byte character, whatever the cap.
+    ///
+    /// `"a🦀b"` is 1 + 4 + 1 = 6 bytes; the crab occupies bytes 1..5. A cap of 2,
+    /// 3, or 4 lands INSIDE the crab's encoding — a naive `&s[..cap]` would panic
+    /// (`byte index N is not a char boundary`) at those caps. `head_chars` must
+    /// back off to the last COMPLETE character instead of splitting one.
+    #[test]
+    fn head_chars_never_splits_a_multibyte_character() {
+        let s = "a🦀b";
+        assert_eq!(head_chars(s, 0), "");
+        assert_eq!(head_chars(s, 1), "a", "cap=1: only the ASCII byte fits");
+        for cap in 2..=4 {
+            assert_eq!(
+                head_chars(s, cap),
+                "a",
+                "cap={cap}: the 4-byte crab cannot fit partially, so it is dropped \
+                 whole rather than split mid-encoding"
+            );
+        }
+        assert_eq!(head_chars(s, 5), "a🦀", "cap=5: the crab fits exactly");
+        assert_eq!(head_chars(s, 6), "a🦀b", "cap=6: the whole string fits");
+        assert_eq!(
+            head_chars(s, 100),
+            "a🦀b",
+            "a cap above the string's length keeps it whole"
+        );
+    }
+
+    /// `truncate_report` is a no-op below the cap: no mark, level `None` — never
+    /// adds the mark to a report that was not actually cut.
+    #[test]
+    fn truncate_report_is_a_no_op_when_the_report_already_fits() {
+        let report = "short report";
+        let out = truncate_report(report, TOOL_RESULT_CAP_BYTES);
+        assert_eq!(out.level, TruncationLevel::None);
+        assert_eq!(out.text, report);
+        assert!(
+            !out.text.contains(TRUNCATION_MARK),
+            "a report that fits must not carry the mark"
+        );
+    }
+
+    /// Builds a report whose kept region (verdict + a real first finding) fits
+    /// comfortably inside `cap`, padded PAST `cap` with filler placed AFTER
+    /// `findings_end` — `keep_verdict_and_first_finding` cuts at `findings_end`,
+    /// so the filler is excluded from the kept slice regardless of its size; its
+    /// only job is to push `report.len()` past `cap` so `truncate_report` actually
+    /// recorts instead of returning the report whole.
+    fn report_with_locatable_sections(cap: usize) -> String {
+        let anchors = SECTION_ANCHORS.expect("this fixture assumes Structural is reachable");
+        format!(
+            "some estimation preamble\n\n{}\nthe consensus is GO\n\n{}\n- first finding\n- \
+             second finding\n\n{}\n- do X\n\n## Dissenting Opinion\n{}",
+            anchors.verdict_start,
+            anchors.findings_start,
+            anchors.findings_end,
+            "z".repeat(cap),
+        )
+    }
+
+    /// SC-A11e (`Structural`): the highest-guarantee level — the verdict AND at
+    /// least the first finding survive the recort, plus the mark.
+    #[test]
+    fn structural_level_keeps_the_verdict_and_the_first_finding() {
+        let anchors = SECTION_ANCHORS.expect("this test assumes Structural is reachable");
+        let report = report_with_locatable_sections(TOOL_RESULT_CAP_BYTES);
+        assert!(
+            report.len() > TOOL_RESULT_CAP_BYTES,
+            "test setup: the fixture must actually exceed the cap"
+        );
+        let out = truncate_report(&report, TOOL_RESULT_CAP_BYTES);
+        assert_eq!(out.level, TruncationLevel::Structural);
+        assert!(
+            out.text.contains(anchors.verdict_start),
+            "guarantee (a): the verdict block"
+        );
+        assert!(
+            out.text.contains(anchors.findings_start),
+            "guarantee (b): at least the first finding"
+        );
+        assert!(
+            out.text.contains(TRUNCATION_MARK),
+            "guarantee (c): the truncation mark"
+        );
+        assert!(out.text.len() <= TOOL_RESULT_CAP_BYTES);
+    }
+
+    /// A report where findings genuinely never rendered — magi-core omits the
+    /// section entirely when there are none (`report_anchors::SectionAnchors::
+    /// findings_start`'s own rustdoc) — still exposes the verdict and the
+    /// unconditional `findings_end` anchor. Padded past `cap` the same way as
+    /// [`report_with_locatable_sections`].
+    fn report_with_only_the_anchor(cap: usize) -> String {
+        let anchors = SECTION_ANCHORS.expect("this fixture assumes Anchored is reachable");
+        format!(
+            "preamble\n\n{}\nno findings section in this report at all\n\n{}\n- do X\n\n## \
+             Dissenting Opinion\n{}",
+            anchors.verdict_start,
+            anchors.findings_end,
+            "z".repeat(cap),
+        )
+    }
+
+    /// SC-A11e (`Anchored`)/SC-A11h: the verdict and the mark survive, but the
+    /// promise stops there — "no findings" (this fixture) and "could not locate"
+    /// both degrade to this same level, which is the point: the consumer only
+    /// needs to know it does NOT have guarantee (b), not which of the two caused
+    /// it (`report_anchors::SectionAnchors::findings_start`'s own rustdoc).
+    #[test]
+    fn anchored_level_keeps_only_the_verdict_when_there_were_no_findings() {
+        let anchors = SECTION_ANCHORS.expect("this test assumes Anchored is reachable");
+        let report = report_with_only_the_anchor(TOOL_RESULT_CAP_BYTES);
+        assert!(
+            report.len() > TOOL_RESULT_CAP_BYTES,
+            "test setup: the fixture must actually exceed the cap"
+        );
+        assert!(
+            !report.contains(anchors.findings_start),
+            "test setup: this fixture must genuinely have NO findings section, not \
+             merely one that got cut off — 'no findings' and 'could not locate' are \
+             two different things and this fixture is testing the former"
+        );
+        let out = truncate_report(&report, TOOL_RESULT_CAP_BYTES);
+        assert_eq!(out.level, TruncationLevel::Anchored);
+        assert!(
+            out.text.contains(anchors.verdict_start),
+            "guarantee (a): the verdict block"
+        );
+        assert!(
+            out.text.contains(TRUNCATION_MARK),
+            "guarantee (c): the truncation mark"
+        );
+        assert!(out.text.len() <= TOOL_RESULT_CAP_BYTES);
+    }
+
+    /// A report with no recognizable anchor at all — neither the verdict box nor
+    /// the unconditional `findings_end`/`## Recommended Actions` anywhere.
+    fn report_with_no_recognizable_structure(cap: usize) -> String {
+        format!(
+            "garbled output with no recognizable anchors at all\n{}",
+            "y".repeat(cap)
+        )
+    }
+
+    /// SC-A11e (`Bytes`)/SC-A11h: the last-resort level promises ONLY the mark —
+    /// no veredict, no finding — and declaring that honestly (rather than
+    /// pretending to preserve the verdict, which was already the guarantee that
+    /// failed to be located) is the entire point of this level existing.
+    #[test]
+    fn bytes_level_promises_only_the_mark() {
+        let report = report_with_no_recognizable_structure(TOOL_RESULT_CAP_BYTES);
+        assert!(
+            report.len() > TOOL_RESULT_CAP_BYTES,
+            "test setup: the fixture must actually exceed the cap"
+        );
+        let out = truncate_report(&report, TOOL_RESULT_CAP_BYTES);
+        assert_eq!(out.level, TruncationLevel::Bytes);
+        assert!(
+            out.text.contains(TRUNCATION_MARK),
+            "the ONE thing this level promises, it must deliver"
+        );
+        assert!(out.text.len() <= TOOL_RESULT_CAP_BYTES);
+    }
+
+    /// A `cap` too small even for the mark itself is unreachable via `magi.toml`
+    /// (`ConfigError::OutputCapTooSmall` rejects it at load — `src/config.rs`),
+    /// but `truncate_report` is a pure function any caller can hand an arbitrary
+    /// `cap`. Rather than emit a fragment that LIES about respecting the cap
+    /// (text longer than `cap` because the mark alone does not fit), the report
+    /// comes back WHOLE, honestly labeled `None` — see `truncate_report`'s own
+    /// rustdoc for why this beats a broken fragment.
+    #[test]
+    fn a_cap_too_small_for_the_mark_returns_the_report_whole_instead_of_a_broken_fragment() {
+        let report = "y".repeat(1_000);
+        let tiny_cap = 1; // far below `mark_overhead()`
+        let out = truncate_report(&report, tiny_cap);
+        assert_eq!(out.level, TruncationLevel::None);
+        assert_eq!(
+            out.text, report,
+            "an unenforceable cap must not truncate mid-report"
+        );
+    }
+
+    /// SC-A11d (the `ConsultTool::execute` route specifically): a report that
+    /// exceeds a tiny effective output cap comes back bounded, with the level
+    /// surfaced in the JSON — proving `execute` actually calls `truncate_report`
+    /// with `self.output_cap`, not merely that the function exists in isolation.
+    #[tokio::test]
+    async fn execute_bounds_the_report_when_it_exceeds_the_configured_output_cap() {
+        let cap = magi_rs::magi::mark_overhead() + 20;
+        let tool = ConsultTool::new(magi_all_ok(), false).with_output_cap(cap);
+        let out = tool
+            .execute(
+                json!({"query": "should we migrate X to Y?"}),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("3 agents → success");
+        let report = out["report"].as_str().expect("report string");
+        assert!(
+            report.len() <= cap,
+            "the ToolResult text must respect the configured cap: {} > {cap}",
+            report.len()
+        );
+        assert_ne!(
+            out["report_truncated"], "none",
+            "a report bigger than the cap must be marked truncated"
+        );
     }
 }

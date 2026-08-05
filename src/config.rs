@@ -586,9 +586,10 @@ impl MagiConfig {
     /// Criterio del número: **costo, no capacidad**. magi-core ya saltea los modelos donde
     /// el prompt no entra, así que esto no protege al modelo — acota el gasto, y el
     /// payload se paga por tres porque va a los tres mages.
-    // Narrow allow: consumed by the consult tool's input cap in a later fase, not this
-    // task. Covered by `effective_max_query_bytes_falls_back_to_the_built_in_when_absent`.
-    #[allow(dead_code)]
+    ///
+    /// Consumido por `check_query_size` en las TRES rutas de entrada (Task 6.2, REQ-A11b,
+    /// SC-A11c): `ConsultTool::execute`, la ruta directa headless
+    /// (`headless_runner::analyze_direct`) y el `/consult` explícito de la TUI.
     #[must_use]
     pub fn effective_max_query_bytes(&self) -> usize {
         self.magi
@@ -603,8 +604,10 @@ impl MagiConfig {
     /// re-envía en cada turno de una sesión larga. Un cap que protege el caso barato y no
     /// el caro protege el caso equivocado.
     // El `allow(dead_code)` que esto tenía se retiró en Task 1.3: `resolve_headless_limits`
-    // ya lo consume. Fase 6 sigue debiendo la aplicación en las OTRAS dos rutas (TUI y el
-    // tool loop de `magi query`), que es su alcance real.
+    // ya lo consume. Task 6.2 cierra las otras dos rutas: `register_consult_tool_if_available`
+    // (main.rs) lo pasa a `ConsultTool::with_output_cap` para el tool loop de la TUI y de
+    // `magi query`, y `TuiMagiRuntimeConfig::tool_result_cap` lo aplica al `/consult`
+    // explícito de la TUI vía `truncate_report`.
     #[must_use]
     pub fn effective_tool_result_cap(&self) -> usize {
         self.tool_result_cap_bytes

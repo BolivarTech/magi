@@ -1609,6 +1609,8 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
         magi_config.magi.auto_approve,
         magi_config.effective_magi_kind(),
         magi_config.magi_endpoint_diverges(),
+        magi_config.effective_max_query_bytes(),
+        magi_config.effective_tool_result_cap(),
     );
 
     crate::tui::run_tui_ext(
@@ -1629,6 +1631,8 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
             default_mode: tui_default_mode,
             untrusted_content: tui_untrusted_content,
             magi_kind: magi_config.effective_magi_kind(),
+            max_query_bytes: magi_config.effective_max_query_bytes(),
+            tool_result_cap: magi_config.effective_tool_result_cap(),
         },
     )
     .await?;
@@ -2610,18 +2614,29 @@ fn build_magi_orchestrator(
 /// acá (fix round 1, Finding 1) y pasado a `ConsultTool::with_magi_endpoint_diverges` —
 /// mismo patrón que `kind`, mismo motivo: `ConsultTool::execute` no vuelve a resolverlo
 /// por llamada.
+/// `max_query_bytes` - `MagiConfig::effective_max_query_bytes()` (REQ-A11b), pasado a
+/// `ConsultTool::with_max_query_bytes` — es el mismo cap que la ruta directa headless y
+/// el `/consult` explícito de la TUI aplican (SC-A11c), resuelto acá una sola vez.
+/// `output_cap` - `MagiConfig::effective_tool_result_cap()` (REQ-A11b), pasado a
+/// `ConsultTool::with_output_cap` — acota el `ToolResult` que reingresa al historial de
+/// la conversación (TUI auto-ruteada y el tool loop de `magi query`, las dos rutas que
+/// comparten este call site).
 fn register_consult_tool_if_available(
     agent: &mut Agent,
     consult_magi: Option<&Arc<Magi>>,
     auto_approve: bool,
     kind: ProviderKind,
     magi_endpoint_diverges: bool,
+    max_query_bytes: usize,
+    output_cap: usize,
 ) {
     if let Some(magi) = consult_magi {
         agent.register_tool(Box::new(
             crate::tools::consult::ConsultTool::new(magi.clone(), auto_approve)
                 .with_kind(kind)
-                .with_magi_endpoint_diverges(magi_endpoint_diverges),
+                .with_magi_endpoint_diverges(magi_endpoint_diverges)
+                .with_max_query_bytes(max_query_bytes)
+                .with_output_cap(output_cap),
         ));
     }
 }
@@ -3802,6 +3817,8 @@ async fn run_query_subcommand(
         magi_config.magi.auto_approve,
         magi_config.effective_magi_kind(),
         magi_config.magi_endpoint_diverges(),
+        magi_config.effective_max_query_bytes(),
+        magi_config.effective_tool_result_cap(),
     );
 
     let policy = Policy::new(tier, resolved.max_tool_calls, h.timeout);
@@ -6111,12 +6128,14 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
-    fn test_headless_consult_over_max_query_len_exits_2() {
+    fn test_headless_consult_over_max_query_bytes_exits_2() {
         with_var("MAGI_PROVIDER", None, || {
             let (_tmp, cwd) = init_static_workspace();
             let prompt = cwd.join("big.txt");
-            // Exceed MAX_QUERY_LEN (8192) so run_consult rejects it (REQ-H33).
-            std::fs::write(&prompt, "x".repeat(9000)).unwrap();
+            // REQ-A11b raised the default cap from the retired 8 KiB `MAX_QUERY_LEN`
+            // to `magi_rs::magi::MAX_QUERY_BYTES` (256 KiB, SC-A11) — 9000 bytes no
+            // longer exceeds it, so the fixture must genuinely be over the new cap.
+            std::fs::write(&prompt, "x".repeat(magi_rs::magi::MAX_QUERY_BYTES + 1)).unwrap();
             let out = cwd.join("out.txt");
 
             let mut h = base_hargs();
@@ -7190,6 +7209,8 @@ mod tests {
                 false,
                 ProviderKind::Ollama,
                 false,
+                magi_rs::magi::MAX_QUERY_BYTES,
+                magi_rs::magi::TOOL_RESULT_CAP_BYTES,
             );
             assert!(
                 agent_with_trio.has_tool("consult"),
@@ -7203,6 +7224,8 @@ mod tests {
                 false,
                 ProviderKind::Ollama,
                 false,
+                magi_rs::magi::MAX_QUERY_BYTES,
+                magi_rs::magi::TOOL_RESULT_CAP_BYTES,
             );
             assert!(
                 !agent_without_trio.has_tool("consult"),

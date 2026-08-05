@@ -103,6 +103,23 @@ fn consult_unavailable_response(reason: &str) -> AgentResponse {
     AgentResponse::Error(reason.to_string())
 }
 
+/// Validates a `/consult` query's size before any model call, INCLUDING a
+/// classification call (REQ-A11b, SC-A11c) — the SAME `check_query_size` the
+/// `ConsultTool` path and the headless direct path apply, against the SAME
+/// `MagiConfig`-resolved cap (`TuiMagiRuntimeConfig::max_query_bytes`).
+///
+/// Extracted from the `UiEvent::Consult` handler for the same reason as
+/// [`consult_unavailable_response`]/[`handle_login`]: the full TUI event loop is
+/// intractable to drive in a test, so the decision is tested here as a plain fn.
+///
+/// # Returns
+/// `Ok(())` when the query passes; `Err(AgentResponse::Error(_))` with the exact
+/// text `check_query_size` produced, ready to send back to the user.
+fn tui_consult_size_check(query: &str, max_query_bytes: usize) -> Result<(), AgentResponse> {
+    crate::tools::consult::check_query_size(query, max_query_bytes)
+        .map_err(|e| AgentResponse::Error(e.to_string()))
+}
+
 /// The `/consult` response BODY for a successful `MagiReport` (REQ-A12c, SC-A12f, fix
 /// round 4, finding 2).
 ///
@@ -680,6 +697,13 @@ impl App {
 ///   [`tui_consult_success_body`]/[`tui_consult_error_body`] so the explicit
 ///   `/consult` command gets the SAME keyless-auth guidance
 ///   `ConsultTool`/headless already have.
+/// - `max_query_bytes` (REQ-A11b) — `MagiConfig::effective_max_query_bytes()`,
+///   resolved once at startup. Checked by the explicit `/consult` command via
+///   `crate::tools::consult::check_query_size` — the SAME cap the tool path and
+///   the headless direct path enforce (SC-A11c).
+/// - `tool_result_cap` (REQ-A11b) — `MagiConfig::effective_tool_result_cap()`,
+///   resolved once at startup. Bounds the explicit `/consult` command's body via
+///   `crate::tools::consult::truncate_report` before it reaches the terminal.
 pub struct TuiMagiRuntimeConfig {
     /// Consulted only when `/consult` declares no mode and none is
     /// configured (REQ-A07c).
@@ -690,6 +714,10 @@ pub struct TuiMagiRuntimeConfig {
     pub untrusted_content: bool,
     /// The `ProviderKind` the trio runs under (REQ-A12c).
     pub magi_kind: ProviderKind,
+    /// Effective input cap (REQ-A11b), checked before any model call.
+    pub max_query_bytes: usize,
+    /// Effective output cap (REQ-A11b), applied to the `/consult` reply.
+    pub tool_result_cap: usize,
 }
 
 /// The MAGI `consult` tool's wiring for the TUI's whole run: whether a live
@@ -771,6 +799,8 @@ pub async fn run_tui_ext(
         default_mode,
         untrusted_content,
         magi_kind,
+        max_query_bytes,
+        tool_result_cap,
     } = magi_runtime;
 
     let original_hook = std::panic::take_hook();
@@ -874,14 +904,8 @@ pub async fn run_tui_ext(
                     // Cap forced /consult input too (the tool path caps in execute; this
                     // direct path bypasses it) — reject before any model call, INCLUDING a
                     // classification call.
-                    if query.len() > crate::tools::consult::MAX_QUERY_LEN {
-                        let _ = response_tx
-                            .send(AgentResponse::Error(format!(
-                                "consult query too large ({} bytes; max {})",
-                                query.len(),
-                                crate::tools::consult::MAX_QUERY_LEN
-                            )))
-                            .await;
+                    if let Err(resp) = tui_consult_size_check(&query, max_query_bytes) {
+                        let _ = response_tx.send(resp).await;
                         continue;
                     }
                     // REQ-A07d: fails closed if the operator declared
@@ -917,9 +941,17 @@ pub async fn run_tui_ext(
                             // — see `tui_consult_success_body`'s own doc for what this
                             // replaces.
                             let body = tui_consult_success_body(&report, magi_kind);
+                            // REQ-A11b/SC-A11d: bounds the reply the same way the other
+                            // two routes bound their `report` field — this is the TUI's
+                            // OTHER consult surface (the explicit command, not the
+                            // agent-routed tool), and a wall of text is worth capping on
+                            // its own merits even though this reply never re-enters
+                            // `runner_agent`'s history the way a `ToolResult` would.
+                            let truncated =
+                                crate::tools::consult::truncate_report(&body, tool_result_cap);
                             // Sanitize the verbatim report (LLM-generated) before rendering —
                             // strips ANSI escapes / control chars, matching the TextDelta path.
-                            let body = crate::agent::Agent::sanitize_text(&body);
+                            let body = crate::agent::Agent::sanitize_text(&truncated.text);
                             let _ = response_tx.send(AgentResponse::Text(body)).await;
                         }
                         Ok(Err(e)) => {
@@ -1039,7 +1071,9 @@ pub async fn run_tui_ext(
                                                         crate::tools::consult::ConsultTool::new(
                                                             new_magi.clone(),
                                                             magi_auto_approve,
-                                                        ),
+                                                        )
+                                                        .with_max_query_bytes(max_query_bytes)
+                                                        .with_output_cap(tool_result_cap),
                                                     ));
                                                     consult_magi_runner = Some(new_magi);
                                                 }
@@ -2105,6 +2139,30 @@ mod tests {
     #[test]
     fn test_consult_unavailable_fallback_is_non_empty() {
         assert!(!CONSULT_UNAVAILABLE_FALLBACK.is_empty());
+    }
+
+    /// SC-A11c: the explicit `/consult` command rejects with the SAME cap the
+    /// tool path and the headless direct path enforce — no re-derived copy.
+    #[test]
+    fn tui_consult_size_check_rejects_over_the_configured_cap() {
+        let over = "x".repeat(101);
+        let err = tui_consult_size_check(&over, 100).expect_err("101 over a 100-byte cap");
+        match err {
+            AgentResponse::Error(msg) => {
+                assert!(msg.contains("101") && msg.contains("100"), "{msg}");
+            }
+            other => panic!("expected AgentResponse::Error, got {other:?}"),
+        }
+    }
+
+    /// Edge case (B13): within the cap, and empty, are the two boundaries.
+    #[test]
+    fn tui_consult_size_check_accepts_within_the_cap_and_rejects_empty() {
+        assert!(tui_consult_size_check("hello", 100).is_ok());
+        assert!(
+            tui_consult_size_check("   ", 100).is_err(),
+            "SC-A11b: an empty/whitespace-only query is rejected too"
+        );
     }
 
     // -----------------------------------------------------------------------

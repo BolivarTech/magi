@@ -53,8 +53,8 @@ use crate::agent::mode_classifier::NoticeSink;
 use crate::agent::{Agent, AgentRunConfig, RunObserver, StreamPiece, MAX_TOOL_CALLS_ERROR};
 use crate::config::MagiConfig;
 use crate::tools::consult::{
-    annotate_report_text, explain_magi_error, report_to_consult_json, AbortOnDrop, RunContext,
-    Truncated, TruncationLevel, MAX_QUERY_LEN,
+    annotate_report_text, check_query_size, explain_magi_error, report_to_consult_json,
+    truncate_report, AbortOnDrop, RunContext,
 };
 
 /// Dedup key for [`NoticeSink::once`] — the SC-A04d warning, distinct from the
@@ -87,14 +87,15 @@ const TIMEOUT_MESSAGE: &str = "run exceeded the --timeout wall-clock limit";
 const CONSULT_TOOL: &str = "consult";
 
 /// `error.message` for a direct `magi consult` prompt that is empty or exceeds
-/// [`MAX_QUERY_LEN`] (REQ-H33: reject, never truncate).
+/// the effective input cap (`MagiConfig::effective_max_query_bytes`, REQ-A11b;
+/// REQ-H33: reject, never truncate).
 const CONSULT_INPUT_INVALID_MESSAGE: &str = "consult prompt is empty or exceeds the maximum length";
 
 /// Typed failure of a direct `magi consult` run, mapped to an [`ErrorKind`] by
 /// the caller so an over-cap prompt becomes `input_invalid` (exit 2, REQ-H33)
 /// and a wall-clock abort becomes `timeout` (exit 1, REQ-H36).
 enum ConsultRunError {
-    /// The prompt was empty or exceeded [`MAX_QUERY_LEN`] (→ `input_invalid`).
+    /// The prompt was empty or exceeded the effective input cap (→ `input_invalid`).
     InputInvalid,
     /// `untrusted_content` was active and no mode was declared by any surface
     /// (→ `input_invalid`, REQ-A07d/REQ-A07r): the run fails closed instead of
@@ -210,8 +211,9 @@ pub(crate) struct MagiRuntimeParams<'a> {
 }
 
 /// Runs `prompt` directly through the 3-perspective MAGI consensus, off the agent
-/// tool-loop (REQ-H21), honoring the same input cap ([`MAX_QUERY_LEN`], REQ-H33)
-/// and the `--timeout`/cancellation plumbing of the enclosing run (REQ-H36).
+/// tool-loop (REQ-H21), honoring the same input cap ([`check_query_size`] against
+/// `runtime.magi_config.effective_max_query_bytes()`, REQ-H33/REQ-A11b) and the
+/// `--timeout`/cancellation plumbing of the enclosing run (REQ-H36).
 ///
 /// The `analyze` call runs on a joined task so a panic in `magi-core` surfaces as
 /// a recoverable [`ConsultRunError::Runtime`] instead of unwinding the caller; on
@@ -239,7 +241,7 @@ pub(crate) struct MagiRuntimeParams<'a> {
 ///
 /// # Errors
 /// - [`ConsultRunError::InputInvalid`] if `prompt` is empty or exceeds
-///   [`MAX_QUERY_LEN`].
+///   `runtime.magi_config.effective_max_query_bytes()`.
 /// - [`ConsultRunError::UntrustedContentRequiresMode`] if
 ///   `runtime.untrusted_content` is `true` and neither `explicit_mode` nor
 ///   `runtime.configured_mode` was declared (REQ-A07d/REQ-A07r).
@@ -261,7 +263,10 @@ async fn analyze_direct(
         runtime.notice_sink.once(NOTICE_TIMEOUT_BELOW_FORMULA, w);
     }
 
-    if prompt.trim().is_empty() || prompt.len() > MAX_QUERY_LEN {
+    // SC-A11c: the SAME `check_query_size` the tool path and the TUI's explicit
+    // `/consult` call, against the SAME `MagiConfig`-resolved cap — one function,
+    // not three copies that could drift apart.
+    if check_query_size(prompt, runtime.magi_config.effective_max_query_bytes()).is_err() {
         return Err(ConsultRunError::InputInvalid);
     }
 
@@ -318,15 +323,15 @@ async fn analyze_direct(
 
     match joined {
         Ok(Ok(report)) => {
-            // The annotation (REQ-A12c) is applied BEFORE wrapping in `Truncated` —
+            // The annotation (REQ-A12c) is applied BEFORE truncating —
             // `report_to_consult_json` renders `truncated.text` verbatim, so the
-            // annotation step has to happen here, not inside it.
-            let truncated = Truncated {
-                text: annotate_report_text(&report, runtime.kind),
-                // No truncation logic exists yet (`truncate_report` is a later
-                // task's job); this is the untruncated report, honestly labeled.
-                level: TruncationLevel::None,
-            };
+            // annotation step has to happen here, not inside `truncate_report`.
+            let annotated = annotate_report_text(&report, runtime.kind);
+            // REQ-A11b/SC-A11d (the `magi consult` headless direct route): bounds
+            // the report the same way the tool-loop route does, with the SAME
+            // truncation-level vocabulary surfaced via `report_truncated`.
+            let truncated =
+                truncate_report(&annotated, runtime.magi_config.effective_tool_result_cap());
             // `resolution` already carries the REAL `classification_attempted`
             // signal from `resolve_mode_guarded` above, unlike `ConsultTool::
             // execute`'s call site, which only has mode+source round-tripped
@@ -631,7 +636,8 @@ fn build_transcript(
 /// reflects that direct nature: `tool_calls` is empty, `response` is the MAGI
 /// report text, and `transcript` is the prompt plus that report.
 ///
-/// An over-cap prompt (`prompt.len() > MAX_QUERY_LEN`) or an empty prompt is
+/// An over-cap prompt (`check_query_size` against `MagiConfig::
+/// effective_max_query_bytes()`) or an empty prompt is
 /// rejected with `error.kind = input_invalid` (REQ-H33: reject, never truncate),
 /// which the caller (Task 7) maps to exit 2. A `--timeout` abort yields
 /// `error.kind = timeout` (REQ-H36); a MAGI failure yields a sanitized `runtime`.
@@ -2224,11 +2230,13 @@ mod tests {
         );
     }
 
-    /// `magi consult` over `MAX_QUERY_LEN` is rejected as `input_invalid` (exit 2),
-    /// NOT truncated: `consult`/`response` stay `None` (REQ-H33).
+    /// `magi consult` over the effective input cap is rejected as `input_invalid`
+    /// (exit 2), NOT truncated: `consult`/`response` stay `None` (REQ-H33/SC-A11b).
     #[tokio::test]
     async fn test_run_consult_over_cap_is_input_invalid_not_truncated() {
-        let big = "x".repeat(MAX_QUERY_LEN + 1);
+        // `MagiConfig::default()` below resolves to `magi_rs::magi::MAX_QUERY_BYTES`
+        // (REQ-A11b's raised cap, SC-A11) — not the retired 8 KiB `MAX_QUERY_LEN`.
+        let big = "x".repeat(magi_rs::magi::MAX_QUERY_BYTES + 1);
         let cfg = MagiConfig::default();
         let sink = RecordingNoticeSink::default();
         let outcome = run_consult(
@@ -2261,6 +2269,52 @@ mod tests {
         );
         assert!(outcome.consult.is_none(), "rejected input ⇒ no MAGI object");
         assert!(outcome.response.is_none(), "rejected, not truncated");
+    }
+
+    /// SC-A11d (the `magi consult` headless direct route specifically): a report
+    /// bigger than a tiny configured output cap comes back bounded, with the
+    /// level surfaced in the JSON — proving `run_consult`/`analyze_direct`
+    /// actually call `truncate_report` with `runtime.magi_config.
+    /// effective_tool_result_cap()`, not merely that the function exists.
+    #[tokio::test]
+    async fn run_consult_bounds_the_report_when_it_exceeds_the_configured_output_cap() {
+        let cap = magi_rs::magi::mark_overhead() + 20;
+        let cfg = MagiConfig {
+            tool_result_cap_bytes: Some(cap),
+            ..MagiConfig::default()
+        };
+        let sink = RecordingNoticeSink::default();
+        let outcome = run_consult(
+            resolved_stub(),
+            canned_magi(),
+            "should we migrate X to Y?",
+            None,
+            Some(Mode::Analysis),
+            &MagiRuntimeParams {
+                kind: ProviderKind::OpenAiCompat,
+                classifier: &NeverClassifier,
+                configured_mode: None,
+                untrusted_content: false,
+                magi_config: &cfg,
+                timeout_decision: neutral_timeout_decision(),
+                notice_sink: &sink,
+            },
+            None,
+        )
+        .await;
+
+        let consult = outcome.consult.expect("healthy consult");
+        let report = consult["report"].as_str().expect("report string");
+        assert!(
+            report.len() <= cap,
+            "the direct consult route must respect the configured output cap: \
+             {} > {cap}",
+            report.len()
+        );
+        assert_ne!(
+            consult["report_truncated"], "none",
+            "a report bigger than the cap must be marked truncated"
+        );
     }
 
     /// Dropping the `run_consult` future itself — NOT via the `--timeout`
