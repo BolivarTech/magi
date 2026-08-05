@@ -176,9 +176,17 @@ pub(crate) fn annotate_report_text(report: &MagiReport, kind: ProviderKind) -> S
 pub(crate) enum TruncationLevel {
     /// The report was not truncated.
     None,
-    // Narrow allow (matches `MagiConfig::effective_max_query_bytes` in `config.rs`):
-    // these three variants have no producer yet — `truncate_report` is a later task's
-    // job. They are exercised directly by `report_truncated_names_the_level_applied`.
+    // Narrow allow (matches `MagiConfig::effective_max_query_bytes` in `config.rs`) —
+    // kept deliberately, unlike the ones this fix round removed elsewhere in this
+    // file: those were unjustified (a hardcoded lie, or a guard for an unreachable
+    // state). This one is different in kind, not just in degree — these three
+    // variants are REQUIRED by `Truncated`'s own field type (the normative interface
+    // for this task), but their only possible producer, `truncate_report`, is
+    // Task 6.2's job by the plan's own module boundary (`examples/ms2_contracts.rs`
+    // scopes it there explicitly). There is no cheap wiring available here the way
+    // there was for `RunContext`'s fields: locating a verdict/finding in magi-core's
+    // markdown output is Task 6.2's actual feature, not a two-line fix. They are
+    // exercised directly by `report_truncated_names_the_level_applied`.
     /// The verdict and at least one finding were located and kept.
     #[allow(dead_code)]
     Structural,
@@ -236,12 +244,13 @@ impl RunContext {
     /// most, not least. Deriving `endpoint_divergence` from the resulting `source`
     /// instead of the attempt flag would give a false negative right where something
     /// went wrong.
-    // Narrow allow: not yet called from production. Both current call sites
-    // (`ConsultTool::execute`, `headless_runner::analyze_direct`) build `RunContext`
-    // directly as an honest placeholder — neither holds a `MagiConfig` +
-    // `TimeoutDecision` pair yet. Wiring this in is deferred to a later task (see
-    // this task's report). Exercised directly by its own unit tests.
-    #[allow(dead_code)]
+    ///
+    /// Called from production at [`headless_runner::analyze_direct`]'s call site
+    /// (`crate::headless_runner`), fed by the real `crate::config::MagiConfig` and a
+    /// real `magi_rs::magi::TimeoutDecision` threaded through `MagiRuntimeParams`
+    /// (fix round 1, Finding 1). `ConsultTool::execute` cannot call this: it has no
+    /// `&MagiConfig`/`&TimeoutDecision` to give it (see its own rustdoc for why that
+    /// is a proven invariant, not a gap) — it builds a `RunContext` literal instead.
     #[must_use]
     pub(crate) fn build(cfg: &MagiConfig, res: &ModeResolution, timeout: &TimeoutDecision) -> Self {
         Self {
@@ -249,72 +258,6 @@ impl RunContext {
             timeout_below_formula: timeout.below_formula,
         }
     }
-}
-
-/// The typed shape of "none of the three mages produced a verdict" (SC-A11g).
-///
-/// **Never surfaced as an empty report marked `degraded`.** `degraded` describes a
-/// *weakened* consensus (two out of three, say); using it for the zero-verdict case
-/// would be a lie — it is not a weaker consensus, it is the absence of one, and a
-/// consumer that only inspects the JSON's shape cannot tell the two apart unless the
-/// zero-verdict case gets its own type.
-// Narrow allow: not yet constructed from production. Translating this into a
-// `ToolError`/`ConsultRunError` at a real call site is deferred to a later task —
-// this predicate's own rustdoc says so explicitly ("prometer una impl que ninguna
-// tarea escribe" — this task does not invent one). Exercised directly by its own
-// unit tests.
-#[allow(dead_code)]
-#[derive(Debug, thiserror::Error)]
-#[error("no mage produced a verdict: {causes}")]
-pub(crate) struct AllMagesFailed {
-    /// Every known cause, joined — see [`guard_all_failed`] for how it is built.
-    pub(crate) causes: String,
-}
-
-/// Guards against emitting a report where **zero** mages produced a verdict.
-///
-/// # Why `agents.is_empty()`, not `failed_agents.len() == 3`
-///
-/// [`MagiReport::failed_agents`] only records a seat that failed to **execute** —
-/// network, credential, timeout. A seat that DID respond but whose output could not be
-/// **extracted** (verdict outside the sentinel markers, invalid schema, or one that
-/// exhausted its corrective retry) lands in [`MagiReport::extraction_failures`] too —
-/// and, per magi-core's own dispatch, the failed-to-extract case also lands in
-/// `failed_agents` alongside it (verified against `orchestrator.rs::dispatch_no_rotation`,
-/// magi-core 3.1.0). `report.agents` is the one field that is empty in **every** case a
-/// seat ends up without a verdict, regardless of which way it lost it — so it is the
-/// only field this predicate can trust.
-///
-/// # Errors
-/// [`AllMagesFailed`] naming every known cause, drawn from BOTH `failed_agents`
-/// (execution failures) and `extraction_failures` (adherence failures) — a message that
-/// only walked `failed_agents` could come back empty in exactly the case this guard
-/// exists to catch.
-// Narrow allow: not yet called from production for the same reason as
-// `AllMagesFailed` above.
-#[allow(dead_code)]
-pub(crate) fn guard_all_failed(report: &MagiReport) -> Result<(), AllMagesFailed> {
-    if !report.agents.is_empty() {
-        return Ok(());
-    }
-    let mut causes: Vec<String> = report
-        .failed_agents
-        .iter()
-        .map(|(seat, why)| format!("{seat:?}: {why}"))
-        .collect();
-    causes.extend(report.extraction_failures.iter().map(|(seat, fs)| {
-        let last = fs.last().map_or_else(
-            || "no detail".to_string(),
-            |f| format!("{} attempt {} — {:?}", f.model, f.attempt, f.cause),
-        );
-        format!("{seat:?}: verdict not extractable ({last})")
-    }));
-    if causes.is_empty() {
-        causes.push("no mage produced a verdict and magi-core reported no cause".to_string());
-    }
-    Err(AllMagesFailed {
-        causes: causes.join("; "),
-    })
 }
 
 /// Stable JSON labels for the effective mode. Kebab-case, matching how magi-core itself
@@ -635,6 +578,17 @@ pub struct ConsultTool {
     /// explanation never applies — a caller that does not care about this
     /// feature does not need to call [`Self::with_kind`].
     kind: ProviderKind,
+    /// `crate::config::MagiConfig::magi_endpoint_diverges()`, resolved ONCE at
+    /// construction (fix round 1, Finding 1) — feeds `RunContext.endpoint_divergence`
+    /// in [`Tool::execute`]. Defaults to `false` (see [`Self::new`]).
+    ///
+    /// **This alone never flips `endpoint_divergence` to `true` at this call site**,
+    /// and that is not a bug: `Tool::execute`'s own rustdoc proves
+    /// `classification_attempted` is structurally always `false` here, so the AND is
+    /// always `false` regardless of this field's value. It is wired anyway —
+    /// correctness should not depend on an invariant elsewhere in the codebase never
+    /// changing, and a future change that makes it real needs no further plumbing.
+    magi_endpoint_diverges: bool,
 }
 
 impl ConsultTool {
@@ -663,6 +617,9 @@ impl ConsultTool {
             // Neutral: `keyless_auth_explanation` only ever fires under `Ollama`, so
             // this default is equivalent to the feature being off until declared.
             kind: ProviderKind::OpenAiCompat,
+            // Safe default: "no divergence" until a caller declares otherwise via
+            // `Self::with_magi_endpoint_diverges`, mirroring `kind`'s own default.
+            magi_endpoint_diverges: false,
         }
     }
 
@@ -675,6 +632,15 @@ impl ConsultTool {
     #[must_use]
     pub fn with_kind(mut self, kind: ProviderKind) -> Self {
         self.kind = kind;
+        self
+    }
+
+    /// Declares whether the trio runs on an endpoint different from the principal
+    /// provider (`crate::config::MagiConfig::magi_endpoint_diverges()`), fix round 1
+    /// Finding 1. Same builder shape as [`Self::with_kind`], for the same reason.
+    #[must_use]
+    pub fn with_magi_endpoint_diverges(mut self, diverges: bool) -> Self {
+        self.magi_endpoint_diverges = diverges;
         self
     }
 }
@@ -796,19 +762,38 @@ impl Tool for ConsultTool {
             // this is the untruncated report, honestly labeled as such.
             level: TruncationLevel::None,
         };
+        // `classification_attempted: false` is a PROVEN invariant here, not a
+        // placeholder (fix round 1, Finding 1). `Tool::execute` is reachable from
+        // production through exactly two funnel call sites —
+        // `Agent::dispatch_consult_through_gate` and the forced pre-loop injection in
+        // `Agent::run_tool_loop` (REQ-H22) — and BOTH call
+        // `magi_rs::magi::mode::resolve_mode_guarded(..., classifier: None, ...)`.
+        // That is not incidental: REQ-A07d/SC-A07u require the agent tool loop to
+        // NEVER pay for a classification call — the agent's own free `AgentChosen`
+        // level (via this tool's `mode` input-schema field) already covers this
+        // route at zero cost, which is the entire point of that level existing.
+        // So no `ModeResolution` reaching this function via the funnel can ever
+        // carry `classification_attempted: true`, and `inject_resolved_mode` does
+        // not even round-trip the flag (only mode+source) — there being nothing
+        // honest to read here is a consequence of the design, not a gap in it.
         let res = ModeResolution {
             mode,
             source,
-            // Not yet threaded through the injected resolution: `inject_resolved_mode`
-            // only round-trips mode+source today. Inert here — this call site builds
-            // `RunContext` directly rather than via `RunContext::build`, so this field
-            // is not read. Wiring it end-to-end is left to a later task.
             classification_attempted: false,
         };
         let ctx = RunContext {
-            // Placeholder until `MagiConfig`/`TimeoutDecision` are threaded to this call
-            // site (a later wiring task) — this tool does not hold either today.
-            endpoint_divergence: false,
+            // `res.classification_attempted` is always `false` (see above), so this
+            // is always `false` too, REGARDLESS of `self.magi_endpoint_diverges` —
+            // computed via the real field rather than hardcoded, so a future change
+            // to the invariant above does not silently leave this wrong.
+            endpoint_divergence: res.classification_attempted && self.magi_endpoint_diverges,
+            // No `--timeout` concept reaches a tool-loop-dispatched consult at all:
+            // `execute` receives a `CancellationToken` shared with the WHOLE agent
+            // run, not a `Duration` dedicated to this one consult, so REQ-A04's
+            // "does `--timeout` leave room for the trio's own retry formula"
+            // comparison — which assumes a budget dedicated to one consult — does
+            // not apply here the way it does to `magi consult`'s direct path
+            // (`headless_runner::analyze_direct`, which DOES wire this for real).
             timeout_below_formula: false,
         };
         Ok(report_to_consult_json(&report, &truncated, &res, &ctx))
@@ -1513,19 +1498,9 @@ mod tests {
         .expect("fixture matches MagiReport's Deserialize shape")
     }
 
-    /// One minimal, validly-shaped `AgentOutput` JSON literal (B4: named once, not
-    /// repeated per test).
-    fn agent_output_json(seat: &str) -> Value {
-        json!({
-            "agent": seat, "verdict": "approve", "confidence": 0.9,
-            "summary": "s", "reasoning": "r", "findings": [], "recommendation": "rec",
-        })
-    }
-
     /// A report where nothing went wrong: no extraction failures, no execution
     /// failures, input under threshold. `agents` is irrelevant to
-    /// `report_to_consult_json` (it never reads that field), so it stays empty here —
-    /// tests that DO care about `agents` (`guard_all_failed`) build their own fixture.
+    /// `report_to_consult_json` (it never reads that field), so it stays empty here.
     fn clean_report() -> MagiReport {
         report_fixture(
             json!([]),
@@ -1566,43 +1541,6 @@ mod tests {
             Value::Null,
             true,
             "a degraded consensus report",
-        )
-    }
-
-    /// A report where ALL THREE seats end up without a verdict — some by execution
-    /// failure, some by extraction failure. `guard_all_failed`'s target case.
-    fn report_with_all_three_failed() -> MagiReport {
-        report_fixture(
-            json!([]),
-            json!({
-                "melchior": "network: connection refused",
-                "balthasar": "timeout: agent timed out after 90s",
-            }),
-            json!({
-                "caspar": [
-                    { "model": "some-model", "attempt": 1, "cause": "missing-markers" },
-                    { "model": "some-model", "attempt": 2, "cause": "unterminated" },
-                ],
-            }),
-            Value::Null,
-            true,
-            "",
-        )
-    }
-
-    /// A report where two of three seats succeeded (`agents` non-empty) —
-    /// `guard_all_failed`'s happy path.
-    fn report_with_two_successes() -> MagiReport {
-        report_fixture(
-            json!([
-                agent_output_json("melchior"),
-                agent_output_json("balthasar")
-            ]),
-            json!({}),
-            json!({}),
-            Value::Null,
-            true,
-            "a degraded but valid consensus report",
         )
     }
 
@@ -1842,19 +1780,29 @@ mod tests {
         );
     }
 
-    /// SC-A11g: zero verdicts is a TYPED ERROR, never a degraded report.
-    #[test]
-    fn guard_all_failed_names_every_known_cause_when_nothing_produced_a_verdict() {
-        let err = guard_all_failed(&report_with_all_three_failed())
-            .expect_err("no agent produced a verdict");
-        assert!(err.causes.contains("Melchior"), "{}", err.causes);
-        assert!(err.causes.contains("Balthasar"), "{}", err.causes);
-        assert!(err.causes.contains("Caspar"), "{}", err.causes);
-    }
-
-    /// Happy path (B13): at least one verdict ⇒ the guard passes.
-    #[test]
-    fn guard_all_failed_passes_when_at_least_one_agent_produced_a_verdict() {
-        assert!(guard_all_failed(&report_with_two_successes()).is_ok());
+    /// Fix round 1, Finding 1 (SC-A11f/REQ-A11d): `endpoint_divergence` and
+    /// `timeout_below_formula` stay `false` through the REAL `Tool::execute` call
+    /// site — driven end to end, not asserted against a hand-built `RunContext`,
+    /// which is exactly what let the previous hardcoded-`false` version of this
+    /// code sit under a green suite. Setting `.with_magi_endpoint_diverges(true)`
+    /// and still observing `false` in the output is the proof that
+    /// `classification_attempted` is what gates it, not a value this call site
+    /// simply forgot to read.
+    #[tokio::test]
+    async fn tool_loop_dispatch_never_reports_endpoint_divergence_or_timeout_below_formula() {
+        let tool = ConsultTool::new(magi_all_ok(), false).with_magi_endpoint_diverges(true);
+        let out = tool
+            .execute(
+                json!({"query": "should we migrate X to Y?"}),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("3 agents → success");
+        assert_eq!(
+            out["endpoint_divergence"], false,
+            "the agent tool loop never classifies (REQ-A07d/SC-A07u), so this must \
+             stay false even with magi_endpoint_diverges declared true"
+        );
+        assert_eq!(out["timeout_below_formula"], false);
     }
 }

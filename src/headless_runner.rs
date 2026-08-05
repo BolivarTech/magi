@@ -46,9 +46,11 @@ use magi_rs::headless::types::{
 };
 use magi_rs::magi::kind::ProviderKind;
 use magi_rs::magi::mode::{resolve_mode_guarded, ModeClassifier, ModeError};
+use magi_rs::magi::TimeoutDecision;
 
 use crate::agent::messages::{Content, Message, Role};
 use crate::agent::{Agent, AgentRunConfig, RunObserver, StreamPiece, MAX_TOOL_CALLS_ERROR};
+use crate::config::MagiConfig;
 use crate::tools::consult::{
     annotate_report_text, explain_magi_error, report_to_consult_json, AbortOnDrop, RunContext,
     Truncated, TruncationLevel, MAX_QUERY_LEN,
@@ -138,14 +140,16 @@ pub(crate) async fn resolve_direct_mode(
 /// trio's provider kind once a result (or failure) comes back.
 ///
 /// Bundled because [`analyze_direct`] and [`run_consult`] both thread these
-/// four values straight from the caller's already-resolved configuration to
-/// two different call sites: `classifier`/`configured_mode`/
-/// `untrusted_content` feed [`resolve_mode_guarded`] verbatim, and `kind`
-/// feeds [`report_to_consult_json`]/[`explain_magi_error`] on the way back
-/// out. None of the four is call-specific the way `explicit_mode` is (that
+/// values straight from the caller's already-resolved configuration to
+/// several different call sites: `classifier`/`configured_mode`/
+/// `untrusted_content` feed [`resolve_mode_guarded`] verbatim, `kind` feeds
+/// [`report_to_consult_json`]/[`explain_magi_error`], and `magi_config`/
+/// `timeout_decision` feed [`RunContext::build`] (fix round 1, Finding 1) on
+/// the way back out. None is call-specific the way `explicit_mode` is (that
 /// one stays its own parameter) — grouping only the values that are constant
 /// for the lifetime of a run removes the parameter-count pressure both
-/// functions used to carry (B3).
+/// functions used to carry (B3): this is what lets `RunContext::build`'s two
+/// new consumers become a **field** each, not an 11th/12th parameter.
 ///
 /// # Fields
 /// - `kind` — the [`ProviderKind`] the trio runs under; feeds
@@ -159,6 +163,16 @@ pub(crate) async fn resolve_direct_mode(
 ///   declared by any other level, the run fails closed
 ///   ([`ConsultRunError::UntrustedContentRequiresMode`]) instead of
 ///   classifying hostile content.
+/// - `magi_config` — feeds `RunContext::build`'s `cfg.magi_endpoint_diverges()`
+///   (REQ-A11d). A reference, not a clone: the caller's `MagiConfig` already
+///   outlives the awaited call.
+/// - `timeout_decision` — the REAL [`TimeoutDecision`] (SC-A04d), computed by
+///   the caller via `magi_rs::magi::resolve_run_timeout` for its
+///   `below_formula` flag — **not recomputed here**. Its `effective_secs` is
+///   deliberately NOT used to override the enforced `timeout` parameter this
+///   call already takes: this struct exists to make the JSON's telemetry
+///   honest, not to change which timeout is actually enforced (a larger,
+///   separate, pre-existing gap — see this fix round's report).
 ///
 /// `pub(crate)`, same reasoning as [`resolve_direct_mode`] above: constructed
 /// from `main.rs`'s `run_consult_subcommand`, which builds it from its own
@@ -172,6 +186,10 @@ pub(crate) struct MagiRuntimeParams<'a> {
     pub(crate) configured_mode: Option<Mode>,
     /// REQ-A07d's guard against classifying untrusted content.
     pub(crate) untrusted_content: bool,
+    /// Feeds `RunContext::build`'s `endpoint_divergence` (REQ-A11d).
+    pub(crate) magi_config: &'a MagiConfig,
+    /// Feeds `RunContext::build`'s `timeout_below_formula` (SC-A04d).
+    pub(crate) timeout_decision: TimeoutDecision,
 }
 
 /// Runs `prompt` directly through the 3-perspective MAGI consensus, off the agent
@@ -281,14 +299,12 @@ async fn analyze_direct(
             // `resolution` already carries the REAL `classification_attempted`
             // signal from `resolve_mode_guarded` above, unlike `ConsultTool::
             // execute`'s call site, which only has mode+source round-tripped
-            // through the tool-call input.
-            let ctx = RunContext {
-                // Placeholder until `MagiConfig`/`TimeoutDecision` are threaded to
-                // this call site (a later wiring task) — this function does not
-                // hold either today.
-                endpoint_divergence: false,
-                timeout_below_formula: false,
-            };
+            // through the tool-call input. `runtime.magi_config`/
+            // `runtime.timeout_decision` are the REAL config/decision the caller
+            // resolved (fix round 1, Finding 1) — `RunContext::build` combines
+            // them with `resolution` exactly as its own contract specifies.
+            let ctx =
+                RunContext::build(runtime.magi_config, &resolution, &runtime.timeout_decision);
             Ok(report_to_consult_json(
                 &report,
                 &truncated,
@@ -975,6 +991,32 @@ mod tests {
     impl ModeClassifier for NeverClassifier {
         async fn classify(&self, _content: &str) -> Option<Mode> {
             panic!("explicit mode must skip classification entirely (SC-A07g)");
+        }
+    }
+
+    /// The counterpart to [`NeverClassifier`]: always succeeds, so a call with no
+    /// explicit/configured mode genuinely ATTEMPTS classification
+    /// (`ModeResolution::classification_attempted == true`) — fix round 1,
+    /// Finding 1's `endpoint_divergence` tests need this to drive the real
+    /// `classification_attempted` signal through `resolve_mode_guarded`, not a
+    /// hand-built `ModeResolution`.
+    struct AlwaysClassifies(Mode);
+
+    #[async_trait]
+    impl ModeClassifier for AlwaysClassifies {
+        async fn classify(&self, _content: &str) -> Option<Mode> {
+            Some(self.0)
+        }
+    }
+
+    /// A [`TimeoutDecision`] that never triggers SC-A04d's warning — the neutral
+    /// filler for tests in this module that do not care about `timeout_below_
+    /// formula` (fix round 1, Finding 1's `MagiRuntimeParams.timeout_decision`).
+    fn neutral_timeout_decision() -> TimeoutDecision {
+        TimeoutDecision {
+            effective_secs: magi_rs::magi::AGENT_TIMEOUT_SECS,
+            warning: None,
+            below_formula: false,
         }
     }
 
@@ -1845,6 +1887,7 @@ mod tests {
     /// and no tool calls are recorded (REQ-H21).
     #[tokio::test]
     async fn test_run_consult_direct_runs_three_perspectives_and_populates_consult() {
+        let cfg = MagiConfig::default();
         let outcome = run_consult(
             resolved_stub(),
             canned_magi(),
@@ -1856,6 +1899,8 @@ mod tests {
                 classifier: &NeverClassifier,
                 configured_mode: None,
                 untrusted_content: false,
+                magi_config: &cfg,
+                timeout_decision: neutral_timeout_decision(),
             },
             None,
         )
@@ -1879,11 +1924,121 @@ mod tests {
         );
     }
 
+    /// Fix round 1, Finding 1 (SC-A11f/REQ-A11d): `endpoint_divergence` reaches
+    /// the JSON from a REAL `run_consult` execution — a diverging `MagiConfig`
+    /// AND a classifier that genuinely runs — not from a hand-built `RunContext`,
+    /// which is exactly what let the previous hardcoded-`false` field sit under a
+    /// green suite undetected.
+    #[tokio::test]
+    async fn endpoint_divergence_reaches_the_json_from_a_real_run() {
+        let diverged = MagiConfig::from_toml_str(
+            "base_url = \"http://a/v1\"\n[magi]\nbase_url = \"http://b/v1\"\n",
+        )
+        .expect("valid toml");
+        let outcome = run_consult(
+            resolved_stub(),
+            canned_magi(),
+            "should we migrate X to Y?",
+            None,
+            // No explicit mode AND no configured mode: classification runs.
+            None,
+            &MagiRuntimeParams {
+                kind: ProviderKind::OpenAiCompat,
+                classifier: &AlwaysClassifies(Mode::Analysis),
+                configured_mode: None,
+                untrusted_content: false,
+                magi_config: &diverged,
+                timeout_decision: neutral_timeout_decision(),
+            },
+            None,
+        )
+        .await;
+
+        let consult = outcome.consult.expect("healthy consult");
+        assert_eq!(
+            consult["endpoint_divergence"], true,
+            "the config diverges AND classification was genuinely attempted"
+        );
+    }
+
+    /// The negative case for the test above: same diverging config, but an
+    /// EXPLICIT mode means classification never runs, so `endpoint_divergence`
+    /// must stay `false` — proves the field tracks the REAL attempt flag, not
+    /// merely whether the config happens to diverge.
+    #[tokio::test]
+    async fn endpoint_divergence_stays_false_without_a_real_classification_attempt() {
+        let diverged = MagiConfig::from_toml_str(
+            "base_url = \"http://a/v1\"\n[magi]\nbase_url = \"http://b/v1\"\n",
+        )
+        .expect("valid toml");
+        let outcome = run_consult(
+            resolved_stub(),
+            canned_magi(),
+            "should we migrate X to Y?",
+            None,
+            Some(Mode::Analysis), // explicit: classification is skipped
+            &MagiRuntimeParams {
+                kind: ProviderKind::OpenAiCompat,
+                classifier: &NeverClassifier,
+                configured_mode: None,
+                untrusted_content: false,
+                magi_config: &diverged,
+                timeout_decision: neutral_timeout_decision(),
+            },
+            None,
+        )
+        .await;
+
+        let consult = outcome.consult.expect("healthy consult");
+        assert_eq!(
+            consult["endpoint_divergence"], false,
+            "no classification attempted ⇒ the content never left for the principal, \
+             even though the config diverges"
+        );
+    }
+
+    /// Fix round 1, Finding 1 (SC-A04d): `timeout_below_formula` reaches the JSON
+    /// from the REAL `TimeoutDecision` threaded through `MagiRuntimeParams`,
+    /// driven through the production `run_consult` entry point.
+    #[tokio::test]
+    async fn timeout_below_formula_reaches_the_json_from_a_real_run() {
+        let cfg = MagiConfig::default();
+        let ceiling = magi_rs::magi::AGENT_TIMEOUT_SECS;
+        // An `asked` well below `headless_consult_timeout_secs(ceiling)`.
+        let decision = magi_rs::magi::resolve_run_timeout(Some(1), ceiling);
+        assert!(
+            decision.below_formula,
+            "test setup: this must actually trigger the formula check"
+        );
+
+        let outcome = run_consult(
+            resolved_stub(),
+            canned_magi(),
+            "should we migrate X to Y?",
+            None,
+            Some(Mode::Analysis),
+            &MagiRuntimeParams {
+                kind: ProviderKind::OpenAiCompat,
+                classifier: &NeverClassifier,
+                configured_mode: None,
+                untrusted_content: false,
+                magi_config: &cfg,
+                timeout_decision: decision,
+            },
+            None,
+        )
+        .await;
+
+        let consult = outcome.consult.expect("healthy consult");
+        assert_eq!(consult["timeout_below_formula"], true);
+    }
+
     /// `magi consult` over `MAX_QUERY_LEN` is rejected as `input_invalid` (exit 2),
     /// NOT truncated: `consult`/`response` stay `None` (REQ-H33).
     #[tokio::test]
     async fn test_run_consult_over_cap_is_input_invalid_not_truncated() {
         let big = "x".repeat(MAX_QUERY_LEN + 1);
+        let cfg = MagiConfig::default();
         let outcome = run_consult(
             resolved_stub(),
             canned_magi(),
@@ -1895,6 +2050,8 @@ mod tests {
                 classifier: &NeverClassifier,
                 configured_mode: None,
                 untrusted_content: false,
+                magi_config: &cfg,
+                timeout_decision: neutral_timeout_decision(),
             },
             None,
         )
@@ -1942,12 +2099,16 @@ mod tests {
         let magi = slow_droppy_magi(Duration::from_secs(3_600), entered.clone(), dropped.clone());
         // Named binding (not an inline temporary): `fut` below is driven across
         // several statements before it is ever awaited, so the borrowed
-        // `MagiRuntimeParams` must outlive the statement that creates `fut`.
+        // `MagiRuntimeParams` (and the `MagiConfig` it borrows) must outlive the
+        // statement that creates `fut`.
+        let cfg = MagiConfig::default();
         let runtime = MagiRuntimeParams {
             kind: ProviderKind::OpenAiCompat,
             classifier: &NeverClassifier,
             configured_mode: None,
             untrusted_content: false,
+            magi_config: &cfg,
+            timeout_decision: neutral_timeout_decision(),
         };
 
         {

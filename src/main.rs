@@ -1608,6 +1608,7 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
         consult_magi.as_ref(),
         magi_config.magi.auto_approve,
         magi_config.effective_magi_kind(),
+        magi_config.magi_endpoint_diverges(),
     );
 
     crate::tui::run_tui_ext(
@@ -2605,15 +2606,22 @@ fn build_magi_orchestrator(
 /// vía `ConsultTool::with_kind`, así `ConsultTool::execute` no tiene que volver a
 /// resolverlo en cada llamada. Determina si un 401/403 de `MagiReport::failed_agents`
 /// se explica como configuración keyless — ver `tools::consult::keyless_auth_explanation`.
+/// `magi_endpoint_diverges` - `MagiConfig::magi_endpoint_diverges()`, resuelto UNA vez
+/// acá (fix round 1, Finding 1) y pasado a `ConsultTool::with_magi_endpoint_diverges` —
+/// mismo patrón que `kind`, mismo motivo: `ConsultTool::execute` no vuelve a resolverlo
+/// por llamada.
 fn register_consult_tool_if_available(
     agent: &mut Agent,
     consult_magi: Option<&Arc<Magi>>,
     auto_approve: bool,
     kind: ProviderKind,
+    magi_endpoint_diverges: bool,
 ) {
     if let Some(magi) = consult_magi {
         agent.register_tool(Box::new(
-            crate::tools::consult::ConsultTool::new(magi.clone(), auto_approve).with_kind(kind),
+            crate::tools::consult::ConsultTool::new(magi.clone(), auto_approve)
+                .with_kind(kind)
+                .with_magi_endpoint_diverges(magi_endpoint_diverges),
         ));
     }
 }
@@ -3793,6 +3801,7 @@ async fn run_query_subcommand(
         consult_magi.as_ref(),
         magi_config.magi.auto_approve,
         magi_config.effective_magi_kind(),
+        magi_config.magi_endpoint_diverges(),
     );
 
     let policy = Policy::new(tier, resolved.max_tool_calls, h.timeout);
@@ -3879,11 +3888,26 @@ async fn run_consult_subcommand(
     // The consult path has no tier tool-gate; only an explicit `--timeout`
     // bounds it (an over-cap prompt is rejected inside `run_consult`, REQ-H33).
     let timeout = h.timeout.map(Duration::from_secs);
+    // Fix round 1, Finding 1 (SC-A04d): computed PURELY for its `below_formula`
+    // telemetry flag — `timeout` above (the value actually ENFORCED) is
+    // deliberately left untouched. Wiring `resolve_run_timeout`'s full behavioral
+    // prescription (defaulting `--timeout` when absent to the derived minimum,
+    // emitting its own stderr warning) is a larger, separate, pre-existing gap
+    // this fix round does not close — see this task's report.
+    let timeout_decision = magi_rs::magi::resolve_run_timeout(
+        h.timeout,
+        magi_config
+            .magi
+            .agent_timeout_secs
+            .unwrap_or(magi_rs::magi::AGENT_TIMEOUT_SECS),
+    );
     let runtime = MagiRuntimeParams {
         kind: magi_config.effective_magi_kind(),
         classifier: &classifier,
         configured_mode,
         untrusted_content,
+        magi_config: &magi_config,
+        timeout_decision,
     };
     let outcome = run_consult(
         resolved,
@@ -7158,6 +7182,7 @@ mod tests {
                 Some(&magi),
                 false,
                 ProviderKind::Ollama,
+                false,
             );
             assert!(
                 agent_with_trio.has_tool("consult"),
@@ -7170,6 +7195,7 @@ mod tests {
                 None,
                 false,
                 ProviderKind::Ollama,
+                false,
             );
             assert!(
                 !agent_without_trio.has_tool("consult"),
