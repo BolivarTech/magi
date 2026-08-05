@@ -29,7 +29,7 @@ use serde::Deserialize;
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
     /// `provider` o `[magi].kind` traen un valor presente y no reconocido.
-    #[error("provider desconocido: {got:?} (válidos: {valid})")]
+    #[error("unknown provider: {got:?} (valid: {valid})")]
     UnknownProviderKind {
         /// Lo que trajo el archivo.
         got: String,
@@ -38,7 +38,7 @@ pub enum ConfigError {
     },
 
     /// `[magi].default_mode` trae un valor presente y no reconocido.
-    #[error("modo desconocido: {got:?} (válidos: {valid})")]
+    #[error("unknown mode: {got:?} (valid: {valid})")]
     UnknownMode {
         /// Lo que trajo el archivo.
         got: String,
@@ -58,9 +58,9 @@ pub enum ConfigError {
 
     /// `[magi].agent_timeout_secs` cae fuera del rango admisible de §4.9.
     #[error(
-        "agent_timeout_secs = {got} fuera de rango [{min}, {max}]: por debajo de {min}s no \
-         entra una generación legítima; por encima de {max}s el peor caso de un consult \
-         (2 intentos por mage) supera los 4 minutos. No se recorta al extremo — se rechaza."
+        "agent_timeout_secs = {got} out of range [{min}, {max}]: below {min}s a legitimate \
+         generation does not fit; above {max}s a consult's worst case (2 attempts per mage) \
+         exceeds 4 minutes. Not clamped to the extreme — rejected."
     )]
     AgentTimeoutOutOfRange {
         /// El valor declarado.
@@ -73,9 +73,9 @@ pub enum ConfigError {
 
     /// `tool_result_cap_bytes` cae por debajo del mínimo viable (REQ-A11b).
     #[error(
-        "tool_result_cap_bytes = {got} es menor que el mínimo viable ({min}): por debajo de \
-         ese umbral ni la marca de recorte entra, y el cap configurado se ignora en \
-         silencio en vez de aplicarse."
+        "tool_result_cap_bytes = {got} is below the minimum viable value ({min}): below that \
+         threshold not even the truncation mark fits, and the configured cap is silently \
+         ignored instead of applied."
     )]
     OutputCapTooSmall {
         /// El valor declarado.
@@ -764,7 +764,7 @@ impl MagiConfig {
             .is_some_and(|s| s.trim().is_empty())
         {
             out.push(format!(
-                "notice: `provider` está vacío; se usa el default `{}`",
+                "notice: `provider` is empty; using the default `{}`",
                 // `DEFAULT_PROVIDER` ya es el valor del vocabulario REQ-A01b ("ollama"),
                 // el mismo al que cae `effective_provider()` cuando `provider` está
                 // ausente/vacío (Task 4.1 colapsó la constante legacy separada).
@@ -791,8 +791,8 @@ impl MagiConfig {
                 && self.embedding.base_url.is_none()
             {
                 out.push(format!(
-                    "notice: el embedder hereda `base_url = {}` de la raíz; declaralo en \
-                     [embedding] si querés otro",
+                    "notice: the embedder inherits `base_url = {}` from the root; declare it \
+                     in [embedding] if you want a different one",
                     root.as_str(),
                 ));
             }
@@ -807,13 +807,13 @@ impl MagiConfig {
         if self.effective_provider() == ProviderKind::Anthropic {
             let declared = self.base_url.is_some();
             out.push(if declared {
-                "notice: con `provider = \"anthropic\"` el `base_url` de raíz NO se usa para el \
-                 agente principal (Anthropic usa su propio endpoint); solo aplica a [magi] y \
-                 [embedding] si lo heredan"
+                "notice: with `provider = \"anthropic\"` the root `base_url` is NOT used for \
+                 the main agent (Anthropic uses its own endpoint); it only applies to [magi] \
+                 and [embedding] if they inherit it"
                     .to_string()
             } else {
-                "notice: `provider = \"anthropic\"` con el `base_url` por defecto de Ollama. Ese \
-                 valor NO se usa para el agente principal; si querías Ollama, corregí `provider`"
+                "notice: `provider = \"anthropic\"` with the default Ollama `base_url`. That \
+                 value is NOT used for the main agent; if you wanted Ollama, fix `provider`"
                     .to_string()
             });
         }
@@ -822,8 +822,8 @@ impl MagiConfig {
         // base_url declarado, que tampoco se usa.
         if self.effective_magi_kind() == ProviderKind::Anthropic && self.magi.base_url.is_some() {
             out.push(
-                "notice: con `[magi].kind = \"anthropic\"` el `[magi].base_url` NO se usa: \
-                 Anthropic usa su propio endpoint"
+                "notice: with `[magi].kind = \"anthropic\"` the `[magi].base_url` is NOT \
+                 used: Anthropic uses its own endpoint"
                     .to_string(),
             );
         }
@@ -1888,7 +1888,7 @@ mod tests {
         std::fs::write(&path, "provider = \"anthropic\"\n").unwrap();
         let (_, notices) = MagiConfig::load(&path).unwrap();
         assert!(
-            notices.iter().any(|n| n.contains("por defecto de Ollama")),
+            notices.iter().any(|n| n.contains("default Ollama")),
             "sin base_url declarado el default sigue ahí, y parece un olvido de migración"
         );
 
@@ -1899,7 +1899,7 @@ mod tests {
         )
         .unwrap();
         let (_, notices) = MagiConfig::load(&path).unwrap();
-        assert!(notices.iter().any(|n| n.contains("NO se usa")));
+        assert!(notices.iter().any(|n| n.contains("NOT used")));
 
         // Y el mismo caso un nivel abajo, en el trío.
         std::fs::write(
@@ -1913,7 +1913,7 @@ mod tests {
         // Sin Anthropic no hay nada que avisar.
         std::fs::write(&path, "provider = \"ollama\"\n").unwrap();
         let (_, notices) = MagiConfig::load(&path).unwrap();
-        assert!(!notices.iter().any(|n| n.contains("no se usa")));
+        assert!(!notices.iter().any(|n| n.contains("not used")));
     }
 
     /// m2 (fix round 2, coordinator, 2026-08-03): un `effective_base_url()` fallido NO
@@ -1945,7 +1945,7 @@ mod tests {
 
         let notices = cfg.resolution_notices();
         assert!(
-            notices.iter().any(|n| n.contains("NO se usa")),
+            notices.iter().any(|n| n.contains("NOT used")),
             "el aviso de incoherencia de Anthropic no debe depender de que la \
              plantilla de raíz haya parseado: {notices:?}"
         );

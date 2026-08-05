@@ -2016,7 +2016,7 @@ fn probe_notice(m: &Measurement) -> String {
     match m {
         Measurement::Measured { window, digest } => {
             let d = digest.as_deref().map_or_else(
-                || "digest no resuelto".to_string(),
+                || "digest not resolved".to_string(),
                 |d| {
                     format!(
                         "digest {}…",
@@ -2027,11 +2027,11 @@ fn probe_notice(m: &Measurement) -> String {
             format!("probe: ventana {window} tokens, {d}")
         }
         Measurement::NotMeasurable => {
-            "probe: este endpoint no ofrece introspección de modelos (no es un fallo)".into()
+            "probe: this endpoint does not offer model introspection (not a failure)".into()
         }
         Measurement::NotMeasuredThisTime => {
-            "probe: no medido esta vez (el daemon puede estar frío); el arranque siguiente \
-             probablemente mida"
+            "probe: not measured this time (the daemon may be cold); the next startup will \
+             likely measure it"
                 .into()
         }
     }
@@ -2054,10 +2054,10 @@ fn stale_composition_notice(window_tokens: usize, max_query_bytes: usize) -> Opt
     let threshold = (window_tokens as f64 * STALE_NOTICE_RATIO) as usize;
     (cap_tokens > threshold).then(|| {
         format!(
-            "notice: `max_query_bytes` ({max_query_bytes} B ≈ {cap_tokens} tokens a \
-             {CHARS_PER_TOKEN_EST} chars/token) está cerca de la ventana medida \
-             ({window_tokens} tokens); si cambiás a un modelo de ventana menor, el aviso \
-             de tamaño puede dejar de dispararse — reiniciá magi-rs tras el cambio"
+            "notice: `max_query_bytes` ({max_query_bytes} B ≈ {cap_tokens} tokens at \
+             {CHARS_PER_TOKEN_EST} chars/token) is close to the measured window \
+             ({window_tokens} tokens); if you switch to a model with a smaller window, the \
+             size warning may stop firing — restart magi-rs after the change"
         )
     })
 }
@@ -2081,7 +2081,7 @@ fn stale_composition_notice(window_tokens: usize, max_query_bytes: usize) -> Opt
 #[derive(Debug, thiserror::Error)]
 enum SeatError {
     /// El kind exige credencial y no hay ninguna resuelta.
-    #[error("falta la credencial {var} para este backend")]
+    #[error("missing credential {var} for this backend")]
     MissingCredential {
         /// Nombre de la variable/entrada de vault esperada.
         var: &'static str,
@@ -2089,7 +2089,7 @@ enum SeatError {
     /// El cliente HTTP no se pudo construir. `SafeErrorText`, no `String`: el texto de
     /// un error foráneo puede llevar la URL con credenciales, y este tipo solo se
     /// construye pasando por [`redact_foreign_error`].
-    #[error("no se pudo construir el cliente HTTP: {0}")]
+    #[error("could not build the HTTP client: {0}")]
     Transport(SafeErrorText),
 }
 
@@ -2122,7 +2122,7 @@ enum TrioError {
     /// defecto que motivó esta tarea — un usuario sin `OPENAI_API_KEY` veía
     /// literalmente "asientos no construibles: 3", sin decir cuál asiento ni por qué.
     #[error(
-        "asientos no construibles: {}",
+        "unbuildable seats: {}",
         seats.iter().map(|(s, c)| format_seat_failure(s, c)).collect::<Vec<_>>().join("; ")
     )]
     SeatUnbuildable {
@@ -2130,16 +2130,16 @@ enum TrioError {
         seats: Vec<(AgentName, SeatError)>,
     },
     /// `[magi].kind` trae un valor que no está en el vocabulario.
-    #[error("`[magi].kind` no reconocido: {0}")]
+    #[error("unrecognized `[magi].kind`: {0}")]
     UnknownKind(String),
     /// No se declaró ningún asiento. Distinto de `SeatUnbuildable`: acá no falló
     /// ninguno, simplemente no había ninguno que construir.
-    #[error("no hay asientos declarados para el trío")]
+    #[error("no seats declared for the trio")]
     NoSeats,
     /// `MagiBuilder::build()` rechazó la configuración. `SafeErrorText`, no `String`:
     /// el mensaje viene de magi-core, que no conoce nuestra regla de redacción y puede
     /// citar la `base_url` con credenciales.
-    #[error("magi-core rechazó la construcción: {0}")]
+    #[error("magi-core rejected the construction: {0}")]
     Builder(SafeErrorText),
 }
 
@@ -2161,17 +2161,17 @@ fn trio_unavailable_message(err: &TrioError) -> String {
                 .collect::<Vec<_>>()
                 .join("\n");
             format!(
-                "El consenso MAGI no está disponible — no se pudieron construir estos \
-                 asientos:\n{detail}\n\nRevisá la credencial del backend declarado en \
-                 `[magi]`, o guardala con `magi-rs vault set`."
+                "MAGI consensus is not available — these seats could not be built:\n{detail}\n\n\
+                 Check the credential for the backend declared in `[magi]`, or store it with \
+                 `magi-rs vault set`."
             )
         }
         TrioError::UnknownKind(k) => format!(
-            "El consenso MAGI no está disponible: `[magi].kind = \"{k}\"` no se reconoce. \
-             Valores válidos: ollama, openai-compat, anthropic."
+            "MAGI consensus is not available: `[magi].kind = \"{k}\"` is not recognized. \
+             Valid values: ollama, openai-compat, anthropic."
         ),
         TrioError::NoSeats | TrioError::Builder(_) => {
-            "El consenso MAGI no está disponible: el trío no se pudo construir.".to_string()
+            "MAGI consensus is not available: the trio could not be built.".to_string()
         }
     }
 }
@@ -2283,9 +2283,9 @@ fn divergence_notice(cfg: &MagiConfig, inference_active: bool) -> Option<Notice>
     let root_text = root_url.map_or_else(|e| e.to_string(), |t| t.as_str().to_string());
 
     Some(Notice::resolution(format!(
-        "notice: el trío corre en {magi_text} pero la inferencia de modo manda el \
-         contenido PRIMERO al provider principal ({root_text}). Declará \
-         `[magi].default_mode` para evitar ese paso."
+        "notice: the trio runs on {magi_text} but mode inference sends the content to the \
+         main provider FIRST ({root_text}). Declare `[magi].default_mode` to avoid that \
+         step."
     )))
 }
 
@@ -2331,9 +2331,9 @@ fn openai_compat_root(base_url: &str) -> (String, Option<String>) {
     } else {
         let normalized = format!("{trimmed}/v1");
         let notice = format!(
-            "notice: `base_url` de Ollama sin sufijo `/v1`; se usa `{}` para \
-             las completions. Declaralo explícito para que la configuración diga lo \
-             que pasa.",
+            "notice: Ollama `base_url` without a `/v1` suffix; using `{}` for \
+             completions. Declare it explicitly so the configuration says what \
+             actually happens.",
             redact_url(&normalized)
         );
         (normalized, Some(notice))
@@ -7382,7 +7382,7 @@ mod tests {
             let cfg = cfg_with_endpoints("http://a/v1", Some("http://b/v1"));
             let n = divergence_notice(&cfg, true).expect("hay divergencia con inferencia activa");
             assert!(
-                n.text.contains("provider principal"),
+                n.text.contains("main provider"),
                 "debe decir por dónde pasa el contenido primero: {}",
                 n.text
             );
@@ -7430,9 +7430,7 @@ mod tests {
             let mut notices: Vec<Notice> = Vec::new();
             push_divergence_notice(&cfg, true, &mut notices);
             assert!(
-                notices
-                    .iter()
-                    .any(|n| n.text.contains("provider principal")),
+                notices.iter().any(|n| n.text.contains("main provider")),
                 "el aviso tiene que estar en el vector que la TUI imprime \
                  (superficie TUI únicamente — ver \
                  test_prepare_headless_carries_the_divergence_notice_when_it_applies \
@@ -7503,11 +7501,7 @@ mod tests {
                              for the TUI (REQ-A07c/SC-A07f: headless is the surface \
                              this notice matters most for)",
                         );
-                        assert!(
-                            notice.text.contains("provider principal"),
-                            "{}",
-                            notice.text
-                        );
+                        assert!(notice.text.contains("main provider"), "{}", notice.text);
                     });
                 });
             });
@@ -7756,10 +7750,10 @@ mod tests {
                 digest: Some("ab".repeat(32)),
             })
             .contains("128000"));
-            assert!(probe_notice(&Measurement::NotMeasurable).contains("no ofrece"));
+            assert!(probe_notice(&Measurement::NotMeasurable).contains("does not offer"));
             let cold = probe_notice(&Measurement::NotMeasuredThisTime);
             assert!(
-                cold.contains("esta vez") && cold.contains("siguiente"),
+                cold.contains("this time") && cold.contains("next"),
                 "debe anticipar que el próximo arranque probablemente mida"
             );
         }
@@ -7784,7 +7778,7 @@ mod tests {
                 digest: None,
             });
             assert!(n.contains("128000"));
-            assert!(n.contains("digest no resuelto"));
+            assert!(n.contains("digest not resolved"));
         }
 
         /// SC-A24i: se avisa, y la comparación es EN TOKENS — no bytes contra tokens.

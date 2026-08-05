@@ -116,8 +116,8 @@ impl ModeClassifier for ProviderClassifier {
     async fn classify(&self, content: &str) -> Option<Mode> {
         self.notices.once(
             NOTICE_CLASSIFY_COST,
-            "notice: sin `--mode` ni `[magi].default_mode`, magi-rs agrega una llamada al \
-             modelo para inferir la lente. Declarar el modo la evita.",
+            "notice: without `--mode` or `[magi].default_mode`, magi-rs adds a call to the \
+             model to infer the lens. Declaring the mode avoids it.",
         );
 
         let prompt = format!(
@@ -134,8 +134,8 @@ impl ModeClassifier for ProviderClassifier {
                 self.notices.once(
                     NOTICE_CLASSIFY_TIMEOUT,
                     &format!(
-                        "notice: la inferencia de modo expiró ({CLASSIFY_TIMEOUT_SECS}s) o \
-                         falló; se usa `analysis`. En providers lentos declará \
+                        "notice: mode inference expired ({CLASSIFY_TIMEOUT_SECS}s) or failed; \
+                         using `analysis`. On slow providers, declare \
                          `[magi].default_mode`."
                     ),
                 );
@@ -280,12 +280,12 @@ mod tests {
         }
 
         assert_eq!(
-            sink.count_matching("agrega una llamada al modelo"),
+            sink.count_matching("adds a call to the model"),
             1,
             "el aviso de COSTO llega antes de pagarlo, una vez"
         );
         assert_eq!(
-            sink.count_matching("expiró"),
+            sink.count_matching("expired"),
             1,
             "el aviso de VENCIMIENTO es distinto: avisa que falló, no que va a ocurrir"
         );
@@ -307,9 +307,9 @@ mod tests {
             Some(Mode::CodeReview),
             "clasificó bien"
         );
-        assert_eq!(sink.count_matching("agrega una llamada al modelo"), 1);
+        assert_eq!(sink.count_matching("adds a call to the model"), 1);
         assert_eq!(
-            sink.count_matching("expiró"),
+            sink.count_matching("expired"),
             0,
             "no hubo vencimiento que reportar"
         );
@@ -333,7 +333,7 @@ mod tests {
             "prosa no es una etiqueta"
         );
         assert_eq!(
-            sink.count_matching("expiró"),
+            sink.count_matching("expired"),
             0,
             "una respuesta no reconocida no es un vencimiento"
         );
@@ -366,9 +366,9 @@ mod tests {
         let a = handle_a.await.expect("classifier `a` task must not panic");
         let b = handle_b.await.expect("classifier `b` task must not panic");
 
-        assert_eq!(a.count_matching("expiró"), 1);
+        assert_eq!(a.count_matching("expired"), 1);
         assert_eq!(
-            b.count_matching("expiró"),
+            b.count_matching("expired"),
             1,
             "un `static` haría que este quedara en 0"
         );

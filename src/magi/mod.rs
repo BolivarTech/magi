@@ -242,10 +242,9 @@ pub fn resolve_run_timeout(asked: Option<u64>, configured_ceiling: u64) -> Timeo
         effective_secs: secs,
         warning: below.then(|| {
             format!(
-                "warning: --timeout {secs}s está por debajo de los {minimum}s que exige la \
-                 escala para `agent_timeout_secs = {configured_ceiling}`; un consult que \
-                 necesite su reintento de schema NO va a completar. Se usa el valor pedido \
-                 igual."
+                "warning: --timeout {secs}s is below the {minimum}s the scale requires for \
+                 `agent_timeout_secs = {configured_ceiling}`; a consult that needs its schema \
+                 retry will NOT complete. Using the requested value anyway."
             )
         }),
         below_formula: below,
@@ -304,7 +303,7 @@ pub const TOOL_RESULT_CAP_BYTES: usize = 64 * 1024;
 
 /// Marca que se agrega a un reporte recortado. **Un recorte silencioso es indistinguible de
 /// un reporte completo**, y esa es toda la razón de que exista.
-pub const TRUNCATION_MARK: &str = "[reporte recortado por límite de tamaño]";
+pub const TRUNCATION_MARK: &str = "[report truncated due to size limit]";
 
 /// Bytes que la marca agrega, para que cada nivel descuente su propio presupuesto.
 ///

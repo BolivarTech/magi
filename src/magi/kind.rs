@@ -61,7 +61,7 @@ pub enum ProviderKind {
 /// `config.rs`, que es del bin. Devolver el error del bin desde el lib invierte la dirección de
 /// la dependencia y no compila; `config.rs` lo absorbe con un `From`.
 #[derive(Debug, thiserror::Error)]
-#[error("provider desconocido: {got:?} (válidos: {valid})")]
+#[error("unknown provider: {got:?} (valid: {valid})")]
 pub struct ProviderKindParseError {
     /// Lo que trajo el archivo.
     pub got: String,

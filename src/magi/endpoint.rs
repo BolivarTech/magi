@@ -91,9 +91,9 @@ impl Scope {
 pub enum EndpointError {
     /// La `base_url` trae una credencial literal en vez de los placeholders.
     #[error(
-        "la `base_url` trae una credencial literal. Reemplazala por \
-         `{USER_PLACEHOLDER}:{PASSWORD_PLACEHOLDER}` y guardá los valores en el vault: \
-         `magi-rs vault set {user_entry}` y `magi-rs vault set {password_entry}`"
+        "`base_url` carries a literal credential. Replace it with \
+         `{USER_PLACEHOLDER}:{PASSWORD_PLACEHOLDER}` and store the values in the vault: \
+         `magi-rs vault set {user_entry}` and `magi-rs vault set {password_entry}`"
     )]
     LiteralCredential {
         /// Entrada de vault para el usuario, según el scope.
@@ -104,8 +104,8 @@ pub enum EndpointError {
 
     /// El placeholder está declarado y la entrada de vault no existe.
     #[error(
-        "la `base_url` declara un placeholder pero falta la entrada {entry} en el vault. \
-         Creala con `magi-rs vault set {entry}`"
+        "`base_url` declares a placeholder but entry {entry} is missing from the vault. \
+         Create it with `magi-rs vault set {entry}`"
     )]
     MissingVaultEntry {
         /// La entrada que hace falta.
@@ -114,13 +114,13 @@ pub enum EndpointError {
 
     /// Un placeholder que no es ninguno de los dos conocidos.
     #[error(
-        "placeholder desconocido en la `base_url`: solo se admiten \
-         `{USER_PLACEHOLDER}` y `{PASSWORD_PLACEHOLDER}`, en la posición de `userinfo`"
+        "unknown placeholder in `base_url`: only `{USER_PLACEHOLDER}` and \
+         `{PASSWORD_PLACEHOLDER}` are accepted, in the `userinfo` position"
     )]
     UnknownPlaceholder,
 
     /// La URL no se pudo recorrer, así que no se puede afirmar que no traiga un secreto.
-    #[error("la `base_url` no tiene una forma reconocible (`esquema://host/...`)")]
+    #[error("`base_url` does not have a recognizable form (`scheme://host/...`)")]
     Unparseable,
 }
 

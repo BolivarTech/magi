@@ -308,9 +308,9 @@ const PROVIDER_AUTH_ERROR_MARKER: &str = "auth error: ";
 /// configuración como **causa PROBABLE**, no demostrada ("no se pide una validación
 /// imposible... se exige que el fallo inevitable llegue explicado"), y ese registro es
 /// el que tiene que sobrevivir en las dos superficies.
-const KEYLESS_AUTH_EXPLANATION: &str = "`[magi].kind = \"ollama\"` es keyless y nunca envía \
-     credencial. Si tu endpoint la exige, usá `kind = \"openai-compat\"` y declará la \
-     clave por env o vault.";
+const KEYLESS_AUTH_EXPLANATION: &str = "`[magi].kind = \"ollama\"` is keyless and never sends \
+     a credential. If your endpoint requires one, use `kind = \"openai-compat\"` and declare \
+     the key via env or vault.";
 
 /// Traduce la causa de UN asiento —tal como aparece en `MagiReport::failed_agents`— a
 /// un error de configuración accionable, cuando esa causa es una autenticación
@@ -381,7 +381,7 @@ pub(crate) fn annotate_report_text(report: &MagiReport, kind: ProviderKind) -> S
             // `PROVIDER_AUTH_ERROR_MARKER` — evidencia positiva. `explain_magi_error`
             // (abajo) no tiene esa evidencia y por eso NO usa esta misma apertura.
             text.push_str(&format!(
-                "\n\n**{agent:?}** rechazado por autenticación: {explanation}"
+                "\n\n**{agent:?}** rejected due to authentication: {explanation}"
             ));
         }
     }
@@ -752,7 +752,7 @@ pub(crate) fn explain_magi_error(err: &MagiError, kind: ProviderKind) -> String 
     let base = redact_foreign_error(err);
     match (err, kind) {
         (MagiError::InsufficientAgents { .. }, ProviderKind::Ollama) => {
-            format!("{base} — posible causa: {KEYLESS_AUTH_EXPLANATION}")
+            format!("{base} — possible cause: {KEYLESS_AUTH_EXPLANATION}")
         }
         _ => base.to_string(),
     }
@@ -1376,7 +1376,7 @@ mod tests {
         // the confident opening `annotate_report_text` uses when it DOES have
         // evidence (`PROVIDER_AUTH_ERROR_MARKER` present in a real cause).
         assert!(
-            !msg.contains("rechazado por autenticación"),
+            !msg.contains("rejected due to authentication"),
             "no per-agent evidence here: must not claim auth was the cause: {msg}"
         );
     }

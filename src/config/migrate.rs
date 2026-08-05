@@ -72,7 +72,7 @@ const VERSION_FROM: &str = "v0.11.0";
 const VERSION_TO: &str = "v0.12.0";
 
 /// Corrección para `provider = "openai"`: nombra las dos opciones y el criterio para elegir.
-const PROVIDER_CORRECTION: &str = "provider = \"ollama\"        # si apunta a un daemon Ollama local, sin credencial\n           provider = \"openai-compat\" # para OpenAI, Groq, OpenRouter y demás endpoints autenticados";
+const PROVIDER_CORRECTION: &str = "provider = \"ollama\"        # if it points to a local Ollama daemon, no credential\n           provider = \"openai-compat\" # for OpenAI, Groq, OpenRouter and other authenticated endpoints";
 
 /// Prefijo de la corrección de `[openai].base_url`, antes del valor redactado.
 const BASE_URL_CORRECTION_PREFIX: &str = "base_url = \"";
@@ -83,14 +83,14 @@ const BASE_URL_CORRECTION_PREFIX: &str = "base_url = \"";
 /// listo-para-pegar (SC-A21e). Un mensaje de migración que filtra una credencial al terminal,
 /// al scrollback y a los logs de CI es peor problema que una línea que hay que completar.
 const BASE_URL_CORRECTION_SUFFIX: &str =
-    "\"   # al nivel raíz, arriba de toda sección. Valor redactado: copiá el real del archivo viejo.";
+    "\"   # at the root level, above every section. Value redacted: copy the real one from the old file.";
 
 /// Prefijo de la corrección de `[headless].tool_result_cap_bytes`.
 const CAP_CORRECTION_PREFIX: &str = "tool_result_cap_bytes = ";
 
 /// Sufijo de la corrección de `[headless].tool_result_cap_bytes`.
 const CAP_CORRECTION_SUFFIX: &str =
-    "   # al nivel raíz: ahora gobierna las TRES rutas (TUI, magi query y consult headless).";
+    "   # at the root level: now governs all THREE routes (TUI, magi query and headless consult).";
 
 /// Nota incondicional sobre el salto desde v0.10.x.
 ///
@@ -99,14 +99,14 @@ const CAP_CORRECTION_SUFFIX: &str =
 /// el error genérico justo cuando más ayuda necesita. Sostener dos generaciones duplicaría la
 /// deuda por un salto que el usuario hace en dos pasos.
 const V0_10_X_NOTE: &str =
-    "Si venís de v0.10.x, migrá primero a v0.11.0 y después a v0.12.0: esta pasada solo conoce\nlos patrones de v0.11.0.";
+    "If you're coming from v0.10.x, migrate to v0.11.0 first and then to v0.12.0: this pass only knows\nthe v0.11.0 patterns.";
 
 /// Consejo de backup, en el cuerpo del error y no solo en el CHANGELOG.
 ///
 /// Quien tropieza con este error llegó **arrancando el binario**, no leyendo notas de release.
 /// Es el único momento en que todavía puede hacer la copia — o sea, antes de editar.
 const BACKUP_ADVISORY: &str =
-    "Guardá una copia de tu magi.toml ANTES de editarlo: la migración es de una vía.";
+    "Save a copy of your magi.toml BEFORE editing it: this migration is one-way.";
 
 /// Un `magi.toml` mínimo y válido de v0.12.0, listo para pegar.
 ///
@@ -211,7 +211,7 @@ fn line_of(raw: &str, needle: &str) -> usize {
 #[must_use]
 pub fn render_migration_error(found: &[Migration]) -> String {
     let mut out = format!(
-        "error: .magi/magi.toml no es compatible con magi-rs {VERSION_TO} (viene de {VERSION_FROM})\n\n"
+        "error: .magi/magi.toml is not compatible with magi-rs {VERSION_TO} (coming from {VERSION_FROM})\n\n"
     );
 
     for m in found {
@@ -219,14 +219,14 @@ pub fn render_migration_error(found: &[Migration]) -> String {
             out.push_str(&format!("  {}\n           {}\n\n", m.key, m.correction));
         } else {
             out.push_str(&format!(
-                "  línea {}  {}\n           {}\n\n",
+                "  line {}  {}\n           {}\n\n",
                 m.line, m.key, m.correction
             ));
         }
     }
 
     out.push_str(BACKUP_ADVISORY);
-    out.push_str("\n\nUn magi.toml mínimo y válido de v0.12.0:\n\n");
+    out.push_str("\n\nA minimal, valid v0.12.0 magi.toml:\n\n");
     out.push_str(MINIMAL_VALID_CONFIG);
     out.push('\n');
     out.push_str(V0_10_X_NOTE);
@@ -277,7 +277,7 @@ mod tests {
             "el host sí, es lo que hace accionable el mensaje"
         );
         assert!(
-            rendered.contains("redactad"),
+            rendered.contains("redacted"),
             "y el mensaje debe decir que está redactado"
         );
     }

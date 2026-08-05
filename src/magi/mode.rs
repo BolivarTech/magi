@@ -319,7 +319,7 @@ pub fn agent_chosen_mode(input: &Value) -> Option<Mode> {
 /// que permitía que el gate y el consult corrieran con modos distintos, y que
 /// el agente satisficiera su propia guarda de `untrusted_content` (REQ-A07d).
 #[derive(Debug, thiserror::Error)]
-#[error("el embudo del agente no inyectó el modo resuelto antes de despachar `consult`")]
+#[error("the agent's tool loop did not inject the resolved mode before dispatching `consult`")]
 pub struct ModeInjectionMissing;
 
 /// Lee la resolución que [`inject_resolved_mode`] escribió.
@@ -350,7 +350,7 @@ pub fn read_resolved_mode(input: &Value) -> Result<(Mode, ModeSource), ModeInjec
 #[derive(Debug, thiserror::Error)]
 pub enum ModeParseError {
     /// El valor tiene contenido y no es una de las tres etiquetas.
-    #[error("modo desconocido: {got:?} (válidos: {valid})")]
+    #[error("unknown mode: {got:?} (valid: {valid})")]
     Unknown {
         /// Lo que trajo el archivo.
         got: String,

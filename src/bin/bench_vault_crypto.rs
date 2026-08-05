@@ -57,5 +57,5 @@ fn main() {
         elapsed.as_secs_f64() * 1000.0
     );
     println!("decrypt per-record: {per_decrypt_us:.1} us");
-    println!("(recall() con N memorias/turno paga N x el per-record de arriba)");
+    println!("(recall() with N memories/turn pays N x the per-record cost above)");
 }
