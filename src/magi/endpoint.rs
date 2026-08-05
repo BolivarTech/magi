@@ -1,21 +1,19 @@
-// Author: Julian Bolivar
-// Version: 1.0.0
-// Date: 2026-08-02
+// Author: Julian Bolivar Version: 1.0.0 Date: 2026-08-02
 
-//! Credenciales de `base_url` por **placeholder**, resueltas del vault en memoria (REQ-A16c).
+//! `base_url` credentials as **placeholder**, resolved from in-memory vault (REQ-A16c).
 //!
-//! # Por qué placeholders y no redacción
+//! # Why placeholders and not redaction
 //!
-//! El diseño anterior aceptaba la credencial en el archivo y la redactaba antes de mostrarla.
-//! Eso deja la seguridad dependiendo de que **cada** camino de salida se acuerde de redactar, y
-//! ya se encontró uno que no lo hacía: el error de parseo de `toml` cita la línea ofensora, así
-//! que un `magi.toml` malformado con `base_url = "https://u:p@host/v1"` escupía la credencial a
-//! stderr y a los logs de CI. Cerrar ese camino no cierra la clase; cierra el camino.
+//! The previous design accepted the credential in the file and redacted it before displaying
+//! it. That leaves security depending on **every** output path remembering to redact, and one
+//! was already found that did not: the `toml` parse error quotes the offending line, so a
+//! malformed `magi.toml` with `base_url = "https://u:p@host/v1"` spat the credential to stderr
+//! and CI logs. Closing that path does not close the class; it closes the path.
 //!
-//! Con placeholders la propiedad es **estructural**: si el archivo no puede contener el
-//! secreto, ningún camino de salida puede filtrarlo, incluidos los que nadie auditó. Es la
-//! misma razón por la que las API keys nunca vivieron en `magi.toml` (REQ-A14) — `base_url` era
-//! el hueco por el que una credencial sí entraba.
+//! With placeholders the property is **structural**: if the file cannot contain the secret, no
+//! output path can leak it, including those nobody audited. It is the same reason API keys
+//! never lived in `magi.toml` (REQ-A14) — `base_url` was the hole through which a credential
+//! did get in.
 
 #![deny(missing_docs)]
 #![deny(clippy::missing_docs_in_private_items)]
@@ -39,21 +37,21 @@ use std::fmt;
 use crate::redact::{locate_userinfo, redact_url, UserinfoLocation};
 use crate::vault::SecretStore;
 
-/// Placeholder de usuario. Literal exacto, **no** un patrón: esto no es un motor de plantillas.
+/// User placeholder. Exact literal, **not** a pattern: this is not a template engine.
 const USER_PLACEHOLDER: &str = "[user]";
-/// Ver [`USER_PLACEHOLDER`].
+/// See [`USER_PLACEHOLDER`].
 const PASSWORD_PLACEHOLDER: &str = "[password]";
 
-/// El `userinfo` que una plantilla con credenciales debe tener, exactamente.
+/// The `userinfo` that a credential template must have, exactly.
 const EXPECTED_USERINFO: &str = "[user]:[password]";
 
-/// Qué `base_url` se está resolviendo. Determina el prefijo de las entradas de vault.
+/// Which `base_url` is being resolved. Determines the prefix of the vault entries.
 ///
-/// Cada `base_url` resuelve **sus** credenciales: dos endpoints distintos pueden tener usuarios
-/// distintos, y compartir una entrada los acoplaría en silencio.
+/// Each `base_url` resolves **its own** credentials: two distinct endpoints may have different
+/// users, and sharing one entry would silently couple them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Scope {
-    /// `base_url` de raíz ⇒ `BASE_URL_USER` / `BASE_URL_PASSWORD`.
+    /// Root `base_url` ⇒ `BASE_URL_USER` / `BASE_URL_PASSWORD`.
     Root,
     /// `[magi].base_url` ⇒ `MAGI_BASE_URL_*`.
     Magi,
@@ -62,7 +60,7 @@ pub enum Scope {
 }
 
 impl Scope {
-    /// Nombre de la entrada de vault con el usuario.
+    /// Name of the vault entry with the user.
     #[must_use]
     pub fn user_entry(self) -> &'static str {
         match self {
@@ -72,7 +70,7 @@ impl Scope {
         }
     }
 
-    /// Nombre de la entrada de vault con la contraseña.
+    /// Name of the vault entry with the password.
     #[must_use]
     pub fn password_entry(self) -> &'static str {
         match self {
@@ -83,66 +81,68 @@ impl Scope {
     }
 }
 
-/// Lo que puede salir mal al leer o resolver una `base_url`.
+/// What can go wrong when reading or resolving a `base_url`.
 ///
-/// **Ningún mensaje repite el valor ofensor**: un error de seguridad que imprime el secreto que
-/// está rechazando no sirve para nada.
+/// **No message repeats the offending value**: a security error that prints the secret it
+/// is rejecting is useless.
 #[derive(Debug, thiserror::Error)]
 pub enum EndpointError {
-    /// La `base_url` trae una credencial literal en vez de los placeholders.
+    /// The `base_url` carries a literal credential instead of placeholders.
     #[error(
         "`base_url` carries a literal credential. Replace it with \
          `{USER_PLACEHOLDER}:{PASSWORD_PLACEHOLDER}` and store the values in the vault: \
          `magi-rs vault set {user_entry}` and `magi-rs vault set {password_entry}`"
     )]
     LiteralCredential {
-        /// Entrada de vault para el usuario, según el scope.
+        /// Vault entry for the user, according to scope.
         user_entry: &'static str,
-        /// Entrada de vault para la contraseña, según el scope.
+        /// Vault entry for the password, according to scope.
         password_entry: &'static str,
     },
 
-    /// El placeholder está declarado y la entrada de vault no existe.
+    /// The placeholder is declared and the vault entry does not exist.
     #[error(
         "`base_url` declares a placeholder but entry {entry} is missing from the vault. \
          Create it with `magi-rs vault set {entry}`"
     )]
     MissingVaultEntry {
-        /// La entrada que hace falta.
+        /// The missing entry.
         entry: &'static str,
     },
 
-    /// Un placeholder que no es ninguno de los dos conocidos.
+    /// A placeholder that is neither of the two known ones.
     #[error(
         "unknown placeholder in `base_url`: only `{USER_PLACEHOLDER}` and \
          `{PASSWORD_PLACEHOLDER}` are accepted, in the `userinfo` position"
     )]
     UnknownPlaceholder,
 
-    /// La URL no se pudo recorrer, así que no se puede afirmar que no traiga un secreto.
+    /// The URL could not be traversed, so it cannot be asserted that it does not carry a
+    /// secret.
     #[error("`base_url` does not have a recognizable form (`scheme://host/...`)")]
     Unparseable,
 }
 
-/// `base_url` **tal como está en el archivo**: con `[user]`/`[password]`, nunca el secreto.
+/// `base_url` **as it is in the file**: with `[user]`/`[password]`, never the secret.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EndpointTemplate(String);
 
 impl EndpointTemplate {
-    /// Lee una `base_url` del archivo y rechaza toda credencial literal (REQ-A16c).
+    /// Reads a `base_url` from the file and rejects any literal credential (REQ-A16c).
     ///
-    /// Reutiliza el localizador de autoridad de [`crate::redact`], que es el mismo que usa la
-    /// redacción: la regla de dónde vive el `userinfo` se escribe **una vez**. Si se escribiera
-    /// dos, desincronizarse significaría que uno de los dos deja de ver una credencial.
+    /// Reuses the authority locator from [`crate::redact`], which is the same one redaction
+    /// uses: the rule of where `userinfo` lives is written **once**. If it were written twice,
+    /// drifting out of sync would mean one of the two stops seeing a credential.
     ///
     /// # Errors
     ///
-    /// [`EndpointError::LiteralCredential`] si el `userinfo` no son exactamente los dos
-    /// placeholders; [`EndpointError::UnknownPlaceholder`] si trae otro placeholder;
-    /// [`EndpointError::Unparseable`] si la URL no se pudo recorrer.
+    /// [`EndpointError::LiteralCredential`] if the `userinfo` are not exactly the two
+    /// placeholders; [`EndpointError::UnknownPlaceholder`] if it carries another placeholder;
+    /// [`EndpointError::Unparseable`] if the URL could not be traversed.
     pub fn parse(raw: &str) -> Result<Self, EndpointError> {
         match locate_userinfo(raw) {
-            // Sin `userinfo` no hay credencial que validar — el caso común no paga nada.
+            // Without `userinfo` there is no credential to validate — the common case pays
+            // nothing.
             UserinfoLocation::Absent => Ok(Self(raw.to_string())),
             UserinfoLocation::Unparseable => Err(EndpointError::Unparseable),
             UserinfoLocation::Found { start, end } => {
@@ -152,13 +152,13 @@ impl EndpointTemplate {
                 if userinfo == EXPECTED_USERINFO {
                     return Ok(Self(raw.to_string()));
                 }
-                // Un placeholder mal escrito se nombra como tal; cualquier otra cosa es una
-                // credencial literal. La distinción importa porque los arreglos son distintos.
+                // A misspelled placeholder is named as such; anything else is a literal
+                // credential. The distinction matters because the fixes are different.
                 if userinfo.contains('[') || userinfo.contains(']') {
                     return Err(EndpointError::UnknownPlaceholder);
                 }
-                // El scope real lo pone el llamador al construir el mensaje; acá se nombra el
-                // de raíz, que es el caso que un usuario ve primero.
+                // The real scope is set by the caller when building the message; here the root
+                // one is named, which is the case a user sees first.
                 Err(EndpointError::LiteralCredential {
                     user_entry: Scope::Root.user_entry(),
                     password_entry: Scope::Root.password_entry(),
@@ -167,40 +167,41 @@ impl EndpointTemplate {
         }
     }
 
-    /// El texto de la plantilla — **seguro por construcción, NO necesita redacción**.
+    /// The template text — **safe by construction, does NOT need redaction**.
     ///
-    /// Lo que hay acá es `https://[user]:[password]@host/v1`: por REQ-A16c una credencial
-    /// literal es error de configuración, así que la plantilla no puede contener un secreto.
-    /// El que sí necesita redacción es [`ResolvedEndpoint`], que es el de después.
+    /// What is here is `https://[user]:[password]@host/v1`: by REQ-A16c a literal credential is
+    /// a configuration error, so the template cannot contain a secret. The one that does need
+    /// redaction is [`ResolvedEndpoint`], which is the one after.
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
 
-    /// Sustituye los placeholders con los valores del vault, **en memoria**.
+    /// Replaces the placeholders with the vault values, **in memory**.
     ///
-    /// Falla **cerrado**: una entrada ausente detiene el proceso nombrándola. Sustituir vacío
-    /// daría un 401 en la primera consulta, sin relación aparente con la configuración — la
-    /// misma clase de fallo tardío que D-A01 eliminó.
+    /// Fails **closed**: a missing entry stops the process by naming it. Substituting empty
+    /// would produce a 401 on the first request, with no apparent relation to the configuration
+    /// — the same class of late failure that D-A01 eliminated.
     ///
     /// # Errors
     ///
-    /// [`EndpointError::MissingVaultEntry`] con la entrada que falta y el comando que la crea.
+    /// [`EndpointError::MissingVaultEntry`] with the missing entry and the command that creates
+    /// it.
     pub fn resolve(
         &self,
         vault: &mut dyn SecretStore,
         scope: Scope,
     ) -> Result<ResolvedEndpoint, EndpointError> {
-        // La sustitución se acota al `userinfo` de la AUTORIDAD, no a la cadena entera.
+        // Substitution is limited to the `userinfo` of the AUTHORITY, not the whole string.
         //
-        // Buscar el placeholder en todo el texto es lo que hacía la primera versión, y un
-        // `https://host/v1/[user]` —donde `[user]` es un segmento literal del path— salía a
-        // buscar una credencial al vault y fallaba cerrado por una entrada que nadie tenía por
-        // qué crear. `parse` ya usa el mismo localizador; resolver con otra regla las
-        // desincroniza.
+        // Searching for the placeholder across the whole text is what the first version did,
+        // and a `https://host/v1/[user]` —where `[user]` is a literal path segment— would go
+        // look for a credential in the vault and fail closed on an entry nobody had any reason
+        // to create. `parse` already uses the same locator; resolving with a different rule
+        // would desynchronize them.
         let UserinfoLocation::Found { start, end } = locate_userinfo(&self.0) else {
-            // Sin `userinfo` no hay nada que sustituir, y el caso común —Ollama local,
-            // keyless— no paga ni un lookup.
+            // Without `userinfo` there is nothing to substitute, and the common case —local
+            // Ollama, keyless— does not pay even a lookup.
             return Ok(ResolvedEndpoint(self.0.clone()));
         };
         let (Some(prefix), Some(userinfo), Some(tail)) = (
@@ -211,7 +212,7 @@ impl EndpointTemplate {
             return Err(EndpointError::Unparseable);
         };
         if userinfo != EXPECTED_USERINFO {
-            // `parse` ya garantizó que un `userinfo` distinto no llega hasta acá.
+            // `parse` already guaranteed that a different `userinfo` does not reach here.
             return Ok(ResolvedEndpoint(self.0.clone()));
         }
 
@@ -243,15 +244,17 @@ impl fmt::Display for EndpointTemplate {
     }
 }
 
-/// URL con los placeholders ya sustituidos.
+/// URL with the placeholders already substituted.
 ///
-/// **Solo [`EndpointTemplate::resolve`] la construye**, y resolver exige el vault — por eso un
-/// `&str` sin resolver no puede llegar a un provider por accidente.
+/// **Only [`EndpointTemplate::resolve`] constructs it**, and resolving requires the vault —
+/// that is why an
+/// unresolved `&str` cannot reach a provider by accident.
 #[derive(Clone, PartialEq, Eq)]
 pub struct ResolvedEndpoint(String);
 
 impl ResolvedEndpoint {
-    /// La URL efectiva. Quien la muestre debe pasarla por [`crate::redact::redact_url`].
+    /// The effective URL. Whoever displays it must run it through
+    /// [`crate::redact::redact_url`].
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
@@ -259,8 +262,8 @@ impl ResolvedEndpoint {
 }
 
 impl fmt::Debug for ResolvedEndpoint {
-    /// A mano y redactado: un `derive(Debug)` acá es la forma más fácil de filtrar la
-    /// credencial sin darse cuenta — basta un `{:?}` en un error o en una traza.
+    /// Hand-written and redacted: a `derive(Debug)` here is the easiest way to leak the
+    /// credential without noticing — a `{:?}` in an error or trace is enough.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "ResolvedEndpoint({})", redact_url(&self.0))
     }
@@ -274,9 +277,9 @@ mod tests {
     use std::collections::BTreeMap;
     use zeroize::Zeroizing;
 
-    /// Vault de prueba: un mapa en memoria, sin cripto ni SQLite.
+    /// Test vault: an in-memory map, no crypto or SQLite.
     struct StubVault {
-        /// Entradas disponibles.
+        /// Available entries.
         entries: BTreeMap<String, String>,
     }
 
@@ -319,7 +322,7 @@ mod tests {
         }
     }
 
-    /// SC-A16d: credencial LITERAL es error, y el mensaje no la repite.
+    /// SC-A16d: LITERAL credential is an error, and the message does not repeat it.
     #[test]
     fn a_literal_credential_is_a_config_error_that_does_not_echo_it() {
         let err = EndpointTemplate::parse("https://juan:s3cr3t@host/v1").unwrap_err();
@@ -339,7 +342,7 @@ mod tests {
         assert!(!msg.contains("juan"), "{msg}");
     }
 
-    /// SC-A16e: el placeholder se resuelve del vault, y la plantilla no muestra nada.
+    /// SC-A16e: the placeholder resolves from the vault, and the template displays nothing.
     #[test]
     fn placeholders_resolve_from_the_vault_in_memory() {
         let mut vault =
@@ -348,11 +351,11 @@ mod tests {
 
         let resolved = tpl.resolve(&mut vault, Scope::Root).unwrap();
         assert_eq!(resolved.as_str(), "https://juan:s3cr3t@host/v1");
-        // La plantilla es lo que se muestra: ya es segura, no hace falta redactarla.
+        // The template is what is displayed: it is already safe, no need to redact it.
         assert_eq!(tpl.as_str(), "https://[user]:[password]@host/v1");
     }
 
-    /// El `Debug` de la URL resuelta redacta: un `derive` acá es la forma más fácil de filtrar.
+    /// The `Debug` of the resolved URL redacts: a `derive` here is the easiest way to leak.
     #[test]
     fn the_resolved_endpoints_debug_never_shows_the_credential() {
         let mut vault =
@@ -366,7 +369,7 @@ mod tests {
         assert!(shown.contains("host"), "y el host sigue visible: {shown}");
     }
 
-    /// SC-A16f: placeholder sin entrada falla CERRADO, no sustituye vacío.
+    /// SC-A16f: placeholder without entry fails CLOSED, does not substitute empty.
     #[test]
     fn a_missing_vault_entry_fails_closed_naming_the_entry() {
         let mut vault = StubVault::with(&[("BASE_URL_USER", "juan")]); // falta la password
@@ -383,7 +386,7 @@ mod tests {
         assert!(msg.contains("vault set"), "y cómo crearla: {msg}");
     }
 
-    /// Cada `base_url` resuelve SUS credenciales: dos endpoints pueden tener usuarios distintos.
+    /// Each `base_url` resolves ITS OWN credentials: two endpoints may have different users.
     #[test]
     fn each_scope_reads_its_own_vault_entries() {
         let mut vault = StubVault::with(&[
@@ -412,11 +415,11 @@ mod tests {
             .contains("emb-u"));
     }
 
-    /// Solo esos dos placeholders, y solo en la autoridad. No es un motor de plantillas.
+    /// Only those two placeholders, and only in the authority. It is not a template engine.
     #[test]
     fn only_the_two_known_placeholders_in_the_authority_are_recognized() {
         assert!(EndpointTemplate::parse("https://[banana]@host/v1").is_err());
-        // Fuera de la autoridad es texto literal del path, no un placeholder.
+        // Outside the authority it is literal path text, not a placeholder.
         let tpl = EndpointTemplate::parse("https://host/v1/[user]").unwrap();
         assert_eq!(
             tpl.resolve(&mut StubVault::empty(), Scope::Root)
@@ -426,7 +429,7 @@ mod tests {
         );
     }
 
-    /// Una URL sin credenciales pasa igual: el caso común no paga nada.
+    /// A URL without credentials passes too: the common case pays nothing.
     #[test]
     fn a_plain_url_without_userinfo_resolves_to_itself() {
         let tpl = EndpointTemplate::parse("http://localhost:11434/v1").unwrap();
@@ -438,13 +441,14 @@ mod tests {
         );
     }
 
-    /// Sin `://` no hay autoridad que recorrer: `locate_userinfo` devuelve `Unparseable` y
-    /// `parse` lo propaga como [`EndpointError::Unparseable`], en vez de asumir "sin credencial".
+    /// Without `://` there is no authority to traverse: `locate_userinfo` returns `Unparseable`
+    /// and `parse` propagates it as [`EndpointError::Unparseable`], instead of assuming "no
+    /// credential".
     ///
-    /// Cubre el brazo `UserinfoLocation::Unparseable => Err(EndpointError::Unparseable)` de
-    /// `EndpointTemplate::parse`, que no tenía ningún caso de prueba: verificado leyendo
-    /// `locate_userinfo` (`src/redact.rs`) — el primer `let Some(scheme_end) = raw.find("://")
-    /// else { return Unparseable }` es alcanzable con cualquier texto que no contenga `"://"`.
+    /// Covers the arm `UserinfoLocation::Unparseable => Err(EndpointError::Unparseable)` of
+    /// `EndpointTemplate::parse`, which had no test case: verified by reading `locate_userinfo`
+    /// (`src/redact.rs`) — the first `let Some(scheme_end) = raw.find("://") else { return
+    /// Unparseable }` is reachable with any text not containing `"://"`.
     #[test]
     fn a_url_without_a_scheme_separator_is_rejected_as_unparseable() {
         let err = EndpointTemplate::parse("localhost:11434/v1").unwrap_err();
@@ -454,8 +458,8 @@ mod tests {
         );
     }
 
-    /// El `Display` de la plantilla emite exactamente lo que guarda — es el mismo texto que
-    /// `as_str()`, así que un consumidor que haga `format!("{tpl}")` ve la plantilla completa.
+    /// The template's `Display` emits exactly what it stores — it is the same text as
+    /// `as_str()`, so a consumer doing `format!("{tpl}")` sees the complete template.
     #[test]
     fn display_renders_the_same_text_as_as_str() {
         let tpl = EndpointTemplate::parse("https://[user]:[password]@host/v1").unwrap();

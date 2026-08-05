@@ -1,47 +1,46 @@
-// Author: Julian Bolivar
-// Version: 1.0.0
-// Date: 2026-08-03
+// Author: Julian Bolivar Version: 1.0.0 Date: 2026-08-03
 
-//! Gate de complejidad: predicado puro que decide si un consult **autorruteado** por el
-//! agente amerita despachar el consenso de tres perspectivas (REQ-A20).
+//! Complexity gate: pure predicate that decides whether an agent-**self-routed** consult merits
+//! dispatching the three-perspective consensus (REQ-A20).
 //!
-//! Tres propiedades que gobiernan este módulo y que son fáciles de invertir por error:
+//! Three properties that govern this module and are easy to get wrong:
 //!
-//! - **Solo el ruteo AUTÓNOMO se evalúa.** `/consult` en la TUI y `magi consult` explícitos
-//!   NUNCA se vetan — el gate ve la decisión del agente de invocar el tool por su cuenta,
-//!   nada más. Esa distinción es de **call site** (dónde se invoca `evaluate`), no de un
-//!   flag que este módulo pueda ver: `gate.rs` no sabe quién llamó.
-//! - **Un veto NO es un error.** [`GateVerdict::Veto`] es un resultado normal del predicado,
-//!   no un `Err`: el embudo del agente lo traduce en un `ToolResult` explicando por qué no
-//!   se despachó, y el turno sigue.
-//! - **La ausencia de configuración NO apaga el gate.** Tabla `[magi.complexity]` ausente ⇒
-//!   los built-ins de [`super::GATE_CODE_REVIEW`]/[`super::GATE_DESIGN`]/
-//!   [`super::GATE_ANALYSIS`] siguen aplicando. Un modo declarado en `0` es la única vía
-//!   explícita de apagar **ese** modo — no los otros dos.
+//! - **Only AUTONOMOUS routing is evaluated.** `/consult` in the TUI and explicit `magi
+//! consult`
+//! are NEVER vetoed — the gate sees the agent's decision to invoke the tool on its own, and
+//! nothing else. That distinction is about **call site** (where `evaluate` is invoked), not a
+//! flag this module can see: `gate.rs` does not know who called.
+//! - **A veto is NOT an error.** [`GateVerdict::Veto`] is a normal result of the predicate,
+//! not an `Err`: the agent funnel translates it into a `ToolResult` explaining why it was not
+//! dispatched, and the turn continues.
+//! - **Missing configuration does NOT turn the gate off.** Absent `[magi.complexity]` table ⇒
+//! the built-ins of [`super::GATE_CODE_REVIEW`]/[`super::GATE_DESIGN`]/
+//! [`super::GATE_ANALYSIS`] still apply. A mode declared at `0` is the only explicit way to
+//! turn **that** mode off — not the other two.
 
 use magi_core::schema::Mode;
 
 use super::{GATE_ANALYSIS, GATE_CODE_REVIEW, GATE_DESIGN};
 
-/// Umbrales efectivos del gate, uno por modo (REQ-A20b).
+/// Effective gate thresholds, one per mode (REQ-A20b).
 ///
-/// Existe como tipo propio —y no como tres `usize` sueltos— porque el punto de la
-/// granularidad por modo es que **apagar uno no apague los otros**: con parámetros
-/// posicionales del mismo tipo, un swap silencioso en un call site rompe exactamente esa
-/// propiedad sin romper la compilación.
+/// Exists as its own type —and not as three loose `usize`s— because the point of per-mode
+/// granularity is that **turning one off does not turn the others off**: with positional
+/// parameters of the same type, a silent swap at a call site breaks exactly that property
+/// without breaking compilation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GateThresholds {
-    /// Umbral de `code-review`, en caracteres.
+    /// `code-review` threshold, in characters.
     pub code_review: usize,
-    /// Umbral de `design`, en caracteres.
+    /// `design` threshold, in characters.
     pub design: usize,
-    /// Umbral de `analysis` — el modo por defecto, y por eso el que NO puede quedar
-    /// efectivamente apagado por accidente (SC-A20j).
+    /// `analysis` threshold — the default mode, and therefore the one that CANNOT be
+    /// effectively turned off by accident (SC-A20j).
     pub analysis: usize,
 }
 
 impl GateThresholds {
-    /// Los built-ins de §4.9, sin config de por medio.
+    /// The §4.9 built-ins, with no config in between.
     #[must_use]
     pub const fn builtin() -> Self {
         Self {
@@ -51,18 +50,18 @@ impl GateThresholds {
         }
     }
 
-    /// Resuelve la tabla `[magi.complexity]` contra los built-ins.
+    /// Resolves the `[magi.complexity]` table against the built-ins.
     ///
-    /// **Tabla ausente ⇒ built-ins** (el gate sigue vivo: un feature de seguridad que se
-    /// apaga solo por omitir una sección es un feature apagado). **Clave ausente DENTRO de
-    /// una tabla presente ⇒ su built-in, no cero**: `Option::unwrap_or` por clave, nunca
-    /// `Default` sobre la struct entera, que colapsaría los tres a `0` y desactivaría el
-    /// gate completo con solo declarar `[magi.complexity]` vacía.
+    /// **Missing table ⇒ built-ins** (the gate stays alive: a security feature that
+    /// turns off just by omitting a section is a turned-off feature). **Missing key INSIDE a
+    /// present table ⇒ its built-in, not zero**: `Option::unwrap_or` per key, never `Default`
+    /// over the whole struct, which would collapse all three to `0` and disable the entire gate
+    /// just by declaring an empty `[magi.complexity]`.
     ///
-    /// **Toma piezas sueltas, NO `&ComplexityConfig`.** Este módulo vive en el lib y
-    /// `ComplexityConfig` en el bin (`src/config.rs`): tomar la struct ataría un módulo
-    /// puro a la forma del TOML y lo volvería incompilable desde el lib. Desarmar la tabla
-    /// es trabajo de `config.rs`'s `gate_thresholds_from`, que ya la tiene en la mano.
+    /// **Takes loose pieces, NOT `&ComplexityConfig`.** This module lives in the lib and
+    /// `ComplexityConfig` in the bin (`src/config.rs`): taking the struct would tie a pure
+    /// module to the shape of the TOML and make it uncompilable from the lib. Disassembling the
+    /// table is the job of `config.rs`'s `gate_thresholds_from`, which already has it in hand.
     #[must_use]
     pub fn from_overrides(o: GateOverrides) -> Self {
         let GateOverrides {
@@ -78,8 +77,8 @@ impl GateThresholds {
         }
     }
 
-    /// Umbral del modo pedido. `0` significa "este modo nunca se veta" (lo interpreta
-    /// [`evaluate`], no esta función).
+    /// Threshold of the requested mode. `0` means "this mode is never vetoed" (interpreted by
+    /// [`evaluate`], not this function).
     #[must_use]
     pub const fn for_mode(&self, mode: &Mode) -> usize {
         match mode {
@@ -90,40 +89,42 @@ impl GateThresholds {
     }
 }
 
-/// Overrides de `[magi.complexity]`, con NOMBRE por campo.
+/// Overrides of `[magi.complexity]`, with NAME per field.
 ///
-/// Tres posicionales del mismo tipo (`Option<usize>`, `Option<usize>`, `Option<usize>`)
-/// son exactamente el swap silencioso que el rustdoc de [`GateThresholds`] condena.
+/// Three positional arguments of the same type (`Option<usize>`, `Option<usize>`,
+/// `Option<usize>`) are exactly the silent swap that the rustdoc of [`GateThresholds`]
+/// condemns.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct GateOverrides {
-    /// Override de `code_review`; ausente ⇒ su built-in.
+    /// Override of `code_review`; absent ⇒ its built-in.
     pub code_review: Option<usize>,
-    /// Override de `design`; ausente ⇒ su built-in.
+    /// Override of `design`; absent ⇒ its built-in.
     pub design: Option<usize>,
-    /// Override de `analysis`; ausente ⇒ su built-in.
+    /// Override of `analysis`; absent ⇒ its built-in.
     pub analysis: Option<usize>,
 }
 
-/// Resultado de evaluar el gate (REQ-A20).
+/// Result of evaluating the gate (REQ-A20).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GateVerdict {
-    /// El contenido amerita el consenso: se despacha.
+    /// The content merits the consensus: it is dispatched.
     Dispatch,
-    /// Por debajo del umbral de su modo: NO se lanza ninguna llamada al modelo.
+    /// Below its mode's threshold: NO model call is launched.
     Veto {
-        /// Modo con el que se evaluó, para el registro de telemetría (SC-A20h).
+        /// Mode with which it was evaluated, for the telemetry log (SC-A20h).
         mode: Mode,
     },
 }
 
-/// Evalúa si un consult **autorruteado** amerita despacharse.
+/// Evaluates whether a **self-routed** consult merits being dispatched.
 ///
-/// **100 % puro:** sin async, sin I/O, sin llamadas al modelo. Se evalúa en el embudo del
-/// agente, no dentro de `ConsultTool::execute` — ver REQ-A20 para por qué no se usa
-/// `MagiBuilder::with_complexity_gate`.
+/// **100 % pure:** no async, no I/O, no model calls. It is evaluated in the funnel of the
+/// agent, not inside `ConsultTool::execute` — see REQ-A20 for why
+/// `MagiBuilder::with_complexity_gate` is not used.
 ///
-/// Mide **caracteres**, no bytes (`content.chars().count()`, O(n) sobre el contenido, sin
-/// bucles anidados): un umbral en bytes trataría distinto al mismo texto en otro idioma.
+/// It measures **characters**, not bytes (`content.chars().count()`, O(n) over the content,
+/// without nested loops): a byte threshold would treat the same text differently in another
+/// language.
 #[must_use]
 pub fn evaluate(content: &str, mode: &Mode, thresholds: &GateThresholds) -> GateVerdict {
     let threshold = thresholds.for_mode(mode);
@@ -134,29 +135,26 @@ pub fn evaluate(content: &str, mode: &Mode, thresholds: &GateThresholds) -> Gate
     }
 }
 
-/// Destino de la telemetría del gate (REQ-A20, SC-A20h).
+/// Destination for gate telemetry (REQ-A20, SC-A20h).
 ///
-/// **Separado del `RunObserver` a propósito.** El observer es opcional por
-/// diseño (`None` en la TUI, que es justo la superficie que más consults
-/// autorrutea), así que colgar de él una señal que SC-A20h exige *siempre*
-/// registrada la volvería condicional a la superficie. Este trait lo
-/// implementan las dos: el runner headless (bin) enrutándolo a su run log
-/// estructurado, la TUI (bin) a un buffer acotado en memoria. Solo el trait y
-/// [`NoGateTelemetry`] viven acá, en el lib — misma frontera que separa
-/// `ModeParseError` de `ConfigError`.
+/// **Separated from `RunObserver` on purpose.** The observer is optional by
+/// design (`None` in the TUI, which is precisely the surface that self-routes the most
+/// consults), so hanging a signal that SC-A20h requires *always* be logged from it would make
+/// it conditional on the surface. Both implement this trait: the headless runner (bin) routing
+/// it to its structured run log, the TUI (bin) to a bounded in-memory buffer. Only the trait
+/// and [`NoGateTelemetry`] live here, in the lib — same boundary that separates
+/// `ModeParseError` from `ConfigError`.
 pub trait GateTelemetry: Send + Sync {
-    /// Registra UNA evaluación: modo, largo del contenido, umbral aplicado y
-    /// si vetó (SC-A20h). El umbral aplicado viaja SIEMPRE, incluso en la
-    /// línea que despacha: sin el número del lado que pasa, calibrar los
-    /// built-ins no tiene con qué comparar.
+    /// Logs ONE evaluation: mode, content length, applied threshold, and whether it vetoed
+    /// (SC-A20h). The applied threshold is ALWAYS carried, even in the line that dispatches:
+    /// without the number on the passing side, calibrating the built-ins has nothing to compare
+    /// against.
     fn on_gate_evaluation(&self, mode: &Mode, chars: usize, threshold: usize, vetoed: bool);
 }
 
-/// Sink nulo: cero registro, comportamiento idéntico al de antes de que este
-/// campo existiera. Es lo que usa el `Default` de la config de corrida del
-/// agente (`AgentRunConfig`, en el binario), así que el campo es puramente
-/// aditivo: ninguna ruta que no lo cablea explícitamente cambia de
-/// comportamiento.
+/// Null sink: zero logging, behavior identical to before this field existed. This is what the
+/// `Default` of the agent run config (`AgentRunConfig`, in the binary) uses, so the field is
+/// purely additive: no route that does not wire it explicitly changes behavior.
 pub struct NoGateTelemetry;
 
 impl GateTelemetry for NoGateTelemetry {
@@ -167,7 +165,7 @@ impl GateTelemetry for NoGateTelemetry {
 mod tests {
     use super::*;
 
-    /// SC-A20b: umbral por modo, y el borde es el documentado (inclusive).
+    /// SC-A20b: threshold per mode, and the boundary is the documented one (inclusive).
     #[test]
     fn thresholds_are_per_mode_and_the_boundary_is_inclusive() {
         let t = GateThresholds::builtin();
@@ -189,14 +187,14 @@ mod tests {
         );
     }
 
-    /// SC-A20j: el gate CUBRE `Analysis`, el modo por defecto de toda invocación sin uno
-    /// declarado — un umbral de 1 lo apagaría justo en el camino autónomo más común.
+    /// SC-A20j: the gate COVERS `Analysis`, the default mode for any invocation without one
+    /// declared — a threshold of 1 would turn it off right on the most common autonomous path.
     #[test]
     fn the_gate_covers_analysis_the_default_mode() {
         let t = GateThresholds::builtin();
-        // `const` y no `assert!` suelto: es una comparación entre dos constantes, así que
-        // clippy (`assertions_on_constants`) exige evaluarla en compilación — misma forma
-        // que ya usa `mod.rs`'s `plan_values_fall_inside_their_documented_ranges`.
+        // `const` and not a loose `assert!`: it is a comparison between two constants, so
+        // clippy (`assertions_on_constants`) demands it be evaluated at compile time — same
+        // form already used by `mod.rs`'s `plan_values_fall_inside_their_documented_ranges`.
         const {
             assert!(
                 GATE_ANALYSIS > 1,
@@ -211,7 +209,7 @@ mod tests {
         );
     }
 
-    /// SC-A20d: sin tabla, aplican los built-ins; `0` apaga SOLO ese modo.
+    /// SC-A20d: without a table, the built-ins apply; `0` turns off ONLY that mode.
     #[test]
     fn an_absent_table_keeps_the_gate_alive_and_zero_disables_one_mode() {
         let t = GateThresholds::from_overrides(GateOverrides::default());
@@ -234,27 +232,23 @@ mod tests {
         );
     }
 
-    // NOTA HONESTA sobre `NoGateTelemetry`: no hay una aserción posible contra
-    // un no-op. Un test anterior aquí llamaba `on_gate_evaluation` dos veces
-    // sin afirmar nada — no podía fallar bajo ningún cambio (mismo defecto
-    // que Task 3.1 encontró y corrigió en su propia simulación, señalado por
-    // el review de esta tarea: I2). El contrato de `NoGateTelemetry` ES el
-    // cuerpo vacío de `on_gate_evaluation`, arriba — se verifica leyéndolo,
-    // no ejecutándolo. Lo que SÍ es observable y SÍ está testeado en
-    // `agent/mod.rs` es que `AgentRunConfig::default()` instala
-    // `NoGateTelemetry` y que un run sin `gate_telemetry` explícito no
-    // registra nada (`every_gate_evaluation_is_logged` prueba el caso
-    // opuesto, con `RecordingGateTelemetry`, que sí puede fallar).
+    // HONEST NOTE about `NoGateTelemetry`: there is no possible assertion against a no-op. An
+    // earlier test here called `on_gate_evaluation` twice without asserting anything — it could
+    // not fail under any change (same defect Task 3.1 found and fixed in its own simulation,
+    // flagged by the review of this task: I2). The contract of `NoGateTelemetry` IS the empty
+    // body of `on_gate_evaluation`, above — it is verified by reading it, not by running it.
+    // What IS observable and IS tested in `agent/mod.rs` is that `AgentRunConfig::default()`
+    // installs `NoGateTelemetry` and that a run without explicit `gate_telemetry` logs nothing
+    // (`every_gate_evaluation_is_logged` tests the opposite case, with
+    // `RecordingGateTelemetry`, which can fail).
 
-    // NOTA HONESTA (cerrada por Task 3.2): la propiedad de REQ-A20 "el gate ve
-    // el ruteo AUTÓNOMO (`ToolUse`) y NO la inyección forzada
-    // (`authorize_and_execute_tool`)" era DELIBERADAMENTE intestable desde este
-    // módulo — los dos call sites viven en `agent/mod.rs`, no acá; `gate.rs`
-    // solo expone `evaluate`, que no sabe ni puede saber quién la invocó. Un
-    // test escrito acá solo podía SIMULAR los dos call sites con literales, y
-    // una simulación de eso era exactamente lo que hacía falso al test
-    // anterior (borrado en Task 3.1 por esa razón). El test real, que dispara
-    // `authorize_and_execute_tool` y el bucle de `ToolUse` contra un `Agent` de
-    // verdad, ahora vive en `agent::tests::
+    // HONEST NOTE (closed by Task 3.2): the REQ-A20 property "the gate sees AUTONOMOUS routing
+    // (`ToolUse`) and NOT forced injection (`authorize_and_execute_tool`)" was DELIBERATELY
+    // untestable from this module — the two call sites live in `agent/mod.rs`, not here;
+    // `gate.rs` only exposes `evaluate`, which neither knows nor can know who invoked it. A
+    // test written here could only SIMULATE the two call sites with literals, and a simulation
+    // of that was exactly what made the earlier test false (deleted in Task 3.1 for that
+    // reason). The real test, which fires `authorize_and_execute_tool` and the `ToolUse` loop
+    // against a real `Agent`, now lives in `agent::tests::
     // a_forced_injection_bypasses_the_gate_while_a_model_choice_does_not`.
 }

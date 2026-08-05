@@ -1,23 +1,21 @@
-// Author: Julian Bolivar
-// Version: 1.0.0
-// Date: 2026-08-03
+// Author: Julian Bolivar Version: 1.0.0 Date: 2026-08-03
 
-//! Orden y tope de los notices de arranque (Task 1.5).
+//! Order and cap of startup notices (Task 1.5).
 //!
-//! # Por qué vive en el LIB y no bajo `system/`/`tui/`
+//! # Why it lives in the LIB and not under `system/`/`tui/`
 //!
-//! Es puro: sin I/O, sin red, sin estado. `main.rs` lo consume para ensamblar la lista
-//! de notices que la TUI muestra al arrancar.
+//! It is pure: no I/O, no network, no state. `main.rs` consumes it to assemble the list of
+//! notices the TUI displays at startup.
 //!
-//! # A qué SUPERFICIE aplica esto, y a cuál NO
+//! # Which SURFACE this applies to, and which it does NOT
 //!
-//! El tiering de este módulo es para notices **renderizados a un humano** en una lista
-//! de arranque — hoy, únicamente la TUI. La ruta headless (`magi query`/`consult`) tiene
-//! su propio contrato de salida (el envelope JSON y el run log, REQ-H23) y no consume
-//! [`Notice`]: no hay ahí una lista de arranque que un humano lea, así que cargarle un
-//! tier sería una representación que nada en esa ruta necesita. Es el límite correcto
-//! del módulo, no un recorte de alcance — si headless alguna vez gana una lista de
-//! arranque legible por humanos, ESE es el momento de decidir si consume este tipo.
+//! The tiering in this module is for notices **rendered to a human** in a startup list — today,
+//! only the TUI. The headless path (`magi query`/`consult`) has its own output contract (the
+//! JSON envelope and the run log, REQ-H23) and does not consume [`Notice`]: there is no startup
+//! list there for a human to read, so assigning it a tier would be a representation that
+//! nothing on that path needs. This is the correct boundary of the module, not a scope cut — if
+//! headless ever gains a human-readable startup list, THAT is the moment to decide whether it
+//! consumes this type.
 
 #![deny(missing_docs)]
 #![deny(clippy::missing_docs_in_private_items)]
@@ -38,42 +36,40 @@
 
 use std::collections::HashSet;
 
-/// Prioridad de un notice de arranque.
+/// Priority of a startup notice.
 ///
-/// **El orden de declaración del enum ES el orden de impresión**: el `derive(Ord)` no
-/// es decorativo — [`render_notices`] ordena con `sort_by_key(|n| n.tier)` y depende de
-/// que `Blocking < Resolution < Info` en ese sentido exacto.
+/// **The enum's declaration order IS the print order**: the `derive(Ord)` does not
+/// is decorative — [`render_notices`] sorts with `sort_by_key(|n| n.tier)` and relies on
+/// `Blocking < Resolution < Info` in that exact sense.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum NoticeTier {
-    /// Algo que el usuario pidió NO está disponible. Acción requerida.
+    /// Something the user asked for is NOT available. Action required.
     Blocking,
-    /// La config se resolvió distinto de lo que el archivo parece decir — o un
-    /// diagnóstico de bajo nivel que no llega a bloquear pero tampoco es ruido:
-    /// hardening/vault (mlock, dump suppression), un fallo al abrir o derivar la
-    /// clave del vault, o la pérdida de persistencia. Ninguno de estos casos exige
-    /// una acción inmediata como `Blocking`, pero todos sorprenden lo suficiente
-    /// como para sobrevivir siempre al tope de [`NOTICE_MAX_INFO`].
+    /// The config resolved differently from what the file seems to say — or a low-level
+    /// diagnostic that does not rise to blocking but is not noise either: hardening/vault
+    /// (mlock, dump suppression), a failure to open or derive the vault key, or loss of
+    /// persistence. None of these cases demand immediate action like `Blocking`, but all are
+    /// surprising enough to always survive the [`NOTICE_MAX_INFO`] cap.
     Resolution,
-    /// Diagnóstico. Útil, nunca urgente.
+    /// Diagnostic. Useful, never urgent.
     Info,
 }
 
-/// Un notice de arranque, con la prioridad que decide su lugar en la lista final.
+/// A startup notice, with the priority that decides its place in the final list.
 ///
-/// **Toda fuente empuja `Notice`, no `String`** — antes de esta tarea, varias fuentes de
-/// `main.rs` empujaban `String` planos a una lista compartida mientras el diseño de
-/// tiers vivía solo en la spec, así que el orden no podía aplicarse a nada real.
+/// **Every source pushes `Notice`, not `String`** — before this task, several sources in
+/// `main.rs` pushed plain `String`s into a shared list while the tier design lived only in the
+/// spec, so the order could not be applied to anything real.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Notice {
-    /// Prioridad — gobierna el orden de impresión y si el tope de [`render_notices`]
-    /// puede alcanzarlo.
+    /// Priority — governs the print order and whether the [`render_notices`] cap can reach it.
     pub tier: NoticeTier,
-    /// Texto a mostrar, ya formateado por quien lo construyó.
+    /// Text to display, already formatted by whoever built it.
     pub text: String,
 }
 
 impl Notice {
-    /// Construye un notice `Blocking`: algo que el usuario pidió no está disponible.
+    /// Builds a `Blocking` notice: something the user asked for is not available.
     pub fn blocking(text: impl Into<String>) -> Self {
         Self {
             tier: NoticeTier::Blocking,
@@ -81,7 +77,7 @@ impl Notice {
         }
     }
 
-    /// Construye un notice `Resolution`: la config se resolvió distinto de lo escrito.
+    /// Builds a `Resolution` notice: the config resolved differently from what was written.
     pub fn resolution(text: impl Into<String>) -> Self {
         Self {
             tier: NoticeTier::Resolution,
@@ -89,7 +85,7 @@ impl Notice {
         }
     }
 
-    /// Construye un notice `Info`: diagnóstico, nunca urgente.
+    /// Builds an `Info` notice: diagnostic, never urgent.
     pub fn info(text: impl Into<String>) -> Self {
         Self {
             tier: NoticeTier::Info,
@@ -98,30 +94,30 @@ impl Notice {
     }
 }
 
-/// Cuántos `Info` sobreviven al tope de [`render_notices`].
+/// How many `Info`s survive the [`render_notices`] cap.
 ///
-/// 5: con diez fuentes posibles, media pantalla es lo que alguien lee de verdad al
-/// arrancar. No es una medición — es el mismo tipo de número elegido a mano que los
-/// umbrales del gate de complejidad (REQ-A20), y se dice para no fingir lo contrario.
+/// 5: with ten possible sources, half a screen is what someone actually reads at startup. It is
+/// not a measurement — it is the same kind of hand-picked number as the complexity-gate
+/// thresholds (REQ-A20), and it is stated so as not to pretend otherwise.
 pub const NOTICE_MAX_INFO: usize = 5;
 
-/// Ordena por tier (`Blocking` primero), deduplica por texto exacto, y recorta solo los
-/// `Info` que excedan [`NOTICE_MAX_INFO`].
+/// Sorts by tier (`Blocking` first), deduplicates by exact text, and trims only the `Info`s
+/// that exceed [`NOTICE_MAX_INFO`].
 ///
 /// # Contrato
-/// - **Orden**: `Blocking` → `Resolution` → `Info`. El `sort_by_key` es estable, así que
-///   dos notices del mismo tier conservan el orden en que se pasaron.
-/// - **Dedup**: dos notices con el mismo `text` colapsan en uno solo — el trío puede
-///   emitir el mismo aviso de normalización de `base_url` tres veces (una por asiento),
-///   y el usuario no necesita leerlo tres veces. Se aplica DESPUÉS de ordenar, así que
-///   sobrevive la primera aparición en orden de tier.
-/// - **Tope**: `Blocking` y `Resolution` NUNCA se recortan — el tope existe para el
-///   ruido de diagnóstico, no para lo accionable ni lo sorprendente. Cuando recorta, la
-///   última línea del resultado dice cuántos `Info` se omitieron.
+/// - **Order**: `Blocking` → `Resolution` → `Info`. The `sort_by_key` is stable, so
+/// two notices of the same tier keep the order in which they were passed.
+/// - **Dedup**: two notices with the same `text` collapse into one — the trio can
+/// emit the same `base_url` normalization warning three times (once per seat), and the user
+/// does not need to read it three times. It is applied AFTER sorting, so the first appearance
+/// in tier order survives.
+/// - **Cap**: `Blocking` and `Resolution` are NEVER trimmed — the cap exists for the
+/// diagnostic noise, not for actionable or surprising items. When it trims, the last line of
+/// the result says how many `Info`s were omitted.
 ///
-/// Complejidad: `O(n log n)` por el sort más `O(n)` por el dedup (un `HashSet` de
-/// textos ya vistos) — aceptable porque `n` es la cantidad de notices de UN arranque
-/// (un puñado de fuentes, nunca miles).
+/// Complexity: `O(n log n)` for the sort plus `O(n)` for the dedup (a `HashSet` of already-seen
+/// texts) — acceptable because `n` is the number of notices from ONE startup (a handful of
+/// sources, never thousands).
 pub fn render_notices(notices: Vec<Notice>) -> Vec<String> {
     let mut sorted = notices;
     sorted.sort_by_key(|n| n.tier);
@@ -154,7 +150,7 @@ pub fn render_notices(notices: Vec<Notice>) -> Vec<String> {
 mod tests {
     use super::*;
 
-    /// Lo accionable primero, sin importar el orden en que se descubrió.
+    /// The actionable items first, regardless of the order in which they were discovered.
     #[test]
     fn notices_are_ordered_by_tier_not_by_discovery() {
         let out = render_notices(vec![
@@ -170,7 +166,7 @@ mod tests {
         assert!(out[2].contains("ventana medida"));
     }
 
-    /// El tope recorta RUIDO, nunca señales.
+    /// The cap trims NOISE, never signals.
     #[test]
     fn the_cap_truncates_info_only_and_says_how_many_it_dropped() {
         let mut v: Vec<Notice> = (0..NOTICE_MAX_INFO + 3)
@@ -192,8 +188,8 @@ mod tests {
         assert!(out.last().unwrap().contains('3'), "dice cuántos omitió");
     }
 
-    /// Dos fuentes pueden producir el MISMO aviso: la normalización de `/v1` la emiten los tres
-    /// asientos con la misma `base_url`.
+    /// Two sources can produce the SAME warning: the three seats with the same `base_url` emit
+    /// the `/v1` normalization.
     #[test]
     fn identical_notices_are_emitted_once() {
         let n = "notice: `base_url` de Ollama sin sufijo `/v1`";
@@ -205,18 +201,18 @@ mod tests {
         assert_eq!(out.len(), 1, "tres asientos, un aviso");
     }
 
-    /// Caso borde vacío (B13): nada que ordenar, deduplicar ni recortar — nunca panica,
-    /// y sin `Info` que recortar no hay línea de "omitidos".
+    /// Empty edge case (B13): nothing to sort, deduplicate, or trim — never panics, and with no
+    /// `Info` to trim there is no "omitted" line.
     #[test]
     fn empty_input_renders_to_an_empty_list() {
         let out = render_notices(vec![]);
         assert!(out.is_empty());
     }
 
-    /// Frontera exacta del tope: `info_seen > NOTICE_MAX_INFO` es estricto, así que
-    /// exactamente `NOTICE_MAX_INFO` notices `Info` no disparan NINGÚN recorte. Solo el
-    /// caso por-encima-del-tope estaba cubierto antes de este test; el off-by-one en la
-    /// frontera es el defecto clásico de este tipo de guard.
+    /// Exact cap boundary: `info_seen > NOTICE_MAX_INFO` is strict, so exactly
+    /// `NOTICE_MAX_INFO` `Info` notices do not trigger ANY trimming. Only the above-the-cap
+    /// case was covered before this test; the off-by-one at the boundary is the classic defect
+    /// of this kind of guard.
     #[test]
     fn exactly_the_cap_worth_of_info_drops_nothing() {
         let v: Vec<Notice> = (0..NOTICE_MAX_INFO)
@@ -234,17 +230,16 @@ mod tests {
         );
     }
 
-    /// La propiedad señal-vs-ruido que el módulo existe para garantizar: mismo texto,
-    /// tiers distintos — sobrevive el más severo (`Blocking`), no el `Info`.
+    /// The signal-vs-noise property the module exists to guarantee: same text, different tiers
+    /// — the more severe one (`Blocking`) survives, not the `Info`.
     ///
-    /// Con texto IDÉNTICO, cuál sobrevivió no se puede leer directo del `String` de
-    /// salida (son el mismo string). Se prueba por su EFECTO en el tope: se agregan
-    /// exactamente `NOTICE_MAX_INFO` rellenos `Info` distintos, que por sí solos no
-    /// disparan ningún recorte (ver el test de frontera exacta arriba). Si el
-    /// duplicado sobreviviera como `Info` en vez de `Blocking`, sumaría un `Info`
-    /// más y SÍ dispararía el recorte. Que no lo dispare, y que el texto duplicado
-    /// siga presente, es la prueba de que sobrevivió el `Blocking` — que nunca
-    /// cuenta contra el tope.
+    /// With IDENTICAL text, which one survived cannot be read directly from the output `String`
+    /// (they are the same string). It is tested by its EFFECT on the cap: exactly
+    /// `NOTICE_MAX_INFO` distinct filler `Info`s are added, which on their own do not trigger
+    /// any trimming (see the exact boundary test above). If the duplicate survived as `Info`
+    /// instead of `Blocking`, it would add one more `Info` and WOULD trigger the trim. That it
+    /// does not trigger it, and that the duplicate text is still present, is the proof that the
+    /// `Blocking` survived — which never counts against the cap.
     #[test]
     fn cross_tier_duplicate_text_keeps_the_more_severe_tier() {
         let dup_text = "el trío no es construible: falta OPENAI_API_KEY";
