@@ -1304,7 +1304,7 @@ impl Agent {
     /// [`CONSULT_ALREADY_FORCED_MESSAGE`] and neither authorized nor executed
     /// again — recorded only in the conversation, NOT re-added to the observer's
     /// audit trail (so `RunOutcome.tool_calls` still shows exactly one `consult`
-    /// entry). This is REQ-H22's "no se re-dispara aunque el agente quisiera".
+    /// entry). This is REQ-H22's "it does not re-fire even if the agent wanted it to".
     ///
     /// The injection deliberately does **not** seed `last_normalized_tool`/
     /// `repeat_count` (the 3x-identical-call guard below): it is a runner

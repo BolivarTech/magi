@@ -1504,10 +1504,10 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
         secret_store: secret_store.as_ref(),
     };
 
-    // REQ-A24/A24b/A24c (Task 5.2): mide el principal y el trío ANTES de construirlo, así
-    // `input_warn_tokens` puede derivarse de la ventana de los MAGES (REQ-A24b) y el
-    // arranque anuncia los tres estados de medición (REQ-A24c). Nunca bloquea ni falla el
-    // arranque: cada sonda falla abierta dentro de `probe_models`/`orchestrate_probes`.
+    // REQ-A24/A24b/A24c (Task 5.2): measure the principal and the trio BEFORE building it, so
+    // `input_warn_tokens` can be derived from the MAGES window (REQ-A24b) and startup announces
+    // the three measurement states (REQ-A24c). Never blocks or fails startup: each probe fails
+    // open inside `probe_models`/`orchestrate_probes`.
     let warn_tokens = probe_and_report(
         &magi_config,
         &endpoints,
@@ -1517,11 +1517,10 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
     )
     .await;
 
-    // Task 4.3 (REQ-A06/SC-A06b): el notice de arranque y la respuesta que un futuro
-    // `/consult` verá comparten el MISMO texto, construido una sola vez acá —
-    // `trio_unavailable_for_tui` es lo que hace esa igualdad verificable en vez de
-    // depender de que este sitio y `run_tui_ext` construyan el mismo `String` por su
-    // cuenta.
+    // Task 4.3 (REQ-A06/SC-A06b): the startup notice and the response a future `/consult` will
+    // see share the SAME text, built once right here — `trio_unavailable_for_tui` is what makes
+    // that equality verifiable instead of relying on this site and `run_tui_ext` constructing
+    // the same `String` independently.
     let mut consult_unavailable_message: Option<String> = None;
     let consult_magi: Option<Arc<Magi>> = match build_magi_orchestrator(
         &magi_config,
@@ -1639,37 +1638,36 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
-/// Credenciales de terceros resueltas `env > vault` (REQ-A12), reducidas a lo que el
-/// trío nativo necesita: una API key por backend que la exige (`openai-compat`,
-/// `anthropic`). `ollama` es keyless y nunca las consulta.
+/// Third-party credentials resolved `env > vault` (REQ-A12), reduced to what the native trio
+/// needs: one API key per backend that requires it (`openai-compat`, `anthropic`). `ollama` is
+/// keyless and never looks them up.
 ///
-/// Aparte del endpoint y no redundante con él: [`ResolvedEndpoint`] puede traer
-/// `userinfo` (autenticación del proxy o del servidor que sirve el modelo), mientras
-/// que la API key del backend va en un header (`Authorization: Bearer` / `x-api-key`).
-/// Dos credenciales, dos destinos.
+/// Separate from the endpoint and not redundant with it: [`ResolvedEndpoint`] can carry
+/// `userinfo` (authentication of the proxy or the server serving the model), while the backend
+/// API key goes in a header (`Authorization: Bearer` / `x-api-key`). Two credentials, two
+/// destinations.
 trait Credentials {
-    /// La API key para el transporte OpenAI-compat (`OPENAI_API_KEY`).
+    /// The API key for the OpenAI-compat transport (`OPENAI_API_KEY`).
     fn openai(&self) -> Option<String>;
-    /// La API key de Anthropic (`ANTHROPIC_API_KEY`).
+    /// The Anthropic API key (`ANTHROPIC_API_KEY`).
     fn anthropic(&self) -> Option<String>;
 }
 
-/// Puente entre la resolución `env > vault` ya existente ([`discover_config`],
-/// [`resolve_openai_key`]) y el trait [`Credentials`] que pide el trío nativo.
+/// Bridge between the existing `env > vault` resolution ([`discover_config`],
+/// [`resolve_openai_key`]) and the [`Credentials`] trait required by the native trio.
 ///
-/// Reusa esas dos funciones en vez de reimplementar la precedencia una tercera vez
-/// (B3): `discover_config` también resuelve el modelo Anthropic, que acá se descarta —
-/// barato, y evita una copia más de las mismas cuatro líneas "env recortado, o
-/// `vault.get(NAME)` recortado".
+/// Reuses those two functions instead of reimplementing precedence a third time (B3):
+/// `discover_config` also resolves the Anthropic model, which is discarded here — cheap, and
+/// avoids yet another copy of the same four lines "trimmed env, or trimmed `vault.get(NAME)`".
 struct EnvVaultCredentials<'a> {
-    /// Config ya cargada — `discover_config` la necesita para el modelo Anthropic
-    /// (descartado acá), aunque esta vista solo pida la clave.
+    /// Config already loaded — `discover_config` needs it for the Anthropic model (discarded
+    /// here), even though this view only asks for the key.
     magi_config: &'a MagiConfig,
-    /// `ANTHROPIC_API_KEY` ya leída (y scrubbeada) del entorno al arrancar.
+    /// `ANTHROPIC_API_KEY` already read (and scrubbed) from the environment at startup.
     anthropic_env: Option<&'a str>,
-    /// `OPENAI_API_KEY` ya leída (y scrubbeada) del entorno al arrancar.
+    /// `OPENAI_API_KEY` already read (and scrubbed) from the environment at startup.
     openai_env: Option<&'a str>,
-    /// El vault abierto esta sesión, si lo hay.
+    /// The vault opened this session, if any.
     secret_store: Option<&'a SharedSecretStore>,
 }
 
@@ -1682,47 +1680,45 @@ impl Credentials for EnvVaultCredentials<'_> {
     }
 }
 
-/// Los tres endpoints del proceso, resueltos de una vez.
+/// The three endpoints of the process, resolved at once.
 ///
-/// El símbolo nace acá (`main.rs`), no en `config.rs`: Task 4.1 es su primer
-/// consumidor (ORDER-FIXES.md #7/#8 — un símbolo se escribe en la tarea que primero lo
-/// consume) y necesita [`SharedSecretStore`]/[`NoVaultInScope`], que ya son privados de
-/// este archivo y de este archivo únicamente — moverlo a `config.rs` obligaría a
-/// exportarlos o a reimplementar el mismo patrón "vault opcional, plantilla sin
-/// resolver nunca llega a un cliente HTTP" una segunda vez.
+/// The symbol is born here (`main.rs`), not in `config.rs`: Task 4.1 is its first consumer
+/// (ORDER-FIXES.md #7/#8 — a symbol is written in the task that first consumes it) and it needs
+/// [`SharedSecretStore`]/[`NoVaultInScope`], which are already private to this file and this
+/// file only — moving it to `config.rs` would force exporting them or reimplementing the same
+/// "optional vault, unresolved template never reaches an HTTP client" pattern a second time.
 struct ResolvedEndpoints {
-    /// `base_url` de raíz — agente principal.
+    /// Root `base_url` — main agent.
     ///
-    /// Task 4.1: el provider principal en sí sigue resolviendo su propio endpoint vía
-    /// `resolve_effective_principal_endpoint` (B3 queda pendiente de una unificación
-    /// deliberadamente diferida). Task 5.2 le agrega un consumidor real distinto: es el
-    /// endpoint contra el que `orchestrate_probes` sondea el modelo principal (REQ-A24),
-    /// así que el `#[allow(dead_code)]` que tenía se retira acá. Se resuelve igual,
-    /// fail-closed, porque `resolve_endpoints` es EL paso de arranque para los tres
-    /// endpoints a la vez — dejar este afuera lo volvería dos pasos. Cubierto por
+    /// Task 4.1: the principal provider itself keeps resolving its own endpoint via
+    /// `resolve_effective_principal_endpoint` (B3 remains pending a deliberately deferred
+    /// unification). Task 5.2 adds a different real consumer to it: it is the endpoint against
+    /// which `orchestrate_probes` probes the principal model (REQ-A24), so the
+    /// `#[allow(dead_code)]` it had is removed here. It is resolved the same way, fail-closed,
+    /// because `resolve_endpoints` is THE startup step for the three endpoints at once —
+    /// leaving this one out would make it two steps. Covered by
     /// `resolve_endpoints_resolves_the_three_fields_from_the_same_root_when_none_diverge`.
     root: ResolvedEndpoint,
-    /// `[magi].base_url` u herencia — el trío y su probe. El único campo que
-    /// `build_magi_orchestrator` lee hoy.
+    /// `[magi].base_url` or inheritance — the trio and its probe. The only field
+    /// `build_magi_orchestrator` reads today.
     magi: ResolvedEndpoint,
-    /// `[embedding].base_url` u herencia — el embedder. Mismo caso que `root`: sin
-    /// consumidor de producción todavía (`resolve_effective_embedding_endpoint`
-    /// sigue resolviendo el suyo por separado), cubierto por el mismo test.
+    /// `[embedding].base_url` or inheritance — the embedder. Same case as `root`: no production
+    /// consumer yet (`resolve_effective_embedding_endpoint` still resolves its own separately),
+    /// covered by the same test.
     #[allow(dead_code)]
     embedding: ResolvedEndpoint,
 }
 
-/// La plantilla efectiva de la raíz: `OPENAI_BASE_URL` (si no está vacía) sobre lo
-/// declarado/heredado en `magi.toml`.
+/// The effective root template: `OPENAI_BASE_URL` (if non-blank) over what is
+/// declared/inherited in `magi.toml`.
 ///
-/// Extraída (fix round 2, I1) para que [`resolve_effective_principal_endpoint`] Y
-/// [`resolve_endpoints`] apliquen EXACTAMENTE la misma capa de env — antes de este
-/// fix, solo el principal la veía, así que `OPENAI_BASE_URL` movía al agente
-/// conversacional sin mover al trío cuando `[magi].base_url` estaba ausente
-/// (heredando).
+/// Extracted (fix round 2, I1) so that [`resolve_effective_principal_endpoint`] AND
+/// [`resolve_endpoints`] apply EXACTLY the same env layer — before this fix, only the principal
+/// saw it, so `OPENAI_BASE_URL` moved the conversational agent without moving the trio when
+/// `[magi].base_url` was absent (inheriting).
 ///
 /// # Errors
-/// Un `OPENAI_BASE_URL` o `base_url` de raíz que no es una plantilla válida.
+/// An `OPENAI_BASE_URL` or root `base_url` that is not a valid template.
 fn effective_root_template(
     magi_config: &MagiConfig,
     env_base_url: Option<&str>,
@@ -1737,21 +1733,21 @@ fn effective_root_template(
     }
 }
 
-/// El paso de arranque: tras abrir el vault, ANTES del probe y del trío.
+/// The startup step: after opening the vault, BEFORE the probe and the trio.
 ///
-/// Falla CERRADO: un placeholder sin entrada detiene el proceso nombrando la entrada y
-/// el comando (`magi-rs vault set …`), nunca sustituye vacío (SC-A16f) — hereda esa
-/// garantía de [`resolve_template`], que ya la implementa para los otros dos
-/// consumidores de `base_url` (el principal y el embedder).
+/// Fails CLOSED: a placeholder without an entry stops the process naming the entry and the
+/// command (`magi-rs vault set …`), never substitutes empty (SC-A16f) — it inherits that
+/// guarantee from [`resolve_template`], which already implements it for the other two
+/// `base_url` consumers (the principal and the embedder).
 ///
-/// `env_base_url` es `OPENAI_BASE_URL` — la MISMA variable que ya movía al principal
-/// (ver [`effective_root_template`]). El embedder sigue heredando solo de TOML vía
-/// `effective_embedding_base_url()`, sin tocar en este fix: no tiene consumidor de
-/// producción todavía (`ResolvedEndpoints.embedding` sigue `#[allow(dead_code)]`) y
-/// el hallazgo del review fue específicamente sobre el trío.
+/// `env_base_url` is `OPENAI_BASE_URL` — the SAME variable that already moved the principal
+/// (see [`effective_root_template`]). The embedder keeps inheriting from TOML only via
+/// `effective_embedding_base_url()`, untouched by this fix: it still has no production consumer
+/// (`ResolvedEndpoints.embedding` remains `#[allow(dead_code)])` and the review finding was
+/// specifically about the trio.
 ///
 /// # Errors
-/// Un mensaje ya legible (ver [`resolve_template`]) del primer endpoint irresoluble.
+/// An already-readable message (see [`resolve_template`]) from the first unresolvable endpoint.
 fn resolve_endpoints(
     magi_config: &MagiConfig,
     env_base_url: Option<&str>,
@@ -1759,8 +1755,8 @@ fn resolve_endpoints(
 ) -> Result<ResolvedEndpoints, String> {
     let root_tpl = effective_root_template(magi_config, env_base_url)?;
 
-    // El trío hereda la MISMA raíz efectiva (con su capa de env) cuando no declara la
-    // propia — nunca `effective_magi_base_url()` a secas, que solo ve TOML.
+    // The trio inherits the SAME effective root (with its env layer) when it does not declare
+    // its own — never bare `effective_magi_base_url()`, which only sees TOML.
     let magi_tpl = match magi_config
         .magi
         .base_url
@@ -1784,19 +1780,19 @@ fn resolve_endpoints(
     })
 }
 
-/// Resuelve el `kind` efectivo del trío: declarado, o el YA RESUELTO del principal
-/// (`principal_kind`, NO `cfg.effective_magi_kind()`/`cfg.effective_provider()` — esos dos
-/// accessors son TOML-only e ignorarían `MAGI_PROVIDER`).
+/// Resolves the effective `kind` of the trio: declared, or the ALREADY-RESOLVED one from the
+/// principal (`principal_kind`, NOT `cfg.effective_magi_kind()`/`cfg.effective_provider()` —
+/// those two accessors are TOML-only and would ignore `MAGI_PROVIDER`).
 ///
-/// Compartida entre [`build_magi_orchestrator`] (construcción real) y
-/// [`orchestrate_probes`] (sondeo, REQ-A24, Task 5.2) para que las dos vean SIEMPRE el
-/// mismo kind (B3): sin esto, un `MAGI_PROVIDER` que mueve al principal sin declarar
-/// `[magi].kind` haría que el probe midiera un backend distinto del que el trío realmente
-/// termina usando — exactamente el bug que el parámetro `principal_kind` de
-/// `build_magi_orchestrator` ya existe para evitar en la construcción real.
+/// Shared between [`build_magi_orchestrator`] (real construction) and [`orchestrate_probes`]
+/// (probing, REQ-A24, Task 5.2) so that both ALWAYS see the same kind (B3): without this, a
+/// `MAGI_PROVIDER` that moves the principal without declaring `[magi].kind` would make the
+/// probe measure a different backend from the one the trio actually ends up using — exactly the
+/// bug that the `principal_kind` parameter of `build_magi_orchestrator` already exists to avoid
+/// in real construction.
 ///
 /// # Errors
-/// [`ProviderKindParseError`] si `[magi].kind` está presente y no se reconoce.
+/// [`ProviderKindParseError`] if `[magi].kind` is present and not recognized.
 fn resolve_magi_kind(
     cfg: &MagiConfig,
     principal_kind: ProviderKind,
@@ -1807,13 +1803,13 @@ fn resolve_magi_kind(
     )
 }
 
-/// Modelo del BACKEND para `kind`: el que hereda un asiento del trío sin override propio,
-/// Y el modelo que se sondea como "modelo principal" (REQ-A24). `[openai]` sirve a
-/// `ollama` Y a `openai-compat` porque comparten protocolo de completions (REQ-A01b).
+/// BACKEND model for `kind`: the one a trio seat inherits without its own override, AND the
+/// model probed as the "principal model" (REQ-A24). `[openai]` serves both `ollama` AND
+/// `openai-compat` because they share the completions protocol (REQ-A01b).
 ///
-/// Compartida entre [`build_magi_orchestrator`] y [`orchestrate_probes`] (B3, Task 5.2) —
-/// antes de esta extracción, sondear el modelo correcto en el arranque habría exigido
-/// repetir esta misma resolución en el call site.
+/// Shared between [`build_magi_orchestrator`] and [`orchestrate_probes`] (B3, Task 5.2) —
+/// before this extraction, probing the correct model at startup would have required repeating
+/// this same resolution at the call site.
 fn resolve_backend_model(cfg: &MagiConfig, kind: ProviderKind) -> &str {
     match kind {
         ProviderKind::Ollama | ProviderKind::OpenAiCompat => cfg
@@ -1829,45 +1825,45 @@ fn resolve_backend_model(cfg: &MagiConfig, kind: ProviderKind) -> &str {
     }
 }
 
-/// Orquesta las sondas del principal y del trío (REQ-A24, Task 5.2): una tanda si
-/// comparten endpoint y kind, dos en `join!` si divergen — y la tabla del trío devuelta
-/// está SIEMPRE re-proyectada para que la ventana del principal jamás contamine
-/// [`derive_warn_tokens`] (SC-A24j): esa función toma el mínimo de lo que recibe, así que
-/// pasarle una tabla que incluyera al principal dejaría que un principal de ventana chica
-/// bajara el umbral que REQ-A24b define sobre los MAGES.
+/// Orchestrates the probes of the principal and the trio (REQ-A24, Task 5.2): one batch if they
+/// share endpoint and kind, two in `join!` if they diverge — and the returned trio table is
+/// ALWAYS re-projected so that the principal window never contaminates [`derive_warn_tokens`]
+/// (SC-A24j): that function takes the minimum of what it receives, so passing it a table that
+/// included the principal would let a small-window principal lower the threshold that REQ-A24b
+/// defines over the MAGES.
 ///
-/// **Resuelve el modelo del principal y el del trío POR SEPARADO, cada uno con SU PROPIO
-/// kind — fix round 1 (finding Logic+Structure).** La primera versión de esta función
-/// recibía `backend_model`/`trio_models` ya resueltos por el LLAMADOR, y los dos call
-/// sites (`run()`/`prepare_headless()`) los resolvían con `resolve_backend_model(cfg,
-/// principal_kind)` — el kind del PRINCIPAL — para los DOS grupos. Eso da la respuesta
-/// correcta solo cuando el trío no diverge (ahí `magi_kind == principal_kind` por
-/// herencia trivial) y se rompe exactamente cuando `[magi].kind` declara un kind DISTINTO
-/// del principal: un asiento del trío sin override propio terminaba heredando el modelo
-/// de la SECCIÓN DEL PRINCIPAL (`[anthropic].model` con el principal en `anthropic`, por
-/// ejemplo) en vez del modelo de SU PROPIA sección (`[openai].model` con el trío en
-/// `ollama`). El síntoma usual es una degradación silenciosa a *no medido*; el peor caso
-/// es que ese nombre coincida con un modelo real del endpoint del trío y el probe mida la
-/// ventana de un modelo AJENO, envenenando `input_warn_tokens` con un número sin relación
-/// con lo que el trío realmente ejecuta. Resolver ACÁ ADENTRO, con el mismo
-/// `resolve_magi_kind` que ya usaba la rama divergente para el KIND, cierra el hueco por
-/// construcción: no hay manera de que esta función y `build_magi_orchestrator` (que hace
-/// exactamente esta misma resolución de kind+modelo) terminen viendo un modelo distinto
-/// para la misma config — la duplicación entre los dos call sites es precisamente por qué
-/// el bug existía DOS veces (B3).
+/// **Resolves the principal's model and the trio's model SEPARATELY, each with its OWN
+/// kind — fix round 1 (finding Logic+Structure).** The first version of this function received
+/// `backend_model`/`trio_models` already resolved by the CALLER, and the two call sites
+/// (`run()`/`prepare_headless()`) resolved them with `resolve_backend_model(cfg,
+/// principal_kind)` — the PRINCIPAL's kind — for BOTH groups. That gives the right answer only
+/// when the trio does not diverge (there `magi_kind == principal_kind` by trivial inheritance)
+/// and breaks exactly when `[magi].kind` declares a kind DIFFERENT from the principal: a trio
+/// seat without its own override ended up inheriting the model from the PRINCIPAL'S SECTION
+/// (`[anthropic].model` with the principal on `anthropic`, for example) instead of the model
+/// from ITS OWN section (`[openai].model` with the trio on `ollama`). The usual symptom is a
+/// silent degradation to *not measured*; the worst case is that that name matches a real model
+/// on the trio's endpoint and the probe measures the window of an ALIEN model, poisoning
+/// `input_warn_tokens` with a number unrelated to what the trio actually runs. Resolving HERE
+/// INSIDE, with the same `resolve_magi_kind` that the divergent branch already used for the
+/// KIND, closes the hole by construction: there is no way for this function and
+/// `build_magi_orchestrator` (which does exactly this same kind+model resolution) to end up
+/// seeing a different model for the same config — the duplication between the two call sites is
+/// precisely why the bug existed TWICE (B3).
 ///
-/// **Nunca bloquea ni falla el arranque**: cada sonda individual falla abierta dentro de
-/// `probe_models` (REQ-A24), y un `[magi].kind` inválido acá degrada el TRÍO entero a *no
-/// medido* en vez de propagar un error — `build_magi_orchestrator`, llamado después con la
-/// MISMA config, es quien reporta ese `[magi].kind` inválido con su error tipado; este
-/// sondeo solo necesita un mejor esfuerzo, nunca la última palabra.
+/// **Never blocks or fails startup**: each individual probe fails open inside of
+/// `probe_models` (REQ-A24), and an invalid `[magi].kind` here degrades the ENTIRE trio to *not
+/// measured* instead of propagating an error — `build_magi_orchestrator`, called later with the
+/// SAME config, is the one that reports that invalid `[magi].kind` with its typed error; this
+/// probe only needs a best effort, never the final word.
 ///
-/// El `kind` va por GRUPO, no global: con el trío en `ollama` y el principal en
-/// `anthropic`, sondear el principal con el kind del trío pediría `/api/show` a un
-/// endpoint que no lo tiene.
+/// The `kind` goes by GROUP, not global: with the trio on `ollama` and the principal on
+/// `anthropic`, probing the principal with the trio's kind would ask `/api/show` of an endpoint
+/// that does not have it.
 ///
-/// Devuelve el modelo del PRINCIPAL además de sus mediciones — el llamador ([`probe_and_report`])
-/// lo necesita para nombrar el notice de arranque (REQ-A24c) sin resolverlo una segunda vez.
+/// Returns the PRINCIPAL's model in addition to its measurements — the caller
+/// ([`probe_and_report`]) needs it to name the startup notice (REQ-A24c) without resolving it a
+/// second time.
 async fn orchestrate_probes(
     cfg: &MagiConfig,
     endpoints: &ResolvedEndpoints,
@@ -1877,18 +1873,17 @@ async fn orchestrate_probes(
     let principal_model = resolve_backend_model(cfg, principal_kind).to_string();
 
     if !cfg.magi_endpoint_diverges() {
-        // Mismo endpoint y mismo kind (`magi_endpoint_diverges() == false` implica
-        // `[magi].kind`/`[magi].base_url` ausentes, así que el trío hereda
-        // `principal_kind` trivialmente — el fallback del trío es EXACTAMENTE el mismo
-        // modelo que el del principal, sin ambigüedad posible): UNA tanda para no sondear
-        // cuatro veces lo mismo.
+        // Same endpoint and same kind (`magi_endpoint_diverges() == false` implies
+        // `[magi].kind`/`[magi].base_url` absent, so the trio inherits `principal_kind`
+        // trivially — the trio's fallback is EXACTLY the same model as the principal's, with no
+        // possible ambiguity): ONE batch so as not to probe the same thing four times.
         let trio_seats = cfg.magi.seats(&principal_model);
         let trio_models: Vec<&str> = trio_seats.iter().map(|(_, m)| m.as_str()).collect();
         let mut all = trio_models.clone();
         all.push(principal_model.as_str());
         let measured = probe_models(principal_kind, &endpoints.root, &all, factory).await;
-        // Re-proyecta la tabla del TRÍO desde `measured`: una sonda, dos vistas — el
-        // principal nunca entra en lo que se devuelve como tabla del trío.
+        // Re-projects the TRIO's table from `measured`: one probe, two views — the principal
+        // never enters what is returned as the trio's table.
         let trio_only: BTreeMap<String, Measurement> = trio_models
             .iter()
             .map(|m| {
@@ -1906,24 +1901,23 @@ async fn orchestrate_probes(
     } else {
         match resolve_magi_kind(cfg, principal_kind) {
             Ok(magi_kind) => {
-                // FIX round 1: el fallback del trío sale de `resolve_backend_model(cfg,
-                // magi_kind)` — el kind DEL TRÍO, ya resuelto arriba — NUNCA de
-                // `principal_kind`. Un `[openai].model`/`[anthropic].model` es una
-                // propiedad de la SECCIÓN, y la sección la elige el kind de CADA grupo,
-                // no el del principal.
+                // FIX round 1: the trio's fallback comes from `resolve_backend_model(cfg,
+                // magi_kind)` — the TRIO's kind, already resolved above — NEVER from
+                // `principal_kind`. An `[openai].model`/`[anthropic].model` is a property of
+                // the SECTION, and the section is chosen by the kind of EACH group, not the
+                // principal's.
                 let trio_model = resolve_backend_model(cfg, magi_kind).to_string();
                 let trio_seats = cfg.magi.seats(&trio_model);
                 let trio_models: Vec<&str> = trio_seats.iter().map(|(_, m)| m.as_str()).collect();
 
-                // `join!`, no dos `.await` en fila: en serie el peor caso de arranque
-                // sería DOS techos; la propiedad exigida (SC-A24k, un nivel más arriba,
-                // entre TANDAS en vez de entre sondas de una tanda) es que siga siendo
-                // UNO.
+                // `join!`, not two `.await`s in a row: in series the worst-case startup would
+                // be TWO ceilings; the required property (SC-A24k, one level up, between
+                // BATCHES rather than between probes in a batch) is that it still be ONE.
                 //
-                // `principal_models` ligado a una variable (no `&[...]` inline): el array
-                // temporal de un slice literal no vive más allá de la expresión que lo
-                // crea, y `tokio::join!` expande sus dos brazos en un solo `match` que los
-                // mantiene vivos más allá de esa expresión — E0716 sin este `let`.
+                // `principal_models` bound to a variable (not an inline `&[...]`): the
+                // temporary array of a slice literal does not live beyond the expression that
+                // creates it, and `tokio::join!` expands its two branches into a single `match`
+                // that keeps them alive beyond that expression — E0716 without this `let`.
                 let principal_models = [principal_model.as_str()];
                 let (principal, trio) = tokio::join!(
                     probe_models(principal_kind, &endpoints.root, &principal_models, factory),
@@ -1933,19 +1927,19 @@ async fn orchestrate_probes(
                 (principal_model, principal_measurement, trio)
             }
             Err(_) => {
-                // `[magi].kind` inválido: `build_magi_orchestrator` lo reporta con su
-                // propio error tipado cuando construya el trío de verdad. Acá no hay un
-                // `ProviderKind` válido con el que resolver ni el kind ni el modelo del
-                // trío, así que degrada TODO el trío a *no medido* sin adivinar ninguno de
-                // los dos — el principal se sondea solo, porque su kind y su modelo sí son
-                // válidos por construcción (`principal_kind` ya llega resuelto).
+                // Invalid `[magi].kind`: `build_magi_orchestrator` reports it with its own
+                // typed error when it builds the real trio. Here there is no valid
+                // `ProviderKind` with which to resolve either the kind or the model of the
+                // trio, so it degrades the WHOLE trio to *not measured* without guessing either
+                // — the principal is probed alone, because its kind and model are valid by
+                // construction (`principal_kind` already arrives resolved).
                 let principal_models = [principal_model.as_str()];
                 let principal =
                     probe_models(principal_kind, &endpoints.root, &principal_models, factory).await;
-                // Los TRES asientos, nombrados con el modelo del PRINCIPAL únicamente para
-                // que la tabla devuelta tenga tres claves plausibles — nunca se sondea con
-                // ese nombre acá, así que el nombre no puede envenenar nada: los tres
-                // valores son `NotMeasuredThisTime` por construcción, no por sondeo.
+                // The THREE seats, named with the PRINCIPAL's model only so the returned table
+                // has three plausible keys — it is never probed with that name here, so the
+                // name cannot poison anything: the three values are `NotMeasuredThisTime` by
+                // construction, not by probing.
                 let trio_seats = cfg.magi.seats(&principal_model);
                 let trio = trio_seats
                     .into_iter()
@@ -1958,19 +1952,19 @@ async fn orchestrate_probes(
     }
 }
 
-/// Sondea el principal y el trío, empuja los notices resultantes a `notices`, y deriva
-/// `input_warn_tokens` (REQ-A24b/SC-A24e: lo declarado en `[magi].input_warn_tokens` gana
-/// sobre lo medido).
+/// Probes the principal and the trio, pushes the resulting notices to `notices`, and derives
+/// `input_warn_tokens` (REQ-A24b/SC-A24e: what is declared in `[magi].input_warn_tokens` wins
+/// over what is measured).
 ///
-/// **El bloque COMPLETO que Task 5.2 tenía duplicado entre `run()` y `prepare_headless()`
-/// — fix round 1, B3.** La duplicación es precisamente por qué el finding
-/// Logic+Structure de este round existía DOS veces en vez de una: cada call site tenía su
-/// propia copia de la resolución de `backend_model`/`trio_models`, y solo una de las dos
-/// copias necesitaba estar mal para que el bug apareciera. Con una única función que hace
-/// el sondeo, arma los notices y deriva el umbral, los dos call sites quedan reducidos a
-/// una llamada — y una prueba contra esta función ejercita EXACTAMENTE lo que los dos call
-/// sites reales invocan, cerrando el hueco que dejaba pasar el finding original (los tests
-/// de la ronda 0 armaban `trio_models` a mano en vez de pasar por la resolución real).
+/// **The COMPLETE block that Task 5.2 had duplicated between `run()` and `prepare_headless()`
+/// — fix round 1, B3.** The duplication is precisely why the Logic+Structure finding of this
+/// round existed TWICE instead of once: each call site had its own copy of the
+/// `backend_model`/`trio_models` resolution, and only one of the two copies needed to be wrong
+/// for the bug to appear. With a single function that does the probing, assembles the notices
+/// and derives the threshold, the two call sites are reduced to one call — and a test against
+/// this function exercises EXACTLY what the two real call sites invoke, closing the gap that
+/// let the original finding through (the round-0 tests built `trio_models` by hand instead of
+/// going through real resolution).
 async fn probe_and_report(
     cfg: &MagiConfig,
     endpoints: &ResolvedEndpoints,
@@ -1989,29 +1983,28 @@ async fn probe_and_report(
             notices.push(Notice::resolution(n));
         }
     }
-    // REQ-A24b/SC-A24e: lo explícito (`[magi].input_warn_tokens`) gana sobre lo medido.
+    // REQ-A24b/SC-A24e: the explicit (`[magi].input_warn_tokens`) wins over the measured.
     cfg.magi
         .input_warn_tokens
         .or_else(|| derive_warn_tokens(&trio))
 }
 
-/// Caracteres de digest que se muestran en el notice de arranque (REQ-A24c).
+/// Digest characters shown in the startup notice (REQ-A24c).
 ///
-/// 12: alcanza para distinguir manifiestos sin ser ruido — el digest completo son 64 hex
-/// (`DIGEST_HEX_LEN` en `magi::probe`, ya validado ahí antes de llegar acá), y mostrarlo
-/// entero en una línea de arranque es ruido: es un identificador, no un secreto que valga
-/// la pena ver completo.
+/// 12: enough to distinguish manifests without being noise — the full digest is 64 hex
+/// (`DIGEST_HEX_LEN` in `magi::probe`, already validated there before reaching here), and
+/// showing it whole in a startup line is noise: it is an identifier, not a secret worth seeing
+/// in full.
 ///
-/// Se recorta con `chars().take(..)`, NUNCA con `&d[..N]`: el digest ya viene validado
-/// como 64 hex ASCII (REQ-A16b) y el slice por bytes sería seguro hoy, pero el invariante
-/// del proyecto es "prohibido byte-indexar sin verificación", sin excepciones por
-/// conveniencia — una excepción justificada hoy es la que alguien copia mañana a un campo
-/// que no es ASCII.
+/// It is trimmed with `chars().take(..)`, NEVER with `&d[..N]`: the digest is already validated
+/// as 64 hex ASCII (REQ-A16b) and a byte slice would be safe today, but the project's invariant
+/// is "byte-indexing without verification is forbidden", with no exceptions for convenience —
+/// an exception justified today is the one someone copies tomorrow to a non-ASCII field.
 const DIGEST_PREVIEW_LEN: usize = 12;
 
-/// Renderiza el notice de arranque del probe (REQ-A24c). Tres estados, no dos — ver
-/// [`Measurement`]: *medido*, *no medible* (el endpoint no ofrece introspección, no es un
-/// fallo) y *no medido esta vez* (el caso común de un daemon frío en el primer arranque).
+/// Renders the probe's startup notice (REQ-A24c). Three states, not two — see [`Measurement`]:
+/// *measured*, *not measurable* (the endpoint does not offer introspection, not a failure) and
+/// *not measured this time* (the common case of a cold daemon on first startup).
 fn probe_notice(m: &Measurement) -> String {
     match m {
         Measurement::Measured { window, digest } => {
@@ -2037,13 +2030,13 @@ fn probe_notice(m: &Measurement) -> String {
     }
 }
 
-/// Avisa cuando `max_query_bytes` queda CERCA de la ventana medida de los MAGES
-/// (SC-A24i/REQ-A24) — nunca de la del principal, que no recibe ese payload.
+/// Warns when `max_query_bytes` is CLOSE to the measured window of the MAGES (SC-A24i/REQ-A24)
+/// — never the principal's, which does not receive that payload.
 ///
-/// Compara en TOKENS, no bytes contra tokens: `max_query_bytes` está en bytes y
-/// `window_tokens` en tokens, y contrastarlos directo haría que el notice saliera o no
-/// por accidente aritmético. El mensaje nombra el estimador para que quien lo lee sepa
-/// que el número convertido es una aproximación, no una medición.
+/// Compares in TOKENS, not bytes against tokens: `max_query_bytes` is in bytes and
+/// `window_tokens` is in tokens, and contrasting them directly would make the notice fire or
+/// not by arithmetic accident. The message names the estimator so the reader knows the
+/// converted number is an approximation, not a measurement.
 fn stale_composition_notice(window_tokens: usize, max_query_bytes: usize) -> Option<String> {
     let cap_tokens = bytes_to_tokens_est(max_query_bytes);
     #[allow(
@@ -2062,95 +2055,92 @@ fn stale_composition_notice(window_tokens: usize, max_query_bytes: usize) -> Opt
     })
 }
 
-/// Por qué un asiento del trío no se pudo construir — tipado, no `String` (REQ-A05b):
-/// el llamador reporta los tres asientos caídos de una vez y necesita distinguir
-/// credencial-faltante de fallo de transporte sin parsear texto.
+/// Why a trio seat could not be built — typed, not `String` (REQ-A05b): the caller reports the
+/// three fallen seats at once and needs to distinguish missing-credential from transport
+/// failure without parsing text.
 ///
-/// **Ya NO tiene una variante `Http`.** La tuvo brevemente (Task 4.4, ronda 1),
-/// anticipando que `build_native_provider` capturaría un `ProviderError::Http` real en
-/// el primer uso del asiento. Verificado que eso nunca ocurre:
-/// `OpenAiCompatibleProvider::with_timeout`/`from_authority` (magi-core 3.1.0) no hacen
-/// ninguna petición HTTP en construcción — su único modo de fallo es
-/// `ProviderError::Network`, vía `client_build_error`. La variante quedaba
-/// permanentemente sin constructor de producción, así que se retiró en la ronda 2 en
-/// vez de arrastrar un `#[allow(dead_code)]` que no protegía nada real. La traducción
-/// del 401/403 keyless (REQ-A12c) ahora opera sobre la causa YA RENDERIZADA de
-/// `MagiReport::failed_agents` — ver `tools::consult::keyless_auth_explanation` — que
-/// es de donde un 401 real SÍ es alcanzable; los detalles y su alcance genuino están en
-/// el reporte de esta tarea.
+/// **It NO LONGER has an `Http` variant.** It briefly had one (Task 4.4, round 1),
+/// anticipating that `build_native_provider` would capture a real `ProviderError::Http` on a
+/// seat's first use. Verified that this never happens:
+/// `OpenAiCompatibleProvider::with_timeout`/`from_authority` (magi-core 3.1.0) do not make any
+/// HTTP request during construction — their only failure mode is `ProviderError::Network`, via
+/// `client_build_error`. The variant remained permanently without a production constructor, so
+/// it was removed in round 2 instead of dragging a `#[allow(dead_code)]` that did not protect
+/// anything real. The translation of keyless 401/403 (REQ-A12c) now operates on the ALREADY-
+/// RENDERED cause of `MagiReport::failed_agents` — see
+/// `tools::consult::keyless_auth_explanation` — which is where a real 401 IS reachable; the
+/// details and their genuine scope are in this task's report.
 #[derive(Debug, thiserror::Error)]
 enum SeatError {
-    /// El kind exige credencial y no hay ninguna resuelta.
+    /// The kind requires a credential and none is resolved.
     #[error("missing credential {var} for this backend")]
     MissingCredential {
-        /// Nombre de la variable/entrada de vault esperada.
+        /// Name of the expected vault variable/entry.
         var: &'static str,
     },
-    /// El cliente HTTP no se pudo construir. `SafeErrorText`, no `String`: el texto de
-    /// un error foráneo puede llevar la URL con credenciales, y este tipo solo se
-    /// construye pasando por [`redact_foreign_error`].
+    /// The HTTP client could not be built. `SafeErrorText`, not `String`: a foreign error's
+    /// text may carry the URL with credentials, and this type is only built by going through
+    /// [`redact_foreign_error`].
     #[error("could not build the HTTP client: {0}")]
     Transport(SafeErrorText),
 }
 
-/// Renderiza UN `(asiento, causa)` como `"Melchior: falta la credencial …"`.
+/// Renders ONE `(seat, cause)` as `"Melchior: missing credential …"`.
 ///
-/// Primitiva única de formateo compartida entre el `Display` de
-/// [`TrioError::SeatUnbuildable`] (abajo) y [`trio_unavailable_message`] (Task 4.3,
-/// B3): antes de esta función existían dos redacciones independientes de la misma
-/// información — el `Display` derivado por `thiserror` reducía `seats` a un conteo
-/// (`seats.len()`) mientras que el mensaje accionable de arranque sí nombraba asiento
-/// y causa. Cualquier `{e}`/`.to_string()` FUTURO sobre un `TrioError` — no solo los
-/// tres sitios que Task 4.3 audita a mano — heredaba la versión pobre en silencio.
-/// `cause` usa su `Display` (`thiserror`), que ya pasa por [`redact_foreign_error`]
-/// donde corresponde (`SeatError::Transport`), así que esta función no necesita su
-/// propia redacción.
+/// Single shared formatting primitive between the `Display` of [`TrioError::SeatUnbuildable`]
+/// (below) and [`trio_unavailable_message`] (Task 4.3, B3): before this function there were two
+/// independent wordings of the same information — the `Display` derived by `thiserror` reduced
+/// `seats` to a count (`seats.len()`) while the actionable startup message did name seat and
+/// cause. Any FUTURE `{e}`/`.to_string()` on a `TrioError` — not just the three sites Task 4.3
+/// audits by hand — would silently inherit the poor version. `cause` uses its `Display`
+/// (`thiserror`), which already goes through [`redact_foreign_error`] where appropriate
+/// (`SeatError::Transport`), so this function does not need its own wording.
 fn format_seat_failure(seat: &AgentName, cause: &SeatError) -> String {
     format!("{seat:?}: {cause}")
 }
 
-/// Por qué el trío no se pudo construir (REQ-A06).
+/// Why the trio could not be built (REQ-A06).
 #[derive(Debug, thiserror::Error)]
 enum TrioError {
-    /// Uno o más asientos declarados fallaron. Se listan **todos**, no el primero: los
-    /// tres comparten credencial y endpoint, así que cuando uno falla por
-    /// configuración lo normal es que fallen los tres — reportar de a uno obliga a
-    /// tres arranques para descubrir un problema único.
+    /// One or more declared seats failed. They are listed **all**, not just the first: the
+    /// three share credential and endpoint, so when one fails due to configuration the normal
+    /// thing is for all three to fail — reporting one at a time forces three startups to
+    /// discover a single problem.
     ///
-    /// El `Display` nombra CADA asiento y su causa (fix round, Task 4.3 review de
-    /// 4.1): un `#[error("…", seats.len())]` que solo cuenta ("3") es exactamente el
-    /// defecto que motivó esta tarea — un usuario sin `OPENAI_API_KEY` veía
-    /// literalmente "asientos no construibles: 3", sin decir cuál asiento ni por qué.
+    /// The `Display` names EACH seat and its cause (fix round, Task 4.3 review of 4.1): a
+    /// `#[error("…", seats.len())]` that only counts ("3") is exactly the defect that motivated
+    /// this task — a user without `OPENAI_API_KEY` literally saw "unbuildable seats: 3",
+    /// without saying which seat or why.
     #[error(
         "unbuildable seats: {}",
         seats.iter().map(|(s, c)| format_seat_failure(s, c)).collect::<Vec<_>>().join("; ")
     )]
     SeatUnbuildable {
-        /// Asiento y causa, uno por cada fallo.
+        /// `Seat and cause, one per failure.
         seats: Vec<(AgentName, SeatError)>,
     },
-    /// `[magi].kind` trae un valor que no está en el vocabulario.
+    /// `[magi].kind` brings a value that is not in the vocabulary.
     #[error("unrecognized `[magi].kind`: {0}")]
     UnknownKind(String),
-    /// No se declaró ningún asiento. Distinto de `SeatUnbuildable`: acá no falló
-    /// ninguno, simplemente no había ninguno que construir.
+    /// No seat was declared. Different from `SeatUnbuildable`: none failed here, there simply
+    /// was none to build.
     #[error("no seats declared for the trio")]
     NoSeats,
-    /// `MagiBuilder::build()` rechazó la configuración. `SafeErrorText`, no `String`:
-    /// el mensaje viene de magi-core, que no conoce nuestra regla de redacción y puede
-    /// citar la `base_url` con credenciales.
+    /// `MagiBuilder::build()` rejected the configuration. `SafeErrorText`, not `String`: the
+    /// message comes from magi-core, which does not know our redaction rule and may quote
+    /// `base_url` with credentials.
     #[error("magi-core rejected the construction: {0}")]
     Builder(SafeErrorText),
 }
 
-/// Mensaje único y accionable para las tres superficies (REQ-A06, SC-A05b/SC-A05c).
+/// Single actionable message for the three surfaces (REQ-A06, SC-A05b/SC-A05c).
 ///
-/// Uno solo para que el notice de arranque, la respuesta de la TUI y el error headless
-/// digan **lo mismo**: si divergen, el usuario cree estar ante tres problemas
-/// distintos. Reusa [`format_seat_failure`] (B3) en vez de re-derivar su propio
-/// resumen de `seats` — la única diferencia con el `Display` de `TrioError` es el
-/// separador (uno por línea acá, para lectura humana en una lista de asientos; `"; "`
-/// en el `Display` técnico, pensado para una sola línea de log/encadenamiento).
+/// Only one so the startup notice, the TUI response and the headless error say **the same
+/// thing**: if they diverge, the user believes they face three different problems. Reuses
+/// [`format_seat_failure`] (B3) instead of re-deriving its own `seats` summary — the only
+/// difference from the `Display` of `TrioError` is the separator (one per line here, for human
+/// reading in a list of seats; `"; "` in the technical `Display`, intended for a single
+/// log/chaining line).
 #[must_use]
 fn trio_unavailable_message(err: &TrioError) -> String {
     match err {
@@ -2176,13 +2166,12 @@ fn trio_unavailable_message(err: &TrioError) -> String {
     }
 }
 
-/// Overrides de modelo por asiento vía `MAGI_MODEL_MELCHIOR`/`BALTHASAR`/`CASPAR`.
+/// Per-seat model overrides via `MAGI_MODEL_MELCHIOR`/`BALTHASAR`/`CASPAR`.
 ///
-/// Restaurado, fix round 1 (coordinador, 2026-08-03): retirado por error en la Task
-/// 4.1 junto con `agent::magi_wiring` (su único llamador de producción, parte de la
-/// máquina de adapters retirada) — pero R-A03 solo admite las tres rupturas
-/// declaradas en REQ-A21/A22/A23, y esta capacidad nunca fue una de ellas. Silencio
-/// más R-A03 significa que la capacidad se queda.
+/// Restored, fix round 1 (coordinator, 2026-08-03): removed by mistake in Task 4.1 along with
+/// `agent::magi_wiring` (its only production caller, part of the removed adapter machinery) —
+/// but R-A03 only admits the three declared breakages in REQ-A21/A22/A23, and this capability
+/// was never one of them. Silence plus R-A03 means the capability stays.
 #[derive(Debug, Clone, Default)]
 struct MagiEnvModelOverrides {
     /// `MAGI_MODEL_MELCHIOR`.
@@ -2194,7 +2183,7 @@ struct MagiEnvModelOverrides {
 }
 
 impl MagiEnvModelOverrides {
-    /// El override de ESTE proceso para `seat`, si `MAGI_MODEL_<AGENT>` está seteada.
+    /// The override for THIS process for `seat`, if `MAGI_MODEL_<AGENT>` is set.
     fn for_seat(&self, seat: AgentName) -> Option<&str> {
         match seat {
             AgentName::Melchior => self.melchior.as_deref(),
@@ -2203,8 +2192,8 @@ impl MagiEnvModelOverrides {
         }
     }
 
-    /// Lee las tres variables de entorno UNA vez, al arrancar (mismo momento que el
-    /// resto de la resolución `env > TOML > default` de este archivo).
+    /// Reads the three environment variables ONCE, at startup (same moment as the rest of this
+    /// file's `env > TOML > default` resolution).
     fn from_env() -> Self {
         Self {
             melchior: env::var("MAGI_MODEL_MELCHIOR").ok(),
@@ -2214,71 +2203,69 @@ impl MagiEnvModelOverrides {
     }
 }
 
-/// Anuncia que el contenido pasa por el provider principal ANTES que por el trío
-/// (REQ-A07c/REQ-A07p, SC-A07p), cuando eso es efectivamente lo que va a pasar.
+/// Announces that content goes through the principal provider BEFORE the trio
+/// (REQ-A07c/REQ-A07p, SC-A07p), when that is effectively what will happen.
 ///
-/// Sale **solo** cuando el trío diverge del principal (`cfg.magi_endpoint_diverges()`)
-/// **y** `inference_active` es `true`: con todo en el mismo endpoint no hay divergencia
-/// que reportar, y con la inferencia inactiva (`[magi].default_mode` declarado) el
-/// contenido nunca sale hacia el principal para clasificarse — el notice sería ruido en
-/// los dos casos.
+/// It fires **only** when the trio diverges from the principal (`cfg.magi_endpoint_diverges()`)
+/// **and** `inference_active` is `true`: with everything on the same endpoint there is no
+/// divergence
+/// to report, and with inference inactive (`[magi].default_mode` declared) content never goes
+/// to the principal to be classified — the notice would be noise in both cases.
 ///
-/// **Divergencia respecto del Step 3 del brief de esta tarea — probada por el propio
-/// test que el brief entregó, no solo argumentada.** El pseudocódigo original
-/// RECALCULABA `will_attempt_classification` puertas adentro (`cfg.effective_default_mode
-/// ().is_none()`), IGNORANDO por completo el parámetro `inference_active`. Con el `cfg`
-/// idéntico en las dos últimas aserciones de `endpoint_divergence_is_announced_only_
-/// when_it_actually_diverges` — la única diferencia es `true` vs. `false` en el segundo
-/// argumento — un recálculo interno habría dado el MISMO resultado en ambas llamadas,
-/// contradiciendo la tercera aserción (`divergence_notice(&cfg, false).is_none()`). El
-/// parámetro tiene que ser la ÚNICA fuente para ese lado del gate; recalcularlo puertas
-/// adentro no es una variación de estilo, es un bug que el propio test del brief hace
-/// visible en cuanto se ejecuta.
+/// **Divergence from Step 3 of this task's brief — proven by the very
+/// test the brief delivered, not just argued.** The original pseudocode RECALCULATED
+/// `will_attempt_classification` inside (`cfg.effective_default_mode().is_none()`), COMPLETELY
+/// IGNORING the `inference_active` parameter. With identical `cfg` in the last two assertions
+/// of `endpoint_divergence_is_announced_only_ when_it_actually_diverges` — the only difference
+/// is `true` vs. `false` in the second argument — an internal recalculation would have yielded
+/// the SAME result in both calls, contradicting the third assertion (`divergence_notice(&cfg,
+/// false).is_none()`). The parameter must be the ONLY source for that side of the gate;
+/// recalculating it inside is not a style variation, it is a bug that the brief's own test
+/// makes visible as soon as it runs.
 ///
 /// # Parameters
-/// * `cfg` - la configuración ya cargada (post [`MagiConfig::load`]); ver la nota de
-///   infalibilidad más abajo sobre por qué sus dos `effective_*_base_url()` no fallan en
-///   producción.
-/// * `inference_active` - `true` cuando ESTA sesión puede llegar a clasificar el modo por
-///   contenido — el llamador ya lo sabe (lo necesita para otras decisiones de la misma
-///   corrida, como si vale la pena avisar del costo de REQ-A07c) y se recibe en vez de
-///   volver a derivarlo acá, precisamente para que esta función no tenga una segunda
-///   opinión sobre algo que el llamador ya resolvió.
+/// * `cfg` - the configuration already loaded (post [`MagiConfig::load`]); see the note about
+/// infallibility below on why its two `effective_*_base_url()` do not fail in production.
+/// * `inference_active` - `true` when THIS session may end up classifying the mode by
+/// content — the caller already knows it (it needs it for other decisions in the same run, such
+/// as whether it is worth warning about the cost of REQ-A07c) and it is received instead of
+/// being re-derived here, precisely so this function does not have a second opinion about
+/// something the caller already resolved.
 ///
 /// # Returns
-/// `Some(Notice)` (tier `Resolution`) cuando la divergencia y la inferencia coinciden;
-/// `None` en cualquier otro caso.
+/// `Some(Notice)` (tier `Resolution`) when divergence and inference coincide; `None` in any
+/// other case.
 #[must_use]
 fn divergence_notice(cfg: &MagiConfig, inference_active: bool) -> Option<Notice> {
     if !(cfg.magi_endpoint_diverges() && inference_active) {
         return None;
     }
 
-    // INFALIBLE POR PRECONDICIÓN, mismo patrón que `MagiConfig::effective_provider`/
-    // `effective_default_mode`: `MagiConfig::load()` ya llamó
-    // `effective_base_url()?`/`effective_magi_base_url()?` antes de devolver este `cfg`
-    // (ver `config.rs::load`), así que un `Err` acá solo puede pasar si alguien construyó
-    // el `MagiConfig` a mano saltándose `load()` — un bug de quien llama, no una entrada
-    // de usuario. El `debug_assert!` lo convierte en un panic ruidoso en debug/test.
+    // INFALLIBLE BY PRECONDITION, same pattern as `MagiConfig::effective_provider`/
+    // `effective_default_mode`: `MagiConfig::load()` already called
+    // `effective_base_url()?`/`effective_magi_base_url()?` before returning this `cfg` (see
+    // `config.rs::load`), so an `Err` here can only happen if someone built `MagiConfig` by
+    // hand skipping `load()` — a caller bug, not a user input. The `debug_assert!` turns it
+    // into a loud panic in debug/test.
     //
-    // Pero NO se propaga con `.ok()?` (el patrón que el brief de esta tarea marca como ya
-    // [CRITICAL] una vez en este gate): en un build de RELEASE, sin `debug_assertions`,
-    // eso tragaría el error en silencio y haría desaparecer este aviso de PRIVACIDAD
-    // exactamente cuando algo ya salió mal. En su lugar, si la resolución alguna vez
-    // fallara pese a la precondición, el notice se emite IGUAL, con el texto del error en
-    // el lugar del endpoint — la propiedad que importa es que la EMISIÓN de este aviso
-    // nunca dependa silenciosamente de si el parseo tuvo éxito.
+    // But it is NOT propagated with `.ok()?` (the pattern this task's brief already marks as
+    // [CRITICAL] once in this gate): in a RELEASE build, without `debug_assertions`, that would
+    // silently swallow the error and make this PRIVACY notice disappear exactly when something
+    // has already gone wrong. Instead, if resolution ever failed despite the precondition, the
+    // notice is emitted ANYWAY, with the error text in place of the endpoint — the property
+    // that matters is that the EMISSION of this notice never silently depends on whether
+    // parsing succeeded.
     let magi_url = cfg.effective_magi_base_url();
     let root_url = cfg.effective_base_url();
     debug_assert!(magi_url.is_ok(), "load() debe haber validado");
     debug_assert!(root_url.is_ok(), "load() debe haber validado");
 
-    // `EndpointTemplate::as_str()`, NUNCA un endpoint resuelto: la plantilla no puede
-    // contener un secreto por construcción (REQ-A16c — `EndpointTemplate::parse` rechaza
-    // credenciales literales) así que este texto no necesita pasar por `redact_url`.
-    // `EndpointError::to_string()` tampoco: sus variantes citan solo nombres de entrada de
-    // vault (`&'static str`) y texto fijo, nunca el valor recibido (ver
-    // `magi/endpoint.rs::EndpointError`) — verificado leyendo el tipo, no asumido.
+    // `EndpointTemplate::as_str()`, NEVER a resolved endpoint: the template cannot contain a
+    // secret by construction (REQ-A16c — `EndpointTemplate::parse` rejects literal credentials)
+    // so this text does not need to go through `redact_url`. `EndpointError::to_string()`
+    // neither: its variants quote only vault entry names (`&'static str`) and fixed text, never
+    // the received value (see `magi/endpoint.rs::EndpointError`) — verified by reading the
+    // type, not assumed.
     let magi_text = magi_url.map_or_else(|e| e.to_string(), |t| t.as_str().to_string());
     let root_text = root_url.map_or_else(|e| e.to_string(), |t| t.as_str().to_string());
 
@@ -2289,41 +2276,39 @@ fn divergence_notice(cfg: &MagiConfig, inference_active: bool) -> Option<Notice>
     )))
 }
 
-/// Empuja el aviso de [`divergence_notice`] a `notices` cuando aplica (SC-A07p,
-/// cableado).
+/// Pushes the notice from [`divergence_notice`] into `notices` when it applies (SC-A07p,
+/// wiring).
 ///
-/// Factorizada aparte de `divergence_notice` para darle a la ESCRITURA misma —no solo al
-/// predicado— un punto que un test pueda invocar directo: `run()`, dueño real de
-/// `startup_notices`, abre el vault, descubre el workspace real y usa un TTY real, así
-/// que no se puede manejar desde un test unitario (mismo límite que
-/// `MagiConfig::resolution_notices`'s propio test en `config.rs` ya documenta y resuelve
-/// llamando a la función directamente). Esta es la ÚNICA línea que `run()` ejecuta para
-/// esto, así que confirmar que el diff la invoca ahí es una revisión de una línea, no de
-/// todo `run()` — el modo de fallo que esto existe para cerrar (`divergence_notice`
-/// correcta pero nunca llamada) ya ocurrió una vez en este plan (Task 4.3).
+/// Factored apart from `divergence_notice` to give the WRITE itself —not just the predicate— a
+/// point a test can invoke directly: `run()`, the real owner of `startup_notices`, opens the
+/// vault, discovers the real workspace and uses a real TTY, so it cannot be handled from a unit
+/// test (same limitation that `MagiConfig::resolution_notices`'s own test in `config.rs`
+/// already documents and resolves by calling the function directly). This is the ONLY line
+/// `run()` executes for this, so confirming the diff invokes it there is a one-line review, not
+/// a review of all of `run()` — the failure mode this exists to close (`divergence_notice`
+/// correct but never called) already happened once in this plan (Task 4.3).
 fn push_divergence_notice(cfg: &MagiConfig, inference_active: bool, notices: &mut Vec<Notice>) {
     if let Some(n) = divergence_notice(cfg, inference_active) {
         notices.push(n);
     }
 }
 
-/// Normaliza una raíz de Ollama a la forma OpenAI-compat (`…/v1`), idempotente, **y
-/// avisa cuando tuvo que tocar algo**.
+/// Normalizes an Ollama root to the OpenAI-compat shape (`…/v1`), idempotent, **and warns when
+/// it had to touch something**.
 ///
-/// Existe porque `OllamaProvider` hacía esto adentro y ya no está en el camino (D-A07):
-/// sin la normalización, una `base_url = "http://localhost:11434"` (que v0.11.0
-/// aceptaba) pegaría contra `/chat/completions` en la raíz y daría 404 en el primer
-/// uso. Devuelve el aviso en vez de aplicarlo callado — una normalización silenciosa
-/// hace que la `base_url` efectiva difiera de la escrita sin que nadie lo sepa.
+/// Exists because `OllamaProvider` used to do this inside and is no longer in the path (D-A07):
+/// without normalization, a `base_url = "http://localhost:11434"` (which v0.11.0 accepted)
+/// would hit `/chat/completions` at the root and return 404 on first use. It returns the notice
+/// instead of applying it silently — silent normalization makes the effective `base_url` differ
+/// from what was written without anyone knowing.
 ///
-/// **El `root` devuelto y el texto del aviso NO comparten la misma URL** (fix round 2,
-/// C1, REQ-A16c camino #2): `base_url` acá ya es el endpoint RESUELTO — post
-/// sustitución de placeholders — así que puede traer una credencial real. El `root`
-/// la necesita intacta (es lo que arma el cliente HTTP); el aviso es texto que
-/// termina en la lista de arranque de la TUI y en stderr de headless, así que pasa
-/// por [`redact_url`] antes de interpolarse. Dos usos, dos reglas — de ahí que la
-/// función construya el aviso a partir de `normalized` pero redacte una COPIA para
-/// el texto, en vez de redactar `normalized` en el lugar.
+/// **The returned `root` and the notice text do NOT share the same URL** (fix round 2,
+/// C1, REQ-A16c path #2): `base_url` here is already the RESOLVED endpoint — post placeholder
+/// substitution — so it may carry a real credential. The `root` needs it intact (it is what
+/// builds the HTTP client); the notice is text that ends up in the TUI startup list and in
+/// headless stderr, so it goes through [`redact_url`] before being interpolated. Two uses, two
+/// rules — hence the function builds the notice from `normalized` but redacts a COPY for the
+/// text, instead of redacting `normalized` in place.
 fn openai_compat_root(base_url: &str) -> (String, Option<String>) {
     let trimmed = base_url.trim_end_matches('/');
     if trimmed.rsplit('/').next() == Some("v1") {
@@ -2340,20 +2325,20 @@ fn openai_compat_root(base_url: &str) -> (String, Option<String>) {
     }
 }
 
-/// Construye UN provider nativo de magi-core según el `kind` declarado (REQ-A01b).
+/// Builds ONE native provider from magi-core according to the declared `kind` (REQ-A01b).
 ///
-/// **`ollama` NO usa el tipo `OllamaProvider` de magi-core para las completions** (D-A07):
-/// verificado contra magi-core 3.1.0 — su único constructor fija 300 s de timeout de
-/// cliente sin override, incompatible con REQ-A04 (`operation_budget + client_timeout
-/// <= techo`). Las completions van por el transporte OpenAI-compat keyless contra
-/// `…/v1`; `OllamaProvider` queda solo como sonda (Fase 5).
+/// **`ollama` does NOT use magi-core's `OllamaProvider` type for completions** (D-A07):
+/// verified against magi-core 3.1.0 — its only constructor fixes a 300 s client timeout with no
+/// override, incompatible with REQ-A04 (`operation_budget + client_timeout <= ceiling`).
+/// Completions go through the keyless OpenAI-compat transport against `…/v1`; `OllamaProvider`
+/// remains only as a probe (Phase 5).
 ///
-/// **`ollama` es keyless**: una `base_url` autenticada bajo este kind no falla acá —
-/// falla en el primer uso con un 401, que Task 4.4 traduce.
+/// **`ollama` is keyless**: an authenticated `base_url` under this kind does not fail here —
+/// it fails on first use with a 401, which Task 4.4 translates.
 ///
 /// # Errors
-/// [`SeatError::MissingCredential`] si el kind exige credencial y no hay ninguna
-/// resuelta; [`SeatError::Transport`] si el cliente HTTP no se pudo construir.
+/// [`SeatError::MissingCredential`] if the kind requires a credential and none is resolved;
+/// [`SeatError::Transport`] if the HTTP client could not be built.
 fn build_native_provider(
     kind: ProviderKind,
     base_url: &ResolvedEndpoint,
@@ -2362,16 +2347,16 @@ fn build_native_provider(
     client_timeout: Duration,
     notices: &mut Vec<Notice>,
 ) -> Result<Arc<dyn LlmProvider>, SeatError> {
-    // `redact_foreign_error`, NO `to_string()`: el mensaje lo arma magi-core, que no
-    // conoce nuestra regla de redacción y puede citar la `base_url`.
+    // `redact_foreign_error`, NOT `to_string()`: magi-core assembles the message, which does
+    // not know our redaction rule and may quote `base_url`.
     let to_seat = |e: ProviderError| SeatError::Transport(redact_foreign_error(&e));
 
     Ok(match kind {
-        // `api_key = None` ⇒ sin header `Authorization`, que es lo que Ollama espera.
+        // `api_key = None` ⇒ no `Authorization` header, which is what Ollama expects.
         ProviderKind::Ollama => {
-            // `.as_str()`, no `.to_string()` (Melchior, loop 32): `base_url` es un
-            // newtype y `with_timeout` toma `impl Into<String>` — `&str` ya lo
-            // satisface sin el paso intermedio.
+            // `.as_str()`, not `.to_string()` (Melchior, loop 32): `base_url` is a newtype and
+            // `with_timeout` takes `impl Into<String>` — `&str` already satisfies it without
+            // the intermediate step.
             let (root, notice) = openai_compat_root(base_url.as_str());
             if let Some(n) = notice {
                 notices.push(Notice::resolution(n));
@@ -2408,129 +2393,123 @@ fn build_native_provider(
     })
 }
 
-// Solo test (I2, fix round 2): rastro de qué wireó la ÚLTIMA llamada a
-// `build_magi_orchestrator` EN ESTE HILO — (asiento, modelo resuelto, envuelto-en-
-// RetryProvider). Existe para que un test pueda afirmar contra la función REAL en vez
-// de reconstruir su lógica de wiring en un `MagiBuilder` propio (que es exactamente lo
-// que dejaba pasar sin ver que el envoltorio de producción desapareciera). No cambia
-// la firma de `build_magi_orchestrator` — cada test de este archivo corre en su PROPIO
-// hilo (el harness de `#[test]` los spawnea así por diseño), así que el thread-local
-// aísla una llamada de otra sin coordinación extra.
+// Test-only (I2, fix round 2): trace of what the LAST call to `build_magi_orchestrator` wired
+// IN THIS THREAD — (seat, resolved model, wrapped-in-RetryProvider). Exists so a test can
+// assert against the REAL function instead of reconstructing its wiring logic in a custom
+// `MagiBuilder` (which is exactly what let the production wrapper disappear unnoticed). Does
+// not change `build_magi_orchestrator`'s signature — each test in this file runs in its OWN
+// thread (the `#[test]` harness spawns them that way by design), so the thread-local isolates
+// one call from another without extra coordination.
 #[cfg(test)]
 thread_local! {
     static SEAT_WIRING_TRACE: std::cell::RefCell<Vec<(AgentName, String, bool)>> =
         const { std::cell::RefCell::new(Vec::new()) };
 }
 
-/// Solo test: el rastro que dejó la ÚLTIMA llamada a `build_magi_orchestrator` en
-/// este hilo. Ver [`SEAT_WIRING_TRACE`].
+/// Test-only: the trace left by the LAST call to `build_magi_orchestrator` in this thread. See
+/// [`SEAT_WIRING_TRACE`].
 #[cfg(test)]
 fn seat_wiring_trace() -> Vec<(AgentName, String, bool)> {
     SEAT_WIRING_TRACE.with(|t| t.borrow().clone())
 }
 
-/// Construye el trío MAGI con los providers NATIVOS de magi-core (REQ-A01).
+/// Builds the MAGI trio with the NATIVE providers of magi-core (REQ-A01).
 ///
-/// Desaparece el adapter y con él el doblado del system prompt: cada mage recibe su
-/// prompt por el canal propio del provider.
+/// The adapter disappears and with it the system-prompt doubling: each mage receives its prompt
+/// through the provider's own channel.
 ///
-/// `notices` recibe los avisos no fatales de construcción (p. ej. la normalización de
-/// una `base_url` de Ollama sin `/v1`). Se pasa por parámetro y no se devuelve aparte
-/// para que un aviso emitido en el camino de error **también** llegue al usuario: un
-/// fallo de asiento y una URL rara suelen ser el mismo problema visto de dos lados.
+/// `notices` receives the non-fatal construction notices (e.g. the normalization of an Ollama
+/// `base_url` without `/v1`). It is passed by parameter and not returned separately so that a
+/// notice emitted on the error path **also** reaches the user: a seat failure and a strange URL
+/// are usually the same problem seen from two sides.
 ///
-/// `warn_tokens` entra por PARÁMETRO y no se resuelve adentro: lo produce el probe
-/// (`orchestrate_probes`/`derive_warn_tokens`, Task 5.2), llamado por el call site ANTES
-/// de esta función. Con `None` cae al default de magi-core — el comportamiento de
-/// v0.11.0, que sigue siendo el resultado cuando el probe no midió nada medible.
+/// `warn_tokens` enters by PARAMETER and is not resolved inside: it is produced by the probe
+/// (`orchestrate_probes`/`derive_warn_tokens`, Task 5.2), called by the call site BEFORE this
+/// function. With `None` it falls back to magi-core's default — the v0.11.0 behavior, which
+/// remains the result when the probe measured nothing measurable.
 ///
 /// # Errors
-/// - [`TrioError::UnknownKind`] si `[magi].kind` trae un valor no reconocido. Se valida
-///   ACÁ con su propio `ProviderKind::parse`, no vía `cfg.effective_magi_kind()`: ese
-///   accessor asume que `validate_vocabulary` ya corrió y se traga un valor no
-///   reconocido cayendo a la herencia — precondición correcta para su resto de
-///   llamadores, pero exactamente la que este punto necesita NO asumir para poder
-///   reportar el error.
-/// - [`TrioError::SeatUnbuildable`] con **todos** los asientos que no se pudieron
-///   construir y su causa.
+/// - [`TrioError::UnknownKind`] if `[magi].kind` brings an unrecognized value. It is validated
+/// HERE with its own `ProviderKind::parse`, not via `cfg.effective_magi_kind()`: that accessor
+/// assumes `validate_vocabulary` already ran and swallows an unrecognized value falling back to
+/// inheritance — a correct precondition for its other callers, but exactly the one this point
+/// must NOT assume in order to report the error.
+/// - [`TrioError::SeatUnbuildable`] with **all** the seats that could not
+/// be built and their cause.
 fn build_magi_orchestrator(
     cfg: &MagiConfig,
-    // El `ProviderKind` YA RESUELTO del principal (env `MAGI_PROVIDER` > TOML >
-    // default — `resolve_effective_provider_kind`), no `cfg.effective_provider()`
-    // (fix round 2, I1): antes, un `[magi].kind` ausente heredaba releyendo `provider`
-    // de TOML por su cuenta, así que `MAGI_PROVIDER` movía al principal sin mover al
-    // trío. Este parámetro es lo que hace que la herencia vea la MISMA decisión.
+    // The ALREADY-RESOLVED `ProviderKind` of the principal (env `MAGI_PROVIDER` > TOML >
+    // default — `resolve_effective_provider_kind`), not `cfg.effective_provider()` (fix round
+    // 2, I1): before, an absent `[magi].kind` inherited by re-reading `provider` from TOML on
+    // its own, so `MAGI_PROVIDER` moved the principal without moving the trio. This parameter
+    // is what makes inheritance see the SAME decision.
     principal_kind: ProviderKind,
-    // Endpoints YA RESUELTOS. El builder no conoce el vault: la resolución es un paso
-    // nombrado de `main.rs` (tras abrir el vault, antes del probe y del trío), y
-    // `resolve_endpoints` es el único productor de `ResolvedEndpoints`.
+    // ALREADY-RESOLVED endpoints. The builder does not know the vault: resolution is a named
+    // step of `main.rs` (after opening the vault, before the probe and the trio), and
+    // `resolve_endpoints` is the sole producer of `ResolvedEndpoints`.
     endpoints: &ResolvedEndpoints,
     creds: Option<&dyn Credentials>,
     warn_tokens: Option<usize>,
-    // Restaurado, fix round 1 (coordinador, 2026-08-03): R-A03 solo admite las tres
-    // rupturas declaradas en REQ-A21/A22/A23, y `MAGI_MODEL_*` no es ninguna de
-    // ellas. Se layerea SOBRE el resultado de `cfg.magi.seats(backend_model)` (que ya
-    // resuelve TOML-o-backend) vía `resolve_magi_override`, dando la cadena completa
-    // `env > TOML > backend` sin duplicar esa resolución.
+    // Restored, fix round 1 (coordinator, 2026-08-03): R-A03 only admits the three declared
+    // breakages in REQ-A21/A22/A23, and `MAGI_MODEL_*` is none of them. It is layered ON TOP of
+    // the result of `cfg.magi.seats(backend_model)` (which already resolves TOML-or-backend)
+    // via `resolve_magi_override`, giving the full chain `env > TOML > backend` without
+    // duplicating that resolution.
     env_overrides: &MagiEnvModelOverrides,
     notices: &mut Vec<Notice>,
 ) -> Result<Arc<Magi>, TrioError> {
-    // `[magi].kind` ausente/vacío hereda `principal_kind` — el YA RESUELTO, no
-    // `cfg.effective_provider()` (TOML-only). Presente-y-no-reconocido sigue siendo
-    // error tipado. Task 5.2: extraído a `resolve_magi_kind`, compartido con
-    // `orchestrate_probes` (B3) — antes cada uno tenía su propia copia de esta misma
-    // regla, con el riesgo de que un probe midiera un kind distinto del que el trío
-    // realmente termina usando.
+    // Absent/empty `[magi].kind` inherits `principal_kind` — the ALREADY-RESOLVED one, not
+    // `cfg.effective_provider()` (TOML-only). Present-but-unrecognized remains a typed error.
+    // Task 5.2: extracted to `resolve_magi_kind`, shared with `orchestrate_probes` (B3) —
+    // before, each had its own copy of this same rule, with the risk that a probe measured a
+    // different kind from the one the trio actually ends up using.
     let kind = resolve_magi_kind(cfg, principal_kind).map_err(|e| TrioError::UnknownKind(e.got))?;
-    // El trío usa el endpoint YA RESUELTO que `main.rs` produjo — no re-resuelve ni lee
-    // la plantilla.
+    // The trio uses the ALREADY-RESOLVED endpoint that `main.rs` produced — it does not re-
+    // resolve or read the template.
     let base = &endpoints.magi;
 
-    // Modelo del BACKEND: el que hereda un asiento sin modelo propio, y el del
-    // fallback del builder. Task 5.2: extraído a `resolve_backend_model`, compartido con
-    // `orchestrate_probes` (B3).
+    // BACKEND model: the one a seat inherits without its own model, and the builder fallback's.
+    // Task 5.2: extracted to `resolve_backend_model`, shared with `orchestrate_probes` (B3).
     let backend_model: &str = resolve_backend_model(cfg, kind);
     let ceiling = Duration::from_secs(cfg.magi.agent_timeout_secs.unwrap_or(AGENT_TIMEOUT_SECS));
 
-    // `RetryConfig` es `#[non_exhaustive]`: fuera del crate NO hay literal ni
-    // `..default()` — se construye con `default()` y se ajusta por campo.
+    // `RetryConfig` is `#[non_exhaustive]`: outside the crate there is NO literal nor
+    // `..default()` — it is built with `default()` and adjusted field by field.
     let mut retry = RetryConfig::default();
     retry.operation_budget = derive_operation_budget(ceiling.as_secs());
     let client_timeout = derive_client_timeout(ceiling.as_secs());
 
-    // Los TRES asientos se construyen primero, para poder reportar TODOS los que fallen.
+    // The THREE seats are built first, so that ALL that fail can be reported.
     let mut failures: Vec<(AgentName, SeatError)> = Vec::new();
     let mut seats: Vec<(AgentName, Arc<dyn LlmProvider>)> = Vec::new();
 
-    // Solo test (I2, fix round 2): limpia el rastro de la llamada ANTERIOR en este
-    // hilo antes de empezar — `seat_wiring_trace()` de un test debe ver SOLO lo que
-    // ESTA llamada wireó.
+    // Test-only (I2, fix round 2): clears the trace of the PREVIOUS call in this thread before
+    // starting — a test's `seat_wiring_trace()` must see ONLY what THIS call wired.
     #[cfg(test)]
     SEAT_WIRING_TRACE.with(|t| t.borrow_mut().clear());
 
     for (seat, toml_or_backend_model) in cfg.magi.seats(backend_model) {
-        // `MAGI_MODEL_<AGENT>` gana sobre lo que `seats()` ya resolvió (TOML, o el
-        // backend si no había override) — `resolve_magi_override` trata el valor
-        // entrante como "lo que gana si no hay env", así que pasarle el resultado de
-        // `seats()` como su `toml_model` da exactamente `env > TOML > backend` sin
-        // reimplementar esa cadena una segunda vez.
+        // `MAGI_MODEL_<AGENT>` wins over what `seats()` already resolved (TOML, or the backend
+        // if there was no override) — `resolve_magi_override` treats the incoming value as
+        // "what wins if there is no env", so passing it the result of `seats()` as its
+        // `toml_model` yields exactly `env > TOML > backend` without reimplementing that chain
+        // a second time.
         let env_model = env_overrides.for_seat(seat);
         let model = resolve_magi_override(Some(&toml_or_backend_model), env_model)
             .unwrap_or(toml_or_backend_model);
         match build_native_provider(kind, base, &model, creds, client_timeout, notices) {
-            // REQ-A03: `MagiBuilder::build()` NO envuelve nada, así que sin esto se
-            // pierde el reintento que el trío heredaba del adapter.
+            // REQ-A03: `MagiBuilder::build()` does NOT wrap anything, so without this the retry
+            // the trio inherited from the adapter is lost.
             Ok(p) => {
                 let wrapped = Arc::new(RetryProvider::with_config(p, retry.clone()));
-                // Grabado EN LA MISMA rama que hace el wrap real (I2, fix round 2):
-                // un test que afirma contra este rastro deja de pasar si el wrap de
-                // arriba desaparece Y nadie toca esta línea — que es el modo de
-                // regresión más probable (borrar el `Arc::new(RetryProvider::…)` de
-                // arriba sin tocar esto también rompe el conteo que el test verifica,
-                // porque entonces `seats.push` seguiría corriendo pero con la forma
-                // cambiada). No es downcasting en runtime — `LlmProvider` es un trait
-                // foráneo sin `Any` — así que es la aproximación más fuerte posible
-                // sin tocar magi-core (R-A01).
+                // Recorded ON THE SAME branch that does the real wrap (I2, fix round 2): a test
+                // that asserts against this trace stops passing if the wrap above disappears
+                // AND no one touches this line — which is the most likely regression mode
+                // (deleting the `Arc::new(RetryProvider::…)` above without touching this also
+                // breaks the count the test verifies, because then `seats.push` would still run
+                // but with the shape changed). It is not runtime downcasting — `LlmProvider` is
+                // a foreign trait without `Any` — so it is the strongest approximation possible
+                // without touching magi-core (R-A01).
                 #[cfg(test)]
                 SEAT_WIRING_TRACE.with(|t| t.borrow_mut().push((seat, model.clone(), true)));
                 seats.push((seat, wrapped));
@@ -2543,21 +2522,20 @@ fn build_magi_orchestrator(
         return Err(TrioError::SeatUnbuildable { seats: failures });
     }
     if seats.is_empty() {
-        // Inalcanzable hoy — `seats()` siempre devuelve los tres — pero la variante
-        // existe para el `match` exhaustivo de Task 4.3 y no depende de esa
-        // invariante interna para ser correcta.
+        // Unreachable today — `seats()` always returns the three — but the variant exists for
+        // Task 4.3's exhaustive `match` and does not depend on that internal invariant to be
+        // correct.
         return Err(TrioError::NoSeats);
     }
 
-    // El FALLBACK del builder se construye APARTE, y el nombre importa: NO es el
-    // "provider principal" de magi-rs (el del agente conversacional, que este
-    // milestone no toca). Con los tres asientos overrideados este provider nunca se
-    // usa, y justamente por eso conviene que sea una decisión escrita.
+    // The builder's FALLBACK is built SEPARATELY, and the name matters: it is NOT magi-rs's
+    // "principal provider" (the conversational agent's, which this milestone does not touch).
+    // With all three seats overridden this provider is never used, and that is precisely why it
+    // is useful for it to be a written decision.
     //
-    // `&mut sink` descartable: el aviso de normalización ya salió en el bucle de
-    // asientos con la MISMA `base_url`. Empujarlo de nuevo lo duplicaría en pantalla
-    // (y `render_notices` lo dedupería igual, pero no vale la pena construirlo dos
-    // veces).
+    // `&mut sink` discardable: the normalization notice already went out in the seat loop with
+    // the SAME `base_url`. Pushing it again would duplicate it on screen (and `render_notices`
+    // would dedupe it anyway, but it is not worth building it twice).
     let mut sink: Vec<Notice> = Vec::new();
     let fallback_provider = build_native_provider(
         kind,
@@ -2575,8 +2553,8 @@ fn build_magi_orchestrator(
     )))
     .with_timeout(ceiling);
 
-    // REQ-A15: las OTRAS DOS claves expuestas también se cablean. Declararlas en el
-    // TOML sin conectarlas las volvería decorativas.
+    // REQ-A15: the OTHER TWO exposed keys are also wired. Declaring them in TOML without
+    // connecting them would make them decorative.
     if let Some(warn) = warn_tokens {
         builder = builder.with_input_warn_tokens(warn);
     }
@@ -2594,33 +2572,30 @@ fn build_magi_orchestrator(
         .map_err(|e| TrioError::Builder(redact_foreign_error(&e)))
 }
 
-/// Registra el tool `consult` en `agent` SOLO SI el trío se construyó (REQ-A06,
-/// SC-A06a).
+/// Registers the `consult` tool on `agent` ONLY IF the trio was built (REQ-A06, SC-A06a).
 ///
-/// Compartida entre la TUI (`run`) y `magi query` (`run_query_subcommand`, B3): antes
-/// de esta función cada una tenía su propia copia del mismo `if let Some(...) {
-/// register_tool(...) }`, dos sitios que podían divergir con el tiempo sin que nada lo
-/// impidiera.
+/// Shared between the TUI (`run`) and `magi query` (`run_query_subcommand`, B3): before this
+/// function each had its own copy of the same `if let Some(...) { register_tool(...) }`, two
+/// places that could diverge over time with nothing preventing it.
 ///
-/// **Cuando el trío no es construible, el tool NO se registra** — nunca a medias, y
-/// nunca con un `execute` que falla en el primer uso: eso gastaría una vuelta del tool
-/// loop (y una llamada al modelo) para descubrir algo que ya se sabía al arrancar,
-/// además de invitar al modelo principal a rutear hacia algo que no puede correr.
-/// `kind` - el `ProviderKind` bajo el que corre el trío (REQ-A12c): construction-time,
-/// vía `ConsultTool::with_kind`, así `ConsultTool::execute` no tiene que volver a
-/// resolverlo en cada llamada. Determina si un 401/403 de `MagiReport::failed_agents`
-/// se explica como configuración keyless — ver `tools::consult::keyless_auth_explanation`.
-/// `magi_endpoint_diverges` - `MagiConfig::magi_endpoint_diverges()`, resuelto UNA vez
-/// acá (fix round 1, Finding 1) y pasado a `ConsultTool::with_magi_endpoint_diverges` —
-/// mismo patrón que `kind`, mismo motivo: `ConsultTool::execute` no vuelve a resolverlo
-/// por llamada.
-/// `max_query_bytes` - `MagiConfig::effective_max_query_bytes()` (REQ-A11b), pasado a
-/// `ConsultTool::with_max_query_bytes` — es el mismo cap que la ruta directa headless y
-/// el `/consult` explícito de la TUI aplican (SC-A11c), resuelto acá una sola vez.
-/// `output_cap` - `MagiConfig::effective_tool_result_cap()` (REQ-A11b), pasado a
-/// `ConsultTool::with_output_cap` — acota el `ToolResult` que reingresa al historial de
-/// la conversación (TUI auto-ruteada y el tool loop de `magi query`, las dos rutas que
-/// comparten este call site).
+/// **When the trio is not buildable, the tool is NOT registered** — never halfway, and
+/// never with an `execute` that fails on first use: that would waste a turn of the tool loop
+/// (and a model call) to discover something already known at startup, besides inviting the
+/// principal model to route to something that cannot run. `kind` - the `ProviderKind` under
+/// which the trio runs (REQ-A12c): construction-time, via `ConsultTool::with_kind`, so
+/// `ConsultTool::execute` does not have to resolve it again on each call. Determines whether a
+/// 401/403 from `MagiReport::failed_agents` is explained as keyless configuration — see
+/// `tools::consult::keyless_auth_explanation`. `magi_endpoint_diverges` -
+/// `MagiConfig::magi_endpoint_diverges()`, resolved ONCE here (fix round 1, Finding 1) and
+/// passed to `ConsultTool::with_magi_endpoint_diverges` — same pattern as `kind`, same reason:
+/// `ConsultTool::execute` does not re-resolve it per call. `max_query_bytes` -
+/// `MagiConfig::effective_max_query_bytes()` (REQ-A11b), passed to
+/// `ConsultTool::with_max_query_bytes` — it is the same cap applied by the direct headless path
+/// and the TUI's explicit `/consult` (SC-A11c), resolved here once. `output_cap` -
+/// `MagiConfig::effective_tool_result_cap()` (REQ-A11b), passed to
+/// `ConsultTool::with_output_cap` — bounds the `ToolResult` that re-enters the conversation
+/// history (TUI auto-routed and `magi query`'s tool loop, the two routes that share this call
+/// site).
 fn register_consult_tool_if_available(
     agent: &mut Agent,
     consult_magi: Option<&Arc<Magi>>,
@@ -2641,13 +2616,12 @@ fn register_consult_tool_if_available(
     }
 }
 
-/// Construye el par (notice de arranque, mensaje de `/consult`) para la TUI cuando el
-/// trío no es construible (REQ-A06, SC-A06b).
+/// Builds the pair (startup notice, `/consult` message) for the TUI when the trio is not
+/// buildable (REQ-A06, SC-A06b).
 ///
-/// Existe para que la propiedad "el notice de arranque y la respuesta de `/consult`
-/// dicen EXACTAMENTE lo mismo" sea verificable con un test en vez de depender de que
-/// dos sitios de `run()` construyan el mismo `String` por su cuenta y se mantengan en
-/// sincronía a mano.
+/// Exists so that the property "the startup notice and the `/consult` response say EXACTLY the
+/// same thing" is testable instead of depending on two places in `run()` building the same
+/// `String` on their own and staying in sync by hand.
 fn trio_unavailable_for_tui(err: &TrioError) -> (Notice, String) {
     let msg = trio_unavailable_message(err);
     (Notice::blocking(msg.clone()), msg)
@@ -2660,7 +2634,7 @@ fn trio_unavailable_for_tui(err: &TrioError) -> (Notice, String) {
 /// in scope. `EndpointTemplate::resolve` only ever calls `get()` when the template
 /// actually declares `[user]:[password]` placeholders — a plain URL with no
 /// credentials resolves without touching the vault at all (see its own doc
-/// comment: "el caso común no paga ni un lookup"). So substituting this stub for a
+/// comment: "the common case does not pay even a lookup"). So substituting this stub
 /// real vault is exactly the right defense: the common, credential-free case is
 /// unaffected, and a template that genuinely needs a vault entry fails LOUDLY
 /// (a typed [`EndpointError::MissingVaultEntry`](magi_rs::magi::endpoint::EndpointError)
@@ -3342,9 +3316,9 @@ fn resolve_headless_limits(cfg: &HeadlessConfig, tool_result_cap: usize) -> Head
             .unwrap_or(d.full_auto_max_tool_calls),
         log_retention_runs: cfg.log_retention.unwrap_or(d.log_retention_runs),
         log_max_bytes: cfg.log_max_bytes.unwrap_or(d.log_max_bytes),
-        // Llega por parámetro y no desde `cfg`: la clave subió de `[headless]` al nivel raíz
-        // (Task 1.3, tercer patrón de REQ-A21b), así que la resuelve `MagiConfig` y esta
-        // función ya no la puede leer de su propia sección.
+        // Passed as a parameter rather than read from `cfg`: the key moved up from `[headless]`
+        // to the root level (Task 1.3, third pattern of REQ-A21b), so `MagiConfig` resolves it
+        // and this function can no longer read it from its own section.
         tool_result_cap,
         full_auto_timeout_secs: cfg.timeout_secs.unwrap_or(d.full_auto_timeout_secs),
     }
@@ -3470,11 +3444,10 @@ async fn prepare_headless(
         }
     };
     let prompt = envelope.prompt.clone();
-    // Extracted BEFORE `resolve_params(envelope, ...)` below consumes `envelope`
-    // by value — an invalid `mode` string here is presente-y-no-reconocido
-    // (REQ-A12), so it fails this run closed rather than being silently
-    // dropped (`resolved_mode()` never got a production caller before this,
-    // so an invalid envelope `mode` was previously accepted and ignored).
+    // Extracted BEFORE `resolve_params(envelope, ...)` below consumes `envelope` by value — an
+    // invalid `mode` string here is present-but-unrecognized (REQ-A12), so it fails this run
+    // closed rather than being silently dropped (`resolved_mode()` never got a production
+    // caller before this, so an invalid envelope `mode` was previously accepted and ignored).
     let env_mode = match envelope.resolved_mode() {
         Ok(m) => m,
         Err(e) => {
@@ -3642,8 +3615,8 @@ async fn prepare_headless(
         secret_store: secret_store.as_ref(),
     };
 
-    // REQ-A24/A24b/A24c (Task 5.2): mismo sondeo que la TUI, ver el comentario de `run()`
-    // — nunca bloquea ni falla el arranque headless.
+    // REQ-A24/A24b/A24c (Task 5.2): same polling as the TUI, see `run()`'s comment — never
+    // blocks or fails headless startup.
     let mut trio_notices: Vec<Notice> = Vec::new();
     let warn_tokens = probe_and_report(
         &magi_config,
@@ -3993,12 +3966,12 @@ mod tests {
     mod mode_surfaces {
         use super::*;
 
-        /// SC-A07b: lo explícito gana en las cuatro superficies.
+        /// SC-A07b: the explicit wins across the four surfaces.
         ///
-        /// m1 fix: las TRES etiquetas por las TRES superficies (CLI, envelope, TUI), no solo
-        /// `"design"`. Con una sola etiqueta cubierta, `"code-review"` podía divergir entre el
-        /// CLI y `normalize_label` sin que ningún test de este grupo lo viera — el mismo bug
-        /// sería válido en `magi.toml` y rechazado en la línea de comandos, o al revés.
+        /// m1 fix: the THREE labels for the THREE surfaces (CLI, envelope, TUI), not just
+        /// `"design"`. With only one label covered, `"code-review"` could diverge between the
+        /// CLI and `normalize_label` without any test in this group noticing — the same bug
+        /// would be accepted in `magi.toml` and rejected on the command line, or vice versa.
         #[test]
         fn every_surface_accepts_an_explicit_mode() {
             use clap::Parser;
@@ -4032,12 +4005,12 @@ mod tests {
             }
         }
 
-        /// SC-A07q: `default_mode` inválido es error de configuración.
+        /// SC-A07q: an invalid `default_mode` is a configuration error.
         #[test]
         fn an_invalid_default_mode_is_a_config_error() {
-            // El valor inválido muere en el PARSEO. `effective_default_mode` devuelve
-            // `Option`, no `Result`, justamente para que ningún llamador pueda escribir
-            // `.ok()` (B9) — y por eso el test tampoco puede encadenarlo con `.and_then`.
+            // The invalid value dies at PARSE time. `effective_default_mode` returns `Option`,
+            // not `Result`, precisely so no caller can write `.ok()` (B9) — and therefore the
+            // test cannot chain it with `.and_then` either.
             assert!(MagiConfig::from_toml_str("[magi]\ndefault_mode = \"banana\"\n").is_err());
 
             let cfg = MagiConfig::from_toml_str("[magi]\ndefault_mode = \"\"\n").unwrap();
@@ -4048,7 +4021,7 @@ mod tests {
             );
         }
 
-        /// SC-A07t: `untrusted_content` en tres superficies; la TUI no la tiene.
+        /// SC-A07t: `untrusted_content` on three surfaces; the TUI does not have it.
         #[test]
         fn untrusted_content_is_declarable_where_the_threat_lives() {
             use clap::Parser;
@@ -4109,18 +4082,18 @@ mod tests {
             assert!(!a.untrusted_content());
         }
 
-        /// Doble de [`magi_rs::magi::mode::ModeClassifier`] que cuenta cuántas
-        /// veces se invoca y siempre devuelve `label` — para SC-A07f/g, donde lo
-        /// que importa es el CONTEO, no el contenido de la respuesta simulada.
+        /// Double of [`magi_rs::magi::mode::ModeClassifier`] that counts how many times it is
+        /// invoked and always returns `label` — for SC-A07f/g, where what matters is the COUNT,
+        /// not the content of the mocked response.
         struct CountingClassifier {
-            /// Invocaciones acumuladas de `classify`.
+            /// Accumulated invocations of `classify`.
             calls: std::sync::atomic::AtomicUsize,
-            /// Etiqueta que esta invocación siempre "clasifica".
+            /// Label that this invocation always "classifies".
             label: Mode,
         }
 
         impl CountingClassifier {
-            /// Crea un contador en cero que clasificará como `label`.
+            /// Creates a counter at zero that will classify as `label`.
             fn new(label: Mode) -> Self {
                 Self {
                     calls: std::sync::atomic::AtomicUsize::new(0),
@@ -4128,7 +4101,7 @@ mod tests {
                 }
             }
 
-            /// Cuántas veces se invocó `classify` hasta ahora.
+            /// How many times `classify` has been invoked so far.
             fn calls(&self) -> usize {
                 self.calls.load(std::sync::atomic::Ordering::SeqCst)
             }
@@ -4142,15 +4115,14 @@ mod tests {
             }
         }
 
-        /// Parsea `args` como si fueran argv, y resuelve el modo del `consult`
-        /// DIRECTO exactamente como lo hace `run_consult_subcommand` en
-        /// producción: lo explícito (`--mode`) gana sin costo; su ausencia pasa
-        /// por `classifier` (REQ-A07c, `headless_runner::resolve_direct_mode`).
+        /// Parses `args` as if they were argv, and resolves the mode of the DIRECT `consult`
+        /// exactly as `run_consult_subcommand` does in production: the explicit (`--mode`) wins
+        /// at no cost; its absence goes through `classifier` (REQ-A07c,
+        /// `headless_runner::resolve_direct_mode`).
         ///
-        /// No construye un `Arc<Magi>` real: SC-A07f/g solo necesitan el conteo
-        /// de llamadas de clasificación y el modo resuelto, no un reporte MAGI
-        /// completo — levantar los tres mages para observar un contador sería
-        /// pagar el costo que el propio gate existe para evitar.
+        /// Does not build a real `Arc<Magi>`: SC-A07f/g only need the count of classification
+        /// calls and the resolved mode, not a full MAGI report — raising the three mages to
+        /// observe a counter would be paying the cost the gate itself exists to avoid.
         async fn run_consult_cli(
             args: &[&str],
             classifier: &dyn magi_rs::magi::mode::ModeClassifier,
@@ -4163,9 +4135,9 @@ mod tests {
             crate::headless_runner::resolve_direct_mode(explicit, classifier, content).await
         }
 
-        /// Renderiza el `--help` largo de un subcomando headless (`"query"`/
-        /// `"consult"`), para verificar que el texto de ayuda documenta el costo
-        /// de omitir `--mode` (REQ-A19, SC-A07i) sin tener que lanzar el binario.
+        /// Renders the long `--help` of a headless subcommand (`"query"`/ `"consult"`), to
+        /// verify that the help text documents the cost of omitting `--mode` (REQ-A19, SC-A07i)
+        /// without having to launch the binary.
         fn render_help(subcommand: &str) -> String {
             use clap::CommandFactory;
 
@@ -4176,9 +4148,9 @@ mod tests {
             sub.render_long_help().to_string()
         }
 
-        /// Task 2.3 (reasignado de 2.2, ver nota de la cabecera del módulo) —
-        /// SC-A07f/g: omitir `--mode` en el `consult` DIRECTO cuesta EXACTAMENTE
-        /// una llamada de clasificación; declararlo cuesta CERO.
+        /// Task 2.3 (reassigned from 2.2, see the module header note) — SC-A07f/g: omitting
+        /// `--mode` in the DIRECT `consult` costs EXACTLY one classification call; declaring it
+        /// costs ZERO.
         #[tokio::test]
         async fn omitting_the_mode_costs_one_call_and_declaring_it_costs_none() {
             let counting = CountingClassifier::new(Mode::CodeReview);
@@ -4209,12 +4181,11 @@ mod tests {
             );
         }
 
-        /// Task 2.3 (reasignado de 2.2) — SC-A07i: el `--help` de `consult` dice
-        /// que omitir `--mode` agrega una llamada al modelo, y cómo evitarlo.
+        /// Task 2.3 (reassigned from 2.2) — SC-A07i: the `consult` `--help` says that omitting
+        /// `--mode` adds a call to the model, and how to avoid it.
         ///
-        /// Un help que no lo dijera sería documentar una mentira hasta que esta
-        /// tarea hiciera cierto el costo que describe — de ahí que este test no
-        /// pudiera existir antes de Task 2.3.
+        /// A help that did not say it would be documenting a lie until this task made the cost
+        /// it describes true — which is why this test could not exist before Task 2.3.
         #[test]
         fn the_consult_help_names_the_extra_call_and_how_to_avoid_it() {
             let help = render_help("consult");
@@ -4229,46 +4200,44 @@ mod tests {
         }
 
         // -------------------------------------------------------------------
-        // Task 2.4 — `resolve_mode_guarded` y la guarda de `untrusted_content`,
-        // reasignados de Task 2.2 (ver la nota de cabecera de este módulo).
+        // Task 2.4 — `resolve_mode_guarded` and the `untrusted_content` guard, reassigned from
+        // Task 2.2 (see this module's header note).
         // -------------------------------------------------------------------
 
-        /// Lo observable de resolver el modo de un consult AUTORRUTEADO —
-        /// suficiente para las cuatro pruebas heredadas (SC-A07d/u/v/w).
+        /// What is observable from resolving the mode of an AUTOROUTED `consult` — enough for
+        /// the four inherited tests (SC-A07d/u/v/w).
         ///
-        /// **No levanta un `Agent`/`ConsultTool` real.** Exercita
-        /// `resolve_mode_guarded` — la pieza de producción que un dispatch real
-        /// usará — con la MISMA combinación de parámetros que ese dispatch le
-        /// pasaría para un consult autorruteado por el agente (sin modo humano
-        /// declarado; la ruta autónoma no tiene ese nivel). Cablear el tool loop
-        /// entero (inyectar el modo resuelto en `ConsultTool::execute`, el
-        /// contador de vetos del gate) es Task 3.2's job — su propio bloque de
-        /// plan declara ahí, no acá, que `ConsultTool::execute` pasa a recibir el
-        /// par `(Mode, ModeSource)` ya resuelto. Levantar esa maquinaria acá
-        /// duplicaría el trabajo de esa tarea y arriesgaría romper los ~15 tests
-        /// existentes de `tools::consult` que llaman `execute` sin inyección.
+        /// **Does not spin up a real `Agent`/`ConsultTool`.** Exercises
+        /// `resolve_mode_guarded` — the production piece a real dispatch will use — with the
+        /// SAME combination of parameters that dispatch would pass it for an agent-autorouted
+        /// `consult` (no human-declared mode; the autonomous path does not have that level).
+        /// Wiring the whole tool loop (injecting the resolved mode into `ConsultTool::execute`,
+        /// the gate's veto counter) is Task 3.2's job — its own plan block states there, not
+        /// here, that `ConsultTool::execute` will receive the already-resolved `(Mode,
+        /// ModeSource)` pair. Building that machinery here would duplicate that task's work and
+        /// risk breaking the ~15 existing `tools::consult` tests that call `execute` without
+        /// injection.
         struct AgentTurnOutcome {
-            /// El modo efectivo resuelto.
+            /// The resolved effective mode.
             mode: Mode,
-            /// De qué nivel salió.
+            /// Which level it came from.
             mode_source: magi_rs::magi::mode::ModeSource,
-            /// Invocaciones al clasificador durante esta resolución.
+            /// Invocations of the classifier during this resolution.
             classification_calls: usize,
-            /// `true` si la resolución fue `Ok` (nada la bloqueó).
+            /// `true` if the resolution was `Ok` (nothing blocked it).
             consult_ran: bool,
         }
 
-        /// SC-A07d: el agente que decide consultar también decide la lente, vía
-        /// el `mode` de su propio `input_schema` — cero llamadas de
-        /// clasificación.
+        /// SC-A07d: the agent that decides to consult also decides the lens, via the `mode` in
+        /// its own `input_schema` — zero classification calls.
         ///
         /// # Errors
-        /// Nunca, en este caso: `untrusted = false`.
+        /// Never, in this case: `untrusted = false`.
         async fn run_turn_with_agent_chosen_mode(
             chosen: Mode,
         ) -> Result<AgentTurnOutcome, magi_rs::magi::mode::ModeError> {
-            // Etiqueta señuelo: si `Design` termina siendo el modo resuelto, el
-            // test descubre que la clasificación corrió cuando no debía.
+            // Decoy label: if `Design` ends up being the resolved mode, the test discovers that
+            // classification ran when it should not have.
             let counting = CountingClassifier::new(Mode::Design);
             let res = magi_rs::magi::mode::resolve_mode_guarded(
                 None,
@@ -4287,13 +4256,11 @@ mod tests {
             })
         }
 
-        /// SC-A07u: con `untrusted_content` activo, la elección del agente sigue
-        /// alcanzando — la marca bloquea la CLASIFICACIÓN (nivel 4), no la
-        /// elección del agente (nivel 3).
+        /// SC-A07u: with `untrusted_content` active, the agent's choice still reaches — the
+        /// flag blocks CLASSIFICATION (level 4), not the agent's choice (level 3).
         ///
         /// # Errors
-        /// Nunca, en este caso: el agente ya eligió, así que la guarda no se
-        /// dispara.
+        /// Never, in this case: the agent already chose, so the guard does not fire.
         async fn run_turn_with_untrusted_and_agent_chosen_mode(
             chosen: Mode,
         ) -> Result<AgentTurnOutcome, magi_rs::magi::mode::ModeError> {
@@ -4315,13 +4282,12 @@ mod tests {
             })
         }
 
-        /// SC-A07v: sin modo elegido por el agente y sin ninguna otra
-        /// declaración, la marca falla cerrado — `AgentChosen` ausente no es
-        /// `Explicit`.
+        /// SC-A07v: without an agent-chosen mode and without any other declaration, the flag
+        /// fails closed — absent `AgentChosen` is not `Explicit`.
         ///
         /// # Errors
-        /// [`magi_rs::magi::mode::ModeError::UntrustedContentRequiresExplicitMode`]
-        /// siempre: es justo lo que este test verifica.
+        /// [`magi_rs::magi::mode::ModeError::UntrustedContentRequiresExplicitMode`] always:
+        /// that is exactly what this test verifies.
         async fn run_turn_with_untrusted_and_no_mode_at_all(
         ) -> Result<AgentTurnOutcome, magi_rs::magi::mode::ModeError> {
             let counting = CountingClassifier::new(Mode::Design);
@@ -4342,11 +4308,11 @@ mod tests {
             })
         }
 
-        /// SC-A07w: `default_mode` le gana al agente — la perilla del operador
-        /// para fijar la lente por encima de lo que el agente elegiría.
+        /// SC-A07w: `default_mode` beats the agent — the operator's knob for setting the lens
+        /// above what the agent would choose.
         ///
         /// # Errors
-        /// Nunca, en este caso: `untrusted = false`.
+        /// Never, in this case: `untrusted = false`.
         async fn run_turn_with_default_mode_and_agent_choice(
             configured: Mode,
             agent_choice: Mode,
@@ -4369,18 +4335,18 @@ mod tests {
             })
         }
 
-        /// SC-A07d — Task 2.4 (reasignado de 2.2). Verifica que el agente que
-        /// decide consultar también decide la lente — el modo llega desde el
-        /// `input_schema` (REQ-A07b), sin llamada de clasificación.
+        /// SC-A07d — Task 2.4 (reassigned from 2.2). Verifies that the agent that decides to
+        /// consult also decides the lens — the mode comes from `input_schema` (REQ-A07b), with
+        /// no classification call.
         #[tokio::test]
         async fn the_agent_that_decides_to_consult_also_picks_the_lens() {
             let out = run_turn_with_agent_chosen_mode(Mode::CodeReview)
                 .await
                 .unwrap();
             assert_eq!(out.mode, Mode::CodeReview);
-            // `AgentChosen`, NO `Inferred`: mientras compartieron etiqueta, la
-            // guarda de `untrusted_content` no podía distinguir "lo eligió el
-            // agente" de "lo dijo el contenido", y terminaba bloqueando los dos.
+            // `AgentChosen`, NOT `Inferred`: as long as they shared the label, the
+            // `untrusted_content` guard could not distinguish "the agent chose it" from "the
+            // content said it", and ended up blocking both.
             assert_eq!(
                 out.mode_source,
                 magi_rs::magi::mode::ModeSource::AgentChosen,
@@ -4392,8 +4358,8 @@ mod tests {
             );
         }
 
-        /// SC-A07u — Task 2.4 (reasignado de 2.2). La marca NO le saca la lente
-        /// al agente — bloquea el nivel 4, no el 3.
+        /// SC-A07u — Task 2.4 (reassigned from 2.2). The flag does NOT take the lens away from
+        /// the agent — it blocks level 4, not level 3.
         #[tokio::test]
         async fn untrusted_content_does_not_take_the_lens_away_from_the_agent() {
             let out = run_turn_with_untrusted_and_agent_chosen_mode(Mode::CodeReview)
@@ -4410,18 +4376,18 @@ mod tests {
             assert_eq!(out.classification_calls, 0);
         }
 
-        /// SC-A07v — Task 2.4 (reasignado de 2.2). Pero el agente NO satisface
-        /// la guarda por su cuenta.
+        /// SC-A07v — Task 2.4 (reassigned from 2.2). But the agent does NOT satisfy the guard
+        /// on its own.
         #[tokio::test]
         async fn the_agent_alone_does_not_satisfy_the_untrusted_guard() {
-            // Sin modo elegido por el agente y sin declaración: la única salida
-            // sería la clasificación, que es lo que la marca bloquea.
+            // Without an agent-chosen mode and without a declaration: the only outlet would be
+            // classification, which is what the flag blocks.
             let out = run_turn_with_untrusted_and_no_mode_at_all().await;
             assert!(out.is_err(), "`AgentChosen` ausente no es `Explicit`");
         }
 
-        /// SC-A07w — Task 2.4 (reasignado de 2.2). `default_mode` le gana al
-        /// agente — la perilla del operador para fijar la lente.
+        /// SC-A07w — Task 2.4 (reassigned from 2.2). `default_mode` beats the agent — the
+        /// operator's knob for setting the lens.
         #[tokio::test]
         async fn configured_default_mode_beats_the_agents_choice() {
             let out = run_turn_with_default_mode_and_agent_choice(Mode::CodeReview, Mode::Design)
@@ -4431,20 +4397,18 @@ mod tests {
             assert_eq!(out.mode_source, magi_rs::magi::mode::ModeSource::Configured);
         }
 
-        /// SC-A07t: el envelope JSON declara la marca — es el consumidor de un
-        /// gate automatizado, la superficie donde más importa (REQ-A07d/A19).
-        /// Sin esta superficie la protección no existiría donde vive la
-        /// amenaza.
+        /// SC-A07t: the JSON envelope declares the flag — it is the consumer of an automated
+        /// gate, the surface where it matters most (REQ-A07d/A19). Without this surface the
+        /// protection would not exist where the threat lives.
         #[tokio::test]
         async fn the_json_envelope_carries_the_flag() {
             let env = parse_input(br#"{"prompt":"x","untrusted_content":true}"#, None)
                 .expect("valid envelope");
             assert_eq!(env.untrusted_content, Some(true));
 
-            // Misma resolución que `run_consult_subcommand` aplica en
-            // producción: el `mode` del envelope como explícito, su
-            // `untrusted_content` como la marca — sin modo declarado, la marca
-            // debe fallar cerrado antes de clasificar.
+            // Same resolution that `run_consult_subcommand` applies in production: the
+            // envelope's `mode` as explicit, its `untrusted_content` as the flag — without a
+            // declared mode, the flag must fail closed before classifying.
             let explicit = env
                 .resolved_mode()
                 .expect("no hay etiqueta de modo que rechazar en este envelope");
@@ -6233,16 +6197,15 @@ mod tests {
         );
     }
 
-    /// Task 4.1 — construcción del trío con providers nativos.
+    /// Task 4.1 — native provider trio construction.
     ///
-    /// SC-A01, SC-A02, SC-A03, SC-A05, SC-A05b, SC-A05c cerradas acá. SC-A04 ya está
-    /// cerrada por `magi::mod::derived_scale_satisfies_invariant_across_the_whole_
-    /// admissible_range` (Fase 0/1) — no es territorio de esta tarea, así que no se
-    /// duplica. SC-A06 (comportamiento por superficie cuando el trío no es
-    /// construible: mensaje accionable en la TUI, `consult` ausente del registro,
-    /// headless cerrado) queda **SIN TEST propio acá**: es el contrato completo de
-    /// Task 4.3 (`trio_unavailable_message`), que aún no existe — ver el reporte de
-    /// esta tarea.
+    /// SC-A01, SC-A02, SC-A03, SC-A05, SC-A05b, SC-A05c closed here. SC-A04 is already closed
+    /// by `magi::mod::derived_scale_satisfies_invariant_across_the_whole_admissible_range`
+    /// (Phase 0/1) — not this task's territory, so it is not duplicated. SC-A06 (surface
+    /// behavior when the trio is unbuildable: actionable message in the TUI, `consult` absent
+    /// from the registry, headless closed) remains **UNTESTED here**: it is the full contract
+    /// of Task 4.3 (`trio_unavailable_message`), which does not yet exist — see this task's
+    /// report.
     mod trio_construction {
         use super::*;
         use magi_core::error::ExternalErrorKind;
@@ -6250,9 +6213,8 @@ mod tests {
         use magi_core::test_support::valid_verdict_for_current_agent;
         use std::time::Instant;
 
-        /// Endpoint de prueba: una `base_url` plana sin placeholders, así que
-        /// resolverla no necesita un vault real — `NoVaultInScope` (ya en
-        /// producción) alcanza.
+        /// Test endpoint: a flat `base_url` with no placeholders, so resolving it does not need
+        /// a real vault — `NoVaultInScope` (already in production) is enough.
         fn test_endpoints() -> ResolvedEndpoints {
             let tpl = EndpointTemplate::parse("http://localhost:11434/v1").unwrap();
             ResolvedEndpoints {
@@ -6262,7 +6224,7 @@ mod tests {
             }
         }
 
-        /// Credenciales fijas de prueba, sin env ni vault detrás.
+        /// Fixed test credentials, no env or vault behind them.
         struct FixedCreds {
             openai: Option<String>,
             anthropic: Option<String>,
@@ -6286,17 +6248,16 @@ mod tests {
             MagiConfig::from_toml_str("provider = \"openai-compat\"\n").unwrap()
         }
 
-        /// Solo Caspar tiene un modelo que no resuelve a un alias Claude válido; los
-        /// otros dos heredan el modelo del backend (`[anthropic].model`, válido). La
-        /// falla de UN asiento sin tocar los otros dos necesita un eje que varíe por
-        /// asiento — un modelo inválido es el único que `build_native_provider` tiene
-        /// (la credencial y el endpoint son compartidos por los tres).
+        /// Only Caspar has a model that does not resolve to a valid Claude alias; the other two
+        /// inherit the backend model (`[anthropic].model`, valid). Making ONE seat fail without
+        /// touching the other two needs an axis that varies by seat — an invalid model is the
+        /// only one `build_native_provider` has (credential and endpoint are shared across all
+        /// three).
         ///
-        /// El string NO puede contener la subcadena `"claude-"` en ningún lado:
-        /// `resolve_claude_alias` (magi-core) acepta CUALQUIER modelo que la
-        /// contenga como passthrough — `"not-a-real-claude-alias"` la contiene
-        /// (`…real-`**`claude-`**`alias`) y por eso resolvía OK, no era el fixture
-        /// roto que este test necesitaba.
+        /// The string MUST NOT contain the `"claude-"` substring anywhere:
+        /// `resolve_claude_alias` (magi-core) accepts ANY model containing it as pass-through —
+        /// `"not-a-real-claude-alias"` contains it (`…real-`**`claude-`**`alias`) and therefore
+        /// resolved OK, so it was not the broken fixture this test needed.
         fn cfg_with_only_caspar_unbuildable() -> MagiConfig {
             MagiConfig::from_toml_str(
                 "provider = \"anthropic\"\n\
@@ -6308,13 +6269,12 @@ mod tests {
             .unwrap()
         }
 
-        /// Construida a mano, saltando la validación de `from_toml_str`
-        /// (`validate_vocabulary`) A PROPÓSITO: un `kind` inválido nunca llega a
-        /// `build_magi_orchestrator` por la ruta de producción real (`load()`/
-        /// `from_toml_str()` ya lo rechazan antes), pero la función igual debe
-        /// reportarlo — defensa en profundidad, ver el rustdoc de
-        /// `build_magi_orchestrator` sobre por qué NO usa
-        /// `cfg.effective_magi_kind()` para esto.
+        /// Hand-built, deliberately skipping `from_toml_str`'s validation
+        /// (`validate_vocabulary`): an invalid `kind` never reaches `build_magi_orchestrator`
+        /// through the real production path (`load()`/`from_toml_str()` already reject it
+        /// earlier), but the function must still report it — defense in depth, see the rustdoc
+        /// of `build_magi_orchestrator` on why it does NOT use `cfg.effective_magi_kind()` for
+        /// this.
         fn cfg_with_kind(kind: &str) -> MagiConfig {
             MagiConfig {
                 provider: Some("ollama".to_string()),
@@ -6326,21 +6286,19 @@ mod tests {
             }
         }
 
-        /// Contenido por encima de cualquier mínimo interno de magi-core — no es el
-        /// gate de complejidad de REQ-A20 (`Magi::analyze` acá no lo usa: `[NO usar
-        /// MagiBuilder::with_complexity_gate]`, decisión de la spec), es
-        /// simplemente "no vacío y realista".
+        /// Content above any magi-core internal minimum — not the REQ-A20 complexity gate
+        /// (`Magi::analyze` does not use it here: `[NO usar
+        /// MagiBuilder::with_complexity_gate]`, spec decision), just "non-empty and realistic".
         fn content_above_gate() -> String {
             "x".repeat(300)
         }
 
-        /// Verdict válido y ATRIBUIDO al agente correcto — `parse_validate_and_check`
-        /// de magi-core rechaza un verdict cuyo campo `"agent"` no coincide con a
-        /// quién se despachó (`AgentIdentity`), así que no alcanza con
-        /// `valid_verdict_for_current_agent()` fuera de un scope de
-        /// `CURRENT_AGENT_IDENTITY` — ese task-local es privado de magi-core y solo
-        /// está activo DURANTE el despacho real, no al construir la respuesta de
-        /// antemano para un `RoutingMockProvider`.
+        /// Valid verdict ATTRIBUTED to the correct agent — magi-core's
+        /// `parse_validate_and_check` rejects a verdict whose `"agent"` field does not match
+        /// who it was dispatched to (`AgentIdentity`), so `valid_verdict_for_current_agent()`
+        /// outside a `CURRENT_AGENT_IDENTITY` scope is not enough; that task-local is private
+        /// to magi-core and only active DURING real dispatch, not when pre-building the
+        /// response for a `RoutingMockProvider`.
         fn verdict_for(agent: AgentName) -> String {
             let name = serde_json::to_value(agent)
                 .ok()
@@ -6355,12 +6313,11 @@ mod tests {
             )
         }
 
-        /// Provider de prueba que graba el system/user prompt que recibió. Cada
-        /// asiento del trío recibe su PROPIA instancia (no compartida): magi-core
-        /// enruta por asignación (`MagiBuilder::with_provider`), no por identidad de
-        /// tarea, así que no hace falta leer `CURRENT_AGENT_IDENTITY` (privado de
-        /// magi-core) para saber "para quién" es esta llamada — la instancia YA lo
-        /// sabe, por construcción.
+        /// Test provider that records the system/user prompt it receives. Each seat of the trio
+        /// gets its OWN instance (not shared): magi-core routes by assignment
+        /// (`MagiBuilder::with_provider`), not by task identity, so reading
+        /// `CURRENT_AGENT_IDENTITY` (private to magi-core) is not needed to know "for whom"
+        /// this call is — the instance ALREADY knows, by construction.
         struct CapturingProvider {
             captured: std::sync::Mutex<Option<(String, String)>>,
         }
@@ -6429,16 +6386,15 @@ mod tests {
             }
         }
 
-        /// Construye un trío EXACTAMENTE con la forma que `build_magi_orchestrator`
-        /// arma el suyo — cada asiento con su PROPIO provider vía
-        /// `MagiBuilder::with_provider()`, sin un adapter que doble el prompt — para
-        /// verificar SC-A01. No pasa por `build_magi_orchestrator` en sí: ese
-        /// construye providers HTTP reales (`OpenAiCompatibleProvider`/
-        /// `ClaudeProvider`) para los que no hay punto de inyección de un test
-        /// double, y llamarlo golpearía la red (prohibido, R-A04). Esta función
-        /// prueba la MISMA forma de construcción con providers de prueba en su
-        /// lugar — junto con SC-A02 (que fija que ningún adapter de folding existe
-        /// en producción), cierran la propiedad end to end.
+        /// Builds a trio EXACTLY in the shape `build_magi_orchestrator` builds its — each seat
+        /// with its OWN provider via `MagiBuilder::with_provider()`, with no adapter folding
+        /// the prompt — to verify SC-A01. It does not go through `build_magi_orchestrator`
+        /// itself: that one builds real HTTP providers
+        /// (`OpenAiCompatibleProvider`/`ClaudeProvider`) for which there is no test-double
+        /// injection point, and calling it would hit the network (forbidden, R-A04). This
+        /// function tests the SAME construction shape with test providers in their place —
+        /// together with SC-A02 (which fixes that no folding adapter exists in production),
+        /// they close the property end to end.
         async fn build_trio_with_capturing_providers() -> CapturedTrio {
             let melchior = CapturingProvider::new();
             let balthasar = CapturingProvider::new();
@@ -6457,28 +6413,25 @@ mod tests {
             }
         }
 
-        /// SC-A01: el system prompt llega ÍNTEGRO por el canal del provider, nunca
-        /// doblado dentro del turno de usuario. Es la propiedad que dejó de
-        /// sostenerse cuando el trío pasaba por `MagiCoreProviderAdapter` (retirado
-        /// esta misma tarea): ese adapter concatenaba `"{system}\n\n{user}"` antes
-        /// de llegar a un `Provider` de magi-rs de un solo canal. Nada en
-        /// `build_native_provider`/`build_magi_orchestrator` hace eso — devuelven el
-        /// provider nativo DIRECTO, sin envoltorio.
+        /// SC-A01: the system prompt arrives INTACT through the provider channel, never folded
+        /// inside the user turn. It is the property that stopped holding when the trio went
+        /// through `MagiCoreProviderAdapter` (retired this same task): that adapter
+        /// concatenated `"{system}\n\n{user}"` before reaching a single-channel magi-rs
+        /// `Provider`. Nothing in `build_native_provider`/`build_magi_orchestrator` does that —
+        /// it returns the native provider DIRECTLY, with no wrapper.
         ///
-        /// **Nota honesta (fix round 2, I2)**: esta prueba NO llama a
-        /// `build_magi_orchestrator` — no puede: esa función siempre construye
-        /// providers HTTP reales (`OpenAiCompatibleProvider`/`ClaudeProvider`), sin
-        /// ningún punto de inyección para un doble, así que invocarla golpearía la
-        /// red (prohibido, R-A04). Y aunque pudiera, `build_magi_orchestrator` NO
-        /// determina el CONTENIDO del system prompt — eso lo decide
-        /// `agent_factory.create_agents_with_prompts` de magi-core, a partir de
-        /// `AgentName` y `Mode`, después de que el trío ya está construido. Introspectar
-        /// esa función no puede probar nada sobre distinción de prompts: es
-        /// estructuralmente la función equivocada para esta propiedad. Lo que SÍ
-        /// prueba esta función (SC-A03, más abajo) es que `build_magi_orchestrator`
-        /// wireó tres asientos DISTINTOS vía `.with_provider()` — el patrón exacto que
-        /// esta prueba también usa, y el que hace que magi-core le entregue una
-        /// persona distinta a cada uno.
+        /// **Honest note (fix round 2, I2)**: this test does NOT call
+        /// `build_magi_orchestrator` — it cannot: that function always builds real HTTP
+        /// providers (`OpenAiCompatibleProvider`/`ClaudeProvider`), with no injection point for
+        /// a double, so invoking it would hit the network (forbidden, R-A04). And even if it
+        /// could, `build_magi_orchestrator` does NOT determine the CONTENT of the system prompt
+        /// — that is decided by `agent_factory.create_agents_with_prompts` in magi-core, from
+        /// `AgentName` and `Mode`, after the trio is already built. Introspecting that function
+        /// cannot prove anything about prompt distinctness: it is structurally the wrong
+        /// function for this property. What this function DOES prove (SC-A03, below) is that
+        /// `build_magi_orchestrator` wired three DISTINCT seats via `.with_provider()` — the
+        /// exact pattern this test also uses, and the one that makes magi-core deliver a
+        /// different persona to each one.
         #[tokio::test]
         async fn each_mage_receives_its_system_prompt_in_the_providers_own_channel() {
             let captured = build_trio_with_capturing_providers().await;
@@ -6493,9 +6446,9 @@ mod tests {
                 );
                 system_prompts.push(system);
             }
-            // I2 (fix round 2): la propiedad que la tarea existe para restaurar es
-            // DISTINCIÓN entre asientos, no solo "no vacío" — tres prompts idénticos
-            // pasaban las aserciones de arriba sin decir nada falso.
+            // I2 (fix round 2): the property this task exists to restore is DISTINCTNESS
+            // between seats, not just "non-empty" — three identical prompts would pass the
+            // assertions above without saying anything false.
             assert_ne!(
                 system_prompts[0], system_prompts[1],
                 "Melchior y Balthasar recibieron el MISMO system prompt"
@@ -6510,21 +6463,20 @@ mod tests {
             );
         }
 
-        /// I2 (fix round 2, IMPORTANT): SC-A03 y SC-A05 (más abajo) afirmaban contra
-        /// un `MagiBuilder` propio, envuelto en su PROPIO `RetryProvider` — borrar el
-        /// envoltorio real de `build_magi_orchestrator` los dejaba en verde igual,
-        /// mientras su comentario decía "sin el envoltorio, este test se pone rojo".
-        /// Esa afirmación era falsa.
+        /// I2 (fix round 2, IMPORTANT): SC-A03 and SC-A05 (below) asserted against a
+        /// `MagiBuilder` of their own, wrapped in their OWN `RetryProvider` — removing
+        /// `build_magi_orchestrator`'s real wrapper left them green anyway, while their comment
+        /// said "without the wrapper, this test turns red". That assertion was false.
         ///
-        /// Esta prueba llama a la función REAL, con `ollama` (keyless, sin credencial
-        /// ni red necesaria para CONSTRUIR — solo arma el cliente HTTP, no lo usa), y
-        /// lee `seat_wiring_trace()` — el rastro que `build_magi_orchestrator` deja
-        /// SOLO en builds de test, en la MISMA rama que hace el wrap real. Si alguien
-        /// borra el `RetryProvider::with_config(...)` de producción sin tocar el
-        /// rastro, el conteo dejaría de coincidir con lo que `seats.push` produce y
-        /// esta prueba cae. No es downcasting en runtime — `LlmProvider` es un trait
-        /// foráneo de magi-core sin `Any` (R-A01 prohíbe tocar esa crate) — así que es
-        /// la aproximación más fuerte alcanzable sin modificarla.
+        /// This test calls the REAL function, with `ollama` (keyless, no credential or network
+        /// needed to BUILD — it only builds the HTTP client, not use it), and reads
+        /// `seat_wiring_trace()` — the trace `build_magi_orchestrator` leaves ONLY in test
+        /// builds, in the SAME branch that does the real wrapping. If someone removes the
+        /// `RetryProvider::with_config(...)` from production without touching the trace, the
+        /// count will stop matching what `seats.push` produces and this test will fail. It is
+        /// not runtime downcasting — `LlmProvider` is a foreign trait from magi-core with no
+        /// `Any` (R-A01 forbids touching that crate) — so this is the strongest approximation
+        /// achievable without modifying it.
         #[test]
         fn build_magi_orchestrator_wires_three_distinct_seats_each_wrapped_in_retry() {
             let cfg = MagiConfig::from_toml_str("provider = \"ollama\"\n").unwrap();
@@ -6559,20 +6511,18 @@ mod tests {
             );
         }
 
-        /// SC-A02: ninguna ruta de producción implementa `LlmProvider` a través de un
-        /// adapter que doble el prompt.
+        /// SC-A02: no production path implements `LlmProvider` through an adapter that folds
+        /// the prompt.
         ///
-        /// NO se grepea el patrón crudo `"impl LlmProvider for"` sobre TODO `src/`:
-        /// los test doubles de ESTE MISMO archivo (`CapturingProvider` arriba) también
-        /// lo implementan, así que ese grep tendría un falso positivo por diseño en
-        /// cuanto existiera un solo test double — que es justamente lo que esta tarea
-        /// necesita para probar SC-A01/SC-A03/SC-A05 sin red real (R-A04). Lo que
-        /// SC-A02 pide en realidad — "la adaptación del prompt no sobrevive" — se
-        /// verifica por la AUSENCIA de una CONSTRUCCIÓN del tipo concreto retirado
-        /// (su llamada de constructor, `::new`), no por un grep ciego del trait ni
-        /// por la ausencia del NOMBRE — el nombre sigue apareciendo, a propósito, en
-        /// comentarios que documentan qué se retiró y por qué (este mismo archivo,
-        /// `agent/messages.rs`, `tui/mod.rs`).
+        /// NO raw `"impl LlmProvider for"` grep across ALL of `src/`: the test doubles in THIS
+        /// same file (`CapturingProvider` above) also implement it, so that grep would have a
+        /// designed-in false positive as soon as a single test double exists — which is exactly
+        /// what this task needs to test SC-A01/SC-A03/SC-A05 without real network (R-A04). What
+        /// SC-A02 actually asks — "prompt adaptation does not survive" — is verified by the
+        /// ABSENCE of a CONSTRUCTION of the retired concrete type (its constructor call,
+        /// `::new`), not by a blind trait grep nor by the absence of the NAME — the name still
+        /// appears, deliberately, in comments documenting what was retired and why (this same
+        /// file, `agent/messages.rs`, `tui/mod.rs`).
         #[test]
         fn no_production_path_implements_llm_provider_via_a_folding_adapter() {
             // Built at RUNTIME, in two pieces: written as one literal it would match
@@ -6590,7 +6540,7 @@ mod tests {
             );
         }
 
-        /// SC-A02c: `kind` inválido ⇒ trío no construible; vacío ⇒ hereda.
+        /// SC-A02c: invalid `kind` ⇒ trio unbuildable; empty ⇒ inherited.
         #[test]
         fn an_unknown_kind_makes_the_trio_unbuildable_while_a_blank_one_inherits() {
             let mut notices = Vec::new();
@@ -6627,18 +6577,17 @@ mod tests {
             );
         }
 
-        /// I1 (fix round 2, IMPORTANT): un `[magi].kind` ausente debe heredar el
-        /// `ProviderKind` YA RESUELTO del principal (`principal_kind`, que ya vio
-        /// `MAGI_PROVIDER`) — no releer `provider` de TOML por su cuenta vía
-        /// `cfg.effective_provider()`. Si no, `MAGI_PROVIDER=anthropic` mueve al
-        /// agente conversacional pero deja el trío en el `provider` que dice el
-        /// archivo.
+        /// I1 (fix round 2, IMPORTANT): an absent `[magi].kind` must inherit the ALREADY-
+        /// RESOLVED principal `ProviderKind` (`principal_kind`, which already saw
+        /// `MAGI_PROVIDER`) — not re-read `provider` from TOML on its own via
+        /// `cfg.effective_provider()`. Otherwise `MAGI_PROVIDER=anthropic` moves the
+        /// conversational agent but leaves the trio on whatever `provider` the file says.
         ///
-        /// Señal observable: el TOML dice `provider = "ollama"` (keyless — CUALQUIER
-        /// credencial, incluida ninguna, construye), pero `principal_kind` pasado es
-        /// `Anthropic` y no se da ninguna credencial. Si la herencia relee TOML (el
-        /// bug), el trío construye igual porque Ollama no exige nada; si hereda
-        /// `principal_kind` de verdad, falla pidiendo `ANTHROPIC_API_KEY`.
+        /// Observable signal: the TOML says `provider = "ollama"` (keyless — ANY credential,
+        /// including none, builds), but the passed `principal_kind` is `Anthropic` and no
+        /// credential is given. If inheritance re-reads TOML (the bug), the trio builds anyway
+        /// because Ollama demands nothing; if it truly inherits `principal_kind`, it fails
+        /// asking for `ANTHROPIC_API_KEY`.
         #[test]
         fn a_blank_magi_kind_inherits_the_resolved_principal_kind_not_a_toml_only_read() {
             let cfg = MagiConfig::from_toml_str("provider = \"ollama\"\n").unwrap();
@@ -6674,10 +6623,10 @@ mod tests {
             }
         }
 
-        /// SC-A05b / SC-A05c: los asientos caídos se nombran, y TODOS de una.
+        /// SC-A05b / SC-A05c: fallen seats are named, and ALL of them.
         ///
-        /// El fixture usa `kind = "openai-compat"` a propósito: `ollama` es keyless,
-        /// así que nunca produce `MissingCredential` y el test no probaría nada.
+        /// The fixture deliberately uses `kind = "openai-compat"`: `ollama` is keyless, so it
+        /// never produces `MissingCredential` and the test would prove nothing.
         #[test]
         fn unbuildable_seats_are_named_all_at_once() {
             let mut notices = Vec::new();
@@ -6710,7 +6659,7 @@ mod tests {
             }
         }
 
-        /// Asientos parciales: 1 de 3 caídos también se reporta completo, y SOLO ese.
+        /// Partial seats: 1 of 3 fallen is also reported complete, and ONLY that one.
         #[test]
         fn a_partial_seat_failure_names_exactly_the_seats_that_failed() {
             let c = creds();
@@ -6736,35 +6685,34 @@ mod tests {
             }
         }
 
-        /// SC-A03: un fallo transitorio se reintenta y el mage responde.
+        /// SC-A03: a transient failure retries and the mage responds.
         ///
-        /// **Corrección honesta (fix round 2, I2)**: la afirmación anterior de este
-        /// comentario — "sin el envoltorio, este test se pone rojo" — era FALSA.
-        /// Este test arma su PROPIO `RetryProvider` sobre un doble, así que borrar el
-        /// `RetryProvider::with_config(...)` real de `build_magi_orchestrator` no lo
-        /// afecta en absoluto: no hay forma de inyectar un doble DENTRO de esa
-        /// función (siempre construye `OpenAiCompatibleProvider`/`ClaudeProvider`
-        /// reales, sin punto de inyección), así que probar el comportamiento DINÁMICO
-        /// del reintento (que efectivamente reintenta y el mage responde) sin red real
-        /// exige un doble por fuera de esa función. Lo que SÍ prueba la función real
-        /// —que efectivamente envuelve cada asiento en `RetryProvider`— lo prueba
-        /// `build_magi_orchestrator_wires_three_distinct_seats_each_wrapped_in_retry`
-        /// (arriba), vía el rastro que esa función deja en test. Las dos pruebas
-        /// juntas cierran REQ-A03: una confirma que el WRAP existe en la función real,
-        /// la otra confirma que ESE WRAP (misma forma, mismo `RetryConfig` derivado)
-        /// efectivamente reintenta y sobrevive un fallo transitorio.
+        /// **Honest correction (fix round 2, I2)**: the previous assertion of this
+        /// comment — "without the wrapper, this test turns red" — was FALSE. This test builds
+        /// its OWN `RetryProvider` over a double, so removing the
+        /// `RetryProvider::with_config(...)` real wrapper from `build_magi_orchestrator` does
+        /// not affect it at all: there is no way to inject a double INSIDE that function (it
+        /// always builds real `OpenAiCompatibleProvider`/`ClaudeProvider`, with no injection
+        /// point), so testing the DYNAMIC behavior of the retry (that it actually retries and
+        /// the mage responds) without real network requires a double outside that function.
+        /// What the real function DOES prove —that it actually wraps each seat in
+        /// `RetryProvider`— is tested by
+        /// `build_magi_orchestrator_wires_three_distinct_seats_each_wrapped_in_retry` (above),
+        /// via the trace that function leaves in test. The two tests together close REQ-A03:
+        /// one confirms the WRAP exists in the real function, the other confirms THAT WRAP
+        /// (same shape, same derived `RetryConfig`) actually retries and survives a transient
+        /// failure.
         ///
-        /// Usa `RoutingMockProvider` de magi-core (feature `test-utils`, ya
-        /// habilitada) en vez de un contador propio: enruta por asiento vía
-        /// `CURRENT_AGENT_IDENTITY`, así que UNA sola instancia compartida entre los
-        /// tres asientos no confunde las respuestas de uno con las de otro bajo el
-        /// despacho PARALELO real de magi-core (verificado, SC-A04e) — un contador
-        /// compartido ingenuo sí lo haría, y por eso este test no afirma un conteo
-        /// total de intentos: con tres asientos despachando en paralelo, cada uno
-        /// con su propio `RetryProvider`, el número total de llamadas depende del
-        /// entrelazado exacto y no es la propiedad que REQ-A03 promete. Lo que sí
-        /// promete — y lo que este test afirma — es que los tres asientos
-        /// SOBREVIVEN su fallo inicial y el consenso queda completo.
+        /// Uses magi-core's `RoutingMockProvider` (feature `test-utils`, already enabled)
+        /// instead of a self-owned counter: it routes by seat via `CURRENT_AGENT_IDENTITY`, so
+        /// a SINGLE instance shared across the three seats does not confuse one seat's
+        /// responses with another's under magi-core's REAL parallel dispatch (verified,
+        /// SC-A04e) — a naive shared counter would, and that is why this test does not assert a
+        /// total attempt count: with three seats dispatched in parallel, each with its own
+        /// `RetryProvider`, the total number of calls depends on the exact interleaving and is
+        /// not the property REQ-A03 promises. What it does promise — and what this test asserts
+        /// — is that all three seats SURVIVE their initial failure and the consensus becomes
+        /// complete.
         #[tokio::test]
         async fn a_transient_failure_is_retried_and_the_mage_answers() {
             let transient = || Err(ProviderError::external("boom", ExternalErrorKind::Network));
@@ -6804,10 +6752,9 @@ mod tests {
             assert!(!report.degraded, "y el consenso quedó completo");
         }
 
-        /// Provider que agota su presupuesto de reintentos SIEMPRE fallando —
-        /// "cuelga" en el sentido de REQ-A05: nunca produce un veredicto utilizable,
-        /// así que el ÚNICO camino de salida es que `RetryProvider` abandone por
-        /// presupuesto agotado, nunca que el proveedor "se resuelva solo".
+        /// Provider that exhausts its retry budget by ALWAYS failing — "hangs" in the sense of
+        /// REQ-A05: never produces a usable verdict, so the ONLY way out is for `RetryProvider`
+        /// to give up by exhausted budget, never for the provider to "resolve itself".
         struct AlwaysFailingProvider {
             calls: std::sync::atomic::AtomicUsize,
         }
@@ -6831,27 +6778,25 @@ mod tests {
             }
         }
 
-        /// SC-A05: un provider que nunca produce un veredicto abandona con una razón
-        /// TIPADA, y lo hace bien ANTES de agotar el techo por mage — un corte opaco
-        /// del techo externo no distingue "colgado" de "lento". Usa un
-        /// `operation_budget` chico en vez del derivado de `AGENT_TIMEOUT_SECS`
-        /// (90 s): la propiedad bajo prueba es la FORMA del abandono (temprano,
-        /// tipado), no el valor exacto del presupuesto derivado — eso ya lo prueba
-        /// `derived_scale_satisfies_invariant_across_the_whole_admissible_range` en
-        /// `magi/mod.rs`, exhaustivamente, sin gastar segundos reales de reloj.
-        /// `max_retries` alto (50) es lo que hace la señal inequívoca: si el
-        /// presupuesto NO estuviera acotando el abandono, agotar 50 reintentos a
-        /// 20 ms cada uno tomaría ~1 s — muy por encima del margen que este test
-        /// tolera.
+        /// SC-A05: a provider that never produces a verdict gives up with a TYPED reason, and
+        /// does so well BEFORE exhausting the per-mage ceiling — a blunt cut from the external
+        /// ceiling does not distinguish "hung" from "slow". It uses a small `operation_budget`
+        /// instead of the one derived from `AGENT_TIMEOUT_SECS` (90 s): the property under test
+        /// is the SHAPE of the abandonment (early, typed), not the exact value of the derived
+        /// budget — that is already tested by
+        /// `derived_scale_satisfies_invariant_across_the_whole_admissible_range` in
+        /// `magi/mod.rs`, exhaustively, without spending real wall-clock seconds. A high
+        /// `max_retries` (50) is what makes the signal unambiguous: if the budget were NOT
+        /// capping the abandonment, exhausting 50 retries at 20 ms each would take ~1 s — far
+        /// above the margin this test tolerates.
         ///
-        /// **Nota honesta (fix round 2, I2)**: igual que SC-A03, este test arma su
-        /// PROPIO `RetryProvider` sobre un doble — no hay forma de inyectar un doble
-        /// dentro de `build_magi_orchestrator` (siempre construye providers HTTP
-        /// reales). El comportamiento DINÁMICO del abandono se prueba acá, contra un
-        /// `RetryConfig` con la MISMA forma que la función real deriva; que la
-        /// función real efectivamente aplica esa forma (envuelve cada asiento) lo
-        /// prueba `build_magi_orchestrator_wires_three_distinct_seats_each_wrapped_
-        /// in_retry`, arriba.
+        /// **Honest note (fix round 2, I2)**: as with SC-A03, this test builds its
+        /// OWN `RetryProvider` over a double — there is no way to inject a double inside
+        /// `build_magi_orchestrator` (it always builds real HTTP providers). The DYNAMIC
+        /// behavior of the abandonment is tested here, against a `RetryConfig` with the SAME
+        /// shape the real function derives; that the real function actually applies that shape
+        /// (wraps each seat) is tested by
+        /// `build_magi_orchestrator_wires_three_distinct_seats_each_wrapped_in_retry`, above.
         #[tokio::test]
         async fn a_hanging_provider_abandons_before_the_ceiling() {
             let inner = Arc::new(AlwaysFailingProvider {
@@ -6882,9 +6827,9 @@ mod tests {
             );
         }
 
-        /// `resolve_endpoints`: los tres campos se resuelven de una — cubre el
-        /// `root` y el `embedding` que `build_magi_orchestrator` no toca (solo usa
-        /// `.magi`), que de otro modo quedarían sin lector.
+        /// `resolve_endpoints`: all three fields are resolved at once — covers the `root` and
+        /// `embedding` that `build_magi_orchestrator` does not touch (it only uses `.magi`),
+        /// which would otherwise go unread.
         #[test]
         fn resolve_endpoints_resolves_the_three_fields_from_the_same_root_when_none_diverge() {
             let cfg = MagiConfig::default();
@@ -6904,8 +6849,8 @@ mod tests {
             );
         }
 
-        /// El trío puede divergir del endpoint de raíz; el embedder, sin override,
-        /// hereda la raíz igual que siempre.
+        /// The trio may diverge from the root endpoint; the embedder, with no override,
+        /// inherits root as always.
         #[test]
         fn resolve_endpoints_lets_the_trio_diverge_from_the_root() {
             let cfg = MagiConfig::from_toml_str(
@@ -6920,11 +6865,10 @@ mod tests {
             assert_eq!(resolved.embedding.as_str(), "http://root:11434/v1");
         }
 
-        /// I1 (fix round 2, IMPORTANT): `resolve_endpoints` debe ver la MISMA capa
-        /// `OPENAI_BASE_URL` que ya aplicaba `resolve_effective_principal_endpoint` —
-        /// si no, el env var mueve al agente conversacional pero deja al trío
-        /// apuntando al `base_url` de TOML/default cuando `[magi].base_url` está
-        /// ausente (heredando).
+        /// I1 (fix round 2, IMPORTANT): `resolve_endpoints` must see the SAME `OPENAI_BASE_URL`
+        /// layer that already applied to `resolve_effective_principal_endpoint` — otherwise the
+        /// env var moves the conversational agent but leaves the trio pointing at the
+        /// TOML/default `base_url` when `[magi].base_url` is absent (inheriting).
         #[test]
         fn resolve_endpoints_honors_openai_base_url_for_the_inherited_trio_endpoint() {
             let cfg = MagiConfig::default(); // sin base_url propio, sin [magi].base_url
@@ -6938,8 +6882,8 @@ mod tests {
             );
         }
 
-        /// Un `[magi].base_url` PROPIO sigue ganándole al env var de la raíz — el env
-        /// solo llena el hueco de la herencia, no pisa una declaración explícita.
+        /// An OWN `[magi].base_url` still wins over the root env var — the env var only fills
+        /// the inheritance gap, not override an explicit declaration.
         #[test]
         fn resolve_endpoints_lets_a_declared_trio_base_url_win_over_the_root_env_override() {
             let cfg =
@@ -6984,11 +6928,11 @@ mod tests {
             );
         }
 
-        /// C1 (fix round 2, CRITICAL, Security): el aviso de normalización interpola el
-        /// endpoint YA RESUELTO (post-sustitución de placeholders REQ-A16c) — si trae
-        /// credenciales, deben llegar redactadas al TEXTO del aviso, aunque el `root`
-        /// devuelto para el provider real las siga llevando intactas (el provider SÍ
-        /// las necesita: `api_key = None` para Ollama no cubre `userinfo` en la URL).
+        /// C1 (fix round 2, CRITICAL, Security): the normalization notice interpolates the
+        /// ALREADY-RESOLVED endpoint (post-placeholder substitution REQ-A16c) — if it carries
+        /// credentials, they must reach the notice TEXT redacted, even though the `root`
+        /// returned for the real provider still carries them intact (the provider DOES need
+        /// them: `api_key = None` for Ollama does not cover `userinfo` in the URL).
         #[test]
         fn openai_compat_root_redacts_credentials_in_the_notice_but_not_in_the_root() {
             let (root, notice) = openai_compat_root("https://realuser:realpass@ollama.lan:11434");
@@ -7033,17 +6977,16 @@ mod tests {
             assert_eq!(c.anthropic(), None);
         }
 
-        /// Restaura la cobertura de precedencia que el trío siempre tuvo para los
-        /// overrides por asiento: `MAGI_MODEL_<AGENT>` (env) > `[magi].<agent>_model`
-        /// (TOML) > el modelo del backend. Fix round 1 (coordinador, 2026-08-03):
-        /// R-A03 solo admite las tres rupturas declaradas en REQ-A21/A22/A23, y
-        /// `MAGI_MODEL_*` no es ninguna de ellas — quitar la capacidad al retirar el
-        /// adapter fue una ruptura NO declarada, así que se restaura acá.
+        /// Restores the precedence coverage the trio always had for per-seat overrides:
+        /// `MAGI_MODEL_<AGENT>` (env) > `[magi].<agent>_model` (TOML) > backend model. Fix
+        /// round 1 (coordinator, 2026-08-03): R-A03 only admits the three declared breakages in
+        /// REQ-A21/A22/A23, and `MAGI_MODEL_*` is none of them — removing the capability when
+        /// retiring the adapter was an undeclared breakage, so it is restored here.
         ///
-        /// Usa la validez del alias de Caspar como señal observable — mismo truco que
-        /// `cfg_with_only_caspar_unbuildable` — en vez de inspeccionar estado interno:
-        /// un modelo inválido hace que ESE asiento falle a construir, así que "¿cuál
-        /// modelo ganó?" se lee de si el trío construye o no, sin necesitar red real.
+        /// Uses Caspar alias validity as the observable signal — same trick as
+        /// `cfg_with_only_caspar_unbuildable` — instead of inspecting internal state: an
+        /// invalid model makes THAT seat fail to build, so "which model won?" is read from
+        /// whether the trio builds or not, without needing real network.
         #[test]
         fn env_model_override_wins_over_toml_which_wins_over_the_backend_model() {
             let backend_only = MagiConfig::from_toml_str(
@@ -7054,7 +6997,7 @@ mod tests {
             let c = creds();
             let endpoints = test_endpoints();
 
-            // Ni TOML ni env: el modelo del BACKEND (válido) alcanza.
+            // Neither TOML nor env: the BACKEND model (valid) is enough.
             let mut notices = Vec::new();
             assert!(
                 build_magi_orchestrator(
@@ -7070,8 +7013,8 @@ mod tests {
                 "sin overrides, el modelo del backend debe alcanzar"
             );
 
-            // Override de TOML inválido, SIN env: el TOML se aplica de verdad (y por
-            // eso falla) — no "se ignora silenciosamente".
+            // Invalid TOML override, NO env: the TOML is actually applied (and thus fails) — it
+            // is not "silently ignored".
             let mut notices = Vec::new();
             assert!(
                 build_magi_orchestrator(
@@ -7087,7 +7030,7 @@ mod tests {
                 "el override de TOML debe aplicarse, aunque sea inválido"
             );
 
-            // El MISMO TOML inválido, pero con env override VÁLIDO: env gana.
+            // The SAME invalid TOML, but with a VALID env override: env wins.
             let env_overrides = MagiEnvModelOverrides {
                 caspar: Some("claude-opus-4-7".to_string()),
                 ..MagiEnvModelOverrides::default()
@@ -7109,11 +7052,11 @@ mod tests {
         }
     }
 
-    /// Task 4.3 — REQ-A06/SC-A06: comportamiento por superficie cuando el trío no es
-    /// construible. `trio_construction` (arriba) ya cubre que
-    /// `build_magi_orchestrator` reporte TODOS los asientos caídos (SC-A05b/SC-A05c);
-    /// este módulo cubre lo que Task 4.3 agrega — que esa información REALMENTE
-    /// llegue al usuario en cada superficie, y no solo que el tipo la lleve.
+    /// Task 4.3 — REQ-A06/SC-A06: surface behavior when the trio is unbuildable.
+    /// `trio_construction` (above) already covers that `build_magi_orchestrator` reports ALL
+    /// fallen seats (SC-A05b/SC-A05c); this module covers what Task 4.3 adds — that this
+    /// information REALLY reaches the user on every surface, and not just that the type carries
+    /// it.
     mod trio_unavailable_surfaces {
         use super::*;
         use magi_core::test_support::RoutingMockProvider;
@@ -7122,8 +7065,8 @@ mod tests {
             TrioError::SeatUnbuildable { seats }
         }
 
-        /// La primitiva de formateo compartida nombra el asiento Y la causa — no un
-        /// conteo. Reusada tanto por `Display` como por `trio_unavailable_message`.
+        /// The shared formatting primitive names the seat AND the cause — not a count. Reused
+        /// by both `Display` and `trio_unavailable_message`.
         #[test]
         fn format_seat_failure_names_the_seat_and_the_cause() {
             let text = format_seat_failure(
@@ -7136,9 +7079,9 @@ mod tests {
             assert!(text.contains("OPENAI_API_KEY"), "{text}");
         }
 
-        /// R2 (obligación heredada de Task 4.1): el `Display` de `SeatUnbuildable` NO
-        /// se queda en un conteo — un `{e}`/`.to_string()` futuro que no pase por
-        /// `trio_unavailable_message` sigue nombrando cada asiento y su causa.
+        /// R2 (inherited obligation from Task 4.1): the `Display` of `SeatUnbuildable` does not
+        /// stop at a count — a future `{e}`/`.to_string()` that does not go through
+        /// `trio_unavailable_message` still names each seat and its cause.
         #[test]
         fn seat_unbuildable_display_names_every_seat_not_just_a_count() {
             let err = seat_unbuildable(vec![
@@ -7166,8 +7109,8 @@ mod tests {
             );
         }
 
-        /// SC-A05b + SC-A05c juntas: el mensaje único nombra CADA asiento caído, su
-        /// causa, y los reporta TODOS en una sola corrida (no solo el primero).
+        /// SC-A05b + SC-A05c together: the single message names EACH fallen seat, its cause,
+        /// and reports ALL of them in a single run (not just the first one).
         #[test]
         fn trio_unavailable_message_names_every_failed_seat_and_its_cause() {
             let err = seat_unbuildable(vec![
@@ -7205,7 +7148,7 @@ mod tests {
             );
         }
 
-        /// `UnknownKind` nombra el valor inválido Y el vocabulario válido.
+        /// `UnknownKind` names the invalid value AND the valid vocabulary.
         #[test]
         fn trio_unavailable_message_unknown_kind_names_the_bad_value_and_the_vocabulary() {
             let msg = trio_unavailable_message(&TrioError::UnknownKind("banana".to_string()));
@@ -7218,10 +7161,10 @@ mod tests {
             );
         }
 
-        /// `NoSeats` y `Builder` comparten el mismo texto genérico — ninguno de los
-        /// dos es alcanzable por la ruta de producción real hoy (ver sus propios
-        /// rustdocs), pero el `match` exhaustivo de `trio_unavailable_message` los
-        /// cubre igual, y ambos deben producir texto no vacío y accionable.
+        /// `NoSeats` and `Builder` share the same generic text — neither is reachable by the
+        /// real production path today (see their own rustdocs), but
+        /// `trio_unavailable_message`'s exhaustive `match` covers them anyway, and both must
+        /// produce non-empty, actionable text.
         #[test]
         fn trio_unavailable_message_no_seats_and_builder_share_the_same_generic_text() {
             let no_seats_msg = trio_unavailable_message(&TrioError::NoSeats);
@@ -7231,9 +7174,9 @@ mod tests {
             assert!(!no_seats_msg.is_empty());
         }
 
-        /// SC-A06b, el invariante central: el notice de arranque y la respuesta que
-        /// un futuro `/consult` da son el MISMO string — no dos redacciones
-        /// independientes que puedan divergir.
+        /// SC-A06b, the central invariant: the startup notice and the response a future
+        /// `/consult` gives are the SAME string — not two independent wordings that could
+        /// diverge.
         #[test]
         fn trio_unavailable_for_tui_notice_and_reply_are_the_same_text_and_blocking_tier() {
             let err = seat_unbuildable(vec![(
@@ -7254,11 +7197,10 @@ mod tests {
             );
         }
 
-        /// SC-A06a: un consult que no puede correr NO se registra — ni con el trío
-        /// ausente (invita al modelo a rutear hacia algo destinado a fallar) ni,
-        /// simétricamente, se OMITE cuando el trío sí construyó (regresión: el
-        /// helper compartido entre la TUI y `magi query` no debe apagar el tool en
-        /// el caso feliz).
+        /// SC-A06a: a consult that cannot run is NOT registered — neither with the trio absent
+        /// (it invites the model to route toward something destined to fail) nor,
+        /// symmetrically, is it OMITTED when the trio did build (regression: the shared helper
+        /// between the TUI and `magi query` must not disable the tool in the happy case).
         #[test]
         fn register_consult_tool_if_available_registers_when_buildable_and_omits_it_otherwise() {
             let magi: Arc<Magi> = Arc::new(Magi::new(Arc::new(RoutingMockProvider::new())));
@@ -7295,10 +7237,9 @@ mod tests {
             );
         }
 
-        /// SC-A06c: un `magi consult` forzado con un trío no construible falla
-        /// CERRADO — código de salida distinto de cero, y SIN escribir ningún
-        /// archivo de salida (la corrida vuelve antes de que exista un `Magi` con
-        /// el que llamar a `analyze`, así que ningún veredicto puede fabricarse).
+        /// SC-A06c: a forced `magi consult` with an unbuildable trio fails CLOSED — non-zero
+        /// exit code, and writes NO output file (the run returns before a `Magi` exists to call
+        /// `analyze` on, so no verdict can be fabricated).
         #[test]
         #[serial_test::serial]
         fn a_forced_consult_fails_closed_when_the_trio_is_unbuildable() {
@@ -7307,9 +7248,9 @@ mod tests {
                     let tmp = tempfile::tempdir().unwrap();
                     let cwd = dunce::canonicalize(tmp.path()).unwrap();
                     crate::system::workspace::init(&cwd).expect("init .magi/");
-                    // openai-compat exige OPENAI_API_KEY para el trío (nunca para el
-                    // agente principal, que cae al dummy "ollama") — sin la variable,
-                    // los TRES asientos fallan por credencial faltante.
+                    // openai-compat requires OPENAI_API_KEY for the trio (never for the
+                    // principal agent, which falls back to the dummy "ollama") — without the
+                    // variable, all THREE seats fail by missing credential.
                     std::fs::write(
                         cwd.join(".magi/magi.toml"),
                         "provider = \"openai-compat\"\n",
@@ -7345,14 +7286,14 @@ mod tests {
         }
     }
 
-    /// Task 4.4 — REQ-A07p/SC-A07p (aviso de divergencia de endpoint) y
-    /// REQ-A12c/SC-A12f (traducción del 401 keyless).
+    /// Task 4.4 — REQ-A07p/SC-A07p (endpoint divergence notice) and REQ-A12c/SC-A12f (keyless
+    /// 401 translation).
     mod divergence_and_keyless_auth {
         use super::*;
 
-        /// Construye un `MagiConfig` con `base_url` de raíz y, opcionalmente, un
-        /// override propio de `[magi].base_url` — el único par de campos que
-        /// `magi_endpoint_diverges()` mira.
+        /// Builds a `MagiConfig` with a root `base_url` and, optionally, an own
+        /// `[magi].base_url` override — the only pair of fields that `magi_endpoint_diverges()`
+        /// looks at.
         fn cfg_with_endpoints(root: &str, magi_override: Option<&str>) -> MagiConfig {
             MagiConfig {
                 base_url: Some(root.to_string()),
@@ -7364,18 +7305,17 @@ mod tests {
             }
         }
 
-        /// SC-A07p: la divergencia de endpoint se avisa, y SOLO cuando hay
-        /// divergencia Y la inferencia está activa.
+        /// SC-A07p: endpoint divergence is warned, and ONLY when there is divergence AND
+        /// inference is active.
         ///
-        /// **Divergencia respecto del pseudocódigo del brief, y por qué está probada
-        /// acá y no solo argumentada en el rustdoc de `divergence_notice`.** El brief
-        /// recalculaba `will_attempt_classification` puertas adentro de la función,
-        /// ignorando el segundo parámetro. Con el `cfg` IDÉNTICO en las últimas dos
-        /// aserciones —difieren solo en `true`/`false`— un recálculo interno habría
-        /// dado el mismo resultado en las dos, y la tercera aserción de este test
-        /// (`divergence_notice(&cfg, false).is_none()`) habría fallado. Este test es
-        /// la evidencia ejecutable de por qué la implementación usa el parámetro
-        /// tal cual, sin recalcularlo.
+        /// **Divergence from the brief's pseudocode, and why it is tested
+        /// here and not only argued in `divergence_notice`'s rustdoc.** The brief recalculated
+        /// `will_attempt_classification` internally, ignoring the second parameter. With the
+        /// IDENTICAL `cfg` in the last two assertions — differing only in `true`/`false` — an
+        /// internal recalculation would have yielded the same result in both, and the third
+        /// assertion of this test (`divergence_notice(&cfg, false).is_none()`) would have
+        /// failed. This test is the executable evidence of why the implementation uses the
+        /// parameter as-is, without recalculating it.
         #[test]
         fn endpoint_divergence_is_announced_only_when_it_actually_diverges_and_inference_is_active()
         {
@@ -7398,32 +7338,30 @@ mod tests {
             );
         }
 
-        /// SC-A07p (cableado, superficie TUI): el aviso no solo se PRODUCE, se EMITE
-        /// — llega al vector que `run()` (la TUI) efectivamente imprime.
+        /// SC-A07p (wiring, TUI surface): the notice is not only PRODUCED, it is EMITTED — it
+        /// reaches the vector that `run()` (the TUI) actually prints.
         ///
-        /// **Alcance declarado, a propósito (fix round 4): esto cubre SOLO la TUI.**
-        /// El brief original de esta tarea pedía "el vector que la TUI **y el
-        /// headless** imprimen" (`task-4.4-brief.md:41`); una revisión encontró que
-        /// este test (y su mensaje de aserción) habían recortado esa cobertura a
-        /// solo la TUI sin que ningún reporte de ronda lo dijera — un requisito
-        /// achicado en silencio dentro del texto de un test, que es exactamente el
-        /// modo en que un hueco se vuelve invisible. El headless YA NO comparte este
-        /// test: tiene el suyo propio,
-        /// `test_prepare_headless_carries_the_divergence_notice_when_it_applies`,
-        /// más abajo, porque `prepare_headless` no puede probarse llamando a
-        /// `push_divergence_notice` directo (esa función no es su única llamadora;
-        /// `prepare_headless` tiene su PROPIO call site — ver ese test para la
-        /// prueba real de que ESE call site existe).
+        /// **Declared scope, deliberately (fix round 4): this covers ONLY the TUI.**
+        /// The brief for this task originally asked for "the vector that the TUI **and
+        /// headless** print" (`task-4.4-brief.md:41`); a review found that this test (and its
+        /// assertion message) had silently trimmed that coverage to only the TUI without any
+        /// round report saying so — a requirement shrunk in silence inside the text of a test,
+        /// which is exactly how a gap becomes invisible. The headless NO LONGER shares this
+        /// test: it has its own,
+        /// `test_prepare_headless_carries_the_divergence_notice_when_it_applies`, below,
+        /// because `prepare_headless` cannot be tested by calling `push_divergence_notice`
+        /// directly (that function is not its only caller; `prepare_headless` has its OWN call
+        /// site — see that test for the real proof that THAT call site exists).
         ///
-        /// Va aparte del test anterior a propósito, como pide el brief de esta
-        /// tarea: aquel verifica el PREDICADO; este verifica el EMPUJE al vector.
-        /// `run()` (dueño real de `startup_notices`) no es unit-testeable — abre el
-        /// vault, descubre el workspace y usa un TTY reales — así que este test
-        /// llama a `push_divergence_notice` directamente: es la MISMA función, y la
-        /// ÚNICA, que `run()` invoca para esto (una línea, trivial de auditar contra
-        /// el diff). Una función correcta que nadie llama pasaría el test anterior y
-        /// dejaría al usuario sin el aviso — es el modo de fallo exacto de un
-        /// "definido pero no cableado" que ya ocurrió una vez en este plan (Task 4.3).
+        /// Separate from the previous test on purpose, as this task's brief asks: that one
+        /// verifies the PREDICATE; this one verifies the PUSH to the vector. `run()` (real
+        /// owner of `startup_notices`) is not unit-testable — it opens the vault, discovers the
+        /// workspace, and uses real TTY — so this test calls `push_divergence_notice` directly:
+        /// it is the SAME function, and the ONLY one, that `run()` invokes for this (a one-line
+        /// call, trivial to audit against the diff). A correct function that nobody calls would
+        /// pass the previous test and leave the user without the notice — this is the exact
+        /// failure mode of a "defined but not wired" that already happened once in this plan
+        /// (Task 4.3).
         #[test]
         fn the_divergence_notice_reaches_the_tui_startup_notices() {
             let cfg = cfg_with_endpoints("http://a/v1", Some("http://b/v1"));
@@ -7438,33 +7376,30 @@ mod tests {
             );
         }
 
-        /// SC-A07p (cableado, superficie HEADLESS) — fix round 4, finding 1.
+        /// SC-A07p (wiring, HEADLESS surface) — fix round 4, finding 1.
         ///
-        /// **Esto es lo que faltaba, sin ningún test que lo cubriera.**
-        /// `push_divergence_notice` solo tenía UN call site de producción, dentro de
-        /// `run()` (la TUI); `prepare_headless` —el preludio compartido de
-        /// `magi query` y `magi consult`— nunca lo invocaba. REQ-A07c es
-        /// explícitamente sobre la ruta headless: un pipeline con `magi consult` sin
-        /// `--mode` es SC-A07f, y ese pipeline no tiene una TUI en la que el aviso
-        /// pudiera aparecer. Cablear solo la superficie interactiva —donde hay un
-        /// humano mirando— e ignorar la automatizada invertía la prioridad que la
-        /// propia spec fija.
+        /// **This is what was missing, with no test covering it.**
+        /// `push_divergence_notice` only had ONE production call site, inside `run()` (the
+        /// TUI); `prepare_headless` —the shared prelude of `magi query` and `magi consult`—
+        /// never invoked it. REQ-A07c is explicitly about the headless path: a pipeline with
+        /// `magi consult` without `--mode` is SC-A07f, and that pipeline has no TUI in which
+        /// the notice could appear. Wiring only the interactive surface —where there is a human
+        /// watching— and ignoring the automated one inverted the priority the spec itself sets.
         ///
-        /// **Por qué este test dirige el `MagiConfig` a mano, no `push_divergence_
-        /// notice` directo.** `prepare_headless` es una función real, con I/O real
-        /// (`.magi/` descubierto, `magi.toml` leído del disco), así que a diferencia
-        /// del test de la TUI de arriba —que no puede evitar llamar a
-        /// `push_divergence_notice` DIRECTO porque `run()` no es testeable en
-        /// absoluto— ACÁ sí se puede manejar la función real de punta a punta:
-        /// `init_default_workspace`/`write_envelope`/`base_hargs` (ya usados por
-        /// `test_prepare_headless_cli_provider_override_normalizes_the_new_vocabulary`
-        /// arriba) son exactamente el arnés que hace esto posible con `--no-memory`,
-        /// sin vault real.
+        /// **Why this test drives `MagiConfig` by hand, not `push_divergence_
+        /// notice` directly.** `prepare_headless` is a real function, with real I/O (discovered
+        /// `.magi/`, `magi.toml` read from disk), so unlike the TUI test above —which cannot
+        /// avoid calling `push_divergence_notice` DIRECTLY because `run()` is not testable at
+        /// all— here the real function can be driven end to end:
+        /// `init_default_workspace`/`write_envelope`/`base_hargs` (already used by
+        /// `test_prepare_headless_cli_provider_override_normalizes_the_new_vocabulary` above)
+        /// are exactly the harness that makes this possible with `--no-memory`, without a real
+        /// vault.
         ///
-        /// `HeadlessContext::divergence_notice` existe SOLO para que este test pueda
-        /// afirmar contra el resultado sin capturar stderr del proceso (un recurso
-        /// global, no seguro para una suite de tests en paralelo) — mismo motivo que
-        /// ya justifica el campo `provider_kind` de la misma struct.
+        /// `HeadlessContext::divergence_notice` exists ONLY so this test can assert against the
+        /// result without capturing stderr from the process (a global resource, unsafe for a
+        /// parallel test suite) — same rationale that already justifies the `provider_kind`
+        /// field on the same struct.
         #[test]
         fn test_prepare_headless_carries_the_divergence_notice_when_it_applies() {
             with_var("MAGI_PROVIDER", None, || {
@@ -7473,8 +7408,8 @@ mod tests {
                         let tmp = tempfile::tempdir().unwrap();
                         let cwd = dunce::canonicalize(tmp.path()).unwrap();
                         crate::system::workspace::init(&cwd).expect("init .magi/");
-                        // Diverge (root vs. [magi].base_url distintos) y NO declara
-                        // `default_mode` ⇒ inferencia activa: las dos condiciones de
+                        // Diverges (different root vs. [magi].base_url) and does NOT declare
+                        // `default_mode` ⇒ inference active: the two conditions of
                         // `divergence_notice` (SC-A07p).
                         std::fs::write(
                             cwd.join(".magi/magi.toml"),
@@ -7507,19 +7442,19 @@ mod tests {
             });
         }
 
-        /// Precondición de `divergence_notice`: `load()` ya validó las dos
-        /// plantillas antes de devolver un `MagiConfig`, así que en producción
-        /// `effective_magi_base_url()`/`effective_base_url()` nunca fallan acá.
-        /// Mismo patrón que `MagiConfig::effective_provider`/`effective_default_mode`
-        /// (`config.rs`): construir el `MagiConfig` a mano, saltándose `load()`, es
-        /// lo único que puede violar esa precondición, y el `debug_assert!` lo
-        /// convierte en un panic ruidoso en vez de un `Ollama`/`None` silencioso.
+        /// Precondition of `divergence_notice`: `load()` already validated both templates
+        /// before returning a `MagiConfig`, so in production
+        /// `effective_magi_base_url()`/`effective_base_url()` never fail here. Same pattern as
+        /// `MagiConfig::effective_provider`/`effective_default_mode` (`config.rs`):
+        /// constructing `MagiConfig` by hand, bypassing `load()`, is the only thing that can
+        /// violate this precondition, and the `debug_assert!` turns it into a loud panic
+        /// instead of a silent `Ollama`/`None`.
         #[test]
         #[should_panic(expected = "validado")]
         fn divergence_notice_panics_in_debug_builds_when_the_endpoint_template_is_invalid() {
-            // Credencial literal: `EndpointTemplate::parse` la rechaza (REQ-A16c), así
-            // que `effective_magi_base_url()` falla — la precondición que `load()`
-            // normalmente garantiza, violada a propósito.
+            // Literal credential: `EndpointTemplate::parse` rejects it (REQ-A16c), so
+            // `effective_magi_base_url()` fails — the precondition that `load()` normally
+            // guarantees, deliberately violated.
             let cfg = MagiConfig {
                 magi: crate::config::MagiSectionConfig {
                     base_url: Some("https://user:pass@host/v1".to_string()),
@@ -7530,48 +7465,45 @@ mod tests {
             let _ = divergence_notice(&cfg, true);
         }
 
-        /// R6 (Task 1.2b, `planning/claude-plan-tdd.md` ~L3160): cierre de los caminos
-        /// de credencial que ese plan marcó como naciendo con el trío nativo en Fase 4.
+        /// R6 (Task 1.2b, `planning/claude-plan-tdd.md` ~L3160): closing the credential paths
+        /// that plan marked as being born with the native trio in Phase 4.
         ///
-        /// **No es el mismo test que el plan describe, y no puede serlo.** El plan
-        /// imaginaba un único canario en `src/magi/endpoint.rs` (lib) cubriendo los
-        /// cinco caminos desde un solo lugar. Pero `MagiConfig` y `SeatError` son
-        /// tipos del crate BIN (`mod config;`/`main.rs`) — ninguno de los dos
-        /// aparece en la lista `pub mod` de `src/lib.rs` (`headless, magi, notices,
-        /// redact, vault`), así que un test del crate LIB no puede nombrarlos, y
-        /// `divergence_notice` tampoco pudo vivir en `src/magi/mode.rs` por la misma
-        /// razón (ver el reporte de esta tarea).
+        /// **It is not the same test the plan describes, and it cannot be.** The plan
+        /// imagined a single canary in `src/magi/endpoint.rs` (lib) covering the five paths
+        /// from a single place. But `MagiConfig` and `SeatError` are BIN-crate types (`mod
+        /// config;`/`main.rs`) — neither appears in the `pub mod` list of `src/lib.rs`
+        /// (`headless, magi, notices, redact, vault`), so a lib-crate test cannot name them,
+        /// and `divergence_notice` could not live in `src/magi/mode.rs` for the same reason
+        /// (see this task's report).
         ///
-        /// **Camino 4 se movió**, y con él su cobertura: la ronda 2 de esta tarea
-        /// retiró `explain_keyless_auth_failure(&SeatError, ProviderKind)` — nunca
-        /// tuvo un llamador de producción real — y la reemplazó por
-        /// `tools::consult::keyless_auth_explanation(&str, ProviderKind)`, que opera
-        /// sobre la causa YA RENDERIZADA de `MagiReport::failed_agents` y vive en
-        /// `src/tools/consult.rs`, donde también está su propia cobertura de no-leak
-        /// (`keyless_auth_explanation_never_echoes_the_raw_cause`). Acá se prueban
-        /// los caminos que SÍ siguen siendo de este archivo: 1
-        /// (`divergence_notice`) y 3 (`trio_unavailable_message`). El camino 2
-        /// (`openai_compat_root`) y el 5 (el aviso de incoherencia de Anthropic en
-        /// `resolution_notices()`) ya tienen su propia cobertura desde Task
-        /// 1.2b/4.1.
+        /// **Path 4 moved**, and with it its coverage: round 2 of this task
+        /// retired `explain_keyless_auth_failure(&SeatError, ProviderKind)` — it never had a
+        /// real production caller — and replaced it with
+        /// `tools::consult::keyless_auth_explanation(&str, ProviderKind)`, which operates on
+        /// the ALREADY-RENDERED cause from `MagiReport::failed_agents` and lives in
+        /// `src/tools/consult.rs`, where its own no-leak coverage
+        /// (`keyless_auth_explanation_never_echoes_the_raw_cause`) also lives. The paths that
+        /// DO remain in this file are tested here: 1 (`divergence_notice`) and 3
+        /// (`trio_unavailable_message`). Path 2 (`openai_compat_root`) and 5 (the Anthropic-
+        /// incoherence notice in `resolution_notices()`) already have their own coverage from
+        /// Task 1.2b/4.1.
         #[test]
         fn no_notice_or_error_path_in_this_file_leaks_a_credential() {
             const CANARY: &str = "c4n4ry-s3cr3t";
 
-            // Camino 1 — `divergence_notice`: opera sobre la PLANTILLA
-            // (`EndpointTemplate::as_str()`), que por construcción (REQ-A16c) no
-            // puede contener un secreto — un literal ahí es rechazado al parsear,
-            // nunca aceptado y mostrado. Se usa el placeholder, no un canario
-            // literal, precisamente porque un canario literal no podría existir en
-            // este campo (probado por el test de arriba).
+            // Path 1 — `divergence_notice`: operates on the TEMPLATE
+            // (`EndpointTemplate::as_str()`), which by construction (REQ-A16c) cannot contain a
+            // secret — a literal there is rejected at parse time, never accepted and displayed.
+            // A placeholder is used, not a literal canary, precisely because a literal canary
+            // could not exist in this field (proven by the test above).
             let cfg = cfg_with_endpoints("http://a/v1", Some("https://[user]:[password]@b/v1"));
             let notice = divergence_notice(&cfg, true).expect("diverge con inferencia activa");
             assert!(!notice.text.contains(CANARY));
 
-            // Camino 3 — `trio_unavailable_message`: la causa foránea pasa por
-            // `redact_foreign_error` ANTES de convertirse en `SeatError::Transport`
-            // (ver `build_native_provider::to_seat`); acá se ejercita la MISMA
-            // composición, directo sobre el tipo.
+            // Path 3 — `trio_unavailable_message`: the foreign cause goes through
+            // `redact_foreign_error` BEFORE becoming `SeatError::Transport` (see
+            // `build_native_provider::to_seat`); here the SAME composition is exercised,
+            // directly on the type.
             let foreign =
                 std::io::Error::other(format!("connect to https://alice:{CANARY}@host/v1"));
             let err = TrioError::SeatUnbuildable {
@@ -7584,10 +7516,9 @@ mod tests {
         }
     }
 
-    /// Task 5.2 — notices del probe (REQ-A24c), el aviso de composición staleness
-    /// (SC-A24i), y `orchestrate_probes` (REQ-A24/SC-A24j/SC-A24k), la función que decide
-    /// cuántas tandas de sondeo lanzar y garantiza que la tabla del trío nunca incluye al
-    /// principal.
+    /// Task 5.2 — probe notices (REQ-A24c), the staleness-of-composition notice (SC-A24i), and
+    /// `orchestrate_probes` (REQ-A24/SC-A24j/SC-A24k), the function that decides how many probe
+    /// batches to launch and guarantees the trio table never includes the principal.
     mod probe_orchestration {
         use super::*;
         use async_trait::async_trait;
@@ -7595,7 +7526,7 @@ mod tests {
         use magi_rs::magi::probe::ProbeSeat;
         use std::sync::atomic::{AtomicUsize, Ordering};
 
-        /// Sonda que devuelve SIEMPRE la misma ventana, sin digest, sin I/O real.
+        /// Probe that ALWAYS returns the same window, no digest, no real I/O.
         struct FixedWindowProbe {
             window: usize,
         }
@@ -7610,14 +7541,14 @@ mod tests {
             }
         }
 
-        /// Doble de `ProbeFactory` con ventana FIJA por modelo (mapa `modelo -> ventana`).
-        /// Un modelo AUSENTE del mapa degrada a `Unbuildable` — nunca panica, nunca inventa
-        /// una ventana. No reusa los dobles privados de `magi::probe::tests` (viven en otro
-        /// módulo y no se exportan) — R-A04 exige la misma costura de inyección acá.
+        /// `ProbeFactory` double with a FIXED window per model (map `model -> window`). A model
+        /// ABSENT from the map degrades to `Unbuildable` — never panics, never invents a
+        /// window. Does not reuse the private doubles from `magi::probe::tests` (they live in
+        /// another module and are not exported) — R-A04 requires the same injection seam here.
         struct MappedProbeFactory {
             windows: BTreeMap<&'static str, usize>,
-            /// Cuántas veces se llamó a `probe_for` — para pinnear SC-A24h: releer un
-            /// snapshot ya capturado nunca debe volver a tocar la fábrica.
+            /// How many times `probe_for` was called — to pin SC-A24h: re-reading an already-
+            /// captured snapshot must never touch the factory again.
             calls: AtomicUsize,
         }
 
@@ -7654,8 +7585,8 @@ mod tests {
             }
         }
 
-        /// Endpoint de prueba compartido: una `base_url` plana sin placeholders, así que
-        /// resolverla no necesita un vault real (mismo patrón que `trio_construction`).
+        /// Shared test endpoint: a flat `base_url` with no placeholders, so resolving it does
+        /// not need a real vault (same pattern as `trio_construction`).
         fn test_endpoints() -> ResolvedEndpoints {
             let tpl = EndpointTemplate::parse("http://localhost:11434/v1").unwrap();
             ResolvedEndpoints {
@@ -7665,8 +7596,8 @@ mod tests {
             }
         }
 
-        /// Endpoints DIVERGENTES: el trío en un host distinto del principal, para ejercitar
-        /// la rama `join!` de `orchestrate_probes`.
+        /// DIVERGENT endpoints: the trio on a different host than the principal, to exercise
+        /// the `join!` branch of `orchestrate_probes`.
         fn diverging_endpoints() -> ResolvedEndpoints {
             let root = EndpointTemplate::parse("http://root-host:11434/v1")
                 .unwrap()
@@ -7687,9 +7618,9 @@ mod tests {
             }
         }
 
-        /// `MagiConfig` cuyo `[magi]` declara `base_url` propio (y opcionalmente `kind`) —
-        /// el par de campos que `magi_endpoint_diverges()` mira. Sin modelo de sección
-        /// propio: quien necesite uno usa [`cfg_diverging_with_models`].
+        /// `MagiConfig` whose `[magi]` declares its own `base_url` (and optionally `kind`) —
+        /// the pair of fields that `magi_endpoint_diverges()` looks at. Without own section
+        /// model: whoever needs one uses [`cfg_diverging_with_models`].
         fn cfg_diverging(kind: Option<&str>) -> MagiConfig {
             MagiConfig {
                 magi: crate::config::MagiSectionConfig {
@@ -7701,12 +7632,12 @@ mod tests {
             }
         }
 
-        /// `MagiConfig` con SECCIONES distintas y nombrables (`[openai].model`,
-        /// `[anthropic].model`), sin ningún override por asiento (`melchior_model` etc. —
-        /// los tres heredan el fallback). Es la fixture del finding de fix round 1: sin
-        /// nombres de sección propios y controlables, no hay forma de distinguir "el trío
-        /// sondeó SU modelo" de "el trío sondeó el del principal" — los dos casos se ven
-        /// idénticos si las dos secciones comparten el mismo nombre.
+        /// `MagiConfig` with DISTINCT, nameable sections (`[openai].model`,
+        /// `[anthropic].model`), with no per-seat override (`melchior_model` etc. — all three
+        /// inherit the fallback). This is the fix-round-1 finding fixture: without own,
+        /// controllable section names, there is no way to distinguish "the trio probed ITS
+        /// model" from "the trio probed the principal's" — the two cases look identical if the
+        /// two sections share the same name.
         fn cfg_with_distinct_section_models(
             openai_model: &str,
             anthropic_model: &str,
@@ -7722,9 +7653,9 @@ mod tests {
             }
         }
 
-        /// Como [`cfg_diverging`], pero con las DOS secciones nombrables también — la
-        /// fixture que ejercita el finding de fix round 1 con el trío en un endpoint Y un
-        /// kind distintos del principal a la vez.
+        /// Like [`cfg_diverging`], but with BOTH nameable sections too — the fixture that
+        /// exercises the fix-round-1 finding with the trio on a different endpoint AND a
+        /// different kind than the principal at the same time.
         fn cfg_diverging_with_models(
             kind: Option<&str>,
             openai_model: &str,
@@ -7740,9 +7671,9 @@ mod tests {
             }
         }
 
-        // ---- probe_notice / stale_composition_notice (contrato del brief, Step 1) -----
+        // ---- probe_notice / stale_composition_notice (brief contract, Step 1) -----
 
-        /// SC-A24f: el arranque en frío se explica, no se confunde con una falla.
+        /// SC-A24f: cold start is explained, not confused with a failure.
         #[test]
         fn the_notice_distinguishes_the_three_measurement_states() {
             assert!(probe_notice(&Measurement::Measured {
@@ -7758,8 +7689,8 @@ mod tests {
             );
         }
 
-        /// El digest se muestra truncado: es un identificador, no un secreto, pero 64 hex
-        /// es ruido.
+        /// The digest is displayed truncated: it is an identifier, not a secret, but 64 hex is
+        /// noise.
         #[test]
         fn the_digest_is_shown_truncated() {
             let n = probe_notice(&Measurement::Measured {
@@ -7769,8 +7700,8 @@ mod tests {
             assert!(!n.contains(&"ab".repeat(32)));
         }
 
-        /// Borde: una ventana medida SIN digest (p. ej. `/api/tags` no lo resolvió) sigue
-        /// reportando la ventana — no se pierde información que sí se tiene.
+        /// Edge: a window measured WITHOUT a digest (e.g. `/api/tags` did not resolve it) still
+        /// reports the window — information that is available is not lost.
         #[test]
         fn a_measured_window_without_a_digest_still_reports_the_window() {
             let n = probe_notice(&Measurement::Measured {
@@ -7781,12 +7712,11 @@ mod tests {
             assert!(n.contains("digest not resolved"));
         }
 
-        /// SC-A24i: se avisa, y la comparación es EN TOKENS — no bytes contra tokens.
+        /// SC-A24i: it is warned, and the comparison is IN TOKENS — not bytes versus tokens.
         #[test]
         fn a_max_query_close_to_the_measured_window_is_flagged_after_unit_conversion() {
             let window_tokens = 100_000_usize;
-            // Un cap en BYTES que, convertido, queda justo por encima del 80 % de la
-            // ventana.
+            // A cap in BYTES that, when converted, lands just above the 80 % of the window.
             let close_bytes =
                 ((window_tokens as f64 * STALE_NOTICE_RATIO * CHARS_PER_TOKEN_EST) as usize) + 8;
             let n = stale_composition_notice(window_tokens, close_bytes).expect("debe avisar");
@@ -7801,12 +7731,11 @@ mod tests {
             );
         }
 
-        /// El bug que este par de funciones existe para evitar: comparar bytes contra
-        /// tokens.
+        /// The bug this pair of functions exists to avoid: comparing bytes against tokens.
         #[test]
         fn comparing_raw_bytes_against_a_token_window_would_be_meaningless() {
             let window_tokens = 128_000_usize;
-            // No un literal suelto: el test sigue al valor real.
+            // Not a loose literal: the test follows the real value.
             let cap_bytes = magi_rs::magi::MAX_QUERY_BYTES;
             assert!(
                 cap_bytes > window_tokens,
@@ -7818,9 +7747,9 @@ mod tests {
             );
         }
 
-        /// `MagiConfig` con el trío en el MISMO endpoint/kind que el principal (rama
-        /// compartida de `orchestrate_probes`), pero con los CUATRO nombres — principal +
-        /// tres mages — distintos y controlables por el test.
+        /// `MagiConfig` with the trio on the SAME endpoint/kind as the principal (shared branch
+        /// of `orchestrate_probes`), but with all FOUR names — principal + three mages —
+        /// distinct and test-controllable.
         fn cfg_with_four_distinct_models(
             principal: &str,
             melchior: &str,
@@ -7841,11 +7770,10 @@ mod tests {
             }
         }
 
-        // ---- orchestrate_probes: rama compartida --------------------------------------
+        // ---- orchestrate_probes: shared branch --------------------------------------
 
-        /// SC-A24 / REQ-A24: endpoint y kind compartidos ⇒ UNA tanda (una sonda por
-        /// modelo único, principal incluido), y la tabla del trío devuelta NUNCA incluye
-        /// al principal.
+        /// SC-A24 / REQ-A24: shared endpoint and kind ⇒ ONE batch (one probe per unique model,
+        /// principal included), and the returned trio table NEVER includes the principal.
         #[tokio::test]
         async fn shared_endpoint_probes_once_and_the_trio_table_excludes_the_principal() {
             let factory = MappedProbeFactory::new(&[
@@ -7879,10 +7807,10 @@ mod tests {
             );
         }
 
-        /// SC-A24j — la propiedad central de esta tarea: un principal de ventana CHICA no
-        /// baja el umbral derivado de los mages, porque `derive_warn_tokens` nunca ve su
-        /// medición — `orchestrate_probes` la excluye de la tabla del trío por
-        /// construcción, no por convención en el llamador.
+        /// SC-A24j — the central property of this task: a small-window principal does NOT lower
+        /// the derived threshold for the mages, because `derive_warn_tokens` never sees its
+        /// measurement — `orchestrate_probes` excludes it from the trio table by construction,
+        /// not by convention in the caller.
         #[tokio::test]
         async fn a_small_principal_never_lowers_the_mage_derived_threshold() {
             let factory = MappedProbeFactory::new(&[
@@ -7909,15 +7837,14 @@ mod tests {
             );
         }
 
-        /// SC-A24h: el umbral derivado de un snapshot de arranque es ESTABLE. La garantía
-        /// completa de la spec ("el probe corre UNA vez por proceso") es estructural — un
-        /// único call site en `run()`/`prepare_headless()`, antes de que arranque el loop
-        /// de turnos — y eso no es algo que un test de unidad pueda ejercitar sin levantar
-        /// el proceso entero. Lo que SÍ es verificable acá, y es la mitad de la propiedad
-        /// que un test de unidad puede pinnear: releer el MISMO snapshot ya capturado es
-        /// una operación pura y determinista que nunca vuelve a tocar la fábrica de
-        /// sondas — si algo en el proceso "refrescara" el umbral por las dudas, esto lo
-        /// delataría por un conteo de llamadas que sube solo.
+        /// SC-A24h: the threshold derived from a startup snapshot is STABLE. The spec's full
+        /// guarantee ("the probe runs ONCE per process") is structural — a single call site in
+        /// `run()`/`prepare_headless()`, before the turn loop starts — and that is not
+        /// something a unit test can exercise without starting the whole process. What IS
+        /// verifiable here, and is the half of the property a unit test can pin: re-reading the
+        /// SAME already-captured snapshot is a pure, deterministic operation that never touches
+        /// the probe factory again — if something in the process "refreshed" the threshold just
+        /// in case, this would expose it by a call count that rises alone.
         #[tokio::test]
         async fn the_probe_runs_once_and_the_threshold_stays_put() {
             let factory = MappedProbeFactory::new(&[("principal", 128_000), ("m", 256_000)]);
@@ -7930,8 +7857,8 @@ mod tests {
                 "la sonda debió correr al menos una vez en el arranque"
             );
 
-            // Dos "lecturas" del mismo snapshot, como dos consultas sucesivas dentro de la
-            // MISMA sesión — nada acá vuelve a invocar `orchestrate_probes`.
+            // Two "reads" of the same snapshot, like two successive queries inside the SAME
+            // session — nothing here invokes `orchestrate_probes` again.
             let warn_at_startup = derive_warn_tokens(&trio);
             let warn_for_a_later_query = derive_warn_tokens(&trio);
             assert_eq!(
@@ -7945,16 +7872,16 @@ mod tests {
             );
         }
 
-        // ---- orchestrate_probes: rama divergente --------------------------------------
+        // ---- orchestrate_probes: divergent branch --------------------------------------
 
-        /// SC-A24k (un nivel más arriba, entre TANDAS): endpoint divergente ⇒ DOS
-        /// llamadas independientes, cada una con su kind y su endpoint propios. Principal
-        /// Y trío en `ollama` (el ÚNICO kind medible) a propósito, con los tres asientos
-        /// del trío overrideados a un modelo propio — es la única forma de que el
-        /// principal y el trío midan ventanas DISTINTAS mientras los dos son medibles: si
-        /// compartieran kind Y ningún asiento tuviera override, resolverían a la MISMA
-        /// sección por diseño (ver `a_diverging_trio_kind_probes_its_own_section_model_
-        /// not_the_principals`, que sí cruza de sección).
+        /// SC-A24k (one level up, between BATCHES): divergent endpoint ⇒ TWO independent calls,
+        /// each with its own kind and endpoint. Principal AND trio on `ollama` (the ONLY
+        /// measurable kind) on purpose, with the three trio seats overridden to their own model
+        /// — this is the only way for the principal and the trio to measure DIFFERENT windows
+        /// while both are measurable: if they shared kind AND no seat had an override, they
+        /// would resolve to the SAME section by design (see
+        /// `a_diverging_trio_kind_probes_its_own_section_model_not_the_principals`, which does
+        /// cross sections).
         #[tokio::test]
         async fn diverging_endpoint_probes_the_trio_separately_with_its_own_kind() {
             let factory = MappedProbeFactory::new(&[("principal", 64_000), ("m", 128_000)]);
@@ -7992,25 +7919,22 @@ mod tests {
             );
         }
 
-        /// **Fix round 1 — finding Logic+Structure.** Reproduce el bug EXACTO reportado:
-        /// principal en `anthropic` (lee `[anthropic].model`), trío en `ollama`
-        /// (`[magi].kind` declarado, divergiendo — lee `[openai].model`), y NINGÚN asiento
-        /// con override propio (`melchior_model`/`balthasar_model`/`caspar_model`
-        /// ausentes), así que los tres heredan el fallback. El fallback correcto es
-        /// `[openai].model` — la sección DEL KIND DEL TRÍO — nunca `[anthropic].model`,
-        /// que es la sección del PRINCIPAL.
+        /// **Fix round 1 — Logic+Structure finding.** Reproduces the EXACT reported bug:
+        /// principal on `anthropic` (reads `[anthropic].model`), trio on `ollama` (declared
+        /// `[magi].kind`, diverging — reads `[openai].model`), and NO seat with its own
+        /// override (`melchior_model`/`balthasar_model`/`caspar_model` absent), so all three
+        /// inherit the fallback. The correct fallback is `[openai].model` — the trio's KIND
+        /// section — never `[anthropic].model`, the principal's section.
         ///
-        /// Antes de este fix, los dos call sites (`run()`/`prepare_headless()`) resolvían
-        /// el fallback del trío con `resolve_backend_model(cfg, principal_kind)` — el
-        /// kind del PRINCIPAL, no el del trío — así que un trío en `ollama` con el
-        /// principal en `anthropic` intentaba sondear el NOMBRE de `[anthropic].model`
-        /// contra el endpoint del trío.
+        /// Before this fix, the two call sites (`run()`/`prepare_headless()`) resolved the
+        /// trio's fallback with `resolve_backend_model(cfg, principal_kind)` — the principal's
+        /// KIND, not the trio's — so a trio on `ollama` with the principal on `anthropic`
+        /// attempted to probe the NAME of `[anthropic].model` against the trio's endpoint.
         ///
-        /// Los dos modelos se mapean a ventanas DISTINTAS (`claude-test` → 999 999,
-        /// `qwen-test` → 128 000) para que el bug, si reaparece, se vea como un NÚMERO
-        /// EQUIVOCADO — envenenando `input_warn_tokens` con la ventana de un modelo ajeno
-        /// — en vez de solo una degradación a "no medido", que sería más fácil de pasar
-        /// por alto en una revisión superficial.
+        /// The two models map to DIFFERENT windows (`claude-test` → 999 999, `qwen-test` → 128
+        /// 000) so that, if the bug reappears, it shows up as a WRONG NUMBER — poisoning
+        /// `input_warn_tokens` with a foreign model's window — rather than just a degradation
+        /// to "not measured", which would be easier to overlook in a cursory review.
         #[tokio::test]
         async fn a_diverging_trio_kind_probes_its_own_section_model_not_the_principals() {
             let factory = MappedProbeFactory::new(&[
@@ -8047,9 +7971,11 @@ mod tests {
             );
         }
 
-        /// Un `[magi].kind` inválido no propaga error ni panica: degrada el TRÍO entero a
-        /// *no medido*, sin adivinar un kind — `build_magi_orchestrator` es quien reporta
-        /// el error tipado cuando construya el trío de verdad con la MISMA config.
+        /// An invalid `[magi].kind` does not propagate error nor panic: it degrades the ENTIRE
+        /// trio to
+        /// *unmeasured*, without guessing a kind — `build_magi_orchestrator` is the one that
+        /// reports
+        /// the typed error when it builds the real trio with the SAME config.
         #[tokio::test]
         async fn an_invalid_magi_kind_degrades_the_trio_without_guessing() {
             let factory = MappedProbeFactory::new(&[("principal", 64_000)]);
@@ -8072,11 +7998,11 @@ mod tests {
             );
         }
 
-        // ---- probe_and_report: consolidación del bloque duplicado (fix round 1, B3) ---
+        // ---- probe_and_report: consolidation of the duplicated block (fix round 1, B3) ---
 
-        /// SC-A24e: lo DECLARADO en `[magi].input_warn_tokens` gana sobre lo MEDIDO —
-        /// antes sin test propio (un `Option::or_else` inline en cada call site); ahora
-        /// que el bloque es una función compartida, es una aserción barata.
+        /// SC-A24e: what is DECLARED in `[magi].input_warn_tokens` wins over what is MEASURED —
+        /// previously with no own test (an inline `Option::or_else` at each call site); now
+        /// that the block is a shared function, it is a cheap assertion.
         #[tokio::test]
         async fn declared_input_warn_tokens_beats_the_measured_threshold() {
             let factory = MappedProbeFactory::new(&[
@@ -8104,7 +8030,8 @@ mod tests {
             );
         }
 
-        /// SC-A24e (el otro lado): sin declarar nada, el umbral sale de lo MEDIDO.
+        /// SC-A24e (the other side): with nothing declared, the threshold comes from what is
+        /// MEASURED.
         #[tokio::test]
         async fn absent_input_warn_tokens_falls_back_to_the_measured_threshold() {
             let factory = MappedProbeFactory::new(&[
@@ -8138,9 +8065,9 @@ mod tests {
 
         // ---- resolve_magi_kind ---------------------------------------------------------
 
-        /// `[magi].kind` ausente hereda el YA RESUELTO del principal — no
-        /// `cfg.effective_provider()`/`cfg.effective_magi_kind()` (TOML-only), que
-        /// ignorarían `MAGI_PROVIDER`.
+        /// Absent `[magi].kind` inherits the ALREADY-RESOLVED principal one — not
+        /// `cfg.effective_provider()`/`cfg.effective_magi_kind()` (TOML-only), which would
+        /// ignore `MAGI_PROVIDER`.
         #[test]
         fn resolve_magi_kind_inherits_the_resolved_principal_when_absent() {
             let cfg = MagiConfig::default();
@@ -8151,7 +8078,7 @@ mod tests {
             );
         }
 
-        /// `[magi].kind` declarado gana sobre el principal.
+        /// Declared `[magi].kind` wins over the principal.
         #[test]
         fn resolve_magi_kind_prefers_the_declared_value_over_the_principal() {
             let cfg = cfg_diverging(Some("anthropic"));
@@ -8161,7 +8088,7 @@ mod tests {
             );
         }
 
-        /// `[magi].kind` no reconocido es error TIPADO, no un fallback silencioso.
+        /// Unrecognized `[magi].kind` is a TYPED error, not a silent fallback.
         #[test]
         fn resolve_magi_kind_rejects_an_unknown_value() {
             let cfg = cfg_diverging(Some("banana"));
@@ -8171,8 +8098,8 @@ mod tests {
 
         // ---- resolve_backend_model ------------------------------------------------------
 
-        /// `[openai].model` para `ollama`/`openai-compat`, `[anthropic].model` para
-        /// `anthropic` — `[openai]` sirve a los dos primeros porque comparten protocolo.
+        /// `[openai].model` for `ollama`/`openai-compat`, `[anthropic].model` for `anthropic` —
+        /// `[openai]` serves the first two because they share the protocol.
         #[test]
         fn resolve_backend_model_picks_the_section_matching_the_kind() {
             let cfg = MagiConfig {
@@ -8198,7 +8125,7 @@ mod tests {
             );
         }
 
-        /// Borde: ambos ausentes ⇒ los defaults built-in del crate, no un `panic`/`unwrap`.
+        /// Edge: both absent ⇒ the crate's built-in defaults, no `panic`/`unwrap`.
         #[test]
         fn resolve_backend_model_falls_back_to_the_built_in_defaults_when_absent() {
             let cfg = MagiConfig::default();
