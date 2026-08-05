@@ -361,14 +361,32 @@ fn failures_json(f: &BTreeMap<AgentName, Vec<ExtractionFailure>>) -> Value {
 /// against `orchestrator.rs::dispatch_one_agent` (magi-core 3.1.0), it is literally
 /// `MagiError::Provider(e).to_string()`, a `format!("timeout: …")`, or a
 /// `format!("retry-failed: …")` wrapping either — none of which magi-rs controls the
-/// content of. Under REQ-A16c a `base_url` may carry `[user]:[password]` placeholders
-/// substituted with real vault credentials in memory, so an ordinary connection failure
-/// (wrong port, TLS mismatch, a DNS blip — nothing attacker-driven) can render that
-/// resolved, credential-bearing URL straight into this string via reqwest/hyper's own
-/// `Display`. `redact_foreign_text` is the SAME positional redaction `explain_magi_error`
-/// already applies to foreign error text elsewhere in this file (B3: one redaction path,
-/// not two) — it just takes the already-formatted `&str` this field already is, instead
-/// of a `&dyn Error` there is none of here.
+/// content of.
+///
+/// **Fix round 4 correction — the mechanism, not the fix, was wrong in the original
+/// writeup.** magi-core 3.1.0's `Network`/`Timeout` variants are already redacted
+/// upstream: `provider.rs::to_provider_error` composes their `message` from an
+/// ALREADY-redacted URL plus `cause_chain(e)`, which starts at `e.source()` and so
+/// **skips** the top-level client error whose `Display` embeds the raw request URL —
+/// pinned by magi-core's own `cause_chain_skips_the_top_level_error` test. So an
+/// ordinary connection failure against a `[user]:[password]`-substituted `base_url`
+/// (REQ-A16c) does NOT leak through that specific path in 3.1.0. The real exposure this
+/// redaction guards is:
+/// - **`ProviderError::Http { body }`** — the response body from whatever a request
+///   reached (a misconfigured proxy echoing headers, a captive portal, a compromised
+///   endpoint) is genuinely unredacted, server-controlled text, and it reaches
+///   `MagiReport::failed_agents` the same way `Network`/`Timeout` do.
+/// - **`ProviderError` (and `Http` itself) is `#[non_exhaustive]`.** A future minor
+///   version of magi-core can add a variant that interpolates free text, and this code
+///   would start leaking again silently, with nothing on our side to change.
+///
+/// So this redaction is defence in depth over a boundary magi-rs does not control, not
+/// a patch for a hole that is live in the `Network`/`Timeout` path today — it stays
+/// correct even where the specific mechanism first suspected does not apply, and stays
+/// correct if magi-core's internals change. `redact_foreign_text` is the SAME positional
+/// redaction `explain_magi_error` already applies to foreign error text elsewhere in
+/// this file (B3: one redaction path, not two) — it just takes the already-formatted
+/// `&str` this field already is, instead of a `&dyn Error` there is none of here.
 #[must_use]
 fn failed_agents_json(agents: &BTreeMap<AgentName, String>) -> Value {
     let mut out = serde_json::Map::new();
@@ -1736,12 +1754,20 @@ mod tests {
     /// SC-A13 / B11 (fix round 3, CRITICAL): a `cause` string reaching `failed_
     /// agents` is THIRD-PARTY text — magi-core's own `ProviderError` rendering,
     /// e.g. `MagiError::Provider(e).to_string()` (verified against `orchestrator.
-    /// rs::dispatch_one_agent`) — and an ordinary connection failure against a
-    /// `[user]:[password]`-substituted `base_url` (REQ-A16c) can embed LIVE
-    /// credentials in exactly this string. `failed_agents_json` must redact it
-    /// before it ever reaches the JSON. A test that redacts a benign string
-    /// proves nothing about this: the credential must actually be present in the
-    /// input and actually absent from the output.
+    /// rs::dispatch_one_agent`) — and `failed_agents_json` must redact it before
+    /// it ever reaches the JSON. A test that redacts a benign string proves
+    /// nothing about this: the credential must actually be present in the input
+    /// and actually absent from the output.
+    ///
+    /// Fix round 4 correction: the URL-with-userinfo canary below is
+    /// REPRESENTATIVE of the shape a `ProviderError::Http { body }` (an
+    /// unredacted, server-controlled response body — `#[non_exhaustive]`, so a
+    /// future magi-core variant could carry free text too) could produce, not a
+    /// pin of a mechanism that actually occurs on the `Network`/`Timeout` path —
+    /// magi-core 3.1.0 already redacts THAT path upstream (`provider.rs::
+    /// to_provider_error`, `cause_chain_skips_the_top_level_error`). This test
+    /// exercises the redaction generically, at the boundary, regardless of which
+    /// `ProviderError` variant a future magi-core version routes a URL through.
     #[test]
     fn a_credential_bearing_cause_never_reaches_the_json() {
         const CANARY: &str = "hunter2-s3cr3t";

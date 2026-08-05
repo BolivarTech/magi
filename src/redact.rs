@@ -191,6 +191,20 @@ fn ends_embedded_url(c: char) -> bool {
 /// el hueco real: el día que alguien tenga un `String` foráneo y no un `Error`, va a escribir
 /// ESE `.to_string()` sin pasar por acá, exactamente el defecto que este fix cierra.
 ///
+/// **Fix round 4 — el mecanismo concreto, corregido.** El motivador original de esta función
+/// (`failed_agents_json`, `src/tools/consult.rs`) describía una FALLA DE CONEXIÓN ORDINARIA
+/// filtrando la URL resuelta vía el `Display` de reqwest/hyper — verificado contra magi-core
+/// 3.1.0 y **es incorrecto**: `provider.rs::to_provider_error` arma `Network`/`Timeout` a partir
+/// de una URL YA REDACTADA más `cause_chain(e)`, que arranca en `e.source()` y por lo tanto
+/// **saltea** el error de más alto nivel (el que interpola la URL cruda) — pineado por el propio
+/// test de magi-core `cause_chain_skips_the_top_level_error`. Esa ruta específica ya está
+/// cubierta aguas arriba. La exposición real que esta redacción cubre es
+/// `ProviderError::Http { body }` (texto de respuesta CONTROLADO POR EL SERVIDOR, sin redactar) y
+/// el hecho de que `ProviderError` es `#[non_exhaustive]` — una variante futura de magi-core
+/// podría interpolar texto libre sin que este código cambie una línea. Por eso la redacción va
+/// en el BORDE (todo `String` foráneo) y no por variante: sigue siendo correcta aunque el
+/// mecanismo original sospechado no aplique, y sigue siendo correcta si magi-core cambia.
+///
 /// # Por qué hace falta redactar esto, y por qué una lista de sitios no alcanza
 ///
 /// Los `format!` que escribimos nosotros se pueden enumerar y auditar. Este camino no: el
