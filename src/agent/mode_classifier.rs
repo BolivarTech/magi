@@ -1,15 +1,12 @@
-// Author: Julian Bolivar
-// Version: 1.0.0
-// Date: 2026-08-03
+// Author: Julian Bolivar Version: 1.0.0 Date: 2026-08-03
 
-//! Clasificador de modo sobre el provider PRINCIPAL (REQ-A07c).
+//! Mode classifier over the PRIMARY provider (REQ-A07c).
 //!
-//! Vive en el **bin**, no en `src/magi/mode.rs` (lib): [`ProviderClassifier`]
-//! necesita `Arc<dyn Provider>`, y `agent::provider::Provider` es un tipo del
-//! binario que el lib no puede ver (ver la tabla de crate split en `CLAUDE.md`).
-//! El trait puro [`magi_rs::magi::mode::ModeClassifier`] que esto implementa,
-//! en cambio, sí vive en el lib — es sin I/O, así que no tiene la misma
-//! restricción.
+//! Lives in the **bin**, not in `src/magi/mode.rs` (lib): [`ProviderClassifier`] needs `Arc<dyn
+//! Provider>`, and `agent::provider::Provider` is a type of the binary that the lib cannot see
+//! (see the crate split table in `CLAUDE.md`). The pure trait
+//! [`magi_rs::magi::mode::ModeClassifier`] that this implements, on the other hand, does live
+//! in the lib — it has no I/O, so it does not have the same restriction.
 
 #![deny(missing_docs)]
 #![deny(clippy::missing_docs_in_private_items)]
@@ -40,46 +37,44 @@ use magi_rs::magi::CLASSIFY_TIMEOUT_SECS;
 use crate::agent::messages::Message;
 use crate::agent::provider::Provider;
 
-/// Delimitadores del contenido no confiable en el prompt de clasificación.
+/// Delimiters for the untrusted content in the classification prompt.
 ///
-/// El contenido va **delimitado** y el prompt declara que lo de adentro es dato
-/// a clasificar, nunca instrucciones. Es higiene: la contención real es
-/// [`normalize_label`], porque no depende de que el modelo se porte bien.
+/// The content is **delimited** and the prompt declares that what is inside is data to
+/// classify, never instructions. It is hygiene: the real containment is [`normalize_label`],
+/// because it does not depend on the model behaving well.
 const CONTENT_OPEN: &str = "<<<CONTENIDO_A_CLASIFICAR>>>";
-/// Ver [`CONTENT_OPEN`].
+/// See [`CONTENT_OPEN`].
 const CONTENT_CLOSE: &str = "<<<FIN_CONTENIDO>>>";
 
-/// Clave del aviso de COSTO: sin `--mode` ni `default_mode`, se agrega una
-/// llamada al modelo. Ver [`NoticeSink::once`].
+/// Key of the COST notice: without `--mode` or `default_mode`, a model call is added. See
+/// [`NoticeSink::once`].
 const NOTICE_CLASSIFY_COST: &str = "classify.cost";
-/// Clave del aviso de VENCIMIENTO: la clasificación expiró o falló. Distinto
-/// del anterior — este avisa que algo FALLÓ, no que algo VA A OCURRIR.
+/// Key of the EXPIRATION notice: the classification expired or failed. Different from the
+/// previous one — this one warns that something FAILED, not that something IS GOING TO HAPPEN.
 const NOTICE_CLASSIFY_TIMEOUT: &str = "classify.timeout";
 
-/// Emisor de avisos de-una-sola-vez, **inyectable**.
+/// Emitter of one-time notices, **injectable**.
 ///
-/// **Resuelve una tensión real entre dos reglas, y por eso no es ni un campo ni
-/// un `static`.** La spec exige *"una vez por proceso"*: un `AtomicBool` como
-/// campo del clasificador cumple eso solo si existe exactamente un
-/// clasificador — cierto hoy, **no un contrato**. Pero un `static` cumple la
-/// semántica y **rompe B13** («tests aislados, sin estado compartido»): el
-/// orden de los tests pasaría a decidir cuál ve el aviso.
+/// **Resolves a real tension between two rules, and therefore is neither a field nor
+/// a `static`.**
 ///
-/// El sink satisface las dos: **una instancia compartida a nivel proceso** en
-/// producción (para `magi consult` headless, un proceso ES una corrida, así
-/// que construir un [`ProcessNoticeSink`] por invocación ya cumple "una vez por
-/// proceso"), **una fresca por test** en la suite. La semántica de "una vez"
-/// vive en el sink, no en quien lo usa.
+/// The spec demands *"once per process"*: an `AtomicBool` as a field of the classifier
+/// satisfies that only if exactly one classifier exists — true today, **not a contract**. But a
+/// `static` satisfies the semantics and **breaks B13** («isolated tests, no shared state»): the
+/// order of the tests would end up deciding which one sees the notice.
 pub trait NoticeSink: Send + Sync {
-    /// Emite `msg` la primera vez que se llama con `key`; las siguientes son
-    /// no-op para esa `key`.
+    /// The sink satisfies both: **one process-level shared instance** in production (for
+    /// headless `magi consult`, one process IS one run, so building a [`ProcessNoticeSink`] per
+    /// invocation already satisfies "once per process"), **one fresh instance per test** in the
+    /// suite. The semantics of "once" live in the sink, not in whoever uses it.
     fn once(&self, key: &'static str, msg: &str);
 }
 
-/// Sink de producción: escribe a stderr, deduplicando por clave.
+/// Emits `msg` the first time it is called with `key`; subsequent calls are no-ops for that
+/// `key`.
 #[derive(Default)]
 pub struct ProcessNoticeSink {
-    /// Claves ya emitidas, para el dedup.
+    /// Production sink: writes to stderr, deduplicating by key.
     seen: Mutex<BTreeSet<&'static str>>,
 }
 
@@ -92,19 +87,19 @@ impl NoticeSink for ProcessNoticeSink {
     }
 }
 
-/// Clasificador sobre el provider PRINCIPAL (REQ-A07c).
+/// Keys already emitted, for dedup.
 ///
-/// Usa el principal y no el trío: es una clasificación de una etiqueta, no una
-/// deliberación; pagarla al precio de tres mages sería absurdo.
+/// Classifier over the PRIMARY provider (REQ-A07c).
 pub struct ProviderClassifier {
-    /// El provider principal ya resuelto (mismo que atiende el tool loop).
+    /// Uses the primary one and not the trio: it is a classification of a label, not a
+    /// deliberation; paying for it at the price of three mages would be absurd.
     provider: Arc<dyn Provider>,
-    /// Emisor de los dos avisos de-una-sola-vez de este módulo.
+    /// The primary provider already resolved (same one that serves the tool loop).
     notices: Arc<dyn NoticeSink>,
 }
 
 impl ProviderClassifier {
-    /// Crea un clasificador sobre `provider`, emitiendo sus avisos por `notices`.
+    /// Emitter of the two one-time notices of this module.
     #[must_use]
     pub fn new(provider: Arc<dyn Provider>, notices: Arc<dyn NoticeSink>) -> Self {
         Self { provider, notices }
@@ -159,14 +154,14 @@ mod tests {
 
     use super::*;
 
-    /// Doble de [`Provider`] que espera `delay` y entonces responde con `text`.
-    /// El `sleep` vive DENTRO de `stream_messages`, así que el
-    /// `tokio::time::timeout` de [`ProviderClassifier::classify`] lo atrapa
-    /// igual que atraparía una latencia real de red.
+    /// Creates a classifier over `provider`, emitting its notices through `notices`.
     struct DelayedProvider {
-        /// Cuánto espera antes de responder.
+        /// Double of [`Provider`] that waits `delay` and then responds with `text`. The `sleep`
+        /// lives INSIDE `stream_messages`, so the `tokio::time::timeout` from
+        /// [`ProviderClassifier::classify`] catches it just as it would catch a real network
+        /// latency.
         delay: Duration,
-        /// Lo que responde, una vez pasado el delay.
+        /// How long it waits before responding.
         text: String,
     }
 
@@ -184,7 +179,7 @@ mod tests {
         }
     }
 
-    /// Un provider que nunca responde a tiempo para [`CLASSIFY_TIMEOUT_SECS`].
+    /// What it responds with, once the delay has passed.
     fn slow_provider(delay: Duration) -> Arc<dyn Provider> {
         Arc::new(DelayedProvider {
             delay,
@@ -192,7 +187,7 @@ mod tests {
         })
     }
 
-    /// Un provider que responde `label` de inmediato.
+    /// A provider that never responds in time for [`CLASSIFY_TIMEOUT_SECS`].
     fn provider_returning(label: &str) -> Arc<dyn Provider> {
         Arc::new(DelayedProvider {
             delay: Duration::ZERO,
@@ -200,14 +195,14 @@ mod tests {
         })
     }
 
-    /// Sink de test: acumula en memoria, sin tocar stderr ni estado global —
-    /// lo que mantiene B13 («tests aislados, sin estado compartido») mientras
-    /// la semántica de "una vez por proceso" sigue viva en producción.
+    /// A provider that responds `label` immediately.
     #[derive(Default)]
     struct RecordingNoticeSink {
-        /// Claves ya vistas, para el dedup (igual que `ProcessNoticeSink`).
+        /// Test sink: accumulates in memory, without touching stderr or global state — which
+        /// keeps B13 («isolated tests, no shared state») while the semantics of "once per
+        /// process" remain alive in production.
         seen: Mutex<BTreeSet<&'static str>>,
-        /// Los mensajes que sí se emitieron, en orden.
+        /// Keys already seen, for dedup (same as `ProcessNoticeSink`).
         messages: Mutex<Vec<String>>,
     }
 
@@ -224,7 +219,7 @@ mod tests {
     }
 
     impl RecordingNoticeSink {
-        /// Cuenta cuántos avisos emitidos contienen `needle`.
+        /// The messages that did get emitted, in order.
         fn count_matching(&self, needle: &str) -> usize {
             self.messages
                 .lock()
@@ -235,8 +230,7 @@ mod tests {
         }
     }
 
-    /// SC-A07m: en un provider lento, la clasificación degrada a `None` sin
-    /// exceder su propio techo — nunca hereda el delay del provider.
+    /// Counts how many emitted notices contain `needle`.
     #[tokio::test]
     async fn a_slow_provider_degrades_every_inference_to_default() {
         let classifier = ProviderClassifier::new(
@@ -256,14 +250,10 @@ mod tests {
         );
     }
 
-    /// SC-A07n / SC-A07o: los dos avisos, cada uno UNA vez — con sink INYECTADO.
+    /// SC-A07m: on a slow provider, classification degrades to `None` without exceeding its own
+    /// ceiling — it never inherits the provider's delay.
     ///
-    /// Reloj PAUSADO (m2, revisión Task 2.3): el provider de 30s nunca corre en
-    /// tiempo real — cada `classify` se lanza en su propia tarea y
-    /// `tokio::time::advance` salta directo más allá del techo de
-    /// [`CLASSIFY_TIMEOUT_SECS`], que es lo único que este test necesita
-    /// observar. Con reloj real esto costaba ~18s (3 llamadas × 6s) en cada
-    /// corrida de la suite.
+    /// SC-A07n / SC-A07o: the two notices, each one ONCE — with an INJECTED sink.
     #[tokio::test(start_paused = true)]
     async fn the_two_notices_fire_once_each() {
         let sink = Arc::new(RecordingNoticeSink::default());
@@ -291,12 +281,12 @@ mod tests {
         );
     }
 
-    /// SC-A07o: el aviso de COSTO sale aunque la clasificación FUNCIONE.
+    /// PAUSED clock (m2, review Task 2.3): the 30s provider never runs in real time — each
+    /// `classify` is launched in its own task and `tokio::time::advance` jumps straight past
+    /// the ceiling of [`CLASSIFY_TIMEOUT_SECS`], which is the only thing this test needs to
+    /// observe. With a real clock this cost ~18s (3 calls × 6s) on every run of the suite.
     ///
-    /// El test anterior lo ejercita con una clasificación que falla, así que no
-    /// distingue «avisó del costo» de «avisó del fallo». Este confirma que el
-    /// aviso previo es independiente del resultado: la llamada se paga igual,
-    /// y de eso avisa.
+    /// SC-A07o: the COST notice fires even if classification WORKS.
     #[tokio::test]
     async fn the_cost_notice_fires_even_when_classification_succeeds() {
         let sink = Arc::new(RecordingNoticeSink::default());
@@ -315,10 +305,10 @@ mod tests {
         );
     }
 
-    /// Caso borde: el provider responde a tiempo pero con algo que no es una
-    /// etiqueta (prosa, JSON, etiqueta inventada). Cae a `None` igual que un
-    /// fallo real, pero SIN el aviso de vencimiento — no expiró ni falló la
-    /// llamada, solo no nombró un modo válido (REQ-A07j).
+    /// The previous test exercises it with a classification that fails, so it cannot
+    /// distinguish the 'cost notice' from the 'failure notice'. This one confirms that the
+    /// previous notice is independent of the result: the call is paid for either way, and that
+    /// is what it warns about.
     #[tokio::test]
     async fn an_unrecognized_reply_yields_none_without_a_timeout_notice() {
         let sink = Arc::new(RecordingNoticeSink::default());
@@ -339,12 +329,13 @@ mod tests {
         );
     }
 
-    /// El aislamiento es real: dos tests no se contaminan aunque corran en
-    /// cualquier orden (B13).
+    /// Edge case: the provider responds on time but with something that is not a label (prose,
+    /// JSON, made-up label). It falls to `None` just like a real failure, but WITHOUT the
+    /// expiration notice — the call neither expired nor failed; it simply did not name a valid
+    /// mode (REQ-A07j).
     ///
-    /// Reloj PAUSADO (m2): mismo motivo que `the_two_notices_fire_once_each` —
-    /// dos clasificaciones contra un provider de 30s no necesitan tiempo real
-    /// para probar el aislamiento del sink.
+    /// The isolation is real: two tests do not contaminate each other even if they run in any
+    /// order (B13).
     #[tokio::test(start_paused = true)]
     async fn two_independent_sinks_do_not_share_state() {
         let a = Arc::new(RecordingNoticeSink::default());

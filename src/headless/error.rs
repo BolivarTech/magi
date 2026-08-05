@@ -1,75 +1,70 @@
-// Author: Julian Bolivar
-// Version: 1.0.0
-// Date: 2026-07-18
-//! Errores de dominio del subsistema Headless.
+// Author: Julian Bolivar Version: 1.0.0 Date: 2026-07-18 Headless subsystem domain errors.
 //!
-//! Sigue el patrón de [`crate::vault::VaultError`]: los tipos foráneos se
-//! **stringifican** en lugar de envolverse, salvo el error del vault
-//! ([`VaultError`]) que se **envuelve** intacto para que el exit-mapper (T9)
-//! distinga su clase.
+//! Follows the pattern of [`crate::vault::VaultError`]: foreign types are
+//! **stringified** instead of being wrapped, except for the vault error
+//! ([`VaultError`]) which is **wrapped** intact so that the exit-mapper (T9) can distinguish
+//! its class.
 //!
-//! **Invariante de seguridad:** ningún mensaje de error contiene jamás un
-//! secreto — solo su clase o la etapa que falló (hereda de [`VaultError`]).
+//! **Security invariant:** no error message ever contains a
+//! secret — only its class or the stage that failed (inherited from [`VaultError`]).
 
 use thiserror::Error;
 
 use crate::vault::VaultError;
 
-/// Errores de dominio del subsistema Headless.
+/// Headless subsystem domain errors.
 ///
-/// Cada variante nombra una clase de fallo distinguible por el borde
-/// (`main.rs`) para mapearla a un exit code accionable (REQ-H23).
+/// Each variant names a failure class distinguishable by the edge (`main.rs`) so it can be
+/// mapped to an actionable exit code (REQ-H23).
 #[derive(Debug, Error)]
 pub enum HeadlessError {
-    /// La entrada (`-i`/stdin) es sintácticamente inválida: no-UTF8, envelope
-    /// sin `prompt` bajo `--input-format json`, campo desconocido, clave
-    /// duplicada o anidamiento patológico. El mensaje **jamás** incluye el
-    /// contenido crudo del prompt (podría ser sensible). Mapea a exit 2.
+    /// The input (`-i`/stdin) is syntactically invalid: non-UTF8, envelope without `prompt`
+    /// under `--input-format json`, unknown field, duplicate key, or pathological nesting. The
+    /// message **never** includes the raw prompt content (it could be sensitive). Maps to exit
+    /// 2.
     #[error("invalid input: {0}")]
     InputInvalid(String),
 
-    /// La entrada supera `MAX_INPUT_BYTES` (DoS bound, REQ-H29). Lleva el
-    /// límite en bytes, nunca el contenido. Mapea a exit 2.
+    /// The input exceeds `MAX_INPUT_BYTES` (DoS bound, REQ-H29). Carries the limit in bytes,
+    /// never the content. Maps to exit 2.
     #[error("input exceeds {0} bytes")]
     InputTooLarge(usize),
 
-    /// Error de E/S en la lectura/escritura de la entrada o la salida. Lleva el
-    /// mensaje del `io::Error`, sin material sensible. Mapea a exit 1.
+    /// I/O error reading/writing input or output. Carries the `io::Error` message, with no
+    /// sensitive material. Maps to exit 1.
     #[error("I/O error: {0}")]
     Io(String),
 
-    /// Fallo a nivel de almacenamiento (SQLite) fuera de la clase de corrupción
-    /// tipada del vault. Mapea a exit 1.
+    /// Storage-level failure (SQLite) outside the vault's typed corruption class. Maps to exit
+    /// 1.
     #[error("storage error: {0}")]
     Storage(String),
 
-    /// El operador (o el usuario interactivo) no confirmó una operación o la
-    /// canceló. El borde sale con código distinto de cero; no es un fallo del
-    /// sistema. Mapea a exit 1.
+    /// The operator (or interactive user) did not confirm an operation or canceled it. The edge
+    /// exits with a non-zero code; it is not a system failure. Maps to exit 1.
     #[error("operation cancelled")]
     Aborted,
 
-    /// No hay TTY y no se proveyó la passphrase por `-p`/`MAGI_PASSPHRASE`
-    /// (REQ-H25/REQ-V40): headless **jamás** cuelga esperando un prompt que no
-    /// puede leer. Mapea a exit 1.
+    /// There is no TTY and the passphrase was not provided via `-p`/`MAGI_PASSPHRASE`
+    /// (REQ-H25/REQ-V40): headless **never** hangs waiting for a prompt it cannot read. Maps to
+    /// exit 1.
     #[error("no passphrase: use -p or MAGI_PASSPHRASE in non-interactive environments")]
     PassphraseUnavailable,
 
-    /// Error propagado desde el subsistema Vault (passphrase incorrecta, meta
-    /// corrupta, DB corrupta, etc.). Se **envuelve** intacto —su `Display` ya
-    /// está sanitizado— para que el exit-mapper (T9) distinga la clase concreta.
+    /// Error propagated from the Vault subsystem (wrong passphrase, corrupt meta, corrupt DB,
+    /// etc.). It is **wrapped** intact —its `Display` is already sanitized— so that the exit-
+    /// mapper (T9) can distinguish the concrete class.
     #[error(transparent)]
     Db(VaultError),
 }
 
-/// Traduce un [`VaultError`] a su [`HeadlessError`] correspondiente.
+/// Translates a [`VaultError`] to its corresponding [`HeadlessError`].
 ///
-/// El `match` es **exhaustivo sin comodín `_`** (MAGI CP2 run 1/2
-/// Melchior/Caspar): una variante nueva de [`VaultError`] **rompe el build**,
-/// forzando una decisión de mapeo explícita en lugar de una degradación
-/// silenciosa. Las variantes con equivalente directo en [`HeadlessError`]
-/// (`PassphraseUnavailable`/`Aborted`/`Io`/`Storage`) se mapean a él; el resto
-/// se **envuelve** en [`HeadlessError::Db`] para que T9 inspeccione su clase.
+/// The `match` is **exhaustive without a `_` wildcard** (MAGI CP2 run 1/2 Melchior/Caspar): a
+/// new [`VaultError`] variant **breaks the build**, forcing an explicit mapping decision
+/// instead of silent degradation. Variants with a direct equivalent in [`HeadlessError`]
+/// (`PassphraseUnavailable`/`Aborted`/`Io`/`Storage`) are mapped to it; the rest are
+/// **wrapped** in [`HeadlessError::Db`] so T9 can inspect their class.
 impl From<VaultError> for HeadlessError {
     fn from(err: VaultError) -> Self {
         match err {

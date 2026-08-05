@@ -1,74 +1,67 @@
-// Author: Julian Bolivar
-// Version: 1.0.0
-// Date: 2026-07-18
+// Author: Julian Bolivar Version: 1.0.0 Date: 2026-07-18
 
-//! Política de autorización de tools por tier headless (REQ-H06/H07/H08/H09).
+//! Tool authorization policy per headless tier (REQ-H06/H07/H08/H09).
 //!
-//! [`Policy`] traduce el tier headless (`default`/`--auto`/`--full-auto`) a una
-//! decisión de aprobación por tool: **fail-closed** — un tool no reconocido
-//! nunca se auto-aprueba, en ningún tier. El módulo es lógica **pura**, sin
-//! dependencia del `Agent` ni de los tools (`headless` es un módulo de la
-//! biblioteca [`crate`], mientras `src/tools/` vive solo en el binario) — el
-//! runner (tarea posterior de MS2) cablea esta decisión al `approval_tx` del
-//! agente.
+//! [`Policy`] translates the headless tier (`default`/`--auto`/`--full-auto`) into a per-tool
+//! approval decision: **fail-closed** — an unrecognized tool never auto-approves, in any tier.
+//! The module is **pure** logic, with no dependency on `Agent` or the tools (`headless` is a
+//! library [`crate`] module, while `src/tools/` lives only in the binary) — the runner (later
+//! MS2 task) wires this decision to the agent's `approval_tx`.
 //!
-//! **Esta política nunca toca las barreras DURAS** (`bash::is_command_allowed`,
-//! la prohibición de metacaracteres, `PathGuard::validate`): esas se aplican
-//! dentro de cada tool y permanecen activas sin importar el tier (REQ-H09). Lo
-//! que esta política decide es exclusivamente la aprobación **suave** por tier.
+//! **This policy never touches the HARD barriers** (`bash::is_command_allowed`,
+//! the prohibition of metacharacters, `PathGuard::validate`): these are applied inside each
+//! tool and remain active regardless of the tier (REQ-H09). What this policy decides is
+//! exclusively the **soft** per-tier approval.
 
 use super::limits::{FULL_AUTO_MAX_TOOL_CALLS, NORMAL_MAX_TOOL_CALLS};
 
-/// Nombres de los tools READ-ONLY — única fuente de verdad del set (REQ-H06,
-/// DRY). Verificado contra el registro real de `main.rs` (`ListTool`/
-/// `FileReadTool`/`GrepTool`, cuyo `Tool::name()` devuelve exactamente estos
-/// tres literales — ver `src/tools/{ls,read,grep}.rs`).
+/// READ-ONLY tool names — single source of truth for the set (REQ-H06, DRY). Verified against
+/// the real registry in `main.rs` (`ListTool`/ `FileReadTool`/`GrepTool`, whose `Tool::name()`
+/// returns exactly these three literals — see `src/tools/{ls,read,grep}.rs`).
 pub const READ_ONLY_TOOLS: &[&str] = &["ls", "view", "grep"];
 
-/// Nombres de los tools que mutan estado o ejecutan procesos/LLM adicionales —
-/// aprobados solo en `Auto`/`FullAuto` (REQ-H07). Verificado contra el registro
-/// real de `main.rs` (`FileWriteTool`/`BashTool`/`ConsultTool`/`ProjectFactTool`,
-/// cuyo `Tool::name()` devuelve estos cuatro literales — ver
-/// `src/tools/{write,bash,consult,knowledge}.rs`).
+/// Names of tools that mutate state or run additional processes/LLMs — approved only in
+/// `Auto`/`FullAuto` (REQ-H07). Verified against the real registry in `main.rs`
+/// (`FileWriteTool`/`BashTool`/`ConsultTool`/`ProjectFactTool`, whose `Tool::name()` returns
+/// these four literals — see `src/tools/{write,bash,consult,knowledge}.rs`).
 const READ_WRITE_TOOLS: &[&str] = &["edit", "bash", "consult", "project_knowledge"];
 
-/// Tier de autorización de tools de una corrida headless.
+/// Tool authorization tier for a headless run.
 ///
-/// Determina exclusivamente la matriz de aprobación **suave**; las barreras
-/// duras de cada tool son idénticas en los tres tiers (REQ-H09).
+/// Determines only the **soft** approval matrix; each tool's hard barriers are identical across
+/// all three tiers (REQ-H09).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tier {
-    /// Solo los tools de [`READ_ONLY_TOOLS`] se auto-aprueban (REQ-H06).
+    /// Only tools in [`READ_ONLY_TOOLS`] auto-approve (REQ-H06).
     Default,
-    /// Todos los tools registrados se auto-aprueban, barreras duras intactas
-    /// (REQ-H07).
+    /// All registered tools auto-approve, hard barriers intact (REQ-H07).
     Auto,
-    /// Como `Auto`, además eleva `max_tool_calls` y silencia las guardas
-    /// suaves del agente (REQ-H08).
+    /// Like `Auto`, it also raises `max_tool_calls` and silences the agent's soft guards
+    /// (REQ-H08).
     FullAuto,
 }
 
-/// Política de autorización efectiva de una corrida headless.
+/// Effective authorization policy for a headless run.
 ///
-/// `max_tool_calls`/`timeout` viajan aquí para que el runner (tarea posterior
-/// de MS2) los consuma junto con la decisión de aprobación; ninguno de los dos
-/// participa en la lógica de [`Policy::approves`], que depende solo del tier.
+/// `max_tool_calls`/`timeout` travel here so the runner (later MS2 task) can consume them
+/// together with the approval decision; neither one participates in the logic of
+/// [`Policy::approves`], which depends only on the tier.
 #[derive(Debug, Clone)]
 pub struct Policy {
-    /// Tier activo; determina la matriz de aprobación y los avisos emitidos.
+    /// Active tier; determines the approval matrix and the warnings emitted.
     tier: Tier,
-    /// Tope de llamadas a tools ya resuelto por el caller (sin clamp aquí).
+    /// Tool-call ceiling already resolved by the caller (no clamping here).
     max_tool_calls: u32,
-    /// Timeout de wall-clock en segundos, si se fijó (REQ-H36; lo aplica T4).
+    /// Wall-clock timeout in seconds, if set (REQ-H36; applied by T4).
     timeout: Option<u64>,
 }
 
 impl Policy {
-    /// Construye una política para `tier` con los límites ya resueltos.
+    /// Builds a policy for `tier` with the limits already resolved.
     ///
-    /// `max_tool_calls`/`timeout` se toman tal cual del caller — esta función
-    /// no aplica ningún clamp de costo (eso ya ocurrió en la resolución de
-    /// parámetros, `resolution::resolve`, tarea previa de MS1).
+    /// `max_tool_calls`/`timeout` are taken as-is from the caller — this function applies no
+    /// cost clamp (that already happened during parameter resolution, `resolution::resolve`,
+    /// previous MS1 task).
     #[must_use]
     pub fn new(tier: Tier, max_tool_calls: u32, timeout: Option<u64>) -> Self {
         Self {
@@ -78,34 +71,34 @@ impl Policy {
         }
     }
 
-    /// Tier activo de esta política.
+    /// Active tier of this policy.
     #[must_use]
     pub fn tier(&self) -> Tier {
         self.tier
     }
 
-    /// Tope de llamadas a tools de esta corrida.
+    /// Tool-call ceiling for this run.
     #[must_use]
     pub fn max_tool_calls(&self) -> u32 {
         self.max_tool_calls
     }
 
-    /// Timeout de wall-clock en segundos, si se fijó uno.
+    /// Wall-clock timeout in seconds, if one was set.
     #[must_use]
     pub fn timeout(&self) -> Option<u64> {
         self.timeout
     }
 
-    /// Decide si `tool_name` se auto-aprueba bajo el tier de esta política.
+    /// Decides whether `tool_name` auto-approves under this policy's tier.
     ///
-    /// **Fail-closed:** un nombre que no pertenece ni a [`READ_ONLY_TOOLS`] ni
-    /// a los tools de lectura-escritura conocidos nunca se aprueba, en ningún
-    /// tier — así un tool futuro registrado en `main.rs` sin clasificar aquí
-    /// queda denegado por defecto en vez de auto-aprobado por omisión.
+    /// **Fail-closed:** a name that belongs neither to [`READ_ONLY_TOOLS`] nor
+    /// to the known read-write tools is never approved, in any tier — so a future tool
+    /// registered in `main.rs` but not classified here is denied by default instead of auto-
+    /// approved by omission.
     ///
-    /// Esta función **no** evalúa ni relaja ninguna barrera dura: la
-    /// aprobación aquí es una condición necesaria pero no suficiente — el tool
-    /// igual puede fallar dentro de sí mismo (`bash` allowlist, `PathGuard`).
+    /// This function does **not** evaluate or relax any hard barrier: approval here is a
+    /// necessary but not sufficient condition — the tool can still fail inside itself (`bash`
+    /// allowlist, `PathGuard`).
     #[must_use]
     pub fn approves(&self, tool_name: &str) -> bool {
         let is_read_only = READ_ONLY_TOOLS.contains(&tool_name);
@@ -115,12 +108,11 @@ impl Policy {
         }
     }
 
-    /// Avisos a emitir (stderr + log) para esta política, al inicio de la
-    /// corrida.
+    /// Warnings to emit (stderr + log) for this policy, at the start of the run.
     ///
-    /// No vacío únicamente bajo `FullAuto` (REQ-H08): la elevación de
-    /// privilegios (cap elevado + guardas suaves silenciadas) nunca es
-    /// silenciosa. `Default`/`Auto` no elevan nada y no emiten aviso.
+    /// Non-empty only under `FullAuto` (REQ-H08): the privilege elevation (raised cap +
+    /// silenced soft guards) is never silent. `Default`/`Auto` do not raise anything and emit
+    /// no warning.
     #[must_use]
     pub fn warnings(&self) -> Vec<String> {
         match self.tier {
@@ -135,44 +127,41 @@ impl Policy {
         }
     }
 
-    /// `true` si el runner debe desactivar las guardas SUAVES del `Agent`.
+    /// `true` if the runner should disable the `Agent`'s SOFT guards.
     ///
-    /// Únicamente `FullAuto` silencia (a) la detección de 3 llamadas
-    /// idénticas consecutivas y (b) el cap normal de `max_tool_calls`
-    /// (reemplazado por el elevado) — REQ-H08. Esta política solo **declara**
-    /// la intención: no tiene una referencia al `Agent` para aplicarla, eso
-    /// lo cablea el runner. Ninguna barrera dura se ve afectada por esta señal.
+    /// Only `FullAuto` silences (a) the detection of 3 consecutive identical calls and (b) the
+    /// normal `max_tool_calls` cap (replaced by the raised one) — REQ-H08. This policy only
+    /// **declares** the intent: it has no reference to the `Agent` to apply it, the runner
+    /// wires that. No hard barrier is affected by this signal.
     #[must_use]
     pub fn silences_soft_guards(&self) -> bool {
         matches!(self.tier, Tier::FullAuto)
     }
 }
 
-/// Fuzz entrypoint del target `fuzz_policy` (MS2 Task 10 / REQ-H35): mapea
-/// bytes arbitrarios a `(tier, nombre_de_tool)` y ejercita toda la superficie
-/// pública de [`Policy`].
+/// Fuzz entrypoint for the `fuzz_policy` target (MS2 Task 10 / REQ-H35): maps arbitrary bytes
+/// to `(tier, nombre_de_tool)` and exercises the entire public surface of [`Policy`].
 ///
-/// El primer byte selecciona el tier (`0` ⇒ [`Tier::Default`], `1` ⇒
-/// [`Tier::Auto`], cualquier otro ⇒ [`Tier::FullAuto`]) y el resto de los bytes
-/// es el nombre del tool, convertido con `String::from_utf8_lossy` — de modo
-/// que la entrada cubre nombres no-UTF8. Invariantes verificadas sobre TODA
-/// entrada: **nunca panic** (la matriz es lógica pura, total), y **fail-closed**
-/// — una aprobación implica que el nombre pertenece al set conocido de tools en
-/// cualquier tier (un nombre desconocido jamás devuelve `true`).
+/// The first byte selects the tier (`0` ⇒ [`Tier::Default`], `1` ⇒ [`Tier::Auto`], any other ⇒
+/// [`Tier::FullAuto`]) and the rest of the bytes are the tool name, converted with
+/// `String::from_utf8_lossy` — so the input covers non-UTF8 names. Invariants verified over
+/// EVERY input: **never panics** (the matrix is pure, total logic), and **fail-closed** — an
+/// approval implies the name belongs to the known tool set in any tier (an unknown name never
+/// returns `true`).
 ///
-/// `#[doc(hidden)] pub` espeja la convención de los `fuzz_*_entrypoint` del
-/// vault y de [`output`](super::output): expone la frontera al crate `fuzz/`
-/// sin ensanchar la API pública documentada del módulo.
+/// `#[doc(hidden)] pub` mirrors the convention of the vault's `fuzz_*_entrypoint` and of
+/// [`output`](super::output): it exposes the boundary to the `fuzz/` crate without widening the
+/// module's documented public API.
 ///
 /// # Panics
 ///
-/// Panica (bajo `debug_assertions`, que `cargo-fuzz` activa) solo si la
-/// invariante fail-closed se viola — ese es el bug genuino que el fuzzer busca,
-/// no un abort espurio.
+/// Panics (under `debug_assertions`, which `cargo-fuzz` enables) only if the fail-closed
+/// invariant is violated — that is the genuine bug the fuzzer is looking for, not a spurious
+/// abort.
 #[doc(hidden)]
 pub fn fuzz_policy_entrypoint(data: &[u8]) {
-    // Primer byte ⇒ tier; resto ⇒ nombre del tool (lossy, cubre no-UTF8). El
-    // fallback `(&0, &[])` cubre la entrada vacía sin indexar (fail-closed).
+    // First byte ⇒ tier; rest ⇒ tool name (lossy, covers non-UTF8). The fallback `(&0, &[])`
+    // covers the empty input without indexing (fail-closed).
     let (&tier_byte, name_bytes) = data.split_first().unwrap_or((&0, &[]));
     let tier = match tier_byte {
         0 => Tier::Default,
@@ -180,15 +169,15 @@ pub fn fuzz_policy_entrypoint(data: &[u8]) {
         _ => Tier::FullAuto,
     };
 
-    // `max_tool_calls`/`timeout` derivados de la cola para ejercitar los
-    // accesores con valores variados; no participan en la lógica de aprobación.
+    // `max_tool_calls`/`timeout` derived from the tail to exercise the accessors with varied
+    // values; they do not participate in the approval logic.
     let max_tool_calls = u32::try_from(name_bytes.len()).unwrap_or(u32::MAX);
     let timeout = name_bytes.first().map(|&b| u64::from(b));
 
     let name = String::from_utf8_lossy(name_bytes);
     let policy = Policy::new(tier, max_tool_calls, timeout);
 
-    // Toda la superficie pública debe ser total (nunca panic) sobre la entrada.
+    // The entire public surface must be total (never panic) over the input.
     let approved = policy.approves(&name);
     let _ = policy.silences_soft_guards();
     let _ = policy.warnings();
@@ -196,8 +185,8 @@ pub fn fuzz_policy_entrypoint(data: &[u8]) {
     let _ = policy.max_tool_calls();
     let _ = policy.timeout();
 
-    // Fail-closed: una aprobación implica un nombre de tool conocido, en
-    // cualquier tier — un nombre desconocido jamás se auto-aprueba (REQ-H09).
+    // Fail-closed: an approval implies a known tool name, in any tier — an unknown name is
+    // never auto-approved (REQ-H09).
     let name_ref: &str = name.as_ref();
     let is_known = READ_ONLY_TOOLS.contains(&name_ref) || READ_WRITE_TOOLS.contains(&name_ref);
     debug_assert!(
@@ -210,15 +199,13 @@ pub fn fuzz_policy_entrypoint(data: &[u8]) {
 mod tests {
     use super::*;
 
-    /// Todos los tools registrados en `main.rs`, tal como los devuelve su
-    /// `Tool::name()` real (verificado en `src/tools/{ls,read,write,grep,
-    /// bash,consult,knowledge}.rs` y el registro de `main.rs` en la fecha de
-    /// este archivo). Es la lista de referencia del test de mantenimiento de
-    /// abajo: un tool nuevo que se registre en `main.rs` sin agregarse aquí
-    /// (y a [`READ_ONLY_TOOLS`]/`READ_WRITE_TOOLS`) queda sin cubrir por este
-    /// guard hasta que un mantenedor actualice ambas listas — el módulo
-    /// `headless` es puro y no puede importar `crate::tools` para verificarlo
-    /// dinámicamente (ver rustdoc de módulo).
+    /// All tools registered in `main.rs`, as returned by their actual `Tool::name()` (verified
+    /// in `src/tools/{ls,read,write,grep, bash,consult,knowledge}.rs` and in the `main.rs`
+    /// registry on this file's date). It is the reference list for the maintenance test below:
+    /// a new tool registered in `main.rs` without being added here (and to
+    /// [`READ_ONLY_TOOLS`]/`READ_WRITE_TOOLS`) remains uncovered by this guard until a
+    /// maintainer updates both lists — the `headless` module is pure and cannot import
+    /// `crate::tools` to verify it dynamically (see module rustdoc).
     const REAL_REGISTERED_TOOL_NAMES: &[&str] = &[
         "ls",
         "view",
@@ -229,9 +216,8 @@ mod tests {
         "project_knowledge",
     ];
 
-    /// La matriz de aprobación por tier es exhaustiva sobre los tools
-    /// conocidos y fail-closed sobre cualquier nombre desconocido, en TODOS
-    /// los tiers (REQ-H06/H07/H09; MS2.md Task 1 Step 1 verbatim).
+    /// The per-tier approval matrix is exhaustive over the known tools and fail-closed over any
+    /// unknown name, in ALL tiers (REQ-H06/H07/H09; MS2.md Task 1 Step 1 verbatim).
     fn policy(tier: Tier) -> Policy {
         Policy::new(tier, NORMAL_MAX_TOOL_CALLS, None)
     }
@@ -268,11 +254,10 @@ mod tests {
         }
     }
 
-    /// El conjunto conocido de [`READ_ONLY_TOOLS`] + `READ_WRITE_TOOLS` debe
-    /// coincidir exactamente (mismo tamaño y mismos elementos) con el registro
-    /// real de `main.rs`, para que un tool agregado ahí y olvidado en la
-    /// clasificación de esta política falle este test en vez de quedar
-    /// silenciosamente denegado o aprobado por omisión.
+    /// The known set of [`READ_ONLY_TOOLS`] + `READ_WRITE_TOOLS` must match exactly (same size
+    /// and same elements) the real registry in `main.rs`, so that a tool added there but
+    /// forgotten in this policy's classification fails this test instead of being silently
+    /// denied or approved by omission.
     #[test]
     fn test_known_tool_set_matches_real_tool_registry() {
         let mut known: Vec<&str> = READ_ONLY_TOOLS
@@ -292,7 +277,7 @@ mod tests {
         );
     }
 
-    /// `silences_soft_guards` es `true` únicamente bajo `FullAuto`.
+    /// `silences_soft_guards` is `true` only under `FullAuto`.
     #[test]
     fn test_silences_soft_guards_true_only_for_full_auto() {
         assert!(!policy(Tier::Default).silences_soft_guards());
@@ -300,8 +285,8 @@ mod tests {
         assert!(policy(Tier::FullAuto).silences_soft_guards());
     }
 
-    /// `warnings()` está vacío en `Default`/`Auto` y contiene el aviso de
-    /// elevación de límites en `FullAuto` (REQ-H08).
+    /// `warnings()` is empty in `Default`/`Auto` and contains the limit-elevation warning in
+    /// `FullAuto` (REQ-H08).
     #[test]
     fn test_warnings_nonempty_only_for_full_auto_and_mentions_elevation() {
         assert!(policy(Tier::Default).warnings().is_empty());
@@ -314,8 +299,8 @@ mod tests {
         assert!(warnings[0].contains("soft guard"));
     }
 
-    /// Borde: `approves` con una cadena vacía (nunca un nombre de tool real)
-    /// se deniega en todos los tiers — fail-closed también sobre input vacío.
+    /// Edge: `approves` with an empty string (never a real tool name) is denied in all tiers —
+    /// fail-closed even on empty input.
     #[test]
     fn test_approves_denies_empty_tool_name_in_every_tier() {
         for tier in [Tier::Default, Tier::Auto, Tier::FullAuto] {
@@ -323,8 +308,8 @@ mod tests {
         }
     }
 
-    /// Los accesores exponen tal cual los valores pasados a `new` (sin clamp),
-    /// incluido el caso borde de `timeout: None`.
+    /// The accessors expose the values passed to `new` exactly as-is (no clamping), including
+    /// the edge case `timeout: None`.
     #[test]
     fn test_new_accessors_expose_constructor_values_unmodified() {
         let p = Policy::new(Tier::Auto, 42, Some(900));
@@ -336,10 +321,10 @@ mod tests {
         assert_eq!(no_timeout.timeout(), None);
     }
 
-    /// Unit-smoke del fuzz entrypoint `fuzz_policy` (REQ-H35): entradas
-    /// degeneradas (vacía, tier fuera de rango, cola no-UTF8, tool desconocido)
-    /// nunca panican y respetan el fail-closed. Es la versión local que SÍ
-    /// corre en cada §0.1, complementando la corrida coverage-guided de CI.
+    /// Unit-smoke of the `fuzz_policy` fuzz entrypoint (REQ-H35): degenerate inputs (empty,
+    /// out-of-range tier, non-UTF8 tail, unknown tool) never panic and respect fail-closed.
+    /// This is the local version that DOES run on every §0.1, complementing CI's coverage-
+    /// guided run.
     #[test]
     fn test_fuzz_policy_entrypoint_never_panics_on_arbitrary_input() {
         let cases: &[&[u8]] = &[

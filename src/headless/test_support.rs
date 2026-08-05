@@ -1,25 +1,21 @@
-// Author: Julian Bolivar
-// Version: 1.0.0
-// Date: 2026-07-18
-//! Helpers de test **genéricos** del subsistema headless.
+// Author: Julian Bolivar Version: 1.0.0 Date: 2026-07-18 **Generic** test helpers for the
+// headless subsystem.
 //!
-//! Solo helpers sin dependencia de tipos del feature viven acá (MAGI CP2 run 2
-//! Melchior — no todos los helpers en T0). Los helpers con semántica de una
-//! tarea concreta (DB, formateo, logs) se declaran en la tarea que los da.
-//! `with_var` es genérico de entorno ⇒ vive acá.
+//! Only helpers with no dependency on feature types live here (MAGI CP2 run 2 Melchior — not
+//! all helpers in T0). Helpers with semantics of a concrete task (DB, formatting, logs) are
+//! declared in the task that provides them. `with_var` is environment-generic ⇒ lives here.
 //!
-//! **Aislamiento:** `cargo nextest` corre un proceso por test, por lo que la
-//! mutación de variables de entorno de [`with_var`] queda aislada entre tests
-//! (no hay carrera cross-test); aun así el helper **restaura** el valor previo.
+//! **Isolation:** `cargo nextest` runs one process per test, so the
+//! mutation of environment variables by [`with_var`] is isolated between tests (no cross-test
+//! race); even so the helper **restores** the previous value.
 
 use std::env;
 
-/// Ejecuta `f` con la variable de entorno `key` fijada a `value` y restaura su
-/// valor previo al terminar.
+/// Runs `f` with the environment variable `key` set to `value` and restores its previous value
+/// on completion.
 ///
-/// `value = Some(v)` fija `key=v`; `value = None` la **elimina** durante `f`. Al
-/// salir, `key` recupera exactamente su estado anterior (presente-con-valor o
-/// ausente).
+/// `value = Some(v)` sets `key=v`; `value = None` **removes** it during `f`. On exit, `key`
+/// recovers exactly its previous state (present-with-value or absent).
 ///
 /// # Examples
 /// ```ignore

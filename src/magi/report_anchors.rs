@@ -1,81 +1,80 @@
-// Author: Julian Bolivar
-// Version: 1.0.0
-// Date: 2026-08-02
+// Author: Julian Bolivar Version: 1.0.0 Date: 2026-08-02
 
-//! Anclas del reporte de magi-core — **dueño único**, sin copia del lado del test.
+//! Anchors of the magi-core report — **single owner**, no copy on the test side.
 //!
-//! # Procedencia: una OBSERVACIÓN, no un contrato publicado
+//! # Provenance: an OBSERVATION, not a published contract
 //!
-//! El formato de `MagiReport::report` **no es API pública** de magi-core: es markdown que la
-//! crate genera para consumo humano. Estas anclas salen del spike de Task 0.6, ejecutado
-//! contra magi-core 3.1.0 el 2026-08-02, y verificadas después contra `src/reporting.rs` del
-//! propio crate para saber **cuáles son incondicionales** y cuáles dependen del contenido.
+//! The format of `MagiReport::report` **is not public API** of magi-core: it is markdown that
+//! the crate generates for human consumption. These anchors come from the Task 0.6 spike, run
+//! against magi-core 3.1.0 on 2026-08-02, and were later verified against the crate's own
+//! `src/reporting.rs` to learn **which ones are unconditional** and which depend on content.
 //!
-//! Por eso viven en un módulo propio y con su procedencia escrita: cuando magi-core cambie el
-//! render se toca **un** archivo, y el guardián
-//! `report_shape_matches_what_the_truncation_design_assumes` avisa antes que un usuario.
+//! That is why they live in a module of their own, with their provenance written down: when
+//! magi-core changes the rendering, **one** file is touched, and the guardian
+//! `report_shape_matches_what_the_truncation_design_assumes` warns before a user does.
 //!
-//! # Qué se verificó, y dónde
+//! # What was verified, and where
 //!
-//! `ReportFormatter` compone el reporte en este orden (`reporting.rs:795-817`):
+//! `ReportFormatter` composes the report in this order (`reporting.rs:795-817`):
 //!
-//! | Sección | ¿Siempre presente? |
+//! | Section | Always present? |
 //! |---|---|
-//! | Caja de veredicto (`MAGI SYSTEM -- VERDICT`) | **sí** |
-//! | Notas de estimación, fallos de extracción, tamaño de entrada | condicionales |
-//! | `## Key Findings` | solo si hay hallazgos |
-//! | `## Dissenting Opinion` | solo si hay disenso |
-//! | `## Conditions for Approval` | solo si hay condiciones |
-//! | `## Recommended Actions` | **sí**, y es la última |
+//! | Verdict box (`MAGI SYSTEM -- VERDICT`) | **yes** |
+//! | Estimation notes, extraction failures, input size | conditional |
+//! | `## Key Findings` | only if there are findings |
+//! | `## Dissenting Opinion` | only if there is dissent |
+//! | `## Conditions for Approval` | only if there are conditions |
+//! | `## Recommended Actions` | **yes**, and it is the last |
 //!
-//! De ahí sale la elección de `findings_end`: **no** `## Conditions for Approval`, que es
-//! opcional, sino `## Recommended Actions`, que siempre está y va después de todo lo que el
-//! recorte quiere conservar.
+//! From there comes the choice of `findings_end`: **not** `## Conditions for Approval`, which
+//! is optional, but `## Recommended Actions`, which is always present and comes after
+//! everything the truncation wants to keep.
 
-/// Anclas de SECCIÓN, **con nombre**. No es un `&[&str]` indexado por posición.
+/// SECTION anchors, **named**. Not a position-indexed `&[&str]`.
 ///
-/// Una lista dejaría el contrato en los índices —`.first()`, `.get(1)`, `.get(2)`— y entonces
-/// un spike que encuentra dos anclas en vez de tres **compila igual** y baja el techo de
-/// recorte **en silencio**, con `report_truncated` todavía diciendo `structural`. Ese es el
-/// peor modo de fallo disponible: el consumidor cree tener una garantía que ya no rige.
+/// A list would leave the contract in the indices —`.first()`, `.get(1)`, `.get(2)`— and then a
+/// spike that finds two anchors instead of three **compiles just the same** and lowers the
+/// truncation ceiling **silently**, with `report_truncated` still saying `structural`. That is
+/// the worst available failure mode: the consumer believes it has a guarantee that no longer
+/// holds.
 ///
-/// Con campos nombrados, un ancla que falta es un `Option` que hay que manejar y una que sobra
-/// no tiene dónde ir: el desacuerdo entre lo medido y lo asumido pasa a ser un error de
-/// compilación.
+/// With named fields, a missing anchor is an `Option` that must be handled and an extra one has
+/// nowhere to go: the mismatch between what was measured and what is assumed becomes a compile
+/// error.
 pub struct SectionAnchors {
-    /// Dónde empieza el bloque de veredicto. Sin esto no hay nivel `Structural`.
+    /// Where the verdict block starts. Without this there is no `Structural` level.
     ///
-    /// Es el texto interior de la caja ASCII y no la línea de `+===+`, que se repite cuatro
-    /// veces y no distingue el principio del final.
+    /// It is the inner text of the ASCII box and not the `+===+` line, which repeats four times
+    /// and does not distinguish beginning from end.
     pub verdict_start: &'static str,
-    /// Dónde empieza la sección de hallazgos — el corte NO va acá, va después.
+    /// Where the findings section starts — the cut does NOT go here, it goes after.
     ///
-    /// **Puede faltar**: magi-core omite la sección entera cuando no hay hallazgos. Un
-    /// consumidor que asuma su presencia trata «no hubo hallazgos» como «no pude localizar»,
-    /// que son dos cosas distintas y solo una es una degradación.
+    /// **May be missing**: magi-core omits the entire section when there are no findings. A
+    /// consumer that assumes its presence treats "no findings" as "could not locate", which are
+    /// two different things and only one is a degradation.
     pub findings_start: &'static str,
-    /// Dónde termina la región que se conserva.
+    /// Where the region that is preserved ends.
     ///
-    /// `## Recommended Actions` y no `## Conditions for Approval`: aquella es incondicional y
-    /// va última, así que todo lo conservable —veredicto, hallazgos, disenso, condiciones—
-    /// queda de este lado. Anclar en una sección opcional dejaría el fin sin definir
-    /// exactamente en los reportes que no la traen.
+    /// `## Recommended Actions` and not `## Conditions for Approval`: the former is
+    /// unconditional and goes last, so everything preservable —verdict, findings, dissent,
+    /// conditions— stays on this side. Anchoring to an optional section would leave the end
+    /// undefined precisely in reports that do not include it.
     pub findings_end: &'static str,
 }
 
-/// Lo que midió el spike de Task 0.6. `None` ⇒ `Structural` no es alcanzable.
+/// What the Task 0.6 spike measured. `None` ⇒ `Structural` is not reachable.
 ///
-/// Es `Some`: el reporte expone encabezados markdown estables, así que los tres niveles de
-/// recorte de REQ-A11b son implementables.
+/// It is `Some`: the report exposes stable markdown headings, so the three truncation levels of
+/// REQ-A11b are implementable.
 pub const SECTION_ANCHORS: Option<SectionAnchors> = Some(SectionAnchors {
     verdict_start: "MAGI SYSTEM -- VERDICT",
     findings_start: "## Key Findings",
     findings_end: "## Recommended Actions",
 });
 
-/// Anclas CONTRACTUALES: el subconjunto que magi-core emite **siempre**.
+/// CONTRACTUAL anchors: the subset that magi-core **always** emits.
 ///
-/// No-vacío ⇒ al menos el nivel `Anchored` es alcanzable, y ese es su papel: son el fallback
-/// para un reporte donde `findings_start` no existe porque no hubo hallazgos. Con estas dos
-/// se puede seguir delimitando el veredicto sin caer al conteo de bytes.
+/// Non-empty ⇒ at least the `Anchored` level is reachable, and that is its role: they are the
+/// fallback for a report where `findings_start` does not exist because there were no findings.
+/// With these two the verdict can still be delimited without falling back to byte counting.
 pub const CONTRACTUAL_ANCHORS: &[&str] = &["MAGI SYSTEM -- VERDICT", "## Recommended Actions"];

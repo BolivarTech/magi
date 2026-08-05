@@ -1,27 +1,22 @@
-// Author: Julian Bolivar
-// Version: 1.0.0
-// Date: 2026-07-18
+// Author: Julian Bolivar Version: 1.0.0 Date: 2026-07-18
 
-//! Logs de corrida en JSONL (`./.magi/logs/run-<ts>-<pid>-<rand>.jsonl`,
-//! REQ-H24/H34): retención por conteo **y** tamaño ordenada por timestamp de
-//! nombre de archivo (nunca por `mtime`), y redacción del `input` crudo de un
-//! tool-call según la verbosidad configurada (REQ-H24 — el cap de tamaño y la
-//! redacción son controles **distintos**, ninguno sustituye al otro).
+//! Run logs in JSONL (`./.magi/logs/run-<ts>-<pid>-<rand>.jsonl`, REQ-H24/H34): retention by
+//! count **and** size ordered by file-name timestamp (never by `mtime`), and redaction of a
+//! tool-call's raw `input` according to configured verbosity (REQ-H24 — the size cap and
+//! redaction are **distinct** controls, neither replaces the other).
 //!
-//! - [`RunLog::start`] descubre/crea el directorio de logs, poda los runs
-//!   viejos (best-effort, tolerante a carreras de `unlink`) y toca el archivo
-//!   de esta corrida.
-//! - [`RunLog::event`] filtra por [`LogLevel`] y escribe una línea JSON por
-//!   [`LogEvent`]: a nivel `info` (o menos verboso) un `ToolCall` solo lleva
-//!   `name`/`ok`/`ms`/`input_len`; a nivel `debug` el `input` se **redacta primero**
-//!   ([`redact_secret_patterns`], reusado de `output.rs`) y **luego** se **capa**
-//!   ([`truncate_result`], reusado de `output.rs`) — este orden evita que un secreto
-//!   partido por el límite de truncado filtre un prefijo parcial; nunca se
-//!   re-implementan los matchers. El `prompt`/envelope crudo **nunca** se
-//!   loguea, a ningún nivel ni en ningún campo.
+//! - [`RunLog::start`] discovers/creates the logs directory, prunes old runs
+//! old (best-effort, tolerant of `unlink` races) and touches this run's file.
+//! - [`RunLog::event`] filters by [`LogLevel`] and writes one JSON line per
+//! [`LogEvent`]: at `info` level (or less verbose) a `ToolCall` only carries
+//! `name`/`ok`/`ms`/`input_len`; at `debug` level the `input` is **redacted first**
+//! ([`redact_secret_patterns`], reused from `output.rs`) and **then** **capped**
+//! ([`truncate_result`], reused from `output.rs`) — this order prevents a secret split by the
+//! truncation limit from leaking a partial prefix; matchers are never re-implemented. The raw
+//! `prompt`/envelope is **never** logged, at any level or in any field.
 //!
-//! `RunLog`/`LogLevel`/`LogEvent` son `pub`: el runner de MS2 vive en el
-//! crate del binario y solo puede alcanzar API `pub` de la lib.
+//! `RunLog`/`LogLevel`/`LogEvent` are `pub`: the MS2 runner lives in the binary crate and can
+//! only reach `pub` APIs of the lib.
 
 use std::fs::{self, OpenOptions};
 use std::io::Write as _;
@@ -35,67 +30,64 @@ use serde::Serialize;
 use super::output::{redact_secret_patterns, truncate_result};
 use super::HeadlessError;
 
-/// Prefijo literal de todo nombre de archivo de log de corrida.
+/// Literal prefix of every run-log file name.
 const LOG_FILENAME_PREFIX: &str = "run-";
 
-/// Sufijo literal de todo nombre de archivo de log de corrida.
+/// Literal suffix of every run-log file name.
 const LOG_FILENAME_SUFFIX: &str = ".jsonl";
 
-/// Separador entre los tres segmentos (`<ts>-<pid>-<rand>`) del nombre.
+/// Separator between the three name segments (`<ts>-<pid>-<rand>`).
 const LOG_FILENAME_SEPARATOR: char = '-';
 
-/// Ancho, en dígitos decimales, del `<ts>` (epoch-millis) embebido en el
-/// nombre del archivo. `u64::MAX` tiene 20 dígitos decimales, así que este
-/// ancho garantiza que el orden lexicográfico del nombre coincida con el
-/// orden cronológico indefinidamente (REQ-H24).
+/// Width, in decimal digits, of the `<ts>` (epoch-millis) embedded in the file name. `u64::MAX`
+/// has 20 decimal digits, so this width ensures the lexicographic order of the name matches
+/// chronological order indefinitely (REQ-H24).
 const TIMESTAMP_WIDTH: usize = 20;
 
-/// Ancho, en dígitos hexadecimales, del sufijo aleatorio del nombre (`u32` =
-/// 4 bytes = 8 dígitos hex) — evita colisiones entre corridas iniciadas
-/// dentro del mismo milisegundo, incluso con el mismo PID (REQ-H24).
+/// Width, in hexadecimal digits, of the name's random suffix (`u32` = 4 bytes = 8 hex digits) —
+/// avoids collisions between runs started within the same millisecond, even with the same PID
+/// (REQ-H24).
 const RAND_SUFFIX_HEX_WIDTH: usize = 8;
 
-/// Valor del campo `"kind"` para una línea [`LogEvent::Message`].
+/// Value of the `"kind"` field for a [`LogEvent::Message`] line.
 const EVENT_KIND_MESSAGE: &str = "message";
 
-/// Valor del campo `"kind"` para una línea [`LogEvent::ToolCall`].
+/// Value of the `"kind"` field for a [`LogEvent::ToolCall`] line.
 const EVENT_KIND_TOOL_CALL: &str = "tool_call";
 
-/// Verbosidad configurada de un [`RunLog`], ordenada de menos a más
-/// detallada (`Error < Warn < Info < Debug`, REQ-H24 `--log-level`).
+/// Configured verbosity of a [`RunLog`], ordered from least to most detailed (`Error < Warn <
+/// Info < Debug`, REQ-H24 `--log-level`).
 ///
-/// Un [`LogEvent`] cuya propia severidad es **más verbosa** que la
-/// verbosidad configurada del [`RunLog`] se filtra y nunca se escribe
-/// (pasa el filtro sii `evento.level() <= configurado`).
+/// A [`LogEvent`] whose own severity is **more verbose** than the configured verbosity of the
+/// [`RunLog`] is filtered and never written (passes the filter iff `event.level() <=
+/// configured`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LogLevel {
-    /// Solo fallos irrecuperables.
+    /// Only irrecoverable failures.
     Error,
-    /// Condiciones recuperables pero dignas de aviso (p. ej. un clamp, una
-    /// denegación por tier).
+    /// Recoverable but noteworthy conditions (e.g. a clamp, a tier denial).
     Warn,
-    /// Avisos operacionales normales (default, REQ-H24) — incluye metadata
-    /// de tool-call pero **nunca** el `input` crudo (redacción REQ-H24).
+    /// Normal operational notices (default, REQ-H24) — includes tool-call metadata but
+    /// **never** the raw `input` (redaction REQ-H24).
     Info,
-    /// Máxima verbosidad — incluye el `input` crudo de un tool-call, capado
-    /// y redactado (nunca sin pasar por el redactor).
+    /// Maximum verbosity — includes a tool-call's raw `input`, capped and redacted (never
+    /// without going through the redactor).
     Debug,
 }
 
 impl std::str::FromStr for LogLevel {
     type Err = HeadlessError;
 
-    /// Parsea el valor de `[headless] log_level` (spec §11): exactamente
-    /// `"error"`, `"warn"`, `"info"` o `"debug"` — los mismos cuatro literales
-    /// que acepta `--log-level` (case-sensitive, sin normalización, para que
-    /// un typo en `magi.toml` sea un error claro en vez de una coincidencia
-    /// accidental).
+    /// Parses the value of `[headless] log_level` (spec §11): exactly `"error"`, `"warn"`,
+    /// `"info"` or `"debug"` — the same four literals accepted by `--log-level` (case-
+    /// sensitive, no normalization, so that a typo in `magi.toml` is a clear error instead of
+    /// an accidental match).
     ///
     /// # Errors
     ///
-    /// Devuelve [`HeadlessError::InputInvalid`] con el valor recibido si `s`
-    /// no es uno de los cuatro literales reconocidos.
+    /// Returns [`HeadlessError::InputInvalid`] with the received value if `s` is not one of the
+    /// four recognized literals.
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "error" => Ok(LogLevel::Error),
@@ -110,72 +102,69 @@ impl std::str::FromStr for LogLevel {
     }
 }
 
-/// Un registro de un archivo `run-*.jsonl` descubierto durante un escaneo de
-/// retención (REQ-H24/H34).
+/// A record of a `run-*.jsonl` file discovered during a retention scan (REQ-H24/H34).
 struct LogFileEntry {
-    /// Ruta completa del archivo.
+    /// Full path of the file.
     path: PathBuf,
-    /// Timestamp epoch-millis parseado del nombre; `None` si el nombre no
-    /// matchea el patrón esperado — se trata como el **más viejo** posible
-    /// (máxima prioridad de poda, ver [`prune_retention`]).
+    /// Epoch-millis timestamp parsed from the name; `None` if the name does not match the
+    /// expected pattern — treated as the **oldest** possible (highest prune priority, see
+    /// [`prune_retention`]).
     ts: Option<u64>,
-    /// Tamaño en bytes del archivo (o `0` si no se pudo leer su metadata).
+    /// Size in bytes of the file (or `0` if its metadata could not be read).
     size_bytes: u64,
 }
 
-/// Una ocurrencia a registrar como una línea JSON en el log de la corrida.
+/// An occurrence to log as one JSON line in the run log.
 ///
-/// Cada variante lleva su propia severidad ([`LogLevel`]) para el filtro de
-/// verbosidad; es independiente de la verbosidad **configurada** del
-/// [`RunLog`], que en cambio gobierna la redacción del `input` de un
-/// `ToolCall` (REQ-H24).
+/// Each variant carries its own severity ([`LogLevel`]) for the verbosity filter; it is
+/// independent of the **configured** verbosity of the [`RunLog`], which instead governs the
+/// redaction of a `ToolCall`'s `input` (REQ-H24).
 #[derive(Debug, Clone)]
 pub enum LogEvent<'a> {
-    /// Un diagnóstico de texto libre (avisos de arranque, clamps, notices).
-    /// **Nunca** debe ser el `prompt`/envelope crudo del caller (REQ-H11/H24).
+    /// A free-text diagnostic (startup notices, clamps, notices).
+    /// **Never** must it be the caller's raw `prompt`/envelope (REQ-H11/H24).
     Message {
-        /// Severidad de esta ocurrencia.
+        /// Severity of this occurrence.
         level: LogLevel,
-        /// Texto legible del mensaje.
+        /// Human-readable message text.
         text: &'a str,
     },
-    /// El registro de una única invocación de tool.
+    /// The record of a single tool invocation.
     ToolCall {
-        /// Severidad de esta ocurrencia.
+        /// Severity of this occurrence.
         level: LogLevel,
-        /// Nombre del tool invocado.
+        /// Name of the invoked tool.
         name: &'a str,
-        /// `true` si la invocación tuvo éxito.
+        /// `true` if the invocation succeeded.
         ok: bool,
-        /// Duración de la invocación en milisegundos.
+        /// Duration of the invocation in milliseconds.
         ms: u64,
-        /// Input crudo del tool (JSON serializado u otro texto); solo se
-        /// incluye en claro (capado + redactado) si la verbosidad
-        /// **configurada** del `RunLog` es [`LogLevel::Debug`] — en caso
-        /// contrario solo se registra su longitud en bytes (REQ-H24).
+        /// Raw tool input (serialized JSON or other text); only included in plaintext (capped +
+        /// redacted) if the verbosity
+        /// **configured** of the `RunLog` is [`LogLevel::Debug`] — otherwise
+        /// only its byte length is logged (REQ-H24).
         input: &'a str,
     },
 }
 
 impl LogEvent<'_> {
-    /// Severidad de esta ocurrencia, usada para filtrar contra la
-    /// verbosidad configurada de un [`RunLog`].
+    /// Severity of this occurrence, used to filter against the configured verbosity of a
+    /// [`RunLog`].
     fn level(&self) -> LogLevel {
         match self {
             LogEvent::Message { level, .. } | LogEvent::ToolCall { level, .. } => *level,
         }
     }
 
-    /// Renderiza esta ocurrencia como una línea JSON, dada la verbosidad
-    /// **configurada** de un [`RunLog`] (gobierna si el `input` de un
-    /// `ToolCall` va crudo-capado-y-redactado o solo como su longitud) y el
-    /// cap EFECTIVO `tool_result_cap` (spec §11) aplicado al `input` redactado.
+    /// Renders this occurrence as one JSON line, given the verbosity
+    /// **configured** of a [`RunLog`] (governs whether a `ToolCall`'s `input` goes
+    /// raw-capped-and-redacted or only as its length) and the EFFECTIVE cap `tool_result_cap`
+    /// (spec §11) applied to the redacted `input`.
     ///
     /// # Errors
     ///
-    /// Devuelve [`HeadlessError::Io`] si la serialización a JSON falla (en la
-    /// práctica, nunca para estas estructuras — no llevan claves de mapa
-    /// no-string ni floats no-finitos).
+    /// Returns [`HeadlessError::Io`] if JSON serialization fails (in practice, never for these
+    /// structures — they carry no non-string map keys nor non-finite floats).
     fn render(
         &self,
         configured_level: LogLevel,
@@ -197,9 +186,9 @@ impl LogEvent<'_> {
                 input,
             } => {
                 let (input_field, input_len_field) = if configured_level == LogLevel::Debug {
-                    // Redact BEFORE truncating: redacting the full input first means a
-                    // secret straddling the truncation boundary cannot be split into an
-                    // un-matchable partial that leaks; then truncate the secret-free result.
+                    // Redact BEFORE truncating: redacting the full input first means a secret
+                    // straddling the truncation boundary cannot be split into an un-matchable
+                    // partial that leaks; then truncate the secret-free result.
                     (
                         Some(truncate_result(
                             &redact_secret_patterns(input),
@@ -226,71 +215,69 @@ impl LogEvent<'_> {
     }
 }
 
-/// Shape JSON de una línea [`LogEvent::Message`].
+/// JSON shape of a [`LogEvent::Message`] line.
 #[derive(Debug, Serialize)]
 struct MessageLine<'a> {
-    /// Epoch-millis de la escritura de esta línea.
+    /// Epoch-millis of this line's writing.
     ts: u64,
-    /// Severidad de la ocurrencia.
+    /// Severity of the occurrence.
     level: LogLevel,
-    /// Discriminador de tipo de línea (`"message"`).
+    /// Line-type discriminator (`"message"`).
     kind: &'static str,
-    /// Texto del mensaje.
+    /// Message text.
     message: &'a str,
 }
 
-/// Shape JSON de una línea [`LogEvent::ToolCall`].
+/// JSON shape of a [`LogEvent::ToolCall`] line.
 #[derive(Debug, Serialize)]
 struct ToolCallLine<'a> {
-    /// Epoch-millis de la escritura de esta línea.
+    /// Epoch-millis of this line's writing.
     ts: u64,
-    /// Severidad de la ocurrencia.
+    /// Severity of the occurrence.
     level: LogLevel,
-    /// Discriminador de tipo de línea (`"tool_call"`).
+    /// Line-type discriminator (`"tool_call"`).
     kind: &'static str,
-    /// Nombre del tool invocado.
+    /// Name of the invoked tool.
     name: &'a str,
-    /// `true` si la invocación tuvo éxito.
+    /// `true` if the invocation succeeded.
     ok: bool,
-    /// Duración de la invocación en milisegundos.
+    /// Duration of the invocation in milliseconds.
     ms: u64,
-    /// `input` crudo (capado + redactado), presente **solo** a nivel debug.
+    /// Raw `input` (capped + redacted), present **only** at debug level.
     #[serde(skip_serializing_if = "Option::is_none")]
     input: Option<String>,
-    /// Longitud en bytes del `input`, presente cuando `input` está ausente
-    /// (niveles distintos de debug) — REQ-H24: el cap no sustituye la
-    /// redacción, así que a niveles no-debug directamente no se emite nada
-    /// del contenido, solo su tamaño.
+    /// Byte length of the `input`, present when `input` is absent (levels other than debug) —
+    /// REQ-H24: the cap does not replace redaction, so at non-debug levels nothing of the
+    /// content is emitted directly, only its size.
     #[serde(skip_serializing_if = "Option::is_none")]
     input_len: Option<usize>,
 }
 
-/// Log de una corrida headless, en JSONL (REQ-H24/H34).
+/// Log of a headless run, in JSONL (REQ-H24/H34).
 #[derive(Debug)]
 pub struct RunLog {
-    /// Ruta del archivo JSONL de esta corrida.
+    /// Path of this run's JSONL file.
     path: PathBuf,
-    /// Verbosidad configurada: eventos más verbosos que este nivel se filtran.
+    /// Configured verbosity: events more verbose than this level are filtered.
     level: LogLevel,
-    /// Cap EFECTIVO (spec §11) aplicado al `input` redactado de un
-    /// `ToolCall` a nivel debug (`[headless] tool_result_cap_bytes`).
+    /// EFFECTIVE cap (spec §11) applied to the redacted `input` of a `ToolCall` at debug level
+    /// (`[headless] tool_result_cap_bytes`).
     tool_result_cap: usize,
 }
 
 impl RunLog {
-    /// Arranca el log de una corrida nueva bajo `logs_dir`: crea el
-    /// directorio si falta, poda los runs viejos (best-effort, REQ-H34) hasta
-    /// los caps EFECTIVOS `retention_runs`/`max_log_bytes` (spec §11, un
-    /// operador puede bajarlos vía `[headless] log_retention`/`log_max_bytes`),
-    /// y toca el archivo `run-<ts>-<pid>-<rand>.jsonl` de esta corrida.
-    /// `tool_result_cap` es el cap EFECTIVO aplicado al `input` redactado de
-    /// un `ToolCall` logueado a nivel debug (`[headless] tool_result_cap_bytes`).
+    /// Starts the log for a new run under `logs_dir`: creates the directory if missing, prunes
+    /// old runs (best-effort, REQ-H34) down to the EFFECTIVE caps
+    /// `retention_runs`/`max_log_bytes` (spec §11, an operator may lower them via `[headless]
+    /// log_retention`/`log_max_bytes`), and touches this run's `run-<ts>-<pid>-<rand>.jsonl`
+    /// file. `tool_result_cap` is the EFFECTIVE cap applied to the redacted `input` of a
+    /// `ToolCall` logged at debug level (`[headless] tool_result_cap_bytes`).
     ///
     /// # Errors
     ///
-    /// Devuelve [`HeadlessError::Io`] si no se puede crear `logs_dir` o abrir
-    /// el archivo de esta corrida. La poda de retención en sí **nunca**
-    /// produce un error propagado — es best-effort (REQ-H34).
+    /// Returns [`HeadlessError::Io`] if `logs_dir` cannot be created or this run's file cannot
+    /// be opened. Retention pruning itself **never** produces a propagated error — it is best-
+    /// effort (REQ-H34).
     pub fn start(
         logs_dir: &Path,
         level: LogLevel,
@@ -315,19 +302,17 @@ impl RunLog {
         })
     }
 
-    /// Registra `ev` como una línea JSON si pasa el filtro de verbosidad
-    /// (`ev.level() <= self.level`); un evento filtrado es un no-op exitoso.
+    /// Logs `ev` as one JSON line if it passes the verbosity filter (`ev.level() <=
+    /// self.level`); a filtered event is a successful no-op.
     ///
-    /// `&mut self`: la firma sigue la interfaz fijada en el plan; hoy ningún
-    /// campo muta (cada llamada abre el archivo en modo append y lo cierra),
-    /// lo que mantiene la implementación simple para un proceso de una sola
-    /// corrida y deja lugar para un writer bufferizado más adelante sin
-    /// romper la firma pública.
+    /// `&mut self`: the signature follows the interface fixed in the plan; today no field
+    /// mutates (each call opens the file in append mode and closes it), which keeps the
+    /// implementation simple for a single-run process and leaves room for a buffered writer
+    /// later without breaking the public signature.
     ///
     /// # Errors
     ///
-    /// Devuelve [`HeadlessError::Io`] si serializar el evento o escribir al
-    /// archivo del log falla.
+    /// Returns [`HeadlessError::Io`] if serializing the event or writing to the log file fails.
     pub fn event(&mut self, ev: &LogEvent<'_>) -> Result<(), HeadlessError> {
         if ev.level() > self.level {
             return Ok(());
@@ -336,8 +321,8 @@ impl RunLog {
         self.append_line(&line)
     }
 
-    /// Anexa `line` (sin salto de línea) más un `\n` al archivo de esta
-    /// corrida, abriéndolo en modo append.
+    /// Appends `line` (without newline) plus a `\n` to this run's file, opening it in append
+    /// mode.
     fn append_line(&self, line: &str) -> Result<(), HeadlessError> {
         let mut file = OpenOptions::new()
             .create(true)
@@ -348,9 +333,9 @@ impl RunLog {
     }
 }
 
-/// Epoch-millis actual, robusto ante un reloj de sistema anterior a la época
-/// Unix (degrada a `0` en vez de entrar en pánico — caso extremo que no
-/// debería ocurrir en la práctica, pero nunca debe abortar la corrida).
+/// Current epoch-millis, robust against a system clock earlier than the Unix epoch (degrades to
+/// `0` instead of panicking — an extreme case that should not happen in practice, but must
+/// never abort the run).
 fn current_epoch_millis() -> u64 {
     let millis = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -359,11 +344,10 @@ fn current_epoch_millis() -> u64 {
     u64::try_from(millis).unwrap_or(u64::MAX)
 }
 
-/// Genera el nombre `run-<ts>-<pid>-<rand>.jsonl` de esta corrida (REQ-H24):
-/// `<ts>` epoch-millis con ancho fijo [`TIMESTAMP_WIDTH`] (orden lexicográfico
-/// == orden cronológico), `<pid>` del proceso actual, `<rand>` hex de
-/// [`RAND_SUFFIX_HEX_WIDTH`] dígitos (evita colisiones bajo paralelismo de CI
-/// con corridas sub-segundo, incluso con reuse de PID).
+/// Generates this run's `run-<ts>-<pid>-<rand>.jsonl` name (REQ-H24): `<ts>` epoch-millis with
+/// fixed width [`TIMESTAMP_WIDTH`] (lexicographic order == chronological order), current
+/// process `<pid>`, [`RAND_SUFFIX_HEX_WIDTH`]-digit hex `<rand>` (avoids collisions under CI
+/// parallelism with sub-second runs, even with PID reuse).
 fn generate_log_file_name() -> String {
     let ts_ms = current_epoch_millis();
     let pid = process::id();
@@ -375,11 +359,10 @@ fn generate_log_file_name() -> String {
     )
 }
 
-/// Parsea el `<ts>` epoch-millis embebido en un nombre
-/// `run-<ts>-<pid>-<rand>.jsonl`. Devuelve `None` si el nombre no matchea el
-/// prefijo/sufijo esperado o si el primer segmento no es un `u64` válido —
-/// los llamadores tratan `None` como el candidato **más viejo** posible
-/// (ver [`prune_retention`]), nunca como un panic ni un salto silencioso.
+/// Parses the `<ts>` epoch-millis embedded in a `run-<ts>-<pid>-<rand>.jsonl` name. Returns
+/// `None` if the name does not match the expected prefix/suffix or if the first segment is not
+/// a valid `u64` — callers treat `None` as the **oldest** possible candidate (see
+/// [`prune_retention`]), never as a panic or a silent skip.
 fn parse_log_timestamp(file_name: &str) -> Option<u64> {
     let stem = file_name
         .strip_prefix(LOG_FILENAME_PREFIX)?
@@ -388,10 +371,9 @@ fn parse_log_timestamp(file_name: &str) -> Option<u64> {
     ts_part.parse::<u64>().ok()
 }
 
-/// Lista los archivos `run-*.jsonl` de `dir` con su timestamp parseado
-/// (o `None`) y tamaño. Un `dir` que no se puede listar (p. ej. no existe
-/// todavía) produce una lista vacía en lugar de propagar un error — la
-/// retención es best-effort (REQ-H34).
+/// Lists the `run-*.jsonl` files of `dir` with their parsed timestamp (or `None`) and size. A
+/// `dir` that cannot be listed (e.g. does not exist yet) yields an empty list instead of
+/// propagating an error — retention is best-effort (REQ-H34).
 fn list_run_logs(dir: &Path) -> Vec<LogFileEntry> {
     let Ok(read_dir) = fs::read_dir(dir) else {
         return Vec::new();
@@ -417,11 +399,10 @@ fn list_run_logs(dir: &Path) -> Vec<LogFileEntry> {
         .collect()
 }
 
-/// Intenta borrar `path`; una carrera donde el archivo ya no existe
-/// (`NotFound`, p. ej. otra corrida concurrente ya lo podó) cuenta como éxito
-/// — el objetivo es el estado final del directorio, no quién lo borró
-/// (REQ-H34). Cualquier otro error (permisos, etc.) se ignora también: la
-/// poda es siempre best-effort y nunca aborta la corrida.
+/// Attempts to delete `path`; a race where the file no longer exists (`NotFound`, e.g. another
+/// concurrent run already pruned it) counts as success — the goal is the final state of the
+/// directory, not who deleted it (REQ-H34). Any other error (permissions, etc.) is also
+/// ignored: pruning is always best-effort and never aborts the run.
 fn try_prune_one(path: &Path) -> bool {
     match fs::remove_file(path) {
         Ok(()) => true,
@@ -430,25 +411,22 @@ fn try_prune_one(path: &Path) -> bool {
     }
 }
 
-/// Poda los `run-*.jsonl` de `dir` hasta que queden a lo sumo
-/// `retention_runs` **y** su tamaño combinado sea a lo sumo `max_bytes`
-/// (REQ-H24/H34). Ambos son los caps EFECTIVOS de esta corrida (spec §11,
-/// `[headless] log_retention`/`log_max_bytes`) —
-/// [`LOG_RETENTION_RUNS`](super::limits::LOG_RETENTION_RUNS) y
-/// [`LOG_MAX_BYTES`](super::limits::LOG_MAX_BYTES) son solo los defaults que
-/// `HeadlessLimits::default()` usa cuando el operador no los fija.
+/// Prunes the `run-*.jsonl` files of `dir` until at most `retention_runs` remain **and** their
+/// combined size is at most `max_bytes` (REQ-H24/H34). Both are the EFFECTIVE caps of this run
+/// (spec §11, `[headless] log_retention`/`log_max_bytes`) —
+/// [`LOG_RETENTION_RUNS`](super::limits::LOG_RETENTION_RUNS) and
+/// [`LOG_MAX_BYTES`](super::limits::LOG_MAX_BYTES) are only the defaults
+/// `HeadlessLimits::default()` uses when the operator does not set them.
 ///
-/// Eviction oldest-first: un nombre cuyo timestamp no parsea ordena como el
-/// más viejo (`None < Some`, `Option::Ord`), así que un nombre ajeno/corrupto
-/// siempre es el primer candidato a poda en lugar de sobrevivir
-/// indefinidamente. Best-effort: cualquier fallo de listado o de borrado
-/// (incluida una carrera de `unlink` con otra corrida) se ignora — la poda
-/// **nunca** aborta la corrida ni contamina stdout.
+/// Eviction oldest-first: a name whose timestamp does not parse sorts as the oldest (`None <
+/// Some`, `Option::Ord`), so a foreign/corrupt name is always the first prune candidate instead
+/// of surviving indefinitely. Best-effort: any listing or deletion failure (including an
+/// `unlink` race with another run) is ignored — pruning
+/// **never** aborts the run nor contaminates stdout.
 ///
-/// **Complejidad:** `O(n log n)` por el `sort_by_key` más `O(n)` por el
-/// recorrido de poda, con `n` = cantidad de archivos `run-*.jsonl` en el
-/// directorio — en la práctica acotado por `retention_runs` más lo acumulado
-/// desde la última poda.
+/// **Complexity:** `O(n log n)` from `sort_by_key` plus `O(n)` from the
+/// prune traversal, with `n` = number of `run-*.jsonl` files in the directory — in practice
+/// bounded by `retention_runs` plus whatever accumulated since the last prune.
 fn prune_retention(dir: &Path, retention_runs: usize, max_bytes: u64) {
     let mut entries = list_run_logs(dir);
     entries.sort_by_key(|e| e.ts);
@@ -478,9 +456,8 @@ mod tests {
         LogLevel, RunLog, LOG_FILENAME_PREFIX, LOG_FILENAME_SUFFIX, TIMESTAMP_WIDTH,
     };
 
-    /// Crea un archivo `run-*.jsonl` fake con un timestamp parseable
-    /// estrictamente creciente en `i`, para ejercitar la retención sin
-    /// depender de reloj real ni de `RunLog::start`.
+    /// Creates a fake `run-*.jsonl` file with a strictly increasing parseable timestamp in `i`,
+    /// to exercise retention without depending on the real clock or `RunLog::start`.
     fn touch_log(dir: &Path, i: usize) -> PathBuf {
         let ts: u64 = 1_000_000_000_000 + i as u64;
         let name = format!(
@@ -492,8 +469,8 @@ mod tests {
         path
     }
 
-    /// REQ-H24/H34: la retención poda los más viejos hasta quedar en el tope
-    /// de conteo (+1 por el archivo de la corrida actual que crea `start`).
+    /// REQ-H24/H34: retention prunes the oldest until the count cap remains (+1 for the current
+    /// run's file created by `start`).
     #[test]
     fn test_log_retention_prunes_oldest_beyond_count_cap() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -517,10 +494,10 @@ mod tests {
         );
     }
 
-    /// REQ-H24/H34, spec §11: la retención debe respetar el cap EFECTIVO
-    /// (`[headless] log_retention`) pasado a `start`, no el
-    /// `LOG_RETENTION_RUNS` constante — un operador que baja el tope a 3 debe
-    /// ver la poda quedarse en ese número, muy por debajo del default de 50.
+    /// REQ-H24/H34, spec §11: retention must respect the EFFECTIVE cap (`[headless]
+    /// log_retention`) passed to `start`, not the `LOG_RETENTION_RUNS` constant — an operator
+    /// who lowers the cap to 3 must see pruning settle at that number, well below the default
+    /// of 50.
     #[test]
     fn test_run_log_start_respects_custom_effective_retention_count() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -545,8 +522,7 @@ mod tests {
         );
     }
 
-    /// La poda conserva los archivos más recientes (mayor `<ts>`), no un
-    /// subconjunto arbitrario.
+    /// Pruning keeps the most recent files (highest `<ts>`), not an arbitrary subset.
     #[test]
     fn test_log_retention_keeps_the_newest_entries() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -568,9 +544,9 @@ mod tests {
         assert!(!oldest.exists(), "oldest log file must be pruned first");
     }
 
-    /// Race tolerance (REQ-H34): un archivo que otra corrida ya borró antes
-    /// de que esta poda lo alcance no hace fallar `start` (simulado borrando
-    /// manualmente uno de los candidatos más viejos antes de podar).
+    /// Race tolerance (REQ-H34): a file another run already deleted before this prune reaches
+    /// it does not make `start` fail (simulated by manually deleting one of the oldest
+    /// candidates before pruning).
     #[test]
     fn test_start_succeeds_when_a_prune_candidate_already_vanished() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -594,8 +570,8 @@ mod tests {
         );
     }
 
-    /// Un nombre cuyo `<ts>` no parsea se trata como el más viejo posible:
-    /// se poda primero y nunca hace crashear la retención.
+    /// A name whose `<ts>` does not parse is treated as the oldest possible: it is pruned first
+    /// and never makes retention crash.
     #[test]
     fn test_unparseable_timestamp_filename_is_pruned_first_without_crashing() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -615,8 +591,8 @@ mod tests {
         );
     }
 
-    /// `parse_log_timestamp` es `None` para un nombre que no matchea el
-    /// patrón, y `Some` con el valor correcto para uno bien formado.
+    /// `parse_log_timestamp` is `None` for a name that does not match the pattern, and `Some`
+    /// with the correct value for a well-formed one.
     #[test]
     fn test_parse_log_timestamp_none_for_malformed_some_for_wellformed() {
         assert_eq!(parse_log_timestamp("not-even-close.txt"), None);
@@ -627,15 +603,13 @@ mod tests {
         );
     }
 
-    /// Un evento a nivel `debug` con un secreto tipo `sk-ant-...` en el
-    /// `input` NO aparece en claro en la línea escrita — se reusa el
-    /// redactor de `output.rs` (REQ-H24, T7).
+    /// A `debug`-level event with a secret like `sk-ant-...` in the `input` does NOT appear in
+    /// plaintext in the written line — the redactor from `output.rs` is reused (REQ-H24, T7).
     #[test]
     fn test_debug_tool_call_redacts_secret_in_written_log_line() {
         let dir = tempfile::tempdir().expect("tempdir");
-        // Construido con `format!` para no disparar el escáner de secretos
-        // hardcodeados del repo (`tests/no_hardcoded_secrets.rs`); es un
-        // fixture sintético, no una key real.
+        // Built with `format!` so as not to trigger the repo's hardcoded-secret scanner
+        // (`tests/no_hardcoded_secrets.rs`); it is a synthetic fixture, not a real key.
         let secret = format!("sk-ant-{}", "SECRET".repeat(3));
         let input = format!("{{\"token\":\"{secret}\"}}");
 
@@ -667,9 +641,9 @@ mod tests {
         );
     }
 
-    /// A nivel `info` (no-debug), un `ToolCall` registra `name`/`ok`/`ms` y
-    /// la longitud del `input`, pero **nunca** el `input` crudo — ni siquiera
-    /// uno sin secretos (REQ-H24: cap ≠ redacción, la ausencia es la regla).
+    /// At `info` level (non-debug), a `ToolCall` logs `name`/`ok`/`ms` and the `input` length,
+    /// but **never** the raw `input` — not even one without secrets (REQ-H24: cap ≠ redaction,
+    /// absence is the rule).
     #[test]
     fn test_info_level_tool_call_omits_raw_input_and_logs_length_only() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -701,29 +675,26 @@ mod tests {
         assert!(contents.contains("\"name\":\"ls\""));
     }
 
-    /// Un secreto `sk-…` posicionado para que el límite de truncado
-    /// (`TOOL_RESULT_CAP`) caiga a mitad de su cuerpo NO deja un prefijo
-    /// parcial en claro: con el orden redact-then-truncate el secreto
-    /// COMPLETO se redacta sobre el input sin truncar, así que ni el secreto
-    /// completo ni un prefijo partido sobreviven en la línea escrita. (Bajo
-    /// el orden viejo truncate-then-redact, el corte partiría el cuerpo del
-    /// secreto en un remanente de 12 caracteres — por debajo del mínimo de 16
-    /// que exige el patrón `sk-` — dejando ese prefijo sin matchear y filtrado
-    /// en claro; este test falla si esa regresión reaparece.)
+    /// A `sk-…` secret positioned so the truncation limit (`TOOL_RESULT_CAP`) falls in the
+    /// middle of its body does NOT leave a partial plaintext prefix: with the redact-then-
+    /// truncate order the COMPLETE secret is redacted over the untruncated input, so neither
+    /// the complete secret nor a split prefix survives in the written line. (Under the old
+    /// truncate-then-redact order, the cut would split the secret body into a 12-character
+    /// remainder — below the 16-character minimum required by the `sk-` pattern — leaving that
+    /// prefix un-matched and leaked in plaintext; this test fails if that regression
+    /// reappears.)
     #[test]
     fn test_debug_input_redacts_secret_straddling_truncation_boundary() {
         use crate::headless::limits::TOOL_RESULT_CAP;
 
-        // Fixture construido con `format!` (no un literal) para no disparar
-        // el escáner de secretos hardcodeados del repo
-        // (`tests/no_hardcoded_secrets.rs`).
+        // Fixture built with `format!` (not a literal) so as not to trigger the repo's
+        // hardcoded-secret scanner (`tests/no_hardcoded_secrets.rs`).
         let body = "SECRET".repeat(4); // 24 caracteres alnum — cuerpo válido del patrón `sk-`.
         let key = format!("sk-{body}");
 
-        // Cuántos caracteres del CUERPO de la key quedan retenidos del lado
-        // "kept" del corte de truncado: por debajo de `SK_KEY_MIN_SUFFIX_LEN`
-        // (16), así que si el input llegara sin redactar hasta el truncado,
-        // el remanente quedaría sin matchear por el patrón `sk-`.
+        // How many characters of the key BODY remain retained on the "kept" side of the
+        // truncation cut: below `SK_KEY_MIN_SUFFIX_LEN` (16), so if the input reached
+        // truncation un-redacted, the remainder would fail to match the `sk-` pattern.
         const KEPT_BODY_LEN: usize = 12;
         let prefix_len = TOOL_RESULT_CAP - "sk-".len() - KEPT_BODY_LEN;
         let input = format!("{}{key}", "x".repeat(prefix_len));
@@ -756,8 +727,8 @@ mod tests {
             "full secret leaked in clear: {contents}"
         );
 
-        // El prefijo que el orden viejo (truncate-then-redact) habría dejado
-        // sin matchear tampoco debe sobrevivir en claro.
+        // The prefix that the old order (truncate-then-redact) would have left un-matched must
+        // also not survive in plaintext.
         let partial_prefix = key
             .get(.."sk-".len() + KEPT_BODY_LEN)
             .expect("prefix within key bounds");
@@ -767,9 +738,9 @@ mod tests {
         );
     }
 
-    /// El `prompt`/envelope crudo nunca se loguea: un `Message` a nivel debug
-    /// solo lleva el texto explícito que el llamador pasó (no hay una vía
-    /// para que el prompt entre por otro campo).
+    /// The raw `prompt`/envelope is never logged: a `Message` at debug level only carries the
+    /// explicit text the caller passed (there is no path for the prompt to enter through
+    /// another field).
     #[test]
     fn test_message_event_never_carries_a_raw_prompt_field() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -792,8 +763,8 @@ mod tests {
         assert!(!contents.contains("\"prompt\""));
     }
 
-    /// Un evento más verboso que la verbosidad configurada se filtra: no se
-    /// escribe ninguna línea (el archivo, tocado por `start`, queda vacío).
+    /// An event more verbose than the configured verbosity is filtered: no line is written (the
+    /// file, touched by `start`, remains empty).
     #[test]
     fn test_event_more_verbose_than_configured_level_is_filtered_out() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -818,8 +789,8 @@ mod tests {
         );
     }
 
-    /// Un evento a la misma verbosidad configurada (o menos verboso) pasa el
-    /// filtro y se escribe.
+    /// An event at the same configured verbosity (or less verbose) passes the filter and is
+    /// written.
     #[test]
     fn test_event_at_or_below_configured_level_is_written() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -841,8 +812,7 @@ mod tests {
         assert!(contents.contains("a warning"));
     }
 
-    /// El orden de severidad es `Error < Warn < Info < Debug` (usado por el
-    /// filtro de verbosidad).
+    /// The severity order is `Error < Warn < Info < Debug` (used by the verbosity filter).
     #[test]
     fn test_log_level_ordering_from_least_to_most_verbose() {
         assert!(LogLevel::Error < LogLevel::Warn);
@@ -850,8 +820,8 @@ mod tests {
         assert!(LogLevel::Info < LogLevel::Debug);
     }
 
-    /// REQ-H24, spec §11: `[headless] log_level` parses exactly the four
-    /// documented literals to their `LogLevel` variant.
+    /// REQ-H24, spec §11: `[headless] log_level` parses exactly the four documented literals to
+    /// their `LogLevel` variant.
     #[test]
     fn test_log_level_from_str_parses_all_four_literals() {
         assert_eq!("error".parse::<LogLevel>().unwrap(), LogLevel::Error);
@@ -860,8 +830,8 @@ mod tests {
         assert_eq!("debug".parse::<LogLevel>().unwrap(), LogLevel::Debug);
     }
 
-    /// An unrecognized `[headless] log_level` string is a clear typed error,
-    /// never a silent fallback to a default.
+    /// An unrecognized `[headless] log_level` string is a clear typed error, never a silent
+    /// fallback to a default.
     #[test]
     fn test_log_level_from_str_rejects_unknown_value() {
         assert!(matches!(
@@ -879,8 +849,8 @@ mod tests {
         ));
     }
 
-    /// `current_epoch_millis` nunca entra en pánico y devuelve un valor
-    /// mayor que cero para un reloj de sistema normal.
+    /// `current_epoch_millis` never panics and returns a value greater than zero for a normal
+    /// system clock.
     #[test]
     fn test_current_epoch_millis_is_nonzero_under_a_normal_clock() {
         assert!(current_epoch_millis() > 0);

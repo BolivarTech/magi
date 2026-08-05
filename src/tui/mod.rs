@@ -2035,9 +2035,9 @@ mod tests {
         }
     }
 
-    /// A [`magi_core::provider::LlmProvider`] double never actually called in
-    /// the `handle_trio_rebuild_failure` tests below — it exists only so
-    /// `Magi::new` has something to wrap into an `Arc<Magi>` fixture.
+    /// A [`magicore::provider::LlmProvider`] double never actually called in the
+    /// `handle_trio_rebuild_failure` tests below — it exists only so `Magi::new` has something
+    /// to wrap into an `Arc<Magi>` fixture.
     struct UnusedProvider;
 
     #[async_trait::async_trait]
@@ -2906,10 +2906,9 @@ mod tests {
     // dispatch, not just its acceptance).
     // -------------------------------------------------------------------
 
-    /// Doble de [`ModeClassifier`] que PANICS si se lo invoca — la forma más fuerte
-    /// de probar "cero llamadas de clasificación": un `CountingClassifier` en 0
-    /// podría ocultar un bug donde se llama pero se descarta el resultado; este no
-    /// deja esa salida.
+    /// A [`ModeClassifier`] double that PANICS if invoked — the strongest way to test "zero
+    /// classification calls": a `CountingClassifier` at 0 could hide a bug where it is called
+    /// but the result is discarded; this one leaves no such escape.
     struct NeverClassifier;
 
     #[async_trait::async_trait]
@@ -2919,7 +2918,7 @@ mod tests {
         }
     }
 
-    /// Doble que siempre devuelve una etiqueta fija, para el camino de inferencia.
+    /// A double that always returns a fixed label, for the inference path.
     struct FixedClassifier(Mode);
 
     #[async_trait::async_trait]
@@ -2929,13 +2928,12 @@ mod tests {
         }
     }
 
-    /// SC-A07b (mitad TUI) — Fix round 1. Antes de este fix, el handler de
-    /// `UiEvent::Consult` corría `Mode::Analysis` sin condición y la entrada del
-    /// loop usaba `parse_consult_command`, que no entendía `--mode` en absoluto:
-    /// `/consult --mode design ¿esto o aquello?` dejaba el texto `--mode design`
-    /// DENTRO de la pregunta y de todos modos analizaba en `Analysis`. Este test
-    /// fija las dos mitades del arreglo: el modo resuelto es `Design`, y la query
-    /// que llegaría a `Magi::analyze` ya no contiene el flag.
+    /// SC-A07b (TUI half) — Fix round 1. Before this fix, the `UiEvent::Consult` handler ran
+    /// `Mode::Analysis` unconditionally and the loop input used `parse_consult_command`, which
+    /// did not understand `--mode` at all: `/consult --mode design this or that?` left the text
+    /// `--mode design` INSIDE the question and still analyzed in `Analysis`. This test pins the
+    /// two halves of the fix: the resolved mode is `Design`, and the query that would reach
+    /// `Magi::analyze` no longer contains the flag.
     #[tokio::test]
     async fn an_explicit_mode_reaches_analyze_as_declared_and_strips_the_flag_from_the_query() {
         let cmd = super::parse_tui_consult("/consult --mode design ¿esto o aquello?").unwrap();
@@ -2954,9 +2952,9 @@ mod tests {
         );
     }
 
-    /// SC-A07k (mitad TUI): `[magi].default_mode` le gana a la clasificación —
-    /// sin `--mode` en el comando, si el operador declaró un default, se usa ESE
-    /// y el clasificador nunca se invoca.
+    /// SC-A07k (TUI half): `[magi].default_mode` beats classification — without `--mode` in the
+    /// command, if the operator declared a default, THAT one is used and the classifier is
+    /// never invoked.
     #[tokio::test]
     async fn configured_default_mode_wins_without_classifying() {
         let cmd = super::parse_tui_consult("/consult ¿esto o aquello?").unwrap();
@@ -2968,8 +2966,8 @@ mod tests {
         assert_eq!(query, "¿esto o aquello?");
     }
 
-    /// Sin `--mode` y sin `default_mode`, el clasificador SÍ se consulta y su
-    /// respuesta se usa — el camino de inferencia sigue vivo en esta superficie.
+    /// Without `--mode` and without `default_mode`, the classifier IS consulted and its answer
+    /// is used — the inference path remains alive on this surface.
     #[tokio::test]
     async fn without_mode_or_config_the_classifier_is_consulted() {
         let cmd = super::parse_tui_consult("/consult ¿esto o aquello?").unwrap();
@@ -2980,9 +2978,9 @@ mod tests {
         assert_eq!(mode, Mode::Design);
     }
 
-    /// SC-A07r (mitad TUI): el operador declaró `untrusted_content = true` en su
-    /// `magi.toml` y ni `--mode` ni `default_mode` nombran una lente — falla
-    /// cerrado, sin clasificar.
+    /// SC-A07r (TUI half): the operator declared `untrusted_content = true` in their
+    /// `magi.toml` and neither `--mode` nor `default_mode` names a lens — fails closed, without
+    /// classifying.
     #[tokio::test]
     async fn operator_declared_untrusted_content_fails_closed_without_a_mode() {
         let cmd = super::parse_tui_consult("/consult ¿esto o aquello?").unwrap();

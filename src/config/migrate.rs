@@ -1,21 +1,19 @@
-// Author: Julian Bolivar
-// Version: 1.0.0
-// Date: 2026-08-02
+// Author: Julian Bolivar Version: 1.0.0 Date: 2026-08-02
 
-//! Pasada de validación PREVIA al parseo, para reportar todas las incompatibilidades de
-//! migración de un `magi.toml` de v0.11.0 juntas (REQ-A21b).
+//! PRE-parse validation pass, to report all migration incompatibilities of a v0.11.0
+//! `magi.toml` together (REQ-A21b).
 //!
-//! `deny_unknown_fields` **aborta en la PRIMERA clave desconocida**, así que "todas juntas"
-//! es imposible de lograr desde el error de serde. Esta pasada lee el TOML como documento
-//! genérico **antes** de deserializar, junta los patrones conocidos y emite un solo mensaje.
-//! Sin ella el usuario paga dos ciclos de editar-arrancar-fallar.
+//! `deny_unknown_fields` **aborts on the FIRST unknown key**, so "all together" is impossible
+//! to achieve from serde's error. This pass reads the TOML as a generic document **before**
+//! deserializing, collects the known patterns, and emits a single message. Without it the user
+//! pays two edit-start-fail cycles.
 //!
-//! # Deuda técnica con fecha
+//! # Dated technical debt
 //!
-//! **Se retira en v0.13.0 (MS3)**, cuando la migración deje de ser el caso común. Duplica un
-//! poco de conocimiento del schema —los patrones son sobre la forma **vieja**, que ya no está
-//! en el código— y esa duplicación se acepta a conciencia: es acotada a tres patrones y está
-//! cubierta por tests contra archivos reales de v0.11.0.
+//! **Removed in v0.13.0 (MS3)**, once migration is no longer the common case. It duplicates a
+//! little schema knowledge — the patterns are about the **old** shape, which is no longer in
+//! the code — and that duplication is accepted knowingly: it is bounded to three patterns and
+//! is covered by tests against real v0.11.0 files.
 
 #![deny(missing_docs)]
 #![deny(clippy::missing_docs_in_private_items)]
@@ -37,110 +35,118 @@
 use magi_rs::redact::redact_url;
 use toml::Value;
 
-/// Clave raíz del proveedor en `magi.toml`.
+/// Root provider key in `magi.toml`.
 const PROVIDER_KEY: &str = "provider";
 
-/// Valor de `provider` en v0.11.0 que dejó de existir en v0.12.0.
+/// Value of `provider` in v0.11.0 that ceased to exist in v0.12.0.
 ///
-/// **No se auto-migra, y es deliberado.** `"openai"` era ambiguo —podía significar un Ollama
-/// local sin credencial o un endpoint autenticado— y partir esa ambigüedad es la mitad del
-/// punto del cambio. Elegir por el usuario sería adivinar exactamente lo que D-A01 prohíbe.
+/// **Not auto-migrated, and that is deliberate.** `"openai"` was ambiguous — it could mean a
+/// local Ollama without credentials or an authenticated endpoint — and splitting that ambiguity
+/// is half the point of the change. Choosing for the user would be guessing exactly what D-A01
+/// forbids.
+/// v0.11.0 `[openai]` section; from v0.12.0 `base_url` no longer lives there.
 const PROVIDER_V0_11_0: &str = "openai";
 
-/// Sección `[openai]` de v0.11.0; desde v0.12.0 `base_url` no vive ahí.
+/// v0.11.0 `[headless]` section; from v0.12.0 `tool_result_cap_bytes` moves to root.
 const OPENAI_SECTION: &str = "openai";
 
-/// Sección `[headless]` de v0.11.0; desde v0.12.0 `tool_result_cap_bytes` sube a raíz.
+/// Key `base_url`, which in v0.11.0 lived inside `[openai]`.
 const HEADLESS_SECTION: &str = "headless";
 
-/// Clave `base_url`, que en v0.11.0 vivía dentro de `[openai]`.
+/// Key `tool_result_cap_bytes`, which in v0.11.0 lived inside `[headless]`.
 const BASE_URL_KEY: &str = "base_url";
 
-/// Clave `tool_result_cap_bytes`, que en v0.11.0 vivía dentro de `[headless]`.
+/// Label shown for `[openai].base_url`.
 const TOOL_RESULT_CAP_BYTES_KEY: &str = "tool_result_cap_bytes";
 
-/// Etiqueta mostrada para `[openai].base_url`.
+/// Label shown for `[headless].tool_result_cap_bytes`.
 const OPENAI_BASE_URL_LABEL: &str = "[openai].base_url";
 
-/// Etiqueta mostrada para `[headless].tool_result_cap_bytes`.
+/// Source version of the migration.
 const HEADLESS_CAP_LABEL: &str = "[headless].tool_result_cap_bytes";
 
-/// Versión de origen de la migración.
+/// Target version of the migration.
 const VERSION_FROM: &str = "v0.11.0";
 
-/// Versión destino de la migración.
+/// Correction for `provider = "openai"`: names both options and the criterion for choosing.
 const VERSION_TO: &str = "v0.12.0";
 
-/// Corrección para `provider = "openai"`: nombra las dos opciones y el criterio para elegir.
+/// Prefix of the `[openai].base_url` correction, before the redacted value.
 const PROVIDER_CORRECTION: &str = "provider = \"ollama\"        # if it points to a local Ollama daemon, no credential\n           provider = \"openai-compat\" # for OpenAI, Groq, OpenRouter and other authenticated endpoints";
 
-/// Prefijo de la corrección de `[openai].base_url`, antes del valor redactado.
+/// Suffix of the `[openai].base_url` correction, after the redacted value.
 const BASE_URL_CORRECTION_PREFIX: &str = "base_url = \"";
 
-/// Sufijo de la corrección de `[openai].base_url`, tras el valor redactado.
+/// States that the value is **redacted**: with embedded credentials, redaction wins over ready-
+/// to-paste (SC-A21e). A migration message that leaks a credential to the terminal, the
+/// scrollback, and CI logs is a worse problem than a line that must be completed.
 ///
-/// Dice que el valor está **redactado**: con credenciales embebidas, redactar gana sobre
-/// listo-para-pegar (SC-A21e). Un mensaje de migración que filtra una credencial al terminal,
-/// al scrollback y a los logs de CI es peor problema que una línea que hay que completar.
+/// Prefix of the `[headless].tool_result_cap_bytes` correction.
 const BASE_URL_CORRECTION_SUFFIX: &str =
     "\"   # at the root level, above every section. Value redacted: copy the real one from the old file.";
 
-/// Prefijo de la corrección de `[headless].tool_result_cap_bytes`.
+/// Suffix of the `[headless].tool_result_cap_bytes` correction.
 const CAP_CORRECTION_PREFIX: &str = "tool_result_cap_bytes = ";
 
-/// Sufijo de la corrección de `[headless].tool_result_cap_bytes`.
+/// Unconditional note about the jump from v0.10.x.
 const CAP_CORRECTION_SUFFIX: &str =
     "   # at the root level: now governs all THREE routes (TUI, magi query and headless consult).";
 
-/// Nota incondicional sobre el salto desde v0.10.x.
+/// **There is NO v0.10.x detection**: the pass only knows the v0.11.0 patterns. A v0.10.x file
+/// may additionally carry earlier incompatibilities that nobody audited, and it would receive
+/// the generic error exactly when it most needs help. Supporting two generations would double
+/// the debt for a jump the user makes in two steps.
 ///
-/// **No hay detección de v0.10.x**: la pasada solo conoce los patrones de v0.11.0. Un archivo
-/// de v0.10.x puede traer además incompatibilidades anteriores que nadie auditó, y recibiría
-/// el error genérico justo cuando más ayuda necesita. Sostener dos generaciones duplicaría la
-/// deuda por un salto que el usuario hace en dos pasos.
+/// Backup advice, in the body of the error and not only in the CHANGELOG.
+/// Whoever hits this error got here **by starting the binary**, not by reading release notes.
+/// It is the only moment when they can still make the copy — that is, before editing.
 const V0_10_X_NOTE: &str =
     "If you're coming from v0.10.x, migrate to v0.11.0 first and then to v0.12.0: this pass only knows\nthe v0.11.0 patterns.";
 
-/// Consejo de backup, en el cuerpo del error y no solo en el CHANGELOG.
+/// A minimal and valid v0.12.0 `magi.toml`, ready to paste.
 ///
-/// Quien tropieza con este error llegó **arrancando el binario**, no leyendo notas de release.
-/// Es el único momento en que todavía puede hacer la copia — o sea, antes de editar.
+/// **It goes in the body of the error and not in `docs/magi.toml.example`**: whoever installed
+/// with
 const BACKUP_ADVISORY: &str =
     "Save a copy of your magi.toml BEFORE editing it: this migration is one-way.";
 
-/// Un `magi.toml` mínimo y válido de v0.12.0, listo para pegar.
+/// `cargo install` or downloaded a release binary does NOT have the example file, and without
+/// an escape flag (REQ-A23) this message is the only defense. It is six lines.
 ///
-/// **Va en el cuerpo del error y no en `docs/magi.toml.example`**: quien instaló con
-/// `cargo install` o bajó un binario del release NO tiene el archivo de ejemplo, y sin
-/// bandera de escape (REQ-A23) este mensaje es la única defensa. Son seis líneas.
+/// A detected migration incompatibility, with its correction.
+/// The shape is the contract shared by `from_toml_str` and [`render_migration_error`].
 const MINIMAL_VALID_CONFIG: &str = "provider = \"ollama\"\nbase_url = \"http://localhost:11434/v1\"\n\n[openai]\nmodel = \"kimi-k2.6:cloud\"\n";
 
-/// Una incompatibilidad de migración detectada, con su corrección.
+/// Affected key, as it appears in the file (e.g., `"[openai].base_url"`).
 ///
-/// El shape es el contrato que comparten `from_toml_str` y [`render_migration_error`].
+/// 1-indexed line where it was found, for the message. `0` if it could not be located.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Migration {
-    /// Clave afectada, tal como aparece en el archivo (p. ej. `"[openai].base_url"`).
+    /// Correction text, already redacted if the original value carried credentials.
     pub key: &'static str,
-    /// Línea 1-indexada donde se encontró, para el mensaje. `0` si no se pudo ubicar.
+    /// Detects the three v0.11.0 migration patterns in a raw `magi.toml`.
     pub line: usize,
-    /// Texto de la corrección, ya redactado si el valor original traía credenciales.
+    /// The patterns are `provider = "openai"` at root, `[openai].base_url`, and
+    /// `[headless].tool_result_cap_bytes`.
     pub correction: String,
 }
 
-/// Detecta los tres patrones de migración de v0.11.0 en un `magi.toml` crudo.
+/// Returns empty if the document **does not parse as TOML**: without structure there is nowhere
+/// to look, and rescuing it by textual search would give advice about a shape nobody knows
+/// which one it is (SC-A21g). A syntactically broken file receives its syntax error, with line
+/// and column, not migration advice.
 ///
-/// Los patrones son `provider = "openai"` en la raíz, `[openai].base_url` y
-/// `[headless].tool_result_cap_bytes`.
+/// Reports **only what that file has wrong**: a half-migrated file receives only the missing
+/// correction (SC-A21h). Repeating one the user already applied would make them doubt whether
+/// they applied it correctly, which is the opposite mental state from what this message aims
+/// for.
 ///
-/// Devuelve vacío si el documento **no parsea como TOML**: sin estructura no hay dónde
-/// buscar, y rescatarlo por búsqueda textual daría consejos sobre una forma que nadie sabe
-/// cuál es (SC-A21g). Un archivo sintácticamente roto recibe su error de sintaxis, con línea
-/// y columna, no consejo de migración.
+/// 1-indexed line number where a `needle` key **starts**, or 0 if it does not appear.
 ///
-/// Reporta **solo lo que ese archivo tiene mal**: un archivo a medio migrar recibe únicamente
-/// la corrección que le falta (SC-A21h). Repetir una que el usuario ya aplicó lo haría dudar
-/// de si la aplicó bien, que es el estado mental opuesto al que este mensaje busca.
+/// Compares against the start of the already-trimmed line, not with `contains`: a `contains`
+/// would match a key mentioned inside a comment, and the default v0.11.0 file is full of
+/// comments that name their own keys. It is only for the message — a wrong line confuses, but
+/// does not change what was detected.
 #[must_use]
 pub fn detect_migrations(raw: &str) -> Vec<Migration> {
     let Ok(doc) = raw.parse::<Value>() else {
@@ -190,24 +196,22 @@ pub fn detect_migrations(raw: &str) -> Vec<Migration> {
     found
 }
 
-/// Número de línea 1-indexado donde **empieza** una clave `needle`, o 0 si no aparece.
+/// Renders the full migration error from the found incompatibilities.
 ///
-/// Compara contra el inicio de la línea ya recortada, no con `contains`: un `contains` haría
-/// match con la clave mencionada dentro de un comentario, y el archivo por defecto de v0.11.0
-/// está lleno de comentarios que nombran sus propias claves. Es solo para el mensaje — una
-/// línea equivocada confunde, pero no cambia qué se detectó.
+/// The message is **self-contained** and does not send the user to any file in the repo: it
+/// includes each correction, the backup advice, a minimal valid `magi.toml` to paste, and the
+/// unconditional note about v0.10.x. Whoever installed via `cargo install` or downloaded a
+/// binary **does not have** the source tree, and sending them there leaves them just as stuck
+/// as no message.
 fn line_of(raw: &str, needle: &str) -> usize {
     raw.lines()
         .position(|line| line.trim_start().starts_with(needle))
         .map_or(0, |idx| idx + 1)
 }
 
-/// Renderiza el error de migración completo a partir de las incompatibilidades halladas.
+/// Unit tests for migration detection and rendering.
 ///
-/// El mensaje es **autocontenido** y no manda al usuario a ningún archivo del repo: incluye
-/// cada corrección, el consejo de backup, un `magi.toml` mínimo válido para pegar, y la nota
-/// incondicional sobre v0.10.x. Quien instaló por `cargo install` o bajó un binario **no
-/// tiene** el árbol de fuentes, y mandarlo ahí lo deja igual de trabado que sin mensaje.
+/// SC-A21: both incompatibilities are reported together.
 #[must_use]
 pub fn render_migration_error(found: &[Migration]) -> String {
     let mut out = format!(
@@ -234,12 +238,12 @@ pub fn render_migration_error(found: &[Migration]) -> String {
     out
 }
 
-/// Tests unitarios de detección y renderizado de migraciones.
+/// SC-A21h: a half-migrated file receives ONLY what is missing.
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// SC-A21: las DOS incompatibilidades se reportan juntas.
+    /// SC-A21e: with embedded credentials, REDACTION wins over ready-to-paste.
     #[test]
     fn a_v0_11_0_config_reports_both_incompatibilities_at_once() {
         let toml = include_str!("../../tests/fixtures/v0.11.0/default.toml");
@@ -254,7 +258,7 @@ mod tests {
         );
     }
 
-    /// SC-A21h: un archivo a medio migrar recibe SOLO lo que le falta.
+    /// SC-A21g: a syntactically broken TOML does NOT receive migration advice.
     #[test]
     fn a_partially_migrated_file_reports_only_what_is_missing() {
         let toml = "provider = \"openai\"\nbase_url = \"http://x/v1\"\n[openai]\nmodel = \"m\"\n";
@@ -263,7 +267,7 @@ mod tests {
         assert_eq!(found[0].key, "provider");
     }
 
-    /// SC-A21e: con credenciales embebidas, REDACTAR gana sobre listo-para-pegar.
+    /// SC-A21f: an empty TOML parses and triggers nothing.
     #[test]
     fn embedded_credentials_are_redacted_in_the_migration_message() {
         let toml = "[openai]\nbase_url = \"https://user:s3cr3t@host/v1\"\n";
@@ -282,7 +286,7 @@ mod tests {
         );
     }
 
-    /// SC-A21g: un TOML sintácticamente roto NO recibe consejo de migración.
+    /// SC-A21i: the jump from v0.10.x is declared unsupported, in EVERY config error.
     #[test]
     fn a_syntactically_broken_toml_gets_a_syntax_error_not_migration_advice() {
         let toml = "provider = \"sin cerrar\n[magi]\n";
@@ -292,14 +296,15 @@ mod tests {
         );
     }
 
-    /// SC-A21f: un TOML vacío parsea y no dispara nada.
+    /// SC-A21d: the message is validated against the FOUR real v0.11.0 files.
     #[test]
     fn an_empty_toml_is_valid_and_triggers_no_migration() {
         assert!(detect_migrations("").is_empty());
         assert!(detect_migrations("   \n\n  ").is_empty());
     }
 
-    /// SC-A21i: el salto desde v0.10.x se declara no soportado, en TODO error de config.
+    /// A hand-written fixture tests that the message **is emitted**; only a real one tests that
+    /// it
     #[test]
     fn every_config_error_mentions_the_v0_10_x_path() {
         let rendered = render_migration_error(&detect_migrations(include_str!(
@@ -311,14 +316,16 @@ mod tests {
         );
     }
 
-    /// SC-A21d: el mensaje se valida contra los CUATRO archivos reales de v0.11.0.
+    /// **reaches**. The four were generated or derived from the published v0.11.0 binary
     ///
-    /// Un fixture escrito a mano prueba que el mensaje **se emite**; solo uno real prueba que
-    /// **alcanza**. Los cuatro fueron generados o derivados del binario publicado de v0.11.0
-    /// y verificados contra él — ver `tests/fixtures/v0.11.0/README.md`.
+    /// and verified against it — see `tests/fixtures/v0.11.0/README.md`.
+    /// The four share the same two incompatibilities because the three variants are derived
+    /// from the canonical `default.toml` without adding or removing migratable keys.
+    /// SC-A21e on the REAL file: the fixture's credential never reaches the message.
     ///
-    /// Los cuatro comparten las mismas dos incompatibilidades porque las tres variantes se
-    /// derivan del `default.toml` canónico sin agregar ni quitar claves migrables.
+    /// The test above uses an inline TOML; this one uses the committed file, which is what a
+    /// user would have. They are different on purpose: the inline pins the rule, this one pins
+    /// that the rule survives the real file.
     #[test]
     fn every_real_v0_11_0_fixture_reports_its_own_incompatibilities() {
         for (name, toml) in [
@@ -351,11 +358,12 @@ mod tests {
         }
     }
 
-    /// SC-A21e sobre el archivo REAL: la credencial del fixture nunca llega al mensaje.
+    /// SC-A21d, second half: **what the message proposes parses without error in v0.12.0**.
     ///
-    /// El test de arriba usa un TOML inline; éste usa el archivo commiteado, que es el que
-    /// un usuario tendría. Son distintos a propósito: el inline fija la regla, éste fija que
-    /// la regla sobrevive al archivo de verdad.
+    /// This is the part that makes the message useful and the part most likely to rot: the
+    /// minimal TOML is a literal, so nothing ties it to the schema except this test. If a later
+    /// task changes a key, the advice we give the stuck user stops working — and without this,
+    /// silently.
     #[test]
     fn the_real_credentials_fixture_never_leaks_its_secret() {
         let toml = include_str!("../../tests/fixtures/v0.11.0/with-credentials.toml");
@@ -370,31 +378,28 @@ mod tests {
         );
     }
 
-    /// SC-A21d, segunda mitad: **lo que el mensaje propone parsea sin error en v0.12.0**.
+    /// `line_of` returns 0 when the pattern does not appear in the text.
     ///
-    /// Es la parte que hace útil al mensaje y la que más fácil se pudre: el TOML mínimo es un
-    /// literal, así que nada lo ata al schema salvo este test. Si una tarea posterior cambia
-    /// una clave, el consejo que le damos al usuario trabado deja de funcionar — y sin esto,
-    /// en silencio.
+    /// `line_of` returns the 1-based line number.
     #[test]
     fn the_minimal_config_the_error_hands_out_actually_parses_today() {
         super::super::MagiConfig::from_toml_str(MINIMAL_VALID_CONFIG)
             .expect("el magi.toml mínimo que el error propone debe parsear en v0.12.0");
     }
 
-    /// `line_of` devuelve 0 cuando el patrón no aparece en el texto.
+    /// Detects the third pattern: `[headless].tool_result_cap_bytes`.
     #[test]
     fn line_of_returns_zero_when_needle_is_absent() {
         assert_eq!(line_of("foo\nbar\n", "baz"), 0);
     }
 
-    /// `line_of` devuelve el número de línea en base 1.
+    /// The three old patterns in a single file are all reported together.
     #[test]
     fn line_of_returns_one_indexed_line_number() {
         assert_eq!(line_of("foo\nbar\nbaz", "bar"), 2);
     }
 
-    /// Detecta el tercer patrón: `[headless].tool_result_cap_bytes`.
+    /// Detects the third pattern: `[headless].tool_result_cap_bytes`.
     #[test]
     fn headless_tool_result_cap_bytes_is_detected() {
         let toml = "[headless]\ntool_result_cap_bytes = 4096\n";
@@ -404,7 +409,7 @@ mod tests {
         assert!(found[0].correction.contains("tool_result_cap_bytes"));
     }
 
-    /// Los tres patrones viejos en un mismo archivo se reportan todos juntos.
+    /// The three old patterns in the same file are all reported together.
     #[test]
     fn all_three_patterns_together_are_reported() {
         let toml = "provider = \"openai\"\n[openai]\nbase_url = \"http://x/v1\"\n\

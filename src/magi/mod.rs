@@ -1,8 +1,6 @@
-// Author: Julian Bolivar
-// Version: 1.0.0
-// Date: 2026-08-02
+// Author: Julian Bolivar Version: 1.0.0 Date: 2026-08-02
 
-//! Subsistema MAGI de magi-rs: resolución de modo, gate de complejidad y probe.
+//! MAGI subsystem of magi-rs: mode resolution, complexity gate, and probe.
 
 #![deny(missing_docs)]
 #![deny(clippy::missing_docs_in_private_items)]
@@ -30,61 +28,62 @@ pub mod report_anchors;
 
 use std::time::Duration;
 
-/// Extremos del rango admisible del techo por mage (§4.9 de la spec).
-// `pub`, no privadas: las consume `validate_agent_timeout` desde `config.rs` (bin) y el
-// barrido de invariante desde `tests/` — dos crates distintos, así que privadas no compilan
-// en ninguno de los dos. El rango de §4.9 es contrato, no detalle interno.
+/// Bounds of the admissible per-mage ceiling range (§4.9 of the spec). `pub`, not private: they
+/// are consumed by `validate_agent_timeout` from `config.rs` (bin) and the invariant sweep from
+/// `tests/` — two distinct crates, so private ones would not compile in either. The §4.9 range
+/// is contract, not internal detail.
 pub const AGENT_TIMEOUT_MIN_SECS: u64 = 30;
-/// Ver [`AGENT_TIMEOUT_MIN_SECS`].
+/// See [`AGENT_TIMEOUT_MIN_SECS`].
 pub const AGENT_TIMEOUT_MAX_SECS: u64 = 120;
 
-/// Techo POR MAGE y POR INTENTO (REQ-A04, verificado contra `orchestrator.rs`).
+/// Ceiling PER MAGE and PER ATTEMPT (REQ-A04, verified against `orchestrator.rs`).
 ///
-/// 90 s: suficiente para una generación legítima de un modelo cloud con cold-load,
-/// y deja el peor caso por mage (2 intentos) en 180 s. El default de magi-core (300)
-/// es demasiado alto: vuelve inalcanzable la cadena de retry.
+/// 90 s: enough for a legitimate generation from a cloud model with cold-load, and leaves the
+/// worst case per mage (2 attempts) at 180 s. The magi-core default (300) is too high: it makes
+/// the retry chain unreachable.
 pub const AGENT_TIMEOUT_SECS: u64 = 90;
 
-/// Fracción del techo para el presupuesto total de reintentos.
+/// Fraction of the ceiling for the total retry budget.
 ///
-/// 0.6 + 0.3 = 0.9 < 1.0: deja 10 % de margen para que el abandono sea TIPADO
-/// (`OperationBudgetExhausted`) y no un corte opaco del techo externo.
+/// 0.6 + 0.3 = 0.9 < 1.0: leaves a 10 % margin so that abandonment is **TYPED**
+/// (`OperationBudgetExhausted`) and not an opaque cut from the external ceiling.
 const OPERATION_BUDGET_FRACTION: f64 = 0.6;
-/// Fracción del techo para el timeout de UNA petición HTTP. Ver [`OPERATION_BUDGET_FRACTION`].
+/// Fraction of the ceiling for the timeout of ONE HTTP request. See
+/// [`OPERATION_BUDGET_FRACTION`].
 const CLIENT_TIMEOUT_FRACTION: f64 = 0.3;
 
-/// Pisos absolutos: por debajo, ninguna petición real completa.
+/// Absolute floors: below them, no real request completes.
 const MIN_OPERATION_BUDGET: Duration = Duration::from_secs(10);
-/// Ver [`MIN_OPERATION_BUDGET`].
+/// See [`MIN_OPERATION_BUDGET`].
 const MIN_CLIENT_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Techo más chico para el que la escala derivada **todavía cumple** REQ-A04.
+/// Smallest ceiling for which the derived scale **still satisfies** REQ-A04.
 ///
-/// # El agujero que esta constante cierra
+/// # The hole this constant closes
 ///
-/// Los dos pisos de arriba son `.max()`, o sea que **ganan** cuando la fracción queda por
-/// debajo. Con un techo de 10 s la derivación da `max(6,10) + max(3,5) = 15 > 10`: el
-/// invariante que REQ-A04 declara *"imposible de romper por construcción"* queda roto —
-/// **y era alcanzable desde `magi.toml`**, porque `agent_timeout_secs` no se validaba.
+/// The two floors above are `.max()`, so they **win** when the fraction ends up below. With a
+/// ceiling of 10 s the derivation yields `max(6,10) + max(3,5) = 15 > 10`: the invariant that
+/// REQ-A04 declares *"impossible to break by construction"* ends up broken —
+/// **and it was reachable from `magi.toml`**, because `agent_timeout_secs` was not validated.
 ///
-/// Peor: el barrido del invariante corría de 30 a 120, así que **nunca cruzaba el punto de
-/// quiebre**. El test no fallaba porque no miraba. Un guardián que solo recorre el rango
-/// feliz certifica el rango feliz, no el invariante.
+/// Worse: the invariant sweep ran from 30 to 120, so it **never crossed the breaking point**.
+/// The test did not fail because it was not looking. A guardian that only walks the happy range
+/// certifies the happy range, not the invariant.
 ///
-/// La suma de los pisos ES el punto de quiebre, así que se **deriva** de ellos en vez de
-/// escribirse a mano: mover un piso sin mover esto reabriría el agujero en silencio.
+/// The sum of the floors IS the breaking point, so it is **derived** from them instead of
+/// written by hand: moving a floor without moving this would silently reopen the hole.
 ///
-/// `pub` por la misma razón que [`AGENT_TIMEOUT_MIN_SECS`]: el rustdoc de
-/// `MagiConfig::validate_agent_timeout` lo enlaza desde el **bin**, y un intra-doc link a un
-/// símbolo privado de otro crate no resuelve. Es el punto de quiebre documentado de la
-/// derivación, o sea contrato del módulo — no un detalle interno.
+/// `pub` for the same reason as [`AGENT_TIMEOUT_MIN_SECS`]: the rustdoc for
+/// `MagiConfig::validate_agent_timeout` links to it from the **bin**, and an intra-doc link to
+/// a private symbol from another crate does not resolve. It is the documented breaking point of
+/// the derivation, i.e. contract of the module — not an internal detail.
 pub const AGENT_TIMEOUT_ABSOLUTE_FLOOR_SECS: u64 =
     MIN_OPERATION_BUDGET.as_secs() + MIN_CLIENT_TIMEOUT.as_secs();
 
-/// Presupuesto total de reintentos, DERIVADO del techo (REQ-A04).
+/// Total retry budget, DERIVED from the ceiling (REQ-A04).
 ///
-/// La derivación es lo que hace imposible configurar una escala inválida: no existe
-/// combinación que rompa `operation_budget + client_timeout <= techo`.
+/// The derivation is what makes it impossible to configure an invalid scale: no combination
+/// exists that breaks `operation_budget + client_timeout <= techo`.
 #[must_use]
 pub fn derive_operation_budget(ceiling_secs: u64) -> Duration {
     #[allow(
@@ -96,7 +95,7 @@ pub fn derive_operation_budget(ceiling_secs: u64) -> Duration {
     derived.max(MIN_OPERATION_BUDGET)
 }
 
-/// Timeout de UNA petición HTTP, DERIVADO del techo. Ver [`derive_operation_budget`].
+/// Timeout for ONE HTTP request, DERIVED from the ceiling. See [`derive_operation_budget`].
 #[must_use]
 pub fn derive_client_timeout(ceiling_secs: u64) -> Duration {
     #[allow(
@@ -108,73 +107,73 @@ pub fn derive_client_timeout(ceiling_secs: u64) -> Duration {
     derived.max(MIN_CLIENT_TIMEOUT)
 }
 
-/// Techo de la llamada de clasificación (REQ-A07c).
+/// Ceiling for the classification call (REQ-A07c).
 ///
-/// 6 s: es UNA etiqueta, no una generación. Un techo generoso acá anula el beneficio
-/// de la ruta barata. En providers lentos expira y cae a `Analysis`/`Default` — es
-/// best-effort declarado, y `default_mode` es la salida sin latencia.
+/// 6 s: it is ONE label, not a generation. A generous ceiling here cancels the benefit of the
+/// cheap route. On slow providers it expires and falls back to `Analysis`/`Default` — it is
+/// declared best-effort, and `default_mode` is the no-latency exit.
 pub const CLASSIFY_TIMEOUT_SECS: u64 = 6;
 
-/// Techo de UNA sonda del probe (REQ-A24). Por sonda, NO plazo compartido.
+/// Ceiling for ONE probe ping (REQ-A24). Per ping, NOT shared deadline.
 ///
-/// 5 s: es una petición HTTP a un endpoint típicamente local, y el arranque NO depende
-/// de su resultado. Se dimensiona por cuánto es tolerable esperar de más al arrancar,
-/// no por el peor caso. Muy por debajo de los 30 s de `DEFAULT_PREFLIGHT_TIMEOUT`.
+/// 5 s: it is one HTTP request to an endpoint that is typically local, and startup does NOT
+/// depend on its result. It is sized by how much extra wait is tolerable at startup, not by the
+/// worst case. Well below the 30 s of `DEFAULT_PREFLIGHT_TIMEOUT`.
 pub const PROBE_TIMEOUT_SECS: u64 = 5;
 
-/// Cap de entrada DE MAGI-RS, previo a magi-core (REQ-A11b).
+/// Input cap OF MAGI-RS, before magi-core (REQ-A11b).
 ///
-/// 256 KiB. El criterio es COSTO, no capacidad: el payload va a los tres mages, así que
-/// se paga por tres. Elegido a mano dentro del rango 256 KiB–1 MiB, holgadamente bajo
-/// los 4 MiB de `max_input_len` para que el de magi-core nunca muerda.
+/// 256 KiB. The criterion is COST, not capacity: the payload goes to the three mages, so you
+/// pay for three. Hand-picked within the 256 KiB–1 MiB range, comfortably below the 4 MiB of
+/// `max_input_len` so that the magi-core one never bites.
 pub const MAX_QUERY_BYTES: usize = 256 * 1024;
 
-/// Fracción de la ventana medida para derivar `input_warn_tokens` (REQ-A24b).
+/// Fraction of the measured window used to derive `input_warn_tokens` (REQ-A24b).
 ///
-/// 0.75: el aviso debe llegar ANTES de acercarse al límite, así que un umbral EN el
-/// límite no avisa nada. Nunca 1.0 — desactivaría el guardarraíl en modelos grandes.
+/// 0.75: the warning must arrive BEFORE getting close to the limit, so a threshold AT the limit
+/// warns about nothing. Never 1.0 — it would disable the guardrail on large-context models.
 pub const WARN_WINDOW_FRACTION: f64 = 0.75;
 
-/// Piso del rango cerrado de una ventana aceptable del probe (REQ-A16b).
+/// Floor of the closed range of an acceptable probe window (REQ-A16b).
 ///
-/// Fuera de rango degrada a *no medido*, NUNCA se recorta al extremo: un valor recortado
-/// se usa como si fuera real. El máximo cubre los modelos de contexto grande conocidos.
+/// Out of range degrades to *unmeasured*, it is NEVER clipped to the extreme: a clipped value
+/// is used as if it were real. The maximum covers the known large-context models.
 pub const PROBE_WINDOW_MIN: usize = 2_048;
-/// Techo del rango. Ver [`PROBE_WINDOW_MIN`].
+/// Ceiling of the range. See [`PROBE_WINDOW_MIN`].
 pub const PROBE_WINDOW_MAX: usize = 2_000_000;
 
-/// Ratio que dispara el notice de composición staleness × ventana (SC-A24i).
+/// Ratio that triggers the composition staleness × window notice (SC-A24i).
 ///
-/// 0.8: con el cap **convertido a tokens** por encima del 80 % de la ventana medida, el
-/// margen es tan chico que un cambio a un modelo menor lo cruza y el aviso de tamaño se
-/// apaga solo.
+/// 0.8: with the cap **converted to tokens** above 80 % of the measured window, the margin is
+/// so small that switching to a smaller model crosses it and the size warning turns off by
+/// itself.
 pub const STALE_NOTICE_RATIO: f64 = 0.8;
 
-// CALIBRACIÓN, verificada contra los defaults que shipeamos — no un número suelto.
+// CALIBRATION, verified against the defaults we ship — not a lone number.
 //
-// El notice compara `bytes_to_tokens_est(MAX_QUERY_BYTES)` contra la ventana MEDIDA. Con el
-// valor anterior (512 KiB ⇒ ~131 k tokens estimados) y un mage de ventana 128 k, el ratio
-// daba 1.0 y **el notice salía en CADA arranque de la configuración por defecto** — un aviso
-// que aparece siempre deja de leerse, que es peor que no tenerlo.
+// The notice compares `bytes_to_tokens_est(MAX_QUERY_BYTES)` against the MEASURED window. With
+// the previous value (512 KiB ⇒ ~131 k estimated tokens) and a mage with a 128 k window, the
+// ratio was 1.0 and **the notice fired on EVERY startup of the default configuration** — a
+// warning that always appears stops being read, which is worse than not having it.
 //
-// Con 256 KiB (~65 k tokens) contra 128 k el ratio es 0.50, holgadamente bajo el umbral: el
-// notice vuelve a significar lo que dice, "esta configuración está apretada".
+// With 256 KiB (~65 k tokens) against 128 k the ratio is 0.50, comfortably below the threshold:
+// the notice again means what it says, "this configuration is tight".
 //
-// 256 KiB sigue adentro del rango de §4.9 (256 KB – 1 MB), sigue siendo "un diff de review
-// real" y **abarata el cap ×3** que es el criterio de costo de REQ-A11b.
+// 256 KiB remains inside the §4.9 range (256 KB – 1 MB), remains "a real review diff" and
+// **makes the cap ×3 cheaper**, which is the cost criterion of REQ-A11b.
 
-/// Caracteres por token del estimador compartido del proyecto.
+/// Characters per token of the project's shared estimator.
 ///
-/// **Existe porque `max_query_bytes` y la ventana medida están en UNIDADES DISTINTAS** —
-/// bytes contra tokens— y compararlos directo no compara nada: el notice de SC-A24i
-/// saldría o no por accidente aritmético. Es el mismo valor que ya usa `[memory]`, y es
-/// una **aproximación declarada**, no una medición: el notice lo nombra.
+/// **It exists because `max_query_bytes` and the measured window are in DIFFERENT UNITS** —
+/// bytes against tokens— and comparing them directly compares nothing: the SC-A24i notice would
+/// fire or not by arithmetic accident. It is the same value that `[memory]` already uses, and
+/// it is a **declared approximation**, not a measurement: the notice names it.
 pub const CHARS_PER_TOKEN_EST: f64 = 4.0;
 
-/// Convierte un cap en bytes a tokens estimados, para poder compararlo con una ventana.
+/// Converts a cap in bytes to estimated tokens, so it can be compared with a window.
 ///
-/// Redondea **hacia arriba**, que es la dirección segura: sobreestimar el tamaño del
-/// payload hace que el notice salga de más, no de menos.
+/// Rounds **up**, which is the safe direction: overestimating the payload size makes the notice
+/// fire more often, not less.
 #[must_use]
 pub fn bytes_to_tokens_est(bytes: usize) -> usize {
     #[allow(
@@ -186,47 +185,49 @@ pub fn bytes_to_tokens_est(bytes: usize) -> usize {
     tokens
 }
 
-/// Holgura del `--timeout` headless, en porcentaje del término mayor de la fórmula (§4.9).
+/// Slack for the headless `--timeout`, as a percentage of the larger term in the formula
+/// (§4.9).
 pub const HEADLESS_TIMEOUT_HOLGURA_PCT: u64 = 20;
 
-/// Mínimo de wall-clock para una corrida que lanza consult, **derivado en RUNTIME del
-/// techo CONFIGURADO** (REQ-A04).
+/// Minimum wall-clock for a run that launches consult, **derived at RUNTIME from the CONFIGURED
+/// ceiling** (REQ-A04).
 ///
-/// **NO es una `const`, y esa es la corrección.** Una constante se calcula sobre
-/// [`AGENT_TIMEOUT_SECS`] —el default built-in— mientras `[magi].agent_timeout_secs` es
-/// **configurable**: un operador que lo suba a 120 dejaría el mínimo calculado sobre 90 y
-/// la relación se rompería **en runtime**, que es exactamente el modo de fallo que REQ-A04
-/// existe para eliminar. Derivar por construcción no sirve si se deriva del valor
-/// equivocado.
+/// **It is NOT a `const`, and that is the fix.** A constant is calculated over
+/// [`AGENT_TIMEOUT_SECS`] —the built-in default— while `[magi].agent_timeout_secs` is
+/// **configurable**: an operator raising it to 120 would leave the minimum calculated over 90
+/// and
+/// the relation would break **at runtime**, which is exactly the failure mode that REQ-A04
+/// exists to eliminate. Deriving by construction is useless if it is derived from the wrong
+/// value.
 ///
-/// El valor efectivo lo entrega `MagiConfig::effective_agent_timeout_secs()` (contrato), que
-/// es lo que resuelve la precedencia entre lo declarado y el default. Las dos capas internas
-/// se DERIVAN de ese número, nunca se configuran (REQ-A04).
+/// The effective value is provided by `MagiConfig::effective_agent_timeout_secs()` (contract),
+/// which is what resolves precedence between the declared value and the default. The two inner
+/// layers are DERIVED from that number, never configured (REQ-A04).
 ///
-/// La fórmula es `clasificación + 2 × techo + holgura`. **NO se multiplica por 3**: los
-/// mages corren en paralelo (verificado, SC-A04e), así que el peor caso es el del mage más
-/// lento, no la suma de los tres.
+/// The formula is `classification + 2 × ceiling + slack`. **It is NOT multiplied by 3**: the
+/// mages run in parallel (verified, SC-A04e), so the worst case is that of the slowest mage,
+/// not the sum of the three.
 #[must_use]
 pub fn headless_consult_timeout_secs(configured_ceiling: u64) -> u64 {
     let dominant = 2 * configured_ceiling; // el término mayor de la fórmula
     let minimum = CLASSIFY_TIMEOUT_SECS + dominant;
-    // §4.9: la holgura es 10–30 % del TÉRMINO MAYOR, no del total — sobre el total se
-    // infla proporcionalmente al término chico, que no es el que domina el riesgo.
+    // §4.9: the slack is 10–30 % of the LARGER TERM, not of the total — over the total it
+    // inflates proportionally to the small term, which is not the one that dominates the risk.
     minimum + dominant * HEADLESS_TIMEOUT_HOLGURA_PCT / 100
 }
 
-/// Decisión de wall-clock de una corrida, con su aviso si corresponde (SC-A04d).
+/// Wall-clock decision for a run, with its warning if applicable (SC-A04d).
 pub struct TimeoutDecision {
-    /// Segundos efectivos: lo que el operador pidió, o el default derivado.
+    /// Effective seconds: what the operator asked for, or the derived default.
     pub effective_secs: u64,
-    /// Aviso cuando lo pedido queda bajo el mínimo de la fórmula.
+    /// Warning when the requested value falls below the formula minimum.
     pub warning: Option<String>,
-    /// Va al JSON de la corrida (REQ-A11d).
+    /// Goes to the run JSON (REQ-A11d).
     pub below_formula: bool,
 }
 
-/// Resuelve el wall-clock de la corrida. **Obedece siempre lo explícito**, y avisa cuando
-/// ese valor hace imposible completar un consult con reintento de schema.
+/// Resolves the run wall-clock. **It always obeys the explicit value**, and warns when that
+/// value makes it impossible to complete a consult with schema retry.
 #[must_use]
 pub fn resolve_run_timeout(asked: Option<u64>, configured_ceiling: u64) -> TimeoutDecision {
     let minimum = headless_consult_timeout_secs(configured_ceiling);
@@ -251,75 +252,77 @@ pub fn resolve_run_timeout(asked: Option<u64>, configured_ceiling: u64) -> Timeo
     }
 }
 
-/// Umbral built-in del gate para `CodeReview` (REQ-A20).
+/// Built-in gate threshold for `CodeReview` (REQ-A20).
 ///
-/// 200 caracteres. Procedencia: el ejemplo del rustdoc de
-/// `MagiBuilder::with_complexity_gate`. **NO está calibrado empíricamente** — es el punto
-/// de partida del autor de la librería, no una medición. La telemetría de REQ-A20 permite
-/// ajustarlo con datos.
+/// 200 characters. Provenance: the example in the rustdoc of
+/// `MagiBuilder::with_complexity_gate`. **It is NOT empirically calibrated** — it is the
+/// library author's starting point, not a measurement. The telemetry from REQ-A20 allows tuning
+/// it with data.
 pub const GATE_CODE_REVIEW: usize = 200;
-/// Umbral built-in del gate para `Design`. Ver [`GATE_CODE_REVIEW`]: misma procedencia,
-/// mismo estado de calibración.
+/// Built-in gate threshold for `Design`. See [`GATE_CODE_REVIEW`]: same provenance, same
+/// calibration status.
 pub const GATE_DESIGN: usize = 500;
-/// Umbral built-in del gate para `Analysis` (REQ-A20).
+/// Built-in gate threshold for `Analysis` (REQ-A20).
 ///
-/// **NO hereda el "no vacío" del ejemplo de magi-core, y esa desviación es el punto:**
-/// `Analysis` es el default de toda invocación sin modo, así que un umbral de 1 apagaría el
-/// gate en el camino autónomo más común. El gate de magi-core protege a cualquier
-/// consumidor; el nuestro solo ve ruteo autónomo, donde vetar es el trabajo.
+/// **It does NOT inherit the \"non-empty\" from magi-core's example, and that deviation is the
+/// point:**
+/// `Analysis` is the default for every modeless invocation, so a threshold of 1 would turn off
+/// the gate on the most common autonomous path. The magi-core gate protects any consumer; ours
+/// only sees autonomous routing, where vetoing is the job.
 ///
-/// # Por qué 200 y no 150
+/// # Why 200 and not 150
 ///
-/// La primera versión puso 150, que lo dejaba como **el umbral más bajo de los tres** — o
-/// sea el modo que MENOS se veta. Eso invierte el argumento de arriba: el razonamiento dice
-/// *"es el camino que el gate más necesita cubrir"* y el número lo hacía el más permisivo.
-/// Un umbral no puede contradecir el rustdoc que lo justifica.
+/// The first version set 150, which made it **the lowest threshold of the three** — i.e. the
+/// mode that is LEAST vetoed. That inverts the argument above: the reasoning says
+/// *"it is the path that the gate most needs to cover"* and the number made it the most
+/// permissive.
+/// A threshold cannot contradict the rustdoc that justifies it.
 ///
-/// Queda **igual que [`GATE_CODE_REVIEW`], no por encima**. Empatarlo con el más exigente
-/// sería la otra sobrecorrección: `Analysis` es la lente más ancha —cae acá toda pregunta
-/// general— y un umbral tipo [`GATE_DESIGN`] vetaría consultas legítimas por ser cortas.
-/// `Design` sigue siendo el más alto porque una deliberación de arquitectura que se puede
-/// plantear en 300 caracteres casi nunca necesita tres perspectivas.
+/// It stays **equal to [`GATE_CODE_REVIEW`], not above**. Matching the strictest one would be
+/// the other overcorrection: `Analysis` is the widest lens — every general question falls here
+/// — and a threshold like [`GATE_DESIGN`] would veto legitimate queries for being short.
+/// `Design` remains the highest because an architectural deliberation that can be posed in 300
+/// characters almost never needs three perspectives.
 ///
-/// Como los otros dos: **no está calibrado empíricamente**. La telemetría de SC-A20h existe
-/// para que la próxima elección tenga datos en vez de otra corazonada.
+/// Like the other two: **it is not empirically calibrated**. The telemetry from SC-A20h exists
+/// so that the next choice has data instead of another guess.
 pub const GATE_ANALYSIS: usize = 200;
 
-/// Los dos saltos de línea que separan la marca del texto conservado.
+/// The two line breaks that separate the mark from the preserved text.
 ///
-/// Constante y no un `2` suelto (B4): el número sale de la forma en que el llamador pega la
-/// marca, y escribirlo a mano lo desacopla de esa forma en silencio.
+/// A constant and not a loose `2` (B4): the number comes from the way the caller appends the
+/// mark, and writing it by hand silently decouples it from that shape.
 pub const TRUNCATION_SEPARATOR_LEN: usize = 2;
 
-/// Cap de SALIDA del reporte por defecto, en las tres rutas (REQ-A11b).
+/// Output cap of the default report, on all three routes (REQ-A11b).
 ///
-/// Nace en Fase 0 y no en Fase 6 por la misma razón que los otros tres símbolos del
-/// recorte: `effective_tool_result_cap` lo consume en **Fase 1**.
+/// It is born in Phase 0 and not in Phase 6 for the same reason as the other three trimming
+/// symbols: `effective_tool_result_cap` consumes it in **Phase 1**.
 ///
-/// El criterio del número es el mismo que el del cap de entrada —COSTO— pero la cuenta es
-/// al revés: la entrada se paga una vez por tres mages, la salida se paga una vez por cada
-/// turno restante de la sesión, porque vive en el historial.
+/// The criterion for the number is the same as for the input cap —COST— but the accounting is
+/// reversed: the input is paid once for three mages, the output is paid once for each remaining
+/// turn of the session, because it lives in the history.
 pub const TOOL_RESULT_CAP_BYTES: usize = 64 * 1024;
 
-/// Marca que se agrega a un reporte recortado. **Un recorte silencioso es indistinguible de
-/// un reporte completo**, y esa es toda la razón de que exista.
+/// Mark appended to a trimmed report. **A silent trim is indistinguishable from a complete
+/// report**, and that is the entire reason it exists.
 pub const TRUNCATION_MARK: &str = "[report truncated due to size limit]";
 
-/// Bytes que la marca agrega, para que cada nivel descuente su propio presupuesto.
+/// Bytes that the mark adds, so that each level deducts its own budget.
 ///
-/// Se DERIVA de la constante en vez de escribirse a mano: cambiar el texto de la marca sin
-/// mover este número volvería a desbordar el cap, en silencio y solo en el borde.
+/// It is DERIVED from the constant instead of written by hand: changing the mark text without
+/// moving this number would silently overflow the cap again, and only at the edge.
 #[must_use]
 pub fn mark_overhead() -> usize {
     TRUNCATION_MARK.len() + TRUNCATION_SEPARATOR_LEN
 }
 
-/// Cap de salida mínimo viable: por debajo, ni la marca de recorte entra.
+/// Minimum viable output cap: below it, not even the trim mark fits.
 ///
-/// Con un cap menor que [`mark_overhead`], los tres niveles hacen `checked_sub` → `None` y
-/// el recorte **no aplica nada**: el reporte sale entero, o sea que el cap configurado se
-/// ignora en silencio. Un límite que deja de aplicarse cuando lo apretás es peor que no
-/// tenerlo.
+/// With a cap smaller than [`mark_overhead`], the three levels do `checked_sub` → `None` and
+/// the trim **applies nothing**: the report comes out whole, meaning the configured cap is
+/// silently ignored. A limit that stops applying when you tighten it is worse than not having
+/// one.
 #[must_use]
 pub fn min_viable_output_cap() -> usize {
     mark_overhead() + 1
@@ -329,11 +332,11 @@ pub fn min_viable_output_cap() -> usize {
 mod tests {
     use super::*;
 
-    /// SC-A04 / REQ-A04: la escala se cumple POR CONSTRUCCIÓN para cualquier techo del rango.
+    /// SC-A04 / REQ-A04: the scale is satisfied BY CONSTRUCTION for any ceiling in the range.
     #[test]
     fn derived_scale_satisfies_invariant_across_the_whole_admissible_range() {
-        // Arranca en el PISO ABSOLUTO, no en el mínimo de §4.9: el punto de quiebre está
-        // por debajo del rango configurable, y un barrido que no lo cruza no prueba nada.
+        // It starts at the ABSOLUTE FLOOR, not at the §4.9 minimum: the breaking point is below
+        // the configurable range, and a sweep that does not cross it proves nothing.
         for ceiling in AGENT_TIMEOUT_ABSOLUTE_FLOOR_SECS..=AGENT_TIMEOUT_MAX_SECS {
             let budget = derive_operation_budget(ceiling);
             let client = derive_client_timeout(ceiling);
@@ -352,10 +355,10 @@ mod tests {
         }
     }
 
-    /// REQ-A04: el --timeout headless cubre clasificación + 2 intentos + holgura.
+    /// REQ-A04: the headless --timeout covers classification + 2 attempts + slack.
     ///
-    /// Se DERIVA, no se hardcodea: un literal se desincroniza en silencio en cuanto alguien
-    /// mueve `AGENT_TIMEOUT_SECS`, y este test lo detectaría recién en el commit siguiente.
+    /// It is DERIVED, not hardcoded: a literal silently desynchronizes as soon as someone moves
+    /// `AGENT_TIMEOUT_SECS`, and this test would only detect it in the next commit.
     #[test]
     fn headless_timeout_default_covers_classification_and_two_attempts() {
         let dominant = 2 * AGENT_TIMEOUT_SECS;
@@ -367,10 +370,10 @@ mod tests {
         );
     }
 
-    /// SC-A04c — el `--timeout` headless respeta la fórmula PARA EL TECHO CONFIGURADO.
+    /// SC-A04c — the headless `--timeout` respects the formula FOR THE CONFIGURED CEILING.
     ///
-    /// Es el mismo bug que la función reemplaza, nombrado por su escenario: una `const` se
-    /// ata al default built-in, no al valor que el operador puso en `[magi]`.
+    /// It is the same bug that the replaced function had, named by its scenario: a `const` is
+    /// tied to the built-in default, not to the value the operator put in `[magi]`.
     #[test]
     fn a_raised_ceiling_raises_the_headless_minimum_too() {
         for ceiling in AGENT_TIMEOUT_MIN_SECS..=AGENT_TIMEOUT_MAX_SECS {
@@ -388,13 +391,12 @@ mod tests {
         );
     }
 
-    /// SC-A04d: un `--timeout` explícito por debajo del mínimo se OBEDECE, con aviso.
+    /// SC-A04d: an explicit `--timeout` below the minimum is OBEYED, with a warning.
     ///
-    /// La bandera es un tope de wall-clock del operador, no un invariante de seguridad:
-    /// quien pide `--timeout 5` quiere cortar a los 5 segundos, y forzarlo a respetar la
-    /// fórmula sería desobedecer una orden clara. Pero un valor bajo el mínimo garantiza
-    /// que **ningún consult con reintento de schema completa**, y eso no es obvio desde la
-    /// línea de comandos.
+    /// The flag is an operator wall-clock cap, not a safety invariant: whoever asks for
+    /// `--timeout 5` wants to cut at 5 seconds, and forcing it to respect the formula would
+    /// disobey a clear order. But a value below the minimum guarantees that **no consult with
+    /// schema retry completes**, and that is not obvious from the command line.
     #[test]
     fn an_explicit_timeout_below_the_formula_is_obeyed_and_warned_about() {
         let asked = 5_u64;
@@ -426,19 +428,18 @@ mod tests {
             .is_none());
     }
 
-    /// §4.9: cada valor cae dentro de su rango admisible.
+    /// §4.9: every value falls within its admissible range.
     #[test]
     fn plan_values_fall_inside_their_documented_ranges() {
-        // Las dos mitades de la defensa, juntas para que se lean como una sola cosa:
-        // la validación de carga impide entrar por debajo del rango, y el piso absoluto
-        // queda holgadamente por debajo de ese rango — o sea que la derivación nunca ve
-        // un techo donde los pisos ganen.
+        // The two halves of the defense, placed together so they read as one thing: load
+        // validation prevents entering below the range, and the absolute floor sits comfortably
+        // below that range — meaning the derivation never sees a ceiling where the floors win.
         //
-        // `const` y no `assert!` suelto: las tres comparaciones de este test que son entre
-        // constantes se evalúan EN COMPILACIÓN, así que violarlas rompe el build en vez de
-        // un test. Es la garantía más fuerte disponible y es lo que clippy pide con
-        // `assertions_on_constants` — la alternativa era un `#[allow]`, que solo apaga el
-        // aviso y deja la comprobación donde estaba.
+        // `const` and not a loose `assert!`: the three comparisons in this test that are
+        // between constants are evaluated AT COMPILE TIME, so violating them breaks the build
+        // rather than a test. It is the strongest guarantee available and it is what clippy
+        // asks for with `assertions_on_constants` — the alternative was a `#[allow]`, which
+        // only silences the warning and leaves the check where it was.
         const {
             assert!(
                 AGENT_TIMEOUT_ABSOLUTE_FLOOR_SECS < AGENT_TIMEOUT_MIN_SECS,
@@ -468,10 +469,10 @@ mod tests {
         }
     }
 
-    /// SC-A24i: el estimador redondea HACIA ARRIBA, que es la dirección segura.
+    /// SC-A24i: the estimator rounds UP, which is the safe direction.
     ///
-    /// Sobreestimar el payload hace que el notice salga de más, nunca de menos — y de menos
-    /// es el modo de fallo que importa, porque apaga un aviso en silencio.
+    /// Overestimating the payload makes the notice fire more often, never less — and less is
+    /// the failure mode that matters, because it silently turns off a warning.
     #[test]
     fn the_token_estimator_rounds_up_and_handles_the_empty_case() {
         assert_eq!(
@@ -492,10 +493,10 @@ mod tests {
         );
     }
 
-    /// El overhead se DERIVA del texto de la marca en vez de escribirse a mano.
+    /// The overhead is DERIVED from the mark text instead of written by hand.
     ///
-    /// Un número escrito a mano se desincroniza al editar la marca, y el desborde
-    /// resultante aparece solo en el borde del cap — o sea casi nunca, y sin diagnóstico.
+    /// A number written by hand desynchronizes when editing the mark, and the resulting
+    /// overflow appears only at the cap edge — i.e. almost never, and without a diagnosis.
     #[test]
     fn the_truncation_overhead_is_derived_from_the_mark_text() {
         assert_eq!(
@@ -508,10 +509,10 @@ mod tests {
         );
     }
 
-    /// Un cap por debajo del overhead haría que el recorte deje de aplicarse EN SILENCIO.
+    /// A cap below the overhead would make the trim stop applying SILENTLY.
     ///
-    /// Con `cap <= mark_overhead()` los tres niveles hacen `checked_sub` → `None` y el
-    /// reporte sale entero: un límite que se ignora cuando lo apretás es peor que ninguno.
+    /// With `cap <= mark_overhead()` the three levels do `checked_sub` → `None` and the report
+    /// comes out whole: a limit that is ignored when you tighten it is worse than none.
     #[test]
     fn the_minimum_viable_cap_leaves_room_for_the_mark_itself() {
         assert!(

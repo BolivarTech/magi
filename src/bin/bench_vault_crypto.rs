@@ -1,21 +1,18 @@
-// Author: Julian Bolivar
-// Version: 1.0.0
-// Date: 2026-07-15
-//! Línea base de performance de `ConcatenatedFec` (REQ-V36).
+// Author: Julian Bolivar Version: 1.0.0 Date: 2026-07-15 Performance baseline of
+// `ConcatenatedFec` (REQ-V36).
 //!
-//! Mide el **costo de decrypt** y la **expansión en disco** del pipeline
-//! `AES-256-GCM-SIV + ConcatenatedFec` del crate `cryptovault`, sobre un corpus
-//! representativo de mensajes. Es **historial de desempeño**, NO un gate: la
-//! elección de FEC está fijada por diseño (D-V02); este número existe para
-//! comparar en releases futuros, no para reabrir la decisión.
+//! Measures the **decrypt cost** and **disk expansion** of the `AES-256-GCM-SIV +
+//! ConcatenatedFec` pipeline in the `cryptovault` crate, over a representative corpus of
+//! messages. It is **performance history**, NOT a gate: the FEC choice is fixed by design
+//! (D-V02); this number exists to compare in future releases, not to reopen the decision.
 //!
-//! Uso: `cargo run --release --bin bench_vault_crypto`
+//! Usage: `cargo run --release --bin bench_vault_crypto`
 
 use std::time::Instant;
 
-/// Cantidad de récords del corpus sintético.
+/// Number of records in the synthetic corpus.
 const CORPUS_SIZE: usize = 1_000;
-/// Longitud representativa de un mensaje de conversación (bytes).
+/// Representative length of a conversation message (bytes).
 const MESSAGE_LEN: usize = 220;
 
 fn main() {
@@ -27,7 +24,7 @@ fn main() {
 
     let plaintext: String = "x".repeat(MESSAGE_LEN);
 
-    // Cifrar el corpus y medir la expansión en disco.
+    // Encrypt the corpus and measure the disk expansion.
     let mut blobs = Vec::with_capacity(CORPUS_SIZE);
     let mut encoded_bytes = 0usize;
     for _ in 0..CORPUS_SIZE {
@@ -38,7 +35,7 @@ fn main() {
     let plain_bytes = CORPUS_SIZE * MESSAGE_LEN;
     let expansion = encoded_bytes as f64 / plain_bytes as f64;
 
-    // Medir la latencia de decrypt (el patrón de `recall()`: N por turno).
+    // Measure decrypt latency (the `recall()` pattern: N per turn).
     let start = Instant::now();
     for blob in &blobs {
         let recovered = vault.decrypt_with_key(&key, blob).expect("decrypt");
