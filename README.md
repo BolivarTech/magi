@@ -125,8 +125,7 @@ When the agent requests a tool, an inline prompt appears: **`y`** approves, **`c
 | `/login` | Start the OAuth (PKCE) login flow — **best-effort**, may be rate-limited (see Configuration); prefer an API key |
 | `/logout` | Clear stored API keys |
 | `/clear` | Clear the on-screen conversation |
-| `/consult <question>` | Force a MAGI 3-perspective consensus on the question (≈ 3 model calls). Blocks the session while it runs, like a normal turn. Requires a configured LLM provider. |
-| `/init-config` | Scaffold a `magi.toml` in the workspace pre-filled with the built-in Ollama-first defaults (refuses to overwrite an existing file). Also available as `magi-rs --init-config`. |
+| `/consult [--mode <code-review\|design\|analysis>] <question>` | Force a MAGI 3-perspective consensus on the question (≈ 3 model calls; omitting `--mode` adds one more to classify it, see [Mode routing](#mode-routing)). Blocks the session while it runs, like a normal turn. Requires a configured LLM provider. |
 | `/help` | Show available commands |
 | `/exit`, `/quit` | Leave the app |
 
@@ -148,10 +147,23 @@ The `bash` allowlist is: `ls git npm cargo rg cat echo pwd grep mkdir touch find
 
 Some decisions carry genuine trade-offs: architecture choices, "should we X vs Y given these constraints?", risk calls. For those, Magi can run a **three-perspective consensus** built on the [`magi-core`](https://crates.io/crates/magi-core) crate: three independent analyst agents (Melchior the scientist, Balthasar the pragmatist, Caspar the critic) evaluate the question and a consensus is synthesized.
 
-- **Automatic (transparent).** The agent decides on its own when a question warrants multi-perspective analysis and invokes the `consult` tool through the normal tool loop. Like any tool call it passes the **inline approval gate** (`y`/`n`). That gate is also your cost control, since a consult is ≈ **3 model calls**. Deny it to keep the single-LLM answer.
-- **Forced.** Type `/consult <question>` to run the consensus directly, bypassing the router and the approval gate. The session shows `MAGI deliberating — 3 model calls…` and then renders the verbatim report (the three perspectives + the consensus verdict). `/consult` blocks the session while it runs, like a normal turn.
-- **Backend.** The consult reuses the **same provider and credentials** already resolved for the agent (Anthropic or any OpenAI-compatible endpoint). No second config. It is unavailable in `StaticProvider` mode (no API key): `/consult` then reports that a provider is required, and the tool is not registered.
-- **Model capability.** Weak / small local models (e.g. Ollama `phi4-mini`) may fail to emit the strict per-agent JSON the consensus requires; the result is then marked `[DEGRADED: …]` (fewer than three agents responded). A capable model is recommended for reliable consensus.
+- **Automatic (transparent), gated by a complexity check.** The agent decides on its own when a question warrants multi-perspective analysis and invokes the `consult` tool through the normal tool loop. Before it dispatches, a **complexity gate** checks the content length against a per-mode threshold (`[magi.complexity]`, in characters); below it, the consult is **vetoed** — no model call happens, and the agent answers directly with a note that no consensus ran. Above it, the call still passes the **inline approval gate** (`y`/`n`) — your cost control, since a consult is ≈ **3 model calls** (4 if the mode had to be classified, see below). `/consult` and explicit CLI invocations are **never** vetoed by the complexity gate.
+- **Forced.** Type `/consult [--mode <code-review|design|analysis>] <question>` to run the consensus directly, bypassing the router, the complexity gate and the approval gate. The session shows `MAGI deliberating — 3 model calls…` and then renders the verbatim report (the three perspectives + the consensus verdict). `/consult` blocks the session while it runs, like a normal turn.
+- **Mode routing.** See [Mode routing](#mode-routing) below — every consult runs one of three modes (`code-review` / `design` / `analysis`), resolved from an explicit flag, `[magi].default_mode`, the agent's own choice, a classification call, or the `analysis` default, in that order.
+- **Backend.** The trio is built on **`magi-core`'s native providers**, each wrapped in retry and each receiving its own system prompt through the provider's own channel (no more folding it into the user turn). By default the trio runs on the same backend and endpoint already resolved for the main agent — no second config — but `[magi]` can point it at a different `kind` and/or `base_url`. It is unavailable when no seat can be built (e.g. no API key resolved for the configured backend): `/consult` then reports which seat failed and why, and the tool is not registered.
+- **Model capability.** Weak / small local models (e.g. Ollama `phi4-mini`) may fail to emit the strict per-agent JSON the consensus requires; the result is then marked `[DEGRADED: …]` (fewer than three agents responded) and the report names which model failed to adhere and why. A capable model is recommended for reliable consensus.
+
+### Mode routing
+
+Each consult runs in one of three modes — `code-review`, `design`, `analysis` — which changes the three perspectives' focus. The effective mode is resolved in order, first hit wins:
+
+1. **Explicit** — `--mode` on `magi query`/`magi consult`, `/consult --mode` in the TUI, or the mode field of the headless JSON envelope. Declared by a human.
+2. **Configured** — `[magi].default_mode` in `magi.toml`. Fixes the mode for every invocation that doesn't pass `--mode`, and — like an explicit flag — skips the classification call below.
+3. **Agent-chosen** — when the agent routes to `consult` on its own, it picks the mode via the tool's input schema. Free: no extra model call.
+4. **Inferred** — only on the direct `magi consult` / envelope-driven path, when none of the above applied: an extra classification call to the main provider picks the mode before the three mages run. **This costs one additional model call.** Declare `--mode` or `[magi].default_mode` to skip it.
+5. **`analysis`** — the final default when nothing else resolved a mode.
+
+The effective mode and which level it came from are reported alongside the consult result (`mode` / `mode_source` in JSON output). If a consult is meant to gate untrusted content (e.g. reviewing a pasted diff from an unknown source), declare `[magi].untrusted_content = true` (or `--untrusted-content`, or the envelope field) to require the mode be declared rather than inferred — it fails closed instead of letting classification run over content it doesn't control.
 
 ---
 
@@ -176,12 +188,17 @@ echo "explain the retry logic in provider.rs" | magi query
 # Rich JSON envelope in, one buffered JSON object out.
 magi query -i q.json -o out.json --output-format json
 
-# Force a MAGI 3-perspective consensus on the prompt directly.
-magi consult -i decision.txt
+# Force a MAGI 3-perspective consensus on the prompt directly. Omitting --mode
+# classifies it first (one extra model call) — see Mode routing above.
+magi consult --mode code-review -i decision.txt
 
 # Read-only structural probe of the .magi/ DB — never unlocks, never prints a secret.
 magi vault diagnose
 ```
+
+`magi query` and `magi consult` both accept `--mode <code-review|design|analysis>`
+and `--untrusted-content` (see [Mode routing](#mode-routing)); the JSON envelope
+carries the same two as fields.
 
 **Input** is auto-detected: a JSON object with a top-level `prompt` string is a
 rich **envelope** (`{prompt, system?, model?, provider?, max_tool_calls?,
@@ -272,7 +289,8 @@ There is **no `get`/`cat`/`show` command**. A stored value is never printed, by 
 ### Default backend — Ollama-first (v0.6.0, BREAKING)
 
 > **Breaking change in 0.6.0.** With **no `magi.toml` and no env vars**, Magi now
-> defaults to a local **Ollama** backend (`provider = "openai"`,
+> defaults to a local **Ollama** backend (`provider = "ollama"` as of v0.12.0 — it was
+> the now-retired `"openai"` value through v0.11.0 —
 > `base_url = http://localhost:11434/v1`, model `kimi-k2.6:cloud`, and the MAGI trio
 > `qwen3.5:397b-cloud` / `gpt-oss:120b-cloud` / `deepseek-v4-pro:cloud`). Previously
 > the no-config default was Anthropic.
@@ -282,42 +300,60 @@ There is **no `get`/`cat`/`show` command**. A stored value is never printed, by 
 default, `StaticProvider` fallback) is unchanged, just **opt-in** now.
 
 To scaffold a `magi.toml` pre-filled with the built-in Ollama-first defaults, run
-`magi-rs --init-config` (CLI) or the **`/init-config`** TUI command. Both refuse to
-overwrite an existing `magi.toml`.
+**`magi init`** (see [Headless mode](#headless-mode)) — it refuses to overwrite an
+existing `.magi/`. There is no other scaffolder: `--init-config` and `/init-config`
+were retired in v0.12.0.
 
 ### `magi.toml` (optional, multi-backend)
 
 Magi can talk to any **OpenAI-compatible** Chat Completions endpoint: a local
 **Ollama** instance (the default), OpenAI itself, Groq, OpenRouter. That is in addition to
-the opt-in Anthropic Messages API. The backend and its non-secret settings live in a
-workspace-local `magi.toml`. A reference is committed as
-[`docs/magi.toml.example`](docs/magi.toml.example); copy it to `magi.toml` and edit, or generate
-it with `magi-rs --init-config`. `magi.toml` is gitignored.
+the opt-in Anthropic Messages API. The backend and its non-secret settings live in
+`.magi/magi.toml`. An annotated reference is committed as
+[`docs/magi.toml.example`](docs/magi.toml.example); copy it and edit, or generate a starting
+point with `magi init`. `magi.toml` is gitignored.
 
 ```toml
-provider = "openai"          # "openai" (default — Ollama) | "anthropic"
+provider = "ollama"          # ollama | openai-compat | anthropic
+
+# System-wide default endpoint: used by the main agent, the MAGI trio and the
+# embedder unless their own section overrides it.
+base_url = "http://localhost:11434/v1"
 
 [openai]
-base_url = "http://localhost:11434/v1"   # Ollama; or https://api.openai.com/v1, Groq, OpenRouter, …
-model    = "kimi-k2.6:cloud"             # built-in default; override per endpoint
+model = "kimi-k2.6:cloud"    # used by BOTH `ollama` and `openai-compat` — they share
+                              # the completions protocol; only `ollama` is probeable
 
 [anthropic]
-model    = "claude-sonnet-4-6"           # optional override of the Anthropic default (opt-in path)
+model = "claude-sonnet-4-6"  # optional override of the Anthropic default (opt-in path)
 ```
 
 **Precedence (per setting): environment variable > `magi.toml` > built-in default.**
 
 | Setting | Env var | `magi.toml` | Default |
 |---------|---------|-------------|---------|
-| Provider backend | `MAGI_PROVIDER` | `provider` | `openai` (Ollama) |
-| OpenAI base URL | `OPENAI_BASE_URL` | `[openai].base_url` | `http://localhost:11434/v1` |
-| OpenAI model | `OPENAI_MODEL` | `[openai].model` | `kimi-k2.6:cloud` |
+| Provider backend (main agent) | `MAGI_PROVIDER` | `provider` | `ollama` |
+| System endpoint | `OPENAI_BASE_URL` | `base_url` (root) | `http://localhost:11434/v1` |
+| OpenAI/Ollama model | `OPENAI_MODEL` | `[openai].model` | `kimi-k2.6:cloud` |
 | Anthropic model | `ANTHROPIC_MODEL` | `[anthropic].model` | see [API key & model discovery](#api-key--model-discovery) |
+| MAGI trio backend | *(none)* | `[magi].kind` | inherits `provider` |
+| MAGI trio endpoint | *(none)* | `[magi].base_url` | inherits root `base_url` |
+| Embedder endpoint | *(none)* | `[embedding].base_url` | inherits root `base_url` |
 
-All built-in default literals live in one place: [`src/defaults.rs`](src/defaults.rs).
+`[magi].kind` and the two section-level `base_url` overrides have **no dedicated env
+var** — they resolve from `magi.toml` only (or inherit), unlike the root-level
+settings above. All built-in default literals live in one place:
+[`src/defaults.rs`](src/defaults.rs).
+
+> **Breaking change from v0.11.0.** `base_url` used to live under `[openai].base_url`;
+> that key no longer exists, and `provider = "openai"` split into `ollama` (keyless,
+> local) and `openai-compat` (authenticated endpoints — OpenAI, Groq, OpenRouter). A
+> `magi.toml` written for v0.11.0 or earlier fails to parse; startup prints a guided
+> migration error naming every incompatibility in the file, with corrected lines ready
+> to paste. Migrating straight from v0.10.x isn't supported — go through v0.11.0 first.
 
 > **Known limitations of the Ollama-first defaults.**
-> 1. The built-in defaults assume **Ollama**. If you point `provider = "openai"` at
+> 1. The built-in defaults assume **Ollama**. If you point `provider = "openai-compat"` at
 >    real OpenAI (or another non-Ollama service) **without** setting `OPENAI_MODEL` /
 >    `[openai].model` (and the `[magi]` trio), those defaults will not exist there. `kimi-k2.6:cloud` and the
 >    `:cloud` trio are Ollama tags. Set them explicitly.
@@ -329,8 +365,28 @@ All built-in default literals live in one place: [`src/defaults.rs`](src/default
 
 - **Anthropic key.** `ANTHROPIC_API_KEY` env var, or the vault entry of the same name (see above).
 - **OpenAI-compatible key.** `OPENAI_API_KEY` env var, or the vault entry of the same name. For a local Ollama instance, magi-rs falls back to a dummy value (`"ollama"`) so you can run without setting anything.
-- Placing `api_key` / `OPENAI_API_KEY` (or any other unknown field) inside `magi.toml` is rejected at parse time under `deny_unknown_fields`, not silently dropped. The file is treated as invalid and magi-rs falls back to defaults with a startup warning.
-- A malformed `magi.toml` does not crash magi-rs: it falls back to defaults and surfaces a notice in the TUI on startup.
+- Placing `api_key` / `OPENAI_API_KEY` (or any other unknown field) inside `magi.toml` is rejected at parse time under `deny_unknown_fields`, not silently dropped.
+- **An authenticated `base_url` never carries a literal credential.** Use the
+  `[user]`/`[password]` placeholders in its `userinfo`, resolved from the vault at use
+  time — never written to disk in the clear:
+  ```toml
+  base_url = "https://[user]:[password]@host/v1"
+  ```
+  ```bash
+  magi-rs vault set BASE_URL_USER
+  magi-rs vault set BASE_URL_PASSWORD
+  ```
+  (`[magi].base_url` and `[embedding].base_url` resolve their own
+  `MAGI_BASE_URL_USER`/`MAGI_BASE_URL_PASSWORD` and
+  `EMBEDDING_BASE_URL_USER`/`EMBEDDING_BASE_URL_PASSWORD` vault entries when they
+  declare their own endpoint.) A literal credential in `base_url` is rejected at
+  startup as a configuration error, naming the fix; a declared placeholder with no
+  matching vault entry fails closed, naming the entry and the command to create it.
+- **A `magi.toml` that exists but does not parse now stops the process.** This is a
+  change from earlier releases, which fell back to defaults with a warning: writing a
+  config file is declaring an intent, and continuing on something else when that intent
+  can't be honored is worse than stopping. An **absent** file is still a silent default,
+  and an **empty** one parses as valid and yields defaults.
 
 #### Per-agent MAGI models — `[magi]` (optional)
 
@@ -349,7 +405,30 @@ caspar_model    = "deepseek-r1:8b" # Critic     — adversarial review
 | Balthasar model | `MAGI_MODEL_BALTHASAR` | `[magi].balthasar_model` | principal model |
 | Caspar model | `MAGI_MODEL_CASPAR` | `[magi].caspar_model` | principal model |
 
-Per-agent overrides **reuse the principal provider's `base_url` + API key** and change only the model name. So real cross-family diversity (e.g. GLM + GPT + DeepSeek) requires the principal backend to be an Ollama-style endpoint serving all three families; with an Anthropic principal you can still vary across Anthropic models (tier diversity). See [`docs/magi.toml.example`](docs/magi.toml.example) for the Light / Balanced / Maximum tier suggestions. A blank value is treated as unset. In `StaticProvider` mode (no API key) the overrides are ignored with a startup notice.
+Per-agent overrides change only the model name; the trio's `kind` and `base_url` — by default inherited from the main agent, or diverged with `[magi].kind`/`[magi].base_url` (see the precedence table above) — are shared across all three seats. So real cross-family diversity (e.g. Qwen + GPT-OSS + DeepSeek) requires that backend to be an Ollama-style endpoint serving all three families; with an Anthropic backend you can still vary across Anthropic models (tier diversity). See [`docs/magi.toml.example`](docs/magi.toml.example) for the full annotated reference. A blank value is treated as unset. If a seat can't be built (e.g. its backend has no resolvable credential), the trio is unavailable and the startup notice names which seat failed and why (see [Mode routing](#mode-routing) above).
+
+#### Tuning the trio — `[magi]` / `[magi.complexity]` (optional)
+
+A handful of other `[magi]` keys are exposed deliberately narrow — an operator-tunable
+subset of what `magi-core`'s builder offers, not the whole surface:
+
+| Key | Purpose |
+|-----|---------|
+| `agent_timeout_secs` | Per-mage ceiling. The two internal timeout layers (retry budget, per-request client timeout) are **derived** from this value, not configured separately — no combination of settings can break the relation between them. |
+| `max_query_bytes` | Input cap applied by magi-rs itself, before `magi-core` sees the payload — rejects rather than truncates, since a silently shortened payload would produce a verdict indistinguishable from a legitimate one. Sized for a real review diff (hundreds of KB), not the old 8 KiB limit. |
+| `input_warn_tokens` | Threshold for the oversized-input warning. Left unset, it is **measured** by a startup probe against the smallest context window across the trio (only possible when the trio's `kind` is `ollama`, the only measurable one); declaring it overrides the measurement. |
+| `retry_disabled` | Disables the trio's inherited retry, for a deployment where 2× the per-mage timeout is unacceptable. |
+| `untrusted_content` | See [Mode routing](#mode-routing) above. |
+
+`tool_result_cap_bytes` (root-level, not under `[magi]`) bounds the consult report that
+enters the conversation history, on all three routes — the TUI, `magi query` and `magi
+consult`. This matters most in an interactive session, where the report is re-sent to
+the model on every subsequent turn, so its cost is paid per turn rather than once.
+
+`[magi.complexity]` sets the length thresholds (in **characters**, not bytes) below
+which the complexity gate vetoes an autonomous consult — see
+[Mode routing](#mode-routing) above. Absent, the built-in thresholds still apply; a
+threshold set to `0` disables the veto for that mode only.
 
 #### Quick start — local Ollama (no cost, no rate limits)
 
@@ -472,6 +551,7 @@ unaffected.
 - **Secrets separation.** The passphrase (which unlocks the DEK) and the stored API keys (entries *inside* the vault) are different secrets in different places: rotating a stored API key never requires re-keying the passphrase, and a wrong API key never invalidates the local conversation DB. `magi-rs vault passwd` rotates the passphrase without re-encrypting any record (it re-wraps the same DEK).
 - **Filesystem sandbox.** Every file-touching tool canonicalizes its target and validates it against the workspace root via `PathGuard` (handling Windows `\\?\` verbatim prefixes, null-byte attacks, and lexical normalization).
 - **Shell sandbox.** The `bash` tool enforces a per-binary argument allowlist and bans shell metacharacters to prevent subshell injection on both PowerShell and bash.
+- **No credentials in `magi.toml`.** An authenticated `base_url` carries `[user]`/`[password]` placeholders, not a literal credential — the real value is resolved from the vault in memory at use time and is never written to disk. A URL that does end up with an embedded credential (e.g. copied from an older config) is redacted **by position**, not by content, in every notice, error and report — including a doubly percent-encoded credential and a URL that fails to parse outright (redacted entirely, as the safe failure direction).
 
 ---
 
@@ -480,12 +560,23 @@ unaffected.
 ```
 src/
   main.rs              -- config discovery, passphrase resolution / vault open, tool registration, entry
-  lib.rs               -- library root (pub mod vault) so fuzz / coverage targets can link
-  config.rs            -- MagiConfig (magi.toml load + provider/model resolution)
+  lib.rs               -- library root (pub mod vault, magi, redact, ...) so fuzz / coverage targets can link
+  config.rs            -- MagiConfig (magi.toml load + provider/model resolution); config/migrate.rs submodule
   defaults.rs          -- single source of truth for all built-in default literals
+  redact.rs            -- URL userinfo redaction by position (REQ-A16), never by content
+  notices.rs           -- startup-notice tiering (Blocking / Resolution / Info)
+  magi/                -- MAGI trio subsystem: mode resolution, complexity gate, probe (lib, pure)
+    mod.rs             -- shared timeout-scale / gate / probe constants
+    kind.rs            -- ProviderKind vocabulary (ollama | openai-compat | anthropic)
+    mode.rs            -- Mode/ModeSource vocabulary + five-level resolve_mode_guarded
+    gate.rs            -- complexity gate: pure predicate over content length + per-mode threshold
+    probe.rs           -- model measurement via magi-core's ProviderProbe (composition, not migration)
+    endpoint.rs        -- base_url credential-placeholder templates, resolved from the vault
+    report_anchors.rs  -- named anchors into magi-core's report markdown, for bounded-output truncation
   agent/
     mod.rs             -- Agent orchestrator: multi-turn tool loop + approval gate
     provider.rs        -- Provider trait; AnthropicProvider (SSE) + OpenAiCompatibleProvider + StaticProvider
+    mode_classifier.rs -- mode classification over the main provider (bin; REQ-A07c)
   memory/
     mod.rs             -- subsystem facade: MemoryKind, public re-exports (recall, assemble_selective)
     store.rs           -- SqliteVectorStore: encrypted vector store (memories table)
