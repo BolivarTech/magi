@@ -1100,8 +1100,8 @@ mod tests {
     /// `RoutingMockProvider` (no network) — deterministic, mirrors the double used
     /// in `consult.rs` so a direct/forced consult yields a non-degraded report.
     fn canned_magi() -> Arc<Magi> {
-        // magi-core 3.x lee el veredicto SOLO entre marcadores; un JSON pelado
-        // (formato válido en 2.x) ya no se parsea y el mage cuenta como fallido.
+        // magi-core 3.x reads the verdict ONLY between markers; a bare JSON (valid format in
+        // 2.x) is no longer parsed and the mage counts as failed.
         fn agent_json(agent: &str) -> String {
             let verdict = format!(
                 r#"{{"agent":"{agent}","verdict":"approve","confidence":0.9,"summary":"s","reasoning":"r","findings":[],"recommendation":"rec"}}"#
@@ -2483,12 +2483,11 @@ mod tests {
         );
     }
 
-    /// A forced consult does NOT double-fire: the runner-injected consult runs
-    /// FIRST (before the model's first turn), and if the model ALSO requests
-    /// `consult` afterward, that redundant request is answered but never
-    /// re-executed or re-recorded — `RunOutcome.tool_calls` still shows exactly
-    /// one `consult` entry (REQ-H22: "no se re-dispara aunque el agente
-    /// quisiera").
+    /// A forced consult does NOT double-fire: the runner-injected consult runs FIRST (before
+    /// the model's first turn), and if the model ALSO requests `consult` afterward, that
+    /// redundant request is answered but never re-executed or re-recorded —
+    /// `RunOutcome.tool_calls` still shows exactly one `consult` entry (`REQ-H22: "does not re-
+    /// fire even if the agent wanted to"`).
     #[tokio::test]
     async fn test_query_forced_consult_does_not_double_fire() {
         let provider = ScriptedProvider::new(vec![

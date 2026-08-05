@@ -2,103 +2,101 @@
 // Version: 1.0.0
 // Date: 2026-07-18
 
-//! Resolución de parámetros de una corrida headless: precedencia por campo y el
-//! clamp de costo del operador (REQ-H12/H12b).
+//! Resolution of parameters for a headless run: per-field precedence and the operator cost
+//! clamp (REQ-H12/H12b).
 //!
-//! [`resolve`] combina tres fuentes con precedencia **flag CLI > envelope >
-//! defaults (toml/built-in)** para las preferencias (`model`/`provider`/
-//! `consult`), y aplica dos límites de **seguridad**:
-//! - `max_tool_calls` es un **techo de costo**: el valor pedido se clampea a
-//!   `operator_ceiling` (el envelope puede pedir menos, nunca más). El techo lo
-//!   computa el *caller* (bin), no esta función.
-//! - `system` es un **límite de prompt-injection**: el `system` del envelope se
-//!   ignora salvo que el operador lo habilite con `allow_system_override`.
+//! [`resolve`] combines three sources with precedence **CLI flag > envelope > defaults
+//! (toml/built-in)** for preferences (`model`/`provider`/ `consult`), and applies two
+//! **safety** limits:
+//! - `max_tool_calls` is a **cost ceiling**: the requested value is clamped to
+//! `operator_ceiling` (the envelope may request less, never more). The ceiling is computed by
+//! the *caller* (bin), not this function.
+//! - `system` is a **prompt-injection limit**: the envelope's `system` is
+//! ignored unless the operator enables it with `allow_system_override`.
 //!
-//! La función es **pura y sin dependencias del bin** (toma structs lib-locales,
-//! no `MagiConfig`/`Args`), por lo que se testea en aislamiento (R-H05).
+//! The function is **pure and has no binary dependencies** (it takes lib-local structs, not
+//! `MagiConfig`/`Args`), so it is tested in isolation (R-H05).
 //!
-//! Visibilidad `pub`: [`Resolved`] embebe [`SystemPolicy`]/[`AppliedCaps`] de
-//! `types.rs`, que son `pub` por la misma razón — el runner de MS2 vive en el
-//! crate del binario y solo puede alcanzar API `pub` de la lib.
+//! `pub` visibility: [`Resolved`] embeds [`SystemPolicy`]/[`AppliedCaps`] from `types.rs`,
+//! which are `pub` for the same reason — the MS2 runner lives in the binary crate and can only
+//! reach `pub` APIs from the lib.
 
 use super::input::Envelope;
 use super::types::{AppliedCaps, SystemPolicy};
 
-/// Defaults derivados de `magi.toml` (más el built-in) que el bin rellena.
+/// Defaults derived from `magi.toml` (plus built-in) filled in by the bin.
 ///
-/// Los campos ya-resueltos (`model`/`provider`/`system`) son `String` porque el
-/// bin colapsa el fallback toml→built-in antes de construir este struct; los
-/// opcionales quedan `None` cuando ni el toml ni el built-in fijan un valor.
+/// The already-resolved fields (`model`/`provider`/`system`) are `String` because the bin
+/// collapses the toml→built-in fallback before constructing this struct; the optionals remain
+/// `None` when neither toml nor built-in sets a value.
 #[derive(Debug, Clone)]
 pub struct ConfigDefaults {
-    /// Modelo LLM por defecto (toml o built-in ya colapsados).
+    /// Default LLM model (toml or built-in already collapsed).
     pub model: String,
-    /// Proveedor LLM por defecto (toml o built-in ya colapsados).
+    /// Default LLM provider (toml or built-in already collapsed).
     pub provider: String,
-    /// Tope de llamadas a tools del toml, si lo fija; participa del techo.
+    /// Tool-call ceiling from toml, if set.
     pub max_tool_calls: Option<u32>,
-    /// Preferencia de `consult` del toml, si la fija.
+    /// `consult` preference from toml, if set.
     pub consult: Option<bool>,
-    /// System-prompt del operador (rige salvo override habilitado).
+    /// Operator system-prompt (governs unless override enabled).
     pub system: String,
 }
 
-/// Overrides provenientes de flags CLI del operador (ganan sobre el envelope).
+/// Overrides coming from operator CLI flags (win over the envelope).
 ///
-/// Todo `None` significa "el operador no pasó ese flag": la resolución cae al
-/// envelope y luego a los defaults.
+/// All `None` means "the operator did not pass that flag": resolution falls to the envelope and
+/// then to defaults.
 #[derive(Debug, Clone, Default)]
 pub struct CliOverrides {
-    /// Modelo forzado por flag, si se pasó.
+    /// Model forced by flag, if passed.
     pub model: Option<String>,
-    /// Proveedor forzado por flag, si se pasó.
+    /// Provider forced by flag, if passed.
     pub provider: Option<String>,
-    /// Tope de llamadas a tools forzado por flag, si se pasó.
+    /// Tool-call ceiling forced by flag, if passed.
     pub max_tool_calls: Option<u32>,
-    /// Preferencia de `consult` forzada por flag, si se pasó.
+    /// `consult` preference forced by flag, if passed.
     pub consult: Option<bool>,
 }
 
-/// Parámetros efectivos de la corrida tras aplicar precedencia y clamps.
+/// Effective run parameters after applying precedence and clamps.
 ///
-/// `applied_caps` hace **visible** el resultado de los límites de seguridad
-/// (clamp de costo, override de system) para que el caller no falle en silencio.
+/// `applied_caps` makes the result of the safety limits **visible** (cost clamp, system
+/// override) so the caller does not silently fail.
 #[derive(Debug, Clone)]
 pub struct Resolved {
-    /// Modelo LLM efectivo.
+    /// Effective LLM model.
     pub model: String,
-    /// Proveedor LLM efectivo.
+    /// Effective LLM provider.
     pub provider: String,
-    /// System-prompt efectivo junto con su origen (operador vs. caller).
+    /// Effective system-prompt together with its origin (operator vs. caller).
     pub system: SystemPolicy,
-    /// Tope efectivo de llamadas a tools (ya clampeado al techo del operador).
+    /// Effective tool-call ceiling (already clamped to the operator's ceiling).
     pub max_tool_calls: u32,
-    /// Preferencia de `consult` efectiva; `None` deja decidir al agente.
+    /// Effective `consult` preference; `None` lets the agent decide.
     pub consult: Option<bool>,
-    /// Límites efectivos aplicados (clamp de costo, override de system).
+    /// Effective limits applied (cost clamp, system override).
     pub applied_caps: AppliedCaps,
 }
 
-/// Resuelve los parámetros efectivos de la corrida por precedencia y clamp.
+/// Resolves the effective run parameters by precedence and clamp.
 ///
-/// Precedencia por campo para las preferencias: `overrides` (flag CLI) > `env`
-/// (envelope) > `defaults` (toml/built-in). `max_tool_calls` sigue la misma
-/// cadena para el *valor pedido*, luego se clampea a `operator_ceiling`
-/// (`min`), marcando `max_tool_calls_clamped` si el pedido lo excedía; si nadie
-/// pide un valor, el efectivo es el techo. El `system` del envelope solo se
-/// honra (`SystemPolicy::CallerOverride`) si `allow_system_override` es `true`;
-/// de lo contrario rige el del operador (`SystemPolicy::Operator`).
+/// Per-field precedence for preferences: `overrides` (CLI flag) > `env` (envelope) > `defaults`
+/// (toml/built-in). `max_tool_calls` follows the same chain for the *requested value*, then is
+/// clamped to `operator_ceiling` (`min`), setting `max_tool_calls_clamped` if the request
+/// exceeded it; if nobody requests a value, the effective is the ceiling. The envelope's
+/// `system` is only honored (`SystemPolicy::CallerOverride`) if `allow_system_override` is
+/// `true`; otherwise the operator's governs (`SystemPolicy::Operator`).
 ///
-/// El `operator_ceiling` lo computa el caller (no se recalcula aquí);
-/// `timeout_secs` queda `None` (lo fija MS2).
+/// The caller computes `operator_ceiling` (not recomputed here); `timeout_secs` remains `None`
+/// (set by MS2).
 ///
 /// # Examples
 ///
-/// Un envelope que pide `max_tool_calls: Some(999)` con `operator_ceiling = 15`
-/// produce un [`Resolved`] con `max_tool_calls == 15` y
-/// `applied_caps.max_tool_calls_clamped == true` (el pedido se recorta al techo).
-/// Ver los tests del módulo para casos ejecutables; este ejemplo es
-/// ilustrativo (`ignore`), no un doctest ejecutado.
+/// An envelope requesting `max_tool_calls: Some(999)` with `operator_ceiling = 15` produces a
+/// [`Resolved`] with `max_tool_calls == 15` and `applied_caps.max_tool_calls_clamped == true`
+/// (the request is trimmed to the ceiling). See the module tests for runnable cases; this
+/// example is illustrative (`ignore`), not a run doctest.
 pub fn resolve(
     env: Envelope,
     defaults: &ConfigDefaults,
@@ -106,7 +104,7 @@ pub fn resolve(
     operator_ceiling: u32,
     allow_system_override: bool,
 ) -> Resolved {
-    // Preferencias: overrides (flag) > env (envelope) > defaults (toml/built-in).
+    // Preferences: overrides (flag) > env (envelope) > defaults (toml/built-in).
     let model = overrides
         .model
         .clone()
@@ -119,8 +117,8 @@ pub fn resolve(
         .unwrap_or_else(|| defaults.provider.clone());
     let consult = overrides.consult.or(env.consult).or(defaults.consult);
 
-    // Costo (SEGURIDAD): el pedido sigue la precedencia; el efectivo se clampea
-    // al techo del operador. Sin pedido ⇒ el efectivo es el techo, sin clamp.
+    // Cost (SAFETY): the request follows precedence; the effective is clamped to the operator's
+    // ceiling. No request ⇒ the effective is the ceiling, no clamp.
     let requested_max = overrides
         .max_tool_calls
         .or(env.max_tool_calls)
@@ -133,7 +131,7 @@ pub fn resolve(
         None => (operator_ceiling, false),
     };
 
-    // System (SEGURIDAD): el del envelope solo se honra con el flag del operador.
+    // System (SAFETY): the envelope's is only honored with the operator's flag.
     let (system, system_override_applied) = match (allow_system_override, env.system) {
         (true, Some(caller)) => (SystemPolicy::CallerOverride(caller), true),
         _ => (SystemPolicy::Operator(defaults.system.clone()), false),
@@ -158,7 +156,7 @@ pub fn resolve(
 mod tests {
     use super::*;
 
-    /// Envelope con `prompt` fijo y el resto de campos vacíos, para tests.
+    /// Envelope with fixed `prompt` and the rest of the fields empty, for tests.
     fn base_env() -> Envelope {
         Envelope {
             prompt: "p".to_string(),
@@ -172,7 +170,7 @@ mod tests {
         }
     }
 
-    /// Defaults con valores distinguibles del operador, para tests.
+    /// Defaults with values distinguishable from the operator's, for tests.
     fn base_defaults() -> ConfigDefaults {
         ConfigDefaults {
             model: "def-model".to_string(),
@@ -183,8 +181,8 @@ mod tests {
         }
     }
 
-    /// Un envelope que pide MÁS que el techo del operador se clampea al techo y
-    /// marca el clamp (REQ-H12b: el caller no puede subir el presupuesto).
+    /// An envelope requesting MORE than the operator's ceiling is clamped to the ceiling and
+    /// marks the clamp (REQ-H12b: the caller cannot raise the budget).
     #[test]
     fn test_envelope_max_tool_calls_clamped_to_operator_ceiling() {
         let mut env = base_env();
@@ -197,7 +195,7 @@ mod tests {
         assert_eq!(r.applied_caps.max_tool_calls, 15);
     }
 
-    /// El flag CLI gana sobre el valor del envelope para las preferencias.
+    /// The CLI flag wins over the envelope value for preferences.
     #[test]
     fn test_cli_flag_wins_over_envelope() {
         let mut env = base_env();
@@ -219,11 +217,11 @@ mod tests {
         assert_eq!(r.consult, Some(true));
     }
 
-    /// Sin flag ni envelope, las preferencias caen a los defaults; con envelope
-    /// (y sin flag), el envelope gana sobre los defaults.
+    /// Without flag or envelope, preferences fall to defaults; with envelope (and no flag), the
+    /// envelope wins over defaults.
     #[test]
     fn test_precedence_envelope_over_defaults_and_fallthrough() {
-        // Nada pedido ⇒ defaults.
+        // Nothing requested ⇒ defaults.
         let r = resolve(
             base_env(),
             &base_defaults(),
@@ -235,15 +233,15 @@ mod tests {
         assert_eq!(r.provider, "def-provider");
         assert_eq!(r.consult, None);
 
-        // Envelope pedido, sin flag ⇒ envelope gana sobre defaults.
+        // Envelope requested, no flag ⇒ envelope wins over defaults.
         let mut env = base_env();
         env.model = Some("env-model".to_string());
         let r2 = resolve(env, &base_defaults(), &CliOverrides::default(), 15, false);
         assert_eq!(r2.model, "env-model");
     }
 
-    /// El `system` del envelope se IGNORA sin el flag del operador: rige el del
-    /// operador y `system_override_applied` queda `false` (REQ-H12b/H37).
+    /// The envelope's `system` is IGNORED without the operator's flag: the operator's governs
+    /// and `system_override_applied` remains `false` (REQ-H12b/H37).
     #[test]
     fn test_envelope_system_ignored_without_override_flag() {
         let mut env = base_env();
@@ -255,8 +253,8 @@ mod tests {
         assert!(!r.applied_caps.system_override_applied);
     }
 
-    /// El `system` del envelope se HONRA con el flag del operador: se convierte
-    /// en `CallerOverride` y `system_override_applied` queda `true`.
+    /// The envelope's `system` is HONORED with the operator's flag: it becomes `CallerOverride`
+    /// and `system_override_applied` remains `true`.
     #[test]
     fn test_envelope_system_honored_with_override_flag() {
         let mut env = base_env();
@@ -268,8 +266,8 @@ mod tests {
         assert!(r.applied_caps.system_override_applied);
     }
 
-    /// El flag habilitado sin un `system` en el envelope no inventa un override:
-    /// rige el del operador y no se marca aplicado.
+    /// The enabled flag without a `system` in the envelope does not invent an override: the
+    /// operator's governs and it is not marked applied.
     #[test]
     fn test_override_flag_without_envelope_system_uses_operator() {
         let r = resolve(
@@ -284,8 +282,8 @@ mod tests {
         assert!(!r.applied_caps.system_override_applied);
     }
 
-    /// Un envelope que pide MENOS que el techo no se clampea; el efectivo es el
-    /// pedido (borde de la regla de costo).
+    /// An envelope requesting LESS than the ceiling is not clamped; the effective is the
+    /// request (edge of the cost rule).
     #[test]
     fn test_envelope_max_tool_calls_below_ceiling_not_clamped() {
         let mut env = base_env();
@@ -297,8 +295,8 @@ mod tests {
         assert!(!r.applied_caps.max_tool_calls_clamped);
     }
 
-    /// Sin pedido de `max_tool_calls` en ninguna fuente, el efectivo cae al
-    /// techo del operador y no se marca clamp.
+    /// Without a `max_tool_calls` request from any source, the effective falls to the
+    /// operator's ceiling and no clamp is marked.
     #[test]
     fn test_max_tool_calls_falls_through_to_operator_ceiling() {
         let r = resolve(
@@ -314,7 +312,7 @@ mod tests {
         assert_eq!(r.applied_caps.timeout_secs, None);
     }
 
-    /// Un pedido EXACTAMENTE igual al techo no se clampea (`>` estricto).
+    /// A request EXACTLY equal to the ceiling is not clamped (strict `>`).
     #[test]
     fn test_max_tool_calls_equal_to_ceiling_not_clamped() {
         let mut env = base_env();

@@ -4226,8 +4226,8 @@ mod tests {
         })
     }
 
-    /// Corre UN turno con los contenidos dados como consults autorruteados,
-    /// uno por turno (SC-A20f/SC-A20m).
+    /// Runs ONE turn with the given contents as self-routed consults, one per turn
+    /// (SC-A20f/SC-A20m).
     async fn run_turn_with_consults(contents: &[&str]) -> anyhow::Result<TurnOutcome> {
         let (mut agent, magi_calls) =
             agent_with_consult_double(SequentialConsultProvider::new(contents));
@@ -4235,8 +4235,7 @@ mod tests {
         run_and_observe(&mut agent, config, &magi_calls, &gate_log_sink).await
     }
 
-    /// Igual, pero emitiendo los `ToolUse` en UN solo bloque de respuesta
-    /// (SC-A20i).
+    /// Same, but emitting the `ToolUse` blocks in a SINGLE response block (SC-A20i).
     async fn run_turn_with_two_tooluse_blocks(contents: &[&str]) -> anyhow::Result<TurnOutcome> {
         let (mut agent, magi_calls) =
             agent_with_consult_double(AllAtOnceConsultProvider::new(contents));
@@ -4244,16 +4243,20 @@ mod tests {
         run_and_observe(&mut agent, config, &magi_calls, &gate_log_sink).await
     }
 
-    /// Corre un turno con un único consult autorruteado.
+    /// Runs a turn with a single self-routed consult.
     async fn run_turn_with_autonomous_consult(content: &str) -> anyhow::Result<TurnOutcome> {
         run_turn_with_consults(&[content]).await
     }
 
-    /// **PLURAL** — an orphan the plan names in several tasks but nobody
-    /// defines (the pre-flight sweep listed it as such); writing it is this
-    /// task's own Step 1. Each `(query, mode)` pair is dispatched on its OWN
-    /// turn, with `mode` carried in the tool input as the AGENT's own choice
-    /// (`agent_chosen_mode`), not a human `--mode`.
+    /// **PLURAL** — an orphan the plan names in several tasks but nobody defines (the pre-
+    /// flight sweep listed it as such); writing it is this task's own Step 1. Each `(query,
+    /// mode)` pair is dispatched on its OWN turn, with `mode` carried in the tool input as the
+    /// AGENT's own choice (`agent_chosen_mode`), not a human `--mode`.
+    /// Ends a FIRST turn via each of the four exit paths, closing the door with two consecutive
+    /// vetoes beforehand whenever `contents` has (at least) two trivial entries — so all four
+    /// scenarios genuinely close the door before concluding, not just the ones that happen to
+    /// need it. Returns the `Agent` wrapped for reuse across a SECOND turn
+    /// ([`run_turn_with_consults_on`]).
     async fn run_turn_with_autonomous_consults(
         pairs: &[(&str, Mode)],
     ) -> anyhow::Result<TurnOutcome> {
@@ -4263,12 +4266,9 @@ mod tests {
         run_and_observe(&mut agent, config, &magi_calls, &gate_log_sink).await
     }
 
-    /// Ends a FIRST turn via each of the four exit paths, closing the door
-    /// with two consecutive vetoes beforehand whenever `contents` has (at
-    /// least) two trivial entries — so all four scenarios genuinely close the
-    /// door before concluding, not just the ones that happen to need it.
-    /// Returns the `Agent` wrapped for reuse across a SECOND turn
-    /// ([`run_turn_with_consults_on`]).
+    /// Runs a FRESH turn on an `Agent` reused from [`agent_after_turn_ending_in`], with its own
+    /// provider/tool/telemetry, so a stale counter from the prior turn would be the only thing
+    /// that could make this one see it.
     async fn agent_after_turn_ending_in(
         exit: Exit,
         contents: &[&str],
@@ -4290,9 +4290,7 @@ mod tests {
         tokio::sync::Mutex::new(agent)
     }
 
-    /// Runs a FRESH turn on an `Agent` reused from [`agent_after_turn_ending_in`],
-    /// with its own provider/tool/telemetry, so a stale counter from the prior
-    /// turn would be the only thing that could make this one see it.
+    /// SC-A20 / SC-A20c: the gate vetoes the autonomous route without erroring.
     async fn run_turn_with_consults_on(
         agent: &tokio::sync::Mutex<Agent>,
         contents: &[&str],
@@ -4305,7 +4303,7 @@ mod tests {
         run_and_observe(&mut guard, config, &magi_calls, &gate_log_sink).await
     }
 
-    /// SC-A20 / SC-A20c: the gate vetoes the autonomous route without erroring.
+    /// SC-A20e: the veto message discourages retrying and never names the threshold.
     #[tokio::test]
     async fn the_gate_vetoes_the_autonomous_route_without_erroring() {
         let outcome = run_turn_with_autonomous_consult("trivial").await;
@@ -4316,8 +4314,7 @@ mod tests {
         assert_eq!(outcome.unwrap().magi_calls, 0, "zero model calls");
     }
 
-    /// SC-A20e: the veto message discourages retrying and never names the
-    /// threshold.
+    /// SC-A20f / SC-A20m: two CONSECUTIVE vetoes are terminal; a success in between resets.
     #[tokio::test]
     async fn the_veto_message_discourages_retry_without_naming_the_threshold() {
         let msg = veto_message(&Mode::Analysis);
@@ -4331,8 +4328,10 @@ mod tests {
         );
     }
 
-    /// SC-A20f / SC-A20m: two CONSECUTIVE vetoes are terminal; a success in
-    /// between resets.
+    /// A veto does NOT loosen the turn's caps. Complements SC-A20f from the other side: SC-A20f
+    /// pins that the consult PATH closes on the second veto; this pins that the WHOLE TURN
+    /// stays capped in the meantime — every processed call (veto, disabled continuation, or
+    /// dispatch) consumes exactly one `max_tool_calls` slot.
     #[tokio::test]
     async fn two_consecutive_vetoes_are_terminal_but_a_success_resets() {
         let out = run_turn_with_consults(&["trivial", "tambien trivial"])
@@ -4351,14 +4350,11 @@ mod tests {
         );
     }
 
-    /// A veto does NOT loosen the turn's caps. Complements SC-A20f from the
-    /// other side: SC-A20f pins that the consult PATH closes on the second
-    /// veto; this pins that the WHOLE TURN stays capped in the meantime —
-    /// every processed call (veto, disabled continuation, or dispatch)
-    /// consumes exactly one `max_tool_calls` slot.
+    /// Many more invocations than `max_tool_calls`, all vetoable.
     #[tokio::test]
     async fn a_veto_still_consumes_the_turn_budget() {
-        // Many more invocations than `max_tool_calls`, all vetoable.
+        // TERMINATION, not a lower bound: 40 vetoable invocations against a `max_tool_calls` of
+        // 15 MUST end exactly at the cap.
         let script: Vec<(&str, Mode)> = vec![("x", Mode::Analysis); 40];
         let out = run_turn_with_autonomous_consults(&script).await.unwrap();
 
@@ -4366,8 +4362,7 @@ mod tests {
             out.tool_calls_counted >= usize::from(MAX_CONSECUTIVE_VETOES),
             "each veto counts as an invocation: max_tool_calls counts what the model asked for"
         );
-        // TERMINATION, not a lower bound: 40 vetoable invocations against a
-        // `max_tool_calls` of 15 MUST end exactly at the cap.
+        // SC-A20g: the counter dies with the turn, through all FOUR exit paths.
         assert_eq!(out.exit, Exit::MaxToolCalls);
         assert_eq!(
             out.tool_calls_counted, DEFAULT_MAX_TOOL_CALLS,
@@ -4375,7 +4370,7 @@ mod tests {
         );
     }
 
-    /// SC-A20g: the counter dies with the turn, through all FOUR exit paths.
+    /// SC-A20h: every evaluation is logged — in EVERY surface, with or without an observer.
     #[tokio::test]
     async fn the_counter_dies_with_the_turn_on_every_exit_path() {
         for exit in [
@@ -4395,8 +4390,8 @@ mod tests {
         }
     }
 
-    /// SC-A20h: every evaluation is logged — in EVERY surface, with or
-    /// without an observer.
+    /// Exercised WITHOUT an observer, which is the TUI's configuration: the gate's telemetry
+    /// cannot depend on a channel the highest-traffic surface does not have.
     #[tokio::test]
     async fn every_gate_evaluation_is_logged() {
         let long = "x".repeat(magi_rs::magi::GATE_ANALYSIS + 1);
@@ -4404,9 +4399,9 @@ mod tests {
             .await
             .unwrap()
             .gate_log;
-        // Exercised WITHOUT an observer, which is the TUI's configuration:
-        // the gate's telemetry cannot depend on a channel the highest-traffic
-        // surface does not have.
+        // SC-A20i: several `ToolUse` blocks in the SAME turn count exactly like separate turns,
+        // and two concurrent sessions never contaminate each other — proven by actually running
+        // them concurrently, not just asserted from the shape of the code.
         assert!(
             !log.is_empty(),
             "without a RunObserver the telemetry must still be recorded — that coupling was \
@@ -4425,10 +4420,13 @@ mod tests {
         );
     }
 
-    /// SC-A20i: several `ToolUse` blocks in the SAME turn count exactly like
-    /// separate turns, and two concurrent sessions never contaminate each
-    /// other — proven by actually running them concurrently, not just
-    /// asserted from the shape of the code.
+    /// Task 3.2's namesake test. `authorize_and_execute_tool` (the forced consult injection,
+    /// REQ-H22) and the `ToolUse` loop (the model's own choice) are two DISTINCT entrances to
+    /// the same `consult` tool, and only the second passes through the complexity gate
+    /// (REQ-A20). A prior attempt at this test (Task 3.1) simulated both sides with hardcoded
+    /// literals and could not fail under any change — see the `#[cfg(test)]` comment in
+    /// `src/magi/gate.rs` naming this task as the gap's owner. This drives BOTH real call sites
+    /// against a real `Agent`.
     #[tokio::test]
     async fn multiple_tooluse_blocks_in_one_turn_count_like_separate_turns() {
         let out = run_turn_with_two_tooluse_blocks(&["trivial", "tambien trivial"])
@@ -4453,22 +4451,15 @@ mod tests {
         );
     }
 
-    /// Task 3.2's namesake test. `authorize_and_execute_tool` (the forced
-    /// consult injection, REQ-H22) and the `ToolUse` loop (the model's own
-    /// choice) are two DISTINCT entrances to the same `consult` tool, and
-    /// only the second passes through the complexity gate (REQ-A20). A prior
-    /// attempt at this test (Task 3.1) simulated both sides with hardcoded
-    /// literals and could not fail under any change — see the `#[cfg(test)]`
-    /// comment in `src/magi/gate.rs` naming this task as the gap's owner.
-    /// This drives BOTH real call sites against a real `Agent`.
+    /// (a) FORCED: `force_consult = true` injects consult via `authorize_and_execute_tool`
+    /// directly, BEFORE the loop even starts — never touching `dispatch_consult_through_gate`.
+    /// Trivial content that would be vetoed anywhere else must still dispatch here.
     #[tokio::test]
     async fn a_forced_injection_bypasses_the_gate_while_a_model_choice_does_not() {
         use std::sync::atomic::Ordering;
 
-        // (a) FORCED: `force_consult = true` injects consult via
-        // `authorize_and_execute_tool` directly, BEFORE the loop even starts —
-        // never touching `dispatch_consult_through_gate`. Trivial content
-        // that would be vetoed anywhere else must still dispatch here.
+        // (b) MODEL-ISSUED: the SAME trivial content, requested by the model through the
+        // ordinary `ToolUse` loop, DOES reach the gate and gets vetoed.
         let (forced_tool, forced_calls) = CountingConsultTool::new();
         let mut forced_agent = Agent::new(Arc::new(MockProvider));
         forced_agent.register_tool(Box::new(forced_tool));
@@ -4488,9 +4479,13 @@ mod tests {
              forbids vetoing it — it never reaches the gate at all"
         );
 
-        // (b) MODEL-ISSUED: the SAME trivial content, requested by the model
-        // through the ordinary `ToolUse` loop, DOES reach the gate and gets
-        // vetoed.
+        // MS2 (REQ-A20/REQ-A07d), review finding I1: the forced pre-loop injection (REQ-H22)
+        // must ALSO resolve and inject a mode before dispatching, not just the model-issued
+        // `ToolUse` path (`dispatch_consult_through_gate`) — REQ-A20 forbids ever vetoing it,
+        // but that is not license to skip resolution. The call-site test above only counts
+        // invocations; this checks WHICH mode actually reached `execute`, so a regression that
+        // stops injecting on this path (falling back silently to `ConsultTool`'s own
+        // `Mode::Analysis` default) fails here even though the tool still runs exactly once.
         let (model_tool, model_calls) = CountingConsultTool::new();
         let provider = SequentialConsultProvider::new(&["trivial"]);
         let mut model_agent = Agent::new(Arc::new(provider));
@@ -4508,15 +4503,9 @@ mod tests {
         );
     }
 
-    /// MS2 (REQ-A20/REQ-A07d), review finding I1: the forced pre-loop
-    /// injection (REQ-H22) must ALSO resolve and inject a mode before
-    /// dispatching, not just the model-issued `ToolUse` path
-    /// (`dispatch_consult_through_gate`) — REQ-A20 forbids ever vetoing it,
-    /// but that is not license to skip resolution. The call-site test above
-    /// only counts invocations; this checks WHICH mode actually reached
-    /// `execute`, so a regression that stops injecting on this path (falling
-    /// back silently to `ConsultTool`'s own `Mode::Analysis` default) fails
-    /// here even though the tool still runs exactly once.
+    /// ───────────────────────────────────────────────────────────────────────── Task 3.3 — the
+    /// "no consensus" mark (REQ-A20/SC-A20k)
+    /// ─────────────────────────────────────────────────────────────────────────
     #[tokio::test]
     async fn a_forced_consult_carries_a_resolved_mode_into_execute() {
         let (tool, _calls, last_args) = CountingConsultTool::new_recording();
@@ -4547,21 +4536,17 @@ mod tests {
         assert_eq!(source, magi_rs::magi::mode::ModeSource::Default);
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // Task 3.3 — the "no consensus" mark (REQ-A20/SC-A20k)
-    // ─────────────────────────────────────────────────────────────────────────
+    // Drives ONE real turn through `Agent::query_streaming` over `provider` (registering the
+    // standard `consult` double) and returns exactly what a live consumer of the chunk stream
+    // would render — the same thing the TUI's `Input` handler does (`tui/mod.rs`'s forwarder
+    // task): concatenate every `StreamPiece::Content` piece, in order, ignoring
+    // `Reasoning`/`Notice`. This IS the only path the TUI's autonomous chat surface renders
+    // from — it discards `query_streaming`'s own return value on `Ok` (`tui/mod.rs`'s `Ok(_) =>
+    // Text("")`) — so asserting on this string asserts on the real rendering path, not a stand-
+    // in for it. Shared by both `render_turn_after_*` helpers below, which differ only in the
+    // provider script driving the turn.
 
-    /// Drives ONE real turn through `Agent::query_streaming` over `provider`
-    /// (registering the standard `consult` double) and returns exactly what
-    /// a live consumer of the chunk stream would render — the same thing
-    /// the TUI's `Input` handler does (`tui/mod.rs`'s forwarder task):
-    /// concatenate every `StreamPiece::Content` piece, in order, ignoring
-    /// `Reasoning`/`Notice`. This IS the only path the TUI's autonomous chat
-    /// surface renders from — it discards `query_streaming`'s own return
-    /// value on `Ok` (`tui/mod.rs`'s `Ok(_) => Text("")`) — so asserting on
-    /// this string asserts on the real rendering path, not a stand-in for
-    /// it. Shared by both `render_turn_after_*` helpers below, which differ
-    /// only in the provider script driving the turn.
+    /// A single trivial autonomous consult, vetoed by the gate.
     async fn render_turn(provider: impl Provider + 'static) -> String {
         let (mut agent, _magi_calls) = agent_with_consult_double(provider);
         let (tx, mut rx) = tokio::sync::mpsc::channel::<StreamPiece>(100);
@@ -4581,31 +4566,34 @@ mod tests {
         collector.await.unwrap_or_default()
     }
 
-    /// A single trivial autonomous consult, vetoed by the gate.
+    /// Content long enough to clear the `Analysis` threshold: the consult genuinely DISPATCHES
+    /// (the registered `CountingConsultTool` double actually runs), so the answer that follows
+    /// IS backed by a consult and must carry no mark.
     async fn render_turn_after_veto() -> String {
         render_turn(SequentialConsultProvider::new(&["trivial"])).await
     }
 
-    /// Content long enough to clear the `Analysis` threshold: the consult
-    /// genuinely DISPATCHES (the registered `CountingConsultTool` double
-    /// actually runs), so the answer that follows IS backed by a consult
-    /// and must carry no mark.
+    /// SC-A20k: the user distinguishes a consensus-backed answer from one that is not.
     async fn render_turn_after_successful_consult() -> String {
         let long = "x".repeat(magi_rs::magi::GATE_ANALYSIS + 10);
         render_turn(SequentialConsultProvider::new(&[long.as_str()])).await
     }
 
-    /// SC-A20k: the user distinguishes a consensus-backed answer from one
-    /// that is not.
+    /// Not just `.contains()`: a marker concatenated straight onto the last word of the answer
+    /// ("...done[NO CONSENSUS: ...]") would also satisfy `.contains()` while defeating the
+    /// entire point of a mark meant for a human to visually tell two kinds of answer apart —
+    /// fix round 1/I1's own catch. `ends_with` pins the SEPARATOR is actually there, not just
+    /// the mark somewhere in the string.
     #[tokio::test]
     async fn the_user_can_tell_a_non_consensus_answer_apart() {
         let rendered = render_turn_after_veto().await;
-        // Not just `.contains()`: a marker concatenated straight onto the
-        // last word of the answer ("...done[NO CONSENSUS: ...]") would also
-        // satisfy `.contains()` while defeating the entire point of a mark
-        // meant for a human to visually tell two kinds of answer apart —
-        // fix round 1/I1's own catch. `ends_with` pins the SEPARATOR is
-        // actually there, not just the mark somewhere in the string.
+        // The mark is meant to travel over TWO different channels for two different consumers
+        // (`final_text` for headless, an extra `StreamPiece::Content` for the TUI) that are
+        // mutually exclusive TODAY only by construction — headless drains the chunk stream
+        // purely for time-to-first-byte (`headless_runner.rs`'s `run_query`) and never reads
+        // `Content` payloads, the TUI never reads `final_text`. Nothing enforces that
+        // exclusivity, so if either surface ever started reading both, the mark would double up
+        // silently. This pins headless's own channel (`final_text`) to exactly ONE occurrence.
         let expected_suffix = format!("{NO_CONSENSUS_MARK_SEPARATOR}{NO_CONSENSUS_MARK}");
         assert!(
             rendered.ends_with(&expected_suffix),
@@ -4624,15 +4612,10 @@ mod tests {
         );
     }
 
-    /// The mark is meant to travel over TWO different channels for two
-    /// different consumers (`final_text` for headless, an extra
-    /// `StreamPiece::Content` for the TUI) that are mutually exclusive TODAY
-    /// only by construction — headless drains the chunk stream purely for
-    /// time-to-first-byte (`headless_runner.rs`'s `run_query`) and never
-    /// reads `Content` payloads, the TUI never reads `final_text`. Nothing
-    /// enforces that exclusivity, so if either surface ever started reading
-    /// both, the mark would double up silently. This pins headless's own
-    /// channel (`final_text`) to exactly ONE occurrence.
+    /// Mirrors `headless_runner::run_query`'s own drain task: read every piece (so
+    /// `query_streaming`'s bounded sender never blocks) but use none of their content —
+    /// headless's actual response comes from the `Result<String>` `query_streaming` returns,
+    /// not from this stream.
     #[tokio::test]
     async fn headless_receives_the_mark_exactly_once_in_final_text() {
         let (mut agent, _magi_calls) =

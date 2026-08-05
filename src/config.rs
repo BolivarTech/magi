@@ -1927,9 +1927,9 @@ mod tests {
             "provider = \"anthropic\"\nbase_url = \"https://alice:s3cr3t@host/v1\"\n",
         )
         .unwrap();
-    // Test precondition: the root template DOES fail (literal credential), so
-    // `resolution_notices()` runs under exactly the condition that its own comment
-    // called "infallible in practice".
+        // Test precondition: the root template DOES fail (literal credential), so
+        // `resolution_notices()` runs under exactly the condition that its own comment
+        // called "infallible in practice".
         assert!(cfg.effective_base_url().is_err());
 
         let notices = cfg.resolution_notices();

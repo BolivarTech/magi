@@ -2,8 +2,8 @@
 // Version: 1.0.0
 // Date: 2026-07-14
 #![forbid(unsafe_code)]
-//! Biblioteca de magi-rs: expone los subsistemas `magi`, `vault` y `headless`
-//! para fuzzing, cobertura y tests, además del binario `main.rs`.
+//! magi-rs library: exposes the `magi`, `vault`, and `headless` subsystems for fuzzing,
+//! coverage, and tests, as well as the `main.rs` binary.
 pub mod headless;
 pub mod magi;
 pub mod notices;
