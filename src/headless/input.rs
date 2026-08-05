@@ -3,12 +3,8 @@
 //! Reading and parsing of headless input (`-i <file>` / stdin, REQ-H03/H10/H11/H29).
 //!
 //! Two orthogonal responsibilities:
-//! - [`read_input_bounded`] bounds untrusted bytes to `MAX_INPUT_BYTES`
-//! (never buffers an unlimited hostile source).
-//! - [`parse_input`] auto-detects plain text vs. JSON envelope and, for the
-//! envelope, applies a **single** hardened parser (one pass over the JSON) that rejects
-//! duplicate keys, unknown fields alongside `prompt`, non-string `prompt`, and pathological
-//! nesting (`> MAX_JSON_DEPTH`), even inside the values of unknown fields.
+//! - [`read_input_bounded`] bounds untrusted bytes to `MAX_INPUT_BYTES` (never buffers an unlimited hostile source).
+//! - [`parse_input`] auto-detects plain text vs. JSON envelope and, for the envelope, applies a **single** hardened parser (one pass over the JSON) that rejects duplicate keys, unknown fields alongside `prompt`, non-string `prompt`, and pathological nesting (`> MAX_JSON_DEPTH`), even inside the values of unknown fields.
 
 use std::cell::Cell;
 use std::collections::HashSet;
@@ -387,11 +383,8 @@ pub fn read_input_bounded(
 /// Semantics (a single parser, no double-parse):
 /// 1. Strict UTF-8: non-UTF8 bytes ⇒ [`HeadlessError::InputInvalid`].
 /// 2. `forced_fmt == Some(Text)` ⇒ never parses: all input is the `prompt`.
-/// 3. Auto-detect by the first non-blank byte: if it is not `{`, the input is not
-/// an envelope ⇒ prompt verbatim (or `InputInvalid` if `forced_fmt == Json`).
-/// 4. If it is `{`, a single pass (`EnvelopeVisitor`) applies dup-key,
-/// depth (`> MAX_JSON_DEPTH`, even inside unknown fields) and the end-of-map decision (without
-/// `prompt` ⇒ text; with `prompt` + unknown field ⇒ error; non-string `prompt` ⇒ error).
+/// 3. Auto-detect by the first non-blank byte: if it is not `{`, the input is not an envelope ⇒ prompt verbatim (or `InputInvalid` if `forced_fmt == Json`).
+/// 4. If it is `{`, a single pass (`EnvelopeVisitor`) applies dup-key, depth (`> MAX_JSON_DEPTH`, even inside unknown fields) and the end-of-map decision (without `prompt` ⇒ text; with `prompt` + unknown field ⇒ error; non-string `prompt` ⇒ error).
 ///
 /// The depth guard **wins** over "verbatim text": a `{`-input without `prompt` but
 /// pathologically nested is **rejected** for DoS, not accepted as a giant prompt.

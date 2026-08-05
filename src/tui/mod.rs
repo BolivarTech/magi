@@ -242,21 +242,8 @@ fn tui_consult_error_body(err: &MagiError, kind: ProviderKind) -> String {
 /// Two things must happen together, and both are about not lying to the
 /// user by omission:
 ///
-/// - **The error text is redacted.** `e` is a foreign [`ProviderError`] from
-///   magi-core — its `Display` can cite the endpoint URL, and magi-core does
-///   not know this crate's redaction rule (REQ-A16c). Every other foreign-
-///   error surface in this codebase routes through [`redact_foreign_error`]
-///   for exactly this reason; this one must too.
-/// - **Nothing keeps using the OLD credentials.** By the time this runs,
-///   [`handle_login`] already wrote a NEW key to the vault, so the running
-///   session and the vault now disagree about what the current credential
-///   is. Leaving `consult_magi_runner` and the registered `consult` tool
-///   pointed at whatever built successfully before this attempt — possibly
-///   nothing, possibly a stale provider from an earlier session — would let
-///   consult keep answering under a diverged credential while the user was
-///   told the rebuild failed. Dropping both makes the direct `/consult` path
-///   and the autonomous tool path fail closed the same way an unconfigured
-///   trio always does (REQ-A06), instead of silently using the wrong thing.
+/// - **The error text is redacted.** `e` is a foreign [`ProviderError`] from magi-core — its `Display` can cite the endpoint URL, and magi-core does not know this crate's redaction rule (REQ-A16c). Every other foreign- error surface in this codebase routes through [`redact_foreign_error`] for exactly this reason; this one must too.
+/// - **Nothing keeps using the OLD credentials.** By the time this runs, [`handle_login`] already wrote a NEW key to the vault, so the running session and the vault now disagree about what the current credential is. Leaving `consult_magi_runner` and the registered `consult` tool pointed at whatever built successfully before this attempt — possibly nothing, possibly a stale provider from an earlier session — would let consult keep answering under a diverged credential while the user was told the rebuild failed. Dropping both makes the direct `/consult` path and the autonomous tool path fail closed the same way an unconfigured trio always does (REQ-A06), instead of silently using the wrong thing.
 ///
 /// [`ProviderError`]: magi_core::error::ProviderError
 fn handle_trio_rebuild_failure(
@@ -745,27 +732,12 @@ impl App {
 /// (`Arc<dyn ModeClassifier>`), not borrowed.
 ///
 /// # Fields
-/// - `mode_classifier` — consulted by [`resolve_tui_consult_mode`] only when
-///   `/consult` has no explicit `--mode` and no `[magi].default_mode` is set
-///   (REQ-A07c).
-/// - `default_mode` — `[magi].default_mode`, resolved once at startup
-///   (REQ-A15).
-/// - `untrusted_content` — `[magi].untrusted_content` only; the TUI never
-///   exposes this as a command-line flag (REQ-A07d/SC-A07t).
-/// - `magi_kind` (REQ-A12c) — the [`ProviderKind`] the trio runs under. Feeds
-///   [`tui_consult_success_body`]/[`tui_consult_error_body`] so the explicit
-///   `/consult` command gets the SAME keyless-auth guidance
-///   `ConsultTool`/headless already have.
-/// - `max_query_bytes` (REQ-A11b) — `MagiConfig::effective_max_query_bytes()`,
-///   resolved once at startup. Checked by the explicit `/consult` command via
-///   `crate::tools::consult::check_query_size` — the SAME cap the tool path and
-///   the headless direct path enforce (SC-A11c).
-/// - `tool_result_cap` (REQ-A11b) — `MagiConfig::effective_tool_result_cap()`,
-///   resolved once at startup. Bounds the explicit `/consult` command's body via
-///   [`tui_consult_success_reply`] before it reaches the terminal — which reserves
-///   room for the `[DEGRADED: ...]` banner ahead of the report, rather than handing
-///   the whole joined string to `crate::tools::consult::truncate_report` the way a
-///   prior fix did (see [`tui_consult_success_body`]'s own doc).
+/// - `mode_classifier` — consulted by [`resolve_tui_consult_mode`] only when `/consult` has no explicit `--mode` and no `[magi].default_mode` is set (REQ-A07c).
+/// - `default_mode` — `[magi].default_mode`, resolved once at startup (REQ-A15).
+/// - `untrusted_content` — `[magi].untrusted_content` only; the TUI never exposes this as a command-line flag (REQ-A07d/SC-A07t).
+/// - `magi_kind` (REQ-A12c) — the [`ProviderKind`] the trio runs under. Feeds [`tui_consult_success_body`]/[`tui_consult_error_body`] so the explicit `/consult` command gets the SAME keyless-auth guidance `ConsultTool`/headless already have.
+/// - `max_query_bytes` (REQ-A11b) — `MagiConfig::effective_max_query_bytes()`, resolved once at startup. Checked by the explicit `/consult` command via `crate::tools::consult::check_query_size` — the SAME cap the tool path and the headless direct path enforce (SC-A11c).
+/// - `tool_result_cap` (REQ-A11b) — `MagiConfig::effective_tool_result_cap()`, resolved once at startup. Bounds the explicit `/consult` command's body via [`tui_consult_success_reply`] before it reaches the terminal — which reserves room for the `[DEGRADED: ...]` banner ahead of the report, rather than handing the whole joined string to `crate::tools::consult::truncate_report` the way a prior fix did (see [`tui_consult_success_body`]'s own doc).
 pub struct TuiMagiRuntimeConfig {
     /// Consulted only when `/consult` declares no mode and none is
     /// configured (REQ-A07c).
@@ -788,24 +760,10 @@ pub struct TuiMagiRuntimeConfig {
 /// again on every post-`/login` trio rebuild (I-5).
 ///
 /// # Fields
-/// - `consult` — the live orchestrator, or `None` if the trio failed to
-///   build at startup (REQ-A06).
-/// - `consult_unavailable_message` (Task 4.3, REQ-A06/SC-A06b) — the SAME
-///   text already pushed to `startup_notices` when `consult` is `None`.
-///   Read only when a `/consult` is issued with no trio available, so a
-///   later `/consult` echoes the exact reason the startup notice already
-///   gave instead of a second, independently-worded message.
-/// - `magi_auto_approve` — whether the registered `consult` tool
-///   auto-approves an autonomous invocation, mirrored into every rebuilt
-///   `ConsultTool` after `/login` (I-5).
-/// - `agent_timeout_secs` — `[magi].agent_timeout_secs` as read from config,
-///   UNRESOLVED (may be `None`). Fed to [`post_login_agent_timeout_secs`] on
-///   every post-`/login` rebuild, which applies the SAME precedence
-///   `build_magi_orchestrator` (`main.rs`) already uses at startup. Before
-///   this field existed, the rebuild ignored config entirely and hardcoded
-///   [`magi_rs::magi::AGENT_TIMEOUT_SECS`] — a configured ceiling silently
-///   stopped applying after a `/login` even though it kept being honored
-///   everywhere else in the process.
+/// - `consult` — the live orchestrator, or `None` if the trio failed to build at startup (REQ-A06).
+/// - `consult_unavailable_message` (Task 4.3, REQ-A06/SC-A06b) — the SAME text already pushed to `startup_notices` when `consult` is `None`. Read only when a `/consult` is issued with no trio available, so a later `/consult` echoes the exact reason the startup notice already gave instead of a second, independently-worded message.
+/// - `magi_auto_approve` — whether the registered `consult` tool auto-approves an autonomous invocation, mirrored into every rebuilt `ConsultTool` after `/login` (I-5).
+/// - `agent_timeout_secs` — `[magi].agent_timeout_secs` as read from config, UNRESOLVED (may be `None`). Fed to [`post_login_agent_timeout_secs`] on every post-`/login` rebuild, which applies the SAME precedence `build_magi_orchestrator` (`main.rs`) already uses at startup. Before this field existed, the rebuild ignored config entirely and hardcoded [`magi_rs::magi::AGENT_TIMEOUT_SECS`] — a configured ceiling silently stopped applying after a `/login` even though it kept being honored everywhere else in the process.
 pub struct TuiConsultWiring {
     /// The live orchestrator, or `None` if the trio failed to build.
     pub consult: Option<std::sync::Arc<magi_core::orchestrator::Magi>>,
@@ -838,11 +796,8 @@ fn post_login_agent_timeout_secs(configured: Option<u64>) -> u64 {
 
 /// # Parameters (REQ-A07d additions over the pre-MS2 signature)
 ///
-/// - `consult_wiring` — the [`TuiConsultWiring`] bundle: the live trio (if
-///   any), its unavailability message, and the tool's auto-approve flag.
-/// - `magi_runtime` — the [`TuiMagiRuntimeConfig`] bundle: the mode
-///   classifier, `[magi].default_mode`, the `untrusted_content` guard, and
-///   the trio's `ProviderKind`.
+/// - `consult_wiring` — the [`TuiConsultWiring`] bundle: the live trio (if any), its unavailability message, and the tool's auto-approve flag.
+/// - `magi_runtime` — the [`TuiMagiRuntimeConfig`] bundle: the mode classifier, `[magi].default_mode`, the `untrusted_content` guard, and the trio's `ProviderKind`.
 pub async fn run_tui_ext(
     agent: Agent,
     startup_notices: Vec<String>,

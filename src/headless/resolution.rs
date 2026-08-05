@@ -8,11 +8,8 @@
 //! [`resolve`] combines three sources with precedence **CLI flag > envelope > defaults
 //! (toml/built-in)** for preferences (`model`/`provider`/ `consult`), and applies two
 //! **safety** limits:
-//! - `max_tool_calls` is a **cost ceiling**: the requested value is clamped to
-//! `operator_ceiling` (the envelope may request less, never more). The ceiling is computed by
-//! the *caller* (bin), not this function.
-//! - `system` is a **prompt-injection limit**: the envelope's `system` is
-//! ignored unless the operator enables it with `allow_system_override`.
+//! - `max_tool_calls` is a **cost ceiling**: the requested value is clamped to `operator_ceiling` (the envelope may request less, never more). The ceiling is computed by the *caller* (bin), not this function.
+//! - `system` is a **prompt-injection limit**: the envelope's `system` is ignored unless the operator enables it with `allow_system_override`.
 //!
 //! The function is **pure and has no binary dependencies** (it takes lib-local structs, not
 //! `MagiConfig`/`Args`), so it is tested in isolation (R-H05).

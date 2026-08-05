@@ -5,15 +5,8 @@
 //! tool-call's raw `input` according to configured verbosity (REQ-H24 — the size cap and
 //! redaction are **distinct** controls, neither replaces the other).
 //!
-//! - [`RunLog::start`] discovers/creates the logs directory, prunes old runs
-//! old (best-effort, tolerant of `unlink` races) and touches this run's file.
-//! - [`RunLog::event`] filters by [`LogLevel`] and writes one JSON line per
-//! [`LogEvent`]: at `info` level (or less verbose) a `ToolCall` only carries
-//! `name`/`ok`/`ms`/`input_len`; at `debug` level the `input` is **redacted first**
-//! ([`redact_secret_patterns`], reused from `output.rs`) and **then** **capped**
-//! ([`truncate_result`], reused from `output.rs`) — this order prevents a secret split by the
-//! truncation limit from leaking a partial prefix; matchers are never re-implemented. The raw
-//! `prompt`/envelope is **never** logged, at any level or in any field.
+//! - [`RunLog::start`] discovers/creates the logs directory, prunes old runs old (best-effort, tolerant of `unlink` races) and touches this run's file.
+//! - [`RunLog::event`] filters by [`LogLevel`] and writes one JSON line per [`LogEvent`]: at `info` level (or less verbose) a `ToolCall` only carries `name`/`ok`/`ms`/`input_len`; at `debug` level the `input` is **redacted first** ([`redact_secret_patterns`], reused from `output.rs`) and **then** **capped** ([`truncate_result`], reused from `output.rs`) — this order prevents a secret split by the truncation limit from leaking a partial prefix; matchers are never re-implemented. The raw `prompt`/envelope is **never** logged, at any level or in any field.
 //!
 //! `RunLog`/`LogLevel`/`LogEvent` are `pub`: the MS2 runner lives in the binary crate and can
 //! only reach `pub` APIs of the lib.

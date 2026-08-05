@@ -43,14 +43,10 @@ const EXIT_TIER_DENIED: i32 = 3;
 /// Computes the exit code of a headless run according to its outcome.
 ///
 /// # Parameters
-/// - `err`: typed error from the run, if any; its presence dominates the
-/// precedence (see the module rustdoc).
+/// - `err`: typed error from the run, if any; its presence dominates the precedence (see the module rustdoc).
 /// - `stop_reason`: reason the agent loop ended.
-/// - `response_empty`: whether the agent's final turn produced no
-/// text block (REQ-H23b — "empty" means *zero* `TextDelta`, not just whitespace; the caller
-/// resolves that distinction before invoking this function).
-/// - `tier_denied`: whether at least one tool was denied by the tier during the
-/// run (regardless of whether the agent managed to work around the denial).
+/// - `response_empty`: whether the agent's final turn produced no text block (REQ-H23b — "empty" means *zero* `TextDelta`, not just whitespace; the caller resolves that distinction before invoking this function).
+/// - `tier_denied`: whether at least one tool was denied by the tier during the run (regardless of whether the agent managed to work around the denial).
 ///
 /// Returns one of `EXIT_OK`, `EXIT_RUNTIME`, `EXIT_MISUSE` or `EXIT_TIER_DENIED`.
 pub fn exit_code(

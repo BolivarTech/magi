@@ -689,19 +689,12 @@ impl MagiConfig {
     ///
     /// - [`ConfigError::NeedsMigration`] if the file brings v0.11.0 patterns.
     /// - [`ConfigError::Parse`] if it exists and does not parse, or could not be read.
-    /// - [`ConfigError::UnknownProviderKind`] / [`ConfigError::UnknownMode`] if
-    /// `provider`, `[magi].kind` or `[magi].default_mode` bring a present but unrecognized
-    /// value.
-    /// - [`ConfigError::AgentTimeoutOutOfRange`] / [`ConfigError::OutputCapTooSmall`] if
-    /// those numbers fall outside their range.
-    /// - [`ConfigError::Endpoint`] if the root, `[magi]` or `[embedding]` `base_url` carries
-    /// a literal credential, an unknown placeholder, or could not be traversed (SC-A16d) —
-    /// before this, ONLY the embedder path (`main.rs::attach_persistent_memory`) saw this
-    /// error, and degraded it to a notice + plain-text memory instead of stopping startup.
+    /// - [`ConfigError::UnknownProviderKind`] / [`ConfigError::UnknownMode`] if `provider`, `[magi].kind` or `[magi].default_mode` bring a present but unrecognized value.
+    /// - [`ConfigError::AgentTimeoutOutOfRange`] / [`ConfigError::OutputCapTooSmall`] if those numbers fall outside their range.
+    /// - [`ConfigError::Endpoint`] if the root, `[magi]` or `[embedding]` `base_url` carries a literal credential, an unknown placeholder, or could not be traversed (SC-A16d) — before this, ONLY the embedder path (`main.rs::attach_persistent_memory`) saw this error, and degraded it to a notice + plain-text memory instead of stopping startup.
     /// # Arguments
     ///
-    /// * `path` - Path to the `magi.toml` file. Recommended absolute/canonical (e.g.
-    /// `Workspace::config_path()`) so resolution is reproducible.
+    /// * `path` - Path to the `magi.toml` file. Recommended absolute/canonical (e.g. `Workspace::config_path()`) so resolution is reproducible.
     /// # Returns
     ///
     /// `(MagiConfig, Vec<String>)` — the parsed config and the notices from REQ-A12b/A12c about

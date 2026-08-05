@@ -128,16 +128,8 @@ const MAX_CONSECUTIVE_VETOES: u8 = 2;
 /// all-caps, `NO_CONSENSUS_MARK_SEPARATOR`-blank-line-separated marker, not
 /// folded into running prose — but a DIFFERENT condition and a DIFFERENT
 /// PLACEMENT, and both distinctions matter:
-/// - Condition: `[DEGRADED: ...]` means a consult ran and came back thin;
-///   this mark means no consult ran at all. Folding the two together would
-///   be a semantic bug — a reader of `[DEGRADED: ...]` would conclude the
-///   trio was consulted, when it never was.
-/// - Placement: `[DEGRADED: ...]` PREPENDS, because it is a caveat about the
-///   report that follows — the reader needs it before the content it
-///   qualifies. This mark APPENDS, because it annotates the answer just
-///   given — there is no "report" to prefix, only a direct answer whose
-///   provenance the reader needs to know AFTER reading it. Same weight,
-///   different placement, for that reason — not an oversight.
+/// - Condition: `[DEGRADED: ...]` means a consult ran and came back thin; this mark means no consult ran at all. Folding the two together would be a semantic bug — a reader of `[DEGRADED: ...]` would conclude the trio was consulted, when it never was.
+/// - Placement: `[DEGRADED: ...]` PREPENDS, because it is a caveat about the report that follows — the reader needs it before the content it qualifies. This mark APPENDS, because it annotates the answer just given — there is no "report" to prefix, only a direct answer whose provenance the reader needs to know AFTER reading it. Same weight, different placement, for that reason — not an oversight.
 ///
 /// Without it a veto is invisible to the user: they asked something, the
 /// agent decided to consult, the gate stopped it, and what comes back is an
@@ -306,14 +298,12 @@ pub trait RunObserver: Send + Sync {
     /// audit shows exactly the one forced `consult` that actually ran.
     ///
     /// # Parameters
-    /// - `id` — the tool-use id, correlating this call with the assistant
-    ///   `ToolUse` block that requested it (used to assemble the transcript).
+    /// - `id` — the tool-use id, correlating this call with the assistant `ToolUse` block that requested it (used to assemble the transcript).
     /// - `name` — the tool name.
     /// - `input` — the JSON input the tool was invoked with.
     /// - `result` — the tool result (or the denial / not-found message).
     /// - `ok` — `true` on successful execution; `false` on failure or denial.
-    /// - `ms` — wall-clock execution time in milliseconds (`0` for a denied
-    ///   call, which never executes).
+    /// - `ms` — wall-clock execution time in milliseconds (`0` for a denied call, which never executes).
     fn on_tool_call(
         &self,
         id: &str,
@@ -441,10 +431,7 @@ pub struct ApprovalRequest {
 ///
 /// - `Content` — answer text (persisted); forwarded to the TUI as a `StreamDelta`.
 /// - `Reasoning` — thinking model chain-of-thought; shown live, never persisted (#24).
-/// - `Notice` — non-content operational notice (e.g. memory fallback warning,
-///   truncation advisory).  Rendered in a distinct style (dimmed/yellow, prefixed
-///   `⚠ `) in the TUI so it stands out from model output without corrupting the
-///   ratatui frame via stderr.
+/// - `Notice` — non-content operational notice (e.g. memory fallback warning, truncation advisory).  Rendered in a distinct style (dimmed/yellow, prefixed `⚠ `) in the TUI so it stands out from model output without corrupting the ratatui frame via stderr.
 ///
 /// Memory assembler truncation notices and agent-loop warnings use `Notice` so they
 /// are routed through the channel rather than written to raw stderr while the TUI
@@ -667,12 +654,9 @@ impl Agent {
     /// (`memory.add_message`) is preserved in both modes.
     ///
     /// # Parameters
-    /// - `store` — encrypted vector store (shares the SQLite connection of
-    ///   `EncryptedSqliteMemory`, so the file stays a single on-disk asset).
-    /// - `embedder` — text-to-vector backend (Ollama default; any openai-compat
-    ///   endpoint works by pointing `base_url`).
-    /// - `clock` — wall-clock abstraction; inject `FixedClock` in tests for
-    ///   deterministic decay (D-18 / R-06).
+    /// - `store` — encrypted vector store (shares the SQLite connection of `EncryptedSqliteMemory`, so the file stays a single on-disk asset).
+    /// - `embedder` — text-to-vector backend (Ollama default; any openai-compat endpoint works by pointing `base_url`).
+    /// - `clock` — wall-clock abstraction; inject `FixedClock` in tests for deterministic decay (D-18 / R-06).
     /// - `cfg` — memory configuration (context budget, weights, mode, …).
     pub fn set_memory_subsystem(
         &mut self,
@@ -969,8 +953,7 @@ impl Agent {
     /// - `name` — the tool name to look up in `self.tools`.
     /// - `input` — the JSON input to execute the tool with.
     /// - `config` — the run configuration (observer, cancellation, approval).
-    /// - `chunk_tx` — streaming sender, used only to forward an auto-approved
-    ///   tool's [`Tool::approval_notice`].
+    /// - `chunk_tx` — streaming sender, used only to forward an auto-approved tool's [`Tool::approval_notice`].
     ///
     /// # Returns
     /// `Content::ToolResult` — a denial (`is_error = true`) when not approved,
@@ -1105,24 +1088,9 @@ impl Agent {
     /// Every branch also updates `*answering_without_consensus` — REQ-A20's
     /// [`NO_CONSENSUS_MARK`], not just the veto counter, tracks whether the
     /// NEXT answer in this turn is backed by a real consult:
-    /// - The door is already closed this turn (`consecutive_vetoes >=
-    ///   [`MAX_CONSECUTIVE_VETOES`]`): not even re-evaluated, zero model calls,
-    ///   `*answering_without_consensus = true` (already was, by construction —
-    ///   see below — but set explicitly so this branch does not silently rely
-    ///   on that invariant holding).
-    /// - [`GateVerdict::Veto`]: `consecutive_vetoes` increments; zero model
-    ///   calls; the result names the mode and, on the second veto, that the
-    ///   door is now closed for the rest of the turn (REQ-A20c);
-    ///   `*answering_without_consensus = true`.
-    /// - [`GateVerdict::Dispatch`]: `consecutive_vetoes` resets to `0` (a
-    ///   dispatched consult spends three model calls — the exact cost the gate
-    ///   exists to avoid — so resetting on it never opens a padding shortcut),
-    ///   and the resolved `(Mode, ModeSource)` is injected into a CLONED input
-    ///   (`magi_rs::magi::mode::input_for_dispatch`) before the real dispatch,
-    ///   so [`ConsultTool`](crate::tools::consult::ConsultTool) reads the same
-    ///   mode the gate just evaluated instead of re-resolving it;
-    ///   `*answering_without_consensus = false` — a genuine consult ran, so
-    ///   whatever the model says next IS backed by consensus.
+    /// - The door is already closed this turn (`consecutive_vetoes >= [`MAX_CONSECUTIVE_VETOES`]`): not even re-evaluated, zero model calls, `*answering_without_consensus = true` (already was, by construction — see below — but set explicitly so this branch does not silently rely on that invariant holding).
+    /// - [`GateVerdict::Veto`]: `consecutive_vetoes` increments; zero model calls; the result names the mode and, on the second veto, that the door is now closed for the rest of the turn (REQ-A20c); `*answering_without_consensus = true`.
+    /// - [`GateVerdict::Dispatch`]: `consecutive_vetoes` resets to `0` (a dispatched consult spends three model calls — the exact cost the gate exists to avoid — so resetting on it never opens a padding shortcut), and the resolved `(Mode, ModeSource)` is injected into a CLONED input (`magi_rs::magi::mode::input_for_dispatch`) before the real dispatch, so [`ConsultTool`](crate::tools::consult::ConsultTool) reads the same mode the gate just evaluated instead of re-resolving it; `*answering_without_consensus = false` — a genuine consult ran, so whatever the model says next IS backed by consensus.
     ///
     /// There is deliberately **no anti-mode-shopping guard**: the agent can
     /// choose the mode via the tool's `input_schema` (REQ-A07b), so a veto
@@ -1260,21 +1228,14 @@ impl Agent {
     /// preserving every invariant of the original loops (REQ-28).
     ///
     /// # Parameters
-    /// - `working` — mutable context slice sent to the provider on each iteration.
-    ///   Extended in-place as assistant responses and tool-result messages are
-    ///   appended. `self.history` is updated in parallel so `load_history` and the
-    ///   message store stay consistent across both paths.
+    /// - `working` — mutable context slice sent to the provider on each iteration. Extended in-place as assistant responses and tool-result messages are appended. `self.history` is updated in parallel so `load_history` and the message store stay consistent across both paths.
     /// - `chunk_tx` — streaming sender for UI pieces (shared reference).
-    /// - `prompt` — the original user query text for this turn. Used ONLY by the
-    ///   [`AgentRunConfig::force_consult`] injection (REQ-H22) to build the
-    ///   forced consult's `{"query": prompt}` input; ignored otherwise.
+    /// - `prompt` — the original user query text for this turn. Used ONLY by the [`AgentRunConfig::force_consult`] injection (REQ-H22) to build the forced consult's `{"query": prompt}` input; ignored otherwise.
     ///
     /// # Returns
     /// A tuple `(full_text, final_text)` where:
-    /// - `full_text` — text accumulated from `TextDelta` chunks (sanitized); used
-    ///   by the `selective` caller for [`write_turn_to_memory`].
-    /// - `final_text` — text extracted from the terminal `MessageDone` content,
-    ///   matching the pre-refactor return value in both branches.
+    /// - `full_text` — text accumulated from `TextDelta` chunks (sanitized); used by the `selective` caller for [`write_turn_to_memory`].
+    /// - `final_text` — text extracted from the terminal `MessageDone` content, matching the pre-refactor return value in both branches.
     ///
     /// # Invariants preserved
     /// `max_tool_calls` cap, 3× repetition abort, approval/timeout/deny semantics,
@@ -1686,10 +1647,7 @@ fn summarize_assembly_error(e: &MemoryError) -> String {
 /// - `session_id` — owning session UUID.
 /// - `text` — raw turn text (not yet prefixed).
 /// - `role` — `Role::User` or `Role::Assistant`; stored in the ID hash for uniqueness.
-/// - `notice_tx` — optional sender for routing non-fatal write-error notices to the
-///   TUI as `StreamPiece::Notice` (instead of raw stderr that corrupts the ratatui
-///   frame).  `None` is accepted so call sites outside the streaming context (tests,
-///   future callers) are not forced to supply a channel.
+/// - `notice_tx` — optional sender for routing non-fatal write-error notices to the TUI as `StreamPiece::Notice` (instead of raw stderr that corrupts the ratatui frame).  `None` is accepted so call sites outside the streaming context (tests, future callers) are not forced to supply a channel.
 ///
 /// # Note
 /// This is intentionally a module-level free function (not a method on `Agent`) so

@@ -187,8 +187,7 @@ fn keep_bytes(report: &str, cap: usize) -> Option<String> {
 /// looking at instead of deducing it (SC-A11e/SC-A11h):
 /// - [`TruncationLevel::Structural`] — verdict + at least the first finding.
 /// - [`TruncationLevel::Anchored`] — only the verdict; the finding is best-effort.
-/// - [`TruncationLevel::Bytes`] — only the first N bytes; nothing else
-/// guaranteed.
+/// - [`TruncationLevel::Bytes`] — only the first N bytes; nothing else guaranteed.
 ///
 /// The `Structural` level is ASSERTED over the RESULT, not the attempt: cutting to `cap` may
 /// cut just before the first finding, and returning `Structural` there would be promising a
@@ -196,9 +195,7 @@ fn keep_bytes(report: &str, cap: usize) -> Option<String> {
 /// the finding did not survive, step down a level instead of lying.
 ///
 /// # Parameters
-/// * `report` - the ALREADY-ANNOTATED text (REQ-A12c, [`annotate_report_text`]) that is
-/// wants to bound. Callers must annotate BEFORE truncating: this function never sees the
-/// keyless-auth hint if the order is reversed.
+/// * `report` - the ALREADY-ANNOTATED text (REQ-A12c, [`annotate_report_text`]) that is wants to bound. Callers must annotate BEFORE truncating: this function never sees the keyless-auth hint if the order is reversed.
 /// * `cap` - the effective byte limit (`MagiConfig::effective_tool_result_cap`).
 ///
 /// # Returns
@@ -289,11 +286,9 @@ const PREFIX_SEPARATOR_LEN: usize = 2;
 /// only the banner.
 ///
 /// # Parameters
-/// * `prefix` - text that must survive the cut whole; meant for a short,
-/// one-line caveat, never the bulk of the reply.
+/// * `prefix` - text that must survive the cut whole; meant for a short, one-line caveat, never the bulk of the reply.
 /// * `report` - the (already-annotated) report text to bound.
-/// * `cap` - the byte budget the combined `prefix + report` output must
-/// respect.
+/// * `cap` - the byte budget the combined `prefix + report` output must respect.
 #[must_use]
 pub(crate) fn truncate_report_with_preserved_prefix(
     prefix: &str,
@@ -580,13 +575,8 @@ fn seat_key(seat: AgentName) -> String {
 ///
 /// **`model` and `cause` are safe to interpolate verbatim — verified against magi-core
 /// 3.1.0, not assumed (fix round 3):**
-/// - `model` is `agent.provider_model().to_string()` — the CONFIGURED model identifier
-/// for the seat (`orchestrator.rs::dispatch_one_agent`), never text derived from a
-/// network/provider error. Not third-party free text.
-/// - `cause: ExtractionFailureCause` is `#[non_exhaustive]` but every variant is a
-/// **fieldless** unit case (`verdict_markers.rs`) — `format!("{:?}", x.cause)` can
-/// only ever produce one of a fixed, closed set of Debug strings (`"MissingMarkers"`, …,
-/// `"Other"`). There is structurally no way for it to carry a URL or a credential.
+/// - `model` is `agent.provider_model().to_string()` — the CONFIGURED model identifier for the seat (`orchestrator.rs::dispatch_one_agent`), never text derived from a network/provider error. Not third-party free text.
+/// - `cause: ExtractionFailureCause` is `#[non_exhaustive]` but every variant is a **fieldless** unit case (`verdict_markers.rs`) — `format!("{:?}", x.cause)` can only ever produce one of a fixed, closed set of Debug strings (`"MissingMarkers"`, …, `"Other"`). There is structurally no way for it to carry a URL or a credential.
 ///
 /// Contrast [`failed_agents_json`], whose `cause` is genuinely third-party free text and DOES
 /// need redaction.
@@ -631,13 +621,8 @@ fn failures_json(f: &BTreeMap<AgentName, Vec<ExtractionFailure>>) -> Value {
 /// pinned by magi-core's own `cause_chain_skips_the_top_level_error` test. So an ordinary
 /// connection failure against a `[user]:[password]`-substituted `base_url` (REQ-A16c) does NOT
 /// leak through that specific path in 3.1.0. The real exposure this redaction guards is:
-/// - **`ProviderError::Http { body }`** — the response body from whatever a request
-/// reached (a misconfigured proxy echoing headers, a captive portal, a compromised endpoint) is
-/// genuinely unredacted, server-controlled text, and it reaches `MagiReport::failed_agents` the
-/// same way `Network`/`Timeout` do.
-/// - **`ProviderError` (and `Http` itself) is `#[non_exhaustive]`.** A future minor
-/// version of magi-core can add a variant that interpolates free text, and this code would
-/// start leaking again silently, with nothing on our side to change.
+/// - **`ProviderError::Http { body }`** — the response body from whatever a request reached (a misconfigured proxy echoing headers, a captive portal, a compromised endpoint) is genuinely unredacted, server-controlled text, and it reaches `MagiReport::failed_agents` the same way `Network`/`Timeout` do.
+/// - **`ProviderError` (and `Http` itself) is `#[non_exhaustive]`.** A future minor version of magi-core can add a variant that interpolates free text, and this code would start leaking again silently, with nothing on our side to change.
 ///
 /// So this redaction is defence in depth over a boundary magi-rs does not control, not a patch
 /// for a hole that is live in the `Network`/`Timeout` path today — it stays correct even where
@@ -692,10 +677,7 @@ fn input_size_json(s: Option<&InputSize>) -> Value {
 ///
 /// # Parameters
 /// * `report` - the finished multi-perspective consensus report.
-/// * `truncated` - the report text actually surfaced, paired with the guarantee it
-/// carries — see [`Truncated`] for why the two travel together. Callers that also annotate the
-/// text (REQ-A12c, [`annotate_report_text`]) must do so **before** building this value: this
-/// function renders `truncated.text` verbatim.
+/// * `truncated` - the report text actually surfaced, paired with the guarantee it carries — see [`Truncated`] for why the two travel together. Callers that also annotate the text (REQ-A12c, [`annotate_report_text`]) must do so **before** building this value: this function renders `truncated.text` verbatim.
 /// * `res` - the resolved mode, its source, and whether classification was attempted.
 /// * `ctx` - the per-run signals that belong in this run's own output (REQ-A11d).
 ///
@@ -910,9 +892,7 @@ impl ConsultTool {
     ///
     /// # Parameters
     /// * `magi` - Shared `Magi` orchestrator that drives the 3-perspective consensus.
-    /// * `auto_approve` - When `true`, the tool opts out of the approval gate for
-    /// autonomous launches (the agent tool loop will auto-approve it and emit a TUI notice).
-    /// Default is `false` — the agent asks before each launch.
+    /// * `auto_approve` - When `true`, the tool opts out of the approval gate for autonomous launches (the agent tool loop will auto-approve it and emit a TUI notice). Default is `false` — the agent asks before each launch.
     ///
     /// # Returns
     /// A new `ConsultTool` instance with a routing-tuned description and `kind` defaulted to

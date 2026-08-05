@@ -105,15 +105,9 @@ pub const NOTICE_MAX_INFO: usize = 5;
 /// that exceed [`NOTICE_MAX_INFO`].
 ///
 /// # Contrato
-/// - **Order**: `Blocking` → `Resolution` → `Info`. The `sort_by_key` is stable, so
-/// two notices of the same tier keep the order in which they were passed.
-/// - **Dedup**: two notices with the same `text` collapse into one — the trio can
-/// emit the same `base_url` normalization warning three times (once per seat), and the user
-/// does not need to read it three times. It is applied AFTER sorting, so the first appearance
-/// in tier order survives.
-/// - **Cap**: `Blocking` and `Resolution` are NEVER trimmed — the cap exists for the
-/// diagnostic noise, not for actionable or surprising items. When it trims, the last line of
-/// the result says how many `Info`s were omitted.
+/// - **Order**: `Blocking` → `Resolution` → `Info`. The `sort_by_key` is stable, so two notices of the same tier keep the order in which they were passed.
+/// - **Dedup**: two notices with the same `text` collapse into one — the trio can emit the same `base_url` normalization warning three times (once per seat), and the user does not need to read it three times. It is applied AFTER sorting, so the first appearance in tier order survives.
+/// - **Cap**: `Blocking` and `Resolution` are NEVER trimmed — the cap exists for the diagnostic noise, not for actionable or surprising items. When it trims, the last line of the result says how many `Info`s were omitted.
 ///
 /// Complexity: `O(n log n)` for the sort plus `O(n)` for the dedup (a `HashSet` of already-seen
 /// texts) — acceptable because `n` is the number of notices from ONE startup (a handful of

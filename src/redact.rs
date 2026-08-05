@@ -37,8 +37,7 @@ const SCHEME_SEPARATOR: &str = "://";
 ///
 /// Exact rule, in three steps:
 /// 1. The **authority** begins after `://` and ends at the first `/`, `?`, or `#`.
-/// 2. Inside that window —and only there— the `userinfo` is everything before the **last** `@`.
-/// The last, not the first: `user:p@ss@host` is a password containing `@`, legal in RFC 3986.
+/// 2. Inside that window —and only there— the `userinfo` is everything before the **last** `@`. The last, not the first: `user:p@ss@host` is a password containing `@`, legal in RFC 3986.
 /// 3. Without an `@` inside the authority there is no `userinfo`, and nothing is touched.
 ///
 /// **Why positional and not by content:** «decode and then redact» loses to

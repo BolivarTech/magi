@@ -5,18 +5,9 @@
 //!
 //! Three properties that govern this module and are easy to get wrong:
 //!
-//! - **Only AUTONOMOUS routing is evaluated.** `/consult` in the TUI and explicit `magi
-//! consult`
-//! are NEVER vetoed — the gate sees the agent's decision to invoke the tool on its own, and
-//! nothing else. That distinction is about **call site** (where `evaluate` is invoked), not a
-//! flag this module can see: `gate.rs` does not know who called.
-//! - **A veto is NOT an error.** [`GateVerdict::Veto`] is a normal result of the predicate,
-//! not an `Err`: the agent funnel translates it into a `ToolResult` explaining why it was not
-//! dispatched, and the turn continues.
-//! - **Missing configuration does NOT turn the gate off.** Absent `[magi.complexity]` table ⇒
-//! the built-ins of [`super::GATE_CODE_REVIEW`]/[`super::GATE_DESIGN`]/
-//! [`super::GATE_ANALYSIS`] still apply. A mode declared at `0` is the only explicit way to
-//! turn **that** mode off — not the other two.
+//! - **Only AUTONOMOUS routing is evaluated.** `/consult` in the TUI and explicit `magi consult` are NEVER vetoed — the gate sees the agent's decision to invoke the tool on its own, and nothing else. That distinction is about **call site** (where `evaluate` is invoked), not a flag this module can see: `gate.rs` does not know who called.
+//! - **A veto is NOT an error.** [`GateVerdict::Veto`] is a normal result of the predicate, not an `Err`: the agent funnel translates it into a `ToolResult` explaining why it was not dispatched, and the turn continues.
+//! - **Missing configuration does NOT turn the gate off.** Absent `[magi.complexity]` table ⇒ the built-ins of [`super::GATE_CODE_REVIEW`]/[`super::GATE_DESIGN`]/ [`super::GATE_ANALYSIS`] still apply. A mode declared at `0` is the only explicit way to turn **that** mode off — not the other two.
 
 use magi_core::schema::Mode;
 

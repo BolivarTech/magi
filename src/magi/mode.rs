@@ -64,10 +64,8 @@ pub enum ModeSource {
 ///
 /// The order reflects both **precedence** and **cost**:
 /// - `Explicit` wins over everything: a human declared it (`--mode`).
-/// - `Configured` fixes the lens: a declared `default_mode` prevents the agent from changing
-/// it.
-/// - `AgentChosen` is above `Inferred` because it cost no model call: the agent
-/// chose it while reasoning.
+/// - `Configured` fixes the lens: a declared `default_mode` prevents the agent from changing it.
+/// - `AgentChosen` is above `Inferred` because it cost no model call: the agent chose it while reasoning.
 /// - `Inferred` comes from a classification call over the content.
 /// - `Default` is `Analysis` mode when no source contributed anything.
 ///

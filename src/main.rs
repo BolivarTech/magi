@@ -2224,13 +2224,8 @@ impl MagiEnvModelOverrides {
 /// makes visible as soon as it runs.
 ///
 /// # Parameters
-/// * `cfg` - the configuration already loaded (post [`MagiConfig::load`]); see the note about
-/// infallibility below on why its two `effective_*_base_url()` do not fail in production.
-/// * `inference_active` - `true` when THIS session may end up classifying the mode by
-/// content — the caller already knows it (it needs it for other decisions in the same run, such
-/// as whether it is worth warning about the cost of REQ-A07c) and it is received instead of
-/// being re-derived here, precisely so this function does not have a second opinion about
-/// something the caller already resolved.
+/// * `cfg` - the configuration already loaded (post [`MagiConfig::load`]); see the note about infallibility below on why its two `effective_*_base_url()` do not fail in production.
+/// * `inference_active` - `true` when THIS session may end up classifying the mode by content — the caller already knows it (it needs it for other decisions in the same run, such as whether it is worth warning about the cost of REQ-A07c) and it is received instead of being re-derived here, precisely so this function does not have a second opinion about something the caller already resolved.
 ///
 /// # Returns
 /// `Some(Notice)` (tier `Resolution`) when divergence and inference coincide; `None` in any
@@ -2429,13 +2424,8 @@ fn seat_wiring_trace() -> Vec<(AgentName, String, bool)> {
 /// remains the result when the probe measured nothing measurable.
 ///
 /// # Errors
-/// - [`TrioError::UnknownKind`] if `[magi].kind` brings an unrecognized value. It is validated
-/// HERE with its own `ProviderKind::parse`, not via `cfg.effective_magi_kind()`: that accessor
-/// assumes `validate_vocabulary` already ran and swallows an unrecognized value falling back to
-/// inheritance — a correct precondition for its other callers, but exactly the one this point
-/// must NOT assume in order to report the error.
-/// - [`TrioError::SeatUnbuildable`] with **all** the seats that could not
-/// be built and their cause.
+/// - [`TrioError::UnknownKind`] if `[magi].kind` brings an unrecognized value. It is validated HERE with its own `ProviderKind::parse`, not via `cfg.effective_magi_kind()`: that accessor assumes `validate_vocabulary` already ran and swallows an unrecognized value falling back to inheritance — a correct precondition for its other callers, but exactly the one this point must NOT assume in order to report the error.
+/// - [`TrioError::SeatUnbuildable`] with **all** the seats that could not be built and their cause.
 fn build_magi_orchestrator(
     cfg: &MagiConfig,
     // The ALREADY-RESOLVED `ProviderKind` of the principal (env `MAGI_PROVIDER` > TOML >
@@ -7932,9 +7922,7 @@ mod tests {
         /// attempted to probe the NAME of `[anthropic].model` against the trio's endpoint.
         ///
         /// The two models map to DIFFERENT windows (`claude-test` → 999 999, `qwen-test` → 128
-        /// 000) so that, if the bug reappears, it shows up as a WRONG NUMBER — poisoning
-        /// `input_warn_tokens` with a foreign model's window — rather than just a degradation
-        /// to "not measured", which would be easier to overlook in a cursory review.
+        /// 000) so that, if the bug reappears, it shows up as a WRONG NUMBER — poisoning `input_warn_tokens` with a foreign model's window — rather than just a degradation to "not measured", which would be easier to overlook in a cursory review.
         #[tokio::test]
         async fn a_diverging_trio_kind_probes_its_own_section_model_not_the_principals() {
             let factory = MappedProbeFactory::new(&[

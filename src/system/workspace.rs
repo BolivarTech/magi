@@ -24,8 +24,7 @@
 //!
 //! - [`Workspace`]: the discovered `.magi/` and the paths of its artifacts.
 //! - [`discover`]: the hardened walk-up (symlink rejection, fs boundary limit).
-//! - [`detect_legacy_files`]: the **primitive** for detecting legacy files
-//! loose in the cwd (the **emission** of the warning is MS2).
+//! - [`detect_legacy_files`]: the **primitive** for detecting legacy files loose in the cwd (the **emission** of the warning is MS2).
 
 use std::fs;
 use std::io;
@@ -389,8 +388,7 @@ fn volume_prefix(path: &Path) -> Option<std::ffi::OsString> {
 /// symlink, not an ancestor directory on the path leading to it.
 ///
 /// # Errors
-/// - [`HeadlessError::InputInvalid`] if an ancestor component of `cwd` is a
-/// symlink.
+/// - [`HeadlessError::InputInvalid`] if an ancestor component of `cwd` is a symlink.
 /// - [`HeadlessError::Aborted`] if `cwd/.magi/` already exists.
 /// - [`HeadlessError::Io`] on a filesystem or ACL error (bad parent, rename).
 /// - [`HeadlessError::Storage`] if the database schema cannot be created.

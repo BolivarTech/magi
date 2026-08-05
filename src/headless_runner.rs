@@ -161,34 +161,13 @@ pub(crate) async fn resolve_direct_mode(
 /// new consumers become a **field** each, not an 11th/12th parameter.
 ///
 /// # Fields
-/// - `kind` — the [`ProviderKind`] the trio runs under; feeds
-///   [`report_to_consult_json`]/[`explain_magi_error`] for provider-specific
-///   guidance (REQ-A12c).
-/// - `classifier` — consulted **only** when neither a call's `explicit_mode`
-///   nor `configured_mode` is set, via [`resolve_mode_guarded`] (REQ-A07c).
-/// - `configured_mode` — `[magi].default_mode`, if declared; wins over the
-///   classification level, below a call's `explicit_mode` (REQ-A15).
-/// - `untrusted_content` — REQ-A07d's guard: with this `true` and no mode
-///   declared by any other level, the run fails closed
-///   ([`ConsultRunError::UntrustedContentRequiresMode`]) instead of
-///   classifying hostile content.
-/// - `magi_config` — feeds `RunContext::build`'s `cfg.magi_endpoint_diverges()`
-///   (REQ-A11d). A reference, not a clone: the caller's `MagiConfig` already
-///   outlives the awaited call.
-/// - `timeout_decision` — the REAL [`TimeoutDecision`] (SC-A04d), computed by
-///   the caller via `magi_rs::magi::resolve_run_timeout` for its
-///   `below_formula` flag — **not recomputed here**. Its `effective_secs` is
-///   deliberately NOT used to override the enforced `timeout` parameter this
-///   call already takes: this struct exists to make the JSON's telemetry
-///   honest, not to change which timeout is actually enforced (a larger,
-///   separate, pre-existing gap — see this fix round's report).
-/// - `notice_sink` — where [`analyze_direct`] emits `timeout_decision.warning`
-///   (fix round 2, SC-A04d's other half: the JSON flag alone isn't the whole
-///   requirement — a human running the command by hand needs the same fact on
-///   stderr). Production shares ONE [`ProcessNoticeSink`](crate::agent::
-///   mode_classifier::ProcessNoticeSink) instance with the mode classifier's own
-///   notices (`run_consult_subcommand`) rather than opening a second output
-///   path — dedup is per-key, so the two notices cannot suppress each other.
+/// - `kind` — the [`ProviderKind`] the trio runs under; feeds [`report_to_consult_json`]/[`explain_magi_error`] for provider-specific guidance (REQ-A12c).
+/// - `classifier` — consulted **only** when neither a call's `explicit_mode` nor `configured_mode` is set, via [`resolve_mode_guarded`] (REQ-A07c).
+/// - `configured_mode` — `[magi].default_mode`, if declared; wins over the classification level, below a call's `explicit_mode` (REQ-A15).
+/// - `untrusted_content` — REQ-A07d's guard: with this `true` and no mode declared by any other level, the run fails closed ([`ConsultRunError::UntrustedContentRequiresMode`]) instead of classifying hostile content.
+/// - `magi_config` — feeds `RunContext::build`'s `cfg.magi_endpoint_diverges()` (REQ-A11d). A reference, not a clone: the caller's `MagiConfig` already outlives the awaited call.
+/// - `timeout_decision` — the REAL [`TimeoutDecision`] (SC-A04d), computed by the caller via `magi_rs::magi::resolve_run_timeout` for its `below_formula` flag — **not recomputed here**. Its `effective_secs` is deliberately NOT used to override the enforced `timeout` parameter this call already takes: this struct exists to make the JSON's telemetry honest, not to change which timeout is actually enforced (a larger, separate, pre-existing gap — see this fix round's report).
+/// - `notice_sink` — where [`analyze_direct`] emits `timeout_decision.warning` (fix round 2, SC-A04d's other half: the JSON flag alone isn't the whole requirement — a human running the command by hand needs the same fact on stderr). Production shares ONE [`ProcessNoticeSink`](crate::agent:: mode_classifier::ProcessNoticeSink) instance with the mode classifier's own notices (`run_consult_subcommand`) rather than opening a second output path — dedup is per-key, so the two notices cannot suppress each other.
 ///
 /// `pub(crate)`, same reasoning as [`resolve_direct_mode`] above: constructed
 /// from `main.rs`'s `run_consult_subcommand`, which builds it from its own
@@ -221,17 +200,12 @@ pub(crate) struct MagiRuntimeParams<'a> {
 /// [`ConsultRunError::Timeout`] is returned.
 ///
 /// # Parameters
-/// - `magi` — shared MAGI orchestrator (the same one wired for the interactive
-///   `consult` tool).
+/// - `magi` — shared MAGI orchestrator (the same one wired for the interactive `consult` tool).
 /// - `prompt` — the decision/content to analyze.
 /// - `cancel` — cooperative cancellation fired by the enclosing run's deadline.
 /// - `timeout` — optional wall-clock ceiling for this consult specifically.
-/// - `explicit_mode` — the lens declared by a human (`--mode`/the envelope
-///   field), if any. Wins outright, at zero classification cost (REQ-A07c,
-///   SC-A07g).
-/// - `runtime` — the session-scoped [`MagiRuntimeParams`] (mode classifier,
-///   `[magi].default_mode`, the `untrusted_content` guard, and the provider
-///   `kind`); see its rustdoc for how each field is used.
+/// - `explicit_mode` — the lens declared by a human (`--mode`/the envelope field), if any. Wins outright, at zero classification cost (REQ-A07c, SC-A07g).
+/// - `runtime` — the session-scoped [`MagiRuntimeParams`] (mode classifier, `[magi].default_mode`, the `untrusted_content` guard, and the provider `kind`); see its rustdoc for how each field is used.
 ///
 /// # SC-A04d's warning
 /// If `runtime.timeout_decision.warning` is `Some`, it is emitted via `runtime.
@@ -240,11 +214,8 @@ pub(crate) struct MagiRuntimeParams<'a> {
 /// turns out to be valid, so it fires even on the `InputInvalid` path below.
 ///
 /// # Errors
-/// - [`ConsultRunError::InputInvalid`] if `prompt` is empty or exceeds
-///   `runtime.magi_config.effective_max_query_bytes()`.
-/// - [`ConsultRunError::UntrustedContentRequiresMode`] if
-///   `runtime.untrusted_content` is `true` and neither `explicit_mode` nor
-///   `runtime.configured_mode` was declared (REQ-A07d/REQ-A07r).
+/// - [`ConsultRunError::InputInvalid`] if `prompt` is empty or exceeds `runtime.magi_config.effective_max_query_bytes()`.
+/// - [`ConsultRunError::UntrustedContentRequiresMode`] if `runtime.untrusted_content` is `true` and neither `explicit_mode` nor `runtime.configured_mode` was declared (REQ-A07d/REQ-A07r).
 /// - [`ConsultRunError::Timeout`] if cancelled or the deadline elapsed.
 /// - [`ConsultRunError::Runtime`] if the MAGI analysis failed or panicked.
 async fn analyze_direct(
@@ -643,24 +614,17 @@ fn build_transcript(
 /// `error.kind = timeout` (REQ-H36); a MAGI failure yields a sanitized `runtime`.
 ///
 /// # Parameters
-/// - `resolved` — effective run parameters; supplies `model`/`provider`/
-///   `applied_caps` for the output.
+/// - `resolved` — effective run parameters; supplies `model`/`provider`/ `applied_caps` for the output.
 /// - `magi` — shared MAGI orchestrator (same one wired for the `consult` tool).
 /// - `prompt` — the decision/content to analyze.
 /// - `timeout` — optional wall-clock ceiling (REQ-H36).
-/// - `explicit_mode` — the lens declared by a human (`--mode`/the envelope
-///   field); `None` triggers exactly one classification call, never more
-///   (REQ-A07c, SC-A07f/g).
-/// - `runtime` — the session-scoped [`MagiRuntimeParams`] (mode classifier,
-///   `[magi].default_mode`, the `untrusted_content` guard, and the `kind`
-///   that feeds [`report_to_consult_json`] via [`analyze_direct`]).
-/// - `run_log` — optional JSONL run log; the terminal summary is recorded
-///   best-effort.
+/// - `explicit_mode` — the lens declared by a human (`--mode`/the envelope field); `None` triggers exactly one classification call, never more (REQ-A07c, SC-A07f/g).
+/// - `runtime` — the session-scoped [`MagiRuntimeParams`] (mode classifier, `[magi].default_mode`, the `untrusted_content` guard, and the `kind` that feeds [`report_to_consult_json`] via [`analyze_direct`]).
+/// - `run_log` — optional JSONL run log; the terminal summary is recorded best-effort.
 ///
 /// # Gaps (documented, never fabricated)
 /// - `usage` is `Usage { 0, 0 }`: `magi-core` does not surface token counts here.
-/// - `timings.per_turn_ms` is empty and `ttfb_ms` is `None`: the direct consult is
-///   a single buffered analysis, not a streamed turn sequence.
+/// - `timings.per_turn_ms` is empty and `ttfb_ms` is `None`: the direct consult is a single buffered analysis, not a streamed turn sequence.
 pub async fn run_consult(
     resolved: Resolved,
     magi: Arc<Magi>,
@@ -737,31 +701,17 @@ pub async fn run_consult(
 ///
 /// `stop_reason` is deterministic (REQ-H23b), with priority
 /// `Error > MaxToolCalls > Denied > Done`:
-/// - the cap being hit ⇒ [`StopReason::MaxToolCalls`] (a terminal state, not an
-///   error — no `error` payload, maps to exit 0);
-/// - any other run error (including a repetitive-guard abort) ⇒
-///   [`StopReason::Error`] with a sanitized `error` payload;
-/// - otherwise, at least one tier denial **and** an empty final turn (zero
-///   `TextDelta` blocks) ⇒ [`StopReason::Denied`]; else [`StopReason::Done`].
+/// - the cap being hit ⇒ [`StopReason::MaxToolCalls`] (a terminal state, not an error — no `error` payload, maps to exit 0);
+/// - any other run error (including a repetitive-guard abort) ⇒ [`StopReason::Error`] with a sanitized `error` payload;
+/// - otherwise, at least one tier denial **and** an empty final turn (zero `TextDelta` blocks) ⇒ [`StopReason::Denied`]; else [`StopReason::Done`].
 ///
 /// # Parameters
-/// - `resolved` — effective run parameters; supplies the output `model`,
-///   `provider` and `applied_caps` (the cap actually enforced comes from
-///   `policy`).
-/// - `policy` — tier policy driving authorization, the tool-call cap and the
-///   soft-guard silencing.
+/// - `resolved` — effective run parameters; supplies the output `model`, `provider` and `applied_caps` (the cap actually enforced comes from `policy`).
+/// - `policy` — tier policy driving authorization, the tool-call cap and the soft-guard silencing.
 /// - `agent` — a constructed agent (provider + registered tools).
 /// - `prompt` — the resolved user prompt.
-/// - `timeout` — optional wall-clock ceiling for the whole run (REQ-H36). `None`
-///   ⇒ no timeout (the interactive default). On elapse the agent future is
-///   dropped — cancelling the in-flight LLM stream — the run's
-///   [`CancellationToken`] is fired so any in-flight `bash` subprocess *tree* is
-///   killed (its group killer drops with the future), and a partial outcome with
-///   `stop_reason = Error` / `error.kind = Timeout` is returned. The tier default
-///   (900 s for `--auto`/`--full-auto`) is selected by the caller (Task 7) and
-///   passed here; use [`resolve_run_timeout`] to apply it.
-/// - `run_log` — optional JSONL run log; tier warnings and each tool call are
-///   recorded best-effort.
+/// - `timeout` — optional wall-clock ceiling for the whole run (REQ-H36). `None` ⇒ no timeout (the interactive default). On elapse the agent future is dropped — cancelling the in-flight LLM stream — the run's [`CancellationToken`] is fired so any in-flight `bash` subprocess *tree* is killed (its group killer drops with the future), and a partial outcome with `stop_reason = Error` / `error.kind = Timeout` is returned. The tier default (900 s for `--auto`/`--full-auto`) is selected by the caller (Task 7) and passed here; use [`resolve_run_timeout`] to apply it.
+/// - `run_log` — optional JSONL run log; tier warnings and each tool call are recorded best-effort.
 ///
 /// # Forced consult (REQ-H22)
 /// `resolved.consult == Some(true)` sets `AgentRunConfig::force_consult`, which
@@ -795,8 +745,7 @@ pub async fn run_consult(
 /// never reports usage yields `{0, 0}`, never a fabricated value.
 ///
 /// # Gaps (documented, never fabricated)
-/// - `timings.per_turn_ms` is empty: turn boundaries are not observable from
-///   outside the loop. `total_ms` and (best-effort) `ttfb_ms` are measured.
+/// - `timings.per_turn_ms` is empty: turn boundaries are not observable from outside the loop. `total_ms` and (best-effort) `ttfb_ms` are measured.
 pub async fn run_query(
     resolved: Resolved,
     policy: Policy,

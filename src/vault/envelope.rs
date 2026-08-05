@@ -41,8 +41,7 @@
 //!
 //! [`open_envelope`] evaluates the FEC **before** the AEAD, so that:
 //! - a failed `fec_decode` ⇒ [`VaultError::VaultMetaCorrupt`] (corrupt data);
-//! - a failed `unwrap_key` after a successful FEC (AEAD tag) ⇒
-//! [`VaultError::WrongPassphrase`] (wrong key).
+//! - a failed `unwrap_key` after a successful FEC (AEAD tag) ⇒ [`VaultError::WrongPassphrase`] (wrong key).
 
 use std::sync::{Arc, Mutex};
 
@@ -155,10 +154,8 @@ pub fn bootstrap_envelope(vault: &CryptoVault, master: &str) -> Result<Bootstrap
 ///
 /// # Errors
 ///
-/// - [`VaultError::VaultMetaCorrupt`] if the FEC cannot recover `salt` or the
-/// wrapped blob (corruption beyond its capacity), or if the blob is not valid base64.
-/// - [`VaultError::WrongPassphrase`] if `master` is incorrect (the AEAD tag
-/// of the unwrap fails after a successful FEC). **Retryable; never deletes.**
+/// - [`VaultError::VaultMetaCorrupt`] if the FEC cannot recover `salt` or the wrapped blob (corruption beyond its capacity), or if the blob is not valid base64.
+/// - [`VaultError::WrongPassphrase`] if `master` is incorrect (the AEAD tag of the unwrap fails after a successful FEC). **Retryable; never deletes.**
 /// - [`VaultError::Crypto`] on a key-derivation failure.
 pub fn open_envelope(
     vault: &CryptoVault,
