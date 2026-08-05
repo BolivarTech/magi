@@ -1,13 +1,11 @@
-// Author: Julian Bolivar
-// Version: 1.0.0
-// Date: 2026-08-02
+// Author: Julian Bolivar Version: 1.0.0 Date: 2026-08-02
 
-//! Redacción de credenciales en URLs, **por posición y nunca por contenido** (REQ-A16).
+//! Redacting credentials in URLs, **by position and never by content** (REQ-A16).
 //!
-//! # Por qué vive en el LIB y no bajo `system/`
+//! # Why it lives in the LIB and not under `system/`
 //!
-//! Procesa entrada no confiable, así que es el candidato de §0.3 a `cargo fuzz`. `system/` es
-//! del binario y no es alcanzable ni desde un fuzz target ni desde `tests/`.
+//! It processes untrusted input, so it is the candidate from §0.3 for `cargo fuzz`. `system/`
+//! belongs to the binary and is not reachable from either a fuzz target or `tests/`.
 
 #![deny(missing_docs)]
 #![deny(clippy::missing_docs_in_private_items)]
@@ -29,32 +27,32 @@
 use std::error::Error;
 use std::fmt;
 
-/// Lo que reemplaza a una credencial, y a una URL entera cuando no se pudo recorrer.
+/// What replaces a credential, and an entire URL when it could not be traversed.
 const FULLY_REDACTED: &str = "***";
 
-/// Separador que abre la autoridad de una URL.
+/// Separator that opens the authority of a URL.
 const SCHEME_SEPARATOR: &str = "://";
 
-/// Redacta el `userinfo` de una URL **por POSICIÓN, nunca por contenido** (REQ-A16).
+/// Redacts the `userinfo` of a URL **by POSITION, never by content** (REQ-A16).
 ///
-/// Regla exacta, en tres pasos:
-/// 1. La **autoridad** empieza tras `://` y termina en el primer `/`, `?` o `#`.
-/// 2. Dentro de esa ventana —y solo ahí— el `userinfo` es todo lo anterior al **último** `@`.
-///    El último, no el primero: `user:p@ss@host` es una contraseña con `@`, legal en RFC 3986.
-/// 3. Sin `@` dentro de la autoridad no hay `userinfo`, y no se toca nada.
+/// Exact rule, in three steps:
+/// 1. The **authority** begins after `://` and ends at the first `/`, `?`, or `#`.
+/// 2. Inside that window —and only there— the `userinfo` is everything before the **last** `@`.
+/// The last, not the first: `user:p@ss@host` is a password containing `@`, legal in RFC 3986.
+/// 3. Without an `@` inside the authority there is no `userinfo`, and nothing is touched.
 ///
-/// **Por qué posicional y no por contenido:** «decodificar y después redactar» pierde contra el
-/// doble percent-encoding — `%2570` decodifica una vez a `%70`, que sigue encodeado, y
-/// decodificar en bucle invita a una bomba de decodificación. La posición del `userinfo` **no
-/// depende de la codificación de su contenido**, así que la regla posicional vale para
-/// cualquier codificación, presente o futura.
+/// **Why positional and not by content:** «decode and then redact» loses to
+/// double percent-encoding — `%2570` decodes once to `%70`, which is still encoded, and
+/// decoding in a loop invites a decoding bomb. The position of `userinfo` **does not depend on
+/// the encoding of its content**, so the positional rule works for any encoding, present or
+/// future.
 ///
-/// Los hosts IPv6 entre corchetes entran sin caso especial: el último `@` de la autoridad cae
-/// antes del `[`, y la regla nunca busca `:`, así que los dos puntos de la dirección no se
-/// confunden con el separador `usuario:clave`.
+/// IPv6 hosts in brackets enter without special casing: the last `@` of the authority falls
+/// before the `[`, and the rule never looks for `:`, so the colons in the address are not
+/// confused with the `usuario:clave` separator.
 ///
-/// Una URL que no parsea se redacta **entera**: es justo donde un secreto puede estar en un
-/// lugar inesperado, así que la dirección segura de fallo es esconder de más.
+/// A URL that does not parse is redacted **whole**: that is exactly where a secret might be in
+/// an unexpected place, so the safe failure direction is to hide too much.
 ///
 /// # Examples
 ///
@@ -82,36 +80,36 @@ pub fn redact_url(raw: &str) -> String {
     }
 }
 
-/// Dónde cae el `userinfo` de una URL, si es que hay uno.
+/// Where the `userinfo` of a URL falls, if there is one.
 ///
-/// Se expone porque **dos** módulos necesitan la misma regla de autoridad: este redacta lo que
-/// encuentra y `magi::endpoint` rechaza lo que encuentra si no son los placeholders. Escribir
-/// el recorrido dos veces es cómo se desincronizan (B3), y acá desincronizarse significa que
-/// uno de los dos deja de ver una credencial.
+/// It is exposed because **two** modules need the same authority rule: this one redacts what it
+/// finds and `magi::endpoint` rejects what it finds if they are not placeholders. Writing the
+/// traversal twice is how they get out of sync (B3), and here getting out of sync means one of
+/// the two stops seeing a credential.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UserinfoLocation {
-    /// La URL no se pudo recorrer. Quien la reciba debe **fallar hacia esconder**: es donde un
-    /// secreto puede estar en un lugar inesperado.
+    /// The URL could not be traversed. Whoever receives it must **fail toward hiding**: that is
+    /// where a secret might be in an unexpected place.
     Unparseable,
-    /// La autoridad no tiene `@`, así que no hay `userinfo` y no hay nada que ocultar.
+    /// The authority has no `@`, so there is no `userinfo` and nothing to hide.
     Absent,
-    /// Rango `[start, end)` del `userinfo`, **sin** incluir el `@` que lo cierra.
+    /// Range `[start, end)` of the `userinfo`, **without** including the closing `@`.
     Found {
-        /// Primer byte del `userinfo`, justo después de `://`.
+        /// First byte of the `userinfo`, right after `://`.
         start: usize,
-        /// Byte del `@` que cierra el `userinfo`.
+        /// Byte of the `@` that closes the `userinfo`.
         end: usize,
     },
 }
 
-/// Localiza el `userinfo` aplicando la regla de autoridad de RFC 3986.
+/// Locates the `userinfo` by applying the RFC 3986 authority rule.
 ///
-/// La regla completa está documentada en [`redact_url`], que es su primer consumidor.
+/// The complete rule is documented in [`redact_url`], which is its first consumer.
 ///
-/// No usa `&raw[a..b]`: el bloque de atributos de este módulo incluye
-/// `deny(clippy::string_slice, clippy::indexing_slicing)`, y `str::get` devuelve `Option` en
-/// vez de panicar en una frontera de carácter — que es la garantía que se quiere en una
-/// función que recorre entrada no confiable.
+/// It does not use `&raw[a..b]`: this module's attribute block includes
+/// `deny(clippy::string_slice, clippy::indexing_slicing)`, and `str::get` returns `Option`
+/// instead of panicking at a character boundary — which is the guarantee wanted in a function
+/// that traverses untrusted input.
 #[must_use]
 pub fn locate_userinfo(raw: &str) -> UserinfoLocation {
     let Some(scheme_end) = raw.find(SCHEME_SEPARATOR) else {
@@ -121,13 +119,13 @@ pub fn locate_userinfo(raw: &str) -> UserinfoLocation {
     let Some(rest) = raw.get(authority_start..) else {
         return UserinfoLocation::Unparseable;
     };
-    // La autoridad termina en el primer `/`, `?` o `#`; sin ninguno, es todo el resto.
+    // The authority ends at the first `/`, `?`, or `#`; with none, it is all the rest.
     let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
     let Some(authority) = rest.get(..authority_end) else {
         return UserinfoLocation::Unparseable;
     };
-    // ÚLTIMO `@` de la autoridad: `user:p@ss@host` es una contraseña con `@`, legal en RFC
-    // 3986. Sin `@` no hay userinfo — un `@` en el path no es credencial.
+    // LAST `@` of the authority: `user:p@ss@host` is a password containing `@`, legal in RFC
+    // 3986. Without `@` there is no userinfo — an `@` in the path is not a credential.
     let Some(at) = authority.rfind('@') else {
         return UserinfoLocation::Absent;
     };
@@ -137,17 +135,17 @@ pub fn locate_userinfo(raw: &str) -> UserinfoLocation {
     }
 }
 
-/// Texto de error ya redactado. **Sus únicos constructores son [`redact_foreign_error`] y
+/// Error text already redacted. **Its only constructors are [`redact_foreign_error`] and
 /// [`redact_foreign_text`].**
 ///
-/// Es lo que impide que un `String` sin redactar llegue a un error de dominio: sin el newtype
-/// el camino sin redactar queda a un `.into()` de distancia, y la defensa vuelve a depender de
-/// que alguien se acuerde en cada sitio.
+/// It is what prevents an unredacted `String` from reaching a domain error: without the newtype
+/// the unredacted path is one `.into()` away, and the defense goes back to depending on someone
+/// remembering at every site.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SafeErrorText(String);
 
 impl SafeErrorText {
-    /// El texto, ya seguro de mostrar.
+    /// The text, already safe to display.
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
@@ -160,59 +158,61 @@ impl fmt::Display for SafeErrorText {
     }
 }
 
-/// Caracteres que pueden formar parte de un esquema de URL (RFC 3986: `ALPHA *( ALPHA / DIGIT
-/// / "+" / "-" / "." )`).
+/// Characters that may be part of a URL scheme (RFC 3986: `ALPHA *( ALPHA / DIGIT / "+" / "-" /
+/// "." )`).
 fn is_scheme_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.')
 }
 
-/// Caracteres que terminan una URL embebida en prosa.
+/// Characters that terminate a URL embedded in prose.
 ///
-/// Deliberadamente generoso por el lado del final: incluir de más recorta la URL antes y a lo
-/// sumo deja visible un tramo del host, mientras que incluir de menos podría dejar la
-/// credencial fuera de la ventana redactada.
+/// Deliberately generous on the ending side: including too much truncates the URL earlier and
+/// at most leaves a stretch of host visible, while including too little could leave the
+/// credential outside the redacted window.
 fn ends_embedded_url(c: char) -> bool {
     c.is_whitespace() || matches!(c, '"' | '\'' | '<' | '>' | '`' | ',' | ';' | ')')
 }
 
-/// Redacta las URLs **embebidas en cualquier prosa de un TERCERO**, conservando el resto —
-/// el motor detrás de [`redact_foreign_error`], expuesto directamente para llamadores que no
-/// tienen un `&dyn Error` que envolver.
+/// Redacts URLs **embedded in any third-party prose**, keeping the rest — the engine behind
+/// [`redact_foreign_error`], exposed directly for callers that do not have a `&dyn Error` to
+/// wrap.
 ///
-/// # Por qué existe SEPARADA de [`redact_foreign_error`] (fix round 3, hallazgo CRÍTICO)
+/// # Why it exists SEPARATE from [`redact_foreign_error`] (fix round 3, CRITICAL finding)
 ///
-/// `redact_foreign_error` toma `&dyn Error` porque su primer consumidor (`explain_magi_error`)
-/// tenía uno a mano. Pero la lógica entera opera sobre el `String` que produce `err.to_string()`
-/// — nada de lo que sigue usa el `Error` en sí. Un segundo llamador con texto de un tercero que
-/// **ya es `String`** (p. ej. `MagiReport::failed_agents`, cuyo valor es literalmente
-/// `MagiError::Provider(e).to_string()` armado por magi-core, verificado contra
-/// `orchestrator.rs::dispatch_one_agent`) no tiene un `Error` que envolver — envolverlo en un
-/// `impl Error` de un solo uso para satisfacer una firma sería un workaround que deja intacto
-/// el hueco real: el día que alguien tenga un `String` foráneo y no un `Error`, va a escribir
-/// ESE `.to_string()` sin pasar por acá, exactamente el defecto que este fix cierra.
+/// `redact_foreign_error` takes `&dyn Error` because its first consumer (`explain_magi_error`)
+/// had one at hand. But the whole logic operates on the `String` produced by `err.to_string()`
+/// — nothing that follows uses the `Error` itself. A second caller with third-party text that
+/// **is already `String`** (e.g. `MagiReport::failed_agents`, whose value is literally
+/// `MagiError::Provider(e).to_string()` built by magi-core, verified against
+/// `orchestrator.rs::dispatch_one_agent`) does not have an `Error` to wrap — wrapping it in a
+/// single-use `impl Error` to satisfy a signature would be a workaround that leaves the real
+/// hole intact: the day someone has a foreign `String` and not an `Error`, they will write THAT
+/// `.to_string()` without going through here, exactly the defect this fix closes.
 ///
-/// **Fix round 4 — el mecanismo concreto, corregido.** El motivador original de esta función
-/// (`failed_agents_json`, `src/tools/consult.rs`) describía una FALLA DE CONEXIÓN ORDINARIA
-/// filtrando la URL resuelta vía el `Display` de reqwest/hyper — verificado contra magi-core
-/// 3.1.0 y **es incorrecto**: `provider.rs::to_provider_error` arma `Network`/`Timeout` a partir
-/// de una URL YA REDACTADA más `cause_chain(e)`, que arranca en `e.source()` y por lo tanto
-/// **saltea** el error de más alto nivel (el que interpola la URL cruda) — pineado por el propio
-/// test de magi-core `cause_chain_skips_the_top_level_error`. Esa ruta específica ya está
-/// cubierta aguas arriba. La exposición real que esta redacción cubre es
-/// `ProviderError::Http { body }` (texto de respuesta CONTROLADO POR EL SERVIDOR, sin redactar) y
-/// el hecho de que `ProviderError` es `#[non_exhaustive]` — una variante futura de magi-core
-/// podría interpolar texto libre sin que este código cambie una línea. Por eso la redacción va
-/// en el BORDE (todo `String` foráneo) y no por variante: sigue siendo correcta aunque el
-/// mecanismo original sospechado no aplique, y sigue siendo correcta si magi-core cambia.
+/// **Fix round 4 — the concrete mechanism, corrected.** The original motivator for this
+/// function
+/// (`failed_agents_json`, `src/tools/consult.rs`) described an ORDINARY CONNECTION FAILURE
+/// leaking the resolved URL through the reqwest/hyper `Display` — verified against magi-core
+/// 3.1.0 and **it is incorrect**: `provider.rs::to_provider_error` builds `Network`/`Timeout`
+/// from an ALREADY REDACTED URL plus `cause_chain(e)`, which starts at `e.source()` and
+/// therefore
+/// **skips** the top-level error (the one that interpolates the raw URL) — pinned by the very
+/// magi-core test `cause_chain_skips_the_top_level_error`. That specific path is already
+/// covered upstream. The real exposure this redaction covers is `ProviderError::Http { body }`
+/// (SERVER-CONTROLLED response text, unredacted) and the fact that `ProviderError` is
+/// `#[non_exhaustive]` — a future magi-core variant might interpolate free text without this
+/// code changing a line. That is why redaction happens at the EDGE (every foreign `String`) and
+/// not by variant: it remains correct even if the originally suspected mechanism does not
+/// apply, and remains correct if magi-core changes.
 ///
-/// # Por qué hace falta redactar esto, y por qué una lista de sitios no alcanza
+/// # Why this needs to be redacted, and why a list of sites is not enough
 ///
-/// Los `format!` que escribimos nosotros se pueden enumerar y auditar. Este camino no: el
-/// texto lo arma **otra crate** con la URL que le pasamos, así que ninguna revisión de
-/// nuestros formateadores lo ve. Todo `String` que empaquete un error foráneo pasa por acá.
+/// The `format!`s we write ourselves can be enumerated and audited. This path cannot: the text
+/// is built by **another crate** with the URL we pass it, so no review of our formatters sees
+/// it. Every `String` that packages a foreign error goes through here.
 ///
-/// No es una segunda implementación de [`redact_url`]: barre las URLs del mensaje y le aplica
-/// a cada una **la misma regla posicional**.
+/// It is not a second implementation of [`redact_url`]: it sweeps the URLs in the message and
+/// applies **the same positional rule** to each one.
 #[must_use]
 pub fn redact_foreign_text(raw: &str) -> SafeErrorText {
     let mut out = String::with_capacity(raw.len());
@@ -220,7 +220,7 @@ pub fn redact_foreign_text(raw: &str) -> SafeErrorText {
 
     while let Some(found) = raw.get(cursor..).and_then(|r| r.find(SCHEME_SEPARATOR)) {
         let sep_at = cursor + found;
-        // El esquema arranca donde terminan los caracteres válidos de esquema hacia atrás.
+        // The scheme starts where valid scheme characters end, working backwards.
         let Some(before) = raw.get(cursor..sep_at) else {
             break;
         };
@@ -253,11 +253,11 @@ pub fn redact_foreign_text(raw: &str) -> SafeErrorText {
     SafeErrorText(out)
 }
 
-/// Redacta las URLs **embebidas en la prosa de un error foráneo**, conservando el resto.
+/// Redacts URLs **embedded in the prose of a foreign error**, keeping the rest.
 ///
-/// Envoltorio de [`redact_foreign_text`] sobre `err.to_string()` — ver su rustdoc para el
-/// porqué de la separación. Se mantiene por compatibilidad con los llamadores que sí tienen un
-/// `&dyn Error` (`explain_magi_error`).
+/// Wrapper of [`redact_foreign_text`] over `err.to_string()` — see its rustdoc for why the
+/// separation. It is kept for compatibility with callers that do have a `&dyn Error`
+/// (`explain_magi_error`).
 #[must_use]
 pub fn redact_foreign_error(err: &dyn Error) -> SafeErrorText {
     redact_foreign_text(&err.to_string())
@@ -267,7 +267,7 @@ pub fn redact_foreign_error(err: &dyn Error) -> SafeErrorText {
 mod tests {
     use super::*;
 
-    /// SC-A13: userinfo simple.
+    /// SC-A13: simple userinfo.
     #[test]
     fn userinfo_is_redacted_and_the_host_survives() {
         assert_eq!(
@@ -276,7 +276,7 @@ mod tests {
         );
     }
 
-    /// SC-A13c: el doble percent-encoding NO esquiva, porque la regla es POSICIONAL.
+    /// SC-A13c: double percent-encoding does NOT evade, because the rule is POSITIONAL.
     #[test]
     fn double_percent_encoding_does_not_evade_redaction() {
         let doubly = "https://%2575%2573%2565%2572:%2570@host/v1";
@@ -285,7 +285,7 @@ mod tests {
         assert!(out.contains("host"));
     }
 
-    /// SC-A13d: un `@` en el PATH no dispara redacción.
+    /// SC-A13d: an `@` in the PATH does not trigger redaction.
     #[test]
     fn an_at_sign_in_the_path_is_not_userinfo() {
         assert_eq!(
@@ -294,7 +294,7 @@ mod tests {
         );
     }
 
-    /// SC-A13d: contraseña que contiene `@` — gana el ÚLTIMO `@` de la autoridad.
+    /// SC-A13d: password containing `@` — the LAST `@` of the authority wins.
     #[test]
     fn the_last_at_within_the_authority_wins() {
         assert_eq!(
@@ -303,7 +303,7 @@ mod tests {
         );
     }
 
-    /// IPv6 entre corchetes: entra en la regla sin caso especial.
+    /// IPv6 in brackets: enters the rule without special casing.
     #[test]
     fn bracketed_ipv6_hosts_are_handled_without_a_special_case() {
         assert_eq!(redact_url("http://[::1]:11434/v1"), "http://[::1]:11434/v1");
@@ -313,16 +313,16 @@ mod tests {
         );
     }
 
-    /// Dirección segura de fallo: lo que no parsea se redacta ENTERO.
+    /// Safe failure direction: what does not parse is redacted WHOLE.
     #[test]
     fn an_unparseable_url_is_redacted_whole() {
         assert_eq!(redact_url("no es una url"), "***");
     }
 
-    /// Un error FORÁNEO trae la URL embebida en su prosa, y ahí también se redacta.
+    /// A FOREIGN error brings the URL embedded in its prose, and there it is also redacted.
     ///
-    /// Es el camino que una lista de `format!` propios no puede ver: el texto lo arma otra
-    /// crate con la URL que le pasamos nosotros.
+    /// It is the path that a list of our own `format!`s cannot see: the text is built by
+    /// another crate with the URL we pass it.
     #[test]
     fn a_foreign_errors_embedded_url_is_redacted_while_its_prose_survives() {
         let err = std::io::Error::other("connect to https://user:hunter2@host:8443/v1 failed");
@@ -339,7 +339,8 @@ mod tests {
         assert!(safe.as_str().contains("failed"), "y la prosa se conserva");
     }
 
-    /// Sin URL adentro, el texto pasa intacto: redactar de más lo volvería inservible.
+    /// Without a URL inside, the text passes through intact: redacting too much would make it
+    /// useless.
     #[test]
     fn a_foreign_error_without_a_url_is_left_alone() {
         let err = std::io::Error::other("connection reset by peer");
@@ -349,7 +350,7 @@ mod tests {
         );
     }
 
-    /// Varias URLs en el mismo mensaje: se redactan TODAS, no la primera.
+    /// Several URLs in the same message: ALL are redacted, not just the first.
     #[test]
     fn every_embedded_url_is_redacted_not_just_the_first() {
         let err =
@@ -360,10 +361,10 @@ mod tests {
         assert!(safe.as_str().contains("one") && safe.as_str().contains("two"));
     }
 
-    /// Fix round 3: [`redact_foreign_text`] es el motor `&str` que
-    /// [`redact_foreign_error`] envuelve — se prueba DIRECTO, sin pasar por un
-    /// `&dyn Error`, para el llamador que ya tiene un `String` foráneo (p. ej.
-    /// `MagiReport::failed_agents`, que ES `MagiError::Provider(e).to_string()`).
+    /// Fix round 3: [`redact_foreign_text`] is the `&str` engine that [`redact_foreign_error`]
+    /// wraps — it is tested DIRECTLY, without going through a `&dyn Error`, for the caller that
+    /// already has a foreign `String` (e.g. `MagiReport::failed_agents`, which IS
+    /// `MagiError::Provider(e).to_string()`).
     #[test]
     fn redact_foreign_text_redacts_a_string_with_no_error_to_wrap() {
         let raw = "network error: connect to https://user:hunter2@host:8443/v1 failed";
@@ -376,8 +377,8 @@ mod tests {
         assert!(safe.as_str().contains("host:8443"), "sigue accionable");
     }
 
-    /// Edge case (B13): sin URL adentro, pasa intacto — mismo contrato que
-    /// [`redact_foreign_error`] sobre el mismo texto.
+    /// Edge case (B13): without a URL inside, it passes intact — same contract as
+    /// [`redact_foreign_error`] on the same text.
     #[test]
     fn redact_foreign_text_leaves_url_free_text_alone() {
         assert_eq!(
