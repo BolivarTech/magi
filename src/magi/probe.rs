@@ -1010,6 +1010,8 @@ mod tests {
         assert!(matches!(m["m"], Measurement::NotMeasuredThisTime));
     }
 
+    /// SC-A24g: the derived threshold is a FRACTION of the window, never the window itself, so the size
+    /// warning stays reachable on a large-window model.
     /// SC-A24j: the threshold comes from the MINIMUM of the mages, not the main one.
     #[test]
     fn the_warn_threshold_comes_from_the_minimum_mage_window() {

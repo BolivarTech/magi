@@ -1877,7 +1877,7 @@ mod tests {
         }
     }
 
-    /// SC-A09b: the JSON grows with the new telemetry fields. `schema_version`
+    /// SC-A09b and SC-A07 (the magi-rs half): the JSON grows with the new telemetry fields. `schema_version`
     /// (`src/headless/output.rs`, an unrelated module) does not move for it (REQ-A08b) —
     /// verified structurally by this task simply never touching that file; its `SCHEMA_VERSION`
     /// constant is private with no public accessor this module could assert against.
@@ -1901,6 +1901,10 @@ mod tests {
         ] {
             assert!(v.get(key).is_some(), "missing {key}");
         }
+        // SC-A07 (magi-rs half): the mode that comes out is the one that was resolved, and
+        // it carries its origin. Asserting only the key's presence would pass even if the
+        // builder emitted a different lens than the caller resolved.
+        assert_eq!(v["mode"], "code-review");
         assert_eq!(v["mode_source"], "inferred");
     }
 

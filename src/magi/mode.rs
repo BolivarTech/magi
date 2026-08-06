@@ -472,7 +472,10 @@ mod tests {
 
     use super::*;
 
-    /// SC-A07b/c/e, SC-A07d and SC-A07w — REQ-A07: **FIVE** levels, in order.
+    /// SC-A07b, SC-A07c, SC-A07e, SC-A07d and SC-A07w — REQ-A07: **FIVE** levels, in order.
+    ///
+    /// The IDs are spelled out rather than compressed as `SC-A07b/c/e`: a coverage sweep greps
+    /// for the literal ID, and a compressed range matches none of the three it names.
     ///
     /// The name says five on purpose: when it said "four" and the resolver already had five,
     /// the test stayed green because it never exercised the missing level.

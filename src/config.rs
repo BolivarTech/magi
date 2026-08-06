@@ -1028,6 +1028,7 @@ mod tests {
     // Task 1.4: `load` takes a FILE path now, not a directory, and returns `Result<(Self,
     // Vec<String>), ConfigError>`.
 
+    /// SC-A21b: an absent `magi.toml` stays a silent default — no error, no degradation.
     #[test]
     fn test_load_missing_file_is_default_no_warning() {
         // Task 1.1: `"openai"` is no longer a valid `provider` value (REQ-A01b) — `"anthropic"`

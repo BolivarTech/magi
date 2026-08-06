@@ -275,7 +275,8 @@ mod tests {
         );
     }
 
-    /// SC-A13c: double percent-encoding does NOT evade, because the rule is POSITIONAL.
+    /// SC-A13c and SC-A13b (first clause): double percent-encoding does NOT evade, because the
+    /// rule is POSITIONAL.
     #[test]
     fn double_percent_encoding_does_not_evade_redaction() {
         let doubly = "https://%2575%2573%2565%2572:%2570@host/v1";
@@ -312,7 +313,7 @@ mod tests {
         );
     }
 
-    /// Safe failure direction: what does not parse is redacted WHOLE.
+    /// SC-A13b (second clause). Safe failure direction: what does not parse is redacted WHOLE.
     #[test]
     fn an_unparseable_url_is_redacted_whole() {
         assert_eq!(redact_url("no es una url"), "***");

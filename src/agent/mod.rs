@@ -4272,6 +4272,8 @@ mod tests {
         assert_eq!(outcome.unwrap().magi_calls, 0, "zero model calls");
     }
 
+    /// SC-A20e: the veto text says retrying gives the same result and never reveals how many
+    /// characters are missing.
     /// SC-A20f / SC-A20m: two CONSECUTIVE vetoes are terminal; a success in between resets.
     #[tokio::test]
     async fn the_veto_message_discourages_retry_without_naming_the_threshold() {
