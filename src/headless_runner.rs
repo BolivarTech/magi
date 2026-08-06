@@ -1513,6 +1513,51 @@ mod tests {
         assert_eq!(outcome.provider, "test-provider");
     }
 
+    /// SC-A20c: a complexity-gate veto of an autonomous `consult` is not an error, so the
+    /// headless exit code stays the SUCCESS one — a CI pipeline reading a non-zero exit here
+    /// would wrongly read a normal, cost-saving veto as a run failure.
+    ///
+    /// The model-issued `consult` ToolUse reaches [`Agent::dispatch_consult_through_gate`]
+    /// directly (it never goes through [`Agent::authorize_and_execute_tool`], so the tier does
+    /// not gate it — only the complexity gate does), so `Tier::Default` already exercises the
+    /// real production path; no elevated tier is needed to observe the veto. The empty `query`
+    /// left by `tool_turn`'s default `json!({})` input is unconditionally below every
+    /// `[magi.complexity]` threshold (REQ-A20 requires every threshold `> 1`), so the veto is
+    /// deterministic without needing to know the exact configured number.
+    #[tokio::test]
+    async fn test_gate_vetoed_consult_still_exits_success() {
+        let provider = ScriptedProvider::new(vec![
+            tool_turn("t1", "consult"),
+            Turn::Text("answered without consensus".to_string()),
+        ]);
+        let mut agent = Agent::new(provider);
+        register_echo(&mut agent, "consult");
+
+        let policy = Policy::new(Tier::Default, 15, None);
+        let outcome = run_query(resolved_stub(), policy, &mut agent, "prompt", None, None).await;
+
+        assert_eq!(
+            outcome.stop_reason,
+            StopReason::Done,
+            "the veto returns an ordinary ToolResult, not an error: the turn completes normally"
+        );
+        assert!(outcome.error.is_none(), "a veto is never an error payload");
+        let response = outcome.response.as_deref().unwrap_or_default();
+        assert!(
+            response.starts_with("answered without consensus"),
+            "the agent's own text must survive: {response}"
+        );
+        assert!(
+            response.contains("NO CONSENSUS"),
+            "SC-A20k: the answer must carry the no-consensus mark: {response}"
+        );
+        assert_eq!(
+            crate::exit_code_for_outcome(&outcome),
+            0,
+            "a vetoed autonomous consult must not turn into a non-zero process exit code"
+        );
+    }
+
     /// `--auto` auto-approves `edit` and `bash`; both execute (hard barriers
     /// still apply inside the real tools) — REQ-H07.
     #[tokio::test]
@@ -2636,6 +2681,69 @@ mod tests {
             Some("reacted-to-consult"),
             "the model's first provider turn must already see the forced \
              consult's ToolResult content"
+        );
+    }
+
+    /// SC-A20c: a vetoed AUTONOMOUS consult — the model's own `ToolUse`, not an
+    /// operator `--consult` — leaves the headless run at `StopReason::Done` with
+    /// no error, so the process exit code stays the success one. `resolved_stub()`
+    /// carries `consult: None` (unlike `forced_resolved()` above), so this goes
+    /// through the ordinary tool loop, where `dispatch_consult_through_gate`
+    /// (`src/agent/mod.rs`) is the ONLY call site the complexity gate sees
+    /// (REQ-A20). MS2 has not yet wired `[magi.complexity]` into `Resolved` (see
+    /// the "Task 3.2" comment inside `run_query` above), so the gate here runs
+    /// with its BUILT-IN thresholds — this also pins that the unconfigured
+    /// default still vetoes trivial content.
+    ///
+    /// The canned `Magi` is real (not a stub that would silently succeed if
+    /// called): `dispatch_consult_through_gate` only reaches
+    /// `authorize_and_execute_tool` — the sole place the `RunObserver` records a
+    /// `tool_calls` entry — on `GateVerdict::Dispatch`, never on a veto. So an
+    /// absent "consult" entry in `outcome.tool_calls` is direct evidence the
+    /// canned MAGI was never invoked, not an assumption.
+    #[tokio::test]
+    async fn a_vetoed_autonomous_consult_leaves_the_headless_run_at_exit_success() {
+        let provider = ScriptedProvider::new(vec![
+            Turn::Tool {
+                id: "c1".to_string(),
+                name: "consult".to_string(),
+                input: json!({ "query": "trivial" }),
+            },
+            Turn::Text("answered without consensus".to_string()),
+        ]);
+        let mut agent = Agent::new(provider);
+        agent.register_tool(Box::new(ConsultTool::new(canned_magi(), true)));
+
+        let policy = Policy::new(Tier::Auto, 15, None);
+        let outcome = run_query(
+            resolved_stub(),
+            policy,
+            &mut agent,
+            "please look into this",
+            None,
+            None,
+        )
+        .await;
+
+        assert_eq!(
+            outcome.stop_reason,
+            StopReason::Done,
+            "a veto is not an error: the turn must finish normally"
+        );
+        assert!(
+            outcome.error.is_none(),
+            "a veto must never populate RunOutcome.error"
+        );
+        assert!(
+            outcome.tool_calls.iter().all(|t| t.name != "consult"),
+            "a vetoed consult never reaches authorize_and_execute_tool, so it must \
+             not appear in the observer-recorded tool_calls — proof the canned \
+             MAGI was never invoked"
+        );
+        assert_eq!(
+            crate::exit_code_for_outcome(&outcome),
+            0,
+            "the process exit code must stay the success one"
         );
     }
 
