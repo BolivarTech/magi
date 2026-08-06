@@ -4261,7 +4261,7 @@ mod tests {
         run_and_observe(&mut guard, config, &magi_calls, &gate_log_sink).await
     }
 
-    /// SC-A20e: the veto message discourages retrying and never names the threshold.
+    /// SC-A20 / SC-A20c: the gate vetoes the autonomous route without erroring.
     #[tokio::test]
     async fn the_gate_vetoes_the_autonomous_route_without_erroring() {
         let outcome = run_turn_with_autonomous_consult("trivial").await;

@@ -1883,7 +1883,8 @@ mod tests {
         }
     }
 
-    /// SC-A12d: inconsistent combination detected ON LOAD, in its TWO sub-cases.
+    /// SC-A12c: what resolved silently gets said — an empty `provider` names the default used,
+    /// and a non-default root `base_url` says where the embedder's endpoint came from.
     #[test]
     fn silent_resolutions_are_announced_as_notices() {
         let dir = tempfile::tempdir().unwrap();

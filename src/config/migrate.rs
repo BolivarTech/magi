@@ -243,7 +243,8 @@ pub fn render_migration_error(found: &[Migration]) -> String {
 mod tests {
     use super::*;
 
-    /// SC-A21e: with embedded credentials, REDACTION wins over ready-to-paste.
+    /// SC-A21: the v0.11.0 config fails with both incompatibilities named together, the
+    /// `base_url` already rewritten, and the criterion for choosing `ollama` vs `openai-compat`.
     #[test]
     fn a_v0_11_0_config_reports_both_incompatibilities_at_once() {
         let toml = include_str!("../../tests/fixtures/v0.11.0/default.toml");
