@@ -1208,6 +1208,26 @@ mod tests {
         assert!(MagiConfig::from_toml_str("[magi]\nunknown_field = \"x\"").is_err());
     }
 
+    /// SC-A12b: `min_agents` is not configurable. `ConsensusConfig` is deliberately not
+    /// exposed as a `magi.toml` key (REQ-A15) — accepting `min_agents` would let an operator
+    /// declare a two-mage consensus as valid, which changes the GATE's semantics (a degraded
+    /// run becomes approvable), not its performance. `deny_unknown_fields` on
+    /// `MagiSectionConfig` is what enforces the hard floor; this test proves that "would
+    /// reject" is actually "does reject" rather than an assumption nobody checks.
+    #[test]
+    fn min_agents_and_any_consensus_config_field_are_rejected_as_unknown() {
+        assert!(
+            MagiConfig::from_toml_str("[magi]\nmin_agents = 2").is_err(),
+            "min_agents must never be accepted: it would let a two-mage consensus \
+             pass as valid, turning a degraded run into an approvable one"
+        );
+        // `epsilon` is `ConsensusConfig`'s other field — same struct, same reasoning.
+        assert!(
+            MagiConfig::from_toml_str("[magi]\nepsilon = 0.001").is_err(),
+            "no ConsensusConfig-shaped field is configurable, not just min_agents"
+        );
+    }
+
     // Default `[magi]` section (absent or empty) must have `auto_approve = false`.
 
     /// Historical: added when `auto_approve` first landed on this section (now
