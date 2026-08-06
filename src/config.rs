@@ -1674,6 +1674,38 @@ mod tests {
         assert!(msg.contains("line 2"), "wrong line: {msg}");
     }
 
+    /// SC-A16g: a broken TOML carrying a `[user]:[password]`-style placeholder does not leak,
+    /// because `safe_parse_error` (proven above to drop the offending value on ANY input) and
+    /// `detect_migrations` (proven in `migrate.rs`'s
+    /// `a_syntactically_broken_toml_gets_a_syntax_error_not_migration_advice` to require
+    /// structural validity, not a textual match) hold TOGETHER on the real
+    /// `from_toml_str` path — this is the combination the scenario actually describes, not
+    /// either property in isolation. What sits on the offending line is `[password]`, never a
+    /// secret, so a `line`-citing error is safe by construction.
+    #[test]
+    fn a_broken_toml_with_a_placeholder_still_only_cites_a_safe_position() {
+        // Unterminated string on the base_url line: syntactically broken. It also textually
+        // resembles the v0.11.0 `[openai].base_url` migration pattern PLUS carries the
+        // placeholder — both would be red herrings if `detect_migrations` matched by grep
+        // instead of requiring structural validity.
+        let toml =
+            "provider = \"openai\"\n[openai]\nbase_url = \"https://[user]:[password]@host/v1\n";
+        let err = MagiConfig::from_toml_str(toml).unwrap_err();
+        assert!(
+            matches!(err, ConfigError::Parse(_)),
+            "a syntactically broken file must get a syntax error, not migration advice: {err}"
+        );
+        let msg = err.to_string();
+        assert!(
+            !msg.contains("host"),
+            "safe_parse_error must never echo the source excerpt, placeholder or not: {msg}"
+        );
+        assert!(
+            msg.contains("line") && msg.contains("column"),
+            "the position is still safe to cite — nothing sensitive sits there: {msg}"
+        );
+    }
+
     /// I5: same precondition, same gap, for `effective_default_mode`.
     #[test]
     #[should_panic(expected = "validado")]
