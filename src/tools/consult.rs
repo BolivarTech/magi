@@ -1754,7 +1754,7 @@ mod tests {
 
     // -----------------------------------------------------------------------
     // Task 6.1 (REQ-A08b/A09/A10/A11c/A11d/A11g/A11h) — telemetry: `report_to_consult_json`,
-    // `RunContext::build`, `guard_all_failed`.
+    // `RunContext::build`.
     // -----------------------------------------------------------------------
 
     /// Builds a real `MagiReport` via `Deserialize` — the only way to construct one outside
