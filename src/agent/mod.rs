@@ -4381,6 +4381,148 @@ mod tests {
         );
     }
 
+    // ─────────────────────────────────────────────────────────────────────────
+    // Loop 1, F23 — REQ-A07d's guard, driven through a real `Agent` turn at BOTH
+    // production call sites.
+    //
+    // The guard was already wired correctly at `dispatch_consult_through_gate` and at the
+    // forced-consult injection, but the only tests covering SC-A07u/v/w called
+    // `resolve_mode_guarded` directly, with hand-picked literals, from `src/main.rs`. That
+    // proves the resolver behaves; it does not prove the loop calls it correctly — and it is
+    // blind to the failure that actually happened, which was upstream of both: nothing
+    // populated `AgentRunConfig::mode_config` in production, so `untrusted_content` was `false`
+    // on every real run no matter what the operator declared. An end-to-end turn fails the
+    // moment the configuration stops arriving.
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// An `AgentRunConfig` with the operator's untrusted-content mark raised.
+    fn config_with_untrusted_content(default_mode: Option<Mode>) -> AgentRunConfig {
+        AgentRunConfig {
+            mode_config: ModeConfig {
+                default_mode,
+                untrusted_content: true,
+            },
+            ..AgentRunConfig::default()
+        }
+    }
+
+    /// Content long enough to clear every built-in gate threshold, so a test about the mode
+    /// guard is never decided by the complexity gate instead.
+    fn gate_clearing_content() -> String {
+        "x".repeat(magi_rs::magi::GATE_DESIGN + 1)
+    }
+
+    /// SC-A07v, model-issued route: the agent asking for `consult` without choosing a lens
+    /// does NOT satisfy the guard — the turn fails closed, before any model call.
+    #[tokio::test]
+    async fn untrusted_content_fails_a_model_issued_consult_that_declares_no_mode() {
+        use std::sync::atomic::Ordering;
+
+        let content = gate_clearing_content();
+        let (mut agent, magi_calls) =
+            agent_with_consult_double(SequentialConsultProvider::new(&[content.as_str()]));
+        let (tx, _rx) = tokio::sync::mpsc::channel(64);
+
+        let err = agent
+            .query_streaming("start", tx, config_with_untrusted_content(None))
+            .await
+            .expect_err("the guard must abort the turn");
+
+        assert!(
+            err.to_string().contains("untrusted content"),
+            "the failure must be the guard, not an unrelated abort: {err}"
+        );
+        assert_eq!(
+            magi_calls.load(Ordering::SeqCst),
+            0,
+            "failing closed means the consult never ran"
+        );
+    }
+
+    /// SC-A07u: the mark blocks the CLASSIFICATION level, not the agent's own choice. The same
+    /// configuration that fails the test above lets this one through, because the agent
+    /// declared a lens through the tool's `input_schema`.
+    #[tokio::test]
+    async fn untrusted_content_still_lets_the_agent_pick_the_lens_through_a_real_turn() {
+        use std::sync::atomic::Ordering;
+
+        let content = gate_clearing_content();
+        let (mut agent, magi_calls) = agent_with_consult_double(ScriptedModeConsultProvider::new(
+            &[(content.as_str(), Mode::CodeReview)],
+        ));
+        let (tx, _rx) = tokio::sync::mpsc::channel(64);
+
+        agent
+            .query_streaming("start", tx, config_with_untrusted_content(None))
+            .await
+            .expect("an agent-chosen lens satisfies the guard");
+
+        assert_eq!(
+            magi_calls.load(Ordering::SeqCst),
+            1,
+            "blocking the agent's own choice buys no security — a compromised agent can \
+             simply not consult — and would kill SC-A07d"
+        );
+    }
+
+    /// SC-A07v, forced route: the pre-loop injection passes `agent_chosen: None` by design (a
+    /// runner injection has no agent choosing), so with the mark raised and nothing declared it
+    /// must fail closed too. This is the second call site, and it fails for a different reason
+    /// than the first — worth pinning separately.
+    #[tokio::test]
+    async fn untrusted_content_fails_a_forced_consult_that_declares_no_mode() {
+        use std::sync::atomic::Ordering;
+
+        let (tool, magi_calls) = CountingConsultTool::new();
+        let mut agent = Agent::new(Arc::new(MockProvider));
+        agent.register_tool(Box::new(tool));
+        let (tx, _rx) = tokio::sync::mpsc::channel(64);
+
+        let err = agent
+            .query_streaming(
+                "start",
+                tx,
+                AgentRunConfig {
+                    force_consult: true,
+                    ..config_with_untrusted_content(None)
+                },
+            )
+            .await
+            .expect_err("the forced injection must fail closed as well");
+
+        assert!(
+            err.to_string().contains("untrusted content"),
+            "the forced route must fail for the same, named reason: {err}"
+        );
+        assert_eq!(magi_calls.load(Ordering::SeqCst), 0);
+    }
+
+    /// The forced route's positive: with `agent_chosen` structurally `None`, only a configured
+    /// `[magi].default_mode` can satisfy the guard there — and it does.
+    #[tokio::test]
+    async fn a_configured_default_mode_satisfies_the_guard_on_the_forced_route() {
+        use std::sync::atomic::Ordering;
+
+        let (tool, magi_calls) = CountingConsultTool::new();
+        let mut agent = Agent::new(Arc::new(MockProvider));
+        agent.register_tool(Box::new(tool));
+        let (tx, _rx) = tokio::sync::mpsc::channel(64);
+
+        agent
+            .query_streaming(
+                "start",
+                tx,
+                AgentRunConfig {
+                    force_consult: true,
+                    ..config_with_untrusted_content(Some(Mode::Analysis))
+                },
+            )
+            .await
+            .expect("a configured lens satisfies the guard");
+
+        assert_eq!(magi_calls.load(Ordering::SeqCst), 1);
+    }
+
     /// Task 3.2's namesake test. `authorize_and_execute_tool` (the forced consult injection,
     /// REQ-H22) and the `ToolUse` loop (the model's own choice) are two DISTINCT entrances to
     /// the same `consult` tool, and only the second passes through the complexity gate
