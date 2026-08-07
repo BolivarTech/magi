@@ -403,6 +403,40 @@ fn extract_consult_value(calls: &[(String, ToolCallRecord)]) -> Option<Value> {
         .and_then(|(_, rec)| serde_json::from_str::<Value>(&rec.result).ok())
 }
 
+/// JSON key of the deadline verdict, shared with `report_to_consult_json`'s own literal.
+///
+/// It is written in two places because they sit on opposite sides of the tool boundary and
+/// neither can see the other's constant: `tools::consult` builds the object, this module
+/// corrects one value in it. Naming it here at least makes the coupling greppable.
+const CONSULT_TIMEOUT_BELOW_FORMULA_KEY: &str = "timeout_below_formula";
+
+/// Overwrites the consult object's `timeout_below_formula` with the value the RUN knows
+/// (SC-A04d).
+///
+/// **`report_to_consult_json` stays the single source of the shape.** It cannot be the source
+/// of this particular *value*: no `--timeout` concept reaches a tool-loop-dispatched consult, so
+/// `ConsultTool::execute` hardcodes `false` — correctly, because from inside the tool it is
+/// unknowable. The deadline belongs to the run, and the run is here. The key is only ever
+/// replaced, never introduced: if the object is not an object, or does not already carry the
+/// key, nothing is touched, so this can never invent a field the contract does not declare.
+///
+/// # Parameters
+/// * `consult` - the extracted consult object, if a consult succeeded.
+/// * `below_formula` - the run's own verdict on its deadline.
+///
+/// # Returns
+/// `consult`, with the key corrected when there was one to correct.
+fn apply_timeout_verdict(consult: Option<Value>, below_formula: bool) -> Option<Value> {
+    let mut consult = consult?;
+    if let Some(slot) = consult
+        .as_object_mut()
+        .and_then(|o| o.get_mut(CONSULT_TIMEOUT_BELOW_FORMULA_KEY))
+    {
+        *slot = Value::Bool(below_formula);
+    }
+    Some(consult)
+}
+
 /// Mutable state collected by [`RunTracker`] during a run.
 ///
 /// Written only from inside the agent's task via the [`RunObserver`] callbacks,
@@ -990,8 +1024,9 @@ pub async fn run_query(
         tool_calls,
         transcript,
         // The MAGI object of whichever consult succeeded (forced or a proactive
-        // `--auto`+ call); `None` when none ran or it was denied by the tier.
-        consult: extract_consult_value(&calls),
+        // `--auto`+ call); `None` when none ran or it was denied by the tier. The run's
+        // deadline verdict is stamped in here (SC-A04d) because only the run knows it.
+        consult: apply_timeout_verdict(extract_consult_value(&calls), wiring.timeout_below_formula),
         applied_caps: resolved.applied_caps,
         error,
     }

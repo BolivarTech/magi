@@ -4043,8 +4043,17 @@ fn query_timeout_decision(
     consult_capable: bool,
     ceiling: u64,
 ) -> Option<magi_rs::magi::TimeoutDecision> {
-    let _ = (deadline, consult_capable, ceiling);
-    None
+    if !consult_capable {
+        return None;
+    }
+    // An unbounded run cannot be below any minimum, so there is nothing to check and nothing
+    // to warn about.
+    let secs = deadline?.as_secs();
+    // The resolved deadline is fed in as the "asked" value whatever knob produced it — an
+    // explicit `--timeout`, `[headless] timeout_secs`, or the tier default. All three are
+    // operator declarations, so all three are obeyed and all three deserve the same heads-up
+    // when they are structurally too short.
+    Some(magi_rs::magi::resolve_run_timeout(Some(secs), ceiling))
 }
 
 /// Resolves the wall-clock deadline actually enforced for a `magi consult` run
