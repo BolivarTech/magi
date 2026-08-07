@@ -55,6 +55,26 @@ prints a guided migration error naming every incompatibility in the file at once
   `report_truncated` — while **`schema_version` deliberately stays at 1**. The project
   is pre-1.0, so the crate version already signals breakage; a consumer should tolerate
   new fields and pin the crate version.
+- **`[embedding].base_url` becomes optional and inherits the root `base_url`** when
+  absent, instead of always defaulting to `localhost:11434`. Anyone who pointed the
+  main agent at a remote endpoint and expected the embedder to stay local now gets
+  the remote endpoint for embeddings too, unless `[embedding].base_url` is declared
+  explicitly.
+
+### Behaviour Change
+
+Neither of these breaks anything or requires editing `magi.toml` — the agent simply
+behaves differently than it did on v0.11.0, and the difference is easy to misread as
+a routing regression if it isn't named.
+
+- **The complexity gate ships active by default.** An autonomous consult the agent
+  used to run unconditionally can now be vetoed below its mode's threshold before any
+  model call happens (see the `### Added` entry below). Explicit `/consult` and
+  `magi consult` are never vetoed.
+- **`analysis` does not carry a pass-through threshold of `1`.** It has a real veto
+  threshold like `code-review` and `design`, and it matters more than the other two
+  because `analysis` is the default mode for every invocation that doesn't route
+  itself — the path most existing users hit without changing anything.
 
 ### Added
 
@@ -98,9 +118,6 @@ prints a guided migration error naming every incompatibility in the file at once
 
 ### Changed
 
-- **`[embedding].base_url` becomes optional and inherits the root `base_url`** when
-  absent. Anyone who pointed the agent at a remote endpoint and expected the embedder to
-  stay local must now declare `[embedding].base_url` explicitly.
 - **Omitting `--mode` costs one extra model call**, which classifies the content before
   the three mages run. Declaring `--mode`, or setting `[magi].default_mode`, avoids it
   entirely.
