@@ -521,8 +521,10 @@ async fn resolve_tui_consult_mode(
 /// The text sent as an [`AgentResponse::Info`] just before the three model calls start.
 #[must_use]
 fn tui_consult_dispatch_notice(res: &ModeResolution) -> String {
-    let _ = res;
-    "MAGI deliberating — 3 model calls…".to_string()
+    format!(
+        "MAGI deliberating in {} mode ({:?}) — 3 model calls…",
+        res.mode, res.source
+    )
 }
 
 /// Braille spinner frames for the "thinking" activity indicator.
