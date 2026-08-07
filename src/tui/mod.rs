@@ -940,7 +940,8 @@ fn post_login_agent_timeout_secs(configured: Option<u64>) -> u64 {
 /// Always [`ProviderKind::Anthropic`]: that is what the rebuild actually constructs.
 #[must_use]
 fn post_login_magi_kind(session_kind: ProviderKind) -> ProviderKind {
-    session_kind
+    let _ = session_kind;
+    ProviderKind::Anthropic
 }
 
 /// The [`AgentRunConfig`] for ONE interactive chat turn (REQ-A20/A20b, REQ-A07/A07d).
