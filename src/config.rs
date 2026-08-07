@@ -1086,8 +1086,9 @@ mod tests {
         );
     }
 
-    /// SC-A12g / REQ-A12: a blank `MAGI_PROVIDER` is treated as ABSENT, not invalid — falls
-    /// through to the TOML/default the same as an unset env var.
+    /// SC-A12g / REQ-A12: a PRESENT but unrecognized `MAGI_PROVIDER` value is a configuration
+    /// error, never a silent fallback — same rule as an invalid `provider`/`[magi].kind` in the
+    /// TOML.
     #[test]
     fn an_unrecognized_env_provider_is_a_configuration_error() {
         let err =
@@ -1095,11 +1096,8 @@ mod tests {
         assert!(err.to_string().contains("banana"));
     }
 
-    /// `test_resolve_openai_base_url_precedence` removed (fix round 3, L1/L2/S1):
-    /// `resolve_openai_base_url` — the function it tested — bypassed blank-is-absent and
-    /// credential resolution entirely, and was removed in favor of `main.rs`'s
-    /// `resolve_effective_principal_endpoint` (which reuses `MagiConfig::effective_base_url`
-    /// and is covered where it lives, alongside `resolve_effective_embedding_endpoint`).
+    /// SC-A12g / REQ-A12: a blank `MAGI_PROVIDER` is treated as ABSENT, not invalid — falls
+    /// through to the TOML/default the same as an unset env var.
     #[test]
     fn a_blank_env_provider_falls_through_to_the_toml_default() {
         let c = MagiConfig {
@@ -1403,7 +1401,6 @@ mod tests {
     /// — is tested against `from_toml_str`, which is where `validate_vocabulary()` really runs;
     /// `load()` exercises it indirectly because it calls `from_toml_str` on the file contents.
     /// Task 1.4 adds the same assertion against `load()` when that function becomes fallible.
-    /// SC-A12g / REQ-A12: general rule — empty or blank is ABSENT, never invalid.
     #[test]
     fn an_invalid_vocabulary_value_is_rejected_at_parse_not_swallowed_by_a_resolver() {
         for (toml, what) in [
@@ -1418,6 +1415,8 @@ mod tests {
         }
     }
 
+    /// SC-A12g / REQ-A12: general rule — empty or blank is ABSENT, never invalid.
+    ///
     /// `effective_base_url()` returns `Result<EndpointTemplate, _>` since REQ-A16c, so the test
     /// compares the TEXT of the template.
     #[test]
@@ -1438,7 +1437,8 @@ mod tests {
         );
     }
 
-    /// SC-A21c: endpoint inheritance and override.
+    /// SC-A02b: `kind` inherits from the root when not declared, and does not change the
+    /// principal's own provider when it is.
     #[test]
     fn magi_kind_inherits_from_root_provider_when_absent() {
         let toml = "provider = \"ollama\"\n[magi]\n";
@@ -1455,6 +1455,9 @@ mod tests {
         );
     }
 
+    /// SC-A21c: endpoint inheritance and override — `base_url` at the root is inherited by
+    /// every section unless that section declares its own.
+    ///
     /// Template TEXT: `effective_*_base_url()` returns `Result<EndpointTemplate,_>` since
     /// REQ-A16c.
     #[test]
@@ -1489,8 +1492,6 @@ mod tests {
     /// API keys NEVER live in `magi.toml`, and `deny_unknown_fields` makes it **mechanical**
     /// instead of a convention someone has to remember. Closes SC-A12 with the case that
     /// matters most: the misspelled field that would also be a secret.
-    ///
-    /// REQ-A15: `default_mode` resolves with the same empty=absent rule.
     #[test]
     fn an_api_key_anywhere_in_the_toml_is_a_parse_error() {
         for toml in [
@@ -1508,8 +1509,9 @@ mod tests {
         }
     }
 
-    /// **Returns `Option<Mode>`, NOT `Result`**: validation lives in `validate_vocabulary`,
+    /// REQ-A15: `default_mode` resolves with the same empty=absent rule.
     ///
+    /// **Returns `Option<Mode>`, NOT `Result`**: validation lives in `validate_vocabulary`,
     /// which runs in `load()`/`from_toml_str()`. A resolver that returns `Result` invites the
     /// caller to write `.ok()` — and that already happened twice in this plan.
     /// The invalid value never reaches this resolver: it dies at parse time.
@@ -1616,8 +1618,9 @@ mod tests {
     // either end is rejected. `validate_agent_timeout` shipped with zero tests and an
     // inclusive-both-ends range with nothing pinning the edge.
 
-    /// I3: the output-cap floor (`min_viable_output_cap()`) itself is accepted; one byte below
-    /// it is rejected. Same "zero tests on a boundary" gap as `validate_agent_timeout`.
+    /// I3: both range boundaries of `agent_timeout_secs` (§4.9) are accepted; one step outside
+    /// either end is rejected. `validate_agent_timeout` shipped with zero tests and an
+    /// inclusive-both-ends range with nothing pinning the edge.
     #[test]
     fn agent_timeout_secs_accepts_both_boundaries_and_rejects_one_step_outside() {
         for ok in [AGENT_TIMEOUT_MIN_SECS, AGENT_TIMEOUT_MAX_SECS] {
@@ -1636,9 +1639,8 @@ mod tests {
         }
     }
 
-    /// I4: `safe_parse_error` keeps line/column (SC-A21g requires a syntax error to name a
-    /// position) but never the offending value — only the source EXCERPT needed suppressing to
-    /// fix the `api_key` leak (see `safe_parse_error`'s own doc), not the position.
+    /// I3: the output-cap floor (`min_viable_output_cap()`) itself is accepted; one byte below
+    /// it is rejected. Same "zero tests on a boundary" gap as `validate_agent_timeout`.
     #[test]
     fn tool_result_cap_bytes_accepts_the_minimum_viable_floor_and_rejects_one_byte_below() {
         let min = magi_rs::magi::min_viable_output_cap();
@@ -1654,6 +1656,10 @@ mod tests {
         );
     }
 
+    /// I4: `safe_parse_error` keeps line/column (SC-A21g requires a syntax error to name a
+    /// position) but never the offending value — only the source EXCERPT needed suppressing to
+    /// fix the `api_key` leak (see `safe_parse_error`'s own doc), not the position.
+    ///
     /// Leading blank line: line 2 (not 1) pins that this is a real computed position, not a
     /// hardcoded "line 1, column 1".
     #[test]
@@ -1707,7 +1713,12 @@ mod tests {
         );
     }
 
-    /// I5: same precondition, same gap, for `effective_default_mode`.
+    /// I5: `effective_provider` is documented "infallible by precondition" — that precondition
+    /// is `validate_vocabulary` having already run. `MagiConfig`'s fields are `pub` and it
+    /// derives `Default`, so nothing at the type level stops a caller from skipping
+    /// `from_toml_str`/`load()` and constructing an invalid config directly; the
+    /// `debug_assert!` is what turns that misuse into a loud debug-build panic instead of a
+    /// silent `Ollama` fallback.
     #[test]
     #[should_panic(expected = "validado")]
     fn effective_provider_panics_in_debug_builds_when_validate_vocabulary_was_skipped() {
@@ -1718,8 +1729,7 @@ mod tests {
         let _ = cfg.effective_provider();
     }
 
-    /// m8: `[magi].base_url = ""` is blank, not a declared override — it must inherit the root,
-    /// not be treated as "the trio declared its own endpoint".
+    /// I5: same precondition, same gap, for `effective_default_mode`.
     #[test]
     #[should_panic(expected = "validado")]
     fn effective_default_mode_panics_in_debug_builds_when_validate_vocabulary_was_skipped() {
@@ -1733,8 +1743,8 @@ mod tests {
         let _ = cfg.effective_default_mode();
     }
 
-    /// m8: a whitespace-only `default_mode` is blank, not a value — same blank-is-absent rule
-    /// as every other vocabulary key.
+    /// m8: `[magi].base_url = ""` is blank, not a declared override — it must inherit the root,
+    /// not be treated as "the trio declared its own endpoint".
     #[test]
     fn magi_base_url_blank_is_treated_as_absent() {
         let toml = "base_url = \"http://lan:11434/v1\"\n[magi]\nbase_url = \"\"\n";
@@ -1750,15 +1760,18 @@ mod tests {
         );
     }
 
-    /// m8: `[embedding].base_url`'s OVERRIDE winning over the root was untested — the existing
-    /// coverage only proved inheritance, never that a declared embedding-specific endpoint
-    /// takes precedence over it.
+    /// m8: a whitespace-only `default_mode` is blank, not a value — same blank-is-absent rule
+    /// as every other vocabulary key.
     #[test]
     fn default_mode_whitespace_only_is_treated_as_absent() {
         let cfg = MagiConfig::from_toml_str("[magi]\ndefault_mode = \"   \"\n").unwrap();
         assert_eq!(cfg.effective_default_mode(), None);
     }
 
+    /// m8: `[embedding].base_url`'s OVERRIDE winning over the root was untested — the existing
+    /// coverage only proved inheritance, never that a declared embedding-specific endpoint
+    /// takes precedence over it.
+    ///
     /// The root and [magi] are unaffected by the embedding-only override.
     #[test]
     fn embedding_base_url_override_wins_over_root_inheritance() {

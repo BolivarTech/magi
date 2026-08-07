@@ -4274,7 +4274,6 @@ mod tests {
 
     /// SC-A20e: the veto text says retrying gives the same result and never reveals how many
     /// characters are missing.
-    /// SC-A20f / SC-A20m: two CONSECUTIVE vetoes are terminal; a success in between resets.
     #[tokio::test]
     async fn the_veto_message_discourages_retry_without_naming_the_threshold() {
         let msg = veto_message(&Mode::Analysis);
@@ -4288,10 +4287,9 @@ mod tests {
         );
     }
 
-    /// A veto does NOT loosen the turn's caps. Complements SC-A20f from the other side: SC-A20f
-    /// pins that the consult PATH closes on the second veto; this pins that the WHOLE TURN
-    /// stays capped in the meantime — every processed call (veto, disabled continuation, or
-    /// dispatch) consumes exactly one `max_tool_calls` slot.
+    /// SC-A20f / SC-A20m: two CONSECUTIVE vetoes are terminal; a success in between resets —
+    /// veto → veto closes the door for the rest of the turn, but veto → dispatch → veto does
+    /// not, because a genuine consult in between resets the counter.
     #[tokio::test]
     async fn two_consecutive_vetoes_are_terminal_but_a_success_resets() {
         let out = run_turn_with_consults(&["trivial", "tambien trivial"])
@@ -4330,7 +4328,8 @@ mod tests {
         );
     }
 
-    /// SC-A20h: every evaluation is logged — in EVERY surface, with or without an observer.
+    /// SC-A20g: the counter dies with the turn, through all FOUR exit paths — final answer,
+    /// `max_tool_calls`, cancellation and error.
     #[tokio::test]
     async fn the_counter_dies_with_the_turn_on_every_exit_path() {
         for exit in [
@@ -4350,6 +4349,8 @@ mod tests {
         }
     }
 
+    /// SC-A20h: every gate evaluation is logged — in EVERY surface, with or without an observer.
+    ///
     /// Exercised WITHOUT an observer, which is the TUI's configuration: the gate's telemetry
     /// cannot depend on a channel the highest-traffic surface does not have.
     #[tokio::test]

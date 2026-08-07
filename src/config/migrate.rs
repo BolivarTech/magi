@@ -259,7 +259,7 @@ mod tests {
         );
     }
 
-    /// SC-A21g: a syntactically broken TOML does NOT receive migration advice.
+    /// SC-A21h: a half-migrated file receives ONLY what is missing.
     #[test]
     fn a_partially_migrated_file_reports_only_what_is_missing() {
         let toml = "provider = \"openai\"\nbase_url = \"http://x/v1\"\n[openai]\nmodel = \"m\"\n";
@@ -268,7 +268,8 @@ mod tests {
         assert_eq!(found[0].key, "provider");
     }
 
-    /// SC-A21f: an empty TOML parses and triggers nothing.
+    /// SC-A21e: embedded credentials in `base_url` are redacted in the migration message — the
+    /// host stays visible, and the message states the value is redacted.
     #[test]
     fn embedded_credentials_are_redacted_in_the_migration_message() {
         let toml = "[openai]\nbase_url = \"https://user:s3cr3t@host/v1\"\n";
@@ -287,7 +288,8 @@ mod tests {
         );
     }
 
-    /// SC-A21i: the jump from v0.10.x is declared unsupported, in EVERY config error.
+    /// SC-A21g: a syntactically broken TOML does NOT receive migration advice — without
+    /// structure, `detect_migrations` finds nothing to search patterns against.
     #[test]
     fn a_syntactically_broken_toml_gets_a_syntax_error_not_migration_advice() {
         let toml = "provider = \"sin cerrar\n[magi]\n";
@@ -297,15 +299,16 @@ mod tests {
         );
     }
 
-    /// SC-A21d: the message is validated against the FOUR real v0.11.0 files.
+    /// SC-A21f: an empty TOML parses and triggers nothing.
     #[test]
     fn an_empty_toml_is_valid_and_triggers_no_migration() {
         assert!(detect_migrations("").is_empty());
         assert!(detect_migrations("   \n\n  ").is_empty());
     }
 
-    /// A hand-written fixture tests that the message **is emitted**; only a real one tests that
-    /// it
+    /// SC-A21i: the jump from v0.10.x is declared unsupported, in EVERY config error — this
+    /// pass only knows the v0.11.0 patterns, so the unconditional note is exercised here via a
+    /// v0.11.0 fixture rather than a v0.10.x one.
     #[test]
     fn every_config_error_mentions_the_v0_10_x_path() {
         let rendered = render_migration_error(&detect_migrations(include_str!(
@@ -317,16 +320,11 @@ mod tests {
         );
     }
 
-    /// **reaches**. The four were generated or derived from the published v0.11.0 binary
-    ///
-    /// and verified against it — see `tests/fixtures/v0.11.0/README.md`.
-    /// The four share the same two incompatibilities because the three variants are derived
-    /// from the canonical `default.toml` without adding or removing migratable keys.
-    /// SC-A21e on the REAL file: the fixture's credential never reaches the message.
-    ///
-    /// The test above uses an inline TOML; this one uses the committed file, which is what a
-    /// user would have. They are different on purpose: the inline pins the rule, this one pins
-    /// that the rule survives the real file.
+    /// SC-A21d: the message is validated against the FOUR real v0.11.0 files, each reporting
+    /// all of its own incompatibilities. The four were generated or derived from the published
+    /// v0.11.0 binary and verified against it — see `tests/fixtures/v0.11.0/README.md`. They
+    /// share the same two incompatibilities because the three variants are derived from the
+    /// canonical `default.toml` without adding or removing migratable keys.
     #[test]
     fn every_real_v0_11_0_fixture_reports_its_own_incompatibilities() {
         for (name, toml) in [
@@ -359,12 +357,12 @@ mod tests {
         }
     }
 
-    /// SC-A21d, second half: **what the message proposes parses without error in v0.12.0**.
+    /// SC-A21e on the REAL file: the fixture's credential never reaches the rendered message.
     ///
-    /// This is the part that makes the message useful and the part most likely to rot: the
-    /// minimal TOML is a literal, so nothing ties it to the schema except this test. If a later
-    /// task changes a key, the advice we give the stuck user stops working — and without this,
-    /// silently.
+    /// The test above (`embedded_credentials_are_redacted_in_the_migration_message`) uses an
+    /// inline TOML; this one uses the committed file, which is what a user would actually have.
+    /// They are different on purpose: the inline test pins the rule, this one pins that the rule
+    /// survives the real file.
     #[test]
     fn the_real_credentials_fixture_never_leaks_its_secret() {
         let toml = include_str!("../../tests/fixtures/v0.11.0/with-credentials.toml");
@@ -379,22 +377,25 @@ mod tests {
         );
     }
 
-    /// `line_of` returns 0 when the pattern does not appear in the text.
+    /// SC-A21d, second half: **what the message proposes parses without error in v0.12.0**.
     ///
-    /// `line_of` returns the 1-based line number.
+    /// This is the part that makes the message useful and the part most likely to rot: the
+    /// minimal TOML is a literal, so nothing ties it to the schema except this test. If a later
+    /// task changes a key, the advice we give the stuck user stops working — and without this,
+    /// silently.
     #[test]
     fn the_minimal_config_the_error_hands_out_actually_parses_today() {
         super::super::MagiConfig::from_toml_str(MINIMAL_VALID_CONFIG)
             .expect("el magi.toml mínimo que el error propone debe parsear en v0.12.0");
     }
 
-    /// Detects the third pattern: `[headless].tool_result_cap_bytes`.
+    /// `line_of` returns 0 when the pattern does not appear in the text.
     #[test]
     fn line_of_returns_zero_when_needle_is_absent() {
         assert_eq!(line_of("foo\nbar\n", "baz"), 0);
     }
 
-    /// The three old patterns in a single file are all reported together.
+    /// `line_of` returns the 1-based line number.
     #[test]
     fn line_of_returns_one_indexed_line_number() {
         assert_eq!(line_of("foo\nbar\nbaz", "bar"), 2);
