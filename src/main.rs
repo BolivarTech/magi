@@ -2786,7 +2786,7 @@ fn tui_mode_classifier_wiring(
     let classifier: Arc<dyn magi_rs::magi::mode::ModeClassifier> =
         Arc::new(crate::agent::mode_classifier::ProviderClassifier::new(
             provider,
-            Arc::new(crate::agent::mode_classifier::ProcessNoticeSink::default()),
+            Arc::clone(&notices) as Arc<dyn crate::agent::mode_classifier::NoticeSink>,
         ));
     (classifier, notices)
 }
