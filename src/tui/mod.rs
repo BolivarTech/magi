@@ -917,6 +917,32 @@ fn post_login_agent_timeout_secs(configured: Option<u64>) -> u64 {
     configured.unwrap_or(magi_rs::magi::AGENT_TIMEOUT_SECS)
 }
 
+/// The [`ProviderKind`] the trio runs under AFTER a successful `/login` rebuild (REQ-A12c).
+///
+/// **It does not depend on `session_kind`, and that is the whole point.** The `/login` handler
+/// rebuilds the trio on a native `ClaudeProvider` unconditionally, whatever `[magi].kind` said
+/// at startup — so a session that began on the documented no-config default
+/// ([`ProviderKind::Ollama`], keyless) is genuinely Anthropic-credentialed afterwards. The
+/// session's `magi_kind` used to keep its startup value forever, and it feeds the keyless-auth
+/// guidance in [`tui_consult_success_body`]/[`tui_consult_error_body`]: a later 401 (revoked
+/// key, clock skew) was then explained as *"your endpoint is keyless — configure
+/// `openai-compat`"*, which sends the user to debug a configuration that is no longer in play.
+/// Wrong advice is worse than none.
+///
+/// `session_kind` is still taken so the signature says what the transformation is — the kind
+/// before the rebuild maps to the kind after it — rather than reading as a constant that
+/// happens to be called from one place.
+///
+/// # Parameters
+/// * `session_kind` - the kind the trio ran under before this `/login`.
+///
+/// # Returns
+/// Always [`ProviderKind::Anthropic`]: that is what the rebuild actually constructs.
+#[must_use]
+fn post_login_magi_kind(session_kind: ProviderKind) -> ProviderKind {
+    session_kind
+}
+
 /// The [`AgentRunConfig`] for ONE interactive chat turn (REQ-A20/A20b, REQ-A07/A07d).
 ///
 /// `AgentRunConfig::default()` is the interactive baseline and must stay exactly that (it is
@@ -964,7 +990,9 @@ pub async fn run_tui_ext(
         classifier_notices,
         default_mode,
         untrusted_content,
-        magi_kind,
+        // `mut`: a successful `/login` rebuilds the trio on Anthropic, and the session's kind
+        // must follow it — see `post_login_magi_kind`.
+        mut magi_kind,
         max_query_bytes,
         tool_result_cap,
     } = magi_runtime;
@@ -1253,11 +1281,19 @@ pub async fn run_tui_ext(
                                                     let new_magi = std::sync::Arc::new(
                                                         magi_core::orchestrator::Magi::new(wrapped),
                                                     );
+                                                    // REQ-A12c: the rebuild is Anthropic, so
+                                                    // BOTH the session's own `magi_kind` and
+                                                    // the rebuilt tool's must say so — a stale
+                                                    // `Ollama` here explains a later 401 as a
+                                                    // keyless-endpoint problem that no longer
+                                                    // exists.
+                                                    magi_kind = post_login_magi_kind(magi_kind);
                                                     runner_agent.register_or_replace_tool(Box::new(
                                                         crate::tools::consult::ConsultTool::new(
                                                             new_magi.clone(),
                                                             magi_auto_approve,
                                                         )
+                                                        .with_kind(magi_kind)
                                                         .with_max_query_bytes(max_query_bytes)
                                                         .with_output_cap(tool_result_cap),
                                                     ));
@@ -2685,6 +2721,43 @@ mod tests {
         assert!(
             body.contains("keyless") && body.contains("openai-compat"),
             "the probable-cause hint must reach the TUI body: {body}"
+        );
+    }
+
+    /// Loop 1, F5 / REQ-A12c: after a `/login` the trio is Anthropic, so the session's kind
+    /// must stop claiming the endpoint is keyless.
+    ///
+    /// The two assertions are the defect from both ends: the transformation itself, and the
+    /// user-visible consequence — the same 401 that legitimately earns the keyless hint under
+    /// the startup kind must NOT earn it once the trio has been rebuilt on credentials.
+    #[tokio::test]
+    async fn a_login_rebuild_stops_the_session_claiming_a_keyless_endpoint() {
+        assert_eq!(
+            post_login_magi_kind(ProviderKind::Ollama),
+            ProviderKind::Anthropic,
+            "the rebuild constructs a native ClaudeProvider, whatever [magi].kind said"
+        );
+
+        let mk = || ClaudeProvider::map_status_to_error(401, "x", vec![], None);
+        let provider = RoutingMockProvider::new()
+            .with_agent_responses(AgentName::Melchior, vec![Err(mk())])
+            .with_agent_responses(AgentName::Balthasar, vec![Err(mk())])
+            .with_agent_responses(AgentName::Caspar, vec![Err(mk())]);
+        let magi = magi_core::orchestrator::Magi::new(Arc::new(provider));
+        let err = magi
+            .analyze(&Mode::Analysis, "should we migrate X to Y?")
+            .await
+            .expect_err("0 of 3 succeed ⇒ Err(InsufficientAgents)");
+
+        assert!(
+            tui_consult_error_body(&err, ProviderKind::Ollama).contains("keyless"),
+            "control: the hint IS correct while the session really is keyless"
+        );
+        assert!(
+            !tui_consult_error_body(&err, post_login_magi_kind(ProviderKind::Ollama))
+                .contains("keyless"),
+            "after /login the endpoint carries a credential, so pointing the user at a \
+             keyless-configuration problem sends them to debug the wrong thing"
         );
     }
 
