@@ -219,41 +219,40 @@ toca el `Agent` y subprocesos ⇒ **no es puro ni Miri-able**. Verificado: MS2 n
   matriz completa; (c) el unit-smoke + los 6 tests de `policy` corren en cada §0.1. **No se declara un
   pase de Miri que no ocurrió** — re-habilitar Miri requiere un nightly sin el ICE.
 
-## Archivos nuevos de MagiCore MS2 (v0.12.0) — recorrer la checklist (B) por cada uno
+## New MagiCore MS2 (v0.12.0) files — walk checklist (B) for each one
 
-**No confundir con "MS2" del Vault (v0.9.0, sección de arriba) — mismo número de milestone,
-proyecto distinto (`sbtdd/spec-behavior.md` de MagiCore).** Once archivos `.rs` nuevos bajo `src/`
-(`git diff --name-status main..HEAD -- 'src/*.rs' 'src/**/*.rs'`, entradas `A`), todos con el
-**mismo bloque de lint attrs** que `src/vault/mod.rs`/`src/headless/mod.rs`
+**Not to be confused with the Vault's "MS2" (v0.9.0, section above) — same milestone number,
+different project (MagiCore's `sbtdd/spec-behavior.md`).** Eleven new `.rs` files under `src/`
+(`git diff --name-status main..HEAD -- 'src/*.rs' 'src/**/*.rs'`, `A` entries), all with the
+**same lint-attribute block** as `src/vault/mod.rs`/`src/headless/mod.rs`
 (`deny(missing_docs, clippy::missing_docs_in_private_items, rustdoc::broken_intra_doc_links,
-clippy::missing_errors_doc, clippy::missing_panics_doc)` + el `cfg_attr(not(test), deny(unwrap_used,
-expect_used, panic, todo, unimplemented, indexing_slicing, string_slice))`) y el header de archivo
-de REQ-A00b (`// Author: Julian Bolivar` / `// Version` / `// Date`).
+clippy::missing_errors_doc, clippy::missing_panics_doc)` + `cfg_attr(not(test), deny(unwrap_used,
+expect_used, panic, todo, unimplemented, indexing_slicing, string_slice))`) and the REQ-A00b file
+header (`// Author: Julian Bolivar` / `// Version` / `// Date`).
 
-Ocho viven en el **lib** (`src/magi/`, `src/notices.rs`, `src/redact.rs` — alcanzables desde
-`tests/`/`fuzz/`); tres en el **bin** (`src/agent/mode_classifier.rs`, `src/config/migrate.rs`)
-porque necesitan un tipo del binario (`agent::provider::Provider`) o son específicos de la forma
-del TOML.
+Eight live in the **lib** (`src/magi/`, `src/notices.rs`, `src/redact.rs` — reachable from
+`tests/`/`fuzz/`); three in the **bin** (`src/agent/mode_classifier.rs`, `src/config/migrate.rs`)
+because they need a bin-only type (`agent::provider::Provider`) or are specific to the TOML's
+shape.
 
-- [ ] `src/magi/mod.rs` — constantes compartidas del subsistema (escala de timeouts derivada,
-      límites del gate y del probe) + wiring de los submódulos públicos
-- [ ] `src/magi/kind.rs` — vocabulario `ProviderKind` (`ollama` | `openai-compat` | `anthropic`,
+- [ ] `src/magi/mod.rs` — subsystem-shared constants (derived timeout scale, gate and probe
+      limits) + wiring of the public submodules
+- [ ] `src/magi/kind.rs` — `ProviderKind` vocabulary (`ollama` | `openai-compat` | `anthropic`,
       REQ-A01b) + parser
-- [ ] `src/magi/mode.rs` — vocabulario `Mode`/`ModeSource`, normalización cerrada de etiquetas,
-      resolución en cinco niveles (`resolve_mode_guarded`, única puerta pública)
-- [ ] `src/magi/gate.rs` — gate de complejidad: predicado puro (largo en caracteres vs. umbral por
-      modo, REQ-A20)
-- [ ] `src/magi/probe.rs` — medición del modelo por composición sobre `ProviderProbe` de magi-core
-      (REQ-A24); `Measurement` de tres estados
-- [ ] `src/magi/endpoint.rs` — plantillas de `base_url` con placeholders de credencial
-      (`[user]`/`[password]`), resueltas del vault en memoria (REQ-A16c)
-- [ ] `src/magi/report_anchors.rs` — anclas nombradas al markdown del reporte de magi-core, para el
-      recorte de salida acotado (REQ-A11b)
-- [ ] `src/agent/mode_classifier.rs` (bin) — clasificación de modo sobre el provider PRINCIPAL
-      (REQ-A07c); implementa el trait puro `magi_rs::magi::mode::ModeClassifier`
-- [ ] `src/config/migrate.rs` (bin) — pasada de detección PREVIA al parseo de los patrones de
-      migración de un `magi.toml` de v0.11.0 (REQ-A21b), deuda técnica con fecha de retiro v0.13.0
-- [ ] `src/notices.rs` — tiering y orden de los notices de arranque (`Blocking` < `Resolution` <
+- [ ] `src/magi/mode.rs` — `Mode`/`ModeSource` vocabulary, closed label normalization,
+      five-level resolution (`resolve_mode_guarded`, the only public door)
+- [ ] `src/magi/gate.rs` — complexity gate: a pure predicate (character length vs. per-mode
+      threshold, REQ-A20)
+- [ ] `src/magi/probe.rs` — model measurement by composition over magi-core's `ProviderProbe`
+      (REQ-A24); a three-state `Measurement`
+- [ ] `src/magi/endpoint.rs` — `base_url` templates with credential placeholders
+      (`[user]`/`[password]`), resolved from the vault in memory (REQ-A16c)
+- [ ] `src/magi/report_anchors.rs` — named anchors into magi-core's report markdown, for bounded
+      output truncation (REQ-A11b)
+- [ ] `src/agent/mode_classifier.rs` (bin) — mode classification over the PRINCIPAL provider
+      (REQ-A07c); implements the pure `magi_rs::magi::mode::ModeClassifier` trait
+- [ ] `src/config/migrate.rs` (bin) — a detection pass PRIOR to parsing, for the migration
+      patterns of a v0.11.0 `magi.toml` (REQ-A21b), dated technical debt retired in v0.13.0
+- [ ] `src/notices.rs` — tiering and ordering of startup notices (`Blocking` < `Resolution` <
       `Info`)
-- [ ] `src/redact.rs` — redacción del `userinfo` de una URL por POSICIÓN, nunca por contenido
-      (REQ-A16)
+- [ ] `src/redact.rs` — redacts a URL's `userinfo` by POSITION, never by content (REQ-A16)

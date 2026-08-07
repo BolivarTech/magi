@@ -49,19 +49,19 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 uuid = { version = "1.8", features = ["v4"] }
 
 # MAGI ecosystem
-# Features EXPLICITAS: los providers estan detras de feature gates y el default no trae
-# ninguno, asi que sin esto el trio nativo de MS2 (REQ-A01b) no compila. Lo encontro
-# `cargo check --example ms2_contracts`, no una revision.
-#   ollama       -> arrastra openai-compat; solo se usa como SONDA (D-A07)
-#   openai-compat -> transporte de completions de `ollama` Y de `openai-compat`
-#   claude-api   -> ClaudeProvider para kind = anthropic
-# claude-cli NO se habilita: lanza el binario `claude` como subproceso, esquivando el
-# modelo de seguridad del tool `bash`, y rechaza con NestedSession bajo CLAUDECODE (spec §8).
+# EXPLICIT features: providers sit behind feature gates and the default brings none, so
+# without this the MS2 native trio (REQ-A01b) does not compile. Found by
+# `cargo check --example ms2_contracts`, not by review.
+#   ollama        -> pulls in openai-compat; used ONLY as a PROBE (D-A07)
+#   openai-compat -> completions transport for BOTH `ollama` AND `openai-compat`
+#   claude-api    -> ClaudeProvider for kind = anthropic
+# claude-cli is NOT enabled: it launches the `claude` binary as a subprocess, bypassing the
+# `bash` tool's security model, and rejects with NestedSession under CLAUDECODE (spec §8).
 #
-# Version EXACTA (`=`), no caret. El rustdoc de `RetryConfig` anuncia que 3.2.0 cambia los
-# defaults de retry, que son justo los numeros de los que REQ-A04 deriva su escala: un
-# `cargo update` moveria el piso de una relacion que este milestone hace imposible de romper.
-# El bump a 3.2.0 es trabajo de MS3, con el spike de Task 0.0 corriendo primero.
+# EXACT version (`=`), not caret. `RetryConfig`'s rustdoc announces that 3.2.0 changes the
+# retry defaults, which are exactly the numbers REQ-A04 derives its scale from: a
+# `cargo update` would move the floor of a relation this milestone makes impossible to break.
+# The bump to 3.2.0 is MS3 work, with the Task 0.0 spike running first.
 magi-core = { version = "=3.1.0", features = ["ollama", "openai-compat", "claude-api"] }
 instant-distance = { version = "0.6", optional = true }
 
@@ -96,9 +96,10 @@ dunce = "1.0.5"
 # for test builds, and it never reaches a release binary (dev-dependencies are
 # not part of the release dependency graph).
 tokio = { version = "1.36", features = ["test-util"] }
-# RoutingMockProvider for consult tests. Repite las features de [dependencies] mas
-# `test-utils`: sin la lista completa el dev-dependency resolveria otra combinacion, y la
-# version va fijada con `=` por la misma razon que arriba (defaults de retry en 3.2.0).
+# RoutingMockProvider for consult tests. Repeats the [dependencies] features plus
+# `test-utils`: without the full list the dev-dependency would resolve a different
+# combination, and the version is pinned with `=` for the same reason as above (retry
+# defaults in 3.2.0).
 magi-core = { version = "=3.1.0", features = ["ollama", "openai-compat", "claude-api", "test-utils"] }
 # Mocking for tests
 mockall = "0.12"
