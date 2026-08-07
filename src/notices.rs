@@ -38,8 +38,8 @@ use std::collections::HashSet;
 
 /// Priority of a startup notice.
 ///
-/// **The enum's declaration order IS the print order**: the `derive(Ord)` does not
-/// is decorative — [`render_notices`] sorts with `sort_by_key(|n| n.tier)` and relies on
+/// **The enum's declaration order IS the print order**: `derive(Ord)` here is not
+/// decorative — [`render_notices`] sorts with `sort_by_key(|n| n.tier)` and relies on
 /// `Blocking < Resolution < Info` in that exact sense.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum NoticeTier {
