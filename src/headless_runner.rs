@@ -24,7 +24,7 @@
 //!
 //! The `magi query` / `magi consult` subcommand dispatch in `main.rs` (MS2 T7)
 //! is the production caller of [`run_query`] / [`run_consult`] /
-//! [`resolve_run_timeout`]; every item is reachable in the non-test build.
+//! [`resolve_tier_timeout_default`]; every item is reachable in the non-test build.
 
 use std::collections::HashMap;
 use std::future;
@@ -63,6 +63,15 @@ use crate::tools::consult::{
 /// both: dedup is per-key, so sharing the sink cannot suppress one notice because
 /// the other already fired.
 const NOTICE_TIMEOUT_BELOW_FORMULA: &str = "timeout.below_formula";
+
+/// Run-log line for the same condition on the `magi query` route (SC-A04d).
+///
+/// The exact seconds live in the stderr notice and in `applied_caps`; the log line only has to
+/// say that the deadline is structurally too short, so a later `error.kind = timeout` can be
+/// attributed to the configuration instead of to the model.
+const TIMEOUT_BELOW_FORMULA_LOG: &str =
+    "the run deadline is below the minimum a consult with its schema retry needs \
+     (REQ-A04); a forced or proactive consult may not complete";
 
 /// Buffered capacity of the internal chunk channel; mirrors the interactive TUI
 /// bridge so backpressure behaves identically. The channel is drained
@@ -471,8 +480,14 @@ impl RunObserver for RunTracker {
     }
 }
 
-/// Resolves the effective wall-clock timeout for a run from its tier policy
+/// Resolves the effective wall-clock timeout for a run from its **tier policy**
 /// (REQ-H36), applying the tier default when none was explicitly configured.
+///
+/// **Not to be confused with `magi_rs::magi::resolve_run_timeout`**, which derives REQ-A04's
+/// minimum from `agent_timeout_secs` and is a different question entirely. The two used to
+/// share a name, distinguishable only by import path, and that is the likeliest reason
+/// `run_query_subcommand` went years calling this one where the consult route also needed the
+/// other; hence the rename.
 ///
 /// Precedence: an explicit `--timeout` / `[headless] timeout_secs` (already
 /// resolved into [`Policy::timeout`]) wins; otherwise any **tool-executing**
@@ -487,7 +502,10 @@ impl RunObserver for RunTracker {
 /// # Returns
 /// `Some(duration)` when a ceiling applies; `None` for an unbounded run.
 #[must_use]
-pub fn resolve_run_timeout(policy: &Policy, full_auto_timeout_secs: u64) -> Option<Duration> {
+pub fn resolve_tier_timeout_default(
+    policy: &Policy,
+    full_auto_timeout_secs: u64,
+) -> Option<Duration> {
     if let Some(secs) = policy.timeout() {
         return Some(Duration::from_secs(secs));
     }
@@ -511,11 +529,14 @@ pub fn resolve_run_timeout(policy: &Policy, full_auto_timeout_secs: u64) -> Opti
 /// # Fields
 /// - `timeout` — wall-clock ceiling for the whole run (REQ-H36). `None` ⇒ unbounded. On elapse the agent future is dropped (cancelling the in-flight LLM stream), the run's [`CancellationToken`] fires so any `bash` subprocess *tree* is killed, and a partial outcome with `stop_reason = Error` / `error.kind = Timeout` is returned.
 /// - `autonomous` — the operator's autonomous-consult configuration (`[magi.complexity]`, `[magi].default_mode`, `[magi].untrusted_content`, the gate telemetry sink), overlaid on the tier-resolved [`AgentRunConfig`] so the tool loop's self-routed `consult` obeys `magi.toml` (REQ-A20/A20b, REQ-A07/A07d).
+/// - `timeout_below_formula` — whether `timeout` is shorter than REQ-A04's minimum for a run that can dispatch a consult (`classification_ceiling + 2 × agent_timeout_secs + slack`). The value is still obeyed — a wall-clock cap is the operator's call, not a safety invariant — but a consult that needs its schema retry cannot complete under it, and SC-A04d requires that fact to reach the JSON as well as stderr: whoever passes an explicit `--timeout` is running a pipeline, i.e. exactly who will not read stderr.
 pub struct RunWiring {
     /// Wall-clock ceiling for the whole run (REQ-H36).
     pub timeout: Option<Duration>,
     /// The operator's autonomous-consult configuration (REQ-A20/A07d).
     pub autonomous: crate::AutonomousRunConfig,
+    /// Whether `timeout` falls below REQ-A04's minimum for a consult-capable run (SC-A04d).
+    pub timeout_below_formula: bool,
 }
 
 /// Wall-clock milliseconds elapsed since `start`, saturating instead of wrapping.
@@ -776,6 +797,18 @@ pub async fn run_query(
     mut run_log: Option<&mut RunLog>,
 ) -> RunOutcome {
     let timeout = wiring.timeout;
+    // SC-A04d: a deadline too short for a consult's schema retry is recorded up front, next to
+    // the tier warnings, so the run log says WHY a later `Timeout` was structural rather than
+    // leaving an opaque `error.kind = timeout` as the only trace.
+    if wiring.timeout_below_formula {
+        log_event(
+            run_log.as_mut(),
+            &LogEvent::Message {
+                level: LogLevel::Warn,
+                text: TIMEOUT_BELOW_FORMULA_LOG,
+            },
+        );
+    }
     // Tier warnings (only under --full-auto) are recorded up front.
     for warning in policy.warnings() {
         log_event(
@@ -1473,6 +1506,7 @@ mod tests {
             autonomous: crate::AutonomousRunConfig::from_magi_config(
                 &crate::config::MagiConfig::default(),
             ),
+            timeout_below_formula: false,
         }
     }
 
@@ -1485,6 +1519,7 @@ mod tests {
             autonomous: crate::AutonomousRunConfig::from_magi_config(
                 &crate::config::MagiConfig::from_toml_str(toml).expect("fixture parses"),
             ),
+            timeout_below_formula: false,
         }
     }
 
@@ -1737,6 +1772,61 @@ mod tests {
             lines[0].contains(&magi_rs::magi::GATE_ANALYSIS.to_string()),
             "the APPLIED threshold travels with the line, or it calibrates nothing: {}",
             lines[0]
+        );
+    }
+
+    /// Loop 1, F7 / SC-A04d: a below-formula deadline reaches THIS run's JSON, not only
+    /// stderr.
+    ///
+    /// Whoever sets an explicit `--timeout` is running a pipeline — exactly the consumer that
+    /// never sees stderr of a process that already exited. The tool-loop consult cannot compute
+    /// this itself (no `--timeout` concept reaches it), so the runner, which owns the deadline,
+    /// corrects the one field the tool hardcodes to `false`.
+    /// Drives one forced consult through a REAL [`ConsultTool`] — so the object under
+    /// assertion is the one `report_to_consult_json` actually produces, not a stand-in — and
+    /// returns its `consult` object.
+    async fn forced_consult_json(timeout_below_formula: bool) -> Value {
+        let provider = ScriptedProvider::new(vec![Turn::Text("answered".to_string())]);
+        let mut agent = Agent::new(provider);
+        agent.register_tool(Box::new(ConsultTool::new(canned_magi(), true)));
+
+        let policy = Policy::new(Tier::Auto, 15, None);
+        let w = RunWiring {
+            timeout: None,
+            autonomous: crate::AutonomousRunConfig::from_magi_config(&MagiConfig::default()),
+            timeout_below_formula,
+        };
+        run_query(
+            forced_resolved(),
+            policy,
+            &mut agent,
+            "decide X vs Y",
+            &w,
+            None,
+        )
+        .await
+        .consult
+        .expect("a forced consult in --auto populates the consult object")
+    }
+
+    #[tokio::test]
+    async fn a_below_formula_deadline_reaches_the_consult_json_of_this_run() {
+        let consult = forced_consult_json(true).await;
+        assert_eq!(
+            consult.get("timeout_below_formula"),
+            Some(&Value::Bool(true)),
+            "the run's own deadline verdict must travel in the run's own JSON: {consult}"
+        );
+    }
+
+    /// The companion: a healthy deadline leaves the flag alone, so it means what it says
+    /// rather than being set by the mere presence of a consult.
+    #[tokio::test]
+    async fn a_healthy_deadline_leaves_the_consult_json_flag_false() {
+        let consult = forced_consult_json(false).await;
+        assert_eq!(
+            consult.get("timeout_below_formula"),
+            Some(&Value::Bool(false))
         );
     }
 
@@ -2020,14 +2110,14 @@ mod tests {
 
     // ── REQ-H36: wall-clock timeout ─────────────────────────────────────────────
 
-    /// `resolve_run_timeout` applies the tier default: the read-only `default`
+    /// `resolve_tier_timeout_default` applies the tier default: the read-only `default`
     /// tier gets no ceiling, while the tool-executing tiers get the 900 s hard
     /// default when none was configured; an explicit config value always wins.
     #[test]
-    fn test_resolve_run_timeout_applies_tier_default() {
+    fn test_resolve_tier_timeout_default_applies_tier_default() {
         // No configured timeout: default tier ⇒ None; Auto/FullAuto ⇒ 900 s.
         assert_eq!(
-            resolve_run_timeout(
+            resolve_tier_timeout_default(
                 &Policy::new(Tier::Default, 15, None),
                 FULL_AUTO_TIMEOUT_SECS
             ),
@@ -2035,11 +2125,14 @@ mod tests {
             "the read-only default tier carries no wall-clock ceiling"
         );
         assert_eq!(
-            resolve_run_timeout(&Policy::new(Tier::Auto, 15, None), FULL_AUTO_TIMEOUT_SECS),
+            resolve_tier_timeout_default(
+                &Policy::new(Tier::Auto, 15, None),
+                FULL_AUTO_TIMEOUT_SECS
+            ),
             Some(Duration::from_secs(FULL_AUTO_TIMEOUT_SECS))
         );
         assert_eq!(
-            resolve_run_timeout(
+            resolve_tier_timeout_default(
                 &Policy::new(Tier::FullAuto, 50, None),
                 FULL_AUTO_TIMEOUT_SECS
             ),
@@ -2047,14 +2140,14 @@ mod tests {
         );
         // An explicit configured timeout wins over the tier default, in any tier.
         assert_eq!(
-            resolve_run_timeout(
+            resolve_tier_timeout_default(
                 &Policy::new(Tier::Auto, 15, Some(5)),
                 FULL_AUTO_TIMEOUT_SECS
             ),
             Some(Duration::from_secs(5))
         );
         assert_eq!(
-            resolve_run_timeout(
+            resolve_tier_timeout_default(
                 &Policy::new(Tier::Default, 15, Some(7)),
                 FULL_AUTO_TIMEOUT_SECS
             ),
@@ -2067,7 +2160,7 @@ mod tests {
     /// `[headless] timeout_secs`), not the `FULL_AUTO_TIMEOUT_SECS` constant,
     /// when no explicit `--timeout`/policy timeout was configured.
     #[test]
-    fn test_resolve_run_timeout_respects_custom_effective_full_auto_default() {
+    fn test_resolve_tier_timeout_default_respects_a_custom_effective_full_auto_default() {
         let custom_default = 42u64;
         assert_ne!(
             custom_default, FULL_AUTO_TIMEOUT_SECS,
@@ -2075,17 +2168,17 @@ mod tests {
         );
 
         assert_eq!(
-            resolve_run_timeout(&Policy::new(Tier::Auto, 15, None), custom_default),
+            resolve_tier_timeout_default(&Policy::new(Tier::Auto, 15, None), custom_default),
             Some(Duration::from_secs(custom_default)),
             "a custom (smaller) effective default must apply, not the module constant"
         );
         assert_eq!(
-            resolve_run_timeout(&Policy::new(Tier::FullAuto, 50, None), custom_default),
+            resolve_tier_timeout_default(&Policy::new(Tier::FullAuto, 50, None), custom_default),
             Some(Duration::from_secs(custom_default))
         );
         // The read-only tier is still unbounded regardless of the effective default.
         assert_eq!(
-            resolve_run_timeout(&Policy::new(Tier::Default, 15, None), custom_default),
+            resolve_tier_timeout_default(&Policy::new(Tier::Default, 15, None), custom_default),
             None
         );
     }
@@ -2375,7 +2468,7 @@ mod tests {
 
     /// Fix round 2 (SC-A04d's other half): the warning reaches a REAL `analyze_
     /// direct` run's `notice_sink`, not just the JSON flag. Driven through
-    /// `run_consult` with a REAL `TimeoutDecision` from `resolve_run_timeout`,
+    /// `run_consult` with a REAL `TimeoutDecision` from `magi_rs::magi::resolve_run_timeout`,
     /// exactly like the JSON-flag test above — a hand-built `TimeoutDecision`
     /// asserted against in isolation would prove nothing about whether
     /// `analyze_direct` actually reads `runtime.notice_sink`.
