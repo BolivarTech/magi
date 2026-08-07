@@ -1,62 +1,82 @@
 # nextest configuration.
 #
-# ## Por qué existe este archivo
+# ## Why this file exists
 #
-# El vault deriva su KEK con Argon2id a coste OWASP 2025 (m=65536 KiB / 64 MiB,
-# t=3, **p=4**). Ese `p=4` es lo que manda: CADA test que abre un vault o una DB
-# cifrada ocupa **cuatro lanes**, no una. Esta caja tiene 6 cores físicos (12
-# lógicos), así que dos tests pesados en paralelo ya saturan los 6.
+# The vault derives its KEK with Argon2id at OWASP 2025 cost (m=65536 KiB / 64 MiB,
+# t=3, **p=4**). That `p=4` is what matters: EVERY test that opens a vault or an
+# encrypted DB occupies **four lanes**, not one. This box has 6 physical cores (12
+# logical), so two heavy tests running in parallel already saturate all 6.
 #
-# Sin cap, nextest lanza hasta 12 a la vez => 48 lanes sobre 6 cores. Los tests
-# sensibles al reloj de pared (abortos de tarea, timeouts de tokio, el
-# busy_timeout de 5 s de SQLite) se quedan sin CPU dentro de su presupuesto y
-# fallan de forma intermitente: un gate flaky, no una regresión real — todos
-# pasan al 100 % en aislamiento.
+# Without a cap, nextest launches up to 12 at once => 48 lanes over 6 cores. Tests
+# sensitive to wall-clock time (task aborts, tokio timeouts, SQLite's 5 s
+# busy_timeout) starve for CPU within their budget and fail intermittently: a
+# flaky gate, not a real regression — everything passes 100% in isolation.
 #
-# ## Por qué el filtro es POR SUBSISTEMA y no por lista de módulos hoja
+# ## Why the filter is BY SUBSYSTEM, not a list of leaf modules
 #
-# La versión anterior filtraba `test(/utils::crypto::tests::/)`, y ese módulo
-# **se borró en v0.8.0** (Vault MS1) cuando la cripto se movió al crate
-# `cryptovault`. Un filtro de nextest que no matchea nada **no da error**, así
-# que el cap siguió declarado y dejó de aplicarse, en silencio. La carga Argon2
-# había migrado a `vault::envelope`, `vault::master`, `vault::store` y
-# `agent::tests`, ninguno de los cuales estaba nombrado.
+# The previous version filtered `test(/utils::crypto::tests::/)`, and that module
+# **was deleted in v0.8.0** (Vault MS1) when crypto moved to the `cryptovault`
+# crate. A nextest filter that matches nothing raises **no error**, so the cap
+# stayed declared in this file and silently stopped applying. The Argon2 load had
+# migrated to `vault::envelope`, `vault::master`, `vault::store` and
+# `agent::tests`, none of which were named.
 #
-# El síntoma fue exactamente el que el cap existía para prevenir, y reapareció
-# en MS2: `headless_runner::tests::test_run_consult_future_drop_aborts_spawned_analysis`
-# falló bajo carga mientras dos `vault::envelope::tests::test_rekey_*` corrían
-# 77 s cada uno sin throttle.
+# The exact failure mode this cap exists to prevent reappeared in MS2:
+# `headless_runner::tests::test_run_consult_future_drop_aborts_spawned_analysis`
+# failed under load while two `vault::envelope::tests::test_rekey_*` ran 77 s each
+# with no throttling.
 #
-# Por eso el filtro ahora nombra **subsistemas enteros** en vez de módulos hoja:
-# renombrar o partir un submódulo dentro de `vault::` ya no lo saca del grupo.
-# Incluye tests baratos (`vault::cli::tests` corre en 35 ms) y ese coste es
-# deliberado: un cap que se cae solo cuando alguien refactoriza es peor que uno
-# levemente ancho.
+# That is why the filter names **whole subsystems** instead of leaf modules:
+# renaming or splitting a submodule under `vault::` no longer drops it out of the
+# group. It sweeps in cheap tests too (`vault::cli::tests` runs in 35 ms), and
+# that cost is deliberate: a cap that falls off by itself the moment someone
+# refactors is worse than one that is slightly too wide.
 #
-# Los cuatro subsistemas cubiertos, con su motivo:
-#   - `vault::`            — deriva KEK (envelope, master, store, diagnose)
-#   - `system::database::` — bootstrap del envelope al abrir la DB
-#   - `agent::tests::`     — abren una DB cifrada real (persistencia, memoria)
-#   - `memory::store::`    — comparte la conexión y la DEK de esa DB
+# ## The same trap, one level down (MS2 Loop 1 fix)
 #
-# ## El coste, medido — no estimado
+# `test(/memory::store::/)` covered the shared connection/DEK of the vector
+# store, but five more test modules open their OWN `EncryptedSqliteMemory`
+# directly and pay the identical four-lane Argon2 cost: `memory::context`,
+# `memory::decay`, `memory::profile`, `memory::retrieval`, `memory::bench`, and
+# `tools::knowledge`. None of them matched `memory::store::` — the exact
+# "matches nothing, raises no error, cap silently narrows" trap described above,
+# just one module deeper. Fixed by widening `memory::store::` to `memory::`
+# (the whole subsystem, not one of its modules) and adding `tools::knowledge::`
+# as its own subsystem, since it lives outside `memory::` but opens the same
+# encrypted DB to persist project facts.
 #
-# Ampliar el grupo **desacelera** la suite: 275 s -> 419 s (+52 %) en esta caja.
-# La predicción al escribir esto era la contraria —que quitar la sobresuscripción
-# compensaría— y fue errónea: serializar el grupo pesado cuesta más de lo que
-# ahorra en contención. Se paga igual, porque un gate que falla una vez cada
-# tantas corridas obliga a re-correr y a dudar de la evidencia, y eso cuesta más
-# que dos minutos y medio.
+# The subsystems covered, with their reason:
+#   - `vault::`            — derives the KEK (envelope, master, store, diagnose)
+#   - `system::database::` — bootstraps the envelope when opening the DB
+#   - `agent::tests::`     — open a real encrypted DB (persistence, memory)
+#   - `memory::`           — every module that opens its own
+#                            `EncryptedSqliteMemory`, or shares the vector
+#                            store's connection/DEK
+#   - `tools::knowledge::` — persists project facts through the same encrypted DB
 #
-# Si el coste llega a doler, la palanca es `max-threads = 3` (12 lanes sobre 12
-# procesadores lógicos, sin sobresuscripción), NO recortar el filtro: recortarlo
-# reintroduce exactamente la pudrición que documenta la sección anterior.
+# ## The cost, measured — not estimated
 #
-# Si aparece flake residual, bajar `max-threads` a 1 antes de tocar el filtro.
+# Widening the group **slows down** the suite: 275 s -> 419 s (+52%) on this box,
+# measured for the four-subsystem filter above. The prediction when this was
+# written was the opposite — that removing the oversubscription would pay for
+# itself — and it was wrong: serializing the heavy group costs more than it saves
+# in contention. It is paid anyway, because a gate that fails once every so many
+# runs forces a re-run and casts doubt on the evidence, and that costs more than
+# two and a half minutes. The further widening to `memory::` and
+# `tools::knowledge::` above was not re-benchmarked in isolation — the five added
+# modules are small (one `EncryptedSqliteMemory::new` call each, three in
+# `tools::knowledge`) — but the same trade-off applies: correctness of the cap
+# over its own stated coverage claim is not optional.
+#
+# If the cost starts to hurt, the lever is `max-threads = 3` (12 lanes over 12
+# logical processors, no oversubscription), NOT trimming the filter: trimming it
+# reintroduces exactly the rot the section above documents.
+#
+# If residual flake appears, drop `max-threads` to 1 before touching the filter.
 
 [test-groups]
 heavy = { max-threads = 2 }
 
 [[profile.default.overrides]]
-filter = 'test(/vault::/) | test(/system::database::/) | test(/agent::tests::/) | test(/memory::store::/)'
+filter = 'test(/vault::/) | test(/system::database::/) | test(/agent::tests::/) | test(/memory::/) | test(/tools::knowledge::/)'
 test-group = "heavy"
