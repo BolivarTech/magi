@@ -2719,11 +2719,15 @@ impl AutonomousRunConfig {
     /// A value carrying the effective gate thresholds, the effective mode configuration, and a
     /// fresh, empty telemetry sink.
     #[must_use]
-    fn from_magi_config(_config: &MagiConfig) -> Self {
-        // Red phase: no resolution yet.
+    fn from_magi_config(config: &MagiConfig) -> Self {
         Self {
-            gate_thresholds: magi_rs::magi::gate::GateThresholds::builtin(),
-            mode_config: magi_rs::magi::mode::ModeConfig::default(),
+            // `config.rs` owns the disassembly of `[magi.complexity]` — the lib-side gate
+            // cannot know the shape of the TOML, which is why the function lives there.
+            gate_thresholds: crate::config::gate_thresholds_from(config),
+            mode_config: magi_rs::magi::mode::ModeConfig {
+                default_mode: config.effective_default_mode(),
+                untrusted_content: config.magi.untrusted_content.unwrap_or(false),
+            },
             telemetry: Arc::new(BufferedGateTelemetry::new()),
         }
     }

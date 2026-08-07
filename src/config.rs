@@ -932,13 +932,11 @@ pub fn resolve_anthropic_model(config: &MagiConfig, env_model: Option<&str>) -> 
 /// cannot know the shape of the TOML; breaking `[magi.complexity]` into loose pieces
 /// (`GateOverrides`) is this module's job, since it already has the table in hand.
 /// Absent table ⇒ `GateOverrides::default()` ⇒ the three built-ins from
-/// [`GateThresholds::builtin`] (the gate is not turned off by omitting the section). Narrow
-/// allow: consumed by the TUI/`magi query`/`magi consult` autonomous-routing wiring in Tasks
-/// 3.2/3.3, not this task. Covered by
-/// `gate_thresholds_from_reads_the_complexity_table_and_falls_back_to_builtins`.
+/// [`GateThresholds::builtin`] (the gate is not turned off by omitting the section).
 ///
-/// -------------------------------------------------------------------------
-#[allow(dead_code)]
+/// Consumed in production by `AutonomousRunConfig::from_magi_config` (`main.rs`), which hands
+/// the result to both autonomous surfaces. Covered by
+/// `gate_thresholds_from_reads_the_complexity_table_and_falls_back_to_builtins`.
 #[must_use]
 pub fn gate_thresholds_from(config: &MagiConfig) -> GateThresholds {
     let overrides = config
