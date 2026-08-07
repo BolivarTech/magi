@@ -10,7 +10,9 @@ use magi_core::error::MagiError;
 use magi_core::reporting::MagiReport;
 use magi_core::schema::Mode;
 use magi_rs::magi::kind::ProviderKind;
-use magi_rs::magi::mode::{normalize_label, resolve_mode_guarded, ModeClassifier, ModeError};
+use magi_rs::magi::mode::{
+    normalize_label, resolve_mode_guarded, ModeClassifier, ModeError, ModeResolution,
+};
 use magi_rs::redact::redact_foreign_error;
 use magi_rs::vault::{SecretStore, VaultError};
 use ratatui::{
@@ -456,6 +458,13 @@ pub(crate) fn parse_tui_consult(trimmed: &str) -> Result<TuiConsultCommand, TuiC
 /// (already flag-stripped) query alongside it — the exact pair the `UiEvent::Consult`
 /// handler passes to `Magi::analyze` (REQ-A07d).
 ///
+/// **Returns the whole [`ModeResolution`], not just its `mode`.** REQ-A08 requires the level
+/// the mode came from to be visible on all four surfaces, and this one used to drop it: a bare
+/// `/consult` running `CodeReview` because the operator configured it, because the classifier
+/// inferred it, or because a classification timed out and fell to the default were three
+/// materially different situations that rendered identically. Only the resolver knows which
+/// happened; a caller cannot re-derive it.
+///
 /// Extracted into its own function, same precedent as `handle_login`/`handle_logout`
 /// above: the full TUI event loop is intractable to test directly, so the logic that
 /// decides the mode is tested here as a plain `async fn`.
@@ -475,7 +484,7 @@ async fn resolve_tui_consult_mode(
     default_mode: Option<Mode>,
     untrusted_content: bool,
     classifier: &dyn ModeClassifier,
-) -> Result<(Mode, String), ModeError> {
+) -> Result<(ModeResolution, String), ModeError> {
     let resolution = resolve_mode_guarded(
         cmd.mode,
         default_mode,
@@ -485,7 +494,35 @@ async fn resolve_tui_consult_mode(
         &cmd.query,
     )
     .await?;
-    Ok((resolution.mode, cmd.query))
+    Ok((resolution, cmd.query))
+}
+
+/// The line the TUI shows when it dispatches an explicit `/consult`, naming the effective mode
+/// and the level it came from (REQ-A08).
+///
+/// **Why it is folded into the "deliberating" line rather than added to the report.** The reply
+/// path reserves room for the `[DEGRADED: …]` banner before truncating the report, and appending
+/// to it would change that byte accounting; this line is emitted before the analysis instead, so
+/// it appears identically whether the consult succeeds or fails — which is the case REQ-A08's
+/// auditability actually needs, since a failed run is when "which lens ran?" is hardest to
+/// answer.
+///
+/// **The source is rendered with `Debug`, deliberately.** `ModeSource` exposes no public label
+/// function; `tools::consult`'s `source_label` is private to that module, and hand-writing a
+/// second five-arm map here is exactly the duplication that drifts (B3). `Debug` is derived, so
+/// it cannot disagree with a variant list it is generated from — and this string is read by a
+/// human in a terminal, not parsed off a wire, so the JSON contract's "never `Debug`" rule
+/// (which exists because a rename must not silently change a wire value) does not bind here.
+///
+/// # Parameters
+/// * `res` - the resolution `resolve_tui_consult_mode` produced for this command.
+///
+/// # Returns
+/// The text sent as an [`AgentResponse::Info`] just before the three model calls start.
+#[must_use]
+fn tui_consult_dispatch_notice(res: &ModeResolution) -> String {
+    let _ = res;
+    "MAGI deliberating — 3 model calls…".to_string()
 }
 
 /// Braille spinner frames for the "thinking" activity indicator.
@@ -1050,7 +1087,7 @@ pub async fn run_tui_ext(
                     // REQ-A07d: fails closed if the operator declared
                     // `untrusted_content = true` and neither `--mode` nor
                     // `default_mode` named a lens — before any model call.
-                    let (mode, query) = match resolve_tui_consult_mode(
+                    let (resolution, query) = match resolve_tui_consult_mode(
                         TuiConsultCommand { mode, query },
                         default_mode,
                         untrusted_content,
@@ -1064,10 +1101,13 @@ pub async fn run_tui_ext(
                             continue;
                         }
                     };
+                    let mode = resolution.mode;
+                    // REQ-A08: the effective mode AND the level it came from, before the
+                    // analysis, so it is shown on the failing runs too.
                     let _ = response_tx
-                        .send(AgentResponse::Info(
-                            "MAGI deliberating — 3 model calls…".to_string(),
-                        ))
+                        .send(AgentResponse::Info(tui_consult_dispatch_notice(
+                            &resolution,
+                        )))
                         .await;
                     // MAGI FIX: joined spawn (awaited inline → serial, no finalize-order
                     // regression) isolates a panic in magi-core's analyze into a recoverable
@@ -3109,11 +3149,11 @@ mod tests {
     #[tokio::test]
     async fn an_explicit_mode_reaches_analyze_as_declared_and_strips_the_flag_from_the_query() {
         let cmd = super::parse_tui_consult("/consult --mode design ¿esto o aquello?").unwrap();
-        let (mode, query) = super::resolve_tui_consult_mode(cmd, None, false, &NeverClassifier)
+        let (res, query) = super::resolve_tui_consult_mode(cmd, None, false, &NeverClassifier)
             .await
             .unwrap();
         assert_eq!(
-            mode,
+            res.mode,
             Mode::Design,
             "el --mode explícito debe ganar, nunca Analysis por defecto"
         );
@@ -3130,11 +3170,16 @@ mod tests {
     #[tokio::test]
     async fn configured_default_mode_wins_without_classifying() {
         let cmd = super::parse_tui_consult("/consult ¿esto o aquello?").unwrap();
-        let (mode, query) =
+        let (res, query) =
             super::resolve_tui_consult_mode(cmd, Some(Mode::CodeReview), false, &NeverClassifier)
                 .await
                 .unwrap();
-        assert_eq!(mode, Mode::CodeReview);
+        assert_eq!(res.mode, Mode::CodeReview);
+        assert_eq!(
+            res.source,
+            magi_rs::magi::mode::ModeSource::Configured,
+            "REQ-A08: the level must survive the trip, or a reader cannot tell a configured              lens from an inferred one"
+        );
         assert_eq!(query, "¿esto o aquello?");
     }
 
@@ -3143,11 +3188,60 @@ mod tests {
     #[tokio::test]
     async fn without_mode_or_config_the_classifier_is_consulted() {
         let cmd = super::parse_tui_consult("/consult ¿esto o aquello?").unwrap();
-        let (mode, _query) =
+        let (res, _query) =
             super::resolve_tui_consult_mode(cmd, None, false, &FixedClassifier(Mode::Design))
                 .await
                 .unwrap();
-        assert_eq!(mode, Mode::Design);
+        assert_eq!(res.mode, Mode::Design);
+        assert_eq!(res.source, magi_rs::magi::mode::ModeSource::Inferred);
+    }
+
+    /// Loop 1, F4 / REQ-A08: the `/consult` reply states the effective mode AND the level it
+    /// came from.
+    ///
+    /// Without the level, three materially different situations render identically to the
+    /// user: the operator configured `code-review`, the classifier inferred it, or a
+    /// classification timed out and everything fell to `Analysis`. With inference active the
+    /// same prompt can resolve differently across two runs, so this is what makes "did the lens
+    /// I asked for actually run?" answerable at all.
+    #[test]
+    fn the_consult_dispatch_notice_names_the_mode_and_its_source() {
+        for (source, needle) in [
+            (magi_rs::magi::mode::ModeSource::Explicit, "Explicit"),
+            (magi_rs::magi::mode::ModeSource::Configured, "Configured"),
+            (magi_rs::magi::mode::ModeSource::Inferred, "Inferred"),
+            (magi_rs::magi::mode::ModeSource::Default, "Default"),
+        ] {
+            let notice = super::tui_consult_dispatch_notice(&ModeResolution {
+                mode: Mode::CodeReview,
+                source,
+                classification_attempted: false,
+            });
+            assert!(
+                notice.contains("code-review"),
+                "the effective mode must be named: {notice}"
+            );
+            assert!(
+                notice.contains(needle),
+                "the level must be named, or a configured lens is indistinguishable from an \
+                 inferred one: {notice}"
+            );
+        }
+    }
+
+    /// The notice keeps saying what it always said — that three model calls are about to run —
+    /// so adding the audit information does not cost the user the cost warning.
+    #[test]
+    fn the_consult_dispatch_notice_still_announces_the_three_calls() {
+        let notice = super::tui_consult_dispatch_notice(&ModeResolution {
+            mode: Mode::Analysis,
+            source: magi_rs::magi::mode::ModeSource::Default,
+            classification_attempted: true,
+        });
+        assert!(
+            notice.contains('3'),
+            "the cost heads-up must survive: {notice}"
+        );
     }
 
     /// SC-A07r (TUI half): the operator declared `untrusted_content = true` in their
