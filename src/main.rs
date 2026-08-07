@@ -1544,11 +1544,8 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
     // `run_consult_subcommand`'s own classifier construction. REQ-A07d: the TUI's
     // explicit `/consult` needs the same `resolve_mode_guarded` classifier/config
     // pair the direct headless `magi consult` path already has.
-    let tui_mode_classifier: Arc<dyn magi_rs::magi::mode::ModeClassifier> =
-        Arc::new(crate::agent::mode_classifier::ProviderClassifier::new(
-            provider.clone(),
-            Arc::new(crate::agent::mode_classifier::ProcessNoticeSink::default()),
-        ));
+    let (tui_mode_classifier, tui_classifier_notices) =
+        tui_mode_classifier_wiring(provider.clone());
     let tui_default_mode = magi_config.effective_default_mode();
     let tui_untrusted_content = magi_config.magi.untrusted_content.unwrap_or(false);
     // REQ-A07p/SC-A07p: `tui_default_mode.is_none()` IS "will this session infer the
@@ -1627,6 +1624,7 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
         secret_store,
         crate::tui::TuiMagiRuntimeConfig {
             mode_classifier: tui_mode_classifier,
+            classifier_notices: tui_classifier_notices,
             default_mode: tui_default_mode,
             untrusted_content: tui_untrusted_content,
             magi_kind: magi_config.effective_magi_kind(),
@@ -2760,6 +2758,37 @@ impl AutonomousRunConfig {
     fn drain_telemetry(&self) -> Vec<String> {
         self.telemetry.drain()
     }
+}
+
+/// Builds the TUI's mode classifier together with the sink its one-time notices go to
+/// (REQ-A07c).
+///
+/// **The two are returned as a pair because they must be the SAME instance.** The classifier
+/// emits its cost/expiry notices through whatever sink it was constructed with; the TUI can
+/// only reroute them away from stderr — where they land on top of the ratatui frame — by
+/// attaching the response channel to that exact sink once it exists. Handing back two
+/// independent values would compile, run, and silently keep writing over the frame, which is
+/// the defect this pair exists to make unrepresentable.
+///
+/// # Parameters
+/// * `provider` - the principal provider; the classification is one label, so it is paid at the principal's price and never at the trio's.
+///
+/// # Returns
+/// The classifier for `TuiMagiRuntimeConfig::mode_classifier`, and the sink for its
+/// `classifier_notices`.
+fn tui_mode_classifier_wiring(
+    provider: Arc<dyn Provider>,
+) -> (
+    Arc<dyn magi_rs::magi::mode::ModeClassifier>,
+    Arc<crate::tui::TuiNoticeSink>,
+) {
+    let notices = Arc::new(crate::tui::TuiNoticeSink::new());
+    let classifier: Arc<dyn magi_rs::magi::mode::ModeClassifier> =
+        Arc::new(crate::agent::mode_classifier::ProviderClassifier::new(
+            provider,
+            Arc::new(crate::agent::mode_classifier::ProcessNoticeSink::default()),
+        ));
+    (classifier, notices)
 }
 
 /// Builds the pair (startup notice, `/consult` message) for the TUI when the trio is not
@@ -7674,6 +7703,73 @@ mod tests {
                 )],
             };
             assert!(!trio_unavailable_message(&err).contains(CANARY));
+        }
+    }
+
+    /// Loop 1, F3 — the mode classifier's notices must not reach stderr while the TUI owns the
+    /// screen.
+    ///
+    /// `ProcessNoticeSink::once` calls `eprintln!` unconditionally, and `run_tui_ext` enters
+    /// raw mode plus the alternate screen before the event loop starts, so a `/consult` with
+    /// no `--mode` under the default scaffold — the very path inference exists to serve — wrote
+    /// raw text over the ratatui frame. The fix is a sink, not a hardcoded destination: the
+    /// same classifier runs headless, where stderr IS correct.
+    mod tui_classifier_notices {
+        use super::*;
+        use crate::agent::mode_classifier::NoticeSink;
+        use crate::tui::AgentResponse;
+
+        /// The classifier the TUI is handed writes its notices to the sink the TUI attaches its
+        /// channel to. Driven through a real `classify()` call, so a wiring that hands back two
+        /// unrelated instances fails here instead of silently writing over the frame.
+        #[tokio::test]
+        async fn the_tui_classifier_emits_its_notices_through_the_attached_channel() {
+            let (classifier, notices) = tui_mode_classifier_wiring(Arc::new(StaticProvider));
+            let (tx, mut rx) = tokio::sync::mpsc::channel::<AgentResponse>(8);
+            notices.attach(tx);
+
+            // `StaticProvider`'s canned text is not one of the three labels, so this
+            // classification fails — which is fine: the COST notice fires before the call,
+            // unconditionally, and that is the one that used to hit the frame first.
+            let _ = classifier
+                .classify("some content with no declared mode")
+                .await;
+
+            let mut seen = Vec::new();
+            while let Ok(resp) = rx.try_recv() {
+                if let AgentResponse::Notice(text) = resp {
+                    seen.push(text);
+                }
+            }
+            assert!(
+                seen.iter().any(|t| t.contains("--mode")),
+                "the classifier's cost notice must arrive as a TUI Notice, not on stderr: \
+                 {seen:?}"
+            );
+        }
+
+        /// Before the channel exists the sink falls back to stderr — correct, because raw mode
+        /// has not been entered yet — and it never drops a notice silently (B9).
+        #[test]
+        fn an_unattached_sink_still_deduplicates_by_key() {
+            let sink = crate::tui::TuiNoticeSink::new();
+            sink.once("k", "first");
+            sink.once("k", "second");
+
+            let (tx, mut rx) = tokio::sync::mpsc::channel::<AgentResponse>(8);
+            sink.attach(tx);
+            sink.once("k", "third");
+            assert!(
+                rx.try_recv().is_err(),
+                "a key already emitted before attachment must stay emitted: \"once\" is per \
+                 key and per process, not per destination"
+            );
+
+            sink.once("other", "fresh key");
+            assert!(
+                matches!(rx.try_recv(), Ok(AgentResponse::Notice(t)) if t == "fresh key"),
+                "a key not yet seen must reach the channel once attached"
+            );
         }
     }
 

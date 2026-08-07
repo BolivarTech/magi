@@ -79,6 +79,84 @@ fn handle_logout(store: Option<&SharedSecretStore>) -> AgentResponse {
     }
 }
 
+/// The mode classifier's one-time notices, routed through the TUI's notice channel instead of
+/// stderr (REQ-A07c's two notices: the cost heads-up and the expiry report).
+///
+/// **Why this type exists.** `ProcessNoticeSink` writes with `eprintln!`, which is correct for
+/// the headless CLI and wrong for the TUI: from the moment `run_tui_ext` enters raw mode and
+/// the alternate screen, an external write to stderr lands on top of the ratatui frame and
+/// desynchronises its previous-frame diff buffer. That is precisely why
+/// [`StreamPiece::Notice`](crate::agent::StreamPiece) exists — and the classifier fires on the
+/// *first* `/consult` without `--mode` under the default scaffold, so it was not an exotic
+/// corner. The destination is injected rather than hardcoded because the same classifier code
+/// runs headless, where stderr **is** the right destination.
+///
+/// **Why the channel is attached late.** `main.rs` builds the classifier before `run_tui_ext`
+/// creates the response channel, so the sink is constructed first and connected afterwards.
+/// Until it is connected — i.e. before raw mode is entered — a notice still has to go
+/// somewhere, and stderr is then the correct place: the frame it could corrupt does not exist
+/// yet.
+pub struct TuiNoticeSink {
+    /// Keys already emitted, for the "once per process" contract of [`NoticeSink::once`].
+    seen: Mutex<std::collections::BTreeSet<&'static str>>,
+    /// The TUI's response channel, present once [`TuiNoticeSink::attach`] has run.
+    tx: Mutex<Option<mpsc::Sender<AgentResponse>>>,
+}
+
+impl TuiNoticeSink {
+    /// A fresh, unattached sink.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            seen: Mutex::new(std::collections::BTreeSet::new()),
+            tx: Mutex::new(None),
+        }
+    }
+
+    /// Connects the sink to the TUI's response channel; every later notice is rendered in the
+    /// frame instead of written to stderr.
+    ///
+    /// # Parameters
+    /// * `tx` - the sender half of the channel `run_tui_ext` already owns.
+    pub fn attach(&self, tx: mpsc::Sender<AgentResponse>) {
+        *self.tx.lock().unwrap_or_else(|p| p.into_inner()) = Some(tx);
+    }
+}
+
+impl Default for TuiNoticeSink {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl crate::agent::mode_classifier::NoticeSink for TuiNoticeSink {
+    /// Emits `msg` the first time it is called with `key`.
+    ///
+    /// A notice is **never dropped silently** (B9): with no channel attached, or with one that
+    /// is closed or full, it falls back to stderr. Both fallbacks are states in which the frame
+    /// is not at risk — before attachment raw mode has not been entered, and a closed channel
+    /// means the session is already tearing down — so the fallback trades a cosmetic risk that
+    /// is not present for a message that would otherwise be lost.
+    fn once(&self, key: &'static str, msg: &str) {
+        {
+            let mut seen = self.seen.lock().unwrap_or_else(|p| p.into_inner());
+            if !seen.insert(key) {
+                return;
+            }
+        }
+        let tx = self
+            .tx
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_ref()
+            .cloned();
+        match tx {
+            Some(tx) if tx.try_send(AgentResponse::Notice(msg.to_string())).is_ok() => {}
+            _ => eprintln!("{msg}"),
+        }
+    }
+}
+
 /// Fallback text for a `/consult` issued with no trio available AND no precomputed
 /// reason (Task 4.3, REQ-A06/SC-A06b).
 ///
@@ -742,6 +820,12 @@ pub struct TuiMagiRuntimeConfig {
     /// Consulted only when `/consult` declares no mode and none is
     /// configured (REQ-A07c).
     pub mode_classifier: Arc<dyn ModeClassifier>,
+    /// The sink `mode_classifier` writes its two one-time notices to, so
+    /// [`run_tui_ext`] can connect it to the response channel once that
+    /// channel exists. It MUST be the same instance the classifier was built
+    /// with, or its notices keep going to stderr and over the frame — see
+    /// [`TuiNoticeSink`].
+    pub classifier_notices: Arc<TuiNoticeSink>,
     /// `[magi].default_mode`, resolved once at startup (REQ-A15).
     pub default_mode: Option<Mode>,
     /// `[magi].untrusted_content` (REQ-A07d/SC-A07t).
@@ -838,6 +922,7 @@ pub async fn run_tui_ext(
     } = consult_wiring;
     let TuiMagiRuntimeConfig {
         mode_classifier,
+        classifier_notices,
         default_mode,
         untrusted_content,
         magi_kind,
@@ -864,6 +949,11 @@ pub async fn run_tui_ext(
     let (event_tx, mut event_rx) = mpsc::channel(100);
     let (response_tx, response_rx) = mpsc::channel(100);
     let (approval_tx, approval_rx) = mpsc::channel(100);
+
+    // From here on the terminal is in raw mode on the alternate screen, so the mode
+    // classifier's notices must stop going to stderr and start going through the frame —
+    // the same rule `StreamPiece::Notice` enforces for every other operational notice.
+    classifier_notices.attach(response_tx.clone());
 
     for notice in startup_notices {
         let _ = response_tx.send(AgentResponse::Info(notice)).await;
