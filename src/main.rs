@@ -7762,6 +7762,146 @@ mod tests {
             };
             assert!(!trio_unavailable_message(&err).contains(CANARY));
         }
+
+        /// The canary value substituted into a template's `[password]`. Distinctive enough
+        /// that a substring search cannot match it by accident.
+        const SEAT_CANARY: &str = "c4n4ry-s3cr3t";
+
+        /// A [`SecretStore`] over a fixed map, so a credentialed [`ResolvedEndpoint`] can be
+        /// built without standing up a real vault.
+        ///
+        /// A real one would work, and would also pay Argon2id at `p = 4` — four lanes on a
+        /// six-core box — for a test that has nothing to do with key derivation. That is the
+        /// cost `.config/nextest.toml` caps the `heavy` group to bound; not incurring it is
+        /// better than being capped for it.
+        struct FixedVault(std::collections::BTreeMap<&'static str, &'static str>);
+
+        impl SecretStore for FixedVault {
+            fn set(&mut self, _name: &str, _value: &str) -> Result<(), VaultError> {
+                Ok(())
+            }
+            fn get(&mut self, name: &str) -> Result<Zeroizing<String>, VaultError> {
+                self.0
+                    .get(name)
+                    .map(|v| Zeroizing::new((*v).to_string()))
+                    .ok_or_else(|| VaultError::SecretNotFound(name.to_string()))
+            }
+            fn remove(&mut self, _name: &str) -> Result<(), VaultError> {
+                Ok(())
+            }
+            fn list(&mut self) -> Result<Vec<SecretEntry>, VaultError> {
+                Ok(Vec::new())
+            }
+            fn contains(&mut self, name: &str) -> Result<bool, VaultError> {
+                Ok(self.0.contains_key(name))
+            }
+        }
+
+        /// Resolves `template` against a vault holding [`SEAT_CANARY`] as the root password —
+        /// the only way to obtain a credential-bearing endpoint, since REQ-A16c rejects a
+        /// literal one at parse time.
+        fn credentialed_endpoint(template: &str) -> ResolvedEndpoint {
+            let mut vault = FixedVault(
+                [
+                    ("BASE_URL_USER", "alice"),
+                    ("BASE_URL_PASSWORD", SEAT_CANARY),
+                ]
+                .into_iter()
+                .collect(),
+            );
+            EndpointTemplate::parse(template)
+                .expect("a placeholder template parses")
+                .resolve(&mut vault, Scope::Root)
+                .expect("the vault holds both entries")
+        }
+
+        /// Loop 1, F20 — the no-leak guarantee is asserted against the REAL composition in
+        /// [`build_native_provider`], not a hand-rolled stand-in.
+        ///
+        /// Every previous no-leak assertion in this file built `SeatError::Transport` by
+        /// calling `redact_foreign_error` itself, so the one production site that maps a
+        /// `ProviderError` into it — the `to_seat` closure — had zero test call sites, and so
+        /// did `build_native_provider`. This drives both.
+        ///
+        /// **The `Ok` half is the one that can actually fail today, and that is deliberate.**
+        /// `openai_compat_root` interpolates the RESOLVED endpoint into its normalization
+        /// notice, which reaches the TUI startup list and headless stderr; drop its
+        /// `redact_url` and this assertion goes red immediately.
+        #[test]
+        fn build_native_provider_never_leaks_a_resolved_credential() {
+            // No `/v1` suffix ⇒ `openai_compat_root` normalizes AND emits its notice, which is
+            // the path that embeds the URL in user-visible text.
+            let endpoint = credentialed_endpoint("http://[user]:[password]@host:11434");
+            let mut notices: Vec<Notice> = Vec::new();
+            let built = build_native_provider(
+                ProviderKind::Ollama,
+                &endpoint,
+                "some-model",
+                None,
+                Duration::from_secs(1),
+                &mut notices,
+            );
+            assert!(built.is_ok(), "keyless ollama over http builds fine");
+            assert!(
+                notices.iter().any(|n| n.text.contains("/v1")),
+                "test setup: the normalization notice must have fired, or this asserts nothing"
+            );
+            for n in &notices {
+                assert!(
+                    !n.text.contains(SEAT_CANARY),
+                    "a construction notice leaked the resolved credential: {}",
+                    n.text
+                );
+                assert!(
+                    !n.text.contains("alice"),
+                    "userinfo is redacted by position, so the user part goes too: {}",
+                    n.text
+                );
+            }
+        }
+
+        /// The `Err` half: a real `ProviderError` from magi-core, mapped through the production
+        /// `to_seat` closure and rendered by `trio_unavailable_message`.
+        ///
+        /// **Honest note on what this proves.** magi-core 3.1.0's `ProviderUrl::parse`
+        /// deliberately never echoes its input (its own module doc says so, and the scheme
+        /// branch interpolates only `parsed.scheme()`), so this message would be canary-free
+        /// even if `to_seat` dropped its redaction today. What the test buys is the future:
+        /// `ProviderError` is `#[non_exhaustive]`, a later version can add a variant that
+        /// interpolates free text, and from that day this assertion is the thing standing
+        /// between it and the terminal. It also closes the "zero test call sites" gap that let
+        /// the composition go unexercised at all.
+        #[test]
+        fn a_real_seat_construction_failure_is_rendered_without_the_credential() {
+            // A non-http(s) scheme is rejected by magi-core's own URL validation, so this is a
+            // genuine `ProviderError` from the real constructor — no network, no mock.
+            let endpoint = credentialed_endpoint("ftp://[user]:[password]@host/v1");
+            let mut notices: Vec<Notice> = Vec::new();
+            // `Arc<dyn LlmProvider>` has no `Debug`, so the `Ok` side cannot be unwrapped with
+            // `expect_err`; matching keeps the assertion on the variant instead.
+            let Err(err) = build_native_provider(
+                ProviderKind::Ollama,
+                &endpoint,
+                "some-model",
+                None,
+                Duration::from_secs(1),
+                &mut notices,
+            ) else {
+                panic!("a non-http scheme cannot build a provider");
+            };
+            assert!(
+                matches!(err, SeatError::Transport(_)),
+                "the failure must arrive through `to_seat`, the site under test: {err:?}"
+            );
+
+            let rendered = trio_unavailable_message(&TrioError::SeatUnbuildable {
+                seats: vec![(AgentName::Melchior, err)],
+            });
+            assert!(
+                !rendered.contains(SEAT_CANARY) && !rendered.contains("alice"),
+                "the seat failure reached the user with a credential in it: {rendered}"
+            );
+        }
     }
 
     /// Loop 1, F7 / SC-A04c-d — REQ-A04's coherence check on `magi query`'s consult route.
