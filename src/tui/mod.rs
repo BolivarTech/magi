@@ -794,16 +794,41 @@ fn post_login_agent_timeout_secs(configured: Option<u64>) -> u64 {
     configured.unwrap_or(magi_rs::magi::AGENT_TIMEOUT_SECS)
 }
 
+/// The [`AgentRunConfig`] for ONE interactive chat turn (REQ-A20/A20b, REQ-A07/A07d).
+///
+/// `AgentRunConfig::default()` is the interactive baseline and must stay exactly that (it is
+/// pinned by the interactive-path regression tests); the operator's `magi.toml` is overlaid on
+/// top of it. Before this existed, the chat loop passed `AgentRunConfig::default()` verbatim,
+/// so `[magi.complexity]`, `[magi].default_mode` and `[magi].untrusted_content` were inert on
+/// the busiest autonomous-consult surface in the product.
+///
+/// Extracted from the event loop for the same reason as
+/// [`handle_login`]/[`post_login_agent_timeout_secs`]: the loop itself is intractable to drive
+/// in a test, so the decision it makes is tested here as a plain `fn`.
+///
+/// # Parameters
+/// * `autonomous` - the operator's autonomous-consult configuration, resolved once at startup.
+///
+/// # Returns
+/// Interactive semantics, with the gate thresholds, mode configuration and telemetry sink the
+/// operator declared.
+#[must_use]
+fn tui_agent_run_config(autonomous: &crate::AutonomousRunConfig) -> AgentRunConfig {
+    autonomous.apply(AgentRunConfig::default())
+}
+
 /// # Parameters (REQ-A07d additions over the pre-MS2 signature)
 ///
 /// - `consult_wiring` — the [`TuiConsultWiring`] bundle: the live trio (if any), its unavailability message, and the tool's auto-approve flag.
-/// - `magi_runtime` — the [`TuiMagiRuntimeConfig`] bundle: the mode classifier, `[magi].default_mode`, the `untrusted_content` guard, and the trio's `ProviderKind`.
+/// - `magi_runtime` — the [`TuiMagiRuntimeConfig`] bundle: the mode classifier, `[magi].default_mode`, the `untrusted_content` guard, and the trio's `ProviderKind`. It serves the EXPLICIT `/consult` command only.
+/// - `autonomous` — the operator's autonomous-consult configuration (`[magi.complexity]`, `[magi].default_mode`, `[magi].untrusted_content`, the gate telemetry sink). It serves the chat loop's SELF-ROUTED consults, which is the other surface entirely — hence its own parameter rather than more fields on `magi_runtime`.
 pub async fn run_tui_ext(
     agent: Agent,
     startup_notices: Vec<String>,
     consult_wiring: TuiConsultWiring,
     secret_store: Option<SharedSecretStore>,
     magi_runtime: TuiMagiRuntimeConfig,
+    autonomous: crate::AutonomousRunConfig,
 ) -> anyhow::Result<()> {
     let TuiConsultWiring {
         consult,
@@ -849,6 +874,11 @@ pub async fn run_tui_ext(
 
     let mut consult_magi_runner = consult;
 
+    // The event loop below is a `'static` spawned task, so it takes ownership of `autonomous`;
+    // this clone (three `Copy` fields plus an `Arc`) keeps the telemetry sink reachable here so
+    // the session's gate evaluations can be reported after the terminal is restored.
+    let gate_telemetry = autonomous.clone();
+
     tokio::spawn(async move {
         while let Some(event) = event_rx.recv().await {
             match event {
@@ -878,10 +908,12 @@ pub async fn run_tui_ext(
                         }
                     });
 
-                    // Interactive path: default config = normal cap, repetitive
-                    // guard on, no headless observer (byte-for-byte unchanged).
+                    // Interactive path: the default config (normal cap, repetitive
+                    // guard on, no headless observer) with the operator's
+                    // autonomous-consult configuration overlaid — see
+                    // `tui_agent_run_config`.
                     let result = runner_agent
-                        .query_streaming(&text, chunk_tx, AgentRunConfig::default())
+                        .query_streaming(&text, chunk_tx, tui_agent_run_config(&autonomous))
                         .await;
                     // Join the forwarder: ensures all deltas are forwarded before the
                     // end-of-turn marker below is enqueued.
@@ -1173,11 +1205,44 @@ pub async fn run_tui_ext(
     );
     let _ = terminal.show_cursor();
 
+    // SC-A20h: the TUI has no structured run log, and while it holds the alternate screen no
+    // line may reach the terminal (that is the whole reason `StreamPiece::Notice` exists). So
+    // the session's gate evaluations are reported HERE — after raw mode and the alternate
+    // screen are gone and stderr is safe again. Silent when nothing was evaluated.
+    report_gate_telemetry(&gate_telemetry.drain_telemetry());
+
     if let Err(err) = res {
         eprintln!("TUI Error: {:?}", err)
     }
     Ok(())
 }
+
+/// Writes the session's gate evaluations to stderr, with the header that states what the sample
+/// can be used for (SC-A20h).
+///
+/// Separate from [`run_tui_ext`] so the "silent when empty" rule is testable without a terminal.
+///
+/// # Parameters
+/// * `lines` - the drained telemetry lines, in the order the evaluations occurred.
+fn report_gate_telemetry(lines: &[String]) {
+    if lines.is_empty() {
+        return;
+    }
+    eprintln!("{GATE_TELEMETRY_HEADER}");
+    for line in lines {
+        eprintln!("{line}");
+    }
+}
+
+/// Header printed above the session's gate telemetry.
+///
+/// It names the sampling bias on purpose: the lines only cover consults the agent **chose to
+/// route**, so they answer "of what the agent wanted to consult, how much did we stop?" and not
+/// "how many valuable consults are we missing?" — reading them as the second question is how a
+/// threshold gets lowered on evidence that does not exist.
+const GATE_TELEMETRY_HEADER: &str =
+    "complexity gate — evaluations from this session (agent-routed consults only; \
+     says nothing about consults the agent never routed):";
 
 async fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Result<()> {
     loop {
@@ -2128,6 +2193,68 @@ mod tests {
             "a configured [magi].agent_timeout_secs must survive a /login \
              rebuild (M1) instead of silently reverting to the built-in \
              default"
+        );
+    }
+
+    /// Loop 1, F1 — the chat loop's turn configuration carries the operator's `magi.toml`.
+    ///
+    /// The event loop used to pass `AgentRunConfig::default()` verbatim, so
+    /// `[magi.complexity]`, `[magi].default_mode` and `[magi].untrusted_content` were inert on
+    /// the surface that self-routes the most consults. The fixture values are deliberately
+    /// distinguishable from the built-ins: a test that only checked "some value came back"
+    /// would still pass against the broken version.
+    #[test]
+    fn the_chat_loop_turn_config_carries_the_operator_configuration() {
+        const CONFIGURED_ANALYSIS: usize = 11;
+        assert_ne!(
+            CONFIGURED_ANALYSIS,
+            magi_rs::magi::GATE_ANALYSIS,
+            "the fixture must differ from the built-in, or this test cannot tell a wired \
+             config from an ignored one"
+        );
+
+        let cfg = crate::config::MagiConfig::from_toml_str(
+            "[magi]\n\
+             default_mode = \"design\"\n\
+             untrusted_content = true\n\
+             [magi.complexity]\n\
+             analysis = 11\n",
+        )
+        .expect("fixture parses");
+        let run = tui_agent_run_config(&crate::AutonomousRunConfig::from_magi_config(&cfg));
+
+        assert_eq!(run.gate_thresholds.analysis, CONFIGURED_ANALYSIS);
+        assert_eq!(run.mode_config.default_mode, Some(Mode::Design));
+        assert!(run.mode_config.untrusted_content);
+    }
+
+    /// Interactive semantics are the BASELINE, not a casualty: everything the operator did not
+    /// configure keeps the value `AgentRunConfig::default()` gives it.
+    #[test]
+    fn the_chat_loop_turn_config_keeps_interactive_defaults() {
+        let run = tui_agent_run_config(&crate::AutonomousRunConfig::from_magi_config(
+            &crate::config::MagiConfig::default(),
+        ));
+        let baseline = AgentRunConfig::default();
+        assert_eq!(run.max_tool_calls, baseline.max_tool_calls);
+        assert_eq!(
+            run.disable_repetitive_guard,
+            baseline.disable_repetitive_guard
+        );
+        assert!(run.observer.is_none(), "the TUI has no headless observer");
+        assert!(!run.force_consult);
+        assert!(run.system.is_none());
+    }
+
+    /// SC-A20h's TUI half: the session report is silent when nothing was evaluated, so a user
+    /// who never triggered an autonomous consult sees no trailing noise on exit.
+    #[test]
+    fn the_gate_telemetry_report_is_silent_when_nothing_was_evaluated() {
+        report_gate_telemetry(&[]);
+        assert!(
+            GATE_TELEMETRY_HEADER.contains("agent-routed"),
+            "the header must state the sampling bias, or the numbers get read as an answer to \
+             a question they cannot answer"
         );
     }
 

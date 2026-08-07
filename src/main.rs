@@ -1633,6 +1633,9 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
             max_query_bytes: magi_config.effective_max_query_bytes(),
             tool_result_cap: magi_config.effective_tool_result_cap(),
         },
+        // The chat loop's SELF-ROUTED consults (REQ-A20/A07d) — a different surface from the
+        // explicit `/consult` above, which is what `TuiMagiRuntimeConfig` serves.
+        AutonomousRunConfig::from_magi_config(&magi_config),
     )
     .await?;
     Ok(ExitCode::SUCCESS)
@@ -2603,6 +2606,155 @@ fn register_consult_tool_if_available(
                 .with_max_query_bytes(max_query_bytes)
                 .with_output_cap(output_cap),
         ));
+    }
+}
+
+/// Upper bound on the gate-evaluation lines [`BufferedGateTelemetry`] keeps in memory.
+///
+/// **A bound, not a budget.** The sink lives for the whole process, and the TUI — the surface
+/// that self-routes the most consults (`magi_rs::magi::gate`'s own module doc) — can run for
+/// hours: an unbounded `Vec` there is a slow leak fed by model behaviour, which is exactly the
+/// kind of growth an attacker-adjacent input should never drive. 256 is chosen so the buffer
+/// costs at most a few tens of KiB while still holding far more evaluations than any single
+/// session produces in practice (one line per autonomous `consult` request, capped per turn by
+/// `DEFAULT_MAX_TOOL_CALLS`). Once full, further lines are DROPPED rather than rotating the
+/// oldest out: the point of the sample is calibrating thresholds, and the first N evaluations
+/// of a session answer that as well as the last N — while dropping is the only variant that
+/// cannot silently rewrite what an earlier read already reported.
+const MAX_GATE_TELEMETRY_LINES: usize = 256;
+
+/// The production [`GateTelemetry`] sink (REQ-A20, SC-A20h).
+///
+/// **What the recorded sample can and cannot answer.** It only sees what the agent *chose to
+/// route* to `consult`, so it answers *"of what the agent wanted to consult, how much did we
+/// stop?"* — the calibration question — and it does **not** answer *"how many valuable consults
+/// are we missing?"*, because a consult the agent never routed leaves no trace here. Reading it
+/// as the second question is how thresholds get lowered on evidence that does not exist.
+///
+/// Buffers rather than writing through, because its two consumers write to destinations this
+/// type must not know about and cannot hold: the headless runner appends to a `RunLog` it owns
+/// mutably (and which is borrowed elsewhere while the agent future is in flight), and the TUI
+/// can only write to stderr *after* leaving raw mode. Both drain it once the run is over.
+struct BufferedGateTelemetry {
+    /// Rendered lines, capped at [`MAX_GATE_TELEMETRY_LINES`].
+    lines: Mutex<Vec<String>>,
+}
+
+impl BufferedGateTelemetry {
+    /// A fresh, empty sink.
+    fn new() -> Self {
+        Self {
+            lines: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Takes every line recorded so far, leaving the sink empty.
+    ///
+    /// A poisoned lock is recovered from rather than propagated (same pattern as the vault's
+    /// `PoisonError::into_inner` recovery): telemetry must never be the thing that fails a run.
+    fn drain(&self) -> Vec<String> {
+        let mut guard = self
+            .lines
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        std::mem::take(&mut guard)
+    }
+}
+
+impl magi_rs::magi::gate::GateTelemetry for BufferedGateTelemetry {
+    fn on_gate_evaluation(&self, mode: &Mode, chars: usize, threshold: usize, vetoed: bool) {
+        let mut guard = self
+            .lines
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if guard.len() >= MAX_GATE_TELEMETRY_LINES {
+            return;
+        }
+        // The APPLIED threshold is on BOTH sides on purpose (SC-A20h): "vetoed at 40 chars"
+        // does not say whether the bar was 50 or 500, and calibrating is comparing the two.
+        guard.push(format!(
+            "gate: mode={mode} chars={chars} threshold={threshold} result={}",
+            if vetoed { "veto" } else { "dispatch" }
+        ));
+    }
+}
+
+/// The operator configuration the agent's **autonomous** consult funnel needs, resolved once
+/// from `magi.toml` and handed to every surface that runs an agent tool loop (REQ-A07/A07d,
+/// REQ-A20/A20b, SC-A20h).
+///
+/// **Why it is a type and not three arguments.** `[magi.complexity]`, `[magi].default_mode`,
+/// `[magi].untrusted_content` and the gate's telemetry sink only ever travel together, from
+/// here to `AgentRunConfig`; three loose values would have to be threaded through two already
+/// wide signatures, and the `untrusted_content` flag among them is a **security** control whose
+/// omission at one call site is exactly the defect this type exists to make unrepresentable.
+///
+/// **Why its fields are private and it has no `Default`.** `AgentRunConfig::default()` must
+/// keep meaning "interactive semantics, byte-for-byte" — that is pinned by regression tests and
+/// is not negotiable — so a caller that forgets the operator's configuration silently gets a
+/// safe-*looking* run with the gate on built-ins, `untrusted_content` off and no telemetry.
+/// The omission is made visible one level up instead: this value cannot be conjured (no
+/// `Default`, no public field literal), the only way to obtain one is
+/// [`AutonomousRunConfig::from_magi_config`], which demands the loaded `MagiConfig`, and both
+/// autonomous surfaces **require** one in their signature. A new surface therefore cannot
+/// forget it by omission — it would have to actively construct one, and there is no
+/// constructor that yields a neutered value.
+#[derive(Clone)]
+struct AutonomousRunConfig {
+    /// `[magi.complexity]` resolved against the built-ins (REQ-A20b).
+    gate_thresholds: magi_rs::magi::gate::GateThresholds,
+    /// `[magi].default_mode` + `[magi].untrusted_content` (REQ-A07/A07d).
+    mode_config: magi_rs::magi::mode::ModeConfig,
+    /// Where every gate evaluation is recorded (SC-A20h).
+    telemetry: Arc<BufferedGateTelemetry>,
+}
+
+impl AutonomousRunConfig {
+    /// Resolves the operator's autonomous-consult configuration from `magi.toml`.
+    ///
+    /// # Parameters
+    /// * `config` - the loaded, already vocabulary-validated `magi.toml`.
+    ///
+    /// # Returns
+    /// A value carrying the effective gate thresholds, the effective mode configuration, and a
+    /// fresh, empty telemetry sink.
+    #[must_use]
+    fn from_magi_config(_config: &MagiConfig) -> Self {
+        // Red phase: no resolution yet.
+        Self {
+            gate_thresholds: magi_rs::magi::gate::GateThresholds::builtin(),
+            mode_config: magi_rs::magi::mode::ModeConfig::default(),
+            telemetry: Arc::new(BufferedGateTelemetry::new()),
+        }
+    }
+
+    /// Overlays this configuration onto `base`, which supplies every field that is a property
+    /// of the **surface** (tool-call cap, observer, cancellation, system prompt) rather than of
+    /// the operator's `magi.toml`.
+    ///
+    /// # Parameters
+    /// * `base` - the surface's own run configuration, typically `AgentRunConfig::default()` for the TUI or the tier-resolved one for headless.
+    ///
+    /// # Returns
+    /// `base` with `gate_thresholds`, `mode_config` and `gate_telemetry` replaced.
+    #[must_use]
+    fn apply(&self, base: crate::agent::AgentRunConfig) -> crate::agent::AgentRunConfig {
+        crate::agent::AgentRunConfig {
+            gate_thresholds: self.gate_thresholds,
+            mode_config: self.mode_config,
+            gate_telemetry: Arc::clone(&self.telemetry)
+                as Arc<dyn magi_rs::magi::gate::GateTelemetry>,
+            ..base
+        }
+    }
+
+    /// Takes every gate evaluation recorded so far, leaving the sink empty (SC-A20h).
+    ///
+    /// # Returns
+    /// One rendered line per evaluation, in the order they occurred.
+    #[must_use]
+    fn drain_telemetry(&self) -> Vec<String> {
+        self.telemetry.drain()
     }
 }
 
@@ -3786,15 +3938,30 @@ async fn run_query_subcommand(
 
     let policy = Policy::new(tier, resolved.max_tool_calls, h.timeout);
     let timeout = resolve_run_timeout(&policy, limits.full_auto_timeout_secs);
+    let wiring = crate::headless_runner::RunWiring {
+        timeout,
+        autonomous: AutonomousRunConfig::from_magi_config(&magi_config),
+    };
     let outcome = run_query(
         resolved,
         policy,
         &mut agent,
         &prompt,
-        timeout,
+        &wiring,
         run_log.as_mut(),
     )
     .await;
+    // SC-A20h: the run's gate evaluations reach the structured run log. Drained here rather
+    // than inside `run_query` because the log is borrowed mutably by the run itself while the
+    // agent future is in flight.
+    if let Some(log) = run_log.as_mut() {
+        for line in wiring.autonomous.drain_telemetry() {
+            let _ = log.event(&magi_rs::headless::log::LogEvent::Message {
+                level: LogLevel::Info,
+                text: &line,
+            });
+        }
+    }
     finish_headless(&h, &outcome, limits.tool_result_cap)
 }
 
@@ -7503,6 +7670,115 @@ mod tests {
                 )],
             };
             assert!(!trio_unavailable_message(&err).contains(CANARY));
+        }
+    }
+
+    /// Loop 1, F1 — the operator's autonomous-consult configuration reaching `AgentRunConfig`.
+    ///
+    /// `[magi.complexity]`, `[magi].default_mode` and `[magi].untrusted_content` were parsed,
+    /// validated and then consumed by nobody: no production caller ever set
+    /// `AgentRunConfig`'s `gate_thresholds`/`mode_config`/`gate_telemetry`, so the two
+    /// highest-traffic autonomous surfaces (the TUI chat loop and `magi query`'s tool loop) ran
+    /// on built-ins with the `untrusted_content` guard permanently off. These tests pin the
+    /// resolution step; the two surfaces' own tests pin that they consume it.
+    mod autonomous_run_config {
+        use super::*;
+        use magi_rs::magi::gate::GateThresholds;
+
+        /// REQ-A20b/REQ-A07/REQ-A07d: every operator key reaches the run configuration —
+        /// including the per-mode `0` off-switch, which is the one value a "fall back to the
+        /// built-in" bug would silently swallow.
+        #[test]
+        fn operator_thresholds_and_mode_config_reach_the_agent_run_config() {
+            let cfg = MagiConfig::from_toml_str(
+                "[magi]\n\
+                 default_mode = \"code-review\"\n\
+                 untrusted_content = true\n\
+                 [magi.complexity]\n\
+                 code_review = 7\n\
+                 analysis = 0\n",
+            )
+            .expect("fixture parses");
+
+            let run = AutonomousRunConfig::from_magi_config(&cfg).apply(Default::default());
+
+            assert_eq!(
+                run.gate_thresholds.code_review, 7,
+                "a declared threshold must reach the gate, not the built-in"
+            );
+            assert_eq!(
+                run.gate_thresholds.design,
+                GateThresholds::builtin().design,
+                "a key absent INSIDE a present table keeps its built-in, never zero"
+            );
+            assert_eq!(
+                run.gate_thresholds.analysis, 0,
+                "0 is the documented per-mode off-switch and must survive the trip"
+            );
+            assert_eq!(
+                run.mode_config.default_mode,
+                Some(Mode::CodeReview),
+                "[magi].default_mode is level 2 of the five-level precedence"
+            );
+            assert!(
+                run.mode_config.untrusted_content,
+                "the untrusted-content guard must reach the funnel; off here means SC-A07r \
+                 cannot fail closed on any autonomous surface"
+            );
+        }
+
+        /// An empty `magi.toml` still leaves the gate ACTIVE on the built-ins (REQ-A20b): the
+        /// absence of configuration is not an off-switch.
+        #[test]
+        fn an_unconfigured_file_keeps_the_builtin_gate_and_no_guard() {
+            let run = AutonomousRunConfig::from_magi_config(&MagiConfig::default())
+                .apply(Default::default());
+            assert_eq!(run.gate_thresholds, GateThresholds::builtin());
+            assert_eq!(run.mode_config.default_mode, None);
+            assert!(!run.mode_config.untrusted_content);
+        }
+
+        /// SC-A20h: the sink installed by `apply` is the one `drain_telemetry` reads, so an
+        /// evaluation recorded through `AgentRunConfig` is observable afterwards.
+        #[test]
+        fn the_installed_sink_is_the_one_that_can_be_drained() {
+            let autonomous = AutonomousRunConfig::from_magi_config(&MagiConfig::default());
+            let run = autonomous.apply(Default::default());
+
+            run.gate_telemetry
+                .on_gate_evaluation(&Mode::Analysis, 3, 200, true);
+            run.gate_telemetry
+                .on_gate_evaluation(&Mode::Design, 900, 500, false);
+
+            let lines = autonomous.drain_telemetry();
+            assert_eq!(lines.len(), 2, "both sides of the gate are recorded");
+            assert!(
+                lines[0].contains("analysis") && lines[0].contains("200"),
+                "the APPLIED threshold travels with the line: {:?}",
+                lines[0]
+            );
+            assert!(
+                lines[1].contains("design") && lines[1].contains("500"),
+                "the dispatching side carries its threshold too: {:?}",
+                lines[1]
+            );
+            assert!(
+                autonomous.drain_telemetry().is_empty(),
+                "draining is a take, not a peek"
+            );
+        }
+
+        /// Edge case: the buffer is bounded, so a long-lived TUI session cannot grow it without
+        /// limit on model-driven input.
+        #[test]
+        fn the_telemetry_buffer_is_bounded() {
+            let autonomous = AutonomousRunConfig::from_magi_config(&MagiConfig::default());
+            let run = autonomous.apply(Default::default());
+            for _ in 0..(MAX_GATE_TELEMETRY_LINES + 10) {
+                run.gate_telemetry
+                    .on_gate_evaluation(&Mode::Analysis, 1, 200, true);
+            }
+            assert_eq!(autonomous.drain_telemetry().len(), MAX_GATE_TELEMETRY_LINES);
         }
     }
 

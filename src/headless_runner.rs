@@ -497,6 +497,27 @@ pub fn resolve_run_timeout(policy: &Policy, full_auto_timeout_secs: u64) -> Opti
     }
 }
 
+/// Everything `main.rs` resolved for ONE `magi query` run that [`run_query`] cannot derive on
+/// its own.
+///
+/// **Bundled rather than added as more parameters.** `run_query` already carried six, and the
+/// values that had to arrive were three (`gate_thresholds`, `mode_config`, `gate_telemetry`) —
+/// enough to push the signature past the point where the only remaining move is an
+/// `#[allow(clippy::too_many_arguments)]`, which this repo tracks as priority debt. Grouping
+/// them behind [`AutonomousRunConfig`](crate::AutonomousRunConfig) keeps the arity where it was
+/// AND makes the operator's configuration a value the caller must produce rather than a set of
+/// fields it can quietly leave at their defaults.
+///
+/// # Fields
+/// - `timeout` — wall-clock ceiling for the whole run (REQ-H36). `None` ⇒ unbounded. On elapse the agent future is dropped (cancelling the in-flight LLM stream), the run's [`CancellationToken`] fires so any `bash` subprocess *tree* is killed, and a partial outcome with `stop_reason = Error` / `error.kind = Timeout` is returned.
+/// - `autonomous` — the operator's autonomous-consult configuration (`[magi.complexity]`, `[magi].default_mode`, `[magi].untrusted_content`, the gate telemetry sink), overlaid on the tier-resolved [`AgentRunConfig`] so the tool loop's self-routed `consult` obeys `magi.toml` (REQ-A20/A20b, REQ-A07/A07d).
+pub struct RunWiring {
+    /// Wall-clock ceiling for the whole run (REQ-H36).
+    pub timeout: Option<Duration>,
+    /// The operator's autonomous-consult configuration (REQ-A20/A07d).
+    pub autonomous: crate::AutonomousRunConfig,
+}
+
 /// Wall-clock milliseconds elapsed since `start`, saturating instead of wrapping.
 fn elapsed_ms(start: Instant) -> u64 {
     u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX)
@@ -710,7 +731,7 @@ pub async fn run_consult(
 /// - `policy` — tier policy driving authorization, the tool-call cap and the soft-guard silencing.
 /// - `agent` — a constructed agent (provider + registered tools).
 /// - `prompt` — the resolved user prompt.
-/// - `timeout` — optional wall-clock ceiling for the whole run (REQ-H36). `None` ⇒ no timeout (the interactive default). On elapse the agent future is dropped — cancelling the in-flight LLM stream — the run's [`CancellationToken`] is fired so any in-flight `bash` subprocess *tree* is killed (its group killer drops with the future), and a partial outcome with `stop_reason = Error` / `error.kind = Timeout` is returned. The tier default (900 s for `--auto`/`--full-auto`) is selected by the caller (Task 7) and passed here; use [`resolve_run_timeout`] to apply it.
+/// - `wiring` — what `main.rs` resolved for THIS run and the runner cannot derive on its own: the wall-clock ceiling and the operator's autonomous-consult configuration. See [`RunWiring`].
 /// - `run_log` — optional JSONL run log; tier warnings and each tool call are recorded best-effort.
 ///
 /// # Forced consult (REQ-H22)
@@ -751,9 +772,10 @@ pub async fn run_query(
     policy: Policy,
     agent: &mut Agent,
     prompt: &str,
-    timeout: Option<Duration>,
+    wiring: &RunWiring,
     mut run_log: Option<&mut RunLog>,
 ) -> RunOutcome {
+    let timeout = wiring.timeout;
     // Tier warnings (only under --full-auto) are recorded up front.
     for warning in policy.warnings() {
         log_event(
@@ -779,7 +801,9 @@ pub async fn run_query(
     // provider layer treats `Some("")` the same as `None`, but normalizing here
     // keeps the intent explicit at the call site.
     let system = resolved.system.text();
-    let config = AgentRunConfig {
+    // The tier-resolved half: everything that is a property of THIS run rather than of the
+    // operator's `magi.toml`.
+    let tier_config = AgentRunConfig {
         max_tool_calls: usize::try_from(policy.max_tool_calls()).unwrap_or(usize::MAX),
         disable_repetitive_guard: policy.silences_soft_guards(),
         observer: Some(Arc::clone(&tracker) as Arc<dyn RunObserver>),
@@ -789,15 +813,12 @@ pub async fn run_query(
         // exactly one IN-LOOP consult (see the `# Forced consult` rustdoc
         // above) rather than the pre-refactor post-loop pass.
         force_consult: resolved.consult == Some(true),
-        // MS2 (Task 3.2): gate_thresholds/mode_config/gate_telemetry are not
-        // wired to the resolved headless config yet — that lands with the
-        // task that threads `[magi.complexity]`/`[magi]` mode config into the
-        // runner. Until then this run gets the same built-in-gate-active,
-        // no-inference-config, no-telemetry defaults `AgentRunConfig::default`
-        // already gives every other unconfigured caller — purely additive,
-        // nothing here changes behavior.
         ..AgentRunConfig::default()
     };
+    // …and the operator's half on top (REQ-A20/A20b, REQ-A07/A07d). Before this, the three
+    // fields stayed at `AgentRunConfig::default()`, so `[magi.complexity]` never applied here
+    // and `untrusted_content` could never fail a self-routed consult closed (SC-A07r).
+    let config = wiring.autonomous.apply(tier_config);
 
     let (chunk_tx, mut chunk_rx) =
         tokio::sync::mpsc::channel::<StreamPiece>(CHUNK_CHANNEL_CAPACITY);
@@ -1358,7 +1379,7 @@ mod tests {
             ..resolved_stub()
         };
         let policy = Policy::new(Tier::Default, 15, None);
-        run_query(resolved, policy, &mut agent, "prompt", None, None).await;
+        run_query(resolved, policy, &mut agent, "prompt", &wiring(None), None).await;
         assert_eq!(
             provider.seen.lock().unwrap().as_slice(),
             &[Some("caller system prompt".to_string())]
@@ -1372,7 +1393,15 @@ mod tests {
         let provider = SystemCapturingProvider::new();
         let mut agent = Agent::new(provider.clone());
         let policy = Policy::new(Tier::Default, 15, None);
-        run_query(resolved_stub(), policy, &mut agent, "prompt", None, None).await;
+        run_query(
+            resolved_stub(),
+            policy,
+            &mut agent,
+            "prompt",
+            &wiring(None),
+            None,
+        )
+        .await;
         assert_eq!(provider.seen.lock().unwrap().as_slice(), &[None]);
     }
 
@@ -1432,6 +1461,33 @@ mod tests {
         }
     }
 
+    /// A [`RunWiring`] with the built-in gate, no configured mode and the guard off — what an
+    /// unconfigured `magi.toml` resolves to — so a test that is not about the operator's
+    /// configuration reads exactly as it did before that configuration existed.
+    ///
+    /// One helper rather than a literal per call site: [`RunWiring`] gains fields as the
+    /// milestone's per-run telemetry grows, and 25 literals would each have to be revisited.
+    fn wiring(timeout: Option<Duration>) -> RunWiring {
+        RunWiring {
+            timeout,
+            autonomous: crate::AutonomousRunConfig::from_magi_config(
+                &crate::config::MagiConfig::default(),
+            ),
+        }
+    }
+
+    /// Same, but with the operator's `magi.toml` in force — the shape a real `magi query` run
+    /// gets, and the one that makes `[magi.complexity]`/`[magi].untrusted_content` observable
+    /// from this surface.
+    fn wiring_from_toml(toml: &str) -> RunWiring {
+        RunWiring {
+            timeout: None,
+            autonomous: crate::AutonomousRunConfig::from_magi_config(
+                &crate::config::MagiConfig::from_toml_str(toml).expect("fixture parses"),
+            ),
+        }
+    }
+
     /// `n` identical `edit` tool calls (same name + input) with distinct ids,
     /// to exercise the repetitive-call soft guard.
     fn identical_edit_turns(n: usize) -> Vec<Turn> {
@@ -1467,7 +1523,15 @@ mod tests {
         register_echo(&mut agent, "edit");
 
         let policy = Policy::new(Tier::Auto, 15, None);
-        let outcome = run_query(resolved_stub(), policy, &mut agent, "prompt", None, None).await;
+        let outcome = run_query(
+            resolved_stub(),
+            policy,
+            &mut agent,
+            "prompt",
+            &wiring(None),
+            None,
+        )
+        .await;
 
         assert_eq!(outcome.usage.input_tokens, 15);
         assert_eq!(outcome.usage.output_tokens, 5);
@@ -1480,7 +1544,15 @@ mod tests {
         let provider = ScriptedProvider::new(vec![Turn::Text("hi".to_string())]);
         let mut agent = Agent::new(provider);
         let policy = Policy::new(Tier::Default, 15, None);
-        let outcome = run_query(resolved_stub(), policy, &mut agent, "prompt", None, None).await;
+        let outcome = run_query(
+            resolved_stub(),
+            policy,
+            &mut agent,
+            "prompt",
+            &wiring(None),
+            None,
+        )
+        .await;
         assert_eq!(outcome.usage.input_tokens, 0);
         assert_eq!(outcome.usage.output_tokens, 0);
     }
@@ -1497,7 +1569,15 @@ mod tests {
         register_echo(&mut agent, "edit");
 
         let policy = Policy::new(Tier::Default, 15, None);
-        let outcome = run_query(resolved_stub(), policy, &mut agent, "prompt", None, None).await;
+        let outcome = run_query(
+            resolved_stub(),
+            policy,
+            &mut agent,
+            "prompt",
+            &wiring(None),
+            None,
+        )
+        .await;
 
         assert!(
             outcome.tool_calls.iter().any(|t| t.name == "edit" && !t.ok),
@@ -1534,7 +1614,15 @@ mod tests {
         register_echo(&mut agent, "consult");
 
         let policy = Policy::new(Tier::Default, 15, None);
-        let outcome = run_query(resolved_stub(), policy, &mut agent, "prompt", None, None).await;
+        let outcome = run_query(
+            resolved_stub(),
+            policy,
+            &mut agent,
+            "prompt",
+            &wiring(None),
+            None,
+        )
+        .await;
 
         assert_eq!(
             outcome.stop_reason,
@@ -1558,6 +1646,100 @@ mod tests {
         );
     }
 
+    /// Loop 1, F1 / SC-A07r: `[magi].untrusted_content = true` must fail a SELF-ROUTED consult
+    /// closed on `magi query`'s tool loop, exactly as it already did on the direct
+    /// `magi consult` route.
+    ///
+    /// This is the surface where the guard was inert: the runner built its `AgentRunConfig`
+    /// with `..AgentRunConfig::default()`, so `mode_config.untrusted_content` was permanently
+    /// `false` no matter what the operator declared. An operator who configured the guard
+    /// specifically to stop hostile content from being classified got no protection here.
+    #[tokio::test]
+    async fn untrusted_content_from_the_toml_fails_a_self_routed_consult_closed() {
+        let provider = ScriptedProvider::new(vec![
+            tool_turn("t1", "consult"),
+            Turn::Text("should never be reached".to_string()),
+        ]);
+        let mut agent = Agent::new(provider);
+        register_echo(&mut agent, "consult");
+
+        let policy = Policy::new(Tier::Default, 15, None);
+        let wiring = wiring_from_toml("[magi]\nuntrusted_content = true\n");
+        let outcome = run_query(resolved_stub(), policy, &mut agent, "prompt", &wiring, None).await;
+
+        assert_eq!(
+            outcome.stop_reason,
+            StopReason::Error,
+            "the guard must abort the turn, not let it classify hostile content"
+        );
+        let err = outcome
+            .error
+            .expect("a fail-closed run carries an error payload");
+        assert_eq!(err.kind, ErrorKind::Runtime);
+        assert!(
+            err.message.contains("untrusted content"),
+            "the message must name the guard so the operator knows what to declare: {}",
+            err.message
+        );
+    }
+
+    /// Loop 1, F1 / SC-A20d: the per-mode `0` off-switch must reach this surface.
+    ///
+    /// `analysis = 0` disables the veto for the default mode, so the same trivial self-routed
+    /// consult that `test_gate_vetoed_consult_still_exits_success` sees vetoed is DISPATCHED
+    /// here. With the thresholds stuck at the built-ins, the two runs would be identical —
+    /// which is precisely the silence this finding is about: the operator turned the gate off
+    /// for a mode and nothing changed.
+    #[tokio::test]
+    async fn a_configured_zero_threshold_lets_a_trivial_self_routed_consult_through() {
+        let provider = ScriptedProvider::new(vec![
+            tool_turn("t1", "consult"),
+            Turn::Text("answered".to_string()),
+        ]);
+        let mut agent = Agent::new(provider);
+        register_echo(&mut agent, "consult");
+
+        let policy = Policy::new(Tier::Default, 15, None);
+        let wiring = wiring_from_toml("[magi.complexity]\nanalysis = 0\n");
+        let outcome = run_query(resolved_stub(), policy, &mut agent, "prompt", &wiring, None).await;
+
+        assert_eq!(outcome.stop_reason, StopReason::Done);
+        let response = outcome.response.as_deref().unwrap_or_default();
+        assert!(
+            !response.contains("NO CONSENSUS"),
+            "the consult ran, so the answer must NOT carry the no-consensus mark: {response}"
+        );
+    }
+
+    /// Loop 1, F1 / SC-A20h: every gate evaluation on this surface is recorded, so the
+    /// thresholds can be calibrated from data instead of guessed again.
+    #[tokio::test]
+    async fn every_gate_evaluation_on_this_surface_is_recorded() {
+        let provider = ScriptedProvider::new(vec![
+            tool_turn("t1", "consult"),
+            Turn::Text("answered".to_string()),
+        ]);
+        let mut agent = Agent::new(provider);
+        register_echo(&mut agent, "consult");
+
+        let policy = Policy::new(Tier::Default, 15, None);
+        let wiring = wiring(None);
+        let _ = run_query(resolved_stub(), policy, &mut agent, "prompt", &wiring, None).await;
+
+        let lines = wiring.autonomous.drain_telemetry();
+        assert_eq!(lines.len(), 1, "one evaluation, one line: {lines:?}");
+        assert!(
+            lines[0].contains("analysis") && lines[0].contains("veto"),
+            "the line names the mode and the outcome: {}",
+            lines[0]
+        );
+        assert!(
+            lines[0].contains(&magi_rs::magi::GATE_ANALYSIS.to_string()),
+            "the APPLIED threshold travels with the line, or it calibrates nothing: {}",
+            lines[0]
+        );
+    }
+
     /// `--auto` auto-approves `edit` and `bash`; both execute (hard barriers
     /// still apply inside the real tools) — REQ-H07.
     #[tokio::test]
@@ -1572,7 +1754,15 @@ mod tests {
         register_echo(&mut agent, "bash");
 
         let policy = Policy::new(Tier::Auto, 15, None);
-        let outcome = run_query(resolved_stub(), policy, &mut agent, "prompt", None, None).await;
+        let outcome = run_query(
+            resolved_stub(),
+            policy,
+            &mut agent,
+            "prompt",
+            &wiring(None),
+            None,
+        )
+        .await;
 
         assert!(outcome.tool_calls.iter().any(|t| t.name == "edit" && t.ok));
         assert!(outcome.tool_calls.iter().any(|t| t.name == "bash" && t.ok));
@@ -1588,7 +1778,15 @@ mod tests {
         register_echo(&mut agent, "edit");
 
         let policy = Policy::new(Tier::Default, 15, None);
-        let outcome = run_query(resolved_stub(), policy, &mut agent, "prompt", None, None).await;
+        let outcome = run_query(
+            resolved_stub(),
+            policy,
+            &mut agent,
+            "prompt",
+            &wiring(None),
+            None,
+        )
+        .await;
 
         assert!(
             outcome.tool_calls.iter().any(|t| t.name == "edit" && !t.ok),
@@ -1616,7 +1814,15 @@ mod tests {
         register_echo(&mut agent, "ls");
 
         let policy = Policy::new(Tier::Auto, 2, None);
-        let outcome = run_query(resolved_stub(), policy, &mut agent, "prompt", None, None).await;
+        let outcome = run_query(
+            resolved_stub(),
+            policy,
+            &mut agent,
+            "prompt",
+            &wiring(None),
+            None,
+        )
+        .await;
 
         assert_eq!(outcome.stop_reason, StopReason::MaxToolCalls);
         assert!(
@@ -1632,7 +1838,15 @@ mod tests {
         let mut agent = Agent::new(provider);
 
         let policy = Policy::new(Tier::Auto, 15, None);
-        let outcome = run_query(resolved_stub(), policy, &mut agent, "prompt", None, None).await;
+        let outcome = run_query(
+            resolved_stub(),
+            policy,
+            &mut agent,
+            "prompt",
+            &wiring(None),
+            None,
+        )
+        .await;
 
         assert_eq!(outcome.stop_reason, StopReason::Error);
         assert!(outcome.error.is_some(), "error payload must be populated");
@@ -1648,7 +1862,15 @@ mod tests {
         register_echo(&mut agent, "edit");
 
         let policy = Policy::new(Tier::Default, 15, None);
-        let outcome = run_query(resolved_stub(), policy, &mut agent, "prompt", None, None).await;
+        let outcome = run_query(
+            resolved_stub(),
+            policy,
+            &mut agent,
+            "prompt",
+            &wiring(None),
+            None,
+        )
+        .await;
 
         assert!(
             outcome.tool_calls.iter().any(|t| t.name == "edit" && !t.ok),
@@ -1675,7 +1897,15 @@ mod tests {
 
         // Default denies edit; cap 2 ⇒ the 3rd (denied) call trips the cap.
         let policy = Policy::new(Tier::Default, 2, None);
-        let outcome = run_query(resolved_stub(), policy, &mut agent, "prompt", None, None).await;
+        let outcome = run_query(
+            resolved_stub(),
+            policy,
+            &mut agent,
+            "prompt",
+            &wiring(None),
+            None,
+        )
+        .await;
 
         assert_eq!(
             outcome.stop_reason,
@@ -1696,7 +1926,15 @@ mod tests {
         register_echo(&mut agent, "edit");
 
         let policy = Policy::new(Tier::FullAuto, 50, None);
-        let outcome = run_query(resolved_stub(), policy, &mut agent, "prompt", None, None).await;
+        let outcome = run_query(
+            resolved_stub(),
+            policy,
+            &mut agent,
+            "prompt",
+            &wiring(None),
+            None,
+        )
+        .await;
 
         assert_eq!(
             outcome.stop_reason,
@@ -1722,7 +1960,15 @@ mod tests {
         register_echo(&mut agent, "edit");
 
         let policy = Policy::new(Tier::Auto, 15, None);
-        let outcome = run_query(resolved_stub(), policy, &mut agent, "prompt", None, None).await;
+        let outcome = run_query(
+            resolved_stub(),
+            policy,
+            &mut agent,
+            "prompt",
+            &wiring(None),
+            None,
+        )
+        .await;
 
         assert_eq!(
             outcome.stop_reason,
@@ -1743,7 +1989,15 @@ mod tests {
         register_echo(&mut agent, "ls");
 
         let policy = Policy::new(Tier::Auto, 15, None);
-        let outcome = run_query(resolved_stub(), policy, &mut agent, "prompt", None, None).await;
+        let outcome = run_query(
+            resolved_stub(),
+            policy,
+            &mut agent,
+            "prompt",
+            &wiring(None),
+            None,
+        )
+        .await;
 
         // user prompt, assistant(tool-use), assistant(final text).
         let user = outcome
@@ -1848,7 +2102,15 @@ mod tests {
         register_echo(&mut agent, "ls");
 
         let policy = Policy::new(Tier::Auto, 15, None);
-        let outcome = run_query(resolved_stub(), policy, &mut agent, "prompt", None, None).await;
+        let outcome = run_query(
+            resolved_stub(),
+            policy,
+            &mut agent,
+            "prompt",
+            &wiring(None),
+            None,
+        )
+        .await;
 
         assert_eq!(
             outcome.stop_reason,
@@ -1917,7 +2179,7 @@ mod tests {
             policy,
             &mut agent,
             "go",
-            Some(Duration::from_millis(CANCEL_FIRE_DELAY_MS)),
+            &wiring(Some(Duration::from_millis(CANCEL_FIRE_DELAY_MS))),
             None,
         )
         .await;
@@ -2418,7 +2680,7 @@ mod tests {
             policy,
             &mut agent,
             "decide X vs Y",
-            None,
+            &wiring(None),
             None,
         )
         .await;
@@ -2459,7 +2721,7 @@ mod tests {
             policy,
             &mut agent,
             "decide X vs Y",
-            None,
+            &wiring(None),
             None,
         )
         .await;
@@ -2504,7 +2766,7 @@ mod tests {
             policy,
             &mut agent,
             "decide X vs Y",
-            None,
+            &wiring(None),
             None,
         )
         .await;
@@ -2543,7 +2805,7 @@ mod tests {
             policy,
             &mut agent,
             "decide X vs Y",
-            None,
+            &wiring(None),
             None,
         )
         .await;
@@ -2609,7 +2871,7 @@ mod tests {
             policy,
             &mut agent,
             "decide X vs Y",
-            None,
+            &wiring(None),
             None,
         )
         .await;
@@ -2671,7 +2933,7 @@ mod tests {
             policy,
             &mut agent,
             "decide X vs Y",
-            None,
+            &wiring(None),
             None,
         )
         .await;
@@ -2720,7 +2982,7 @@ mod tests {
             policy,
             &mut agent,
             "please look into this",
-            None,
+            &wiring(None),
             None,
         )
         .await;
@@ -2771,7 +3033,7 @@ mod tests {
             policy,
             &mut agent,
             "decide X vs Y",
-            Some(Duration::from_millis(300)),
+            &wiring(Some(Duration::from_millis(300))),
             None,
         )
         .await;
