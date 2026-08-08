@@ -15,7 +15,8 @@ use magi_rs::magi::kind::ProviderKind;
 use magi_rs::magi::mode::{read_resolved_mode, ModeResolution, ModeSource};
 use magi_rs::magi::report_anchors::{CONTRACTUAL_ANCHORS, SECTION_ANCHORS};
 use magi_rs::magi::{
-    mark_overhead, TimeoutDecision, MAX_QUERY_BYTES, TOOL_RESULT_CAP_BYTES, TRUNCATION_MARK,
+    bytes_to_tokens_est, mark_overhead, TimeoutDecision, MAX_QUERY_BYTES, TOOL_RESULT_CAP_BYTES,
+    TRUNCATION_MARK,
 };
 use magi_rs::redact::{redact_foreign_error, redact_foreign_text};
 use serde_json::{json, Value};
@@ -494,6 +495,25 @@ pub(crate) struct RunContext {
     pub(crate) endpoint_divergence: bool,
     /// `true` when an explicit `--timeout` landed below the formula's minimum (SC-A04d).
     pub(crate) timeout_below_formula: bool,
+    /// Honest replacement for the `0` [`input_size_json`] used to fabricate when
+    /// `MagiReport::input_size` is `None` (Loop 2 gate, S4 finding 3).
+    ///
+    /// `report.input_size` is `None` only for a `MagiReport` magi-core itself did not measure
+    /// — verified against `orchestrator.rs::analyze` (magi-core 3.1.0): `measure_input` runs
+    /// UNCONDITIONALLY and the real report always carries `Some`, so this branch is
+    /// unreachable from any live `Magi::analyze()` call today. It stays reachable through the
+    /// type (`Option<InputSize>`, `#[non_exhaustive]`), and this project's own fixtures already
+    /// exercise it (`report_with_one_failed_mage`), so it must not lie when it does fire.
+    ///
+    /// `Some(bytes_to_tokens_est(query.len()))` at the ONE call site that has the query text at
+    /// hand (`ConsultTool::execute`'s literal) — an honest, already-used-elsewhere estimator
+    /// (SC-A24i), never a fabricated `0` that a consumer could misread as "empty payload".
+    /// `RunContext::build` (the headless `analyze_direct` call site) sets this to `None`: its
+    /// three existing parameters (`cfg`, `res`, `timeout`) carry no query text, and widening its
+    /// signature would require editing `headless_runner.rs`, out of scope for this fix round.
+    /// `input_size_json` falls back to `0` only when BOTH `report.input_size` and this field are
+    /// `None` — the dead branch described above, now narrowed instead of silently accepted.
+    pub(crate) unmeasured_fallback_tokens: Option<usize>,
 }
 
 impl RunContext {
@@ -517,6 +537,11 @@ impl RunContext {
         Self {
             endpoint_divergence: res.classification_attempted && cfg.magi_endpoint_diverges(),
             timeout_below_formula: timeout.below_formula,
+            // No query text reaches this constructor (see the field's own rustdoc) — the
+            // headless path keeps the old fallback-of-last-resort in `input_size_json` for the
+            // dead `None` branch, rather than a fabricated non-zero number this function has no
+            // basis for.
+            unmeasured_fallback_tokens: None,
         }
     }
 }
@@ -647,21 +672,37 @@ fn failed_agents_json(agents: &BTreeMap<AgentName, String>) -> Value {
 ///
 /// `None` from magi-core is neither omitted nor emitted as `null`: it reports what the pipeline
 /// actually APPLIED — magi-core's own default as the threshold, and `exceeded` evaluated
-/// against that — never a bare "I don't know" that a consumer could confuse with an unmeasured
-/// `0`.
+/// against that.
+///
+/// **`estimated_tokens` is never a fabricated `0` (Loop 2 gate, S4 finding 3).** magi-core's own
+/// rustdoc on `MagiReport::input_size` names exactly this trap: a `Default` reading
+/// `estimated_tokens: 0` "is not a neutral value but the false claim that the input was empty" —
+/// which is precisely what the old unconditional `0` here asserted, and provably wrong whenever
+/// this function is reachable at all: every entry route validates the query non-empty
+/// (`check_query_size`, REQ-A11b) before a `MagiReport` can exist. `fallback_tokens` — computed
+/// by the caller from the real query where it has one at hand (see
+/// [`RunContext::unmeasured_fallback_tokens`]) — replaces it when present; only when BOTH
+/// `s` and `fallback_tokens` are `None` (magi-core did not measure, AND the caller had no query
+/// text to fall back on — today only `RunContext::build`'s headless call site, itself dead code
+/// per that field's rustdoc) does this still report `0`, as a documented last resort rather than
+/// a silent one.
 #[must_use]
-fn input_size_json(s: Option<&InputSize>) -> Value {
+fn input_size_json(s: Option<&InputSize>, fallback_tokens: Option<usize>) -> Value {
     match s {
         Some(v) => json!({
             "estimated_tokens": v.estimated_tokens,
             "warn_threshold": v.warn_threshold,
             "exceeded": v.exceeded,
         }),
-        None => json!({
-            "estimated_tokens": 0,
-            "warn_threshold": CoreMagiConfig::default().input_warn_tokens,
-            "exceeded": false,
-        }),
+        None => {
+            let warn_threshold = CoreMagiConfig::default().input_warn_tokens;
+            let estimated_tokens = fallback_tokens.unwrap_or(0);
+            json!({
+                "estimated_tokens": estimated_tokens,
+                "warn_threshold": warn_threshold,
+                "exceeded": estimated_tokens > warn_threshold,
+            })
+        }
     }
 }
 
@@ -704,7 +745,7 @@ pub(crate) fn report_to_consult_json(
         "extraction_failures": failures_json(&report.extraction_failures),
         // Always present WITH its sub-keys: an object that is always there but whose contents
         // vary is the same instability one level down (SC-A10c).
-        "input_size": input_size_json(report.input_size.as_ref()),
+        "input_size": input_size_json(report.input_size.as_ref(), ctx.unmeasured_fallback_tokens),
         "report_truncated": truncation_label(truncated.level),
         // REQ-A11d: what affects how THIS run reads goes in THIS run's JSON, not a notice — a
         // batch consumer never sees stderr from a process that already exited.
@@ -1098,6 +1139,10 @@ impl Tool for ConsultTool {
             // consult — does not apply here the way it does to `magi consult`'s direct path
             // (`headless_runner::analyze_direct`, which DOES wire this for real).
             timeout_below_formula: false,
+            // Loop 2 gate, S4 finding 3: `query` is right here, non-empty (`check_query_size`
+            // already rejected an empty one above) — an honest fallback for `input_size_json`'s
+            // `None` arm instead of the `0` it used to fabricate.
+            unmeasured_fallback_tokens: Some(bytes_to_tokens_est(query.len())),
         };
         Ok(report_to_consult_json(&report, &truncated, &res, &ctx))
     }
@@ -1866,6 +1911,7 @@ mod tests {
         RunContext {
             endpoint_divergence: false,
             timeout_below_formula: false,
+            unmeasured_fallback_tokens: None,
         }
     }
 
@@ -1874,6 +1920,18 @@ mod tests {
         RunContext {
             endpoint_divergence: true,
             timeout_below_formula: false,
+            unmeasured_fallback_tokens: None,
+        }
+    }
+
+    /// Local double: a `RunContext` carrying an honest fallback estimate, as
+    /// `ConsultTool::execute` would supply from a real, non-empty query
+    /// (Loop 2 gate, S4 finding 3).
+    fn ctx_with_fallback(tokens: usize) -> RunContext {
+        RunContext {
+            endpoint_divergence: false,
+            timeout_below_formula: false,
+            unmeasured_fallback_tokens: Some(tokens),
         }
     }
 
@@ -1943,6 +2001,55 @@ mod tests {
             !clean["input_size"]["warn_threshold"].is_null(),
             "never null to mean 'I don't know': report what was APPLIED"
         );
+    }
+
+    /// Loop 2 gate, S4 finding 3: an honest fallback replaces the fabricated `0`.
+    ///
+    /// `report_with_one_failed_mage` carries `input_size: None` — magi-core did not measure.
+    /// With a caller-supplied fallback (the shape `ConsultTool::execute` builds from a real,
+    /// non-empty query), the JSON must report THAT number, never `0` — a query that passed
+    /// `check_query_size` is provably non-empty, so `estimated_tokens: 0` would be a knowingly
+    /// false claim, exactly the trap magi-core's own `InputSize` rustdoc names.
+    #[test]
+    fn an_unmeasured_input_reports_the_callers_honest_fallback_not_a_fabricated_zero() {
+        let r = report_with_one_failed_mage();
+        let v = report_to_consult_json(
+            &r,
+            &untruncated(&r),
+            &res_of(Mode::Analysis, ModeSource::Default),
+            &ctx_with_fallback(42),
+        );
+        assert_eq!(
+            v["input_size"]["estimated_tokens"], 42,
+            "the honest fallback must reach the JSON, not a fabricated 0"
+        );
+        assert!(
+            !v["input_size"]["exceeded"].as_bool().unwrap(),
+            "42 tokens sits far under magi-core's default warn threshold"
+        );
+        assert!(
+            !v["input_size"]["warn_threshold"].is_null(),
+            "the threshold actually applied is still magi-core's own default"
+        );
+    }
+
+    /// The dead branch (no magi-core measurement AND no caller fallback — today only
+    /// `RunContext::build`'s headless call site) is a documented last resort, not a silent one:
+    /// it still reports `0`, but the shape stays stable and `exceeded` is derived from that same
+    /// `0` rather than independently hardcoded — pinning the fallback-of-last-resort behavior so
+    /// a future change to it is deliberate, not incidental.
+    #[test]
+    fn the_last_resort_fallback_still_yields_a_stable_shape() {
+        let r = report_with_one_failed_mage();
+        let v = report_to_consult_json(
+            &r,
+            &untruncated(&r),
+            &res_of(Mode::Analysis, ModeSource::Default),
+            &ctx_plain(),
+        );
+        assert_eq!(v["input_size"]["estimated_tokens"], 0);
+        assert!(!v["input_size"]["exceeded"].as_bool().unwrap());
+        assert!(!v["input_size"]["warn_threshold"].is_null());
     }
 
     /// SC-A08: a non-adhering model is NAMED, with its attempt and a typed cause.
