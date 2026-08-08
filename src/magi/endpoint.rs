@@ -392,6 +392,50 @@ mod tests {
         assert!(msg.contains("vault set"), "y cómo crearla: {msg}");
     }
 
+    /// Loop 2 fix (Caspar, S1): a reserved character in a vault-stored credential must be
+    /// percent-encoded before substitution, not inserted raw.
+    ///
+    /// Without encoding, a password containing `/` truncates the AUTHORITY: `locate_userinfo`
+    /// stops at the first `/`, `?` or `#` it sees when computing where the authority ends, so
+    /// `"p/ss"` as a password yields `https://juan:p/ss@host/v1` — the authority becomes
+    /// `juan:p` (ends at the `/`), which has no `@` in it, so `locate_userinfo` returns
+    /// `Absent` and `redact_url` returns the string UNCHANGED. The rest of the password
+    /// (`ss@host/v1`) reads as path text in cleartext, and the string no longer denotes the
+    /// intended host either — this is simultaneously a redaction bypass and a mis-route, the
+    /// exact defect the placeholder design exists to make structurally impossible.
+    ///
+    /// Percent-encoding both `user` and `password` for the `userinfo` position closes this: no
+    /// substituted byte can ever be interpreted as `/`, `?`, `#` or `@` by a URL parser, so the
+    /// authority window `locate_userinfo` computes always matches the one the template declared.
+    #[test]
+    fn a_reserved_character_in_the_password_is_percent_encoded_not_left_raw() {
+        let mut vault = StubVault::with(&[
+            ("BASE_URL_USER", "juan"),
+            ("BASE_URL_PASSWORD", "p/ss@word?#evil"),
+        ]);
+        let resolved = EndpointTemplate::parse("https://[user]:[password]@host/v1", Scope::Root)
+            .unwrap()
+            .resolve(&mut vault, Scope::Root)
+            .unwrap();
+
+        // The raw reserved characters must not survive substitution unescaped: if they did,
+        // they would still be sitting where a URL parser looks for authority terminators.
+        assert!(
+            !resolved.as_str().contains("p/ss@word?#evil"),
+            "the raw password leaked into the resolved URL unescaped: {}",
+            resolved.as_str()
+        );
+
+        // The redaction that this whole design is built around must still find EXACTLY the
+        // credential and mask it, leaving the host visible — proving the authority is still
+        // parsed the way the template intended, not truncated by an embedded '/'.
+        let redacted = redact_url(resolved.as_str());
+        assert_eq!(
+            redacted, "https://***@host/v1",
+            "encoding must preserve both redaction AND correct host routing: got {redacted}"
+        );
+    }
+
     /// Each `base_url` resolves ITS OWN credentials: two endpoints may have different users.
     #[test]
     fn each_scope_reads_its_own_vault_entries() {
