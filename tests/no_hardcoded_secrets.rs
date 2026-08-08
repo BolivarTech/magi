@@ -1,10 +1,14 @@
 // Author: Julian Bolivar
-// Version: 2.0.0
-// Date: 2026-07-31
+// Version: 2.1.0
+// Date: 2026-08-07
 //! Falla si el árbol del repo contiene material tipo-clave, IPs privadas o rutas
 //! absolutas de usuario hardcodeadas.
 //!
-//! Cubre dos superficies con reglas distintas:
+//! Cubre TRES superficies con reglas distintas — la lista es explícita a propósito (loop 1 fix
+//! round CE, F13): la tercera se agregó porque un archivo nuevo de este milestone,
+//! `tests/support/mod.rs`, no caía en ninguna de las otras dos, limpio por accidente de lo que
+//! alguien escribió y no por cobertura del escaneo. Un `tests/*.rs` nuevo que se sume mañana
+//! debe caer bajo la tercera sin que nadie tenga que acordarse de extenderla:
 //!
 //! - **Fuentes** (`src/**/*.rs`): patrones tipo-clave únicamente, ignorando líneas
 //!   de comentario. Comportamiento histórico, sin cambios.
@@ -12,10 +16,17 @@
 //!   y `.github/`): además de las claves, IPs privadas, hostnames internos y rutas
 //!   absolutas de usuario. La documentación es la superficie que más fácil filtra
 //!   infraestructura, y hasta ahora no la miraba nadie.
+//! - **Ayudantes de test** (`tests/**/*.rs`): el mismo trato no-estricto que las fuentes
+//!   (`skip_line_comments = true`, `strict = false`) — un doble de test se gana la misma
+//!   tolerancia que el código de producción, porque los chequeos de IP/ruta de `strict` apuntan
+//!   a prosa de documentación, no a código.
 //!
 //! Una línea puede eximirse con el marcador [`ALLOW_MARKER`]. Es deliberadamente
 //! explícito: exime **una** línea, queda visible en el archivo, y obliga a que la
-//! exención sea una decisión de alguien y no un efecto lateral de dónde cayó el texto.
+//! exención sea una decisión de alguien y no un efecto lateral de dónde cayó el texto. Este
+//! propio archivo necesita el marcador en varias líneas: es donde viven los patrones y los
+//! fixtures adversariales que los prueban, así que con la tercera superficie cubriéndose a sí
+//! mismo, esas líneas se detectan a sí mismas si no se eximen.
 
 use std::fs;
 use std::path::Path;
@@ -120,10 +131,14 @@ fn classify(line: &str, strict: bool) -> Option<&'static str> {
     if line.contains(ALLOW_MARKER) {
         return None;
     }
-    if line.contains("sk-ant-api") {
+    // The two `if` lines below are the PATTERN definitions themselves, not leaked values — with
+    // the F13 extension of this scan to tests/**/*.rs, this file's own detection logic would
+    // otherwise flag itself; each carries its own trailing marker because the scanner
+    // classifies line by line, so a marker on this comment would not reach them.
+    if line.contains("sk-ant-api" /* allow-secret-scan */) {
         return Some("clave Anthropic");
     }
-    if line.contains("-----BEGIN") {
+    if line.contains("-----BEGIN" /* allow-secret-scan */) {
         return Some("bloque PEM");
     }
     // Solo en documentación: `src/` está lleno de fixtures sintéticos legítimos
@@ -251,9 +266,19 @@ fn test_no_hardcoded_secrets_in_documentation() {
 /// que mirar, que es indistinguible de pasar por estar limpio.
 #[test]
 fn test_detector_catches_known_leak_shapes() {
+    // Fixtures below are deliberately shaped like each leak category, not real secrets — F13
+    // extended this scan to tests/**/*.rs, so the two entries the scan itself would trip on
+    // carry the same allowance `with-credentials.toml` already uses (trailing per line: the
+    // scanner classifies line by line).
     let cases: [(&str, &str); 6] = [
-        ("api_key = \"sk-ant-api03-REDACTED\"", "clave Anthropic"),
-        ("-----BEGIN RSA PRIVATE KEY-----", "bloque PEM"),
+        (
+            "api_key = \"sk-ant-api03-REDACTED\"", /* allow-secret-scan */
+            "clave Anthropic",
+        ),
+        (
+            "-----BEGIN RSA PRIVATE KEY-----", /* allow-secret-scan */
+            "bloque PEM",
+        ),
         ("token: sk-abcdefghijklmnopqrstuvwxyz", "token tipo-clave"),
         ("host = \"192.168.0.30\"", "IP privada"),
         ("remote: 10.1.2.3:22", "IP privada"),
@@ -287,10 +312,54 @@ fn test_detector_ignores_prose_and_placeholders() {
     }
 }
 
+/// REQ-A00b (loop 1 fix round CE, F13): source-tree-style scanning now also reaches
+/// `tests/**/*.rs`. Before this test, `tests/support/mod.rs` — new in this milestone — fell
+/// outside BOTH existing scans: the source-tree one above only walks `src`, and the
+/// documentation one only reads doc extensions (`.md`/`.toml`/`.yml`/`.yaml`/`.example`), never
+/// `.rs`. It was clean by content, never by coverage — a future edit to a test double had no
+/// safety net the way `src/**/*.rs` and `tests/fixtures` already do.
+///
+/// Same treatment as the source-tree scan (`skip_line_comments = true`, `strict = false`): a
+/// test double is allowed the same non-strict pass source gets, since `strict` mode's IP/path
+/// checks are aimed at documentation prose, not code.
+#[test]
+fn test_no_hardcoded_secrets_in_test_helpers() {
+    let mut hits = Vec::new();
+    scan(Path::new("tests"), &["rs"], true, false, &mut hits);
+    assert!(
+        hits.is_empty(),
+        "posible secreto hardcodeado en tests/**/*.rs:{}",
+        render(&hits)
+    );
+}
+
+/// The scan above passing is not, by itself, proof that it is watching anything — the same
+/// "clean is not the same as covered" gap this whole finding is about. This drives `scan` over
+/// a tempdir shaped like the coverage it protects (a `.rs` file, non-strict) and plants a real
+/// leak shape in it, so the assertion above is backed by something that can be shown to fail.
+#[test]
+fn test_the_rs_scan_catches_a_planted_leak_like_test_helpers_would() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        dir.path().join("planted.rs"),
+        // Matches the unconditional "clave Anthropic" pattern, not the `strict`-gated
+        // key-like-token one: the real coverage this proves reuses `strict = false` (same
+        // non-strict pass `src/**/*.rs` gets), so a `strict`-only pattern would prove nothing.
+        "let leaked = \"sk-ant-api-planted-for-this-test\";\n", // allow-secret-scan: fixture
+    )
+    .expect("write planted fixture");
+    let mut hits = Vec::new();
+    scan(dir.path(), &["rs"], true, false, &mut hits);
+    assert!(
+        !hits.is_empty(),
+        "el escaneo no detectó el leak plantado bajo un árbol .rs"
+    );
+}
+
 /// El marcador exime exactamente su línea, y solo la suya.
 #[test]
 fn test_allow_marker_exempts_only_its_own_line() {
-    let leak = "key = \"sk-ant-api03-REDACTED\"";
+    let leak = "key = \"sk-ant-api03-REDACTED\""; // allow-secret-scan: fixture, not a real key
     assert!(
         classify(leak, true).is_some(),
         "la línea sin marcador debe disparar"
