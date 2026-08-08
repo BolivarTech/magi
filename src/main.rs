@@ -3311,7 +3311,7 @@ fn write_headless_output(
         if out_json {
             write_json(&mut buf, outcome, tool_result_cap)?;
         } else {
-            write_text(&mut buf, &mut std::io::stderr(), outcome);
+            write_text(&mut buf, &mut std::io::stderr(), outcome)?;
         }
         write_output_atomic(path, &buf, h.no_clobber)
     } else {
@@ -3320,7 +3320,7 @@ fn write_headless_output(
         if out_json {
             write_json(&mut out, outcome, tool_result_cap)?;
         } else {
-            write_text(&mut out, &mut std::io::stderr(), outcome);
+            write_text(&mut out, &mut std::io::stderr(), outcome)?;
         }
         out.flush().map_err(|e| HeadlessError::Io(e.to_string()))
     }

@@ -207,26 +207,71 @@ pub fn write_json(
     serde_json::to_writer(out, &wire).map_err(|e| HeadlessError::Io(e.to_string()))
 }
 
+/// Text-mode stderr notice for [`StopReason::MaxToolCalls`] (MAGI S6 gate finding 5).
+///
+/// The JSON contract already names the ceiling via `stop_reason`, but text mode writes only
+/// `response` to stdout — and a run that hits the cap always has `response = None`
+/// (`headless_runner::run_query`'s `Some(Err(e))` arm for `MAX_TOOL_CALLS_ERROR` constructs the
+/// outcome with `None` unconditionally). Without this notice, a consumer of text mode sees the
+/// SAME empty stdout and exit code 0 for two different outcomes: a genuinely empty successful
+/// run, and one that hit the tool-call ceiling before producing a final response — indistinguishable
+/// without reading JSON. `exit::exit_code` deliberately maps `MaxToolCalls` to success (REQ-H23b:
+/// reaching the cap is a terminal state, not an error) and that mapping is intentionally
+/// unchanged here — this notice restores the missing SIGNAL, not the exit code.
+const MAX_TOOL_CALLS_TEXT_NOTICE: &str =
+    "stop_reason: max_tool_calls — the tool-call budget was exhausted before a final response\n";
+
+/// Writes `bytes` to `w`, treating a `BrokenPipe` error as benign (the downstream reader of
+/// stdout/stderr closed its end deliberately — e.g. `magi-rs query ... | head -1`) and
+/// propagating any OTHER write failure as [`HeadlessError::Io`].
+///
+/// This distinction is the point (MAGI S6 gate finding 4): `BrokenPipe` is the one write
+/// failure every Unix CLI convention treats as expected and silent; a genuine failure — disk
+/// full, permission denied on a redirected file, a closed handle for a reason OTHER than the
+/// reader hanging up — is not the same category and must not be swallowed under the same
+/// blanket `let _ = ...` (B9: no silent failures).
+fn write_all_unless_broken_pipe(w: &mut impl Write, bytes: &[u8]) -> Result<(), HeadlessError> {
+    match w.write_all(bytes) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+        Err(e) => Err(HeadlessError::Io(e.to_string())),
+    }
+}
+
 /// Writes output in text mode (REQ-H13, default): `o`'s `response` goes to `out` with no other
 /// content (stdout stays clean for the response); if `o.applied_caps.max_tool_calls_clamped`, a
 /// one-line warning is emitted to `err_out` (stderr) so that the REQ-H12b clamp is never
-/// silent, even in text mode.
+/// silent, even in text mode; if `o.stop_reason` is [`StopReason::MaxToolCalls`], a matching
+/// one-line stderr notice is emitted for the same reason (MAGI S6 gate finding 5).
 ///
-/// Write failures on `out`/`err_out` (e.g., a broken pipe on stdout/stderr) are deliberately
-/// discarded: this function's signature returns no `Result` (contract fixed by the headless
-/// caller, MS2), so there is no channel to propagate them; it is the same trade-off most Unix
-/// CLIs make with `SIGPIPE`/`EPIPE`.
-pub fn write_text(out: &mut impl Write, err_out: &mut impl Write, o: &RunOutcome) {
+/// # Errors
+/// The first non-`BrokenPipe` write failure on either `out` or `err_out` (MAGI S6 gate finding
+/// 4). A broken pipe is swallowed, matching the trade-off most Unix CLIs make with
+/// `SIGPIPE`/`EPIPE`; any other I/O error (disk full, a redirected file that cannot be written)
+/// is real and must reach the caller, which already has an error channel
+/// (`write_headless_output` → `finish_headless` → a dedicated non-zero exit code) — this
+/// function returning `()` unconditionally was itself the defect: its sibling [`write_json`]
+/// already propagates its write failures via `?`, and there is nothing about text mode that
+/// makes its own write failures less real.
+pub fn write_text(
+    out: &mut impl Write,
+    err_out: &mut impl Write,
+    o: &RunOutcome,
+) -> Result<(), HeadlessError> {
     if let Some(response) = &o.response {
-        let _ = out.write_all(response.as_bytes());
+        write_all_unless_broken_pipe(out, response.as_bytes())?;
     }
     if o.applied_caps.max_tool_calls_clamped {
         let notice = format!(
             "applied_caps: max_tool_calls clamped to {}\n",
             o.applied_caps.max_tool_calls
         );
-        let _ = err_out.write_all(notice.as_bytes());
+        write_all_unless_broken_pipe(err_out, notice.as_bytes())?;
     }
+    if o.stop_reason == StopReason::MaxToolCalls {
+        write_all_unless_broken_pipe(err_out, MAX_TOOL_CALLS_TEXT_NOTICE.as_bytes())?;
+    }
+    Ok(())
 }
 
 /// Classifies `raw` as a provider error shaped like an HTTP status.
@@ -598,7 +643,7 @@ mod tests {
         let mut out = Vec::new();
         let mut err = Vec::new();
 
-        write_text(&mut out, &mut err, &o);
+        write_text(&mut out, &mut err, &o).unwrap();
 
         assert_eq!(String::from_utf8(out).unwrap(), "Hello from magi.");
         assert!(err.is_empty());
@@ -613,7 +658,7 @@ mod tests {
         let mut out = Vec::new();
         let mut err = Vec::new();
 
-        write_text(&mut out, &mut err, &o);
+        write_text(&mut out, &mut err, &o).unwrap();
 
         assert_eq!(String::from_utf8(out).unwrap(), "Hello from magi.");
         let err_text = String::from_utf8(err).unwrap();
@@ -628,10 +673,52 @@ mod tests {
         let mut out = Vec::new();
         let mut err = Vec::new();
 
-        write_text(&mut out, &mut err, &o);
+        write_text(&mut out, &mut err, &o).unwrap();
 
         assert!(out.is_empty());
         assert!(err.is_empty());
+    }
+
+    /// MAGI S6 gate finding 5: a run that stopped because it hit the tool-call ceiling
+    /// (`response` is always `None` in that case) must still say so in text mode — the JSON
+    /// contract already carries `stop_reason`, but text mode wrote nothing at all before this,
+    /// making it indistinguishable from a genuinely empty successful run (both exit 0, both
+    /// empty stdout).
+    #[test]
+    fn test_write_text_notes_max_tool_calls_on_stderr_when_response_is_empty() {
+        let mut o = RunOutcome::sample();
+        o.response = None;
+        o.stop_reason = StopReason::MaxToolCalls;
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+
+        write_text(&mut out, &mut err, &o).unwrap();
+
+        assert!(
+            out.is_empty(),
+            "stdout stays clean — the notice is stderr-only, matching the clamp notice"
+        );
+        let err_text = String::from_utf8(err).unwrap();
+        assert!(
+            err_text.contains("max_tool_calls"),
+            "stderr must name the ceiling as the reason no response was produced: {err_text:?}"
+        );
+    }
+
+    /// A run that completes normally (`StopReason::Done`) never emits the `max_tool_calls`
+    /// notice, even though nothing about `write_text` computes `stop_reason` from `response`
+    /// being present — the two are checked independently, so this pins that they do not
+    /// accidentally interact.
+    #[test]
+    fn test_write_text_omits_max_tool_calls_notice_when_stop_reason_is_done() {
+        let o = RunOutcome::sample();
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+
+        write_text(&mut out, &mut err, &o).unwrap();
+
+        let err_text = String::from_utf8(err).unwrap();
+        assert!(!err_text.contains("max_tool_calls"));
     }
 
     /// A short `result` is left untouched (no marker, no content change).
