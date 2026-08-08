@@ -134,11 +134,24 @@ impl Default for TuiNoticeSink {
 impl crate::agent::mode_classifier::NoticeSink for TuiNoticeSink {
     /// Emits `msg` the first time it is called with `key`.
     ///
-    /// A notice is **never dropped silently** (B9): with no channel attached, or with one that
-    /// is closed or full, it falls back to stderr. Both fallbacks are states in which the frame
-    /// is not at risk — before attachment raw mode has not been entered, and a closed channel
-    /// means the session is already tearing down — so the fallback trades a cosmetic risk that
-    /// is not present for a message that would otherwise be lost.
+    /// A notice is **never dropped silently** (B9), and it never corrupts a LIVE frame either
+    /// — the two fallbacks used to be conflated (MAGI S7 fix round, finding 1) and that was a
+    /// real bug: `tx.try_send(..).is_ok()` failing on a **full** channel fell back to
+    /// `eprintln!` exactly like a closed one, even though a full channel means the TUI is very
+    /// much alive and about to have its frame written over — precisely the corruption this
+    /// sink exists to prevent (see the module rustdoc). The two cases are distinguished by
+    /// `TrySendError`'s variant, not lumped into "any send failure":
+    /// - **No channel attached yet** (`self.tx` is `None`) — raw mode has not been entered, so
+    ///   there is no frame to protect; stderr is correct.
+    /// - **`TrySendError::Closed`** — the receiver is gone, which only happens once the TUI is
+    ///   tearing down; stderr is correct for the same reason.
+    /// - **`TrySendError::Full`** — the frame IS at risk, so this never prints. The classifier
+    ///   (`agent::mode_classifier::ProviderClassifier`) only ever emits two distinct keys total
+    ///   in a process's lifetime (the cost heads-up, the expiry report), deduplicated by `seen`
+    ///   above — so a bounded background task per full-channel event cannot accumulate; it
+    ///   waits for room with a real `.send().await` and, if the channel closes before room
+    ///   frees up (the run ended), falls back to stderr at that point, which is again a
+    ///   torn-down session.
     fn once(&self, key: &'static str, msg: &str) {
         {
             let mut seen = self.seen.lock().unwrap_or_else(|p| p.into_inner());
@@ -152,9 +165,28 @@ impl crate::agent::mode_classifier::NoticeSink for TuiNoticeSink {
             .unwrap_or_else(|p| p.into_inner())
             .as_ref()
             .cloned();
-        match tx {
-            Some(tx) if tx.try_send(AgentResponse::Notice(msg.to_string())).is_ok() => {}
-            _ => eprintln!("{msg}"),
+        let Some(tx) = tx else {
+            eprintln!("{msg}");
+            return;
+        };
+        match tx.try_send(AgentResponse::Notice(msg.to_string())) {
+            Ok(()) => {}
+            Err(mpsc::error::TrySendError::Closed(_)) => eprintln!("{msg}"),
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                // The frame is live and momentarily saturated — printing here is exactly the
+                // corruption this sink exists to prevent, so this waits for room instead
+                // (`spawn`, not a blocking wait, since `once` is a sync trait method called
+                // from inside an async caller and must not stall its executor thread).
+                let msg = msg.to_string();
+                tokio::spawn(async move {
+                    if tx.send(AgentResponse::Notice(msg.clone())).await.is_err() {
+                        // The channel closed while this was queued (the run ended before
+                        // room freed up) — the same "session already tearing down" case as
+                        // the `Closed` arm above, just discovered later.
+                        eprintln!("{msg}");
+                    }
+                });
+            }
         }
     }
 }

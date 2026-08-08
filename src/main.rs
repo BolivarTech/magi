@@ -8105,6 +8105,49 @@ mod tests {
                 "a key not yet seen must reach the channel once attached"
             );
         }
+
+        /// MAGI S7 fix round, finding 1: a FULL channel (the TUI is alive and just
+        /// momentarily saturated) must never fall back to `eprintln!` the way a
+        /// closed/unattached one does — that was the actual bug, since a full channel is
+        /// precisely the case where the frame is at risk. This fills the channel to
+        /// capacity first, then calls `once` and proves the message still arrives via the
+        /// channel (once room frees up) instead of being lost or printed.
+        #[tokio::test]
+        async fn a_full_channel_waits_for_room_instead_of_falling_back_to_stderr() {
+            let (tx, mut rx) = tokio::sync::mpsc::channel::<AgentResponse>(1);
+            let sink = crate::tui::TuiNoticeSink::new();
+            // Clone before `attach` moves `tx` in, so this test keeps a handle able to
+            // saturate the channel's single slot ahead of the notice under test.
+            sink.attach(tx.clone());
+            tx.try_send(AgentResponse::Notice("filler".to_string()))
+                .expect("the fresh channel has room for the filler");
+
+            // `once` now hits `TrySendError::Full` and must queue rather than print.
+            sink.once("full-channel-key", "queued while full");
+
+            // Poll for the condition instead of sleeping a fixed duration
+            // (CLAUDE.local.md: "wait on conditions, never on durations"): drain the
+            // filler first (frees the slot the spawned background send is waiting on),
+            // then look for the queued notice.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            let mut delivered = None;
+            while std::time::Instant::now() < deadline {
+                if let Ok(AgentResponse::Notice(text)) = rx.try_recv() {
+                    if text == "filler" {
+                        continue;
+                    }
+                    delivered = Some(text);
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+            assert_eq!(
+                delivered.as_deref(),
+                Some("queued while full"),
+                "a notice queued while the channel was full must still be delivered \
+                 through the channel, not dropped or printed to stderr"
+            );
+        }
     }
 
     /// Loop 1, F1 — the operator's autonomous-consult configuration reaching `AgentRunConfig`.
