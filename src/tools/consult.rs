@@ -742,6 +742,31 @@ fn input_size_json(s: Option<&InputSize>, fallback_tokens: Option<usize>) -> Val
 /// A JSON object with `report`, `degraded`, `mode`, `mode_source`, `extraction_failures`,
 /// `input_size`, `report_truncated`, `endpoint_divergence`, `timeout_below_formula` and
 /// `failed_agents` — every key always present.
+///
+/// # `report` (`truncated.text`) is NOT redacted, unlike `failed_agents` — a deliberate decision
+///
+/// Loop 2 gate, S4 finding 2 (Caspar): why the asymmetry with [`failed_agents_json`] is correct,
+/// not an oversight.
+///
+/// `failed_agents_json` redacts because its `cause` strings are `MagiError::Provider(e)
+/// .to_string()` / `format!("timeout: …")` — text `magi-core`'s HTTP client (`reqwest`)
+/// constructs from the RESOLVED `base_url` it dialed (REQ-A16c: `[user]`/`[password]`
+/// placeholders substituted with real vault credentials). A connection failure's `Display` can
+/// embed that URL. `report.report`, by contrast, is the mages' own analysis TEXT — model output
+/// — and the resolved endpoint structurally cannot reach it: `base_url` is consumed purely as an
+/// HTTP client target (`OllamaProvider::new(base_url.as_str(), model)` and the OpenAI-compat/
+/// Anthropic equivalents), never interpolated into any prompt sent to a mage. A model cannot
+/// echo a value it was never given.
+///
+/// The one way a credential-bearing URL COULD appear in `report.report` is the user's OWN
+/// submitted `query` containing one (e.g. pasting a live, unredacted `base_url` for review) and
+/// a mage echoing it back. That is not a NEW leak of a magi-rs secret: the same string already
+/// went out over the wire to three external LLM providers as part of the INPUT the instant the
+/// consult was dispatched — redacting the OUTPUT does not undo an input exposure that already
+/// happened, and it is the user's own secret, not one magi-rs resolved from its vault. Running
+/// `redact_foreign_text` over the ENTIRE verdict text on every consult would also risk mangling
+/// a legitimate URL the mages correctly discuss as PART of their analysis (e.g. reviewing an API
+/// design), for zero security benefit against the one leak vector output redaction cannot close.
 pub(crate) fn report_to_consult_json(
     report: &MagiReport,
     truncated: &Truncated,
