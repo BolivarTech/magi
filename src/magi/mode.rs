@@ -432,8 +432,9 @@ fn trim_ascii(raw: &str) -> &str {
 /// applied here one level higher.
 ///
 /// **Known, intended limitation (MAGI S2 re-gate, Caspar): a leading BOM or non-ASCII
-/// whitespace (e.g. NBSP) is NOT trimmed** — [`trim_ascii`] only strips ASCII whitespace, on
-/// purpose. A classifier reply like `"\u{feff}code-review"` therefore fails the literal
+/// whitespace (e.g. NBSP) is NOT trimmed** — the private `trim_ascii` helper this function
+/// calls only strips ASCII whitespace, on purpose. A classifier reply like
+/// `"\u{feff}code-review"` therefore fails the literal
 /// comparison and falls through to `Analysis`/`Default`, exactly like any other unrecognized
 /// reply. This is the SAFE direction (no injection risk, no mode forged from wider
 /// normalization) and the accepted cost of closed containment — it degrades inference quality
