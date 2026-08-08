@@ -134,12 +134,19 @@ impl EndpointTemplate {
     /// uses: the rule of where `userinfo` lives is written **once**. If it were written twice,
     /// drifting out of sync would mean one of the two stops seeing a credential.
     ///
+    /// `scope` is what makes a [`EndpointError::LiteralCredential`] actionable: it names the
+    /// vault entries of the `base_url` actually being parsed (`BASE_URL_USER` for the root,
+    /// `MAGI_BASE_URL_USER` for `[magi]`, `EMBEDDING_BASE_URL_USER` for `[embedding]`), not
+    /// always the root's — a fix round CE (loop 1, F22) correction: the previous signature took
+    /// no scope and always named the root entries, misdirecting an operator fixing `[magi]` or
+    /// `[embedding]` to create the wrong vault entry.
+    ///
     /// # Errors
     ///
     /// [`EndpointError::LiteralCredential`] if the `userinfo` are not exactly the two
     /// placeholders; [`EndpointError::UnknownPlaceholder`] if it carries another placeholder;
     /// [`EndpointError::Unparseable`] if the URL could not be traversed.
-    pub fn parse(raw: &str) -> Result<Self, EndpointError> {
+    pub fn parse(raw: &str, scope: Scope) -> Result<Self, EndpointError> {
         match locate_userinfo(raw) {
             // Without `userinfo` there is no credential to validate — the common case pays
             // nothing.
@@ -157,11 +164,9 @@ impl EndpointTemplate {
                 if userinfo.contains('[') || userinfo.contains(']') {
                     return Err(EndpointError::UnknownPlaceholder);
                 }
-                // The real scope is set by the caller when building the message; here the root
-                // one is named, which is the case a user sees first.
                 Err(EndpointError::LiteralCredential {
-                    user_entry: Scope::Root.user_entry(),
-                    password_entry: Scope::Root.password_entry(),
+                    user_entry: scope.user_entry(),
+                    password_entry: scope.password_entry(),
                 })
             }
         }
@@ -325,7 +330,7 @@ mod tests {
     /// SC-A16d: LITERAL credential is an error, and the message does not repeat it.
     #[test]
     fn a_literal_credential_is_a_config_error_that_does_not_echo_it() {
-        let err = EndpointTemplate::parse("https://juan:s3cr3t@host/v1").unwrap_err();
+        let err = EndpointTemplate::parse("https://juan:s3cr3t@host/v1", Scope::Root).unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("[user]") && msg.contains("[password]"),
@@ -347,7 +352,8 @@ mod tests {
     fn placeholders_resolve_from_the_vault_in_memory() {
         let mut vault =
             StubVault::with(&[("BASE_URL_USER", "juan"), ("BASE_URL_PASSWORD", "s3cr3t")]);
-        let tpl = EndpointTemplate::parse("https://[user]:[password]@host/v1").unwrap();
+        let tpl =
+            EndpointTemplate::parse("https://[user]:[password]@host/v1", Scope::Root).unwrap();
 
         let resolved = tpl.resolve(&mut vault, Scope::Root).unwrap();
         assert_eq!(resolved.as_str(), "https://juan:s3cr3t@host/v1");
@@ -360,7 +366,7 @@ mod tests {
     fn the_resolved_endpoints_debug_never_shows_the_credential() {
         let mut vault =
             StubVault::with(&[("BASE_URL_USER", "juan"), ("BASE_URL_PASSWORD", "s3cr3t")]);
-        let resolved = EndpointTemplate::parse("https://[user]:[password]@host/v1")
+        let resolved = EndpointTemplate::parse("https://[user]:[password]@host/v1", Scope::Root)
             .unwrap()
             .resolve(&mut vault, Scope::Root)
             .unwrap();
@@ -373,7 +379,7 @@ mod tests {
     #[test]
     fn a_missing_vault_entry_fails_closed_naming_the_entry() {
         let mut vault = StubVault::with(&[("BASE_URL_USER", "juan")]); // falta la password
-        let err = EndpointTemplate::parse("https://[user]:[password]@host/v1")
+        let err = EndpointTemplate::parse("https://[user]:[password]@host/v1", Scope::Root)
             .unwrap()
             .resolve(&mut vault, Scope::Root)
             .unwrap_err();
@@ -397,7 +403,8 @@ mod tests {
             ("EMBEDDING_BASE_URL_USER", "emb-u"),
             ("EMBEDDING_BASE_URL_PASSWORD", "emb-p"),
         ]);
-        let tpl = EndpointTemplate::parse("https://[user]:[password]@host/v1").unwrap();
+        let tpl =
+            EndpointTemplate::parse("https://[user]:[password]@host/v1", Scope::Root).unwrap();
         assert!(tpl
             .resolve(&mut vault, Scope::Root)
             .unwrap()
@@ -418,9 +425,9 @@ mod tests {
     /// Only those two placeholders, and only in the authority. It is not a template engine.
     #[test]
     fn only_the_two_known_placeholders_in_the_authority_are_recognized() {
-        assert!(EndpointTemplate::parse("https://[banana]@host/v1").is_err());
+        assert!(EndpointTemplate::parse("https://[banana]@host/v1", Scope::Root).is_err());
         // Outside the authority it is literal path text, not a placeholder.
-        let tpl = EndpointTemplate::parse("https://host/v1/[user]").unwrap();
+        let tpl = EndpointTemplate::parse("https://host/v1/[user]", Scope::Root).unwrap();
         assert_eq!(
             tpl.resolve(&mut StubVault::empty(), Scope::Root)
                 .unwrap()
@@ -432,7 +439,7 @@ mod tests {
     /// A URL without credentials passes too: the common case pays nothing.
     #[test]
     fn a_plain_url_without_userinfo_resolves_to_itself() {
-        let tpl = EndpointTemplate::parse("http://localhost:11434/v1").unwrap();
+        let tpl = EndpointTemplate::parse("http://localhost:11434/v1", Scope::Root).unwrap();
         assert_eq!(
             tpl.resolve(&mut StubVault::empty(), Scope::Root)
                 .unwrap()
@@ -451,7 +458,7 @@ mod tests {
     /// Unparseable }` is reachable with any text not containing `"://"`.
     #[test]
     fn a_url_without_a_scheme_separator_is_rejected_as_unparseable() {
-        let err = EndpointTemplate::parse("localhost:11434/v1").unwrap_err();
+        let err = EndpointTemplate::parse("localhost:11434/v1", Scope::Root).unwrap_err();
         assert!(
             matches!(err, EndpointError::Unparseable),
             "esperaba Unparseable, salió {err:?}"
@@ -462,8 +469,39 @@ mod tests {
     /// `as_str()`, so a consumer doing `format!("{tpl}")` sees the complete template.
     #[test]
     fn display_renders_the_same_text_as_as_str() {
-        let tpl = EndpointTemplate::parse("https://[user]:[password]@host/v1").unwrap();
+        let tpl =
+            EndpointTemplate::parse("https://[user]:[password]@host/v1", Scope::Root).unwrap();
         assert_eq!(format!("{tpl}"), tpl.as_str());
         assert_eq!(tpl.to_string(), "https://[user]:[password]@host/v1");
+    }
+
+    /// Loop 1 fix round CE, F22: a literal credential in `[magi].base_url` or
+    /// `[embedding].base_url` must name THAT scope's vault entries, not the root's. Before this
+    /// fix `parse` always named `BASE_URL_USER`/`BASE_URL_PASSWORD`, so an operator fixing
+    /// `[magi]` was sent to create the wrong entry and only discovered the real one when
+    /// `resolve` failed a second time against `MAGI_BASE_URL_USER`.
+    #[test]
+    fn a_literal_credential_names_the_entries_of_its_own_scope() {
+        let cases = [
+            (Scope::Root, "BASE_URL_USER", "BASE_URL_PASSWORD"),
+            (Scope::Magi, "MAGI_BASE_URL_USER", "MAGI_BASE_URL_PASSWORD"),
+            (
+                Scope::Embedding,
+                "EMBEDDING_BASE_URL_USER",
+                "EMBEDDING_BASE_URL_PASSWORD",
+            ),
+        ];
+        for (scope, expected_user, expected_password) in cases {
+            let err = EndpointTemplate::parse("https://juan:s3cr3t@host/v1", scope).unwrap_err();
+            let msg = err.to_string();
+            assert!(
+                msg.contains(expected_user),
+                "{scope:?}: esperaba {expected_user} en {msg}"
+            );
+            assert!(
+                msg.contains(expected_password),
+                "{scope:?}: esperaba {expected_password} en {msg}"
+            );
+        }
     }
 }

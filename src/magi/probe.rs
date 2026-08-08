@@ -381,7 +381,7 @@ mod tests {
     /// degrade) if the fixture is malformed: a test helper that silently degraded would hide a
     /// broken fixture behind a result that looks valid.
     fn resolved(raw: &str) -> ResolvedEndpoint {
-        EndpointTemplate::parse(raw)
+        EndpointTemplate::parse(raw, Scope::Root)
             .expect("fixture de test bien formada")
             .resolve(&mut NoSecrets, Scope::Root)
             .expect("fixture de test sin placeholders")

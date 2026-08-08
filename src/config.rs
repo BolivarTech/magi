@@ -627,6 +627,7 @@ impl MagiConfig {
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
                 .unwrap_or(crate::defaults::DEFAULT_OPENAI_BASE_URL),
+            magi_rs::magi::endpoint::Scope::Root,
         )
     }
 
@@ -642,9 +643,10 @@ impl MagiConfig {
     fn override_or_inherit_base_url(
         &self,
         own: Option<&str>,
+        scope: magi_rs::magi::endpoint::Scope,
     ) -> Result<EndpointTemplate, EndpointError> {
         match own.map(str::trim).filter(|s| !s.is_empty()) {
-            Some(own) => EndpointTemplate::parse(own),
+            Some(own) => EndpointTemplate::parse(own, scope),
             None => self.effective_base_url(), // herencia, ya validada
         }
     }
@@ -661,7 +663,10 @@ impl MagiConfig {
     /// (REQ-A21 — behavior change from v0.11.0, see
     /// [`crate::memory::config::EmbeddingConfig::base_url`]).
     pub fn effective_magi_base_url(&self) -> Result<EndpointTemplate, EndpointError> {
-        self.override_or_inherit_base_url(self.magi.base_url.as_deref())
+        self.override_or_inherit_base_url(
+            self.magi.base_url.as_deref(),
+            magi_rs::magi::endpoint::Scope::Magi,
+        )
     }
 
     /// # Errors
@@ -670,7 +675,10 @@ impl MagiConfig {
     /// Loads `magi.toml` from its **path** (not its directory) — Task 1.4 finally consumes
     /// `Workspace::config_path()` (REQ-A22b).
     pub fn effective_embedding_base_url(&self) -> Result<EndpointTemplate, EndpointError> {
-        self.override_or_inherit_base_url(self.embedding.base_url.as_deref())
+        self.override_or_inherit_base_url(
+            self.embedding.base_url.as_deref(),
+            magi_rs::magi::endpoint::Scope::Embedding,
+        )
     }
 
     /// An **absent** file returns the built-in defaults, `Ok`, with no notices. An **empty or
@@ -1855,15 +1863,21 @@ mod tests {
     /// the half.
     #[test]
     fn a_literal_credential_in_any_base_url_scope_fails_closed_at_load() {
-        for (toml, scope) in [
-            ("base_url = \"https://alice:s3cr3t@host/v1\"\n", "raíz"),
+        for (toml, scope, expected_entry) in [
+            (
+                "base_url = \"https://alice:s3cr3t@host/v1\"\n",
+                "raíz",
+                "BASE_URL_USER",
+            ),
             (
                 "[magi]\nbase_url = \"https://alice:s3cr3t@host/v1\"\n",
                 "[magi]",
+                "MAGI_BASE_URL_USER",
             ),
             (
                 "[embedding]\nbase_url = \"https://alice:s3cr3t@host/v1\"\n",
                 "[embedding]",
+                "EMBEDDING_BASE_URL_USER",
             ),
         ] {
             let dir = tempfile::tempdir().unwrap();
@@ -1891,6 +1905,14 @@ mod tests {
             assert!(
                 msg.contains("magi-rs vault set"),
                 "{scope}: no nombra el comando para arreglarlo: {msg}"
+            );
+            // Loop 1 fix round CE, F22: not just AN entry name — the RIGHT one for this scope.
+            // Before the fix every scope named the root's `BASE_URL_USER`/`BASE_URL_PASSWORD`,
+            // which this assertion did not catch because it only checked for the placeholder
+            // syntax, never the entry name itself.
+            assert!(
+                msg.contains(expected_entry),
+                "{scope}: esperaba la entrada {expected_entry}, salió: {msg}"
             );
         }
     }

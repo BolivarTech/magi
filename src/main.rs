@@ -1727,9 +1727,8 @@ fn effective_root_template(
     env_base_url: Option<&str>,
 ) -> Result<EndpointTemplate, String> {
     match env_base_url.map(str::trim).filter(|s| !s.is_empty()) {
-        Some(env_val) => {
-            EndpointTemplate::parse(env_val).map_err(|e| format!("OPENAI_BASE_URL is invalid: {e}"))
-        }
+        Some(env_val) => EndpointTemplate::parse(env_val, Scope::Root)
+            .map_err(|e| format!("OPENAI_BASE_URL is invalid: {e}")),
         None => magi_config
             .effective_base_url()
             .map_err(|e| format!("base_url is invalid: {e}")),
@@ -1767,9 +1766,8 @@ fn resolve_endpoints(
         .map(str::trim)
         .filter(|s| !s.is_empty())
     {
-        Some(own) => {
-            EndpointTemplate::parse(own).map_err(|e| format!("magi base_url is invalid: {e}"))?
-        }
+        Some(own) => EndpointTemplate::parse(own, Scope::Magi)
+            .map_err(|e| format!("magi base_url is invalid: {e}"))?,
         None => root_tpl.clone(),
     };
 
@@ -6464,7 +6462,7 @@ mod tests {
         /// Test endpoint: a flat `base_url` with no placeholders, so resolving it does not need
         /// a real vault — `NoVaultInScope` (already in production) is enough.
         fn test_endpoints() -> ResolvedEndpoints {
-            let tpl = EndpointTemplate::parse("http://localhost:11434/v1").unwrap();
+            let tpl = EndpointTemplate::parse("http://localhost:11434/v1", Scope::Root).unwrap();
             ResolvedEndpoints {
                 root: tpl.resolve(&mut NoVaultInScope, Scope::Root).unwrap(),
                 magi: tpl.resolve(&mut NoVaultInScope, Scope::Magi).unwrap(),
@@ -7809,7 +7807,7 @@ mod tests {
                 .into_iter()
                 .collect(),
             );
-            EndpointTemplate::parse(template)
+            EndpointTemplate::parse(template, Scope::Root)
                 .expect("a placeholder template parses")
                 .resolve(&mut vault, Scope::Root)
                 .expect("the vault holds both entries")
@@ -8222,7 +8220,7 @@ mod tests {
         /// Shared test endpoint: a flat `base_url` with no placeholders, so resolving it does
         /// not need a real vault (same pattern as `trio_construction`).
         fn test_endpoints() -> ResolvedEndpoints {
-            let tpl = EndpointTemplate::parse("http://localhost:11434/v1").unwrap();
+            let tpl = EndpointTemplate::parse("http://localhost:11434/v1", Scope::Root).unwrap();
             ResolvedEndpoints {
                 root: tpl.resolve(&mut NoVaultInScope, Scope::Root).unwrap(),
                 magi: tpl.resolve(&mut NoVaultInScope, Scope::Magi).unwrap(),
@@ -8233,15 +8231,15 @@ mod tests {
         /// DIVERGENT endpoints: the trio on a different host than the principal, to exercise
         /// the `join!` branch of `orchestrate_probes`.
         fn diverging_endpoints() -> ResolvedEndpoints {
-            let root = EndpointTemplate::parse("http://root-host:11434/v1")
+            let root = EndpointTemplate::parse("http://root-host:11434/v1", Scope::Root)
                 .unwrap()
                 .resolve(&mut NoVaultInScope, Scope::Root)
                 .unwrap();
-            let magi = EndpointTemplate::parse("http://magi-host:11434/v1")
+            let magi = EndpointTemplate::parse("http://magi-host:11434/v1", Scope::Magi)
                 .unwrap()
                 .resolve(&mut NoVaultInScope, Scope::Magi)
                 .unwrap();
-            let embedding = EndpointTemplate::parse("http://localhost:11434/v1")
+            let embedding = EndpointTemplate::parse("http://localhost:11434/v1", Scope::Embedding)
                 .unwrap()
                 .resolve(&mut NoVaultInScope, Scope::Embedding)
                 .unwrap();
