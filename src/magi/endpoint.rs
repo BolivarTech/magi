@@ -217,7 +217,21 @@ impl EndpointTemplate {
             return Err(EndpointError::Unparseable);
         };
         if userinfo != EXPECTED_USERINFO {
-            // `parse` already guaranteed that a different `userinfo` does not reach here.
+            // INVARIANT, not reachable in practice (Loop 2 note, Melchior, S1): `Self(String)`'s
+            // field is private to this module, and the ONLY public constructor is `parse`, which
+            // already rejects (as `LiteralCredential`/`UnknownPlaceholder`) any `userinfo` that
+            // is not exactly `EXPECTED_USERINFO` before an `EndpointTemplate` can exist. So by
+            // construction, every `EndpointTemplate` this method is ever called on already
+            // satisfies this check.
+            //
+            // Kept as a real branch rather than `unreachable!()` or removed: it costs nothing on
+            // the happy path, and it is deliberately defensive against a FUTURE change that
+            // loosens the invariant (a second constructor, a `From<String>`, a refactor of
+            // `parse` that widens what it accepts) without updating this comment — `unreachable!`
+            // would turn that same future mistake into a panic instead of a graceful no-op, and a
+            // config module reachable from the same run loop as the TUI/headless surfaces should
+            // not be the one to introduce a new panic path over what is, worst case, an
+            // unexpected but harmless template string.
             return Ok(ResolvedEndpoint(self.0.clone()));
         }
 
