@@ -78,6 +78,21 @@ const TIMEOUT_BELOW_FORMULA_LOG: &str =
 /// concurrently, so this is a small smoothing buffer, not a bound on output.
 const CHUNK_CHANNEL_CAPACITY: usize = 100;
 
+/// Upper bound on how long [`run_query`] waits for the ttfb-measuring drain task after the
+/// run itself has already concluded (by completion, timeout, or error) — MAGI S6 gate finding
+/// 6.
+///
+/// In the well-behaved case this is a formality: `chunk_tx` is a parameter owned by
+/// `Agent::query_streaming`'s future, so it is dropped — and `chunk_rx.recv()` returns `None`,
+/// closing the drain loop — essentially synchronously with that future's own completion or
+/// drop. This bound exists so `run_query`'s own wall-clock guarantee (REQ-H36: "the bound is
+/// not a lie") does not silently depend on that invariant holding forever in a file outside
+/// this module's edit surface (`src/agent/mod.rs`): if a future change there ever leaks a
+/// `chunk_tx` clone into a longer-lived task, this run still returns instead of hanging past
+/// its own deadline — it degrades to `ttfb_ms: None` (never measured) rather than blocking.
+/// 500ms is generous relative to the sub-millisecond cost of the well-behaved case.
+const DRAIN_GRACE: Duration = Duration::from_millis(500);
+
 /// Normalized transcript role for a real user turn (REQ-H14).
 const ROLE_USER: &str = "user";
 
@@ -675,6 +690,28 @@ fn build_transcript(
     transcript
 }
 
+/// Awaits the ttfb-measuring drain task with [`DRAIN_GRACE`] as an upper bound, aborting it on
+/// timeout so an unexpectedly long-lived `chunk_rx.recv()` loop cannot keep [`run_query`] from
+/// returning (MAGI S6 gate finding 6 — see [`DRAIN_GRACE`]'s rustdoc for why this bound exists
+/// instead of an unconditional `.await`).
+///
+/// # Parameters
+/// - `drain` — the task spawned by `run_query` draining `chunk_rx` and computing
+///   time-to-first-byte.
+///
+/// # Returns
+/// The measured `ttfb_ms`, or `None` if the task panicked or did not finish within
+/// [`DRAIN_GRACE`] (in which case it is aborted, so it cannot linger consuming resources).
+async fn bounded_drain_result(mut drain: tokio::task::JoinHandle<Option<u64>>) -> Option<u64> {
+    match tokio::time::timeout(DRAIN_GRACE, &mut drain).await {
+        Ok(join_result) => join_result.ok().flatten(),
+        Err(_elapsed) => {
+            drain.abort();
+            None
+        }
+    }
+}
+
 /// Runs `prompt` directly through the 3-perspective MAGI consensus for the
 /// `magi consult` subcommand (REQ-H21), returning a [`RunOutcome`] whose `consult`
 /// field holds the MAGI object.
@@ -924,7 +961,7 @@ pub async fn run_query(
         },
         None => Some(query_fut.await),
     };
-    let ttfb_ms = drain.await.ok().flatten();
+    let ttfb_ms = bounded_drain_result(drain).await;
 
     let total_ms = elapsed_ms(run_start);
 
@@ -2790,6 +2827,47 @@ mod tests {
             );
             tokio::time::sleep(POLL).await;
         }
+    }
+
+    /// MAGI S6 gate finding 6: `bounded_drain_result` must return within `DRAIN_GRACE`
+    /// (rather than hang) even when the drain task never sees its channel close — the
+    /// pathological case a future leak of a `chunk_tx` clone elsewhere in the crate (outside
+    /// this module's edit surface) could produce. The sender is deliberately kept alive so
+    /// `rx.recv()` never resolves, simulating exactly that leak.
+    #[tokio::test]
+    async fn test_bounded_drain_result_degrades_instead_of_hanging_when_channel_never_closes() {
+        let (_never_dropped_tx, mut rx) = tokio::sync::mpsc::channel::<()>(1);
+        let drain: tokio::task::JoinHandle<Option<u64>> = tokio::spawn(async move {
+            loop {
+                rx.recv().await;
+            }
+        });
+
+        let start = Instant::now();
+        let result = bounded_drain_result(drain).await;
+        let elapsed = start.elapsed();
+
+        assert_eq!(
+            result, None,
+            "a drain that never observes its channel close must degrade to unmeasured"
+        );
+        // A generous failure ceiling (not a tight timing assertion, per CLAUDE.local.md's
+        // "wait on conditions, never on durations"): the discriminating property is "returned
+        // at all", not "returned in exactly DRAIN_GRACE".
+        assert!(
+            elapsed < DRAIN_GRACE * 10,
+            "bounded_drain_result must return promptly bounded by DRAIN_GRACE, not hang \
+             indefinitely: took {elapsed:?}"
+        );
+    }
+
+    /// The well-behaved case is unaffected: a drain that finishes normally (its channel
+    /// closes promptly, as `Agent::query_streaming` dropping `chunk_tx` does in production)
+    /// still returns its measured value through the new bound.
+    #[tokio::test]
+    async fn test_bounded_drain_result_returns_the_measured_value_in_the_normal_case() {
+        let drain: tokio::task::JoinHandle<Option<u64>> = tokio::spawn(async { Some(42) });
+        assert_eq!(bounded_drain_result(drain).await, Some(42));
     }
 
     /// `query --consult` in `--auto` invokes consult **exactly once**, IN-LOOP —
