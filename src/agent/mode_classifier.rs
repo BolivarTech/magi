@@ -144,7 +144,6 @@ impl ModeClassifier for ProviderClassifier {
 mod tests {
     use std::collections::BTreeSet;
     use std::sync::Mutex;
-    use std::time::Instant;
 
     use anyhow::Result;
     use futures::stream::{self, BoxStream, StreamExt};
@@ -230,23 +229,37 @@ mod tests {
         }
     }
 
-    /// Counts how many emitted notices contain `needle`.
-    #[tokio::test]
+    /// SC-A07m: a provider slower than [`CLASSIFY_TIMEOUT_SECS`] never makes `classify` inherit
+    /// its delay. Paused clock (loop 1 fix round CE, F14): the other four timing tests in this
+    /// file already use `start_paused = true`; this one used a real 8-second
+    /// `tokio::time::sleep` plus a wall-clock upper bound, reproducing the load-flakiness
+    /// pattern `CLAUDE.local.md` documents twice — under concurrent `cargo nextest run`, the
+    /// internal `tokio::time::timeout` firing late enough to blow the margin is a plausible
+    /// flake, not a hypothetical one.
+    ///
+    /// **No elapsed-time assertion is needed under a manually-driven clock**, and adding one
+    /// back would be the wrong kind of assertion: with the clock paused, "elapsed" is whatever
+    /// we choose to `advance()` past, not a measurement of anything the code did. The property
+    /// this test actually needs — the provider's delay is never inherited — is asserted
+    /// structurally instead, the same way `the_two_notices_fire_once_each` right below proves
+    /// it: the advance is `CLASSIFY_TIMEOUT_SECS + 1`, strictly between the classifier's own
+    /// ceiling and the `+2` provider delay. If `classify` ever started waiting on the provider's
+    /// full delay instead of its own, `handle.await` would have nothing left to resolve it and
+    /// the test would hang rather than reach the assertion below.
+    #[tokio::test(start_paused = true)]
     async fn a_slow_provider_degrades_every_inference_to_default() {
         let classifier = ProviderClassifier::new(
             slow_provider(Duration::from_secs(CLASSIFY_TIMEOUT_SECS + 2)),
             Arc::new(ProcessNoticeSink::default()),
         );
 
-        let started = Instant::now();
-        let inferred = classifier.classify("x").await;
+        let handle = tokio::spawn(async move { classifier.classify("x").await });
+        tokio::time::advance(Duration::from_secs(CLASSIFY_TIMEOUT_SECS + 1)).await;
+        let inferred = handle.await.expect("the classify task must not panic");
+
         assert_eq!(
             inferred, None,
             "un provider que no responde a tiempo falla abierto"
-        );
-        assert!(
-            started.elapsed() < Duration::from_secs(CLASSIFY_TIMEOUT_SECS + 1),
-            "el techo propio de la clasificación no se respetó"
         );
     }
 
