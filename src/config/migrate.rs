@@ -89,6 +89,19 @@ const BASE_URL_CORRECTION_TAIL: &str = "\"   # at the root level, above every se
 const BASE_URL_CORRECTION_SUFFIX_REDACTED: &str =
     " Value redacted: copy the real one from the old file.";
 
+/// States that the value is **masked in full**, for a `base_url` that never parsed as a URL to
+/// begin with (loop 1 fix round CF, F21 follow-up).
+///
+/// `redact_url` masks `UserinfoLocation::Unparseable` to the literal `"***"` just like it masks
+/// a located credential — it is the same "safe failure direction" rule, applied because a string
+/// with no `"://"` might hide a secret anywhere. The wording deliberately differs from
+/// [`BASE_URL_CORRECTION_SUFFIX_REDACTED`]: there is no credential to "copy from the old file"
+/// here, because the value never had URL structure to extract one from. Telling the user to copy
+/// a credential that was never identified would send them looking for something that is not
+/// there.
+const BASE_URL_CORRECTION_SUFFIX_UNPARSEABLE: &str =
+    " Value masked: the original did not parse as a URL at all — check the old file directly.";
+
 /// Prefix of the `[headless].tool_result_cap_bytes` correction.
 const CAP_CORRECTION_PREFIX: &str = "tool_result_cap_bytes = ";
 
@@ -167,14 +180,20 @@ pub fn detect_migrations(raw: &str) -> Vec<Migration> {
         .and_then(|t| t.get(BASE_URL_KEY))
         .and_then(Value::as_str)
     {
-        // The "redacted" clause only applies when there is actually something to redact — a
-        // credential-free value renders literal and pasteable, with nothing left to claim was
-        // hidden (SC-A21e, F21).
-        let had_credential = matches!(locate_userinfo(url), UserinfoLocation::Found { .. });
-        let redacted_clause = if had_credential {
-            BASE_URL_CORRECTION_SUFFIX_REDACTED
-        } else {
-            ""
+        // Exhaustive over `UserinfoLocation` on purpose (loop 1 fix round CF): a positive check
+        // against `Found` alone left `Unparseable` — a DIFFERENT outcome where `redact_url` also
+        // shows a value that is not the real one — silently undisclosed. Matching means a future
+        // fourth variant fails to compile here instead of falling into the wrong branch, which is
+        // exactly how this bug happened the first time.
+        let redacted_clause = match locate_userinfo(url) {
+            // The shown value equals the real one: nothing was hidden, nothing to disclose
+            // (SC-A21e, F21).
+            UserinfoLocation::Absent => "",
+            // A credential was located and masked: point the user at the old file to recover it.
+            UserinfoLocation::Found { .. } => BASE_URL_CORRECTION_SUFFIX_REDACTED,
+            // The whole value was masked because it never parsed as a URL: different disclosure,
+            // since there is no credential to "copy" (F21 follow-up).
+            UserinfoLocation::Unparseable => BASE_URL_CORRECTION_SUFFIX_UNPARSEABLE,
         };
         found.push(Migration {
             key: OPENAI_BASE_URL_LABEL,
