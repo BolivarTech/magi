@@ -55,6 +55,32 @@ pub enum ModeSource {
     Default,
 }
 
+/// Human-facing label for [`ModeSource`] (F26, loop 1 fix round CE).
+///
+/// Exists so a caller that renders the level for a person (the TUI's dispatch notice is the
+/// motivating case) has a real `Display` to reach for instead of `{:?}` — a derived `Debug` is
+/// meant for developers, and relying on it for user-facing text means the label can drift the
+/// moment someone adds a `#[derive]` attribute that changes its shape. The five strings are
+/// chosen to match `Debug`'s output exactly, pinned by
+/// `tests::display_matches_the_five_variant_names`, so swapping `{:?}` for `{}` at a call site
+/// changes nothing the user sees.
+///
+/// This is a **different** vocabulary from the module's internal `mode_source_label` on purpose
+/// — that one is the internal, stable wire label for [`RESOLVED_MODE_KEY`]'s round-trip and is
+/// deliberately insulated from anything a human reads (see its own doc). Collapsing the two
+/// would couple a reserved, load-bearing key to cosmetic text.
+impl std::fmt::Display for ModeSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Explicit => "Explicit",
+            Self::Configured => "Configured",
+            Self::AgentChosen => "AgentChosen",
+            Self::Inferred => "Inferred",
+            Self::Default => "Default",
+        })
+    }
+}
+
 /// Resolves the effective mode from the five possible sources.
 ///
 /// The only public door is [`resolve_mode_guarded`]. Keeping this function private prevents any
@@ -618,6 +644,26 @@ mod tests {
         let e = <Mode as ModeExt>::parse_config_value("banana").unwrap_err();
         assert!(e.to_string().contains("banana"), "nombra el valor recibido");
         assert!(e.to_string().contains("code-review"), "y los tres válidos");
+    }
+
+    /// F26 (loop 1, fix round CE): [`Display`](std::fmt::Display) exists so a caller that wants
+    /// the level for a human (e.g. the TUI's dispatch notice) does not have to fall back to
+    /// `Debug` or hand-roll a second five-arm label map next to [`mode_source_label`]'s. The
+    /// five strings match [`std::fmt::Debug`]'s output exactly and on purpose: this pins that
+    /// choice so a future edit to one cannot silently diverge from the other.
+    #[test]
+    fn display_matches_the_five_variant_names() {
+        let cases = [
+            (ModeSource::Explicit, "Explicit"),
+            (ModeSource::Configured, "Configured"),
+            (ModeSource::AgentChosen, "AgentChosen"),
+            (ModeSource::Inferred, "Inferred"),
+            (ModeSource::Default, "Default"),
+        ];
+        for (source, expected) in cases {
+            assert_eq!(source.to_string(), expected, "{source:?}");
+            assert_eq!(source.to_string(), format!("{source:?}"), "{source:?}");
+        }
     }
 
     /// The five levels of [`ModeSource`] are distinguishable from one another.
