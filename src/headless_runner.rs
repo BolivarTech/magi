@@ -640,18 +640,32 @@ fn build_transcript(
     for msg in history {
         match msg.role {
             Role::User => {
-                // A `User` message is either a real user turn (Text) or a
-                // tool-result carrier (ToolResult); fold the latter away.
-                let is_tool_result = msg
-                    .content
-                    .iter()
-                    .any(|c| matches!(c, Content::ToolResult { .. }));
-                if is_tool_result {
+                // Every current production write path constructs a tool-result carrier
+                // message with ONLY `Content::ToolResult` blocks (see `agent::mod.rs`'s
+                // `tool_results.push(result_content)` / `content: vec![result_content]`
+                // sites) — never mixed with `Content::Text` in the same message. But
+                // `Message`/`Content` place no such constraint in the TYPE SYSTEM (MAGI S6
+                // gate finding 7): CLAUDE.md's durable invariant is that a tool result must
+                // never be COLLAPSED into text, which cuts the other way from what an
+                // unconditional "any ToolResult block ⇒ discard the whole message" would do
+                // if a message ever carried both. The distinction that matters is whether
+                // there is real text to keep, not whether a ToolResult block is ALSO
+                // present: a pure tool-result carrier (no text) is folded away as before;
+                // anything with text is kept, so a hypothetical mixed message — from a
+                // future write path, or a session loaded from the DB under `load_all`
+                // (REQ-28) — cannot silently lose its real user text (B9).
+                let text = msg.concat_text();
+                let is_pure_tool_result_carrier = text.is_empty()
+                    && msg
+                        .content
+                        .iter()
+                        .any(|c| matches!(c, Content::ToolResult { .. }));
+                if is_pure_tool_result_carrier {
                     continue;
                 }
                 transcript.push(TranscriptEntry {
                     role: ROLE_USER.to_string(),
-                    content: msg.concat_text(),
+                    content: text,
                     tool_calls: None,
                 });
             }
@@ -2180,6 +2194,68 @@ mod tests {
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].name, "ls");
         assert!(calls[0].ok);
+    }
+
+    /// MAGI S6 gate finding 7: a `User`-role message that carries BOTH a real `Text` block
+    /// and a `Content::ToolResult` block must not have its text silently discarded. No
+    /// current production write path constructs this shape (see `build_transcript`'s
+    /// updated rustdoc), but nothing in `Message`/`Content` rules it out, and the old
+    /// "any ToolResult block ⇒ skip the whole message" check would have dropped the text
+    /// here.
+    #[test]
+    fn test_build_transcript_keeps_text_from_a_user_message_that_also_carries_a_tool_result() {
+        let history = vec![Message {
+            role: Role::User,
+            content: vec![
+                Content::Text {
+                    text: "please also note: X".to_string(),
+                },
+                Content::ToolResult {
+                    tool_use_id: "call-1".to_string(),
+                    content: "tool output".to_string(),
+                    is_error: false,
+                },
+            ],
+        }];
+        let records: HashMap<&str, &ToolCallRecord> = HashMap::new();
+
+        let transcript = build_transcript(&history, &records);
+
+        assert_eq!(
+            transcript.len(),
+            1,
+            "the text must not vanish: {transcript:?}"
+        );
+        assert_eq!(transcript[0].role, "user");
+        assert_eq!(transcript[0].content, "please also note: X");
+    }
+
+    /// The overwhelmingly common case is unaffected: a PURE tool-result carrier (no text at
+    /// all) is still folded away — its outcome already lives inside the requesting
+    /// assistant entry's `tool_calls`.
+    #[test]
+    fn test_build_transcript_still_folds_away_a_pure_tool_result_carrier() {
+        let history = vec![
+            Message::user("prompt"),
+            Message {
+                role: Role::User,
+                content: vec![Content::ToolResult {
+                    tool_use_id: "call-1".to_string(),
+                    content: "tool output".to_string(),
+                    is_error: false,
+                }],
+            },
+        ];
+        let records: HashMap<&str, &ToolCallRecord> = HashMap::new();
+
+        let transcript = build_transcript(&history, &records);
+
+        assert_eq!(
+            transcript.len(),
+            1,
+            "the pure tool-result carrier must still be folded away: {transcript:?}"
+        );
+        assert_eq!(transcript[0].content, "prompt");
     }
 
     // ── REQ-H36: wall-clock timeout ─────────────────────────────────────────────
