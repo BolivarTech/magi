@@ -526,6 +526,22 @@ fn tui_consult_dispatch_notice(res: &ModeResolution) -> String {
     )
 }
 
+/// The notice sent when the spawned `magi.analyze` task panics (loop 1 fix round CE, F24).
+///
+/// **Replaces a pre-existing `eprintln!`** that predates this gate's merge-base and wrote
+/// straight to stderr while the TUI holds raw mode and the alternate screen — the same
+/// frame-corruption class F3 fixed for the mode classifier's notices. Unlike its sibling arm
+/// (`Ok(Err(e))`, whose `eprintln!` was a pure duplicate of the `AgentResponse::Error` sent
+/// right after and was simply dropped), this one carries [`tokio::task::JoinError`] detail —
+/// e.g. which panic message the task exited with — that the generic "crashed unexpectedly"
+/// error text sent alongside it does not transport. Routed through
+/// [`AgentResponse::Notice`] instead of dropped, so the diagnostic survives losing its
+/// stderr line.
+#[must_use]
+fn consult_panic_notice(join_err: &tokio::task::JoinError) -> String {
+    format!("[consult] analyze panicked: {join_err}")
+}
+
 /// Braille spinner frames for the "thinking" activity indicator.
 pub(crate) const SPINNER_FRAMES: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
@@ -1173,12 +1189,24 @@ pub async fn run_tui_ext(
                             // the SAME `explain_magi_error` `ConsultTool`/headless use —
                             // see `tui_consult_error_body`'s own doc. `body` is already
                             // redacted (B11) before either use below.
+                            //
+                            // Loop 1 fix round CE, F24: the pre-existing `eprintln!` here
+                            // was dropped rather than routed — it was a PURE duplicate of
+                            // `body`, which the very next line already sends through
+                            // `AgentResponse::Error`. Nothing was lost by removing it.
                             let body = tui_consult_error_body(&e, magi_kind);
-                            eprintln!("[consult] analyze failed: {body}");
                             let _ = response_tx.send(AgentResponse::Error(body)).await;
                         }
                         Err(join_err) => {
-                            eprintln!("[consult] analyze panicked: {join_err}");
+                            // Loop 1 fix round CE, F24: replaces a pre-existing `eprintln!`
+                            // that wrote over the ratatui frame while raw mode is active —
+                            // the same class F3 fixed for the classifier's notices. Unlike
+                            // the arm above, this one's `eprintln!` carried `JoinError`
+                            // detail the generic error text below does not, so it is routed
+                            // through the notice channel instead of dropped.
+                            let _ = response_tx
+                                .send(AgentResponse::Notice(consult_panic_notice(&join_err)))
+                                .await;
                             let _ = response_tx
                                 .send(AgentResponse::Error(
                                     "MAGI consult crashed unexpectedly; the session is still alive."
@@ -3399,6 +3427,30 @@ mod tests {
             app.messages.iter().any(|m| m.contains("MAGI VERDICT")),
             "expected a message containing 'MAGI VERDICT', got: {:?}",
             app.messages
+        );
+    }
+
+    /// Loop 1 fix round CE, F24: the JoinError's own detail reaches the notice text, driven
+    /// through a REAL panicked `tokio::spawn`, not a hand-rolled stand-in — a genuine
+    /// `JoinError` cannot be constructed any other way (it has no public constructor), and a
+    /// mock would not prove the real `Display` output is what ends up in the notice.
+    #[tokio::test]
+    async fn consult_panic_notice_carries_the_real_join_errors_detail() {
+        let join_err = tokio::spawn(async {
+            panic!("synthetic panic for F24 verification");
+        })
+        .await
+        .expect_err("the spawned task must have panicked");
+
+        let notice = consult_panic_notice(&join_err);
+
+        assert!(
+            notice.starts_with("[consult] analyze panicked: "),
+            "{notice}"
+        );
+        assert!(
+            notice.contains(&join_err.to_string()),
+            "the JoinError's own Display must reach the notice verbatim: {notice}"
         );
     }
 }
