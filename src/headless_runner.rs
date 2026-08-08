@@ -2258,6 +2258,102 @@ mod tests {
         assert_eq!(transcript[0].content, "prompt");
     }
 
+    /// MAGI S6 gate finding 8: `policy::READ_ONLY_TOOLS`/`READ_WRITE_TOOLS` must match the
+    /// REAL `Tool::name()` implementations, not a third hand-typed literal list
+    /// (`policy.rs`'s own `REAL_REGISTERED_TOOL_NAMES`, which was exactly as fictional as the
+    /// two lists it checked — nothing failed if `main.rs` and `policy.rs` drifted, only if
+    /// `policy.rs` disagreed with itself). The `headless` module stays pure (cannot import
+    /// `crate::tools`, see its own module rustdoc) — but this file, `headless_runner.rs`,
+    /// already lives in the BINARY crate alongside `crate::tools` (it already imports
+    /// `crate::tools::consult::ConsultTool`/`crate::tools::bash::BashTool` for other tests),
+    /// so it can construct each real tool and read its actual name.
+    ///
+    /// This does not close the drift risk completely: a BRAND NEW tool type registered in
+    /// `main.rs` without a corresponding construction added here would still slip past both
+    /// this test and the old one — there is no single "real registry" function in `main.rs` to
+    /// call instead of enumerating tool types by hand, and `main.rs` is outside this file's
+    /// edit surface. What this closes is the more common failure mode this project has already
+    /// hit once (the nextest-filter drift documented in `CLAUDE.local.md`): an EXISTING tool's
+    /// name changing without every list that names it being updated in step.
+    #[tokio::test]
+    async fn test_policy_tool_lists_match_real_tool_name_implementations() {
+        use magi_rs::headless::policy::{READ_ONLY_TOOLS, READ_WRITE_TOOLS};
+
+        use crate::system::database::MemoryStore;
+        use crate::system::fs::{FileSystem, RealFileSystem};
+        use crate::system::grep::MockGrep;
+        use crate::tools::bash::BashTool;
+        use crate::tools::grep::GrepTool;
+        use crate::tools::knowledge::ProjectFactTool;
+        use crate::tools::ls::ListTool;
+        use crate::tools::read::FileReadTool;
+        use crate::tools::write::FileWriteTool;
+
+        /// Never actually called: `ProjectFactTool::new` only needs a value of the right
+        /// type to construct, and this test never invokes any of its methods — it exists
+        /// purely so `Tool::name()` can be called on a real `ProjectFactTool`.
+        struct UnusedMemoryStore;
+
+        #[async_trait::async_trait]
+        impl MemoryStore for UnusedMemoryStore {
+            async fn create_session(&self, _project_name: &str) -> anyhow::Result<String> {
+                unimplemented!("not exercised by this test")
+            }
+            async fn add_message(
+                &self,
+                _session_id: &str,
+                _message: &Message,
+            ) -> anyhow::Result<()> {
+                unimplemented!("not exercised by this test")
+            }
+            async fn get_messages(&self, _session_id: &str) -> anyhow::Result<Vec<Message>> {
+                unimplemented!("not exercised by this test")
+            }
+            async fn list_sessions(&self) -> anyhow::Result<Vec<(String, String)>> {
+                unimplemented!("not exercised by this test")
+            }
+            async fn set_knowledge(&self, _key: &str, _value: &str) -> anyhow::Result<()> {
+                unimplemented!("not exercised by this test")
+            }
+            async fn get_knowledge(&self, _key: &str) -> anyhow::Result<Option<String>> {
+                unimplemented!("not exercised by this test")
+            }
+            async fn list_knowledge_keys(&self) -> anyhow::Result<Vec<String>> {
+                unimplemented!("not exercised by this test")
+            }
+        }
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().to_path_buf();
+        let fs: Arc<dyn FileSystem> = Arc::new(RealFileSystem);
+
+        let real_tools: Vec<Box<dyn Tool>> = vec![
+            Box::new(ListTool::new(fs.clone(), root.clone()).expect("ListTool")),
+            Box::new(FileReadTool::new(fs.clone(), root.clone()).expect("FileReadTool")),
+            Box::new(FileWriteTool::new(fs.clone(), root.clone()).expect("FileWriteTool")),
+            Box::new(GrepTool::new(Box::new(MockGrep::new()), root.clone()).expect("GrepTool")),
+            Box::new(BashTool::new(root.clone()).expect("BashTool")),
+            Box::new(ConsultTool::new(canned_magi(), false)),
+            Box::new(ProjectFactTool::new(Arc::new(UnusedMemoryStore))),
+        ];
+        let mut real_names: Vec<&str> = real_tools.iter().map(|t| t.name()).collect();
+        real_names.sort_unstable();
+
+        let mut known: Vec<&str> = READ_ONLY_TOOLS
+            .iter()
+            .copied()
+            .chain(READ_WRITE_TOOLS.iter().copied())
+            .collect();
+        known.sort_unstable();
+
+        assert_eq!(
+            known, real_names,
+            "policy::READ_ONLY_TOOLS + READ_WRITE_TOOLS must match the real Tool::name() \
+             implementations exactly — update the policy lists when a tool's name changes \
+             or a new tool is registered in main.rs"
+        );
+    }
+
     // ── REQ-H36: wall-clock timeout ─────────────────────────────────────────────
 
     /// `resolve_tier_timeout_default` applies the tier default: the read-only `default`

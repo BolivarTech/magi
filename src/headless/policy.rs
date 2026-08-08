@@ -24,7 +24,12 @@ pub const READ_ONLY_TOOLS: &[&str] = &["ls", "view", "grep"];
 /// `Auto`/`FullAuto` (REQ-H07). Verified against the real registry in `main.rs`
 /// (`FileWriteTool`/`BashTool`/`ConsultTool`/`ProjectFactTool`, whose `Tool::name()` returns
 /// these four literals — see `src/tools/{write,bash,consult,knowledge}.rs`).
-const READ_WRITE_TOOLS: &[&str] = &["edit", "bash", "consult", "project_knowledge"];
+///
+/// `pub` (not `pub(crate)`, which would not cross the lib/bin crate boundary): the binary
+/// crate's `headless_runner.rs` — which, unlike this pure `headless` module, CAN reach
+/// `crate::tools` — cross-checks this list against the real `Tool::name()` implementations
+/// (MAGI S6 gate finding 8, `test_policy_tool_lists_match_real_tool_name_implementations`).
+pub const READ_WRITE_TOOLS: &[&str] = &["edit", "bash", "consult", "project_knowledge"];
 
 /// Tool authorization tier for a headless run.
 ///
@@ -206,6 +211,14 @@ mod tests {
     /// [`READ_ONLY_TOOLS`]/`READ_WRITE_TOOLS`) remains uncovered by this guard until a
     /// maintainer updates both lists — the `headless` module is pure and cannot import
     /// `crate::tools` to verify it dynamically (see module rustdoc).
+    ///
+    /// **This is a hand-typed list, same as the two it checks — it is not, by itself, a check
+    /// against `main.rs`** (MAGI S6 gate finding 8). The genuinely dynamic check lives in the
+    /// BINARY crate's `headless_runner.rs`
+    /// (`test_policy_tool_lists_match_real_tool_name_implementations`), which — unlike this
+    /// pure `headless` module — sits alongside `crate::tools` and constructs each real `Tool`
+    /// to read its actual `Tool::name()`. This list stays as a same-crate sanity check that
+    /// `READ_ONLY_TOOLS`/`READ_WRITE_TOOLS` are internally consistent.
     const REAL_REGISTERED_TOOL_NAMES: &[&str] = &[
         "ls",
         "view",
