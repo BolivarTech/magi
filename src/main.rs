@@ -7825,11 +7825,28 @@ mod tests {
         /// `openai_compat_root` interpolates the RESOLVED endpoint into its normalization
         /// notice, which reaches the TUI startup list and headless stderr; drop its
         /// `redact_url` and this assertion goes red immediately.
+        ///
+        /// **The survival check targets the interpolated value, not the template.** An earlier
+        /// version of this test asserted only `.contains("/v1")` as proof the notice fired —
+        /// but that literal is *also* static text in `openai_compat_root`'s own message
+        /// ("without a `/v1` suffix"), so it is satisfied no matter what gets interpolated in
+        /// its place. Mutation-verified: swapping `redact_url(&normalized)` for the opaque
+        /// literal `"***"` at that call site left the old assertion green. The fixture below
+        /// uses a host:port the template cannot produce by coincidence, so only the REAL
+        /// redacted URL — `"***@" + host + ":" + port + "/v1"` — can satisfy the check.
         #[test]
         fn build_native_provider_never_leaks_a_resolved_credential() {
+            // Distinctive enough that neither the message template nor an opaque `"***"`
+            // literal could match it by chance — only interpolating the actual resolved,
+            // redacted URL produces this host:port pair.
+            const CANARY_HOST: &str = "zzq-mutation-canary.example";
+            const CANARY_PORT: &str = "48213";
+
             // No `/v1` suffix ⇒ `openai_compat_root` normalizes AND emits its notice, which is
             // the path that embeds the URL in user-visible text.
-            let endpoint = credentialed_endpoint("http://[user]:[password]@host:11434");
+            let endpoint = credentialed_endpoint(&format!(
+                "http://[user]:[password]@{CANARY_HOST}:{CANARY_PORT}"
+            ));
             let mut notices: Vec<Notice> = Vec::new();
             let built = build_native_provider(
                 ProviderKind::Ollama,
@@ -7840,10 +7857,19 @@ mod tests {
                 &mut notices,
             );
             assert!(built.is_ok(), "keyless ollama over http builds fine");
+
+            // Only `redact_url`'s designed output over the resolved URL contains this exact
+            // substring: the userinfo replaced in place, host and port left visible. A
+            // template-only match (or a bare `"***"` standing in for the whole credential)
+            // cannot carry the host/port, which is what makes this load-bearing rather than
+            // cosmetic — see the mutation note above.
+            let expected_redacted = format!("***@{CANARY_HOST}:{CANARY_PORT}/v1");
             assert!(
-                notices.iter().any(|n| n.text.contains("/v1")),
-                "test setup: the normalization notice must have fired, or this asserts nothing"
+                notices.iter().any(|n| n.text.contains(&expected_redacted)),
+                "test setup: the normalization notice must carry the resolved, redacted host, \
+                 or this asserts nothing; notices: {notices:?}"
             );
+
             for n in &notices {
                 assert!(
                     !n.text.contains(SEAT_CANARY),
