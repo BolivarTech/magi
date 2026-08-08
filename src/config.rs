@@ -451,8 +451,6 @@ impl MagiConfig {
     /// ceiling below the absolute floor of the derivation, the internal floors win and the sum
     /// exceeds the ceiling. "Impossible by construction" is only true if the input range is
     /// bounded.
-    ///
-    /// Rejects an output cap below the minimum viable (REQ-A11b).
     fn validate_agent_timeout(&self) -> Result<(), ConfigError> {
         let Some(secs) = self.magi.agent_timeout_secs else {
             return Ok(()); // ausente ⇒ el default built-in, ya válido
@@ -467,10 +465,11 @@ impl MagiConfig {
         })
     }
 
+    /// Rejects an output cap below the minimum viable (REQ-A11b).
+    ///
     /// # Errors
     ///
     /// [`ConfigError::OutputCapTooSmall`] with the received value and the minimum.
-    /// Effective provider of the main agent: root key, or the built-in default.
     fn validate_output_cap(&self) -> Result<(), ConfigError> {
         let Some(cap) = self.tool_result_cap_bytes else {
             return Ok(());
@@ -482,8 +481,9 @@ impl MagiConfig {
         Ok(())
     }
 
-    /// **Infallible by precondition:** [`Self::validate_vocabulary`] already ran in
+    /// Effective provider of the main agent: root key, or the built-in default.
     ///
+    /// **Infallible by precondition:** [`Self::validate_vocabulary`] already ran in
     /// [`Self::from_toml_str`]/`load()`, so the only possible `None` is the absent-or-empty
     /// one.
     /// Task 4.1: consumed in production by `resolve_effective_provider_kind` (main agent
@@ -497,7 +497,6 @@ impl MagiConfig {
     /// calls "infallible by precondition" is exactly what this checks.
     #[must_use]
     pub fn effective_provider(&self) -> ProviderKind {
-        // Mode declared in `[magi].default_mode`, or `None` if absent/empty (REQ-A15).
         debug_assert!(
             self.validate_vocabulary().is_ok(),
             "load() debe haber validado"
@@ -523,7 +522,7 @@ impl MagiConfig {
     /// `debug_assert!`.
     #[must_use]
     pub fn effective_default_mode(&self) -> Option<Mode> {
-        // Trio `kind`: declared, or **inherited** from the main one (REQ-A01b).
+        // Mode declared in `[magi].default_mode`, or `None` if absent/empty (REQ-A15).
         debug_assert!(
             self.validate_vocabulary().is_ok(),
             "load() debe haber validado"
@@ -532,6 +531,8 @@ impl MagiConfig {
             .unwrap_or(None)
     }
 
+    /// Trio `kind`: declared, or **inherited** from the main one (REQ-A01b).
+    ///
     /// Inheritance is NOT a heuristic: a heuristic guesses from an observed datum (e.g., the
     /// port); inheritance reads a declared value. There is nothing to guess wrong.
     ///
@@ -543,8 +544,6 @@ impl MagiConfig {
     /// depend on this accessor to report its typed invalid-kind error; it does so BEFORE, with
     /// its own `ProviderKind::parse`. Covered by
     /// `magi_kind_inherits_from_root_provider_when_absent`.
-    ///
-    /// `true` if the trio runs on a different endpoint or kind from the main one.
     #[must_use]
     pub fn effective_magi_kind(&self) -> ProviderKind {
         ProviderKind::parse(self.magi.kind.as_deref().unwrap_or_default())
@@ -552,16 +551,15 @@ impl MagiConfig {
             .unwrap_or_else(|| self.effective_provider())
     }
 
-    /// **It is decided on what is DECLARED, not by comparing resolved URLs.** Two different
+    /// `true` if the trio runs on a different endpoint or kind from the main one.
     ///
+    /// **It is decided on what is DECLARED, not by comparing resolved URLs.** Two different
     /// templates can resolve to the same host — one with vault credentials and one without —
     /// and comparing the result would say "they do not diverge" for a configuration that does.
     /// What matters here is the operator's intention.
     /// Task 4.4: consumed in production by `divergence_notice` (`main.rs`, REQ-A07p) — the
     /// `#[allow(dead_code)]` it had was removed here because there is now a real caller.
     /// Covered by `magi_endpoint_diverges_when_the_trio_declares_its_own_kind_or_base_url`.
-    ///
-    /// Input cap OF magi-rs, before magi-core's `max_input_len` (REQ-A11b).
     #[must_use]
     pub fn magi_endpoint_diverges(&self) -> bool {
         let declara_url = self
@@ -577,6 +575,8 @@ impl MagiConfig {
         declara_url || declara_kind
     }
 
+    /// Input cap OF magi-rs, before magi-core's `max_input_len` (REQ-A11b).
+    ///
     /// Rationale for the number: **cost, not capacity**. magi-core already skips models where
     /// the prompt does not fit, so this does not protect the model — it bounds the expense, and
     /// the payload is paid for three because it goes to the three mages.
@@ -584,8 +584,6 @@ impl MagiConfig {
     /// Consumed by `check_query_size` on ALL THREE entry paths (Task 6.2, REQ-A11b, SC-A11c):
     /// `ConsultTool::execute`, the direct headless path (`headless_runner::analyze_direct`) and
     /// the explicit `/consult` of the TUI.
-    ///
-    /// Report OUTPUT cap, on ALL THREE paths (REQ-A11b).
     #[must_use]
     pub fn effective_max_query_bytes(&self) -> usize {
         self.magi
@@ -593,8 +591,9 @@ impl MagiConfig {
             .unwrap_or(magi_rs::magi::MAX_QUERY_BYTES)
     }
 
-    /// **It lives at the root and not in `[headless]`**: under `[headless]` it would only cover
+    /// Report OUTPUT cap, on ALL THREE paths (REQ-A11b).
     ///
+    /// **It lives at the root and not in `[headless]`**: under `[headless]` it would only cover
     /// batch mode and leave interactive mode loose, which is exactly where the report is re-
     /// sent on every turn of a long session. A cap that protects the cheap case and not the
     /// expensive one protects the wrong case. The `allow(dead_code)` this had was removed in
@@ -603,13 +602,14 @@ impl MagiConfig {
     /// `ConsultTool::with_output_cap` for the TUI and `magi query` tool loop, and
     /// `TuiMagiRuntimeConfig::tool_result_cap` applies it to the explicit `/consult` of the TUI
     /// via `truncate_report`.
-    /// System endpoint: declared root, or the built-in default.
     #[must_use]
     pub fn effective_tool_result_cap(&self) -> usize {
         self.tool_result_cap_bytes
             .unwrap_or(magi_rs::magi::TOOL_RESULT_CAP_BYTES)
     }
 
+    /// System endpoint: declared root, or the built-in default.
+    ///
     /// Returns the TEMPLATE, not an already usable `&str`: resolving credentials requires the
     /// vault, and that is the only path to a usable endpoint (REQ-A16c).
     ///
@@ -618,8 +618,6 @@ impl MagiConfig {
     /// [`EndpointError`] if the declared value is not a valid template (literal credential,
     /// unknown placeholder, or untraversable URL). See
     /// [`magi_rs::magi::endpoint::EndpointTemplate::parse`].
-    /// Resolves a section's override (`[magi].base_url`/`[embedding].base_url`) against the
-    /// same effective system endpoint, or inherits if there is no override.
     pub fn effective_base_url(&self) -> Result<EndpointTemplate, EndpointError> {
         EndpointTemplate::parse(
             self.base_url
@@ -631,6 +629,9 @@ impl MagiConfig {
         )
     }
 
+    /// Resolves a section's override (`[magi].base_url`/`[embedding].base_url`) against the
+    /// same effective system endpoint, or inherits if there is no override.
+    ///
     /// Shared by [`Self::effective_magi_base_url`] and [`Self::effective_embedding_base_url`]:
     /// both apply **exactly** the same rule ("own, blank-is-absent, else inheritance") and
     /// repeating it in each would be the kind of duplication that B3 forbids — desynchronizing
@@ -639,7 +640,6 @@ impl MagiConfig {
     /// # Errors
     ///
     /// See [`Self::effective_base_url`].
-    /// Trio endpoint: override of `[magi].base_url`, or inheritance from the system.
     fn override_or_inherit_base_url(
         &self,
         own: Option<&str>,
@@ -651,6 +651,8 @@ impl MagiConfig {
         }
     }
 
+    /// Trio endpoint: override of `[magi].base_url`, or inheritance from the system.
+    ///
     /// # Errors
     ///
     /// See [`Self::effective_base_url`].
@@ -658,10 +660,6 @@ impl MagiConfig {
     /// BEFORE startup finishes — it also closes SC-A16d for `[magi].base_url`, not only for the
     /// root and the embedder. The actual native trio construction on this value remains Phase
     /// 4; here it is only validated.
-    ///
-    /// Embedder endpoint: override of `[embedding].base_url`, or inheritance from the system
-    /// (REQ-A21 — behavior change from v0.11.0, see
-    /// [`crate::memory::config::EmbeddingConfig::base_url`]).
     pub fn effective_magi_base_url(&self) -> Result<EndpointTemplate, EndpointError> {
         self.override_or_inherit_base_url(
             self.magi.base_url.as_deref(),
@@ -669,11 +667,13 @@ impl MagiConfig {
         )
     }
 
+    /// Embedder endpoint: override of `[embedding].base_url`, or inheritance from the system
+    /// (REQ-A21 — behavior change from v0.11.0, see
+    /// [`crate::memory::config::EmbeddingConfig::base_url`]).
+    ///
     /// # Errors
     ///
     /// See [`Self::effective_base_url`].
-    /// Loads `magi.toml` from its **path** (not its directory) — Task 1.4 finally consumes
-    /// `Workspace::config_path()` (REQ-A22b).
     pub fn effective_embedding_base_url(&self) -> Result<EndpointTemplate, EndpointError> {
         self.override_or_inherit_base_url(
             self.embedding.base_url.as_deref(),
@@ -681,6 +681,9 @@ impl MagiConfig {
         )
     }
 
+    /// Loads `magi.toml` from its **path** (not its directory) — Task 1.4 finally consumes
+    /// `Workspace::config_path()` (REQ-A22b).
+    ///
     /// An **absent** file returns the built-in defaults, `Ok`, with no notices. An **empty or
     /// whitespace-only** file too: every root field is optional, so an empty TOML is a valid
     /// TOML that declares zero things (SC-A21f).
@@ -812,9 +815,8 @@ impl MagiConfig {
             });
         }
 
-        // Prefixes a [`ConfigError::Parse`] with the path of the offending file; the other
-        // variants are already self-contained (they name the field, the value, or the range)
-        // and do not need the path to be actionable.
+        // REQ-A12c, same shape one level down: `[magi].kind = "anthropic"` with its own
+        // declared `[magi].base_url` — that endpoint is not used either.
         if self.effective_magi_kind() == ProviderKind::Anthropic && self.magi.base_url.is_some() {
             out.push(
                 "notice: with `[magi].kind = \"anthropic\"` the `[magi].base_url` is NOT \
@@ -827,8 +829,9 @@ impl MagiConfig {
     }
 }
 
-/// Effective backend of the main agent: env `MAGI_PROVIDER` > TOML `provider` >
-/// `DEFAULT_PROVIDER` (RF-1, REQ-A01b).
+/// Prefixes a [`ConfigError::Parse`] with the path of the offending file; the other variants
+/// are already self-contained (they name the field, the value, or the range) and do not need
+/// the path to be actionable.
 fn attach_path(e: ConfigError, path: &Path) -> ConfigError {
     match e {
         ConfigError::Parse(msg) => ConfigError::Parse(format!("{}: {msg}", path.display())),
@@ -836,6 +839,9 @@ fn attach_path(e: ConfigError, path: &Path) -> ConfigError {
     }
 }
 
+/// Effective backend of the main agent: env `MAGI_PROVIDER` > TOML `provider` >
+/// `DEFAULT_PROVIDER` (RF-1, REQ-A01b).
+///
 /// Task 4.1: removes the `legacy_backend_label`/`resolve_provider` shim that normalized the new
 /// vocabulary (`ollama`/`openai-compat`/`anthropic`) onto the legacy label `"openai"` so that
 /// the `provider_kind == "openai"` chain in `main.rs` kept working without touching it. With
@@ -855,9 +861,6 @@ fn attach_path(e: ConfigError, path: &Path) -> ConfigError {
 ///
 /// [`ProviderKindParseError`] if `MAGI_PROVIDER` is present and not one of the three vocabulary
 /// values.
-/// Resolves a per-agent MAGI model override. Precedence: env (non-empty) > TOML (non-empty) >
-/// `None`. A blank/whitespace value (env or TOML) is treated as unset and falls through to the
-/// next level. `None` means the agent uses the backend's model (RF-2, S-4, S-5).
 pub fn resolve_effective_provider_kind(
     config: &MagiConfig,
     env_provider: Option<&str>,
@@ -870,6 +873,10 @@ pub fn resolve_effective_provider_kind(
     Ok(config.effective_provider())
 }
 
+/// Resolves a per-agent MAGI model override. Precedence: env (non-empty) > TOML (non-empty) >
+/// `None`. A blank/whitespace value (env or TOML) is treated as unset and falls through to the
+/// next level. `None` means the agent uses the backend's model (RF-2, S-4, S-5).
+///
 /// Restored fix round 1 (coordinator, 2026-08-03): Task 4.1 deleted this along with
 /// `agent::magi_wiring` (its only caller, the retired per-agent-adapter machinery) on the
 /// reasoning that the native trio's `build_magi_orchestrator` had no env-override parameter in
@@ -888,8 +895,6 @@ pub fn resolve_effective_provider_kind(
 /// # Returns
 ///
 /// `Some(model)` when an effective override exists; `None` otherwise.
-/// env `OPENAI_MODEL` > TOML `[openai].model` > `DEFAULT_OPENAI_MODEL` (RF-3). No longer
-/// fallible: the openai path has a built-in default (Ollama-first).
 pub fn resolve_magi_override(toml_model: Option<&str>, env_model: Option<&str>) -> Option<String> {
     fn non_empty(s: Option<&str>) -> Option<String> {
         s.map(str::trim)
@@ -899,6 +904,9 @@ pub fn resolve_magi_override(toml_model: Option<&str>, env_model: Option<&str>) 
     non_empty(env_model).or_else(|| non_empty(toml_model))
 }
 
+/// env `OPENAI_MODEL` > TOML `[openai].model` > `DEFAULT_OPENAI_MODEL` (RF-3). No longer
+/// fallible: the openai path has a built-in default (Ollama-first).
+///
 /// # Arguments
 ///
 /// * `config` - Parsed `MagiConfig`.
@@ -906,7 +914,6 @@ pub fn resolve_magi_override(toml_model: Option<&str>, env_model: Option<&str>) 
 /// # Returns
 ///
 /// Resolved model name; env overrides TOML, both override the built-in default.
-/// env `ANTHROPIC_MODEL` > TOML `[anthropic].model` > `DEFAULT_ANTHROPIC_MODEL`.
 pub fn resolve_openai_model(config: &MagiConfig, env_model: Option<&str>) -> String {
     env_model
         .map(str::to_string)
@@ -914,6 +921,8 @@ pub fn resolve_openai_model(config: &MagiConfig, env_model: Option<&str>) -> Str
         .unwrap_or_else(|| crate::defaults::DEFAULT_OPENAI_MODEL.into())
 }
 
+/// env `ANTHROPIC_MODEL` > TOML `[anthropic].model` > `DEFAULT_ANTHROPIC_MODEL`.
+///
 /// Mirrors [`resolve_openai_model`]'s precedence exactly. Fixes a MAGI re-gate WARNING: prior
 /// call sites in `main.rs` disagreed on precedence — the headless path checked TOML before env
 /// (backwards), and the TUI/other path (`discover_config`) read only env and ignored
@@ -926,7 +935,6 @@ pub fn resolve_openai_model(config: &MagiConfig, env_model: Option<&str>) -> Str
 /// # Returns
 ///
 /// Resolved model name; env overrides TOML, both override the built-in default.
-/// Builds the complexity gate thresholds from `[magi.complexity]` (REQ-A20b).
 pub fn resolve_anthropic_model(config: &MagiConfig, env_model: Option<&str>) -> String {
     env_model
         .map(str::to_string)
@@ -934,8 +942,9 @@ pub fn resolve_anthropic_model(config: &MagiConfig, env_model: Option<&str>) -> 
         .unwrap_or_else(|| crate::defaults::DEFAULT_ANTHROPIC_MODEL.into())
 }
 
-/// **It lives here, and not in `magi_rs::magi::gate` — moved from Task 1.1 (see
+/// Builds the complexity gate thresholds from `[magi.complexity]` (REQ-A20b).
 ///
+/// **It lives here, and not in `magi_rs::magi::gate` — moved from Task 1.1 (see
 /// `.superpowers/sdd/claude-plan-tdd/ORDER-FIXES.md`, #1).** `gate.rs` lives in the lib and
 /// cannot know the shape of the TOML; breaking `[magi.complexity]` into loose pieces
 /// (`GateOverrides`) is this module's job, since it already has the table in hand.
@@ -1670,12 +1679,6 @@ mod tests {
     /// hardcoded "line 1, column 1".
     #[test]
     fn safe_parse_error_keeps_the_position_but_drops_the_offending_value() {
-        // I5: `effective_provider` is documented "infallible by precondition" — that
-        // precondition is `validate_vocabulary` having already run. `MagiConfig`'s fields are
-        // `pub` and it derives `Default`, so nothing at the type level stops a caller from
-        // skipping `from_toml_str`/`load()` and constructing an invalid config directly; the
-        // `debug_assert!` is what turns that misuse into a loud debug-build panic instead of a
-        // silent `Ollama` fallback.
         let toml = "\napi_key = \"sk-secreto\"\n";
         let err = MagiConfig::from_toml_str(toml).unwrap_err();
         let msg = err.to_string();
@@ -1943,7 +1946,12 @@ mod tests {
         );
     }
 
-    /// (b) Ollama default sitting there — the case an `is_some()` guard did NOT cover.
+    /// SC-A12d: an incoherent `provider`/`base_url` combination is flagged AT LOAD, not
+    /// discovered later as a network error against `localhost`. Covers REQ-A12c's two
+    /// sub-cases — (a) the user DECLARED a `base_url` and it is silently unused, and (b) the
+    /// untouched Ollama default sitting there, which reads like a migration oversight — and the
+    /// same shape one level down for `[magi].kind = "anthropic"`. (b) is the case an earlier
+    /// `is_some()` guard did NOT cover.
     #[test]
     fn anthropic_flags_both_the_declared_and_the_defaulted_base_url() {
         let dir = tempfile::tempdir().unwrap();

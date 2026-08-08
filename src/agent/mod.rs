@@ -4320,7 +4320,6 @@ mod tests {
             out.tool_calls_counted >= usize::from(MAX_CONSECUTIVE_VETOES),
             "each veto counts as an invocation: max_tool_calls counts what the model asked for"
         );
-        // SC-A20g: the counter dies with the turn, through all FOUR exit paths.
         assert_eq!(out.exit, Exit::MaxToolCalls);
         assert_eq!(
             out.tool_calls_counted, DEFAULT_MAX_TOOL_CALLS,
