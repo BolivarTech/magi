@@ -507,12 +507,11 @@ async fn resolve_tui_consult_mode(
 /// auditability actually needs, since a failed run is when "which lens ran?" is hardest to
 /// answer.
 ///
-/// **The source is rendered with `Debug`, deliberately.** `ModeSource` exposes no public label
-/// function; `tools::consult`'s `source_label` is private to that module, and hand-writing a
-/// second five-arm map here is exactly the duplication that drifts (B3). `Debug` is derived, so
-/// it cannot disagree with a variant list it is generated from — and this string is read by a
-/// human in a terminal, not parsed off a wire, so the JSON contract's "never `Debug`" rule
-/// (which exists because a rename must not silently change a wire value) does not bind here.
+/// **The source is rendered with `ModeSource`'s `Display`** (loop 1 fix round CE, F26) — a
+/// dedicated human-facing label added to `src/magi/mode.rs` rather than the derived `Debug` this
+/// line used before. The five strings are pinned to match `Debug`'s output exactly, so this
+/// change is not observable to anyone reading the terminal; what changes is that the label is no
+/// longer borrowed from a trait meant for developers.
 ///
 /// # Parameters
 /// * `res` - the resolution `resolve_tui_consult_mode` produced for this command.
@@ -522,7 +521,7 @@ async fn resolve_tui_consult_mode(
 #[must_use]
 fn tui_consult_dispatch_notice(res: &ModeResolution) -> String {
     format!(
-        "MAGI deliberating in {} mode ({:?}) — 3 model calls…",
+        "MAGI deliberating in {} mode ({}) — 3 model calls…",
         res.mode, res.source
     )
 }
