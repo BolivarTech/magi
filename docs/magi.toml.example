@@ -99,7 +99,7 @@ agent_timeout_secs = 90
 [magi.complexity]
 code_review = 200
 design      = 500
-analysis    = 120
+analysis    = 200
 
 [embedding]
 model = "nomic-embed-text-v2-moe:latest"

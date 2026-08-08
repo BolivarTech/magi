@@ -1045,6 +1045,31 @@ mod tests {
         );
     }
 
+    /// MAGI S2 re-gate (Balthasar): the scaffolded example's `[magi.complexity]` table drifted
+    /// from the built-ins (`analysis = 120` in the file vs. `GATE_ANALYSIS = 200` in code) with
+    /// nothing to catch it. A one-off value fix does not prevent it from drifting again — this
+    /// parses `docs/magi.toml.example` for real and asserts its thresholds resolve to exactly
+    /// [`GateThresholds::builtin`], so any future edit to either side that breaks the match
+    /// fails this test instead of silently shipping a misleading example.
+    #[test]
+    fn example_toml_complexity_table_matches_the_builtin_gate_thresholds() {
+        let raw = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/docs/magi.toml.example"
+        ))
+        .expect("docs/magi.toml.example must be readable");
+        let parsed = MagiConfig::from_toml_str(&raw).expect(
+            "docs/magi.toml.example must parse as valid v0.12.0 TOML (commented lines inert)",
+        );
+        assert_eq!(
+            gate_thresholds_from(&parsed),
+            GateThresholds::builtin(),
+            "docs/magi.toml.example's [magi.complexity] table must mirror the built-in \
+             thresholds exactly — it is the first thing an operator copies, and a mismatch \
+             there is a lie about what the gate actually does out of the box"
+        );
+    }
+
     #[test]
     fn test_parses_full_config() {
         // -------------------------------------------------------------------------
