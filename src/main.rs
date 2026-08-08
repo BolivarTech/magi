@@ -1983,11 +1983,50 @@ async fn probe_and_report(
         if let Some(n) = stale_composition_notice(min_window, cfg.effective_max_query_bytes()) {
             notices.push(Notice::resolution(n));
         }
+    } else if let Some(n) = trio_probe_incomplete_notice(&trio, cfg.magi.input_warn_tokens) {
+        // MAGI S3 re-gate (Caspar): the notice above only ever reports the PRINCIPAL's own
+        // measurement — on a cold daemon the trio's models (usually different from the
+        // principal's, per REQ-A05) can fail to measure independently, silently falling
+        // `input_warn_tokens` back to magi-core's built-in default with nothing telling the
+        // user their small-window mage's size warning is not the one actually in effect.
+        notices.push(Notice::resolution(n));
     }
     // REQ-A24b/SC-A24e: the explicit (`[magi].input_warn_tokens`) wins over the measured.
     cfg.magi
         .input_warn_tokens
         .or_else(|| derive_warn_tokens(&trio))
+}
+
+/// Builds the notice for when `input_warn_tokens` COULD NOT be derived from the trio at all
+/// (`min_mage_window` returned `None`) — the gap `probe_and_report`'s per-principal notice
+/// leaves open (see its call site).
+///
+/// `None` (no notice) in two cases where firing one would be noise, not signal:
+/// - **`declared` is `Some`**: `[magi].input_warn_tokens` already wins over anything derived
+///   (REQ-A24b/SC-A24e), so a failed derivation changes nothing observable — there is no
+///   surprise to report.
+/// - **Every mage is [`Measurement::NotMeasurable`]**, never
+///   [`Measurement::NotMeasuredThisTime`]: that is the expected, non-actionable case of a
+///   `kind` that offers no introspection (`openai-compat`/`anthropic`, SC-A24b) — not a failure,
+///   and [`probe_notice`] already covers "not measurable" wording for the principal; repeating
+///   it here for the trio would be the same non-news twice.
+fn trio_probe_incomplete_notice(
+    trio: &BTreeMap<String, Measurement>,
+    declared: Option<usize>,
+) -> Option<String> {
+    if declared.is_some() {
+        return None;
+    }
+    let any_cold = trio
+        .values()
+        .any(|m| matches!(m, Measurement::NotMeasuredThisTime));
+    any_cold.then(|| {
+        "input_warn_tokens could not be derived this startup: at least one of the trio's \
+         models was not measured (the daemon may be cold); the size warning falls back to \
+         magi-core's built-in default until a later startup measures it — set \
+         `[magi].input_warn_tokens` to fix it at a known value regardless"
+            .to_string()
+    })
 }
 
 /// Digest characters shown in the startup notice (REQ-A24c).
@@ -8406,6 +8445,77 @@ mod tests {
                 bytes_to_tokens_est(cap_bytes) < window_tokens,
                 "...pero convertido NO la supera: sin conversión el notice saldría siempre"
             );
+        }
+
+        // ---- trio_probe_incomplete_notice (MAGI S3 re-gate, Caspar) --------------
+
+        /// MAGI S3 re-gate (Caspar): the principal's own probe notice can succeed while the
+        /// trio's cold-start failure — which is what actually drives `input_warn_tokens` — goes
+        /// unreported. A mage stuck at `NotMeasuredThisTime`, with no declared
+        /// `[magi].input_warn_tokens` to make the derivation failure moot, must surface a
+        /// notice.
+        #[test]
+        fn a_cold_mage_with_no_declared_fallback_is_reported() {
+            let trio = BTreeMap::from([
+                (
+                    "melchior-model".to_string(),
+                    Measurement::NotMeasuredThisTime,
+                ),
+                (
+                    "balthasar-model".to_string(),
+                    Measurement::Measured {
+                        window: 128_000,
+                        digest: None,
+                    },
+                ),
+            ]);
+            let n = trio_probe_incomplete_notice(&trio, None)
+                .expect("un mage frío sin fallback declarado debe avisar");
+            assert!(
+                n.contains("input_warn_tokens") && n.contains("cold"),
+                "debe nombrar la clave y la causa: {n}"
+            );
+        }
+
+        /// A declared `[magi].input_warn_tokens` already wins over anything derived
+        /// (REQ-A24b/SC-A24e): the derivation failing changes nothing observable, so there is
+        /// nothing to warn about.
+        #[test]
+        fn a_declared_fallback_makes_the_derivation_failure_moot() {
+            let trio = BTreeMap::from([(
+                "melchior-model".to_string(),
+                Measurement::NotMeasuredThisTime,
+            )]);
+            assert!(
+                trio_probe_incomplete_notice(&trio, Some(150_000)).is_none(),
+                "con la clave declarada, que falle la derivación no cambia nada observable"
+            );
+        }
+
+        /// Every mage `NotMeasurable` (not `NotMeasuredThisTime`) is the EXPECTED,
+        /// non-actionable case of a `kind` with no introspection (SC-A24b) — not a cold-start
+        /// failure, so no notice: `probe_notice`'s "does not offer introspection" wording
+        /// already covers this for the principal, and repeating it for the trio would be the
+        /// same non-news twice.
+        #[test]
+        fn every_mage_not_measurable_is_not_reported_as_a_cold_start() {
+            let trio = BTreeMap::from([
+                ("melchior-model".to_string(), Measurement::NotMeasurable),
+                ("balthasar-model".to_string(), Measurement::NotMeasurable),
+            ]);
+            assert!(
+                trio_probe_incomplete_notice(&trio, None).is_none(),
+                "NotMeasurable no es un fallo transitorio: no amerita este aviso"
+            );
+        }
+
+        /// When the trio DID derive a minimum window, `probe_and_report`'s other branch already
+        /// covers it via `stale_composition_notice` — this function is only reached from the
+        /// `None` arm, and an empty trio is the degenerate case of that: no mage, nothing cold,
+        /// nothing to report.
+        #[test]
+        fn an_empty_trio_reports_nothing() {
+            assert!(trio_probe_incomplete_notice(&BTreeMap::new(), None).is_none());
         }
 
         /// `MagiConfig` with the trio on the SAME endpoint/kind as the principal (shared branch
