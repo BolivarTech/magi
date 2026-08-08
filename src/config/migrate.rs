@@ -44,37 +44,36 @@ const PROVIDER_KEY: &str = "provider";
 /// local Ollama without credentials or an authenticated endpoint — and splitting that ambiguity
 /// is half the point of the change. Choosing for the user would be guessing exactly what D-A01
 /// forbids.
-/// v0.11.0 `[openai]` section; from v0.12.0 `base_url` no longer lives there.
 const PROVIDER_V0_11_0: &str = "openai";
 
-/// v0.11.0 `[headless]` section; from v0.12.0 `tool_result_cap_bytes` moves to root.
+/// v0.11.0 `[openai]` section; from v0.12.0 `base_url` no longer lives there.
 const OPENAI_SECTION: &str = "openai";
 
-/// Key `base_url`, which in v0.11.0 lived inside `[openai]`.
+/// v0.11.0 `[headless]` section; from v0.12.0 `tool_result_cap_bytes` moves to root.
 const HEADLESS_SECTION: &str = "headless";
 
-/// Key `tool_result_cap_bytes`, which in v0.11.0 lived inside `[headless]`.
+/// Key `base_url`, which in v0.11.0 lived inside `[openai]`.
 const BASE_URL_KEY: &str = "base_url";
 
-/// Label shown for `[openai].base_url`.
+/// Key `tool_result_cap_bytes`, which in v0.11.0 lived inside `[headless]`.
 const TOOL_RESULT_CAP_BYTES_KEY: &str = "tool_result_cap_bytes";
 
-/// Label shown for `[headless].tool_result_cap_bytes`.
+/// Label shown for `[openai].base_url`.
 const OPENAI_BASE_URL_LABEL: &str = "[openai].base_url";
 
-/// Source version of the migration.
+/// Label shown for `[headless].tool_result_cap_bytes`.
 const HEADLESS_CAP_LABEL: &str = "[headless].tool_result_cap_bytes";
 
-/// Target version of the migration.
+/// Source version of the migration.
 const VERSION_FROM: &str = "v0.11.0";
 
-/// Correction for `provider = "openai"`: names both options and the criterion for choosing.
+/// Target version of the migration.
 const VERSION_TO: &str = "v0.12.0";
 
-/// Prefix of the `[openai].base_url` correction, before the redacted value.
+/// Correction for `provider = "openai"`: names both options and the criterion for choosing.
 const PROVIDER_CORRECTION: &str = "provider = \"ollama\"        # if it points to a local Ollama daemon, no credential\n           provider = \"openai-compat\" # for OpenAI, Groq, OpenRouter and other authenticated endpoints";
 
-/// Suffix of the `[openai].base_url` correction, after the redacted value.
+/// Prefix of the `[openai].base_url` correction, before the redacted value.
 const BASE_URL_CORRECTION_PREFIX: &str = "base_url = \"";
 
 /// Common closing clause of the `[openai].base_url` correction, said either way (SC-A21e).
@@ -90,10 +89,10 @@ const BASE_URL_CORRECTION_TAIL: &str = "\"   # at the root level, above every se
 const BASE_URL_CORRECTION_SUFFIX_REDACTED: &str =
     " Value redacted: copy the real one from the old file.";
 
-/// Suffix of the `[headless].tool_result_cap_bytes` correction.
+/// Prefix of the `[headless].tool_result_cap_bytes` correction.
 const CAP_CORRECTION_PREFIX: &str = "tool_result_cap_bytes = ";
 
-/// Unconditional note about the jump from v0.10.x.
+/// Suffix of the `[headless].tool_result_cap_bytes` correction.
 const CAP_CORRECTION_SUFFIX: &str =
     "   # at the root level: now governs all THREE routes (TUI, magi query and headless consult).";
 
@@ -102,40 +101,39 @@ const CAP_CORRECTION_SUFFIX: &str =
 /// the generic error exactly when it most needs help. Supporting two generations would double
 /// the debt for a jump the user makes in two steps.
 ///
+/// Unconditional note about the jump from v0.10.x.
+const V0_10_X_NOTE: &str =
+    "If you're coming from v0.10.x, migrate to v0.11.0 first and then to v0.12.0: this pass only knows\nthe v0.11.0 patterns.";
+
 /// Backup advice, in the body of the error and not only in the CHANGELOG.
 /// Whoever hits this error got here **by starting the binary**, not by reading release notes.
 /// It is the only moment when they can still make the copy — that is, before editing.
-const V0_10_X_NOTE: &str =
-    "If you're coming from v0.10.x, migrate to v0.11.0 first and then to v0.12.0: this pass only knows\nthe v0.11.0 patterns.";
+const BACKUP_ADVISORY: &str =
+    "Save a copy of your magi.toml BEFORE editing it: this migration is one-way.";
 
 /// A minimal and valid v0.12.0 `magi.toml`, ready to paste.
 ///
 /// **It goes in the body of the error and not in `docs/magi.toml.example`**: whoever installed
-/// with
-const BACKUP_ADVISORY: &str =
-    "Save a copy of your magi.toml BEFORE editing it: this migration is one-way.";
-
-/// `cargo install` or downloaded a release binary does NOT have the example file, and without
-/// an escape flag (REQ-A23) this message is the only defense. It is six lines.
-///
-/// A detected migration incompatibility, with its correction.
-/// The shape is the contract shared by `from_toml_str` and [`render_migration_error`].
+/// with `cargo install` or downloaded a release binary does NOT have the example file, and
+/// without an escape flag (REQ-A23) this message is the only defense. It is six lines.
 const MINIMAL_VALID_CONFIG: &str = "provider = \"ollama\"\nbase_url = \"http://localhost:11434/v1\"\n\n[openai]\nmodel = \"kimi-k2.6:cloud\"\n";
 
-/// Affected key, as it appears in the file (e.g., `"[openai].base_url"`).
-///
-/// 1-indexed line where it was found, for the message. `0` if it could not be located.
+/// A detected migration incompatibility, with its correction.
+/// The shape is the contract shared by `from_toml_str` and [`render_migration_error`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Migration {
-    /// Correction text, already redacted if the original value carried credentials.
+    /// Affected key, as it appears in the file (e.g., `"[openai].base_url"`).
     pub key: &'static str,
-    /// Detects the three v0.11.0 migration patterns in a raw `magi.toml`.
+    /// 1-indexed line where it was found, for the message. `0` if it could not be located.
     pub line: usize,
-    /// The patterns are `provider = "openai"` at root, `[openai].base_url`, and
-    /// `[headless].tool_result_cap_bytes`.
+    /// Correction text, already redacted if the original value carried credentials.
     pub correction: String,
 }
 
+/// Detects the three v0.11.0 migration patterns in a raw `magi.toml`.
+/// The patterns are `provider = "openai"` at root, `[openai].base_url`, and
+/// `[headless].tool_result_cap_bytes`.
+///
 /// Returns empty if the document **does not parse as TOML**: without structure there is nowhere
 /// to look, and rescuing it by textual search would give advice about a shape nobody knows
 /// which one it is (SC-A21g). A syntactically broken file receives its syntax error, with line
@@ -145,13 +143,6 @@ pub struct Migration {
 /// correction (SC-A21h). Repeating one the user already applied would make them doubt whether
 /// they applied it correctly, which is the opposite mental state from what this message aims
 /// for.
-///
-/// 1-indexed line number where a `needle` key **starts**, or 0 if it does not appear.
-///
-/// Compares against the start of the already-trimmed line, not with `contains`: a `contains`
-/// would match a key mentioned inside a comment, and the default v0.11.0 file is full of
-/// comments that name their own keys. It is only for the message — a wrong line confuses, but
-/// does not change what was detected.
 #[must_use]
 pub fn detect_migrations(raw: &str) -> Vec<Migration> {
     let Ok(doc) = raw.parse::<Value>() else {
@@ -210,6 +201,18 @@ pub fn detect_migrations(raw: &str) -> Vec<Migration> {
     found
 }
 
+/// 1-indexed line number where a `needle` key **starts**, or 0 if it does not appear.
+///
+/// Compares against the start of the already-trimmed line, not with `contains`: a `contains`
+/// would match a key mentioned inside a comment, and the default v0.11.0 file is full of
+/// comments that name their own keys. It is only for the message — a wrong line confuses, but
+/// does not change what was detected.
+fn line_of(raw: &str, needle: &str) -> usize {
+    raw.lines()
+        .position(|line| line.trim_start().starts_with(needle))
+        .map_or(0, |idx| idx + 1)
+}
+
 /// Renders the full migration error from the found incompatibilities.
 ///
 /// The message is **self-contained** and does not send the user to any file in the repo: it
@@ -217,15 +220,6 @@ pub fn detect_migrations(raw: &str) -> Vec<Migration> {
 /// unconditional note about v0.10.x. Whoever installed via `cargo install` or downloaded a
 /// binary **does not have** the source tree, and sending them there leaves them just as stuck
 /// as no message.
-fn line_of(raw: &str, needle: &str) -> usize {
-    raw.lines()
-        .position(|line| line.trim_start().starts_with(needle))
-        .map_or(0, |idx| idx + 1)
-}
-
-/// Unit tests for migration detection and rendering.
-///
-/// SC-A21: both incompatibilities are reported together.
 #[must_use]
 pub fn render_migration_error(found: &[Migration]) -> String {
     let mut out = format!(
@@ -252,7 +246,9 @@ pub fn render_migration_error(found: &[Migration]) -> String {
     out
 }
 
-/// SC-A21h: a half-migrated file receives ONLY what is missing.
+/// Unit tests for migration detection and rendering.
+///
+/// SC-A21: both incompatibilities are reported together.
 #[cfg(test)]
 mod tests {
     use super::*;
