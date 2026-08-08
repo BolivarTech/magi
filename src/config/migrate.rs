@@ -484,6 +484,37 @@ mod tests {
         assert_eq!(line_of("foo\nbar\nbaz", "bar"), 2);
     }
 
+    /// Loop 2 fix (Caspar, S1): a half-migrated file that already has the NEW root-level
+    /// `base_url` but has not yet removed the OLD `[openai].base_url` must report the line of
+    /// the `[openai]` occurrence, not the root one. `line_of` searched the whole file for the
+    /// first line starting with `"base_url"`, which — with the root key written first, the
+    /// common layout — pointed the user at the wrong line.
+    #[test]
+    fn a_half_migrated_files_openai_base_url_reports_its_own_line_not_the_roots() {
+        let toml = "base_url = \"http://root/v1\"\n\n[openai]\nbase_url = \"http://old/v1\"\n";
+        let found = detect_migrations(toml);
+        assert_eq!(found.len(), 1, "only the leftover [openai].base_url");
+        assert_eq!(found[0].key, OPENAI_BASE_URL_LABEL);
+        assert_eq!(
+            found[0].line, 4,
+            "must point at the [openai] section's own base_url line, not the root's (line 1)"
+        );
+    }
+
+    /// Same defect, mirrored for `[headless].tool_result_cap_bytes` against a root-level key
+    /// that happens to start the same way in the file.
+    #[test]
+    fn a_half_migrated_files_headless_cap_reports_its_own_line_not_an_earlier_namesake() {
+        let toml = "tool_result_cap_bytes = 4096\n\n[headless]\ntool_result_cap_bytes = 2048\n";
+        let found = detect_migrations(toml);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].key, HEADLESS_CAP_LABEL);
+        assert_eq!(
+            found[0].line, 4,
+            "must point at the [headless] section's own line, not the root's (line 1)"
+        );
+    }
+
     /// Detects the third pattern: `[headless].tool_result_cap_bytes`.
     #[test]
     fn headless_tool_result_cap_bytes_is_detected() {
