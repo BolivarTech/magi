@@ -439,6 +439,23 @@ const MOCK_ENDLESS_BODY_LIMIT: usize = 64 * 1024 * 1024;
 /// Tamaño de cada trozo que escribe el mock.
 const MOCK_CHUNK_BYTES: usize = 8 * 1024;
 
+/// Techo de bytes SERVIDOS que la aserción tolera antes de considerar que magi-core dejó de
+/// cortar (loop 1 fix round CE, F6).
+///
+/// **Este es el número que hace al test discriminar.** Las tres aserciones que tenía antes
+/// (mock golpeado, resultado `None`/`Err`, `elapsed` bajo el timeout de 5 s) las satisface
+/// IGUAL un lector sin cap que se traga los 64 MiB completos en loopback —eso tarda muy por
+/// debajo de 5 s— y falla a parsear el JSON deliberadamente sin cerrar de todos modos, así que
+/// terminaba en `Ok(None)`/`Err(_)` de cualquier manera. Ninguna de esas tres mide lo único que
+/// separa «cortó leyendo» de «leyó todo y recién después midió»: los BYTES efectivamente
+/// transferidos antes de que la conexión se corte.
+///
+/// El valor es 8× el `MAX_SHOW_BODY_BYTES` de 1 MiB de magi-core —holgado para no acoplarse al
+/// byte exacto de la constante `pub(crate)` que no se puede nombrar desde acá, más el margen de
+/// un chunk en vuelo cuando el lector corta— y 8× por debajo de los 64 MiB del mock: un lector
+/// sin cap lo cruza inmediatamente, uno que corta a 1 MiB nunca se le acerca.
+const MAX_BYTES_TOLERATED_BEFORE_CUT: usize = 8 * 1024 * 1024;
+
 /// REQ-A16b / SC-A16c — **satisfecho POR magi-core, verificado acá.**
 ///
 /// `OllamaProvider::window()` hace su propio HTTP y magi-core ya acota el cuerpo:
@@ -453,22 +470,33 @@ const MOCK_CHUNK_BYTES: usize = 8 * 1024;
 ///
 /// El cuerpo se emite en trozos y no como un `String` gigante: el punto es que el lector
 /// corte **durante** la lectura, y un cuerpo finito-y-grande no distingue «cortó al leer» de
-/// «alojó todo y después midió».
+/// «alojó todo y después midió» — **salvo que se cuenten los bytes efectivamente servidos**,
+/// que es lo que este test hace (fix round CE, F6): el mock incrementa un contador compartido
+/// antes de CADA `write_all`, así que su valor final es exactamente cuánto llegó a fluir antes
+/// de que el lector cortara la conexión — la única señal que distingue «cortó al leer» de
+/// «leyó todo y luego fracasó al parsear igual».
 ///
 /// Si este test **falla**, magi-core dejó de capear y REQ-A16b pasa a ser responsabilidad de
 /// magi-rs — y el guardián lo dijo antes de que lo dijera un endpoint hostil en producción.
 #[tokio::test]
 async fn magi_core_rejects_an_endless_probe_body_instead_of_accumulating_it() {
+    let bytes_served = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = Arc::clone(&bytes_served);
+
     let mut server = mockito::Server::new_async().await;
     let mock = server
         .mock("POST", "/api/show")
         .with_status(200)
-        .with_chunked_body(|writer| {
+        .with_chunked_body(move |writer| {
             // Un JSON que nunca cierra: empieza plausible y no termina jamás.
             writer.write_all(br#"{"model_info":{"llama.context_length":"#)?;
             let chunk = [b'1'; MOCK_CHUNK_BYTES];
             let mut written = 0usize;
             while written < MOCK_ENDLESS_BODY_LIMIT {
+                // Se cuenta ANTES de escribir: lo que importa es cuánto se INTENTÓ servir, no
+                // solo lo que confirmadamente llegó — así el contador no puede quedarse corto
+                // por una carrera entre el incremento y el corte de conexión.
+                counter.fetch_add(MOCK_CHUNK_BYTES, Ordering::SeqCst);
                 // Cuando el lector corta y suelta la conexión, esto devuelve `Err` y el
                 // callback termina solo. Ese `?` ES el final esperado del mock.
                 writer.write_all(&chunk)?;
@@ -500,5 +528,13 @@ async fn magi_core_rejects_an_endless_probe_body_instead_of_accumulating_it() {
         elapsed < Duration::from_secs(PROBE_TIMEOUT_SECS),
         "tardó {elapsed:?}: debe cortar POR TAMAÑO mientras lee, no acumular hasta que expire \
          un timeout. Contra un endpoint hostil la diferencia es entre 1 MiB y memoria sin cota",
+    );
+    let served = bytes_served.load(Ordering::SeqCst);
+    assert!(
+        served < MAX_BYTES_TOLERATED_BEFORE_CUT,
+        "el mock llegó a servir {served} bytes antes de que el lector cortara la conexión — \
+         eso es {}× el cap documentado de magi-core (1 MiB): dejó de cortar mientras lee y \
+         acumuló el cuerpo entero en cambio",
+        served / (1024 * 1024),
     );
 }
