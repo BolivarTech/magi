@@ -32,7 +32,7 @@
     )
 )]
 
-use magi_rs::redact::redact_url;
+use magi_rs::redact::{locate_userinfo, redact_url, UserinfoLocation};
 use toml::Value;
 
 /// Root provider key in `magi.toml`.
@@ -77,13 +77,18 @@ const PROVIDER_CORRECTION: &str = "provider = \"ollama\"        # if it points t
 /// Suffix of the `[openai].base_url` correction, after the redacted value.
 const BASE_URL_CORRECTION_PREFIX: &str = "base_url = \"";
 
+/// Common closing clause of the `[openai].base_url` correction, said either way (SC-A21e).
+const BASE_URL_CORRECTION_TAIL: &str = "\"   # at the root level, above every section.";
+
 /// States that the value is **redacted**: with embedded credentials, redaction wins over ready-
 /// to-paste (SC-A21e). A migration message that leaks a credential to the terminal, the
 /// scrollback, and CI logs is a worse problem than a line that must be completed.
 ///
-/// Prefix of the `[headless].tool_result_cap_bytes` correction.
-const BASE_URL_CORRECTION_SUFFIX: &str =
-    "\"   # at the root level, above every section. Value redacted: copy the real one from the old file.";
+/// **Used only when `url` actually carried a `userinfo`** (loop 1 fix round CE, F21) —
+/// unconditionally appending it made the message lie for the common, credential-free case: the
+/// value shown was already the real, pasteable one, while the text told the user it was not.
+const BASE_URL_CORRECTION_SUFFIX_REDACTED: &str =
+    " Value redacted: copy the real one from the old file.";
 
 /// Suffix of the `[headless].tool_result_cap_bytes` correction.
 const CAP_CORRECTION_PREFIX: &str = "tool_result_cap_bytes = ";
@@ -171,11 +176,20 @@ pub fn detect_migrations(raw: &str) -> Vec<Migration> {
         .and_then(|t| t.get(BASE_URL_KEY))
         .and_then(Value::as_str)
     {
+        // The "redacted" clause only applies when there is actually something to redact — a
+        // credential-free value renders literal and pasteable, with nothing left to claim was
+        // hidden (SC-A21e, F21).
+        let had_credential = matches!(locate_userinfo(url), UserinfoLocation::Found { .. });
+        let redacted_clause = if had_credential {
+            BASE_URL_CORRECTION_SUFFIX_REDACTED
+        } else {
+            ""
+        };
         found.push(Migration {
             key: OPENAI_BASE_URL_LABEL,
             line: line_of(raw, BASE_URL_KEY),
             correction: format!(
-                "{BASE_URL_CORRECTION_PREFIX}{}{BASE_URL_CORRECTION_SUFFIX}",
+                "{BASE_URL_CORRECTION_PREFIX}{}{BASE_URL_CORRECTION_TAIL}{redacted_clause}",
                 redact_url(url)
             ),
         });
@@ -285,6 +299,25 @@ mod tests {
         assert!(
             rendered.contains("redacted"),
             "y el mensaje debe decir que está redactado"
+        );
+    }
+
+    /// SC-A21e, negative clause (loop 1 fix round CE, F21): a `base_url` WITHOUT credentials is
+    /// pasted literally — the message must not claim it was redacted, because there is nothing
+    /// left to copy from the old file. Covers three of the four real v0.11.0 fixtures, the
+    /// common case (an unauthenticated local Ollama).
+    #[test]
+    fn a_credential_free_base_url_is_not_claimed_to_be_redacted() {
+        let toml = "[openai]\nbase_url = \"http://localhost:11434/v1\"\n";
+        let rendered = render_migration_error(&detect_migrations(toml));
+        assert!(
+            rendered.contains("http://localhost:11434/v1"),
+            "el valor completo debe quedar pegable: {rendered}"
+        );
+        assert!(
+            !rendered.contains("redacted"),
+            "sin credenciales no hay nada que redactar, así que no hay nada que copiar del \
+             archivo viejo: {rendered}"
         );
     }
 
