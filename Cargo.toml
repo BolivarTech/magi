@@ -50,8 +50,9 @@ uuid = { version = "1.8", features = ["v4"] }
 
 # MAGI ecosystem
 # EXPLICIT features: providers sit behind feature gates and the default brings none, so
-# without this the MS2 native trio (REQ-A01b) does not compile. Found by
-# `cargo check --example ms2_contracts`, not by review.
+# without this the MS2 native trio (REQ-A01b) does not compile. Originally caught by
+# `cargo check --example ms2_contracts`; that file pinned nothing (loop 1 fix round A, F2)
+# and was deleted, so this is now enforced by the crate's own build + `cargo nextest run`.
 #   ollama        -> pulls in openai-compat; used ONLY as a PROBE (D-A07)
 #   openai-compat -> completions transport for BOTH `ollama` AND `openai-compat`
 #   claude-api    -> ClaudeProvider for kind = anthropic
