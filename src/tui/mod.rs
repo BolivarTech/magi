@@ -659,6 +659,19 @@ pub struct App {
     pub selection_start: Option<usize>,
     /// History of messages to display.
     pub messages: Vec<String>,
+    /// Indices into `messages` that are operational notices (memory warning, truncation
+    /// advisory, …), as pushed by [`App::push_notice`] — the STRUCTURED record of which
+    /// entries deserve the notice style.
+    ///
+    /// Before this field existed, the Normal-mode renderer decided styling by sniffing a
+    /// leading `⚠` glyph out of the rendered text (MAGI S7 finding 2): any model or user
+    /// message that happened to start with the same glyph was silently mis-styled as a
+    /// notice, and the coupling between "this is a notice" and "this text starts with ⚠"
+    /// was invisible — nothing signalled that changing the prefix in [`App::push_notice`]
+    /// would also have to be mirrored in the renderer's `starts_with` check. Tracking the
+    /// index here instead makes notice-ness structured data the renderer looks up, not a
+    /// property it infers from content.
+    pub notice_indices: std::collections::HashSet<usize>,
     /// Channel to send events to the agent runner.
     pub event_tx: mpsc::Sender<UiEvent>,
     /// Channel to receive responses from the agent.
@@ -708,6 +721,7 @@ impl App {
             cursor_position: 0,
             selection_start: None,
             messages: Vec::new(),
+            notice_indices: std::collections::HashSet::new(),
             event_tx,
             response_rx,
             approval_rx,
@@ -854,13 +868,18 @@ impl App {
         self.scroll_offset = 0;
     }
 
-    /// Appends an operational notice to the UI history with the `⚠ ` prefix so
-    /// it is visually distinct from model output.  The prefix is also used by the
-    /// Normal-mode renderer to apply a dimmed/yellow style.
+    /// Appends an operational notice to the UI history with the `⚠ ` prefix so it is
+    /// visually distinct from model output at a glance in a plain-text copy/paste.
+    ///
+    /// The prefix is cosmetic text, not the styling mechanism: the Normal-mode renderer
+    /// looks up `notice_indices` (recorded here) rather than sniffing the prefix back out
+    /// of the rendered line — see `notice_indices`'s rustdoc for why that distinction
+    /// matters (MAGI S7 finding 2).
     pub fn push_notice(&mut self, text: String) {
         // Ensure the text is valid UTF-8 (it always is, but make the intent explicit).
         let notice = format!("⚠ {}", text);
         self.messages.push(notice);
+        self.notice_indices.insert(self.messages.len() - 1);
         self.scroll_offset = 0;
     }
 
@@ -1803,6 +1822,7 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Re
                                         }
                                         "/clear" => {
                                             app.messages.clear();
+                                            app.notice_indices.clear();
                                             let _ = app.event_tx.send(UiEvent::Clear).await;
                                             continue;
                                         }
@@ -2023,6 +2043,44 @@ fn input_pane_rows(input: &str, width: usize, max: usize) -> usize {
     wrap_message(input, width).len().clamp(1, max.max(1))
 }
 
+/// Flattens `messages` into wrap-rendered lines for the Normal-mode conversation pane,
+/// alongside a parallel per-line "is this an operational notice" flag — one blank
+/// separator line between messages, matching the layout `ui()` used to build inline.
+///
+/// Notice-ness is looked up from `notice_indices` (the structured record [`App::push_notice`]
+/// produces) rather than sniffed from a leading glyph in the rendered text (MAGI S7 finding
+/// 2): a model or user message that happens to start with the same glyph must never be
+/// mis-styled, and a long notice's wrapped CONTINUATION lines must stay styled too — a
+/// first-line-only glyph check could not express that second property either, since
+/// [`wrap_message`] only leaves the `⚠` prefix on the first of a notice's wrapped lines.
+///
+/// # Parameters
+/// * `messages` - the conversation history, in display order.
+/// * `notice_indices` - indices into `messages` that are operational notices.
+/// * `width` - wrap width in terminal columns, forwarded to [`wrap_message`].
+///
+/// # Returns
+/// `(lines, is_notice)` — same length, one entry per rendered line.
+fn flatten_history_lines(
+    messages: &[String],
+    notice_indices: &std::collections::HashSet<usize>,
+    width: usize,
+) -> (Vec<String>, Vec<bool>) {
+    let mut lines = Vec::new();
+    let mut is_notice = Vec::new();
+    for (i, m) in messages.iter().enumerate() {
+        if i > 0 {
+            lines.push(String::new());
+            is_notice.push(false);
+        }
+        let notice = notice_indices.contains(&i);
+        let wrapped = wrap_message(m, width);
+        is_notice.extend(std::iter::repeat_n(notice, wrapped.len()));
+        lines.extend(wrapped);
+    }
+    (lines, is_notice)
+}
+
 fn ui(f: &mut Frame, app: &mut App) {
     let area = f.size();
     // Input content width = full width minus the layout margin (1 each side) and
@@ -2046,23 +2104,18 @@ fn ui(f: &mut Frame, app: &mut App) {
         // between messages), then render a scrollable window of it. This gives
         // line-level scrollback — a single message taller than the viewport (e.g. the
         // consult report) is fully reachable via PgUp/PgDn/Home/End.
-        let mut all_lines: Vec<String> = Vec::new();
-        for (i, m) in app.messages.iter().enumerate() {
-            if i > 0 {
-                all_lines.push(String::new());
-            }
-            all_lines.extend(wrap_message(m, inner_width));
-        }
+        let (mut all_lines, mut line_is_notice) =
+            flatten_history_lines(&app.messages, &app.notice_indices, inner_width);
         // Compact "thinking…" indicator (mode B): a transient last line while a
         // reasoning model is thinking, with an animated spinner advanced per frame.
         if app.thinking_active {
             if !all_lines.is_empty() {
                 all_lines.push(String::new());
+                line_is_notice.push(false);
             }
-            all_lines.extend(wrap_message(
-                &thinking_indicator(app.spinner_frame),
-                inner_width,
-            ));
+            let indicator_lines = wrap_message(&thinking_indicator(app.spinner_frame), inner_width);
+            line_is_notice.extend(std::iter::repeat_n(false, indicator_lines.len()));
+            all_lines.extend(indicator_lines);
             app.spinner_frame = next_spinner_frame(app.spinner_frame);
         }
         let total = all_lines.len();
@@ -2073,15 +2126,17 @@ fn ui(f: &mut Frame, app: &mut App) {
             app.scroll_offset = app.last_max_scroll;
         }
         let range = scroll_window(total, inner_height, app.scroll_offset);
-        // Render notice lines (⚠ prefix) with a dimmed yellow style so they are
-        // visually distinct from model Content and from system messages.
+        // Render notice lines with a dimmed yellow style so they are visually distinct
+        // from model Content and from system messages — driven by `line_is_notice`
+        // (structured, see `flatten_history_lines`), not a glyph sniffed from the text.
         let notice_style = Style::default()
             .fg(Color::Yellow)
             .add_modifier(Modifier::DIM);
-        let visible: Vec<Line> = all_lines[range]
+        let visible: Vec<Line> = all_lines[range.clone()]
             .iter()
-            .map(|l| {
-                if l.starts_with('⚠') {
+            .zip(&line_is_notice[range])
+            .map(|(l, &notice)| {
+                if notice {
                     Line::styled(l.clone(), notice_style)
                 } else {
                     Line::from(l.clone())
@@ -2972,6 +3027,65 @@ mod tests {
             wrap_message("あいうえお", 6),
             vec!["あいう".to_string(), "えお".to_string()]
         );
+    }
+
+    /// MAGI S7 fix round, finding 2: a message that legitimately STARTS WITH the notice
+    /// glyph but was never pushed via `push_notice` must not be styled as a notice — the
+    /// old `l.starts_with('⚠')` check could not tell the two apart because it never looked
+    /// at how the message was produced, only at its rendered text.
+    #[test]
+    fn test_flatten_history_lines_does_not_style_a_message_that_merely_starts_with_the_glyph() {
+        let messages = vec!["⚠ this is model output, not a real notice".to_string()];
+        let notice_indices = std::collections::HashSet::new(); // never pushed via push_notice
+        let (lines, is_notice) = flatten_history_lines(&messages, &notice_indices, 80);
+        assert_eq!(
+            lines,
+            vec!["⚠ this is model output, not a real notice".to_string()]
+        );
+        assert_eq!(
+            is_notice,
+            vec![false],
+            "notice styling must come from notice_indices, not the leading glyph"
+        );
+    }
+
+    /// The counterpart: a genuine notice's WRAPPED CONTINUATION lines must stay styled
+    /// too, not just the first wrapped line (a first-line-only glyph check could not
+    /// express this, since `wrap_message` leaves the `⚠` prefix only on the first line).
+    #[test]
+    fn test_flatten_history_lines_styles_every_wrapped_line_of_a_long_notice() {
+        let long_notice = format!("⚠ {}", "x".repeat(50));
+        let messages = vec![long_notice];
+        let mut notice_indices = std::collections::HashSet::new();
+        notice_indices.insert(0usize);
+
+        let (lines, is_notice) = flatten_history_lines(&messages, &notice_indices, 10);
+        assert!(
+            lines.len() > 1,
+            "the notice must actually wrap to multiple lines for this test to be meaningful: {lines:?}"
+        );
+        assert!(
+            is_notice.iter().all(|&n| n),
+            "every wrapped line of a notice message must be styled, including continuation \
+             lines: {is_notice:?}"
+        );
+    }
+
+    /// A real user/assistant message (no notice) yields an `is_notice` vector of the same
+    /// length as its wrapped lines, all `false` — and the one-blank-line-per-message
+    /// separator is itself never styled as a notice.
+    #[test]
+    fn test_flatten_history_lines_separator_between_messages_is_never_a_notice() {
+        let messages = vec!["first".to_string(), "second".to_string()];
+        let mut notice_indices = std::collections::HashSet::new();
+        notice_indices.insert(1usize); // "second" IS a notice
+
+        let (lines, is_notice) = flatten_history_lines(&messages, &notice_indices, 80);
+        assert_eq!(
+            lines,
+            vec!["first".to_string(), String::new(), "second".to_string()]
+        );
+        assert_eq!(is_notice, vec![false, false, true]);
     }
 
     #[test]
