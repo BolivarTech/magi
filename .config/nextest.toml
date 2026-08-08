@@ -73,9 +73,27 @@
 # reintroduces exactly the rot the section above documents.
 #
 # If residual flake appears, drop `max-threads` to 1 before touching the filter.
+#
+# ## The lever was pulled (2026-08-07, MS2 Loop 1)
+#
+# The cost did start to hurt. Widening the filter took the suite to 492 s on this
+# box, and a fix round paying that per commit spent ~88% of its wall-clock inside
+# `cargo`: two rounds of 13 and 11 commits took 3h26m and 2h58m respectively.
+#
+# So `max-threads` went 2 -> 3, which is exactly the lever this file already
+# named and for the reason it gave: **3 heavy tests x 4 Argon2 lanes = 12 lanes
+# over 12 logical processors**. That is the ceiling, not a compromise — going to
+# 4 would put 16 lanes on 12 processors and reintroduce the oversubscription the
+# whole cap exists to prevent, which is the failure this file documents twice.
+#
+# The filter was NOT touched, deliberately: trimming it is what rotted twice
+# before, and the coverage claim in the section above has to stay true.
+#
+# If flake returns, go back to 2 before considering anything else. A slower gate
+# is cheaper than one whose evidence cannot be trusted.
 
 [test-groups]
-heavy = { max-threads = 2 }
+heavy = { max-threads = 3 }
 
 [[profile.default.overrides]]
 filter = 'test(/vault::/) | test(/system::database::/) | test(/agent::tests::/) | test(/memory::/) | test(/tools::knowledge::/)'
