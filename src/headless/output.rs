@@ -381,13 +381,33 @@ fn match_generic_secret_run(chars: &[char], i: usize) -> Option<usize> {
 /// `sk-…`, `AKIA…`, long hex/base64-like runs) to `REDACTED_PLACEHOLDER`; the rest of the text
 /// passes through unchanged.
 ///
-/// **Complexity:** every position is evaluated against the four patterns; if
-/// one matches, the cursor jumps immediately over the full match length (`i += consumed`), so a
-/// found secret is not re-scanned character by character. The pathological case (a run of
-/// eligible characters whose length falls just below `GENERIC_SECRET_RUN_MIN_LEN` at each
-/// position) is `O(n²)` in the worst case, but `n` here is the length of a diagnostic error
-/// message (typically bytes to a few KB, not an arbitrary payload), so the real cost is
-/// negligible.
+/// # Complexity: `O(n)`, not `O(n²)` — verified, not assumed
+///
+/// A prior revision of this doc claimed a quadratic worst case, reasoning that a run of
+/// eligible characters that falls just short of a threshold (e.g. `GENERIC_SECRET_RUN_MIN_LEN`)
+/// gets re-scanned from the next starting position. That undercounts the actual bound: **every
+/// one of the three "near-miss" scan lengths is capped by a small `const`**
+/// (`GENERIC_SECRET_RUN_MIN_LEN - 1` = 31, `SK_KEY_MIN_SUFFIX_LEN - 1` = 15,
+/// `AKIA_KEY_BODY_LEN - 1` = 15) — a failing match at position `i` can never scan more than
+/// that constant number of characters, because scanning past it would mean the run met the
+/// threshold and *matched* instead of failing. A failing position therefore costs `O(1)`
+/// amortized, not `O(remaining run length)`, and the whole pass is `O(n)`. Confirmed
+/// empirically against the exact adversarial shape described above (many maximal near-miss
+/// blocks back to back): wall-clock time scales linearly with input length, not
+/// quadratically — see `redact_secret_patterns_stays_linear_on_the_adversarial_near_miss_pattern`
+/// below, which pins this so a future change that removes one of those three bounds (e.g. by
+/// deriving a threshold from input length) regresses a test, not just a doc comment.
+///
+/// On a successful match the cursor also jumps over the full match length (`i += consumed`),
+/// so a found secret is not re-scanned either.
+///
+/// Because the bound is `O(n)` regardless of content, this function is safe to run over input
+/// that is **not** small diagnostic text too: `headless::log` reuses it (below, via `pub`) for
+/// a tool call's full, untruncated `input` at debug level — which can be attacker- or
+/// model-influenced and is not bounded to a few KB the way an error message is. Redaction
+/// deliberately runs before truncation there (see `LogEvent::render`), so this function's
+/// linear bound — not an assumption that callers only ever pass short text — is what keeps
+/// that debug-logging path from being a quadratic-cost lever.
 ///
 /// `pub` (widened from private in T8, REQ-H24, and from `pub(crate)` for the MS2 runner in the
 /// binary crate): `headless::log` reuses this same redactor for a tool-call's `input` at debug
@@ -790,5 +810,33 @@ mod tests {
         let upper = sanitize_error_message(&format!("auth failed: BEARER {token}"));
         assert!(!upper.contains(&token), "uppercase BEARER leaked: {upper}");
         assert!(upper.contains(REDACTED_PLACEHOLDER));
+    }
+
+    /// Regression guard for `redact_secret_patterns`'s complexity claim (MAGI S2 re-gate,
+    /// Melchior): the adversarial shape named in its rustdoc — many maximal "near-miss" runs,
+    /// each one character short of a threshold, back to back — must stay linear in input
+    /// length rather than degenerating to quadratic if a future change removes the constant
+    /// bound on one of the three near-miss scan lengths.
+    ///
+    /// A coarse ceiling, not a precise wall-clock budget (this repo's own documented
+    /// flakiness lesson: assert on a generous failure deadline, never on duration). At this
+    /// input size a genuine quadratic regression would take on the order of minutes; this
+    /// gives tens of seconds of headroom above the sub-second time linear scaling actually
+    /// takes, so ordinary CI/CPU contention cannot false-fail it.
+    #[test]
+    fn redact_secret_patterns_stays_linear_on_the_adversarial_near_miss_pattern() {
+        let block = "a".repeat(GENERIC_SECRET_RUN_MIN_LEN - 1) + "!";
+        let input = block.repeat(20_000); // ~640,000 characters, all near-miss runs.
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = redact_secret_patterns(&input);
+            let _ = tx.send(());
+        });
+        assert!(
+            rx.recv_timeout(std::time::Duration::from_secs(15)).is_ok(),
+            "redact_secret_patterns did not return within a generous ceiling on the \
+             near-miss-run pattern; this is the signal of a regression to quadratic \
+             behavior, not ordinary CI slowness"
+        );
     }
 }
