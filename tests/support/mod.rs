@@ -110,37 +110,43 @@ pub fn verdict_json_with_findings(agent: &str) -> String {
     )
 }
 
+/// Deduce el asiento a partir de la **primera línea** de un system prompt.
+///
+/// **Solo el encabezado, nunca el prompt entero, y esto costó un ciclo descubrirlo:** los
+/// prompts se mencionan entre sí —el de Caspar dice *"Leave happy-path correctness analysis to
+/// Melchior"*— así que buscar el nombre en todo el texto le asigna a Caspar el veredicto de
+/// Melchior, magi-core lo rechaza por `agent identity mismatch` y el asiento se pierde. La
+/// primera línea es `# <Nombre> — <Rol>`, que sí discrimina.
+///
+/// Cae en `melchior` si no reconoce ninguno: un doble no debe fallar en silencio, pero tampoco
+/// panicar dentro de una tarea del orquestador — el `InsufficientAgents` resultante lo delata
+/// igual, y con mejor mensaje que un panic en un `spawn`.
+///
+/// **Función libre y no un método de un solo doble (B3, MAGI S3 re-gate fix):** originalmente
+/// vivía solo en `AdheringTrioProvider`, pero `OverlapCountingProvider` tiene la MISMA
+/// necesidad — un doble que responde el mismo `"agent":"melchior"` a los tres asientos hace que
+/// magi-core rechace y **reintente** los dos que no coinciden, multiplicando las llamadas a
+/// `complete` más allá del número de asientos y rompiendo cualquier guardián que cuente
+/// llamadas exactas (como el rendezvous de `OverlapCountingProvider`). Compartir la función
+/// evita que un tercer doble la reimplemente mal.
+fn seat_from_prompt(system_prompt: &str) -> &'static str {
+    let header = system_prompt
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .to_lowercase();
+    SEAT_NAMES
+        .into_iter()
+        .find(|seat| header.contains(seat))
+        .unwrap_or("melchior")
+}
+
 /// Responde un veredicto válido **a nombre del asiento que preguntó**, con hallazgos.
 ///
 /// Los tres asientos comparten la instancia y el doble los discrimina por su system prompt,
 /// que es donde aparece el nombre del mage (REQ-A02). Así el reporte sale con los tres
 /// adhiriendo, que es la condición para que el render exponga todas sus secciones.
 pub struct AdheringTrioProvider;
-
-impl AdheringTrioProvider {
-    /// Deduce el asiento a partir de la **primera línea** de su system prompt.
-    ///
-    /// **Solo el encabezado, nunca el prompt entero, y esto costó un ciclo descubrirlo:**
-    /// los prompts se mencionan entre sí —el de Caspar dice *"Leave happy-path correctness
-    /// analysis to Melchior"*— así que buscar el nombre en todo el texto le asigna a Caspar
-    /// el veredicto de Melchior, magi-core lo rechaza por `agent identity mismatch` y el
-    /// asiento se pierde. La primera línea es `# <Nombre> — <Rol>`, que sí discrimina.
-    ///
-    /// Cae en `melchior` si no reconoce ninguno: un doble no debe fallar en silencio, pero
-    /// tampoco panicar dentro de una tarea del orquestador — el `InsufficientAgents`
-    /// resultante lo delata igual, y con mejor mensaje que un panic en un `spawn`.
-    fn seat_from_prompt(system_prompt: &str) -> &'static str {
-        let header = system_prompt
-            .lines()
-            .next()
-            .unwrap_or_default()
-            .to_lowercase();
-        SEAT_NAMES
-            .into_iter()
-            .find(|seat| header.contains(seat))
-            .unwrap_or("melchior")
-    }
-}
 
 #[async_trait]
 impl LlmProvider for AdheringTrioProvider {
@@ -150,7 +156,7 @@ impl LlmProvider for AdheringTrioProvider {
         _user_prompt: &str,
         _config: &CompletionConfig,
     ) -> Result<String, ProviderError> {
-        let seat = Self::seat_from_prompt(system_prompt);
+        let seat = seat_from_prompt(system_prompt);
         Ok(format!(
             "{VERDICT_OPEN}\n{}\n{VERDICT_CLOSE}",
             verdict_json_with_findings(seat)
@@ -270,25 +276,52 @@ impl LlmProvider for HangingProvider {
 /// Sostiene SC-A04e: los tres mages **se solapan**. Si magi-core pasara a despachar en serie,
 /// el peor caso saltaría de 2× a 6× el techo y el `--timeout` derivado empezaría a cortar
 /// consults sanos — sin que una sola línea de magi-rs cambiara.
+///
+/// **Rendezvous, no `sleep` fijo (MAGI S3 re-gate, Caspar).** La versión anterior hacía que
+/// cada llamada durmiera un `dwell` fijo (500 ms) antes de salir, confiando en que las tres
+/// llegaran DENTRO de esa ventana para que el pico llegara a 3 — exactamente el patrón de
+/// flakiness que este repo ya diagnosticó dos veces (`.config/nextest.toml`): bajo la carga
+/// Argon2 del resto de la suite (este test corre en el grupo `default`, no en `heavy`), un
+/// asiento retrasado en despacharse podía salir DESPUÉS de que otro ya hubiera dormido su
+/// ventana entera y salido, bajando el pico observado a 2 sin que hubiera ningún defecto real.
+///
+/// Con un [`tokio::sync::Barrier`] de tamaño `expected`, ninguna llamada puede "salir"
+/// (decrementar `live`) hasta que las `expected` hayan "llegado" — la contención de CPU solo
+/// hace que el rendezvous tarde más, nunca que el pico observado sea menor. Es la misma
+/// disciplina que el resto del proyecto exige para tests con reloj: esperar sobre una
+/// CONDICIÓN, no sobre una duración.
+///
+/// **El veredicto responde a nombre del asiento que preguntó, vía [`seat_from_prompt`] — y
+/// esto NO es cosmético para un rendezvous de tamaño fijo.** La primera versión de este ajuste
+/// reusaba `marked_verdict()` (siempre `"agent":"melchior"`), y el rendezvous colgó: magi-core
+/// rechaza el veredicto de Balthasar/Caspar por `agent identity mismatch` y **reintenta** esos
+/// dos asientos, así que `complete` termina llamándose más de `expected` veces para una sola
+/// `analyze`. Con un `Barrier` de tamaño 3 eso deja arribos sueltos que nunca completan un
+/// grupo de tres — exactamente el hallazgo que el comentario de [`AdheringTrioProvider`]
+/// documenta, aplicado acá donde además rompe la sincronización, no solo el conteo.
 pub struct OverlapCountingProvider {
     /// Ejecuciones en vuelo ahora.
     pub live: Arc<AtomicUsize>,
     /// Máximo de ejecuciones simultáneas observado.
     pub peak: Arc<AtomicUsize>,
-    /// Cuánto permanece «adentro» cada llamada, para que el solapamiento sea observable.
-    pub dwell: Duration,
+    /// Punto de encuentro: se libera recién cuando `expected` llamadas llegaron a la vez.
+    barrier: Arc<tokio::sync::Barrier>,
 }
 
 impl OverlapCountingProvider {
     /// Construye el doble junto con los contadores que el test va a leer.
+    ///
+    /// `expected` es cuántas llamadas simultáneas debe esperar el rendezvous antes de liberar
+    /// a todas — típicamente [`EXPECTED_SEATS`] en `magi_core_contract.rs`, pero el doble no
+    /// hardcodea ese número: es el llamador quien conoce cuántos asientos va a despachar.
     #[must_use]
-    pub fn new(dwell: Duration) -> (Arc<Self>, Arc<AtomicUsize>) {
+    pub fn new(expected: usize) -> (Arc<Self>, Arc<AtomicUsize>) {
         let live = Arc::new(AtomicUsize::new(0));
         let peak = Arc::new(AtomicUsize::new(0));
         let provider = Arc::new(Self {
             live,
             peak: Arc::clone(&peak),
-            dwell,
+            barrier: Arc::new(tokio::sync::Barrier::new(expected)),
         });
         (provider, peak)
     }
@@ -298,15 +331,27 @@ impl OverlapCountingProvider {
 impl LlmProvider for OverlapCountingProvider {
     async fn complete(
         &self,
-        _system_prompt: &str,
+        system_prompt: &str,
         _user_prompt: &str,
         _config: &CompletionConfig,
     ) -> Result<String, ProviderError> {
         let now = self.live.fetch_add(1, Ordering::SeqCst) + 1;
         self.peak.fetch_max(now, Ordering::SeqCst);
-        tokio::time::sleep(self.dwell).await;
+        // Blocks until every expected call has arrived — see the struct doc for why this
+        // replaces a fixed `sleep`. The caller wraps the whole `analyze` in a generous timeout
+        // so a genuine regression to serial dispatch (this never resolving) fails clearly
+        // instead of hanging the suite.
+        self.barrier.wait().await;
         self.live.fetch_sub(1, Ordering::SeqCst);
-        Ok(marked_verdict())
+        // NOT `marked_verdict()` — see the struct doc for why a shared, seat-blind verdict
+        // (always `"agent":"melchior"`) breaks a fixed-size rendezvous: magi-core retries the
+        // two mismatched seats, and their retry calls arrive after the barrier has already
+        // moved past this generation.
+        let seat = seat_from_prompt(system_prompt);
+        Ok(format!(
+            "{VERDICT_OPEN}\n{}\n{VERDICT_CLOSE}",
+            verdict_json_with_findings(seat)
+        ))
     }
 
     fn name(&self) -> &str {

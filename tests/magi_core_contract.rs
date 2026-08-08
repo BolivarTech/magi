@@ -334,17 +334,27 @@ async fn a_hanging_provider_consumes_one_timeout_window() {
     );
 }
 
-/// Cuánto permanece «adentro» cada llamada del doble de solapamiento.
+/// Cuánto tolera esperar el rendezvous del doble de solapamiento antes de concluir que el
+/// despacho NO es concurrente (MAGI S3 re-gate, Caspar — reemplaza el `OVERLAP_DWELL` fijo de
+/// 500 ms del primer borrador).
 ///
-/// **Medio segundo y no los 150 ms del primer borrador.** El pico solo baja de 3 si un asiento
-/// llega a arrancar después de que otro ya salió, o sea si el scheduler se demora más que este
-/// valor en despachar tres tareas. Con 150 ms eso es improbable pero alcanzable bajo la carga
-/// Argon2 del resto de la suite —este test no está en el grupo `heavy`— y produciría
-/// exactamente el fallo intermitente que `.config/nextest.toml` documenta.
-///
-/// Medio segundo hace la ventana holgada sin debilitar la aserción, que es la dirección
-/// correcta del intercambio: se paga medio segundo una vez, no un guardián que a veces miente.
-const OVERLAP_DWELL: Duration = Duration::from_millis(500);
+/// **Techo generoso, no una medición precisa** — la misma disciplina que el resto del proyecto
+/// exige para tests con reloj (`.config/nextest.toml` documenta dos veces el costo de no
+/// seguirla): con despacho realmente concurrente, el rendezvous de
+/// [`support::OverlapCountingProvider`] se resuelve en milisegundos incluso bajo la carga
+/// Argon2 del resto de la suite —este test corre en el grupo `default`, no en `heavy`—; si
+/// magi-core regresara a despacho en serie, el rendezvous del último asiento JAMÁS se
+/// completaría (nada puede "salir" hasta que los tres "lleguen"), así que este techo es
+/// exactamente donde ese defecto se vuelve un fallo claro en vez de una suite colgada.
+const OVERLAP_RENDEZVOUS_DEADLINE: Duration = Duration::from_secs(30);
+
+/// Techo por asiento pasado al builder para ESTE test. Igual de generoso que
+/// [`OVERLAP_RENDEZVOUS_DEADLINE`] y por la misma razón: si el techo interno de magi-core
+/// (REQ-A04) fuera más ajustado que lo que el rendezvous necesita bajo contención real, un
+/// asiento podría abortarse por timeout ANTES de llegar al rendezvous — un fallo distinto
+/// (timeout de agente) que este test no existe para diagnosticar. No mide wall-clock real: el
+/// doble no genera nada, solo espera a los otros dos.
+const OVERLAP_AGENT_TIMEOUT: Duration = OVERLAP_RENDEZVOUS_DEADLINE;
 
 /// SC-A04e: los tres mages se ejecutan **solapados**, no en serie.
 ///
@@ -357,16 +367,31 @@ const OVERLAP_DWELL: Duration = Duration::from_millis(500);
 ///
 /// **El pico se afirma en {EXPECTED_SEATS}, no en `>= 2`.** Dos mages solapados y el tercero
 /// en serie ya rompe la fórmula —el peor caso pasa a 4×— y un `>= 2` lo daría por bueno.
+///
+/// **Espera sobre una CONDICIÓN (rendezvous de tres llegadas), no sobre una duración fija** —
+/// ver el doc de [`support::OverlapCountingProvider`] para el porqué: la versión anterior de
+/// este test dormía 500 ms por llamada y confiaba en que el scheduler despachara las tres
+/// dentro de esa ventana, que es precisamente el patrón de flakiness bajo carga que este
+/// proyecto ya diagnosticó dos veces.
 #[tokio::test]
 async fn the_three_mages_execute_concurrently() {
-    let (provider, peak) = support::OverlapCountingProvider::new(OVERLAP_DWELL);
+    let (provider, peak) = support::OverlapCountingProvider::new(EXPECTED_SEATS);
 
     let magi = MagiBuilder::new(provider)
-        .with_timeout(Duration::from_secs(5))
+        .with_timeout(OVERLAP_AGENT_TIMEOUT)
         .build()
         .expect("el builder acepta un solo provider compartido");
 
-    let _ = magi.analyze(&Mode::Analysis, DISPATCHABLE_CONTENT).await;
+    let outcome = tokio::time::timeout(
+        OVERLAP_RENDEZVOUS_DEADLINE,
+        magi.analyze(&Mode::Analysis, DISPATCHABLE_CONTENT),
+    )
+    .await;
+    assert!(
+        outcome.is_ok(),
+        "no completó dentro de {OVERLAP_RENDEZVOUS_DEADLINE:?}: probable despacho en SERIE — \
+         el rendezvous del último asiento nunca habría llegado a {EXPECTED_SEATS} arribos",
+    );
 
     let observed = peak.load(Ordering::SeqCst);
     assert_eq!(
