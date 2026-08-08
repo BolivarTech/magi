@@ -208,7 +208,7 @@ pub fn detect_migrations(raw: &str) -> Vec<Migration> {
         };
         found.push(Migration {
             key: OPENAI_BASE_URL_LABEL,
-            line: line_of(raw, BASE_URL_KEY),
+            line: line_of_in_section(raw, OPENAI_SECTION, BASE_URL_KEY),
             correction: format!(
                 "{BASE_URL_CORRECTION_PREFIX}{}{BASE_URL_CORRECTION_TAIL}{redacted_clause}",
                 redact_url(url)
@@ -223,7 +223,7 @@ pub fn detect_migrations(raw: &str) -> Vec<Migration> {
     {
         found.push(Migration {
             key: HEADLESS_CAP_LABEL,
-            line: line_of(raw, TOOL_RESULT_CAP_BYTES_KEY),
+            line: line_of_in_section(raw, HEADLESS_SECTION, TOOL_RESULT_CAP_BYTES_KEY),
             correction: format!("{CAP_CORRECTION_PREFIX}{cap}{CAP_CORRECTION_SUFFIX}"),
         });
     }
@@ -237,10 +237,51 @@ pub fn detect_migrations(raw: &str) -> Vec<Migration> {
 /// would match a key mentioned inside a comment, and the default v0.11.0 file is full of
 /// comments that name their own keys. It is only for the message — a wrong line confuses, but
 /// does not change what was detected.
+///
+/// **Unscoped, used only for `provider` at the root** (Loop 2, S1): TOML syntax forces every
+/// root-level key to appear textually before the first `[section]` header in the file, so a
+/// root `provider` line is always the FIRST line starting with `"provider"` regardless of what
+/// sections follow — there is no section-scoped `provider` occurrence that could sit earlier in
+/// the file and get matched by mistake, unlike `base_url`/`tool_result_cap_bytes` below.
 fn line_of(raw: &str, needle: &str) -> usize {
     raw.lines()
         .position(|line| line.trim_start().starts_with(needle))
         .map_or(0, |idx| idx + 1)
+}
+
+/// 1-indexed line where `needle` starts **inside** the named TOML `section`, or 0 if the section
+/// is absent or does not contain it.
+///
+/// **Why scoped, and not just [`line_of`] (Loop 2 fix, Caspar, S1).** A half-migrated
+/// `magi.toml` can legally carry BOTH the new root-level key (`base_url`,
+/// `tool_result_cap_bytes`) and the leftover old section-scoped one with the exact same
+/// trailing name — that overlap is precisely what makes the file "half-migrated" rather than
+/// simply old. An unscoped search for `"base_url"` finds whichever line comes first in the
+/// file, which is the ROOT one in the common layout (the reshaped v0.12.0 template puts
+/// `base_url` above every section), and reports that line for an incompatibility that is
+/// actually about the `[openai]` occurrence — pointing the user at the wrong line to fix.
+///
+/// Scans forward from the `[section]` header (matched at the start of a trimmed line, so a
+/// mention inside a comment or a differently-named table like `[embedding]` cannot match) and
+/// stops at the next `[`-prefixed line, so a needle appearing in a LATER section is correctly
+/// treated as absent from this one.
+fn line_of_in_section(raw: &str, section: &str, needle: &str) -> usize {
+    let header = format!("[{section}]");
+    let mut in_section = false;
+    for (idx, line) in raw.lines().enumerate() {
+        let trimmed = line.trim_start();
+        if in_section {
+            if trimmed.starts_with('[') {
+                break; // Entered the next table without finding the needle in this one.
+            }
+            if trimmed.starts_with(needle) {
+                return idx + 1;
+            }
+        } else if trimmed.starts_with(&header) {
+            in_section = true;
+        }
+    }
+    0
 }
 
 /// Renders the full migration error from the found incompatibilities.
