@@ -78,20 +78,36 @@ pub(crate) fn check_query_size(query: &str, cap: usize) -> Result<(), ConsultInp
     Ok(())
 }
 
-/// Did the anchor of the first finding survive the cut?
+/// Did the FIRST FINDING ITSELF — not merely its section heading — survive the cut?
 ///
 /// This is the check that turns [`TruncationLevel::Structural`] from intention into fact: it is
 /// ASSERTED over the RESULTING TEXT (`kept`), not over whether the attempt to locate the
 /// anchors succeeded — the same discipline SC-A11e demands of its own assertions.
+///
+/// **Checks for content AFTER the heading, not merely the heading's own presence (Loop 2 gate,
+/// S4 finding 4).** `kept.contains(a.findings_start)` alone would be satisfied by a cut that
+/// lands right after the heading and before any bullet text — `"...## Findings\n"` with nothing
+/// past it — which promises "at least the first finding" while the kept slice contains no
+/// finding at all, only the announcement that a findings section exists. That is exactly the gap
+/// [`TruncationLevel::Structural`]'s own rustdoc warns against: "returning `Structural` there
+/// would be promising a guarantee the text does not meet."
+///
 /// `SECTION_ANCHORS` may legitimately not appear in the original report when there were no
 /// findings (`report_anchors::SectionAnchors:: findings_start`); in that case this function
 /// also returns `false`, and the caller steps down to [`TruncationLevel::Anchored`] instead of
-/// asserting a guarantee the text does not meet — "there were no findings" and "could not be
-/// located" are indistinguishable to this check, but the result (stepping down) is correct in
-/// both cases.
+/// asserting a guarantee the text does not meet — "there were no findings", "the heading did not
+/// survive the cut", and "the heading survived but nothing after it did" are three distinct
+/// causes this function does not need to tell apart, because all three warrant the same
+/// step-down.
 #[must_use]
 fn kept_has_first_finding(kept: &str) -> bool {
-    SECTION_ANCHORS.is_some_and(|a| kept.contains(a.findings_start))
+    SECTION_ANCHORS.is_some_and(|a| {
+        kept.find(a.findings_start).is_some_and(|start| {
+            let after = start + a.findings_start.len();
+            kept.get(after..)
+                .is_some_and(|rest| !rest.trim().is_empty())
+        })
+    })
 }
 
 /// Trims at most `cap` bytes from `s`, cutting at a CHARACTER boundary.
@@ -2383,6 +2399,13 @@ mod tests {
 
     /// SC-A11e (`Structural`): the highest-guarantee level — the verdict AND at least the first
     /// finding survive the recort, plus the mark.
+    ///
+    /// Loop 2 gate, S4 finding 4 (Caspar): guarantee (b) asserted on `"- first finding"` — text
+    /// that only a REAL preserved finding can supply — not on `anchors.findings_start` alone
+    /// (the section heading), which would pass even if the cut fell right after the heading and
+    /// no finding text survived. See `kept_has_first_finding`'s own rustdoc for the production
+    /// fix this pins, and `structural_regresses_to_a_lower_level_when_only_the_heading_survives`
+    /// below for the mutation this guards against.
     #[test]
     fn structural_level_keeps_the_verdict_and_the_first_finding() {
         let anchors = SECTION_ANCHORS.expect("this test assumes Structural is reachable");
@@ -2398,14 +2421,56 @@ mod tests {
             "guarantee (a): the verdict block"
         );
         assert!(
-            out.text.contains(anchors.findings_start),
-            "guarantee (b): at least the first finding"
+            out.text.contains("- first finding"),
+            "guarantee (b): the FIRST FINDING'S OWN TEXT, not merely the heading above it"
         );
         assert!(
             out.text.contains(TRUNCATION_MARK),
             "guarantee (c): the truncation mark"
         );
         assert!(out.text.len() <= TOOL_RESULT_CAP_BYTES);
+    }
+
+    /// Loop 2 gate, S4 finding 4 (Caspar) — the mutation the test above alone could not catch
+    /// under the OLD `kept_has_first_finding` (heading-presence-only): a cut engineered to land
+    /// EXACTLY at the end of `findings_start`, with zero characters of the actual finding
+    /// surviving. `budget` (derived from `cap`) is set to the exact byte length of
+    /// `"{verdict_start}\nthe consensus is GO\n\n{findings_start}"` — the heading is fully kept,
+    /// nothing after it is.
+    ///
+    /// Under the old check (`kept.contains(anchors.findings_start)`), this would have wrongly
+    /// returned `Structural`, promising a finding the text does not contain — precisely
+    /// [`TruncationLevel::Structural`]'s own rustdoc warning. The fixed check requires content
+    /// AFTER the heading, so this must step down instead.
+    #[test]
+    fn structural_regresses_to_a_lower_level_when_only_the_heading_survives() {
+        let anchors = SECTION_ANCHORS.expect("this test assumes Structural/Anchored are reachable");
+        let head = format!(
+            "{}\nthe consensus is GO\n\n{}",
+            anchors.verdict_start, anchors.findings_start
+        );
+        let report = format!(
+            "preamble\n\n{head}\n- first finding\n\n{}\n- do X",
+            anchors.findings_end
+        );
+        let cap = head.len() + mark_overhead();
+        assert!(
+            report.len() > cap,
+            "test setup: the fixture must actually exceed the cap"
+        );
+
+        let out = truncate_report(&report, cap);
+
+        assert_ne!(
+            out.level,
+            TruncationLevel::Structural,
+            "the heading alone survived, not the finding beneath it — Structural would be a \
+             false promise"
+        );
+        assert!(
+            !out.text.contains("- first finding"),
+            "test setup sanity: the cut must genuinely exclude the finding's own text"
+        );
     }
 
     /// Builds a report where the verdict + first-finding region GENUINELY EXISTS — unlike
