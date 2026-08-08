@@ -25,7 +25,7 @@ use futures::StreamExt;
 use magi_core::schema::Mode;
 use magi_rs::magi::gate::{evaluate, GateTelemetry, GateThresholds, GateVerdict, NoGateTelemetry};
 use magi_rs::magi::mode::{
-    agent_chosen_mode, input_for_dispatch, resolve_mode_guarded, ModeConfig,
+    agent_chosen_mode, input_for_dispatch, resolve_mode_guarded, ModeConfig, ModeSources,
 };
 // Test-only: `read_resolved_mode` is the inverse of `input_for_dispatch` /
 // `inject_resolved_mode` and has no production caller in this module — only
@@ -1150,9 +1150,11 @@ impl Agent {
         // own `mode` argument (`agent_chosen_mode`), which is level 3, not a
         // classification call.
         let res = resolve_mode_guarded(
-            None,
-            config.mode_config.default_mode,
-            agent_chosen_mode(input),
+            ModeSources {
+                configured: config.mode_config.default_mode,
+                agent_chosen: agent_chosen_mode(input),
+                ..ModeSources::default()
+            },
             config.mode_config.untrusted_content,
             None,
             query,
@@ -1349,9 +1351,10 @@ impl Agent {
             // injection, not a model-issued call — so there is nothing to
             // read a `mode` field out of.
             let forced_res = resolve_mode_guarded(
-                None,
-                config.mode_config.default_mode,
-                None,
+                ModeSources {
+                    configured: config.mode_config.default_mode,
+                    ..ModeSources::default()
+                },
                 config.mode_config.untrusted_content,
                 None,
                 prompt,

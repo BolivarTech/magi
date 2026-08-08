@@ -11,7 +11,7 @@ use magi_core::reporting::MagiReport;
 use magi_core::schema::Mode;
 use magi_rs::magi::kind::ProviderKind;
 use magi_rs::magi::mode::{
-    normalize_label, resolve_mode_guarded, ModeClassifier, ModeError, ModeResolution,
+    normalize_label, resolve_mode_guarded, ModeClassifier, ModeError, ModeResolution, ModeSources,
 };
 use magi_rs::redact::redact_foreign_error;
 use magi_rs::vault::{SecretStore, VaultError};
@@ -486,9 +486,11 @@ async fn resolve_tui_consult_mode(
     classifier: &dyn ModeClassifier,
 ) -> Result<(ModeResolution, String), ModeError> {
     let resolution = resolve_mode_guarded(
-        cmd.mode,
-        default_mode,
-        None,
+        ModeSources {
+            explicit: cmd.mode,
+            configured: default_mode,
+            ..ModeSources::default()
+        },
         untrusted_content,
         Some(classifier),
         &cmd.query,

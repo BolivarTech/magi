@@ -45,7 +45,7 @@ use magi_rs::headless::types::{
     Usage,
 };
 use magi_rs::magi::kind::ProviderKind;
-use magi_rs::magi::mode::{resolve_mode_guarded, ModeClassifier, ModeError};
+use magi_rs::magi::mode::{resolve_mode_guarded, ModeClassifier, ModeError, ModeSources};
 use magi_rs::magi::TimeoutDecision;
 
 use crate::agent::messages::{Content, Message, Role};
@@ -254,9 +254,11 @@ async fn analyze_direct(
     // `agent_chosen` level to feed in (`None`, third argument) — only "a human
     // declared it" (explicit/configured) vs. "classify it" (REQ-A07c).
     let resolution = resolve_mode_guarded(
-        explicit_mode,
-        runtime.configured_mode,
-        None,
+        ModeSources {
+            explicit: explicit_mode,
+            configured: runtime.configured_mode,
+            ..ModeSources::default()
+        },
         runtime.untrusted_content,
         Some(runtime.classifier),
         prompt,

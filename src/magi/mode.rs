@@ -157,6 +157,41 @@ pub struct ModeResolution {
     pub classification_attempted: bool,
 }
 
+/// The three DECLARED-OR-CHOSEN mode inputs [`resolve_mode_guarded`] takes, bundled by NAME
+/// instead of position (MAGI S2 re-gate, Balthasar).
+///
+/// # Why a struct and not three `Option<Mode>` parameters
+///
+/// `resolve_mode_guarded` used to take `explicit`, `configured` and `agent_chosen` as three
+/// consecutive positional `Option<Mode>` arguments. Nothing in the type system stops a call
+/// site from writing them in the wrong order — say, `configured` where `agent_chosen` belongs
+/// — and a transposition like that **compiles clean** while silently inverting REQ-A07's
+/// precedence (`Explicit` > `Configured` > `AgentChosen`). It is exactly the failure mode
+/// `OpenAiSettings` (`src/agent/provider.rs`) already exists to close for a different
+/// same-typed trio (`base_url`/`api_key`/`model`, all `String`) — this is that same fix applied
+/// to this module's own three-same-type hazard.
+///
+/// Bundling into one value with named fields turns a silent semantic bug into a compile error:
+/// a call site that means to pass `agent_chosen` where `configured` goes now has to write
+/// `configured: my_value` and get the field wrong on purpose, not just list the arguments in
+/// the wrong order.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ModeSources {
+    /// Level 1: a HUMAN declared it (`--mode` in the invocation, or the envelope field).
+    pub explicit: Option<Mode>,
+    /// Level 2: `[magi].default_mode`.
+    pub configured: Option<Mode>,
+    /// Level 3: the AGENT chose it via the tool's `input_schema` — zero extra calls.
+    ///
+    /// **A separate field from `explicit`, and that separation is the fix for REQ-A07d.**
+    /// While the agent's choice went through `explicit`, it satisfied the `untrusted_content`
+    /// guard on its own — the bypass this requirement exists to close. The lens chosen by the
+    /// agent is not the content choosing it: blocking it buys no security (an agent compromised
+    /// to the point of choosing the wrong lens can simply not consult, or lie in the report)
+    /// and would kill SC-A07d, which is a hard requirement.
+    pub agent_chosen: Option<Mode>,
+}
+
 /// The ONLY public door to mode resolution (REQ-A07d).
 ///
 /// It is `async` because classification lives **inside**: it does not receive a precomputed
@@ -165,22 +200,12 @@ pub struct ModeResolution {
 /// it. Folding the call in here makes that order inexpressible.
 ///
 /// **The guard goes FIRST, before classifying.** With `untrusted` active and no declared path
-/// (`explicit`/`configured`/`agent_chosen`), the function returns `Err` without touching the
-/// classifier — the content never leaks to the main provider.
-///
-///
-/// **`agent_chosen` is a SEPARATE parameter from `explicit`, and that separation is the fix for
-/// REQ-A07d.** While the agent's choice went through `explicit`, it satisfied the guard on its
-/// own — the bypass this requirement exists to close. The lens chosen by the agent is not the
-/// content choosing it: blocking it buys no security (an agent compromised to the point of
-/// choosing the wrong lens can simply not consult, or lie in the report) and would kill
-/// SC-A07d, which is a hard requirement.
-///
+/// (`sources.explicit`/`sources.configured`/`sources.agent_chosen`), the function returns
+/// `Err` without touching the classifier — the content never leaks to the main provider.
 ///
 /// **Short-circuit, not eager evaluation:** if there is already a mode through a declared path,
 /// the classifier is never invoked — `Option::is_none()` is evaluated before any `.await`,
 /// which is what makes declaring the mode cost zero calls (SC-A07g).
-///
 ///
 /// Precedence: `explicit` > `configured` > `agent_chosen` > classification > `Analysis`.
 ///
@@ -188,16 +213,16 @@ pub struct ModeResolution {
 /// [`ModeError::UntrustedContentRequiresExplicitMode`] if `untrusted` is `true` and there is no
 /// declared mode (human or config) nor one chosen by the agent.
 pub async fn resolve_mode_guarded(
-    explicit: Option<Mode>,
-    configured: Option<Mode>,
-    // LEVEL 3, and it goes in its OWN parameter — it does not reuse `explicit`. While the
-    // agent's choice went through `explicit`, it satisfied the `untrusted_content` guard on its
-    // own: that was the bypass this separate parameter closes.
-    agent_chosen: Option<Mode>,
+    sources: ModeSources,
     untrusted: bool,
     classifier: Option<&dyn ModeClassifier>,
     content: &str,
 ) -> Result<ModeResolution, ModeError> {
+    let ModeSources {
+        explicit,
+        configured,
+        agent_chosen,
+    } = sources;
     if untrusted && explicit.is_none() && configured.is_none() && agent_chosen.is_none() {
         return Err(ModeError::UntrustedContentRequiresExplicitMode);
     }
@@ -405,6 +430,14 @@ fn trim_ascii(raw: &str) -> &str {
 /// It is the same scheme as the **magi-core verdict sentinel**: the output IS the response, or
 /// it is a failure. That crate removed its search parser in 3.0.0, and that lesson is the one
 /// applied here one level higher.
+///
+/// **Known, intended limitation (MAGI S2 re-gate, Caspar): a leading BOM or non-ASCII
+/// whitespace (e.g. NBSP) is NOT trimmed** — [`trim_ascii`] only strips ASCII whitespace, on
+/// purpose. A classifier reply like `"\u{feff}code-review"` therefore fails the literal
+/// comparison and falls through to `Analysis`/`Default`, exactly like any other unrecognized
+/// reply. This is the SAFE direction (no injection risk, no mode forged from wider
+/// normalization) and the accepted cost of closed containment — it degrades inference quality
+/// on a provider that prepends such characters, it does not weaken the guard.
 ///
 /// # Examples
 ///
@@ -818,9 +851,14 @@ mod tests {
     #[tokio::test]
     async fn untrusted_content_without_a_declared_mode_fails_closed() {
         let counting = CountingClassifier::wrapping(Mode::Design);
-        let err = resolve_mode_guarded(None, None, None, true, Some(&counting), "contenido hostil")
-            .await
-            .expect_err("debe fallar cerrado");
+        let err = resolve_mode_guarded(
+            ModeSources::default(),
+            true,
+            Some(&counting),
+            "contenido hostil",
+        )
+        .await
+        .expect_err("debe fallar cerrado");
         assert!(matches!(
             err,
             ModeError::UntrustedContentRequiresExplicitMode
@@ -844,9 +882,10 @@ mod tests {
         let counting = CountingClassifier::wrapping(Mode::Design);
 
         let res = resolve_mode_guarded(
-            Some(Mode::CodeReview),
-            None,
-            None,
+            ModeSources {
+                explicit: Some(Mode::CodeReview),
+                ..ModeSources::default()
+            },
             true,
             Some(&counting),
             "x",
@@ -859,9 +898,10 @@ mod tests {
         );
 
         let res = resolve_mode_guarded(
-            None,
-            Some(Mode::CodeReview),
-            None,
+            ModeSources {
+                configured: Some(Mode::CodeReview),
+                ..ModeSources::default()
+            },
             true,
             Some(&counting),
             "x",
@@ -887,9 +927,10 @@ mod tests {
     async fn untrusted_content_still_lets_the_agent_pick_the_lens() {
         let counting = CountingClassifier::wrapping(Mode::Design);
         let res = resolve_mode_guarded(
-            None,
-            None,
-            Some(Mode::CodeReview),
+            ModeSources {
+                agent_chosen: Some(Mode::CodeReview),
+                ..ModeSources::default()
+            },
             true,
             Some(&counting),
             "x",
@@ -913,9 +954,11 @@ mod tests {
     #[tokio::test]
     async fn configured_default_mode_beats_the_agent() {
         let res = resolve_mode_guarded(
-            None,
-            Some(Mode::CodeReview),
-            Some(Mode::Design),
+            ModeSources {
+                configured: Some(Mode::CodeReview),
+                agent_chosen: Some(Mode::Design),
+                ..ModeSources::default()
+            },
             false,
             None,
             "x",
@@ -934,9 +977,7 @@ mod tests {
     #[tokio::test]
     async fn without_the_flag_inference_remains_the_default_path() {
         let res = resolve_mode_guarded(
-            None,
-            None,
-            None,
+            ModeSources::default(),
             false,
             Some(&EchoClassifier::new("code-review")),
             "x",
@@ -953,9 +994,7 @@ mod tests {
         // the content ALREADY leaked, and that is the signal a future endpoint divergence
         // (REQ-A11d) will need.
         let res = resolve_mode_guarded(
-            None,
-            None,
-            None,
+            ModeSources::default(),
             false,
             Some(&StubClassifier::with(ClassifyOutcome::Timeout)),
             "x",
@@ -972,7 +1011,7 @@ mod tests {
         );
 
         // Without classifier (path with no agent): Default, and NO attempt was made.
-        let res = resolve_mode_guarded(None, None, None, false, None, "x")
+        let res = resolve_mode_guarded(ModeSources::default(), false, None, "x")
             .await
             .unwrap();
         assert_eq!(res.source, ModeSource::Default);

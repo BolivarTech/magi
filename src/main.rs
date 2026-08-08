@@ -4486,9 +4486,10 @@ mod tests {
             // classification ran when it should not have.
             let counting = CountingClassifier::new(Mode::Design);
             let res = magi_rs::magi::mode::resolve_mode_guarded(
-                None,
-                None,
-                Some(chosen),
+                magi_rs::magi::mode::ModeSources {
+                    agent_chosen: Some(chosen),
+                    ..magi_rs::magi::mode::ModeSources::default()
+                },
                 false,
                 Some(&counting),
                 "contenido de prueba",
@@ -4512,9 +4513,10 @@ mod tests {
         ) -> Result<AgentTurnOutcome, magi_rs::magi::mode::ModeError> {
             let counting = CountingClassifier::new(Mode::Design);
             let res = magi_rs::magi::mode::resolve_mode_guarded(
-                None,
-                None,
-                Some(chosen),
+                magi_rs::magi::mode::ModeSources {
+                    agent_chosen: Some(chosen),
+                    ..magi_rs::magi::mode::ModeSources::default()
+                },
                 true,
                 Some(&counting),
                 "contenido de prueba",
@@ -4538,9 +4540,7 @@ mod tests {
         ) -> Result<AgentTurnOutcome, magi_rs::magi::mode::ModeError> {
             let counting = CountingClassifier::new(Mode::Design);
             let res = magi_rs::magi::mode::resolve_mode_guarded(
-                None,
-                None,
-                None,
+                magi_rs::magi::mode::ModeSources::default(),
                 true,
                 Some(&counting),
                 "contenido de prueba",
@@ -4565,9 +4565,11 @@ mod tests {
         ) -> Result<AgentTurnOutcome, magi_rs::magi::mode::ModeError> {
             let counting = CountingClassifier::new(Mode::Design);
             let res = magi_rs::magi::mode::resolve_mode_guarded(
-                None,
-                Some(configured),
-                Some(agent_choice),
+                magi_rs::magi::mode::ModeSources {
+                    configured: Some(configured),
+                    agent_chosen: Some(agent_choice),
+                    ..magi_rs::magi::mode::ModeSources::default()
+                },
                 false,
                 Some(&counting),
                 "contenido de prueba",
@@ -4660,9 +4662,10 @@ mod tests {
                 .expect("no hay etiqueta de modo que rechazar en este envelope");
             let untrusted = env.untrusted_content.unwrap_or(false);
             let err = magi_rs::magi::mode::resolve_mode_guarded(
-                explicit,
-                None,
-                None,
+                magi_rs::magi::mode::ModeSources {
+                    explicit,
+                    ..magi_rs::magi::mode::ModeSources::default()
+                },
                 untrusted,
                 None,
                 &env.prompt,
