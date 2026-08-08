@@ -233,11 +233,27 @@ impl EndpointTemplate {
                     entry: scope.password_entry(),
                 })?;
 
+        // Loop 2 fix (Caspar, S1): PERCENT-ENCODED, never raw. A vault value is an opaque
+        // secret the operator chose — nothing here constrains it to characters that are safe
+        // to sit unescaped inside a URL authority. `locate_userinfo`/`redact_url` compute the
+        // authority window by scanning for `/`, `?`, `#` (terminators) and the LAST `@`
+        // (userinfo/host split); a raw `/`, `?`, `#` or extra `@` from the credential shifts
+        // that window, which is both a redaction bypass (the truncated "authority" no longer
+        // contains an `@`, so `locate_userinfo` returns `Absent` and nothing gets masked) and a
+        // mis-route (the actual host substring changes). `urlencoding::encode` escapes every
+        // byte outside the RFC 3986 unreserved set (ALPHA / DIGIT / `-` / `.` / `_` / `~`),
+        // which includes `/ ? # @ %` — so no substituted byte can ever be mistaken for a URL
+        // structural character, regardless of what the operator's secret contains. `%` itself
+        // is escaped too, so a literal `%2F` typed into a password cannot smuggle a decoded
+        // `/` past a consumer that decodes once.
+        let user_encoded = urlencoding::encode(user.as_str());
+        let password_encoded = urlencoding::encode(password.as_str());
+
         let mut out = String::with_capacity(self.0.len());
         out.push_str(prefix);
-        out.push_str(user.as_str());
+        out.push_str(&user_encoded);
         out.push(':');
-        out.push_str(password.as_str());
+        out.push_str(&password_encoded);
         out.push_str(tail);
         Ok(ResolvedEndpoint(out))
     }
