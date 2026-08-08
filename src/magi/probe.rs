@@ -33,6 +33,19 @@
 //! digest that is not exactly 64 lowercase hex characters degrades to *not measured*, never
 //! being used as-is nor clipped to the range boundary.
 //!
+//! # Operational note: a measurement is only ever refreshed by a RESTART (MAGI S3 re-gate,
+//! Balthasar)
+//!
+//! The probe runs once per process, at startup (REQ-A24), and its result is a **final state
+//! for that process** — there is no periodic re-check and no lazy re-probe. If an operator
+//! switches the daemon's model to one with a smaller context window while magi-rs keeps
+//! running, `input_warn_tokens` stays derived from the STALE, larger window until the process
+//! is restarted, which can silently disable the size warning exactly when a smaller window
+//! makes it matter more. This is an accepted trade-off (re-probing would reintroduce the
+//! unpredictable latency the short probe timeout exists to avoid), not an oversight — but it is
+//! an operational fact worth stating outside this doc comment too: **a model swap on the daemon
+//! requires restarting magi-rs to pick up the new window.**
+//!
 //! # `ProbeError` is not defined in this file
 //!
 //! The task header lists `ProbeError` as a symbol to define here, but no path in this design
@@ -127,10 +140,10 @@ pub enum ProbeSeat {
 pub trait ProbeFactory: Send + Sync {
     /// Builds the probe for an `(endpoint, model)`.
     ///
-    /// Takes `&ResolvedEndpoint`, not `&str`: it is the newtype whose only constructor is
-    /// `EndpointTemplate::resolve`, so a `base_url` with placeholders left unreplaced cannot
-    /// reach here by construction — resolution happens at startup, after opening the vault and
-    /// before probing or building the trio.
+    /// The `base_url` parameter's type is `&ResolvedEndpoint`, not `&str`: it is the newtype
+    /// whose only constructor is `EndpointTemplate::resolve`, so a `base_url` with placeholders
+    /// left unreplaced cannot reach here by construction — resolution happens at startup, after
+    /// opening the vault and before probing or building the trio.
     fn probe_for(&self, kind: ProviderKind, base_url: &ResolvedEndpoint, model: &str) -> ProbeSeat;
 }
 

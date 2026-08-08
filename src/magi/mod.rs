@@ -84,6 +84,16 @@ pub const AGENT_TIMEOUT_ABSOLUTE_FLOOR_SECS: u64 =
 ///
 /// The derivation is what makes it impossible to configure an invalid scale: no combination
 /// exists that breaks `operation_budget + client_timeout <= techo`.
+///
+/// **Caller contract (documented, not type-enforced — MAGI S2 re-gate, Caspar):** the
+/// "impossible to break by construction" claim holds only for
+/// `ceiling_secs >= AGENT_TIMEOUT_ABSOLUTE_FLOOR_SECS`. `config.rs` upholds that by validating
+/// `[magi].agent_timeout_secs` into the narrower `AGENT_TIMEOUT_MIN_SECS..=AGENT_TIMEOUT_MAX_SECS`
+/// range before this ever runs. A hypothetical caller outside that validated path that invokes
+/// this `pub` function directly with a ceiling below the absolute floor gets a `budget +
+/// client_timeout` that legitimately exceeds `ceiling_secs` — the floors win over the fraction,
+/// as `derived_scale_satisfies_invariant_across_the_whole_admissible_range` deliberately
+/// exercises down to that exact floor to prove.
 #[must_use]
 pub fn derive_operation_budget(ceiling_secs: u64) -> Duration {
     #[allow(
@@ -132,6 +142,15 @@ pub const MAX_QUERY_BYTES: usize = 256 * 1024;
 ///
 /// 0.75: the warning must arrive BEFORE getting close to the limit, so a threshold AT the limit
 /// warns about nothing. Never 1.0 — it would disable the guardrail on large-context models.
+///
+/// **Confirmed intended (MAGI S3 re-gate, Caspar): the derived warning is largely vestigial for
+/// 128K+-window mages, and that is fine.** With [`MAX_QUERY_BYTES`] at 256 KiB and
+/// [`CHARS_PER_TOKEN_EST`], the maximum possible input is ~65K tokens; a mage measured at 128K
+/// tokens derives a threshold of ~96K (`0.75 × 128K`), which the input can never reach — the
+/// derived warning simply never fires for that mage. This is not a bug: [`MAX_QUERY_BYTES`] is
+/// the hard guard that actually bounds what gets sent, and the derived warning's job is to
+/// catch the case a large payload approaches a **small** measured window (well under the
+/// generous hard cap), which is exactly where it still fires.
 pub const WARN_WINDOW_FRACTION: f64 = 0.75;
 
 /// Floor of the closed range of an acceptable probe window (REQ-A16b).
@@ -337,6 +356,14 @@ mod tests {
     fn derived_scale_satisfies_invariant_across_the_whole_admissible_range() {
         // It starts at the ABSOLUTE FLOOR, not at the §4.9 minimum: the breaking point is below
         // the configurable range, and a sweep that does not cross it proves nothing.
+        //
+        // Below `AGENT_TIMEOUT_MIN_SECS` (30s) the derived values are dominated by
+        // `MIN_OPERATION_BUDGET`/`MIN_CLIENT_TIMEOUT` rather than the 0.6/0.3 fractions — the
+        // practical, `config.rs`-validated range an operator can actually reach is 30-120s. The
+        // sweep is deliberately WIDER than that: it exists specifically to prove the invariant
+        // holds down at the absolute floor too, for any non-`config.rs` caller of
+        // `derive_operation_budget`/`derive_client_timeout` (both `pub`) that is not gated by
+        // that validation.
         for ceiling in AGENT_TIMEOUT_ABSOLUTE_FLOOR_SECS..=AGENT_TIMEOUT_MAX_SECS {
             let budget = derive_operation_budget(ceiling);
             let client = derive_client_timeout(ceiling);
