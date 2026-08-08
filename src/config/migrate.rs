@@ -156,6 +156,17 @@ pub struct Migration {
 /// correction (SC-A21h). Repeating one the user already applied would make them doubt whether
 /// they applied it correctly, which is the opposite mental state from what this message aims
 /// for.
+///
+/// **Deliberately NOT a fourth pattern: `[embedding].provider = "openai"` (Loop 2, S1,
+/// verified false positive).** `tests/fixtures/v0.11.0/full.toml` carries that exact line and
+/// `every_real_v0_11_0_fixture_reports_its_own_incompatibilities` asserts it is NOT flagged —
+/// which looked, from this module alone, like it could leave the user with a second, unguided
+/// parse error after applying the two named corrections. It does not: `[embedding].provider` is
+/// a **different vocabulary** from the root `provider`/`[magi].kind` this pass polices — see
+/// [`crate::memory::config::EmbeddingConfig::provider`], which only requires non-empty and never
+/// compares against [`magi_rs::magi::kind::ProviderKind`]. `"openai"` is literally that field's
+/// own built-in default, so it round-trips through v0.12.0 without error — verified by reading
+/// `EmbeddingConfig::validate` and its default provider function.
 #[must_use]
 pub fn detect_migrations(raw: &str) -> Vec<Migration> {
     let Ok(doc) = raw.parse::<Value>() else {

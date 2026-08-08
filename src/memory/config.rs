@@ -345,6 +345,14 @@ impl Default for MemoryConfig {
 #[serde(deny_unknown_fields)]
 pub struct EmbeddingConfig {
     /// Provider kind; reuses the OpenAI-compatible path. Default `"openai"`.
+    ///
+    /// **NOT the same vocabulary as the root `provider`/`[magi].kind`** (MS2's
+    /// `magi::kind::ProviderKind`, `{ollama, openai-compat, anthropic}` — Loop 2, S1
+    /// clarification). This is a label for the embeddings backend's own route dispatcher,
+    /// validated only as non-empty (see [`Self::validate`]); it is never parsed against
+    /// `ProviderKind`, so `"openai"` (its own default, unchanged since before MS2) is a valid
+    /// value here and is deliberately excluded from `config::migrate::detect_migrations`'s
+    /// v0.11.0 pattern list — flagging it would be a false alarm, not a migration.
     #[serde(default = "d::emb_provider")]
     pub provider: String,
     /// Endpoint base URL. `None` ⇒ **inherits** the root `base_url` of `magi.toml`
