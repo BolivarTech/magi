@@ -176,6 +176,14 @@ fn line_col_of(raw: &str, offset: usize) -> (usize, usize) {
     (line, column)
 }
 
+/// Loop 2 (S1) construction-boundary note: fields are `pub` and this derives `Default` on
+/// purpose, for `serde` and for the many `MagiConfig { .. }` test literals across `main.rs`/
+/// `headless_runner.rs`. That means the vocabulary [`Self::validate_vocabulary`] enforces is
+/// **not** enforced at the type level — a hand-built literal with `provider: Some("banana")`
+/// compiles. The two production accessors that would otherwise silently misbehave on such a
+/// value (`effective_provider`, `effective_default_mode`) each `assert!` the precondition
+/// instead, which panics in every build profile — see their rustdoc for why that is the chosen
+/// trade-off over a private-fields/builder restructuring.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MagiConfig {
@@ -495,11 +503,35 @@ impl MagiConfig {
     /// so `MagiConfig { provider: Some("banana".into()), ..Default::default() }` compiles and,
     /// without this, would silently return `Ollama` — the precondition this function's own doc
     /// calls "infallible by precondition" is exactly what this checks.
+    ///
+    /// Loop 2 fix (Melchior/Balthasar, S1): **`assert!`, not `debug_assert!`.** The original
+    /// version only checked in debug builds, so a release binary had **no check at all** for a
+    /// precondition documented as security-relevant (REQ-A01b: an invalid provider must never
+    /// silently become a working default). `assert!` is never compiled out regardless of
+    /// profile, so the panic this precondition guards is now present in every build, not just
+    /// the one `cargo nextest` happens to run.
+    ///
+    /// **Why `assert!` and not a `Result`.** This function's signature (`-> ProviderKind`,
+    /// consumed by every call site as infallible) is load-bearing across the bin — turning it
+    /// fallible would ripple a `?`/`.unwrap()` decision through every caller. The only way to
+    /// reach this precondition violation is a caller that hand-builds a `MagiConfig` literal
+    /// skipping `from_toml_str`/`load()`, which is a programmer bug, not a runtime input —
+    /// `assert!` is the idiomatic response to a violated contract, not a recoverable error.
+    ///
+    /// **Why the fields stay `pub` instead of removing this class of bug at the type level.**
+    /// The ideal fix makes an invalid `MagiConfig` unconstructible (private fields, a single
+    /// validated constructor, the same shape as `AutonomousRunConfig` in `main.rs`). That would
+    /// require touching every `MagiConfig { .. }` struct-literal test in `main.rs` and
+    /// `headless_runner.rs` (dozens of sites, several deliberately constructing an invalid value
+    /// to exercise this exact panic) — out of scope for this fix, which is confined to
+    /// `config.rs`. `assert!` closes the concrete release-mode gap the review raised without
+    /// that wider, cross-file restructuring.
     #[must_use]
     pub fn effective_provider(&self) -> ProviderKind {
-        debug_assert!(
+        assert!(
             self.validate_vocabulary().is_ok(),
-            "load() debe haber validado"
+            "MagiConfig::effective_provider called on an unvalidated config — \
+             construct it via from_toml_str()/load(), never as a raw struct literal"
         );
         ProviderKind::parse(self.provider.as_deref().unwrap_or_default())
             .unwrap_or(None)
@@ -519,13 +551,18 @@ impl MagiConfig {
     /// `effective_default_mode_follows_the_same_blank_is_absent_rule`.
     ///
     /// I5 (review round 2): restored — same precondition/rationale as `effective_provider`'s
-    /// `debug_assert!`.
+    /// assertion.
+    ///
+    /// Loop 2 fix (Melchior/Balthasar, S1): same `assert!`-not-`debug_assert!` and
+    /// pub-fields-stay-pub reasoning as [`Self::effective_provider`] — see its rustdoc for the
+    /// full explanation.
     #[must_use]
     pub fn effective_default_mode(&self) -> Option<Mode> {
         // Mode declared in `[magi].default_mode`, or `None` if absent/empty (REQ-A15).
-        debug_assert!(
+        assert!(
             self.validate_vocabulary().is_ok(),
-            "load() debe haber validado"
+            "MagiConfig::effective_default_mode called on an unvalidated config — \
+             construct it via from_toml_str()/load(), never as a raw struct literal"
         );
         <Mode as ModeExt>::parse_config_value(self.magi.default_mode.as_deref().unwrap_or_default())
             .unwrap_or(None)
@@ -1725,12 +1762,18 @@ mod tests {
     /// I5: `effective_provider` is documented "infallible by precondition" — that precondition
     /// is `validate_vocabulary` having already run. `MagiConfig`'s fields are `pub` and it
     /// derives `Default`, so nothing at the type level stops a caller from skipping
-    /// `from_toml_str`/`load()` and constructing an invalid config directly; the
-    /// `debug_assert!` is what turns that misuse into a loud debug-build panic instead of a
-    /// silent `Ollama` fallback.
+    /// `from_toml_str`/`load()` and constructing an invalid config directly.
+    ///
+    /// Loop 2 fix (Melchior/Balthasar, S1): the guard is now `assert!`, which panics in EVERY
+    /// build profile, not only under `debug_assertions` — a release binary hitting this misuse
+    /// used to silently fall back to `Ollama` with zero signal; now it panics the same way a
+    /// debug build always did. `cargo nextest` always builds with `debug_assertions` on, so this
+    /// test cannot itself distinguish `assert!` from the old `debug_assert!` at runtime — the
+    /// property that changed (never compiled out) is a static one, verified by reading the
+    /// macro used, not by a profile-dependent test run.
     #[test]
-    #[should_panic(expected = "validado")]
-    fn effective_provider_panics_in_debug_builds_when_validate_vocabulary_was_skipped() {
+    #[should_panic(expected = "unvalidated config")]
+    fn effective_provider_panics_when_validate_vocabulary_was_skipped() {
         let cfg = MagiConfig {
             provider: Some("banana".into()),
             ..Default::default()
@@ -1738,10 +1781,11 @@ mod tests {
         let _ = cfg.effective_provider();
     }
 
-    /// I5: same precondition, same gap, for `effective_default_mode`.
+    /// I5: same precondition, same gap, for `effective_default_mode`. See
+    /// `effective_provider_panics_when_validate_vocabulary_was_skipped` for the Loop 2 fix note.
     #[test]
-    #[should_panic(expected = "validado")]
-    fn effective_default_mode_panics_in_debug_builds_when_validate_vocabulary_was_skipped() {
+    #[should_panic(expected = "unvalidated config")]
+    fn effective_default_mode_panics_when_validate_vocabulary_was_skipped() {
         let cfg = MagiConfig {
             magi: MagiSectionConfig {
                 default_mode: Some("banana".into()),
