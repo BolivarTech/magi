@@ -317,6 +317,30 @@ mod tests {
         );
     }
 
+    /// Loop 1 fix round CF (finding F21 follow-up): a scheme-less/malformed `base_url` hits
+    /// `UserinfoLocation::Unparseable`, which `redact_url` masks to the literal `"***"` — not
+    /// the real value, exactly like the credential case, just for a different reason. The
+    /// disclaimer must cover this outcome too, with wording that does not tell the user to
+    /// "copy the real one" (there is no credential to extract) but instead that the original
+    /// never parsed as a URL at all.
+    #[test]
+    fn an_unparseable_base_url_states_it_is_masked_and_not_paste_ready() {
+        let toml = "[openai]\nbase_url = \"localhost:11434/v1\"\n";
+        let rendered = render_migration_error(&detect_migrations(toml));
+        assert!(
+            rendered.contains("***"),
+            "el valor mostrado debe ser la mascara completa: {rendered}"
+        );
+        assert!(
+            rendered.contains("did not parse as a URL"),
+            "debe decir que el original no parseaba como URL: {rendered}"
+        );
+        assert!(
+            !rendered.contains("copy the real one"),
+            "esa frase es solo para el caso con credencial, no aplica aquí: {rendered}"
+        );
+    }
+
     /// SC-A21g: a syntactically broken TOML does NOT receive migration advice — without
     /// structure, `detect_migrations` finds nothing to search patterns against.
     #[test]
