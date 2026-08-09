@@ -5,7 +5,7 @@ Why this exists
 The full suite runs 400-600 s, and the agent tooling's command ceiling is
 600 s. Agents were therefore backgrounding the run and yielding their turn,
 which strands them: a background task only wakes an agent that is still
-running. Seven stalls in one milestone traced back to that single squeeze.
+running. Nine stalls in one milestone traced back to that single squeeze.
 
 Running only the touched modules per commit takes the run well clear of the
 ceiling. The full suite still runs once per round, so nothing is skipped --
@@ -21,12 +21,20 @@ filter excluded, and the round-closing full suite is what catches that.
 
 Fail-safe by construction
 -------------------------
-The filter is DERIVED from ``git diff``, never hand-maintained. A hand-written
-list is exactly the failure mode ``.config/nextest.toml`` documents twice: a
-filter that matches nothing raises no error, so it silently stops applying.
-Anything this script cannot map confidently -- a crate-root file, a manifest,
-a build script, an unrecognised path -- falls back to the FULL suite. The
-default direction is always "run more", never "run less".
+The filter is DERIVED, never hand-maintained. A hand-written list is exactly
+the failure mode ``.config/nextest.toml`` documents twice: a filter that
+matches nothing raises no error, so it silently stops applying. Anything this
+script cannot map confidently -- a workspace manifest, a lockfile, the nextest
+config, an unrecognised path -- falls back to the FULL suite. The default
+direction is always "run more", never "run less".
+
+Workspaces
+----------
+Package boundaries come from ``cargo metadata``, not from guessed directory
+names such as ``crates/``. Guessing would be the same class of mistake as a
+hand-written filter: it works until someone lays the workspace out differently,
+and then it silently maps nothing. With the real package list, touching one
+member's crate root scopes the run to *that package* rather than to everything.
 
 Usage
 -----
@@ -38,82 +46,145 @@ Exits with the test runner's own status so it can gate a commit directly.
 """
 
 import argparse
+import json
+import os
 import subprocess
 import sys
 
-# Touching any of these invalidates the mapping, so we run everything.
+# Touching any of these invalidates the mapping, so we run everything. These are
+# repository-root paths; a *member's* Cargo.toml is handled per package below.
 FULL_SUITE_TRIGGERS = (
     "cargo.toml",
     "cargo.lock",
     "build.rs",
-    "src/main.rs",
-    "src/lib.rs",
     ".config/nextest.toml",
 )
 
+# Paths that cannot break a test on their own and so contribute no filter.
+DOC_PREFIXES = ("docs/", "dev-docs/", ".superpowers/", "planning/", "sbtdd/")
+DOC_SUFFIXES = (".md", ".toml", ".json", ".yml", ".yaml", ".txt")
+
 
 def changed_files(rev_range):
-    """Return the repository-relative paths the range (or worktree) touches.
-
-    With no range, compares the working tree *and* the index against HEAD, so
-    staged-but-uncommitted work is included.
-    """
-    if rev_range:
-        cmd = ["git", "diff", "--name-only", rev_range]
-    else:
-        cmd = ["git", "diff", "--name-only", "HEAD"]
+    """Return the repository-relative paths the range (or worktree) touches."""
+    cmd = ["git", "diff", "--name-only"]
+    cmd.append(rev_range if rev_range else "HEAD")
     out = subprocess.run(cmd, capture_output=True, text=True, check=True).stdout
-    return [line.strip() for line in out.splitlines() if line.strip()]
+    return [line.strip().replace("\\", "/") for line in out.splitlines() if line.strip()]
 
 
-def module_filter(path):
-    """Map one repository path to a nextest filter fragment, or None.
+def repo_root():
+    out = subprocess.run(["git", "rev-parse", "--show-toplevel"],
+                         capture_output=True, text=True, check=True).stdout
+    return out.strip().replace("\\", "/")
 
-    Returns the string ``"full"`` when the path forces a full run.
+
+def packages():
+    """Return [(package_name, dir_relative_to_repo_root)], longest dir first.
+
+    Sorting by descending path length lets the caller take the first prefix
+    match, which is the innermost package -- the right answer when one member
+    lives inside another's directory tree.
+    """
+    try:
+        out = subprocess.run(
+            ["cargo", "metadata", "--no-deps", "--format-version", "1"],
+            capture_output=True, text=True, check=True).stdout
+        meta = json.loads(out)
+    except (OSError, subprocess.CalledProcessError, ValueError):
+        return None  # Not a cargo project, or cargo is unavailable.
+
+    root = repo_root()
+    found = []
+    for pkg in meta.get("packages", []):
+        manifest = pkg.get("manifest_path", "").replace("\\", "/")
+        pkg_dir = os.path.dirname(manifest)
+        rel = os.path.relpath(pkg_dir, root).replace("\\", "/")
+        rel = "" if rel == "." else rel
+        found.append((pkg["name"], rel))
+    found.sort(key=lambda item: len(item[1]), reverse=True)
+    return found
+
+
+def owning_package(path, pkgs):
+    """Return (package_name, path_relative_to_that_package), or None."""
+    for name, pkg_dir in pkgs:
+        if not pkg_dir:
+            return name, path
+        if path.startswith(pkg_dir + "/"):
+            return name, path[len(pkg_dir) + 1:]
+    return None
+
+
+def scope(name, inner, single_crate):
+    """Wrap a filter fragment in a package predicate unless the crate is alone."""
+    if single_crate:
+        return inner
+    if inner is None:
+        return "package(%s)" % name
+    return "package(%s) & %s" % (name, inner)
+
+
+def module_filter(path, pkgs=None, single_crate=True):
+    """Map one repository path to a nextest filter fragment.
+
+    Returns ``"full"`` when the path forces a full run, ``None`` when it
+    contributes no filter at all.
     """
     lowered = path.lower()
     if lowered in FULL_SUITE_TRIGGERS:
         return "full"
 
-    if path.startswith("tests/") and path.endswith(".rs"):
-        # An integration-test file is its own binary; run that binary whole.
-        name = path[len("tests/"):-len(".rs")]
-        if "/" in name:
-            # A helper module under tests/ is compiled into several binaries
-            # and we cannot tell which, so widen rather than guess.
+    if pkgs:
+        owned = owning_package(path, pkgs)
+        if owned is None:
+            # Inside the repository but outside every package: documentation and
+            # tooling live here, and anything else we do not understand.
+            if path.startswith(DOC_PREFIXES) or path.endswith(DOC_SUFFIXES):
+                return None
             return "full"
-        return "binary(%s)" % name
+        name, rel = owned
+    else:
+        name, rel = None, path
 
-    if path.startswith("src/") and path.endswith(".rs"):
-        rest = path[len("src/"):-len(".rs")]
-        parts = rest.split("/")
+    # A member's own manifest or build script: scope to that package.
+    if rel.lower() in ("cargo.toml", "build.rs"):
+        return "full" if single_crate else scope(name, None, False)
+
+    if rel.startswith("tests/") and rel.endswith(".rs"):
+        stem = rel[len("tests/"):-len(".rs")]
+        if "/" in stem:
+            # A helper module under tests/ is compiled into several binaries and
+            # we cannot tell which, so widen rather than guess.
+            return "full" if single_crate else scope(name, None, False)
+        return scope(name, "binary(%s)" % stem, single_crate)
+
+    if rel.startswith("src/") and rel.endswith(".rs"):
+        parts = rel[len("src/"):-len(".rs")].split("/")
         if parts[-1] == "mod":
             # A module root: its children may depend on it, so take the subtree.
             parts = parts[:-1]
-        if not parts:
-            return "full"
-        return "test(/%s::/)" % "::".join(parts)
+        if not parts or parts == ["main"] or parts == ["lib"]:
+            # The crate root. In a workspace that means "this package"; in a
+            # single crate it means everything, so there is nothing to narrow.
+            return "full" if single_crate else scope(name, None, False)
+        return scope(name, "test(/%s::/)" % "::".join(parts), single_crate)
 
-    # Documentation, fixtures and config we do not know how to map: those
-    # cannot break a test on their own, so they contribute no filter. If the
-    # commit touched nothing else, the caller treats that as "nothing to run".
-    if path.startswith(("docs/", "dev-docs/", ".superpowers/", "planning/", "sbtdd/")):
-        return None
-    if path.endswith((".md", ".toml", ".json", ".yml", ".yaml")):
+    if path.startswith(DOC_PREFIXES) or path.endswith(DOC_SUFFIXES):
         return None
 
-    # Anything unrecognised: widen, never narrow.
     return "full"
 
 
-def build_filter(paths):
-    """Return (expression, reason). An empty expression means 'run nothing'."""
+def build_filter(paths, pkgs):
+    """Return (expression, reason). ``None`` means 'nothing to run'."""
     if not paths:
         return None, "no changes detected"
 
+    single_crate = not pkgs or len(pkgs) == 1
     fragments = []
     for path in paths:
-        mapped = module_filter(path)
+        mapped = module_filter(path, pkgs, single_crate)
         if mapped == "full":
             return "full", "%s forces a full run" % path
         if mapped and mapped not in fragments:
@@ -121,29 +192,35 @@ def build_filter(paths):
 
     if not fragments:
         return None, "only documentation or config changed"
-    return " | ".join(fragments), "%d path(s) mapped" % len(paths)
+    if len(fragments) == 1:
+        return fragments[0], "1 path group mapped"
+    return " | ".join("(%s)" % f for f in fragments), "%d path groups mapped" % len(fragments)
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description="Run the tests a change can affect.")
     parser.add_argument("--range", dest="rev_range", default=None,
                         help="git revision range, e.g. HEAD~3..HEAD")
     parser.add_argument("--print", dest="print_only", action="store_true",
-                        help="print the derived filter and exit")
+                        help="print the derived command and exit")
     args = parser.parse_args()
 
     paths = changed_files(args.rev_range)
-    expression, reason = build_filter(paths)
+    pkgs = packages()
+    if pkgs is None:
+        print("[scoped-tests] cargo metadata unavailable: running the full suite")
+        expression, reason = "full", "no package metadata"
+    else:
+        expression, reason = build_filter(paths, pkgs)
+        if len(pkgs) > 1:
+            print("[scoped-tests] workspace with %d packages" % len(pkgs))
 
     if expression == "full":
         print("[scoped-tests] FULL suite: %s" % reason)
         cmd = ["cargo", "nextest", "run"]
     elif expression is None:
-        print("[scoped-tests] nothing to run: %s" % reason)
-        if args.print_only:
-            return 0
-        # Still run the full suite rather than claiming a green gate on nothing.
-        print("[scoped-tests] running the full suite anyway, to avoid a vacuous pass")
+        print("[scoped-tests] %s -- running the full suite anyway, so the gate is "
+              "never green over nothing" % reason)
         cmd = ["cargo", "nextest", "run"]
     else:
         print("[scoped-tests] scoped run (%s): %s" % (reason, expression))
