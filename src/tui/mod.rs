@@ -367,15 +367,7 @@ fn tui_consult_error_reply(
     kind: ProviderKind,
     cap: usize,
 ) -> crate::tools::consult::Truncated {
-    // S7 gate re-review finding (Balthasar): pre-fix behavior, extracted verbatim from the
-    // production call site so the finding can be reproduced as a failing assertion rather
-    // than a compile error — `cap` is accepted but not yet applied. The `fix:` commit
-    // routes this through `truncate_report`.
-    let _ = cap;
-    crate::tools::consult::Truncated {
-        text: tui_consult_error_body(err, kind),
-        level: crate::tools::consult::TruncationLevel::None,
-    }
+    crate::tools::consult::truncate_report(&tui_consult_error_body(err, kind), cap)
 }
 
 /// Handles a failed post-`/login` MAGI trio rebuild (I4, fix round 2).
