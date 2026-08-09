@@ -1680,6 +1680,54 @@ mod tests {
         assert_eq!(outcome.usage.output_tokens, 0);
     }
 
+    /// MS2 gate S6 finding 1: `applied_caps.timeout_secs` must report the wall-clock
+    /// ceiling the runner actually enforced, not a permanent `None`. `Resolved::
+    /// applied_caps.timeout_secs` starts `None` (resolution.rs cannot know the caller's
+    /// ceiling); `run_query` receives the effective one via `RunWiring::timeout` and
+    /// must copy it into the outcome — a consumer reading `null` otherwise cannot tell
+    /// "no cap" from "cap applied but not reported".
+    #[tokio::test]
+    async fn test_run_query_reports_the_effective_timeout_in_applied_caps() {
+        let provider = ScriptedProvider::new(vec![Turn::Text("hi".to_string())]);
+        let mut agent = Agent::new(provider);
+        let policy = Policy::new(Tier::Default, 15, None);
+        let outcome = run_query(
+            resolved_stub(),
+            policy,
+            &mut agent,
+            "prompt",
+            &wiring(Some(Duration::from_secs(42))),
+            None,
+        )
+        .await;
+        assert_eq!(
+            outcome.applied_caps.timeout_secs,
+            Some(42),
+            "a run with a 42s wall-clock ceiling must surface 42 in \
+             applied_caps.timeout_secs, not null"
+        );
+    }
+
+    /// The other half of the same contract: a run with no wall-clock ceiling
+    /// (`wiring.timeout == None`) reports `applied_caps.timeout_secs == None`, which
+    /// is how "no cap" stays distinguishable from the bug the sibling test pins.
+    #[tokio::test]
+    async fn test_run_query_reports_no_timeout_when_none_is_set() {
+        let provider = ScriptedProvider::new(vec![Turn::Text("hi".to_string())]);
+        let mut agent = Agent::new(provider);
+        let policy = Policy::new(Tier::Default, 15, None);
+        let outcome = run_query(
+            resolved_stub(),
+            policy,
+            &mut agent,
+            "prompt",
+            &wiring(None),
+            None,
+        )
+        .await;
+        assert_eq!(outcome.applied_caps.timeout_secs, None);
+    }
+
     /// Default tier denies `edit`; the agent still answers, so the run is `Done`
     /// (the denial is recorded, exit 0) — MS2.md Task 3 Step 1 / REQ-H23b.
     #[tokio::test]
@@ -2909,6 +2957,41 @@ mod tests {
         assert_ne!(
             consult["report_truncated"], "none",
             "a report bigger than the cap must be marked truncated"
+        );
+    }
+
+    /// Same contract as `test_run_query_reports_the_effective_timeout_in_applied_caps`,
+    /// for the direct `magi consult` route: `run_consult` takes its wall-clock ceiling
+    /// as the `timeout` parameter directly (not via `RunWiring`), and must copy it into
+    /// `applied_caps.timeout_secs` rather than leaving `Resolved::applied_caps`'s
+    /// static `None` untouched.
+    #[tokio::test]
+    async fn run_consult_reports_the_effective_timeout_in_applied_caps() {
+        let cfg = MagiConfig::default();
+        let sink = RecordingNoticeSink::default();
+        let outcome = run_consult(
+            resolved_stub(),
+            canned_magi(),
+            "should we migrate X to Y?",
+            Some(Duration::from_secs(77)),
+            Some(Mode::Analysis),
+            &MagiRuntimeParams {
+                kind: ProviderKind::OpenAiCompat,
+                classifier: &NeverClassifier,
+                configured_mode: None,
+                untrusted_content: false,
+                magi_config: &cfg,
+                timeout_decision: neutral_timeout_decision(),
+                notice_sink: &sink,
+            },
+            None,
+        )
+        .await;
+
+        assert_eq!(
+            outcome.applied_caps.timeout_secs,
+            Some(77),
+            "run_consult's `timeout` parameter must surface in applied_caps.timeout_secs"
         );
     }
 
