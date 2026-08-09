@@ -9122,6 +9122,48 @@ mod tests {
             );
         }
 
+        /// S8 gate re-review finding (Caspar): `min_mage_window` returns `Some` as soon as
+        /// ONE mage measures, so a branch that only checks `trio_probe_incomplete_notice`
+        /// when `min_mage_window` is `None` skips it whenever the trio is PARTIALLY cold —
+        /// exactly the case where it matters most. `derive_warn_tokens` takes the minimum of
+        /// whichever mages happened to measure; if the cold one would have had the smallest
+        /// window, the derived threshold comes out too high and the size warning stops firing
+        /// silently for that mage.
+        #[tokio::test]
+        async fn a_partially_cold_trio_still_reports_the_incomplete_measurement_notice() {
+            // Two of three mages measured; "caspar" is absent from the map, so `probe_for`
+            // returns `Unbuildable` -> `Measurement::NotMeasuredThisTime` (the cold case) —
+            // `min_mage_window` still returns `Some(128_000)` from the other two.
+            let factory = MappedProbeFactory::new(&[
+                ("principal", 128_000),
+                ("melchior", 128_000),
+                ("balthasar", 128_000),
+            ]);
+            let cfg = cfg_with_four_distinct_models("principal", "melchior", "balthasar", "caspar");
+            let mut notices = Vec::new();
+            let warn_tokens = probe_and_report(
+                &cfg,
+                &test_endpoints(),
+                ProviderKind::Ollama,
+                &factory,
+                &mut notices,
+            )
+            .await;
+
+            assert!(
+                warn_tokens.is_some(),
+                "two of three mages measured: the derivation itself still succeeds — this is \
+                 not the bug"
+            );
+            assert!(
+                notices
+                    .iter()
+                    .any(|n| n.text.contains("input_warn_tokens") && n.text.contains("cold")),
+                "a partially cold trio must still surface the incomplete-measurement notice, \
+                 not just a fully cold one: {notices:?}"
+            );
+        }
+
         // ---- resolve_magi_kind ---------------------------------------------------------
 
         /// Absent `[magi].kind` inherits the ALREADY-RESOLVED principal one — not
