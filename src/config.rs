@@ -1280,6 +1280,57 @@ mod tests {
         );
     }
 
+    // S1 gate re-review finding (Balthasar): `resolve_openai_model`/`resolve_anthropic_model`
+    // must treat a blank/whitespace-only env value as absent (REQ-A12), the same rule
+    // `resolve_effective_provider_kind`/`resolve_magi_override` already apply — an
+    // `OPENAI_MODEL=""` exported empty in a CI script must fall through to TOML, then the
+    // built-in default, not be forwarded as a literal empty model name.
+
+    #[test]
+    fn test_resolve_openai_model_blank_env_falls_through_to_toml() {
+        let c = MagiConfig {
+            openai: OpenAiConfig {
+                model: Some("phi4-mini".into()),
+            },
+            ..Default::default()
+        };
+        assert_eq!(resolve_openai_model(&c, Some("")), "phi4-mini");
+        assert_eq!(resolve_openai_model(&c, Some("   ")), "phi4-mini");
+    }
+
+    #[test]
+    fn test_resolve_openai_model_blank_env_falls_through_to_default_when_no_toml() {
+        use crate::defaults::DEFAULT_OPENAI_MODEL;
+        assert_eq!(
+            resolve_openai_model(&MagiConfig::default(), Some("")),
+            DEFAULT_OPENAI_MODEL
+        );
+    }
+
+    #[test]
+    fn test_resolve_anthropic_model_blank_env_falls_through_to_toml() {
+        let c = MagiConfig {
+            anthropic: AnthropicConfig {
+                model: Some("claude-toml-model".into()),
+            },
+            ..Default::default()
+        };
+        assert_eq!(resolve_anthropic_model(&c, Some("")), "claude-toml-model");
+        assert_eq!(
+            resolve_anthropic_model(&c, Some("   ")),
+            "claude-toml-model"
+        );
+    }
+
+    #[test]
+    fn test_resolve_anthropic_model_blank_env_falls_through_to_default_when_no_toml() {
+        use crate::defaults::DEFAULT_ANTHROPIC_MODEL;
+        assert_eq!(
+            resolve_anthropic_model(&MagiConfig::default(), Some("")),
+            DEFAULT_ANTHROPIC_MODEL
+        );
+    }
+
     #[test]
     fn test_load_unreadable_file_is_fatal() {
         // -------------------------------------------------------------------------
