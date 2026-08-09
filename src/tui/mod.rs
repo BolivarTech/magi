@@ -940,14 +940,14 @@ impl App {
     }
 
     /// Inserts a character at the current cursor position.
+    ///
+    /// Delegates to [`Self::insert_str`] (a single-character `&str` view of `c`, via
+    /// `char::encode_utf8` over a stack buffer — no allocation) so the selection-clearing and
+    /// char-boundary emergency-fallback logic lives in exactly one place (B3) rather than
+    /// being duplicated between the single-character and batched insertion paths.
     pub fn insert_char(&mut self, c: char) {
-        self.delete_selection();
-        // Ensure cursor is at char boundary before insert
-        if !self.input.is_char_boundary(self.cursor_position) {
-            self.cursor_position = 0; // Emergency fallback
-        }
-        self.input.insert(self.cursor_position, c);
-        self.cursor_position += c.len_utf8();
+        let mut buf = [0u8; 4];
+        self.insert_str(c.encode_utf8(&mut buf));
     }
 
     /// Inserts `text` at the current cursor position in a single operation.
