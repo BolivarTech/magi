@@ -1022,19 +1022,22 @@ impl App {
         self.thinking_active = false;
         // Streaming content → follow the tail so the live reply stays visible.
         self.scroll_offset = 0;
-        if self.streaming {
-            if let Some(last) = self.messages.last_mut() {
-                last.push_str(&delta);
-                return;
-            }
+        if let Some(target) = self
+            .stream_target
+            .and_then(|idx| self.messages.get_mut(idx))
+        {
+            target.push_str(&delta);
+            return;
         }
         self.messages.push(format!("Magi Agent: {}", delta));
+        self.stream_target = Some(self.messages.len() - 1);
         self.streaming = true;
     }
 
     /// Marks the end of a streamed assistant turn.
     pub fn finalize_stream(&mut self) {
         self.streaming = false;
+        self.stream_target = None;
         // Turn over → drop any lingering "thinking…" indicator (covers turns that
         // reasoned but produced no content: empty answer, error, or tool-only).
         self.thinking_active = false;
