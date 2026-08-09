@@ -1605,7 +1605,7 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
         &mut agent,
         consult_magi.as_ref(),
         magi_config.magi.auto_approve,
-        magi_config.effective_magi_kind(),
+        registered_magi_kind(&magi_config, provider_kind),
         magi_config.magi_endpoint_diverges(),
         magi_config.effective_max_query_bytes(),
         magi_config.effective_tool_result_cap(),
@@ -1629,7 +1629,7 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
             classifier_notices: tui_classifier_notices,
             default_mode: tui_default_mode,
             untrusted_content: tui_untrusted_content,
-            magi_kind: magi_config.effective_magi_kind(),
+            magi_kind: registered_magi_kind(&magi_config, provider_kind),
             max_query_bytes: magi_config.effective_max_query_bytes(),
             tool_result_cap: magi_config.effective_tool_result_cap(),
         },
@@ -1807,6 +1807,38 @@ fn resolve_magi_kind(
         ProviderKind::parse(cfg.magi.kind.as_deref().unwrap_or_default())?
             .unwrap_or(principal_kind),
     )
+}
+
+/// The trio `kind` every DOWNSTREAM CONSUMER must see (`ConsultTool::with_kind`,
+/// `MagiRuntimeParams::kind`) — resolved the SAME way [`build_magi_orchestrator`]/
+/// [`orchestrate_probes`] actually build the trio (MS2 gate S8 finding).
+///
+/// A thin wrapper over [`resolve_magi_kind`], NOT a second, divergent rule: every call site
+/// that needs to report/consume the trio's active kind (the four in `run()`,
+/// `run_query_subcommand`, `run_consult_subcommand`) goes through this one function instead of
+/// each calling `cfg.effective_magi_kind()` directly — that accessor is TOML-only and ignores
+/// `MAGI_PROVIDER`, so a `MAGI_PROVIDER` that moves the principal without declaring
+/// `[magi].kind` used to make these call sites report a stale kind. That stale value reaches
+/// `explain_magi_error`'s keyless-auth hint (REQ-A12c): a wrong `kind` there either adds the
+/// hint when the real cause has nothing to do with keyless auth, or suppresses it when it
+/// should have fired.
+///
+/// An unrecognized `[magi].kind` falls back to `principal_kind` instead of propagating
+/// [`resolve_magi_kind`]'s typed error: a genuinely invalid `[magi].kind` already makes the
+/// trio unbuildable upstream (`build_magi_orchestrator` returns `Err`), so `consult_magi` is
+/// `None`/absent and no call site ever registers `ConsultTool` or builds `MagiRuntimeParams`
+/// with this fallback value — it is unreachable in production, never silently wrong.
+///
+/// # Parameters
+/// * `cfg` - the loaded `magi.toml`.
+/// * `principal_kind` - the ALREADY env-resolved principal kind (`provider_kind` in `run()`,
+///   `HeadlessContext::provider_kind` in the two dispatchers) — never `cfg.effective_provider()`.
+///
+/// # Returns
+/// The kind every downstream consumer of the trio should report/use.
+#[must_use]
+fn registered_magi_kind(cfg: &MagiConfig, principal_kind: ProviderKind) -> ProviderKind {
+    resolve_magi_kind(cfg, principal_kind).unwrap_or(principal_kind)
 }
 
 /// BACKEND model for `kind`: the one a trio seat inherits without its own override, AND the
@@ -3436,18 +3468,18 @@ struct HeadlessContext {
     magi_config: MagiConfig,
     /// The resolved principal LLM provider.
     provider: Arc<dyn Provider>,
-    /// The resolved provider kind (Task 4.1: `ProviderKind`, not the retired legacy
+    /// The resolved principal provider kind (Task 4.1: `ProviderKind`, not the retired legacy
     /// `"openai"`/`"anthropic"` label — the vocabulary is unified now).
     ///
-    /// Not read by either dispatcher's production code anymore: `run_query_subcommand`/
-    /// `run_consult_subcommand` used to derive `backend_label` from it for the retired
-    /// per-agent adapter machinery, and that whole path is gone. Kept on the struct
-    /// (rather than dropped as a local in `prepare_headless`) because it verifies a
-    /// property `ctx.resolved.provider` alone cannot: that the raw string actually
-    /// PARSED into the REQ-A01b vocabulary, not just that it equals some literal —
-    /// `test_prepare_headless_cli_provider_override_normalizes_the_new_vocabulary` and
-    /// its envelope-field sibling below assert on it directly.
-    #[allow(dead_code)]
+    /// Read by both dispatchers' production code (MS2 gate S8 finding): `run_query_subcommand`
+    /// and `run_consult_subcommand` pass it into `registered_magi_kind` alongside `magi_config`
+    /// to resolve the trio's `kind` for `ConsultTool`/`MagiRuntimeParams`, the SAME way
+    /// `build_magi_orchestrator` resolves it — `magi_config.effective_magi_kind()` alone is
+    /// TOML-only and would ignore `MAGI_PROVIDER`. It also still verifies a property
+    /// `ctx.resolved.provider` alone cannot: that the raw string actually PARSED into the
+    /// REQ-A01b vocabulary, not just that it equals some literal —
+    /// `test_prepare_headless_cli_provider_override_normalizes_the_new_vocabulary` and its
+    /// envelope-field sibling below assert on it directly.
     provider_kind: ProviderKind,
     /// The MAGI trio built with native providers (REQ-A01), or why it couldn't be
     /// (REQ-A06). Built ONCE here — both `run_query_subcommand` and
@@ -3484,16 +3516,14 @@ struct HeadlessContext {
     /// The REQ-A07p/SC-A07p endpoint-divergence notice for THIS run, if it applies —
     /// fix round 4. Already `eprintln!`'d to stderr by `prepare_headless` (same
     /// immediate-print convention as `cfg_notices`/`trio_notices` just above it), and
-    /// ALSO kept here for the same reason `provider_kind` above is kept on the
-    /// struct: `prepare_headless` cannot be driven from a unit test in any way that
-    /// captures its stderr (this is a real process resource, global and not
+    /// ALSO kept here because `prepare_headless` cannot be driven from a unit test in any way
+    /// that captures its stderr (this is a real process resource, global and not
     /// parallel-test-safe to redirect), so a test asserts on this field directly
     /// instead — see `test_prepare_headless_carries_the_divergence_notice_when_it_applies`.
     ///
-    /// `#[allow(dead_code)]`, same as `provider_kind` above and for the identical
-    /// reason: no dispatcher's PRODUCTION code reads it back off `ctx` (both destructure
-    /// `HeadlessContext` with `..`) — it exists purely so a test can assert against the
-    /// real `prepare_headless` output instead of a hand-rolled stand-in.
+    /// `#[allow(dead_code)]`: no dispatcher's PRODUCTION code reads it back off `ctx` (both
+    /// destructure `HeadlessContext` with `..` for this field) — it exists purely so a test can
+    /// assert against the real `prepare_headless` output instead of a hand-rolled stand-in.
     #[allow(dead_code)]
     divergence_notice: Option<Notice>,
 }
@@ -3949,6 +3979,7 @@ async fn run_query_subcommand(
         workdir,
         magi_config,
         provider,
+        provider_kind,
         consult_magi,
         resolved,
         prompt,
@@ -4007,7 +4038,7 @@ async fn run_query_subcommand(
         &mut agent,
         consult_magi.as_ref(),
         magi_config.magi.auto_approve,
-        magi_config.effective_magi_kind(),
+        registered_magi_kind(&magi_config, provider_kind),
         magi_config.magi_endpoint_diverges(),
         magi_config.effective_max_query_bytes(),
         magi_config.effective_tool_result_cap(),
@@ -4139,6 +4170,7 @@ async fn run_consult_subcommand(
     let HeadlessContext {
         magi_config,
         provider,
+        provider_kind,
         consult_magi,
         resolved,
         prompt,
@@ -4202,7 +4234,7 @@ async fn run_consult_subcommand(
     );
     let timeout = Some(consult_deadline(&timeout_decision));
     let runtime = MagiRuntimeParams {
-        kind: magi_config.effective_magi_kind(),
+        kind: registered_magi_kind(&magi_config, provider_kind),
         classifier: &classifier,
         configured_mode,
         untrusted_content,
