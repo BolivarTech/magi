@@ -43,8 +43,8 @@ model = "claude-sonnet-4-6"
 # ===========================================================================
 [magi]
 melchior_model  = "qwen3.5:397b-cloud"     # Scientist  — theoretical analysis
-balthasar_model = "kimi-k2.6:cloud"        # Pragmatist — practical trade-offs
-caspar_model    = "glm-5.2:cloud"          # Critic     — adversarial review
+balthasar_model = "gpt-oss:120b-cloud"     # Pragmatist — practical trade-offs
+caspar_model    = "deepseek-v4-pro:cloud"  # Critic     — adversarial review
 
 # When `false`, the agent asks before each autonomous launch. When `true`, it
 # auto-approves and announces it. The explicit `/consult` command is never gated.
