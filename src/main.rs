@@ -8762,6 +8762,72 @@ mod tests {
             );
         }
 
+        /// **Rejected finding (S8 review round, finding 2) — pinned with a regression test.**
+        /// The finding claimed `orchestrate_probes` "assumes a shared endpoint implies a
+        /// shared kind": that a literally-shared `base_url` between the principal and the
+        /// trio routes both into the single-batch branch regardless of `kind`, silently
+        /// attributing one model's window to the other. That is not what the code does:
+        /// `MagiConfig::magi_endpoint_diverges()` (`config.rs`) is `declara_url ||
+        /// declara_kind` — declaring `[magi].kind` ALONE routes to the kind-aware `join!`
+        /// branch, with NO dependency on whether `[magi].base_url` is also declared. The
+        /// single-batch branch is only taken when NEITHER is declared, in which case the
+        /// trio's kind is not merely "probably the same" — it is PROVABLY identical to the
+        /// principal's by construction (`resolve_magi_kind` falls back to `principal_kind`
+        /// under the exact same absence), never by comparing resolved URL strings.
+        ///
+        /// This reproduces the finding's own scenario directly: `[magi].kind` declared
+        /// (`ollama`, diverging from the principal's `anthropic`) with `[magi].base_url`
+        /// ABSENT, so the trio's resolved endpoint is the LITERAL SAME STRING as the
+        /// principal's (asserted below as a precondition). If the code really reused one
+        /// measurement off endpoint equality alone, the principal's non-probeable
+        /// `anthropic` kind would either poison the trio's result or the trio would never
+        /// be probed under its own (probeable) kind at all. Neither happens: the principal
+        /// degrades to `NotMeasurable` (anthropic has no probe endpoint) while the trio, on
+        /// the SAME endpoint string, is measured under its own `ollama` kind.
+        #[tokio::test]
+        async fn a_shared_endpoint_with_a_declared_diverging_kind_probes_with_its_own_kind() {
+            let endpoints = test_endpoints();
+            assert_eq!(
+                endpoints.root.as_str(),
+                endpoints.magi.as_str(),
+                "precondition: the trio's endpoint is literally the same string as the \
+                 principal's — no `[magi].base_url` override is declared below"
+            );
+
+            let factory = MappedProbeFactory::new(&[("m", 128_000)]);
+            let cfg = MagiConfig {
+                magi: crate::config::MagiSectionConfig {
+                    // NOTE: `kind` diverges from the principal; `base_url` does NOT.
+                    kind: Some("ollama".to_string()),
+                    melchior_model: Some("m".to_string()),
+                    balthasar_model: Some("m".to_string()),
+                    caspar_model: Some("m".to_string()),
+                    ..crate::config::MagiSectionConfig::default()
+                },
+                ..MagiConfig::default()
+            };
+
+            let (_principal_model, principal, trio) =
+                orchestrate_probes(&cfg, &endpoints, ProviderKind::Anthropic, &factory).await;
+
+            assert!(
+                matches!(principal, Some(Measurement::NotMeasurable)),
+                "the principal (anthropic, not probeable) must not inherit a measurement \
+                 from the trio's shared-string endpoint: {principal:?}"
+            );
+            assert!(
+                trio.values().all(|m| matches!(
+                    m,
+                    Measurement::Measured {
+                        window: 128_000,
+                        ..
+                    }
+                )),
+                "the trio (ollama, probeable) must still be measured under its OWN kind \
+                 even though its endpoint string is identical to the principal's: {trio:?}"
+            );
+        }
+
         /// **Fix round 1 — Logic+Structure finding.** Reproduces the EXACT reported bug:
         /// principal on `anthropic` (reads `[anthropic].model`), trio on `ollama` (declared
         /// `[magi].kind`, diverging — reads `[openai].model`), and NO seat with its own
