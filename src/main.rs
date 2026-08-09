@@ -7409,6 +7409,64 @@ mod tests {
                 "env must win over an invalid TOML override"
             );
         }
+
+        // -------------------------------------------------------------------
+        // S8 gate re-review finding (Balthasar): `MagiEnvModelOverrides` reads
+        // MAGI_MODEL_* raw, with no blank-is-absent filtering of its own.
+        // -------------------------------------------------------------------
+
+        /// Full-chain regression (the reviewer's actual worry): a blank `MAGI_MODEL_MELCHIOR`
+        /// must not reach `build_native_provider` as a literal empty model name. Reads the
+        /// model `build_magi_orchestrator` actually wired via `seat_wiring_trace()` — the
+        /// same trace `env_model_override_wins_over_toml_which_wins_over_the_backend_model`
+        /// uses — rather than only asserting `.is_ok()`, which an empty-but-still-buildable
+        /// model string could satisfy without proving which model was used.
+        ///
+        /// **Verified false positive for THIS call site, pinned rather than "fixed":**
+        /// `for_seat`'s only production caller (`build_magi_orchestrator`, below) already
+        /// passes its result through [`resolve_magi_override`], which independently applies
+        /// the same blank-is-absent predicate to its `env_model` parameter — see
+        /// `test_resolve_magi_override_empty_string_is_unset` in `config.rs`. This test
+        /// constructs `MagiEnvModelOverrides` directly (not through `from_env`, which cannot
+        /// be driven without mutating process-global env vars) to exercise exactly that
+        /// downstream filtering.
+        #[test]
+        fn a_blank_magi_model_env_override_falls_through_to_the_toml_or_backend_model() {
+            let cfg = MagiConfig::from_toml_str(
+                "provider = \"ollama\"\n[magi]\nmelchior_model = \"toml-melchior-model\"\n",
+            )
+            .unwrap();
+            let env_overrides = MagiEnvModelOverrides {
+                melchior: Some(String::new()),
+                balthasar: Some("   ".to_string()),
+                caspar: None,
+            };
+            let mut notices = Vec::new();
+
+            let magi = build_magi_orchestrator(
+                &cfg,
+                ProviderKind::Ollama,
+                &test_endpoints(),
+                None,
+                None,
+                &env_overrides,
+                &mut notices,
+            )
+            .expect("ollama is keyless: blank overrides must not break construction");
+            drop(magi);
+
+            let trace = seat_wiring_trace();
+            let melchior_model = trace
+                .iter()
+                .find(|(seat, _, _)| *seat == AgentName::Melchior)
+                .map(|(_, model, _)| model.as_str());
+            assert_eq!(
+                melchior_model,
+                Some("toml-melchior-model"),
+                "a blank MAGI_MODEL_MELCHIOR must fall through to [magi].melchior_model, \
+                 never wire an empty model name: {trace:?}"
+            );
+        }
     }
 
     /// Task 4.3 — REQ-A06/SC-A06: surface behavior when the trio is unbuildable.
