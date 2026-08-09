@@ -2,42 +2,43 @@
 // Version: 1.0.0
 // Date: 2026-08-02
 
-//! Dobles compartidos de los tests de integración de MS2 (Task 0.7).
+//! Shared doubles for MS2's integration tests (Task 0.7).
 //!
-//! # Por qué es un módulo con dueño y no un detalle de cada test
+//! # Why this is a module with an owner and not a per-test detail
 //!
-//! El plan cita cerca de veinte dobles en doce tareas y **no los presupuestaba en ninguna**.
-//! Dejarlos implícitos hace dos daños concretos, los dos ya vistos en este proyecto:
+//! The plan cites close to twenty doubles across twelve tasks and **did not budget for them
+//! in any of them**. Leaving them implicit does two concrete kinds of damage, both already
+//! seen in this project:
 //!
-//! 1. **Rompe la fase Red.** «Rojo por la razón correcta» exige que el único símbolo faltante
-//!    sea el que la tarea implementa. Un doble sin escribir hace que el test **no compile**,
-//!    que es un rojo distinto y una violación de §3 de `CLAUDE.local.md`.
-//! 2. **Esconde el costo donde no se ve.** El type-check y los imports de un módulo compartido
-//!    no aparecen en el `use` del archivo que lo consume, así que es justo el costo que se
-//!    subestima al presupuestar una tarea.
+//! 1. **It breaks the Red phase.** "Red for the right reason" requires that the only missing
+//!    symbol be the one the task implements. An unwritten double makes the test **fail to
+//!    compile**, which is a different kind of red and a violation of `CLAUDE.local.md` §3.
+//! 2. **It hides cost where it doesn't show.** The type-check and imports of a shared module
+//!    don't appear in the `use` block of the file that consumes it, so it's exactly the cost
+//!    that gets underestimated when budgeting a task.
 //!
-//! # Se construye incremental, con la fase que lo estrena
+//! # Built incrementally, alongside the phase that debuts it
 //!
-//! No se escriben los veinte acá. Cada fase agrega los suyos en su propio Step 1; lo que esta
-//! tarea fija es el **dueño y el lugar**, para que no vuelvan a aparecer como nombres sin
-//! archivo. Hoy viven los de Fase 0.
+//! The twenty aren't all written here. Each phase adds its own in its own Step 1; what this
+//! task fixes is the **owner and the location**, so they never again show up as names with no
+//! file. Today it holds Phase 0's.
 //!
-//! **`MockEndpoint` NO está acá todavía, y es a propósito:** necesita `wiremock`, que entra
-//! como dev-dependency recién en Task 0.5. Escribirlo antes dejaría este módulo sin compilar,
-//! que es exactamente el fallo que viene a prevenir. Lo agrega esa tarea, junto con su
-//! dependencia.
+//! **`MockEndpoint` is NOT here yet, and that's on purpose:** it needs `wiremock`, which only
+//! enters as a dev-dependency in Task 0.5. Writing it earlier would leave this module unable
+//! to compile, which is exactly the failure it's here to prevent. That task adds it, along
+//! with its dependency.
 //!
-//! # Imports lazy
+//! # Lazy imports
 //!
-//! Lo consumen tareas de las siete fases, así que va a traer tipos que nacen en Fase 5. Cada
-//! doble importa **lo suyo dentro de su propio bloque**, nunca en la cabecera: de otro modo
-//! una tarea posterior rompe la colección **entera** de tests y el fallo no señala a la tarea
-//! que lo causó.
+//! Tasks across all seven phases consume this module, so it will end up bringing in types born
+//! in Phase 5. Each double imports **its own things inside its own block**, never at the
+//! header: otherwise a later task breaks the **entire** test collection and the failure
+//! doesn't point back to the task that caused it.
 
-// Un módulo bajo `tests/` se compila UNA VEZ POR BINARIO de test, y cada binario usa un
-// subconjunto distinto. El `dead_code` que eso produce es estructural del layout, no un
-// símbolo olvidado: es el patrón que documenta el propio Rust Book para `tests/common`. Sin
-// esto, agregar un doble para un binario haría fallar `-D warnings` en todos los demás.
+// A module under `tests/` compiles ONCE PER TEST BINARY, and each binary uses a different
+// subset. The `dead_code` that produces is structural to the layout, not a forgotten symbol:
+// it's the pattern the Rust Book itself documents for `tests/common`. Without this, adding a
+// double for one binary would fail `-D warnings` in every other one.
 #![allow(dead_code)]
 
 use std::collections::BTreeMap;
@@ -47,25 +48,25 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use magi_core::error::{ExternalErrorKind, ProviderError};
-// `CompletionConfig` vive en `provider`, NO en `orchestrator`: ahí solo está importado y es
-// privado. El plan pegaba la ruta de `orchestrator` en los tres dobles.
+// `CompletionConfig` lives in `provider`, NOT in `orchestrator`: there it's only imported and
+// is private. The plan had pasted the `orchestrator` path into all three doubles.
 use magi_core::provider::{CompletionConfig, LlmProvider};
 use magi_core::verdict_markers::{VERDICT_CLOSE, VERDICT_OPEN};
 
-/// Nombre que reportan los dobles por `LlmProvider::name`.
+/// Name the doubles report via `LlmProvider::name`.
 ///
-/// `LlmProvider` exige **tres** métodos, no solo `complete`: `name` y `model` no tienen impl
-/// por defecto. Es telemetría —magi-core los usa para nombrar al provider en un reporte— así
-/// que un doble puede devolver un valor fijo, pero no puede omitirlos.
+/// `LlmProvider` requires **three** methods, not just `complete`: `name` and `model` have no
+/// default impl. It's telemetry — magi-core uses them to name the provider in a report — so a
+/// double can return a fixed value, but it can't omit them.
 const DOUBLE_PROVIDER_NAME: &str = "test-double";
 
-/// Modelo que reportan los dobles por `LlmProvider::model`. Ver [`DOUBLE_PROVIDER_NAME`].
+/// Model the doubles report via `LlmProvider::model`. See [`DOUBLE_PROVIDER_NAME`].
 const DOUBLE_MODEL_NAME: &str = "test-double-model";
 
-/// Un veredicto que satisface el schema de magi-core.
+/// A verdict that satisfies magi-core's schema.
 ///
-/// Va **entre los marcadores** en todos los dobles que lo emiten: magi-core 3.0.0 borró su
-/// parser de búsqueda, así que un JSON pelado ya no se parsea por más válido que sea.
+/// Goes **between the markers** in every double that emits it: magi-core 3.0.0 removed its
+/// search parser, so a bare JSON no longer parses no matter how valid it is.
 #[must_use]
 pub fn valid_verdict_json() -> String {
     r#"{"agent":"melchior","verdict":"approve","confidence":0.9,
@@ -73,62 +74,61 @@ pub fn valid_verdict_json() -> String {
         .to_string()
 }
 
-/// Envuelve un veredicto en los marcadores que magi-core exige para extraerlo.
+/// Wraps a verdict in the markers magi-core requires to extract it.
 #[must_use]
 pub fn marked_verdict() -> String {
     format!("{VERDICT_OPEN}\n{}\n{VERDICT_CLOSE}", valid_verdict_json())
 }
 
-/// Los tres asientos, en minúscula, tal como magi-core los espera en el campo `agent`.
+/// The three seats, lowercase, exactly as magi-core expects them in the `agent` field.
 const SEAT_NAMES: [&str; 3] = ["melchior", "balthasar", "caspar"];
 
-/// Un veredicto **con hallazgos**, emitido a nombre de `agent`.
+/// A verdict **with findings**, issued in the name of `agent`.
 ///
-/// Dos cosas que este helper existe para resolver, ambas descubiertas ejecutando:
+/// Two things this helper exists to solve, both discovered by running the tests:
 ///
-/// 1. **Los hallazgos no pueden ir vacíos.** El de [`valid_verdict_json`] los trae así, y con
-///    la lista vacía el reporte puede no emitir la sección de hallazgos en absoluto — o sea
-///    que un spike sobre él no podría decidir si esa sección es localizable, que es justo lo
-///    que Task 0.6 tiene que decidir.
-/// 2. **El campo `agent` DEBE coincidir con el asiento que preguntó.** magi-core valida esa
-///    correspondencia y descarta el veredicto que no la cumple: un doble que responde
-///    `"melchior"` a los tres deja `succeeded: 1` y el orquestador aborta con
-///    `InsufficientAgents`. El guardián de reintentos no lo notaba porque solo cuenta
-///    llamadas, así que la restricción quedó invisible hasta que un test miró el reporte.
+/// 1. **The findings can't be empty.** [`valid_verdict_json`]'s are, and with an empty list
+///    the report might not emit the findings section at all — meaning a spike on top of it
+///    couldn't decide whether that section is locatable, which is exactly what Task 0.6 has
+///    to decide.
+/// 2. **The `agent` field MUST match the seat that asked.** magi-core validates that
+///    correspondence and discards a verdict that doesn't satisfy it: a double that answers
+///    `"melchior"` to all three leaves `succeeded: 1` and the orchestrator aborts with
+///    `InsufficientAgents`. The retry guardian didn't notice because it only counts calls, so
+///    the constraint stayed invisible until a test looked at the report.
 #[must_use]
 pub fn verdict_json_with_findings(agent: &str) -> String {
     format!(
         r#"{{"agent":"{agent}","verdict":"conditional","confidence":0.85,
-        "summary":"resumen de una linea","reasoning":"razonamiento del mage",
+        "summary":"one-line summary","reasoning":"the mage's reasoning",
         "findings":[
-          {{"severity":"critical","title":"Primer hallazgo","detail":"detalle del primero",
+          {{"severity":"critical","title":"First finding","detail":"detail of the first",
            "file":"src/x.rs","line":42,"category":"logic-error"}},
-          {{"severity":"warning","title":"Segundo hallazgo","detail":"detalle del segundo",
+          {{"severity":"warning","title":"Second finding","detail":"detail of the second",
            "file":"src/y.rs","line":7,"category":"performance"}}
         ],
-        "recommendation":"lo que recomienda"}}"#
+        "recommendation":"what it recommends"}}"#
     )
 }
 
-/// Deduce el asiento a partir de la **primera línea** de un system prompt.
+/// Deduces the seat from the **first line** of a system prompt.
 ///
-/// **Solo el encabezado, nunca el prompt entero, y esto costó un ciclo descubrirlo:** los
-/// prompts se mencionan entre sí —el de Caspar dice *"Leave happy-path correctness analysis to
-/// Melchior"*— así que buscar el nombre en todo el texto le asigna a Caspar el veredicto de
-/// Melchior, magi-core lo rechaza por `agent identity mismatch` y el asiento se pierde. La
-/// primera línea es `# <Nombre> — <Rol>`, que sí discrimina.
+/// **Only the header, never the whole prompt, and this cost a whole cycle to discover:** the
+/// prompts mention each other — Caspar's says *"Leave happy-path correctness analysis to
+/// Melchior"* — so searching the name across the whole text would assign Caspar's verdict to
+/// Melchior, magi-core rejects it with `agent identity mismatch`, and the seat is lost. The
+/// first line is `# <Name> — <Role>`, which does discriminate correctly.
 ///
-/// Cae en `melchior` si no reconoce ninguno: un doble no debe fallar en silencio, pero tampoco
-/// panicar dentro de una tarea del orquestador — el `InsufficientAgents` resultante lo delata
-/// igual, y con mejor mensaje que un panic en un `spawn`.
+/// Falls back to `melchior` if it recognizes none: a double must not fail silently, but it
+/// also must not panic inside an orchestrator task — the resulting `InsufficientAgents` gives
+/// it away anyway, with a better message than a panic inside a `spawn`.
 ///
-/// **Función libre y no un método de un solo doble (B3, MAGI S3 re-gate fix):** originalmente
-/// vivía solo en `AdheringTrioProvider`, pero `OverlapCountingProvider` tiene la MISMA
-/// necesidad — un doble que responde el mismo `"agent":"melchior"` a los tres asientos hace que
-/// magi-core rechace y **reintente** los dos que no coinciden, multiplicando las llamadas a
-/// `complete` más allá del número de asientos y rompiendo cualquier guardián que cuente
-/// llamadas exactas (como el rendezvous de `OverlapCountingProvider`). Compartir la función
-/// evita que un tercer doble la reimplemente mal.
+/// **Free function, not a method on a single double (B3, MAGI S3 re-gate fix):** it originally
+/// lived only in `AdheringTrioProvider`, but `OverlapCountingProvider` has the SAME need — a
+/// double that answers the same `"agent":"melchior"` to all three seats makes magi-core reject
+/// and **retry** the two mismatched ones, multiplying `complete` calls beyond the number of
+/// seats and breaking any guardian that counts exact calls (like `OverlapCountingProvider`'s
+/// rendezvous). Sharing the function keeps a third double from reimplementing it wrong.
 fn seat_from_prompt(system_prompt: &str) -> &'static str {
     let header = system_prompt
         .lines()
@@ -141,11 +141,11 @@ fn seat_from_prompt(system_prompt: &str) -> &'static str {
         .unwrap_or("melchior")
 }
 
-/// Responde un veredicto válido **a nombre del asiento que preguntó**, con hallazgos.
+/// Answers a valid verdict **in the name of the seat that asked**, with findings.
 ///
-/// Los tres asientos comparten la instancia y el doble los discrimina por su system prompt,
-/// que es donde aparece el nombre del mage (REQ-A02). Así el reporte sale con los tres
-/// adhiriendo, que es la condición para que el render exponga todas sus secciones.
+/// All three seats share the instance and the double discriminates them by their system
+/// prompt, which is where the mage's name appears (REQ-A02). This way the report comes out
+/// with all three adhering, which is the condition for the render to expose every section.
 pub struct AdheringTrioProvider;
 
 #[async_trait]
@@ -172,27 +172,27 @@ impl LlmProvider for AdheringTrioProvider {
     }
 }
 
-/// Devuelve schema inválido en el primer intento de cada asiento y válido en el segundo.
+/// Returns invalid schema on each seat's first attempt and valid on the second.
 ///
-/// Sostiene el guardián de SC-A04b: un fallo de validación consume **dos** ventanas de
-/// `timeout`, que es de donde sale el factor 2 de la fórmula del `--timeout` (REQ-A04).
+/// Sustains SC-A04b's guardian: a validation failure consumes **two** `timeout` windows, which
+/// is where the factor of 2 in the `--timeout` formula (REQ-A04) comes from.
 pub struct SchemaFailsOnceProvider {
-    /// Llamadas **por asiento**, discriminadas por su system prompt.
+    /// Calls **per seat**, discriminated by system prompt.
     ///
-    /// `Mutex<BTreeMap>` y no `AtomicUsize`: un contador global no distingue «un asiento
-    /// reintentó» de «tres asientos llamaron una vez», y con tres mages un `total >= 2` pasa
-    /// **aunque magi-core no reintente nunca**. Un guardián que no puede fallar es peor que
-    /// ninguno, porque además certifica.
+    /// `Mutex<BTreeMap>` and not `AtomicUsize`: a global counter can't distinguish "one seat
+    /// retried" from "three seats each called once", and with three mages a `total >= 2`
+    /// passes **even if magi-core never retries at all**. A guardian that can't fail is worse
+    /// than none, because it also certifies.
     ///
-    /// El system prompt sirve de clave porque cada mage recibe el suyo (REQ-A02), así que el
-    /// doble discrimina asientos sin tener que saber de `AgentName`.
+    /// The system prompt serves as the key because each mage receives its own (REQ-A02), so
+    /// the double discriminates seats without needing to know about `AgentName`.
     pub calls_by_seat: Mutex<BTreeMap<String, usize>>,
-    /// Latencia simulada de cada llamada.
+    /// Simulated latency of each call.
     pub per_call: Duration,
 }
 
 impl SchemaFailsOnceProvider {
-    /// Construye el doble con su mapa de conteo vacío.
+    /// Builds the double with its count map empty.
     #[must_use]
     pub fn new(per_call: Duration) -> Self {
         Self {
@@ -201,14 +201,14 @@ impl SchemaFailsOnceProvider {
         }
     }
 
-    /// Copia del conteo por asiento, para afirmar sobre él sin sostener el lock.
+    /// Copy of the per-seat count, for asserting on it without holding the lock.
     ///
     /// # Panics
     ///
-    /// Si el `Mutex` quedó envenenado por un panic de otro test.
+    /// If the `Mutex` was poisoned by a panic in another test.
     #[must_use]
     pub fn calls_by_seat(&self) -> BTreeMap<String, usize> {
-        self.calls_by_seat.lock().expect("sin envenenar").clone()
+        self.calls_by_seat.lock().expect("not poisoned").clone()
     }
 }
 
@@ -222,13 +222,13 @@ impl LlmProvider for SchemaFailsOnceProvider {
     ) -> Result<String, ProviderError> {
         tokio::time::sleep(self.per_call).await;
         let previous = {
-            let mut map = self.calls_by_seat.lock().expect("sin envenenar");
+            let mut map = self.calls_by_seat.lock().expect("not poisoned");
             let counter = map.entry(system_prompt.to_string()).or_insert(0);
             *counter += 1;
             *counter - 1
         };
         if previous == 0 {
-            Ok("no soy un veredicto".to_string())
+            Ok("not a verdict".to_string())
         } else {
             Ok(marked_verdict())
         }
@@ -243,8 +243,8 @@ impl LlmProvider for SchemaFailsOnceProvider {
     }
 }
 
-/// Nunca responde. Sostiene la otra mitad de SC-A04b: un cuelgue consume **una** ventana,
-/// porque un timeout del provider **no** dispara el reintento correctivo de schema.
+/// Never responds. Sustains the other half of SC-A04b: a hang consumes **one** window, because
+/// a provider timeout does **not** trigger the corrective schema retry.
 pub struct HangingProvider;
 
 #[async_trait]
@@ -257,7 +257,7 @@ impl LlmProvider for HangingProvider {
     ) -> Result<String, ProviderError> {
         std::future::pending::<()>().await;
         Err(ProviderError::external(
-            "inalcanzable",
+            "unreachable",
             ExternalErrorKind::Network,
         ))
     }
@@ -271,49 +271,49 @@ impl LlmProvider for HangingProvider {
     }
 }
 
-/// Registra el máximo de ejecuciones simultáneas que vio.
+/// Records the highest number of simultaneous executions it saw.
 ///
-/// Sostiene SC-A04e: los tres mages **se solapan**. Si magi-core pasara a despachar en serie,
-/// el peor caso saltaría de 2× a 6× el techo y el `--timeout` derivado empezaría a cortar
-/// consults sanos — sin que una sola línea de magi-rs cambiara.
+/// Sustains SC-A04e: the three mages **overlap**. If magi-core switched to serial dispatch,
+/// the worst case would jump from 2x to 6x the ceiling and the derived `--timeout` would start
+/// cutting off healthy consults — without a single line of magi-rs changing.
 ///
-/// **Rendezvous, no `sleep` fijo (MAGI S3 re-gate, Caspar).** La versión anterior hacía que
-/// cada llamada durmiera un `dwell` fijo (500 ms) antes de salir, confiando en que las tres
-/// llegaran DENTRO de esa ventana para que el pico llegara a 3 — exactamente el patrón de
-/// flakiness que este repo ya diagnosticó dos veces (`.config/nextest.toml`): bajo la carga
-/// Argon2 del resto de la suite (este test corre en el grupo `default`, no en `heavy`), un
-/// asiento retrasado en despacharse podía salir DESPUÉS de que otro ya hubiera dormido su
-/// ventana entera y salido, bajando el pico observado a 2 sin que hubiera ningún defecto real.
+/// **Rendezvous, not a fixed `sleep` (MAGI S3 re-gate, Caspar).** The previous version had
+/// every call sleep a fixed `dwell` (500 ms) before returning, trusting that all three would
+/// arrive WITHIN that window for the peak to reach 3 — exactly the flakiness pattern this repo
+/// has already diagnosed twice (`.config/nextest.toml`): under the Argon2 load from the rest
+/// of the suite (this test runs in the `default` group, not `heavy`), a seat delayed in
+/// dispatching could return AFTER another had already slept out its whole window and returned,
+/// dropping the observed peak to 2 with no real defect involved.
 ///
-/// Con un [`tokio::sync::Barrier`] de tamaño `expected`, ninguna llamada puede "salir"
-/// (decrementar `live`) hasta que las `expected` hayan "llegado" — la contención de CPU solo
-/// hace que el rendezvous tarde más, nunca que el pico observado sea menor. Es la misma
-/// disciplina que el resto del proyecto exige para tests con reloj: esperar sobre una
-/// CONDICIÓN, no sobre una duración.
+/// With a [`tokio::sync::Barrier`] sized `expected`, no call can "leave" (decrement `live`)
+/// until `expected` of them have "arrived" — CPU contention only makes the rendezvous take
+/// longer, never the observed peak lower. It's the same discipline the rest of the project
+/// requires for clock-dependent tests: wait on a CONDITION, not on a duration.
 ///
-/// **El veredicto responde a nombre del asiento que preguntó, vía [`seat_from_prompt`] — y
-/// esto NO es cosmético para un rendezvous de tamaño fijo.** La primera versión de este ajuste
-/// reusaba `marked_verdict()` (siempre `"agent":"melchior"`), y el rendezvous colgó: magi-core
-/// rechaza el veredicto de Balthasar/Caspar por `agent identity mismatch` y **reintenta** esos
-/// dos asientos, así que `complete` termina llamándose más de `expected` veces para una sola
-/// `analyze`. Con un `Barrier` de tamaño 3 eso deja arribos sueltos que nunca completan un
-/// grupo de tres — exactamente el hallazgo que el comentario de [`AdheringTrioProvider`]
-/// documenta, aplicado acá donde además rompe la sincronización, no solo el conteo.
+/// **The verdict answers in the name of the seat that asked, via [`seat_from_prompt`] — and
+/// this is NOT cosmetic for a fixed-size rendezvous.** The first version of this fix reused
+/// `marked_verdict()` (always `"agent":"melchior"`), and the rendezvous hung: magi-core rejects
+/// Balthasar's/Caspar's verdict with `agent identity mismatch` and **retries** those two seats,
+/// so `complete` ends up being called more than `expected` times for a single `analyze`. With
+/// a `Barrier` of size 3 that leaves stray arrivals that never complete a group of three —
+/// exactly the finding [`AdheringTrioProvider`]'s doc comment documents, applied here where it
+/// also breaks the synchronization, not just the count.
 pub struct OverlapCountingProvider {
-    /// Ejecuciones en vuelo ahora.
+    /// Executions currently in flight.
     pub live: Arc<AtomicUsize>,
-    /// Máximo de ejecuciones simultáneas observado.
+    /// Highest number of simultaneous executions observed.
     pub peak: Arc<AtomicUsize>,
-    /// Punto de encuentro: se libera recién cuando `expected` llamadas llegaron a la vez.
+    /// Rendezvous point: only releases once `expected` calls have arrived at once.
     barrier: Arc<tokio::sync::Barrier>,
 }
 
 impl OverlapCountingProvider {
-    /// Construye el doble junto con los contadores que el test va a leer.
+    /// Builds the double along with the counters the test will read.
     ///
-    /// `expected` es cuántas llamadas simultáneas debe esperar el rendezvous antes de liberar
-    /// a todas — típicamente [`EXPECTED_SEATS`] en `magi_core_contract.rs`, pero el doble no
-    /// hardcodea ese número: es el llamador quien conoce cuántos asientos va a despachar.
+    /// `expected` is how many simultaneous calls the rendezvous should wait for before
+    /// releasing all of them — typically [`EXPECTED_SEATS`] in `magi_core_contract.rs`, but
+    /// the double doesn't hardcode that number: it's the caller who knows how many seats it's
+    /// going to dispatch.
     #[must_use]
     pub fn new(expected: usize) -> (Arc<Self>, Arc<AtomicUsize>) {
         let live = Arc::new(AtomicUsize::new(0));

@@ -2,41 +2,43 @@
 // Version: 1.0.0
 // Date: 2026-08-02
 
-//! Guardián de la superficie de API de `magi-core 3.1.0` (Task 0.0, Fase 0 de MS2).
+//! Guardian of the `magi-core 3.1.0` API surface (Task 0.0, MS2 Phase 0).
 //!
-//! # Qué prueba, y qué NO
+//! # What it tests, and what it does NOT
 //!
-//! **No prueba comportamiento.** Prueba que cada símbolo de magi-core que MS2 consume
-//! **existe y tipa con la forma que el plan asume**. Si magi-core lo renombra, le cambia la
-//! aridad, el orden de argumentos o el tipo de un campo, esto **no compila** — que es
-//! exactamente el resultado buscado, y en Fase 0 en vez de en Fase 4.
+//! **It does not test behavior.** It tests that every magi-core symbol MS2 consumes **exists
+//! and types the way the plan assumes it does**. If magi-core renames it, changes its arity,
+//! its argument order, or a field's type, this **fails to compile** — which is exactly the
+//! wanted outcome, and in Phase 0 instead of Phase 4.
 //!
-//! # Por qué existe
+//! # Why it exists
 //!
-//! El plan TDD de MS2 asumió una superficie de API que nadie había verificado, y la primera
-//! lectura del crate encontró **cinco** suposiciones falsas de un saque: `with_client` no
-//! existe en ningún provider, `OllamaProvider` fija 300 s de timeout de cliente sin override
-//! (lo que lo saca del camino de las completions — D-A07), `RetryConfig` es
-//! `#[non_exhaustive]`, `ClaudeProvider` toma `api_key` **primero**, y `Mode` no tiene ningún
-//! método de parseo. Cinco fallos en un solo pase es la medida de cuánta superficie hay.
+//! The MS2 TDD plan assumed an API surface nobody had verified, and the first read of the
+//! crate found **five** false assumptions in one pass: `with_client` does not exist on any
+//! provider, `OllamaProvider` fixes a 300 s client timeout with no override (which takes it
+//! out of the completions path — D-A07), `RetryConfig` is `#[non_exhaustive]`, `ClaudeProvider`
+//! takes `api_key` **first**, and `Mode` has no parsing method at all. Five failures in a
+//! single pass is the measure of how much surface there is.
 //!
-//! **La lectura no reemplaza a este archivo, lo justifica**: una lectura envejece en cuanto
-//! magi-core publica una versión; el compilador no.
+//! **The reading does not replace this file, it justifies it**: a reading goes stale the
+//! moment magi-core publishes a new version; the compiler does not.
 //!
-//! # Relación con `examples/ms2_contracts.rs`
+//! # Relationship with `examples/ms2_contracts.rs`
 //!
-//! Son dos archivos con dos vidas. El *example* cruza los contratos **internos** de magi-rs
-//! entre sí y **se borra** al cerrar la Fase 6, cuando la implementación real lo reemplaza.
-//! Este test cubre la frontera con el **crate externo** y **sobrevive al milestone**: es lo
-//! que hace que un bump a magi-core 3.2.0 rompa la suite en vez de derivar en silencio.
+//! These are two files with two different lifetimes. The *example* cross-checks magi-rs's
+//! **internal** contracts against each other and **gets deleted** when Phase 6 closes, once
+//! the real implementation replaces it. This test covers the boundary with the **external
+//! crate** and **outlives the milestone**: it is what makes a bump to magi-core 3.2.0 break
+//! the suite instead of silently drifting.
 //!
-//! # Cómo se lee un fallo acá
+//! # How to read a failure here
 //!
-//! Un error de compilación en este archivo **no se arregla acomodando el test**. Se busca el
-//! nombre real en el crate, se corrigen **todas** las apariciones en el plan, y la diferencia
-//! se anota en `dev-docs/MS2-DECISIONS.md` con fecha. Si el símbolo no existe en ninguna forma
-//! —como le pasó a `MagiReport::window_rejected`— eso **no se inventa**: se registra como
-//! capacidad ausente y el requerimiento que dependía de ella se replantea con lo que sí hay.
+//! A compile error in this file is **not fixed by adjusting the test**. Look up the real name
+//! in the crate, fix **every** occurrence in the plan, and record the difference in
+//! `dev-docs/MS2-DECISIONS.md` with a date. If the symbol does not exist in any form — as
+//! happened with `MagiReport::window_rejected` — it does **not** get invented: it is logged
+//! as a missing capability and the requirement that depended on it is reworked around what
+//! actually exists.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::Ordering;
@@ -55,68 +57,70 @@ use magi_core::verdict_markers::{VERDICT_CLOSE, VERDICT_OPEN};
 use magi_rs::magi::report_anchors::{CONTRACTUAL_ANCHORS, SECTION_ANCHORS};
 use magi_rs::magi::PROBE_TIMEOUT_SECS;
 
-/// Dobles compartidos de los tests de integración (Task 0.7). Se declara acá porque este es
-/// su primer consumidor: un módulo bajo `tests/` que nadie declara **no es un target de
-/// build**, así que ni `cargo check` ni `clippy --all-targets` lo compilarían.
+/// Shared doubles for the integration tests (Task 0.7). Declared here because this is their
+/// first consumer: a module under `tests/` that nobody declares **is not a build target**, so
+/// neither `cargo check` nor `clippy --all-targets` would compile it.
 mod support;
 
-/// Endpoint sintáctico para construir providers. **Nunca se contacta**: este archivo no hace
-/// I/O, solo type-checking, y un provider se construye sin abrir ninguna conexión.
+/// Syntactic endpoint for constructing providers. **Never contacted**: this file does no I/O,
+/// only type-checking, and a provider is constructed without opening any connection.
 const SYNTHETIC_BASE_URL: &str = "http://127.0.0.1:11434/v1";
 
-/// Modelo sintético, del mismo carácter que [`SYNTHETIC_BASE_URL`].
+/// Synthetic model, of the same nature as [`SYNTHETIC_BASE_URL`].
 const SYNTHETIC_MODEL: &str = "guardian-model";
 
-/// Forma de [`MagiReport`] que la Fase 6 consume, **con tipos anotados**.
+/// Shape of [`MagiReport`] that Phase 6 consumes, **with annotated types**.
 ///
-/// Las anotaciones no son ceremonia: un `let _ = &r.campo` prueba que el campo existe y nada
-/// más, y toda la telemetría de la Fase 6 **itera** estas estructuras. Un cambio de forma
-/// —`Vec` a `BTreeMap`, `T` a `Option<T>`— compilaría un binding suelto y rompería la fase
-/// entera. Existencia y forma son dos verificaciones distintas.
+/// The annotations are not ceremony: a `let _ = &r.field` proves only that the field exists
+/// and nothing more, and all of Phase 6's telemetry **iterates** these structures. A shape
+/// change — `Vec` to `BTreeMap`, `T` to `Option<T>` — would compile a loose binding and break
+/// the whole phase. Existence and shape are two separate checks.
 ///
-/// Nunca se llama: su cuerpo se type-checkea igual, que es todo lo que hace falta.
-/// `MagiReport` es `#[non_exhaustive]`, así que fuera del crate no hay forma de construir uno.
+/// Never called: its body gets type-checked all the same, which is all that's needed.
+/// `MagiReport` is `#[non_exhaustive]`, so there is no way to construct one from outside the
+/// crate.
 fn report_shape(r: &MagiReport) {
     let _: &str = &r.report;
     let _: bool = r.degraded;
-    // Por ASIENTO y con un `Vec` adentro. Sin anotar el tipo, "nombrar el modelo que no
-    // adhirió" (REQ-A09) parecía imposible desde una clave `AgentName`.
+    // PER SEAT and with a `Vec` inside. Without the type annotation, "naming the model that
+    // did not adhere" (REQ-A09) seemed impossible from an `AgentName` key.
     let _: &BTreeMap<AgentName, Vec<ExtractionFailure>> = &r.extraction_failures;
-    // **`Option`**, no un valor. REQ-A11 exige el campo SIEMPRE presente en el JSON de
-    // magi-rs, así que el `None` se **mapea**, no se omite: es una traducción nuestra, no un
-    // reflejo del reporte.
+    // **`Option`**, not a value. REQ-A11 requires the field to ALWAYS be present in magi-rs's
+    // JSON, so the `None` is **mapped**, not omitted: it's our own translation, not a mirror
+    // of the report.
     let _: &Option<InputSize> = &r.input_size;
-    // El sustituto verificado de un `window_rejected` que NO existe en `MagiReport` (vive en
-    // `rotation.rs`, que es MS3). REQ-A11d y SC-A11g se replantearon sobre esto.
+    // The verified substitute for a `window_rejected` that does NOT exist on `MagiReport`
+    // (it lives in `rotation.rs`, which is MS3). REQ-A11d and SC-A11g were reworked around
+    // this.
     let _: &BTreeMap<AgentName, String> = &r.failed_agents;
-    // Sostiene SC-A11g: su vacío ES "cero veredictos válidos", que no es un consenso
-    // degradado sino la ausencia de consenso.
+    // Sustains SC-A11g: it being empty IS "zero valid verdicts", which is not a degraded
+    // consensus but the absence of consensus.
     let _: &Vec<AgentOutput> = &r.agents;
-    // MS3. Acá solo se comprueba que el campo existe; su forma la fija ese milestone.
+    // MS3. Only its existence is checked here; that milestone fixes its shape.
     let _ = &r.rotations;
 }
 
-/// Campos de [`ExtractionFailure`] que REQ-A09 exige surface-ar.
+/// [`ExtractionFailure`] fields that REQ-A09 requires to surface.
 ///
-/// `model` es el que no puede faltar: con rotación (MS3) la pregunta accionable es *qué
-/// modelo* no adhiere, no *qué asiento*.
+/// `model` is the one that can't be missing: with rotation (MS3) the actionable question is
+/// *which model* failed to adhere, not *which seat*.
 fn extraction_failure_shape(f: &ExtractionFailure) {
     let _: &str = &f.model;
     let _: u8 = f.attempt;
     let _ = &f.cause;
 }
 
-/// Campos de [`InputSize`], que van los tres al JSON de REQ-A11 sin omitir ninguno.
+/// [`InputSize`] fields, all three of which go into REQ-A11's JSON without omitting any.
 fn input_size_shape(s: &InputSize) {
     let _: usize = s.estimated_tokens;
     let _: usize = s.warn_threshold;
     let _: bool = s.exceeded;
 }
 
-/// Métodos de [`MagiBuilder`] que el cableado del trío encadena (Task 4.1).
+/// [`MagiBuilder`] methods that the trio wiring chains (Task 4.1).
 ///
-/// Encadenados a propósito: cada uno debe devolver `Self` por valor. Si alguno pasara a
-/// `&mut Self`, la cadena deja de compilar acá en vez de en la Fase 4.
+/// Chained on purpose: each one must return `Self` by value. If any of them switched to
+/// `&mut Self`, the chain would stop compiling here instead of in Phase 4.
 fn builder_surface(b: MagiBuilder, p: Arc<dyn LlmProvider>) -> MagiBuilder {
     b.with_timeout(Duration::from_secs(90))
         .with_provider(AgentName::Melchior, p)
@@ -124,20 +128,21 @@ fn builder_surface(b: MagiBuilder, p: Arc<dyn LlmProvider>) -> MagiBuilder {
         .with_retry_disabled()
 }
 
-/// Que un tipo concreto satisfaga [`LlmProvider`], no solo que el trait exista.
+/// That a concrete type satisfies [`LlmProvider`], not just that the trait exists.
 fn assert_is_provider<P: LlmProvider + 'static>(_p: &P) {}
 
-/// Ídem para [`ProviderProbe`], que es un trait **separado** — la composición de REQ-A24
-/// depende de que se pueda implementar uno sin el otro.
+/// Same for [`ProviderProbe`], which is a **separate** trait — REQ-A24's composition depends
+/// on being able to implement one without the other.
 fn assert_is_probe<P: ProviderProbe + 'static>(_p: &P) {}
 
-/// El `match` sobre [`Mode`] es exhaustivo **sin brazo `_`**.
+/// The `match` over [`Mode`] is exhaustive **with no `_` arm**.
 ///
-/// magi-core documenta el enum como deliberadamente cerrado: *"no `#[non_exhaustive]`: a new
-/// mode should break exhaustive matches so consumers revisit their logic"*. Tres funciones de
-/// MS2 lo asumen (`GateThresholds::for_mode`, `CliMode::into_mode`, `normalize_label`), así
-/// que fijarlo acá es aceptar la invitación: si 3.2.0 agrega un modo, **esto** es lo primero
-/// que rompe, en Fase 0, en vez de un `for_mode` devolviendo el umbral equivocado en Fase 3.
+/// magi-core documents the enum as deliberately closed: *"no `#[non_exhaustive]`: a new mode
+/// should break exhaustive matches so consumers revisit their logic"*. Three MS2 functions
+/// assume this (`GateThresholds::for_mode`, `CliMode::into_mode`, `normalize_label`), so
+/// pinning it here is accepting the invitation: if 3.2.0 adds a mode, **this** is the first
+/// thing that breaks, in Phase 0, instead of a `for_mode` returning the wrong threshold in
+/// Phase 3.
 fn mode_is_closed(m: Mode) -> &'static str {
     match m {
         Mode::CodeReview => "code-review",
@@ -148,51 +153,51 @@ fn mode_is_closed(m: Mode) -> &'static str {
 
 #[test]
 fn magi_core_api_surface_is_what_the_plan_assumes() {
-    // --- (1) Los tres asientos y los tres modos ------------------------------------------
+    // --- (1) The three seats and the three modes ------------------------------------------
     let _seats = [AgentName::Melchior, AgentName::Balthasar, AgentName::Caspar];
     assert_eq!(mode_is_closed(Mode::CodeReview), "code-review");
     assert_eq!(mode_is_closed(Mode::Design), "design");
     assert_eq!(mode_is_closed(Mode::Analysis), "analysis");
 
-    // --- (2) Propiedades de TIPO de las que cuelga el diseño -----------------------------
+    // --- (2) TYPE properties the design hangs off of ---------------------------------------
     fn assert_clone<T: Clone>() {}
     fn assert_copy_eq<T: Copy + PartialEq>() {}
-    // Los tres asientos comparten una config de retry y cada `RetryProvider::with_config` la
-    // consume **por valor**: sin `Clone` hay que reconstruirla por asiento y la escala
-    // derivada de REQ-A04 deja de ser una sola cosa.
+    // The three seats share a retry config and every `RetryProvider::with_config` consumes it
+    // **by value**: without `Clone` it would have to be rebuilt per seat, and REQ-A04's
+    // derived scale would stop being a single thing.
     assert_clone::<RetryConfig>();
-    // `GateVerdict::Veto { mode: *mode }` y media docena de `assert_eq!` sobre modos.
+    // `GateVerdict::Veto { mode: *mode }` and half a dozen `assert_eq!`s over modes.
     assert_copy_eq::<Mode>();
-    // La costura de inyección del probe (Task 5.1) es `Arc<dyn ProviderProbe>`. Si el trait
-    // dejara de ser dyn-compatible, la fábrica entera se replantea — mejor saberlo acá.
+    // The probe's injection seam (Task 5.1) is `Arc<dyn ProviderProbe>`. If the trait stopped
+    // being dyn-compatible, the whole factory would need rethinking — better to know here.
     let _: Option<Arc<dyn ProviderProbe>> = None;
 
-    // --- (3) `RetryConfig` es `#[non_exhaustive]` ---------------------------------------
-    // Fuera del crate NO compila ni el literal `RetryConfig { .. }` ni el update funcional
-    // `..default()`. El patrón obligado es `default()` mutable, que es el que magi-core
-    // documenta.
+    // --- (3) `RetryConfig` is `#[non_exhaustive]` -------------------------------------------
+    // From outside the crate, neither the `RetryConfig { .. }` literal nor the functional
+    // update `..default()` compile. The mandated pattern is a mutable `default()`, which is
+    // what magi-core documents.
     let mut retry = RetryConfig::default();
     retry.operation_budget = Duration::from_secs(54);
     let _: Duration = retry.operation_budget;
 
-    // --- (4) `Mode` NO tiene método de parseo -------------------------------------------
-    // Lo que existe es `Display` + serde en kebab-case, y por eso MS2 necesita su propio
-    // `ModeExt::parse_config_value` (Task 1.0). Ese trait es de magi-rs y nace en la Fase 1:
-    // nombrarlo acá volvería no-compilable justo al spike cuyo trabajo es impedir eso.
+    // --- (4) `Mode` has NO parsing method ----------------------------------------------------
+    // What exists is `Display` + serde in kebab-case, which is why MS2 needs its own
+    // `ModeExt::parse_config_value` (Task 1.0). That trait belongs to magi-rs and is born in
+    // Phase 1: naming it here would make it non-compilable right at the spike whose job is to
+    // prevent exactly that.
     let _: String = Mode::CodeReview.to_string();
     let parsed: Mode = serde_json::from_str(r#""code-review""#).expect("kebab-case");
     assert_eq!(parsed, Mode::CodeReview);
 
-    // --- (5) Constructores, con su ORDEN DE ARGUMENTOS real ------------------------------
-    // `api_key` PRIMERO en Claude. Los dos parámetros son `impl Into<String>`, así que
-    // invertirlos **compila** y falla en runtime con un 401 — el tipo de defecto que ninguna
-    // revisión encuentra.
+    // --- (5) Constructors, with their real ARGUMENT ORDER -----------------------------------
+    // `api_key` FIRST on Claude. Both parameters are `impl Into<String>`, so swapping them
+    // **compiles** and fails at runtime with a 401 — the kind of defect no review ever catches.
     let _ = ClaudeProvider::new("api-key", SYNTHETIC_MODEL);
     let _ = ClaudeProvider::with_timeout("api-key", SYNTHETIC_MODEL, Duration::from_secs(27));
 
-    // `Option<String>` en el TERCER parámetro; `None` es el caso Ollama (keyless).
+    // `Option<String>` in the THIRD parameter; `None` is the Ollama case (keyless).
     let openai = OpenAiCompatibleProvider::new(SYNTHETIC_BASE_URL, SYNTHETIC_MODEL, None)
-        .expect("base_url sintáctica válida");
+        .expect("valid synthetic base_url");
     let _ = OpenAiCompatibleProvider::with_timeout(
         SYNTHETIC_BASE_URL,
         SYNTHETIC_MODEL,
@@ -201,73 +206,75 @@ fn magi_core_api_surface_is_what_the_plan_assumes() {
     );
     assert_is_provider(&openai);
 
-    // `OllamaProvider` sigue existiendo, pero SOLO como sonda: su único constructor fija un
-    // cliente de 300 s sin override, lo que hace imposible la relación de REQ-A04
-    // (`operation_budget + client_timeout <= techo`). Devuelve `Result` porque normaliza la
-    // URL — y esa normalización es la que REQ-A01b obliga a anunciar en un notice.
-    let ollama = OllamaProvider::new(SYNTHETIC_BASE_URL, SYNTHETIC_MODEL)
-        .expect("base_url sintáctica válida");
+    // `OllamaProvider` still exists, but ONLY as a probe: its sole constructor fixes a 300 s
+    // client with no override, which makes REQ-A04's relation
+    // (`operation_budget + client_timeout <= ceiling`) impossible to satisfy. It returns a
+    // `Result` because it normalizes the URL — and that normalization is exactly what REQ-A01b
+    // requires to be announced in a notice.
+    let ollama =
+        OllamaProvider::new(SYNTHETIC_BASE_URL, SYNTHETIC_MODEL).expect("valid synthetic base_url");
     assert_is_provider(&ollama);
     assert_is_probe(&ollama);
 
-    // --- (6) `RetryProvider` envuelve un `Arc<dyn LlmProvider>` --------------------------
-    // REQ-A03: `MagiBuilder::build()` NO envuelve nada, así que sin esto el trío pierde el
-    // reintento que hoy hereda del adapter — una regresión de resiliencia.
+    // --- (6) `RetryProvider` wraps an `Arc<dyn LlmProvider>` ---------------------------------
+    // REQ-A03: `MagiBuilder::build()` does NOT wrap anything, so without this the trio loses
+    // the retry it currently inherits from the adapter — a resilience regression.
     let inner: Arc<dyn LlmProvider> = Arc::new(
         OpenAiCompatibleProvider::new(SYNTHETIC_BASE_URL, SYNTHETIC_MODEL, None)
-            .expect("base_url sintáctica válida"),
+            .expect("valid synthetic base_url"),
     );
     let _ = RetryProvider::with_config(inner, RetryConfig::default());
 
-    // --- (7) Config del orquestador: los dos campos que la escala derivada lee ------------
+    // --- (7) Orchestrator config: the two fields the derived scale reads ---------------------
     let _: Duration = CoreMagiConfig::default().timeout;
     let _: usize = CoreMagiConfig::default().max_input_len;
 
-    // --- (8) Marcadores de veredicto (contrato 3.0.0) ------------------------------------
-    // Los dobles de test DEBEN emitir el veredicto entre estos marcadores: magi-core borró su
-    // parser de búsqueda, así que un JSON pelado ya no parsea por más válido que sea.
+    // --- (8) Verdict markers (3.0.0 contract) -------------------------------------------------
+    // Test doubles MUST emit the verdict between these markers: magi-core removed its search
+    // parser, so a bare JSON no longer parses no matter how valid it is.
     assert!(!VERDICT_OPEN.is_empty());
     assert!(!VERDICT_CLOSE.is_empty());
 
-    // --- (9) Formas que no se pueden instanciar fuera del crate --------------------------
-    // Referenciar el item lo marca como usado; su cuerpo ya se type-checkeó. No hace falta
-    // llamarlo, y no hay `#[allow(dead_code)]` que justificar.
+    // --- (9) Shapes that can't be instantiated outside the crate ------------------------------
+    // Referencing the item marks it as used; its body was already type-checked. There's no
+    // need to call it, and no `#[allow(dead_code)]` to justify.
     let _ = report_shape;
     let _ = extraction_failure_shape;
     let _ = input_size_shape;
     let _ = builder_surface;
 }
 
-/// Contenido con largo suficiente para que el orquestador despache los tres asientos.
+/// Content long enough for the orchestrator to dispatch all three seats.
 ///
-/// El gate de complejidad de magi-core veta contenido trivial, así que un payload corto haría
-/// que estos guardianes midieran **cero llamadas** y pasaran por la razón equivocada.
+/// magi-core's complexity gate vetoes trivial content, so a short payload would make these
+/// guardians measure **zero calls** and pass for the wrong reason.
 const DISPATCHABLE_CONTENT: &str =
-    "Contenido con largo más que suficiente para que el orquestador despache los tres \
-     asientos en vez de vetar la consulta por trivial, que es lo que haría un payload corto.";
+    "Content that is more than long enough for the orchestrator to dispatch all three seats \
+     instead of vetoing the query as trivial, which is what a short payload would trigger.";
 
-/// Asientos que magi-core despacha por consulta: el trío completo.
+/// Seats magi-core dispatches per query: the full trio.
 const EXPECTED_SEATS: usize = 3;
 
-/// Intentos por asiento ante un schema inválido — **medido**, no supuesto.
+/// Attempts per seat when facing an invalid schema — **measured**, not assumed.
 ///
-/// Una sonda sobre magi-core 3.1.0 (2026-08-02) observó los tres asientos con exactamente dos
-/// llamadas cada uno. Es de donde sale el factor 2 de la fórmula del `--timeout` (REQ-A04), y
-/// por eso se afirma el valor exacto en vez de un `>= 2`: ese `>=` pasaba con **un solo**
-/// asiento reintentando, o sea que no distinguía el caso sano del degradado.
+/// A probe against magi-core 3.1.0 (2026-08-02) observed all three seats making exactly two
+/// calls each. That's where the factor of 2 in the `--timeout` formula (REQ-A04) comes from,
+/// and that's why the exact value is asserted instead of `>= 2`: that `>=` would pass with
+/// just **one** seat retrying, i.e. it would not distinguish the healthy case from the
+/// degraded one.
 const ATTEMPTS_PER_SEAT: usize = 2;
 
-/// SC-A04b, primera mitad: un fallo de schema consume **DOS** ventanas de `timeout`.
+/// SC-A04b, first half: a schema failure consumes **TWO** `timeout` windows.
 ///
-/// De acá sale el factor 2 de la fórmula del `--timeout` headless (REQ-A04). Si magi-core
-/// dejara de reintentar ante schema inválido, la escala quedaría sobredimensionada y nadie se
-/// enteraría — el consult seguiría funcionando, solo que el `--timeout` derivado pasaría a
-/// cubrir el doble de lo necesario.
+/// This is where the factor of 2 in the headless `--timeout` formula (REQ-A04) comes from. If
+/// magi-core stopped retrying on invalid schema, the scale would end up oversized and nobody
+/// would notice — the consult would keep working, only the derived `--timeout` would cover
+/// twice what's needed.
 ///
-/// **El conteo es POR ASIENTO, y esa es la diferencia entre un guardián y un adorno.** Con un
-/// contador global, `total >= 2` pasa con tres mages llamando una vez cada uno — o sea
-/// **aunque magi-core no reintente jamás**. El system prompt discrimina asientos porque cada
-/// mage recibe el suyo (REQ-A02).
+/// **The count is PER SEAT, and that's the difference between a guardian and window dressing.**
+/// With a global counter, `total >= 2` passes with three mages each calling once — i.e. **even
+/// if magi-core never retries at all**. The system prompt discriminates seats because each
+/// mage receives its own (REQ-A02).
 #[tokio::test]
 async fn schema_retry_consumes_two_timeout_windows_per_seat() {
     let ceiling = Duration::from_secs(2);
@@ -277,51 +284,52 @@ async fn schema_retry_consumes_two_timeout_windows_per_seat() {
     let magi = MagiBuilder::new(provider.clone())
         .with_timeout(ceiling)
         .build()
-        .expect("el builder acepta un solo provider compartido");
+        .expect("the builder accepts a single shared provider");
 
     let started = Instant::now();
     let _ = magi.analyze(&Mode::Analysis, DISPATCHABLE_CONTENT).await;
     let elapsed = started.elapsed();
 
     let by_seat = provider.calls_by_seat();
-    // Solo los CONTEOS en los mensajes: las claves son los system prompts completos, o sea
-    // ~30 KB que volverían ilegible cualquier fallo. El conteo es el dato; la clave, el medio.
+    // Only the COUNTS go into the messages: the keys are the full system prompts, i.e. ~30 KB
+    // that would make any failure unreadable. The count is the data; the key is just the
+    // medium.
     let counts: Vec<usize> = by_seat.values().copied().collect();
 
     assert_eq!(
         by_seat.len(),
         EXPECTED_SEATS,
-        "se esperaban {EXPECTED_SEATS} asientos con system prompts distintos y hubo \
-         {}: o magi-core dejó de despachar el trío completo, o dejó de darle a cada mage su \
-         propio system prompt (REQ-A02) — que es lo que hace discriminable este conteo",
+        "expected {EXPECTED_SEATS} seats with distinct system prompts and got {}: either \
+         magi-core stopped dispatching the full trio, or it stopped giving each mage its own \
+         system prompt (REQ-A02) — which is what makes this count discriminating",
         by_seat.len(),
     );
     assert!(
         counts.iter().all(|n| *n == ATTEMPTS_PER_SEAT),
-        "cada asiento debe consumir exactamente {ATTEMPTS_PER_SEAT} intentos ante schema \
-         inválido; se observaron {counts:?}. Menos ⇒ magi-core dejó de reintentar y el factor \
-         2 de REQ-A04 sobredimensiona la escala. Más ⇒ el peor caso ya no es 2× el techo y la \
-         fórmula del `--timeout` subestima",
+        "each seat must consume exactly {ATTEMPTS_PER_SEAT} attempts on invalid schema; \
+         observed {counts:?}. Fewer ⇒ magi-core stopped retrying and REQ-A04's factor of 2 \
+         oversizes the scale. More ⇒ the worst case is no longer 2x the ceiling and the \
+         `--timeout` formula underestimates it",
     );
     assert!(
         elapsed < ceiling * 3,
-        "el peor caso superó 2× el techo ({elapsed:?} con techo {ceiling:?})",
+        "the worst case exceeded 2x the ceiling ({elapsed:?} with ceiling {ceiling:?})",
     );
 }
 
-/// SC-A04b, segunda mitad: un provider **colgado** consume UNA sola ventana.
+/// SC-A04b, second half: a **hanging** provider consumes only ONE window.
 ///
-/// Es la asimetría que hace correcta la fórmula: un timeout del provider **no** dispara el
-/// reintento correctivo de schema, así que ese camino cuesta 1×, no 2×. Si magi-core empezara
-/// a reintentar también tras un timeout, el peor caso por mage saltaría de 2× a 4× y el
-/// `--timeout` derivado empezaría a cortar consults sanos.
+/// This is the asymmetry that makes the formula correct: a provider timeout does **not**
+/// trigger the corrective schema retry, so that path costs 1x, not 2x. If magi-core started
+/// retrying after a timeout too, the worst case per mage would jump from 2x to 4x and the
+/// derived `--timeout` would start cutting off healthy consults.
 #[tokio::test]
 async fn a_hanging_provider_consumes_one_timeout_window() {
     let ceiling = Duration::from_millis(300);
     let magi = MagiBuilder::new(Arc::new(support::HangingProvider))
         .with_timeout(ceiling)
         .build()
-        .expect("el builder acepta un solo provider compartido");
+        .expect("the builder accepts a single shared provider");
 
     let started = Instant::now();
     let _ = magi.analyze(&Mode::Analysis, DISPATCHABLE_CONTENT).await;
@@ -329,50 +337,51 @@ async fn a_hanging_provider_consumes_one_timeout_window() {
 
     assert!(
         elapsed < ceiling * 2,
-        "un cuelgue consumió {elapsed:?} con techo {ceiling:?}: magi-core empezó a reintentar \
-         tras timeout, y el peor caso de REQ-A04 pasa de 2× a 4×",
+        "a hang consumed {elapsed:?} with ceiling {ceiling:?}: magi-core started retrying \
+         after a timeout, and REQ-A04's worst case goes from 2x to 4x",
     );
 }
 
-/// Cuánto tolera esperar el rendezvous del doble de solapamiento antes de concluir que el
-/// despacho NO es concurrente (MAGI S3 re-gate, Caspar — reemplaza el `OVERLAP_DWELL` fijo de
-/// 500 ms del primer borrador).
+/// How long it's tolerable to wait for the overlap double's rendezvous before concluding
+/// dispatch is NOT concurrent (MAGI S3 re-gate, Caspar — replaces the first draft's fixed
+/// 500 ms `OVERLAP_DWELL`).
 ///
-/// **Techo generoso, no una medición precisa** — la misma disciplina que el resto del proyecto
-/// exige para tests con reloj (`.config/nextest.toml` documenta dos veces el costo de no
-/// seguirla): con despacho realmente concurrente, el rendezvous de
-/// [`support::OverlapCountingProvider`] se resuelve en milisegundos incluso bajo la carga
-/// Argon2 del resto de la suite —este test corre en el grupo `default`, no en `heavy`—; si
-/// magi-core regresara a despacho en serie, el rendezvous del último asiento JAMÁS se
-/// completaría (nada puede "salir" hasta que los tres "lleguen"), así que este techo es
-/// exactamente donde ese defecto se vuelve un fallo claro en vez de una suite colgada.
+/// **A generous ceiling, not a precise measurement** — the same discipline the rest of the
+/// project requires for clock-dependent tests (`.config/nextest.toml` documents twice over the
+/// cost of not following it): with genuinely concurrent dispatch, [`support::OverlapCountingProvider`]'s
+/// rendezvous resolves in milliseconds even under the Argon2 load from the rest of the suite
+/// (this test runs in the `default` group, not `heavy`); if magi-core regressed to serial
+/// dispatch, the last seat's rendezvous would NEVER complete (nothing can "leave" until all
+/// three "arrive"), so this ceiling is exactly where that defect turns into a clear failure
+/// instead of a hung suite.
 const OVERLAP_RENDEZVOUS_DEADLINE: Duration = Duration::from_secs(30);
 
-/// Techo por asiento pasado al builder para ESTE test. Igual de generoso que
-/// [`OVERLAP_RENDEZVOUS_DEADLINE`] y por la misma razón: si el techo interno de magi-core
-/// (REQ-A04) fuera más ajustado que lo que el rendezvous necesita bajo contención real, un
-/// asiento podría abortarse por timeout ANTES de llegar al rendezvous — un fallo distinto
-/// (timeout de agente) que este test no existe para diagnosticar. No mide wall-clock real: el
-/// doble no genera nada, solo espera a los otros dos.
+/// Per-seat ceiling passed to the builder for THIS test. Just as generous as
+/// [`OVERLAP_RENDEZVOUS_DEADLINE`] and for the same reason: if magi-core's internal ceiling
+/// (REQ-A04) were tighter than what the rendezvous needs under real contention, a seat could
+/// be aborted by timeout BEFORE reaching the rendezvous — a different failure (agent timeout)
+/// this test does not exist to diagnose. It does not measure real wall-clock: the double
+/// generates nothing, it just waits for the other two.
 const OVERLAP_AGENT_TIMEOUT: Duration = OVERLAP_RENDEZVOUS_DEADLINE;
 
-/// SC-A04e: los tres mages se ejecutan **solapados**, no en serie.
+/// SC-A04e: the three mages execute **overlapped**, not serially.
 ///
-/// Es lo que sostiene el «**NO** se multiplica por 3» de la fórmula del `--timeout` (REQ-A04):
-/// con despacho paralelo el peor caso de un consult es el del mage más lento, no la suma de
-/// los tres. Si magi-core pasara a despachar en serie, ese peor caso saltaría de 2× a 6× el
-/// techo y el `--timeout` derivado empezaría a cortar consults perfectamente sanos — **sin que
-/// una sola línea de magi-rs cambiara**, que es exactamente el fallo silencioso que este
-/// guardián convierte en una suite rota.
+/// This is what sustains the "**NOT** multiplied by 3" in the `--timeout` formula (REQ-A04):
+/// with parallel dispatch, the worst case of a consult is that of the slowest mage, not the
+/// sum of the three. If magi-core switched to serial dispatch, that worst case would jump from
+/// 2x to 6x the ceiling and the derived `--timeout` would start cutting off perfectly healthy
+/// consults — **without a single line of magi-rs changing**, which is exactly the silent
+/// failure this guardian turns into a broken suite.
 ///
-/// **El pico se afirma en {EXPECTED_SEATS}, no en `>= 2`.** Dos mages solapados y el tercero
-/// en serie ya rompe la fórmula —el peor caso pasa a 4×— y un `>= 2` lo daría por bueno.
+/// **The peak is asserted as {EXPECTED_SEATS}, not `>= 2`.** Two overlapping mages plus a
+/// third running serially would already break the formula — the worst case becomes 4x — and
+/// a `>= 2` would pass it as fine.
 ///
-/// **Espera sobre una CONDICIÓN (rendezvous de tres llegadas), no sobre una duración fija** —
-/// ver el doc de [`support::OverlapCountingProvider`] para el porqué: la versión anterior de
-/// este test dormía 500 ms por llamada y confiaba en que el scheduler despachara las tres
-/// dentro de esa ventana, que es precisamente el patrón de flakiness bajo carga que este
-/// proyecto ya diagnosticó dos veces.
+/// **It waits on a CONDITION (a rendezvous of three arrivals), not on a fixed duration** — see
+/// [`support::OverlapCountingProvider`]'s doc comment for why: the previous version of this
+/// test slept 500 ms per call and trusted the scheduler to dispatch all three within that
+/// window, which is precisely the load-induced flakiness pattern this project has already
+/// diagnosed twice.
 #[tokio::test]
 async fn the_three_mages_execute_concurrently() {
     let (provider, peak) = support::OverlapCountingProvider::new(EXPECTED_SEATS);
@@ -380,7 +389,7 @@ async fn the_three_mages_execute_concurrently() {
     let magi = MagiBuilder::new(provider)
         .with_timeout(OVERLAP_AGENT_TIMEOUT)
         .build()
-        .expect("el builder acepta un solo provider compartido");
+        .expect("the builder accepts a single shared provider");
 
     let outcome = tokio::time::timeout(
         OVERLAP_RENDEZVOUS_DEADLINE,
@@ -389,45 +398,47 @@ async fn the_three_mages_execute_concurrently() {
     .await;
     assert!(
         outcome.is_ok(),
-        "no completó dentro de {OVERLAP_RENDEZVOUS_DEADLINE:?}: probable despacho en SERIE — \
-         el rendezvous del último asiento nunca habría llegado a {EXPECTED_SEATS} arribos",
+        "did not complete within {OVERLAP_RENDEZVOUS_DEADLINE:?}: likely SERIAL dispatch — the \
+         last seat's rendezvous would never have reached {EXPECTED_SEATS} arrivals",
     );
 
     let observed = peak.load(Ordering::SeqCst);
     assert_eq!(
         observed, EXPECTED_SEATS,
-        "pico de concurrencia = {observed}, esperado {EXPECTED_SEATS}: magi-core dejó de \
-         despachar los tres asientos en paralelo. La fórmula del `--timeout` (REQ-A04) asume \
-         solapamiento total y ahora subestima el peor caso",
+        "concurrency peak = {observed}, expected {EXPECTED_SEATS}: magi-core stopped \
+         dispatching all three seats in parallel. The `--timeout` formula (REQ-A04) assumes \
+         full overlap and now underestimates the worst case",
     );
 }
 
-/// SPIKE de Task 0.6: qué expone `MagiReport::report` de forma localizable.
+/// SPIKE for Task 0.6: what `MagiReport::report` exposes in a locatable way.
 ///
-/// Decide el `TruncationLevel` máximo alcanzable, que Task 6.2 consume. Va en Fase 0 y no en
-/// Fase 6 a propósito: el recorte estructural depende de poder ubicar veredicto y hallazgos en
-/// un markdown que genera **otra crate**, y eso es una suposición. Descubrir que no se puede,
-/// con el milestone casi entero encima, dejaría el requerimiento sin salida.
+/// Decides the maximum reachable `TruncationLevel`, which Task 6.2 consumes. It runs in Phase
+/// 0 rather than Phase 6 on purpose: structural truncation depends on being able to locate the
+/// verdict and findings in markdown generated by **another crate**, and that's an assumption.
+/// Discovering it can't be done with the milestone nearly finished would leave the requirement
+/// with no way out.
 #[tokio::test]
 async fn report_shape_matches_what_the_truncation_design_assumes() {
     let provider = Arc::new(support::AdheringTrioProvider);
     let magi = MagiBuilder::new(provider)
         .build()
-        .expect("el builder acepta un solo provider compartido");
+        .expect("the builder accepts a single shared provider");
     let report = magi
         .analyze(&Mode::CodeReview, DISPATCHABLE_CONTENT)
         .await
-        .expect("los tres adhieren, así que hay reporte");
+        .expect("all three adhere, so there is a report");
 
     assert!(
         !report.report.is_empty(),
-        "un reporte vacío invalidaría cualquier nivel de recorte",
+        "an empty report would invalidate any truncation level",
     );
 
-    // Las anclas se IMPORTAN de producción, no se redeclaran acá. Redeclararlas partiría la
-    // verdad en dos: el spike mediría una cosa y `truncate_report` (Task 6.2) leería otra, y
-    // el desacuerdo aparecería recién cuando un reporte saliera mal recortado.
-    let anchors = SECTION_ANCHORS.expect("el spike concluyó que `Structural` es alcanzable");
+    // The anchors are IMPORTED from production, not redeclared here. Redeclaring them would
+    // split the truth in two: the spike would measure one thing and `truncate_report` (Task
+    // 6.2) would read another, and the disagreement would only surface once a report came out
+    // badly truncated.
+    let anchors = SECTION_ANCHORS.expect("the spike concluded that `Structural` is reachable");
     for anchor in [
         anchors.verdict_start,
         anchors.findings_start,
@@ -435,74 +446,76 @@ async fn report_shape_matches_what_the_truncation_design_assumes() {
     ] {
         assert!(
             report.report.contains(anchor),
-            "ancla de sección ausente: {anchor:?}. magi-core cambió el render y el nivel \
-             `Structural` de REQ-A11b dejó de ser alcanzable con estas anclas — que es \
-             justamente lo que este guardián existe para avisar antes que un usuario.\n\
-             Reporte observado:\n{}",
+            "missing section anchor: {anchor:?}. magi-core changed its rendering and REQ-A11b's \
+             `Structural` level is no longer reachable with these anchors — which is exactly \
+             what this guardian exists to warn about before a user does.\n\
+             Observed report:\n{}",
             report.report,
         );
     }
     for anchor in CONTRACTUAL_ANCHORS {
         assert!(
             report.report.contains(anchor),
-            "ancla contractual ausente: {anchor:?}. Estas son las que magi-core emite SIEMPRE, \
-             así que su ausencia baja el techo de recorte hasta `Bytes`.\n\
-             Reporte observado:\n{}",
+            "missing contractual anchor: {anchor:?}. These are the ones magi-core ALWAYS \
+             emits, so their absence lowers the truncation ceiling to `Bytes`.\n\
+             Observed report:\n{}",
             report.report,
         );
     }
 }
 
-/// Tope defensivo de lo que el mock llega a escribir antes de rendirse.
+/// Defensive cap on what the mock will actually write before giving up.
 ///
-/// El cuerpo pretende ser **sin fin**, pero un bucle literalmente infinito convierte un
-/// guardián fallido en un test **colgado**, que es el peor resultado: no reporta, bloquea la
-/// suite y hay que ir a buscarlo. 64 MiB es 64× el cap de 1 MiB de magi-core, así que si el
-/// lector corta —que es lo que se verifica— nunca se alcanza.
+/// The body is meant to look **endless**, but a literally infinite loop turns a failed
+/// guardian into a **hung** test, which is the worst outcome: it doesn't report, it blocks the
+/// suite, and someone has to go hunt for it. 64 MiB is 64x magi-core's 1 MiB cap, so if the
+/// reader cuts off — which is what's being verified — it's never reached.
 const MOCK_ENDLESS_BODY_LIMIT: usize = 64 * 1024 * 1024;
 
-/// Tamaño de cada trozo que escribe el mock.
+/// Size of each chunk the mock writes.
 const MOCK_CHUNK_BYTES: usize = 8 * 1024;
 
-/// Techo de bytes SERVIDOS que la aserción tolera antes de considerar que magi-core dejó de
-/// cortar (loop 1 fix round CE, F6).
+/// Ceiling of SERVED bytes the assertion tolerates before concluding magi-core stopped cutting
+/// off (loop 1 fix round CE, F6).
 ///
-/// **Este es el número que hace al test discriminar.** Las tres aserciones que tenía antes
-/// (mock golpeado, resultado `None`/`Err`, `elapsed` bajo el timeout de 5 s) las satisface
-/// IGUAL un lector sin cap que se traga los 64 MiB completos en loopback —eso tarda muy por
-/// debajo de 5 s— y falla a parsear el JSON deliberadamente sin cerrar de todos modos, así que
-/// terminaba en `Ok(None)`/`Err(_)` de cualquier manera. Ninguna de esas tres mide lo único que
-/// separa «cortó leyendo» de «leyó todo y recién después midió»: los BYTES efectivamente
-/// transferidos antes de que la conexión se corte.
+/// **This is the number that makes the test discriminate.** The three assertions it had
+/// before (mock hit, `None`/`Err` result, `elapsed` under the 5 s timeout) are ALL satisfied
+/// just the same by a reader with no cap that swallows the full 64 MiB over loopback — that
+/// takes well under 5 s — and fails to parse the JSON anyway because it deliberately never
+/// closes, so it would end up in `Ok(None)`/`Err(_)` either way. None of those three measure
+/// the one thing that separates "cut off while reading" from "read everything and only
+/// measured afterward": the BYTES actually transferred before the connection got cut.
 ///
-/// El valor es 8× el `MAX_SHOW_BODY_BYTES` de 1 MiB de magi-core —holgado para no acoplarse al
-/// byte exacto de la constante `pub(crate)` que no se puede nombrar desde acá, más el margen de
-/// un chunk en vuelo cuando el lector corta— y 8× por debajo de los 64 MiB del mock: un lector
-/// sin cap lo cruza inmediatamente, uno que corta a 1 MiB nunca se le acerca.
+/// The value is 8x magi-core's 1 MiB `MAX_SHOW_BODY_BYTES` — generous enough not to couple to
+/// the exact byte count of the `pub(crate)` constant that can't be named from here, plus margin
+/// for one chunk in flight when the reader cuts off — and 8x below the mock's 64 MiB: a reader
+/// with no cap crosses it immediately, one that cuts off at 1 MiB never comes close.
 const MAX_BYTES_TOLERATED_BEFORE_CUT: usize = 8 * 1024 * 1024;
 
-/// REQ-A16b / SC-A16c — **satisfecho POR magi-core, verificado acá.**
+/// REQ-A16b / SC-A16c — **satisfied BY magi-core, verified here.**
 ///
-/// `OllamaProvider::window()` hace su propio HTTP y magi-core ya acota el cuerpo:
-/// `MAX_SHOW_BODY_BYTES = 1 MiB`, leído con `read_probe_body`, y su rustdoc dice que el
-/// cuerpo es *"untrusted"* y queda *"bounded"* — o sea que corta **mientras lee**, que es
-/// exactamente lo que el requerimiento pide.
+/// `OllamaProvider::window()` does its own HTTP and magi-core already bounds the body:
+/// `MAX_SHOW_BODY_BYTES = 1 MiB`, read via `read_probe_body`, whose rustdoc says the body is
+/// *"untrusted"* and stays *"bounded"* — i.e. it cuts off **while reading**, which is exactly
+/// what the requirement asks for.
 ///
-/// **Por eso magi-rs NO implementa su propio `read_capped`**: sería reimplementar una guarda
-/// existente, que es lo que R-A02 prohíbe. Lo que sí corresponde es un guardián de que la
-/// propiedad siga siendo cierta. La constante es `pub(crate)`, así que no se puede afirmar
-/// sobre ella — se afirma sobre el **comportamiento**, que además es lo que importa.
+/// **That's why magi-rs does NOT implement its own `read_capped`**: it would be
+/// reimplementing an existing guard, which is what R-A02 forbids. What is warranted is a
+/// guardian that the property keeps holding. The constant is `pub(crate)`, so it can't be
+/// asserted on directly — the assertion is on the **behavior** instead, which is what matters
+/// anyway.
 ///
-/// El cuerpo se emite en trozos y no como un `String` gigante: el punto es que el lector
-/// corte **durante** la lectura, y un cuerpo finito-y-grande no distingue «cortó al leer» de
-/// «alojó todo y después midió» — **salvo que se cuenten los bytes efectivamente servidos**,
-/// que es lo que este test hace (fix round CE, F6): el mock incrementa un contador compartido
-/// antes de CADA `write_all`, así que su valor final es exactamente cuánto llegó a fluir antes
-/// de que el lector cortara la conexión — la única señal que distingue «cortó al leer» de
-/// «leyó todo y luego fracasó al parsear igual».
+/// The body is emitted in chunks rather than as one giant `String`: the point is that the
+/// reader cuts off **during** the read, and a finite-but-large body doesn't distinguish "cut
+/// off while reading" from "buffered it all and measured afterward" — **unless the actually
+/// served bytes are counted**, which is what this test does (fix round CE, F6): the mock
+/// increments a shared counter before EVERY `write_all`, so its final value is exactly how
+/// much made it through before the reader cut the connection — the only signal that
+/// distinguishes "cut off while reading" from "read everything and then still failed to parse
+/// it".
 ///
-/// Si este test **falla**, magi-core dejó de capear y REQ-A16b pasa a ser responsabilidad de
-/// magi-rs — y el guardián lo dijo antes de que lo dijera un endpoint hostil en producción.
+/// If this test **fails**, magi-core stopped capping and REQ-A16b becomes magi-rs's
+/// responsibility — and the guardian said so before a hostile endpoint said so in production.
 #[tokio::test]
 async fn magi_core_rejects_an_endless_probe_body_instead_of_accumulating_it() {
     let bytes_served = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -513,17 +526,18 @@ async fn magi_core_rejects_an_endless_probe_body_instead_of_accumulating_it() {
         .mock("POST", "/api/show")
         .with_status(200)
         .with_chunked_body(move |writer| {
-            // Un JSON que nunca cierra: empieza plausible y no termina jamás.
+            // A JSON that never closes: it starts out plausible and never ends.
             writer.write_all(br#"{"model_info":{"llama.context_length":"#)?;
             let chunk = [b'1'; MOCK_CHUNK_BYTES];
             let mut written = 0usize;
             while written < MOCK_ENDLESS_BODY_LIMIT {
-                // Se cuenta ANTES de escribir: lo que importa es cuánto se INTENTÓ servir, no
-                // solo lo que confirmadamente llegó — así el contador no puede quedarse corto
-                // por una carrera entre el incremento y el corte de conexión.
+                // Counted BEFORE writing: what matters is how much was ATTEMPTED to be
+                // served, not only what confirmedly arrived — this way the counter can't
+                // undercount due to a race between the increment and the connection cutting
+                // off.
                 counter.fetch_add(MOCK_CHUNK_BYTES, Ordering::SeqCst);
-                // Cuando el lector corta y suelta la conexión, esto devuelve `Err` y el
-                // callback termina solo. Ese `?` ES el final esperado del mock.
+                // When the reader cuts off and drops the connection, this returns `Err` and
+                // the callback ends on its own. That `?` IS the expected end of the mock.
                 writer.write_all(&chunk)?;
                 written += MOCK_CHUNK_BYTES;
             }
@@ -532,34 +546,35 @@ async fn magi_core_rejects_an_endless_probe_body_instead_of_accumulating_it() {
         .create_async()
         .await;
 
-    let probe = OllamaProvider::new(server.url(), SYNTHETIC_MODEL).expect("base_url del mock");
+    let probe = OllamaProvider::new(server.url(), SYNTHETIC_MODEL).expect("mock's base_url");
 
     let started = Instant::now();
     let window = probe.window().await;
     let elapsed = started.elapsed();
 
-    // PRIMERO que el mock se haya golpeado, y esto no es ceremonia: la aserción de abajo
-    // acepta `Err(_)`, así que pasaría igual si la petición nunca hubiera llegado —una URL
-    // mal armada, una conexión rechazada— y el guardián estaría certificando un cap que
-    // nunca ejercitó. Es la misma vacuidad que hace inútil a un `any(>= 2)`.
+    // FIRST, that the mock was actually hit, and this isn't ceremony: the assertion below
+    // accepts `Err(_)`, so it would pass just as well if the request never arrived — a
+    // malformed URL, a refused connection — and the guardian would be certifying a cap it
+    // never exercised. It's the same vacuity that makes an `any(>= 2)` useless.
     mock.assert_async().await;
 
     assert!(
         matches!(window, Ok(None) | Err(_)),
-        "un cuerpo sin fin debe degradar a no-medido o a error, nunca completar con un valor: \
-         magi-core dejó de acotar el cuerpo del probe y REQ-A16b pasó a ser nuestro",
+        "an endless body must degrade to not-measured or to an error, never complete with a \
+         value: magi-core stopped bounding the probe body and REQ-A16b became ours",
     );
     assert!(
         elapsed < Duration::from_secs(PROBE_TIMEOUT_SECS),
-        "tardó {elapsed:?}: debe cortar POR TAMAÑO mientras lee, no acumular hasta que expire \
-         un timeout. Contra un endpoint hostil la diferencia es entre 1 MiB y memoria sin cota",
+        "took {elapsed:?}: it must cut off BY SIZE while reading, not accumulate until a \
+         timeout expires. Against a hostile endpoint the difference is between 1 MiB and \
+         unbounded memory",
     );
     let served = bytes_served.load(Ordering::SeqCst);
     assert!(
         served < MAX_BYTES_TOLERATED_BEFORE_CUT,
-        "el mock llegó a servir {served} bytes antes de que el lector cortara la conexión — \
-         eso es {}× el cap documentado de magi-core (1 MiB): dejó de cortar mientras lee y \
-         acumuló el cuerpo entero en cambio",
+        "the mock managed to serve {served} bytes before the reader cut the connection — \
+         that's {}x magi-core's documented cap (1 MiB): it stopped cutting off while reading \
+         and buffered the entire body instead",
         served / (1024 * 1024),
     );
 }
