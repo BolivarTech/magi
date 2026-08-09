@@ -645,6 +645,40 @@ mod tests {
         assert!(!msg.contains("SECRET-KEY-123"));
     }
 
+    /// S9 gate finding (mutation-verify, round 3): the previous test only proved the key
+    /// is absent from a body that never contained it. A misconfigured gateway or a hostile
+    /// endpoint can echo the request straight back — including the `Authorization` header —
+    /// and the 256-char snippet built at `call_embeddings`'s non-2xx arm used to copy that
+    /// body verbatim into `EmbeddingError::Http`. This plants the actual key inside a
+    /// non-URL echo (no `://` anywhere in the body) so `redact_url`/`redact_foreign_text`
+    /// alone — which only redact URL `userinfo` — could not catch it; only stripping the
+    /// known literal key value closes this. Also asserts the surrounding diagnostic text
+    /// survives, so the fix cannot degenerate into blanking the whole snippet.
+    #[tokio::test]
+    async fn test_http_error_body_echoing_authorization_header_does_not_leak_key() {
+        let mut server = mockito::Server::new_async().await;
+        server
+            .mock("POST", "/embeddings")
+            .with_status(500)
+            .with_body(
+                r#"{"error":"bad request — offending headers: \
+                 authorization: Bearer SECRET-KEY-123, content-type: application/json"}"#,
+            )
+            .create_async()
+            .await;
+        let emb = OpenAiCompatibleEmbedder::new(&cfg(&server.url()), Some("SECRET-KEY-123".into()))
+            .unwrap();
+        let msg = emb.embed(&["x".into()]).await.unwrap_err().to_string();
+        assert!(
+            !msg.contains("SECRET-KEY-123"),
+            "the API key leaked through an echoed response body: {msg}"
+        );
+        assert!(
+            msg.contains("HTTP 500") && msg.contains("offending headers"),
+            "the redaction must not collapse the useful diagnostic text: {msg}"
+        );
+    }
+
     // ── Fix 2: Autodetect dim enforcement ─────────────────────────────────────
 
     /// Fix 2: when `dim = 0` (autodetect), the first successful response establishes
