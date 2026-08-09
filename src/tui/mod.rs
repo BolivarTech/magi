@@ -950,6 +950,12 @@ impl App {
         self.cursor_position += c.len_utf8();
     }
 
+    /// Inserts `text` at the current cursor position in a single operation.
+    ///
+    /// TODO(MS2 gate S7 seventh-pass): stub only — always a no-op. Batch-insertion logic lands
+    /// in the next commit; this stub exists solely so the tests below compile red.
+    pub fn insert_str(&mut self, _text: &str) {}
+
     /// Deletes the character before the current cursor position.
     pub fn delete_char(&mut self) {
         if self.selection_start.is_some() {
@@ -3379,6 +3385,57 @@ mod tests {
 
         app.insert_char('x');
         assert_eq!(app.input, "xá");
+    }
+
+    /// MS2 gate S7 seventh-pass finding (Caspar): clipboard paste (`Ctrl+V`) used to insert
+    /// each pasted character individually via `insert_char`, which calls `String::insert` — an
+    /// O(n) tail-shift per character, making an N-character paste O(N^2). A 50 KB code block
+    /// (a routine terminal paste) would perform on the order of a billion byte-shifts,
+    /// freezing the 50ms-poll event loop for seconds. `insert_str` must place the whole
+    /// clipboard payload with one `String::insert_str` call regardless of its length, and must
+    /// still honor the char-boundary invariant every other mutator in this file relies on.
+    #[tokio::test]
+    async fn test_insert_str_places_a_large_multibyte_paste_at_the_cursor_in_one_call() {
+        let (event_tx, _) = mpsc::channel(1);
+        let (_, response_rx) = mpsc::channel(1);
+        let (_, approval_rx) = mpsc::channel(1);
+        let mut app = App::new(event_tx, response_rx, approval_rx);
+
+        app.insert_char('á');
+        app.insert_char('c');
+        // Cursor sits after "ác" (byte 3) — move it back to between the two characters
+        // (byte 2), so the pasted payload lands in the middle of existing multi-byte content.
+        app.move_cursor_left(false);
+
+        // A large, multi-byte payload — the shape of a real clipboard paste of a code block
+        // with non-ASCII content (emoji in a comment, accented identifiers, etc.).
+        let pasted: String = "🎉x".repeat(2000);
+        app.insert_str(&pasted);
+
+        let expected = format!("á{pasted}c");
+        assert_eq!(app.input, expected);
+        assert_eq!(app.cursor_position, "á".len() + pasted.len());
+    }
+
+    /// Companion to the paste-batching test above: a paste that lands while text is selected
+    /// must replace the selection exactly once — [`App::insert_str`] mirrors
+    /// [`App::insert_char`]'s `delete_selection` call, not a per-character repeat of it.
+    #[tokio::test]
+    async fn test_insert_str_replaces_an_active_selection() {
+        let (event_tx, _) = mpsc::channel(1);
+        let (_, response_rx) = mpsc::channel(1);
+        let (_, approval_rx) = mpsc::channel(1);
+        let mut app = App::new(event_tx, response_rx, approval_rx);
+
+        app.insert_char('a');
+        app.insert_char('b');
+        app.insert_char('c');
+        app.selection_start = Some(0); // selects the whole "abc", cursor already at 3
+
+        app.insert_str("xyz");
+        assert_eq!(app.input, "xyz");
+        assert_eq!(app.cursor_position, 3);
+        assert!(app.selection_start.is_none());
     }
 
     #[test]
