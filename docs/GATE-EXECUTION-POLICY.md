@@ -90,10 +90,38 @@ file already named this as the correct lever and gave the reason: 3 heavy tests 
 coverage claim has to stay true. If intermittent failures reappear, revert the group to `2` first
 and leave the filter alone.
 
-## A third option, deliberately not taken
+## The third measure, adopted 2026-08-08 on new evidence
 
-Running a **filtered** test subset during a mini-cycle and the full suite only at the round's end
-was considered and **declined for now**. It is the largest theoretical saving and carries the
-matching risk: a fix can break a module the filter excluded, and that would surface only at the end
-of the round, after several commits have been built on top of it. Revisit only if the two measures
-above prove insufficient — and measure before deciding.
+Running a **filtered** test subset per commit, with the full suite at the round's end, was declined
+when this document was first written, to be revisited "only if the two measures above prove
+insufficient". They did prove insufficient — but for a problem that was not visible at the time, so
+this is not a reversal of the earlier reasoning.
+
+**The problem the first two measures could not solve.** The full suite runs 400–600 s and the agent
+tooling's command ceiling is **600 s**. Agents were therefore backgrounding the run and ending their
+turn — which strands them, because a background task only wakes an agent that is still running.
+**Seven stalls in one milestone** traced to that single squeeze, each costing a detection turn plus
+a resume turn at full context. Raising the concurrency cap and deferring four gates cut the *cost*
+of the suite; neither moved it clear of the *ceiling*.
+
+**How it works.** `python scripts/scoped_tests.py` derives a nextest filter from `git diff` and runs
+it. Per commit, use it in place of a bare `cargo nextest run`. At the round's close, run the full
+suite.
+
+**The gap, stated plainly, and what covers it.** Per commit this narrows *which tests execute*, not
+*whether the code compiles*: `cargo clippy --all-targets` and `cargo build` still cover every
+target, and they catch the common cross-module break — a changed signature. What it can miss is a
+**behavioural** regression in a module the filter excluded. The round-closing full suite is what
+catches that, and it is the reason the full suite remains non-negotiable rather than optional.
+
+**Why it is derived and never hand-maintained.** A hand-written list is precisely the failure mode
+`.config/nextest.toml` documents twice: a filter that matches nothing raises **no error**, so it
+stays declared in the file and silently stops applying. The script maps paths to modules
+mechanically, and **every case it cannot map confidently — a crate root, a manifest, a build script,
+a shared test helper, an unrecognised path — falls back to the full suite.** The default direction
+is always "run more", never "run less". A documentation-only change runs the full suite too, rather
+than reporting a vacuous pass over nothing.
+
+**Measured on this repository's last 40 commits:** 28 would run scoped, 11 would fall back to the
+full suite, 1 touched documentation only. So the saving applies to roughly seven commits in ten,
+and the fallbacks are exactly the commits where narrowing would have been least safe.
