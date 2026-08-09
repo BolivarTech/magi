@@ -2543,6 +2543,39 @@ mod tests {
         );
     }
 
+    /// MS2 gate S7 finding: `run_tui_ext` used to drop the event loop's `tokio::spawn`
+    /// `JoinHandle` and drain the gate telemetry immediately, racing the still-running task. A
+    /// gate evaluation recorded in the task's tail (e.g. after the last `UiEvent` but before
+    /// `on_session_close` returns) could be lost to a drain that ran first.
+    ///
+    /// `join_event_loop_then_drain` closes that window by awaiting the handle before draining.
+    /// This double stands in for the event-loop task: it sleeps, THEN records one evaluation —
+    /// exactly the "telemetry written by the task's tail" shape the race loses. Under
+    /// `start_paused = true` the sleep does not consume real wall-clock time; tokio
+    /// auto-advances the paused clock once every other task is parked on it, so the assertion
+    /// is deterministic rather than a timing guess.
+    #[tokio::test(start_paused = true)]
+    async fn join_event_loop_then_drain_waits_for_the_spawned_tasks_tail() {
+        let autonomous =
+            crate::AutonomousRunConfig::from_magi_config(&crate::config::MagiConfig::default());
+        let run_cfg = tui_agent_run_config(&autonomous);
+        let telemetry = run_cfg.gate_telemetry;
+
+        let handle = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            telemetry.on_gate_evaluation(&Mode::Analysis, 999, 1, true);
+        });
+
+        let lines = join_event_loop_then_drain(handle, &autonomous).await;
+
+        assert_eq!(
+            lines.len(),
+            1,
+            "the evaluation the spawned task recorded AFTER its sleep must survive the drain"
+        );
+        assert!(lines[0].contains("chars=999"));
+    }
+
     /// Companion to the test above: absence of `[magi].agent_timeout_secs`
     /// must still fall back to the built-in default, matching
     /// `build_magi_orchestrator`'s own `unwrap_or(AGENT_TIMEOUT_SECS)`
