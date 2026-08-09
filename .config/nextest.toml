@@ -91,10 +91,28 @@
 #
 # If flake returns, go back to 2 before considering anything else. A slower gate
 # is cheaper than one whose evidence cannot be trusted.
+#
+# ## The same trap, TWO levels down (MS2 gate, third pass)
+#
+# `test(/system::database::/)`, `test(/agent::tests::/)`, and `test(/tools::knowledge::/)`
+# were still leaf-module patterns, in direct contradiction of the policy this file spends
+# its first section explaining — caught independently by two reviewers in the same gate
+# round (S10, Caspar and Balthasar). `agent::tests::` in particular already had siblings
+# it did not cover: `agent::provider::tests` and `agent::mode_classifier::tests` are
+# separate leaf test modules one level under `agent::`, exactly the shape that rotted
+# `memory::store::` before it. Widened to subsystem level: `system::database::` ->
+# `system::` (sweeps in `fs`, `git`, `grep`, `path_guard`, `workspace` — none of them open
+# an encrypted DB, but a leaf pattern here is what silently dropped coverage twice
+# already), `agent::tests::` -> `agent::` (adds `agent::provider::tests`,
+# `agent::mode_classifier::tests`), `tools::knowledge::` -> `tools::` (adds `bash`,
+# `consult`, `grep`, `ls`, `read`, `write`, and `tools::mod`'s own tests). Matched test
+# count went from 242 to 416 (`cargo nextest list -E '<filter>'`, counted before and after
+# this change) — the filter was NOT trimmed back down to the smaller number: per this
+# file's own rule, a cap that is a little too wide is the cost of one that cannot rot.
 
 [test-groups]
 heavy = { max-threads = 3 }
 
 [[profile.default.overrides]]
-filter = 'test(/vault::/) | test(/system::database::/) | test(/agent::tests::/) | test(/memory::/) | test(/tools::knowledge::/)'
+filter = 'test(/vault::/) | test(/system::/) | test(/agent::/) | test(/memory::/) | test(/tools::/)'
 test-group = "heavy"
