@@ -92,6 +92,13 @@ struct EmbedResponse {
 #[derive(Deserialize)]
 struct EmbedData {
     embedding: Vec<f32>,
+    /// This item's position in the request `input` array, per the OpenAI-compatible
+    /// contract. Not every compatible server sets it, so it is `Option`: absent on
+    /// every item falls back to trusting response array order (see
+    /// [`reorder_by_index`]); present on every item is authoritative and reorders
+    /// the response before anything reads it positionally.
+    #[serde(default)]
+    index: Option<usize>,
 }
 
 // ─── Implementation ───────────────────────────────────────────────────────────
@@ -259,6 +266,30 @@ impl OpenAiCompatibleEmbedder {
             return Err(EmbeddingError::Malformed("empty data array".into()));
         }
 
+        // The trait contract (`EmbeddingProvider::embed`) documents that `Ok` is NEVER a
+        // `Vec` shorter than `texts`, in order — this is what upholds it against a
+        // server that silently drops or duplicates an item. Without this check a
+        // response with fewer items than requested would zip against `texts`
+        // positionally at the caller (`retrieval::reembed_pending` does exactly this,
+        // pairing each embedding with a memory `id` by position) and mis-associate
+        // every entry after the first gap with the wrong memory — a corruption that
+        // looks like a valid, plausible embedding rather than a visible error. A
+        // response with MORE items than requested is equally rejected: the extra
+        // entries have no legitimate consumer, and it is at least as likely to be a
+        // server bug than an item at the front is unexpectedly missing.
+        if parsed.data.len() != texts.len() {
+            return Err(EmbeddingError::Malformed(format!(
+                "expected {} embeddings for {} inputs, got {}",
+                texts.len(),
+                texts.len(),
+                parsed.data.len()
+            )));
+        }
+
+        // Reorders by `index` when the server reports one on every item — see
+        // `reorder_by_index` for why response array order alone is not trusted.
+        let data = reorder_by_index(parsed.data)?;
+
         // In autodetect mode (configured_dim == 0), load any dimension that was
         // established by a previous successful call. Use Acquire ordering so we
         // see the latest value written by any thread that won the CAS (F4).
@@ -268,8 +299,8 @@ impl OpenAiCompatibleEmbedder {
             self.detected_dim.load(Ordering::Acquire) // 0 if not yet detected
         };
 
-        let mut out = Vec::with_capacity(parsed.data.len());
-        for item in parsed.data {
+        let mut out = Vec::with_capacity(data.len());
+        for item in data {
             let got = item.embedding.len();
             if effective_dim > 0 {
                 // Configured or previously-detected dimension: enforce consistency.
@@ -355,6 +386,46 @@ impl EmbeddingProvider for OpenAiCompatibleEmbedder {
 }
 
 // ─── Private helpers ──────────────────────────────────────────────────────────
+
+/// Reorders `data` by each item's `index` field when EVERY item reports one,
+/// verifying the indices form an exact permutation of `0..data.len()`; returns
+/// `data` unchanged when no item reports an index at all.
+///
+/// Nothing in the OpenAI-compatible wire contract guarantees a server preserves
+/// response array order under internal batching or parallelization — `index` is
+/// the field the contract defines for this purpose, so when it is present it is
+/// authoritative instead of a hint. A response that reports `index` on SOME but
+/// not all items, or whose indices are not a valid permutation (a duplicate or an
+/// out-of-range value), is malformed rather than guessed at: silently trusting a
+/// partial or malformed index set would reintroduce exactly the positional
+/// mis-association this function exists to prevent.
+///
+/// # Errors
+/// [`EmbeddingError::Malformed`] if `index` is reported on some but not all items,
+/// or the reported indices are not a permutation of `0..data.len()`.
+fn reorder_by_index(mut data: Vec<EmbedData>) -> Result<Vec<EmbedData>, EmbeddingError> {
+    let with_index = data.iter().filter(|d| d.index.is_some()).count();
+    if with_index == 0 {
+        // No server-reported ordering at all: fall back to trusting response array
+        // order, same as before this function existed. The caller's own count check
+        // (`call_embeddings`) still guarantees the LENGTH is right either way.
+        return Ok(data);
+    }
+    if with_index != data.len() {
+        return Err(EmbeddingError::Malformed(
+            "embedding response mixes items with and without an index".into(),
+        ));
+    }
+
+    data.sort_by_key(|d| d.index.unwrap_or(usize::MAX));
+    let is_permutation = data.iter().enumerate().all(|(i, d)| d.index == Some(i));
+    if !is_permutation {
+        return Err(EmbeddingError::Malformed(
+            "embedding response indices are not a valid permutation of the request order".into(),
+        ));
+    }
+    Ok(data)
+}
 
 /// Resolves `cfg.base_url` for construction: blank or absent falls back to the
 /// Ollama default (review round 2, C1 defense in depth; m6 — shared by `new` and
@@ -880,5 +951,142 @@ mod tests {
         // Same dim=3 on second call — must succeed.
         let second = emb.embed(&["b".into()]).await.unwrap();
         assert_eq!(second[0].len(), 3, "F4: same-dim second call must succeed");
+    }
+
+    // ── S9 review round: response count integrity + `index` ordering ─────────
+    //
+    // `call_embeddings` previously zipped `parsed.data` against `texts` purely by
+    // response array position, with no check that the two were the same length.
+    // A caller that zips the result positionally against its own input (e.g.
+    // `retrieval::reembed_pending`, which pairs each embedding with a memory `id`)
+    // would silently mis-associate every entry after the first gap — a corruption
+    // that looks like a valid result rather than a visible error.
+
+    /// A response with FEWER embeddings than requested inputs must be rejected,
+    /// never silently returned as a short `Vec` — the trait's documented invariant
+    /// ("`Ok` is never a `Vec` shorter than `texts`") depends on this.
+    #[tokio::test]
+    async fn test_embed_response_with_fewer_items_than_inputs_is_rejected() {
+        let mut server = mockito::Server::new_async().await;
+        server
+            .mock("POST", "/embeddings")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            // Only ONE item back, but two inputs are requested below.
+            .with_body(r#"{"data":[{"embedding":[0.1,0.2,0.3]}]}"#)
+            .create_async()
+            .await;
+        let emb = OpenAiCompatibleEmbedder::new(&cfg(&server.url()), None).unwrap();
+        let err = emb
+            .embed(&["a".to_string(), "b".to_string()])
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, EmbeddingError::Malformed(_)),
+            "a short response must be rejected, not silently zipped against the \
+             wrong number of inputs: got {err:?}"
+        );
+    }
+
+    /// A response with MORE embeddings than requested inputs is equally rejected:
+    /// the extra items have no legitimate consumer and the mismatch itself is the
+    /// signal something is wrong, whichever side is at fault.
+    #[tokio::test]
+    async fn test_embed_response_with_more_items_than_inputs_is_rejected() {
+        let mut server = mockito::Server::new_async().await;
+        server
+            .mock("POST", "/embeddings")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"data":[{"embedding":[0.1,0.2,0.3]},{"embedding":[0.4,0.5,0.6]}]}"#)
+            .create_async()
+            .await;
+        let emb = OpenAiCompatibleEmbedder::new(&cfg(&server.url()), None).unwrap();
+        let err = emb.embed(&["only-one".to_string()]).await.unwrap_err();
+        assert!(
+            matches!(err, EmbeddingError::Malformed(_)),
+            "an over-long response must be rejected too: got {err:?}"
+        );
+    }
+
+    /// When the server reports `index` on every item, the response is reordered
+    /// by it BEFORE anything reads it positionally — response array order alone
+    /// is never trusted when the contract's own ordering field is available.
+    #[tokio::test]
+    async fn test_embed_response_out_of_order_is_reordered_by_index() {
+        let mut server = mockito::Server::new_async().await;
+        server
+            .mock("POST", "/embeddings")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            // Server returns index 1 before index 0 — deliberately out of request order.
+            .with_body(
+                r#"{"data":[{"embedding":[2.0,2.0,2.0],"index":1},{"embedding":[1.0,1.0,1.0],"index":0}]}"#,
+            )
+            .create_async()
+            .await;
+        let emb = OpenAiCompatibleEmbedder::new(&cfg(&server.url()), None).unwrap();
+        let out = emb
+            .embed(&["first".to_string(), "second".to_string()])
+            .await
+            .unwrap();
+        assert_eq!(
+            out[0],
+            vec![1.0, 1.0, 1.0],
+            "index 0 must land at position 0 regardless of response array order"
+        );
+        assert_eq!(
+            out[1],
+            vec![2.0, 2.0, 2.0],
+            "index 1 must land at position 1 regardless of response array order"
+        );
+    }
+
+    /// Indices that are not a valid permutation of `0..len` (a duplicate, here)
+    /// are malformed rather than guessed at — silently accepting them would
+    /// reintroduce the same mis-association the count check exists to prevent.
+    #[tokio::test]
+    async fn test_embed_response_with_duplicate_indices_is_rejected() {
+        let mut server = mockito::Server::new_async().await;
+        server
+            .mock("POST", "/embeddings")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"data":[{"embedding":[1.0,1.0,1.0],"index":0},{"embedding":[2.0,2.0,2.0],"index":0}]}"#,
+            )
+            .create_async()
+            .await;
+        let emb = OpenAiCompatibleEmbedder::new(&cfg(&server.url()), None).unwrap();
+        let err = emb
+            .embed(&["a".to_string(), "b".to_string()])
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, EmbeddingError::Malformed(_)),
+            "duplicate indices are not a valid permutation and must be rejected: got {err:?}"
+        );
+    }
+
+    /// A response that omits `index` entirely keeps working exactly as before —
+    /// the common case (most OpenAI-compatible servers) pays nothing new besides
+    /// the count check.
+    #[tokio::test]
+    async fn test_embed_response_without_any_index_still_trusts_array_order() {
+        let mut server = mockito::Server::new_async().await;
+        server
+            .mock("POST", "/embeddings")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"data":[{"embedding":[1.0,1.0,1.0]},{"embedding":[2.0,2.0,2.0]}]}"#)
+            .create_async()
+            .await;
+        let emb = OpenAiCompatibleEmbedder::new(&cfg(&server.url()), None).unwrap();
+        let out = emb
+            .embed(&["first".to_string(), "second".to_string()])
+            .await
+            .unwrap();
+        assert_eq!(out[0], vec![1.0, 1.0, 1.0]);
+        assert_eq!(out[1], vec![2.0, 2.0, 2.0]);
     }
 }
