@@ -135,23 +135,23 @@ fn classify(line: &str, strict: bool) -> Option<&'static str> {
     // otherwise flag itself; each carries its own trailing marker because the scanner
     // classifies line by line, so a marker on this comment would not reach them.
     if line.contains("sk-ant-api" /* allow-secret-scan */) {
-        return Some("clave Anthropic");
+        return Some("Anthropic key");
     }
     if line.contains("-----BEGIN" /* allow-secret-scan */) {
-        return Some("bloque PEM");
+        return Some("PEM block");
     }
     // Documentation only: `src/` is full of legitimate synthetic fixtures
     // (`sk-super-secret-PROBE-value`, `sk-proj-OPENAISECRET`) that exist to prove redaction
     // works. Flagging them one by one would be noise, and widening the source scan is not
     // this gate's scope.
     if strict && has_key_like_token(line) {
-        return Some("token tipo-clave");
+        return Some("key-like token");
     }
     if strict && has_private_ipv4(line) {
-        return Some("IP privada");
+        return Some("private IP");
     }
     if strict && has_absolute_home_path(line) {
-        return Some("ruta absoluta de usuario");
+        return Some("absolute user path");
     }
     None
 }
@@ -270,19 +270,16 @@ fn test_detector_catches_known_leak_shapes() {
     let cases: [(&str, &str); 6] = [
         (
             "api_key = \"sk-ant-api03-REDACTED\"", /* allow-secret-scan */
-            "clave Anthropic",
+            "Anthropic key",
         ),
         (
             "-----BEGIN RSA PRIVATE KEY-----", /* allow-secret-scan */
-            "bloque PEM",
+            "PEM block",
         ),
-        ("token: sk-abcdefghijklmnopqrstuvwxyz", "token tipo-clave"),
-        ("host = \"192.168.0.30\"", "IP privada"),
-        ("remote: 10.1.2.3:22", "IP privada"),
-        (
-            "path = \"/home/jdoe/.ssh/id_rsa\"",
-            "ruta absoluta de usuario",
-        ),
+        ("token: sk-abcdefghijklmnopqrstuvwxyz", "key-like token"),
+        ("host = \"192.168.0.30\"", "private IP"),
+        ("remote: 10.1.2.3:22", "private IP"),
+        ("path = \"/home/jdoe/.ssh/id_rsa\"", "absolute user path"),
     ];
     for (line, expected) in cases {
         assert_eq!(
@@ -339,7 +336,7 @@ fn test_the_rs_scan_catches_a_planted_leak_like_test_helpers_would() {
     let dir = tempfile::tempdir().expect("tempdir");
     std::fs::write(
         dir.path().join("planted.rs"),
-        // Matches the unconditional "clave Anthropic" pattern, not the `strict`-gated
+        // Matches the unconditional "Anthropic key" pattern, not the `strict`-gated
         // key-like-token one: the real coverage this proves reuses `strict = false` (same
         // non-strict pass `src/**/*.rs` gets), so a `strict`-only pattern would prove nothing.
         "let leaked = \"sk-ant-api-planted-for-this-test\";\n", // allow-secret-scan: fixture
