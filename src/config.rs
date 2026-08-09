@@ -1026,22 +1026,22 @@ mod tests {
             MagiConfig::from_toml_str("[magi.complexity]\ncode_review = 50\nanalysis = 0\n")
                 .unwrap();
         let t = gate_thresholds_from(&with_table);
-        assert_eq!(t.code_review, 50, "declarado: se usa el valor del archivo");
+        assert_eq!(t.code_review, 50, "declared: the file's value is used");
         assert_eq!(
             t.design,
             GateThresholds::builtin().design,
-            "ausente DENTRO de la tabla: su built-in, no cero"
+            "absent WITHIN the table: its built-in, not zero"
         );
         assert_eq!(
             t.analysis, 0,
-            "0 declarado se preserva: es la vía de apagar ESE modo"
+            "a declared 0 is preserved: it is the way to turn off THAT mode"
         );
 
         let without_table = MagiConfig::default();
         assert_eq!(
             gate_thresholds_from(&without_table),
             GateThresholds::builtin(),
-            "tabla ausente ⇒ built-ins: el gate no se apaga por omitir la sección"
+            "table absent ⇒ built-ins: the gate does not turn off by omitting the section"
         );
     }
 
@@ -1460,7 +1460,7 @@ mod tests {
         assert!(ProviderKind::parse("banana").is_err());
         assert!(
             ProviderKind::parse("openai").is_err(),
-            "el valor viejo ya no es válido"
+            "the old value is no longer valid"
         );
     }
 
@@ -1481,13 +1481,13 @@ mod tests {
     #[test]
     fn an_invalid_vocabulary_value_is_rejected_at_parse_not_swallowed_by_a_resolver() {
         for (toml, what) in [
-            ("provider = \"banana\"\n", "provider de raíz"),
+            ("provider = \"banana\"\n", "root provider"),
             ("[magi]\nkind = \"banana\"\n", "[magi].kind"),
             ("[magi]\ndefault_mode = \"banana\"\n", "[magi].default_mode"),
         ] {
             assert!(
                 MagiConfig::from_toml_str(toml).is_err(),
-                "{what}: un valor no reconocido debe ser ERROR, nunca un fallback silencioso"
+                "{what}: an unrecognized value must be an ERROR, never a silent fallback"
             );
         }
     }
@@ -1501,11 +1501,11 @@ mod tests {
         assert_eq!(ProviderKind::parse("").unwrap(), None);
         assert_eq!(ProviderKind::parse("   ").unwrap(), None);
         let toml = "provider = \"\"\nbase_url = \"  \"\n";
-        let cfg = MagiConfig::from_toml_str(toml).expect("vacío no debe romper el parseo");
+        let cfg = MagiConfig::from_toml_str(toml).expect("empty must not break parsing");
         assert_eq!(
             cfg.effective_provider(),
             ProviderKind::Ollama,
-            "cae al default built-in"
+            "falls back to the built-in default"
         );
         // SC-A02b: `[magi].kind` INHERITS from the root when not declared.
         assert_eq!(
@@ -1528,7 +1528,7 @@ mod tests {
         assert_eq!(
             cfg.effective_provider(),
             ProviderKind::Ollama,
-            "el principal no cambia"
+            "the principal does not change"
         );
     }
 
@@ -1578,10 +1578,10 @@ mod tests {
             "[magi]\napi_key = \"sk-secreto\"\n",
         ] {
             let err = MagiConfig::from_toml_str(toml)
-                .expect_err("una api_key en el TOML debe ser ERROR, no aceptación silenciosa");
+                .expect_err("an api_key in the TOML must be an ERROR, not silent acceptance");
             assert!(
                 !err.to_string().contains("sk-secreto"),
-                "y el error NO puede repetir el secreto que se está rechazando"
+                "and the error must NOT repeat the secret it is rejecting"
             );
         }
     }
@@ -1882,7 +1882,7 @@ mod tests {
     #[test]
     fn an_invalid_vocabulary_value_is_fatal_through_load_not_degraded_to_defaults() {
         for (toml, what) in [
-            ("provider = \"banana\"\n", "provider de raíz"),
+            ("provider = \"banana\"\n", "root provider"),
             ("[magi]\nkind = \"banana\"\n", "[magi].kind"),
             ("[magi]\ndefault_mode = \"banana\"\n", "[magi].default_mode"),
         ] {
@@ -1891,7 +1891,7 @@ mod tests {
             std::fs::write(&path, toml).unwrap();
             assert!(
                 MagiConfig::load(&path).is_err(),
-                "{what}: por load() también debe ser ERROR, nunca defaults + warning"
+                "{what}: through load() must also be ERROR, never defaults + warning"
             );
         }
     }
@@ -1921,7 +1921,7 @@ mod tests {
         assert!(notices.is_empty());
 
         std::fs::write(&path, "provdier = \"x\"").unwrap();
-        let err = MagiConfig::load(&path).expect_err("presente y roto: FATAL");
+        let err = MagiConfig::load(&path).expect_err("present and broken: FATAL");
         assert!(err.to_string().contains("magi.toml"));
     }
 
@@ -1938,7 +1938,7 @@ mod tests {
         for (toml, scope, expected_entry) in [
             (
                 "base_url = \"https://alice:s3cr3t@host/v1\"\n",
-                "raíz",
+                "root",
                 "BASE_URL_USER",
             ),
             (
@@ -1958,7 +1958,9 @@ mod tests {
             let err = match MagiConfig::load(&path) {
                 Err(e) => e,
                 Ok(_) => {
-                    panic!("{scope}: load() debió fallar ante una credencial literal en base_url")
+                    panic!(
+                        "{scope}: load() should have failed given a literal credential in base_url"
+                    )
                 }
             };
             let msg = err.to_string();
@@ -1966,17 +1968,20 @@ mod tests {
             // correct placeholder and the vault command, not just say "invalid credential".
             assert!(
                 !msg.contains("s3cr3t"),
-                "{scope}: filtró la contraseña: {msg}"
+                "{scope}: leaked the password: {msg}"
             );
-            assert!(!msg.contains("alice"), "{scope}: filtró el usuario: {msg}");
+            assert!(
+                !msg.contains("alice"),
+                "{scope}: leaked the username: {msg}"
+            );
             // REQ-A12b: silent resolutions are announced.
             assert!(
                 msg.contains("[user]") && msg.contains("[password]"),
-                "{scope}: no nombra el placeholder: {msg}"
+                "{scope}: does not name the placeholder: {msg}"
             );
             assert!(
                 msg.contains("magi-rs vault set"),
-                "{scope}: no nombra el comando para arreglarlo: {msg}"
+                "{scope}: does not name the command to fix it: {msg}"
             );
             // Loop 1 fix round CE, F22: not just AN entry name — the RIGHT one for this scope.
             // Before the fix every scope named the root's `BASE_URL_USER`/`BASE_URL_PASSWORD`,
@@ -1984,7 +1989,7 @@ mod tests {
             // syntax, never the entry name itself.
             assert!(
                 msg.contains(expected_entry),
-                "{scope}: esperaba la entrada {expected_entry}, salió: {msg}"
+                "{scope}: expected entry {expected_entry}, got: {msg}"
             );
         }
     }
@@ -2004,14 +2009,14 @@ mod tests {
         let (_, notices) = MagiConfig::load(&path).unwrap();
         assert!(
             notices.iter().any(|n| n.contains("embedder")),
-            "el embedder hereda un base_url NO-default: hay que decirlo"
+            "the embedder inherits a NON-default base_url: it must be said"
         );
 
         std::fs::write(&path, "base_url = \"http://localhost:11434/v1\"\n").unwrap();
         let (_, notices) = MagiConfig::load(&path).unwrap();
         assert!(
             !notices.iter().any(|n| n.contains("embedder")),
-            "heredar el DEFAULT no es sorprendente: sería ruido en cada arranque"
+            "inheriting the DEFAULT is not surprising: it would be noise on every startup"
         );
     }
 
@@ -2031,7 +2036,8 @@ mod tests {
         let (_, notices) = MagiConfig::load(&path).unwrap();
         assert!(
             notices.iter().any(|n| n.contains("default Ollama")),
-            "sin base_url declarado el default sigue ahí, y parece un olvido de migración"
+            "with no base_url declared the default is still there, and it looks like a \
+             migration oversight"
         );
 
         // And the same case one level down, in the trio.
@@ -2092,8 +2098,8 @@ mod tests {
         let notices = cfg.resolution_notices();
         assert!(
             notices.iter().any(|n| n.contains("NOT used")),
-            "el aviso de incoherencia de Anthropic no debe depender de que la \
-             plantilla de raíz haya parseado: {notices:?}"
+            "the Anthropic incoherence notice must not depend on the root template \
+             having parsed: {notices:?}"
         );
     }
 }

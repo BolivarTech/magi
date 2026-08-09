@@ -374,13 +374,13 @@ mod tests {
 
     impl SecretStore for NoSecrets {
         fn set(&mut self, _name: &str, _value: &str) -> Result<(), VaultError> {
-            unreachable!("estos tests no escriben al vault")
+            unreachable!("these tests do not write to the vault")
         }
         fn get(&mut self, name: &str) -> Result<Zeroizing<String>, VaultError> {
             Err(VaultError::SecretNotFound(name.to_string()))
         }
         fn remove(&mut self, _name: &str) -> Result<(), VaultError> {
-            unreachable!("estos tests no borran del vault")
+            unreachable!("these tests do not remove from the vault")
         }
         fn list(&mut self) -> Result<Vec<SecretEntry>, VaultError> {
             Ok(Vec::new())
@@ -395,9 +395,9 @@ mod tests {
     /// broken fixture behind a result that looks valid.
     fn resolved(raw: &str) -> ResolvedEndpoint {
         EndpointTemplate::parse(raw, Scope::Root)
-            .expect("fixture de test bien formada")
+            .expect("well-formed test fixture")
             .resolve(&mut NoSecrets, Scope::Root)
-            .expect("fixture de test sin placeholders")
+            .expect("test fixture with no placeholders")
     }
 
     /// The shared endpoint for tests that do not exercise real I/O.
@@ -464,7 +464,7 @@ mod tests {
     /// only constructor of `SafeErrorText` is `redact_foreign_error`, so a double that needs to
     /// produce one cannot simply wrap a `String`.
     fn unbuildable_reason() -> SafeErrorText {
-        redact_foreign_error(&std::io::Error::other("stub: construcción rechazada"))
+        redact_foreign_error(&std::io::Error::other("stub: construction rejected"))
     }
 
     #[async_trait]
@@ -695,9 +695,9 @@ mod tests {
             *self
                 .timings
                 .lock()
-                .expect("el lock del stub no se envenena en estos tests")
+                .expect("the stub's lock does not get poisoned in these tests")
                 .get(model)
-                .unwrap_or_else(|| panic!("no se registró timing para {model}"))
+                .unwrap_or_else(|| panic!("no timing was recorded for {model}"))
         }
     }
 
@@ -777,7 +777,7 @@ mod tests {
         assert_eq!(
             bad.len(),
             DIGEST_HEX_LEN,
-            "el test debe seguir probando el borde exacto"
+            "the test must still be probing the exact edge"
         );
         assert_eq!(validate_digest(Some(bad)), None);
     }
@@ -813,7 +813,7 @@ mod tests {
         .await;
         assert!(
             matches!(m["m"], Measurement::NotMeasurable),
-            "no es un fallo: es la capacidad que ese endpoint no ofrece"
+            "not a failure: it is a capability that endpoint does not offer"
         );
     }
 
@@ -839,7 +839,8 @@ mod tests {
             .await;
             assert!(
                 matches!(m["m"], Measurement::NotMeasuredThisTime),
-                "recortar al extremo convertiría un dato basura en uno plausible (ventana {absurd})"
+                "clamping to the extreme would turn garbage data into something \
+                 plausible (window {absurd})"
             );
         }
     }
@@ -861,7 +862,8 @@ mod tests {
             .await;
             assert!(
                 matches!(m["m"], Measurement::Measured { window, .. } if window == edge),
-                "el rango es cerrado: {edge} debe aceptarse sin degradar (borde de PROBE_WINDOW_MIN/MAX)"
+                "the range is closed: {edge} must be accepted without degrading \
+                 (PROBE_WINDOW_MIN/MAX edge)"
             );
         }
     }
@@ -889,10 +891,10 @@ mod tests {
             Measurement::Measured { digest, .. } => {
                 assert!(
                     digest.is_none(),
-                    "un digest que no es 64 hex se descarta, la ventana sobrevive"
+                    "a digest that is not 64 hex is discarded, the window survives"
                 );
             }
-            other => panic!("esperaba Measured, salió {other:?}"),
+            other => panic!("expected Measured, got {other:?}"),
         }
     }
 
@@ -912,7 +914,7 @@ mod tests {
         .await;
         assert!(
             matches!(m["m"], Measurement::NotMeasuredThisTime),
-            "un ProviderError real en window() debe fallar abierto, igual que un timeout"
+            "a real ProviderError in window() must fail open, just like a timeout"
         );
     }
 
@@ -934,14 +936,14 @@ mod tests {
             Measurement::Measured { window, digest } => {
                 assert_eq!(
                     *window, 128_000,
-                    "la ventana medida con éxito debe sobrevivir"
+                    "the successfully measured window must survive"
                 );
                 assert!(
                     digest.is_none(),
-                    "un digest que falla degrada solo, sin arrastrar la ventana"
+                    "a failing digest degrades alone, without dragging down the window"
                 );
             }
-            other => panic!("esperaba Measured, salió {other:?}"),
+            other => panic!("expected Measured, got {other:?}"),
         }
     }
 
@@ -966,7 +968,7 @@ mod tests {
 
         assert!(
             started.elapsed() < Duration::from_secs(PROBE_TIMEOUT_SECS + 1),
-            "corren en paralelo: el peor caso es UN techo, no cuatro"
+            "they run in parallel: the worst case is ONE ceiling, not four"
         );
         assert!(matches!(m["a"], Measurement::NotMeasuredThisTime));
         assert_eq!(
@@ -974,18 +976,18 @@ mod tests {
                 .filter(|v| matches!(v, Measurement::Measured { .. }))
                 .count(),
             3,
-            "con plazo compartido, la lenta habría dejado a las otras sin presupuesto"
+            "with a shared deadline, the slow one would have left the others with no budget"
         );
         // The ceiling is PER PROBE: the slow one consumed its whole own without cutting anyone
         // else's.
         assert!(
             stub.elapsed_of("a") >= Duration::from_secs(PROBE_TIMEOUT_SECS),
-            "la sonda lenta debe agotar SU techo completo, no una fracción compartida"
+            "the slow probe must exhaust ITS OWN full ceiling, not a shared fraction"
         );
         for fast in ["b", "c", "d"] {
             assert!(
                 stub.elapsed_of(fast) < Duration::from_secs(PROBE_TIMEOUT_SECS),
-                "{fast} no debe haber esperado a la lenta"
+                "{fast} must not have waited for the slow one"
             );
         }
     }
@@ -1045,7 +1047,7 @@ mod tests {
             ),
             ("caspar".to_string(), Measurement::NotMeasuredThisTime),
         ]);
-        let derived = derive_warn_tokens(&mages).expect("hay al menos un mage medido");
+        let derived = derive_warn_tokens(&mages).expect("at least one mage was measured");
         #[allow(
             clippy::cast_precision_loss,
             clippy::cast_possible_truncation,
@@ -1054,9 +1056,9 @@ mod tests {
         let expected = (128_000.0 * WARN_WINDOW_FRACTION) as usize;
         assert_eq!(
             derived, expected,
-            "manda el primero que deja de aceptar el payload"
+            "the first to stop accepting the payload wins"
         );
-        assert!(derived < 128_000, "una fracción, nunca la ventana entera");
+        assert!(derived < 128_000, "a fraction, never the whole window");
     }
 
     /// SC-A24j (regression): a non-measurable mage is OMITTED from the minimum, not lowered.
@@ -1066,7 +1068,7 @@ mod tests {
         assert_eq!(
             derive_warn_tokens(&none),
             None,
-            "sin ninguno medible se cae al nivel siguiente"
+            "with none measurable it falls to the next level"
         );
     }
 
@@ -1096,7 +1098,7 @@ mod tests {
         assert_eq!(
             min_mage_window(&mages),
             Some(128_000),
-            "el mínimo CRUDO, sin fracción — distinto del umbral derivado"
+            "the RAW minimum, without fraction — different from the derived threshold"
         );
     }
 
@@ -1124,13 +1126,13 @@ mod tests {
         )
         .await;
 
-        assert_eq!(counting.probes_built(), 2, "solo dos modelos distintos");
-        assert_eq!(m.len(), 2, "el mapa dedup-ea por clave");
+        assert_eq!(counting.probes_built(), 2, "only two distinct models");
+        assert_eq!(m.len(), 2, "the map dedups by key");
         // The three entries of "a" share the result of the ONLY probe of "a", and that is
         // checked against the count above — comparing `m["a"] == m["a"]` would be tautological.
         assert_ne!(
             m["a"], m["b"],
-            "sondas de modelos distintos dan resultados distintos"
+            "probes of distinct models give distinct results"
         );
         assert!(matches!(m["a"], Measurement::Measured { .. }));
     }
@@ -1158,17 +1160,17 @@ mod tests {
         let base = resolved(&format!("{}/v1", server.url()));
         let seat = OllamaProbeFactory.probe_for(ProviderKind::Ollama, &base, "m");
         let ProbeSeat::Ready(probe) = seat else {
-            panic!("ollama es medible, tenía que producir una sonda lista");
+            panic!("ollama is measurable, it should have produced a ready probe");
         };
 
-        let window = probe.window().await.expect("el mock responde 200");
+        let window = probe.window().await.expect("the mock responds 200");
         mock.assert_async().await;
         assert_eq!(
             window,
             Some(128_000),
-            "si hubiera pegado en /v1/api/show, el mock de /api/show nunca se habría \
-             golpeado y `mock.assert_async()` ya habría hecho fallar este test antes de \
-             llegar acá"
+            "if it had hit /v1/api/show, the /api/show mock would never have been hit \
+             and `mock.assert_async()` would already have failed this test before \
+             getting here"
         );
 
         assert!(
@@ -1176,7 +1178,7 @@ mod tests {
                 OllamaProbeFactory.probe_for(ProviderKind::Anthropic, &base, "m"),
                 ProbeSeat::NotProbeable
             ),
-            "un kind no medible no produce sonda"
+            "a non-measurable kind produces no probe"
         );
     }
 
@@ -1195,12 +1197,12 @@ mod tests {
             ProbeSeat::Unbuildable(reason) => {
                 assert!(
                     !reason.as_str().is_empty(),
-                    "una razón vacía no es diagnosticable"
+                    "an empty reason is not diagnosable"
                 );
             }
-            ProbeSeat::Ready(_) => panic!("un esquema ftp no debería construir un cliente"),
+            ProbeSeat::Ready(_) => panic!("an ftp scheme should not build a client"),
             ProbeSeat::NotProbeable => {
-                panic!("ollama es medible, esto es un fallo de construcción, no de capacidad")
+                panic!("ollama is measurable, this is a construction failure, not a capability one")
             }
         }
     }

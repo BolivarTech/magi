@@ -369,15 +369,15 @@ mod tests {
             let client = derive_client_timeout(ceiling);
             assert!(
                 budget + client <= Duration::from_secs(ceiling),
-                "techo {ceiling}s: {budget:?} + {client:?} excede el techo",
+                "ceiling {ceiling}s: {budget:?} + {client:?} exceeds the ceiling",
             );
             assert!(
                 budget >= MIN_OPERATION_BUDGET,
-                "techo {ceiling}s cae bajo el piso"
+                "ceiling {ceiling}s falls below the floor"
             );
             assert!(
                 client >= MIN_CLIENT_TIMEOUT,
-                "techo {ceiling}s cae bajo el piso"
+                "ceiling {ceiling}s falls below the floor"
             );
         }
     }
@@ -393,7 +393,7 @@ mod tests {
         let holgura = dominant * HEADLESS_TIMEOUT_HOLGURA_PCT / 100;
         assert!(
             headless_consult_timeout_secs(AGENT_TIMEOUT_SECS) >= minimum + holgura,
-            "el default headless no cubre {minimum}s + holgura",
+            "the headless default does not cover {minimum}s + slack",
         );
     }
 
@@ -409,12 +409,12 @@ mod tests {
             let holgura = dominant * HEADLESS_TIMEOUT_HOLGURA_PCT / 100;
             assert!(
                 headless_consult_timeout_secs(ceiling) >= minimum + holgura,
-                "techo {ceiling}s: el mínimo headless no cubre la fórmula"
+                "ceiling {ceiling}s: the headless minimum does not cover the formula"
             );
         }
         assert!(
             headless_consult_timeout_secs(120) > headless_consult_timeout_secs(90),
-            "subir `agent_timeout_secs` DEBE subir el mínimo; una const no lo haría"
+            "raising `agent_timeout_secs` MUST raise the minimum; a const would not"
         );
     }
 
@@ -430,25 +430,26 @@ mod tests {
         let decision = resolve_run_timeout(Some(asked), AGENT_TIMEOUT_SECS);
         assert_eq!(
             decision.effective_secs, asked,
-            "se obedece la orden del operador"
+            "the operator's order is obeyed"
         );
         let warning = decision
             .warning
-            .expect("un valor bajo el mínimo debe avisar");
+            .expect("a value below the minimum must warn");
         assert!(
             warning.contains(&headless_consult_timeout_secs(AGENT_TIMEOUT_SECS).to_string()),
-            "el aviso nombra el mínimo que la fórmula pedía"
+            "the warning names the minimum the formula required"
         );
         assert!(
             decision.below_formula,
-            "y viaja al JSON: quien usa la bandera corre en pipeline, o sea que menos lee stderr"
+            "and it travels to the JSON: whoever uses the flag runs in a pipeline, i.e. is less \
+             likely to read stderr"
         );
 
         assert!(
             resolve_run_timeout(None, AGENT_TIMEOUT_SECS)
                 .warning
                 .is_none(),
-            "el default no avisa de sí mismo"
+            "the default does not warn about itself"
         );
         assert!(resolve_run_timeout(Some(1_000), AGENT_TIMEOUT_SECS)
             .warning
@@ -470,16 +471,16 @@ mod tests {
         const {
             assert!(
                 AGENT_TIMEOUT_ABSOLUTE_FLOOR_SECS < AGENT_TIMEOUT_MIN_SECS,
-                "el rango configurable DEBE quedar por encima del punto de quiebre; si un \
-                 día no lo estuviera, la validación de carga dejaría pasar un techo que \
-                 rompe el invariante y ningún otro test lo notaría"
+                "the configurable range MUST stay above the breaking point; if it ever \
+                 did not, load validation would let through a ceiling that breaks the \
+                 invariant and no other test would notice"
             );
         }
         assert!(
             (AGENT_TIMEOUT_MIN_SECS..=AGENT_TIMEOUT_MAX_SECS).contains(&AGENT_TIMEOUT_SECS),
-            "el rango sale de §4.9, no de literales repetidos: con `30..=120` escrito a \
-             mano acá Y en el barrido de arriba, mover el rango deja los dos en \
-             desacuerdo, y el que falla es el que nadie mira"
+            "the range comes from §4.9, not from repeated literals: with `30..=120` \
+             written by hand here AND in the sweep above, moving the range leaves the \
+             two disagreeing, and the one that fails is the one nobody watches"
         );
         assert!((3..=10).contains(&CLASSIFY_TIMEOUT_SECS));
         assert!((3..=10).contains(&PROBE_TIMEOUT_SECS));
@@ -492,7 +493,10 @@ mod tests {
             assert!(PROBE_WINDOW_MIN < PROBE_WINDOW_MAX);
         }
         for t in [GATE_CODE_REVIEW, GATE_DESIGN, GATE_ANALYSIS] {
-            assert!(t > 1, "un umbral de 1 apaga el gate en ese modo (REQ-A20)");
+            assert!(
+                t > 1,
+                "a threshold of 1 turns off the gate for that mode (REQ-A20)"
+            );
         }
     }
 
@@ -505,18 +509,18 @@ mod tests {
         assert_eq!(
             bytes_to_tokens_est(0),
             0,
-            "un payload vacío no estima tokens"
+            "an empty payload estimates no tokens"
         );
         assert_eq!(
             bytes_to_tokens_est(1),
             1,
-            "un byte suelto redondea a un token, no a cero"
+            "a lone byte rounds up to one token, not zero"
         );
-        assert_eq!(bytes_to_tokens_est(4), 1, "el caso exacto no infla");
+        assert_eq!(bytes_to_tokens_est(4), 1, "the exact case does not inflate");
         assert_eq!(
             bytes_to_tokens_est(5),
             2,
-            "hacia arriba en cuanto sobra un byte"
+            "rounds up as soon as one byte is left over"
         );
     }
 
@@ -532,7 +536,7 @@ mod tests {
         );
         assert!(
             mark_overhead() > TRUNCATION_SEPARATOR_LEN,
-            "la marca aporta su propio texto"
+            "the mark contributes its own text"
         );
     }
 
@@ -544,11 +548,11 @@ mod tests {
     fn the_minimum_viable_cap_leaves_room_for_the_mark_itself() {
         assert!(
             min_viable_output_cap() > mark_overhead(),
-            "por debajo del overhead el recorte no aplica nada y el cap se ignora en silencio"
+            "below the overhead the trim applies nothing and the cap is silently ignored"
         );
         assert!(
             TOOL_RESULT_CAP_BYTES > min_viable_output_cap(),
-            "el default built-in debe quedar holgadamente por encima del mínimo viable"
+            "the built-in default must sit comfortably above the minimum viable value"
         );
     }
 }

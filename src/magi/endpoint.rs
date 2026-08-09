@@ -364,15 +364,15 @@ mod tests {
         let msg = err.to_string();
         assert!(
             msg.contains("[user]") && msg.contains("[password]"),
-            "nombra el reemplazo: {msg}"
+            "names the placeholder: {msg}"
         );
         assert!(
             msg.contains("vault set"),
-            "y el comando que lo guarda: {msg}"
+            "and the command that stores it: {msg}"
         );
         assert!(
             !msg.contains("s3cr3t"),
-            "un error de seguridad que repite el secreto no sirve: {msg}"
+            "a security error that repeats the secret is useless: {msg}"
         );
         assert!(!msg.contains("juan"), "{msg}");
     }
@@ -401,8 +401,11 @@ mod tests {
             .resolve(&mut vault, Scope::Root)
             .unwrap();
         let shown = format!("{resolved:?}");
-        assert!(!shown.contains("s3cr3t"), "filtró por Debug: {shown}");
-        assert!(shown.contains("host"), "y el host sigue visible: {shown}");
+        assert!(!shown.contains("s3cr3t"), "leaked via Debug: {shown}");
+        assert!(
+            shown.contains("host"),
+            "and the host stays visible: {shown}"
+        );
     }
 
     /// SC-A16f: placeholder without entry fails CLOSED, does not substitute empty.
@@ -415,11 +418,8 @@ mod tests {
             .unwrap_err();
 
         let msg = err.to_string();
-        assert!(
-            msg.contains("BASE_URL_PASSWORD"),
-            "nombra la entrada: {msg}"
-        );
-        assert!(msg.contains("vault set"), "y cómo crearla: {msg}");
+        assert!(msg.contains("BASE_URL_PASSWORD"), "names the entry: {msg}");
+        assert!(msg.contains("vault set"), "and how to create it: {msg}");
     }
 
     /// Loop 2 fix (Caspar, S1): a reserved character in a vault-stored credential must be
@@ -535,7 +535,7 @@ mod tests {
         let err = EndpointTemplate::parse("localhost:11434/v1", Scope::Root).unwrap_err();
         assert!(
             matches!(err, EndpointError::Unparseable),
-            "esperaba Unparseable, salió {err:?}"
+            "expected Unparseable, got {err:?}"
         );
     }
 
@@ -570,11 +570,11 @@ mod tests {
             let msg = err.to_string();
             assert!(
                 msg.contains(expected_user),
-                "{scope:?}: esperaba {expected_user} en {msg}"
+                "{scope:?}: expected {expected_user} in {msg}"
             );
             assert!(
                 msg.contains(expected_password),
-                "{scope:?}: esperaba {expected_password} en {msg}"
+                "{scope:?}: expected {expected_password} in {msg}"
             );
         }
     }

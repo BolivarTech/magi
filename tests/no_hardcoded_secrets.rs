@@ -212,7 +212,7 @@ fn test_no_hardcoded_secrets_in_source_tree() {
     scan(Path::new("src"), &["rs"], true, false, &mut hits);
     assert!(
         hits.is_empty(),
-        "posible secreto hardcodeado en:{}",
+        "possible hardcoded secret in:{}",
         render(&hits)
     );
 }
@@ -252,7 +252,7 @@ fn test_no_hardcoded_secrets_in_documentation() {
     }
     assert!(
         hits.is_empty(),
-        "posible fuga en documentación:{}",
+        "possible leak in documentation:{}",
         render(&hits)
     );
 }
@@ -288,7 +288,7 @@ fn test_detector_catches_known_leak_shapes() {
         assert_eq!(
             classify(line, true),
             Some(expected),
-            "no detectó la fuga en: {line}"
+            "did not detect the leak in: {line}"
         );
     }
 }
@@ -305,7 +305,7 @@ fn test_detector_ignores_prose_and_placeholders() {
         "a public address like 8.8.8.8 is not private",
     ];
     for line in benign {
-        assert_eq!(classify(line, true), None, "falso positivo en: {line}");
+        assert_eq!(classify(line, true), None, "false positive in: {line}");
     }
 }
 
@@ -325,7 +325,7 @@ fn test_no_hardcoded_secrets_in_test_helpers() {
     scan(Path::new("tests"), &["rs"], true, false, &mut hits);
     assert!(
         hits.is_empty(),
-        "posible secreto hardcodeado en tests/**/*.rs:{}",
+        "possible hardcoded secret in tests/**/*.rs:{}",
         render(&hits)
     );
 }
@@ -349,7 +349,7 @@ fn test_the_rs_scan_catches_a_planted_leak_like_test_helpers_would() {
     scan(dir.path(), &["rs"], true, false, &mut hits);
     assert!(
         !hits.is_empty(),
-        "el escaneo no detectó el leak plantado bajo un árbol .rs"
+        "the scan did not detect the leak planted under a .rs tree"
     );
 }
 
@@ -359,8 +359,8 @@ fn test_allow_marker_exempts_only_its_own_line() {
     let leak = "key = \"sk-ant-api03-REDACTED\""; // allow-secret-scan: fixture, not a real key
     assert!(
         classify(leak, true).is_some(),
-        "la línea sin marcador debe disparar"
+        "the line with no marker must trigger"
     );
     let marked = format!("{leak} // {ALLOW_MARKER}");
-    assert_eq!(classify(&marked, true), None, "el marcador debe eximirla");
+    assert_eq!(classify(&marked, true), None, "the marker must exempt it");
 }

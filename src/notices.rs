@@ -154,7 +154,7 @@ mod tests {
         ]);
         assert!(
             out[0].contains("no es construible"),
-            "primero lo que exige acción"
+            "the one demanding action goes first"
         );
         assert!(out[1].contains("heredó"));
         assert!(out[2].contains("ventana medida"));
@@ -172,14 +172,20 @@ mod tests {
         let out = render_notices(v);
         assert!(
             out.iter().any(|n| n.contains("b1")),
-            "Blocking NUNCA se recorta"
+            "Blocking is NEVER trimmed"
         );
-        assert!(out.iter().any(|n| n.contains("r1")), "Resolution tampoco");
+        assert!(
+            out.iter().any(|n| n.contains("r1")),
+            "Resolution is not trimmed either"
+        );
         assert_eq!(
             out.iter().filter(|n| n.starts_with('d')).count(),
             NOTICE_MAX_INFO
         );
-        assert!(out.last().unwrap().contains('3'), "dice cuántos omitió");
+        assert!(
+            out.last().unwrap().contains('3'),
+            "says how many it dropped"
+        );
     }
 
     /// Two sources can produce the SAME warning: the three seats with the same `base_url` emit
@@ -192,7 +198,7 @@ mod tests {
             Notice::resolution(n),
             Notice::resolution(n),
         ]);
-        assert_eq!(out.len(), 1, "tres asientos, un aviso");
+        assert_eq!(out.len(), 1, "three seats, one notice");
     }
 
     /// Empty edge case (B13): nothing to sort, deduplicate, or trim — never panics, and with no
@@ -216,11 +222,11 @@ mod tests {
         assert_eq!(
             out.len(),
             NOTICE_MAX_INFO,
-            "ninguno se recorta en la frontera exacta"
+            "none is trimmed at the exact boundary"
         );
         assert!(
             !out.iter().any(|n| n.contains("omitted")),
-            "sin recorte no hay línea de omitidos: {out:?}"
+            "with no trimming there is no omitted line: {out:?}"
         );
     }
 
@@ -246,11 +252,12 @@ mod tests {
         let out = render_notices(v);
         assert!(
             out.iter().any(|n| n.contains(dup_text)),
-            "el duplicado debe sobrevivir (bajo el tier Blocking): {out:?}"
+            "the duplicate must survive (under the Blocking tier): {out:?}"
         );
         assert!(
             !out.iter().any(|n| n.contains("omitted")),
-            "si sobreviviera el Info, se pasaría del tope y algo se recortaría: {out:?}"
+            "if the Info survived, it would exceed the cap and something would get \
+             trimmed: {out:?}"
         );
     }
 }

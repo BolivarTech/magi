@@ -848,12 +848,12 @@ mod tests {
         // a message that names the cause, instead of a parse panic that has to be interpreted.
         let raw_value: toml::Value = raw
             .parse()
-            .expect("el magi.toml escaneado debe ser TOML válido");
+            .expect("the scanned magi.toml must be valid TOML");
         if let Some(openai) = raw_value.get("openai") {
             assert!(
                 openai.get("base_url").is_none(),
-                "[openai].base_url se mudó a la raíz en REQ-A21; el scaffolder no debe \
-                 emitirlo"
+                "[openai].base_url moved to the root in REQ-A21; the scaffolder must \
+                 not emit it"
             );
         }
 
@@ -869,19 +869,18 @@ mod tests {
         // `EndpointError::Unparseable` on the next startup — the exact first-use failure this
         // test exists to prevent.
         let (parsed, _notices) = crate::config::MagiConfig::load(&ws.config_path())
-            .expect("magi init nunca debe escribir un magi.toml que el binario rechace");
+            .expect("magi init must never write a magi.toml the binary rejects");
 
         assert!(
             parsed.base_url.is_some(),
-            "base_url debe estar declarado en la raíz (REQ-A21)"
+            "base_url must be declared at the root (REQ-A21)"
         );
         assert!(
             matches!(
                 parsed.provider.as_deref(),
                 Some("ollama") | Some("openai-compat") | Some("anthropic")
             ),
-            "provider debe ser uno de los tres valores del vocabulario REQ-A01b, se \
-             obtuvo {:?}",
+            "provider must be one of the three REQ-A01b vocabulary values, got {:?}",
             parsed.provider
         );
     }

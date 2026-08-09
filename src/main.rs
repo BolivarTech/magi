@@ -2297,8 +2297,8 @@ fn divergence_notice(cfg: &MagiConfig, inference_active: bool) -> Option<Notice>
     // parsing succeeded.
     let magi_url = cfg.effective_magi_base_url();
     let root_url = cfg.effective_base_url();
-    debug_assert!(magi_url.is_ok(), "load() debe haber validado");
-    debug_assert!(root_url.is_ok(), "load() debe haber validado");
+    debug_assert!(magi_url.is_ok(), "load() must have validated");
+    debug_assert!(root_url.is_ok(), "load() must have validated");
 
     // `EndpointTemplate::as_str()`, NEVER a resolved endpoint: the template cannot contain a
     // secret by construction (REQ-A16c — `EndpointTemplate::parse` rejects literal credentials)
@@ -4307,7 +4307,7 @@ mod tests {
             assert_eq!(
                 cfg.effective_default_mode(),
                 None,
-                "vacío es AUSENTE, no inválido"
+                "empty is ABSENT, not invalid"
             );
         }
 
@@ -4325,12 +4325,12 @@ mod tests {
             assert_eq!(
                 env.untrusted_content,
                 Some(true),
-                "el envelope es el consumidor de un gate automatizado: no puede faltar"
+                "the envelope is the consumer of an automated gate: it cannot be missing"
             );
 
             assert!(
                 crate::tui::parse_tui_consult("/consult --untrusted-content x").is_err(),
-                "la TUI no expone la marca: ahí hay un humano que eligió el contenido"
+                "the TUI does not expose the flag: there is a human there who chose the content"
             );
         }
 
@@ -4448,12 +4448,12 @@ mod tests {
             assert_eq!(
                 mode,
                 Mode::CodeReview,
-                "sin --mode, se usa lo que devolvió la clasificación"
+                "without --mode, what the classification returned is used"
             );
             assert_eq!(
                 counting.calls(),
                 1,
-                "sin --mode, se clasifica exactamente una vez"
+                "without --mode, classification happens exactly once"
             );
 
             let counting = CountingClassifier::new(Mode::CodeReview);
@@ -4463,12 +4463,8 @@ mod tests {
                 "algo",
             )
             .await;
-            assert_eq!(mode, Mode::Design, "lo explícito se usa tal cual");
-            assert_eq!(
-                counting.calls(),
-                0,
-                "declarado ⇒ cero llamadas de clasificación"
-            );
+            assert_eq!(mode, Mode::Design, "the explicit value is used as-is");
+            assert_eq!(counting.calls(), 0, "declared ⇒ zero classification calls");
         }
 
         /// Task 2.3 (reassigned from 2.2) — SC-A07i: the `consult` `--help` says that omitting
@@ -4481,11 +4477,11 @@ mod tests {
             let help = render_help("consult");
             assert!(
                 help.contains("extra model call"),
-                "el --help debe nombrar el costo de omitir --mode: {help}"
+                "the --help must name the cost of omitting --mode: {help}"
             );
             assert!(
                 help.contains("default_mode"),
-                "y cómo evitarlo, vía [magi].default_mode: {help}"
+                "and how to avoid it, via [magi].default_mode: {help}"
             );
         }
 
@@ -4642,11 +4638,11 @@ mod tests {
             assert_eq!(
                 out.mode_source,
                 magi_rs::magi::mode::ModeSource::AgentChosen,
-                "la eligió el agente, no un default"
+                "the agent chose it, not a default"
             );
             assert_eq!(
                 out.classification_calls, 0,
-                "por el schema del tool: cero llamadas extra"
+                "via the tool's schema: zero extra calls"
             );
         }
 
@@ -4659,7 +4655,7 @@ mod tests {
                 .unwrap();
             assert!(
                 out.consult_ran,
-                "el agente eligió la lente: no hay clasificación que bloquear"
+                "the agent chose the lens: there is no classification to block"
             );
             assert_eq!(
                 out.mode_source,
@@ -4675,7 +4671,7 @@ mod tests {
             // Without an agent-chosen mode and without a declaration: the only outlet would be
             // classification, which is what the flag blocks.
             let out = run_turn_with_untrusted_and_no_mode_at_all().await;
-            assert!(out.is_err(), "`AgentChosen` ausente no es `Explicit`");
+            assert!(out.is_err(), "`AgentChosen` absent is not `Explicit`");
         }
 
         /// SC-A07w — Task 2.4 (reassigned from 2.2). `default_mode` beats the agent — the
@@ -4685,7 +4681,7 @@ mod tests {
             let out = run_turn_with_default_mode_and_agent_choice(Mode::CodeReview, Mode::Design)
                 .await
                 .unwrap();
-            assert_eq!(out.mode, Mode::CodeReview, "gana la config, no el agente");
+            assert_eq!(out.mode, Mode::CodeReview, "the config wins, not the agent");
             assert_eq!(out.mode_source, magi_rs::magi::mode::ModeSource::Configured);
         }
 
@@ -4703,7 +4699,7 @@ mod tests {
             // declared mode, the flag must fail closed before classifying.
             let explicit = env
                 .resolved_mode()
-                .expect("no hay etiqueta de modo que rechazar en este envelope");
+                .expect("there is no mode label to reject in this envelope");
             let untrusted = env.untrusted_content.unwrap_or(false);
             let err = magi_rs::magi::mode::resolve_mode_guarded(
                 magi_rs::magi::mode::ModeSources {
@@ -4715,7 +4711,7 @@ mod tests {
                 &env.prompt,
             )
             .await
-            .expect_err("sin modo declarado, la marca del envelope debe fallar cerrado");
+            .expect_err("with no mode declared, the envelope's flag must fail closed");
             assert!(matches!(
                 err,
                 magi_rs::magi::mode::ModeError::UntrustedContentRequiresExplicitMode
@@ -6731,10 +6727,13 @@ mod tests {
             for seat in [AgentName::Melchior, AgentName::Balthasar, AgentName::Caspar] {
                 let system = captured.system_prompt_of(seat);
                 let user = captured.user_prompt_of(seat);
-                assert!(!system.is_empty(), "{seat:?}: no recibió system prompt");
+                assert!(
+                    !system.is_empty(),
+                    "{seat:?}: did not receive a system prompt"
+                );
                 assert!(
                     !user.contains(&system),
-                    "{seat:?}: el system prompt se dobló dentro del turno de usuario"
+                    "{seat:?}: the system prompt was folded inside the user turn"
                 );
                 system_prompts.push(system);
             }
@@ -6743,15 +6742,15 @@ mod tests {
             // assertions above without saying anything false.
             assert_ne!(
                 system_prompts[0], system_prompts[1],
-                "Melchior y Balthasar recibieron el MISMO system prompt"
+                "Melchior and Balthasar received the SAME system prompt"
             );
             assert_ne!(
                 system_prompts[0], system_prompts[2],
-                "Melchior y Caspar recibieron el MISMO system prompt"
+                "Melchior and Caspar received the SAME system prompt"
             );
             assert_ne!(
                 system_prompts[1], system_prompts[2],
-                "Balthasar y Caspar recibieron el MISMO system prompt"
+                "Balthasar and Caspar received the SAME system prompt"
             );
         }
 
@@ -6782,24 +6781,24 @@ mod tests {
                 &MagiEnvModelOverrides::default(),
                 &mut notices,
             )
-            .expect("ollama es keyless: debe construir sin credenciales ni red");
+            .expect("ollama is keyless: it must build with no credentials or network");
             drop(magi);
 
             let trace = seat_wiring_trace();
-            assert_eq!(trace.len(), 3, "los tres asientos deben quedar wireados");
+            assert_eq!(trace.len(), 3, "all three seats must end up wired");
             let seats: std::collections::HashSet<AgentName> =
                 trace.iter().map(|(s, _, _)| *s).collect();
             assert_eq!(
                 seats.len(),
                 3,
-                "los tres asientos wireados deben ser DISTINTOS entre sí"
+                "the three wired seats must be DISTINCT from each other"
             );
             for expected in [AgentName::Melchior, AgentName::Balthasar, AgentName::Caspar] {
-                assert!(seats.contains(&expected), "falta el asiento {expected:?}");
+                assert!(seats.contains(&expected), "missing seat {expected:?}");
             }
             assert!(
                 trace.iter().all(|(_, _, wrapped)| *wrapped),
-                "los tres asientos deben quedar envueltos en RetryProvider (REQ-A03): {trace:?}"
+                "all three seats must end up wrapped in RetryProvider (REQ-A03): {trace:?}"
             );
         }
 
@@ -6849,7 +6848,7 @@ mod tests {
                     ),
                     Err(TrioError::UnknownKind(_))
                 ),
-                "un kind no reconocido debe reportarse tipado, no adivinarse"
+                "an unrecognized kind must be reported typed, never guessed"
             );
 
             let c = creds();
@@ -6865,7 +6864,7 @@ mod tests {
                     &mut notices,
                 )
                 .is_ok(),
-                "un kind vacío hereda del principal en vez de fallar"
+                "an empty kind inherits from the principal instead of failing"
             );
         }
 
@@ -6894,8 +6893,8 @@ mod tests {
                 &mut notices,
             ) {
                 Ok(_) => panic!(
-                    "el trío heredó \"ollama\" de TOML en vez del ProviderKind::Anthropic \
-                     ya resuelto del principal"
+                    "the trio inherited \"ollama\" from TOML instead of the already-resolved \
+                     principal's ProviderKind::Anthropic"
                 ),
                 Err(e) => e,
             };
@@ -6910,7 +6909,7 @@ mod tests {
                     )));
                 }
                 other => {
-                    panic!("esperaba SeatUnbuildable (Anthropic sin credencial), salió {other:?}")
+                    panic!("expected SeatUnbuildable (Anthropic without credential), got {other:?}")
                 }
             }
         }
@@ -6933,7 +6932,7 @@ mod tests {
                 &MagiEnvModelOverrides::default(),
                 &mut notices,
             ) {
-                Ok(_) => panic!("sin credencial el trío no es construible"),
+                Ok(_) => panic!("without credential the trio is not buildable"),
                 Err(e) => e,
             };
             match err {
@@ -6941,13 +6940,14 @@ mod tests {
                     assert_eq!(
                         seats.len(),
                         3,
-                        "los tres comparten credencial: reportar de a uno obliga a tres arranques"
+                        "the three share a credential: reporting one at a time forces \
+                         three startups"
                     );
                     assert!(seats
                         .iter()
                         .all(|(_, cause)| matches!(cause, SeatError::MissingCredential { .. })));
                 }
-                other => panic!("esperaba SeatUnbuildable, salió {other:?}"),
+                other => panic!("expected SeatUnbuildable, got {other:?}"),
             }
         }
 
@@ -6965,7 +6965,7 @@ mod tests {
                 &MagiEnvModelOverrides::default(),
                 &mut notices,
             ) {
-                Ok(_) => panic!("un asiento caído basta para que el trío no sea construible"),
+                Ok(_) => panic!("one fallen seat is enough for the trio to be unbuildable"),
                 Err(e) => e,
             };
             match err {
@@ -6973,7 +6973,7 @@ mod tests {
                     assert_eq!(seats.len(), 1);
                     assert_eq!(seats[0].0, AgentName::Caspar);
                 }
-                other => panic!("esperaba SeatUnbuildable, salió {other:?}"),
+                other => panic!("expected SeatUnbuildable, got {other:?}"),
             }
         }
 
@@ -7040,8 +7040,8 @@ mod tests {
             let report = magi
                 .analyze(&Mode::Analysis, &content_above_gate())
                 .await
-                .expect("responde pese al fallo transitorio de cada asiento");
-            assert!(!report.degraded, "y el consenso quedó completo");
+                .expect("responds despite each seat's transient failure");
+            assert!(!report.degraded, "and the consensus stayed complete");
         }
 
         /// Provider that exhausts its retry budget by ALWAYS failing — "hangs" in the sense of
@@ -7106,16 +7106,17 @@ mod tests {
             let err = provider
                 .complete("s", "u", &CompletionConfig::default())
                 .await
-                .expect_err("debe abandonar");
+                .expect_err("must abandon");
             let elapsed = started.elapsed();
 
             assert!(
                 matches!(err, ProviderError::RetryAbandoned { .. }),
-                "el abandono debe nombrar su causa (RetryAbandoned), no ser un corte mudo: {err}"
+                "the abandonment must name its cause (RetryAbandoned), not be a silent \
+                 cutoff: {err}"
             );
             assert!(
                 elapsed < Duration::from_millis(500),
-                "abandonó mucho antes de lo que tomarían 50 reintentos reales: {elapsed:?}"
+                "abandoned well before what 50 real retries would take: {elapsed:?}"
             );
         }
 
@@ -7127,8 +7128,7 @@ mod tests {
         #[test]
         fn resolve_endpoints_resolves_the_two_fields_from_the_same_root_when_none_diverge() {
             let cfg = MagiConfig::default();
-            let resolved =
-                resolve_endpoints(&cfg, None, None).expect("sin placeholders, sin vault");
+            let resolved = resolve_endpoints(&cfg, None, None).expect("no placeholders, no vault");
             assert_eq!(
                 resolved.root.as_str(),
                 crate::defaults::DEFAULT_OPENAI_BASE_URL
@@ -7203,8 +7203,8 @@ mod tests {
             assert_eq!(
                 resolved.magi.as_str(),
                 "http://otherhost:9999/v1",
-                "el trío hereda la raíz YA resuelta con su capa de env, no una \
-                 recalculada solo de TOML"
+                "the trio inherits the root ALREADY resolved with its env layer, not one \
+                 recalculated from TOML alone"
             );
         }
 
@@ -7245,12 +7245,12 @@ mod tests {
 
             let (root, notice) = openai_compat_root("http://localhost:11434/v1");
             assert_eq!(root, "http://localhost:11434/v1");
-            assert!(notice.is_none(), "ya normalizado: sin aviso");
+            assert!(notice.is_none(), "already normalized: no notice");
 
             let (root, _) = openai_compat_root("http://localhost:11434/v1/");
             assert_eq!(
                 root, "http://localhost:11434/v1",
-                "idempotente ante una barra final"
+                "idempotent against a trailing slash"
             );
         }
 
@@ -7264,16 +7264,16 @@ mod tests {
             let (root, notice) = openai_compat_root("https://realuser:realpass@ollama.lan:11434");
             assert_eq!(
                 root, "https://realuser:realpass@ollama.lan:11434/v1",
-                "el ROOT real es lo que el provider necesita para autenticar"
+                "the real ROOT is what the provider needs to authenticate"
             );
-            let notice = notice.expect("sin /v1, debe avisar");
+            let notice = notice.expect("without /v1, must warn");
             assert!(
                 !notice.contains("realuser") && !notice.contains("realpass"),
-                "la credencial no debe llegar al aviso: {notice}"
+                "the credential must not reach the notice: {notice}"
             );
             assert!(
                 notice.contains("ollama.lan"),
-                "el host sí debe seguir visible: {notice}"
+                "the host must stay visible: {notice}"
             );
         }
 
@@ -7336,7 +7336,7 @@ mod tests {
                     &mut notices,
                 )
                 .is_ok(),
-                "sin overrides, el modelo del backend debe alcanzar"
+                "without overrides, the backend model must be enough"
             );
 
             // Invalid TOML override, NO env: the TOML is actually applied (and thus fails) — it
@@ -7353,7 +7353,7 @@ mod tests {
                     &mut notices,
                 )
                 .is_err(),
-                "el override de TOML debe aplicarse, aunque sea inválido"
+                "the TOML override must be applied, even if invalid"
             );
 
             // The SAME invalid TOML, but with a VALID env override: env wins.
@@ -7373,7 +7373,7 @@ mod tests {
                     &mut notices,
                 )
                 .is_ok(),
-                "env debe ganarle a un override de TOML inválido"
+                "env must win over an invalid TOML override"
             );
         }
     }
@@ -7427,11 +7427,11 @@ mod tests {
             let text = err.to_string();
             assert!(
                 text.contains("Melchior") && text.contains("OPENAI_API_KEY"),
-                "el primer asiento debe nombrarse con su causa: {text}"
+                "the first seat must be named with its cause: {text}"
             );
             assert!(
                 text.contains("Caspar") && text.contains("connection refused"),
-                "el segundo asiento debe nombrarse con su causa: {text}"
+                "the second seat must be named with its cause: {text}"
             );
         }
 
@@ -7465,12 +7465,12 @@ mod tests {
             assert!(msg.contains("Caspar"), "{msg}");
             assert!(
                 msg.matches("OPENAI_API_KEY").count() >= 2,
-                "las dos causas de credencial deben aparecer, no colapsarse: {msg}"
+                "both credential causes must appear, not collapse: {msg}"
             );
             assert!(msg.contains("connection refused"), "{msg}");
             assert!(
                 msg.contains("vault set"),
-                "debe decir CÓMO habilitarlo: {msg}"
+                "must say HOW to enable it: {msg}"
             );
         }
 
@@ -7512,14 +7512,11 @@ mod tests {
                 },
             )]);
             let (notice, msg) = trio_unavailable_for_tui(&err);
-            assert_eq!(
-                notice.text, msg,
-                "notice y respuesta deben ser el MISMO texto"
-            );
+            assert_eq!(notice.text, msg, "notice and reply must be the SAME text");
             assert_eq!(
                 notice.tier,
                 NoticeTier::Blocking,
-                "el trío no construible exige acción — no es un Resolution ni un Info"
+                "an unbuildable trio demands action — it is not a Resolution or an Info"
             );
         }
 
@@ -7646,21 +7643,22 @@ mod tests {
         fn endpoint_divergence_is_announced_only_when_it_actually_diverges_and_inference_is_active()
         {
             let cfg = cfg_with_endpoints("http://a/v1", Some("http://b/v1"));
-            let n = divergence_notice(&cfg, true).expect("hay divergencia con inferencia activa");
+            let n =
+                divergence_notice(&cfg, true).expect("there is divergence with inference active");
             assert!(
                 n.text.contains("main provider"),
-                "debe decir por dónde pasa el contenido primero: {}",
+                "must say where the content passes through first: {}",
                 n.text
             );
             assert_eq!(n.tier, NoticeTier::Resolution);
 
             assert!(
                 divergence_notice(&cfg_with_endpoints("http://a/v1", None), true).is_none(),
-                "mismo endpoint (el trío hereda): no hay divergencia que anunciar"
+                "same endpoint (the trio inherits): no divergence to announce"
             );
             assert!(
                 divergence_notice(&cfg, false).is_none(),
-                "sin inferencia activa el contenido no pasa por el principal"
+                "without active inference the content does not pass through the principal"
             );
         }
 
@@ -7695,10 +7693,9 @@ mod tests {
             push_divergence_notice(&cfg, true, &mut notices);
             assert!(
                 notices.iter().any(|n| n.text.contains("main provider")),
-                "el aviso tiene que estar en el vector que la TUI imprime \
-                 (superficie TUI únicamente — ver \
-                 test_prepare_headless_carries_the_divergence_notice_when_it_applies \
-                 para la superficie headless): {notices:?}"
+                "the notice must be in the vector the TUI prints (TUI surface only — see \
+                 test_prepare_headless_carries_the_divergence_notice_when_it_applies for \
+                 the headless surface): {notices:?}"
             );
         }
 
@@ -7776,7 +7773,7 @@ mod tests {
         /// violate this precondition, and the `debug_assert!` turns it into a loud panic
         /// instead of a silent `Ollama`/`None`.
         #[test]
-        #[should_panic(expected = "validado")]
+        #[should_panic(expected = "validated")]
         fn divergence_notice_panics_in_debug_builds_when_the_endpoint_template_is_invalid() {
             // Literal credential: `EndpointTemplate::parse` rejects it (REQ-A16c), so
             // `effective_magi_base_url()` fails — the precondition that `load()` normally
@@ -7823,7 +7820,7 @@ mod tests {
             // A placeholder is used, not a literal canary, precisely because a literal canary
             // could not exist in this field (proven by the test above).
             let cfg = cfg_with_endpoints("http://a/v1", Some("https://[user]:[password]@b/v1"));
-            let notice = divergence_notice(&cfg, true).expect("diverge con inferencia activa");
+            let notice = divergence_notice(&cfg, true).expect("diverges with inference active");
             assert!(!notice.text.contains(CANARY));
 
             // Path 3 — `trio_unavailable_message`: the foreign cause goes through
@@ -8360,7 +8357,7 @@ mod tests {
                 match self.windows.get(model) {
                     Some(&window) => ProbeSeat::Ready(Arc::new(FixedWindowProbe { window })),
                     None => ProbeSeat::Unbuildable(redact_foreign_error(&std::io::Error::other(
-                        "modelo no mapeado en el doble de test",
+                        "model not mapped in the test double",
                     ))),
                 }
             }
@@ -8457,7 +8454,7 @@ mod tests {
             let cold = probe_notice(&Measurement::NotMeasuredThisTime);
             assert!(
                 cold.contains("this time") && cold.contains("next"),
-                "debe anticipar que el próximo arranque probablemente mida"
+                "must anticipate that the next startup will probably measure"
             );
         }
 
@@ -8491,15 +8488,15 @@ mod tests {
             // A cap in BYTES that, when converted, lands just above the 80 % of the window.
             let close_bytes =
                 ((window_tokens as f64 * STALE_NOTICE_RATIO * CHARS_PER_TOKEN_EST) as usize) + 8;
-            let n = stale_composition_notice(window_tokens, close_bytes).expect("debe avisar");
+            let n = stale_composition_notice(window_tokens, close_bytes).expect("must warn");
             assert!(
                 n.contains("tokens") && n.contains("chars/token"),
-                "el notice debe nombrar el estimador: es una aproximación, no una medición"
+                "the notice must name the estimator: it is an approximation, not a measurement"
             );
 
             assert!(
                 stale_composition_notice(window_tokens, close_bytes / 10).is_none(),
-                "con holgura amplia no hay riesgo que anunciar"
+                "with wide slack there is no risk to announce"
             );
         }
 
@@ -8511,11 +8508,12 @@ mod tests {
             let cap_bytes = magi_rs::magi::MAX_QUERY_BYTES;
             assert!(
                 cap_bytes > window_tokens,
-                "en crudo el cap 'supera' la ventana..."
+                "raw, the cap 'exceeds' the window..."
             );
             assert!(
                 bytes_to_tokens_est(cap_bytes) < window_tokens,
-                "...pero convertido NO la supera: sin conversión el notice saldría siempre"
+                "...but converted it does NOT exceed it: without conversion the notice \
+                 would always fire"
             );
         }
 
@@ -8542,10 +8540,10 @@ mod tests {
                 ),
             ]);
             let n = trio_probe_incomplete_notice(&trio, None)
-                .expect("un mage frío sin fallback declarado debe avisar");
+                .expect("a cold mage with no declared fallback must warn");
             assert!(
                 n.contains("input_warn_tokens") && n.contains("cold"),
-                "debe nombrar la clave y la causa: {n}"
+                "must name the key and the cause: {n}"
             );
         }
 
@@ -8560,7 +8558,7 @@ mod tests {
             )]);
             assert!(
                 trio_probe_incomplete_notice(&trio, Some(150_000)).is_none(),
-                "con la clave declarada, que falle la derivación no cambia nada observable"
+                "with the key declared, the derivation failing changes nothing observable"
             );
         }
 
@@ -8634,7 +8632,7 @@ mod tests {
                 principal,
                 Some(Measurement::Measured { window: 4_096, .. })
             ));
-            assert_eq!(trio.len(), 3, "solo los TRES mages, nunca el principal");
+            assert_eq!(trio.len(), 3, "only the THREE mages, never the principal");
             assert!(!trio.contains_key("principal"));
             assert!(matches!(
                 trio["melchior"],
@@ -8646,7 +8644,7 @@ mod tests {
             assert_eq!(
                 factory.calls(),
                 4,
-                "una tanda: las 4 sondas (principal + 3 mages) se piden juntas"
+                "one batch: all 4 probes (principal + 3 mages) are requested together"
             );
         }
 
@@ -8666,7 +8664,7 @@ mod tests {
             let (_principal_model, _principal, trio) =
                 orchestrate_probes(&cfg, &test_endpoints(), ProviderKind::Ollama, &factory).await;
 
-            let derived = derive_warn_tokens(&trio).expect("los tres mages midieron");
+            let derived = derive_warn_tokens(&trio).expect("all three mages measured");
             #[allow(
                 clippy::cast_precision_loss,
                 clippy::cast_possible_truncation,
@@ -8675,8 +8673,8 @@ mod tests {
             let expected_from_caspar = (256_000.0 * magi_rs::magi::WARN_WINDOW_FRACTION) as usize;
             assert_eq!(
                 derived, expected_from_caspar,
-                "el mínimo de los MAGES (Caspar, 256k) manda — NUNCA el del principal (2k), \
-                 que sería un umbral absurdamente bajo si se hubiera colado"
+                "the MAGES' minimum (Caspar, 256k) wins — NEVER the principal's (2k), \
+                 which would be an absurdly low threshold if it had leaked through"
             );
         }
 
@@ -8697,7 +8695,7 @@ mod tests {
             let calls_after_the_startup_probe = factory.calls();
             assert!(
                 calls_after_the_startup_probe > 0,
-                "la sonda debió correr al menos una vez en el arranque"
+                "the probe must have run at least once at startup"
             );
 
             // Two "reads" of the same snapshot, like two successive queries inside the SAME
@@ -8706,12 +8704,13 @@ mod tests {
             let warn_for_a_later_query = derive_warn_tokens(&trio);
             assert_eq!(
                 warn_at_startup, warn_for_a_later_query,
-                "el umbral derivado del snapshot de arranque no cambia solo"
+                "the threshold derived from the startup snapshot does not change on its own"
             );
             assert_eq!(
                 factory.calls(),
                 calls_after_the_startup_probe,
-                "derivar el umbral de un snapshot ya capturado NUNCA vuelve a tocar la sonda"
+                "deriving the threshold from an already-captured snapshot NEVER touches \
+                 the probe again"
             );
         }
 
@@ -8758,7 +8757,7 @@ mod tests {
                         ..
                     }
                 )),
-                "los tres asientos overrideados a \"m\" deben medir la ventana de \"m\""
+                "the three seats overridden to \"m\" must measure \"m\"'s window"
             );
         }
 
@@ -8860,7 +8859,7 @@ mod tests {
 
             assert_eq!(
                 principal_model, "claude-test",
-                "el principal SÍ debe resolver su propia sección — esto no es lo que falla"
+                "the principal MUST resolve its own section — this is not what fails"
             );
             assert!(
                 trio.values().all(|m| matches!(
@@ -8870,11 +8869,11 @@ mod tests {
                         ..
                     }
                 )),
-                "el trío debe sondear qwen-test (SU sección, [openai].model bajo kind \
-                 ollama) — nunca claude-test (la del principal): de lo contrario mediría \
-                 999999 (la ventana de un modelo ajeno) o degradaría a \
-                 NotMeasuredThisTime si claude-test no existiera en el endpoint real, y en \
-                 ningún caso el umbral derivado tendría relación con el trío. Trío: {trio:?}"
+                "the trio must probe qwen-test (ITS section, [openai].model under kind \
+                 ollama) — never claude-test (the principal's): otherwise it would measure \
+                 999999 (a foreign model's window) or degrade to NotMeasuredThisTime if \
+                 claude-test did not exist on the real endpoint, and in no case would the \
+                 derived threshold relate to the trio. Trio: {trio:?}"
             );
         }
 
@@ -8896,12 +8895,12 @@ mod tests {
                     principal,
                     Some(Measurement::Measured { window: 64_000, .. })
                 ),
-                "el principal SÍ se sondea: su kind es válido por construcción"
+                "the principal IS probed: its kind is valid by construction"
             );
             assert!(
                 trio.values()
                     .all(|m| matches!(m, Measurement::NotMeasuredThisTime)),
-                "los tres asientos degradan sin adivinar ningún modelo"
+                "all three seats degrade without guessing any model"
             );
         }
 
@@ -8933,7 +8932,7 @@ mod tests {
             assert_eq!(
                 warn_tokens,
                 Some(999),
-                "lo declarado gana aunque el probe SÍ midió algo distinto"
+                "the declared value wins even though the probe DID measure something different"
             );
         }
 
@@ -8966,7 +8965,7 @@ mod tests {
             assert_eq!(warn_tokens, Some(expected));
             assert!(
                 notices.iter().any(|n| n.text.contains("principal")),
-                "el notice del principal se empujó a la lista compartida"
+                "the principal's notice was pushed into the shared list"
             );
         }
 
@@ -8981,7 +8980,8 @@ mod tests {
             assert_eq!(
                 resolve_magi_kind(&cfg, ProviderKind::Anthropic).unwrap(),
                 ProviderKind::Anthropic,
-                "hereda lo YA RESUELTO, no cfg.effective_provider() (que daría Ollama)"
+                "inherits the ALREADY RESOLVED value, not cfg.effective_provider() \
+                 (which would give Ollama)"
             );
         }
 

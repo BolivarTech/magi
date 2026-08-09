@@ -3334,7 +3334,7 @@ mod tests {
             Err(super::TuiConsultParseError::UnsupportedFlag(
                 "--untrusted-content".to_string()
             )),
-            "la TUI no expone la marca: ahí hay un humano que eligió el contenido"
+            "the TUI does not expose the flag: there is a human there who chose the content"
         );
     }
 
@@ -3406,12 +3406,12 @@ mod tests {
         assert_eq!(
             res.mode,
             Mode::Design,
-            "el --mode explícito debe ganar, nunca Analysis por defecto"
+            "the explicit --mode must win, never default to Analysis"
         );
         assert_eq!(query, "¿esto o aquello?");
         assert!(
             !query.contains("--mode"),
-            "el flag no debe sobrevivir en el texto que llega a analyze: {query:?}"
+            "the flag must not survive in the text that reaches analyze: {query:?}"
         );
     }
 
@@ -3503,7 +3503,7 @@ mod tests {
         let cmd = super::parse_tui_consult("/consult ¿esto o aquello?").unwrap();
         let err = super::resolve_tui_consult_mode(cmd, None, true, &NeverClassifier)
             .await
-            .expect_err("sin modo declarado, la marca del operador debe fallar cerrado");
+            .expect_err("with no mode declared, the operator's flag must fail closed");
         assert!(matches!(
             err,
             ModeError::UntrustedContentRequiresExplicitMode

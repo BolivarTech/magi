@@ -151,10 +151,13 @@ mod tests {
     #[test]
     fn the_old_openai_value_is_rejected_rather_than_guessed() {
         let err = ProviderKind::parse("openai").unwrap_err();
-        assert!(err.to_string().contains("openai"), "nombra lo recibido");
+        assert!(
+            err.to_string().contains("openai"),
+            "names what was received"
+        );
         assert!(
             err.to_string().contains("openai-compat"),
-            "y los válidos, para que el arreglo sea obvio"
+            "and the valid ones, so the fix is obvious"
         );
     }
 

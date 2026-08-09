@@ -259,7 +259,7 @@ mod tests {
 
         assert_eq!(
             inferred, None,
-            "un provider que no responde a tiempo falla abierto"
+            "a provider that does not respond in time fails open"
         );
     }
 
@@ -285,12 +285,13 @@ mod tests {
         assert_eq!(
             sink.count_matching("adds a call to the model"),
             1,
-            "el aviso de COSTO llega antes de pagarlo, una vez"
+            "the COST notice arrives before paying for it, once"
         );
         assert_eq!(
             sink.count_matching("expired"),
             1,
-            "el aviso de VENCIMIENTO es distinto: avisa que falló, no que va a ocurrir"
+            "the EXPIRY notice is different: it warns that it failed, not that it is \
+             about to happen"
         );
     }
 
@@ -308,13 +309,13 @@ mod tests {
         assert_eq!(
             classifier.classify("x").await,
             Some(Mode::CodeReview),
-            "clasificó bien"
+            "classified correctly"
         );
         assert_eq!(sink.count_matching("adds a call to the model"), 1);
         assert_eq!(
             sink.count_matching("expired"),
             0,
-            "no hubo vencimiento que reportar"
+            "there was no expiry to report"
         );
     }
 
@@ -330,15 +331,11 @@ mod tests {
             sink.clone(),
         );
 
-        assert_eq!(
-            classifier.classify("x").await,
-            None,
-            "prosa no es una etiqueta"
-        );
+        assert_eq!(classifier.classify("x").await, None, "prose is not a label");
         assert_eq!(
             sink.count_matching("expired"),
             0,
-            "una respuesta no reconocida no es un vencimiento"
+            "an unrecognized reply is not an expiry"
         );
     }
 
@@ -374,7 +371,7 @@ mod tests {
         assert_eq!(
             b.count_matching("expired"),
             1,
-            "un `static` haría que este quedara en 0"
+            "a `static` would leave this at 0"
         );
     }
 }

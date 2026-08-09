@@ -281,7 +281,7 @@ mod tests {
     fn double_percent_encoding_does_not_evade_redaction() {
         let doubly = "https://%2575%2573%2565%2572:%2570@host/v1";
         let out = redact_url(doubly);
-        assert!(!out.contains("%2570"), "quedó credencial: {out}");
+        assert!(!out.contains("%2570"), "credential leaked: {out}");
         assert!(out.contains("host"));
     }
 
@@ -329,14 +329,17 @@ mod tests {
         let safe = redact_foreign_error(&err);
         assert!(
             !safe.as_str().contains("hunter2"),
-            "filtró: {}",
+            "leaked: {}",
             safe.as_str()
         );
         assert!(
             safe.as_str().contains("host:8443"),
-            "el host sigue siendo accionable"
+            "the host stays actionable"
         );
-        assert!(safe.as_str().contains("failed"), "y la prosa se conserva");
+        assert!(
+            safe.as_str().contains("failed"),
+            "and the prose is preserved"
+        );
     }
 
     /// Without a URL inside, the text passes through intact: redacting too much would make it
@@ -356,8 +359,8 @@ mod tests {
         let err =
             std::io::Error::other("tried https://a:b@one/v1 then https://c:d@two/v1 and gave up");
         let safe = redact_foreign_error(&err);
-        assert!(!safe.as_str().contains("a:b"), "primera: {}", safe.as_str());
-        assert!(!safe.as_str().contains("c:d"), "segunda: {}", safe.as_str());
+        assert!(!safe.as_str().contains("a:b"), "first: {}", safe.as_str());
+        assert!(!safe.as_str().contains("c:d"), "second: {}", safe.as_str());
         assert!(safe.as_str().contains("one") && safe.as_str().contains("two"));
     }
 
@@ -371,10 +374,10 @@ mod tests {
         let safe = redact_foreign_text(raw);
         assert!(
             !safe.as_str().contains("hunter2"),
-            "filtró: {}",
+            "leaked: {}",
             safe.as_str()
         );
-        assert!(safe.as_str().contains("host:8443"), "sigue accionable");
+        assert!(safe.as_str().contains("host:8443"), "stays actionable");
     }
 
     /// Edge case (B13): without a URL inside, it passes intact — same contract as

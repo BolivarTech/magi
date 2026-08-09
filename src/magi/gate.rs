@@ -163,7 +163,7 @@ mod tests {
         assert_eq!(
             evaluate(&"x".repeat(GATE_CODE_REVIEW), &Mode::CodeReview, &t),
             GateVerdict::Dispatch,
-            "justo EN el umbral pasa"
+            "exactly AT the threshold, it passes"
         );
         assert_eq!(
             evaluate(&"x".repeat(GATE_CODE_REVIEW - 1), &Mode::CodeReview, &t),
@@ -174,7 +174,7 @@ mod tests {
         assert_eq!(
             evaluate(&"x".repeat(GATE_CODE_REVIEW), &Mode::Design, &t),
             GateVerdict::Veto { mode: Mode::Design },
-            "Design exige más"
+            "Design demands more"
         );
     }
 
@@ -189,7 +189,8 @@ mod tests {
         const {
             assert!(
                 GATE_ANALYSIS > 1,
-                "un umbral de 1 apagaría el gate justo en el camino autónomo más común"
+                "a threshold of 1 would turn off the gate right on the most common \
+                 autonomous path"
             );
         }
         assert_eq!(
@@ -207,7 +208,7 @@ mod tests {
         assert_eq!(
             t,
             GateThresholds::builtin(),
-            "tabla ausente ⇒ built-ins: el gate no se apaga por omitir una sección"
+            "table absent ⇒ built-ins: the gate does not turn off by omitting a section"
         );
 
         let t = GateThresholds::from_overrides(GateOverrides {
@@ -218,8 +219,9 @@ mod tests {
         assert_eq!(
             evaluate("x", &Mode::Design, &t),
             GateVerdict::Veto { mode: Mode::Design },
-            "apagar un modo no apaga los otros: sin granularidad, la única salida sería \
-             poner los tres en cero, y un mecanismo que solo sabe apagarse termina apagado"
+            "turning off one mode does not turn off the others: without granularity, \
+             the only way out would be setting all three to zero, and a mechanism \
+             that only knows how to turn itself off ends up off"
         );
     }
 

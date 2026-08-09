@@ -330,13 +330,13 @@ mod tests {
     fn a_v0_11_0_config_reports_both_incompatibilities_at_once() {
         let toml = include_str!("../../tests/fixtures/v0.11.0/default.toml");
         let found = detect_migrations(toml);
-        assert_eq!(found.len(), 2, "esperaba provider + [openai].base_url");
+        assert_eq!(found.len(), 2, "expected provider + [openai].base_url");
         let rendered = render_migration_error(&found);
         assert!(rendered.contains("provider"));
         assert!(rendered.contains("base_url"));
         assert!(
             rendered.contains("ollama") && rendered.contains("openai-compat"),
-            "debe decir CÓMO elegir entre los dos"
+            "must say HOW to choose between the two"
         );
     }
 
@@ -357,15 +357,15 @@ mod tests {
         let rendered = render_migration_error(&detect_migrations(toml));
         assert!(
             !rendered.contains("s3cr3t"),
-            "la credencial NO puede aparecer"
+            "the credential must NOT appear"
         );
         assert!(
             rendered.contains("host"),
-            "el host sí, es lo que hace accionable el mensaje"
+            "the host must, though — it is what makes the message actionable"
         );
         assert!(
             rendered.contains("redacted"),
-            "y el mensaje debe decir que está redactado"
+            "and the message must say it is redacted"
         );
     }
 
@@ -379,12 +379,12 @@ mod tests {
         let rendered = render_migration_error(&detect_migrations(toml));
         assert!(
             rendered.contains("http://localhost:11434/v1"),
-            "el valor completo debe quedar pegable: {rendered}"
+            "the full value must remain paste-ready: {rendered}"
         );
         assert!(
             !rendered.contains("redacted"),
-            "sin credenciales no hay nada que redactar, así que no hay nada que copiar del \
-             archivo viejo: {rendered}"
+            "with no credentials there is nothing to redact, so there is nothing to \
+             copy from the old file: {rendered}"
         );
     }
 
@@ -400,15 +400,15 @@ mod tests {
         let rendered = render_migration_error(&detect_migrations(toml));
         assert!(
             rendered.contains("***"),
-            "el valor mostrado debe ser la mascara completa: {rendered}"
+            "the value shown must be the full mask: {rendered}"
         );
         assert!(
             rendered.contains("did not parse as a URL"),
-            "debe decir que el original no parseaba como URL: {rendered}"
+            "must say the original did not parse as a URL: {rendered}"
         );
         assert!(
             !rendered.contains("copy the real one"),
-            "esa frase es solo para el caso con credencial, no aplica aquí: {rendered}"
+            "that phrase is only for the case with a credential, it does not apply here: {rendered}"
         );
     }
 
@@ -419,7 +419,8 @@ mod tests {
         let toml = "provider = \"sin cerrar\n[magi]\n";
         assert!(
             detect_migrations(toml).is_empty(),
-            "sin estructura no hay dónde buscar patrones; la pasada no rescata por grep"
+            "with no structure there is nowhere to search for patterns; the pass does \
+             not rescue via grep"
         );
     }
 
@@ -440,7 +441,7 @@ mod tests {
         )));
         assert!(
             rendered.contains("v0.11.0"),
-            "no hay detección de v0.10.x: hay una nota incondicional"
+            "there is no v0.10.x detection: there is an unconditional note"
         );
     }
 
@@ -473,11 +474,11 @@ mod tests {
             assert_eq!(
                 found.len(),
                 2,
-                "{name}: esperaba provider + [openai].base_url"
+                "{name}: expected provider + [openai].base_url"
             );
             let rendered = render_migration_error(&found);
-            assert!(rendered.contains(PROVIDER_KEY), "{name}: nombra provider");
-            assert!(rendered.contains(BASE_URL_KEY), "{name}: nombra base_url");
+            assert!(rendered.contains(PROVIDER_KEY), "{name}: names provider");
+            assert!(rendered.contains(BASE_URL_KEY), "{name}: names base_url");
         }
     }
 
@@ -493,11 +494,11 @@ mod tests {
         let rendered = render_migration_error(&detect_migrations(toml));
         assert!(
             !rendered.contains("s3cr3t"),
-            "la credencial del fixture no puede aparecer en el mensaje"
+            "the fixture's credential must not appear in the message"
         );
         assert!(
             rendered.contains("host"),
-            "el host sí, para que sea accionable"
+            "the host must, so it stays actionable"
         );
     }
 
@@ -510,7 +511,7 @@ mod tests {
     #[test]
     fn the_minimal_config_the_error_hands_out_actually_parses_today() {
         super::super::MagiConfig::from_toml_str(MINIMAL_VALID_CONFIG)
-            .expect("el magi.toml mínimo que el error propone debe parsear en v0.12.0");
+            .expect("the minimal magi.toml the error proposes must parse in v0.12.0");
     }
 
     /// `line_of` returns 0 when the pattern does not appear in the text.

@@ -241,15 +241,15 @@ mod tests {
         for ro in READ_ONLY_TOOLS {
             assert!(
                 default.approves(ro),
-                "{ro} debe auto-aprobarse en default (read-only)"
+                "{ro} must auto-approve in default (read-only)"
             );
         }
         for rw in READ_WRITE_TOOLS {
-            assert!(!default.approves(rw), "{rw} NO debe aprobarse en default");
+            assert!(!default.approves(rw), "{rw} must NOT approve in default");
         }
         assert!(
             !default.approves("tool_que_no_existe"),
-            "fail-closed: un tool desconocido nunca se aprueba en default"
+            "fail-closed: an unknown tool never approves in default"
         );
 
         for tier in [Tier::Auto, Tier::FullAuto] {
@@ -257,12 +257,12 @@ mod tests {
             for known in READ_ONLY_TOOLS.iter().chain(READ_WRITE_TOOLS.iter()) {
                 assert!(
                     p.approves(known),
-                    "{known} debe aprobarse en {tier:?} (todos los registrados)"
+                    "{known} must approve in {tier:?} (all registered)"
                 );
             }
             assert!(
                 !p.approves("tool_que_no_existe"),
-                "fail-closed: un tool desconocido nunca se aprueba, ni en {tier:?}"
+                "fail-closed: an unknown tool never approves, not even in {tier:?}"
             );
         }
     }
@@ -285,8 +285,8 @@ mod tests {
 
         assert_eq!(
             known, real,
-            "READ_ONLY_TOOLS + READ_WRITE_TOOLS debe coincidir con el registro \
-             real de main.rs — actualizar ambas listas al registrar un tool nuevo"
+            "READ_ONLY_TOOLS + READ_WRITE_TOOLS must match the real registry \
+             in main.rs — update both lists when registering a new tool"
         );
     }
 

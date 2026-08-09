@@ -2188,7 +2188,7 @@ mod tests {
         );
         assert!(
             rendered.contains("host:8443"),
-            "the host must survive redaction — still accionable: {rendered}"
+            "the host must survive redaction — still actionable: {rendered}"
         );
     }
 
