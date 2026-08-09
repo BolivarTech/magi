@@ -62,15 +62,19 @@ const LEN_PREFIX: usize = 4;
 /// cache in memory.
 type Bootstrapped = (Vec<u8>, Vec<u8>, Zeroizing<Vec<u8>>);
 
-/// Translates a [`cryptovault::CryptoError`] to the vault domain, for a caller that has
-/// PERSISTED `vault_meta` to blame ([`open_envelope`], [`rekey_envelope`]).
+/// Translates a [`cryptovault::CryptoError`] to the vault domain, for a call that evaluates a
+/// **persisted** blob: [`fec_decode`] (via [`open_envelope`]/[`check_meta_fec`]) and
+/// [`CryptoVault::unwrap_key`] (via [`open_envelope`]).
 ///
 /// The mapping is unambiguous because each stage produces a distinct variant: `Cipher` is only
-/// produced by the AEAD (tag failure = wrong key/AAD);
-/// `ErrorCorrection`/`Encoding`/`InvalidInput` only by the FEC/framing layer.
+/// produced by the AEAD (tag failure = wrong key/AAD, i.e. `unwrap_key`);
+/// `ErrorCorrection`/`Encoding`/`InvalidInput` only by the FEC/framing layer (i.e.
+/// `fec_decode`).
 ///
-/// **Not used by [`bootstrap_envelope`]** — see [`map_bootstrap_crypto_err`] for why a failure
-/// there can never be "corrupt metadata" (MS2 gate S9 finding).
+/// **Not used for any `derive_key` call** — see [`map_key_derivation_err`] for why a
+/// `derive_key` failure can never be "corrupt metadata," whether or not `vault_meta` exists yet
+/// (MS2 gate S9 finding, fixed for [`bootstrap_envelope`] first and for [`open_envelope`] in the
+/// seventh gate pass).
 fn map_crypto_err(e: CryptoError) -> VaultError {
     match e {
         CryptoError::Cipher(_) => VaultError::WrongPassphrase,
@@ -81,18 +85,28 @@ fn map_crypto_err(e: CryptoError) -> VaultError {
     }
 }
 
-/// Translates a [`cryptovault::CryptoError`] raised DURING BOOTSTRAP (`derive_key`/`wrap_key`
-/// inside [`bootstrap_envelope`]), where `vault_meta` does not exist yet.
+/// Translates a [`cryptovault::CryptoError`] raised by a call that is never evaluating a
+/// **persisted** blob: every `derive_key` call ([`bootstrap_envelope`], [`open_envelope`], the
+/// re-wrap step of [`rekey_envelope_inner`]), plus `wrap_key` during [`bootstrap_envelope`]
+/// (where `vault_meta` does not exist yet for either call to blame).
 ///
-/// Every variant maps to [`VaultError::Crypto`] — unlike [`map_crypto_err`], which the OPEN
-/// path uses to distinguish a corrupt persisted blob (`VaultMetaCorrupt`) from a wrong key
-/// (`WrongPassphrase`). Reusing that mapping here would misclassify a first-run KDF/AEAD
-/// failure — e.g. `CryptoVault::derive_key`'s own `CryptoError::InvalidInput` on an empty
-/// password or a malformed salt — as `VaultMetaCorrupt`, a category error: that variant is a
-/// documented, retryable, NEVER-DELETE signal about metadata that ALREADY EXISTS (REQ-V35), and
-/// bootstrap has no metadata yet for it to describe. MS2 gate S9 finding; see this module's own
-/// doc comment for the same reasoning already applied to the RNG-failure arms above.
-fn map_bootstrap_crypto_err(e: CryptoError) -> VaultError {
+/// Every variant maps to [`VaultError::Crypto`] — unlike [`map_crypto_err`], which distinguishes
+/// a corrupt persisted blob (`VaultMetaCorrupt`) from a wrong key (`WrongPassphrase`) for calls
+/// that actually evaluate persisted ciphertext (`fec_decode`, `unwrap_key`). `derive_key` never
+/// does that, at any call site: its errors — `CryptoError::InvalidInput` on an empty password or
+/// a malformed salt, `KeyDerivation` on an internal KDF failure — describe the KDF's own inputs,
+/// never the state of `vault_meta`. That holds even when `vault_meta` already exists and has
+/// already been FEC-recovered successfully by the time `derive_key` runs (`open_envelope`'s
+/// case): the recovered `salt` bytes are known-good at that point, so a `derive_key` failure can
+/// only be about `master`. Reusing `map_crypto_err` there misclassifies an empty/malformed
+/// passphrase as `VaultMetaCorrupt` — a documented, retryable, NEVER-DELETE signal about
+/// EXISTING corrupt data (REQ-V35) — steering the user toward "restore/delete"
+/// (`vault_error_exit_code`, `main.rs`) instead of "re-enter a valid passphrase." MS2 gate S9
+/// finding; first fixed for `bootstrap_envelope` (where `vault_meta` does not exist yet to be
+/// corrupt), then generalized to every `derive_key` call once the open and rekey paths were
+/// found to have the identical bug for a different reason (existing-but-already-verified
+/// metadata).
+fn map_key_derivation_err(e: CryptoError) -> VaultError {
     VaultError::Crypto(e.to_string())
 }
 
@@ -161,10 +175,10 @@ pub fn bootstrap_envelope(vault: &CryptoVault, master: &str) -> Result<Bootstrap
         .map_err(|e| VaultError::Crypto(format!("DEK generation failed: {e}")))?;
     let kek = vault
         .derive_key(master, &salt)
-        .map_err(map_bootstrap_crypto_err)?;
+        .map_err(map_key_derivation_err)?;
     let wrapped = vault
         .wrap_key(&kek, &salt, &dek)
-        .map_err(map_bootstrap_crypto_err)?;
+        .map_err(map_key_derivation_err)?;
     let salt_fec = fec_encode(&salt)?;
     let wrapped_fec = fec_encode(wrapped.as_bytes())?;
     Ok((salt_fec, wrapped_fec, dek))
@@ -189,7 +203,9 @@ pub fn open_envelope(
     let salt = fec_decode(salt_fec)?;
     let wrapped_bytes = fec_decode(wrapped_dek_fec)?;
     let wrapped = String::from_utf8(wrapped_bytes).map_err(|_| VaultError::VaultMetaCorrupt)?;
-    let kek = vault.derive_key(master, &salt).map_err(map_crypto_err)?;
+    let kek = vault
+        .derive_key(master, &salt)
+        .map_err(map_key_derivation_err)?;
     vault
         .unwrap_key(&kek, &salt, &wrapped)
         .map_err(map_crypto_err)
@@ -285,7 +301,9 @@ fn rekey_envelope_inner(
 
     // (2) Re-wrap the SAME DEK under a fresh salt/KEK (Argon2 #2, off-lock).
     let new_salt = cryptovault::generate_salt().map_err(map_crypto_err)?;
-    let kek_new = vault.derive_key(new, &new_salt).map_err(map_crypto_err)?;
+    let kek_new = vault
+        .derive_key(new, &new_salt)
+        .map_err(map_key_derivation_err)?;
     let wrapped_new = vault
         .wrap_key(&kek_new, &new_salt, &dek)
         .map_err(map_crypto_err)?;
