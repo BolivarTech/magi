@@ -29,7 +29,7 @@ The suite got slower for a good reason: closing a real coverage gap in `.config/
 ### Per commit — every commit, no exceptions
 
 ```
-cargo nextest run
+python scripts/scoped_tests.py
 cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 ```
@@ -38,9 +38,13 @@ These three can each fail from an ordinary code edit, so they gate every commit.
 runs **alone**, never piped: a pipe's exit code masks the failure, and that has bitten this project
 before.
 
+`scoped_tests.py` runs the touched modules rather than the whole suite — see "The third measure"
+below for why, and for the fail-safe that makes it narrow only when it can do so confidently.
+
 ### Per round — once, before the round's work is declared verified
 
 ```
+cargo nextest run          <- the FULL suite, mandatory
 cargo build --release
 cargo doc --no-deps
 cargo audit
@@ -49,6 +53,12 @@ cargo deny check licenses
 
 A "round" is one dispatched unit of work: a fix round, a task's full Red-Green-Refactor cycle, or
 any batch of commits reported as complete.
+
+**The full suite belongs here and is not optional.** It is not "the per-commit run again": the
+per-commit run narrows *which tests execute*, and this is the only run that executes them all, so
+it is the only thing that catches a behavioural regression in a module the per-commit filter
+excluded. If it ever falls out of this list, the split stops being a split and becomes a loss of
+coverage.
 
 **Why each one moved, individually — the justification is per gate, not a blanket exemption:**
 
