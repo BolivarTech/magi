@@ -272,7 +272,7 @@ fn is_key_at(line: &str, needle: &str) -> bool {
 /// the file and get matched by mistake, unlike `base_url`/`tool_result_cap_bytes` below.
 fn line_of(raw: &str, needle: &str) -> usize {
     raw.lines()
-        .position(|line| line.trim_start().starts_with(needle))
+        .position(|line| is_key_at(line.trim_start(), needle))
         .map_or(0, |idx| idx + 1)
 }
 
@@ -301,7 +301,7 @@ fn line_of_in_section(raw: &str, section: &str, needle: &str) -> usize {
             if trimmed.starts_with('[') {
                 break; // Entered the next table without finding the needle in this one.
             }
-            if trimmed.starts_with(needle) {
+            if is_key_at(trimmed, needle) {
                 return idx + 1;
             }
         } else if trimmed.starts_with(&header) {
