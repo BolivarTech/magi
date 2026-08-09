@@ -52,9 +52,11 @@ prints a guided migration error naming every incompatibility in the file at once
   with an unknown-argument error.
 - **The `--output-format json` object of `magi consult` grows fields** — `mode`,
   `mode_source`, `extraction_failures`, `input_size`, `failed_agents`,
-  `report_truncated` — while **`schema_version` deliberately stays at 1**. The project
-  is pre-1.0, so the crate version already signals breakage; a consumer should tolerate
-  new fields and pin the crate version.
+  `report_truncated` — while **`schema_version` deliberately stays at 1**. This is a
+  contract change even without a schema bump: the project is pre-1.0, so the crate
+  version is what signals it instead. **A consumer of this JSON must tolerate new
+  fields and pin the crate version** — do not treat an unchanged `schema_version` as a
+  backward-compatibility guarantee while magi-rs is `0.x`.
 - **`[embedding].base_url` becomes optional and inherits the root `base_url`** when
   absent, instead of always defaulting to `localhost:11434`. Anyone who pointed the
   main agent at a remote endpoint and expected the embedder to stay local now gets
