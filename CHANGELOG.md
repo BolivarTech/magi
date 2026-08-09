@@ -790,7 +790,17 @@ Initial pre-release, published primarily to reserve the `magi-rs` crate name.
 - `ratatui` TUI with Normal / Selection / Visual modes and Unicode-safe input.
 - OAuth (PKCE) login and OS keyring integration, with `magi-rust` legacy migration.
 
-[Unreleased]: https://github.com/BolivarTech/magi/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/BolivarTech/magi/compare/v0.12.0...HEAD
+[0.12.0]: https://github.com/BolivarTech/magi/compare/v0.11.0...v0.12.0
+[0.11.0]: https://github.com/BolivarTech/magi/compare/v0.10.4...v0.11.0
+[0.10.4]: https://github.com/BolivarTech/magi/compare/v0.10.3...v0.10.4
+[0.10.3]: https://github.com/BolivarTech/magi/compare/v0.10.2...v0.10.3
+[0.10.2]: https://github.com/BolivarTech/magi/compare/v0.10.1...v0.10.2
+[0.10.1]: https://github.com/BolivarTech/magi/compare/v0.10.0...v0.10.1
+[0.10.0]: https://github.com/BolivarTech/magi/compare/v0.9.0...v0.10.0
+[0.9.0]: https://github.com/BolivarTech/magi/compare/v0.8.0...v0.9.0
+[0.8.0]: https://github.com/BolivarTech/magi/compare/v0.7.0...v0.8.0
+[0.7.0]: https://github.com/BolivarTech/magi/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/BolivarTech/magi/compare/v0.5.2...v0.6.0
 [0.3.1]: https://github.com/BolivarTech/magi/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/BolivarTech/magi/compare/v0.2.1...v0.3.0
