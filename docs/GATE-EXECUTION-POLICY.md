@@ -135,3 +135,27 @@ than reporting a vacuous pass over nothing.
 **Measured on this repository's last 40 commits:** 28 would run scoped, 11 would fall back to the
 full suite, 1 touched documentation only. So the saving applies to roughly seven commits in ten,
 and the fallbacks are exactly the commits where narrowing would have been least safe.
+
+**Workspaces are handled, and package boundaries come from `cargo metadata`** rather than from
+guessed directory names such as `crates/`. Guessing would be the same class of mistake as a
+hand-written filter — it works until someone lays the workspace out differently, and then it
+silently maps nothing. With the real package list, touching one member's crate root scopes the run
+to *that package* instead of to everything. A single-crate repository is unaffected: the package
+predicate is omitted and the derived filter is byte-identical to what it was before.
+
+### The approach is not Rust-specific — only this implementation is
+
+Three things in `scoped_tests.py` are tied to Rust: how packages are discovered (`cargo metadata`),
+how a path maps to a test selector (`src/foo/bar.rs` → `foo::bar`), and the runner command
+(`cargo nextest run`). Everything else is language-neutral, and it is the part worth reusing:
+**derive the selection from `git diff` rather than maintaining a list by hand, and widen to the full
+suite whenever the mapping is not confident.**
+
+The same shape ports directly. With **pytest**, a source path maps to its test module or to a
+`-k`/marker expression, and touching `conftest.py` or `pyproject.toml` widens the way a crate root
+does here. With **CMake and CTest**, a source file maps to the target that compiles it and then to
+that target's tests via `ctest -R` or a label, and touching `CMakeLists.txt` widens.
+
+What must not be ported as an afterthought is the fail-safe. It is the whole reason this is safe to
+run at all: a filter that quietly matches nothing looks identical to one that legitimately selected
+nothing, and both report success.

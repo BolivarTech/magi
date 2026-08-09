@@ -36,6 +36,35 @@ hand-written filter: it works until someone lays the workspace out differently,
 and then it silently maps nothing. With the real package list, touching one
 member's crate root scopes the run to *that package* rather than to everything.
 
+Adapting this to another language
+---------------------------------
+This implementation is Rust-specific in exactly three places, and nowhere else:
+
+* ``packages()`` -- how package boundaries are discovered (``cargo metadata``).
+* ``module_filter()`` -- how a file path maps to a test selector. Here that is
+  Rust's module convention, ``src/foo/bar.rs`` -> ``foo::bar``.
+* the runner command -- ``cargo nextest run [-E EXPR]``.
+
+Everything else is language-neutral and is the part actually worth reusing:
+derive the selection from ``git diff`` instead of maintaining a list by hand,
+and make every case you cannot map confidently widen to the full suite rather
+than narrow.
+
+Sketches for the two other stacks this author works in:
+
+* **Python / pytest** -- packages come from the project layout or a monorepo
+  manifest; ``pkg/foo/bar.py`` maps to ``tests/foo/test_bar.py`` or to a
+  ``-k``/marker expression; the runner is ``pytest``. Touching ``conftest.py``
+  or ``pyproject.toml`` is the analogue of touching a crate root, so it widens.
+* **C / C++ with CMake + CTest** -- packages come from the CMake target list;
+  a source file maps to the target that compiles it, then to that target's
+  tests via ``ctest -R`` or a label. Touching ``CMakeLists.txt`` widens.
+
+**Do not port the fail-safe as an afterthought.** It is the reason this is
+safe to run at all: a filter that quietly matches nothing looks exactly like a
+filter that legitimately selected nothing, and both report success. Whatever
+maps paths in your language, the rule stays -- when in doubt, run everything.
+
 Usage
 -----
     python scripts/scoped_tests.py            # working tree vs HEAD
