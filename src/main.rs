@@ -1683,13 +1683,27 @@ impl Credentials for EnvVaultCredentials<'_> {
     }
 }
 
-/// The three endpoints of the process, resolved at once.
+/// The two endpoints that gate startup, resolved at once.
 ///
 /// The symbol is born here (`main.rs`), not in `config.rs`: Task 4.1 is its first consumer
 /// (ORDER-FIXES.md #7/#8 — a symbol is written in the task that first consumes it) and it needs
 /// [`SharedSecretStore`]/[`NoVaultInScope`], which are already private to this file and this
 /// file only — moving it to `config.rs` would force exporting them or reimplementing the same
 /// "optional vault, unresolved template never reaches an HTTP client" pattern a second time.
+///
+/// **Deliberately does NOT include the embedding endpoint (S8 review round, finding 1).** An
+/// earlier version resolved `[embedding].base_url` here too, fail-closed like the other two —
+/// but that made a broken embedding config (a missing vault entry for its
+/// `[user]:[password]` placeholder, say) abort the ENTIRE process via the `?` both call sites
+/// (`run()`/`prepare_headless()`) apply to this function's result, even for a session that
+/// never attaches persistent memory at all (an ephemeral TUI run, headless `--no-memory`).
+/// Root and the trio are in play for EVERY session with a principal provider or a trio, so a
+/// broken config for either is unavoidably a config problem for the current run; the embedder
+/// is only in play once a vector store actually attaches, and that path
+/// (`resolve_effective_embedding_endpoint`, called from `attach_persistent_memory`) already
+/// resolves it and degrades gracefully to text-only persistence with a notice on failure
+/// (REQ-29) — this struct must not duplicate that resolution with a stricter, unconditional
+/// failure mode. See `resolve_endpoints_does_not_fail_closed_on_an_unresolvable_embedding_placeholder`.
 struct ResolvedEndpoints {
     /// Root `base_url` — main agent.
     ///
@@ -1698,18 +1712,13 @@ struct ResolvedEndpoints {
     /// unification). Task 5.2 adds a different real consumer to it: it is the endpoint against
     /// which `orchestrate_probes` probes the principal model (REQ-A24), so the
     /// `#[allow(dead_code)]` it had is removed here. It is resolved the same way, fail-closed,
-    /// because `resolve_endpoints` is THE startup step for the three endpoints at once —
-    /// leaving this one out would make it two steps. Covered by
-    /// `resolve_endpoints_resolves_the_three_fields_from_the_same_root_when_none_diverge`.
+    /// because `resolve_endpoints` is THE startup step for these endpoints at once — leaving
+    /// this one out would make it two steps. Covered by
+    /// `resolve_endpoints_resolves_the_two_fields_from_the_same_root_when_none_diverge`.
     root: ResolvedEndpoint,
     /// `[magi].base_url` or inheritance — the trio and its probe. The only field
     /// `build_magi_orchestrator` reads today.
     magi: ResolvedEndpoint,
-    /// `[embedding].base_url` or inheritance — the embedder. Same case as `root`: no production
-    /// consumer yet (`resolve_effective_embedding_endpoint` still resolves its own separately),
-    /// covered by the same test.
-    #[allow(dead_code)]
-    embedding: ResolvedEndpoint,
 }
 
 /// The effective root template: `OPENAI_BASE_URL` (if non-blank) over what is
@@ -1737,19 +1746,19 @@ fn effective_root_template(
 
 /// The startup step: after opening the vault, BEFORE the probe and the trio.
 ///
-/// Fails CLOSED: a placeholder without an entry stops the process naming the entry and the
-/// command (`magi-rs vault set …`), never substitutes empty (SC-A16f) — it inherits that
-/// guarantee from [`resolve_template`], which already implements it for the other two
-/// `base_url` consumers (the principal and the embedder).
+/// Fails CLOSED on `root` and `magi`: a placeholder without an entry stops the process
+/// naming the entry and the command (`magi-rs vault set …`), never substitutes empty
+/// (SC-A16f) — it inherits that guarantee from [`resolve_template`].
 ///
 /// `env_base_url` is `OPENAI_BASE_URL` — the SAME variable that already moved the principal
-/// (see [`effective_root_template`]). The embedder keeps inheriting from TOML only via
-/// `effective_embedding_base_url()`, untouched by this fix: it still has no production consumer
-/// (`ResolvedEndpoints.embedding` remains `#[allow(dead_code)])` and the review finding was
-/// specifically about the trio.
+/// (see [`effective_root_template`]). The embedding endpoint is deliberately NOT resolved
+/// here (S8 review round, finding 1) — see [`ResolvedEndpoints`]'s own doc for why: it has no
+/// production consumer at this step, and its real, gracefully-degrading resolution already
+/// lives in `resolve_effective_embedding_endpoint`/`attach_persistent_memory`.
 ///
 /// # Errors
-/// An already-readable message (see [`resolve_template`]) from the first unresolvable endpoint.
+/// An already-readable message (see [`resolve_template`]) from the first unresolvable
+/// `root`/`magi` endpoint.
 fn resolve_endpoints(
     magi_config: &MagiConfig,
     env_base_url: Option<&str>,
@@ -1771,13 +1780,9 @@ fn resolve_endpoints(
         None => root_tpl.clone(),
     };
 
-    let embedding_tpl = magi_config
-        .effective_embedding_base_url()
-        .map_err(|e| format!("embedding base_url is invalid: {e}"))?;
     Ok(ResolvedEndpoints {
         root: resolve_template(&root_tpl, Scope::Root, secret_store)?,
         magi: resolve_template(&magi_tpl, Scope::Magi, secret_store)?,
-        embedding: resolve_template(&embedding_tpl, Scope::Embedding, secret_store)?,
     })
 }
 
@@ -6508,7 +6513,6 @@ mod tests {
             ResolvedEndpoints {
                 root: tpl.resolve(&mut NoVaultInScope, Scope::Root).unwrap(),
                 magi: tpl.resolve(&mut NoVaultInScope, Scope::Magi).unwrap(),
-                embedding: tpl.resolve(&mut NoVaultInScope, Scope::Embedding).unwrap(),
             }
         }
 
@@ -7115,11 +7119,13 @@ mod tests {
             );
         }
 
-        /// `resolve_endpoints`: all three fields are resolved at once — covers the `root` and
-        /// `embedding` that `build_magi_orchestrator` does not touch (it only uses `.magi`),
-        /// which would otherwise go unread.
+        /// `resolve_endpoints`: the two fields it fails closed on (`root`, `magi`) are
+        /// resolved at once — covers the `root` that `build_magi_orchestrator` does not
+        /// touch (it only uses `.magi`), which would otherwise go unread. `embedding` is
+        /// deliberately NOT part of this step (S8 review round, finding 1) — see
+        /// `resolve_endpoints_does_not_fail_closed_on_an_unresolvable_embedding_placeholder`.
         #[test]
-        fn resolve_endpoints_resolves_the_three_fields_from_the_same_root_when_none_diverge() {
+        fn resolve_endpoints_resolves_the_two_fields_from_the_same_root_when_none_diverge() {
             let cfg = MagiConfig::default();
             let resolved =
                 resolve_endpoints(&cfg, None, None).expect("sin placeholders, sin vault");
@@ -7131,14 +7137,9 @@ mod tests {
                 resolved.magi.as_str(),
                 crate::defaults::DEFAULT_OPENAI_BASE_URL
             );
-            assert_eq!(
-                resolved.embedding.as_str(),
-                crate::defaults::DEFAULT_OPENAI_BASE_URL
-            );
         }
 
-        /// The trio may diverge from the root endpoint; the embedder, with no override,
-        /// inherits root as always.
+        /// The trio may diverge from the root endpoint.
         #[test]
         fn resolve_endpoints_lets_the_trio_diverge_from_the_root() {
             let cfg = MagiConfig::from_toml_str(
@@ -7150,7 +7151,44 @@ mod tests {
             let resolved = resolve_endpoints(&cfg, None, None).unwrap();
             assert_eq!(resolved.root.as_str(), "http://root:11434/v1");
             assert_eq!(resolved.magi.as_str(), "http://trio:11434/v1");
-            assert_eq!(resolved.embedding.as_str(), "http://root:11434/v1");
+        }
+
+        /// **S8 review round, finding 1.** `resolve_endpoints` is the startup step that
+        /// aborts the ENTIRE process (`?`-propagated by both `run()` and
+        /// `prepare_headless()`) on any endpoint it cannot resolve. Before this fix it
+        /// also resolved `[embedding].base_url` there, so a broken embedding placeholder
+        /// — a missing vault entry, here simulated by having no vault open at all —
+        /// aborted startup even for a session that will NEVER attach persistent memory
+        /// (an ephemeral TUI run, or headless `--no-memory`): a config problem in a
+        /// feature the user is not using stopped the program from starting at all.
+        ///
+        /// The embedding endpoint's real, authoritative resolution already lives in
+        /// `resolve_effective_embedding_endpoint`, called from `attach_persistent_memory`
+        /// ONLY when a vector store actually attaches — and it already degrades
+        /// gracefully to text-only persistence with a notice on failure (REQ-29), never
+        /// aborting the process. Root and the trio stay fail-closed here on purpose:
+        /// unlike the embedder, they are in play for every session with a principal
+        /// provider or a trio, so a broken config for either IS a config problem the
+        /// current session cannot avoid paying for.
+        #[test]
+        fn resolve_endpoints_does_not_fail_closed_on_an_unresolvable_embedding_placeholder() {
+            let cfg = MagiConfig::from_toml_str(
+                "[embedding]\nbase_url = \"https://[user]:[password]@host/v1\"\n",
+            )
+            .unwrap();
+            // No vault open (`secret_store = None`): the embedding placeholder cannot be
+            // substituted. Root and the trio do not declare placeholders, so they are
+            // unaffected — startup must proceed regardless.
+            let resolved = resolve_endpoints(&cfg, None, None)
+                .expect("a broken, unused embedding endpoint must never abort the whole process");
+            assert_eq!(
+                resolved.root.as_str(),
+                crate::defaults::DEFAULT_OPENAI_BASE_URL
+            );
+            assert_eq!(
+                resolved.magi.as_str(),
+                crate::defaults::DEFAULT_OPENAI_BASE_URL
+            );
         }
 
         /// I1 (fix round 2, IMPORTANT): `resolve_endpoints` must see the SAME `OPENAI_BASE_URL`
@@ -8335,7 +8373,6 @@ mod tests {
             ResolvedEndpoints {
                 root: tpl.resolve(&mut NoVaultInScope, Scope::Root).unwrap(),
                 magi: tpl.resolve(&mut NoVaultInScope, Scope::Magi).unwrap(),
-                embedding: tpl.resolve(&mut NoVaultInScope, Scope::Embedding).unwrap(),
             }
         }
 
@@ -8350,15 +8387,7 @@ mod tests {
                 .unwrap()
                 .resolve(&mut NoVaultInScope, Scope::Magi)
                 .unwrap();
-            let embedding = EndpointTemplate::parse("http://localhost:11434/v1", Scope::Embedding)
-                .unwrap()
-                .resolve(&mut NoVaultInScope, Scope::Embedding)
-                .unwrap();
-            ResolvedEndpoints {
-                root,
-                magi,
-                embedding,
-            }
+            ResolvedEndpoints { root, magi }
         }
 
         /// `MagiConfig` whose `[magi]` declares its own `base_url` (and optionally `kind`) —
@@ -8750,8 +8779,8 @@ mod tests {
         #[tokio::test]
         async fn a_diverging_trio_kind_probes_its_own_section_model_not_the_principals() {
             let factory = MappedProbeFactory::new(&[
-                ("claude-test", 999_999), // [anthropic].model — la sección del PRINCIPAL
-                ("qwen-test", 128_000),   // [openai].model — la sección REAL del trío
+                ("claude-test", 999_999), // [anthropic].model — the PRINCIPAL's section
+                ("qwen-test", 128_000),   // [openai].model — the trio's REAL section
             ]);
             let cfg = cfg_diverging_with_models(Some("ollama"), "qwen-test", "claude-test");
 
