@@ -696,9 +696,28 @@ fn tui_consult_dispatch_notice(res: &ModeResolution) -> String {
 /// error text sent alongside it does not transport. Routed through
 /// [`AgentResponse::Notice`] instead of dropped, so the diagnostic survives losing its
 /// stderr line.
+///
+/// **Also runs the result through [`crate::agent::Agent::sanitize_text`]** (S7 gate
+/// re-review finding, Caspar): this is the third and last arm of the `match join { ... }`
+/// block in `run_app`'s `/consult` handler, and the only one that still sent its text to
+/// the UI unsanitized — the success arm sanitizes at its call site and the error arm's
+/// `tui_consult_error_reply` sanitizes internally. `{join_err}` embeds whatever panic
+/// message `magi.analyze` exited with, which this crate does not compose and does not
+/// control, and it lands in a terminal sitting in raw mode on the alternate screen —
+/// exactly the combination `sanitize_text` exists to guard.
+///
+/// Empirically, `tokio::task::JoinError`'s `Display` already Debug-escapes a `String`/
+/// `&str` panic payload (`{:?}` turns a raw ESC or other control byte into the literal
+/// text `\u{1b}`), verified against the tokio 1.53.1 this crate pins — so no panic
+/// triggered through the public `panic!` API can put a raw control byte in this
+/// function's output today. Sanitizing anyway is still correct: that guarantee lives
+/// inside a dependency this crate does not control and did not design for this purpose,
+/// the cost is a linear pass over a short string, and it keeps this arm identical in
+/// shape to its two siblings instead of exempt for a reason a future reader would have
+/// to rediscover.
 #[must_use]
 fn consult_panic_notice(join_err: &tokio::task::JoinError) -> String {
-    format!("[consult] analyze panicked: {join_err}")
+    crate::agent::Agent::sanitize_text(&format!("[consult] analyze panicked: {join_err}"))
 }
 
 /// Braille spinner frames for the "thinking" activity indicator.
@@ -4183,6 +4202,48 @@ mod tests {
         assert!(
             notice.contains(&join_err.to_string()),
             "the JoinError's own Display must reach the notice verbatim: {notice}"
+        );
+    }
+
+    /// S7 gate re-review finding (Caspar): the panic arm sent `consult_panic_notice`'s
+    /// output straight to `AgentResponse::Notice` with no [`crate::agent::Agent::sanitize_text`]
+    /// pass, unlike its two siblings — the success arm sanitizes at its call site (see `run_app`)
+    /// and the error arm's `tui_consult_error_reply` sanitizes internally. Driven through a REAL
+    /// panicked `tokio::spawn`, same reasoning as the test above: a genuine `JoinError` has no
+    /// public constructor, so a hand-rolled stand-in would not prove what the real `Display`
+    /// output looks like.
+    ///
+    /// **Note on what this proves.** A real `JoinError`'s `Display` already Debug-escapes a
+    /// raw ESC/control byte embedded in a `String`/`&str` panic payload (`{:?}` renders it as
+    /// literal `\u{1b}` text, not the raw byte) — verified directly against tokio 1.53.1, the
+    /// version this crate pins. So these three assertions hold even without
+    /// `consult_panic_notice`'s `sanitize_text` pass; this test does not reproduce a live
+    /// injection through the JoinError path. It still earns its place: it locks in the
+    /// end-to-end guarantee explicitly (this crate's own `sanitize_text`, not an incidental
+    /// property of a dependency it does not control) and keeps this arm's coverage on par with
+    /// its two siblings, one of which (`tui_consult_error_reply_strips_ansi_escapes_and_control_chars`)
+    /// covers a source that CAN carry raw control bytes (a foreign HTTP error body).
+    #[tokio::test]
+    async fn consult_panic_notice_strips_ansi_escapes_and_control_chars() {
+        let join_err = tokio::spawn(async {
+            panic!("malicious\x1B[31m escape\x07 payload");
+        })
+        .await
+        .expect_err("the spawned task must have panicked");
+
+        let notice = consult_panic_notice(&join_err);
+
+        assert!(
+            !notice.contains('\x1B'),
+            "ANSI escape must be stripped: {notice:?}"
+        );
+        assert!(
+            !notice.contains('\x07'),
+            "control character must be stripped: {notice:?}"
+        );
+        assert!(
+            notice.contains("malicious") && notice.contains("escape") && notice.contains("payload"),
+            "readable content must survive sanitization: {notice}"
         );
     }
 }
