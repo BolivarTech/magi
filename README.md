@@ -230,6 +230,39 @@ classifier, so it is exactly this JSON shape — not a CLI flag typed by hand �
 that needs to declare both fields. See [Mode routing](#mode-routing) for what
 each one does.
 
+### JSON output shape
+
+`--output-format json` writes one buffered JSON object with `schema_version`
+always the first physical key, followed (in this exact order) by `response`,
+`model`, `provider`, `usage`, `timings`, `stop_reason`, `tool_calls[]`,
+`transcript[]`, `consult`, `applied_caps`, `error`.
+
+**Consumer contract while `magi-rs` is `0.x` (REQ-A08b):** `schema_version` does
+**not** move when fields are added — the crate's own `0.x` version is the
+compatibility signal instead. A consumer of this JSON **must tolerate new
+fields and pin the crate version**; do not treat an unchanged `schema_version`
+as a backward-compatibility guarantee.
+
+`consult` is `null` unless the run dispatched a MAGI consensus (via the
+`consult` tool, an autonomous route, or `magi consult` directly), in which case
+it is an object with these keys, **all always present**:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `report` | string | the (possibly annotated, possibly truncated) verdict text |
+| `degraded` | bool | fewer than 3 agents responded — consensus may be unreliable |
+| `mode` | string | the effective mode: `code-review` / `design` / `analysis` |
+| `mode_source` | string | how it was resolved: `explicit` / `configured` / `agent-chosen` / `inferred` / `default` (see [Mode routing](#mode-routing)) |
+| `extraction_failures` | object | per-seat list of `{model, attempt, cause}`; an empty object certifies every seat adhered to the verdict contract |
+| `input_size` | object | `{estimated_tokens, warn_threshold, exceeded}` — always all three sub-keys, even when unmeasured |
+| `report_truncated` | string | `none` / `structural` / `anchored` / `bytes` — which guarantee survived truncation, never a bare boolean |
+| `endpoint_divergence` | bool | whether this run's content passed through the principal provider (mode classification) before reaching a trio on a different endpoint |
+| `timeout_below_formula` | bool | whether an explicit `--timeout` was below what the derived escalation formula requires |
+| `failed_agents` | object | per-seat failure cause, redacted, for a mage that produced no verdict |
+
+New fields are added to `consult` without a `schema_version` bump — the same
+consumer contract above applies to it.
+
 ### Authorization tiers
 
 Secure by default: a read-only CI job cannot mutate or execute:
