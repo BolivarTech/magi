@@ -2017,16 +2017,29 @@ async fn probe_and_report(
         "{principal_model}: {}",
         probe_notice(&principal_measurement.unwrap_or(Measurement::NotMeasuredThisTime))
     )));
+    // MAGI S3 re-gate (Caspar): the principal's own notice above only ever reports the
+    // PRINCIPAL's measurement — on a cold daemon the trio's models (usually different from
+    // the principal's, per REQ-A05) can fail to measure independently, silently falling
+    // `input_warn_tokens` back to magi-core's built-in default with nothing telling the user
+    // their small-window mage's size warning is not the one actually in effect.
+    //
+    // **Two INDEPENDENT `if`s, not `if`/`else if` (S8 gate re-review fix).** The previous
+    // `else if` only reached `trio_probe_incomplete_notice` when `min_mage_window` returned
+    // `None` — i.e. when EVERY mage was cold. But `min_mage_window` returns `Some` as soon as
+    // ONE mage measures, so a PARTIALLY cold trio (the common cold-daemon case: some mages
+    // warm up faster than others) took the `Some` branch and never reached the incomplete-
+    // measurement notice at all — exactly backwards from what the notice exists to catch,
+    // since `derive_warn_tokens` below takes the minimum of whichever mages happened to
+    // measure and a cold mage with the smallest window silently vanishes from that minimum.
+    // The two conditions are not mutually exclusive: a trio can simultaneously have a
+    // measured-but-stale minimum window AND an unmeasured seat, and both notices are
+    // independently actionable, so both must be free to fire.
     if let Some(min_window) = min_mage_window(&trio) {
         if let Some(n) = stale_composition_notice(min_window, cfg.effective_max_query_bytes()) {
             notices.push(Notice::resolution(n));
         }
-    } else if let Some(n) = trio_probe_incomplete_notice(&trio, cfg.magi.input_warn_tokens) {
-        // MAGI S3 re-gate (Caspar): the notice above only ever reports the PRINCIPAL's own
-        // measurement — on a cold daemon the trio's models (usually different from the
-        // principal's, per REQ-A05) can fail to measure independently, silently falling
-        // `input_warn_tokens` back to magi-core's built-in default with nothing telling the
-        // user their small-window mage's size warning is not the one actually in effect.
+    }
+    if let Some(n) = trio_probe_incomplete_notice(&trio, cfg.magi.input_warn_tokens) {
         notices.push(Notice::resolution(n));
     }
     // REQ-A24b/SC-A24e: the explicit (`[magi].input_warn_tokens`) wins over the measured.
@@ -2035,9 +2048,11 @@ async fn probe_and_report(
         .or_else(|| derive_warn_tokens(&trio))
 }
 
-/// Builds the notice for when `input_warn_tokens` COULD NOT be derived from the trio at all
-/// (`min_mage_window` returned `None`) — the gap `probe_and_report`'s per-principal notice
-/// leaves open (see its call site).
+/// Builds the notice for when at least one mage of the trio is `NotMeasuredThisTime` (cold) —
+/// the gap `probe_and_report`'s per-principal notice leaves open (see its call site).
+/// Independent of whether `min_mage_window` derived a threshold at all: a trio can be
+/// PARTIALLY cold and still have a `Some` minimum from the mages that did measure, and that
+/// case is exactly what this notice exists to catch (S8 gate re-review fix).
 ///
 /// `None` (no notice) in two cases where firing one would be noise, not signal:
 /// - **`declared` is `Some`**: `[magi].input_warn_tokens` already wins over anything derived
@@ -8732,10 +8747,9 @@ mod tests {
             );
         }
 
-        /// When the trio DID derive a minimum window, `probe_and_report`'s other branch already
-        /// covers it via `stale_composition_notice` — this function is only reached from the
-        /// `None` arm, and an empty trio is the degenerate case of that: no mage, nothing cold,
-        /// nothing to report.
+        /// An empty trio is the degenerate case: no mage, nothing cold, nothing to report.
+        /// (`probe_and_report` also calls this unconditionally now — S8 gate re-review fix —
+        /// so it is no longer gated behind `min_mage_window` returning `None`.)
         #[test]
         fn an_empty_trio_reports_nothing() {
             assert!(trio_probe_incomplete_notice(&BTreeMap::new(), None).is_none());
