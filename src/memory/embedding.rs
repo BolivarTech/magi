@@ -244,12 +244,17 @@ impl OpenAiCompatibleEmbedder {
             s => {
                 // 3xx (if reqwest's redirect budget is exhausted or redirects are
                 // disabled), 4xx (non-401/403/429), and 5xx are all treated as HTTP
-                // errors (G5): anything not 2xx is a failure. The api_key is never
-                // in the server's response body.
-                let snippet = response
-                    .text()
-                    .await
-                    .unwrap_or_default()
+                // errors (G5): anything not 2xx is a failure. The response body is
+                // PROSE COMPOSED BY ANOTHER PARTY (the server) — S9 gate finding:
+                // a misconfigured gateway or a hostile endpoint does not need to be
+                // trusted not to echo the request back, including the Authorization
+                // header, so the snippet is redacted before it can reach the error
+                // text. Redacted on the FULL body, before truncating to 256 chars,
+                // so a key straddling the truncation boundary cannot survive half
+                // out of the window.
+                let body = response.text().await.unwrap_or_default();
+                let snippet = self
+                    .redact_response_snippet(&body)
                     .chars()
                     .take(256)
                     .collect::<String>();
@@ -351,7 +356,36 @@ impl OpenAiCompatibleEmbedder {
         }
         Ok(out)
     }
+
+    /// Redacts a server-controlled HTTP error body before it can reach
+    /// [`EmbeddingError::Http`] (S9 gate finding).
+    ///
+    /// The body is prose composed by **another party** — the same class of untrusted
+    /// text [`redact_foreign_text`][magi_rs::redact::redact_foreign_text] exists for — so
+    /// it is run through that function to catch any credential-bearing URL it embeds.
+    /// But that alone is not enough here: `redact_foreign_text` only redacts a URL's
+    /// `userinfo` (REQ-A16's positional rule), and a misconfigured gateway does not
+    /// need a URL to leak the key — it can simply echo the request headers verbatim,
+    /// e.g. `authorization: Bearer <key>`, which contains no `://` at all. This call
+    /// site is the one place that KNOWS the literal secret it just sent, so it first
+    /// strips every exact occurrence of that value. This is not the content-based
+    /// guessing REQ-A16 forbids for URLs (there the credential's format is arbitrary
+    /// and unknown in advance); it is an exact match against a secret whose value is
+    /// already held here.
+    fn redact_response_snippet(&self, raw: &str) -> String {
+        let key_stripped = match self.api_key.as_deref() {
+            Some(key) if !key.is_empty() => raw.replace(key, FULLY_REDACTED_KEY),
+            _ => raw.to_string(),
+        };
+        magi_rs::redact::redact_foreign_text(&key_stripped).to_string()
+    }
 }
+
+/// What replaces a known API key found verbatim in server-controlled text
+/// (`redact_response_snippet`). Distinct from [`magi_rs::redact`]'s own placeholder so a
+/// reader of a redacted body can tell "a literal secret was here" apart from "a URL's
+/// userinfo was here" if both constants are ever compared side by side in a test.
+const FULLY_REDACTED_KEY: &str = "***";
 
 #[async_trait]
 impl EmbeddingProvider for OpenAiCompatibleEmbedder {
