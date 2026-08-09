@@ -7,6 +7,7 @@ mod headless_runner;
 mod memory;
 mod services;
 mod system;
+mod task;
 mod tools;
 mod tui;
 

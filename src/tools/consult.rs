@@ -5,6 +5,7 @@
 //! directly.
 
 use crate::config::MagiConfig;
+use crate::task::AbortOnDrop;
 use crate::tools::{Tool, ToolError, ToolResult};
 use async_trait::async_trait;
 use magi_core::error::MagiError;
@@ -863,42 +864,6 @@ pub(crate) fn explain_magi_error(err: &MagiError, kind: ProviderKind) -> String 
     }
 }
 
-/// RAII backstop that aborts a spawned task when the guard is dropped.
-///
-/// [`ConsultTool::execute`] runs the 3-perspective analysis on a `tokio::spawn` task and awaits
-/// it under a `select!`. The explicit cancel arm aborts the task on `--timeout`, but if the
-/// `execute` future itself is *dropped* before either arm resolves (e.g. the caller drops the
-/// tool call), a bare spawned task would keep running and orphan its three in-flight LLM calls.
-/// Holding this guard across the `select!` aborts the task on that drop too, mirroring the
-/// `GroupKiller` backstop the `bash` tool uses for its subprocess.
-///
-/// `pub(crate)` so [`crate::headless_runner`]'s direct `magi consult` path (`analyze_direct`)
-/// reuses this exact primitive for its own spawned MAGI analysis rather than duplicating it —
-/// same gap, same fix, one guard type.
-pub(crate) struct AbortOnDrop {
-    /// Abort handle of the guarded task.
-    handle: tokio::task::AbortHandle,
-}
-
-impl AbortOnDrop {
-    /// Wraps a task's abort handle so dropping the guard aborts the task.
-    pub(crate) fn new(handle: tokio::task::AbortHandle) -> Self {
-        Self { handle }
-    }
-
-    /// Aborts the guarded task now. Idempotent: aborting an already-finished or already-aborted
-    /// task is a no-op, so `Drop` re-invoking it is harmless.
-    pub(crate) fn abort(&self) {
-        self.handle.abort();
-    }
-}
-
-impl Drop for AbortOnDrop {
-    fn drop(&mut self) {
-        self.handle.abort();
-    }
-}
-
 /// Notice emitted in the TUI when the `consult` tool is auto-approved. Visible to the user so
 /// they know the 3-LLM consensus was launched.
 const AUTO_LAUNCH_NOTICE: &str = "launched MAGI multi-perspective consensus — awaiting evaluation…";
@@ -1197,7 +1162,6 @@ mod tests {
     use magi_core::test_support::RoutingMockProvider;
     use magi_core::verdict_markers::{VERDICT_CLOSE, VERDICT_OPEN};
     use magi_rs::magi::{resolve_run_timeout, AGENT_TIMEOUT_SECS};
-    use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
 
     /// Upper bound on how long a *cancelled* `execute` may take to return. The cancel path
@@ -1745,34 +1709,6 @@ mod tests {
         assert!(
             elapsed.as_millis() < CANCEL_RETURN_BUDGET_MS,
             "cancelled consult must return promptly (took {elapsed:?}); it awaited the full analysis"
-        );
-    }
-
-    /// The `AbortOnDrop` backstop aborts its guarded task the instant the guard is dropped, so
-    /// a dropped `execute` future cannot orphan the spawned analysis (the drop path the
-    /// explicit cancel arm does not cover). A bare dropped `JoinHandle`/`AbortHandle` would
-    /// merely detach the task, leaving it to run to completion — this asserts the join reports
-    /// cancellation and the task never reached its completion store.
-    #[tokio::test]
-    async fn test_abort_on_drop_aborts_task_when_guard_dropped() {
-        let ran_to_completion = Arc::new(AtomicBool::new(false));
-        let flag = ran_to_completion.clone();
-        let handle = tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_secs(BlockingProvider::SLEEP_SECS)).await;
-            flag.store(true, Ordering::SeqCst);
-        });
-        {
-            let _guard = AbortOnDrop::new(handle.abort_handle());
-            // `_guard` drops here without ever calling `abort()` explicitly.
-        }
-        let joined = handle.await;
-        assert!(
-            joined.as_ref().err().map(|e| e.is_cancelled()).unwrap_or(false),
-            "dropping the guard must abort the task (join must report cancellation); got {joined:?}"
-        );
-        assert!(
-            !ran_to_completion.load(Ordering::SeqCst),
-            "aborted task must not have reached its completion store"
         );
     }
 

@@ -52,9 +52,10 @@ use crate::agent::messages::{Content, Message, Role};
 use crate::agent::mode_classifier::NoticeSink;
 use crate::agent::{Agent, AgentRunConfig, RunObserver, StreamPiece, MAX_TOOL_CALLS_ERROR};
 use crate::config::MagiConfig;
+use crate::task::AbortOnDrop;
 use crate::tools::consult::{
     annotate_report_text, check_query_size, explain_magi_error, report_to_consult_json,
-    truncate_report, AbortOnDrop, RunContext,
+    truncate_report, RunContext,
 };
 
 /// Dedup key for [`NoticeSink::once`] — the SC-A04d warning, distinct from the
