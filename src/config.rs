@@ -1270,8 +1270,8 @@ mod tests {
 
     #[test]
     fn test_resolve_anthropic_model_env_wins_over_toml() {
-        // A directory named `magi.toml` makes read_to_string fail with a non-NotFound error →
-        // REQ-A23: must be FATAL, never degrade to defaults + warning.
+        // Mirrors test_resolve_openai_model_env_wins_over_toml just above: env must win over
+        // TOML for the Anthropic model too, not the other way around.
         let c = MagiConfig {
             anthropic: AnthropicConfig {
                 model: Some("claude-toml-model".into()),
