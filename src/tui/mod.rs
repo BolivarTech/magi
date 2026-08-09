@@ -26,6 +26,7 @@ use ratatui::{
 use std::io;
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 /// A vault-backed secret store shared with `main.rs`, used by the `/login`
@@ -2623,6 +2624,56 @@ mod tests {
             post_login_agent_timeout_secs(None),
             magi_rs::magi::AGENT_TIMEOUT_SECS
         );
+    }
+
+    /// MS2 gate S7 finding: `UiEvent::Login` used to await
+    /// `oauth.start_callback_server()` directly inside the event loop's sequential
+    /// dispatch. That call is already bounded (RF-4.2, `OAUTH_CALLBACK_TIMEOUT_SECS` =
+    /// 600s) but not CANCELLABLE — a user who presses Esc to quit while the OAuth
+    /// round-trip is still pending had the queued `UiEvent::Quit` sit unprocessed
+    /// behind it, so the process could not exit for up to 10 minutes.
+    ///
+    /// This exercises `await_login_callback_or_quit` directly against a callback future
+    /// that never resolves on its own (`std::future::pending`, standing in for a real
+    /// but very slow OAuth wait) and asserts cancellation wins promptly — the whole
+    /// point being that the caller never has to wait for the callback future at all.
+    /// Wrapped in an outer `tokio::time::timeout` so a regression back to awaiting the
+    /// callback inline fails this test instead of hanging the test suite.
+    #[tokio::test]
+    async fn await_login_callback_or_quit_returns_promptly_when_quit_fires_first() {
+        let quit_token = CancellationToken::new();
+        let cancel_for_task = quit_token.clone();
+        let handle = tokio::spawn(async move {
+            await_login_callback_or_quit(std::future::pending(), &cancel_for_task).await
+        });
+        // Give the spawned task a chance to start polling the pending future before
+        // cancelling, so this genuinely exercises "cancel arrives while the callback
+        // wait is in flight" rather than "cancel arrives before select! ever runs".
+        tokio::task::yield_now().await;
+        quit_token.cancel();
+
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), handle)
+            .await
+            .expect("cancellation must resolve the select! promptly, not hang")
+            .expect("the spawned task must not panic");
+        assert!(
+            result.is_err(),
+            "a cancelled login must surface an error, not a fabricated OAuth code"
+        );
+    }
+
+    /// The reverse race: when the callback resolves before any cancellation, its
+    /// result passes through unchanged — cancellation support must not swallow a
+    /// legitimate, fast OAuth completion.
+    #[tokio::test]
+    async fn await_login_callback_or_quit_returns_the_callback_result_when_it_wins() {
+        let quit_token = CancellationToken::new();
+        let result = await_login_callback_or_quit(
+            std::future::ready(Ok("auth-code-123".to_string())),
+            &quit_token,
+        )
+        .await;
+        assert_eq!(result.unwrap(), "auth-code-123");
     }
 
     /// SC-A06b: the TUI's `/consult`-without-a-trio reply is verbatim `reason`,
