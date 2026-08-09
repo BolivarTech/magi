@@ -104,7 +104,7 @@ pub const NOTICE_MAX_INFO: usize = 5;
 /// Sorts by tier (`Blocking` first), deduplicates by exact text, and trims only the `Info`s
 /// that exceed [`NOTICE_MAX_INFO`].
 ///
-/// # Contrato
+/// # Contract
 /// - **Order**: `Blocking` → `Resolution` → `Info`. The `sort_by_key` is stable, so two notices of the same tier keep the order in which they were passed.
 /// - **Dedup**: two notices with the same `text` collapse into one — the trio can emit the same `base_url` normalization warning three times (once per seat), and the user does not need to read it three times. It is applied AFTER sorting, so the first appearance in tier order survives.
 /// - **Cap**: `Blocking` and `Resolution` are NEVER trimmed — the cap exists for the diagnostic noise, not for actionable or surprising items. When it trims, the last line of the result says how many `Info`s were omitted.
@@ -148,16 +148,16 @@ mod tests {
     #[test]
     fn notices_are_ordered_by_tier_not_by_discovery() {
         let out = render_notices(vec![
-            Notice::info("ventana medida: 128k"),
-            Notice::blocking("el trío no es construible: falta OPENAI_API_KEY"),
-            Notice::resolution("`[embedding].base_url` heredó la raíz"),
+            Notice::info("measured window: 128k"),
+            Notice::blocking("the trio is not buildable: missing OPENAI_API_KEY"),
+            Notice::resolution("`[embedding].base_url` inherited the root"),
         ]);
         assert!(
-            out[0].contains("no es construible"),
+            out[0].contains("not buildable"),
             "the one demanding action goes first"
         );
-        assert!(out[1].contains("heredó"));
-        assert!(out[2].contains("ventana medida"));
+        assert!(out[1].contains("inherited"));
+        assert!(out[2].contains("measured window"));
     }
 
     /// The cap trims NOISE, never signals.
@@ -242,7 +242,7 @@ mod tests {
     /// `Blocking` survived — which never counts against the cap.
     #[test]
     fn cross_tier_duplicate_text_keeps_the_more_severe_tier() {
-        let dup_text = "el trío no es construible: falta OPENAI_API_KEY";
+        let dup_text = "the trio is not buildable: missing OPENAI_API_KEY";
         let mut v: Vec<Notice> = (0..NOTICE_MAX_INFO)
             .map(|i| Notice::info(format!("filler{i}")))
             .collect();

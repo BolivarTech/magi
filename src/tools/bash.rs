@@ -388,10 +388,7 @@ mod tests {
             check("rm -r -f ./build"),
             "rm -r -f ./build (subdir via ./) must stay allowed"
         );
-        assert!(
-            check("rm archivo.txt"),
-            "non-recursive rm of a file allowed"
-        );
+        assert!(check("rm file.txt"), "non-recursive rm of a file allowed");
         // `rm -d .` removes an empty workspace root — closed via the `d` flag.
         assert!(
             !check("rm -d ."),
@@ -466,7 +463,7 @@ mod tests {
         );
         // S-5: rm targeting outside the workspace.
         assert!(
-            !check("rm C:/importante/archivo"),
+            !check("rm C:/important/file"),
             "S-5 rm outside must be rejected"
         );
         assert!(
@@ -475,7 +472,7 @@ mod tests {
         );
         // S-3: relative in-workspace path is allowed.
         assert!(
-            check("cat archivo.txt"),
+            check("cat file.txt"),
             "S-3 relative in-workspace must be allowed"
         );
         // S-4: non-path args are allowed (resolve to workspace-relative).

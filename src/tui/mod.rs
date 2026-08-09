@@ -2903,8 +2903,8 @@ mod tests {
     /// wrapped as an error — never a re-worded summary of it.
     #[test]
     fn test_consult_unavailable_response_echoes_the_reason_verbatim() {
-        let reason = "El consenso MAGI no está disponible — no se pudieron construir \
-                       estos asientos:\n  Melchior: falta la credencial OPENAI_API_KEY";
+        let reason = "MAGI consensus is not available — these seats could not be \
+                       built:\n  Melchior: missing the OPENAI_API_KEY credential";
         match consult_unavailable_response(reason) {
             AgentResponse::Error(text) => assert_eq!(text, reason),
             other => panic!("expected AgentResponse::Error, got {other:?}"),
@@ -3698,9 +3698,9 @@ mod tests {
 
     #[test]
     fn test_parse_tui_consult_accepts_an_explicit_mode_and_keeps_the_query() {
-        let cmd = super::parse_tui_consult("/consult --mode design ¿esto o aquello?").unwrap();
+        let cmd = super::parse_tui_consult("/consult --mode design this or that?").unwrap();
         assert_eq!(cmd.mode, Some(Mode::Design));
-        assert_eq!(cmd.query, "¿esto o aquello?");
+        assert_eq!(cmd.query, "this or that?");
     }
 
     #[test]
@@ -3793,7 +3793,7 @@ mod tests {
     /// `Magi::analyze` no longer contains the flag.
     #[tokio::test]
     async fn an_explicit_mode_reaches_analyze_as_declared_and_strips_the_flag_from_the_query() {
-        let cmd = super::parse_tui_consult("/consult --mode design ¿esto o aquello?").unwrap();
+        let cmd = super::parse_tui_consult("/consult --mode design this or that?").unwrap();
         let (res, query) = super::resolve_tui_consult_mode(cmd, None, false, &NeverClassifier)
             .await
             .unwrap();
@@ -3802,7 +3802,7 @@ mod tests {
             Mode::Design,
             "the explicit --mode must win, never default to Analysis"
         );
-        assert_eq!(query, "¿esto o aquello?");
+        assert_eq!(query, "this or that?");
         assert!(
             !query.contains("--mode"),
             "the flag must not survive in the text that reaches analyze: {query:?}"
@@ -3814,7 +3814,7 @@ mod tests {
     /// never invoked.
     #[tokio::test]
     async fn configured_default_mode_wins_without_classifying() {
-        let cmd = super::parse_tui_consult("/consult ¿esto o aquello?").unwrap();
+        let cmd = super::parse_tui_consult("/consult this or that?").unwrap();
         let (res, query) =
             super::resolve_tui_consult_mode(cmd, Some(Mode::CodeReview), false, &NeverClassifier)
                 .await
@@ -3825,14 +3825,14 @@ mod tests {
             magi_rs::magi::mode::ModeSource::Configured,
             "REQ-A08: the level must survive the trip, or a reader cannot tell a configured              lens from an inferred one"
         );
-        assert_eq!(query, "¿esto o aquello?");
+        assert_eq!(query, "this or that?");
     }
 
     /// Without `--mode` and without `default_mode`, the classifier IS consulted and its answer
     /// is used — the inference path remains alive on this surface.
     #[tokio::test]
     async fn without_mode_or_config_the_classifier_is_consulted() {
-        let cmd = super::parse_tui_consult("/consult ¿esto o aquello?").unwrap();
+        let cmd = super::parse_tui_consult("/consult this or that?").unwrap();
         let (res, _query) =
             super::resolve_tui_consult_mode(cmd, None, false, &FixedClassifier(Mode::Design))
                 .await
@@ -3894,7 +3894,7 @@ mod tests {
     /// classifying.
     #[tokio::test]
     async fn operator_declared_untrusted_content_fails_closed_without_a_mode() {
-        let cmd = super::parse_tui_consult("/consult ¿esto o aquello?").unwrap();
+        let cmd = super::parse_tui_consult("/consult this or that?").unwrap();
         let err = super::resolve_tui_consult_mode(cmd, None, true, &NeverClassifier)
             .await
             .expect_err("with no mode declared, the operator's flag must fail closed");

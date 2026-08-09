@@ -4351,13 +4351,13 @@ mod tests {
     /// not, because a genuine consult in between resets the counter.
     #[tokio::test]
     async fn two_consecutive_vetoes_are_terminal_but_a_success_resets() {
-        let out = run_turn_with_consults(&["trivial", "tambien trivial"])
+        let out = run_turn_with_consults(&["trivial", "also trivial"])
             .await
             .unwrap();
         assert!(out.consult_disabled_for_rest_of_turn);
 
         let long = "x".repeat(magi_rs::magi::GATE_ANALYSIS + 10);
-        let out = run_turn_with_consults(&["trivial", &long, "trivial otra vez"])
+        let out = run_turn_with_consults(&["trivial", &long, "trivial again"])
             .await
             .unwrap();
         assert!(
@@ -4677,7 +4677,7 @@ mod tests {
     /// against a real `Agent`.
     #[tokio::test]
     async fn multiple_tooluse_blocks_in_one_turn_count_like_separate_turns() {
-        let out = run_turn_with_two_tooluse_blocks(&["trivial", "tambien trivial"])
+        let out = run_turn_with_two_tooluse_blocks(&["trivial", "also trivial"])
             .await
             .unwrap();
         assert_eq!(

@@ -296,7 +296,7 @@ fn test_detector_ignores_prose_and_placeholders() {
     let benign = [
         "set ANTHROPIC_API_KEY or store it in the vault",
         "base_url = \"http://localhost:11434/v1\"",
-        "el prefijo sk-ant se menciona sin material de clave detrás",
+        "the sk-ant prefix is mentioned without any key material behind it",
         "clone it to /home/ and run the build",
         "version 2.35 or newer, see 1.2.3.4 in the RFC",
         "a public address like 8.8.8.8 is not private",

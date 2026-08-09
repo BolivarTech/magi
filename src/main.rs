@@ -4360,7 +4360,7 @@ mod tests {
                     "envelope surface, label {label:?}"
                 );
 
-                let tui_line = format!("/consult --mode {label} ¿esto o aquello?");
+                let tui_line = format!("/consult --mode {label} this or that?");
                 assert_eq!(
                     crate::tui::parse_tui_consult(&tui_line).unwrap().mode,
                     Some(expected),
@@ -4606,7 +4606,7 @@ mod tests {
                 },
                 false,
                 Some(&counting),
-                "contenido de prueba",
+                "test content",
             )
             .await?;
             Ok(AgentTurnOutcome {
@@ -4633,7 +4633,7 @@ mod tests {
                 },
                 true,
                 Some(&counting),
-                "contenido de prueba",
+                "test content",
             )
             .await?;
             Ok(AgentTurnOutcome {
@@ -4657,7 +4657,7 @@ mod tests {
                 magi_rs::magi::mode::ModeSources::default(),
                 true,
                 Some(&counting),
-                "contenido de prueba",
+                "test content",
             )
             .await?;
             Ok(AgentTurnOutcome {
@@ -4686,7 +4686,7 @@ mod tests {
                 },
                 false,
                 Some(&counting),
-                "contenido de prueba",
+                "test content",
             )
             .await?;
             Ok(AgentTurnOutcome {
@@ -8840,7 +8840,7 @@ mod tests {
             ]);
             assert!(
                 trio_probe_incomplete_notice(&trio, None).is_none(),
-                "NotMeasurable no es un fallo transitorio: no amerita este aviso"
+                "NotMeasurable is not a transient failure: it does not warrant this notice"
             );
         }
 

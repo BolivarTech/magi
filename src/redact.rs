@@ -59,7 +59,7 @@ const SCHEME_SEPARATOR: &str = "://";
 /// use magi_rs::redact::redact_url;
 ///
 /// assert_eq!(redact_url("https://user:pass@host/v1"), "https://***@host/v1");
-/// assert_eq!(redact_url("https://host/ruta@cosa"), "https://host/ruta@cosa");
+/// assert_eq!(redact_url("https://host/path@thing"), "https://host/path@thing");
 /// ```
 #[must_use]
 pub fn redact_url(raw: &str) -> String {
@@ -289,8 +289,8 @@ mod tests {
     #[test]
     fn an_at_sign_in_the_path_is_not_userinfo() {
         assert_eq!(
-            redact_url("https://host/ruta@cosa"),
-            "https://host/ruta@cosa"
+            redact_url("https://host/path@thing"),
+            "https://host/path@thing"
         );
     }
 
@@ -316,7 +316,7 @@ mod tests {
     /// SC-A13b (second clause). Safe failure direction: what does not parse is redacted WHOLE.
     #[test]
     fn an_unparseable_url_is_redacted_whole() {
-        assert_eq!(redact_url("no es una url"), "***");
+        assert_eq!(redact_url("not a url"), "***");
     }
 
     /// A FOREIGN error brings the URL embedded in its prose, and there it is also redacted.
