@@ -7197,7 +7197,7 @@ mod tests {
         /// TOML/default `base_url` when `[magi].base_url` is absent (inheriting).
         #[test]
         fn resolve_endpoints_honors_openai_base_url_for_the_inherited_trio_endpoint() {
-            let cfg = MagiConfig::default(); // sin base_url propio, sin [magi].base_url
+            let cfg = MagiConfig::default(); // no own base_url, no [magi].base_url
             let resolved = resolve_endpoints(&cfg, Some("http://otherhost:9999/v1"), None).unwrap();
             assert_eq!(resolved.root.as_str(), "http://otherhost:9999/v1");
             assert_eq!(
@@ -8657,7 +8657,7 @@ mod tests {
         #[tokio::test]
         async fn a_small_principal_never_lowers_the_mage_derived_threshold() {
             let factory = MappedProbeFactory::new(&[
-                ("principal", 2_048), // la ventana MÁS CHICA de todo el proceso
+                ("principal", 2_048), // the SMALLEST window in the whole process
                 ("melchior", 1_000_000),
                 ("balthasar", 512_000),
                 ("caspar", 256_000),

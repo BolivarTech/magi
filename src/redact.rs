@@ -48,7 +48,7 @@ const SCHEME_SEPARATOR: &str = "://";
 ///
 /// IPv6 hosts in brackets enter without special casing: the last `@` of the authority falls
 /// before the `[`, and the rule never looks for `:`, so the colons in the address are not
-/// confused with the `usuario:clave` separator.
+/// confused with the `user:password` separator.
 ///
 /// A URL that does not parse is redacted **whole**: that is exactly where a secret might be in
 /// an unexpected place, so the safe failure direction is to hide too much.

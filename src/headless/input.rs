@@ -530,7 +530,7 @@ mod tests {
         let t = parse_input(b"just text", None).unwrap();
         assert_eq!(t.prompt, "just text");
 
-        let j = parse_input(br#"{"foo":1}"#, None).unwrap(); // objeto sin prompt => texto
+        let j = parse_input(br#"{"foo":1}"#, None).unwrap(); // object without prompt => text
         assert_eq!(j.prompt, r#"{"foo":1}"#);
     }
 

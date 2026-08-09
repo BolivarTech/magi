@@ -682,7 +682,7 @@ mod tests {
 
         // Fixture built with `format!` (not a literal) so as not to trigger the repo's
         // hardcoded-secret scanner (`tests/no_hardcoded_secrets.rs`).
-        let body = "SECRET".repeat(4); // 24 caracteres alnum — cuerpo válido del patrón `sk-`.
+        let body = "SECRET".repeat(4); // 24 alnum characters — a valid `sk-` pattern body.
         let key = format!("sk-{body}");
 
         // How many characters of the key BODY remain retained on the "kept" side of the

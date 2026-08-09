@@ -156,7 +156,7 @@ fn mark(kept: String) -> String {
 /// `cap` and then concatenating would exceed the cap by `mark_overhead()` bytes.
 #[must_use]
 fn keep_verdict_and_first_finding(report: &str, cap: usize) -> Option<String> {
-    let anchors = SECTION_ANCHORS?; // sin anclas: este nivel no aplica
+    let anchors = SECTION_ANCHORS?; // no anchors: this level does not apply
     let start = report.find(anchors.verdict_start)?;
     let end = report
         .get(start..)
@@ -166,7 +166,7 @@ fn keep_verdict_and_first_finding(report: &str, cap: usize) -> Option<String> {
     if slice.is_empty() {
         return None;
     }
-    let budget = cap.checked_sub(mark_overhead())?; // cap ridículo ⇒ este nivel no aplica
+    let budget = cap.checked_sub(mark_overhead())?; // cap too small ⇒ this level does not apply
     Some(head_chars(slice, budget))
 }
 

@@ -228,7 +228,7 @@ pub const HEADLESS_TIMEOUT_HOLGURA_PCT: u64 = 20;
 /// not the sum of the three.
 #[must_use]
 pub fn headless_consult_timeout_secs(configured_ceiling: u64) -> u64 {
-    let dominant = 2 * configured_ceiling; // el término mayor de la fórmula
+    let dominant = 2 * configured_ceiling; // the formula's larger/dominant term
     let minimum = CLASSIFY_TIMEOUT_SECS + dominant;
     // §4.9: the slack is 10–30 % of the LARGER TERM, not of the total — over the total it
     // inflates proportionally to the small term, which is not the one that dominates the risk.

@@ -477,7 +477,7 @@ mod tests {
         let vault = cryptovault::CryptoVault::default();
         let (salt_fec, mut wrapped_fec, _) = bootstrap_envelope(&vault, M).expect("bootstrap");
         for b in wrapped_fec.iter_mut() {
-            *b ^= 0xFF; // daño masivo, más allá de la FEC
+            *b ^= 0xFF; // massive damage, beyond the FEC's correction capacity
         }
         let err = open_envelope(&vault, M, &salt_fec, &wrapped_fec).expect_err("corrupt must fail");
         assert!(matches!(err, VaultError::VaultMetaCorrupt));

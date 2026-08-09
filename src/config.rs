@@ -461,7 +461,7 @@ impl MagiConfig {
     /// bounded.
     fn validate_agent_timeout(&self) -> Result<(), ConfigError> {
         let Some(secs) = self.magi.agent_timeout_secs else {
-            return Ok(()); // ausente ⇒ el default built-in, ya válido
+            return Ok(()); // absent ⇒ the built-in default, already valid
         };
         if (AGENT_TIMEOUT_MIN_SECS..=AGENT_TIMEOUT_MAX_SECS).contains(&secs) {
             return Ok(());

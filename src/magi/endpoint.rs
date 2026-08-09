@@ -408,7 +408,7 @@ mod tests {
     /// SC-A16f: placeholder without entry fails CLOSED, does not substitute empty.
     #[test]
     fn a_missing_vault_entry_fails_closed_naming_the_entry() {
-        let mut vault = StubVault::with(&[("BASE_URL_USER", "juan")]); // falta la password
+        let mut vault = StubVault::with(&[("BASE_URL_USER", "juan")]); // password missing
         let err = EndpointTemplate::parse("https://[user]:[password]@host/v1", Scope::Root)
             .unwrap()
             .resolve(&mut vault, Scope::Root)
