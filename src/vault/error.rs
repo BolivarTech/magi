@@ -1,97 +1,91 @@
-// Author: Julian Bolivar
-// Version: 1.0.0
-// Date: 2026-07-14
-//! Errores de dominio del subsistema Vault.
+// Author: Julian Bolivar Version: 1.0.0 Date: 2026-07-14 Vault subsystem domain errors.
 //!
-//! Sigue el patrón de [`crate::memory::error::MemoryError`]: los tipos foráneos
-//! (`cryptovault`, `rusqlite`) se **stringifican** en lugar de envolverse, para
-//! mantener los tipos externos fuera de la API pública del vault y conservar
-//! `Send + Sync` sin acoplarse a sus versiones.
+//! Follows the pattern of [`crate::memory::error::MemoryError`]: foreign types (`cryptovault`,
+//! `rusqlite`) are **stringified** instead of wrapped, to keep external types out of the
+//! vault's public API and preserve `Send + Sync` without coupling to their versions.
 //!
-//! **Invariante de seguridad:** ningún mensaje de error contiene jamás el
-//! *valor* de un secreto — solo su *nombre* o la etapa que falló.
+//! **Security invariant:** no error message ever contains the
+//! *value* of a secret — only its *name* or the stage that failed.
 
 use std::path::PathBuf;
 
 use thiserror::Error;
 
-/// Errores de dominio del subsistema Vault.
+/// Vault subsystem domain errors.
 ///
-/// Cada variante nombra una etapa de fallo distinguible por el llamador; el
-/// AEAD subyacente impide falsificación sin importar cuál se exponga.
+/// Each variant names a failure stage distinguishable by the caller; the underlying AEAD
+/// prevents forgery regardless of which one is exposed.
 #[derive(Debug, Error)]
 pub enum VaultError {
-    /// El desenvolvimiento (`unwrap`) de la DEK falló el tag AEAD tras la
-    /// corrección FEC — es decir, la clave maestra es **incorrecta**.
+    /// The DEK unwrap failed the AEAD tag after FEC correction — that is, the master key is
+    /// **incorrect**.
     ///
-    /// Es **reintentable** y **nunca** dispara un borrado de datos: ver la
-    /// política de nunca-borrar (REQ-V35).
+    /// It is **retryable** and **never** triggers data deletion: see the never-delete policy
+    /// (REQ-V35).
     #[error("incorrect passphrase")]
     WrongPassphrase,
 
-    /// `vault_meta` está presente pero es irrecuperable **incluso tras** la
-    /// corrección FEC (corrupción más allá de la capacidad del códec).
+    /// `vault_meta` is present but unrecoverable **even after** FEC correction (corruption
+    /// beyond the codec's capacity).
     ///
-    /// Requiere una acción **explícita** del usuario; el sistema jamás se
-    /// auto-repara destruyendo datos.
+    /// Requires **explicit** user action; the system never self-repairs by destroying data.
     #[error("vault metadata is corrupt and unrecoverable")]
     VaultMetaCorrupt,
 
-    /// La DB de `.magi/` está **corrupta**: hay datos cifrados presentes pero
-    /// **no** hay envelope (DEK) para descifrarlos, o falta una tabla esperada
-    /// del schema (§2.1 / D-H10). **Never-delete absoluto:** este estado
-    /// **jamás** dispara un borrado ni un bootstrap encima — requiere acción
-    /// explícita del usuario (restaurar un backup o quitar `.magi/` a mano).
+    /// The `.magi/` DB is **corrupt**: encrypted data is present but
+    /// **no** envelope (DEK) exists to decrypt them, or an expected table is missing
+    /// from the schema (§2.1 / D-H10). **Absolute never-delete:** this state
+    /// **never** triggers a deletion or a bootstrap on top — requires
+    /// explicit user action (restore a backup or remove `.magi/` manually).
     ///
-    /// La variante es **estructurada** para que el borde construya un texto de
-    /// recuperación accionable: `db_path` nombra qué DB y `detail` por qué. El
-    /// `Display` expone **solo** el path y la clase — **nunca** un secreto.
+    /// The variant is **structured** so the edge can build actionable recovery text: `db_path`
+    /// names which DB and `detail` why. The `Display` exposes **only** the path and the class —
+    /// **never** a secret.
     #[error("database corrupt at {}: {detail}", .db_path.display())]
     DbCorrupt {
-        /// Ruta de la DB de `.magi/` afectada (no es material sensible).
+        /// Path of the affected `.magi/` DB (not sensitive material).
         db_path: PathBuf,
-        /// Clase de la corrupción (p.ej. "data present without envelope" o
-        /// "missing table `<name>`") — **jamás** contiene un secreto.
+        /// Class of corruption (e.g. "data present without envelope" or "missing table
+        /// `<name>`") — **never** contains a secret.
         detail: String,
     },
 
-    /// No existe un secreto con el nombre indicado. El nombre no es material
-    /// sensible, por lo que puede figurar en el mensaje.
+    /// No secret exists with the given name. The name is not sensitive material, so it may
+    /// appear in the message.
     #[error("secret not found: {0}")]
     SecretNotFound(String),
 
-    /// Fallo criptográfico propagado desde `cryptovault` (mensaje ya
-    /// sanitizado por el crate — sin oráculos de decode ni de timing).
+    /// Cryptographic failure propagated from `cryptovault` (message already sanitized by the
+    /// crate — no decode or timing oracles).
     #[error("crypto error: {0}")]
     Crypto(String),
 
-    /// Fallo a nivel de almacenamiento SQLite.
+    /// Failure at the SQLite storage level.
     #[error("storage error: {0}")]
     Storage(String),
 
-    /// No hay TTY y no se proveyó la passphrase por `-p`/`MAGI_PASSPHRASE`
-    /// (REQ-V40): la passphrase **jamás** se lee de un pipe. Reintentable.
+    /// No TTY and the passphrase was not provided via `-p`/`MAGI_PASSPHRASE` (REQ-V40): the
+    /// passphrase is **never** read from a pipe. Retryable.
     #[error("no passphrase: use -p or MAGI_PASSPHRASE in non-interactive environments")]
     PassphraseUnavailable,
 
-    /// La passphrase no alcanza el piso duro de fortaleza (REQ-V18). El mensaje
-    /// lleva los motivos + tips, **jamás** la passphrase.
+    /// The passphrase does not reach the hard strength floor (REQ-V18). The message carries the
+    /// reasons + tips, **never** the passphrase.
     #[error("passphrase rejected: {0}")]
     WeakPassphrase(String),
 
-    /// Error de E/S del terminal (prompt oculto / eco). Mensaje del `io::Error`,
-    /// sin material sensible.
+    /// Terminal I/O error (hidden prompt / echo). Message from the `io::Error`, no sensitive
+    /// material.
     #[error("I/O error: {0}")]
     Io(String),
 
-    /// El usuario no confirmó una operación destructiva (REQ-V22). El CLI
-    /// sale con código de salida distinto de cero para que los scripts lo
-    /// detecten; no es un fallo del sistema.
+    /// The user did not confirm a destructive operation (REQ-V22). The CLI exits with a non-
+    /// zero exit code so scripts detect it; it is not a system failure.
     #[error("operation cancelled")]
     Aborted,
 
-    /// El valor supera `cryptovault::MAX_PLAINTEXT_LEN` (MAGI run 4,
-    /// Caspar). Lleva el límite, nunca el valor.
+    /// The value exceeds `cryptovault::MAX_PLAINTEXT_LEN` (MAGI run 4, Caspar). It carries the
+    /// limit, never the value.
     #[error("value exceeds {0} bytes")]
     ValueTooLarge(usize),
 }

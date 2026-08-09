@@ -18,6 +18,10 @@ CLAUDE.local.md
 sbtdd/
 planning/
 .superpowers/
+# Verifiers whose ONLY subject is the gitignored plan: tracking a checker while its
+# target stays local would leave a script in the repo that nobody else can run.
+/scripts/plan_contract_check.py
+/scripts/plan_symbol_sweep.py
 
 # Internal development docs (audit, strategy, roadmap — not public)
 dev-docs/

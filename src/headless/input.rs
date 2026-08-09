@@ -1,97 +1,121 @@
-// Author: Julian Bolivar
-// Version: 1.1.0
-// Date: 2026-07-18
+// Author: Julian Bolivar Version: 1.1.0 Date: 2026-07-18
 
-//! Lectura y parseo de la entrada headless (`-i <file>` / stdin, REQ-H03/H10/H11/H29).
+//! Reading and parsing of headless input (`-i <file>` / stdin, REQ-H03/H10/H11/H29).
 //!
-//! Dos responsabilidades ortogonales:
-//! - [`read_input_bounded`] acota los bytes no confiables a `MAX_INPUT_BYTES`
-//!   (nunca bufferiza una fuente hostil ilimitada).
-//! - [`parse_input`] auto-detecta texto-plano vs. envelope JSON y, para el
-//!   envelope, aplica un **único** parser endurecido (un solo recorrido del
-//!   JSON) que rechaza claves duplicadas, campos desconocidos junto a `prompt`,
-//!   `prompt` no-string y anidamiento patológico (`> MAX_JSON_DEPTH`), incluso
-//!   dentro de los valores de campos desconocidos.
+//! Two orthogonal responsibilities:
+//! - [`read_input_bounded`] bounds untrusted bytes to `MAX_INPUT_BYTES` (never buffers an unlimited hostile source).
+//! - [`parse_input`] auto-detects plain text vs. JSON envelope and, for the envelope, applies a **single** hardened parser (one pass over the JSON) that rejects duplicate keys, unknown fields alongside `prompt`, non-string `prompt`, and pathological nesting (`> MAX_JSON_DEPTH`), even inside the values of unknown fields.
 
 use std::cell::Cell;
 use std::collections::HashSet;
 use std::fmt;
 use std::io::Read;
 
+use magi_core::schema::Mode;
 use serde::de::{
     self, DeserializeSeed, Deserializer, Error as _, IgnoredAny, MapAccess, SeqAccess, Visitor,
 };
 
 use super::limits::MAX_JSON_DEPTH;
 use super::HeadlessError;
+use crate::magi::mode::{ModeExt, ModeParseError};
 
-/// Mensaje de error cuando el anidamiento JSON supera [`MAX_JSON_DEPTH`].
+/// Error message when JSON nesting exceeds [`MAX_JSON_DEPTH`].
 ///
-/// Se comparte entre el visitor del envelope y [`DepthLimitedIgnoredAny`], por
-/// lo que vive como constante (DRY, aparece en los tres puntos de guardia).
+/// It is shared between the envelope visitor and [`DepthLimitedIgnoredAny`], so it lives as a
+/// constant (DRY, it appears in the three guard points).
 const DEPTH_EXCEEDED: &str = "JSON nesting too deep";
 
-/// Mensaje de error cuando aparece una clave top-level duplicada (REQ-H11: el
-/// last-wins silencioso de `serde_json` se rechaza explícitamente).
+/// Error message when a duplicate top-level key appears (REQ-H11: `serde_json`'s silent last-
+/// wins is explicitly rejected).
 const DUPLICATE_KEY: &str = "duplicate top-level key";
 
-/// Mensaje de error cuando hay un campo desconocido junto a un `prompt`
-/// presente (deny-unknown se aplica sólo entonces, no antes).
+/// Error message when there is an unknown field alongside a present `prompt` (deny-unknown
+/// applies only then, not before).
 const UNKNOWN_FIELD: &str = "unknown field alongside prompt";
 
-/// Formato de la entrada headless, forzable por `--input-format` (REQ-H04).
+/// Format of the headless input, forceable via `--input-format` (REQ-H04).
 ///
-/// Declarado como enum público porque el target de fuzz (T10) y el dispatch de
-/// CLI lo referencian; el auto-detect (`None`) lo infiere del primer byte.
+/// Declared as a public enum because the fuzz target (T10) and CLI dispatch reference it; auto-
+/// detect (`None`) infers it from the first byte.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputFormat {
-    /// La entrada es texto plano: todo el contenido es el `prompt` verbatim.
+    /// The input is plain text: all content is the `prompt` verbatim.
     Text,
-    /// La entrada es un envelope JSON (objeto con al menos un `prompt`).
+    /// The input is a JSON envelope (object with at least one `prompt`).
     Json,
 }
 
-/// Envelope de entrada resuelto (REQ-H11): el `prompt` obligatorio más los
-/// campos opcionales de parametrización por-request.
+/// Resolved input envelope (REQ-H11): the mandatory `prompt` plus the optional per-request
+/// parameterization fields.
 ///
-/// Todo campo ausente en el JSON queda `None`; la resolución de defaults
-/// (`magi.toml` / flags / agente proactivo) es responsabilidad de una tarea
-/// posterior, no de este parser.
+/// Any field absent in the JSON becomes `None`; default resolution (`magi.toml` / flags /
+/// proactive agent) is the responsibility of a later task, not this parser.
 #[derive(Debug, Clone)]
 pub struct Envelope {
-    /// Prompt del usuario (obligatorio). En modo texto es la entrada completa
-    /// verbatim; en modo envelope, el valor string del campo `prompt`.
+    /// User prompt (mandatory). In text mode it is the entire input verbatim; in envelope mode,
+    /// the string value of the `prompt` field.
     pub prompt: String,
-    /// System-prompt propuesto por el caller (política de seguridad; el
-    /// operador decide si se honra — REQ-H12b).
+    /// System prompt proposed by the caller (security policy; the operator decides whether to
+    /// honor it — REQ-H12b).
     pub system: Option<String>,
-    /// Modelo LLM propuesto por el caller.
+    /// LLM model proposed by the caller.
     pub model: Option<String>,
-    /// Proveedor LLM propuesto por el caller.
+    /// LLM provider proposed by the caller.
     pub provider: Option<String>,
-    /// Tope de llamadas a tools propuesto por el caller (clampeado al techo del
-    /// operador en una tarea posterior — REQ-H12b).
+    /// Tool call cap proposed by the caller (clamped to the operator's ceiling in a later task
+    /// — REQ-H12b).
     pub max_tool_calls: Option<u32>,
-    /// Si forzar una pasada MAGI multiperspectiva (REQ-H22).
+    /// Whether to force a MAGI multi-perspective pass (REQ-H22).
     pub consult: Option<bool>,
+    /// Explicit mode proposed by the caller (REQ-A07/A07c). `None` if the field is absent; the
+    /// content (absent/blank vs. present-and-unrecognized) is validated in
+    /// [`Envelope::resolved_mode`], not here — this parser only collects the raw string, just
+    /// as it does for `system`/`model`/`provider`.
+    pub mode: Option<String>,
+    /// Declares that the `prompt` under analysis is NOT trusted (REQ-A07d): with this active,
+    /// omitting the mode becomes an error instead of inference. `None` if the field is absent —
+    /// the surface that actually needs this flag is precisely this one (the envelope is the
+    /// consumer of an automated gate).
+    pub untrusted_content: Option<bool>,
 }
 
-/// Resultado del recorrido del mapa top-level antes de la decisión final.
+impl Envelope {
+    /// Resolves the envelope's `mode` field to a [`Mode`] (REQ-A07c).
+    ///
+    /// Same treatment as a configuration value ([`ModeExt::parse_config_value`]): absent or
+    /// blank ⇒ `Ok(None)`; present and unrecognized ⇒ `Err`. The field was declared by a human
+    /// or an integrator system writing the envelope, not a model — therefore it goes through
+    /// configuration validation and not through `magi_rs::magi::mode::normalize_label`, which
+    /// is the open-format normalization intended for LLM output text.
+    ///
+    /// # Errors
+    /// [`ModeParseError::Unknown`] if `mode` carries content and does not name any of the three
+    /// valid modes. Narrow allow: consumed by the real mode resolution in Task 2.3/2.4 — this
+    /// task only adds the field and its parsing, it does not connect it to dispatch. Covered by
+    /// `every_surface_accepts_an_explicit_mode`.
+    #[allow(dead_code)]
+    pub fn resolved_mode(&self) -> Result<Option<Mode>, ModeParseError> {
+        <Mode as ModeExt>::parse_config_value(self.mode.as_deref().unwrap_or_default())
+    }
+}
+
+/// Result of the top-level map traversal before the final decision.
 ///
-/// El visitor no puede decidir texto-vs-envelope hasta el **final** del mapa
-/// (SC-H36: un objeto sin `prompt` es texto verbatim, sin importar sus otros
-/// campos), por lo que separa "es un envelope válido" de "no había `prompt`".
+/// The visitor cannot decide text-vs-envelope until the **end** of the map (SC-H36: an object
+/// without `prompt` is verbatim text, regardless of its other fields), so it separates "is a
+/// valid envelope" from "there was no `prompt`".
 enum MapOutcome {
-    /// El objeto tenía `prompt` y sólo campos conocidos: es un envelope.
+    /// The object had `prompt` and only known fields: it is an envelope.
     Envelope(Envelope),
-    /// El objeto NO tenía `prompt`: no es un envelope (cae a texto verbatim,
-    /// salvo `--input-format json` que lo convierte en error de input).
+    /// The object did NOT have `prompt`: it is not an envelope (falls back to verbatim text,
+    /// except `--input-format json` turns it into an input error).
     NoPrompt,
 }
 
-/// Construye un [`Envelope`] de sólo-texto: todo el input es el `prompt`.
+/// Builds a text-only [`Envelope`]: all input is the `prompt`.
 ///
-/// Complejidad `O(n)` por la copia del texto; el resto de campos quedan `None`.
+/// Complexity `O(n)` due to copying the text; the rest of the fields become `None`.
 fn text_envelope(text: &str) -> Envelope {
     Envelope {
         prompt: text.to_string(),
@@ -100,30 +124,30 @@ fn text_envelope(text: &str) -> Envelope {
         provider: None,
         max_tool_calls: None,
         consult: None,
+        mode: None,
+        untrusted_content: None,
     }
 }
 
-/// `true` si `byte` es whitespace JSON (space, tab, LF, CR).
+/// `true` if `byte` is JSON whitespace (space, tab, LF, CR).
 ///
-/// Se usa para hallar el primer byte significativo del auto-detect sin
-/// depender de `char::is_whitespace` (que aceptaría Unicode fuera del grammar
-/// JSON).
+/// Used to find the first significant byte of auto-detect without relying on
+/// `char::is_whitespace` (which would accept Unicode outside the JSON grammar).
 fn is_json_whitespace(byte: u8) -> bool {
     matches!(byte, b' ' | b'\t' | b'\n' | b'\r')
 }
 
-/// Entra a un contenedor JSON (map/seq) incrementando `depth` y falla si supera
+/// Enters a JSON container (map/seq) incrementing `depth` and fails if it exceeds
 /// [`MAX_JSON_DEPTH`].
 ///
-/// Compartida por [`EnvelopeVisitor`] y [`DepthLimitedIgnoredAny`] para que el
-/// tope de profundidad sea **global** (64 vale para todo valor, conocido o no —
-/// cierra el bypass del `IgnoredAny` plano, que recursaría bajo el límite
-/// interno de `serde_json`, 128).
+/// Shared by [`EnvelopeVisitor`] and [`DepthLimitedIgnoredAny`] so the depth cap is **global**
+/// (64 applies to every value, known or not — it closes the bypass of plain `IgnoredAny`, which
+/// would recurse under `serde_json`'s internal limit, 128).
 ///
 /// # Errors
 ///
-/// Devuelve `E::custom(DEPTH_EXCEEDED)` si la profundidad tras incrementar
-/// excede [`MAX_JSON_DEPTH`].
+/// Returns `E::custom(DEPTH_EXCEEDED)` if the depth after incrementing exceeds
+/// [`MAX_JSON_DEPTH`].
 fn enter_depth<E: de::Error>(depth: &Cell<u32>) -> Result<(), E> {
     let next = depth.get().saturating_add(1);
     if next > MAX_JSON_DEPTH {
@@ -133,20 +157,19 @@ fn enter_depth<E: de::Error>(depth: &Cell<u32>) -> Result<(), E> {
     Ok(())
 }
 
-/// Sale de un contenedor JSON decrementando `depth` (saturante por robustez).
+/// Leaves a JSON container decrementing `depth` (saturating for robustness).
 fn leave_depth(depth: &Cell<u32>) {
     depth.set(depth.get().saturating_sub(1));
 }
 
-/// Seed que ignora el contenido de un valor JSON pero **cuenta su profundidad**
-/// contra [`MAX_JSON_DEPTH`], compartiendo el contador con el visitor padre.
+/// Seed that ignores the content of a JSON value but **counts its depth** against
+/// [`MAX_JSON_DEPTH`], sharing the counter with the parent visitor.
 ///
-/// Reemplaza a `serde::de::IgnoredAny` para los valores de campos desconocidos:
-/// el `IgnoredAny` plano recursa bajo el límite interno de `serde_json` (128),
-/// no bajo el nuestro (64), dejando pasar un valor profundo-en-desconocido de
-/// profundidad ∈ (64, 128]. Este seed cierra ese bypass.
+/// Replaces `serde::de::IgnoredAny` for the values of unknown fields: plain `IgnoredAny`
+/// recurses under `serde_json`'s internal limit (128), not under ours (64), allowing a deep-in-
+/// unknown value of depth ∈ (64, 128]. This seed closes that bypass.
 struct DepthLimitedIgnoredAny<'a> {
-    /// Contador de profundidad compartido con el visitor del envelope.
+    /// Depth counter shared with the envelope visitor.
     depth: &'a Cell<u32>,
 }
 
@@ -161,10 +184,10 @@ impl<'de, 'a> DeserializeSeed<'de> for DepthLimitedIgnoredAny<'a> {
     }
 }
 
-/// Visitor que descarta cualquier valor JSON pero contabiliza su anidamiento
-/// (delegado por [`DepthLimitedIgnoredAny`]).
+/// Visitor that discards any JSON value but accounts for its nesting (delegated by
+/// [`DepthLimitedIgnoredAny`]).
 struct DepthLimitedVisitor<'a> {
-    /// Contador de profundidad compartido.
+    /// Shared depth counter.
     depth: &'a Cell<u32>,
 }
 
@@ -221,9 +244,8 @@ impl<'de, 'a> Visitor<'de> for DepthLimitedVisitor<'a> {
         A: MapAccess<'de>,
     {
         enter_depth::<A::Error>(self.depth)?;
-        // Las claves JSON son siempre strings (profundidad 1): `IgnoredAny`
-        // plano es seguro para ellas. Sólo los VALORES pueden anidar, y esos
-        // llevan el seed que cuenta profundidad.
+        // JSON keys are always strings (depth 1): plain `IgnoredAny` is safe for them. Only
+        // VALUES can nest, and those carry the depth-counting seed.
         while map.next_key::<IgnoredAny>()?.is_some() {
             map.next_value_seed(DepthLimitedIgnoredAny { depth: self.depth })?;
         }
@@ -232,10 +254,10 @@ impl<'de, 'a> Visitor<'de> for DepthLimitedVisitor<'a> {
     }
 }
 
-/// Visitor del envelope: un **único** recorrido del objeto top-level que aplica
-/// todas las guardias y recolecta las claves antes de la decisión final.
+/// Envelope visitor: a **single** pass over the top-level object that applies all guards and
+/// collects the keys before the final decision.
 struct EnvelopeVisitor {
-    /// Contador de profundidad; el objeto top-level cuenta como nivel 1.
+    /// Depth counter; the top-level object counts as level 1.
     depth: Cell<u32>,
 }
 
@@ -259,24 +281,28 @@ impl<'de> Visitor<'de> for EnvelopeVisitor {
         let mut provider: Option<String> = None;
         let mut max_tool_calls: Option<u32> = None;
         let mut consult: Option<bool> = None;
+        let mut mode: Option<String> = None;
+        let mut untrusted_content: Option<bool> = None;
         let mut unknown_seen = false;
 
         while let Some(key) = map.next_key::<String>()? {
-            // Dup-key aplica SIEMPRE (aborta antes de decidir) — REQ-H11.
+            // Dup-key applies ALWAYS (aborts before deciding) — REQ-H11.
             if !seen.insert(key.clone()) {
                 return Err(A::Error::custom(DUPLICATE_KEY));
             }
             match key.as_str() {
-                // `prompt` no-string ⇒ error de tipo inmediato (sin recursión):
-                // el deserializador de String falla en el primer token no-string.
+                // Non-string `prompt` ⇒ immediate type error (no recursion): the String
+                // deserializer fails on the first non-string token.
                 "prompt" => prompt = Some(map.next_value::<String>()?),
                 "system" => system = map.next_value::<Option<String>>()?,
                 "model" => model = map.next_value::<Option<String>>()?,
                 "provider" => provider = map.next_value::<Option<String>>()?,
                 "max_tool_calls" => max_tool_calls = map.next_value::<Option<u32>>()?,
                 "consult" => consult = map.next_value::<Option<bool>>()?,
-                // Campo desconocido: su valor se consume con el seed que cuenta
-                // profundidad (NUNCA `IgnoredAny` plano — cerraría bajo 128).
+                "mode" => mode = map.next_value::<Option<String>>()?,
+                "untrusted_content" => untrusted_content = map.next_value::<Option<bool>>()?,
+                // Unknown field: its value is consumed with the depth-counting seed (NEVER
+                // plain `IgnoredAny` — it would fall under 128).
                 _ => {
                     unknown_seen = true;
                     map.next_value_seed(DepthLimitedIgnoredAny { depth: &self.depth })?;
@@ -286,10 +312,10 @@ impl<'de> Visitor<'de> for EnvelopeVisitor {
 
         leave_depth(&self.depth);
 
-        // Decisión AL FINAL del mapa, en orden (REQ-H10):
-        //   1. sin `prompt` ⇒ NoPrompt (texto verbatim; SC-H36 gana sobre deny-unknown).
-        //   2. con `prompt` + campo desconocido ⇒ error (deny-unknown recién acá).
-        //   3. con `prompt` + sólo conocidos ⇒ Envelope.
+        // Decision AT THE END of the map, in order (REQ-H10):
+        // 1. without `prompt` ⇒ NoPrompt (verbatim text; SC-H36 wins over deny-unknown).
+        // 2. with `prompt` + unknown field ⇒ error (deny-unknown only here).
+        // 3. with `prompt` + only known fields ⇒ Envelope.
         match prompt {
             None => Ok(MapOutcome::NoPrompt),
             Some(prompt) => {
@@ -303,6 +329,8 @@ impl<'de> Visitor<'de> for EnvelopeVisitor {
                         provider,
                         max_tool_calls,
                         consult,
+                        mode,
+                        untrusted_content,
                     }))
                 }
             }
@@ -310,30 +338,28 @@ impl<'de> Visitor<'de> for EnvelopeVisitor {
     }
 }
 
-/// Lee `reader` hasta EOF, acotado a `max_input_bytes` (REQ-H29, anti-DoS).
+/// Reads `reader` until EOF, bounded to `max_input_bytes` (REQ-H29, anti-DoS).
 ///
-/// `max_input_bytes` es el cap EFECTIVO de esta corrida — el operador puede
-/// bajarlo (nunca subirlo) vía `[headless] max_input_bytes` en `magi.toml`
-/// (spec §11); [`MAX_INPUT_BYTES`](super::limits::MAX_INPUT_BYTES) es solo el
-/// valor por-default que `HeadlessLimits::default()` usa cuando el operador no
-/// lo fija.
+/// `max_input_bytes` is the EFFECTIVE cap for this run — the operator can lower it (never raise
+/// it) via `[headless] max_input_bytes` in `magi.toml` (spec §11);
+/// [`MAX_INPUT_BYTES`](super::limits::MAX_INPUT_BYTES) is only the default value that
+/// `HeadlessLimits::default()` uses when the operator does not set it.
 ///
-/// Usa `reader.take(max_input_bytes as u64 + 1)`: el `+1` es lo que permite
-/// distinguir "la fuente tenía exactamente el cap" de "la fuente excedía el
-/// cap" sin necesidad de leer más allá — una fuente hostil e ilimitada (p.ej.
-/// `std::io::repeat`) nunca se bufferiza por completo, porque `take` corta la
-/// lectura en `cap + 1` bytes pase lo que pase aguas arriba.
+/// Uses `reader.take(max_input_bytes as u64 + 1)`: the `+1` is what makes it possible to
+/// distinguish "the source had exactly the cap" from "the source exceeded the cap" without
+/// reading further — a hostile and unlimited source (e.g., `std::io::repeat`) is never fully
+/// buffered, because `take` cuts off reading at `cap + 1` bytes no matter what happens
+/// upstream.
 ///
-/// Complejidad `O(n)` en el tamaño de la entrada, acotada por `cap + 1`
-/// sin importar cuánto produzca `reader`.
+/// Complexity `O(n)` in the size of the input, bounded by `cap + 1` regardless of how much
+/// `reader` produces.
 ///
 /// # Errors
 ///
-/// Devuelve [`HeadlessError::InputTooLarge`] con el límite configurado si el
-/// contenido leído excede `max_input_bytes`. Devuelve [`HeadlessError::Io`] si
-/// el `reader` subyacente falla durante la lectura (p.ej. un error real de E/S
-/// de stdin o de un archivo); ese caso se propaga tal cual, sin exponer nunca
-/// contenido de la entrada en el mensaje de error.
+/// Returns [`HeadlessError::InputTooLarge`] with the configured limit if the read content
+/// exceeds `max_input_bytes`. Returns [`HeadlessError::Io`] if the underlying `reader` fails
+/// during reading (e.g., a real I/O error from stdin or a file); that case is propagated as-is,
+/// never exposing input content in the error message.
 pub fn read_input_bounded(
     reader: impl Read,
     max_input_bytes: usize,
@@ -351,48 +377,41 @@ pub fn read_input_bounded(
     Ok(buf)
 }
 
-/// Parsea `bytes` a un [`Envelope`], auto-detectando texto-plano vs. envelope
-/// JSON (o forzando el formato con `forced_fmt`) — REQ-H10/H11.
+/// Parses `bytes` into an [`Envelope`], auto-detecting plain text vs. JSON envelope (or forcing
+/// the format with `forced_fmt`) — REQ-H10/H11.
 ///
-/// Semántica (un solo parser, sin doble-parse):
-/// 1. UTF-8 estricto: bytes no-UTF8 ⇒ [`HeadlessError::InputInvalid`].
-/// 2. `forced_fmt == Some(Text)` ⇒ nunca parsea: todo el input es el `prompt`.
-/// 3. Auto-detect por el primer byte no-blanco: si no es `{`, la entrada no es
-///    un envelope ⇒ prompt verbatim (o `InputInvalid` si `forced_fmt == Json`).
-/// 4. Si es `{`, un único recorrido (`EnvelopeVisitor`) aplica dup-key,
-///    profundidad (`> MAX_JSON_DEPTH`, incluso dentro de campos desconocidos) y
-///    la decisión de fin-de-mapa (sin `prompt` ⇒ texto; con `prompt` + campo
-///    desconocido ⇒ error; `prompt` no-string ⇒ error).
+/// Semantics (a single parser, no double-parse):
+/// 1. Strict UTF-8: non-UTF8 bytes ⇒ [`HeadlessError::InputInvalid`].
+/// 2. `forced_fmt == Some(Text)` ⇒ never parses: all input is the `prompt`.
+/// 3. Auto-detect by the first non-blank byte: if it is not `{`, the input is not an envelope ⇒ prompt verbatim (or `InputInvalid` if `forced_fmt == Json`).
+/// 4. If it is `{`, a single pass (`EnvelopeVisitor`) applies dup-key, depth (`> MAX_JSON_DEPTH`, even inside unknown fields) and the end-of-map decision (without `prompt` ⇒ text; with `prompt` + unknown field ⇒ error; non-string `prompt` ⇒ error).
 ///
-/// La guardia de profundidad **gana** sobre "texto verbatim": un `{`-input sin
-/// `prompt` pero patológicamente anidado se **rechaza** por DoS, no se acepta
-/// como prompt gigante.
+/// The depth guard **wins** over "verbatim text": a `{`-input without `prompt` but
+/// pathologically nested is **rejected** for DoS, not accepted as a giant prompt.
 ///
-/// Complejidad `O(n)` en el tamaño de la entrada; la recursión del recorrido
-/// está acotada por [`MAX_JSON_DEPTH`], por lo que no puede desbordar la pila.
+/// Complexity `O(n)` in the size of the input; the traversal recursion is bounded by
+/// [`MAX_JSON_DEPTH`], so it cannot overflow the stack.
 ///
 /// # Errors
 ///
-/// Devuelve [`HeadlessError::InputInvalid`] si: los bytes no son UTF-8; se
-/// fuerza `Json` pero la entrada no es un objeto (o no tiene `prompt`); el JSON
-/// es malformado; hay una clave duplicada; hay un campo desconocido junto a
-/// `prompt`; `prompt` no es un string; o el anidamiento supera
-/// [`MAX_JSON_DEPTH`]. El mensaje **jamás** incluye el contenido crudo de la
-/// entrada.
+/// Returns [`HeadlessError::InputInvalid`] if: the bytes are not UTF-8; `Json` is forced but
+/// the input is not an object (or has no `prompt`); the JSON is malformed; there is a duplicate
+/// key; there is an unknown field alongside `prompt`; `prompt` is not a string; or the nesting
+/// exceeds [`MAX_JSON_DEPTH`]. The message **never** includes the raw content of the input.
 pub fn parse_input(
     bytes: &[u8],
     forced_fmt: Option<InputFormat>,
 ) -> Result<Envelope, HeadlessError> {
-    // 1. UTF-8 estricto.
+    // 1. Strict UTF-8.
     let text = std::str::from_utf8(bytes)
         .map_err(|_| HeadlessError::InputInvalid("input is not valid UTF-8".to_string()))?;
 
-    // 2. Formato forzado a texto: nunca se parsea como JSON.
+    // 2. Format forced to text: it is never parsed as JSON.
     if forced_fmt == Some(InputFormat::Text) {
         return Ok(text_envelope(text));
     }
 
-    // 3. Auto-detect barato: primer byte no-blanco.
+    // 3. Cheap auto-detect: first non-blank byte.
     let looks_like_object = text.bytes().find(|&b| !is_json_whitespace(b)) == Some(b'{');
 
     if !looks_like_object {
@@ -404,14 +423,14 @@ pub fn parse_input(
         return Ok(text_envelope(text));
     }
 
-    // 4. Único parser endurecido del objeto.
+    // 4. Single hardened parser of the object.
     let mut de = serde_json::Deserializer::from_slice(bytes);
     let outcome = (&mut de)
         .deserialize_map(EnvelopeVisitor {
             depth: Cell::new(0),
         })
         .map_err(|_| HeadlessError::InputInvalid("malformed JSON envelope".to_string()))?;
-    // Rechazar datos basura tras el objeto (sin silent-accept).
+    // Reject garbage data after the object (no silent-accept).
     de.end().map_err(|_| {
         HeadlessError::InputInvalid("trailing data after JSON envelope".to_string())
     })?;
@@ -437,8 +456,8 @@ mod tests {
     use super::super::limits::MAX_INPUT_BYTES;
     use super::*;
 
-    /// Una fuente ilimitada (`io::repeat`) nunca se bufferiza por completo:
-    /// `take(cap+1)` la corta y el resultado es `InputTooLarge`, no un hang/OOM.
+    /// An unlimited source (`io::repeat`) is never fully buffered: `take(cap+1)` cuts it and
+    /// the result is `InputTooLarge`, not a hang/OOM.
     #[test]
     fn test_read_input_rejects_oversized_without_buffering_all() {
         let r = std::io::repeat(b'a');
@@ -448,8 +467,8 @@ mod tests {
         ));
     }
 
-    /// Entrada vacía es válida a este nivel: el parser de envelope (tarea
-    /// posterior) es quien decide si un prompt vacío es un error de input.
+    /// Empty input is valid at this level: the envelope parser (later task) is the one that
+    /// decides whether an empty prompt is an input error.
     #[test]
     fn test_read_input_empty_reader_returns_empty_vec() {
         let r = Cursor::new(Vec::new());
@@ -459,7 +478,7 @@ mod tests {
         );
     }
 
-    /// Caso borde exacto: `MAX_INPUT_BYTES` bytes caben justo bajo el cap.
+    /// Exact edge case: `MAX_INPUT_BYTES` bytes fit just under the cap.
     #[test]
     fn test_read_input_accepts_exactly_max_input_bytes() {
         let r = std::io::repeat(b'x').take(MAX_INPUT_BYTES as u64);
@@ -467,7 +486,7 @@ mod tests {
         assert_eq!(out.len(), MAX_INPUT_BYTES);
     }
 
-    /// Caso borde exacto: `MAX_INPUT_BYTES + 1` bytes excede el cap por uno.
+    /// Exact edge case: `MAX_INPUT_BYTES + 1` bytes exceeds the cap by one.
     #[test]
     fn test_read_input_rejects_max_input_bytes_plus_one() {
         let r = std::io::repeat(b'x').take(MAX_INPUT_BYTES as u64 + 1);
@@ -477,10 +496,9 @@ mod tests {
         ));
     }
 
-    /// REQ-H29/spec §11: el cap EFECTIVO (`[headless] max_input_bytes`) debe
-    /// gobernar la lectura, no el `MAX_INPUT_BYTES` constante — un operador que
-    /// baja el cap a 10 bytes debe ver una entrada de 11 bytes rechazada aunque
-    /// esté muy por debajo del default de 10 MiB.
+    /// REQ-H29/spec §11: the EFFECTIVE cap (`[headless] max_input_bytes`) must govern reading,
+    /// not the constant `MAX_INPUT_BYTES` — an operator who lowers the cap to 10 bytes must see
+    /// an 11-byte input rejected even if it is far below the 10 MiB default.
     #[test]
     fn test_read_input_bounded_respects_custom_effective_cap() {
         let small_cap = 10usize;
@@ -501,8 +519,8 @@ mod tests {
 
     // ---- parse_input --------------------------------------------------------
 
-    /// Auto-detect: objeto con `prompt` ⇒ envelope; texto ⇒ prompt verbatim;
-    /// objeto SIN `prompt` ⇒ texto verbatim (SC-H36).
+    /// Auto-detect: object with `prompt` ⇒ envelope; text ⇒ prompt verbatim; object WITHOUT
+    /// `prompt` ⇒ verbatim text (SC-H36).
     #[test]
     fn test_parse_input_autodetect() {
         let e = parse_input(br#"{"prompt":"hi","consult":true}"#, None).unwrap();
@@ -512,13 +530,44 @@ mod tests {
         let t = parse_input(b"just text", None).unwrap();
         assert_eq!(t.prompt, "just text");
 
-        let j = parse_input(br#"{"foo":1}"#, None).unwrap(); // objeto sin prompt => texto
+        let j = parse_input(br#"{"foo":1}"#, None).unwrap(); // object without prompt => text
         assert_eq!(j.prompt, r#"{"foo":1}"#);
     }
 
-    /// La prioridad de deny-unknown depende de la presencia de `prompt`
-    /// (resuelve la contradicción `{"foo":1}`): sin `prompt`, un campo
-    /// desconocido NO invalida (es texto); con `prompt`, sí.
+    /// The envelope collects `mode`/`untrusted_content` just like its other optional fields,
+    /// and `resolved_mode` validates the raw string (REQ-A07/A07c/A07d).
+    #[test]
+    fn test_parse_input_carries_mode_and_untrusted_content() {
+        let e = parse_input(
+            br#"{"prompt":"x","mode":"design","untrusted_content":true}"#,
+            None,
+        )
+        .unwrap();
+        assert_eq!(e.mode.as_deref(), Some("design"));
+        assert_eq!(e.resolved_mode().unwrap(), Some(Mode::Design));
+        assert_eq!(e.untrusted_content, Some(true));
+
+        // Absent ⇒ `None`, without inventing a default.
+        let bare = parse_input(br#"{"prompt":"x"}"#, None).unwrap();
+        assert_eq!(bare.mode, None);
+        assert_eq!(bare.resolved_mode().unwrap(), None);
+        assert_eq!(bare.untrusted_content, None);
+    }
+
+    /// A present and unrecognized `mode` is a typed error, not a silent `None` — same rule as a
+    /// configuration value (REQ-A07c).
+    #[test]
+    fn test_envelope_resolved_mode_rejects_an_unknown_label() {
+        let e = parse_input(br#"{"prompt":"x","mode":"banana"}"#, None).unwrap();
+        assert!(matches!(
+            e.resolved_mode(),
+            Err(ModeParseError::Unknown { .. })
+        ));
+    }
+
+    /// The priority of deny-unknown depends on the presence of `prompt` (resolves the
+    /// contradiction `{"foo":1}`): without `prompt`, an unknown field does NOT invalidate (it
+    /// is text); with `prompt`, it does.
     #[test]
     fn test_parse_input_unknown_field_priority_depends_on_prompt_presence() {
         let t = parse_input(br#"{"foo":1}"#, None).unwrap();
@@ -537,8 +586,8 @@ mod tests {
         );
     }
 
-    /// `prompt` no-string ⇒ InputInvalid; clave duplicada ⇒ InputInvalid;
-    /// anidamiento profundo (forzado Json, no-objeto) ⇒ InputInvalid.
+    /// Non-string `prompt` ⇒ InputInvalid; duplicate key ⇒ InputInvalid; deep nesting (forced
+    /// Json, non-object) ⇒ InputInvalid.
     #[test]
     fn test_parse_input_rejects_nonstring_prompt_dupkey_and_deep() {
         assert!(matches!(
@@ -556,9 +605,9 @@ mod tests {
         ));
     }
 
-    /// Construye `levels` objetos `{"a": ...}` anidados, valor interno `1`.
+    /// Builds `levels` nested `{"a": ...}` objects, inner value `1`.
     ///
-    /// La profundidad de contenedores resultante es exactamente `levels`.
+    /// The resulting container depth is exactly `levels`.
     fn nested_object(levels: u32) -> String {
         let mut s = String::from("1");
         for _ in 0..levels {
@@ -567,22 +616,22 @@ mod tests {
         s
     }
 
-    /// Frontera de profundidad: 64 niveles OK (cae a texto verbatim), 65
-    /// niveles ⇒ InputInvalid por la guardia de profundidad.
+    /// Depth boundary: 64 levels OK (falls back to verbatim text), 65 levels ⇒ InputInvalid due
+    /// to the depth guard.
     #[test]
     fn test_parse_input_depth_boundary_64_ok_65_rejected() {
-        // 64 contenedores (== MAX_JSON_DEPTH): NO error. Sin `prompt` ⇒ texto.
+        // 64 containers (== MAX_JSON_DEPTH): NO error. Without `prompt` ⇒ text.
         assert!(parse_input(nested_object(64).as_bytes(), None).is_ok());
-        // 65 contenedores (> MAX_JSON_DEPTH): rechazado por profundidad.
+        // 65 containers (> MAX_JSON_DEPTH): rejected due to depth.
         assert!(matches!(
             parse_input(nested_object(65).as_bytes(), None),
             Err(HeadlessError::InputInvalid(_))
         ));
     }
 
-    /// Un valor ~100-profundo DENTRO de un campo desconocido, con `prompt`
-    /// presente, ⇒ InputInvalid: prueba que el bypass del `IgnoredAny` plano
-    /// (que recursaría bajo el límite interno 128) está cerrado.
+    /// A ~100-deep value INSIDE an unknown field, with `prompt` present, ⇒ InputInvalid: proves
+    /// that the bypass of plain `IgnoredAny` (which would recurse under the internal limit 128)
+    /// is closed.
     #[test]
     fn test_parse_input_depth_inside_unknown_field_is_bounded() {
         let deep_value = format!("{}{}{}", "[".repeat(100), "1", "]".repeat(100));
@@ -593,9 +642,8 @@ mod tests {
         ));
     }
 
-    /// La guardia de profundidad GANA sobre "texto verbatim": un `{`-input SIN
-    /// `prompt` pero patológicamente anidado se rechaza (DoS), no se acepta
-    /// como prompt gigante.
+    /// The depth guard WINS over "verbatim text": a `{`-input WITHOUT `prompt` but
+    /// pathologically nested is rejected (DoS), not accepted as a giant prompt.
     #[test]
     fn test_parse_input_deep_object_without_prompt_rejected_by_depth() {
         let deep_value = format!("{}{}{}", "[".repeat(100), "1", "]".repeat(100));
@@ -606,8 +654,8 @@ mod tests {
         ));
     }
 
-    /// `forced_fmt = Text` con un `{`-input profundo ⇒ texto verbatim: nunca se
-    /// parsea, la profundidad no aplica (sólo el cap de bytes).
+    /// `forced_fmt = Text` with a deep `{`-input ⇒ verbatim text: it is never parsed, depth
+    /// does not apply (only the byte cap).
     #[test]
     fn test_parse_input_forced_text_never_parses_deep_object() {
         let deep_value = format!("{}{}{}", "[".repeat(100), "1", "]".repeat(100));
@@ -616,8 +664,8 @@ mod tests {
         assert_eq!(e.prompt, input);
     }
 
-    /// Format forcing: `Json` + texto no-objeto ⇒ InputInvalid; `Text` +
-    /// `{"prompt":"x"}` ⇒ el prompt es el string JSON verbatim (no se parsea).
+    /// Format forcing: `Json` + non-object text ⇒ InputInvalid; `Text` + `{"prompt":"x"}` ⇒ the
+    /// prompt is the JSON string verbatim (not parsed).
     #[test]
     fn test_parse_input_format_forcing() {
         assert!(matches!(
@@ -629,7 +677,7 @@ mod tests {
         assert_eq!(e.prompt, r#"{"prompt":"x"}"#);
     }
 
-    /// Bytes no-UTF8 ⇒ InputInvalid (nunca panic).
+    /// Non-UTF8 bytes ⇒ InputInvalid (never panic).
     #[test]
     fn test_parse_input_rejects_non_utf8() {
         assert!(matches!(
@@ -638,12 +686,11 @@ mod tests {
         ));
     }
 
-    /// Unit-smoke del target de fuzz `fuzz_headless_input` (REQ-H35): entradas
-    /// degeneradas (vacía, no-UTF8, JSON patológicamente anidado, clave
-    /// duplicada, `prompt` no-string, strings con `{`/`[`/claves embebidas)
-    /// nunca panican y siempre devuelven un `Result` tipado — ni OOM (lectura
-    /// acotada) ni stack overflow (profundidad acotada). Corre en cada §0.1,
-    /// complementando la corrida coverage-guided de CI.
+    /// Unit-smoke of the fuzz target `fuzz_headless_input` (REQ-H35): degenerate inputs (empty,
+    /// non-UTF8, pathologically nested JSON, duplicate key, non-string `prompt`, strings with
+    /// `{`/`[`/embedded keys) never panic and always return a typed `Result` — neither OOM
+    /// (bounded reading) nor stack overflow (bounded depth). Runs at every §0.1, complementing
+    /// the CI coverage-guided run.
     #[test]
     fn test_parse_input_smoke_never_panics_on_degenerate_bytes() {
         let deep = format!("{}1{}", "[".repeat(200), "]".repeat(200));
@@ -661,10 +708,10 @@ mod tests {
         ];
         for bytes in &cases {
             for fmt in [None, Some(InputFormat::Json), Some(InputFormat::Text)] {
-                // Nunca panic; el resultado tipado se descarta (sólo robustez).
+                // Never panic; the typed result is discarded (only robustness).
                 let _ = parse_input(bytes, fmt);
             }
-            // La lectura acotada del mismo input tampoco panica.
+            // The bounded reading of the same input also does not panic.
             let _ = read_input_bounded(Cursor::new(bytes.clone()), MAX_INPUT_BYTES);
         }
     }

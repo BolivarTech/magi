@@ -2,60 +2,53 @@
 // Version: 1.0.0
 // Date: 2026-07-18
 
-//! Mapeo de un desenlace headless a un exit code accionable (REQ-H23/H23b).
+//! Mapping of a headless outcome to an actionable exit code (REQ-H23/H23b).
 //!
-//! [`exit_code`] es una función **pura y total**: no hay rama que no produzca
-//! un código, y el `match` interno sobre [`HeadlessError`] es **exhaustivo sin
-//! comodín `_`** — una variante nueva de la fuente rompe el build en lugar de
-//! degradar en silencio a un exit code por default (mismo patrón que
-//! `HeadlessError::from(VaultError)`, T0).
+//! [`exit_code`] is a **pure and total** function: there is no branch that fails to produce a
+//! code, and the internal `match` over [`HeadlessError`] is **exhaustive with no `_` wildcard**
+//! — a new variant from the source breaks the build instead of silently degrading to a default
+//! exit code (same pattern as `HeadlessError::from(VaultError)`, T0).
 //!
-//! **Precedencia** (REQ-H23, "cuando co-ocurren varias condiciones"): un error
-//! tipado presente domina siempre — `InputInvalid`/`InputTooLarge` ⇒
-//! `EXIT_MISUSE`, cualquier otra variante ⇒ `EXIT_RUNTIME`. Solo en
-//! **ausencia** de error se evalúa el criterio determinístico de exit 3
-//! (REQ-H23b): el tier denegó al menos un tool **y** el turno final del
-//! agente no produjo respuesta (`response_empty`) **y** el `stop_reason`
-//! resultante es [`StopReason::Denied`] — las tres señales coinciden por
-//! construcción (`Denied` se asigna precisamente bajo esa condición), pero se
-//! verifican las tres para no depender de un único canal. Cualquier otro caso
-//! es éxito (`EXIT_OK`).
+//! **Precedence** (REQ-H23, "when several conditions co-occur"): a
+//! typed error present always dominates — `InputInvalid`/`InputTooLarge` ⇒ `EXIT_MISUSE`, any
+//! other variant ⇒ `EXIT_RUNTIME`. Only in
+//! **absence** of error, the deterministic criterion for exit 3 is evaluated
+//! (REQ-H23b): the tier denied at least one tool **and** the agent's final turn produced no
+//! response (`response_empty`) **and** the resulting `stop_reason` is [`StopReason::Denied`] —
+//! the three signals coincide by construction (`Denied` is assigned precisely under that
+//! condition), but all three are verified so as not to rely on a single channel. Any other case
+//! is success (`EXIT_OK`).
 //!
-//! `exit_code` es `pub`: el runner de MS2 vive en el crate del binario y
-//! solo puede alcanzar API `pub` de la lib.
+//! `exit_code` is `pub`: the MS2 runner lives in the binary crate and can only reach `pub` APIs
+//! from the lib.
 
 use super::types::StopReason;
 use super::HeadlessError;
 
-/// Exit code de una corrida exitosa (REQ-H23).
+/// Exit code of a successful run (REQ-H23).
 const EXIT_OK: i32 = 0;
 
-/// Exit code de un error de runtime/agente: DB corrupta, passphrase
-/// incorrecta o no disponible, I/O, storage, cancelación, timeout (REQ-H23).
+/// Exit code of a runtime/agent error: corrupt DB, wrong or unavailable passphrase, I/O,
+/// storage, cancellation, timeout (REQ-H23).
 const EXIT_RUNTIME: i32 = 1;
 
-/// Exit code de mal uso de CLI o input inválido: envelope sin `prompt`,
-/// input que excede el cap de tamaño, formato inválido (REQ-H23).
+/// Exit code for CLI misuse or invalid input: envelope without `prompt`, input that exceeds the
+/// size cap, invalid format (REQ-H23).
 const EXIT_MISUSE: i32 = 2;
 
-/// Exit code cuando el tier de autorización bloqueó la tarea: al menos un
-/// tool esencial fue denegado y el agente no produjo respuesta (REQ-H23b).
+/// Exit code when the authorization tier blocked the task: at least one essential tool was
+/// denied and the agent produced no response (REQ-H23b).
 const EXIT_TIER_DENIED: i32 = 3;
 
-/// Calcula el exit code de una corrida headless según su desenlace.
+/// Computes the exit code of a headless run according to its outcome.
 ///
-/// # Parámetros
-/// - `err`: error tipado de la corrida, si la hubo; su presencia domina la
-///   precedencia (ver el rustdoc del módulo).
-/// - `stop_reason`: motivo con el que terminó el loop del agente.
-/// - `response_empty`: si el turno final del agente no produjo ningún bloque
-///   de texto (REQ-H23b — "vacío" es *cero* `TextDelta`, no solo whitespace;
-///   esa distinción la resuelve el llamador antes de invocar esta función).
-/// - `tier_denied`: si al menos un tool fue denegado por el tier durante la
-///   corrida (independientemente de si el agente logró sortear la denegación).
+/// # Parameters
+/// - `err`: typed error from the run, if any; its presence dominates the precedence (see the module rustdoc).
+/// - `stop_reason`: reason the agent loop ended.
+/// - `response_empty`: whether the agent's final turn produced no text block (REQ-H23b — "empty" means *zero* `TextDelta`, not just whitespace; the caller resolves that distinction before invoking this function).
+/// - `tier_denied`: whether at least one tool was denied by the tier during the run (regardless of whether the agent managed to work around the denial).
 ///
-/// Devuelve uno de `EXIT_OK`, `EXIT_RUNTIME`, `EXIT_MISUSE` o
-/// `EXIT_TIER_DENIED`.
+/// Returns one of `EXIT_OK`, `EXIT_RUNTIME`, `EXIT_MISUSE` or `EXIT_TIER_DENIED`.
 pub fn exit_code(
     err: Option<&HeadlessError>,
     stop_reason: StopReason,
@@ -71,11 +64,10 @@ pub fn exit_code(
     EXIT_OK
 }
 
-/// Traduce un [`HeadlessError`] concreto a su clase de exit code.
+/// Translates a concrete [`HeadlessError`] to its exit-code class.
 ///
-/// El `match` es **exhaustivo sin comodín `_`**: agregar una variante a
-/// [`HeadlessError`] fuerza decidir aquí su mapeo en vez de heredar
-/// silenciosamente [`EXIT_RUNTIME`].
+/// The `match` is **exhaustive with no `_` wildcard**: adding a variant to [`HeadlessError`]
+/// forces its mapping to be decided here instead of silently defaulting to [`EXIT_RUNTIME`].
 fn exit_code_for_error(err: &HeadlessError) -> i32 {
     match err {
         HeadlessError::InputInvalid(_) | HeadlessError::InputTooLarge(_) => EXIT_MISUSE,
@@ -94,7 +86,7 @@ mod tests {
     use crate::headless::HeadlessError;
     use crate::vault::VaultError;
 
-    /// Éxito sin error, sin denegación ⇒ 0.
+    /// Success with no error, no denial ⇒ 0.
     #[test]
     fn test_exit_codes_taxonomy() {
         assert_eq!(exit_code(None, StopReason::Done, false, false), EXIT_OK);
@@ -107,16 +99,16 @@ mod tests {
             ),
             EXIT_MISUSE
         );
-        // tier bloqueó la tarea: denegado + sin respuesta + stop_reason=denied.
+        // tier blocked the task: denied + no response + stop_reason=denied.
         assert_eq!(
             exit_code(None, StopReason::Denied, true, true),
             EXIT_TIER_DENIED
         );
-        // el agente sorteó la denegación: produjo respuesta ⇒ éxito.
+        // the agent worked around the denial: produced a response ⇒ success.
         assert_eq!(exit_code(None, StopReason::Done, false, true), EXIT_OK);
     }
 
-    /// `InputTooLarge` es mal-uso de CLI (input que excede el cap) ⇒ 2.
+    /// `InputTooLarge` is CLI misuse (input that exceeds the cap) ⇒ 2.
     #[test]
     fn test_input_too_large_maps_to_misuse() {
         let err = HeadlessError::InputTooLarge(10 * 1024 * 1024);
@@ -126,7 +118,7 @@ mod tests {
         );
     }
 
-    /// Passphrase no disponible (fail-closed sin TTY) ⇒ error de runtime.
+    /// Passphrase unavailable (fail-closed without TTY) ⇒ runtime error.
     #[test]
     fn test_passphrase_unavailable_maps_to_runtime_error() {
         let err = HeadlessError::PassphraseUnavailable;
@@ -136,7 +128,7 @@ mod tests {
         );
     }
 
-    /// DB corrupta (envuelta desde `VaultError`) ⇒ error de runtime.
+    /// Corrupt DB (wrapped from `VaultError`) ⇒ runtime error.
     #[test]
     fn test_db_corrupt_maps_to_runtime_error() {
         let err: HeadlessError = VaultError::DbCorrupt {
@@ -150,7 +142,7 @@ mod tests {
         );
     }
 
-    /// Wrong passphrase (envuelta desde `VaultError`) ⇒ error de runtime.
+    /// Wrong passphrase (wrapped from `VaultError`) ⇒ runtime error.
     #[test]
     fn test_wrong_passphrase_maps_to_runtime_error() {
         let err: HeadlessError = VaultError::WrongPassphrase.into();
@@ -160,7 +152,7 @@ mod tests {
         );
     }
 
-    /// I/O y storage son errores de runtime, no de mal-uso.
+    /// I/O and storage are runtime errors, not misuse.
     #[test]
     fn test_io_and_storage_map_to_runtime_error() {
         let io = HeadlessError::Io("disk full".into());
@@ -175,7 +167,7 @@ mod tests {
         );
     }
 
-    /// Cancelación explícita (`Aborted`) es un error de runtime, no éxito.
+    /// Explicit cancellation (`Aborted`) is a runtime error, not success.
     #[test]
     fn test_aborted_maps_to_runtime_error() {
         let err = HeadlessError::Aborted;
@@ -185,8 +177,8 @@ mod tests {
         );
     }
 
-    /// Un error tipado presente domina sobre la señal de tier-denied: incluso
-    /// con `tier_denied=true` y `response_empty=true`, el error gana (2, no 3).
+    /// A present typed error dominates over the tier-denied signal: even with
+    /// `tier_denied=true` and `response_empty=true`, the error wins (2, not 3).
     #[test]
     fn test_error_precedence_wins_over_tier_denied_signal() {
         let err = HeadlessError::InputInvalid("bad envelope".into());
@@ -196,8 +188,8 @@ mod tests {
         );
     }
 
-    /// `tier_denied` sin `response_empty` nunca produce exit 3, aunque el
-    /// `stop_reason` reportado sea `Denied` (inconsistencia defensiva).
+    /// `tier_denied` without `response_empty` never produces exit 3, even if the reported
+    /// `stop_reason` is `Denied` (defensive inconsistency).
     #[test]
     fn test_tier_denied_without_empty_response_is_success() {
         assert_eq!(exit_code(None, StopReason::Denied, false, true), EXIT_OK);

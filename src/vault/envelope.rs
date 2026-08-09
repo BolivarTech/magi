@@ -1,52 +1,47 @@
-// Author: Julian Bolivar
-// Version: 1.0.0
-// Date: 2026-07-14
-//! Primitivas de envelope DEK/KEK con `vault_meta` protegido por FEC.
+// Author: Julian Bolivar Version: 1.0.0 Date: 2026-07-14 DEK/KEK envelope primitives with
+// `vault_meta` protected by FEC.
 //!
-//! # Modelo
+//! # Model
 //!
-//! Una **DEK** (Data Encryption Key) aleatoria de 32 B cifra todos los registros;
-//! la clave maestra deriva una **KEK** (Key Encryption Key) que *envuelve* la DEK
-//! (`wrap_key`, salt-as-AAD). La DEK envuelta y el salt viven en `vault_meta`.
-//! Cambiar la clave maestra solo re-envuelve la DEK (O(1)); los datos no se
-//! re-cifran.
+//! A random 32 B **DEK** (Data Encryption Key) encrypts all records; the master key derives a
+//! **KEK** (Key Encryption Key) that *wraps* the DEK (`wrap_key`, salt-as-AAD). The wrapped DEK
+//! and the salt live in `vault_meta`. Changing the master key only re-wraps the DEK (O(1)); the
+//! data is not re-encrypted.
 //!
-//! # Capas de FEC (por qué se FEC-encodea el blob del crate)
+//! # FEC Layers (why the crate blob is FEC-encoded)
 //!
-//! `cryptovault::CryptoVault::wrap_key` ya aplica `AEAD → FEC → base64`, pero el
-//! **base64 queda como capa externa**: un bit podrido en el texto base64
-//! almacenado rompe el `base64-decode` **antes** de que el FEC interno del crate
-//! pueda corregirlo. Por eso este módulo aplica **su propia** capa
-//! [`ConcatenatedFec`] sobre la representación base64 en disco: corrige el
-//! bit-rot de la *representación almacenada* de modo que el `base64-decode` del
-//! crate nunca vea entrada corrupta.
+//! `cryptovault::CryptoVault::wrap_key` already applies `AEAD → FEC → base64`, but the
+//! **base64 remains as the outer layer**: a rotten bit in the base64 text
+//! stored breaks the `base64-decode` **before** the crate's internal FEC can correct it. That
+//! is why this module applies **its own** [`ConcatenatedFec`] layer over the base64
+//! representation on disk: it corrects the bit-rot of the *stored representation* so that the
+//! crate's `base64-decode` never sees corrupt input.
 //!
-//! ## Alcance exacto de la corrección (precisión — code review Loop 1)
+//! ## Exact scope of the correction (precision — code review Loop 1)
 //!
-//! La cobertura FEC **no es uniforme sobre todo el blob**: [`fec_encode`] antepone
-//! un prefijo **crudo** de longitud (`u32` LE, [`LEN_PREFIX`] bytes) **fuera** de la
-//! región FEC. Un bit podrido **dentro del prefijo** (4 bytes de ~600) **no** se
-//! auto-corrige — pero **falla seguro**: produce siempre [`VaultError::VaultMetaCorrupt`]
-//! (nunca panic, nunca una DEK incorrecta), porque un `pre_len` corrupto lo rechaza
-//! el chequeo de bloques de la RS o falla downstream (largo de salt inválido / tag
-//! AEAD). Verificado exhaustivamente (los 32 single-bit flips del prefijo).
-//! *No se puede meter la longitud dentro de la región FEC:* `ConcatenatedFec::decode`
-//! **exige** el `pre_len` como parámetro para decodificar, así que el prefijo debe ir
-//! por fuera. Endurecerlo (p.ej. redundancia sobre el prefijo) es un follow-up de
-//! robustez, no un defecto de correctitud (`dev-docs/PENDING_IMPLEMENTATION.md`).
+//! FEC coverage **is not uniform over the whole blob**: [`fec_encode`] prepends a **raw**
+//! length prefix (`u32` LE, [`LEN_PREFIX`] bytes) **outside** the FEC region. A rotten bit
+//! **inside the prefix** (4 bytes out of ~600) is **not** self-corrected — but it **fails
+//! safe**: it always produces [`VaultError::VaultMetaCorrupt`] (never a panic, never a wrong
+//! DEK), because a corrupt `pre_len` is rejected by the RS block-count check or fails
+//! downstream (invalid salt length / AEAD tag). Verified exhaustively (all 32 single-bit flips
+//! of the prefix).
+//! *The length cannot be put inside the FEC region:* `ConcatenatedFec::decode`
+//! **requires** `pre_len` as a parameter to decode, so the prefix must go
+//! outside. Hardening it (e.g., redundancy over the prefix) is a robustness follow-up, not a
+//! correctness defect (`dev-docs/PENDING_IMPLEMENTATION.md`).
 //!
-//! Nota: sobre este camino la FEC **interna del crate** rara vez corrige algo — si el
-//! `fec_decode` externo tiene éxito, ya recuperó los bytes exactos, y [`open_envelope`]
-//! solo entonces llama a `unwrap_key`; si falla, retorna `VaultMetaCorrupt` sin llegar
-//! a la FEC interna. La FEC del crate sigue siendo la defensa del payload en tránsito
-//! por otros canales; en disco, la capa externa es la que corrige.
+//! Note: along this path the crate's **internal FEC** rarely corrects anything — if the
+//! external `fec_decode` succeeds, it has already recovered the exact bytes, and
+//! [`open_envelope`] only then calls `unwrap_key`; if it fails, it returns `VaultMetaCorrupt`
+//! without reaching the internal FEC. The crate's FEC remains the defense for the payload in
+//! transit over other channels; on disk, the external layer is the one that corrects.
 //!
-//! # Distinción corrupción vs. clave equivocada
+//! # Distinction: corruption vs. wrong key
 //!
-//! [`open_envelope`] evalúa la FEC **antes** que el AEAD, de modo que:
-//! - un `fec_decode` fallido ⇒ [`VaultError::VaultMetaCorrupt`] (dato corrupto);
-//! - un `unwrap_key` fallido tras un FEC exitoso (tag AEAD) ⇒
-//!   [`VaultError::WrongPassphrase`] (clave equivocada).
+//! [`open_envelope`] evaluates the FEC **before** the AEAD, so that:
+//! - a failed `fec_decode` ⇒ [`VaultError::VaultMetaCorrupt`] (corrupt data);
+//! - a failed `unwrap_key` after a successful FEC (AEAD tag) ⇒ [`VaultError::WrongPassphrase`] (wrong key).
 
 use std::sync::{Arc, Mutex};
 
@@ -57,21 +52,29 @@ use zeroize::Zeroizing;
 
 use crate::vault::VaultError;
 
-/// Ancho del prefijo de longitud original (`u32` little-endian) que
-/// [`fec_encode`] antepone al blob para que [`fec_decode`] sea auto-descriptivo.
+/// Width of the original length prefix (`u32` little-endian) that [`fec_encode`] prepends to
+/// the blob so that [`fec_decode`] is self-describing.
 const LEN_PREFIX: usize = 4;
 
-/// Salida de [`bootstrap_envelope`]: `(salt_fec, wrapped_dek_fec, dek)`.
+/// Output of [`bootstrap_envelope`]: `(salt_fec, wrapped_dek_fec, dek)`.
 ///
-/// Las dos primeras entradas van a `vault_meta` (FEC-encoded); la tercera es la
-/// DEK en claro para cachear en memoria.
+/// The first two entries go to `vault_meta` (FEC-encoded); the third is the plaintext DEK to
+/// cache in memory.
 type Bootstrapped = (Vec<u8>, Vec<u8>, Zeroizing<Vec<u8>>);
 
-/// Traduce un [`cryptovault::CryptoError`] al dominio del vault.
+/// Translates a [`cryptovault::CryptoError`] to the vault domain, for a call that evaluates a
+/// **persisted** blob: [`fec_decode`] (via [`open_envelope`]/[`check_meta_fec`]) and
+/// [`CryptoVault::unwrap_key`] (via [`open_envelope`]).
 ///
-/// El mapeo es inequívoco porque cada etapa produce una variante distinta:
-/// `Cipher` solo lo genera el AEAD (fallo de tag = clave/AAD equivocada);
-/// `ErrorCorrection`/`Encoding`/`InvalidInput` solo la capa FEC/framing.
+/// The mapping is unambiguous because each stage produces a distinct variant: `Cipher` is only
+/// produced by the AEAD (tag failure = wrong key/AAD, i.e. `unwrap_key`);
+/// `ErrorCorrection`/`Encoding`/`InvalidInput` only by the FEC/framing layer (i.e.
+/// `fec_decode`).
+///
+/// **Not used for any `derive_key` call** — see [`map_key_derivation_err`] for why a
+/// `derive_key` failure can never be "corrupt metadata," whether or not `vault_meta` exists yet
+/// (MS2 gate S9 finding, fixed for [`bootstrap_envelope`] first and for [`open_envelope`] in the
+/// seventh gate pass).
 fn map_crypto_err(e: CryptoError) -> VaultError {
     match e {
         CryptoError::Cipher(_) => VaultError::WrongPassphrase,
@@ -82,23 +85,48 @@ fn map_crypto_err(e: CryptoError) -> VaultError {
     }
 }
 
-/// Envuelve `bytes` en una capa [`ConcatenatedFec`] keyless, con la longitud
-/// original prefijada (`u32` LE) para que el decode sea auto-descriptivo.
+/// Translates a [`cryptovault::CryptoError`] raised by a call that is never evaluating a
+/// **persisted** blob: every `derive_key` call ([`bootstrap_envelope`], [`open_envelope`], the
+/// re-wrap step of [`rekey_envelope_inner`]), plus `wrap_key` during [`bootstrap_envelope`]
+/// (where `vault_meta` does not exist yet for either call to blame).
 ///
-/// La FEC es un códec **sin clave**: corrige bit-rot de la representación en
-/// disco sin necesitar el secreto.
+/// Every variant maps to [`VaultError::Crypto`] — unlike [`map_crypto_err`], which distinguishes
+/// a corrupt persisted blob (`VaultMetaCorrupt`) from a wrong key (`WrongPassphrase`) for calls
+/// that actually evaluate persisted ciphertext (`fec_decode`, `unwrap_key`). `derive_key` never
+/// does that, at any call site: its errors — `CryptoError::InvalidInput` on an empty password or
+/// a malformed salt, `KeyDerivation` on an internal KDF failure — describe the KDF's own inputs,
+/// never the state of `vault_meta`. That holds even when `vault_meta` already exists and has
+/// already been FEC-recovered successfully by the time `derive_key` runs (`open_envelope`'s
+/// case): the recovered `salt` bytes are known-good at that point, so a `derive_key` failure can
+/// only be about `master`. Reusing `map_crypto_err` there misclassifies an empty/malformed
+/// passphrase as `VaultMetaCorrupt` — a documented, retryable, NEVER-DELETE signal about
+/// EXISTING corrupt data (REQ-V35) — steering the user toward "restore/delete"
+/// (`vault_error_exit_code`, `main.rs`) instead of "re-enter a valid passphrase." MS2 gate S9
+/// finding; first fixed for `bootstrap_envelope` (where `vault_meta` does not exist yet to be
+/// corrupt), then generalized to every `derive_key` call once the open and rekey paths were
+/// found to have the identical bug for a different reason (existing-but-already-verified
+/// metadata).
+fn map_key_derivation_err(e: CryptoError) -> VaultError {
+    VaultError::Crypto(e.to_string())
+}
+
+/// Wraps `bytes` in a keyless [`ConcatenatedFec`] layer, with the original length prefixed
+/// (`u32` LE) so that decode is self-describing.
+///
+/// FEC is a **keyless** codec: it corrects bit-rot of the on-disk representation without
+/// needing the secret.
 ///
 /// # Errors
 ///
-/// [`VaultError::Crypto`] si `bytes.len()` no cabe en el prefijo `u32` (jamás
-/// alcanzable para las entradas de `vault_meta`, ~48 B; se reporta como error
-/// tipado en vez de truncar silenciosamente el prefijo — defensa en release).
+/// [`VaultError::Crypto`] if `bytes.len()` does not fit in the `u32` prefix (never reachable
+/// for `vault_meta` entries, ~48 B; reported as a typed error instead of silently truncating
+/// the prefix — defense in release).
 fn fec_encode(bytes: &[u8]) -> Result<Vec<u8>, VaultError> {
     let len = u32::try_from(bytes.len()).map_err(|_| {
         VaultError::Crypto("vault_meta entry exceeds the u32 length prefix".to_string())
     })?;
-    // Codificar primero: `ConcatenatedFec` expande ~2.3x, así que dimensionar por
-    // `bytes.len()` forzaría un realloc. Con `encoded.len()` la capacidad es exacta.
+    // Encode first: `ConcatenatedFec` expands ~2.3x, so sizing by `bytes.len()` would force a
+    // realloc. With `encoded.len()` the capacity is exact.
     let encoded = ConcatenatedFec::default().encode(bytes);
     let mut out = Vec::with_capacity(LEN_PREFIX + encoded.len());
     out.extend_from_slice(&len.to_le_bytes());
@@ -106,16 +134,16 @@ fn fec_encode(bytes: &[u8]) -> Result<Vec<u8>, VaultError> {
     Ok(out)
 }
 
-/// Recupera los bytes originales de un blob producido por [`fec_encode`].
+/// Recovers the original bytes from a blob produced by [`fec_encode`].
 ///
 /// # Errors
 ///
-/// [`VaultError::VaultMetaCorrupt`] si el prefijo de longitud falta o el
-/// `ConcatenatedFec::decode` no logra corregir la corrupción.
+/// [`VaultError::VaultMetaCorrupt`] if the length prefix is missing or
+/// `ConcatenatedFec::decode` fails to correct the corruption.
 fn fec_decode(blob: &[u8]) -> Result<Vec<u8>, VaultError> {
-    // `split_first_chunk` yields the 4-byte prefix as a `&[u8; LEN_PREFIX]` and the
-    // remaining payload in one bounds-safe step — no fallible `try_into` (whose
-    // error arm was unreachable once the length was already guaranteed).
+    // `split_first_chunk` yields the 4-byte prefix as a `&[u8; LEN_PREFIX]` and the remaining
+    // payload in one bounds-safe step — no fallible `try_into` (whose error arm was unreachable
+    // once the length was already guaranteed).
     let (len_arr, payload) = blob
         .split_first_chunk::<LEN_PREFIX>()
         .ok_or(VaultError::VaultMetaCorrupt)?;
@@ -125,46 +153,47 @@ fn fec_decode(blob: &[u8]) -> Result<Vec<u8>, VaultError> {
         .map_err(map_crypto_err)
 }
 
-/// Bootstrapea un envelope nuevo para una clave maestra dada.
+/// Bootstraps a new envelope for a given master key.
 ///
-/// Genera una DEK y un salt aleatorios, deriva la KEK desde `master` + salt, y
-/// envuelve la DEK. Devuelve `(salt_fec, wrapped_dek_fec, dek)`: las dos primeras
-/// entradas van a `vault_meta` (FEC-encoded), la DEK se cachea en memoria.
+/// Generates a random DEK and salt, derives the KEK from `master` + salt, and wraps the DEK.
+/// Returns `(salt_fec, wrapped_dek_fec, dek)`: the first two entries go to `vault_meta` (FEC-
+/// encoded), the DEK is cached in memory.
 ///
-/// `master` es la passphrase vigente del usuario **como `&str`** (UTF-8 válido
-/// por construcción; nunca bytes crudos no-UTF8).
+/// `master` is the user's current passphrase **as `&str`** (UTF-8 valid by construction; never
+/// raw non-UTF8 bytes).
 ///
 /// # Errors
 ///
-/// [`VaultError::Crypto`] si la generación de material aleatorio, la derivación
-/// de la KEK o el envoltorio de la DEK fallan.
+/// [`VaultError::Crypto`] if the generation of random material, the KEK derivation, or the DEK
+/// wrapping fail.
 pub fn bootstrap_envelope(vault: &CryptoVault, master: &str) -> Result<Bootstrapped, VaultError> {
-    // Un fallo de RNG en el bootstrap NO es corrupción de `vault_meta` (aún no
-    // existe metadata): se reporta como `Crypto`, no como `VaultMetaCorrupt`.
+    // An RNG failure during bootstrap is NOT corruption of `vault_meta` (metadata does not
+    // exist yet): it is reported as `Crypto`, not `VaultMetaCorrupt`.
     let salt = cryptovault::generate_salt()
         .map_err(|e| VaultError::Crypto(format!("salt generation failed: {e}")))?;
     let dek = cryptovault::generate_dek()
         .map_err(|e| VaultError::Crypto(format!("DEK generation failed: {e}")))?;
-    let kek = vault.derive_key(master, &salt).map_err(map_crypto_err)?;
-    let wrapped = vault.wrap_key(&kek, &salt, &dek).map_err(map_crypto_err)?;
+    let kek = vault
+        .derive_key(master, &salt)
+        .map_err(map_key_derivation_err)?;
+    let wrapped = vault
+        .wrap_key(&kek, &salt, &dek)
+        .map_err(map_key_derivation_err)?;
     let salt_fec = fec_encode(&salt)?;
     let wrapped_fec = fec_encode(wrapped.as_bytes())?;
     Ok((salt_fec, wrapped_fec, dek))
 }
 
-/// Abre un envelope existente, recuperando la DEK.
+/// Opens an existing envelope, recovering the DEK.
 ///
-/// Corrige el bit-rot de `salt_fec`/`wrapped_dek_fec` (FEC) **antes** de
-/// desenvolver, y distingue corrupción de clave equivocada.
+/// Corrects the bit-rot of `salt_fec`/`wrapped_dek_fec` (FEC) **before** unwrapping, and
+/// distinguishes corruption from wrong key.
 ///
 /// # Errors
 ///
-/// - [`VaultError::VaultMetaCorrupt`] si la FEC no puede recuperar `salt` o el
-///   blob envuelto (corrupción más allá de su capacidad), o si el blob no es
-///   base64 válido.
-/// - [`VaultError::WrongPassphrase`] si el `master` es incorrecto (el tag AEAD
-///   del desenvoltorio falla tras un FEC exitoso). **Reintentable; nunca borra.**
-/// - [`VaultError::Crypto`] ante un fallo de derivación de clave.
+/// - [`VaultError::VaultMetaCorrupt`] if the FEC cannot recover `salt` or the wrapped blob (corruption beyond its capacity), or if the blob is not valid base64.
+/// - [`VaultError::WrongPassphrase`] if `master` is incorrect (the AEAD tag of the unwrap fails after a successful FEC). **Retryable; never deletes.**
+/// - [`VaultError::Crypto`] on a key-derivation failure.
 pub fn open_envelope(
     vault: &CryptoVault,
     master: &str,
@@ -174,25 +203,25 @@ pub fn open_envelope(
     let salt = fec_decode(salt_fec)?;
     let wrapped_bytes = fec_decode(wrapped_dek_fec)?;
     let wrapped = String::from_utf8(wrapped_bytes).map_err(|_| VaultError::VaultMetaCorrupt)?;
-    let kek = vault.derive_key(master, &salt).map_err(map_crypto_err)?;
+    let kek = vault
+        .derive_key(master, &salt)
+        .map_err(map_key_derivation_err)?;
     vault
         .unwrap_key(&kek, &salt, &wrapped)
         .map_err(map_crypto_err)
 }
 
-/// Read-only FEC-only check used by `magi vault diagnose` (REQ-H32): verifies
-/// that both `vault_meta` blobs (`salt_fec`, `wrapped_dek_fec`) FEC-decode
+/// Read-only FEC-only check used by `magi vault diagnose` (REQ-H32): verifies that both
+/// `vault_meta` blobs (`salt_fec`, `wrapped_dek_fec`) FEC-decode
 /// **without ever attempting the AEAD unwrap** — no master passphrase is
 /// accepted or needed, so this can run on a DB nobody can currently unlock.
 ///
-/// `pub(super)` (not re-exported from [`crate::vault`]): this is an internal
-/// building block for [`crate::vault::diagnose`], not part of the crate's
-/// public API surface.
+/// `pub(super)` (not re-exported from [`crate::vault`]): this is an internal building block for
+/// [`crate::vault::diagnose`], not part of the crate's public API surface.
 ///
 /// # Errors
-/// [`VaultError::VaultMetaCorrupt`] if either blob fails to FEC-decode (the
-/// same failure [`open_envelope`] would report **before** it ever reaches the
-/// AEAD stage).
+/// [`VaultError::VaultMetaCorrupt`] if either blob fails to FEC-decode (the same failure
+/// [`open_envelope`] would report **before** it ever reaches the AEAD stage).
 pub(super) fn check_meta_fec(salt_fec: &[u8], wrapped_dek_fec: &[u8]) -> Result<(), VaultError> {
     fec_decode(salt_fec)?;
     fec_decode(wrapped_dek_fec)?;
@@ -202,8 +231,8 @@ pub(super) fn check_meta_fec(salt_fec: &[u8], wrapped_dek_fec: &[u8]) -> Result<
 /// Reads the FEC-encoded `salt` and `wrapped_dek` rows from `vault_meta`.
 ///
 /// # Errors
-/// [`VaultError::Storage`] on a SQL failure; [`VaultError::VaultMetaCorrupt`] if a
-/// row is missing.
+/// [`VaultError::Storage`] on a SQL failure; [`VaultError::VaultMetaCorrupt`] if a row is
+/// missing.
 fn read_meta(guard: &Connection) -> Result<(Vec<u8>, Vec<u8>), VaultError> {
     let salt: Option<Vec<u8>> = guard
         .query_row("SELECT value FROM vault_meta WHERE key = 'salt'", [], |r| {
@@ -225,20 +254,20 @@ fn read_meta(guard: &Connection) -> Result<(Vec<u8>, Vec<u8>), VaultError> {
     }
 }
 
-/// Re-keys the envelope: re-wraps the **same** DEK under a new passphrase (O(1) —
-/// no record is re-encrypted). Implements `magi vault passwd` (REQ-V20).
+/// Re-keys the envelope: re-wraps the **same** DEK under a new passphrase (O(1) — no record is
+/// re-encrypted). Implements `magi vault passwd` (REQ-V20).
 ///
-/// Steps: (1) **verify `current`** by unwrapping the DEK — a wrong passphrase fails
-/// the AEAD tag and returns [`VaultError::WrongPassphrase`], changing nothing (the
-/// lock that stops `passwd` being a recovery path); (2) fresh salt → KEK_new →
-/// re-wrap the SAME DEK; (3) write `{salt, wrapped_dek}` in ONE `BEGIN IMMEDIATE`
-/// transaction, crash-safe (the DB stays openable with the old **or** new
-/// passphrase, never bricked — SC-V35). Argon2 runs OUTSIDE the connection lock.
+/// Steps: (1) **verify `current`** by unwrapping the DEK — a wrong passphrase fails the AEAD
+/// tag and returns [`VaultError::WrongPassphrase`], changing nothing (the lock that stops
+/// `passwd` being a recovery path); (2) fresh salt → KEK_new → re-wrap the SAME DEK; (3) write
+/// `{salt, wrapped_dek}` in ONE `BEGIN IMMEDIATE` transaction, crash-safe (the DB stays
+/// openable with the old **or** new passphrase, never bricked — SC-V35). Argon2 runs OUTSIDE
+/// the connection lock.
 ///
 /// # Errors
-/// [`VaultError::WrongPassphrase`] if `current` is wrong; [`VaultError::Storage`] on
-/// a SQL failure or a detected concurrent re-wrap; [`VaultError::VaultMetaCorrupt`]
-/// or [`VaultError::Crypto`] on corrupt metadata or a crypto failure.
+/// [`VaultError::WrongPassphrase`] if `current` is wrong; [`VaultError::Storage`] on a SQL
+/// failure or a detected concurrent re-wrap; [`VaultError::VaultMetaCorrupt`] or
+/// [`VaultError::Crypto`] on corrupt metadata or a crypto failure.
 pub fn rekey_envelope(
     vault: &CryptoVault,
     conn: &Arc<Mutex<Connection>>,
@@ -248,9 +277,9 @@ pub fn rekey_envelope(
     rekey_envelope_inner(vault, conn, current, new, || {})
 }
 
-/// Shared body of [`rekey_envelope`] with an injectable hook that runs **between**
-/// the initial `vault_meta` read and the write transaction — the exact TOCTOU
-/// window the compare-and-abort guards. Production calls it with a no-op closure.
+/// Shared body of [`rekey_envelope`] with an injectable hook that runs **between** the initial
+/// `vault_meta` read and the write transaction — the exact TOCTOU window the compare-and-abort
+/// guards. Production calls it with a no-op closure.
 fn rekey_envelope_inner(
     vault: &CryptoVault,
     conn: &Arc<Mutex<Connection>>,
@@ -264,15 +293,17 @@ fn rekey_envelope_inner(
         read_meta(&guard)?
     };
 
-    // (1b) Verify `current` and recover the DEK (Argon2 #1, off-lock). Wrong
-    // passphrase ⇒ WrongPassphrase, nothing written.
+    // (1b) Verify `current` and recover the DEK (Argon2 #1, off-lock). Wrong passphrase ⇒
+    // WrongPassphrase, nothing written.
     let dek = open_envelope(vault, current, &salt_fec, &wrapped_fec)?;
 
     between_read_and_tx();
 
     // (2) Re-wrap the SAME DEK under a fresh salt/KEK (Argon2 #2, off-lock).
     let new_salt = cryptovault::generate_salt().map_err(map_crypto_err)?;
-    let kek_new = vault.derive_key(new, &new_salt).map_err(map_crypto_err)?;
+    let kek_new = vault
+        .derive_key(new, &new_salt)
+        .map_err(map_key_derivation_err)?;
     let wrapped_new = vault
         .wrap_key(&kek_new, &new_salt, &dek)
         .map_err(map_crypto_err)?;
@@ -286,8 +317,8 @@ fn rekey_envelope_inner(
         .map_err(|e| VaultError::Storage(e.to_string()))?;
     let (_, current_wrapped) = read_meta(&tx)?;
     if current_wrapped != wrapped_fec {
-        // Another process re-wrapped between our read and this transaction; abort
-        // rather than clobber its envelope.
+        // Another process re-wrapped between our read and this transaction; abort rather than
+        // clobber its envelope.
         return Err(VaultError::Storage(
             "concurrent rekey detected; aborted".to_string(),
         ));
@@ -319,13 +350,12 @@ pub(crate) fn rekey_envelope_with_hook(
     rekey_envelope_inner(vault, conn, current, new, between_read_and_tx)
 }
 
-/// Entrypoint del fuzzer (`fuzz_vault_meta_decode`, Task 9).
+/// Fuzzer entrypoint (`fuzz_vault_meta_decode`, Task 9).
 ///
-/// Parte `data` en `(salt_fec, wrapped_fec)` de forma determinista y
-/// bounds-safe — primer `u16` LE = `len(salt_fec)` — y llama [`open_envelope`]
-/// con un `CryptoVault::default()` y un master fijo, **descartando** el `Result`.
-/// El invariante que verifica el fuzzer: *nunca panic ni borrado*, sea cual sea
-/// `data`.
+/// Splits `data` into `(salt_fec, wrapped_fec)` deterministically and bounds-safely — first
+/// `u16` LE = `len(salt_fec)` — and calls [`open_envelope`] with a `CryptoVault::default()` and
+/// a fixed master, **discarding** the `Result`. The invariant the fuzzer verifies: *never panic
+/// nor deletion*, whatever `data` is.
 #[doc(hidden)]
 pub fn fuzz_open_entrypoint(data: &[u8]) {
     const SPLIT_PREFIX: usize = 2;
@@ -350,8 +380,8 @@ mod tests {
     use rusqlite::Connection;
     use std::sync::{Arc, Mutex};
 
-    /// Builds an in-memory DB with a `vault_meta` table bootstrapped under `master`.
-    /// Returns the shared connection.
+    /// Builds an in-memory DB with a `vault_meta` table bootstrapped under `master`. Returns
+    /// the shared connection.
     fn meta_conn(master: &str) -> Arc<Mutex<Connection>> {
         let conn = Connection::open_in_memory().expect("mem");
         conn.execute(
@@ -458,7 +488,7 @@ mod tests {
         open_envelope(&vault, "winner-passphrase-xyz", &s, &w).expect("winner opens");
     }
 
-    // master de test = string base64-like (UTF-8 válido, como el del keyring).
+    // Test master = base64-like string (UTF-8 valid, like the keyring one).
     const M: &str = "bWFzdGVyLWtleS0zMi1ieXRlcy1iYXNlNjQtc3RyaW5n";
 
     #[test]
@@ -467,6 +497,55 @@ mod tests {
         let (salt_fec, wrapped_fec, dek) = bootstrap_envelope(&vault, M).expect("bootstrap");
         let dek2 = open_envelope(&vault, M, &salt_fec, &wrapped_fec).expect("open");
         assert_eq!(&dek[..], &dek2[..]);
+    }
+
+    /// MS2 gate S9 finding: `bootstrap_envelope`'s `derive_key`/`wrap_key` calls used to route
+    /// through [`map_crypto_err`] — the mapping [`open_envelope`] uses to distinguish a corrupt
+    /// PERSISTED blob from a wrong key. During bootstrap there is no `vault_meta` yet (the
+    /// module doc above already says this explicitly for the RNG failure arms), so nothing
+    /// could be "corrupt" — any `CryptoError` here must report [`VaultError::Crypto`], never
+    /// [`VaultError::VaultMetaCorrupt`], or a first-run KDF failure gets misclassified as
+    /// existing-metadata corruption (a category confusion the never-delete state machine,
+    /// REQ-V35, treats very differently: `VaultMetaCorrupt` is a retryable signal about
+    /// EXISTING data, which does not exist yet here).
+    ///
+    /// `CryptoVault::derive_key` itself rejects an empty password with
+    /// `CryptoError::InvalidInput` (`cryptovault` 0.3.0, `vault.rs`) — a real, DI-double-free
+    /// path into the exact `CryptoError` variant `map_crypto_err` maps to `VaultMetaCorrupt`.
+    #[test]
+    fn bootstrap_envelope_reports_crypto_not_vault_meta_corrupt_on_an_invalid_input_failure() {
+        let vault = cryptovault::CryptoVault::default();
+        let err = bootstrap_envelope(&vault, "").expect_err("an empty passphrase must fail");
+        assert!(
+            matches!(err, VaultError::Crypto(_)),
+            "bootstrap has no vault_meta yet to be corrupt — an InvalidInput failure here must \
+             report Crypto, not VaultMetaCorrupt: {err:?}"
+        );
+    }
+
+    /// MS2 gate S9 seventh-pass finding (Balthasar): `open_envelope` routed its `derive_key`
+    /// call through [`map_crypto_err`] — the mapping reserved for evaluating a *persisted*
+    /// blob (FEC/AEAD outcomes) — even though `salt` at this point has already been FEC-
+    /// recovered successfully. A `derive_key` failure here is about `master` (e.g. an empty
+    /// passphrase, the exact case [`bootstrap_envelope`]'s equivalent test already covers) or
+    /// the KDF itself, never about corruption of `vault_meta`. Reporting it as
+    /// `VaultMetaCorrupt` steers the user toward "restore/delete" (`vault_error_exit_code`,
+    /// `main.rs`) when the real remedy is "re-enter a valid passphrase" — the wrong-remedy
+    /// class of mistake this project treats as worse than the error itself, precisely because
+    /// a wrong passphrase and corrupt metadata already fail identically at the AEAD stage and
+    /// REQ-V35 forbids wiping on either.
+    #[test]
+    fn open_envelope_reports_crypto_not_vault_meta_corrupt_on_an_invalid_input_failure() {
+        let vault = cryptovault::CryptoVault::default();
+        let (salt_fec, wrapped_fec, _) = bootstrap_envelope(&vault, M).expect("bootstrap");
+        let err = open_envelope(&vault, "", &salt_fec, &wrapped_fec)
+            .expect_err("an empty passphrase must fail");
+        assert!(
+            matches!(err, VaultError::Crypto(_)),
+            "vault_meta FEC-decoded fine here — an InvalidInput failure from derive_key is about \
+             `master`, not the persisted blob, and must report Crypto, not VaultMetaCorrupt: \
+             {err:?}"
+        );
     }
 
     #[test]
@@ -488,7 +567,7 @@ mod tests {
         let vault = cryptovault::CryptoVault::default();
         let (salt_fec, mut wrapped_fec, _) = bootstrap_envelope(&vault, M).expect("bootstrap");
         for b in wrapped_fec.iter_mut() {
-            *b ^= 0xFF; // daño masivo, más allá de la FEC
+            *b ^= 0xFF; // massive damage, beyond the FEC's correction capacity
         }
         let err = open_envelope(&vault, M, &salt_fec, &wrapped_fec).expect_err("corrupt must fail");
         assert!(matches!(err, VaultError::VaultMetaCorrupt));
@@ -498,7 +577,7 @@ mod tests {
     fn test_single_bit_flip_in_wrapped_dek_is_corrected_by_fec() {
         let vault = cryptovault::CryptoVault::default();
         let (salt_fec, mut wrapped_fec, dek) = bootstrap_envelope(&vault, M).expect("bootstrap");
-        // Voltear un bit en el PAYLOAD FEC (tras el prefijo de 4 bytes de longitud).
+        // Flip one bit in the FEC PAYLOAD (after the 4-byte length prefix).
         wrapped_fec[super::LEN_PREFIX] ^= 0x01;
         let dek2 = open_envelope(&vault, M, &salt_fec, &wrapped_fec).expect("bit-flip corregible");
         assert_eq!(&dek[..], &dek2[..]);
@@ -515,10 +594,10 @@ mod tests {
 
     #[test]
     fn test_bit_flip_in_length_prefix_fails_safe_as_corrupt() {
-        // The 4-byte length prefix sits OUTSIDE the FEC-protected region
-        // (see `fec_encode`), so corruption there is not self-corrected — but it
-        // MUST fail safe: a typed `VaultMetaCorrupt`, never a panic and never a
-        // wrong DEK (REQ-V35). Documents the intentionally-uncorrected window.
+        // The 4-byte length prefix sits OUTSIDE the FEC-protected region (see `fec_encode`), so
+        // corruption there is not self-corrected — but it MUST fail safe: a typed
+        // `VaultMetaCorrupt`, never a panic and never a wrong DEK (REQ-V35). Documents the
+        // intentionally-uncorrected window.
         let vault = cryptovault::CryptoVault::default();
         let (salt_fec, wrapped_fec, _) = bootstrap_envelope(&vault, M).expect("bootstrap");
 
@@ -530,18 +609,62 @@ mod tests {
         let err = open_envelope(&vault, M, &salt_fec, &multi).expect_err("prefix corruption fails");
         assert!(matches!(err, VaultError::VaultMetaCorrupt));
 
-        // Single-bit flip in the most-significant prefix byte (LE) — a large
-        // `pre_len` the FEC block-count check rejects.
+        // Single-bit flip in the most-significant prefix byte (LE) — a large `pre_len` the FEC
+        // block-count check rejects.
         let mut single = wrapped_fec.clone();
         single[super::LEN_PREFIX - 1] ^= 0x80;
         let err2 = open_envelope(&vault, M, &salt_fec, &single).expect_err("prefix bit-flip fails");
         assert!(matches!(err2, VaultError::VaultMetaCorrupt));
     }
 
+    /// Sixth-pass gate finding (S9, Caspar) — **rejected as a false positive**, pinned here
+    /// rather than left as an assertion in a report someone has to trust.
+    ///
+    /// The finding read `let pre_len = u32::from_le_bytes(*len_arr) as usize;` followed by
+    /// `ConcatenatedFec::default().decode(payload, pre_len)` as "read a length from data,
+    /// allocate that much" — the classic unbounded-allocation shape. It is not that shape
+    /// here, verified by reading `cryptovault` 0.3.0 (an audited crate, not our code):
+    /// `ConcatenatedFec::decode`'s FIRST step is `validate_pre_fec`, which caps the RECEIVED
+    /// blob at `cryptovault::MAX_BLOB_LEN` (an analytically-derived, compile-time constant —
+    /// tens of MB, documented `SR-R4` DoS guard) BEFORE any FEC stage runs. The eventual
+    /// Reed-Solomon output buffer is sized from `blocks = encoded.len() / n` — derived from
+    /// that already-bounded RECEIVED length, never from `pre_len` — and allocated with a
+    /// fallible `try_reserve`, not an infallible allocation that could abort the process. A
+    /// `pre_len` inconsistent with the real block count is REJECTED
+    /// (`RsError::InvalidInput`, mapped here to `VaultMetaCorrupt`) rather than used to size
+    /// anything. `pre_len` cannot drive an oversized allocation; it can only be wrong.
+    ///
+    /// This plants the worst possible prefix (`u32::MAX`, ~4.29 GB) over an otherwise-valid
+    /// small FEC blob and asserts two things: it fails safe (never a panic, never a wrong
+    /// DEK) AND it does so near-instantly — the generous 30 s deadline follows this
+    /// project's own guidance (`CLAUDE.local.md`: wait on a failure deadline, not a guessed
+    /// duration) so this stays meaningful under the parallel-Argon2 CPU load that flakes
+    /// tighter deadlines here, while still being far short of what a multi-gigabyte
+    /// allocation attempt (successful or not) would look like.
+    #[test]
+    fn fec_decode_with_a_maximal_length_prefix_fails_safe_without_a_large_allocation() {
+        let vault = cryptovault::CryptoVault::default();
+        let (_salt_fec, wrapped_fec, _dek) = bootstrap_envelope(&vault, M).expect("bootstrap");
+
+        let mut hostile = wrapped_fec;
+        hostile[..super::LEN_PREFIX].copy_from_slice(&u32::MAX.to_le_bytes());
+
+        let started = std::time::Instant::now();
+        let err =
+            super::fec_decode(&hostile).expect_err("a maximal pre_len must be rejected, not used");
+        let elapsed = started.elapsed();
+
+        assert!(matches!(err, VaultError::VaultMetaCorrupt));
+        assert!(
+            elapsed < std::time::Duration::from_secs(30),
+            "must fail fast — a real attempt at a ~4.29 GB allocation would not: {elapsed:?}"
+        );
+    }
+
     #[test]
     fn test_check_meta_fec_succeeds_without_attempting_the_aead_unwrap() {
-        // A bogus master never enters this check at all — it only takes the two
-        // FEC blobs, so a passphrase-less caller (`vault diagnose`) can call it.
+        // A bogus master never enters this check at all — it only takes the two FEC blobs, so a
+        // passphrase-less caller (`vault diagnose`) can call it.
         let vault = cryptovault::CryptoVault::default();
         let (salt_fec, wrapped_fec, _dek) = bootstrap_envelope(&vault, M).expect("bootstrap");
         super::check_meta_fec(&salt_fec, &wrapped_fec).expect("both blobs FEC-decode");
@@ -561,7 +684,7 @@ mod tests {
 
     #[test]
     fn test_fuzz_entrypoint_never_panics_on_arbitrary_input() {
-        // Entradas degeneradas: vacía, corta, aleatoria — jamás panic.
+        // Degenerate inputs: empty, short, random — never panic.
         for data in [
             &b""[..],
             &b"\x00"[..],

@@ -142,14 +142,47 @@ fn parse_tool_input(acc: &str) -> Result<serde_json::Value, String> {
     serde_json::from_str(acc).map_err(|e| e.to_string())
 }
 
-/// Drains complete SSE event blocks (terminated by `"\n\n"`) from a raw byte
-/// buffer, decoding each *complete* block as UTF-8. Buffering raw bytes until the
+/// Byte sequences that terminate an SSE event — "a blank line" in the wire format (Loop 2 gate,
+/// S5 finding 5, Caspar). The SSE spec treats CR, LF, and CRLF as interchangeable line
+/// terminators, so a boundary is two of them in a row, in any of these three same-terminator
+/// forms. `b"\n\n"` alone covers every provider this crate targets directly — Anthropic and
+/// every OpenAI-compatible backend (Ollama, OpenAI, Groq, OpenRouter) emit LF — but a proxy or
+/// gateway sitting between magi-rs and the endpoint may normalize line endings to CRLF, and
+/// without the other two patterns [`drain_sse_events`] would never see a boundary in that
+/// stream at all: not a parse error surfaced anywhere, a silent hang that looks exactly like a
+/// dead endpoint (the malformed-line tolerance this function's caller relies on only swallows a
+/// *complete*, malformed block — an incomplete one just accumulates, unbounded up to
+/// [`MAX_SSE_BUFFER_BYTES`]).
+///
+/// No two of these three patterns can match starting at the same buffer position — their second
+/// byte differs pairwise (`\r\n\r\n` and `\r\r` both start with `\r` but diverge at the second
+/// byte; `\n\n` starts with `\n`, disjoint from both) — so scanning all three independently and
+/// keeping the earliest match needs no further tie-break.
+const SSE_EVENT_BOUNDARIES: [&[u8]; 3] = [b"\r\n\r\n", b"\n\n", b"\r\r"];
+
+/// Earliest occurrence of any [`SSE_EVENT_BOUNDARIES`] pattern in `buffer`, as `(start, len)` —
+/// the position to cut at and how many bytes the boundary itself occupies.
+#[must_use]
+fn next_sse_boundary(buffer: &[u8]) -> Option<(usize, usize)> {
+    SSE_EVENT_BOUNDARIES
+        .iter()
+        .filter_map(|pattern| {
+            buffer
+                .windows(pattern.len())
+                .position(|w| w == *pattern)
+                .map(|pos| (pos, pattern.len()))
+        })
+        .min_by_key(|&(pos, _)| pos)
+}
+
+/// Drains complete SSE event blocks (terminated by any [`SSE_EVENT_BOUNDARIES`] pattern) from a
+/// raw byte buffer, decoding each *complete* block as UTF-8. Buffering raw bytes until the
 /// event boundary means a multi-byte UTF-8 character split across network chunks
 /// is never decoded mid-character (#3). Incomplete trailing bytes stay buffered.
 fn drain_sse_events(buffer: &mut Vec<u8>) -> Vec<String> {
     let mut blocks = Vec::new();
-    while let Some(pos) = buffer.windows(2).position(|w| w == b"\n\n") {
-        let block: Vec<u8> = buffer.drain(..pos + 2).collect();
+    while let Some((pos, len)) = next_sse_boundary(buffer) {
+        let block: Vec<u8> = buffer.drain(..pos + len).collect();
         blocks.push(String::from_utf8_lossy(&block).into_owned());
     }
     blocks
@@ -578,6 +611,18 @@ impl OpenAiCompatibleProvider {
             api_key: s.api_key,
             model: s.model,
         }
+    }
+}
+
+#[cfg(test)]
+impl OpenAiCompatibleProvider {
+    /// Test-only accessor exposing the real `reqwest::Client` this provider
+    /// built (SC-A19 fix round 1). Hands back the actual client — never a
+    /// fabricated stand-in — so a test can inspect its `Debug` output, which
+    /// is the only way to observe `reqwest::Client`'s total-timeout
+    /// configuration: the type exposes no public getter for it.
+    fn client_for_test(&self) -> &reqwest::Client {
+        &self.client
     }
 }
 
@@ -1282,6 +1327,8 @@ mod tests {
     use mockito::Server;
     use serde_json::json;
     use std::sync::{Arc, Mutex};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
 
     #[test]
     fn test_parse_tool_input_empty_is_object() {
@@ -1334,6 +1381,60 @@ mod tests {
             vec!["event: a\n\n".to_string(), "event: b\n\n".to_string()]
         );
         assert_eq!(buf, b"event: c-incomplete".to_vec());
+    }
+
+    /// Loop 2 gate, S5 finding 5 (Caspar): a CRLF-framed stream — as a proxy or gateway between
+    /// magi-rs and the endpoint may normalize line endings to — must still yield event
+    /// boundaries. Before the fix this would never match (`\r\n\r\n` contains no literal `\n\n`
+    /// substring, since the two `\n`s are separated by `\r`), and the buffer would grow
+    /// unboundedly instead of ever draining an event.
+    #[test]
+    fn test_drain_sse_events_recognizes_crlf_framing() {
+        let mut buf: Vec<u8> =
+            b"event: a\r\ndata: 1\r\n\r\nevent: b\r\ndata: 2\r\n\r\nevent: c-incomplete\r\n"
+                .to_vec();
+        assert_eq!(
+            drain_sse_events(&mut buf),
+            vec![
+                "event: a\r\ndata: 1\r\n\r\n".to_string(),
+                "event: b\r\ndata: 2\r\n\r\n".to_string(),
+            ]
+        );
+        assert_eq!(buf, b"event: c-incomplete\r\n".to_vec());
+    }
+
+    /// Same guarantee for the bare-CR line-terminator form (`\r\r`) — less likely in practice
+    /// than CRLF, but the SSE spec permits CR alone as a line terminator too, and the fix covers
+    /// it by the same mechanism.
+    #[test]
+    fn test_drain_sse_events_recognizes_bare_cr_framing() {
+        let mut buf: Vec<u8> = b"event: a\rdata: 1\r\r".to_vec();
+        assert_eq!(
+            drain_sse_events(&mut buf),
+            vec!["event: a\rdata: 1\r\r".to_string()]
+        );
+        assert!(buf.is_empty());
+    }
+
+    /// The multibyte-split guarantee (C-S1) must hold under CRLF framing too, not just `\n\n` —
+    /// a fix that only widened the boundary set without preserving the byte-buffering discipline
+    /// would reopen the original mid-character corruption bug for CRLF-framed streams.
+    #[test]
+    fn test_drain_sse_events_handles_multibyte_split_across_chunks_under_crlf() {
+        let mut buf: Vec<u8> = Vec::new();
+        buf.extend_from_slice("data: caf".as_bytes());
+        buf.push(0xC3);
+        assert!(
+            drain_sse_events(&mut buf).is_empty(),
+            "no event before the boundary"
+        );
+        buf.push(0xA9);
+        buf.extend_from_slice(b"\r\n\r\n");
+        assert_eq!(
+            drain_sse_events(&mut buf),
+            vec!["data: café\r\n\r\n".to_string()]
+        );
+        assert!(buf.is_empty());
     }
 
     #[test]
@@ -2863,5 +2964,219 @@ mod tests {
         let body = captured.lock().unwrap().clone().expect("request captured");
         let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(parsed["stream_options"]["include_usage"], true);
+    }
+
+    // ─── SC-A19: the principal provider survived the adapter removal ─────────
+    //
+    // Task 4.1 removed `src/agent/magi_adapter.rs` and rebuilt the MAGI trio on
+    // magi-core's native providers. These tests pin that the retirement did NOT
+    // drag the *principal* `OpenAiCompatibleProvider` along with it — exactly
+    // what the migration discarded in spec §3 would have broken (`LlmProvider`
+    // is request/response, has no streaming, and no tool calling).
+    //
+    // The "no total-request timeout" property is pinned TWICE, deliberately,
+    // by two tests that prove different things (fix round 1 — the original
+    // single stalling-socket test only caught a regression SHORTER than its
+    // 2s stall, missing exactly the realistic shape: someone re-adding a 30s
+    // or 300s total timeout, the latter being what D-A07 rejected outright
+    // for magi-core's `OllamaProvider`):
+    //   - `the_principal_providers_client_carries_no_total_timeout_marker`
+    //     pins the CLIENT'S CONFIGURATION, instantly and for a timeout of any
+    //     duration, via `reqwest::Client`'s `Debug` output.
+    //   - `the_principal_provider_has_no_total_request_timeout` (below) pins
+    //     that nothing else in the CALL PATH imposes a deadline either — a
+    //     real stalling socket, not just client config.
+    //
+    // The third SC-A19 property — a malformed `data:` line must not abort the
+    // stream — is already pinned above by `test_openai_swallows_malformed_line`
+    // (predates this task). It is intentionally not duplicated here; see
+    // task-4.2-report.md for the revert-and-retest evidence that it is not
+    // vacuous.
+
+    /// The literal marker `reqwest::Client`'s `Debug` impl emits when (and
+    /// only when) a total-request timeout is set via
+    /// `ClientBuilder::timeout(...)`.
+    ///
+    /// This is NOT the string `"timeout"`. `Client`'s `Debug` impl
+    /// (`async_impl/client.rs:2727`) delegates to `ClientRef::fmt_fields`
+    /// (`:2957`), which prints the total timeout via
+    /// `RequestConfig<TotalTimeout>::fmt_as_field` (`config.rs:60`) — and that
+    /// helper uses `std::any::type_name::<TotalTimeout>()` as the field NAME,
+    /// not a hardcoded string. `ClientBuilder`'s own `Debug` impl is a
+    /// DIFFERENT code path (`Config::fmt_fields`, `client.rs:2772`) that does
+    /// print the literal field `"timeout"` — but `OpenAiCompatibleProvider`
+    /// holds a built `Client`, never a `ClientBuilder`, so that path is not
+    /// what these tests exercise.
+    ///
+    /// Verified empirically (not just read) against the pinned
+    /// `reqwest = 0.13.4` (see `Cargo.lock`) by probing
+    /// `format!("{:?}", client)` on three clients:
+    /// - plain `Client::new()`: no timeout-shaped field at all.
+    /// - `.timeout(Duration::from_secs(30))`:
+    ///   `reqwest::config::TotalTimeout: 30s`.
+    /// - `.connect_timeout(Duration::from_secs(7))`: no field at all —
+    ///   `ClientRef` (what `Client`'s `Debug` reads) has no
+    ///   `connect_timeout` field; only `ClientBuilder`'s `Debug` shows it.
+    ///
+    /// That last point is why this needle cannot collide: `connect_timeout`
+    /// never appears in a `Client`'s `Debug` output at all, and the only
+    /// other timeout-shaped field `ClientRef` can print — `read_timeout`
+    /// (`client.rs:2988`, unused by this provider) — is a different token
+    /// than `TotalTimeout` and cannot match it as a substring.
+    const TOTAL_TIMEOUT_DEBUG_MARKER: &str = "reqwest::config::TotalTimeout";
+
+    /// Positive-control timeout for
+    /// [`the_principal_providers_client_carries_no_total_timeout_marker`].
+    /// The exact duration is immaterial to what the control proves (any
+    /// `Some(_)` total timeout must surface the marker) — `30` is chosen to
+    /// echo the realistic regression shape named in the fix-round-1 finding
+    /// (a re-added `.timeout(Duration::from_secs(30))`).
+    const POSITIVE_CONTROL_TIMEOUT: Duration = Duration::from_secs(30);
+
+    #[test]
+    fn the_principal_providers_client_carries_no_total_timeout_marker() {
+        // SC-A19 fix round 1: the 2s stalling-socket test below only proves
+        // the absence of a timeout SHORTER than its stall. A regression that
+        // reintroduces a 30s or 300s total timeout — the latter being
+        // precisely what D-A07 rejected for magi-core's `OllamaProvider` —
+        // sails straight through it. `reqwest::Client` exposes no public
+        // timeout getter, but its `Debug` impl only ever prints
+        // `TOTAL_TIMEOUT_DEBUG_MARKER` when a total timeout is actually set
+        // (see that constant's rustdoc for the verified mechanism), so the
+        // property is observable instantly and deterministically, for a
+        // timeout of ANY duration, with no wall-clock at all.
+        let client = OpenAiCompatibleProvider::new(OpenAiSettings {
+            base_url: "http://127.0.0.1:1".into(),
+            api_key: "k".into(),
+            model: "m".into(),
+        });
+        let debug = format!("{:?}", client.client_for_test());
+        assert!(
+            !debug.contains(TOTAL_TIMEOUT_DEBUG_MARKER),
+            "the principal provider's client must carry no total-request \
+             timeout marker, got: {debug}"
+        );
+
+        // Positive control (mandatory, same test): prove the marker DOES
+        // surface for a client that legitimately carries a total timeout.
+        // Without this, a future reqwest release that stops emitting the
+        // field would make the assertion above pass for the wrong reason —
+        // silently switching the guardrail off, exactly the failure mode
+        // this project's spec condemns repeatedly. With the control, that
+        // release breaks this test instead of the guardrail going dark.
+        let with_timeout = reqwest::Client::builder()
+            .timeout(POSITIVE_CONTROL_TIMEOUT)
+            .build()
+            .expect("build a client with a total timeout for the positive control");
+        let control_debug = format!("{with_timeout:?}");
+        assert!(
+            control_debug.contains(TOTAL_TIMEOUT_DEBUG_MARKER),
+            "positive control: a client built WITH .timeout(...) must show \
+             the marker in its Debug output, got: {control_debug}"
+        );
+    }
+
+    /// Mid-response stall used to pin that nothing in the call path — beyond
+    /// the client configuration already pinned by
+    /// [`the_principal_providers_client_carries_no_total_timeout_marker`] —
+    /// imposes a deadline on a slow-arriving SSE stream. Long enough that a
+    /// deadline shorter than this turns the stall into a hard `Err`; short
+    /// enough not to bloat `cargo nextest`'s wall-clock (this box already
+    /// starves under load, see `CLAUDE.local.md`). This constant deliberately
+    /// stays short — widening it to also catch a 30s/300s-shaped regression
+    /// would pay real wall-clock on every suite run forever; that shape is
+    /// instead covered, for free and deterministically, by the sibling
+    /// `Debug`-marker test above.
+    const NO_TIMEOUT_STALL: Duration = Duration::from_secs(2);
+
+    /// Spawns a one-shot raw TCP server on an ephemeral loopback port that
+    /// speaks just enough HTTP/1.1 to satisfy `reqwest`: it writes response
+    /// headers immediately, stalls for [`NO_TIMEOUT_STALL`] BEFORE writing any
+    /// SSE body byte — mirroring the cold-load scenario documented on
+    /// `OpenAiCompatibleProvider::new` ("Ollama can spend tens of seconds on
+    /// cold-load before the first SSE event arrives") — then finishes the
+    /// stream and closes. `mockito::Server` (used by every other test in this
+    /// module) serves its mock body immediately and cannot inject a mid-response
+    /// stall, so this fixture needs a real socket.
+    ///
+    /// Returns the `http://127.0.0.1:<port>` base URL once the listener is
+    /// bound and ready to accept a connection.
+    async fn spawn_stalling_sse_server() -> String {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind an ephemeral loopback port for the stall fixture");
+        let addr = listener
+            .local_addr()
+            .expect("a bound listener exposes its local address");
+        tokio::spawn(async move {
+            let Ok((socket, _)) = listener.accept().await else {
+                return;
+            };
+            let (mut reader, mut writer) = socket.into_split();
+            // Drain and discard the request concurrently with writing the
+            // response: the client's request write must never block on this
+            // fixture reading it. O(request size) — bounded by one small JSON
+            // test message, never more than a few hundred bytes.
+            tokio::spawn(async move {
+                let mut sink = [0u8; 4096];
+                while matches!(reader.read(&mut sink).await, Ok(n) if n > 0) {}
+            });
+            let head =
+                "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n";
+            if writer.write_all(head.as_bytes()).await.is_err() || writer.flush().await.is_err() {
+                return;
+            }
+            sleep(NO_TIMEOUT_STALL).await;
+            let body = concat!(
+                "data: {\"choices\":[{\"delta\":{\"content\":\"post-stall\"},",
+                "\"finish_reason\":\"stop\"}]}\n\n",
+                "data: [DONE]\n\n",
+            );
+            let _ = writer.write_all(body.as_bytes()).await;
+            let _ = writer.flush().await;
+            let _ = writer.shutdown().await;
+        });
+        format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn the_principal_provider_has_no_total_request_timeout() {
+        // SC-A19 / REQ-A19b: the client must still tolerate a stall before the
+        // first SSE byte — exactly what local Ollama's cold-load looks like
+        // (`OpenAiCompatibleProvider::new` rustdoc). This proves the CALL PATH
+        // imposes no deadline shorter than NO_TIMEOUT_STALL end-to-end (a real
+        // socket, real send_messages() drive) — it is NOT the test that pins
+        // "no total timeout of any duration"; that is
+        // `the_principal_providers_client_carries_no_total_timeout_marker`
+        // above, which checks the client's actual configuration and is not
+        // bounded by wall-clock. A total-request timeout shorter than the
+        // stall would surface as an `Err` here (verified by temporarily
+        // reintroducing one — see task-4.2-report.md for the red output).
+        let base_url = spawn_stalling_sse_server().await;
+        let p = OpenAiCompatibleProvider::new(OpenAiSettings {
+            base_url,
+            api_key: "k".into(),
+            model: "m".into(),
+        });
+        let result = p.send_messages(&[Message::user("hi")], &[], None).await;
+        assert!(
+            result.is_ok(),
+            "a {:?} stall before the first SSE byte must not abort the stream: {:?}",
+            NO_TIMEOUT_STALL,
+            result.err()
+        );
+        assert_eq!(
+            result.expect("checked is_ok above").content,
+            vec![Content::Text {
+                text: "post-stall".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn the_principal_provider_kept_its_tool_call_slot_cap() {
+        // SC-A19: retiring the adapter must not have changed the anti-OOM
+        // ceiling on streamed tool-call indices (Task 5 / RF-8).
+        assert_eq!(MAX_TOOL_CALL_SLOTS, 64);
     }
 }

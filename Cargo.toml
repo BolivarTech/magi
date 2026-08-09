@@ -1,6 +1,6 @@
 [package]
 name = "magi-rs"
-version = "0.11.0"
+version = "0.12.0"
 edition = "2021"
 default-run = "magi-rs"
 authors = ["Julian Bolivar <jbolivarg@gmail.com>"]
@@ -49,7 +49,21 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 uuid = { version = "1.8", features = ["v4"] }
 
 # MAGI ecosystem
-magi-core = "3.1.0"
+# EXPLICIT features: providers sit behind feature gates and the default brings none, so
+# without this the MS2 native trio (REQ-A01b) does not compile. Originally caught by
+# `cargo check --example ms2_contracts`; that file pinned nothing (loop 1 fix round A, F2)
+# and was deleted, so this is now enforced by the crate's own build + `cargo nextest run`.
+#   ollama        -> pulls in openai-compat; used ONLY as a PROBE (D-A07)
+#   openai-compat -> completions transport for BOTH `ollama` AND `openai-compat`
+#   claude-api    -> ClaudeProvider for kind = anthropic
+# claude-cli is NOT enabled: it launches the `claude` binary as a subprocess, bypassing the
+# `bash` tool's security model, and rejects with NestedSession under CLAUDECODE (spec §8).
+#
+# EXACT version (`=`), not caret. `RetryConfig`'s rustdoc announces that 3.2.0 changes the
+# retry defaults, which are exactly the numbers REQ-A04 derives its scale from: a
+# `cargo update` would move the floor of a relation this milestone makes impossible to break.
+# The bump to 3.2.0 is MS3 work, with the Task 0.0 spike running first.
+magi-core = { version = "=3.1.0", features = ["ollama", "openai-compat", "claude-api"] }
 instant-distance = { version = "0.6", optional = true }
 
 # Vault MS2 — REQ-V42 layer 1: mlock/VirtualLock via a safe crate (no own unsafe).
@@ -75,8 +89,19 @@ tokio-util = { version = "0.7", default-features = false }
 dunce = "1.0.5"
 
 [dev-dependencies]
-# RoutingMockProvider for consult tests (no extra runtime deps; reqwest NOT pulled)
-magi-core = { version = "3.1.0", features = ["test-utils"] }
+# `test-util` unlocks `tokio::time::{pause, advance}` for a virtual/paused clock.
+# Task 2.3 review (m2): two `mode_classifier` tests exercised the real
+# `CLASSIFY_TIMEOUT_SECS`/30s doubles with a live sleep (~30s of real wall clock
+# across the two); a paused clock advances past the same timers instantly.
+# Dev-only: Cargo unifies this with the pinned `tokio = "1.36"` main dependency
+# for test builds, and it never reaches a release binary (dev-dependencies are
+# not part of the release dependency graph).
+tokio = { version = "1.36", features = ["test-util"] }
+# RoutingMockProvider for consult tests. Repeats the [dependencies] features plus
+# `test-utils`: without the full list the dev-dependency would resolve a different
+# combination, and the version is pinned with `=` for the same reason as above (retry
+# defaults in 3.2.0).
+magi-core = { version = "=3.1.0", features = ["ollama", "openai-compat", "claude-api", "test-utils"] }
 # Mocking for tests
 mockall = "0.12"
 mockito = "1.4"

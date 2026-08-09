@@ -98,10 +98,9 @@ pub struct SecretEntry {
 pub trait SecretStore: Send {
     /// Adds a new secret or overwrites an existing one (idempotent).
     ///
-    /// An existing `name`'s `created_at` is preserved; only `updated_at`
-    /// advances (SC-V02). Encrypts before taking the connection lock and
-    /// rejects an empty or whitespace-only `name` before touching the
-    /// database (R-V08, "Nombre no vacío").
+    /// An existing `name`'s `created_at` is preserved; only `updated_at` advances (SC-V02).
+    /// Encrypts before taking the connection lock and rejects an empty or whitespace-only
+    /// `name` before touching the database (R-V08, "Non-empty name").
     ///
     /// # Errors
     ///
@@ -214,9 +213,9 @@ fn raw_column_bytes(value: rusqlite::types::ValueRef<'_>) -> Vec<u8> {
     }
 }
 
-/// Rejects an empty or whitespace-only secret name before any database
-/// access (R-V08, "Nombre no vacío"): a blank name is a usage error, not a
-/// valid key, and letting it through would create a ghost row.
+/// Rejects an empty or whitespace-only secret name before any database access (R-V08, "Non-
+/// empty name"): a blank name is a usage error, not a valid key, and letting it through would
+/// create a ghost row.
 ///
 /// # Errors
 ///

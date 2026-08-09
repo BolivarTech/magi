@@ -1,8 +1,7 @@
 //! The Agent orchestrator coordinates between the Provider and the Tools.
 
-pub mod magi_adapter;
-pub mod magi_wiring;
 pub mod messages;
+pub mod mode_classifier;
 pub mod provider;
 
 use crate::agent::messages::{Content, Message, Role};
@@ -23,6 +22,18 @@ use crate::system::database::MemoryStore;
 use crate::tools::Tool;
 use anyhow::Result;
 use futures::StreamExt;
+use magi_core::schema::Mode;
+use magi_rs::magi::gate::{evaluate, GateTelemetry, GateThresholds, GateVerdict, NoGateTelemetry};
+use magi_rs::magi::mode::{
+    agent_chosen_mode, input_for_dispatch, resolve_mode_guarded, ModeConfig, ModeSources,
+};
+// Test-only: `read_resolved_mode` is the inverse of `input_for_dispatch` /
+// `inject_resolved_mode` and has no production caller in this module — only
+// `a_forced_consult_carries_a_resolved_mode_into_execute` reads it back to
+// assert what was actually injected. `ConsultTool::execute` (a different
+// module) is the production reader.
+#[cfg(test)]
+use magi_rs::magi::mode::read_resolved_mode;
 use sha2::{Digest, Sha256};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -91,6 +102,168 @@ const FORCED_CONSULT_TOOL_USE_ID: &str = "forced-consult";
 const CONSULT_ALREADY_FORCED_MESSAGE: &str =
     "consult already ran once for this forced query; no further invocations";
 
+/// Consecutive vetoes that close `consult` for the rest of the TURN (REQ-A20c).
+///
+/// **The exact sequence, spelled out because "the second veto is terminal" reads
+/// two ways and the trace is not obvious:**
+///
+/// | Call | Counter on entry | What happens |
+/// |---|---|---|
+/// | 1st, trivial | 0 | EVALUATED, vetoed ⇒ counter 1 |
+/// | 2nd, trivial | 1 | EVALUATED, vetoed ⇒ counter 2 |
+/// | 3rd onward | 2 | NOT evaluated: the door is closed and the result says so |
+///
+/// So: two vetoes actually occur, and starting from the third call the door is
+/// closed. The second is not rejected sight-unseen — it is evaluated, vetoed,
+/// and that is the last one. `1` here would block the second call WITHOUT
+/// evaluating it, which is one fewer veto than the spec describes.
+const MAX_CONSECUTIVE_VETOES: u8 = 2;
+
+/// Marks a final answer that did NOT come from the three-perspective
+/// consult, because the complexity gate vetoed it and the model answered
+/// directly instead (REQ-A20/SC-A20k).
+///
+/// **Same visual WEIGHT as `[DEGRADED: ...]`** (`tui/mod.rs`'s marker for a
+/// consult that ran with fewer than three responding mages) — a bracketed,
+/// all-caps, `NO_CONSENSUS_MARK_SEPARATOR`-blank-line-separated marker, not
+/// folded into running prose — but a DIFFERENT condition and a DIFFERENT
+/// PLACEMENT, and both distinctions matter:
+/// - Condition: `[DEGRADED: ...]` means a consult ran and came back thin; this mark means no consult ran at all. Folding the two together would be a semantic bug — a reader of `[DEGRADED: ...]` would conclude the trio was consulted, when it never was.
+/// - Placement: `[DEGRADED: ...]` PREPENDS, because it is a caveat about the report that follows — the reader needs it before the content it qualifies. This mark APPENDS, because it annotates the answer just given — there is no "report" to prefix, only a direct answer whose provenance the reader needs to know AFTER reading it. Same weight, different placement, for that reason — not an oversight.
+///
+/// Without it a veto is invisible to the user: they asked something, the
+/// agent decided to consult, the gate stopped it, and what comes back is an
+/// ordinary model answer — indistinguishable from one backed by three
+/// perspectives, which inverts the gate's whole purpose (saving three model
+/// calls, not letting the user believe they happened). After the terminal
+/// rule (REQ-A20c) this matters more: the second veto disables `consult`
+/// for the REST of the turn, so every remaining answer in that turn carries
+/// this mark too — see `answering_without_consensus` in
+/// [`Agent::run_tool_loop`].
+pub const NO_CONSENSUS_MARK: &str =
+    "[NO CONSENSUS: answered directly — the three-model consult did not run]";
+
+/// Separates the answer from [`NO_CONSENSUS_MARK`] when it is appended
+/// (REQ-A20/SC-A20k, fix round 1/I1).
+///
+/// Mirrors the blank line `[DEGRADED: ...]` already uses to separate itself
+/// from the report it prepends (`tui/mod.rs:699`'s `"{}\n\n{}"`) — a marker
+/// concatenated straight onto the last word of an answer defeats the whole
+/// point of a feature whose only job is letting a human tell the two kinds
+/// of answer apart. A named `const` (not an inline `"\n\n"` at each call
+/// site) because the literal is used twice — the `final_text` append and
+/// the `StreamPiece::Content` send — and B3 treats a twice-repeated literal
+/// as a constant.
+const NO_CONSENSUS_MARK_SEPARATOR: &str = "\n\n";
+
+/// Text returned to the agent after a veto (REQ-A20e).
+///
+/// **Does not reveal the threshold**: saying how many characters are missing is
+/// a direct invitation to pad the content until it passes, which would produce
+/// exactly the expensive consult the gate exists to avoid, plus the cost of the
+/// padding.
+fn veto_message(mode: &Mode) -> String {
+    format!(
+        "This content does not warrant a three-perspective consensus in {mode} mode: it is \
+         too short. Retrying with the same content gives the same result — answer directly \
+         instead."
+    )
+}
+
+/// SECOND veto: also says the door closed for the rest of the turn (REQ-A20f).
+fn veto_message_terminal(mode: &Mode) -> String {
+    format!(
+        "{} And this is the second veto this turn: `consult` is now disabled for the rest \
+         of it. The next turn starts clean.",
+        veto_message(mode)
+    )
+}
+
+/// Calls made AFTER the door already closed: not even re-evaluated. Same rule
+/// as the other two messages — never names the threshold.
+fn consult_disabled_message() -> String {
+    "`consult` is disabled for the rest of this turn (two consecutive vetoes). Answer \
+     directly; the next turn starts clean."
+        .to_string()
+}
+
+/// Records ONE gate evaluation (REQ-A20 telemetry, SC-A20h).
+///
+/// **Not an `eprintln!`**: this is telemetry to calibrate thresholds, not a
+/// user-facing message — mixing the two channels would make the interactive
+/// path noisy.
+fn log_gate(config: &AgentRunConfig, mode: &Mode, chars: usize, threshold: usize, vetoed: bool) {
+    // The APPLIED threshold travels in the line (SC-A20h). Without it the
+    // telemetry cannot do the one thing it exists for: with `[magi.complexity]`
+    // configurable, "vetoed at 40 chars" does not say whether the threshold was
+    // 50 or 500, and calibrating is exactly comparing the two numbers.
+    config
+        .gate_telemetry
+        .on_gate_evaluation(mode, chars, threshold, vetoed);
+}
+
+/// Updates the identical-3x-call dedup guard for ONE real invocation of
+/// `name`/`input`.
+///
+/// Factored out of [`Agent::run_tool_loop`]'s per-tool accounting so the
+/// generic path and `consult`'s genuine-dispatch path
+/// (`Agent::dispatch_consult_through_gate`'s `GateVerdict::Dispatch` arm)
+/// apply EXACTLY the same tracking instead of two copies that can drift.
+///
+/// **Deliberately NOT called for a `consult` call the gate arbitrates** (a
+/// veto, or an already-closed door, REQ-A20c): a burst of identical trivial
+/// content is exactly what produces repeated vetoes, and this guard firing on
+/// top of that would abort the whole turn with a hard error instead of the
+/// gate's own graceful, non-error terminal rule.
+///
+/// # Errors
+/// "Repetitive tool call detected" once three consecutive identical calls are
+/// seen, unless `disable_repetitive_guard` is set (REQ-H08, soft guard only —
+/// no hard barrier is affected).
+fn track_repetition(
+    name: &str,
+    input: &serde_json::Value,
+    last_normalized_tool: &mut Option<(String, String)>,
+    repeat_count: &mut i32,
+    disable_repetitive_guard: bool,
+) -> Result<()> {
+    let normalized_input = Agent::normalize_input(input, 0)?;
+    if let Some((ref last_name, ref last_norm_input)) = *last_normalized_tool {
+        if last_name == name && last_norm_input == &normalized_input {
+            *repeat_count += 1;
+            // REQ-H08: `--full-auto` silences this SOFT guard (only). No hard
+            // barrier is affected.
+            if *repeat_count >= 3 && !disable_repetitive_guard {
+                return Err(anyhow::anyhow!("Repetitive tool call detected"));
+            }
+        } else {
+            *repeat_count = 0;
+        }
+    }
+    *last_normalized_tool = Some((name.to_string(), normalized_input));
+    Ok(())
+}
+
+/// Forwards ONE `piece` to `chunk_tx`, mapping a dropped receiver (the UI
+/// closed the connection mid-stream) to the SAME error every send site in
+/// [`Agent::run_tool_loop`] previously produced independently.
+///
+/// Factored out once REQ-A20's `NO_CONSENSUS_MARK` send (SC-A20k) would
+/// have made this a THIRD copy of the identical six-line pattern —
+/// `TextDelta` and `ReasoningDelta` already each had their own (B3).
+///
+/// # Errors
+/// Returns an error if the receiver has been dropped.
+async fn send_or_closed_err(
+    chunk_tx: &tokio::sync::mpsc::Sender<StreamPiece>,
+    piece: StreamPiece,
+) -> Result<()> {
+    chunk_tx
+        .send(piece)
+        .await
+        .map_err(|_| anyhow::anyhow!("TUI connection closed during streaming"))
+}
+
 /// Observes an agent run from **outside** the tool loop, for the headless runner.
 ///
 /// Absent ([`AgentRunConfig::observer`] is `None`) ⇒ the interactive tool loop
@@ -125,14 +298,12 @@ pub trait RunObserver: Send + Sync {
     /// audit shows exactly the one forced `consult` that actually ran.
     ///
     /// # Parameters
-    /// - `id` — the tool-use id, correlating this call with the assistant
-    ///   `ToolUse` block that requested it (used to assemble the transcript).
+    /// - `id` — the tool-use id, correlating this call with the assistant `ToolUse` block that requested it (used to assemble the transcript).
     /// - `name` — the tool name.
     /// - `input` — the JSON input the tool was invoked with.
     /// - `result` — the tool result (or the denial / not-found message).
     /// - `ok` — `true` on successful execution; `false` on failure or denial.
-    /// - `ms` — wall-clock execution time in milliseconds (`0` for a denied
-    ///   call, which never executes).
+    /// - `ms` — wall-clock execution time in milliseconds (`0` for a denied call, which never executes).
     fn on_tool_call(
         &self,
         id: &str,
@@ -206,6 +377,29 @@ pub struct AgentRunConfig {
     /// [`Agent::run_tool_loop`] for the full authorization/at-most-once
     /// contract.
     pub force_consult: bool,
+    /// Complexity-gate thresholds for an autonomous `consult` (REQ-A20/A20b).
+    /// [`AgentRunConfig::default`] uses [`GateThresholds::builtin`] — the gate
+    /// is ACTIVE by default (REQ-A20b): a security-relevant gate that turns
+    /// itself off by omission is a gate that's effectively off. Only
+    /// [`Agent::dispatch_consult_through_gate`] (the model-issued `ToolUse`
+    /// path) ever evaluates this; the forced pre-loop injection above
+    /// (REQ-H22) never does — see that method's rustdoc for why that
+    /// call-site distinction IS REQ-A20's contract.
+    pub gate_thresholds: GateThresholds,
+    /// Mode resolution inputs the funnel needs without re-reading `magi.toml`
+    /// per turn (REQ-A07/A07c/A07d). [`AgentRunConfig::default`] leaves both
+    /// fields at their least-surprising value — no configured default mode,
+    /// `untrusted_content` off — so an unconfigured run keeps inferring/
+    /// defaulting exactly as it did before this field existed.
+    pub mode_config: ModeConfig,
+    /// Sink for the gate's telemetry (REQ-A20, SC-A20h). **Deliberately
+    /// separate from [`RunObserver`]**: the observer is `None` in the TUI —
+    /// the surface that autonomously routes to `consult` the most — so a
+    /// signal SC-A20h requires *always* recorded cannot depend on it.
+    /// [`AgentRunConfig::default`] installs [`NoGateTelemetry`] (zero
+    /// recording), so this field is purely additive: no existing run changes
+    /// behavior by having it.
+    pub gate_telemetry: Arc<dyn GateTelemetry>,
 }
 
 impl Default for AgentRunConfig {
@@ -217,6 +411,9 @@ impl Default for AgentRunConfig {
             cancel: CancellationToken::new(),
             system: None,
             force_consult: false,
+            gate_thresholds: GateThresholds::builtin(),
+            mode_config: ModeConfig::default(),
+            gate_telemetry: Arc::new(NoGateTelemetry),
         }
     }
 }
@@ -234,10 +431,7 @@ pub struct ApprovalRequest {
 ///
 /// - `Content` — answer text (persisted); forwarded to the TUI as a `StreamDelta`.
 /// - `Reasoning` — thinking model chain-of-thought; shown live, never persisted (#24).
-/// - `Notice` — non-content operational notice (e.g. memory fallback warning,
-///   truncation advisory).  Rendered in a distinct style (dimmed/yellow, prefixed
-///   `⚠ `) in the TUI so it stands out from model output without corrupting the
-///   ratatui frame via stderr.
+/// - `Notice` — non-content operational notice (e.g. memory fallback warning, truncation advisory).  Rendered in a distinct style (dimmed/yellow, prefixed `⚠ `) in the TUI so it stands out from model output without corrupting the ratatui frame via stderr.
 ///
 /// Memory assembler truncation notices and agent-loop warnings use `Notice` so they
 /// are routed through the channel rather than written to raw stderr while the TUI
@@ -365,6 +559,30 @@ impl Agent {
         }
     }
 
+    /// Removes the tool named `name`, if registered. A no-op if absent.
+    ///
+    /// The counterpart to [`Self::register_or_replace_tool`] for the case where
+    /// there is nothing safe to replace it WITH: when a provider-bound tool's
+    /// backing provider fails to rebuild (e.g. a post-`/login` MAGI trio rebuild
+    /// error), leaving the OLD registration in place would let the agent keep
+    /// routing to it — against credentials that may already be stale or rotated
+    /// — while the user was told the rebuild failed. Removing it degrades to
+    /// "tool unavailable" instead of "tool silently using the wrong thing".
+    pub fn remove_tool(&mut self, name: &str) {
+        self.tools.retain(|t| t.name() != name);
+    }
+
+    /// Returns `true` if a tool named `name` is currently registered.
+    ///
+    /// Introspection helper alongside [`Self::register_or_replace_tool`] and
+    /// [`Self::remove_tool`] — lets a caller (or a test, e.g. the `tui`
+    /// module's post-`/login` rebuild-failure coverage) verify a
+    /// registration change without reaching into the private `tools` field.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn has_tool(&self, name: &str) -> bool {
+        self.tools.iter().any(|t| t.name() == name)
+    }
+
     /// Normalizes tool input recursively to detect semantically identical calls.
     pub fn normalize_input(val: &serde_json::Value, depth: usize) -> Result<String> {
         const MAX_DEPTH: usize = 10;
@@ -436,12 +654,9 @@ impl Agent {
     /// (`memory.add_message`) is preserved in both modes.
     ///
     /// # Parameters
-    /// - `store` — encrypted vector store (shares the SQLite connection of
-    ///   `EncryptedSqliteMemory`, so the file stays a single on-disk asset).
-    /// - `embedder` — text-to-vector backend (Ollama default; any openai-compat
-    ///   endpoint works by pointing `base_url`).
-    /// - `clock` — wall-clock abstraction; inject `FixedClock` in tests for
-    ///   deterministic decay (D-18 / R-06).
+    /// - `store` — encrypted vector store (shares the SQLite connection of `EncryptedSqliteMemory`, so the file stays a single on-disk asset).
+    /// - `embedder` — text-to-vector backend (Ollama default; any openai-compat endpoint works by pointing `base_url`).
+    /// - `clock` — wall-clock abstraction; inject `FixedClock` in tests for deterministic decay (D-18 / R-06).
     /// - `cfg` — memory configuration (context budget, weights, mode, …).
     pub fn set_memory_subsystem(
         &mut self,
@@ -738,8 +953,7 @@ impl Agent {
     /// - `name` — the tool name to look up in `self.tools`.
     /// - `input` — the JSON input to execute the tool with.
     /// - `config` — the run configuration (observer, cancellation, approval).
-    /// - `chunk_tx` — streaming sender, used only to forward an auto-approved
-    ///   tool's [`Tool::approval_notice`].
+    /// - `chunk_tx` — streaming sender, used only to forward an auto-approved tool's [`Tool::approval_notice`].
     ///
     /// # Returns
     /// `Content::ToolResult` — a denial (`is_error = true`) when not approved,
@@ -854,6 +1068,160 @@ impl Agent {
         }
     }
 
+    /// Runs a model-issued `consult` request through the complexity gate
+    /// (REQ-A20), producing the `ToolResult` to fold into the turn.
+    ///
+    /// # The call-site distinction this method IS
+    ///
+    /// This is called **only** from the `ToolUse` loop in [`Self::run_tool_loop`]
+    /// — the model deciding, on its own, to invoke `consult`. The forced
+    /// pre-loop injection (REQ-H22) calls [`Self::authorize_and_execute_tool`]
+    /// directly and never reaches this method at all. That is the entire
+    /// mechanism behind REQ-A20's "the gate vetoes the autonomous route, never
+    /// an explicit one": `/consult` (TUI), `magi consult` (CLI) and a forced
+    /// consult all bypass the gate structurally, by never calling this method,
+    /// not by any flag this method could check. If a future refactor ever
+    /// unifies the two call sites "to simplify", an explicit consult starts
+    /// getting vetoed — see `a_forced_injection_bypasses_the_gate_while_a_model_choice_does_not`.
+    ///
+    /// # Outcomes
+    /// Every branch also updates `*answering_without_consensus` — REQ-A20's
+    /// [`NO_CONSENSUS_MARK`], not just the veto counter, tracks whether the
+    /// NEXT answer in this turn is backed by a real consult:
+    /// - The door is already closed this turn (`consecutive_vetoes >= [`MAX_CONSECUTIVE_VETOES`]`): not even re-evaluated, zero model calls, `*answering_without_consensus = true` (already was, by construction — see below — but set explicitly so this branch does not silently rely on that invariant holding).
+    /// - [`GateVerdict::Veto`]: `consecutive_vetoes` increments; zero model calls; the result names the mode and, on the second veto, that the door is now closed for the rest of the turn (REQ-A20c); `*answering_without_consensus = true`.
+    /// - [`GateVerdict::Dispatch`]: `consecutive_vetoes` resets to `0` (a dispatched consult spends three model calls — the exact cost the gate exists to avoid — so resetting on it never opens a padding shortcut), and the resolved `(Mode, ModeSource)` is injected into a CLONED input (`magi_rs::magi::mode::input_for_dispatch`) before the real dispatch, so [`ConsultTool`](crate::tools::consult::ConsultTool) reads the same mode the gate just evaluated instead of re-resolving it; `*answering_without_consensus = false` — a genuine consult ran, so whatever the model says next IS backed by consensus.
+    ///
+    /// There is deliberately **no anti-mode-shopping guard**: the agent can
+    /// choose the mode via the tool's `input_schema` (REQ-A07b), so a veto
+    /// under `Design` (higher threshold) followed by a retry under `Analysis`
+    /// (lower) that then dispatches is not evasion — the built-in thresholds
+    /// say a shorter `Analysis` is legitimately enough for that lens, and the
+    /// gate's own `Dispatch` verdict says so. A guard here would second-guess
+    /// the gate's own configuration, and the plain reset-on-success rule
+    /// already covers the case that matters: a mode change that fails to pass
+    /// is still a `Veto` (counts, and closes the door on the second one).
+    ///
+    /// # Errors
+    /// Propagates [`magi_rs::magi::mode::ModeError`] from
+    /// [`resolve_mode_guarded`] (`untrusted_content` active with no declared
+    /// mode) — the same fail-closed behavior the rest of the run already
+    /// applies to a malformed turn.
+    ///
+    /// `last_normalized_tool`/`repeat_count` are passed through so a GENUINE
+    /// dispatch (only) can join the same identical-call dedup guard every
+    /// other tool gets — see `track_repetition`'s rustdoc for why a veto or an
+    /// already-closed door must NOT touch them.
+    // Established local convention for this exact shape (turn-scoped
+    // dispatch state threaded through a helper): `headless_runner.rs:168/546`
+    // and `tui/mod.rs:552` carry the identical allow+comment pattern.
+    #[allow(clippy::too_many_arguments)]
+    async fn dispatch_consult_through_gate(
+        &mut self,
+        id: &str,
+        input: &serde_json::Value,
+        config: &AgentRunConfig,
+        chunk_tx: &tokio::sync::mpsc::Sender<StreamPiece>,
+        consecutive_vetoes: &mut u8,
+        answering_without_consensus: &mut bool,
+        last_normalized_tool: &mut Option<(String, String)>,
+        repeat_count: &mut i32,
+    ) -> Result<Content> {
+        if *consecutive_vetoes >= MAX_CONSECUTIVE_VETOES {
+            // REQ-A20c: the door already closed this turn. Not even the gate
+            // itself runs again — zero model calls, same as a fresh veto.
+            // Explicit rather than relying on it already being `true` from
+            // the veto that closed the door (see this method's rustdoc).
+            *answering_without_consensus = true;
+            return Ok(Content::ToolResult {
+                tool_use_id: id.to_string(),
+                content: consult_disabled_message(),
+                is_error: false,
+            });
+        }
+
+        let query = input
+            .get("query")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        // Explicit (level 1) is never populated here: there is no human on the
+        // autonomous route. `classifier: None` — this call site never infers
+        // (REQ-A07d); the agent already had its chance to pick a mode via its
+        // own `mode` argument (`agent_chosen_mode`), which is level 3, not a
+        // classification call.
+        let res = resolve_mode_guarded(
+            ModeSources {
+                configured: config.mode_config.default_mode,
+                agent_chosen: agent_chosen_mode(input),
+                ..ModeSources::default()
+            },
+            config.mode_config.untrusted_content,
+            None,
+            query,
+        )
+        .await?;
+
+        match evaluate(query, &res.mode, &config.gate_thresholds) {
+            GateVerdict::Veto { mode } => {
+                *consecutive_vetoes += 1;
+                *answering_without_consensus = true;
+                log_gate(
+                    config,
+                    &mode,
+                    query.chars().count(),
+                    config.gate_thresholds.for_mode(&mode),
+                    true,
+                );
+                let content = if *consecutive_vetoes >= MAX_CONSECUTIVE_VETOES {
+                    veto_message_terminal(&mode)
+                } else {
+                    veto_message(&mode)
+                };
+                Ok(Content::ToolResult {
+                    tool_use_id: id.to_string(),
+                    content,
+                    is_error: false,
+                })
+            }
+            GateVerdict::Dispatch => {
+                // A dispatched consult already spends three model calls, so
+                // resetting here never opens a "pad it until it passes"
+                // shortcut (REQ-A20c) — that cost IS what the gate exists to
+                // avoid, so paying it buys the reset honestly.
+                *consecutive_vetoes = 0;
+                *answering_without_consensus = false;
+                log_gate(
+                    config,
+                    &res.mode,
+                    query.chars().count(),
+                    config.gate_thresholds.for_mode(&res.mode),
+                    false,
+                );
+                // A GENUINE dispatch is a real tool execution like any other,
+                // so it joins the same dedup guard (keyed off the ORIGINAL
+                // model input, not the mode-injected copy) — three identical
+                // real analyses are still caught.
+                track_repetition(
+                    CONSULT_TOOL_NAME,
+                    input,
+                    last_normalized_tool,
+                    repeat_count,
+                    config.disable_repetitive_guard,
+                )?;
+                let tool_input = input_for_dispatch(input, &res);
+                Ok(self
+                    .authorize_and_execute_tool(
+                        id,
+                        CONSULT_TOOL_NAME,
+                        &tool_input,
+                        config,
+                        chunk_tx,
+                    )
+                    .await)
+            }
+        }
+    }
+
     /// Inner tool-loop shared by the `selective` and `load_all` execution paths.
     ///
     /// Streams provider responses and dispatches tool use until the model produces
@@ -862,21 +1230,14 @@ impl Agent {
     /// preserving every invariant of the original loops (REQ-28).
     ///
     /// # Parameters
-    /// - `working` — mutable context slice sent to the provider on each iteration.
-    ///   Extended in-place as assistant responses and tool-result messages are
-    ///   appended. `self.history` is updated in parallel so `load_history` and the
-    ///   message store stay consistent across both paths.
+    /// - `working` — mutable context slice sent to the provider on each iteration. Extended in-place as assistant responses and tool-result messages are appended. `self.history` is updated in parallel so `load_history` and the message store stay consistent across both paths.
     /// - `chunk_tx` — streaming sender for UI pieces (shared reference).
-    /// - `prompt` — the original user query text for this turn. Used ONLY by the
-    ///   [`AgentRunConfig::force_consult`] injection (REQ-H22) to build the
-    ///   forced consult's `{"query": prompt}` input; ignored otherwise.
+    /// - `prompt` — the original user query text for this turn. Used ONLY by the [`AgentRunConfig::force_consult`] injection (REQ-H22) to build the forced consult's `{"query": prompt}` input; ignored otherwise.
     ///
     /// # Returns
     /// A tuple `(full_text, final_text)` where:
-    /// - `full_text` — text accumulated from `TextDelta` chunks (sanitized); used
-    ///   by the `selective` caller for [`write_turn_to_memory`].
-    /// - `final_text` — text extracted from the terminal `MessageDone` content,
-    ///   matching the pre-refactor return value in both branches.
+    /// - `full_text` — text accumulated from `TextDelta` chunks (sanitized); used by the `selective` caller for [`write_turn_to_memory`].
+    /// - `final_text` — text extracted from the terminal `MessageDone` content, matching the pre-refactor return value in both branches.
     ///
     /// # Invariants preserved
     /// `max_tool_calls` cap, 3× repetition abort, approval/timeout/deny semantics,
@@ -906,7 +1267,7 @@ impl Agent {
     /// [`CONSULT_ALREADY_FORCED_MESSAGE`] and neither authorized nor executed
     /// again — recorded only in the conversation, NOT re-added to the observer's
     /// audit trail (so `RunOutcome.tool_calls` still shows exactly one `consult`
-    /// entry). This is REQ-H22's "no se re-dispara aunque el agente quisiera".
+    /// entry). This is REQ-H22's "it does not re-fire even if the agent wanted it to".
     ///
     /// The injection deliberately does **not** seed `last_normalized_tool`/
     /// `repeat_count` (the 3x-identical-call guard below): it is a runner
@@ -921,9 +1282,39 @@ impl Agent {
         config: &AgentRunConfig,
         prompt: &str,
     ) -> Result<(String, String)> {
+        // SEQUENTIALITY REQUIRED: this counter — like `repeat_count` just below, and like
+        // the veto counter REQ-A20c adds in MS2 — is a flat local that assumes the
+        // `ToolUse` loop further down dispatches one at a time. Parallelising that loop
+        // breaks all of them at once, and silently: nothing in a `let mut x = 0` says
+        // "sequential". Pinned by `tool_dispatch_is_sequential_within_a_turn`, so the
+        // change breaks the suite instead of surfacing as miscounts under load.
         let mut tool_call_count = 0;
         let mut last_normalized_tool: Option<(String, String)> = None;
+        // SEQUENTIALITY REQUIRED — see the note on `tool_call_count` above.
         let mut repeat_count = 0;
+        // SEQUENTIALITY REQUIRED — see the note on `tool_call_count` above. This
+        // is the third counter that note already promised: MS2's veto counter
+        // (REQ-A20c). Same flat local, same lifetime (the turn: born on entry,
+        // gone on exit via any of the four return paths, no `Drop` to write),
+        // same pin (`tool_dispatch_is_sequential_within_a_turn`). It does NOT
+        // live on `Agent` or on `ConsultTool` (an `Arc` shared across
+        // sessions) — putting it there would let a turn vetoed in one session
+        // disable `consult` in another.
+        let mut consecutive_vetoes: u8 = 0;
+        // REQ-A20/SC-A20k: whether the NEXT answer produced in this turn is
+        // backed by a genuine three-model consult. Same lifetime, same flat
+        // local, same reasoning as `consecutive_vetoes` right above (turn-
+        // scoped, dies on any of the four exit paths, no `Drop`) — it is
+        // flipped in lockstep with that counter, inside
+        // `dispatch_consult_through_gate`: `true` on a veto or an
+        // already-closed door, `false` on a genuine dispatch. Read at the
+        // terminal (no-tool) turn below to decide whether the answer about
+        // to be returned needs `NO_CONSENSUS_MARK`. It intentionally does
+        // NOT describe the turn's history (a turn that vetoed, then
+        // dispatched, then answered is NOT marked — the dispatch reset it,
+        // exactly like `consecutive_vetoes`), only the response being given
+        // right now.
+        let mut answering_without_consensus = false;
         // REQ-H22: locks out any further `consult` request once the forced
         // pre-loop injection below has run (success, denial, or "not found").
         // Defensive/redundant by construction: the injection block runs iff
@@ -941,6 +1332,35 @@ impl Agent {
                 // stability contract with `headless_runner::run_query`.
                 return Err(anyhow::anyhow!(MAX_TOOL_CALLS_ERROR));
             }
+            // MS2 (REQ-A20/REQ-A07d), fix round 1 (I1): this call site must
+            // ALSO resolve and inject the mode, mirroring
+            // `dispatch_consult_through_gate` MINUS the gate evaluation —
+            // REQ-A20 forbids ever vetoing a forced (user-requested) consult,
+            // but it still needs a resolved mode injected before dispatch.
+            // Without this, `ConsultTool::execute` silently falls back to
+            // `Mode::Analysis` for EVERY forced consult in production —
+            // harmless only by coincidence today (that fallback IS what
+            // resolution currently produces), and a latent divergence bug
+            // the moment a later task wires `default_mode` from `magi.toml`
+            // into `AgentRunConfig`: the forced route would keep ignoring it
+            // silently, no error, no test, no notice. Pinned by
+            // `a_forced_consult_carries_a_resolved_mode_into_execute`.
+            //
+            // `agent_chosen` is `None` explicitly, not derived from `input`:
+            // there is no agent choosing on this route — it is a runner
+            // injection, not a model-issued call — so there is nothing to
+            // read a `mode` field out of.
+            let forced_res = resolve_mode_guarded(
+                ModeSources {
+                    configured: config.mode_config.default_mode,
+                    ..ModeSources::default()
+                },
+                config.mode_config.untrusted_content,
+                None,
+                prompt,
+            )
+            .await?;
+            let tool_input = input_for_dispatch(&input, &forced_res);
             // Deliberately NOT seeding `last_normalized_tool` here: this is a
             // runner injection, not a model-issued call, so it must not count
             // toward the model's own 3x-identical repetitive-call guard below
@@ -950,7 +1370,7 @@ impl Agent {
                 .authorize_and_execute_tool(
                     FORCED_CONSULT_TOOL_USE_ID,
                     CONSULT_TOOL_NAME,
-                    &input,
+                    &tool_input,
                     config,
                     chunk_tx,
                 )
@@ -1000,25 +1420,13 @@ impl Agent {
                         let sanitized = Self::sanitize_text(&delta);
                         turn_text_blocks += 1;
                         full_text.push_str(&sanitized);
-                        if chunk_tx
-                            .send(StreamPiece::Content(sanitized))
-                            .await
-                            .is_err()
-                        {
-                            return Err(anyhow::anyhow!("TUI connection closed during streaming"));
-                        }
+                        send_or_closed_err(chunk_tx, StreamPiece::Content(sanitized)).await?;
                     }
                     ResponseChunk::ReasoningDelta(delta) => {
                         // Forwarded for live display only — NOT added to `full_text`,
                         // so the persisted assistant message excludes the thinking.
                         let sanitized = Self::sanitize_text(&delta);
-                        if chunk_tx
-                            .send(StreamPiece::Reasoning(sanitized))
-                            .await
-                            .is_err()
-                        {
-                            return Err(anyhow::anyhow!("TUI connection closed during streaming"));
-                        }
+                        send_or_closed_err(chunk_tx, StreamPiece::Reasoning(sanitized)).await?;
                     }
                     ResponseChunk::MessageDone(msg) => {
                         last_message = Some(msg);
@@ -1062,20 +1470,37 @@ impl Agent {
                         return Err(anyhow::anyhow!(MAX_TOOL_CALLS_ERROR));
                     }
 
-                    let normalized_input = Self::normalize_input(input, 0)?;
-                    if let Some((ref last_name, ref last_norm_input)) = last_normalized_tool {
-                        if last_name == name && last_norm_input == &normalized_input {
-                            repeat_count += 1;
-                            // REQ-H08: `--full-auto` silences this SOFT guard (only).
-                            // No hard barrier is affected.
-                            if repeat_count >= 3 && !config.disable_repetitive_guard {
-                                return Err(anyhow::anyhow!("Repetitive tool call detected"));
-                            }
-                        } else {
-                            repeat_count = 0;
-                        }
+                    // REQ-H22: once the forced consult has run, any further
+                    // `consult` request — model-issued or not — is locked out
+                    // for the rest of THIS run (see below). That lock, not the
+                    // gate, is what handles it, so it is excluded from
+                    // `is_gate_arbitrated_consult`.
+                    let is_forced_lock =
+                        config.force_consult && forced_consult_done && name == CONSULT_TOOL_NAME;
+                    // MS2 (REQ-A20c): a `consult` call the GATE arbitrates
+                    // (vetoed, or the door already closed this turn) does NOT
+                    // participate in the generic 3x-identical dedup guard
+                    // below. A burst of identical trivial content is exactly
+                    // what produces repeated vetoes, and letting the dedup
+                    // guard ALSO fire on it would abort the WHOLE TURN with
+                    // "Repetitive tool call detected" — a hard error — instead
+                    // of the gate's own graceful, non-error terminal rule
+                    // (REQ-A20c/SC-A20c: a veto is never an error). A GENUINE
+                    // dispatch still goes through the same dedup tracking any
+                    // other tool gets — see `dispatch_consult_through_gate`'s
+                    // `GateVerdict::Dispatch` arm — so three identical real
+                    // analyses are still caught.
+                    let is_gate_arbitrated_consult = name == CONSULT_TOOL_NAME && !is_forced_lock;
+
+                    if !is_gate_arbitrated_consult {
+                        track_repetition(
+                            name,
+                            input,
+                            &mut last_normalized_tool,
+                            &mut repeat_count,
+                            config.disable_repetitive_guard,
+                        )?;
                     }
-                    last_normalized_tool = Some((name.clone(), normalized_input));
 
                     // REQ-H22: once the forced consult has run (successfully or
                     // not), any further `consult` request for the rest of THIS
@@ -1088,18 +1513,37 @@ impl Agent {
                     // absent from the observer audit trail (`on_tool_call` is not
                     // called), so `RunOutcome.tool_calls` shows exactly the one
                     // forced consult that actually ran.
-                    let result_content =
-                        if config.force_consult && forced_consult_done && name == CONSULT_TOOL_NAME
-                        {
-                            Content::ToolResult {
-                                tool_use_id: id.clone(),
-                                content: CONSULT_ALREADY_FORCED_MESSAGE.to_string(),
-                                is_error: true,
-                            }
-                        } else {
-                            self.authorize_and_execute_tool(id, name, input, config, chunk_tx)
-                                .await
-                        };
+                    let result_content = if is_forced_lock {
+                        Content::ToolResult {
+                            tool_use_id: id.clone(),
+                            content: CONSULT_ALREADY_FORCED_MESSAGE.to_string(),
+                            is_error: true,
+                        }
+                    } else if is_gate_arbitrated_consult {
+                        // REQ-A20: this is the model's OWN request (the
+                        // `ToolUse` loop), which is exactly the call site the
+                        // complexity gate is meant to see. The forced
+                        // pre-loop injection above never reaches this branch
+                        // — it calls `authorize_and_execute_tool` directly, a
+                        // few lines up, bypassing the gate entirely. Two
+                        // distinct call sites to the SAME tool is the whole
+                        // property REQ-A20 rests on; see
+                        // `dispatch_consult_through_gate`'s rustdoc.
+                        self.dispatch_consult_through_gate(
+                            id,
+                            input,
+                            config,
+                            chunk_tx,
+                            &mut consecutive_vetoes,
+                            &mut answering_without_consensus,
+                            &mut last_normalized_tool,
+                            &mut repeat_count,
+                        )
+                        .await?
+                    } else {
+                        self.authorize_and_execute_tool(id, name, input, config, chunk_tx)
+                            .await
+                    };
                     tool_results.push(result_content);
                 }
             }
@@ -1129,7 +1573,7 @@ impl Agent {
                 // Extract final text from MessageDone content — matches the
                 // pre-refactor return path used by both the selective and load_all
                 // branches (distinct from `full_text` which is delta-accumulated).
-                let final_text = response
+                let mut final_text = response
                     .content
                     .iter()
                     .rev()
@@ -1141,6 +1585,27 @@ impl Agent {
                         }
                     })
                     .unwrap_or_default();
+                // REQ-A20/SC-A20k: this answer is not backed by a real
+                // consult (a veto, or the door already closed this turn) —
+                // mark it on BOTH channels a caller might read it from.
+                // `final_text` is what headless (`run_query`) actually uses
+                // as the response; the TUI's autonomous chat path instead
+                // renders purely from `StreamPiece::Content` forwarded
+                // during the loop above and discards this return value
+                // entirely (`tui/mod.rs`'s `Ok(_) => Text("")`), so without
+                // this extra send the mark would reach headless but never
+                // reach the screen.
+                if answering_without_consensus {
+                    final_text.push_str(NO_CONSENSUS_MARK_SEPARATOR);
+                    final_text.push_str(NO_CONSENSUS_MARK);
+                    send_or_closed_err(
+                        chunk_tx,
+                        StreamPiece::Content(format!(
+                            "{NO_CONSENSUS_MARK_SEPARATOR}{NO_CONSENSUS_MARK}"
+                        )),
+                    )
+                    .await?;
+                }
                 return Ok((full_text, final_text));
             }
         }
@@ -1185,10 +1650,7 @@ fn summarize_assembly_error(e: &MemoryError) -> String {
 /// - `session_id` — owning session UUID.
 /// - `text` — raw turn text (not yet prefixed).
 /// - `role` — `Role::User` or `Role::Assistant`; stored in the ID hash for uniqueness.
-/// - `notice_tx` — optional sender for routing non-fatal write-error notices to the
-///   TUI as `StreamPiece::Notice` (instead of raw stderr that corrupts the ratatui
-///   frame).  `None` is accepted so call sites outside the streaming context (tests,
-///   future callers) are not forced to supply a channel.
+/// - `notice_tx` — optional sender for routing non-fatal write-error notices to the TUI as `StreamPiece::Notice` (instead of raw stderr that corrupts the ratatui frame).  `None` is accepted so call sites outside the streaming context (tests, future callers) are not forced to supply a channel.
 ///
 /// # Note
 /// This is intentionally a module-level free function (not a method on `Agent`) so
@@ -2624,6 +3086,50 @@ mod tests {
         );
     }
 
+    /// I4 (fix round 2): `remove_tool` drops the named registration and leaves
+    /// an unrelated one untouched. This is the counterpart to
+    /// `register_or_replace_tool` for when a provider-bound tool's backing
+    /// provider fails to rebuild (e.g. a failed post-`/login` MAGI trio
+    /// rebuild) and there is nothing safe to replace it WITH — the caller
+    /// needs to make it disappear, not swap it.
+    #[test]
+    fn remove_tool_drops_the_named_tool_and_leaves_others_untouched() {
+        let (tool_a, _executed_a) = TrackingTool::new("keep_me", true);
+        let (tool_b, _executed_b) = TrackingTool::new("drop_me", true);
+        let mut agent = Agent::new(Arc::new(crate::agent::provider::StaticProvider));
+        agent.register_tool(Box::new(tool_a));
+        agent.register_tool(Box::new(tool_b));
+
+        agent.remove_tool("drop_me");
+
+        assert!(
+            agent.tools.iter().any(|t| t.name() == "keep_me"),
+            "removing one tool must not touch an unrelated registration"
+        );
+        assert!(
+            !agent.tools.iter().any(|t| t.name() == "drop_me"),
+            "the named tool must be gone after remove_tool"
+        );
+    }
+
+    /// I4 (fix round 2): removing a name that was never registered is a
+    /// harmless no-op, not a panic — the caller (a login-rebuild failure
+    /// handler) must be able to call it unconditionally.
+    #[test]
+    fn remove_tool_on_an_absent_name_is_a_harmless_no_op() {
+        let (tool_a, _executed_a) = TrackingTool::new("keep_me", true);
+        let mut agent = Agent::new(Arc::new(crate::agent::provider::StaticProvider));
+        agent.register_tool(Box::new(tool_a));
+
+        agent.remove_tool("never_registered");
+
+        assert_eq!(
+            agent.tools.len(),
+            1,
+            "removing an absent name must change nothing"
+        );
+    }
+
     /// Adversarial: a dangerous tool (`requires_approval() = true`) is denied
     /// and does NOT execute when a blanket-denier `approval_tx` is connected.
     ///
@@ -3079,6 +3585,1307 @@ mod tests {
             all_text.contains("use rust"),
             "turn 2's assembled context must contain the promoted preference 'use rust'; \
              got:\n{all_text}"
+        );
+    }
+
+    /// Rendezvous window for [`OverlapProbeTool`].
+    ///
+    /// Under the sequential dispatch this guards, nobody ever arrives, so this window is
+    /// spent in full on every run — that fixed half second is the price of the guarantee.
+    /// It is deliberately generous anyway: if it were too short, a *parallel* loop whose
+    /// second dispatch merely started late would leave the peak at 1 and the test would go
+    /// green with the property already broken. A guardian's false negative is worse than
+    /// its cost.
+    const OVERLAP_RENDEZVOUS: std::time::Duration = std::time::Duration::from_millis(500);
+
+    /// Records the peak number of `execute` calls that were ever in flight at once.
+    struct OverlapProbeTool {
+        /// Executions inside `execute` right now.
+        live: Arc<std::sync::atomic::AtomicUsize>,
+        /// High-water mark of `live`.
+        peak: Arc<std::sync::atomic::AtomicUsize>,
+        /// Total calls so far, which is what decides who waits.
+        ///
+        /// Separate from `live` on purpose: under sequential dispatch the second execution
+        /// also finds `live == 1`, so keying the wait off `live` makes BOTH of them sit
+        /// through the full window and doubles the test's fixed cost for nothing. Only the
+        /// first call needs to offer a window for someone to overlap it.
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+        /// Meeting point between the two executions. See the comment in `execute`.
+        second_arrived: Arc<tokio::sync::Notify>,
+    }
+
+    #[async_trait]
+    impl Tool for OverlapProbeTool {
+        fn name(&self) -> &str {
+            "overlap_probe"
+        }
+        fn description(&self) -> &str {
+            "records overlap between tool executions"
+        }
+        fn input_schema(&self) -> Value {
+            json!({"type": "object", "properties": {}})
+        }
+
+        async fn execute(&self, _args: Value, _cancel: &CancellationToken) -> ToolResult<Value> {
+            use std::sync::atomic::Ordering;
+
+            // SYNCHRONISATION, not a `sleep`. The first execution waits for a second one to
+            // release it. Under SEQUENTIAL dispatch nobody ever does, the timeout expires,
+            // and the peak stays at 1 — detected deterministically. Under PARALLEL dispatch
+            // the second arrives while the first is still inside, so the peak reaches 2.
+            //
+            // A bare `sleep` would invert the failure: if a parallel scheduler took longer
+            // than the window, the two executions would not overlap and the test would pass
+            // green with the loop already parallelised.
+            let ordinal = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+            let now = self.live.fetch_add(1, Ordering::SeqCst) + 1;
+            self.peak.fetch_max(now, Ordering::SeqCst);
+            if ordinal == 1 {
+                let _ =
+                    tokio::time::timeout(OVERLAP_RENDEZVOUS, self.second_arrived.notified()).await;
+            } else {
+                self.second_arrived.notify_waiters();
+            }
+            self.live.fetch_sub(1, Ordering::SeqCst);
+            Ok(json!({"ok": true}))
+        }
+    }
+
+    /// Emits TWO `ToolUse` blocks in one assistant turn, then a plain text turn.
+    struct TwoToolUseProvider {
+        /// Turns served so far; the first is the two-tool turn.
+        turn: Arc<std::sync::Mutex<u32>>,
+    }
+
+    #[async_trait]
+    impl Provider for TwoToolUseProvider {
+        async fn stream_messages(
+            &self,
+            _messages: &[Message],
+            _tools: &[Box<dyn Tool>],
+            _system: Option<&str>,
+        ) -> Result<BoxStream<'static, Result<ResponseChunk>>> {
+            let mut n = self.turn.lock().unwrap();
+            *n += 1;
+            let call = *n;
+            drop(n);
+
+            if call == 1 {
+                let msg = Message {
+                    role: Role::Assistant,
+                    content: vec![
+                        Content::ToolUse {
+                            id: "seq-a".to_string(),
+                            name: "overlap_probe".to_string(),
+                            input: json!({}),
+                        },
+                        Content::ToolUse {
+                            id: "seq-b".to_string(),
+                            name: "overlap_probe".to_string(),
+                            input: json!({}),
+                        },
+                    ],
+                };
+                Ok(Box::pin(stream::iter(vec![Ok(
+                    ResponseChunk::MessageDone(msg),
+                )])))
+            } else {
+                Ok(Box::pin(stream::iter(vec![
+                    Ok(ResponseChunk::TextDelta("done".to_string())),
+                    Ok(ResponseChunk::MessageDone(Message::assistant("done"))),
+                ])))
+            }
+        }
+    }
+
+    /// SC-A20l: two `ToolUse` blocks from the same turn execute ONE AFTER THE OTHER.
+    ///
+    /// `tool_call_count` and `repeat_count` are flat locals whose correctness rests on this
+    /// property, and MS2 adds a third one — the veto counter of REQ-A20c (Task 3.2).
+    /// Parallelising the loop breaks all of them at once, and it would break them silently:
+    /// nothing in their declarations says "sequential", which is why this test exists and
+    /// why each declaration carries a comment pointing here.
+    #[tokio::test]
+    async fn tool_dispatch_is_sequential_within_a_turn() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let live = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+
+        let provider = TwoToolUseProvider {
+            turn: Arc::new(std::sync::Mutex::new(0)),
+        };
+        let mut agent = Agent::new(Arc::new(provider));
+        agent.register_tool(Box::new(OverlapProbeTool {
+            live: Arc::clone(&live),
+            peak: Arc::clone(&peak),
+            calls: Arc::new(AtomicUsize::new(0)),
+            second_arrived: Arc::new(tokio::sync::Notify::new()),
+        }));
+
+        let (chunk_tx, _rx) = tokio::sync::mpsc::channel(64);
+        let _ = agent
+            .query_streaming("two tools", chunk_tx, AgentRunConfig::default())
+            .await;
+
+        assert_eq!(
+            peak.load(Ordering::SeqCst),
+            1,
+            "the tool loop dispatched in parallel: the per-turn counters stop being correct",
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Task 3.2 — veto counter and the terminal rule (REQ-A20c)
+    //
+    // Five tests inherited from Task 3.1 (its Step 1 pasted them alongside its
+    // own three pure ones), plus one written here to close SC-A20i, which the
+    // reassigned five leave unnamed. `run_turn_with_autonomous_consults`
+    // (PLURAL) is an orphan nobody defines in the plan — writing it is part of
+    // this task's own Step 1, same as `agent_after_turn_ending_in` and
+    // `run_turn_with_consults_on`, neither of which any prior task names.
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// The observable outcome of a turn, for the gate's tests.
+    ///
+    /// `tool_calls_counted` and `exit` are NOT in the plan's pasted contract
+    /// block (`examples/ms2_contracts.rs`'s normative stub only lists
+    /// `veto_count`/`consult_disabled_for_rest_of_turn`/`magi_calls`/
+    /// `gate_log`) even though `a_veto_still_consumes_the_turn_budget` reads
+    /// both — registered plan debt #7, verified against the code before
+    /// adding these two fields.
+    struct TurnOutcome {
+        /// Vetoes that were actually EVALUATED and cut short (derived from
+        /// `gate_log`, which only grows on a real evaluation — a call made
+        /// after the door already closed never reaches `evaluate` at all).
+        veto_count: usize,
+        /// Whether the terminal rule (REQ-A20c) closed `consult` for the rest
+        /// of the turn. Derived by replaying `gate_log` through the SAME
+        /// reset-on-dispatch / increment-on-veto state machine
+        /// `dispatch_consult_through_gate` runs in production, so it reflects
+        /// the state at the END of the turn — a dispatch in the middle
+        /// re-opens the door, exactly like SC-A20m requires.
+        consult_disabled_for_rest_of_turn: bool,
+        /// Real invocations of the `consult` double's `execute` — zero
+        /// whenever the gate vetoed (SC-A20).
+        magi_calls: usize,
+        /// Lines the gate's telemetry sink recorded, in order (SC-A20h).
+        gate_log: Vec<String>,
+        /// How many `consult` calls the turn actually accounted for before
+        /// terminating — vetoes, disabled-door continuations and dispatches
+        /// all count (SC-A20f): every processed call produces exactly one
+        /// `Content::ToolResult`, so counting those (not raw `ToolUse`
+        /// blocks, which an overflowing call still leaves in history before
+        /// erroring) gives the count `max_tool_calls` actually saw.
+        tool_calls_counted: usize,
+        /// How the run ended.
+        exit: Exit,
+    }
+
+    /// Exit paths of a turn, for [`the_counter_dies_with_the_turn_on_every_exit_path`].
+    ///
+    /// `PartialEq`/`Eq` beyond the plan's pasted `#[derive(Debug, Clone,
+    /// Copy)]`: `a_veto_still_consumes_the_turn_budget` asserts
+    /// `out.exit == Exit::MaxToolCalls` via `assert_eq!`, which needs it.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Exit {
+        FinalAnswer,
+        MaxToolCalls,
+        Cancelled,
+        Error,
+    }
+
+    /// Test double standing in for `ConsultTool`: counts genuine invocations
+    /// without calling any model, registered under [`CONSULT_TOOL_NAME`] so
+    /// the gate's call-site distinction is exercised against the SAME name
+    /// production code dispatches to.
+    struct CountingConsultTool {
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+        /// `Some` only for [`Self::new_recording`] — records the args of the
+        /// MOST RECENT `execute` call, so a test can check not just *that*
+        /// the tool was dispatched but *what* it was dispatched with (e.g.
+        /// whether a resolved mode was injected).
+        last_args: Option<Arc<std::sync::Mutex<Option<Value>>>>,
+    }
+
+    impl CountingConsultTool {
+        /// Builds a fresh double and returns it alongside a handle to its
+        /// call counter.
+        fn new() -> (Self, Arc<std::sync::atomic::AtomicUsize>) {
+            let (tool, calls, _) = Self::new_recording();
+            (tool, calls)
+        }
+
+        /// Like [`Self::new`], plus a handle to the args of the most recent
+        /// `execute` call.
+        fn new_recording() -> (
+            Self,
+            Arc<std::sync::atomic::AtomicUsize>,
+            Arc<std::sync::Mutex<Option<Value>>>,
+        ) {
+            use std::sync::atomic::AtomicUsize;
+            use std::sync::Mutex;
+            let calls = Arc::new(AtomicUsize::new(0));
+            let last_args = Arc::new(Mutex::new(None));
+            (
+                Self {
+                    calls: calls.clone(),
+                    last_args: Some(last_args.clone()),
+                },
+                calls,
+                last_args,
+            )
+        }
+    }
+
+    #[async_trait]
+    impl Tool for CountingConsultTool {
+        fn name(&self) -> &str {
+            CONSULT_TOOL_NAME
+        }
+        fn description(&self) -> &str {
+            "test double standing in for consult"
+        }
+        fn input_schema(&self) -> Value {
+            json!({
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"},
+                    "mode": {"type": "string"}
+                },
+                "required": ["query"]
+            })
+        }
+        async fn execute(&self, args: Value, _cancel: &CancellationToken) -> ToolResult<Value> {
+            use std::sync::atomic::Ordering;
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            if let Some(last_args) = &self.last_args {
+                *last_args.lock().unwrap() = Some(args);
+            }
+            Ok(json!({"report": "ok", "degraded": false}))
+        }
+    }
+
+    /// Test double for [`GateTelemetry`]: records every line the sink
+    /// receives, in the exact format `log_gate` writes (SC-A20h).
+    struct RecordingGateTelemetry {
+        lines: Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl GateTelemetry for RecordingGateTelemetry {
+        fn on_gate_evaluation(&self, mode: &Mode, chars: usize, threshold: usize, vetoed: bool) {
+            self.lines.lock().unwrap().push(format!(
+                "gate {mode} chars={chars} threshold={threshold} {}",
+                if vetoed { "veto" } else { "dispatch" }
+            ));
+        }
+    }
+
+    /// Builds a fresh `AgentRunConfig` wired with a [`RecordingGateTelemetry`]
+    /// sink, alongside the sink itself (to read `gate_log` back after the
+    /// run). Factored out because every `run_turn_with_*` helper below needs
+    /// exactly this pair.
+    fn config_with_gate_log() -> (AgentRunConfig, Arc<std::sync::Mutex<Vec<String>>>) {
+        let gate_log_sink = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let config = AgentRunConfig {
+            gate_telemetry: Arc::new(RecordingGateTelemetry {
+                lines: gate_log_sink.clone(),
+            }),
+            ..AgentRunConfig::default()
+        };
+        (config, gate_log_sink)
+    }
+
+    /// Builds an `Agent` over `provider` with a fresh [`CountingConsultTool`]
+    /// double registered, alongside a handle to its call counter. Factored out
+    /// because every `run_turn_with_*` helper below needs exactly this pair,
+    /// differing only in which `Provider` double drives the turn.
+    fn agent_with_consult_double(
+        provider: impl Provider + 'static,
+    ) -> (Agent, Arc<std::sync::atomic::AtomicUsize>) {
+        let (tool, magi_calls) = CountingConsultTool::new();
+        let mut agent = Agent::new(Arc::new(provider));
+        agent.register_tool(Box::new(tool));
+        (agent, magi_calls)
+    }
+
+    /// Emits ONE `ToolUse` of `consult` per entry of `script`, one PER TURN
+    /// (a separate `stream_messages` call each), then a plain-text turn once
+    /// `script` is exhausted so the loop ends normally.
+    struct SequentialConsultProvider {
+        script: Vec<String>,
+        turn: std::sync::Mutex<usize>,
+    }
+
+    impl SequentialConsultProvider {
+        fn new(contents: &[&str]) -> Self {
+            Self {
+                script: contents.iter().map(|s| (*s).to_string()).collect(),
+                turn: std::sync::Mutex::new(0),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Provider for SequentialConsultProvider {
+        async fn stream_messages(
+            &self,
+            _messages: &[Message],
+            _tools: &[Box<dyn Tool>],
+            _system: Option<&str>,
+        ) -> Result<BoxStream<'static, Result<ResponseChunk>>> {
+            let mut n = self.turn.lock().unwrap();
+            let idx = *n;
+            *n += 1;
+            drop(n);
+
+            if let Some(q) = self.script.get(idx) {
+                let msg = Message {
+                    role: Role::Assistant,
+                    content: vec![Content::ToolUse {
+                        id: format!("seq-consult-{idx}"),
+                        name: CONSULT_TOOL_NAME.to_string(),
+                        input: json!({"query": q}),
+                    }],
+                };
+                Ok(Box::pin(stream::iter(vec![Ok(
+                    ResponseChunk::MessageDone(msg),
+                )])))
+            } else {
+                Ok(Box::pin(stream::iter(vec![
+                    Ok(ResponseChunk::TextDelta("done".to_string())),
+                    Ok(ResponseChunk::MessageDone(Message::assistant("done"))),
+                ])))
+            }
+        }
+    }
+
+    /// Emits ALL of `contents` as separate `ToolUse` blocks within the SAME
+    /// assistant turn (one `stream_messages` call), then a plain-text turn
+    /// (SC-A20i).
+    struct AllAtOnceConsultProvider {
+        script: Vec<String>,
+        served: std::sync::Mutex<bool>,
+    }
+
+    impl AllAtOnceConsultProvider {
+        fn new(contents: &[&str]) -> Self {
+            Self {
+                script: contents.iter().map(|s| (*s).to_string()).collect(),
+                served: std::sync::Mutex::new(false),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Provider for AllAtOnceConsultProvider {
+        async fn stream_messages(
+            &self,
+            _messages: &[Message],
+            _tools: &[Box<dyn Tool>],
+            _system: Option<&str>,
+        ) -> Result<BoxStream<'static, Result<ResponseChunk>>> {
+            let mut served = self.served.lock().unwrap();
+            if !*served {
+                *served = true;
+                drop(served);
+                let content = self
+                    .script
+                    .iter()
+                    .enumerate()
+                    .map(|(i, q)| Content::ToolUse {
+                        id: format!("batch-consult-{i}"),
+                        name: CONSULT_TOOL_NAME.to_string(),
+                        input: json!({"query": q}),
+                    })
+                    .collect();
+                let msg = Message {
+                    role: Role::Assistant,
+                    content,
+                };
+                Ok(Box::pin(stream::iter(vec![Ok(
+                    ResponseChunk::MessageDone(msg),
+                )])))
+            } else {
+                Ok(Box::pin(stream::iter(vec![
+                    Ok(ResponseChunk::TextDelta("done".to_string())),
+                    Ok(ResponseChunk::MessageDone(Message::assistant("done"))),
+                ])))
+            }
+        }
+    }
+
+    /// Emits ONE `ToolUse` per `(query, mode)` pair, one per turn — the
+    /// `mode` travels in the tool input exactly as the agent's own choice via
+    /// the `input_schema` would (REQ-A07b, `agent_chosen_mode`).
+    struct ScriptedModeConsultProvider {
+        script: Vec<(String, Mode)>,
+        turn: std::sync::Mutex<usize>,
+    }
+
+    impl ScriptedModeConsultProvider {
+        fn new(pairs: &[(&str, Mode)]) -> Self {
+            Self {
+                script: pairs.iter().map(|(q, m)| ((*q).to_string(), *m)).collect(),
+                turn: std::sync::Mutex::new(0),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Provider for ScriptedModeConsultProvider {
+        async fn stream_messages(
+            &self,
+            _messages: &[Message],
+            _tools: &[Box<dyn Tool>],
+            _system: Option<&str>,
+        ) -> Result<BoxStream<'static, Result<ResponseChunk>>> {
+            let mut n = self.turn.lock().unwrap();
+            let idx = *n;
+            *n += 1;
+            drop(n);
+
+            if let Some((q, m)) = self.script.get(idx) {
+                let msg = Message {
+                    role: Role::Assistant,
+                    content: vec![Content::ToolUse {
+                        id: format!("mode-consult-{idx}"),
+                        name: CONSULT_TOOL_NAME.to_string(),
+                        input: json!({"query": q, "mode": m.to_string()}),
+                    }],
+                };
+                Ok(Box::pin(stream::iter(vec![Ok(
+                    ResponseChunk::MessageDone(msg),
+                )])))
+            } else {
+                Ok(Box::pin(stream::iter(vec![
+                    Ok(ResponseChunk::TextDelta("done".to_string())),
+                    Ok(ResponseChunk::MessageDone(Message::assistant("done"))),
+                ])))
+            }
+        }
+    }
+
+    /// Loop 2 gate, S4 finding 1 (Caspar) — a model-issued `ToolUse` whose input FORGES the
+    /// reserved `__resolved_mode`/`__resolved_mode_source` keys, claiming `Explicit`, as if a
+    /// model tried to satisfy its own `untrusted_content` guard from the inside. Emits exactly
+    /// ONE such `ToolUse` (no legitimate `"mode"` field — the agent did not choose a lens
+    /// either), then a plain-text turn so the loop ends normally if the spoofed call is ever let
+    /// through.
+    struct SpoofedReservedKeysConsultProvider {
+        content: String,
+        served: std::sync::Mutex<bool>,
+    }
+
+    impl SpoofedReservedKeysConsultProvider {
+        fn new(content: &str) -> Self {
+            Self {
+                content: content.to_string(),
+                served: std::sync::Mutex::new(false),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Provider for SpoofedReservedKeysConsultProvider {
+        async fn stream_messages(
+            &self,
+            _messages: &[Message],
+            _tools: &[Box<dyn Tool>],
+            _system: Option<&str>,
+        ) -> Result<BoxStream<'static, Result<ResponseChunk>>> {
+            let mut served = self.served.lock().unwrap();
+            if !*served {
+                *served = true;
+                drop(served);
+                let msg = Message {
+                    role: Role::Assistant,
+                    content: vec![Content::ToolUse {
+                        id: "spoofed-consult".to_string(),
+                        name: CONSULT_TOOL_NAME.to_string(),
+                        input: json!({
+                            "query": self.content,
+                            magi_rs::magi::mode::RESOLVED_MODE_KEY: "code-review",
+                            magi_rs::magi::mode::RESOLVED_MODE_SOURCE_KEY: "explicit",
+                        }),
+                    }],
+                };
+                Ok(Box::pin(stream::iter(vec![Ok(
+                    ResponseChunk::MessageDone(msg),
+                )])))
+            } else {
+                Ok(Box::pin(stream::iter(vec![
+                    Ok(ResponseChunk::TextDelta("done".to_string())),
+                    Ok(ResponseChunk::MessageDone(Message::assistant("done"))),
+                ])))
+            }
+        }
+    }
+
+    /// Emits one vetoable `ToolUse` per entry of `contents` (closing the door
+    /// after two, if `contents` has at least two trivial entries), then
+    /// concludes the turn according to `exit` — all four exit paths converge
+    /// on the SAME provider so `agent_after_turn_ending_in` can drive them
+    /// uniformly.
+    struct ClosingTurnProvider {
+        contents: Vec<String>,
+        exit: Exit,
+        turn: std::sync::Mutex<usize>,
+    }
+
+    impl ClosingTurnProvider {
+        fn new(contents: &[&str], exit: Exit) -> Self {
+            Self {
+                contents: contents.iter().map(|s| (*s).to_string()).collect(),
+                exit,
+                turn: std::sync::Mutex::new(0),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Provider for ClosingTurnProvider {
+        async fn stream_messages(
+            &self,
+            _messages: &[Message],
+            _tools: &[Box<dyn Tool>],
+            _system: Option<&str>,
+        ) -> Result<BoxStream<'static, Result<ResponseChunk>>> {
+            let mut n = self.turn.lock().unwrap();
+            let idx = *n;
+            *n += 1;
+            drop(n);
+
+            let q = if idx < self.contents.len() {
+                Some(self.contents[idx].clone())
+            } else if matches!(self.exit, Exit::MaxToolCalls) {
+                // Keep hammering the (already closed) door so the CAP — not
+                // an early final answer — is what ends this turn.
+                self.contents.last().cloned()
+            } else {
+                None
+            };
+
+            if let Some(q) = q {
+                let msg = Message {
+                    role: Role::Assistant,
+                    content: vec![Content::ToolUse {
+                        id: format!("closing-{idx}"),
+                        name: CONSULT_TOOL_NAME.to_string(),
+                        input: json!({"query": q}),
+                    }],
+                };
+                return Ok(Box::pin(stream::iter(vec![Ok(
+                    ResponseChunk::MessageDone(msg),
+                )])));
+            }
+
+            match self.exit {
+                Exit::FinalAnswer | Exit::MaxToolCalls => Ok(Box::pin(stream::iter(vec![
+                    Ok(ResponseChunk::TextDelta("done".to_string())),
+                    Ok(ResponseChunk::MessageDone(Message::assistant("done"))),
+                ]))),
+                Exit::Cancelled => Err(anyhow::anyhow!("provider aborted: cancelled by timeout")),
+                Exit::Error => Err(anyhow::anyhow!(
+                    "provider aborted: simulated upstream failure"
+                )),
+            }
+        }
+    }
+
+    /// Shared core: runs one turn on `agent` with a freshly wired gate-log
+    /// sink and `consult` double, and assembles the [`TurnOutcome`].
+    async fn run_and_observe(
+        agent: &mut Agent,
+        config: AgentRunConfig,
+        magi_calls: &Arc<std::sync::atomic::AtomicUsize>,
+        gate_log_sink: &Arc<std::sync::Mutex<Vec<String>>>,
+    ) -> anyhow::Result<TurnOutcome> {
+        use std::sync::atomic::Ordering;
+
+        let (tx, _rx) = tokio::sync::mpsc::channel(64);
+        let result = agent.query_streaming("start", tx, config).await;
+
+        let exit = match &result {
+            Ok(_) => Exit::FinalAnswer,
+            Err(e) if e.to_string() == MAX_TOOL_CALLS_ERROR => Exit::MaxToolCalls,
+            Err(e) if e.to_string().contains("cancelled") => Exit::Cancelled,
+            Err(_) => Exit::Error,
+        };
+
+        let gate_log = gate_log_sink.lock().unwrap().clone();
+        let veto_count = gate_log.iter().filter(|l| l.ends_with("veto")).count();
+        let mut running = 0usize;
+        for line in &gate_log {
+            if line.ends_with("veto") {
+                running += 1;
+            } else {
+                running = 0;
+            }
+        }
+        let consult_disabled_for_rest_of_turn = running >= usize::from(MAX_CONSECUTIVE_VETOES);
+
+        let tool_calls_counted = agent
+            .history()
+            .iter()
+            .flat_map(|m| &m.content)
+            .filter(|c| matches!(c, Content::ToolResult { .. }))
+            .count();
+
+        Ok(TurnOutcome {
+            veto_count,
+            consult_disabled_for_rest_of_turn,
+            magi_calls: magi_calls.load(Ordering::SeqCst),
+            gate_log,
+            tool_calls_counted,
+            exit,
+        })
+    }
+
+    /// Runs ONE turn with the given contents as self-routed consults, one per turn
+    /// (SC-A20f/SC-A20m).
+    async fn run_turn_with_consults(contents: &[&str]) -> anyhow::Result<TurnOutcome> {
+        let (mut agent, magi_calls) =
+            agent_with_consult_double(SequentialConsultProvider::new(contents));
+        let (config, gate_log_sink) = config_with_gate_log();
+        run_and_observe(&mut agent, config, &magi_calls, &gate_log_sink).await
+    }
+
+    /// Same, but emitting the `ToolUse` blocks in a SINGLE response block (SC-A20i).
+    async fn run_turn_with_two_tooluse_blocks(contents: &[&str]) -> anyhow::Result<TurnOutcome> {
+        let (mut agent, magi_calls) =
+            agent_with_consult_double(AllAtOnceConsultProvider::new(contents));
+        let (config, gate_log_sink) = config_with_gate_log();
+        run_and_observe(&mut agent, config, &magi_calls, &gate_log_sink).await
+    }
+
+    /// Runs a turn with a single self-routed consult.
+    async fn run_turn_with_autonomous_consult(content: &str) -> anyhow::Result<TurnOutcome> {
+        run_turn_with_consults(&[content]).await
+    }
+
+    /// **PLURAL** — an orphan the plan names in several tasks but nobody defines (the pre-
+    /// flight sweep listed it as such); writing it is this task's own Step 1. Each `(query,
+    /// mode)` pair is dispatched on its OWN turn, with `mode` carried in the tool input as the
+    /// AGENT's own choice (`agent_chosen_mode`), not a human `--mode`.
+    /// Ends a FIRST turn via each of the four exit paths, closing the door with two consecutive
+    /// vetoes beforehand whenever `contents` has (at least) two trivial entries — so all four
+    /// scenarios genuinely close the door before concluding, not just the ones that happen to
+    /// need it. Returns the `Agent` wrapped for reuse across a SECOND turn
+    /// ([`run_turn_with_consults_on`]).
+    async fn run_turn_with_autonomous_consults(
+        pairs: &[(&str, Mode)],
+    ) -> anyhow::Result<TurnOutcome> {
+        let (mut agent, magi_calls) =
+            agent_with_consult_double(ScriptedModeConsultProvider::new(pairs));
+        let (config, gate_log_sink) = config_with_gate_log();
+        run_and_observe(&mut agent, config, &magi_calls, &gate_log_sink).await
+    }
+
+    /// Runs a FRESH turn on an `Agent` reused from [`agent_after_turn_ending_in`], with its own
+    /// provider/tool/telemetry, so a stale counter from the prior turn would be the only thing
+    /// that could make this one see it.
+    async fn agent_after_turn_ending_in(
+        exit: Exit,
+        contents: &[&str],
+    ) -> tokio::sync::Mutex<Agent> {
+        let (mut agent, _calls) =
+            agent_with_consult_double(ClosingTurnProvider::new(contents, exit));
+
+        let max_tool_calls = if matches!(exit, Exit::MaxToolCalls) {
+            contents.len()
+        } else {
+            DEFAULT_MAX_TOOL_CALLS
+        };
+        let config = AgentRunConfig {
+            max_tool_calls,
+            ..AgentRunConfig::default()
+        };
+        let (tx, _rx) = tokio::sync::mpsc::channel(64);
+        let _ = agent.query_streaming("first turn", tx, config).await;
+        tokio::sync::Mutex::new(agent)
+    }
+
+    /// SC-A20 / SC-A20c: the gate vetoes the autonomous route without erroring.
+    async fn run_turn_with_consults_on(
+        agent: &tokio::sync::Mutex<Agent>,
+        contents: &[&str],
+    ) -> anyhow::Result<TurnOutcome> {
+        let mut guard = agent.lock().await;
+        let (tool, magi_calls) = CountingConsultTool::new();
+        guard.set_provider(Arc::new(SequentialConsultProvider::new(contents)));
+        guard.register_or_replace_tool(Box::new(tool));
+        let (config, gate_log_sink) = config_with_gate_log();
+        run_and_observe(&mut guard, config, &magi_calls, &gate_log_sink).await
+    }
+
+    /// SC-A20 / SC-A20c: the gate vetoes the autonomous route without erroring.
+    #[tokio::test]
+    async fn the_gate_vetoes_the_autonomous_route_without_erroring() {
+        let outcome = run_turn_with_autonomous_consult("trivial").await;
+        assert!(
+            outcome.is_ok(),
+            "the veto comes back as a normal ToolResult, not an error"
+        );
+        assert_eq!(outcome.unwrap().magi_calls, 0, "zero model calls");
+    }
+
+    /// SC-A20e: the veto text says retrying gives the same result and never reveals how many
+    /// characters are missing.
+    #[tokio::test]
+    async fn the_veto_message_discourages_retry_without_naming_the_threshold() {
+        let msg = veto_message(&Mode::Analysis);
+        assert!(
+            msg.to_lowercase().contains("same result"),
+            "must say retrying is pointless"
+        );
+        assert!(
+            !msg.contains(&magi_rs::magi::GATE_ANALYSIS.to_string()),
+            "revealing how many characters are missing is a direct invitation to pad content"
+        );
+    }
+
+    /// SC-A20f / SC-A20m: two CONSECUTIVE vetoes are terminal; a success in between resets —
+    /// veto → veto closes the door for the rest of the turn, but veto → dispatch → veto does
+    /// not, because a genuine consult in between resets the counter.
+    #[tokio::test]
+    async fn two_consecutive_vetoes_are_terminal_but_a_success_resets() {
+        let out = run_turn_with_consults(&["trivial", "also trivial"])
+            .await
+            .unwrap();
+        assert!(out.consult_disabled_for_rest_of_turn);
+
+        let long = "x".repeat(magi_rs::magi::GATE_ANALYSIS + 10);
+        let out = run_turn_with_consults(&["trivial", &long, "trivial again"])
+            .await
+            .unwrap();
+        assert!(
+            !out.consult_disabled_for_rest_of_turn,
+            "veto → runs → veto is not a loop: it's a turn with one trivial question and \
+             one that genuinely warranted consensus"
+        );
+    }
+
+    /// Many more invocations than `max_tool_calls`, all vetoable.
+    #[tokio::test]
+    async fn a_veto_still_consumes_the_turn_budget() {
+        // TERMINATION, not a lower bound: 40 vetoable invocations against a `max_tool_calls` of
+        // 15 MUST end exactly at the cap.
+        let script: Vec<(&str, Mode)> = vec![("x", Mode::Analysis); 40];
+        let out = run_turn_with_autonomous_consults(&script).await.unwrap();
+
+        assert!(
+            out.tool_calls_counted >= usize::from(MAX_CONSECUTIVE_VETOES),
+            "each veto counts as an invocation: max_tool_calls counts what the model asked for"
+        );
+        assert_eq!(out.exit, Exit::MaxToolCalls);
+        assert_eq!(
+            out.tool_calls_counted, DEFAULT_MAX_TOOL_CALLS,
+            "all 15 were consumed: vetoes AND denials count alike"
+        );
+    }
+
+    /// SC-A20g: the counter dies with the turn, through all FOUR exit paths — final answer,
+    /// `max_tool_calls`, cancellation and error.
+    #[tokio::test]
+    async fn the_counter_dies_with_the_turn_on_every_exit_path() {
+        for exit in [
+            Exit::FinalAnswer,
+            Exit::MaxToolCalls,
+            Exit::Cancelled,
+            Exit::Error,
+        ] {
+            let agent = agent_after_turn_ending_in(exit, &["trivial", "trivial"]).await;
+            let out = run_turn_with_consults_on(&agent, &["trivial"])
+                .await
+                .unwrap();
+            assert!(
+                !out.consult_disabled_for_rest_of_turn,
+                "turn {exit:?}: must not persist"
+            );
+        }
+    }
+
+    /// SC-A20h: every gate evaluation is logged — in EVERY surface, with or without an observer.
+    ///
+    /// Exercised WITHOUT an observer, which is the TUI's configuration: the gate's telemetry
+    /// cannot depend on a channel the highest-traffic surface does not have.
+    #[tokio::test]
+    async fn every_gate_evaluation_is_logged() {
+        let long = "x".repeat(magi_rs::magi::GATE_ANALYSIS + 1);
+        let log = run_turn_with_consults(&["trivial", &long])
+            .await
+            .unwrap()
+            .gate_log;
+        // SC-A20i: several `ToolUse` blocks in the SAME turn count exactly like separate turns,
+        // and two concurrent sessions never contaminate each other — proven by actually running
+        // them concurrently, not just asserted from the shape of the code.
+        assert!(
+            !log.is_empty(),
+            "without a RunObserver the telemetry must still be recorded — that coupling was \
+             the bug"
+        );
+        assert_eq!(log.len(), 2, "both the veto and the pass get recorded");
+        assert!(log[0].contains("analysis") && log[0].contains("veto"));
+        assert!(
+            log[0].contains(&magi_rs::magi::GATE_ANALYSIS.to_string()),
+            "SC-A20h requires the APPLIED threshold: the length alone doesn't say which side \
+             it fell on, and calibrating is exactly comparing the two"
+        );
+        assert!(
+            log[1].contains(&magi_rs::magi::GATE_ANALYSIS.to_string()),
+            "also on the line that dispatches: one side alone doesn't calibrate anything"
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Loop 1, F23 — REQ-A07d's guard, driven through a real `Agent` turn at BOTH
+    // production call sites.
+    //
+    // The guard was already wired correctly at `dispatch_consult_through_gate` and at the
+    // forced-consult injection, but the only tests covering SC-A07u/v/w called
+    // `resolve_mode_guarded` directly, with hand-picked literals, from `src/main.rs`. That
+    // proves the resolver behaves; it does not prove the loop calls it correctly — and it is
+    // blind to the failure that actually happened, which was upstream of both: nothing
+    // populated `AgentRunConfig::mode_config` in production, so `untrusted_content` was `false`
+    // on every real run no matter what the operator declared. An end-to-end turn fails the
+    // moment the configuration stops arriving.
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// An `AgentRunConfig` with the operator's untrusted-content mark raised.
+    fn config_with_untrusted_content(default_mode: Option<Mode>) -> AgentRunConfig {
+        AgentRunConfig {
+            mode_config: ModeConfig {
+                default_mode,
+                untrusted_content: true,
+            },
+            ..AgentRunConfig::default()
+        }
+    }
+
+    /// Content long enough to clear every built-in gate threshold, so a test about the mode
+    /// guard is never decided by the complexity gate instead.
+    fn gate_clearing_content() -> String {
+        "x".repeat(magi_rs::magi::GATE_DESIGN + 1)
+    }
+
+    /// SC-A07v, model-issued route: the agent asking for `consult` without choosing a lens
+    /// does NOT satisfy the guard — the turn fails closed, before any model call.
+    #[tokio::test]
+    async fn untrusted_content_fails_a_model_issued_consult_that_declares_no_mode() {
+        use std::sync::atomic::Ordering;
+
+        let content = gate_clearing_content();
+        let (mut agent, magi_calls) =
+            agent_with_consult_double(SequentialConsultProvider::new(&[content.as_str()]));
+        let (tx, _rx) = tokio::sync::mpsc::channel(64);
+
+        let err = agent
+            .query_streaming("start", tx, config_with_untrusted_content(None))
+            .await
+            .expect_err("the guard must abort the turn");
+
+        assert!(
+            err.to_string().contains("untrusted content"),
+            "the failure must be the guard, not an unrelated abort: {err}"
+        );
+        assert_eq!(
+            magi_calls.load(Ordering::SeqCst),
+            0,
+            "failing closed means the consult never ran"
+        );
+    }
+
+    /// Loop 2 gate, S4 finding 1 (Caspar) — REJECTED as a bypass, pinned as a regression test
+    /// per the gate's own instruction to add one regardless. Caspar's concern:
+    /// `resolved_mode_and_source` (`src/tools/consult.rs`) reads
+    /// `__resolved_mode`/`__resolved_mode_source` from the tool's `args`, which are
+    /// model-produced — could a model set `__resolved_mode_source = "explicit"` in its own
+    /// `ToolUse` input and thereby satisfy the `untrusted_content` guard from the inside?
+    ///
+    /// It cannot, for a reason that has nothing to do with `resolved_mode_and_source` at all:
+    /// the guard (`resolve_mode_guarded`, called from `dispatch_consult_through_gate`) decides
+    /// from `explicit` (hardcoded `None` here — there is no human on the autonomous route),
+    /// `configured` (`[magi].default_mode`), and `agent_chosen` (`agent_chosen_mode`, which
+    /// reads the SEPARATE, schema-declared `"mode"` field — never the reserved keys). The
+    /// reserved keys are an OUTPUT of that decision, written by `inject_resolved_mode` onto a
+    /// CLONE after the gate already ran (`input_for_dispatch`, called from
+    /// `dispatch_consult_through_gate`'s `Dispatch` arm) — `resolved_mode_and_source` only ever
+    /// reads a value the agent's own funnel wrote a moment earlier, never anything the model put
+    /// there. `inject_resolved_mode` OVERWRITES unconditionally (`map.insert`), so even a model
+    /// that reaches dispatch with a forged pair never gets it echoed back into `execute`.
+    ///
+    /// This test drives a real turn where the model's `ToolUse` input claims
+    /// `__resolved_mode_source = "explicit"` (and `__resolved_mode = "code-review"`) with
+    /// `untrusted_content` active and no declared mode: the turn still fails closed, and the
+    /// tool is never even invoked — the guard runs BEFORE the reserved keys are ever read for
+    /// anything.
+    #[tokio::test]
+    async fn spoofed_resolved_mode_source_does_not_satisfy_the_untrusted_content_guard() {
+        use std::sync::atomic::Ordering;
+
+        let content = gate_clearing_content();
+        let (mut agent, magi_calls) =
+            agent_with_consult_double(SpoofedReservedKeysConsultProvider::new(&content));
+        let (tx, _rx) = tokio::sync::mpsc::channel(64);
+
+        let err = agent
+            .query_streaming("start", tx, config_with_untrusted_content(None))
+            .await
+            .expect_err("a model-supplied `explicit` claim must not satisfy the guard");
+
+        assert!(
+            err.to_string().contains("untrusted content"),
+            "the failure must be the guard, not an unrelated abort: {err}"
+        );
+        assert_eq!(
+            magi_calls.load(Ordering::SeqCst),
+            0,
+            "the guard runs before dispatch, so a spoofed claim never even reaches the tool"
+        );
+    }
+
+    /// Companion to the guard test above: even OUTSIDE `untrusted_content` (where the turn does
+    /// reach dispatch), a model-forged `__resolved_mode`/`__resolved_mode_source` pair never
+    /// reaches `ConsultTool::execute` — `inject_resolved_mode` overwrites it unconditionally
+    /// before the real dispatch. With no legitimate `"mode"` field either, the resolution that
+    /// DOES reach `execute` is the honest one: `Analysis`/`Default`, never the spoofed
+    /// `CodeReview`/`Explicit`.
+    #[tokio::test]
+    async fn a_forged_reserved_pair_is_overwritten_before_it_ever_reaches_execute() {
+        let content = gate_clearing_content();
+        let (tool, _calls, last_args) = CountingConsultTool::new_recording();
+        let mut agent = Agent::new(Arc::new(SpoofedReservedKeysConsultProvider::new(&content)));
+        agent.register_tool(Box::new(tool));
+        let (tx, _rx) = tokio::sync::mpsc::channel(64);
+
+        agent
+            .query_streaming("start", tx, AgentRunConfig::default())
+            .await
+            .unwrap();
+
+        let args = last_args
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("the model-issued consult must have dispatched to execute");
+        let (mode, source) = read_resolved_mode(&args)
+            .expect("the funnel must inject a resolved pair before dispatch");
+        assert_eq!(
+            mode,
+            Mode::Analysis,
+            "the spoofed `code-review` must never survive to `execute`"
+        );
+        assert_eq!(
+            source,
+            magi_rs::magi::mode::ModeSource::Default,
+            "the spoofed `explicit` must never survive to `execute`"
+        );
+    }
+
+    /// SC-A07u: the mark blocks the CLASSIFICATION level, not the agent's own choice. The same
+    /// configuration that fails the test above lets this one through, because the agent
+    /// declared a lens through the tool's `input_schema`.
+    #[tokio::test]
+    async fn untrusted_content_still_lets_the_agent_pick_the_lens_through_a_real_turn() {
+        use std::sync::atomic::Ordering;
+
+        let content = gate_clearing_content();
+        let (mut agent, magi_calls) = agent_with_consult_double(ScriptedModeConsultProvider::new(
+            &[(content.as_str(), Mode::CodeReview)],
+        ));
+        let (tx, _rx) = tokio::sync::mpsc::channel(64);
+
+        agent
+            .query_streaming("start", tx, config_with_untrusted_content(None))
+            .await
+            .expect("an agent-chosen lens satisfies the guard");
+
+        assert_eq!(
+            magi_calls.load(Ordering::SeqCst),
+            1,
+            "blocking the agent's own choice buys no security — a compromised agent can \
+             simply not consult — and would kill SC-A07d"
+        );
+    }
+
+    /// SC-A07v, forced route: the pre-loop injection passes `agent_chosen: None` by design (a
+    /// runner injection has no agent choosing), so with the mark raised and nothing declared it
+    /// must fail closed too. This is the second call site, and it fails for a different reason
+    /// than the first — worth pinning separately.
+    #[tokio::test]
+    async fn untrusted_content_fails_a_forced_consult_that_declares_no_mode() {
+        use std::sync::atomic::Ordering;
+
+        let (tool, magi_calls) = CountingConsultTool::new();
+        let mut agent = Agent::new(Arc::new(MockProvider));
+        agent.register_tool(Box::new(tool));
+        let (tx, _rx) = tokio::sync::mpsc::channel(64);
+
+        let err = agent
+            .query_streaming(
+                "start",
+                tx,
+                AgentRunConfig {
+                    force_consult: true,
+                    ..config_with_untrusted_content(None)
+                },
+            )
+            .await
+            .expect_err("the forced injection must fail closed as well");
+
+        assert!(
+            err.to_string().contains("untrusted content"),
+            "the forced route must fail for the same, named reason: {err}"
+        );
+        assert_eq!(magi_calls.load(Ordering::SeqCst), 0);
+    }
+
+    /// The forced route's positive: with `agent_chosen` structurally `None`, only a configured
+    /// `[magi].default_mode` can satisfy the guard there — and it does.
+    #[tokio::test]
+    async fn a_configured_default_mode_satisfies_the_guard_on_the_forced_route() {
+        use std::sync::atomic::Ordering;
+
+        let (tool, magi_calls) = CountingConsultTool::new();
+        let mut agent = Agent::new(Arc::new(MockProvider));
+        agent.register_tool(Box::new(tool));
+        let (tx, _rx) = tokio::sync::mpsc::channel(64);
+
+        agent
+            .query_streaming(
+                "start",
+                tx,
+                AgentRunConfig {
+                    force_consult: true,
+                    ..config_with_untrusted_content(Some(Mode::Analysis))
+                },
+            )
+            .await
+            .expect("a configured lens satisfies the guard");
+
+        assert_eq!(magi_calls.load(Ordering::SeqCst), 1);
+    }
+
+    /// Task 3.2's namesake test. `authorize_and_execute_tool` (the forced consult injection,
+    /// REQ-H22) and the `ToolUse` loop (the model's own choice) are two DISTINCT entrances to
+    /// the same `consult` tool, and only the second passes through the complexity gate
+    /// (REQ-A20). A prior attempt at this test (Task 3.1) simulated both sides with hardcoded
+    /// literals and could not fail under any change — see the `#[cfg(test)]` comment in
+    /// `src/magi/gate.rs` naming this task as the gap's owner. This drives BOTH real call sites
+    /// against a real `Agent`.
+    #[tokio::test]
+    async fn multiple_tooluse_blocks_in_one_turn_count_like_separate_turns() {
+        let out = run_turn_with_two_tooluse_blocks(&["trivial", "also trivial"])
+            .await
+            .unwrap();
+        assert_eq!(
+            out.veto_count, 2,
+            "both blocks of the same turn get evaluated and vetoed"
+        );
+        assert!(out.consult_disabled_for_rest_of_turn);
+
+        let long = "x".repeat(magi_rs::magi::GATE_ANALYSIS + 5);
+        let long_slice = [long.as_str()];
+        let (closed_door, clean_session) = tokio::join!(
+            run_turn_with_two_tooluse_blocks(&["trivial", "trivial"]),
+            run_turn_with_consults(&long_slice),
+        );
+        assert!(closed_door.unwrap().consult_disabled_for_rest_of_turn);
+        assert!(
+            !clean_session.unwrap().consult_disabled_for_rest_of_turn,
+            "the other session never even noticed"
+        );
+    }
+
+    /// (a) FORCED: `force_consult = true` injects consult via `authorize_and_execute_tool`
+    /// directly, BEFORE the loop even starts — never touching `dispatch_consult_through_gate`.
+    /// Trivial content that would be vetoed anywhere else must still dispatch here.
+    #[tokio::test]
+    async fn a_forced_injection_bypasses_the_gate_while_a_model_choice_does_not() {
+        use std::sync::atomic::Ordering;
+
+        // (b) MODEL-ISSUED: the SAME trivial content, requested by the model through the
+        // ordinary `ToolUse` loop, DOES reach the gate and gets vetoed.
+        let (forced_tool, forced_calls) = CountingConsultTool::new();
+        let mut forced_agent = Agent::new(Arc::new(MockProvider));
+        forced_agent.register_tool(Box::new(forced_tool));
+        let (tx, _rx) = tokio::sync::mpsc::channel(64);
+        let forced_config = AgentRunConfig {
+            force_consult: true,
+            ..AgentRunConfig::default()
+        };
+        forced_agent
+            .query_streaming("trivial", tx, forced_config)
+            .await
+            .unwrap();
+        assert_eq!(
+            forced_calls.load(Ordering::SeqCst),
+            1,
+            "the forced injection must dispatch even though its content is trivial: REQ-A20 \
+             forbids vetoing it — it never reaches the gate at all"
+        );
+
+        // MS2 (REQ-A20/REQ-A07d), review finding I1: the forced pre-loop injection (REQ-H22)
+        // must ALSO resolve and inject a mode before dispatching, not just the model-issued
+        // `ToolUse` path (`dispatch_consult_through_gate`) — REQ-A20 forbids ever vetoing it,
+        // but that is not license to skip resolution. The call-site test above only counts
+        // invocations; this checks WHICH mode actually reached `execute`, so a regression that
+        // stops injecting on this path (falling back silently to `ConsultTool`'s own
+        // `Mode::Analysis` default) fails here even though the tool still runs exactly once.
+        let (model_tool, model_calls) = CountingConsultTool::new();
+        let provider = SequentialConsultProvider::new(&["trivial"]);
+        let mut model_agent = Agent::new(Arc::new(provider));
+        model_agent.register_tool(Box::new(model_tool));
+        let (tx2, _rx2) = tokio::sync::mpsc::channel(64);
+        model_agent
+            .query_streaming("start", tx2, AgentRunConfig::default())
+            .await
+            .unwrap();
+        assert_eq!(
+            model_calls.load(Ordering::SeqCst),
+            0,
+            "the model's own request for the SAME trivial content must be vetoed: it enters \
+             through the ToolUse loop, which the gate DOES see"
+        );
+    }
+
+    /// ───────────────────────────────────────────────────────────────────────── Task 3.3 — the
+    /// "no consensus" mark (REQ-A20/SC-A20k)
+    /// ─────────────────────────────────────────────────────────────────────────
+    #[tokio::test]
+    async fn a_forced_consult_carries_a_resolved_mode_into_execute() {
+        let (tool, _calls, last_args) = CountingConsultTool::new_recording();
+        let mut agent = Agent::new(Arc::new(MockProvider));
+        agent.register_tool(Box::new(tool));
+        let (tx, _rx) = tokio::sync::mpsc::channel(64);
+        let config = AgentRunConfig {
+            force_consult: true,
+            ..AgentRunConfig::default()
+        };
+        agent.query_streaming("trivial", tx, config).await.unwrap();
+
+        let args = last_args
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("the forced consult must have dispatched to execute");
+        let (mode, source) = read_resolved_mode(&args).expect(
+            "the forced path must inject a resolved (Mode, ModeSource) before dispatch, \
+             exactly like the model-issued path — reading `ConsultTool`'s own fallback \
+             instead is precisely the divergence REQ-A07d exists to close",
+        );
+        assert_eq!(
+            mode,
+            Mode::Analysis,
+            "no default_mode/agent choice here ⇒ Default level"
+        );
+        assert_eq!(source, magi_rs::magi::mode::ModeSource::Default);
+    }
+
+    // Drives ONE real turn through `Agent::query_streaming` over `provider` (registering the
+    // standard `consult` double) and returns exactly what a live consumer of the chunk stream
+    // would render — the same thing the TUI's `Input` handler does (`tui/mod.rs`'s forwarder
+    // task): concatenate every `StreamPiece::Content` piece, in order, ignoring
+    // `Reasoning`/`Notice`. This IS the only path the TUI's autonomous chat surface renders
+    // from — it discards `query_streaming`'s own return value on `Ok` (`tui/mod.rs`'s `Ok(_) =>
+    // Text("")`) — so asserting on this string asserts on the real rendering path, not a stand-
+    // in for it. Shared by both `render_turn_after_*` helpers below, which differ only in the
+    // provider script driving the turn.
+
+    /// A single trivial autonomous consult, vetoed by the gate.
+    async fn render_turn(provider: impl Provider + 'static) -> String {
+        let (mut agent, _magi_calls) = agent_with_consult_double(provider);
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<StreamPiece>(100);
+        let collector = tokio::spawn(async move {
+            let mut rendered = String::new();
+            while let Some(piece) = rx.recv().await {
+                if let StreamPiece::Content(s) = piece {
+                    rendered.push_str(&s);
+                }
+            }
+            rendered
+        });
+        agent
+            .query_streaming("start", tx, AgentRunConfig::default())
+            .await
+            .unwrap();
+        collector.await.unwrap_or_default()
+    }
+
+    /// Content long enough to clear the `Analysis` threshold: the consult genuinely DISPATCHES
+    /// (the registered `CountingConsultTool` double actually runs), so the answer that follows
+    /// IS backed by a consult and must carry no mark.
+    async fn render_turn_after_veto() -> String {
+        render_turn(SequentialConsultProvider::new(&["trivial"])).await
+    }
+
+    /// SC-A20k: the user distinguishes a consensus-backed answer from one that is not.
+    async fn render_turn_after_successful_consult() -> String {
+        let long = "x".repeat(magi_rs::magi::GATE_ANALYSIS + 10);
+        render_turn(SequentialConsultProvider::new(&[long.as_str()])).await
+    }
+
+    /// Not just `.contains()`: a marker concatenated straight onto the last word of the answer
+    /// ("...done[NO CONSENSUS: ...]") would also satisfy `.contains()` while defeating the
+    /// entire point of a mark meant for a human to visually tell two kinds of answer apart —
+    /// fix round 1/I1's own catch. `ends_with` pins the SEPARATOR is actually there, not just
+    /// the mark somewhere in the string.
+    #[tokio::test]
+    async fn the_user_can_tell_a_non_consensus_answer_apart() {
+        let rendered = render_turn_after_veto().await;
+        // The mark is meant to travel over TWO different channels for two different consumers
+        // (`final_text` for headless, an extra `StreamPiece::Content` for the TUI) that are
+        // mutually exclusive TODAY only by construction — headless drains the chunk stream
+        // purely for time-to-first-byte (`headless_runner.rs`'s `run_query`) and never reads
+        // `Content` payloads, the TUI never reads `final_text`. Nothing enforces that
+        // exclusivity, so if either surface ever started reading both, the mark would double up
+        // silently. This pins headless's own channel (`final_text`) to exactly ONE occurrence.
+        let expected_suffix = format!("{NO_CONSENSUS_MARK_SEPARATOR}{NO_CONSENSUS_MARK}");
+        assert!(
+            rendered.ends_with(&expected_suffix),
+            "without the mark AND its blank-line separator, a veto is either invisible (no \
+             mark) or unreadable (mark run into the answer's last word) — the user asked \
+             something, the agent decided to consult, the gate stopped it, and what comes back \
+             must read as two visually distinct pieces, exactly like `[DEGRADED: ...]` does for \
+             its own report; got: {rendered:?}"
+        );
+
+        let rendered = render_turn_after_successful_consult().await;
+        assert!(
+            !rendered.contains(NO_CONSENSUS_MARK),
+            "a genuine dispatch resets the flag: the answer that follows a real consult must \
+             not carry a mark meant for the opposite case"
+        );
+    }
+
+    /// Mirrors `headless_runner::run_query`'s own drain task: read every piece (so
+    /// `query_streaming`'s bounded sender never blocks) but use none of their content —
+    /// headless's actual response comes from the `Result<String>` `query_streaming` returns,
+    /// not from this stream.
+    #[tokio::test]
+    async fn headless_receives_the_mark_exactly_once_in_final_text() {
+        let (mut agent, _magi_calls) =
+            agent_with_consult_double(SequentialConsultProvider::new(&["trivial"]));
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<StreamPiece>(100);
+        // Mirrors `headless_runner::run_query`'s own drain task: read every
+        // piece (so `query_streaming`'s bounded sender never blocks) but use
+        // none of their content — headless's actual response comes from the
+        // `Result<String>` `query_streaming` returns, not from this stream.
+        let drain = tokio::spawn(async move { while rx.recv().await.is_some() {} });
+        let final_text = agent
+            .query_streaming("start", tx, AgentRunConfig::default())
+            .await
+            .unwrap();
+        let _ = drain.await;
+
+        assert_eq!(
+            final_text.matches(NO_CONSENSUS_MARK).count(),
+            1,
+            "headless must see the mark exactly once in the text it actually returns to the \
+             caller — not zero (invisible veto) and not doubled (the two channels are supposed \
+             to be mutually exclusive per consumer)"
         );
     }
 }

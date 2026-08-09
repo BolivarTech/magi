@@ -59,4 +59,29 @@ impl Message {
             }],
         }
     }
+
+    /// Concatenates every `Content::Text` block of this message, in order.
+    ///
+    /// `ToolUse`/`ToolResult` blocks contribute nothing: a caller that needs
+    /// those iterates `content` directly. Shared by the mode classifier
+    /// (`agent::mode_classifier::ProviderClassifier::classify`) and
+    /// `headless_runner::build_transcript`, so the same five-line filter/join
+    /// is not re-derived at each call site.
+    ///
+    /// `agent::magi_adapter::MagiCoreProviderAdapter::complete` used to carry its own
+    /// inline copy of this same logic. Task 4.1 deleted `src/agent/magi_adapter.rs`
+    /// outright — native MAGI providers (`magi_core::providers::*`) replace the
+    /// adapter entirely, so the duplicate this doc used to schedule for removal is
+    /// simply gone now, not migrated.
+    #[must_use]
+    pub fn concat_text(&self) -> String {
+        self.content
+            .iter()
+            .filter_map(|c| match c {
+                Content::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("")
+    }
 }

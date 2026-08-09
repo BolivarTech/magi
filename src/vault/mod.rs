@@ -5,9 +5,8 @@
 #![deny(clippy::missing_docs_in_private_items)]
 #![deny(rustdoc::broken_intra_doc_links)]
 #![deny(clippy::missing_errors_doc, clippy::missing_panics_doc)]
-// Lints de panic/bounds-safety: SOLO en producción. Los tests usan
-// `unwrap`/`expect`/indexing idiomáticamente (un fallo en un test ES el test
-// fallando, que es el comportamiento correcto).
+// Panic/bounds-safety lints: **ONLY** in production. Tests use `unwrap`/`expect`/indexing
+// idiomatically (a failure in a test IS the test failing, which is the correct behavior).
 #![cfg_attr(
     not(test),
     deny(
@@ -21,10 +20,10 @@
     )
 )]
 
-//! Vault: fundación criptográfica del agente (endurecimiento).
+//! Vault: cryptographic foundation of the agent (hardening).
 //!
-//! MS1 aloja los errores de dominio y las primitivas de envelope; la
-//! superficie de usuario (tabla `vault`, CLI) llega en MS2.
+//! MS1 hosts the domain errors and the envelope primitives; the user surface (table `vault`,
+//! CLI) arrives in MS2.
 
 mod cli;
 mod diagnose;
