@@ -17,7 +17,7 @@ use crate::agent::Agent;
 // It is DISTINCT from `magi_core::orchestrator::MagiConfig` — the latter is NEVER
 // imported here, avoiding the name collision.
 use crate::config::{
-    resolve_anthropic_model, resolve_effective_provider_kind, resolve_magi_override,
+    non_blank, resolve_anthropic_model, resolve_effective_provider_kind, resolve_magi_override,
     resolve_openai_model, HeadlessConfig, MagiConfig,
 };
 use crate::headless_runner::{
@@ -472,7 +472,10 @@ fn discover_config(
     secret_store: Option<&SharedSecretStore>,
 ) -> Option<Config> {
     let model = resolve_anthropic_model(config, env::var("ANTHROPIC_MODEL").ok().as_deref());
-    if let Some(key) = env_key {
+    // REQ-A12 / MS2 gate S8 seventh-pass finding: a blank/whitespace-only env value is ABSENT,
+    // never a literal key — an `ANTHROPIC_API_KEY=""` exported empty in a CI script must fall
+    // through to the vault instead of short-circuiting it with an empty key that will 401.
+    if let Some(key) = non_blank(env_key) {
         return Some(Config {
             api_key: key.trim().to_string(),
             model,
@@ -507,7 +510,9 @@ fn resolve_openai_key(
     env_key: Option<&str>,
     secret_store: Option<&SharedSecretStore>,
 ) -> Option<String> {
-    if let Some(key) = env_key {
+    // REQ-A12 / MS2 gate S8 seventh-pass finding: same absent-not-invalid rule as
+    // `discover_config` — a blank `OPENAI_API_KEY` falls through to the vault.
+    if let Some(key) = non_blank(env_key) {
         return Some(key.trim().to_string());
     }
     let ss = secret_store?;
