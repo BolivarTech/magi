@@ -130,8 +130,13 @@ pub struct OpenAiCompatibleEmbedder {
     /// Configured dimension (0 = autodetect).
     configured_dim: usize,
     /// Detected dimension from the first successful response; only used when
-    /// `configured_dim == 0`. Stored with relaxed ordering — it is a best-effort
-    /// hint for [`dim()`][Self::dim], not a security primitive.
+    /// `configured_dim == 0`. Accessed with `AcqRel`/`Acquire` (F4, see
+    /// [`call_embeddings`][Self::call_embeddings]'s CAS), NOT `Relaxed`: autodetect
+    /// convergence needs a happens-before edge between the thread that wins the CAS and
+    /// every thread that reads the value it stored, so a concurrent first-caller that
+    /// lost the race is guaranteed to observe the winner's dimension rather than a stale
+    /// `0` — `Relaxed` would only guarantee the write is eventually visible, not that a
+    /// losing thread's subsequent read sees it before comparing against it.
     detected_dim: AtomicUsize,
     query_prefix: String,
     document_prefix: String,
