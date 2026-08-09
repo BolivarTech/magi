@@ -1507,6 +1507,11 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
         secret_store: secret_store.as_ref(),
     };
 
+    // Read ONCE and shared by the probe AND the builder below (sixth-pass gate finding, S8):
+    // the probe must measure exactly the models `build_magi_orchestrator` is about to run,
+    // which requires the SAME `MagiEnvModelOverrides`, not two independently-constructed ones.
+    let env_overrides = MagiEnvModelOverrides::from_env();
+
     // REQ-A24/A24b/A24c (Task 5.2): measure the principal and the trio BEFORE building it, so
     // `input_warn_tokens` can be derived from the MAGES window (REQ-A24b) and startup announces
     // the three measurement states (REQ-A24c). Never blocks or fails startup: each probe fails
@@ -1516,6 +1521,7 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
         &endpoints,
         provider_kind,
         &OllamaProbeFactory,
+        &env_overrides,
         &mut startup_notices,
     )
     .await;
@@ -1531,7 +1537,7 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
         &endpoints,
         Some(&creds),
         warn_tokens,
-        &MagiEnvModelOverrides::from_env(),
+        &env_overrides,
         &mut startup_notices,
     ) {
         Ok(magi) => Some(magi),
@@ -1908,6 +1914,11 @@ async fn orchestrate_probes(
     endpoints: &ResolvedEndpoints,
     principal_kind: ProviderKind,
     factory: &dyn ProbeFactory,
+    // `MAGI_MODEL_<AGENT>` overrides, applied per seat via `seats_with_env_overrides` — the
+    // SAME resolution `build_magi_orchestrator` performs when it actually constructs the trio
+    // (sixth-pass gate finding, S8, Balthasar: before this parameter, the probe measured the
+    // TOML/backend model while the trio ran the env-overridden one).
+    env_overrides: &MagiEnvModelOverrides,
 ) -> (String, Option<Measurement>, BTreeMap<String, Measurement>) {
     let principal_model = resolve_backend_model(cfg, principal_kind).to_string();
 
@@ -1916,7 +1927,7 @@ async fn orchestrate_probes(
         // `[magi].kind`/`[magi].base_url` absent, so the trio inherits `principal_kind`
         // trivially — the trio's fallback is EXACTLY the same model as the principal's, with no
         // possible ambiguity): ONE batch so as not to probe the same thing four times.
-        let trio_seats = cfg.magi.seats(&principal_model);
+        let trio_seats = seats_with_env_overrides(cfg, &principal_model, env_overrides);
         let trio_models: Vec<&str> = trio_seats.iter().map(|(_, m)| m.as_str()).collect();
         let mut all = trio_models.clone();
         all.push(principal_model.as_str());
@@ -1946,7 +1957,7 @@ async fn orchestrate_probes(
                 // the SECTION, and the section is chosen by the kind of EACH group, not the
                 // principal's.
                 let trio_model = resolve_backend_model(cfg, magi_kind).to_string();
-                let trio_seats = cfg.magi.seats(&trio_model);
+                let trio_seats = seats_with_env_overrides(cfg, &trio_model, env_overrides);
                 let trio_models: Vec<&str> = trio_seats.iter().map(|(_, m)| m.as_str()).collect();
 
                 // `join!`, not two `.await`s in a row: in series the worst-case startup would
@@ -1975,11 +1986,12 @@ async fn orchestrate_probes(
                 let principal_models = [principal_model.as_str()];
                 let principal =
                     probe_models(principal_kind, &endpoints.root, &principal_models, factory).await;
-                // The THREE seats, named with the PRINCIPAL's model only so the returned table
+                // The THREE seats, named with the PRINCIPAL's model (env-overridden, same as
+                // the other two branches, purely for naming consistency) so the returned table
                 // has three plausible keys — it is never probed with that name here, so the
                 // name cannot poison anything: the three values are `NotMeasuredThisTime` by
                 // construction, not by probing.
-                let trio_seats = cfg.magi.seats(&principal_model);
+                let trio_seats = seats_with_env_overrides(cfg, &principal_model, env_overrides);
                 let trio = trio_seats
                     .into_iter()
                     .map(|(_, m)| (m, Measurement::NotMeasuredThisTime))
@@ -2009,10 +2021,13 @@ async fn probe_and_report(
     endpoints: &ResolvedEndpoints,
     principal_kind: ProviderKind,
     factory: &dyn ProbeFactory,
+    // Threaded straight through to `orchestrate_probes` — see its own doc (sixth-pass gate
+    // finding, S8).
+    env_overrides: &MagiEnvModelOverrides,
     notices: &mut Vec<Notice>,
 ) -> Option<usize> {
     let (principal_model, principal_measurement, trio) =
-        orchestrate_probes(cfg, endpoints, principal_kind, factory).await;
+        orchestrate_probes(cfg, endpoints, principal_kind, factory, env_overrides).await;
     notices.push(Notice::info(format!(
         "{principal_model}: {}",
         probe_notice(&principal_measurement.unwrap_or(Measurement::NotMeasuredThisTime))
@@ -2322,6 +2337,37 @@ impl MagiEnvModelOverrides {
     }
 }
 
+/// Applies `MAGI_MODEL_<AGENT>` env overrides on top of [`MagiSectionConfig::seats`]'s
+/// TOML-or-backend resolution — the SAME `env > TOML > backend` chain
+/// [`build_magi_orchestrator`] applies when it actually constructs each seat's provider.
+///
+/// Extracted (sixth-pass gate finding, S8, Balthasar) so [`orchestrate_probes`] and
+/// [`build_magi_orchestrator`] cannot see a different model for the same seat: before this, the
+/// probe read `cfg.magi.seats(...)` directly and never consulted `env_overrides` at all, so an
+/// operator setting `MAGI_MODEL_MELCHIOR` had the probe measure one model's window while the
+/// trio actually ran a different one — silently poisoning `input_warn_tokens` (REQ-A24b, whose
+/// value is the MINIMUM across the mages) with a number that describes a model nobody is
+/// running. One function computing the resolved seat models, used by both, makes that
+/// divergence structurally impossible instead of a discipline to remember at each call site
+/// (B3 — the same reasoning that already produced [`resolve_magi_kind`]/[`resolve_backend_model`]
+/// for the kind and the backend model).
+fn seats_with_env_overrides(
+    cfg: &MagiConfig,
+    backend_model: &str,
+    env_overrides: &MagiEnvModelOverrides,
+) -> Vec<(AgentName, String)> {
+    cfg.magi
+        .seats(backend_model)
+        .into_iter()
+        .map(|(seat, toml_or_backend_model)| {
+            let env_model = env_overrides.for_seat(seat);
+            let model = resolve_magi_override(Some(&toml_or_backend_model), env_model)
+                .unwrap_or(toml_or_backend_model);
+            (seat, model)
+        })
+        .collect()
+}
+
 /// Formats a `base_url` resolution result for display in a startup notice: the endpoint
 /// TEMPLATE on success, or a redacted rendering of the error's `Display` on failure.
 ///
@@ -2624,15 +2670,10 @@ fn build_magi_orchestrator(
     #[cfg(test)]
     SEAT_WIRING_TRACE.with(|t| t.borrow_mut().clear());
 
-    for (seat, toml_or_backend_model) in cfg.magi.seats(backend_model) {
-        // `MAGI_MODEL_<AGENT>` wins over what `seats()` already resolved (TOML, or the backend
-        // if there was no override) — `resolve_magi_override` treats the incoming value as
-        // "what wins if there is no env", so passing it the result of `seats()` as its
-        // `toml_model` yields exactly `env > TOML > backend` without reimplementing that chain
-        // a second time.
-        let env_model = env_overrides.for_seat(seat);
-        let model = resolve_magi_override(Some(&toml_or_backend_model), env_model)
-            .unwrap_or(toml_or_backend_model);
+    // `env > TOML > backend`, via `seats_with_env_overrides` — the SAME resolution
+    // `orchestrate_probes` now applies (B3, sixth-pass gate finding S8), so the two cannot see
+    // a different model for the same seat.
+    for (seat, model) in seats_with_env_overrides(cfg, backend_model, env_overrides) {
         match build_native_provider(kind, base, &model, creds, client_timeout, notices) {
             // REQ-A03: `MagiBuilder::build()` does NOT wrap anything, so without this the retry
             // the trio inherited from the adapter is lost.
@@ -3933,6 +3974,10 @@ async fn prepare_headless(
         secret_store: secret_store.as_ref(),
     };
 
+    // Read ONCE and shared by the probe AND the builder below — see `run()`'s comment for why
+    // (sixth-pass gate finding, S8).
+    let env_overrides = MagiEnvModelOverrides::from_env();
+
     // REQ-A24/A24b/A24c (Task 5.2): same polling as the TUI, see `run()`'s comment — never
     // blocks or fails headless startup.
     let mut trio_notices: Vec<Notice> = Vec::new();
@@ -3941,6 +3986,7 @@ async fn prepare_headless(
         &endpoints,
         provider_kind,
         &OllamaProbeFactory,
+        &env_overrides,
         &mut trio_notices,
     )
     .await;
@@ -3950,7 +3996,7 @@ async fn prepare_headless(
         &endpoints,
         Some(&creds),
         warn_tokens,
-        &MagiEnvModelOverrides::from_env(),
+        &env_overrides,
         &mut trio_notices,
     );
     // REQ-A07p/SC-A07p (fix round 4, finding 1): headless is the surface this notice
@@ -8966,8 +9012,14 @@ mod tests {
                 ("caspar", 256_000),
             ]);
             let cfg = cfg_with_four_distinct_models("principal", "melchior", "balthasar", "caspar");
-            let (principal_model, principal, trio) =
-                orchestrate_probes(&cfg, &test_endpoints(), ProviderKind::Ollama, &factory).await;
+            let (principal_model, principal, trio) = orchestrate_probes(
+                &cfg,
+                &test_endpoints(),
+                ProviderKind::Ollama,
+                &factory,
+                &MagiEnvModelOverrides::default(),
+            )
+            .await;
 
             assert_eq!(principal_model, "principal");
             assert!(matches!(
@@ -9003,8 +9055,14 @@ mod tests {
                 ("caspar", 256_000),
             ]);
             let cfg = cfg_with_four_distinct_models("principal", "melchior", "balthasar", "caspar");
-            let (_principal_model, _principal, trio) =
-                orchestrate_probes(&cfg, &test_endpoints(), ProviderKind::Ollama, &factory).await;
+            let (_principal_model, _principal, trio) = orchestrate_probes(
+                &cfg,
+                &test_endpoints(),
+                ProviderKind::Ollama,
+                &factory,
+                &MagiEnvModelOverrides::default(),
+            )
+            .await;
 
             let derived = derive_warn_tokens(&trio).expect("all three mages measured");
             #[allow(
@@ -9032,8 +9090,14 @@ mod tests {
         async fn the_probe_runs_once_and_the_threshold_stays_put() {
             let factory = MappedProbeFactory::new(&[("principal", 128_000), ("m", 256_000)]);
             let cfg = cfg_with_four_distinct_models("principal", "m", "m", "m");
-            let (_principal_model, _principal, trio) =
-                orchestrate_probes(&cfg, &test_endpoints(), ProviderKind::Ollama, &factory).await;
+            let (_principal_model, _principal, trio) = orchestrate_probes(
+                &cfg,
+                &test_endpoints(),
+                ProviderKind::Ollama,
+                &factory,
+                &MagiEnvModelOverrides::default(),
+            )
+            .await;
             let calls_after_the_startup_probe = factory.calls();
             assert!(
                 calls_after_the_startup_probe > 0,
@@ -9074,12 +9138,8 @@ mod tests {
                 ("balthasar", 200_000),
                 ("caspar", 256_000),
             ]);
-            let cfg = cfg_with_four_distinct_models(
-                "principal",
-                "toml-melchior",
-                "balthasar",
-                "caspar",
-            );
+            let cfg =
+                cfg_with_four_distinct_models("principal", "toml-melchior", "balthasar", "caspar");
             let env_overrides = MagiEnvModelOverrides::from_raw(Some("env-melchior"), None, None);
 
             let (_principal_model, _principal, trio) = orchestrate_probes(
@@ -9130,9 +9190,14 @@ mod tests {
                 },
                 ..MagiConfig::default()
             };
-            let (principal_model, principal, trio) =
-                orchestrate_probes(&cfg, &diverging_endpoints(), ProviderKind::Ollama, &factory)
-                    .await;
+            let (principal_model, principal, trio) = orchestrate_probes(
+                &cfg,
+                &diverging_endpoints(),
+                ProviderKind::Ollama,
+                &factory,
+                &MagiEnvModelOverrides::default(),
+            )
+            .await;
             assert_eq!(principal_model, "principal");
             assert!(matches!(
                 principal,
@@ -9195,8 +9260,14 @@ mod tests {
                 ..MagiConfig::default()
             };
 
-            let (_principal_model, principal, trio) =
-                orchestrate_probes(&cfg, &endpoints, ProviderKind::Anthropic, &factory).await;
+            let (_principal_model, principal, trio) = orchestrate_probes(
+                &cfg,
+                &endpoints,
+                ProviderKind::Anthropic,
+                &factory,
+                &MagiEnvModelOverrides::default(),
+            )
+            .await;
 
             assert!(
                 matches!(principal, Some(Measurement::NotMeasurable)),
@@ -9243,6 +9314,7 @@ mod tests {
                 &diverging_endpoints(),
                 ProviderKind::Anthropic,
                 &factory,
+                &MagiEnvModelOverrides::default(),
             )
             .await;
 
@@ -9275,9 +9347,14 @@ mod tests {
         async fn an_invalid_magi_kind_degrades_the_trio_without_guessing() {
             let factory = MappedProbeFactory::new(&[("principal", 64_000)]);
             let cfg = cfg_diverging_with_models(Some("banana"), "principal", "irrelevant");
-            let (principal_model, principal, trio) =
-                orchestrate_probes(&cfg, &diverging_endpoints(), ProviderKind::Ollama, &factory)
-                    .await;
+            let (principal_model, principal, trio) = orchestrate_probes(
+                &cfg,
+                &diverging_endpoints(),
+                ProviderKind::Ollama,
+                &factory,
+                &MagiEnvModelOverrides::default(),
+            )
+            .await;
             assert_eq!(principal_model, "principal");
             assert!(
                 matches!(
@@ -9315,6 +9392,7 @@ mod tests {
                 &test_endpoints(),
                 ProviderKind::Ollama,
                 &factory,
+                &MagiEnvModelOverrides::default(),
                 &mut notices,
             )
             .await;
@@ -9342,6 +9420,7 @@ mod tests {
                 &test_endpoints(),
                 ProviderKind::Ollama,
                 &factory,
+                &MagiEnvModelOverrides::default(),
                 &mut notices,
             )
             .await;
@@ -9382,6 +9461,7 @@ mod tests {
                 &test_endpoints(),
                 ProviderKind::Ollama,
                 &factory,
+                &MagiEnvModelOverrides::default(),
                 &mut notices,
             )
             .await;
