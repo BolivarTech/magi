@@ -448,12 +448,25 @@ fn tui_consult_error_body(err: &MagiError, kind: ProviderKind) -> String {
 /// structure, so there is no anchor to preserve — `truncate_report` degrades to its
 /// byte-only level for text with no contractual anchors, which is exactly what an
 /// arbitrary error string needs.
+///
+/// Also runs the result through [`crate::agent::Agent::sanitize_text`] (sixth-pass gate
+/// finding, S7): the success arm's call site sanitizes `tui_consult_success_reply`'s output
+/// before rendering it, but this error arm did not, even though `tui_consult_error_body`
+/// embeds `explain_magi_error`'s text — which in turn can carry a `ProviderError::Http`
+/// body composed by a foreign HTTP endpoint we do not control. `explain_magi_error` already
+/// redacts credentials (B11) via `redact_foreign_error`, but redaction is not sanitization:
+/// it strips secrets, not ANSI escapes or control characters. Sanitizing AFTER truncation,
+/// same order as the success arm, so a cut mid-escape-sequence is still cleaned up rather
+/// than leaving a dangling `ESC` at the tail.
 fn tui_consult_error_reply(
     err: &MagiError,
     kind: ProviderKind,
     cap: usize,
 ) -> crate::tools::consult::Truncated {
-    crate::tools::consult::truncate_report(&tui_consult_error_body(err, kind), cap)
+    let mut truncated =
+        crate::tools::consult::truncate_report(&tui_consult_error_body(err, kind), cap);
+    truncated.text = crate::agent::Agent::sanitize_text(&truncated.text);
+    truncated
 }
 
 /// Handles a failed post-`/login` MAGI trio rebuild (I4, fix round 2).
