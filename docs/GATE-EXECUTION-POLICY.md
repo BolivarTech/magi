@@ -128,9 +128,18 @@ catches that, and it is the reason the full suite remains non-negotiable rather 
 `.config/nextest.toml` documents twice: a filter that matches nothing raises **no error**, so it
 stays declared in the file and silently stops applying. The script maps paths to modules
 mechanically, and **every case it cannot map confidently — a crate root, a manifest, a build script,
-a shared test helper, an unrecognised path — falls back to the full suite.** The default direction
-is always "run more", never "run less". A documentation-only change runs the full suite too, rather
-than reporting a vacuous pass over nothing.
+a shared test helper, an unrecognised path — falls back to the full suite.** Where there is doubt,
+the direction is "run more". A documentation-only change runs the full suite too, rather than
+reporting a vacuous pass over nothing.
+
+**The one exception is an empty diff: when git reports no change at all, nothing runs.** That is not
+"running less" — it is not running the same thing twice: there is nothing to verify, so the previous
+verification still stands. The case that matters in practice is editing a **git-ignored** file
+(`CLAUDE.md`, `.claude/`, `dev-docs/`, `planning/`): git cannot see it, it cannot affect the build,
+and spending 400 seconds of suite on it is exactly the waste this split exists to remove. The
+"never green over nothing" rule applies to a documentation change git *can* see — it might touch a
+doctest — and not to an empty diff. Conflating the two cost a full suite for every edit to a local
+note.
 
 **Measured on this repository's last 40 commits:** 28 would run scoped, 11 would fall back to the
 full suite, 1 touched documentation only. So the saving applies to roughly seven commits in ten,

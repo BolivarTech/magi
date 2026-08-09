@@ -23,10 +23,19 @@ Fail-safe by construction
 -------------------------
 The filter is DERIVED, never hand-maintained. A hand-written list is exactly
 the failure mode ``.config/nextest.toml`` documents twice: a filter that
-matches nothing raises no error, so it silently stops applying. Anything this
-script cannot map confidently -- a workspace manifest, a lockfile, the nextest
-config, an unrecognised path -- falls back to the FULL suite. The default
-direction is always "run more", never "run less".
+matches nothing raises no error, so it silently stops applying. Anything git
+SEES that this script cannot map confidently -- a workspace manifest, a
+lockfile, the nextest config, an unrecognised path -- falls back to the FULL
+suite. Where there is doubt, the direction is "run more".
+
+The one exception is an EMPTY diff: when git reports no change at all, nothing
+runs. That is not "running less" -- it is not running the same thing twice:
+there is nothing to verify, so the previous verification still stands. The case
+that matters in practice is editing a GIT-IGNORED file (local notes, agent
+config, planning material): git cannot see it, it cannot affect the build, and
+spending the whole suite on it is the waste this script exists to remove. The
+"never green over nothing" rule applies to a documentation change git *can*
+see -- it might touch a doctest -- and not to an empty diff.
 
 Workspaces
 ----------
