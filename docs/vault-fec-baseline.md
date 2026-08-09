@@ -1,46 +1,48 @@
-# ConcatenatedFec — línea base de performance (REQ-V36)
+# ConcatenatedFec — performance baseline (REQ-V36)
 
-> **Historial de desempeño, NO un gate de decisión.** La elección de FEC está fijada por diseño
-> (D-V02): la resiliencia de canal es parte de la tesis de endurecimiento. Este número existe para
-> comparar en releases futuros, **no** para reabrir la decisión. Medido con
-> `cargo run --release --bin bench_vault_crypto` sobre `magi-rs` 0.8.0 (rustc 1.97, Windows MSVC).
+> **Performance history, NOT a decision gate.** The FEC choice is fixed by design (D-V02):
+> channel resilience is part of the hardening thesis. This number exists to compare against
+> future releases, **not** to reopen the decision. Measured with
+> `cargo run --release --bin bench_vault_crypto` against `magi-rs` 0.8.0 (rustc 1.97, Windows MSVC).
 
-## Medición (2026-07-15)
+## Measurement (2026-07-15)
 
-Corpus: **1000 récords × 220 B** de plaintext (tamaño representativo de un mensaje de conversación).
+Corpus: **1000 records × 220 B** of plaintext (a representative size for a conversation message).
 
-| Métrica | Valor |
+| Metric | Value |
 |---|---|
-| Plaintext total | 220 000 B |
-| Encoded total (en disco) | 1 364 000 B |
-| **Expansión en disco** | **≈ 6.2×** |
-| **Decrypt por récord** | **≈ 5.3 ms** |
-| Decrypt total (1000 récords) | ≈ 5.3 s |
+| Total plaintext | 220 000 B |
+| Total encoded (on disk) | 1 364 000 B |
+| **On-disk expansion** | **≈ 6.2×** |
+| **Decrypt per record** | **≈ 5.3 ms** |
+| Total decrypt (1000 records) | ≈ 5.3 s |
 
-## Interpretación honesta
+## Honest interpretation
 
-**La expansión real (≈6.2×) es mayor que el ≈2.3× que la spec estimó.** El ≈2.3× aplica al *payload
-grande* (RS 1.14× × Viterbi 2×); para **mensajes chicos** (220 B) los overheads fijos dominan —
-nonce + tag AEAD (~28 B), padding del bloque RS(255,223), la duplicación de Viterbi y el base64
-externo se pagan sobre un payload pequeño, así que la razón sube.
+**The real expansion (≈6.2×) is greater than the ≈2.3× the spec estimated.** The ≈2.3× applies to
+a *large payload* (RS 1.14× × Viterbi 2×); for **small messages** (220 B) the fixed overheads
+dominate — the nonce + AEAD tag (~28 B), the RS(255,223) block padding, Viterbi's duplication, and
+the outer base64 are all paid against a small payload, so the ratio climbs.
 
-**El decrypt (~5.3 ms/récord) es el costo de Viterbi.** El crypto in-tree anterior era **RS-only (sin
-Viterbi)**; `ConcatenatedFec` **agrega** la etapa Viterbi (corrección de errores de bit + coding
-gain), que es computacionalmente pesada. La migración es, por diseño, **más lenta y más grande** a
-cambio de **más resiliencia de canal**.
+**The decrypt cost (~5.3 ms/record) is Viterbi's cost.** The previous in-tree crypto was
+**RS-only (no Viterbi)**; `ConcatenatedFec` **adds** the Viterbi stage (bit-level error correction
++ coding gain), which is computationally heavy. The migration is, by design, **slower and larger**
+in exchange for **more channel resilience**.
 
-## Impacto en el hot path (`recall()` / carga de historial)
+## Impact on the hot path (`recall()` / history loading)
 
-- **Modo `selective` (default):** `recall()` descifra ~`top_k` (12) memorias/turno ⇒ **~64 ms/turno**
-  de FEC-decrypt. Despreciable frente a la latencia de un turno LLM (segundos).
-- **Modo `load_all` (control del benchmark, no default):** cargar N mensajes cuesta N × 5.3 ms ⇒
-  **~5.3 s por 1000 mensajes**. Es la razón adicional por la que `selective` es el default.
-- **Carga de una sesión** (`get_messages`): decenas de mensajes ⇒ cientos de ms. Perceptible pero
-  acotado.
+- **`selective` mode (default):** `recall()` decrypts ~`top_k` (12) memories/turn ⇒ **~64 ms/turn**
+  of FEC-decrypt. Negligible against an LLM turn's latency (seconds).
+- **`load_all` mode (the benchmark's control, not the default):** loading N messages costs
+  N × 5.3 ms ⇒ **~5.3 s per 1000 messages**. This is the additional reason `selective` is the
+  default.
+- **Loading a session** (`get_messages`): tens of messages ⇒ hundreds of ms. Perceptible but
+  bounded.
 
-## Palancas si el costo resultara inaceptable (fuera de alcance de MS1)
+## Levers if the cost turns out unacceptable (out of scope for MS1)
 
-La FEC es una **estrategia inyectable** (`ErrorCorrection`). Si en el futuro el costo pesara, el crate
-0.3.0 ofrece `fec::ReedSolomonCodec` (RS-only, ~1.14×, sin Viterbi — como el crypto viejo) o `NoFec`
-(1×, solo AEAD). **Cambiar la FEC cambia el formato en disco** (D-V02) ⇒ requeriría migración/reset,
-por eso no es un cambio trivial. Registrado como palanca conocida, no como acción de MS1.
+FEC is an **injectable strategy** (`ErrorCorrection`). If the cost ever weighs too much, the 0.3.0
+crate offers `fec::ReedSolomonCodec` (RS-only, ~1.14×, no Viterbi — like the old crypto) or `NoFec`
+(1×, AEAD only). **Changing the FEC changes the on-disk format** (D-V02) ⇒ it would require a
+migration/reset, which is why it is not a trivial change. Recorded as a known lever, not as MS1
+action.

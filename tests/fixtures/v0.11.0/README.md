@@ -1,50 +1,50 @@
-# Fixtures de `magi.toml` de v0.11.0
+# v0.11.0 `magi.toml` fixtures
 
-Archivos de configuración **reales** de magi-rs v0.11.0, usados por
-`src/config/migrate.rs` para probar la pasada de migración a v0.12.0 (REQ-A21c, SC-A21d).
+**Real** magi-rs v0.11.0 configuration files, used by `src/config/migrate.rs` to test the
+migration pass to v0.12.0 (REQ-A21c, SC-A21d).
 
-## Por qué son reales y no escritos a mano
+## Why they are real and not hand-written
 
-v0.12.0 rompe **todo** `magi.toml` de v0.11.0, y la decisión del usuario (2026-08-01) fue no
-proveer bandera de escape: el mensaje de migración es la **única** defensa. Si al mensaje se le
-escapa un patrón, el usuario queda con un binario que no arranca y sin downgrade limpio.
+v0.12.0 breaks **every** v0.11.0 `magi.toml`, and the user's decision (2026-08-01) was not to
+provide an escape hatch: the migration message is the **only** defense. If a pattern slips past
+the message, the user is left with a binary that will not start and no clean downgrade.
 
-Un fixture escrito a mano prueba que el mensaje **se emite**. Solo uno real prueba que
-**alcanza** — que nombra todas las incompatibilidades de ese archivo y que lo que propone
-efectivamente parsea en v0.12.0.
+A hand-written fixture proves the message **is emitted**. Only a real one proves it **reaches** —
+that it names every incompatibility in that file and that what it proposes actually parses in
+v0.12.0.
 
-## Por qué están commiteados y no se generan en tiempo de test
+## Why they are committed and not generated at test time
 
-Generarlos durante la suite ataría los tests a tener v0.11.0 instalado. No lo hay en CI, ni en un
-clon nuevo, ni dentro de un año. Un test que no puede correr no defiende nada, y éste es el único
-que defiende la migración.
+Generating them during the suite would tie the tests to having v0.11.0 installed. It is not
+present in CI, nor in a fresh clone, nor a year from now. A test that cannot run defends nothing,
+and this is the only one that defends the migration.
 
-## Procedencia
+## Provenance
 
-Generados el **2026-08-02** con el binario publicado de v0.11.0:
+Generated on **2026-08-02** with the published v0.11.0 binary:
 
 ```bash
 cargo install magi-rs --version 0.11.0 --root <tmp>/magi-v11 --locked
 cd <tmp>/genfix && <tmp>/magi-v11/bin/magi-rs.exe --init-config
 ```
 
-| Archivo | Origen |
+| File | Origin |
 |---|---|
-| `default.toml` | Salida **verbatim** de `magi-rs --init-config` (4769 bytes). Canónico. |
-| `with-models.toml` | `default.toml` con los tres modelos por mage cambiados a valores no built-in. |
-| `full.toml` | `default.toml` con cinco knobs avanzados de `[memory]` y `[embedding]` descomentados. |
-| `with-credentials.toml` | `default.toml` con `[openai].base_url = "https://user:s3cr3t@host/v1"`, más un comentario TOML al final de esa línea con el marcador del escáner de secretos (ver abajo). |
+| `default.toml` | **Verbatim** output of `magi-rs --init-config` (4769 bytes). Canonical. |
+| `with-models.toml` | `default.toml` with the three per-mage models changed to non-built-in values. |
+| `full.toml` | `default.toml` with five advanced `[memory]`/`[embedding]` knobs uncommented. |
+| `with-credentials.toml` | `default.toml` with `[openai].base_url = "https://user:s3cr3t@host/v1"`, plus a trailing TOML comment on that line carrying the secret-scanner marker (see below). |
 
-Las tres variantes se derivan de `default.toml` agregando o modificando **solo claves que el
-schema de v0.11.0 acepta** — verificado contra `git show v0.11.0:src/config.rs` y
-`git show v0.11.0:src/memory/config.rs`. v0.11.0 parsea con `deny_unknown_fields`, así que una
-clave inventada produciría un archivo que v0.11.0 habría rechazado, y el fixture no probaría nada.
+The three variants are derived from `default.toml` by adding or changing **only keys the v0.11.0
+schema accepts** — verified against `git show v0.11.0:src/config.rs` and
+`git show v0.11.0:src/memory/config.rs`. v0.11.0 parses with `deny_unknown_fields`, so a made-up
+key would produce a file v0.11.0 itself would have rejected, and the fixture would prove nothing.
 
-## Cómo se verificó cada uno
+## How each one was verified
 
-Cada fixture se colocó como `.magi/magi.toml` en un workspace temporal y se ejecutó el binario de
-v0.11.0 contra él, buscando en la salida el warning que ese binario emite cuando la configuración
-no parsea (`"is invalid and was ignored"`, de `MagiConfig::load`):
+Each fixture was placed as `.magi/magi.toml` in a temporary workspace and run against the v0.11.0
+binary, checking its output for the warning that binary emits when the configuration fails to
+parse (`"is invalid and was ignored"`, from `MagiConfig::load`):
 
 ```bash
 <tmp>/magi-v11/bin/magi-rs.exe init
@@ -53,29 +53,28 @@ MAGI_PASSPHRASE="…" <tmp>/magi-v11/bin/magi-rs.exe query -i "hi" --timeout 2 2
   | grep -ci "is invalid and was ignored"
 ```
 
-Cero coincidencias significa que v0.11.0 aceptó el archivo. Los cuatro dieron cero.
+Zero matches means v0.11.0 accepted the file. All four returned zero.
 
-**El método se validó antes de confiar en él.** Se corrió primero con un archivo deliberadamente
-inválido (`bogus_unknown_key = 1`), que sí produjo el warning. Sin ese control, "no apareció el
-warning" sería indistinguible de "el warning nunca aparece", y los cuatro habrían pasado por
-construcción.
+**The method was validated before being trusted.** It was first run against a deliberately
+invalid file (`bogus_unknown_key = 1`), which did produce the warning. Without that control,
+"the warning did not appear" would be indistinguishable from "the warning never appears," and all
+four fixtures would have passed by construction.
 
-## `with-credentials.toml` contiene un secreto a propósito
+## `with-credentials.toml` deliberately contains a secret
 
-Lleva `s3cr3t` embebido en la `base_url`. Es exactamente lo que `tests/no_hardcoded_secrets.rs`
-busca, así que necesita una exención explícita en ese escáner.
+It carries `s3cr3t` embedded in the `base_url`. That is exactly what
+`tests/no_hardcoded_secrets.rs` looks for, so it needs an explicit exemption in that scanner.
 
-La exención es **por línea, no por directorio**: el marcador `allow-secret-scan` va como
-comentario TOML al final de la línea de `base_url`, y `tests/fixtures` se **agregó** a los
-directorios que el escáner recorre. Excluir el directorio habría sido más simple y peor — los
-fixtures son justo la clase de archivo donde alguien pega una credencial real sin querer
-mientras los genera, así que la superficie tiene que quedar vigilada salvo en la línea donde el
-secreto es deliberado.
+The exemption is **per line, not per directory**: the `allow-secret-scan` marker sits as a TOML
+comment at the end of the `base_url` line, and `tests/fixtures` was **added** to the directories
+the scanner walks. Excluding the whole directory would have been simpler and worse — fixtures are
+exactly the kind of file where someone accidentally pastes a real credential while generating
+them, so the surface has to stay watched except on the one line where the secret is deliberate.
 
-El comentario **no altera lo que v0.11.0 parsea** —es un comentario TOML— y el archivo se
-re-verificó con el binario de v0.11.0 **después** de agregarlo, no antes.
+The comment **does not change what v0.11.0 parses** — it is a TOML comment — and the file was
+re-verified against the v0.11.0 binary **after** adding it, not before.
 
-## Regenerarlos
+## Regenerating them
 
-Repetir los comandos de arriba. `default.toml` debe salir byte-idéntico mientras se use el mismo
-v0.11.0 publicado; las variantes se re-derivan de él con los cambios de la tabla.
+Repeat the commands above. `default.toml` should come out byte-identical as long as the same
+published v0.11.0 is used; the variants are re-derived from it with the changes in the table.

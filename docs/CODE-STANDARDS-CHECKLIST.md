@@ -1,223 +1,243 @@
 # Code Standards Checklist
 
-Checklist por archivo que Loop 1 (`/requesting-code-review`) y MAGI (`/magi:magi`) recorren
-sobre cada archivo tocado, en adición a `cargo nextest` / `clippy -D warnings` / `fmt --check` /
-`build --release` / `doc` / `audit` / `deny check licenses` (§0.1 del `CLAUDE.local.md`).
+Per-file checklist that Loop 1 (`/requesting-code-review`) and MAGI (`/magi:magi`) walk over
+every touched file, in addition to `cargo nextest` / `clippy -D warnings` / `fmt --check` /
+`build --release` / `doc` / `audit` / `deny check licenses` (`CLAUDE.local.md` §0.1).
 
-## Por archivo
+## Per file
 
-- [ ] **SRP** — cada función/módulo hace una sola cosa; si el propósito necesita "y" para
-      describirse, dividirlo.
-- [ ] **DRY** — cero bloques de 3+ líneas duplicados; extraer a una función/constante
-      compartida.
-- [ ] **Cero magic numbers** — salvo `0`, `1`, `-1`; todo lo demás es una constante nombrada
+- [ ] **SRP** — each function/module does exactly one thing; if the purpose needs "and" to be
+      described, split it.
+- [ ] **DRY** — zero duplicated blocks of 3+ lines; extract to a shared function/constant.
+- [ ] **Zero magic numbers** — except `0`, `1`, `-1`; everything else is a named constant
       (`SCREAMING_SNAKE_CASE`).
-- [ ] **Rustdoc útil** en todo ítem público — explica el propósito sin repetir el nombre del
-      ítem; incluye `# Errors` si la función devuelve `Result`; incluye `# Examples` si el uso
-      no es trivial.
-- [ ] **Orden de imports** — std → externos → crate, cada grupo separado por una línea en
-      blanco.
-- [ ] **Header de archivo** — todo archivo nuevo abre con `// Author: Julian Bolivar`,
+- [ ] **Useful rustdoc** on every public item — explains the purpose without repeating the
+      item's name; includes `# Errors` if the function returns `Result`; includes `# Examples`
+      if the usage is not trivial.
+- [ ] **Import order** — std → external → crate, each group separated by a blank line.
+- [ ] **File header** — every new file opens with `// Author: Julian Bolivar`,
       `// Version: 1.0.0`, `// Date: YYYY-MM-DD`.
-- [ ] **Big-O en loops anidados** — cualquier anidamiento de bucles documenta su complejidad
-      esperada y por qué es aceptable (o se refactoriza si no lo es).
-- [ ] **Dependencias justificadas y pineadas** — toda dependencia nueva tiene una razón
-      documentada (commit/PR) y una versión pineada en `Cargo.toml`.
-- [ ] **Cobertura de test mínima por función pública** — al menos un caso "happy path" y al
-      menos un caso borde (vacío, límite, error) por función pública nueva.
+- [ ] **Big-O on nested loops** — any loop nesting documents its expected complexity and why
+      it is acceptable (or gets refactored if it is not).
+- [ ] **Justified and pinned dependencies** — every new dependency has a documented reason
+      (commit/PR) and a pinned version in `Cargo.toml`.
+- [ ] **Minimum test coverage per public function** — at least one "happy path" case and at
+      least one edge case (empty, boundary, error) per new public function.
 
-## Gates mecánicos que respaldan esta checklist
+## Mechanical gates backing this checklist
 
-| Gate | Comando | Qué certifica |
+| Gate | Command | What it certifies |
 |---|---|---|
-| Compilación | `cargo build --release` | El crate compila sin warnings en modo release. |
-| Tests | `cargo nextest run` | Toda la suite pasa; ningún test roto por el cambio. |
-| Lints | `cargo clippy --all-targets -- -D warnings` | Cero warnings de clippy, incluyendo
+| Compilation | `cargo build --release` | The crate builds without warnings in release mode. |
+| Tests | `cargo nextest run` | The whole suite passes; no test broken by the change. |
+| Lints | `cargo clippy --all-targets -- -D warnings` | Zero clippy warnings, including
   `unwrap_used`/`expect_used`/`panic`/`todo`/`unimplemented`/`indexing_slicing`/
-  `string_slice` dentro de `src/vault/` (denegados a nivel de módulo). |
-| Formato | `cargo fmt --check` | El código sigue `rustfmt.toml` (`max_width = 100`). |
-| Documentación | `cargo doc --no-deps` | Rustdoc compila sin warnings; `missing_docs` **y
-  `clippy::missing_docs_in_private_items`** son `deny` dentro de `src/vault/` (MS2 Task 0) —
-  TODO ítem, público **o `pub(crate)`/privado**, exige rustdoc. Verificado 2026-07-17: un
-  `pub(crate) fn` sin doc rompe el build. |
+  `string_slice` inside `src/vault/` (denied at the module level). |
+| Formatting | `cargo fmt --check` | The code follows `rustfmt.toml` (`max_width = 100`). |
+| Documentation | `cargo doc --no-deps` | Rustdoc builds without warnings; `missing_docs` **and
+  `clippy::missing_docs_in_private_items`** are `deny` inside `src/vault/` (MS2 Task 0) — EVERY
+  item, public **or `pub(crate)`/private**, requires rustdoc. Verified 2026-07-17: a
+  `pub(crate) fn` without docs breaks the build. |
 
-## Archivos nuevos de MS2 (recorrer la checklist (B) por cada uno)
+## New MS2 files (walk checklist (B) for each one)
 
-Cada archivo nuevo del vault se somete a la checklist "Por archivo" de arriba en cada
-`/verification-before-completion` y en el gate §6:
+Every new vault file goes through the "Per file" checklist above at each
+`/verification-before-completion` and at the §6 gate:
 
 - [ ] `src/vault/memguard.rs` (Task 1) — `MaskedDek` + `harden_process`
-- [ ] `src/vault/store.rs` (Task 2) — tabla `vault` + `SecretStore` CRUD
-- [ ] `src/vault/master.rs` (Task 4) — resolución de passphrase + `zxcvbn`
-- [ ] `src/vault/cli.rs` (Task 6) — subcomandos `clap` `ls`/`set`/`rm`/`passwd`
-- [ ] `src/vault/envelope.rs` (Task 5, ampliación) — `rekey_envelope`
-- [ ] `src/vault/error.rs` (Tasks 2/4/6, variantes nuevas + corrección a inglés de las de MS1)
+- [ ] `src/vault/store.rs` (Task 2) — `vault` table + `SecretStore` CRUD
+- [ ] `src/vault/master.rs` (Task 4) — passphrase resolution + `zxcvbn`
+- [ ] `src/vault/cli.rs` (Task 6) — `clap` subcommands `ls`/`set`/`rm`/`passwd`
+- [ ] `src/vault/envelope.rs` (Task 5, extension) — `rekey_envelope`
+- [ ] `src/vault/error.rs` (Tasks 2/4/6, new variants + English correction of the MS1 ones)
 
-## Archivos nuevos de MS1 (headless) — recorrer la checklist (B) por cada uno
+## New MS1 (headless) files — walk checklist (B) for each one
 
-Módulo `src/headless/` (vive en `lib.rs` como `pub mod headless`, igual que `vault`, para
-que fuzz/coverage linkeen — REQ-H00). Los lint attrs de `src/headless/mod.rs` son **idénticos**
-a los de `src/vault/mod.rs` (`deny(missing_docs, missing_docs_in_private_items, unwrap_used[not(test)],
-…)`). Cobertura `cargo llvm-cov` **≥ 90 %** sobre `src/headless/` **y `src/system/workspace.rs`**
-(exclusiones documentadas para glue puro).
+`src/headless/` module (lives in `lib.rs` as `pub mod headless`, same as `vault`, so fuzz/coverage
+can link — REQ-H00). The lint attrs of `src/headless/mod.rs` are **identical** to those of
+`src/vault/mod.rs` (`deny(missing_docs, missing_docs_in_private_items, unwrap_used[not(test)],
+…)`). `cargo llvm-cov` coverage **≥ 90 %** over `src/headless/` **and `src/system/workspace.rs`**
+(documented exclusions for pure glue).
 
-- [x] `src/headless/mod.rs` (Task 0) — frontera + lint attrs (REQ-H00) + re-exports
-- [x] `src/headless/error.rs` (Task 0) — `HeadlessError` (`thiserror`) + `From<VaultError>` exhaustivo
-- [x] `src/headless/types.rs` (Task 0) — tipos compartidos DECLARADOS del contrato MS1↔MS2 (`pub(crate)`)
-- [x] `src/headless/test_support.rs` (Task 0, `#[cfg(test)]`) — helper genérico de entorno `with_var`
-- [ ] `src/headless/input.rs` (Tasks 4/5/6) — lectura acotada + auto-detect + parser de envelope + resolución
-- [x] `src/headless/output.rs` (Task 7) — formateo texto/JSON rico + truncado + redacción de errores
-- [ ] `src/headless/log.rs` (Task 8) — JSONL a `.magi/logs/`, niveles, retención count+size, redacción
-- [ ] `src/headless/exit.rs` (Task 9) — taxonomía de exit codes (0/1/2/3)
-- [ ] `src/system/workspace.rs` (Tasks 1/2) — descubrir/init `.magi/` (walk-up, symlink-reject, perms, atómico)
+- [x] `src/headless/mod.rs` (Task 0) — boundary + lint attrs (REQ-H00) + re-exports
+- [x] `src/headless/error.rs` (Task 0) — `HeadlessError` (`thiserror`) + exhaustive `From<VaultError>`
+- [x] `src/headless/types.rs` (Task 0) — shared types DECLARING the MS1↔MS2 contract (`pub(crate)`)
+- [x] `src/headless/test_support.rs` (Task 0, `#[cfg(test)]`) — generic `with_var` environment helper
+- [ ] `src/headless/input.rs` (Tasks 4/5/6) — bounded read + auto-detect + envelope parser + resolution
+- [x] `src/headless/output.rs` (Task 7) — rich text/JSON formatting + truncation + error redaction
+- [ ] `src/headless/log.rs` (Task 8) — JSONL to `.magi/logs/`, levels, count+size retention, redaction
+- [ ] `src/headless/exit.rs` (Task 9) — exit-code taxonomy (0/1/2/3)
+- [ ] `src/system/workspace.rs` (Tasks 1/2) — discover/init `.magi/` (walk-up, symlink-reject, perms, atomic)
 
-| Vulnerabilidades | `cargo audit` | Sin advisories conocidos en el árbol de dependencias. |
-| Licencias | `cargo deny check licenses` | Solo licencias permisivas listadas en
+| Vulnerabilities | `cargo audit` | No known advisories in the dependency tree. |
+| Licenses | `cargo deny check licenses` | Only permissive licenses listed in
   `deny.toml`. |
-| Secretos | `cargo nextest run --test no_hardcoded_secrets` | Ningún `.rs` bajo `src/`
-  lleva material tipo-clave hardcodeado (`sk-ant-api...`, bloques `-----BEGIN`), <!-- allow-secret-scan --> y ninguna
-  doc o config (`.md`/`.toml`/`.yml`/`.yaml`/`.example` en la raíz, `docs/` y `.github/`)
-  lleva además IPs privadas ni rutas absolutas de usuario. Una línea se exime con el
-  marcador `allow-secret-scan`, que aplica solo a esa línea. <!-- allow-secret-scan --> |
+| Secrets | `cargo nextest run --test no_hardcoded_secrets` | No `.rs` file under `src/`
+  carries key-shaped hardcoded material (`sk-ant-api...`, `-----BEGIN` blocks), <!-- allow-secret-scan --> and no
+  doc or config file (`.md`/`.toml`/`.yml`/`.yaml`/`.example` at the root, `docs/` and `.github/`)
+  carries private IPs or absolute user paths either. A line is exempted with the
+  `allow-secret-scan` marker, which applies only to that line. <!-- allow-secret-scan --> |
 
-Todo hallazgo que no encaje en una categoría de la tabla de gates mecánicos, pero sí en la
-checklist manual de arriba, se reporta como finding de review (Loop 1 / MAGI) — nunca se
-ignora en silencio.
+Any finding that does not fit a mechanical-gate category above, but does fit the manual
+checklist above, is reported as a review finding (Loop 1 / MAGI) — never silently ignored.
 
-## Alcance de Miri (REQ-V38) — spike de Task 0b (2026-07-14)
+## Miri scope (REQ-V38) — Task 0b spike (2026-07-14)
 
-**Determinado empíricamente:** `cargo +nightly miri test vault::error` corre **limpio** en este
-entorno (Windows MSVC) — los 3 tests puros de `vault::error` pasan bajo Miri (0.59s), sin
-operaciones no soportadas. Los binarios que tocan SQLite (`rusqlite` bundled, FFI en C) y tokio
-(hilos de SO) quedan **naturalmente fuera** del alcance de Miri (sus tests se filtran; Miri no
-puede interpretar FFI en C ni el runtime de hilos).
+**Empirically determined:** `cargo +nightly miri test vault::error` runs **clean** in this
+environment (Windows MSVC) — all 3 pure `vault::error` tests pass under Miri (0.59s), with no
+unsupported operations. Binaries touching SQLite (`rusqlite` bundled, C FFI) and tokio (OS
+threads) fall **naturally outside** Miri's scope (their tests are filtered out; Miri cannot
+interpret C FFI or the thread runtime).
 
-**Alcance de REQ-V38 (Task 9):** Miri corre sobre el **código puro del vault** — `error` y
-`envelope` (framing de `vault_meta`, FEC keyless, wrap/unwrap). **Excluidos:** `store`/`database`
-(SQLite FFI). **Pendiente de confirmar en Task 2:** que el *crypto* del crate (`cryptovault`:
-AES-256-GCM-SIV, Argon2id) corra bajo Miri — el `aes` puede usar intrínsecos AES-NI que caen al
-backend portable bajo Miri (esperado vía `cpufeatures`), y Argon2 (m=64 MiB) puede ser lento bajo
-interpretación. Si el crypto no corre bajo Miri, el alcance se acota a `error` + al framing/FEC
-**no-AEAD** de `envelope`, y se documenta la exclusión (nunca declarar un pase que no ocurrió).
+**REQ-V38 scope (Task 9):** Miri runs over the vault's **pure code** — `error` and `envelope`
+(`vault_meta` framing, keyless FEC, wrap/unwrap). **Excluded:** `store`/`database` (SQLite FFI).
+**Pending confirmation in Task 2:** whether the crate's *crypto* (`cryptovault`: AES-256-GCM-SIV,
+Argon2id) runs under Miri — `aes` may use AES-NI intrinsics that fall back to the portable
+backend under Miri (expected via `cpufeatures`), and Argon2 (m=64 MiB) may be slow under
+interpretation. If the crypto does not run under Miri, the scope is narrowed to `error` + the
+**non-AEAD** framing/FEC of `envelope`, and the exclusion is documented (never claim a pass that
+did not happen).
 
-## Gate de hardening de milestone — resultado (Task 9, 2026-07-15)
+## Milestone hardening gate — result (Task 9, 2026-07-15)
 
-**Miri (REQ-V38) — alcance verificado empíricamente:**
-- ✅ `cargo +nightly miri test vault::error` corre **limpio** (lógica de dominio pura, sin UB) — confirmado en el spike de Task 0b.
-- ⚠️ El **crypto del envelope** (`vault::envelope`) **NO corre bajo Miri**: invoca `cryptovault` (AES-256-GCM-SIV con posibles intrínsecos AES-NI + Argon2 a 64 MiB + FEC Viterbi), que Miri no interpreta / hace impracticablemente lento. **Alcance de Miri acotado a la lógica pura** (`error`, framing/bounds-safety), con el crypto **excluido y documentado** — nunca se declara un pase que no ocurrió (contingencia prevista en REQ-V38).
+**Miri (REQ-V38) — empirically verified scope:**
+- ✅ `cargo +nightly miri test vault::error` runs **clean** (pure domain logic, no UB) — confirmed
+  in the Task 0b spike.
+- ⚠️ **The envelope's crypto** (`vault::envelope`) **does NOT run under Miri**: it invokes
+  `cryptovault` (AES-256-GCM-SIV with possible AES-NI intrinsics + Argon2 at 64 MiB + Viterbi
+  FEC), which Miri either cannot interpret or makes impractically slow. **Miri's scope is bounded
+  to the pure logic** (`error`, framing/bounds-safety), with the crypto **excluded and
+  documented** — a pass that did not happen is never claimed (contingency anticipated by REQ-V38).
 
-**Fuzz (REQ-V39) — targets definidos, ejecución en CI Linux:**
-- Los 2 targets existen en `fuzz/fuzz_targets/`: `fuzz_vault_meta_decode` (bytes arbitrarios → `open_envelope`, invariante: nunca panic ni borrado) y `fuzz_vault_blob_decrypt` (blob arbitrario → `decrypt_with_key`, maneja no-UTF8).
-- ⚠️ **`cargo-fuzz`/libFuzzer requiere el sanitizer `-fsanitize=fuzzer` (clang/LLVM), NO soportado en Windows MSVC** (limitación conocida del tooling, no del código). Los targets se **ejecutan en un CI Linux con nightly**: `cargo +nightly fuzz run <target> -- -max_total_time=300`. El bounds-safety del split que ejercitarían (`fuzz_open_entrypoint`) está además cubierto por el lint `clippy::indexing_slicing` (rompe el build) y por `test_fuzz_entrypoint_never_panics_on_arbitrary_input` (unit test).
+**Fuzz (REQ-V39) — targets defined, execution in Linux CI:**
+- The 2 targets exist under `fuzz/fuzz_targets/`: `fuzz_vault_meta_decode` (arbitrary bytes →
+  `open_envelope`, invariant: never panic or wipe) and `fuzz_vault_blob_decrypt` (arbitrary blob →
+  `decrypt_with_key`, handles non-UTF8).
+- ⚠️ **`cargo-fuzz`/libFuzzer requires the `-fsanitize=fuzzer` sanitizer (clang/LLVM), NOT
+  supported on Windows MSVC** (a known tooling limitation, not a code one). The targets **run in a
+  Linux CI job with nightly**: `cargo +nightly fuzz run <target> -- -max_total_time=300`. The
+  bounds-safety of the split they would exercise (`fuzz_open_entrypoint`) is additionally covered
+  by the `clippy::indexing_slicing` lint (breaks the build) and by
+  `test_fuzz_entrypoint_never_panics_on_arbitrary_input` (unit test).
 
-## Gate de hardening MS2 (REQ-V38 Miri · REQ-V39 fuzz) — Task 8 (2026-07-17)
+## MS2 hardening gate (REQ-V38 Miri · REQ-V39 fuzz) — Task 8 (2026-07-17)
 
-**Fuzz targets (REQ-V39) — 4 totales, wired y unit-smoked:**
+**Fuzz targets (REQ-V39) — 4 total, wired and unit-smoked:**
 - MS1: `fuzz_vault_meta_decode`, `fuzz_vault_blob_decrypt`.
-- MS2: `fuzz_secret_value_roundtrip` (valor arbitrario → set/get, nunca panic), `fuzz_passphrase_input`
-  (passphrase arbitraria lossy → `check_strength` + derive KEK, nunca panic).
-- Cada entrypoint (`magi_rs::vault::fuzz_*_entrypoint`) tiene un **test unitario** que lo ejercita
-  con entradas degeneradas (vacía, no-UTF8, grande) bajo `cargo nextest` — cobertura de robustez
-  local que SÍ corre en cada §0.1.
-- **La corrida larga (≥ 30 min/target, coverage-guided) corre en CI Linux con nightly** (job dedicado,
-  no en el loop RGR ni en el presupuesto §7 — long-running por diseño, §0.3 de `CLAUDE.local.md`).
-  Consistente con la nota de MS1: `cargo +nightly fuzz build` en Windows-MSVC arranca la instrumentación
-  (ASan/sancov) pero el enlace con libFuzzer es problemático en MSVC (por eso el gate real es CI Linux);
-  no se declara un pase de Windows que no se verificó. El bounds-safety de los entrypoints está además
-  garantizado por `clippy::indexing_slicing` (rompe el build) + los tests unitarios de arriba.
+- MS2: `fuzz_secret_value_roundtrip` (arbitrary value → set/get, never panics),
+  `fuzz_passphrase_input` (arbitrary lossy passphrase → `check_strength` + KEK derivation, never
+  panics).
+- Each entrypoint (`magi_rs::vault::fuzz_*_entrypoint`) has a **unit test** exercising it with
+  degenerate inputs (empty, non-UTF8, large) under `cargo nextest` — local robustness coverage
+  that DOES run on every §0.1.
+- **The long run (≥ 30 min/target, coverage-guided) runs in Linux CI with nightly** (a dedicated
+  job, not in the RGR loop or the §7 budget — long-running by design, `CLAUDE.local.md` §0.3).
+  Consistent with the MS1 note: `cargo +nightly fuzz build` on Windows-MSVC starts the
+  instrumentation (ASan/sancov) but linking with libFuzzer is problematic on MSVC (which is why
+  the real gate is Linux CI); no Windows pass that was not actually verified is claimed. The
+  entrypoints' bounds-safety is additionally guaranteed by `clippy::indexing_slicing` (breaks the
+  build) + the unit tests above.
 
-**Miri (REQ-V38) — alcance MS2 (extiende el spike de Task 0b):**
-- ✅ Cubre la **lógica pura** nueva: el enmascarado XOR de `memguard` (aritmética sobre buffers,
-  aliasing, init) y `check_strength` de `master` (zxcvbn es Rust puro). `vault::error` sigue limpio.
-- **Excluidos** (Miri no puede ejecutarlos, documentado sin fingir un pase):
-  - `store` y las pruebas de `envelope`/`database` que tocan **SQLite** (`rusqlite` bundled = FFI en C).
-  - Las **syscalls** de `region::lock`/`mlock` y de `harden_process` (`RLIMIT_CORE`/`PR_SET_DUMPABLE`)
-    — se saltean bajo `#[cfg(miri)]`; Miri no modela syscalls del SO.
-  - La derivación **Argon2id** (`m=64 MiB`, muy lenta bajo interpretación) y el AES que puede usar
-    AES-NI (cae al backend portable vía `cpufeatures`, no siempre bajo Miri).
-- **Se corre en CI** junto al fuzz; no se declara un pase de lo que no se ejecutó.
+**Miri (REQ-V38) — MS2 scope (extends the Task 0b spike):**
+- ✅ Covers the new **pure logic**: `memguard`'s XOR masking (buffer arithmetic, aliasing, init)
+  and `master`'s `check_strength` (zxcvbn is pure Rust). `vault::error` remains clean.
+- **Excluded** (Miri cannot run them, documented without faking a pass):
+  - `store` and the `envelope`/`database` tests that touch **SQLite** (`rusqlite` bundled = C FFI).
+  - The **syscalls** of `region::lock`/`mlock` and of `harden_process`
+    (`RLIMIT_CORE`/`PR_SET_DUMPABLE`) — skipped under `#[cfg(miri)]`; Miri does not model OS
+    syscalls.
+  - The **Argon2id** derivation (`m=64 MiB`, very slow under interpretation) and the AES that may
+    use AES-NI (falls back to the portable backend via `cpufeatures`, not always under Miri).
+- **Runs in CI** alongside the fuzz targets; no pass is claimed for what was not executed.
 
-## Gate de hardening MS1-headless (REQ-H35 fuzz · REQ-V38 Miri) — Task 10 (2026-07-18)
+## MS1-headless hardening gate (REQ-H35 fuzz · REQ-V38 Miri) — Task 10 (2026-07-18)
 
-**Fuzz targets (REQ-H35) — 2 nuevos, wired + build + smoke ejecutados en local:**
-- `fuzz_headless_input` (bytes arbitrarios → `read_input_bounded` + `parse_input` en los 3 modos
-  de `InputFormat`; invariante: nunca panic/UB, sin OOM por la lectura acotada ni stack-overflow por
-  la profundidad JSON acotada). Llama directo a los `pub fn` del módulo `input`.
-- `fuzz_sanitize_error` (string lossy arbitrario → `sanitize_error_message` + `redact_secret_patterns`;
-  invariante: nunca panic/UB **y** redacción **idempotente** — proxy de "ningún patrón tipo-clave se
-  deja pasar sin redactar"). El entrypoint es `magi_rs::headless::fuzz_sanitize_error_entrypoint`
-  (`#[doc(hidden)] pub`, misma convención que los 4 `fuzz_*_entrypoint` del vault: expone la frontera
-  `pub(crate)` al crate `fuzz/` **sin** ensanchar la API pública documentada).
-- Cada uno tiene un **unit-smoke** bajo `cargo nextest` (`test_parse_input_smoke_never_panics_on_degenerate_bytes`
-  en `input.rs`; `test_fuzz_sanitize_error_entrypoint_never_panics_on_arbitrary_input` en `output.rs`)
-  con entradas degeneradas (vacía, no-UTF8, JSON patológicamente anidado, dup-key, `prompt` no-string,
-  strings con `{`/`[`/claves embebidas) — cobertura de robustez que SÍ corre en cada §0.1.
-- ✅ **`cargo +nightly fuzz build` PASA en Windows-MSVC** con `cargo-fuzz 0.13.2` + nightly
-  `da80ed070` (la limitación de link MSVC documentada para el vault ya no aplica con esta versión del
-  tooling). **El binario instrumentado requiere el runtime ASan en el PATH en runtime**
-  (`clang_rt.asan_dynamic-x86_64.dll`, en `…\VC\Tools\MSVC\<ver>\bin\Hostx64\x64\`); sin él, el `.exe`
-  falla con `STATUS_DLL_NOT_FOUND` (0xc0000135) — no es un crash del target.
-- ✅ **Smoke 60 s local, cero crashes:** `fuzz_headless_input` → **346 653 runs / 61 s**;
-  `fuzz_sanitize_error` → **267 007 runs / 61 s** (la idempotencia del redactor no falló en ~267 k
-  entradas adversariales). La **corrida larga coverage-guided (≥ 30 min/target)** queda para CI/§0.3,
-  fuera del loop RGR y del presupuesto §7.
+**Fuzz targets (REQ-H35) — 2 new, wired + built + smoke-tested locally:**
+- `fuzz_headless_input` (arbitrary bytes → `read_input_bounded` + `parse_input` across the 3
+  `InputFormat` modes; invariant: never panic/UB, no OOM from the bounded read nor stack overflow
+  from the bounded JSON depth). Calls the module's `pub fn`s directly.
+- `fuzz_sanitize_error` (arbitrary lossy string → `sanitize_error_message` +
+  `redact_secret_patterns`; invariant: never panic/UB **and** **idempotent** redaction — a proxy
+  for "no key-shaped pattern slips through unredacted"). The entrypoint is
+  `magi_rs::headless::fuzz_sanitize_error_entrypoint` (`#[doc(hidden)] pub`, the same convention as
+  the 4 vault `fuzz_*_entrypoint`s: exposes the `pub(crate)` boundary to the `fuzz/` crate
+  **without** widening the documented public API).
+- Each one has a **unit smoke test** under `cargo nextest`
+  (`test_parse_input_smoke_never_panics_on_degenerate_bytes` in `input.rs`;
+  `test_fuzz_sanitize_error_entrypoint_never_panics_on_arbitrary_input` in `output.rs`) with
+  degenerate inputs (empty, non-UTF8, pathologically nested JSON, duplicate keys, a non-string
+  `prompt`, strings with embedded `{`/`[`/keys) — robustness coverage that DOES run on every
+  §0.1.
+- ✅ **`cargo +nightly fuzz build` PASSES on Windows-MSVC** with `cargo-fuzz 0.13.2` + nightly
+  `da80ed070` (the MSVC link limitation documented for the vault no longer applies with this
+  tooling version). **The instrumented binary requires the ASan runtime on the PATH at runtime**
+  (`clang_rt.asan_dynamic-x86_64.dll`, under `…\VC\Tools\MSVC\<ver>\bin\Hostx64\x64\`); without it
+  the `.exe` fails with `STATUS_DLL_NOT_FOUND` (0xc0000135) — not a target crash.
+- ✅ **60 s local smoke, zero crashes:** `fuzz_headless_input` → **346 653 runs / 61 s**;
+  `fuzz_sanitize_error` → **267 007 runs / 61 s** (the redactor's idempotence did not fail across
+  ~267k adversarial inputs). The **long coverage-guided run (≥ 30 min/target)** is left for
+  CI/§0.3, outside the RGR loop and the §7 budget.
 
-**Miri (REQ-V38) — INFEASIBLE en el nightly actual (regresión de toolchain, NO un hallazgo de UB):**
-- ❌ `cargo +nightly miri test headless::{input,output,exit}` **aborta con un ICE de rustc**
-  (`resolver_for_lowering_raw` panickea en la fase de lowering, **antes** de correr cualquier test) en
-  `rustc 1.99.0-nightly (da80ed070 2026-07-14)`. El ICE ocurre al compilar el crate bajo Miri, no al
-  ejecutar código headless.
-- ✅ **Verificado que es toolchain, no código:** `cargo +nightly miri test vault::error` — que corría
-  **limpio** bajo Miri en un nightly anterior (spike Task 0b) — **ICEa idéntico** en este nightly. La
-  causa es el compilador, no los módulos headless.
-- **Mitigación de robustez sin Miri, honesta:** (a) el crate es `#![forbid(unsafe_code)]`
-  crate-wide ⇒ no hay `unsafe` donde alojar UB (un pase Miri sería trivial por construcción); (b) los
-  2 targets de fuzz (build + smoke, cero crashes) ejercitan el parser no confiable y el redactor; (c)
-  los unit-smoke corren en cada §0.1. **No se declara un pase de Miri que no ocurrió.** Re-habilitar
-  Miri requiere un nightly sin el ICE (o pinnear uno previo conocido-bueno).
+**Miri (REQ-V38) — INFEASIBLE on the current nightly (toolchain regression, NOT a UB finding):**
+- ❌ `cargo +nightly miri test headless::{input,output,exit}` **aborts with a rustc ICE**
+  (`resolver_for_lowering_raw` panics during the lowering phase, **before** running any test) on
+  `rustc 1.99.0-nightly (da80ed070 2026-07-14)`. The ICE happens while compiling the crate under
+  Miri, not while running headless code.
+- ✅ **Verified it is the toolchain, not the code:** `cargo +nightly miri test vault::error` —
+  which ran **clean** under Miri on an earlier nightly (Task 0b spike) — **ICEs identically** on
+  this nightly. The cause is the compiler, not the headless modules.
+- **Robustness mitigation without Miri, honestly stated:** (a) the crate is
+  `#![forbid(unsafe_code)]` crate-wide ⇒ there is no `unsafe` to host UB in (a Miri pass would be
+  trivial by construction); (b) the 2 fuzz targets (build + smoke, zero crashes) exercise the
+  untrusted parser and the redactor; (c) the unit smoke tests run on every §0.1. **No Miri pass
+  that did not happen is claimed.** Re-enabling Miri requires a nightly without the ICE (or
+  pinning a previously known-good one).
 
-## Gate de hardening MS2-headless (REQ-H35 fuzz · REQ-V38 Miri) — Task 10 (2026-07-19)
+## MS2-headless hardening gate (REQ-H35 fuzz · REQ-V38 Miri) — Task 10 (2026-07-19)
 
-Alcance de MS2 sobre la superficie **nueva de lógica pura**: la matriz de autorización por tier
-(`src/headless/policy.rs` — `Policy::approves`/`silences_soft_guards`/`warnings`). El parser de
-entrada no confiable (envelope + lectura acotada + `sanitize_error_message`) es de MS1 y ya está
-cubierto por `fuzz_headless_input` + `fuzz_sanitize_error` (MS1 Task 10). El runner/timeout/consult
-toca el `Agent` y subprocesos ⇒ **no es puro ni Miri-able**. Verificado: MS2 no introdujo ninguna
-**nueva** superficie de entrada no confiable sin target de fuzz.
+MS2 scope over the **new pure-logic surface**: the per-tier authorization matrix
+(`src/headless/policy.rs` — `Policy::approves`/`silences_soft_guards`/`warnings`). The untrusted
+input parser (envelope + bounded read + `sanitize_error_message`) is from MS1 and is already
+covered by `fuzz_headless_input` + `fuzz_sanitize_error` (MS1 Task 10). The runner/timeout/consult
+touches `Agent` and subprocesses ⇒ **neither pure nor Miri-able**. Verified: MS2 introduced no
+**new** untrusted-input surface without a fuzz target.
 
-**Fuzz target (REQ-H35) — 1 nuevo, wired + build + smoke ejecutados en local:**
-- `fuzz_policy` (bytes arbitrarios → `(tier_byte, nombre_de_tool)` → toda la superficie pública de
-  `Policy`; invariantes: **nunca panic** + **fail-closed** — una aprobación implica un nombre de tool
-  conocido en cualquier tier, un desconocido jamás devuelve `true`). El entrypoint es
-  `magi_rs::headless::fuzz_policy_entrypoint` (`#[doc(hidden)] pub`, misma convención que los
-  `fuzz_*_entrypoint` del vault/`output`: expone la frontera al crate `fuzz/` sin ensanchar la API
-  pública documentada). El fail-closed se verifica con `debug_assert!` (que `cargo-fuzz` activa).
-- Tiene un **unit-smoke** bajo `cargo nextest`
-  (`test_fuzz_policy_entrypoint_never_panics_on_arbitrary_input` en `policy.rs`) con entradas
-  degeneradas (vacía, tier fuera de rango, cola no-UTF8, tool desconocido) — robustez que SÍ corre en
-  cada §0.1.
-- ✅ **`cargo +nightly fuzz build` PASA** en Windows-MSVC (`cargo-fuzz 0.13.2` + nightly `da80ed070`);
-  compila los 7 targets. El `.exe` instrumentado requiere el runtime ASan en el PATH
-  (`clang_rt.asan_dynamic-x86_64.dll`, en `…\VC\Tools\MSVC\<ver>\bin\Hostx64\x64\`), igual que MS1.
-- ✅ **Smoke 60 s local, cero crashes:** `fuzz_policy` → **2 528 273 runs / 61 s**. El fuzzer
-  coverage-guided descubrió por CMP los 7 nombres de tool reales (`ls`/`view`/`grep`/`edit`/`bash`/
-  `consult`/`project_knowledge`), ejercitando la matriz completa y la rama fail-closed sin panic. Los
-  targets de MS1 recompilan limpio como parte del mismo `fuzz build`. La corrida larga
-  coverage-guided (≥ 30 min) queda para CI/§0.3.
+**Fuzz target (REQ-H35) — 1 new, wired + built + smoke-tested locally:**
+- `fuzz_policy` (arbitrary bytes → `(tier_byte, tool_name)` → the whole public surface of
+  `Policy`; invariants: **never panics** + **fails closed** — an approval implies a tool name
+  known to some tier, an unknown one never returns `true`). The entrypoint is
+  `magi_rs::headless::fuzz_policy_entrypoint` (`#[doc(hidden)] pub`, the same convention as the
+  vault's/`output`'s `fuzz_*_entrypoint`s: exposes the boundary to the `fuzz/` crate without
+  widening the documented public API). Fail-closed is verified with `debug_assert!` (which
+  `cargo-fuzz` enables).
+- Has a **unit smoke test** under `cargo nextest`
+  (`test_fuzz_policy_entrypoint_never_panics_on_arbitrary_input` in `policy.rs`) with degenerate
+  inputs (empty, out-of-range tier, non-UTF8 tail, unknown tool) — robustness that DOES run on
+  every §0.1.
+- ✅ **`cargo +nightly fuzz build` PASSES** on Windows-MSVC (`cargo-fuzz 0.13.2` + nightly
+  `da80ed070`); builds all 7 targets. The instrumented `.exe` requires the ASan runtime on the
+  PATH (`clang_rt.asan_dynamic-x86_64.dll`, under `…\VC\Tools\MSVC\<ver>\bin\Hostx64\x64\`), same
+  as MS1.
+- ✅ **60 s local smoke, zero crashes:** `fuzz_policy` → **2 528 273 runs / 61 s**. The
+  coverage-guided fuzzer discovered all 7 real tool names by CMP (`ls`/`view`/`grep`/`edit`/`bash`/
+  `consult`/`project_knowledge`), exercising the whole matrix and the fail-closed branch without
+  panicking. MS1's targets rebuild clean as part of the same `fuzz build`. The long coverage-guided
+  run (≥ 30 min) is left for CI/§0.3.
 
-**Miri (REQ-V38) — INFEASIBLE en el nightly actual (el MISMO ICE de MS1 Task 10, sigue sin resolver):**
-- ❌ `cargo +nightly miri test headless::policy` **aborta con el ICE de rustc**
-  (`resolver_for_lowering_raw` panickea en la fase de lowering, **antes** de correr cualquier test) en
-  `rustc 1.99.0-nightly (da80ed070 2026-07-14)`. El ICE ocurre al compilar el crate bajo Miri, no al
-  ejecutar la lógica de `policy`.
-- ✅ **Re-verificado que es toolchain, no código:** `cargo +nightly miri test vault::error` — que
-  corría **limpio** bajo Miri en un nightly previo (spike Task 0b) — **ICEa idéntico** en este
-  nightly. La causa es el compilador, no `src/headless/policy.rs`.
-- **Mitigación de robustez sin Miri, honesta:** (a) `#![forbid(unsafe_code)]` crate-wide ⇒ no hay
-  `unsafe` donde alojar UB, y `policy` es lógica puramente aritmética/de matching (un pase Miri sería
-  trivial por construcción); (b) el target `fuzz_policy` (build + 2.5 M runs, cero crashes) ejercita la
-  matriz completa; (c) el unit-smoke + los 6 tests de `policy` corren en cada §0.1. **No se declara un
-  pase de Miri que no ocurrió** — re-habilitar Miri requiere un nightly sin el ICE.
+**Miri (REQ-V38) — INFEASIBLE on the current nightly (the SAME MS1 ICE, still unresolved):**
+- ❌ `cargo +nightly miri test headless::policy` **aborts with the same rustc ICE**
+  (`resolver_for_lowering_raw` panics during the lowering phase, **before** running any test) on
+  `rustc 1.99.0-nightly (da80ed070 2026-07-14)`. The ICE happens while compiling the crate under
+  Miri, not while running `policy`'s logic.
+- ✅ **Re-verified it is the toolchain, not the code:** `cargo +nightly miri test vault::error` —
+  which ran **clean** under Miri on an earlier nightly (Task 0b spike) — **ICEs identically** on
+  this nightly. The cause is the compiler, not `src/headless/policy.rs`.
+- **Robustness mitigation without Miri, honestly stated:** (a) `#![forbid(unsafe_code)]`
+  crate-wide ⇒ there is no `unsafe` to host UB in, and `policy` is purely arithmetic/matching logic
+  (a Miri pass would be trivial by construction); (b) the `fuzz_policy` target (build + 2.5M runs,
+  zero crashes) exercises the whole matrix; (c) the unit smoke test + `policy`'s 6 tests run on
+  every §0.1. **No Miri pass that did not happen is claimed** — re-enabling Miri requires a
+  nightly without the ICE.
 
 ## New MagiCore MS2 (v0.12.0) files — walk checklist (B) for each one
 
