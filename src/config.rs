@@ -910,6 +910,22 @@ pub fn resolve_effective_provider_kind(
     Ok(config.effective_provider())
 }
 
+/// Treats a blank or whitespace-only string as absent (REQ-A12): a value that is empty or
+/// blank is ABSENT, never a literal value, for every text-valued key this module resolves.
+/// An env var exported empty in a CI script (`OPENAI_MODEL=""`) is indistinguishable from
+/// never having been set, so it must fall through to the next precedence level rather than
+/// being forwarded as a literal empty string.
+///
+/// Shared by every resolver in this module that reads a text value from env or TOML, so the
+/// predicate lives in exactly one place (B3) rather than being re-implemented per call site
+/// — see [`resolve_magi_override`], [`resolve_openai_model`], [`resolve_anthropic_model`].
+/// [`ProviderKind::parse`] applies the same rule for `provider`/`[magi].kind`, but cannot
+/// share this helper: it also validates the non-blank remainder against a fixed vocabulary,
+/// which is a different, fallible operation this helper does not perform.
+fn non_blank(s: Option<&str>) -> Option<&str> {
+    s.map(str::trim).filter(|s| !s.is_empty())
+}
+
 /// Resolves a per-agent MAGI model override. Precedence: env (non-empty) > TOML (non-empty) >
 /// `None`. A blank/whitespace value (env or TOML) is treated as unset and falls through to the
 /// next level. `None` means the agent uses the backend's model (RF-2, S-4, S-5).
@@ -933,16 +949,18 @@ pub fn resolve_effective_provider_kind(
 ///
 /// `Some(model)` when an effective override exists; `None` otherwise.
 pub fn resolve_magi_override(toml_model: Option<&str>, env_model: Option<&str>) -> Option<String> {
-    fn non_empty(s: Option<&str>) -> Option<String> {
-        s.map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_string)
-    }
-    non_empty(env_model).or_else(|| non_empty(toml_model))
+    non_blank(env_model)
+        .or_else(|| non_blank(toml_model))
+        .map(str::to_string)
 }
 
 /// env `OPENAI_MODEL` > TOML `[openai].model` > `DEFAULT_OPENAI_MODEL` (RF-3). No longer
 /// fallible: the openai path has a built-in default (Ollama-first).
+///
+/// **S1 gate re-review fix (Balthasar):** both `env_model` and `config.openai.model` go
+/// through [`non_blank`] — a blank value at either level falls through to the next one
+/// instead of being forwarded as a literal empty model name (REQ-A12), matching
+/// [`resolve_magi_override`]'s already-correct handling of the sibling per-agent overrides.
 ///
 /// # Arguments
 ///
@@ -952,18 +970,19 @@ pub fn resolve_magi_override(toml_model: Option<&str>, env_model: Option<&str>) 
 ///
 /// Resolved model name; env overrides TOML, both override the built-in default.
 pub fn resolve_openai_model(config: &MagiConfig, env_model: Option<&str>) -> String {
-    env_model
+    non_blank(env_model)
+        .or_else(|| non_blank(config.openai.model.as_deref()))
         .map(str::to_string)
-        .or_else(|| config.openai.model.clone())
         .unwrap_or_else(|| crate::defaults::DEFAULT_OPENAI_MODEL.into())
 }
 
 /// env `ANTHROPIC_MODEL` > TOML `[anthropic].model` > `DEFAULT_ANTHROPIC_MODEL`.
 ///
-/// Mirrors [`resolve_openai_model`]'s precedence exactly. Fixes a MAGI re-gate WARNING: prior
-/// call sites in `main.rs` disagreed on precedence — the headless path checked TOML before env
-/// (backwards), and the TUI/other path (`discover_config`) read only env and ignored
-/// `[anthropic].model` entirely. Both now route through this single resolver.
+/// Mirrors [`resolve_openai_model`]'s precedence exactly, including the blank-is-absent
+/// handling on both levels (REQ-A12, S1 gate re-review fix). Fixes a MAGI re-gate WARNING:
+/// prior call sites in `main.rs` disagreed on precedence — the headless path checked TOML
+/// before env (backwards), and the TUI/other path (`discover_config`) read only env and
+/// ignored `[anthropic].model` entirely. Both now route through this single resolver.
 ///
 /// # Arguments
 ///
@@ -973,9 +992,9 @@ pub fn resolve_openai_model(config: &MagiConfig, env_model: Option<&str>) -> Str
 ///
 /// Resolved model name; env overrides TOML, both override the built-in default.
 pub fn resolve_anthropic_model(config: &MagiConfig, env_model: Option<&str>) -> String {
-    env_model
+    non_blank(env_model)
+        .or_else(|| non_blank(config.anthropic.model.as_deref()))
         .map(str::to_string)
-        .or_else(|| config.anthropic.model.clone())
         .unwrap_or_else(|| crate::defaults::DEFAULT_ANTHROPIC_MODEL.into())
 }
 
