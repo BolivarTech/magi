@@ -574,6 +574,50 @@ mod tests {
         assert!(matches!(err2, VaultError::VaultMetaCorrupt));
     }
 
+    /// Sixth-pass gate finding (S9, Caspar) — **rejected as a false positive**, pinned here
+    /// rather than left as an assertion in a report someone has to trust.
+    ///
+    /// The finding read `let pre_len = u32::from_le_bytes(*len_arr) as usize;` followed by
+    /// `ConcatenatedFec::default().decode(payload, pre_len)` as "read a length from data,
+    /// allocate that much" — the classic unbounded-allocation shape. It is not that shape
+    /// here, verified by reading `cryptovault` 0.3.0 (an audited crate, not our code):
+    /// `ConcatenatedFec::decode`'s FIRST step is `validate_pre_fec`, which caps the RECEIVED
+    /// blob at `cryptovault::MAX_BLOB_LEN` (an analytically-derived, compile-time constant —
+    /// tens of MB, documented `SR-R4` DoS guard) BEFORE any FEC stage runs. The eventual
+    /// Reed-Solomon output buffer is sized from `blocks = encoded.len() / n` — derived from
+    /// that already-bounded RECEIVED length, never from `pre_len` — and allocated with a
+    /// fallible `try_reserve`, not an infallible allocation that could abort the process. A
+    /// `pre_len` inconsistent with the real block count is REJECTED
+    /// (`RsError::InvalidInput`, mapped here to `VaultMetaCorrupt`) rather than used to size
+    /// anything. `pre_len` cannot drive an oversized allocation; it can only be wrong.
+    ///
+    /// This plants the worst possible prefix (`u32::MAX`, ~4.29 GB) over an otherwise-valid
+    /// small FEC blob and asserts two things: it fails safe (never a panic, never a wrong
+    /// DEK) AND it does so near-instantly — the generous 30 s deadline follows this
+    /// project's own guidance (`CLAUDE.local.md`: wait on a failure deadline, not a guessed
+    /// duration) so this stays meaningful under the parallel-Argon2 CPU load that flakes
+    /// tighter deadlines here, while still being far short of what a multi-gigabyte
+    /// allocation attempt (successful or not) would look like.
+    #[test]
+    fn fec_decode_with_a_maximal_length_prefix_fails_safe_without_a_large_allocation() {
+        let vault = cryptovault::CryptoVault::default();
+        let (_salt_fec, wrapped_fec, _dek) = bootstrap_envelope(&vault, M).expect("bootstrap");
+
+        let mut hostile = wrapped_fec;
+        hostile[..super::LEN_PREFIX].copy_from_slice(&u32::MAX.to_le_bytes());
+
+        let started = std::time::Instant::now();
+        let err =
+            super::fec_decode(&hostile).expect_err("a maximal pre_len must be rejected, not used");
+        let elapsed = started.elapsed();
+
+        assert!(matches!(err, VaultError::VaultMetaCorrupt));
+        assert!(
+            elapsed < std::time::Duration::from_secs(30),
+            "must fail fast — a real attempt at a ~4.29 GB allocation would not: {elapsed:?}"
+        );
+    }
+
     #[test]
     fn test_check_meta_fec_succeeds_without_attempting_the_aead_unwrap() {
         // A bogus master never enters this check at all — it only takes the two FEC blobs, so a
