@@ -1070,6 +1070,41 @@ mod tests {
         );
     }
 
+    /// MAGI S10 gate finding (third pass): the scaffolded example's `balthasar_model` and
+    /// `caspar_model` had drifted to older tag names (`kimi-k2.6:cloud`, `glm-5.2:cloud`)
+    /// that no longer matched `src/defaults.rs`'s `DEFAULT_MAGI_BALTHASAR`/`DEFAULT_MAGI_CASPAR`
+    /// — the same class of defect `example_toml_complexity_table_matches_the_builtin_gate_thresholds`
+    /// exists to catch, just for the `[magi]` per-mage models instead of the complexity table.
+    /// Same fix shape: pin the example's parsed values against the single source of truth so a
+    /// future edit to either side that breaks the match fails this test instead of shipping a
+    /// stale example silently.
+    #[test]
+    fn example_toml_magi_models_match_the_builtin_defaults() {
+        let raw = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/docs/magi.toml.example"
+        ))
+        .expect("docs/magi.toml.example must be readable");
+        let parsed = MagiConfig::from_toml_str(&raw).expect(
+            "docs/magi.toml.example must parse as valid v0.12.0 TOML (commented lines inert)",
+        );
+        assert_eq!(
+            parsed.magi.melchior_model.as_deref(),
+            Some(crate::defaults::DEFAULT_MAGI_MELCHIOR),
+            "docs/magi.toml.example's melchior_model must mirror DEFAULT_MAGI_MELCHIOR"
+        );
+        assert_eq!(
+            parsed.magi.balthasar_model.as_deref(),
+            Some(crate::defaults::DEFAULT_MAGI_BALTHASAR),
+            "docs/magi.toml.example's balthasar_model must mirror DEFAULT_MAGI_BALTHASAR"
+        );
+        assert_eq!(
+            parsed.magi.caspar_model.as_deref(),
+            Some(crate::defaults::DEFAULT_MAGI_CASPAR),
+            "docs/magi.toml.example's caspar_model must mirror DEFAULT_MAGI_CASPAR"
+        );
+    }
+
     #[test]
     fn test_parses_full_config() {
         // -------------------------------------------------------------------------
