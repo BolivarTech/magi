@@ -9,7 +9,7 @@ changes and the **patch** position signals backward-compatible fixes.
 
 ## [Unreleased]
 
-## [0.12.0] - 2026-08-05
+## [0.12.0] - 2026-08-09
 
 Adoption release: magi-rs now uses what `magi-core` 3.1.0 already offered. The MAGI
 trio is built on the crate's native providers and the in-tree adapter is gone, consult
