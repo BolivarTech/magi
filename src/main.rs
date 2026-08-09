@@ -5304,6 +5304,30 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
+    fn test_discover_config_falls_through_to_vault_on_a_blank_env_value() {
+        // MS2 gate S8 seventh-pass finding (Balthasar): an `ANTHROPIC_API_KEY=""` exported
+        // empty must be treated as ABSENT (REQ-A12) and fall through to the vault, mirroring
+        // `test_resolve_openai_key_falls_through_to_vault_on_a_blank_env_value`.
+        with_var("ANTHROPIC_MODEL", None, || {
+            let ss = vault_fixture();
+            {
+                let mut guard = ss.lock().unwrap();
+                guard.set("ANTHROPIC_API_KEY", "sk-from-vault").unwrap();
+            }
+            let config = MagiConfig::default();
+
+            let cfg = discover_config(&config, Some(""), Some(&ss)).expect("vault key");
+            assert_eq!(cfg.api_key, "sk-from-vault");
+            assert_eq!(cfg.source, "vault");
+
+            let cfg = discover_config(&config, Some("   "), Some(&ss)).expect("vault key");
+            assert_eq!(cfg.api_key, "sk-from-vault");
+            assert_eq!(cfg.source, "vault");
+        });
+    }
+
+    #[test]
+    #[serial_test::serial]
     fn test_discover_config_model_prefers_env_over_toml_then_falls_back_to_toml() {
         // MAGI re-gate WARNING fix: `discover_config` previously read only
         // `ANTHROPIC_MODEL` from the environment and never consulted
@@ -5397,6 +5421,29 @@ mod tests {
         assert_eq!(
             resolve_openai_key(Some("sk-oai-env"), Some(&ss)).as_deref(),
             Some("sk-oai-env")
+        );
+    }
+
+    #[test]
+    fn test_resolve_openai_key_falls_through_to_vault_on_a_blank_env_value() {
+        // MS2 gate S8 seventh-pass finding (Balthasar): an `OPENAI_API_KEY=""` exported empty
+        // in a CI script must be treated as ABSENT (REQ-A12), the same rule `non_blank` already
+        // applies to `effective_root_template` and `MagiEnvModelOverrides::from_raw` — not as a
+        // literal empty key that short-circuits the vault lookup and produces an authentication
+        // failure while a perfectly good stored credential sits unused.
+        let ss = vault_fixture();
+        {
+            let mut guard = ss.lock().unwrap();
+            guard.set("OPENAI_API_KEY", "sk-oai-vault").unwrap();
+        }
+        // Empty string and whitespace-only both fall through to the vault.
+        assert_eq!(
+            resolve_openai_key(Some(""), Some(&ss)).as_deref(),
+            Some("sk-oai-vault")
+        );
+        assert_eq!(
+            resolve_openai_key(Some("   "), Some(&ss)).as_deref(),
+            Some("sk-oai-vault")
         );
     }
 
