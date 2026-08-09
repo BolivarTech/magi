@@ -345,6 +345,39 @@ fn tui_consult_error_body(err: &MagiError, kind: ProviderKind) -> String {
     )
 }
 
+/// The truncation-safe `/consult` reply for a FAILED `Magi::analyze()` call — the error-arm
+/// counterpart of [`tui_consult_success_reply`] (REQ-A11b/SC-A11d, S7 gate re-review fix).
+///
+/// **Before this fix, the error arm of `UiEvent::Consult` sent [`tui_consult_error_body`]'s
+/// output straight to `AgentResponse::Error` with no cap at all.** The success arm has been
+/// bounded since the REQ-A11b work landed, but the error arm was never brought in line with
+/// it: a foreign provider's HTTP error body can be arbitrarily long (`ProviderError::Http`
+/// carries the response body verbatim), so an unbounded error reply defeated the exact
+/// budget the success path exists to enforce, on the surface most likely to actually hit
+/// it — an HTTP error page or a misconfigured endpoint's response.
+///
+/// Reuses [`crate::tools::consult::truncate_report`] directly rather than the
+/// preserved-prefix variant [`tui_consult_success_reply`] uses for the `[DEGRADED: ...]`
+/// banner: [`tui_consult_error_body`] never carries a `MagiReport`'s verdict/finding
+/// structure, so there is no anchor to preserve — `truncate_report` degrades to its
+/// byte-only level for text with no contractual anchors, which is exactly what an
+/// arbitrary error string needs.
+fn tui_consult_error_reply(
+    err: &MagiError,
+    kind: ProviderKind,
+    cap: usize,
+) -> crate::tools::consult::Truncated {
+    // S7 gate re-review finding (Balthasar): pre-fix behavior, extracted verbatim from the
+    // production call site so the finding can be reproduced as a failing assertion rather
+    // than a compile error — `cap` is accepted but not yet applied. The `fix:` commit
+    // routes this through `truncate_report`.
+    let _ = cap;
+    crate::tools::consult::Truncated {
+        text: tui_consult_error_body(err, kind),
+        level: crate::tools::consult::TruncationLevel::None,
+    }
+}
+
 /// Handles a failed post-`/login` MAGI trio rebuild (I4, fix round 2).
 ///
 /// Extracted from the `/login` event handler for the same reason as
@@ -1263,8 +1296,14 @@ pub async fn run_tui_ext(
                             // was dropped rather than routed — it was a PURE duplicate of
                             // `body`, which the very next line already sends through
                             // `AgentResponse::Error`. Nothing was lost by removing it.
-                            let body = tui_consult_error_body(&e, magi_kind);
-                            let _ = response_tx.send(AgentResponse::Error(body)).await;
+                            //
+                            // REQ-A11b/SC-A11d (S7 gate re-review finding): capped through
+                            // `tui_consult_error_reply` the same way the success arm above
+                            // is capped — see that function's own doc for the defect this
+                            // closes (an unbounded provider error body bypassing
+                            // `tool_result_cap`).
+                            let truncated = tui_consult_error_reply(&e, magi_kind, tool_result_cap);
+                            let _ = response_tx.send(AgentResponse::Error(truncated.text)).await;
                         }
                         Err(join_err) => {
                             // Loop 1 fix round CE, F24: replaces a pre-existing `eprintln!`
@@ -3091,6 +3130,57 @@ mod tests {
         assert!(
             !body.contains("keyless"),
             "openai-compat carries a credential: no hint: {body}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // S7 gate re-review finding (Balthasar): the error arm bypassed
+    // `tool_result_cap` entirely — only the success arm was bounded.
+    // -----------------------------------------------------------------------
+
+    /// A foreign provider's HTTP error body can be arbitrarily long — built here via the
+    /// SAME `map_status_to_error` real dispatch uses to construct `ProviderError::Http`,
+    /// whose `body` field carries the response text verbatim. Before this fix,
+    /// `UiEvent::Consult`'s error arm sent this straight through with no cap.
+    #[test]
+    fn tui_consult_error_reply_truncates_a_long_provider_error_body_under_the_cap() {
+        let big_body = "x".repeat(5_000);
+        let provider_err = ClaudeProvider::map_status_to_error(500, &big_body, vec![], None);
+        let err = MagiError::Provider(provider_err);
+        let cap = 256;
+
+        let out = tui_consult_error_reply(&err, ProviderKind::OpenAiCompat, cap);
+
+        assert!(
+            out.text.len() <= cap,
+            "must not exceed the configured cap: {} > {cap}",
+            out.text.len()
+        );
+        assert!(
+            out.text.contains(magi_rs::magi::TRUNCATION_MARK),
+            "a body this large must show the truncation mark: {}",
+            out.text
+        );
+    }
+
+    /// Negative control: an error well under the cap is returned intact and unmarked — the
+    /// cap is a ceiling on the rare long case, not a rewrite of every error reply.
+    #[test]
+    fn tui_consult_error_reply_leaves_a_short_error_untouched() {
+        let err = MagiError::InsufficientAgents {
+            succeeded: 0,
+            required: 2,
+        };
+        let cap = 4096;
+        let body = tui_consult_error_body(&err, ProviderKind::OpenAiCompat);
+
+        let out = tui_consult_error_reply(&err, ProviderKind::OpenAiCompat, cap);
+
+        assert_eq!(out.text, body, "well under the cap, nothing should change");
+        assert!(
+            !out.text.contains(magi_rs::magi::TRUNCATION_MARK),
+            "short error must not be marked as truncated: {}",
+            out.text
         );
     }
 
