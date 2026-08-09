@@ -9003,6 +9003,66 @@ mod tests {
             assert_eq!(err.got, "banana");
         }
 
+        // ---- registered_magi_kind -------------------------------------------------------
+
+        /// MS2 gate S8 finding: the value reported to `ConsultTool`/`MagiRuntimeParams` (and
+        /// therefore to `explain_magi_error`'s keyless-auth hint, REQ-A12c) must follow the
+        /// ALREADY-RESOLVED principal kind, exactly like `resolve_magi_kind` — never
+        /// `MagiConfig::effective_magi_kind()` directly, which is TOML-only and ignores
+        /// `MAGI_PROVIDER`. This is the same divergence `resolve_magi_kind_inherits_the_
+        /// resolved_principal_when_absent` proves for the trio's own construction; this test
+        /// proves the SAME value is what every downstream consumer sees too — the four call
+        /// sites (`register_consult_tool_if_available` in `run()`/`run_query_subcommand`,
+        /// `TuiMagiRuntimeConfig` in `run()`, `MagiRuntimeParams` in `run_consult_subcommand`)
+        /// all resolve through this one function rather than each re-deriving it.
+        #[test]
+        fn registered_magi_kind_follows_the_resolved_principal_not_the_toml_only_accessor() {
+            // `[magi].kind` absent; TOML root `provider` absent too, so the TOML-only
+            // accessor falls to the built-in default (Ollama) — see the existing
+            // `resolve_magi_kind_inherits_the_resolved_principal_when_absent` comment.
+            let cfg = MagiConfig::default();
+            assert_eq!(
+                cfg.effective_magi_kind(),
+                ProviderKind::Ollama,
+                "sanity: this fixture only proves something if the TOML-only accessor \
+                 actually disagrees with the env-resolved principal below"
+            );
+
+            // `MAGI_PROVIDER=openai-compat` moved the PRINCIPAL without declaring
+            // `[magi].kind` — exactly the scenario the env-override gap reopens.
+            assert_eq!(
+                registered_magi_kind(&cfg, ProviderKind::OpenAiCompat),
+                ProviderKind::OpenAiCompat,
+                "must follow the resolved principal kind (matching resolve_magi_kind), \
+                 not the TOML-only accessor"
+            );
+        }
+
+        /// A declared `[magi].kind` still wins over the principal through this function too
+        /// (it is a thin wrapper over `resolve_magi_kind`, not a second, divergent rule).
+        #[test]
+        fn registered_magi_kind_prefers_the_declared_value_over_the_principal() {
+            let cfg = cfg_diverging(Some("anthropic"));
+            assert_eq!(
+                registered_magi_kind(&cfg, ProviderKind::Ollama),
+                ProviderKind::Anthropic
+            );
+        }
+
+        /// An unrecognized `[magi].kind` falls back to the principal here instead of
+        /// propagating `resolve_magi_kind`'s typed error — safe because a genuinely invalid
+        /// `[magi].kind` already made the trio unbuildable upstream (`build_magi_orchestrator`
+        /// validates it and returns `Err`, so `consult_magi` is `None` and no call site ever
+        /// registers `ConsultTool`/builds `MagiRuntimeParams` with this fallback value).
+        #[test]
+        fn registered_magi_kind_falls_back_to_the_principal_on_an_unrecognized_value() {
+            let cfg = cfg_diverging(Some("banana"));
+            assert_eq!(
+                registered_magi_kind(&cfg, ProviderKind::Ollama),
+                ProviderKind::Ollama
+            );
+        }
+
         // ---- resolve_backend_model ------------------------------------------------------
 
         /// `[openai].model` for `ollama`/`openai-compat`, `[anthropic].model` for `anthropic` —
