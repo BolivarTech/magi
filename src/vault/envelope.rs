@@ -458,6 +458,30 @@ mod tests {
         assert_eq!(&dek[..], &dek2[..]);
     }
 
+    /// MS2 gate S9 finding: `bootstrap_envelope`'s `derive_key`/`wrap_key` calls used to route
+    /// through [`map_crypto_err`] — the mapping [`open_envelope`] uses to distinguish a corrupt
+    /// PERSISTED blob from a wrong key. During bootstrap there is no `vault_meta` yet (the
+    /// module doc above already says this explicitly for the RNG failure arms), so nothing
+    /// could be "corrupt" — any `CryptoError` here must report [`VaultError::Crypto`], never
+    /// [`VaultError::VaultMetaCorrupt`], or a first-run KDF failure gets misclassified as
+    /// existing-metadata corruption (a category confusion the never-delete state machine,
+    /// REQ-V35, treats very differently: `VaultMetaCorrupt` is a retryable signal about
+    /// EXISTING data, which does not exist yet here).
+    ///
+    /// `CryptoVault::derive_key` itself rejects an empty password with
+    /// `CryptoError::InvalidInput` (`cryptovault` 0.3.0, `vault.rs`) — a real, DI-double-free
+    /// path into the exact `CryptoError` variant `map_crypto_err` maps to `VaultMetaCorrupt`.
+    #[test]
+    fn bootstrap_envelope_reports_crypto_not_vault_meta_corrupt_on_an_invalid_input_failure() {
+        let vault = cryptovault::CryptoVault::default();
+        let err = bootstrap_envelope(&vault, "").expect_err("an empty passphrase must fail");
+        assert!(
+            matches!(err, VaultError::Crypto(_)),
+            "bootstrap has no vault_meta yet to be corrupt — an InvalidInput failure here must \
+             report Crypto, not VaultMetaCorrupt: {err:?}"
+        );
+    }
+
     #[test]
     fn test_open_with_wrong_master_yields_wrong_passphrase_not_corrupt() {
         let vault = cryptovault::CryptoVault::default();
