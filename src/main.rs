@@ -66,7 +66,7 @@ use magi_rs::magi::{
     CHARS_PER_TOKEN_EST, STALE_NOTICE_RATIO,
 };
 use magi_rs::notices::{render_notices, Notice};
-use magi_rs::redact::{redact_foreign_error, redact_url, SafeErrorText};
+use magi_rs::redact::{redact_foreign_error, redact_foreign_text, redact_url, SafeErrorText};
 use magi_rs::vault::{
     check_strength, create_passphrase, diagnose, format_diagnose_report, harden_process,
     rekey_envelope, resolve_passphrase, run_vault_cmd, strip_trailing_newline, wire,
@@ -2322,6 +2322,36 @@ impl MagiEnvModelOverrides {
     }
 }
 
+/// Formats a `base_url` resolution result for display in a startup notice: the endpoint
+/// TEMPLATE on success, or a redacted rendering of the error's `Display` on failure.
+///
+/// The success branch never needs [`redact_url`]: an [`EndpointTemplate`] cannot contain a
+/// secret by construction (REQ-A16c — `EndpointTemplate::parse` rejects a literal credential,
+/// so `as_str()` can only ever carry the `[user]:[password]` placeholders). Running it through
+/// redaction anyway would blank that informative placeholder text by position, which is exactly
+/// what the `endpoint_display_text_leaves_a_valid_template_untouched` test guards against.
+///
+/// Generic over the error type — rather than hard-coded to `EndpointError` — precisely so a
+/// test can exercise the failure branch with a fabricated error whose `Display` embeds a
+/// credential. `EndpointError`'s own variants cannot do that today: every string-carrying
+/// field is `&'static str` (a vault entry name or fixed text), never text derived from the
+/// received value — see `src/magi/endpoint.rs`, where `EndpointError` is defined in THIS crate,
+/// not a genuinely external, separately-versioned dependency like `magi-core` (whose
+/// `#[non_exhaustive]` error types are what [`redact_foreign_error`] exists to guard against a
+/// *future* release changing under us). That distinction does not make the failure branch safe
+/// to leave unguarded, though (sixth-pass gate finding, S8, Balthasar): "no current variant
+/// leaks the value" was true only by inspection, not by anything the compiler enforces, so
+/// routing it through [`redact_foreign_text`] anyway makes the property hold structurally
+/// instead of by convention — a no-op today, and still correct if a future variant ever does
+/// interpolate raw text.
+#[must_use]
+fn endpoint_display_text<E: std::fmt::Display>(result: &Result<EndpointTemplate, E>) -> String {
+    match result {
+        Ok(template) => template.as_str().to_string(),
+        Err(e) => redact_foreign_text(&e.to_string()).as_str().to_string(),
+    }
+}
+
 /// Announces that content goes through the principal provider BEFORE the trio
 /// (REQ-A07c/REQ-A07p, SC-A07p), when that is effectively what will happen.
 ///
@@ -2374,14 +2404,11 @@ fn divergence_notice(cfg: &MagiConfig, inference_active: bool) -> Option<Notice>
     debug_assert!(magi_url.is_ok(), "load() must have validated");
     debug_assert!(root_url.is_ok(), "load() must have validated");
 
-    // `EndpointTemplate::as_str()`, NEVER a resolved endpoint: the template cannot contain a
-    // secret by construction (REQ-A16c — `EndpointTemplate::parse` rejects literal credentials)
-    // so this text does not need to go through `redact_url`. `EndpointError::to_string()`
-    // neither: its variants quote only vault entry names (`&'static str`) and fixed text, never
-    // the received value (see `magi/endpoint.rs::EndpointError`) — verified by reading the
-    // type, not assumed.
-    let magi_text = magi_url.map_or_else(|e| e.to_string(), |t| t.as_str().to_string());
-    let root_text = root_url.map_or_else(|e| e.to_string(), |t| t.as_str().to_string());
+    // See `endpoint_display_text`'s own doc for why the success branch never needs
+    // `redact_url` and the failure branch is routed through `redact_foreign_text` anyway
+    // (sixth-pass gate finding, S8).
+    let magi_text = endpoint_display_text(&magi_url);
+    let root_text = endpoint_display_text(&root_url);
 
     Some(Notice::resolution(format!(
         "notice: the trio runs on {magi_text} but mode inference sends the content to the \
