@@ -231,6 +231,33 @@ pub fn detect_migrations(raw: &str) -> Vec<Migration> {
     found
 }
 
+/// True when the already-trimmed `line` is a TOML key assignment for exactly `needle`, not
+/// merely a line that happens to start with the same characters.
+///
+/// **Why a boundary check and not bare `starts_with` (Loop 1 gate S1-f finding, Caspar).**
+/// `starts_with` alone would also match a key that has `needle` as a literal prefix — e.g. a
+/// hypothetical `provider_timeout` key would match the needle `"provider"`. No such colliding
+/// key exists in the schema today for any of the three needles this module uses (verified: the
+/// only fields whose full name contains "provider" / "base_url" / "tool_result_cap_bytes" are
+/// the exact keys these patterns already look for), so today this cannot misfire — but that
+/// safety is a property of the CURRENT field list, not of the matching logic, and the matching
+/// logic does not know it. A future field rename or addition one prefix away would silently
+/// point the user at the wrong line, which this module's own `detect_migrations` doc calls
+/// worse than no line at all — a wrong line is trusted; an absent one is not.
+///
+/// The boundary mirrors TOML key syntax: a bare key is followed by whitespace, `=`, or the end
+/// of the line — never by another identifier character (TOML bare keys are
+/// `[A-Za-z0-9_-]+`, so a real continuation is alphanumeric, `_`, or `-`).
+fn is_key_at(line: &str, needle: &str) -> bool {
+    match line.strip_prefix(needle) {
+        Some(rest) => rest
+            .chars()
+            .next()
+            .is_none_or(|c| c.is_whitespace() || c == '='),
+        None => false,
+    }
+}
+
 /// 1-indexed line number where a `needle` key **starts**, or 0 if it does not appear.
 ///
 /// Compares against the start of the already-trimmed line, not with `contains`: a `contains`
@@ -574,5 +601,56 @@ mod tests {
                     [headless]\ntool_result_cap_bytes = 2048\n";
         let found = detect_migrations(toml);
         assert_eq!(found.len(), 3);
+    }
+
+    /// Loop 1 gate S1-f finding (Caspar): `line_of` must not mistake a key that merely has
+    /// `needle` as a literal PREFIX for `needle` itself. Without a boundary check, a
+    /// `provider_timeout` key would be reported as the `provider` line, even though it is a
+    /// different key entirely.
+    #[test]
+    fn line_of_does_not_match_a_key_that_merely_has_the_needle_as_a_prefix() {
+        assert_eq!(
+            line_of("provider_timeout = 5\nprovider = \"openai\"\n", "provider"),
+            2,
+            "must skip the prefix-colliding key and find the real one"
+        );
+    }
+
+    /// Companion: when ONLY the prefix-colliding key is present, the real needle is correctly
+    /// reported absent (line 0), not misattributed to the colliding key's line.
+    #[test]
+    fn line_of_returns_zero_when_only_a_prefix_colliding_key_is_present() {
+        assert_eq!(line_of("provider_timeout = 5\n", "provider"), 0);
+    }
+
+    /// Same guard, for the section-scoped lookup.
+    #[test]
+    fn line_of_in_section_does_not_match_a_prefix_colliding_key() {
+        let toml = "[openai]\nbase_url_backup = \"http://old/v1\"\nbase_url = \"http://real/v1\"\n";
+        assert_eq!(
+            line_of_in_section(toml, OPENAI_SECTION, BASE_URL_KEY),
+            3,
+            "must skip base_url_backup and find the real base_url line"
+        );
+    }
+
+    /// `is_key_at` directly: a bare key with nothing trailing (end-of-line boundary) still
+    /// counts as a match.
+    #[test]
+    fn is_key_at_accepts_a_bare_key_with_no_trailing_content() {
+        assert!(is_key_at("provider", "provider"));
+    }
+
+    /// Both forms TOML allows around `=` must still match.
+    #[test]
+    fn is_key_at_matches_with_and_without_space_before_equals() {
+        assert!(is_key_at("provider = \"openai\"", "provider"));
+        assert!(is_key_at("provider=\"openai\"", "provider"));
+    }
+
+    /// The exact collision this fix closes.
+    #[test]
+    fn is_key_at_rejects_a_longer_key_sharing_the_prefix() {
+        assert!(!is_key_at("provider_timeout = 5", "provider"));
     }
 }
