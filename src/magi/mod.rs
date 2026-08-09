@@ -83,7 +83,7 @@ pub const AGENT_TIMEOUT_ABSOLUTE_FLOOR_SECS: u64 =
 /// Total retry budget, DERIVED from the ceiling (REQ-A04).
 ///
 /// The derivation is what makes it impossible to configure an invalid scale: no combination
-/// exists that breaks `operation_budget + client_timeout <= techo`.
+/// exists that breaks `operation_budget + client_timeout <= ceiling`.
 ///
 /// **Caller contract (documented, not type-enforced — MAGI S2 re-gate, Caspar):** the
 /// "impossible to break by construction" claim holds only for
@@ -206,7 +206,7 @@ pub fn bytes_to_tokens_est(bytes: usize) -> usize {
 
 /// Slack for the headless `--timeout`, as a percentage of the larger term in the formula
 /// (§4.9).
-pub const HEADLESS_TIMEOUT_HOLGURA_PCT: u64 = 20;
+pub const HEADLESS_TIMEOUT_SLACK_PCT: u64 = 20;
 
 /// Minimum wall-clock for a run that launches consult, **derived at RUNTIME from the CONFIGURED
 /// ceiling** (REQ-A04).
@@ -232,7 +232,7 @@ pub fn headless_consult_timeout_secs(configured_ceiling: u64) -> u64 {
     let minimum = CLASSIFY_TIMEOUT_SECS + dominant;
     // §4.9: the slack is 10–30 % of the LARGER TERM, not of the total — over the total it
     // inflates proportionally to the small term, which is not the one that dominates the risk.
-    minimum + dominant * HEADLESS_TIMEOUT_HOLGURA_PCT / 100
+    minimum + dominant * HEADLESS_TIMEOUT_SLACK_PCT / 100
 }
 
 /// Wall-clock decision for a run, with its warning if applicable (SC-A04d).
@@ -390,9 +390,9 @@ mod tests {
     fn headless_timeout_default_covers_classification_and_two_attempts() {
         let dominant = 2 * AGENT_TIMEOUT_SECS;
         let minimum = CLASSIFY_TIMEOUT_SECS + dominant;
-        let holgura = dominant * HEADLESS_TIMEOUT_HOLGURA_PCT / 100;
+        let slack = dominant * HEADLESS_TIMEOUT_SLACK_PCT / 100;
         assert!(
-            headless_consult_timeout_secs(AGENT_TIMEOUT_SECS) >= minimum + holgura,
+            headless_consult_timeout_secs(AGENT_TIMEOUT_SECS) >= minimum + slack,
             "the headless default does not cover {minimum}s + slack",
         );
     }
@@ -406,9 +406,9 @@ mod tests {
         for ceiling in AGENT_TIMEOUT_MIN_SECS..=AGENT_TIMEOUT_MAX_SECS {
             let dominant = 2 * ceiling;
             let minimum = CLASSIFY_TIMEOUT_SECS + dominant;
-            let holgura = dominant * HEADLESS_TIMEOUT_HOLGURA_PCT / 100;
+            let slack = dominant * HEADLESS_TIMEOUT_SLACK_PCT / 100;
             assert!(
-                headless_consult_timeout_secs(ceiling) >= minimum + holgura,
+                headless_consult_timeout_secs(ceiling) >= minimum + slack,
                 "ceiling {ceiling}s: the headless minimum does not cover the formula"
             );
         }
@@ -488,7 +488,7 @@ mod tests {
         const {
             assert!(WARN_WINDOW_FRACTION > 0.0 && WARN_WINDOW_FRACTION < 1.0);
         }
-        assert!((10..=30).contains(&HEADLESS_TIMEOUT_HOLGURA_PCT));
+        assert!((10..=30).contains(&HEADLESS_TIMEOUT_SLACK_PCT));
         const {
             assert!(PROBE_WINDOW_MIN < PROBE_WINDOW_MAX);
         }
