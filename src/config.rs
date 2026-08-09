@@ -1931,6 +1931,33 @@ mod tests {
         let _ = cfg.effective_default_mode();
     }
 
+    /// Sixth-pass gate finding (S1, Balthasar) — **rejected**: `effective_magi_kind` needs no
+    /// `assert!` of its own, and this test is what pins that instead of leaving it as a claim.
+    ///
+    /// `effective_magi_kind` has two branches. When `[magi].kind` parses successfully, the
+    /// returned value is a fresh, direct `ProviderKind::parse` of the CURRENT field — nothing
+    /// is swallowed into a default, so there is nothing for an assert to catch. When it does
+    /// NOT parse (absent, blank, or — as constructed here, bypassing `load()` — invalid), the
+    /// function falls through to `self.effective_provider()`, which ALREADY carries the same
+    /// `validate_vocabulary().is_ok()` precondition check that
+    /// `effective_provider_panics_when_validate_vocabulary_was_skipped` pins — and
+    /// `validate_vocabulary` checks `magi.kind` too (see its body), so the delegated call
+    /// re-validates the very field this test corrupts. Adding a second `assert!` directly in
+    /// `effective_magi_kind` would duplicate a check the call it already makes performs on the
+    /// SAME field; this test demonstrates the existing delegation already catches the misuse.
+    #[test]
+    #[should_panic(expected = "unvalidated config")]
+    fn effective_magi_kind_panics_via_the_delegated_effective_provider_check_when_invalid() {
+        let cfg = MagiConfig {
+            magi: MagiSectionConfig {
+                kind: Some("banana".into()),
+                ..MagiSectionConfig::default()
+            },
+            ..Default::default()
+        };
+        let _ = cfg.effective_magi_kind();
+    }
+
     /// m8: `[magi].base_url = ""` is blank, not a declared override — it must inherit the root,
     /// not be treated as "the trio declared its own endpoint".
     #[test]
