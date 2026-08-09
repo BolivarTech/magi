@@ -104,6 +104,40 @@ pub struct TuiNoticeSink {
     seen: Mutex<std::collections::BTreeSet<&'static str>>,
     /// The TUI's response channel, present once [`TuiNoticeSink::attach`] has run.
     tx: Mutex<Option<mpsc::Sender<AgentResponse>>>,
+    /// Notices that could not be delivered through `tx` (closed, or full and later closed)
+    /// while the alternate screen might still be up — see [`Self::flush`] for why a fallback
+    /// never prints for itself.
+    pending: Arc<Mutex<PendingNotices>>,
+}
+
+/// The state [`TuiNoticeSink::pending`] moves through exactly once, in exactly one direction.
+///
+/// **Why a state, not a flag plus a buffer.** A prior version of this sink fell back to
+/// `eprintln!` directly from inside `once` — including from the `tokio::spawn`ed task queued
+/// when the channel was momentarily full (MS2 gate S7-f finding, Caspar): that spawned task's
+/// own "the channel closed while I waited" check and its `eprintln!` were two steps with an
+/// `.await` between them, and nothing synchronized either step against `run_tui_ext` calling
+/// `LeaveAlternateScreen` on a different task. The fallback could print while the alternate
+/// screen was still up, or concurrently with the very call that was tearing it down — a real,
+/// if low-probability, frame corruption.
+///
+/// The fix is not "check a flag, then write" (that is the same two-step race with extra
+/// steps) — it is "the check AND the write happen under the SAME lock as the state
+/// transition, so there is exactly one linearization point". While `Buffering`, a fallback
+/// defers its message into the `Vec` under the lock and returns; nothing is printed. Once
+/// [`TuiNoticeSink::flush`] — called by `run_tui_ext` strictly AFTER `LeaveAlternateScreen` —
+/// swaps the state to `Flushed` under that same lock, EVERY fallback that observes `Flushed`
+/// (whether it ran before, during, or after the swap) knows the terminal has already been
+/// restored, because `flush` is the only thing that produces `Flushed` and it is only called
+/// post-teardown. There is no window in which "closed" and "still on screen" can be true at
+/// once from the writer's point of view.
+enum PendingNotices {
+    /// The alternate screen may still be active; fallbacks accumulate here instead of
+    /// printing.
+    Buffering(Vec<String>),
+    /// `run_tui_ext` has already left the alternate screen; a fallback observing this state
+    /// prints immediately — doing so is now always safe.
+    Flushed,
 }
 
 impl TuiNoticeSink {
@@ -113,6 +147,7 @@ impl TuiNoticeSink {
         Self {
             seen: Mutex::new(std::collections::BTreeSet::new()),
             tx: Mutex::new(None),
+            pending: Arc::new(Mutex::new(PendingNotices::Buffering(Vec::new()))),
         }
     }
 
@@ -123,6 +158,47 @@ impl TuiNoticeSink {
     /// * `tx` - the sender half of the channel `run_tui_ext` already owns.
     pub fn attach(&self, tx: mpsc::Sender<AgentResponse>) {
         *self.tx.lock().unwrap_or_else(|p| p.into_inner()) = Some(tx);
+    }
+
+    /// Routes one fallback message through [`PendingNotices`]: buffered while the alternate
+    /// screen might still be active, printed immediately once [`Self::flush`] has run. See
+    /// the enum's doc for why the check and the write must share one lock with the state
+    /// transition.
+    fn defer_or_print(pending: &Mutex<PendingNotices>, msg: String) {
+        let mut guard = pending.lock().unwrap_or_else(|p| p.into_inner());
+        match &mut *guard {
+            PendingNotices::Flushed => {
+                drop(guard);
+                eprintln!("{msg}");
+            }
+            PendingNotices::Buffering(queued) => queued.push(msg),
+        }
+    }
+
+    /// Marks the sink as safe to print immediately from now on, and returns every message
+    /// that had to be deferred before this call. **Must be called by `run_tui_ext` AFTER
+    /// `LeaveAlternateScreen` — never before** — the caller is responsible for printing the
+    /// returned messages (this method has no I/O of its own, which is what keeps it testable
+    /// without capturing stderr). A second call returns an empty `Vec`: once `Flushed`, later
+    /// fallbacks print themselves immediately instead of accumulating here.
+    pub(crate) fn flush(&self) -> Vec<String> {
+        let mut guard = self.pending.lock().unwrap_or_else(|p| p.into_inner());
+        match std::mem::replace(&mut *guard, PendingNotices::Flushed) {
+            PendingNotices::Buffering(queued) => queued,
+            PendingNotices::Flushed => Vec::new(),
+        }
+    }
+
+    /// Test-only, non-destructive peek at how many notices are currently buffered — lets a
+    /// test poll for "the background fallback landed" without calling [`Self::flush`] itself,
+    /// which would prematurely flip the sink to `Flushed` and hide the very race window under
+    /// test.
+    #[cfg(test)]
+    pub(crate) fn pending_len(&self) -> usize {
+        match &*self.pending.lock().unwrap_or_else(|p| p.into_inner()) {
+            PendingNotices::Buffering(queued) => queued.len(),
+            PendingNotices::Flushed => 0,
+        }
     }
 }
 
@@ -143,16 +219,21 @@ impl crate::agent::mode_classifier::NoticeSink for TuiNoticeSink {
     /// sink exists to prevent (see the module rustdoc). The two cases are distinguished by
     /// `TrySendError`'s variant, not lumped into "any send failure":
     /// - **No channel attached yet** (`self.tx` is `None`) — raw mode has not been entered, so
-    ///   there is no frame to protect; stderr is correct.
-    /// - **`TrySendError::Closed`** — the receiver is gone, which only happens once the TUI is
-    ///   tearing down; stderr is correct for the same reason.
-    /// - **`TrySendError::Full`** — the frame IS at risk, so this never prints. The classifier
-    ///   (`agent::mode_classifier::ProviderClassifier`) only ever emits two distinct keys total
-    ///   in a process's lifetime (the cost heads-up, the expiry report), deduplicated by `seen`
-    ///   above — so a bounded background task per full-channel event cannot accumulate; it
-    ///   waits for room with a real `.send().await` and, if the channel closes before room
-    ///   frees up (the run ended), falls back to stderr at that point, which is again a
-    ///   torn-down session.
+    ///   there is no frame to protect; stderr is correct — printed directly, no deferral needed.
+    /// - **`TrySendError::Closed`** — the receiver is gone, which only happens once `run_app`
+    ///   has returned and dropped it, i.e. once teardown has *started*. That is not the same as
+    ///   teardown having *finished*: `LeaveAlternateScreen` runs on a different task and is not
+    ///   synchronized with this one, so printing here directly used to be a second instance of
+    ///   the same race the `Full` branch has (MS2 gate S7-f finding, Caspar). This now routes
+    ///   through [`Self::defer_or_print`] instead of printing unconditionally.
+    /// - **`TrySendError::Full`** — the frame IS at risk, so this never prints inline. The
+    ///   classifier (`agent::mode_classifier::ProviderClassifier`) only ever emits two distinct
+    ///   keys total in a process's lifetime (the cost heads-up, the expiry report), deduplicated
+    ///   by `seen` above — so a bounded background task per full-channel event cannot
+    ///   accumulate; it waits for room with a real `.send().await` and, if the channel closes
+    ///   before room frees up (the run ended), defers through the same
+    ///   [`Self::defer_or_print`] path rather than printing directly from the spawned task —
+    ///   see [`PendingNotices`] for why that indirection is what actually closes the race.
     fn once(&self, key: &'static str, msg: &str) {
         {
             let mut seen = self.seen.lock().unwrap_or_else(|p| p.into_inner());
@@ -172,19 +253,24 @@ impl crate::agent::mode_classifier::NoticeSink for TuiNoticeSink {
         };
         match tx.try_send(AgentResponse::Notice(msg.to_string())) {
             Ok(()) => {}
-            Err(mpsc::error::TrySendError::Closed(_)) => eprintln!("{msg}"),
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                Self::defer_or_print(&self.pending, msg.to_string());
+            }
             Err(mpsc::error::TrySendError::Full(_)) => {
                 // The frame is live and momentarily saturated — printing here is exactly the
                 // corruption this sink exists to prevent, so this waits for room instead
                 // (`spawn`, not a blocking wait, since `once` is a sync trait method called
                 // from inside an async caller and must not stall its executor thread).
                 let msg = msg.to_string();
+                let pending = Arc::clone(&self.pending);
                 tokio::spawn(async move {
                     if tx.send(AgentResponse::Notice(msg.clone())).await.is_err() {
                         // The channel closed while this was queued (the run ended before
-                        // room freed up) — the same "session already tearing down" case as
-                        // the `Closed` arm above, just discovered later.
-                        eprintln!("{msg}");
+                        // room freed up) — deferred rather than printed here directly, because
+                        // this task's own "found it closed" and "write to stderr" are two
+                        // steps with nothing synchronizing them against `LeaveAlternateScreen`
+                        // on the main task; see `PendingNotices`.
+                        Self::defer_or_print(&pending, msg);
                     }
                 });
             }
@@ -1516,6 +1602,15 @@ pub async fn run_tui_ext(
         DisableMouseCapture
     );
     let _ = terminal.show_cursor();
+
+    // MS2 gate S7-f finding (Caspar): any classifier notice that had to defer instead of
+    // printing (because the channel closed or was full while the alternate screen might still
+    // have been up) is safe to print only now, strictly AFTER `LeaveAlternateScreen` above —
+    // `flush` is what makes that "strictly after" hold even under concurrent scheduling, not
+    // just program order; see `PendingNotices`.
+    for msg in classifier_notices.flush() {
+        eprintln!("{msg}");
+    }
 
     // SC-A20h: the TUI has no structured run log, and while it holds the alternate screen no
     // line may reach the terminal (that is the whole reason `StreamPiece::Notice` exists). So
