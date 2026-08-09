@@ -802,6 +802,19 @@ pub struct App {
     pub visual_selection_start: Option<usize>,
     /// Whether the agent is currently streaming a response.
     pub streaming: bool,
+    /// Index into `messages` of the entry currently receiving stream deltas — `None` when
+    /// not streaming.
+    ///
+    /// Tracked explicitly rather than inferred (MS2 gate S7-f finding, Balthasar):
+    /// `append_stream_delta` used to assume its target was always `messages.last_mut()`, but
+    /// `push_notice` legitimately interleaves a NEW message into `messages` while `streaming`
+    /// is still `true` — an operational notice does not end the turn, see the `run_app` call
+    /// site — which left the notice, not the in-progress reply, as `messages.last_mut()`. The
+    /// next delta then appended onto the notice's text instead of the reply's, corrupting
+    /// both. Tracking the index directly means ANY interleaved push (not just notices) is
+    /// safe: the delta always lands where the stream actually started, regardless of what
+    /// else got appended after it.
+    pub stream_target: Option<usize>,
     /// Conversation scrollback offset: wrapped lines scrolled UP from the bottom
     /// (Normal mode). `0` follows the tail (newest content visible).
     pub scroll_offset: usize,
@@ -843,6 +856,7 @@ impl App {
             visual_cursor: 0,
             visual_selection_start: None,
             streaming: false,
+            stream_target: None,
             scroll_offset: 0,
             last_max_scroll: 0,
             last_viewport_height: 0,
@@ -997,6 +1011,12 @@ impl App {
 
     /// Appends a streaming delta to the in-progress assistant message,
     /// creating the line on the first delta. Append-only; never byte-indexes.
+    ///
+    /// Targets `stream_target` explicitly rather than `messages.last_mut()` (MS2 gate S7-f
+    /// finding, Balthasar): a notice or another message can legitimately land at the end of
+    /// `messages` while a stream is still in progress (see `stream_target`'s doc), and writing
+    /// blindly to "whatever is last" would then corrupt that interleaved entry instead of the
+    /// reply actually being streamed.
     pub fn append_stream_delta(&mut self, delta: String) {
         // Answer content arriving means the thinking phase is over.
         self.thinking_active = false;
@@ -3920,6 +3940,67 @@ mod tests {
         assert_eq!(
             app.scroll_offset, 0,
             "push_notice must reset scroll_offset to 0 (follow-tail)"
+        );
+    }
+
+    /// MS2 gate S7-f finding (Balthasar): `push_notice` — and any other push — can
+    /// legitimately land while `streaming` is still `true` (an operational notice does not
+    /// end the turn — see the `AgentResponse::Notice` arm in `run_app`). Before `stream_target`
+    /// existed, `append_stream_delta` blindly wrote to `messages.last_mut()`, so a delta
+    /// arriving after the notice appended onto the NOTICE's text instead of the reply's,
+    /// corrupting both the notice and the in-progress answer.
+    #[test]
+    fn a_notice_arriving_mid_stream_does_not_corrupt_the_streamed_reply() {
+        let (event_tx, _) = mpsc::channel(1);
+        let (_, response_rx) = mpsc::channel(1);
+        let (_, approval_rx) = mpsc::channel(1);
+        let mut app = App::new(event_tx, response_rx, approval_rx);
+
+        app.append_stream_delta("Hello".to_string());
+        app.push_notice("memory: context assembly failed".to_string());
+        app.append_stream_delta(", world".to_string());
+
+        assert_eq!(
+            app.messages.len(),
+            2,
+            "the notice must stay its own entry, not get merged into the reply: {:?}",
+            app.messages
+        );
+        assert_eq!(
+            app.messages[0], "Magi Agent: Hello, world",
+            "the second delta must land on the streamed reply, not the notice that \
+             happened to be last: {:?}",
+            app.messages
+        );
+        assert!(
+            app.messages[1].starts_with("⚠ ") && app.messages[1].contains("context assembly"),
+            "the notice text must be untouched by the delta that arrived after it: {:?}",
+            app.messages
+        );
+    }
+
+    /// Companion: `finalize_stream` must clear `stream_target`, or a delta belonging to the
+    /// NEXT turn would silently append onto the previous turn's now-finalized message instead
+    /// of starting a fresh one.
+    #[test]
+    fn finalize_stream_clears_the_target_so_the_next_turn_starts_a_new_message() {
+        let (event_tx, _) = mpsc::channel(1);
+        let (_, response_rx) = mpsc::channel(1);
+        let (_, approval_rx) = mpsc::channel(1);
+        let mut app = App::new(event_tx, response_rx, approval_rx);
+
+        app.append_stream_delta("first turn".to_string());
+        app.finalize_stream();
+        app.append_stream_delta("second turn".to_string());
+
+        assert_eq!(
+            app.messages,
+            vec![
+                "Magi Agent: first turn".to_string(),
+                "Magi Agent: second turn".to_string(),
+            ],
+            "a new turn must start a new message, not append onto the finalized one: {:?}",
+            app.messages
         );
     }
 
