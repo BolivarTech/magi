@@ -3294,6 +3294,41 @@ mod tests {
         );
     }
 
+    /// Sixth-pass gate finding (S7, Balthasar): the error arm sent `AgentResponse::Error`
+    /// straight to the terminal with no [`crate::agent::Agent::sanitize_text`] pass, unlike
+    /// the success arm (see the call site in `run_app`, which sanitizes `tui_consult_success_reply`'s
+    /// output before rendering it). A `ProviderError::Http` body is text composed by ANOTHER
+    /// crate from a response we do not control — exactly the untrusted path `sanitize_text`
+    /// exists to cover — so an ANSI escape or control character embedded in an HTTP error page
+    /// reached the terminal verbatim.
+    #[test]
+    fn tui_consult_error_reply_strips_ansi_escapes_and_control_chars() {
+        let hostile_body = "\x1B[31mmalicious\x1B[0m content\x07 here";
+        let provider_err = ClaudeProvider::map_status_to_error(500, hostile_body, vec![], None);
+        let err = MagiError::Provider(provider_err);
+        let cap = 4096;
+
+        let out = tui_consult_error_reply(&err, ProviderKind::OpenAiCompat, cap);
+
+        assert!(
+            !out.text.contains('\x1B'),
+            "ANSI escape must be stripped: {:?}",
+            out.text
+        );
+        assert!(
+            !out.text.contains('\x07'),
+            "control character must be stripped: {:?}",
+            out.text
+        );
+        assert!(
+            out.text.contains("malicious")
+                && out.text.contains("content")
+                && out.text.contains("here"),
+            "readable content must survive sanitization: {}",
+            out.text
+        );
+    }
+
     #[tokio::test]
     async fn test_app_cursor_logic() {
         let (event_tx, _) = mpsc::channel(1);
