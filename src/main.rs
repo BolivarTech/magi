@@ -9056,6 +9056,53 @@ mod tests {
             );
         }
 
+        /// Sixth-pass gate finding (S8, Balthasar): `orchestrate_probes` read
+        /// `cfg.magi.seats(...)` raw, ignoring `MAGI_MODEL_<AGENT>` env overrides entirely —
+        /// so with an override set, the probe measured the TOML/backend model's window while
+        /// `build_magi_orchestrator` (which DOES apply the override via
+        /// `resolve_magi_override`) actually ran the trio on a DIFFERENT model.
+        /// `input_warn_tokens` derives from the probe's measurement (the MINIMUM across the
+        /// mages, REQ-A24b) — measuring the wrong model here silently poisons that threshold
+        /// for the model that is actually running, and per SC-A24j the dangerous direction is
+        /// a threshold that comes out TOO HIGH (a guard-rail that switched itself off).
+        #[tokio::test]
+        async fn env_overrides_change_which_model_the_probe_measures() {
+            let factory = MappedProbeFactory::new(&[
+                ("principal", 4_096),
+                ("toml-melchior", 1_000), // the TOML model — must NOT be what gets probed
+                ("env-melchior", 128_000), // env-overridden — must be probed INSTEAD
+                ("balthasar", 200_000),
+                ("caspar", 256_000),
+            ]);
+            let cfg = cfg_with_four_distinct_models(
+                "principal",
+                "toml-melchior",
+                "balthasar",
+                "caspar",
+            );
+            let env_overrides = MagiEnvModelOverrides::from_raw(Some("env-melchior"), None, None);
+
+            let (_principal_model, _principal, trio) = orchestrate_probes(
+                &cfg,
+                &test_endpoints(),
+                ProviderKind::Ollama,
+                &factory,
+                &env_overrides,
+            )
+            .await;
+
+            assert!(
+                trio.contains_key("env-melchior"),
+                "the probe must measure the ENV-overridden model, the one the trio actually \
+                 runs: {trio:?}"
+            );
+            assert!(
+                !trio.contains_key("toml-melchior"),
+                "the TOML model must not be probed once an env override wins for that seat: \
+                 {trio:?}"
+            );
+        }
+
         // ---- orchestrate_probes: divergent branch --------------------------------------
 
         /// SC-A24k (one level up, between BATCHES): divergent endpoint ⇒ TWO independent calls,
