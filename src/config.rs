@@ -184,6 +184,23 @@ fn line_col_of(raw: &str, offset: usize) -> (usize, usize) {
 /// value (`effective_provider`, `effective_default_mode`) each `assert!` the precondition
 /// instead, which panics in every build profile — see their rustdoc for why that is the chosen
 /// trade-off over a private-fields/builder restructuring.
+///
+/// # Accepted technical debt, scheduled
+///
+/// The MS2 §6 gate raised this three times and it was **accepted as a documented residual by the
+/// project owner on 2026-08-09**, to be repaid in the next patch or release. Recording it here
+/// rather than only in a local note is deliberate: `dev-docs/` is git-ignored, so a note there
+/// would not reach whoever plans that release.
+///
+/// The repayment is private fields plus a crate-internal builder, which makes the invalid state
+/// unconstructible instead of merely asserted against. It was deferred because it touches dozens
+/// of `MagiConfig { .. }` literals in `main.rs` and `headless_runner.rs`, and doing that late in a
+/// quality gate would have invalidated verdicts already earned for a change with no behavioural
+/// effect.
+///
+/// What keeps the risk low in the meantime, and it is worth being precise: every production path
+/// builds this through [`Self::load`], which validates. A hand-built invalid literal therefore
+/// fails **loudly, at the point of misuse, in release builds too** — not silently and not later.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MagiConfig {
