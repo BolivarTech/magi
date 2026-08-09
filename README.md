@@ -218,10 +218,17 @@ carries the same two as fields.
 
 **Input** is auto-detected: a JSON object with a top-level `prompt` string is a
 rich **envelope** (`{prompt, system?, model?, provider?, max_tool_calls?,
-consult?}`); anything else is a plain-text prompt. CLI flags win over envelope
-fields, and the operator's `magi.toml` caps (e.g. `max_tool_calls`) are a ceiling
-the envelope cannot exceed. `--input-format` / `--output-format` force the
-interpretation.
+consult?, mode?, untrusted_content?}`); anything else is a plain-text prompt.
+CLI flags win over envelope fields, and the operator's `magi.toml` caps (e.g.
+`max_tool_calls`) are a ceiling the envelope cannot exceed. `--input-format` /
+`--output-format` force the interpretation.
+
+The envelope is the **primary** surface for `mode` and `untrusted_content`, not
+an afterthought: an automated gate piping untrusted content through `magi query
+-i` / `magi consult -i` has no human reading the prompt before it reaches the
+classifier, so it is exactly this JSON shape — not a CLI flag typed by hand —
+that needs to declare both fields. See [Mode routing](#mode-routing) for what
+each one does.
 
 ### Authorization tiers
 
