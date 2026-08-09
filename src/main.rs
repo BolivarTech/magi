@@ -2270,14 +2270,40 @@ impl MagiEnvModelOverrides {
         }
     }
 
+    /// Builds a set of overrides from three ALREADY-READ raw env values (REQ-A12, S8 gate
+    /// re-review finding), applying [`crate::config::non_blank`] to each — a blank
+    /// `MAGI_MODEL_<AGENT>` (common in CI, where an empty variable is exported rather than
+    /// left undeclared) becomes `None` here instead of an active empty-string override.
+    ///
+    /// **Verified redundant, kept anyway.** `for_seat`'s only production caller
+    /// (`build_magi_orchestrator`) already passes its result through
+    /// [`resolve_magi_override`], which independently applies the same blank-is-absent
+    /// predicate to its `env_model` parameter — see
+    /// `a_blank_magi_model_env_override_falls_through_to_the_toml_or_backend_model`, which
+    /// pins that end-to-end property. Filtering it here too removes the inconsistency a
+    /// reviewer would otherwise trip over reading this struct in isolation, and closes the
+    /// gap for any FUTURE caller of `for_seat` that does not route through
+    /// `resolve_magi_override`.
+    ///
+    /// Extracted from [`from_env`] so the filtering is testable without mutating
+    /// process-global environment variables (test isolation, B13) — `env::var` reads are not
+    /// otherwise injectable in this struct.
+    fn from_raw(melchior: Option<&str>, balthasar: Option<&str>, caspar: Option<&str>) -> Self {
+        Self {
+            melchior: crate::config::non_blank(melchior).map(str::to_string),
+            balthasar: crate::config::non_blank(balthasar).map(str::to_string),
+            caspar: crate::config::non_blank(caspar).map(str::to_string),
+        }
+    }
+
     /// Reads the three environment variables ONCE, at startup (same moment as the rest of this
     /// file's `env > TOML > default` resolution).
     fn from_env() -> Self {
-        Self {
-            melchior: env::var("MAGI_MODEL_MELCHIOR").ok(),
-            balthasar: env::var("MAGI_MODEL_BALTHASAR").ok(),
-            caspar: env::var("MAGI_MODEL_CASPAR").ok(),
-        }
+        Self::from_raw(
+            env::var("MAGI_MODEL_MELCHIOR").ok().as_deref(),
+            env::var("MAGI_MODEL_BALTHASAR").ok().as_deref(),
+            env::var("MAGI_MODEL_CASPAR").ok().as_deref(),
+        )
     }
 }
 
@@ -7430,6 +7456,11 @@ mod tests {
         /// constructs `MagiEnvModelOverrides` directly (not through `from_env`, which cannot
         /// be driven without mutating process-global env vars) to exercise exactly that
         /// downstream filtering.
+        ///
+        /// The refactor below (`from_raw`) additionally filters blanks at the struct's own
+        /// boundary, which this test would still pass without: the two levels of defense are
+        /// independently verified — this one at the `resolve_magi_override` boundary, the two
+        /// below at `from_raw`'s own.
         #[test]
         fn a_blank_magi_model_env_override_falls_through_to_the_toml_or_backend_model() {
             let cfg = MagiConfig::from_toml_str(
@@ -7466,6 +7497,37 @@ mod tests {
                 "a blank MAGI_MODEL_MELCHIOR must fall through to [magi].melchior_model, \
                  never wire an empty model name: {trace:?}"
             );
+        }
+
+        /// `MagiEnvModelOverrides::from_raw` — the constructor `from_env` delegates to after
+        /// reading the three raw env values — applies the SAME blank-is-absent rule
+        /// (REQ-A12) as every other resolver in this file: a blank or whitespace-only value
+        /// becomes `None`, never an active empty-string override.
+        #[test]
+        fn magi_env_model_overrides_from_raw_treats_blank_as_absent() {
+            let overrides =
+                MagiEnvModelOverrides::from_raw(Some(""), Some("   "), Some("caspar-model"));
+            assert_eq!(overrides.melchior, None, "empty string must become absent");
+            assert_eq!(
+                overrides.balthasar, None,
+                "whitespace-only must become absent"
+            );
+            assert_eq!(
+                overrides.caspar,
+                Some("caspar-model".to_string()),
+                "a real value must survive untouched"
+            );
+        }
+
+        /// Negative control: `None` (the var was never set) stays `None` — filtering blanks
+        /// must not be confused with treating "unset" and "set-to-empty" differently in the
+        /// other direction.
+        #[test]
+        fn magi_env_model_overrides_from_raw_leaves_absent_as_absent() {
+            let overrides = MagiEnvModelOverrides::from_raw(None, None, None);
+            assert_eq!(overrides.melchior, None);
+            assert_eq!(overrides.balthasar, None);
+            assert_eq!(overrides.caspar, None);
         }
     }
 

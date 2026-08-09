@@ -916,13 +916,18 @@ pub fn resolve_effective_provider_kind(
 /// never having been set, so it must fall through to the next precedence level rather than
 /// being forwarded as a literal empty string.
 ///
-/// Shared by every resolver in this module that reads a text value from env or TOML, so the
-/// predicate lives in exactly one place (B3) rather than being re-implemented per call site
-/// — see [`resolve_magi_override`], [`resolve_openai_model`], [`resolve_anthropic_model`].
-/// [`ProviderKind::parse`] applies the same rule for `provider`/`[magi].kind`, but cannot
-/// share this helper: it also validates the non-blank remainder against a fixed vocabulary,
-/// which is a different, fallible operation this helper does not perform.
-fn non_blank(s: Option<&str>) -> Option<&str> {
+/// Shared by every resolver in this module — and by `main.rs`'s `MagiEnvModelOverrides`,
+/// the only other reader of a `MAGI_MODEL_*`-shaped env var — that reads a text value from
+/// env or TOML, so the predicate lives in exactly one place (B3) rather than being
+/// re-implemented per call site — see [`resolve_magi_override`], [`resolve_openai_model`],
+/// [`resolve_anthropic_model`]. [`ProviderKind::parse`] applies the same rule for
+/// `provider`/`[magi].kind`, but cannot share this helper: it also validates the non-blank
+/// remainder against a fixed vocabulary, which is a different, fallible operation this
+/// helper does not perform.
+///
+/// `pub(crate)`, not private: `main.rs` reuses it for `MagiEnvModelOverrides::from_raw`
+/// rather than writing a third copy of the same trim-and-filter predicate.
+pub(crate) fn non_blank(s: Option<&str>) -> Option<&str> {
     s.map(str::trim).filter(|s| !s.is_empty())
 }
 
