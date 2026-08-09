@@ -952,9 +952,31 @@ impl App {
 
     /// Inserts `text` at the current cursor position in a single operation.
     ///
-    /// TODO(MS2 gate S7 seventh-pass): stub only — always a no-op. Batch-insertion logic lands
-    /// in the next commit; this stub exists solely so the tests below compile red.
-    pub fn insert_str(&mut self, _text: &str) {}
+    /// MS2 gate S7 seventh-pass fix: clipboard paste (`Ctrl+V`) used to call [`Self::insert_char`]
+    /// once per pasted character, and `insert_char` calls `String::insert` — an O(n) tail-shift.
+    /// Repeated N times for an N-character paste, that is O(N^2): a 50 KB clipboard paste (a
+    /// routine terminal action) would perform on the order of a billion byte-shifts and freeze
+    /// the 50ms-poll event loop for seconds. `insert_str` places the whole payload with one
+    /// `String::insert_str` call — O(n) total for the whole paste, matching `insert_char`'s
+    /// per-character cost for a single character.
+    ///
+    /// Mirrors `insert_char`'s two invariants exactly, just once instead of per character:
+    /// clears any active selection first (so a paste over a selection replaces it, not appends
+    /// to it), and falls back the cursor to `0` if it is not on a char boundary — the same
+    /// emergency guard `insert_char` uses, kept here rather than only in the single-character
+    /// path so every mutator in this file upholds the UTF-8 boundary-safety invariant
+    /// independently (`char_indices`/`is_char_boundary`, never a raw byte index).
+    pub fn insert_str(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        self.delete_selection();
+        if !self.input.is_char_boundary(self.cursor_position) {
+            self.cursor_position = 0; // Emergency fallback, mirrors insert_char.
+        }
+        self.input.insert_str(self.cursor_position, text);
+        self.cursor_position += text.len();
+    }
 
     /// Deletes the character before the current cursor position.
     pub fn delete_char(&mut self) {
@@ -1928,9 +1950,11 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Re
                             (KeyCode::Char('v'), KeyModifiers::CONTROL) => {
                                 if let Ok(mut clipboard) = arboard::Clipboard::new() {
                                     if let Ok(text) = clipboard.get_text() {
-                                        for c in text.chars() {
-                                            app.insert_char(c);
-                                        }
+                                        // Batched (`insert_str`), not per-character: an
+                                        // `insert_char` loop here is O(N^2) on the pasted
+                                        // length and freezes the event loop on a large paste
+                                        // (MS2 gate S7 seventh-pass finding).
+                                        app.insert_str(&text);
                                     }
                                 }
                                 continue;
