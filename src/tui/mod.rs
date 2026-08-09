@@ -1087,6 +1087,12 @@ pub async fn run_tui_ext(
     let (response_tx, response_rx) = mpsc::channel(100);
     let (approval_tx, approval_rx) = mpsc::channel(100);
 
+    // Cancelled right after `run_app` returns, below — races an in-flight OAuth callback
+    // wait so quitting mid-login does not force the process to sit out
+    // `OAUTH_CALLBACK_TIMEOUT_SECS` (MS2 gate S7 finding; see
+    // `await_login_callback_or_quit`).
+    let quit_token = CancellationToken::new();
+
     // From here on the terminal is in raw mode on the alternate screen, so the mode
     // classifier's notices must stop going to stderr and start going through the frame —
     // the same rule `StreamPiece::Notice` enforces for every other operational notice.
@@ -1105,6 +1111,10 @@ pub async fn run_tui_ext(
     // this clone (three `Copy` fields plus an `Arc`) keeps the telemetry sink reachable here so
     // the session's gate evaluations can be reported after the terminal is restored.
     let gate_telemetry = autonomous.clone();
+
+    // Cloned into the event loop below for `UiEvent::Login` to race against; `quit_token`
+    // itself stays here so `run_tui_ext` can cancel it once `run_app` returns.
+    let quit_token_for_loop = quit_token.clone();
 
     // The handle is kept and joined (via `join_event_loop_then_drain`) before the gate
     // telemetry is drained below, instead of being dropped here — a detached spawn would let
@@ -1280,7 +1290,16 @@ pub async fn run_tui_ext(
                     let url = oauth.get_authorize_url();
                     let _ = response_tx.send(AgentResponse::Info(url)).await;
 
-                    match oauth.start_callback_server().await {
+                    // MS2 gate S7 finding: raced against `quit_token_for_loop` instead of
+                    // awaited directly, so a user who quits while this is pending does not
+                    // strand the process for up to OAUTH_CALLBACK_TIMEOUT_SECS (600s) behind
+                    // an already-queued UiEvent::Quit — see `await_login_callback_or_quit`.
+                    match await_login_callback_or_quit(
+                        oauth.start_callback_server(),
+                        &quit_token_for_loop,
+                    )
+                    .await
+                    {
                         Ok(code) => {
                             let _ = response_tx
                                 .send(AgentResponse::Info("Authenticating...".to_string()))
@@ -1452,6 +1471,13 @@ pub async fn run_tui_ext(
     let app = App::new(event_tx, response_rx, approval_rx);
     let res = run_app(&mut terminal, app).await;
 
+    // `run_app` returning — by ANY exit path — means the user is done with the terminal.
+    // Cancel here, before `join_event_loop_then_drain` awaits the event loop below: if
+    // `UiEvent::Login` is mid-wait on the OAuth callback, this makes
+    // `await_login_callback_or_quit` abandon it immediately instead of the loop sitting
+    // out the OAuth timeout behind an already-queued `UiEvent::Quit` (MS2 gate S7 finding).
+    quit_token.cancel();
+
     let _ = disable_raw_mode();
     let _ = execute!(
         terminal.backend_mut(),
@@ -1515,6 +1541,14 @@ const GATE_TELEMETRY_HEADER: &str =
 /// `Err` from `.await`, swallowed here (best-effort, matching the rest of this shutdown path)
 /// rather than propagated.
 ///
+/// **This "guaranteed to finish" was true but misleading before the MS2 gate S7 fix**: it
+/// bounded the wait at `OAUTH_CALLBACK_TIMEOUT_SECS` (600s) if `UiEvent::Login` was still
+/// awaiting the OAuth callback when `Quit` was queued behind it, which is "not indefinite"
+/// but is still up to ten minutes of an unresponsive process after the user already asked to
+/// quit. `run_tui_ext` now cancels `quit_token` right after `run_app` returns, before calling
+/// this function, so that wait — if in flight — is abandoned promptly instead
+/// (`await_login_callback_or_quit`).
+///
 /// # Parameters
 /// * `event_loop` - the join handle of the spawned event-loop task.
 /// * `telemetry` - the sink to drain once `event_loop` has completed.
@@ -1528,6 +1562,46 @@ async fn join_event_loop_then_drain(
 ) -> Vec<String> {
     let _ = event_loop.await;
     telemetry.drain_telemetry()
+}
+
+/// Races an in-flight OAuth callback wait against the user quitting (MS2 gate S7 finding).
+///
+/// `UiEvent::Login` used to await `oauth.start_callback_server()` directly inside the event
+/// loop's sequential dispatch, so a user who quit while the browser round-trip was still
+/// pending had the queued `UiEvent::Quit` sit unprocessed behind it — bounded by
+/// `OAUTH_CALLBACK_TIMEOUT_SECS` (600s), not indefinite, but ten minutes of an unresponsive
+/// process is not an acceptable response to "the user already asked to quit".
+///
+/// `quit_token` is cancelled by [`run_tui_ext`] as soon as `run_app` returns — every exit
+/// path from `run_app` means the user is done with the terminal, regardless of which key
+/// triggered it. `CancellationToken::cancelled()` is level-triggered rather than a one-shot
+/// notify, so this resolves promptly whether the cancellation happened before this function
+/// was even called (e.g. `Login` was still queued behind other events) or arrives mid-wait.
+/// `biased` favors the cancellation arm so an already-cancelled token wins immediately rather
+/// than racing a `callback` that also happens to be ready.
+///
+/// Dropping `callback` on the cancellation branch is what actually frees the port: the
+/// callback server (`axum::serve` over a `TcpListener`) is a plain awaited future inside
+/// `callback`, not a detached task, so dropping it drops the listener and unbinds
+/// `REDIRECT_PORT` — no explicit signal needs to reach `oauth.rs` for that to happen.
+///
+/// # Errors
+/// The callback's own error if it resolves first; a cancellation error naming the reason if
+/// `quit_token` fires first.
+async fn await_login_callback_or_quit<F>(
+    callback: F,
+    quit_token: &CancellationToken,
+) -> anyhow::Result<String>
+where
+    F: std::future::Future<Output = anyhow::Result<String>>,
+{
+    tokio::select! {
+        biased;
+        () = quit_token.cancelled() => Err(anyhow::anyhow!(
+            "login cancelled: quit requested before the OAuth callback arrived"
+        )),
+        res = callback => res,
+    }
 }
 
 async fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Result<()> {
