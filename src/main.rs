@@ -8351,6 +8351,103 @@ mod tests {
                  through the channel, not dropped or printed to stderr"
             );
         }
+
+        /// MS2 gate S7-f finding (Caspar): a `Closed` channel used to fall back to
+        /// `eprintln!` unconditionally, on the theory that "receiver gone" always means
+        /// "teardown, stderr is safe" — but `response_rx` drops as soon as `run_app`
+        /// returns, which is BEFORE `run_tui_ext` calls `LeaveAlternateScreen`. A notice
+        /// racing that window must defer instead of printing immediately: `flush()` (not
+        /// `once()` itself) is what surfaces it, simulating `run_tui_ext`'s post-teardown
+        /// call.
+        #[test]
+        fn a_closed_channel_defers_instead_of_printing_before_flush() {
+            let (tx, rx) = tokio::sync::mpsc::channel::<AgentResponse>(8);
+            let sink = crate::tui::TuiNoticeSink::new();
+            sink.attach(tx);
+            // Simulates `run_app` having returned and dropped `response_rx` — teardown has
+            // STARTED but `LeaveAlternateScreen` has not run yet.
+            drop(rx);
+
+            sink.once("closed-key", "deferred message");
+            assert_eq!(
+                sink.pending_len(),
+                1,
+                "a notice hitting a closed channel before flush() must be buffered, not \
+                 printed inline — printing here would race LeaveAlternateScreen"
+            );
+
+            let deferred = sink.flush();
+            assert_eq!(
+                deferred,
+                vec!["deferred message".to_string()],
+                "flush() must hand back exactly what was deferred, so run_tui_ext can print \
+                 it only after the alternate screen is confirmed gone"
+            );
+        }
+
+        /// Companion to the test above: once `flush()` has run — meaning `run_tui_ext` has
+        /// already left the alternate screen — a LATER notice on the same (still closed)
+        /// channel is safe to print immediately and must not be re-buffered, or it would
+        /// never reach the user.
+        #[test]
+        fn a_notice_after_flush_is_not_rebuffered() {
+            let (tx, rx) = tokio::sync::mpsc::channel::<AgentResponse>(8);
+            let sink = crate::tui::TuiNoticeSink::new();
+            sink.attach(tx);
+            drop(rx);
+
+            sink.once("k1", "first");
+            assert_eq!(sink.flush(), vec!["first".to_string()]);
+
+            sink.once("k2", "second");
+            assert_eq!(
+                sink.pending_len(),
+                0,
+                "once flushed, a later fallback must go straight to stderr instead of \
+                 accumulating in the buffer, since the terminal is already known to be \
+                 restored by then"
+            );
+            assert!(
+                sink.flush().is_empty(),
+                "a second flush after the sink is already Flushed must be a no-op, not \
+                 re-deliver 'second' out of band"
+            );
+        }
+
+        /// MS2 gate S7-f finding (Caspar), the `Full` branch's half: a background task
+        /// queued while the channel was momentarily full can find it CLOSED by the time
+        /// room would have freed up (the run ended mid-wait). That fallback must land in
+        /// the same deferred buffer as the direct `Closed` case — not print for itself from
+        /// inside the spawned task, which is exactly the race the fix closes.
+        #[tokio::test]
+        async fn a_full_channel_that_closes_before_room_frees_up_defers_too() {
+            let (tx, rx) = tokio::sync::mpsc::channel::<AgentResponse>(1);
+            let sink = crate::tui::TuiNoticeSink::new();
+            sink.attach(tx.clone());
+            tx.try_send(AgentResponse::Notice("filler".to_string()))
+                .expect("the fresh channel has room for the filler");
+
+            // Hits `TrySendError::Full` and spawns a background task waiting for room.
+            sink.once("full-then-closed", "should defer, not print");
+
+            // Drop the receiver while that background task is still waiting — simulates
+            // `run_app` returning (and dropping `response_rx`) before room ever freed.
+            drop(rx);
+
+            // Poll a non-destructive peek (never `flush()`, which would itself flip the
+            // sink to `Flushed` and hide the very race this proves closed) until the
+            // spawned task has resolved and deferred its message.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while std::time::Instant::now() < deadline && sink.pending_len() == 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+            assert_eq!(
+                sink.flush(),
+                vec!["should defer, not print".to_string()],
+                "a full-then-closed notice must surface only through flush(), never by \
+                 printing itself from the spawned task"
+            );
+        }
     }
 
     /// Loop 1, F1 — the operator's autonomous-consult configuration reaching `AgentRunConfig`.
