@@ -7781,6 +7781,7 @@ mod tests {
     /// 401 translation).
     mod divergence_and_keyless_auth {
         use super::*;
+        use magi_rs::magi::endpoint::EndpointError;
 
         /// Builds a `MagiConfig` with a root `base_url` and, optionally, an own
         /// `[magi].base_url` override — the only pair of fields that `magi_endpoint_diverges()`
@@ -7954,6 +7955,56 @@ mod tests {
                 ..MagiConfig::default()
             };
             let _ = divergence_notice(&cfg, true);
+        }
+
+        /// Sixth-pass gate finding (S8, Balthasar): `divergence_notice`'s error branch
+        /// formatted `EndpointError::to_string()` verbatim, trusting a comment that no
+        /// current variant embeds the received value. `EndpointError`'s own fields are all
+        /// `&'static str` (see `src/magi/endpoint.rs`), so it cannot be mutated into leaking a
+        /// credential today — which is exactly why `endpoint_display_text` is generic over the
+        /// error type: this fabricated error stands in for a hypothetical future variant that
+        /// DOES interpolate raw text, and proves the redaction wrap actually fires rather than
+        /// relying on the same kind of by-inspection promise the finding objected to.
+        struct FakeCredentialLeak;
+
+        impl std::fmt::Display for FakeCredentialLeak {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(
+                    f,
+                    "connection failed: https://secretuser:secretpass@host.example:1234/v1"
+                )
+            }
+        }
+
+        #[test]
+        fn endpoint_display_text_redacts_a_credential_a_future_error_variant_might_embed() {
+            let result: Result<EndpointTemplate, FakeCredentialLeak> = Err(FakeCredentialLeak);
+
+            let out = endpoint_display_text(&result);
+
+            assert!(!out.contains("secretuser"), "credential leaked: {out}");
+            assert!(!out.contains("secretpass"), "credential leaked: {out}");
+            assert!(
+                out.contains("host.example"),
+                "the useful part (host) must survive redaction: {out}"
+            );
+        }
+
+        /// Counterpart of the test above: the SUCCESS branch must stay untouched by
+        /// redaction. `EndpointTemplate::as_str()` can only ever carry the `[user]:[password]`
+        /// placeholders, never a real secret (REQ-A16c) — running it through
+        /// `redact_foreign_text` too would blank that informative placeholder text by
+        /// position, the exact regression this test guards against.
+        #[test]
+        fn endpoint_display_text_leaves_a_valid_template_untouched() {
+            let template =
+                EndpointTemplate::parse("https://[user]:[password]@host:1234/v1", Scope::Root)
+                    .expect("placeholders are a valid template");
+            let result: Result<EndpointTemplate, EndpointError> = Ok(template);
+
+            let out = endpoint_display_text(&result);
+
+            assert_eq!(out, "https://[user]:[password]@host:1234/v1");
         }
 
         /// R6 (Task 1.2b, `planning/claude-plan-tdd.md` ~L3160): closing the credential paths
