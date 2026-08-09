@@ -505,6 +505,31 @@ mod tests {
         );
     }
 
+    /// MS2 gate S9 seventh-pass finding (Balthasar): `open_envelope` routed its `derive_key`
+    /// call through [`map_crypto_err`] — the mapping reserved for evaluating a *persisted*
+    /// blob (FEC/AEAD outcomes) — even though `salt` at this point has already been FEC-
+    /// recovered successfully. A `derive_key` failure here is about `master` (e.g. an empty
+    /// passphrase, the exact case [`bootstrap_envelope`]'s equivalent test already covers) or
+    /// the KDF itself, never about corruption of `vault_meta`. Reporting it as
+    /// `VaultMetaCorrupt` steers the user toward "restore/delete" (`vault_error_exit_code`,
+    /// `main.rs`) when the real remedy is "re-enter a valid passphrase" — the wrong-remedy
+    /// class of mistake this project treats as worse than the error itself, precisely because
+    /// a wrong passphrase and corrupt metadata already fail identically at the AEAD stage and
+    /// REQ-V35 forbids wiping on either.
+    #[test]
+    fn open_envelope_reports_crypto_not_vault_meta_corrupt_on_an_invalid_input_failure() {
+        let vault = cryptovault::CryptoVault::default();
+        let (salt_fec, wrapped_fec, _) = bootstrap_envelope(&vault, M).expect("bootstrap");
+        let err = open_envelope(&vault, "", &salt_fec, &wrapped_fec)
+            .expect_err("an empty passphrase must fail");
+        assert!(
+            matches!(err, VaultError::Crypto(_)),
+            "vault_meta FEC-decoded fine here — an InvalidInput failure from derive_key is about \
+             `master`, not the persisted blob, and must report Crypto, not VaultMetaCorrupt: \
+             {err:?}"
+        );
+    }
+
     #[test]
     fn test_open_with_wrong_master_yields_wrong_passphrase_not_corrupt() {
         let vault = cryptovault::CryptoVault::default();
