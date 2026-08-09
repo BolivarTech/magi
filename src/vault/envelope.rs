@@ -62,11 +62,15 @@ const LEN_PREFIX: usize = 4;
 /// cache in memory.
 type Bootstrapped = (Vec<u8>, Vec<u8>, Zeroizing<Vec<u8>>);
 
-/// Translates a [`cryptovault::CryptoError`] to the vault domain.
+/// Translates a [`cryptovault::CryptoError`] to the vault domain, for a caller that has
+/// PERSISTED `vault_meta` to blame ([`open_envelope`], [`rekey_envelope`]).
 ///
 /// The mapping is unambiguous because each stage produces a distinct variant: `Cipher` is only
 /// produced by the AEAD (tag failure = wrong key/AAD);
 /// `ErrorCorrection`/`Encoding`/`InvalidInput` only by the FEC/framing layer.
+///
+/// **Not used by [`bootstrap_envelope`]** — see [`map_bootstrap_crypto_err`] for why a failure
+/// there can never be "corrupt metadata" (MS2 gate S9 finding).
 fn map_crypto_err(e: CryptoError) -> VaultError {
     match e {
         CryptoError::Cipher(_) => VaultError::WrongPassphrase,
@@ -75,6 +79,21 @@ fn map_crypto_err(e: CryptoError) -> VaultError {
         | CryptoError::InvalidInput(_) => VaultError::VaultMetaCorrupt,
         CryptoError::KeyDerivation(m) => VaultError::Crypto(m),
     }
+}
+
+/// Translates a [`cryptovault::CryptoError`] raised DURING BOOTSTRAP (`derive_key`/`wrap_key`
+/// inside [`bootstrap_envelope`]), where `vault_meta` does not exist yet.
+///
+/// Every variant maps to [`VaultError::Crypto`] — unlike [`map_crypto_err`], which the OPEN
+/// path uses to distinguish a corrupt persisted blob (`VaultMetaCorrupt`) from a wrong key
+/// (`WrongPassphrase`). Reusing that mapping here would misclassify a first-run KDF/AEAD
+/// failure — e.g. `CryptoVault::derive_key`'s own `CryptoError::InvalidInput` on an empty
+/// password or a malformed salt — as `VaultMetaCorrupt`, a category error: that variant is a
+/// documented, retryable, NEVER-DELETE signal about metadata that ALREADY EXISTS (REQ-V35), and
+/// bootstrap has no metadata yet for it to describe. MS2 gate S9 finding; see this module's own
+/// doc comment for the same reasoning already applied to the RNG-failure arms above.
+fn map_bootstrap_crypto_err(e: CryptoError) -> VaultError {
+    VaultError::Crypto(e.to_string())
 }
 
 /// Wraps `bytes` in a keyless [`ConcatenatedFec`] layer, with the original length prefixed
@@ -140,8 +159,12 @@ pub fn bootstrap_envelope(vault: &CryptoVault, master: &str) -> Result<Bootstrap
         .map_err(|e| VaultError::Crypto(format!("salt generation failed: {e}")))?;
     let dek = cryptovault::generate_dek()
         .map_err(|e| VaultError::Crypto(format!("DEK generation failed: {e}")))?;
-    let kek = vault.derive_key(master, &salt).map_err(map_crypto_err)?;
-    let wrapped = vault.wrap_key(&kek, &salt, &dek).map_err(map_crypto_err)?;
+    let kek = vault
+        .derive_key(master, &salt)
+        .map_err(map_bootstrap_crypto_err)?;
+    let wrapped = vault
+        .wrap_key(&kek, &salt, &dek)
+        .map_err(map_bootstrap_crypto_err)?;
     let salt_fec = fec_encode(&salt)?;
     let wrapped_fec = fec_encode(wrapped.as_bytes())?;
     Ok((salt_fec, wrapped_fec, dek))
