@@ -41,8 +41,8 @@ use magi_rs::headless::output::sanitize_error_message;
 use magi_rs::headless::policy::{Policy, Tier};
 use magi_rs::headless::resolution::Resolved;
 use magi_rs::headless::types::{
-    ErrorKind, ErrorPayload, RunOutcome, StopReason, Timings, ToolCallRecord, TranscriptEntry,
-    Usage,
+    AppliedCaps, ErrorKind, ErrorPayload, RunOutcome, StopReason, Timings, ToolCallRecord,
+    TranscriptEntry, Usage,
 };
 use magi_rs::magi::kind::ProviderKind;
 use magi_rs::magi::mode::{resolve_mode_guarded, ModeClassifier, ModeError, ModeSources};
@@ -812,7 +812,14 @@ pub async fn run_consult(
         tool_calls: Vec::new(),
         transcript,
         consult,
-        applied_caps: resolved.applied_caps,
+        applied_caps: AppliedCaps {
+            // Same reasoning as `run_query`: `resolved.applied_caps.timeout_secs` is a
+            // static `None` from `resolution::resolve`; the direct consult route knows
+            // its own effective ceiling as the `timeout` parameter and must stamp it
+            // here (MS2 gate S6 finding 1).
+            timeout_secs: timeout.map(|d| d.as_secs()),
+            ..resolved.applied_caps
+        },
         error,
     }
 }
@@ -1080,7 +1087,14 @@ pub async fn run_query(
         // `--auto`+ call); `None` when none ran or it was denied by the tier. The run's
         // deadline verdict is stamped in here (SC-A04d) because only the run knows it.
         consult: apply_timeout_verdict(extract_consult_value(&calls), wiring.timeout_below_formula),
-        applied_caps: resolved.applied_caps,
+        applied_caps: AppliedCaps {
+            // `resolution::resolve` cannot know the caller's wall-clock ceiling (it is
+            // resolved separately, into `wiring.timeout`); stamp the effective one here
+            // rather than leaving the static `None` it was built with (MS2 gate S6
+            // finding 1).
+            timeout_secs: wiring.timeout.map(|d| d.as_secs()),
+            ..resolved.applied_caps
+        },
         error,
     }
 }

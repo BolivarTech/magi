@@ -85,8 +85,10 @@ pub struct Resolved {
 /// `system` is only honored (`SystemPolicy::CallerOverride`) if `allow_system_override` is
 /// `true`; otherwise the operator's governs (`SystemPolicy::Operator`).
 ///
-/// The caller computes `operator_ceiling` (not recomputed here); `timeout_secs` remains `None`
-/// (set by MS2).
+/// The caller computes `operator_ceiling` (not recomputed here); `timeout_secs` is left `None`
+/// here because this function has no wall-clock ceiling to report — `run_query`/`run_consult`
+/// (`headless_runner.rs`) know the effective one (`RunWiring::timeout` / their own `timeout`
+/// parameter) and stamp it into `AppliedCaps` themselves before returning the `RunOutcome`.
 ///
 /// # Examples
 ///
