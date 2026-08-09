@@ -206,9 +206,16 @@ def module_filter(path, pkgs=None, single_crate=True):
 
 
 def build_filter(paths, pkgs):
-    """Return (expression, reason). ``None`` means 'nothing to run'."""
+    """Return (expression, reason).
+
+    ``None`` means "documentation or config only" -- widen to the full suite.
+    ``"none"`` means git sees no change at all, which is different and must not
+    widen: there is nothing to verify, so the previous verification still
+    stands. Conflating the two burns a full suite every time someone edits a
+    git-ignored file, which is exactly the waste this script exists to remove.
+    """
     if not paths:
-        return None, "no changes detected"
+        return "none", "git reports no change"
 
     single_crate = not pkgs or len(pkgs) == 1
     fragments = []
@@ -243,6 +250,12 @@ def main():
         expression, reason = build_filter(paths, pkgs)
         if len(pkgs) > 1:
             print("[scoped-tests] workspace with %d packages" % len(pkgs))
+
+    if expression == "none":
+        print("[scoped-tests] %s -- nothing to verify, so nothing is run." % reason)
+        print("[scoped-tests] A git-ignored file (CLAUDE.md, .claude/, dev-docs/, planning/) "
+              "is invisible to git and cannot affect the build.")
+        return 0
 
     if expression == "full":
         print("[scoped-tests] FULL suite: %s" % reason)
