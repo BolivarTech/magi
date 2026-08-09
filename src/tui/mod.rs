@@ -1105,7 +1105,12 @@ pub async fn run_tui_ext(
     // the session's gate evaluations can be reported after the terminal is restored.
     let gate_telemetry = autonomous.clone();
 
-    tokio::spawn(async move {
+    // The handle is kept and joined (via `join_event_loop_then_drain`) before the gate
+    // telemetry is drained below, instead of being dropped here — a detached spawn would let
+    // the drain race the task's tail (its last `UiEvent` or `on_session_close`'s best-effort
+    // distillation pass), silently losing whatever it recorded after the drain ran (MS2 gate
+    // S7 finding).
+    let event_loop = tokio::spawn(async move {
         while let Some(event) = event_rx.recv().await {
             match event {
                 UiEvent::Input(text) => {
@@ -1458,7 +1463,10 @@ pub async fn run_tui_ext(
     // line may reach the terminal (that is the whole reason `StreamPiece::Notice` exists). So
     // the session's gate evaluations are reported HERE — after raw mode and the alternate
     // screen are gone and stderr is safe again. Silent when nothing was evaluated.
-    report_gate_telemetry(&gate_telemetry.drain_telemetry());
+    //
+    // `join_event_loop_then_drain` awaits `event_loop` first (MS2 gate S7 finding): draining
+    // straight from `gate_telemetry` here would race the still-running event-loop task.
+    report_gate_telemetry(&join_event_loop_then_drain(event_loop, &gate_telemetry).await);
 
     if let Err(err) = res {
         eprintln!("TUI Error: {:?}", err)
@@ -1492,6 +1500,34 @@ fn report_gate_telemetry(lines: &[String]) {
 const GATE_TELEMETRY_HEADER: &str =
     "complexity gate — evaluations from this session (agent-routed consults only; \
      says nothing about consults the agent never routed):";
+
+/// Awaits `event_loop` before draining `telemetry` (MS2 gate S7 finding: the loop's
+/// `tokio::spawn` handle used to be dropped immediately, so [`run_tui_ext`] could call
+/// `drain_telemetry` while the task was still processing its final `UiEvent` or still inside
+/// `on_session_close`'s best-effort distillation pass — silently losing any gate evaluation
+/// recorded after the drain ran).
+///
+/// `event_loop` is guaranteed to finish rather than hang: every `run_app` exit path either
+/// sends `UiEvent::Quit` before returning (which the loop's `while let Some(event) =
+/// event_rx.recv()` breaks on) or drops `app` — and with it `event_tx` — which closes the
+/// channel and ends the `recv()` loop the same way. A panic inside the task surfaces as an
+/// `Err` from `.await`, swallowed here (best-effort, matching the rest of this shutdown path)
+/// rather than propagated.
+///
+/// # Parameters
+/// * `event_loop` - the join handle of the spawned event-loop task.
+/// * `telemetry` - the sink to drain once `event_loop` has completed.
+///
+/// # Returns
+/// Every gate-evaluation line recorded up to and including whatever the event loop's tail
+/// (including `on_session_close`) produced.
+async fn join_event_loop_then_drain(
+    event_loop: tokio::task::JoinHandle<()>,
+    telemetry: &crate::AutonomousRunConfig,
+) -> Vec<String> {
+    let _ = event_loop.await;
+    telemetry.drain_telemetry()
+}
 
 async fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Result<()> {
     loop {
