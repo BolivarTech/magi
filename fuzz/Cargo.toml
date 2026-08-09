@@ -12,9 +12,9 @@ libfuzzer-sys = "0.4"
 magi-rs = { path = ".." }
 cryptovault = "0.3.0"
 
-# Targets de fuzzing (REQ-V39). Ejecutar en CI Linux con nightly:
+# Fuzz targets. Run on Linux CI with a nightly toolchain:
 #   cargo +nightly fuzz run fuzz_vault_meta_decode -- -max_total_time=300
-# (cargo-fuzz/libFuzzer no compila en Windows MSVC — ver docs/CODE-STANDARDS-CHECKLIST.md.)
+# cargo-fuzz/libFuzzer does not build on Windows MSVC, so these are Linux-only.
 [[bin]]
 name = "fuzz_vault_meta_decode"
 path = "fuzz_targets/fuzz_vault_meta_decode.rs"

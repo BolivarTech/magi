@@ -33,8 +33,8 @@ use std::path::Path;
 
 /// Marker that exempts its line from the scan.
 ///
-/// Meant for prose that *describes* the patterns (the gate table in
-/// `docs/CODE-STANDARDS-CHECKLIST.md` names them literally) or for synthetic fixtures.
+/// Meant for prose that *describes* the patterns — documentation naming them literally, or this
+/// scanner's own pattern definitions — and for synthetic fixtures.
 /// Equivalent to `# noqa` / `gitleaks:allow`.
 const ALLOW_MARKER: &str = "allow-secret-scan";
 
