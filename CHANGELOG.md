@@ -9,11 +9,23 @@ changes and the **patch** position signals backward-compatible fixes.
 
 ## [Unreleased]
 
-## [0.12.1] - 2026-08-10
+## [0.12.2] - 2026-08-10
 
 Dependency-only patch: `magi-core` moves from 3.1.0 to **3.2.0**. Nothing in this
 release uses what that version adds — it is the base the next minor is built on, put in
 place on its own so the version bump and the work that depends on it stay separable.
+
+> **0.12.1 does not exist and never will.** Its tag was pushed by hand before the release
+> workflow ran. The gate resolves a release by comparing `Cargo.toml`'s version against the
+> highest tag already present, so it found `v0.12.1`, concluded the version was already
+> released, and skipped the build, the crates.io publish, the tag and the GitHub Release —
+> reporting **success**, because declining to release is not a failure. The tag is protected
+> by a ruleset and cannot be deleted, so the version number was retired rather than reused.
+> `v0.12.1` therefore joins `v0.10.2` as a tag that never reached crates.io.
+>
+> The release is driven by **pushing a version bump to `main`**, never by pushing a tag; the
+> workflow creates the tag last, on purpose, so that a tag always means *this version built,
+> published and released*.
 
 ### Changed
 
