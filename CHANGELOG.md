@@ -9,6 +9,38 @@ changes and the **patch** position signals backward-compatible fixes.
 
 ## [Unreleased]
 
+## [0.12.1] - 2026-08-10
+
+Dependency-only patch: `magi-core` moves from 3.1.0 to **3.2.0**. Nothing in this
+release uses what that version adds — it is the base the next minor is built on, put in
+place on its own so the version bump and the work that depends on it stay separable.
+
+### Changed
+
+- **`magi-core` 3.1.0 → 3.2.0**, pinned exactly (`=`) as before. The upstream release is
+  purely additive: two new constructors, one new trait method with a defaulting body, and
+  a warning on a previously silent condition. No behaviour of this crate changes.
+
+  3.2.0 adds what magi-rs needs for lineage rotation, and adds it in two forms:
+  `FallbackPoolBuilder::push_with_probe` / `MagiBuilder::with_agent_and_probe` let a
+  rotation probe be declared apart from the provider that serves completions, and
+  `OllamaProvider::with_timeout` closes an asymmetry that made that type unusable for
+  completions by any consumer sizing its timeout layers against a single ceiling.
+  **Neither is used yet.** Wiring them is the next minor's work.
+
+- **The exact pin's stated reason moved to 3.3.0.** It guards the retry defaults, which
+  are the numbers the per-mage timeout scale derives from — a `cargo update` that moved
+  them would move the floor of a relation the design makes impossible to break from
+  configuration. 3.1.0's rustdoc announced that change for 3.2.0; 3.2.0 shipped without
+  it. That was **verified before bumping rather than taken from the changelog**: the
+  backoff constants and `impl Default for RetryConfig` are byte-identical across the two
+  versions. The pin stays, now pointing at the next release.
+
+### Verified
+
+- The full suite passes unchanged at **1088 tests**, the same count as 0.12.0, so the
+  upgrade introduces no regression. All seven gates green.
+
 ## [0.12.0] - 2026-08-09
 
 Adoption release: magi-rs now uses what `magi-core` 3.1.0 already offered. The MAGI
