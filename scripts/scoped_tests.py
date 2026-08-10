@@ -99,7 +99,18 @@ FULL_SUITE_TRIGGERS = (
 )
 
 # Paths that cannot break a test on their own and so contribute no filter.
-DOC_PREFIXES = ("docs/", "dev-docs/", ".superpowers/", "planning/", "sbtdd/")
+#
+# ``graphify-out/`` is GENERATED DOCUMENTATION -- a knowledge-graph dump some
+# projects track so library consumers get the structure map. Nothing compiles it
+# and no test reads it, so it belongs here on the merits. It is listed by prefix
+# rather than left to DOC_SUFFIXES because the directory also holds ``.html``,
+# which is not a documentation suffix and would therefore force a full run. That
+# matters where a post-commit hook refreshes the graph: without this line almost
+# every commit widens, and the script quietly stops scoping anything at all --
+# it still reports success, which is the failure mode this file is written to
+# avoid everywhere else.
+DOC_PREFIXES = ("docs/", "dev-docs/", ".superpowers/", "planning/", "sbtdd/",
+                "graphify-out/")
 DOC_SUFFIXES = (".md", ".toml", ".json", ".yml", ".yaml", ".txt")
 
 
