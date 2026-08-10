@@ -109,10 +109,43 @@
 # count went from 242 to 416 (`cargo nextest list -E '<filter>'`, counted before and after
 # this change) — the filter was NOT trimmed back down to the smaller number: per this
 # file's own rule, a cap that is a little too wide is the cost of one that cannot rot.
+#
+# ## The first VICTIM joins the group (2026-08-10, v0.12.2 release)
+#
+# Every entry above earns its place by PRODUCING Argon2 load. `headless_runner::` earns
+# its place by SUFFERING it, and that is a deliberate widening of the membership rule to
+# match what the first section of this file already says the cap is for: "tests sensitive
+# to wall-clock time ... starve for CPU within their budget and fail intermittently".
+# Protecting a victim is the stated purpose; producing load was only ever the proxy.
+#
+# What forced it: `headless_runner::tests::test_run_query_timeout_kills_bash_and_reports_
+# timeout_windows` failed in CI on the v0.12.2 release run, on the PRECONDITION
+# `the child really ran (START present)` — not on the property under test. It ran 18.7 s
+# alongside two `vault::envelope::tests::test_rekey_*` of 18.5 s and 18.75 s. Unthrottled,
+# it was competing with up to 3 heavy tests x 4 Argon2 lanes.
+#
+# This is the THIRD time this module has been hit. The second is recorded above
+# (`test_run_consult_future_drop_aborts_spawned_analysis`). The first is recorded in the
+# rustdoc of `CANCEL_FIRE_DELAY_MS`, whose remedy was to grow the constant from ~2 s to
+# 5 s — a duration sized against one machine's contention. CI's runner exceeded 5 s of
+# `python` cold start, so the kill fired before the worker had written START.
+#
+# Matched test count went from 489 to 538 (`cargo nextest list -E '<filter>'`, counted
+# before and after), a delta of exactly the 49 tests in `headless_runner::`. Counting was
+# verified against the OLD filter as a control first: the initial attempt reported 0 for
+# every filter including the known-good one, which exposed a broken counting command
+# rather than a broken pattern. That control is the only reason this entry is not the
+# "matches nothing, raises no error" failure the top of this file exists to warn about.
+#
+# **This entry does not fix the ordering, and must not be mistaken for a fix.** It removes
+# the contention that makes a cold start exceed the budget; the budget is still a guessed
+# duration. The real remedy is to derive the delay from a MEASURED cold start instead of a
+# constant, which is tracked as follow-up. Until that lands, a heavier CI runner can
+# reproduce this.
 
 [test-groups]
 heavy = { max-threads = 3 }
 
 [[profile.default.overrides]]
-filter = 'test(/vault::/) | test(/system::/) | test(/agent::/) | test(/memory::/) | test(/tools::/)'
+filter = 'test(/vault::/) | test(/system::/) | test(/agent::/) | test(/memory::/) | test(/tools::/) | test(/headless_runner::/)'
 test-group = "heavy"
