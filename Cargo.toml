@@ -1,6 +1,6 @@
 [package]
 name = "magi-rs"
-version = "0.12.0"
+version = "0.12.1"
 edition = "2021"
 default-run = "magi-rs"
 authors = ["Julian Bolivar <jbolivarg@gmail.com>"]
@@ -59,11 +59,17 @@ uuid = { version = "1.8", features = ["v4"] }
 # claude-cli is NOT enabled: it launches the `claude` binary as a subprocess, bypassing the
 # `bash` tool's security model, and rejects with NestedSession under CLAUDECODE (spec §8).
 #
-# EXACT version (`=`), not caret. `RetryConfig`'s rustdoc announces that 3.2.0 changes the
-# retry defaults, which are exactly the numbers REQ-A04 derives its scale from: a
-# `cargo update` would move the floor of a relation this milestone makes impossible to break.
-# The bump to 3.2.0 is MS3 work, with the Task 0.0 spike running first.
-magi-core = { version = "=3.1.0", features = ["ollama", "openai-compat", "claude-api"] }
+# EXACT version (`=`), not caret, and the reason has MOVED — it has not gone away. The pin
+# guards the retry defaults, which are exactly the numbers REQ-A04 derives its timeout scale
+# from: a `cargo update` that moved them would move the floor of a relation the design makes
+# impossible to break from configuration.
+#
+# 3.1.0's rustdoc announced that change for 3.2.0. 3.2.0 shipped WITHOUT it and says so in its
+# own changelog — the defaults work is now tracked for 3.3.0 — and that was VERIFIED here
+# before bumping, not taken on trust: `backoff.rs`'s constants and `impl Default for
+# RetryConfig` are byte-identical between 3.1.0 and 3.2.0. So the guard still points at the
+# next release, not this one.
+magi-core = { version = "=3.2.0", features = ["ollama", "openai-compat", "claude-api"] }
 instant-distance = { version = "0.6", optional = true }
 
 # Vault MS2 — REQ-V42 layer 1: mlock/VirtualLock via a safe crate (no own unsafe).
@@ -100,8 +106,10 @@ tokio = { version = "1.36", features = ["test-util"] }
 # RoutingMockProvider for consult tests. Repeats the [dependencies] features plus
 # `test-utils`: without the full list the dev-dependency would resolve a different
 # combination, and the version is pinned with `=` for the same reason as above (retry
-# defaults in 3.2.0).
-magi-core = { version = "=3.1.0", features = ["ollama", "openai-compat", "claude-api", "test-utils"] }
+# defaults, now tracked for 3.3.0). Keep this line's version in lockstep with the
+# [dependencies] one: two different pins would build the tests against a different crate
+# than production.
+magi-core = { version = "=3.2.0", features = ["ollama", "openai-compat", "claude-api", "test-utils"] }
 # Mocking for tests
 mockall = "0.12"
 mockito = "1.4"
