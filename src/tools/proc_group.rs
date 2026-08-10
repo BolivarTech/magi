@@ -373,13 +373,15 @@ pub(crate) mod test_support {
     /// kill still genuinely pre-empts live work rather than racing completion.
     pub(crate) const CANCEL_FIRE_DELAY_MS: u64 = 5_000;
 
-    /// How long a test waits, after the kill/timeout has fired, before
-    /// asserting `done.marker` is absent. Must exceed the worker's *remaining*
-    /// sleep at the moment of the kill (`WORKER_SLEEP_SECS * 1000 -
-    /// CANCEL_FIRE_DELAY_MS` = 10 000 ms) with margin, so a surviving
-    /// (un-killed) orphan would provably have written `done.marker` by the
-    /// time we check — otherwise the assertion would be meaningless.
-    pub(crate) const POST_KILL_WAIT_MS: u64 = 13_000;
+    // `POST_KILL_WAIT_MS` (13 000) was removed here, deliberately and not merely
+    // because it fell out of use. It encoded the worker's remaining sleep for ONE
+    // kill moment — `WORKER_SLEEP_SECS * 1000 - CANCEL_FIRE_DELAY_MS` — so it was
+    // only correct while the kill landed exactly where that constant said. Both
+    // callers now decide the kill moment at run time (one measures cold start, one
+    // waits for START), which makes a single shared answer wrong for at least one of
+    // them: cancelling AT start leaves the full sleep remaining, and 13 s would have
+    // checked for DONE before a survivor could write it — passing whether or not the
+    // tree died. Each caller now derives its own wait from its own kill moment.
 
     /// A Python worker that writes a `start.marker` immediately, sleeps well past
     /// any test's cancel, then — **only if it survives** — writes a `done.marker`.
@@ -388,12 +390,26 @@ pub(crate) mod test_support {
     /// exist (the real grandchild ran) and DONE must never appear (it was killed
     /// mid-work, not merely denied time — the test waits past the sleep).
     pub(crate) fn tree_kill_worker() -> String {
+        tree_kill_worker_with_sleep(WORKER_SLEEP_SECS)
+    }
+
+    /// [`tree_kill_worker`] with an explicit sleep, for a caller that **derives** its
+    /// kill moment from a measurement and must therefore derive the window that
+    /// moment has to land in from the same number.
+    ///
+    /// Keeping the kill moment and the sleep as two independent constants is what let
+    /// them drift into an ordering a slow machine could invert: a 5 s kill against a
+    /// 15 s sleep looks safe until `python` needs more than 5 s to start, at which
+    /// point the kill lands *before* the worker exists and the test fails on its own
+    /// precondition. Deriving both from one measurement makes that inversion
+    /// unrepresentable rather than merely unlikely.
+    pub(crate) fn tree_kill_worker_with_sleep(sleep_secs: u64) -> String {
         format!(
             "\
 import os, time\n\
 d = os.path.dirname(os.path.abspath(__file__))\n\
 open(os.path.join(d, 'start.marker'), 'w').close()\n\
-time.sleep({WORKER_SLEEP_SECS})\n\
+time.sleep({sleep_secs})\n\
 open(os.path.join(d, 'done.marker'), 'w').close()\n"
         )
     }
@@ -474,5 +490,105 @@ open(os.path.join(d, 'exfil.marker'), 'w').write(','.join(found))\n";
             .output()
             .map(|o| o.status.success())
             .unwrap_or(false)
+    }
+
+    /// FAILURE deadline for [`wait_for_marker`] — deliberately far larger than any
+    /// healthy cold start.
+    ///
+    /// **It is not a budget and must never be read as one.** The discriminating
+    /// property of these tests is *"the child started"*, never *"the child started
+    /// within N milliseconds"*. The only job of this number is to stop a genuinely
+    /// broken spawn from hanging the suite forever. Sizing it tight is exactly what
+    /// turns CPU contention into a spurious failure — the mistake this module has now
+    /// made three times through [`CANCEL_FIRE_DELAY_MS`].
+    pub(crate) const MARKER_WAIT_DEADLINE_MS: u64 = 60_000;
+
+    /// Poll interval for [`wait_for_marker`]: short enough that the observed start
+    /// time is a usable measurement, long enough not to spin a core while the suite
+    /// is already CPU-starved.
+    const MARKER_POLL_INTERVAL_MS: u64 = 25;
+
+    /// How many times the measured cold start is multiplied to place the kill.
+    ///
+    /// A **factor**, not an added constant: a machine twice as slow needs twice the
+    /// margin, and a fixed addend that suffices on one machine is exactly what a
+    /// slower one outgrows. Three is chosen to absorb the difference between the
+    /// probe's warm-ish spawn and a genuinely cold one under contention.
+    pub(crate) const COLD_START_MARGIN_FACTOR: u64 = 3;
+
+    /// How long after the kill a surviving orphan would still need before writing
+    /// `done.marker`, in seconds.
+    ///
+    /// The worker's sleep is derived as *(kill moment) + this*, so DONE always sits a
+    /// fixed distance **after** the kill no matter when the kill turned out to land.
+    /// That is what keeps "DONE is absent" a proof of death rather than a proof that
+    /// we looked too early.
+    pub(crate) const DONE_MARGIN_SECS: u64 = 15;
+
+    /// Waits until `marker` exists, returning how long that took, or `None` if it
+    /// never appeared within `deadline_ms`.
+    ///
+    /// Waits on the CONDITION, never on a duration. A fixed sleep followed by an
+    /// assertion is a guess about someone else's scheduler, and this repository has
+    /// paid for that guess three times in this module alone.
+    pub(crate) async fn wait_for_marker(
+        marker: &std::path::Path,
+        deadline_ms: u64,
+    ) -> Option<std::time::Duration> {
+        let started = std::time::Instant::now();
+        let deadline = std::time::Duration::from_millis(deadline_ms);
+        while started.elapsed() < deadline {
+            if marker.exists() {
+                return Some(started.elapsed());
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(MARKER_POLL_INTERVAL_MS)).await;
+        }
+        marker.exists().then(|| started.elapsed())
+    }
+
+    /// Measures interpreter cold start **on this machine, under the load present
+    /// right now**, by running a script that does nothing but write a marker.
+    ///
+    /// [`CANCEL_FIRE_DELAY_MS`] is a constant calibrated against one machine's
+    /// contention, and a constant cannot know what else is running. It was grown from
+    /// ~2 s to 5 s for exactly this failure and still fired before the worker existed
+    /// on a CI runner. A measurement taken seconds before the run it sizes cannot go
+    /// stale that way.
+    ///
+    /// Returns milliseconds, and leaves neither script nor marker behind.
+    ///
+    /// # Failure
+    ///
+    /// If the probe does not run, this returns [`CANCEL_FIRE_DELAY_MS`] rather than an
+    /// optimistic zero. The safe direction is the **larger** delay: firing too early
+    /// is a spurious failure, firing too late only costs wall clock.
+    pub(crate) async fn measure_cold_start_ms(root: &std::path::Path) -> u64 {
+        let script = root.join("cold_start_probe.py");
+        let marker = root.join("cold_start_probe.marker");
+        std::fs::write(
+            &script,
+            "import os\n\
+             d = os.path.dirname(os.path.abspath(__file__))\n\
+             open(os.path.join(d, 'cold_start_probe.marker'), 'w').close()\n",
+        )
+        .expect("write cold-start probe");
+
+        let started = std::time::Instant::now();
+        let status = tokio::process::Command::new("python")
+            .arg(&script)
+            .current_dir(root)
+            .status()
+            .await;
+        let elapsed = started.elapsed().as_millis() as u64;
+
+        let measured = matches!(status, Ok(s) if s.success()) && marker.exists();
+        let _ = std::fs::remove_file(&marker);
+        let _ = std::fs::remove_file(&script);
+
+        if measured {
+            elapsed
+        } else {
+            CANCEL_FIRE_DELAY_MS
+        }
     }
 }

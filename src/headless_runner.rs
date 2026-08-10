@@ -2548,7 +2548,9 @@ mod tests {
     async fn run_query_timeout_kills_bash() {
         use crate::tools::bash::BashTool;
         use crate::tools::proc_group::test_support::{
-            python_available, tree_kill_worker, CANCEL_FIRE_DELAY_MS, POST_KILL_WAIT_MS,
+            measure_cold_start_ms, python_available, tree_kill_worker_with_sleep, wait_for_marker,
+            CANCEL_FIRE_DELAY_MS, COLD_START_MARGIN_FACTOR, DONE_MARGIN_SECS,
+            MARKER_WAIT_DEADLINE_MS,
         };
 
         if !python_available() {
@@ -2557,7 +2559,24 @@ mod tests {
         }
         let dir = tempfile::tempdir().expect("tempdir");
         let root = dir.path().canonicalize().expect("canonicalize");
-        std::fs::write(root.join("worker.py"), tree_kill_worker()).expect("write worker");
+
+        // Size the kill from a MEASURED cold start instead of a constant. The constant
+        // was calibrated on one machine, grown from ~2 s to 5 s after this exact
+        // failure, and still fired before the worker existed on a CI runner — the kill
+        // landing ahead of START makes the test fail on its own precondition, which
+        // reads like a broken kill and is not one.
+        let cold_ms = measure_cold_start_ms(&root).await;
+        let fire_after_ms = (cold_ms * COLD_START_MARGIN_FACTOR).max(CANCEL_FIRE_DELAY_MS);
+        // Derived from the same number, so DONE always sits a fixed distance AFTER
+        // whenever the kill actually landed. Two independent constants are what let the
+        // ordering invert on a slow machine.
+        let worker_sleep_secs = fire_after_ms.div_ceil(1_000) + DONE_MARGIN_SECS;
+        let post_kill_wait_ms = DONE_MARGIN_SECS * 1_000 + 3_000;
+        std::fs::write(
+            root.join("worker.py"),
+            tree_kill_worker_with_sleep(worker_sleep_secs),
+        )
+        .expect("write worker");
 
         let provider = ScriptedProvider::new(vec![
             Turn::Tool {
@@ -2581,7 +2600,7 @@ mod tests {
             policy,
             &mut agent,
             "go",
-            &wiring(Some(Duration::from_millis(CANCEL_FIRE_DELAY_MS))),
+            &wiring(Some(Duration::from_millis(fire_after_ms))),
             None,
         )
         .await;
@@ -2600,14 +2619,21 @@ mod tests {
             "error.kind must be timeout (first-class)"
         );
 
-        // Prove the tree died: wait past when a surviving orphan would write
-        // DONE — see `POST_KILL_WAIT_MS` rustdoc for the margin math.
-        let done = root.join("done.marker");
-        tokio::time::sleep(Duration::from_millis(POST_KILL_WAIT_MS)).await;
+        // The precondition, waited on as a CONDITION with a generous failure
+        // deadline. It guards against a false pass: had the child never run, DONE
+        // would be absent for a reason that proves nothing about the kill.
+        let start_seen = wait_for_marker(&root.join("start.marker"), MARKER_WAIT_DEADLINE_MS).await;
         assert!(
-            root.join("start.marker").exists(),
-            "the child really ran (START present)"
+            start_seen.is_some(),
+            "the child really ran (START present) — measured cold start {cold_ms} ms, \
+             kill armed at {fire_after_ms} ms; a miss here means the kill still \
+             outran the spawn, not that tree-kill is broken"
         );
+
+        // Prove the tree died: wait past when a surviving orphan would write DONE.
+        // The margin is derived from the kill moment above, not a constant.
+        let done = root.join("done.marker");
+        tokio::time::sleep(Duration::from_millis(post_kill_wait_ms)).await;
         assert!(
             !done.exists(),
             "the bash subprocess tree must be dead — no DONE marker"

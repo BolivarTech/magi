@@ -671,7 +671,7 @@ mod tests {
     #[cfg(any(windows, unix))]
     async fn cancel_kills_subprocess_tree(worker_src: &str) {
         use crate::tools::proc_group::test_support::{
-            python_available, CANCEL_FIRE_DELAY_MS, POST_KILL_WAIT_MS,
+            python_available, wait_for_marker, MARKER_WAIT_DEADLINE_MS, WORKER_SLEEP_SECS,
         };
 
         if !python_available() {
@@ -686,21 +686,23 @@ mod tests {
         let cancel = CancellationToken::new();
         let args = serde_json::json!({ "command": "python worker.py" });
 
-        // Fire cancel after START is surely written (python cold start + margin,
-        // generous enough to absorb full-suite CPU contention — see
-        // `CANCEL_FIRE_DELAY_MS` rustdoc) but well before the worker's sleep
-        // would complete, so the kill genuinely pre-empts live work.
+        // Fire the cancel once START has actually been OBSERVED, not after a delay
+        // guessed to outlast a cold start. This test owns the trigger, so it can wait
+        // on the condition directly — no measurement needed, and no machine is slow
+        // enough to invert the ordering.
         let cancel_fire = cancel.clone();
+        let start_marker = root.join("start.marker");
         let firer = tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(CANCEL_FIRE_DELAY_MS)).await;
+            let seen = wait_for_marker(&start_marker, MARKER_WAIT_DEADLINE_MS).await;
             cancel_fire.cancel();
+            seen
         });
 
         let result = tool
             .execute(args, &cancel)
             .await
             .expect("execute returns an (aborted) value, never a panic");
-        firer.await.expect("cancel task joins");
+        let start_seen = firer.await.expect("cancel task joins");
 
         assert_eq!(
             result["interrupted"],
@@ -708,16 +710,20 @@ mod tests {
             "a cancelled run must report interrupted=true"
         );
 
-        let start = root.join("start.marker");
         let done = root.join("done.marker");
         assert!(
-            start.exists(),
+            start_seen.is_some(),
             "START marker must exist — the real subprocess actually ran"
         );
-        // Wait past when a SURVIVING (orphaned) worker would have written DONE —
-        // see `POST_KILL_WAIT_MS` rustdoc for the margin math. If the tree was
-        // truly killed, DONE never appears.
-        tokio::time::sleep(Duration::from_millis(POST_KILL_WAIT_MS)).await;
+        // Wait past when a SURVIVING (orphaned) worker would have written DONE.
+        //
+        // This margin GREW with the change above, and had to. `POST_KILL_WAIT_MS`
+        // (13 s) was sized against a kill fired 5 s in, leaving 10 s of the worker's
+        // sleep to outlast. Cancelling AT start leaves the full `WORKER_SLEEP_SECS`
+        // remaining, so 13 s would now check *before* a survivor could write DONE —
+        // and the assertion would pass whether or not the tree died. Waiting on the
+        // condition made the old margin a false pass, not merely a tight one.
+        tokio::time::sleep(Duration::from_millis(WORKER_SLEEP_SECS * 1_000 + 3_000)).await;
         assert!(
             !done.exists(),
             "DONE marker must NOT exist — the subprocess tree was killed, not orphaned"
