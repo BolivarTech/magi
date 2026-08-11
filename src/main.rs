@@ -4352,14 +4352,7 @@ async fn run_query_subcommand(
     // SC-A04c/d: this route shares its single deadline with a forced/proactive consult
     // (REQ-H22), so REQ-A04's minimum applies here too. The deadline is obeyed either way;
     // what the check adds is the heads-up on stderr and the flag in the JSON.
-    let timeout_decision = query_timeout_decision(
-        timeout,
-        consult_magi.is_some(),
-        magi_config
-            .magi()
-            .agent_timeout_secs
-            .unwrap_or(magi_rs::magi::AGENT_TIMEOUT_SECS),
-    );
+    let timeout_decision = query_timeout_decision(timeout, consult_magi.is_some(), &magi_config);
     if let Some(w) = timeout_decision.as_ref().and_then(|d| d.warning.as_ref()) {
         eprintln!("{w}");
     }
@@ -4413,11 +4406,31 @@ async fn run_query_subcommand(
 /// # Returns
 /// `None` when the check does not apply; otherwise the decision, whose `warning` names the
 /// computed minimum and whose `below_formula` feeds the run's JSON.
+/// The three configuration values REQ-R20's formula needs, resolved ONCE.
+///
+/// They travel together because they are read together at every site that asks *"how long may
+/// this run take?"*, and resolving them separately at each site is exactly how two call sites end
+/// up disagreeing about the same run's worst case — the failure mode being that a `--timeout`
+/// computed from a stale worst case cuts off a healthy consult, and only when a rotation also
+/// happened, which is very hard to reproduce.
+///
+/// A tuple and not a struct: the three types are distinct, so the compiler catches a
+/// transposition, and the values are destructured at the single point of use.
+fn timeout_scale(cfg: &MagiConfig) -> (u64, u32, bool) {
+    (
+        cfg.magi()
+            .agent_timeout_secs
+            .unwrap_or(magi_rs::magi::AGENT_TIMEOUT_SECS),
+        cfg.effective_max_rotations(),
+        cfg.magi().retry_disabled.unwrap_or(false),
+    )
+}
+
 #[must_use]
 fn query_timeout_decision(
     deadline: Option<Duration>,
     consult_capable: bool,
-    ceiling: u64,
+    cfg: &MagiConfig,
 ) -> Option<magi_rs::magi::TimeoutDecision> {
     if !consult_capable {
         return None;
@@ -4429,7 +4442,13 @@ fn query_timeout_decision(
     // explicit `--timeout`, `[headless] timeout_secs`, or the tier default. All three are
     // operator declarations, so all three are obeyed and all three deserve the same heads-up
     // when they are structurally too short.
-    Some(magi_rs::magi::resolve_run_timeout(Some(secs), ceiling))
+    let (ceiling, max_rotations, retry_disabled) = timeout_scale(cfg);
+    Some(magi_rs::magi::resolve_run_timeout(
+        Some(secs),
+        ceiling,
+        max_rotations,
+        retry_disabled,
+    ))
 }
 
 /// Resolves the wall-clock deadline actually enforced for a `magi consult` run
@@ -4528,13 +4547,9 @@ async fn run_consult_subcommand(
     // `analyze_direct`'s deadline arm never fired). `.below_formula`/`.warning`
     // — the JSON telemetry and the stderr notice, emitted by `analyze_direct`
     // via `runtime.notice_sink` — were already wired by Task 6.1.
-    let timeout_decision = magi_rs::magi::resolve_run_timeout(
-        h.timeout,
-        magi_config
-            .magi()
-            .agent_timeout_secs
-            .unwrap_or(magi_rs::magi::AGENT_TIMEOUT_SECS),
-    );
+    let (ceiling, max_rotations, retry_disabled) = timeout_scale(&magi_config);
+    let timeout_decision =
+        magi_rs::magi::resolve_run_timeout(h.timeout, ceiling, max_rotations, retry_disabled);
     let timeout = Some(consult_deadline(&timeout_decision));
     let runtime = MagiRuntimeParams {
         kind: registered_magi_kind(&magi_config, provider_kind),
@@ -6839,11 +6854,13 @@ mod tests {
     #[test]
     fn consult_deadline_falls_back_to_the_formula_minimum_when_absent() {
         let ceiling = magi_rs::magi::AGENT_TIMEOUT_SECS;
-        let decision = magi_rs::magi::resolve_run_timeout(None, ceiling);
+        let decision = magi_rs::magi::resolve_run_timeout(None, ceiling, 0, false);
         let deadline = consult_deadline(&decision);
         assert_eq!(
             deadline,
-            Duration::from_secs(magi_rs::magi::headless_consult_timeout_secs(ceiling)),
+            Duration::from_secs(magi_rs::magi::headless_consult_timeout_secs(
+                ceiling, 0, false
+            )),
             "an absent --timeout must fall back to the formula-derived minimum"
         );
         assert!(
@@ -6860,7 +6877,7 @@ mod tests {
     #[test]
     fn consult_deadline_obeys_an_explicit_timeout_even_below_the_formula() {
         let ceiling = magi_rs::magi::AGENT_TIMEOUT_SECS;
-        let decision = magi_rs::magi::resolve_run_timeout(Some(1), ceiling);
+        let decision = magi_rs::magi::resolve_run_timeout(Some(1), ceiling, 0, false);
         assert_eq!(
             consult_deadline(&decision),
             Duration::from_secs(1),
@@ -9028,14 +9045,40 @@ mod tests {
         /// a check that ignored it would not accidentally agree.
         const CEILING: u64 = 60;
 
+        /// A config declaring [`CEILING`], so the check reads its scale where production reads it.
+        fn cfg_with_ceiling() -> MagiConfig {
+            MagiConfig::from_toml_str(&format!(
+                "[magi]
+agent_timeout_secs = {CEILING}
+"
+            ))
+            .expect("a ceiling inside the admissible range must parse")
+        }
+
+        /// The formula minimum for that config, resolved THROUGH `timeout_scale` — the same
+        /// resolution production uses.
+        ///
+        /// Deriving it rather than writing a literal is deliberate here and would be wrong in
+        /// `magi::tests`: there the arithmetic itself is under test and is pinned against literal
+        /// values; here what is under test is the WIRING — that the decision consults the config
+        /// at all — so an expectation computed any other way would just be a second, drifting
+        /// copy of the formula.
+        fn formula_minimum() -> u64 {
+            let (ceiling, max_rotations, retry_disabled) = timeout_scale(&cfg_with_ceiling());
+            magi_rs::magi::headless_consult_timeout_secs(ceiling, max_rotations, retry_disabled)
+        }
+
         /// A deadline below `classification + 2 × ceiling + slack` is reported, and the warning
         /// names the computed minimum so the operator can act on it.
         #[test]
         fn a_deadline_below_the_formula_is_reported_with_its_minimum() {
-            let minimum = magi_rs::magi::headless_consult_timeout_secs(CEILING);
-            let decision =
-                query_timeout_decision(Some(Duration::from_secs(minimum - 1)), true, CEILING)
-                    .expect("a bounded, consult-capable run is exactly the checked case");
+            let minimum = formula_minimum();
+            let decision = query_timeout_decision(
+                Some(Duration::from_secs(minimum - 1)),
+                true,
+                &cfg_with_ceiling(),
+            )
+            .expect("a bounded, consult-capable run is exactly the checked case");
 
             assert!(decision.below_formula);
             let warning = decision.warning.expect("below the formula ⇒ a warning");
@@ -9045,14 +9088,50 @@ mod tests {
             );
         }
 
+        /// REQ-R20: the run's minimum FOLLOWS `[magi].max_rotations`, so a deadline that was
+        /// generous before rotation existed can become too short once a pool is declared.
+        ///
+        /// Without this, `query_timeout_decision` could read the ceiling and ignore the rotation
+        /// ceiling entirely and every other test here would still pass — they all compare against
+        /// a minimum derived the same way. This one compares two DIFFERENT configs against each
+        /// other, which is the only shape that can catch it.
+        #[test]
+        fn the_minimum_grows_with_the_declared_rotation_ceiling() {
+            let no_rotation = MagiConfig::from_toml_str(&format!(
+                "[magi]\nagent_timeout_secs = {CEILING}\nmax_rotations = 0\n"
+            ))
+            .expect("valid");
+            let two_rotations = MagiConfig::from_toml_str(&format!(
+                "[magi]\nagent_timeout_secs = {CEILING}\nmax_rotations = 2\n"
+            ))
+            .expect("valid");
+
+            let minimum_of = |cfg: &MagiConfig| {
+                // A deadline of 1 s is below any minimum, so the decision always carries one.
+                query_timeout_decision(Some(Duration::from_secs(1)), true, cfg)
+                    .expect("bounded and consult-capable")
+                    .warning
+                    .expect("below the formula ⇒ a warning naming the minimum")
+            };
+
+            assert_ne!(
+                minimum_of(&no_rotation),
+                minimum_of(&two_rotations),
+                "declaring a rotation ceiling MUST move the minimum; if these agree, the \
+                 decision is ignoring max_rotations and a healthy consult that rotates will be \
+                 cut off — a symptom that only appears WHEN a rotation also happened"
+            );
+        }
+
         /// The operator's value is never overridden: a wall-clock cap is an instruction, not a
         /// safety invariant.
         #[test]
         fn the_requested_deadline_is_obeyed_even_when_it_is_too_short() {
-            let minimum = magi_rs::magi::headless_consult_timeout_secs(CEILING);
+            let minimum = formula_minimum();
             let asked = minimum - 1;
             let decision =
-                query_timeout_decision(Some(Duration::from_secs(asked)), true, CEILING).unwrap();
+                query_timeout_decision(Some(Duration::from_secs(asked)), true, &cfg_with_ceiling())
+                    .unwrap();
             assert_eq!(
                 decision.effective_secs, asked,
                 "obeying the request is the point; the check only adds the heads-up"
@@ -9062,10 +9141,13 @@ mod tests {
         /// A generous deadline warns about nothing.
         #[test]
         fn a_deadline_above_the_formula_is_silent() {
-            let minimum = magi_rs::magi::headless_consult_timeout_secs(CEILING);
-            let decision =
-                query_timeout_decision(Some(Duration::from_secs(minimum + 1)), true, CEILING)
-                    .unwrap();
+            let minimum = formula_minimum();
+            let decision = query_timeout_decision(
+                Some(Duration::from_secs(minimum + 1)),
+                true,
+                &cfg_with_ceiling(),
+            )
+            .unwrap();
             assert!(!decision.below_formula);
             assert!(decision.warning.is_none());
         }
@@ -9075,11 +9157,12 @@ mod tests {
         #[test]
         fn the_check_does_not_apply_without_a_deadline_or_without_a_trio() {
             assert!(
-                query_timeout_decision(None, true, CEILING).is_none(),
+                query_timeout_decision(None, true, &cfg_with_ceiling()).is_none(),
                 "an unbounded run cannot be below any minimum"
             );
             assert!(
-                query_timeout_decision(Some(Duration::from_secs(1)), false, CEILING).is_none(),
+                query_timeout_decision(Some(Duration::from_secs(1)), false, &cfg_with_ceiling())
+                    .is_none(),
                 "with no trio built there is no consult to warn about — warning would be noise"
             );
         }

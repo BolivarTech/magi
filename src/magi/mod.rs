@@ -225,12 +225,54 @@ pub const HEADLESS_TIMEOUT_SLACK_PCT: u64 = 20;
 /// which is what resolves precedence between the declared value and the default. The two inner
 /// layers are DERIVED from that number, never configured (REQ-A04).
 ///
-/// The formula is `classification + 2 × ceiling + slack`. **It is NOT multiplied by 3**: the
-/// mages run in parallel (verified, SC-A04e), so the worst case is that of the slowest mage,
-/// not the sum of the three.
+/// **It is NOT multiplied by 3**: the mages run in parallel (verified, SC-A04e), so the worst
+/// case is that of the slowest mage, not the sum of the three.
+///
+/// # The four nested layers, and why only two of them multiply (REQ-R19/R20, D-R16)
+///
+/// ```text
+/// rotation          1 + max_rotations models        ← multiplies
+///  └─ attempt_model 1 ceiling per attempt, x2 if the corrective schema retry fires
+///      └─ RetryProvider  operation_budget = ceiling x 0.6, max_retries = 3
+///          └─ HTTP client client_timeout  = ceiling x 0.3
+/// ```
+///
+/// **The retry does not multiply the wall-clock**, and that is the part worth stating because it
+/// is counter-intuitive. `attempt_model` wraps `agent.execute_with(provider, …)` in ONE
+/// `tokio::time::timeout` (`orchestrator.rs:1738`), and that `provider` **is** the seat already
+/// wrapped in `RetryProvider` — so the whole retry chain spends budget *inside* a window this
+/// formula has already counted. A factor for `max_retries` would over-dimension the timeout by an
+/// order of magnitude.
+///
+/// **And it survives BECAUSE the scale is derived, not by luck.** `RetryConfig`'s own rustdoc
+/// warns that its shipped defaults (`operation_budget + client_timeout = 600 + 300 = 900` against
+/// a 300 s ceiling) leave every retry **inert** on a hang: the first attempt consumes the whole
+/// budget and none of the retries run. magi-rs does not land there because it sets
+/// `retry.operation_budget = derive_operation_budget(ceiling)`. Passing a `RetryConfig::default()`
+/// without deriving would switch this layer off in silence — no failure, no warning, just no
+/// retries.
+///
+/// # Why a hung model costs ONE ceiling and a schema failure costs TWO
+///
+/// The two `tokio::time::timeout`s in `attempt_model` are sequential, and the second is only
+/// reached if the first **responded** and failed validation. A first attempt that expires returns
+/// `Transport { kind: Timeout }` at once and rotates. Hence `retry_disabled` drops the multiplier
+/// to one attempt per model rather than halving anything.
+///
+/// # Arguments
+/// * `configured_ceiling` - `[magi].agent_timeout_secs`, resolved.
+/// * `max_rotations` - `[magi].max_rotations`, resolved. `0` is the kill-switch and yields the
+///   v0.12.0 value by construction, not by a special case.
+/// * `retry_disabled` - `[magi].retry_disabled`, resolved.
 #[must_use]
-pub fn headless_consult_timeout_secs(configured_ceiling: u64) -> u64 {
-    let dominant = 2 * configured_ceiling; // the formula's larger/dominant term
+pub fn headless_consult_timeout_secs(
+    configured_ceiling: u64,
+    max_rotations: u32,
+    retry_disabled: bool,
+) -> u64 {
+    let attempts_per_model = if retry_disabled { 1 } else { 2 };
+    let models_per_mage = u64::from(max_rotations) + 1;
+    let dominant = attempts_per_model * models_per_mage * configured_ceiling;
     let minimum = CLASSIFY_TIMEOUT_SECS + dominant;
     // §4.9: the slack is 10–30 % of the LARGER TERM, not of the total — over the total it
     // inflates proportionally to the small term, which is not the one that dominates the risk.
@@ -249,9 +291,20 @@ pub struct TimeoutDecision {
 
 /// Resolves the run wall-clock. **It always obeys the explicit value**, and warns when that
 /// value makes it impossible to complete a consult with schema retry.
+///
+/// # Arguments
+/// * `asked` - the explicit `--timeout`, if the operator gave one.
+/// * `configured_ceiling` - `[magi].agent_timeout_secs`, resolved.
+/// * `max_rotations` - `[magi].max_rotations`, resolved (REQ-R20).
+/// * `retry_disabled` - `[magi].retry_disabled`, resolved.
 #[must_use]
-pub fn resolve_run_timeout(asked: Option<u64>, configured_ceiling: u64) -> TimeoutDecision {
-    let minimum = headless_consult_timeout_secs(configured_ceiling);
+pub fn resolve_run_timeout(
+    asked: Option<u64>,
+    configured_ceiling: u64,
+    max_rotations: u32,
+    retry_disabled: bool,
+) -> TimeoutDecision {
+    let minimum = headless_consult_timeout_secs(configured_ceiling, max_rotations, retry_disabled);
     let Some(secs) = asked else {
         return TimeoutDecision {
             effective_secs: minimum,
@@ -394,7 +447,7 @@ mod tests {
         let minimum = CLASSIFY_TIMEOUT_SECS + dominant;
         let slack = dominant * HEADLESS_TIMEOUT_SLACK_PCT / 100;
         assert!(
-            headless_consult_timeout_secs(AGENT_TIMEOUT_SECS) >= minimum + slack,
+            headless_consult_timeout_secs(AGENT_TIMEOUT_SECS, 0, false) >= minimum + slack,
             "the headless default does not cover {minimum}s + slack",
         );
     }
@@ -410,12 +463,13 @@ mod tests {
             let minimum = CLASSIFY_TIMEOUT_SECS + dominant;
             let slack = dominant * HEADLESS_TIMEOUT_SLACK_PCT / 100;
             assert!(
-                headless_consult_timeout_secs(ceiling) >= minimum + slack,
+                headless_consult_timeout_secs(ceiling, 0, false) >= minimum + slack,
                 "ceiling {ceiling}s: the headless minimum does not cover the formula"
             );
         }
         assert!(
-            headless_consult_timeout_secs(120) > headless_consult_timeout_secs(90),
+            headless_consult_timeout_secs(120, 0, false)
+                > headless_consult_timeout_secs(90, 0, false),
             "raising `agent_timeout_secs` MUST raise the minimum; a const would not"
         );
     }
@@ -474,7 +528,7 @@ mod tests {
     #[test]
     fn an_explicit_timeout_below_the_formula_is_obeyed_and_warned_about() {
         let asked = 5_u64;
-        let decision = resolve_run_timeout(Some(asked), AGENT_TIMEOUT_SECS);
+        let decision = resolve_run_timeout(Some(asked), AGENT_TIMEOUT_SECS, 0, false);
         assert_eq!(
             decision.effective_secs, asked,
             "the operator's order is obeyed"
@@ -483,7 +537,8 @@ mod tests {
             .warning
             .expect("a value below the minimum must warn");
         assert!(
-            warning.contains(&headless_consult_timeout_secs(AGENT_TIMEOUT_SECS).to_string()),
+            warning
+                .contains(&headless_consult_timeout_secs(AGENT_TIMEOUT_SECS, 0, false).to_string()),
             "the warning names the minimum the formula required"
         );
         assert!(
@@ -493,14 +548,16 @@ mod tests {
         );
 
         assert!(
-            resolve_run_timeout(None, AGENT_TIMEOUT_SECS)
+            resolve_run_timeout(None, AGENT_TIMEOUT_SECS, 0, false)
                 .warning
                 .is_none(),
             "the default does not warn about itself"
         );
-        assert!(resolve_run_timeout(Some(1_000), AGENT_TIMEOUT_SECS)
-            .warning
-            .is_none());
+        assert!(
+            resolve_run_timeout(Some(1_000), AGENT_TIMEOUT_SECS, 0, false)
+                .warning
+                .is_none()
+        );
     }
 
     /// §4.9: every value falls within its admissible range.

@@ -2170,7 +2170,7 @@ mod tests {
             "base_url = \"http://a/v1\"\n[magi]\nbase_url = \"http://b/v1\"\n",
         )
         .expect("valid toml");
-        let dec = resolve_run_timeout(None, AGENT_TIMEOUT_SECS);
+        let dec = resolve_run_timeout(None, AGENT_TIMEOUT_SECS, 0, false);
 
         let ctx = RunContext::build(&diverged, &resolution(true), &dec);
         assert!(ctx.endpoint_divergence);
@@ -2202,7 +2202,7 @@ mod tests {
             "base_url = \"http://a/v1\"\n[magi]\nbase_url = \"http://b/v1\"\n",
         )
         .expect("valid toml");
-        let dec = resolve_run_timeout(None, AGENT_TIMEOUT_SECS);
+        let dec = resolve_run_timeout(None, AGENT_TIMEOUT_SECS, 0, false);
 
         let ctx = RunContext::build(&diverged, &resolution(true), &dec);
         assert!(

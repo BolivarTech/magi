@@ -2771,7 +2771,7 @@ mod tests {
         let cfg = MagiConfig::default();
         let ceiling = magi_rs::magi::AGENT_TIMEOUT_SECS;
         // An `asked` well below `headless_consult_timeout_secs(ceiling)`.
-        let decision = magi_rs::magi::resolve_run_timeout(Some(1), ceiling);
+        let decision = magi_rs::magi::resolve_run_timeout(Some(1), ceiling, 0, false);
         assert!(
             decision.below_formula,
             "test setup: this must actually trigger the formula check"
@@ -2811,7 +2811,7 @@ mod tests {
     async fn sc_a04d_warning_reaches_the_notice_sink_from_a_real_run() {
         let cfg = MagiConfig::default();
         let ceiling = magi_rs::magi::AGENT_TIMEOUT_SECS;
-        let decision = magi_rs::magi::resolve_run_timeout(Some(1), ceiling);
+        let decision = magi_rs::magi::resolve_run_timeout(Some(1), ceiling, 0, false);
         assert!(
             decision.below_formula && decision.warning.is_some(),
             "test setup: this must actually trigger the warning"
@@ -2853,7 +2853,7 @@ mod tests {
         let cfg = MagiConfig::default();
         let ceiling = magi_rs::magi::AGENT_TIMEOUT_SECS;
 
-        let generous = magi_rs::magi::resolve_run_timeout(Some(100_000), ceiling);
+        let generous = magi_rs::magi::resolve_run_timeout(Some(100_000), ceiling, 0, false);
         assert!(
             !generous.below_formula && generous.warning.is_none(),
             "test setup: this must NOT trigger the formula check"
@@ -2883,7 +2883,7 @@ mod tests {
             sink_generous.emitted()
         );
 
-        let absent = magi_rs::magi::resolve_run_timeout(None, ceiling);
+        let absent = magi_rs::magi::resolve_run_timeout(None, ceiling, 0, false);
         assert!(
             absent.warning.is_none(),
             "test setup: no --timeout, no warning"
