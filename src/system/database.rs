@@ -522,6 +522,12 @@ pub(crate) fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
             key TEXT PRIMARY KEY,
             value BLOB NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS model_capabilities (
+            endpoint TEXT NOT NULL,
+            model TEXT NOT NULL,
+            capability_blob TEXT NOT NULL,
+            PRIMARY KEY (endpoint, model)
+        );
         CREATE TABLE IF NOT EXISTS memories (
             id TEXT PRIMARY KEY,
             session_id TEXT NOT NULL,
