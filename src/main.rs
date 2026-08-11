@@ -6785,6 +6785,183 @@ mod tests {
             }
         }
 
+        /// Resolves an arbitrary flat `base_url` into a [`ResolvedEndpoint`], for the tests that
+        /// need a real listening socket rather than the fixed `localhost:11434` above.
+        fn endpoint_at(base_url: &str) -> ResolvedEndpoint {
+            EndpointTemplate::parse(base_url, Scope::Root)
+                .expect("a flat test URL must parse")
+                .resolve(&mut NoVaultInScope, Scope::Magi)
+                .expect("a URL with no placeholders needs no vault")
+        }
+
+        /// A local listener that accepts one connection and **answers nothing**, so a request
+        /// against it can only end by the CLIENT's timeout.
+        ///
+        /// `127.0.0.1:0` picks a free port and the whole exchange stays on the machine — no real
+        /// network, which R-R05 forbids. The returned guard keeps the task alive; dropping it
+        /// closes the listener.
+        async fn silent_listener() -> (String, tokio::task::JoinHandle<()>) {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("binding a loopback port must succeed");
+            let addr = listener
+                .local_addr()
+                .expect("a bound listener has an address");
+            let guard = tokio::spawn(async move {
+                if let Ok((socket, _)) = listener.accept().await {
+                    // Held open, unanswered, for as long as the test runs.
+                    let _held = socket;
+                    std::future::pending::<()>().await;
+                }
+            });
+            (format!("http://{addr}"), guard)
+        }
+
+        /// A local listener that records the FIRST request line it receives, answers 404 so the
+        /// client stops waiting, and hands that line back.
+        ///
+        /// This is what makes "both spellings reach the same endpoint" an observation instead of
+        /// a restatement of the code: the assertion reads the path the provider actually put on
+        /// the wire.
+        async fn recording_listener() -> (String, tokio::task::JoinHandle<String>) {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("binding a loopback port must succeed");
+            let addr = listener
+                .local_addr()
+                .expect("a bound listener has an address");
+            let handle = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.expect("the client must connect");
+                let mut buf = vec![0u8; 1024];
+                let read = socket.read(&mut buf).await.unwrap_or(0);
+                let text = String::from_utf8_lossy(&buf[..read]).into_owned();
+                let _ = socket
+                    .write_all(b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\n\r\n")
+                    .await;
+                text.lines().next().unwrap_or_default().to_owned()
+            });
+            (format!("http://{addr}"), handle)
+        }
+
+        /// SC-R48: the client timeout a seat is built with is the one it HONOURS — never the
+        /// crate's 300 s default.
+        ///
+        /// `OllamaProvider::new` delegates to `with_timeout(..., DEFAULT_CLIENT_TIMEOUT)` = 300 s,
+        /// which breaks `operation_budget + client_timeout <= agent_timeout_secs`. Picking the
+        /// wrong constructor COMPILES, RUNS, and breaks the derived scale SILENTLY — the exact
+        /// defect D-A07 existed to prevent, which survives its reversal (D-R12).
+        ///
+        /// Observed through BEHAVIOUR, not through the value: neither `reqwest::Client` nor
+        /// `OllamaProvider` exposes its timeout, so a test that re-reads the argument it just
+        /// passed would assert nothing. This one points the seat at a socket that never answers
+        /// and requires the request to end anyway.
+        ///
+        /// The discriminating property is **"not the crate's 300 s"**, not "under 400 ms", so the
+        /// deadline is generous on purpose: that keeps the test meaningful AND immune to load
+        /// (R-R05 — wait on conditions, never on durations).
+        #[tokio::test]
+        async fn the_ollama_seat_honours_the_client_timeout_it_was_given() {
+            let (base, _guard) = silent_listener().await;
+            let mut notices = Vec::new();
+            let provider = build_native_provider(
+                ProviderKind::Ollama,
+                &endpoint_at(&base),
+                "any-model",
+                None,
+                Duration::from_millis(400),
+                &mut notices,
+            )
+            .expect("ollama is keyless: it must build with no credentials");
+
+            let outcome = tokio::time::timeout(
+                Duration::from_secs(30),
+                provider.complete("s", "u", &CompletionConfig::default()),
+            )
+            .await;
+
+            let ended = outcome.expect(
+                "the request must end by the client timeout the seat was BUILT with; \
+                 hitting this deadline means the 300 s crate default reached the seat",
+            );
+            assert!(
+                ended.is_err(),
+                "a server that never answers must surface as an error, not a completion"
+            );
+        }
+
+        /// SC-R49: both `base_url` spellings reach the same completions endpoint. Under
+        /// `kind = "ollama"` a URL without `/v1` used to end in 404.
+        #[tokio::test]
+        async fn both_base_url_spellings_reach_the_same_completions_endpoint() {
+            for suffix in ["", "/v1"] {
+                let (host, recorded) = recording_listener().await;
+                let mut notices = Vec::new();
+                let provider = build_native_provider(
+                    ProviderKind::Ollama,
+                    &endpoint_at(&format!("{host}{suffix}")),
+                    "any-model",
+                    None,
+                    Duration::from_secs(10),
+                    &mut notices,
+                )
+                .expect("ollama is keyless");
+                // The 404 is expected; what matters is the path that reached the wire.
+                let _ = provider
+                    .complete("s", "u", &CompletionConfig::default())
+                    .await;
+                let line = recorded.await.expect("the listener task must finish");
+                assert!(
+                    line.starts_with("POST /v1/chat/completions"),
+                    "base_url ending in {suffix:?} put {line:?} on the wire"
+                );
+            }
+        }
+
+        /// SC-R50: `openai-compat` does NOT change transport, even pointing at an Ollama daemon.
+        /// The partition is by DECLARED kind, never by what happens to be on the other side.
+        ///
+        /// Also pins the observable REQ-R30 declares changed, and which the CHANGELOG has to
+        /// name: under `kind = "ollama"` the provider now identifies itself as `"ollama"` in
+        /// errors and reports, where it used to say `"openai-compat"`.
+        #[test]
+        fn the_declared_kind_decides_the_transport_not_the_daemon_behind_it() {
+            let mut notices = Vec::new();
+            let creds = FixedCreds {
+                openai: Some("test-key".to_string()),
+                anthropic: None,
+            };
+            let compat = build_native_provider(
+                ProviderKind::OpenAiCompat,
+                &test_endpoints().magi,
+                "any-model",
+                Some(&creds),
+                Duration::from_secs(10),
+                &mut notices,
+            )
+            .expect("openai-compat with a key must build");
+            assert_eq!(
+                compat.name(),
+                "openai-compat",
+                "an Ollama daemon behind the URL must not change the declared transport"
+            );
+
+            let ollama = build_native_provider(
+                ProviderKind::Ollama,
+                &test_endpoints().magi,
+                "any-model",
+                None,
+                Duration::from_secs(10),
+                &mut notices,
+            )
+            .expect("ollama is keyless");
+            assert_eq!(
+                ollama.name(),
+                "ollama",
+                "REQ-R30: the ollama kind completes through OllamaProvider now"
+            );
+        }
+
         /// Fixed test credentials, no env or vault behind them.
         struct FixedCreds {
             openai: Option<String>,
