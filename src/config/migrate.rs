@@ -653,4 +653,80 @@ mod tests {
     fn is_key_at_rejects_a_longer_key_sharing_the_prefix() {
         assert!(!is_key_at("provider_timeout = 5", "provider"));
     }
+
+    /// A `magi.toml` carrying **all three** retired v0.11.0 patterns at once: `provider =
+    /// "openai"` at the root, `[openai].base_url` and `[headless].tool_result_cap_bytes`.
+    ///
+    /// One shared literal because both retirement tests need the same file and a second copy
+    /// could drift from this one, which would let one of them keep passing for the wrong reason.
+    const V0_11_0_SAMPLE: &str = "provider = \"openai\"\n\
+                                  [openai]\n\
+                                  base_url = \"http://localhost:11434/v1\"\n\
+                                  [headless]\n\
+                                  tool_result_cap_bytes = 65536\n";
+
+    /// SC-R20: a v0.11.0 file no longer receives ITS guided error — the patterns retired with the
+    /// milestone that owed them. It gets generic serde errors for its own keys instead, and the
+    /// CHANGELOG says so.
+    ///
+    /// **What this test can and cannot catch (B16 honesty).** Once the pattern table is empty,
+    /// `detect_migrations` reports nothing for *any* input, so no mutation of the current body
+    /// turns this red — it is a **regression pin**, not a behavioral guardian: it goes red the day
+    /// someone re-adds a v0.11.0 pattern to the table (verified by mutation: restoring the
+    /// `provider = "openai"` arm alone makes it fail).
+    #[test]
+    fn the_three_v0_11_0_patterns_are_no_longer_detected() {
+        let found = detect_migrations(V0_11_0_SAMPLE);
+        assert!(
+            found.is_empty(),
+            "v0.11.0 patterns must no longer be detected, got {found:?}"
+        );
+    }
+
+    /// The retirement removes the **patterns**, never the **pass**: `detect_migrations` and
+    /// [`render_migration_error`] keep their signatures and their behavior, so a later task can
+    /// reload the table with a new generation's patterns without rebuilding the reporting side.
+    ///
+    /// **Why the emptiness precondition is part of THIS test and not just a duplicate of the one
+    /// above.** It is what makes the assertion a *survival* claim — "the renderer still works even
+    /// though the pass itself now declares no pattern" — instead of a plain rendering test that
+    /// would have been just as green before the retirement. It is also what makes this test red
+    /// before Green, so the guardian was watched failing like any other.
+    ///
+    /// Mutation that verifies it: deleting the per-migration loop, the backup advisory or the
+    /// minimal-config block from [`render_migration_error`] turns it red.
+    #[test]
+    fn the_reporting_mechanism_still_renders_after_the_patterns_are_retired() {
+        assert!(
+            detect_migrations(V0_11_0_SAMPLE).is_empty(),
+            "precondition: no pattern is declared today"
+        );
+
+        let rendered = render_migration_error(&[Migration {
+            key: "[magi].melchior_lineage",
+            line: 7,
+            correction: "melchior_lineage = \"alibaba\"".to_owned(),
+        }]);
+
+        assert!(
+            rendered.contains("[magi].melchior_lineage"),
+            "the caller's key must reach the message: {rendered}"
+        );
+        assert!(
+            rendered.contains("line 7"),
+            "the caller's line must reach the message: {rendered}"
+        );
+        assert!(
+            rendered.contains("melchior_lineage = \"alibaba\""),
+            "the caller's correction must reach the message: {rendered}"
+        );
+        assert!(
+            rendered.contains(BACKUP_ADVISORY),
+            "the backup advisory is part of the frame, not of any pattern: {rendered}"
+        );
+        assert!(
+            rendered.contains(MINIMAL_VALID_CONFIG),
+            "so is the ready-to-paste minimal config: {rendered}"
+        );
+    }
 }
