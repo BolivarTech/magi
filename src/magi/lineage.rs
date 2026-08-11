@@ -78,6 +78,19 @@ impl Lineage {
     }
 }
 
+impl From<Lineage> for magi_core::rotation::Lineage {
+    /// Hands the validated label to magi-core, which owns the type the builder registers.
+    ///
+    /// The two types exist for different reasons and neither replaces the other: magi-core's is
+    /// **infallible** — `Lineage::new("")` is a valid *value*, rejected later at
+    /// `MagiBuilder::build()` — while this crate's rejects blank at construction, so a missing
+    /// declaration is caught while the configuration key that produced it is still known. The
+    /// conversion goes one way on purpose: a label that reached magi-core has already passed here.
+    fn from(lineage: Lineage) -> Self {
+        magi_core::rotation::Lineage::new(lineage.0)
+    }
+}
+
 impl fmt::Display for Lineage {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0)

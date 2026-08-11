@@ -14,6 +14,7 @@ use magi_core::schema::{AgentName, Mode};
 use magi_rs::magi::endpoint::{EndpointError, EndpointTemplate};
 use magi_rs::magi::gate::{GateOverrides, GateThresholds};
 use magi_rs::magi::kind::{ProviderKind, ProviderKindParseError};
+use magi_rs::magi::lineage::{Lineage, LineageError};
 use magi_rs::magi::mode::{ModeExt, ModeParseError};
 use magi_rs::magi::{min_viable_output_cap, AGENT_TIMEOUT_MAX_SECS, AGENT_TIMEOUT_MIN_SECS};
 use serde::Deserialize;
@@ -535,6 +536,66 @@ impl MagiSectionConfig {
                 self.caspar_model.clone().unwrap_or_else(|| fallback.into()),
             ),
         ]
+    }
+
+    /// The independent failure domain of one seat: the declared label, or the built-in one when
+    /// the seat declares no model (REQ-R01/R02).
+    ///
+    /// # The trigger rule, and why it has two halves
+    ///
+    /// A seat that **declares a model** owes a lineage: the label decides every rotation
+    /// eligibility question, it is a semantic choice of the operator, and there is no observable
+    /// datum to derive it from without inventing one (R-R03). A seat that **declares no model**
+    /// runs the built-in model, whose lineage is built in too — so it inherits both together and
+    /// owes nothing. Without that second half the default configuration, belonging to whoever
+    /// never touched `[magi]`, would register three seats with no lineage, and
+    /// `MagiBuilder::build()` rejects a blank one outright.
+    ///
+    /// A declared lineage wins in both cases: the operator who bothered to label a seat is the
+    /// authority on what its failure domain is.
+    ///
+    /// Blank counts as **absent**, never invalid — the rule every text key has followed since MS2.
+    ///
+    /// # Errors
+    ///
+    /// [`LineageError::Missing`] naming the configuration key, when a seat declares a model and no
+    /// lineage. `MagiConfig::load` already rejects that file through
+    /// [`migrate::missing_seat_lineages`], which reports all three seats at once; this is the same
+    /// rule enforced at the point of use, for the crate-internal builder that bypasses `load`.
+    #[must_use = "the resolved lineage is what the seat registers with"]
+    pub fn lineage_of_seat(&self, seat: AgentName) -> Result<Lineage, LineageError> {
+        let (declared, model, key, built_in) = match seat {
+            AgentName::Melchior => (
+                &self.melchior_lineage,
+                &self.melchior_model,
+                "melchior_lineage",
+                crate::defaults::DEFAULT_MAGI_MELCHIOR_LINEAGE,
+            ),
+            AgentName::Balthasar => (
+                &self.balthasar_lineage,
+                &self.balthasar_model,
+                "balthasar_lineage",
+                crate::defaults::DEFAULT_MAGI_BALTHASAR_LINEAGE,
+            ),
+            AgentName::Caspar => (
+                &self.caspar_lineage,
+                &self.caspar_model,
+                "caspar_lineage",
+                crate::defaults::DEFAULT_MAGI_CASPAR_LINEAGE,
+            ),
+        };
+
+        match declared.as_deref().map(Lineage::parse) {
+            // Declared and non-blank: the operator's label wins, trimmed.
+            Some(Ok(lineage)) => Ok(lineage),
+            // Absent or blank. `Lineage::parse` cannot name the key that was empty — it is a value
+            // parser — so the error is remapped here, where the key IS known.
+            _ if model.as_deref().is_some_and(|m| !m.trim().is_empty()) => {
+                Err(LineageError::Missing { key })
+            }
+            // No model declared either: the seat runs the built-in model and inherits its lineage.
+            _ => Lineage::parse(built_in),
+        }
     }
 
     /// Model of the **builder fallback** — the one magi-core would use for an agent without an

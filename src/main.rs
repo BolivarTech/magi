@@ -43,6 +43,7 @@ use magi_core::orchestrator::{Magi, MagiBuilder};
 use magi_core::provider::{LlmProvider, RetryConfig, RetryProvider};
 use magi_core::providers::claude::ClaudeProvider;
 use magi_core::providers::openai_compat::OpenAiCompatibleProvider;
+use magi_core::rotation::Lineage as CoreLineage;
 use magi_core::schema::{AgentName, Mode};
 use magi_rs::headless::exit::exit_code as headless_exit_code;
 use magi_rs::headless::input::{parse_input, read_input_bounded, InputFormat};
@@ -57,6 +58,7 @@ use magi_rs::headless::types::{ErrorKind, RunOutcome, StopReason};
 use magi_rs::headless::HeadlessError;
 use magi_rs::magi::endpoint::{EndpointTemplate, ResolvedEndpoint, Scope};
 use magi_rs::magi::kind::{ProviderKind, ProviderKindParseError};
+use magi_rs::magi::lineage::LineageError;
 use magi_rs::magi::probe::{
     derive_warn_tokens, min_mage_window, probe_models, Measurement, OllamaProbeFactory,
     ProbeFactory,
@@ -2196,6 +2198,18 @@ enum SeatError {
     /// [`redact_foreign_error`].
     #[error("could not build the HTTP client: {0}")]
     Transport(SafeErrorText),
+    /// The seat declares a model but not the lineage that model belongs to (REQ-R02).
+    ///
+    /// A `SeatError` rather than its own `TrioError` variant so it joins the mechanism that
+    /// reports **every** failing seat at once: an operator who forgot one lineage has usually
+    /// forgotten more than one, and discovering them one start at a time costs a start each.
+    /// `MagiConfig::load` rejects such a file earlier and more completely; this arm is the same
+    /// rule enforced at the point of use, for the crate-internal builder that bypasses `load`.
+    #[error("missing lineage: declare [magi].{key} for this seat's model")]
+    MissingLineage {
+        /// Configuration key the operator has to add.
+        key: &'static str,
+    },
 }
 
 /// Renders ONE `(seat, cause)` as `"Melchior: missing credential …"`.
@@ -2605,6 +2619,25 @@ fn seat_wiring_trace() -> Vec<(AgentName, String, bool)> {
     SEAT_WIRING_TRACE.with(|t| t.borrow().clone())
 }
 
+// Test-only (Task 3.1): the lineage each seat was REGISTERED with — recorded in the loop that
+// calls `with_agent`, not in the one that builds the providers. The two facts have two different
+// sites and each guardian is anchored at its own: the retry wrap can only disappear where the
+// wrapping happens, and the lineage can only be wrong where the registration happens. Reading it
+// from the built `Magi` is not an option — `MagiBuilder::agent_lineages` is private and the
+// orchestrator exposes no reader (R-A01 forbids touching that crate).
+#[cfg(test)]
+thread_local! {
+    static SEAT_LINEAGE_TRACE: std::cell::RefCell<Vec<(AgentName, String)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Test-only: the lineages the LAST call to `build_magi_orchestrator` registered in this thread.
+/// See [`SEAT_LINEAGE_TRACE`].
+#[cfg(test)]
+fn seat_lineage_trace() -> Vec<(AgentName, String)> {
+    SEAT_LINEAGE_TRACE.with(|t| t.borrow().clone())
+}
+
 /// Builds the MAGI trio with the NATIVE providers of magi-core (REQ-A01).
 ///
 /// The adapter disappears and with it the system-prompt doubling: each mage receives its prompt
@@ -2668,17 +2701,28 @@ fn build_magi_orchestrator(
 
     // The THREE seats are built first, so that ALL that fail can be reported.
     let mut failures: Vec<(AgentName, SeatError)> = Vec::new();
-    let mut seats: Vec<(AgentName, Arc<dyn LlmProvider>)> = Vec::new();
+    let mut seats: Vec<(AgentName, Arc<dyn LlmProvider>, CoreLineage)> = Vec::new();
 
     // Test-only (I2, fix round 2): clears the trace of the PREVIOUS call in this thread before
     // starting — a test's `seat_wiring_trace()` must see ONLY what THIS call wired.
     #[cfg(test)]
     SEAT_WIRING_TRACE.with(|t| t.borrow_mut().clear());
+    #[cfg(test)]
+    SEAT_LINEAGE_TRACE.with(|t| t.borrow_mut().clear());
 
     // `env > TOML > backend`, via `seats_with_env_overrides` — the SAME resolution
     // `orchestrate_probes` now applies (B3, sixth-pass gate finding S8), so the two cannot see
     // a different model for the same seat.
     for (seat, model) in seats_with_env_overrides(cfg, backend_model, env_overrides) {
+        // REQ-R01/R02: resolved BEFORE the provider, so a seat missing its lineage joins the same
+        // "report every failing seat at once" pass instead of aborting on the first one.
+        let lineage = match cfg.magi().lineage_of_seat(seat) {
+            Ok(l) => CoreLineage::from(l),
+            Err(LineageError::Missing { key }) => {
+                failures.push((seat, SeatError::MissingLineage { key }));
+                continue;
+            }
+        };
         match build_native_provider(kind, base, &model, creds, client_timeout, notices) {
             // REQ-A03: `MagiBuilder::build()` does NOT wrap anything, so without this the retry
             // the trio inherited from the adapter is lost.
@@ -2694,7 +2738,7 @@ fn build_magi_orchestrator(
                 // without touching magi-core (R-A01).
                 #[cfg(test)]
                 SEAT_WIRING_TRACE.with(|t| t.borrow_mut().push((seat, model.clone(), true)));
-                seats.push((seat, wrapped));
+                seats.push((seat, wrapped, lineage));
             }
             Err(cause) => failures.push((seat, cause)),
         }
@@ -2744,8 +2788,17 @@ fn build_magi_orchestrator(
         builder = builder.with_retry_disabled();
     }
 
-    for (seat, provider) in seats {
-        builder = builder.with_provider(seat, provider);
+    // REQ-R01: `with_agent`, not `with_provider` — the only door that carries the rotation
+    // diversity key. Note that `with_agent` also does `primary_probes.remove(&agent)` ("a plain
+    // primary declares no probe", `orchestrator.rs:309-320`), so once Phase 6 registers probes
+    // through `with_agent_and_probe`, a plain `with_agent` for the SAME seat afterwards would
+    // discard that probe in silence. Order is load-bearing here.
+    for (seat, provider, lineage) in seats {
+        // Recorded ON THE SAME loop that registers, for the same reason the wrap trace is
+        // recorded on the branch that wraps: a guardian anchored anywhere else stops guarding.
+        #[cfg(test)]
+        SEAT_LINEAGE_TRACE.with(|t| t.borrow_mut().push((seat, lineage.as_str().to_owned())));
+        builder = builder.with_agent(seat, provider, lineage);
     }
 
     builder
@@ -7042,7 +7095,11 @@ mod tests {
 
             let registered: std::collections::BTreeMap<AgentName, String> =
                 seat_lineage_trace().into_iter().collect();
-            assert_eq!(registered.len(), 3, "all three seats must declare a lineage");
+            assert_eq!(
+                registered.len(),
+                3,
+                "all three seats must declare a lineage"
+            );
             for (seat, expected) in [
                 (AgentName::Melchior, "declared-melchior"),
                 (AgentName::Balthasar, "declared-balthasar"),
