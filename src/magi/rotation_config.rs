@@ -1,4 +1,3 @@
-
 // Author: Julian Bolivar
 // Version: 1.0.0
 // Date: 2026-08-11
@@ -118,9 +117,45 @@ pub fn validate_diversity(
     pool: &[FallbackEntry],
     enforce: bool,
 ) -> Result<Vec<Notice>, DiversityError> {
-    // STUB (Red phase): no real logic yet.
-    let _ = (seats, pool, enforce);
-    Ok(Vec::new())
+    let mut notices = Vec::new();
+
+    // Distinctness is required regardless of whether a pool exists or rotation is enabled:
+    // three mages in the same lineage provide no ensemble benefit.
+    let mut by_lineage: Vec<(Lineage, Vec<AgentName>)> = Vec::new();
+    for (name, lineage) in seats {
+        match by_lineage.iter_mut().find(|(l, _)| l == lineage) {
+            Some((_, names)) => names.push(*name),
+            None => by_lineage.push((lineage.clone(), vec![*name])),
+        }
+    }
+    for (lineage, names) in by_lineage {
+        // Not enforced ⇒ a shared lineage is not even reported. Coverage notices are the only soft
+        // signal, so the operator who deliberately relaxed this setting is not nagged about it.
+        if names.len() > 1 && enforce {
+            return Err(DiversityError::NonDistinctSeats {
+                seats: names,
+                lineage,
+            });
+        }
+    }
+
+    // Coverage only matters when there is a pool to rotate into.
+    if !pool.is_empty() {
+        let uncovered = seats_without_coverage(seats, pool);
+        if !uncovered.is_empty() {
+            if enforce {
+                return Err(DiversityError::UncoveredSeats { seats: uncovered });
+            }
+            notices.push(Notice::resolution(format!(
+                "the seats {} have no fallback coverage; every seat must be rotatable to a \
+                 different lineage. Add fallback entries covering these seats, declare finer \
+                 lineage labels by model family, or set enforce_diversity to false.",
+                seat_names(&uncovered)
+            )));
+        }
+    }
+
+    Ok(notices)
 }
 
 /// Unit tests for `FallbackEntry` deserialization and diversity validation.
@@ -210,8 +245,8 @@ mod tests {
             ("balthasar", "anthropic"),
             ("caspar", "anthropic"),
         ]);
-        let err = validate_diversity(&seats, &[], true)
-            .expect_err("same lineage must fail under true");
+        let err =
+            validate_diversity(&seats, &[], true).expect_err("same lineage must fail under true");
         let msg = err.to_string();
         assert!(
             msg.contains("melchior") && msg.contains("balthasar") && msg.contains("caspar"),
@@ -262,4 +297,3 @@ mod tests {
         assert!(validate_diversity(&seats, &pool_of(&[("m", "x")]), false).is_ok());
     }
 }
-
