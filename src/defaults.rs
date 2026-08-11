@@ -53,10 +53,9 @@ pub const DEFAULT_EMBEDDING_MODEL: &str = "nomic-embed-text-v2-moe:latest";
 
 // ── Lineage rotation (MS3) ────────────────────────────────────────────────────
 
-// The three constants below have no production caller YET: their consumers are later tasks of this
-// milestone (seat registration, pool construction, guard resolution). `cfg(test)` states that fact
-// rather than hiding it — an `#[allow(dead_code)]` or a fabricated caller would both be lies the
-// linter cannot catch. Each is un-gated by the task that first reads it in production.
+// These three were `cfg(test)` while nothing in production read them — the honest way to say "no
+// caller yet", as opposed to an `#[allow(dead_code)]` or a fabricated caller, which are both lies
+// the linter cannot catch. The scaffold below is that first production caller, so the gate is gone.
 
 /// Fallback models a mage may rotate through before its run degrades (REQ-R05).
 ///
@@ -69,7 +68,6 @@ pub const DEFAULT_EMBEDDING_MODEL: &str = "nomic-embed-text-v2-moe:latest";
 /// escape valve already shipped: `--timeout 300` with a notice naming the computed minimum.
 ///
 /// **`0` is the kill-switch** and must stay reachable: it restores v0.12.0 behaviour exactly.
-#[cfg(test)]
 pub const DEFAULT_MAX_ROTATIONS: u32 = 2;
 
 /// Whether a candidate whose context window could not be measured is refused (REQ-R11).
@@ -78,7 +76,6 @@ pub const DEFAULT_MAX_ROTATIONS: u32 = 2;
 /// has not warmed up answers no probe inside the 5 s ceiling, so with the guard on, the first run
 /// anyone makes would find no eligible candidate. That is the worst possible first impression and
 /// it is transitory.
-#[cfg(test)]
 pub const DEFAULT_STRICT_CONTEXT_GUARD: bool = false;
 
 /// Whether distinct lineages are required rather than merely encouraged (REQ-R29).
@@ -90,8 +87,23 @@ pub const DEFAULT_STRICT_CONTEXT_GUARD: bool = false;
 ///
 /// This key is **exclusive to magi-rs**: magi-core treats the lineage as an opaque string and is
 /// agnostic to it, so the value is never passed down.
-#[cfg(test)]
 pub const DEFAULT_ENFORCE_DIVERSITY: bool = true;
+
+/// Fallback pool that `magi init` scaffolds, ordered strongest to weakest (REQ-R27).
+///
+/// **Every label here is one NO SEAT HAS**, and that is the point rather than a stylistic choice.
+/// An entry whose lineage matches a seat covers **only that seat**; an entry with a foreign label
+/// covers **all three**. Three foreign labels therefore buy three-way coverage for the same three
+/// declared lines that a matching-label pool would spend one per seat.
+///
+/// The scaffold ships this pool **ACTIVE, not commented**: a commented pool next to a live
+/// `max_rotations` tells the operator they have a safety net while they silently fall back to
+/// no-rotation behaviour — the same shape of defect as a setting that is declared and not applied.
+pub const DEFAULT_SCAFFOLD_POOL: [(&str, &str); 3] = [
+    ("glm-5.2:cloud", "zhipu"),
+    ("minimax-m3:cloud", "minimax"),
+    ("gemma4:cloud", "google"),
+];
 
 // ── Headless mode constants ───────────────────────────────────────────────────
 //
@@ -219,6 +231,25 @@ pub fn render_default_magi_toml() -> String {
          # true = launch MAGI consult automatically (announces in TUI); \
          false = ask before each autonomous launch (default). \
          The explicit /consult TUI command is always user-initiated and never gated."
+    )
+    .unwrap();
+    writeln!(out).unwrap();
+    writeln!(
+        out,
+        "# Rotation. 0 disables it and restores the pre-rotation behaviour exactly."
+    )
+    .unwrap();
+    writeln!(out, "max_rotations   = {DEFAULT_MAX_ROTATIONS}").unwrap();
+    writeln!(
+        out,
+        "# enforce_diversity = {DEFAULT_ENFORCE_DIVERSITY}  \
+         # require three distinct lineages; set false if every model you have shares one"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "# strict_context_guard = {DEFAULT_STRICT_CONTEXT_GUARD}  \
+         # refuse candidates whose context window could not be measured"
     )
     .unwrap();
     writeln!(out).unwrap();
@@ -509,6 +540,30 @@ pub fn render_default_magi_toml() -> String {
     )
     .unwrap();
 
+    // ── The pool goes LAST IN THE FILE, and that is a TOML rule, not a style choice ──────────
+    // Every loose key and every sub-table must precede the first array of tables. A rule phrased
+    // as "last in the [magi] block" would let a later addition to [magi] — or a new sub-table —
+    // land after the array and parse into the wrong table. "Last in the file" leaves nowhere to
+    // get it wrong, which is why [embedding] above is deliberately emitted before this point.
+    writeln!(out).unwrap();
+    writeln!(
+        out,
+        "# ---------------------------------------------------------------------------"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "# Rotation pool, shared by the three seats, strongest first. Every label here is one no \
+         seat holds, so each entry can serve any of the three."
+    )
+    .unwrap();
+    for (model, lineage) in DEFAULT_SCAFFOLD_POOL {
+        writeln!(out).unwrap();
+        writeln!(out, "[[magi.fallback]]").unwrap();
+        writeln!(out, "model   = \"{model}\"").unwrap();
+        writeln!(out, "lineage = \"{lineage}\"").unwrap();
+    }
+
     out
 }
 
@@ -748,5 +803,60 @@ mod tests {
             !s.contains("sk-"),
             "docs/magi.toml.example must not contain 'sk-' key prefix"
         );
+    }
+
+    /// SC-R34: `magi init` ships REAL rotation, not decorative.
+    ///
+    /// A commented pool next to an active `max_rotations` makes the operator believe they have a
+    /// safety net while they fall back to no-rotation behaviour — the same shape of defect as a
+    /// setting that is declared and never applied.
+    #[test]
+    fn the_scaffold_ships_an_active_pool_with_lineages_no_seat_has() {
+        let scaffold = render_default_magi_toml();
+        let cfg = crate::config::MagiConfig::from_toml_str(&scaffold)
+            .expect("the scaffold must pass the very validation it teaches");
+
+        let pool = cfg.fallback_pool();
+        assert_eq!(pool.len(), 3, "the pool must be ACTIVE, not commented out");
+
+        let seat_lineages = [
+            DEFAULT_MAGI_MELCHIOR_LINEAGE,
+            DEFAULT_MAGI_BALTHASAR_LINEAGE,
+            DEFAULT_MAGI_CASPAR_LINEAGE,
+        ];
+        for entry in pool {
+            assert!(
+                !seat_lineages.contains(&entry.lineage.as_str()),
+                "each pool entry must carry a label NO seat holds, so it covers all three: {entry:?}"
+            );
+        }
+
+        assert_eq!(
+            cfg.effective_max_rotations(),
+            DEFAULT_MAX_ROTATIONS,
+            "the scaffold must declare rotation, not leave it implicit"
+        );
+    }
+
+    /// The pool must be the LAST thing in the file. In TOML every loose key and sub-table has to
+    /// precede the first array of tables, so anything emitted after it would parse into the pool
+    /// entry instead of its own table — silently, which is the part that makes it dangerous.
+    #[test]
+    fn nothing_is_emitted_after_the_fallback_pool() {
+        let scaffold = render_default_magi_toml();
+        let first_pool = scaffold
+            .find("[[magi.fallback]]")
+            .expect("the scaffold must declare a pool");
+        let tail = &scaffold[first_pool..];
+        for line in tail.lines() {
+            let t = line.trim();
+            if t.is_empty() || t.starts_with('#') || t.starts_with("[[magi.fallback]]") {
+                continue;
+            }
+            assert!(
+                t.starts_with("model") || t.starts_with("lineage"),
+                "only pool entries may follow the pool; found: {t}"
+            );
+        }
     }
 }
