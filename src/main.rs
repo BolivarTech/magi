@@ -6983,6 +6983,199 @@ mod tests {
             );
         }
 
+        /// Body of an OpenAI-compatible response carrying a valid verdict for `agent`.
+        ///
+        /// Built with `serde_json` rather than by string interpolation: the verdict itself is
+        /// JSON **inside** a JSON string field, and hand-escaping that is how a mock ends up
+        /// serving something the parser rejects for a reason unrelated to the test.
+        fn verdict_body(agent: &str) -> String {
+            use magi_core::verdict_markers::{VERDICT_CLOSE, VERDICT_OPEN};
+            let verdict = format!(
+                "{VERDICT_OPEN}\n{{\"agent\":\"{agent}\",\"verdict\":\"approve\",\
+                 \"confidence\":0.9,\"summary\":\"ok\",\"reasoning\":\"r\",\
+                 \"recommendation\":\"go\",\"findings\":[]}}\n{VERDICT_CLOSE}"
+            );
+            serde_json::json!({ "choices": [ { "message": { "content": verdict } } ] }).to_string()
+        }
+
+        /// A `magi.toml` declaring the three seats, their lineages and one pool candidate.
+        fn cfg_with_pool(max_rotations: u32) -> MagiConfig {
+            MagiConfig::from_toml_str(&format!(
+                "provider = \"ollama\"\n\
+                 [magi]\n\
+                 melchior_model    = \"ok-model\"\nmelchior_lineage  = \"lin-melchior\"\n\
+                 balthasar_model   = \"ok-model\"\nbalthasar_lineage = \"lin-balthasar\"\n\
+                 caspar_model      = \"down-model\"\ncaspar_lineage    = \"lin-caspar\"\n\
+                 agent_timeout_secs = 30\n\
+                 max_rotations = {max_rotations}\n\
+                 [[magi.fallback]]\n\
+                 model   = \"rescue-model\"\nlineage = \"lin-rescue\"\n"
+            ))
+            .expect("the rotation config must parse")
+        }
+
+        /// SC-R01/REQ-R03: the pool declared in `[[magi.fallback]]` reaches magi-core with each
+        /// candidate's model AND its lineage, in the declared order (strongest first).
+        ///
+        /// Read from `pool_wiring_trace()`, recorded in the same place the pool is handed to the
+        /// builder: `MagiBuilder` keeps `fallback_pool` private and `Magi` exposes no reader, so
+        /// from outside the crate there is nothing else to observe.
+        #[test]
+        fn the_declared_pool_reaches_magi_core_with_its_lineages() {
+            let mut notices = Vec::new();
+            let magi = build_magi_orchestrator(
+                &cfg_with_pool(2),
+                ProviderKind::Ollama,
+                &test_endpoints(),
+                None,
+                None,
+                &MagiEnvModelOverrides::default(),
+                &mut notices,
+            )
+            .expect("ollama is keyless");
+            drop(magi);
+
+            let wired = pool_wiring_trace().expect("a declared pool must be wired");
+            assert_eq!(
+                wired.candidates,
+                vec![("rescue-model".to_string(), "lin-rescue".to_string())],
+                "the candidate must carry its declared lineage, not an inferred one"
+            );
+            assert_eq!(wired.max_rotations, 2);
+        }
+
+        /// SC-R04/REQ-R05: `max_rotations = 0` is a kill-switch, and it survives as a DECLARED
+        /// value — collapsing `None` and `Some(0)` would turn an explicit "no rotation" into
+        /// "use the default", which is the opposite instruction.
+        #[test]
+        fn max_rotations_zero_is_wired_as_a_declared_kill_switch() {
+            let mut notices = Vec::new();
+            let magi = build_magi_orchestrator(
+                &cfg_with_pool(0),
+                ProviderKind::Ollama,
+                &test_endpoints(),
+                None,
+                None,
+                &MagiEnvModelOverrides::default(),
+                &mut notices,
+            )
+            .expect("ollama is keyless");
+            drop(magi);
+
+            let wired = pool_wiring_trace().expect("the pool is still declared");
+            assert_eq!(
+                wired.max_rotations, 0,
+                "0 must reach magi-core as 0, never as the default"
+            );
+        }
+
+        /// SC-R01 END TO END: a mage whose model fails **rotates to the declared candidate** and
+        /// still emits a verdict, driven through the REAL `build_magi_orchestrator` rather than a
+        /// hand-built `MagiBuilder`.
+        ///
+        /// This is the only test in the milestone that exercises the whole chain — config →
+        /// pool → provider → rotation → report — so it is the one that would catch a wiring
+        /// mistake the trace-based tests above cannot see, such as a pool built from the right
+        /// models against the wrong endpoint.
+        ///
+        /// The server discriminates by **model**, which is what the request body carries, and the
+        /// matchers are mutually exclusive so the result does not depend on mockito's matching
+        /// order. `down-model` answers **400**: a non-retryable status, so `RetryProvider` gives
+        /// up at once and the rotation is what is being measured, not the retry backoff.
+        #[tokio::test]
+        async fn a_mage_whose_model_fails_rotates_to_the_declared_candidate() {
+            use mockito::Matcher;
+            let mut server = mockito::Server::new_async().await;
+
+            let _down = server
+                .mock("POST", "/v1/chat/completions")
+                .match_body(Matcher::AllOf(vec![
+                    Matcher::Regex("(?i)caspar".into()),
+                    Matcher::Regex("down-model".into()),
+                ]))
+                .with_status(400)
+                .with_body("{\"error\":\"model unavailable\"}")
+                .expect_at_least(1)
+                .create_async()
+                .await;
+            let _rescue = server
+                .mock("POST", "/v1/chat/completions")
+                .match_body(Matcher::AllOf(vec![
+                    Matcher::Regex("(?i)caspar".into()),
+                    Matcher::Regex("rescue-model".into()),
+                ]))
+                .with_status(200)
+                .with_body(verdict_body("caspar"))
+                .expect_at_least(1)
+                .create_async()
+                .await;
+            let _melchior = server
+                .mock("POST", "/v1/chat/completions")
+                .match_body(Matcher::Regex("(?i)melchior".into()))
+                .with_status(200)
+                .with_body(verdict_body("melchior"))
+                .create_async()
+                .await;
+            let _balthasar = server
+                .mock("POST", "/v1/chat/completions")
+                .match_body(Matcher::Regex("(?i)balthasar".into()))
+                .with_status(200)
+                .with_body(verdict_body("balthasar"))
+                .create_async()
+                .await;
+
+            let endpoint = endpoint_at(&server.url());
+            let endpoints = ResolvedEndpoints {
+                root: endpoint_at(&server.url()),
+                magi: endpoint,
+            };
+            let mut notices = Vec::new();
+            let magi = build_magi_orchestrator(
+                &cfg_with_pool(2),
+                ProviderKind::Ollama,
+                &endpoints,
+                None,
+                None,
+                &MagiEnvModelOverrides::default(),
+                &mut notices,
+            )
+            .expect("ollama is keyless");
+
+            let report = magi
+                .analyze(
+                    &Mode::Analysis,
+                    "a question long enough to be a real consult",
+                )
+                .await
+                .expect("the consult must complete");
+
+            assert_eq!(
+                report.agents.len(),
+                3,
+                "the consensus must still have three"
+            );
+            assert!(!report.degraded, "a rotation is NOT degradation (REQ-R04)");
+
+            // `rotations` is populated for EVERY agent, rotated or not — its rustdoc calls it
+            // "always present". What distinguishes the one that rotated is a non-empty `chain`.
+            let caspar = report
+                .rotations
+                .get(&AgentName::Caspar)
+                .expect("rotations is always present, for every agent");
+            assert!(
+                !caspar.chain.is_empty(),
+                "Caspar's model was down: it must have hopped"
+            );
+            assert_eq!(
+                caspar.model_used, "rescue-model",
+                "REQ-R06: the report must name the model that ACTUALLY produced the verdict"
+            );
+            assert!(
+                report.rotations[&AgentName::Melchior].chain.is_empty(),
+                "nobody else had a reason to rotate"
+            );
+        }
+
         /// Fixed test credentials, no env or vault behind them.
         struct FixedCreds {
             openai: Option<String>,
