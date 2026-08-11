@@ -264,4 +264,147 @@ mod tests {
             "so is the ready-to-paste minimal config: {rendered}"
         );
     }
+
+    /// A `magi.toml` exactly as v0.12.0 wrote it: the three seats declared **by model**, and not
+    /// one lineage anywhere.
+    ///
+    /// One shared literal for every test of the v0.13.0 break, for the same reason
+    /// [`V0_11_0_SAMPLE`] is shared: a second copy could drift from this one and let a test keep
+    /// passing for the wrong reason.
+    const V0_12_0_SAMPLE: &str = "[magi]\n\
+                                  melchior_model = \"qwen3.5:397b-cloud\"\n\
+                                  balthasar_model = \"gpt-oss:120b-cloud\"\n\
+                                  caspar_model = \"deepseek-v4-pro:cloud\"\n";
+
+    /// SC-R47: the break is reported WHOLE, never one incompatibility per start.
+    ///
+    /// That is the mechanism's reason to exist: serde reports **one** missing field at a time (and
+    /// `deny_unknown_fields` aborts on the FIRST unknown key), so without a pass that collects them
+    /// all the user pays three edit-start-fail cycles for one migration.
+    ///
+    /// The variant assertion is not decoration: it is what separates "the file failed" from "the
+    /// file failed through the GUIDED path". A bare serde error would satisfy `expect_err` and
+    /// leave the user exactly as stuck as SC-R46 forbids.
+    #[test]
+    fn all_three_missing_lineages_are_reported_in_one_message() {
+        let err = super::super::MagiConfig::from_toml_str(V0_12_0_SAMPLE)
+            .expect_err("a v0.12.0 magi.toml must not start under v0.13.0");
+        assert!(
+            matches!(err, super::super::ConfigError::NeedsMigration(_)),
+            "the break must take the guided path, not serde's generic one: {err}"
+        );
+        let msg = err.to_string();
+        for key in ["melchior_lineage", "balthasar_lineage", "caspar_lineage"] {
+            assert!(msg.contains(key), "the message must name {key}: {msg}");
+        }
+    }
+
+    /// SC-R46: and it must EXPLAIN — naming a key the user has never seen, without showing the
+    /// line that declares it, only tells them they are stuck in more words.
+    #[test]
+    fn the_v0_12_0_error_says_how_to_declare_the_missing_keys() {
+        let msg = super::super::MagiConfig::from_toml_str(V0_12_0_SAMPLE)
+            .expect_err("a v0.12.0 magi.toml must not start under v0.13.0")
+            .to_string();
+        for key in ["melchior_lineage", "balthasar_lineage", "caspar_lineage"] {
+            assert!(
+                msg.contains(&format!("{key} = \"")),
+                "the message must show HOW to declare {key}, not just that it is missing: {msg}"
+            );
+        }
+    }
+
+    /// SC-A21h: a half-migrated file is told **only what it still lacks**.
+    ///
+    /// Repeating a correction the user already applied makes them doubt whether they applied it
+    /// correctly, which is the opposite of the mental state this message exists to produce.
+    #[test]
+    fn a_half_migrated_file_is_told_only_what_it_still_lacks() {
+        let half = "[magi]\n\
+                    melchior_model = \"qwen3.5:397b-cloud\"\n\
+                    melchior_lineage = \"alibaba\"\n\
+                    balthasar_model = \"gpt-oss:120b-cloud\"\n\
+                    caspar_model = \"deepseek-v4-pro:cloud\"\n";
+        let msg = super::super::MagiConfig::from_toml_str(half)
+            .expect_err("two lineages are still missing")
+            .to_string();
+        assert!(
+            !msg.contains("melchior_lineage"),
+            "the seat that IS declared must not be mentioned at all: {msg}"
+        );
+        assert!(
+            msg.contains("balthasar_lineage") && msg.contains("caspar_lineage"),
+            "the two that are still missing must both appear: {msg}"
+        );
+    }
+
+    /// SC-R19: blank is **absent**, never invalid — the same rule every text key has followed
+    /// since MS2. An exported-but-unfilled variable in a CI script is an everyday accident, and a
+    /// blank lineage must therefore land in the guided migration message rather than in a separate
+    /// "invalid value" error the user cannot act on.
+    #[test]
+    fn a_blank_lineage_is_absent_and_therefore_reported_as_missing() {
+        let blank = "[magi]\n\
+                     melchior_model = \"qwen3.5:397b-cloud\"\n\
+                     melchior_lineage = \"   \"\n";
+        let msg = super::super::MagiConfig::from_toml_str(blank)
+            .expect_err("a blank lineage is an absent lineage")
+            .to_string();
+        assert!(
+            msg.contains("melchior_lineage = \""),
+            "a blank lineage must get the same guided correction as an absent one: {msg}"
+        );
+    }
+
+    /// The **scope fence** of the new rule, and the reason it is phrased per seat: a file that
+    /// declares no seat model declares no lineage either, and must keep starting.
+    ///
+    /// **What it can and cannot catch (B16 honesty).** It is green before Green, because today
+    /// nothing rejects these files. Its job is the opposite direction: it turns red the moment the
+    /// implementation over-reaches — demanding lineages from every `[magi]` section, or from every
+    /// file — which would break every user who never configured the trio, for a break that is not
+    /// theirs.
+    #[test]
+    fn a_file_that_declares_no_seat_model_is_not_broken_by_the_new_rule() {
+        super::super::MagiConfig::from_toml_str("")
+            .expect("an empty magi.toml still means 'all defaults'");
+        super::super::MagiConfig::from_toml_str("provider = \"ollama\"\n")
+            .expect("a file that never configures the trio has no lineage to declare");
+        super::super::MagiConfig::from_toml_str("[magi]\nauto_approve = true\n")
+            .expect("a [magi] section without seat models declares no seat to give a lineage to");
+    }
+
+    /// The message frame must name **this** break, not the retired one.
+    ///
+    /// A correct list of incompatibilities under a header naming the wrong pair of versions is
+    /// worse than no message: it tells the user their file is a generation older than it is, and
+    /// sends them to migrate something they already migrated.
+    ///
+    /// Mutation that verifies it: reverting `VERSION_TO` to `"v0.12.0"` (or `VERSION_FROM` to
+    /// `"v0.11.0"`) turns it red.
+    #[test]
+    fn the_message_frame_names_the_versions_of_the_break_it_reports() {
+        let msg = super::super::MagiConfig::from_toml_str(V0_12_0_SAMPLE)
+            .expect_err("a v0.12.0 magi.toml must not start under v0.13.0")
+            .to_string();
+        assert!(
+            msg.contains("magi-rs v0.13.0 (coming from v0.12.0)"),
+            "the frame must name the break it is actually reporting: {msg}"
+        );
+    }
+
+    /// SC-A21g: a syntactically broken file gets its **syntax error**, with line and column, not
+    /// advice about a shape nobody can tell which one it is.
+    ///
+    /// Green before Green, like the scope fence above: it turns red if the implementation ever
+    /// starts guessing at text it could not parse.
+    #[test]
+    fn a_syntactically_broken_file_gets_its_syntax_error_not_migration_advice() {
+        let err = super::super::MagiConfig::from_toml_str("[magi\nmelchior_model = ")
+            .expect_err("broken TOML must not parse");
+        assert!(
+            matches!(err, super::super::ConfigError::Parse(_)),
+            "a syntax error must stay a syntax error: {err}"
+        );
+    }
 }
