@@ -176,31 +176,23 @@ fn line_col_of(raw: &str, offset: usize) -> (usize, usize) {
     (line, column)
 }
 
-/// Loop 2 (S1) construction-boundary note: fields are `pub` and this derives `Default` on
-/// purpose, for `serde` and for the many `MagiConfig { .. }` test literals across `main.rs`/
-/// `headless_runner.rs`. That means the vocabulary [`Self::validate_vocabulary`] enforces is
-/// **not** enforced at the type level — a hand-built literal with `provider: Some("banana")`
-/// compiles. The two production accessors that would otherwise silently misbehave on such a
-/// value (`effective_provider`, `effective_default_mode`) each `assert!` the precondition
-/// instead, which panics in every build profile — see their rustdoc for why that is the chosen
-/// trade-off over a private-fields/builder restructuring.
+/// Construction boundary (REQ-R23, SC-R21): **every field is private**, so there is no
+/// `MagiConfig { provider: Some("banana"), ..Default::default() }` to write. The two ways in are
+/// [`Self::load`]/[`Self::from_toml_str`] — the production path — and [`MagiConfigBuilder`],
+/// both of which run [`Self::validate_vocabulary`]. The vocabulary is therefore enforced at the
+/// TYPE level and not merely asserted after the fact.
 ///
-/// # Accepted technical debt, scheduled
+/// This closes the debt the MS2 §6 gate raised three times and the project owner accepted as a
+/// documented residual on 2026-08-09. It was deferred then because it touches dozens of
+/// construction sites in `main.rs` and `headless_runner.rs`, and doing that inside a quality gate
+/// would have invalidated verdicts already earned for a change with no behavioural effect.
 ///
-/// The MS2 §6 gate raised this three times and it was **accepted as a documented residual by the
-/// project owner on 2026-08-09**, to be repaid in the next patch or release. Recording it here
-/// rather than only in a local note is deliberate: `dev-docs/` is git-ignored, so a note there
-/// would not reach whoever plans that release.
-///
-/// The repayment is private fields plus a crate-internal builder, which makes the invalid state
-/// unconstructible instead of merely asserted against. It was deferred because it touches dozens
-/// of `MagiConfig { .. }` literals in `main.rs` and `headless_runner.rs`, and doing that late in a
-/// quality gate would have invalidated verdicts already earned for a change with no behavioural
-/// effect.
-///
-/// What keeps the risk low in the meantime, and it is worth being precise: every production path
-/// builds this through [`Self::load`], which validates. A hand-built invalid literal therefore
-/// fails **loudly, at the point of misuse, in release builds too** — not silently and not later.
+/// **`Default` and the `assert!`s stay, and that is not leftover caution.** `Deserialize` is
+/// still a way to materialize this struct without passing through either constructor — a plain
+/// `toml::from_str::<MagiConfig>` does exactly that — so the preconditions of
+/// [`Self::effective_provider`] and [`Self::effective_default_mode`] remain reachable, and they
+/// remain `assert!` (every build profile), not `debug_assert!`. Private fields removed the
+/// *literal* bypass, which was the wide one; they did not remove the deserialization one.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MagiConfig {
@@ -712,10 +704,9 @@ impl MagiConfig {
     /// inheritance). Covered by `blank_string_keys_are_absent_not_invalid` and
     /// `magi_kind_inherits_from_root_provider_when_absent`.
     ///
-    /// I5 (review round 2): restored. `MagiConfig`'s fields are `pub` and it derives `Default`,
-    /// so `MagiConfig { provider: Some("banana".into()), ..Default::default() }` compiles and,
-    /// without this, would silently return `Ollama` — the precondition this function's own doc
-    /// calls "infallible by precondition" is exactly what this checks.
+    /// I5 (review round 2): restored, because without it an unvalidated config would silently
+    /// return `Ollama` — the precondition this function's own doc calls "infallible by
+    /// precondition" is exactly what this checks.
     ///
     /// Loop 2 fix (Melchior/Balthasar, S1): **`assert!`, not `debug_assert!`.** The original
     /// version only checked in debug builds, so a release binary had **no check at all** for a
@@ -726,25 +717,21 @@ impl MagiConfig {
     ///
     /// **Why `assert!` and not a `Result`.** This function's signature (`-> ProviderKind`,
     /// consumed by every call site as infallible) is load-bearing across the bin — turning it
-    /// fallible would ripple a `?`/`.unwrap()` decision through every caller. The only way to
-    /// reach this precondition violation is a caller that hand-builds a `MagiConfig` literal
-    /// skipping `from_toml_str`/`load()`, which is a programmer bug, not a runtime input —
-    /// `assert!` is the idiomatic response to a violated contract, not a recoverable error.
+    /// fallible would ripple a `?`/`.unwrap()` decision through every caller. Reaching this
+    /// precondition violation is a programmer bug, not a runtime input, and `assert!` is the
+    /// idiomatic response to a violated contract rather than a recoverable error.
     ///
-    /// **Why the fields stay `pub` instead of removing this class of bug at the type level.**
-    /// The ideal fix makes an invalid `MagiConfig` unconstructible (private fields, a single
-    /// validated constructor, the same shape as `AutonomousRunConfig` in `main.rs`). That would
-    /// require touching every `MagiConfig { .. }` struct-literal test in `main.rs` and
-    /// `headless_runner.rs` (dozens of sites, several deliberately constructing an invalid value
-    /// to exercise this exact panic) — out of scope for this fix, which is confined to
-    /// `config.rs`. `assert!` closes the concrete release-mode gap the review raised without
-    /// that wider, cross-file restructuring.
+    /// **Why the check survives Task 1.1's private fields (REQ-R23).** Making the struct literal
+    /// unconstructible removed the WIDE bypass, not every one: `Deserialize` still materializes a
+    /// `MagiConfig` without either validating constructor (`toml::from_str::<MagiConfig>`, and
+    /// `MagiConfigBuilder::build_unvalidated` in tests). This assertion is what those remaining
+    /// paths run into, and it is still `assert!`, never `debug_assert!`.
     #[must_use]
     pub fn effective_provider(&self) -> ProviderKind {
         assert!(
             self.validate_vocabulary().is_ok(),
             "MagiConfig::effective_provider called on an unvalidated config — \
-             construct it via from_toml_str()/load(), never as a raw struct literal"
+             construct it via from_toml_str()/load(), never by deserializing it directly"
         );
         ProviderKind::parse(self.provider.as_deref().unwrap_or_default())
             .unwrap_or(None)
@@ -766,8 +753,9 @@ impl MagiConfig {
     /// I5 (review round 2): restored — same precondition/rationale as `effective_provider`'s
     /// assertion.
     ///
-    /// Loop 2 fix (Melchior/Balthasar, S1): same `assert!`-not-`debug_assert!` and
-    /// pub-fields-stay-pub reasoning as [`Self::effective_provider`] — see its rustdoc for the
+    /// Loop 2 fix (Melchior/Balthasar, S1), and Task 1.1's private fields (REQ-R23): same
+    /// `assert!`-not-`debug_assert!` reasoning, and the same reason the check outlives the
+    /// literal it used to guard against — see [`Self::effective_provider`]'s rustdoc for the
     /// full explanation.
     #[must_use]
     pub fn effective_default_mode(&self) -> Option<Mode> {
@@ -775,7 +763,7 @@ impl MagiConfig {
         assert!(
             self.validate_vocabulary().is_ok(),
             "MagiConfig::effective_default_mode called on an unvalidated config — \
-             construct it via from_toml_str()/load(), never as a raw struct literal"
+             construct it via from_toml_str()/load(), never by deserializing it directly"
         );
         <Mode as ModeExt>::parse_config_value(self.magi.default_mode.as_deref().unwrap_or_default())
             .unwrap_or(None)
@@ -2108,9 +2096,10 @@ mod tests {
     }
 
     /// I5: `effective_provider` is documented "infallible by precondition" — that precondition
-    /// is `validate_vocabulary` having already run. `MagiConfig`'s fields are `pub` and it
-    /// derives `Default`, so nothing at the type level stops a caller from skipping
-    /// `from_toml_str`/`load()` and constructing an invalid config directly.
+    /// is `validate_vocabulary` having already run. Task 1.1's private fields (REQ-R23) closed
+    /// the struct-literal way of skipping it, but not `Deserialize` — reproduced here by
+    /// `build_unvalidated`, the builder's test-only exit — so the precondition is still
+    /// violable and still worth asserting.
     ///
     /// Loop 2 fix (Melchior/Balthasar, S1): the guard is now `assert!`, which panics in EVERY
     /// build profile, not only under `debug_assertions` — a release binary hitting this misuse
