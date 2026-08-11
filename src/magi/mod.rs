@@ -420,6 +420,51 @@ mod tests {
         );
     }
 
+    /// SC-R31: the multiplier follows BOTH configuration keys, and **no new key is added** — the
+    /// worst case is calculated from what the operator already declared in `magi.toml`.
+    ///
+    /// A `--timeout` that ignores either one cuts off healthy consults, and the symptom would
+    /// appear **only when a rotation also happened**: very hard to reproduce and very easy to
+    /// blame on the wrong model.
+    #[test]
+    fn the_multiplier_follows_both_config_keys() {
+        // Defaults: 2 attempts x (1 + 2 rotations) models x 90 s = 540 s dominant.
+        assert_eq!(
+            headless_consult_timeout_secs(90, 2, false),
+            CLASSIFY_TIMEOUT_SECS + 540 + 540 * HEADLESS_TIMEOUT_SLACK_PCT / 100
+        );
+        // `retry_disabled` ⇒ ONE attempt per model: magi-core returns the schema outcome
+        // immediately instead of spending a second ceiling on the corrective retry.
+        assert_eq!(
+            headless_consult_timeout_secs(90, 2, true),
+            CLASSIFY_TIMEOUT_SECS + 270 + 270 * HEADLESS_TIMEOUT_SLACK_PCT / 100
+        );
+    }
+
+    /// SC-R18/SC-R04: the kill-switch restores the v0.12.0 value EXACTLY — **by construction**,
+    /// not by a special case in the formula. `1 + max_rotations` with `max_rotations = 0` is one
+    /// model, which is what the formula multiplied by before rotation existed.
+    #[test]
+    fn the_kill_switch_restores_the_v0_12_0_timeout_exactly() {
+        assert_eq!(headless_consult_timeout_secs(90, 0, false), 222);
+    }
+
+    /// SC-R53: the retry chain lives INSIDE one ceiling per attempt (D-R16, verified against
+    /// `orchestrator.rs:1738`), so the formula carries **no factor for `max_retries`**.
+    ///
+    /// `attempt_model` wraps `agent.execute_with(provider, …)` in ONE `tokio::time::timeout`, and
+    /// that `provider` is the seat **already wrapped** in `RetryProvider` — so the retries spend
+    /// budget inside a window the formula has already counted. Adding a factor for them would
+    /// over-dimension the wall-clock by an order of magnitude.
+    #[test]
+    fn the_formula_carries_no_max_retries_factor() {
+        let with_defaults = headless_consult_timeout_secs(90, 2, false);
+        assert!(
+            with_defaults < 1_000,
+            "a max_retries factor would push this past 2000 s; got {with_defaults}"
+        );
+    }
+
     /// SC-A04d: an explicit `--timeout` below the minimum is OBEYED, with a warning.
     ///
     /// The flag is an operator wall-clock cap, not a safety invariant: whoever asks for
