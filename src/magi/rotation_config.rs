@@ -30,7 +30,12 @@ use serde::Deserialize;
 use crate::magi::lineage::Lineage;
 
 /// One fallback rotation candidate, deserialized from a `[[magi.fallback]]` entry.
+///
+/// `deny_unknown_fields` is not decoration: a typo in a pool entry must be a parse error naming the
+/// key, never a silently ignored one. An entry that looks configured and is not is exactly the kind
+/// of safety net an operator believes they have and does not.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FallbackEntry {
     /// Model tag to rotate to.
     pub model: String,
