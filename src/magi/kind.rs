@@ -44,10 +44,15 @@ pub const VALID_PROVIDER_KINDS: &str = "ollama, openai-compat, anthropic";
 pub enum ProviderKind {
     /// Ollama: keyless, and the ONLY measurable one (`/api/show` + `/api/tags`).
     ///
-    /// **Does not use the `OllamaProvider` type from magi-core for completions** (D-A07): its only
-    /// constructor sets a 300 s client timeout with no override, which makes it impossible to
-    /// meet the scale of REQ-A04. Completions go through the keyless OpenAI-compat transport
-    /// against `…/v1`; `OllamaProvider` is used only as a probe.
+    /// **Does not use the `OllamaProvider` type from magi-core for completions** (D-A07):
+    /// completions go through the keyless OpenAI-compat transport against `…/v1`, and
+    /// `OllamaProvider` is used only as a probe.
+    ///
+    /// The reason originally recorded for D-A07 — *"its only constructor sets a 300 s client
+    /// timeout with no override, so it cannot meet the scale of REQ-A04"* — **no longer holds**:
+    /// magi-core 3.2.0 added `OllamaProvider::with_timeout`, which bounds both HTTP clients the
+    /// type builds. What survives is narrower: **never build it with `new`**, which still
+    /// delegates with the 300 s default. The current wiring is a choice, not a constraint.
     Ollama,
     /// OpenAI, Groq, OpenRouter — any Chat Completions. With token, no probe.
     OpenAiCompat,
