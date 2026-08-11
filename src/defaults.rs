@@ -37,6 +37,48 @@ pub const DEFAULT_ANTHROPIC_MODEL: &str = "claude-sonnet-4-6";
 /// re-exported by `memory::config::d::emb_model` so both resolve identically.
 pub const DEFAULT_EMBEDDING_MODEL: &str = "nomic-embed-text-v2-moe:latest";
 
+// ── Lineage rotation (MS3) ────────────────────────────────────────────────────
+
+// The three constants below have no production caller YET: their consumers are later tasks of this
+// milestone (seat registration, pool construction, guard resolution). `cfg(test)` states that fact
+// rather than hiding it — an `#[allow(dead_code)]` or a fabricated caller would both be lies the
+// linter cannot catch. Each is un-gated by the task that first reads it in production.
+
+/// Fallback models a mage may rotate through before its run degrades (REQ-R05).
+///
+/// **2 — the same value magi-core ships, deliberately not a default of our own** (D-R14). A
+/// divergent default would have to be explained in the CHANGELOG and defended on every upgrade.
+///
+/// The cost is the worst case it implies: with the 90 s ceiling and retry enabled the derived
+/// headless `--timeout` becomes `2 attempts x 3 models x 90 s` plus slack, i.e. ~654 s. That is
+/// paid **only when something is genuinely hung** — a healthy consult never approaches it — and the
+/// escape valve already shipped: `--timeout 300` with a notice naming the computed minimum.
+///
+/// **`0` is the kill-switch** and must stay reachable: it restores v0.12.0 behaviour exactly.
+#[cfg(test)]
+pub const DEFAULT_MAX_ROTATIONS: u32 = 2;
+
+/// Whether a candidate whose context window could not be measured is refused (REQ-R11).
+///
+/// **`false`, including on Ollama.** The case the guard bites is the **cold start**: a daemon that
+/// has not warmed up answers no probe inside the 5 s ceiling, so with the guard on, the first run
+/// anyone makes would find no eligible candidate. That is the worst possible first impression and
+/// it is transitory.
+#[cfg(test)]
+pub const DEFAULT_STRICT_CONTEXT_GUARD: bool = false;
+
+/// Whether distinct lineages are required rather than merely encouraged (REQ-R29).
+///
+/// **`true`.** Lineage diversity is what makes rotation worth anything, so the system demands it and
+/// whoever genuinely cannot meet it opts out in one line. It is the correct failure direction: a
+/// pool without diversity that starts silently is a safety net the operator believes they have and
+/// do not — and they find out when a model falls over, which is the worst moment to find out.
+///
+/// This key is **exclusive to magi-rs**: magi-core treats the lineage as an opaque string and is
+/// agnostic to it, so the value is never passed down.
+#[cfg(test)]
+pub const DEFAULT_ENFORCE_DIVERSITY: bool = true;
+
 // ── Headless mode constants ───────────────────────────────────────────────────
 //
 // The headless numeric caps (`MAX_INPUT_BYTES`, `MAX_JSON_DEPTH`, …) live in the

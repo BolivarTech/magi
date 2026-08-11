@@ -460,6 +460,34 @@ pub struct MagiSectionConfig {
     pub retry_disabled: Option<bool>,
     /// Complexity gate thresholds per mode; absent ⇒ built-ins (REQ-A20b).
     pub complexity: Option<ComplexityConfig>,
+
+    /// Fallback models a mage may rotate through; absent ⇒ [`DEFAULT_MAX_ROTATIONS`] (REQ-R05).
+    ///
+    /// **`0` is the kill-switch**, and it must survive as a declared value: collapsing `None` and
+    /// `Some(0)` would turn an explicit "no rotation" into "use the default".
+    pub max_rotations: Option<u32>,
+    /// Refuse fallback candidates whose window could not be measured; absent ⇒
+    /// [`DEFAULT_STRICT_CONTEXT_GUARD`] (REQ-R11).
+    ///
+    /// What the operator **declares**. Whether it is **applied** is another matter: magi-rs passes
+    /// it down only when at least one candidate has a measured window, because a `true` with
+    /// nothing measured would disqualify every candidate and switch rotation off in silence.
+    pub strict_context_guard: Option<bool>,
+    /// Require the three seats to declare distinct lineages; absent ⇒
+    /// [`DEFAULT_ENFORCE_DIVERSITY`] (REQ-R29).
+    ///
+    /// **Exclusive to magi-rs** — never forwarded to magi-core, which treats the lineage as an
+    /// opaque string.
+    pub enforce_diversity: Option<bool>,
+
+    /// The shared rotation pool, ordered strongest to weakest (REQ-R13).
+    ///
+    /// **Goes LAST in the file, not last in the `[magi]` block.** In TOML every loose key and
+    /// sub-table must precede the first array of tables, so a rule phrased as "last in the block"
+    /// would let a later addition to `[magi]` land after the array and parse into the wrong table.
+    /// "Last in the file" leaves nowhere to get it wrong.
+    #[serde(default)]
+    pub fallback: Vec<magi_rs::magi::rotation_config::FallbackEntry>,
 }
 
 impl MagiSectionConfig {
@@ -520,6 +548,10 @@ impl Default for MagiSectionConfig {
             input_warn_tokens: None,
             retry_disabled: None,
             complexity: None,
+            max_rotations: None,
+            strict_context_guard: None,
+            enforce_diversity: None,
+            fallback: Vec::new(),
         }
     }
 }
@@ -570,6 +602,44 @@ impl MagiConfig {
     #[must_use]
     pub(crate) fn magi(&self) -> &MagiSectionConfig {
         &self.magi
+    }
+
+    /// Fallback models a mage may rotate through (REQ-R05).
+    ///
+    /// A declared `0` is honoured as the kill-switch; only an **absent** key falls back to
+    /// [`DEFAULT_MAX_ROTATIONS`].
+    #[cfg(test)]
+    pub(crate) fn effective_max_rotations(&self) -> u32 {
+        self.magi
+            .max_rotations
+            .unwrap_or(crate::defaults::DEFAULT_MAX_ROTATIONS)
+    }
+
+    /// What the operator **declared** for the context guard (REQ-R11).
+    ///
+    /// Deliberately named `declared_`, not `effective_`: whether the guard is actually applied
+    /// depends on there being at least one measured candidate window, which this type cannot know.
+    /// That decision belongs to the trio construction, and naming it here would invite a caller to
+    /// pass this value straight to magi-core — which is the silent-rotation-shutdown bug.
+    #[cfg(test)]
+    pub(crate) fn declared_strict_context_guard(&self) -> bool {
+        self.magi
+            .strict_context_guard
+            .unwrap_or(crate::defaults::DEFAULT_STRICT_CONTEXT_GUARD)
+    }
+
+    /// Whether the three seats must declare distinct lineages (REQ-R29).
+    #[cfg(test)]
+    pub(crate) fn effective_enforce_diversity(&self) -> bool {
+        self.magi
+            .enforce_diversity
+            .unwrap_or(crate::defaults::DEFAULT_ENFORCE_DIVERSITY)
+    }
+
+    /// The shared rotation pool, in declared order (strongest to weakest).
+    #[cfg(test)]
+    pub(crate) fn fallback_pool(&self) -> &[magi_rs::magi::rotation_config::FallbackEntry] {
+        &self.magi.fallback
     }
 
     /// `[memory]` section, as declared.
@@ -2551,6 +2621,122 @@ mod tests {
             public_fields.is_empty(),
             "MagiConfig must have no public field, or a field literal can build a \
              configuration the vocabulary validation never saw; found: {public_fields:?}"
+        );
+    }
+
+    /// REQ-R05 / D-R14: magi-rs ships the crate's own `DEFAULT_MAX_ROTATIONS`, not one of its own.
+    #[test]
+    fn max_rotations_defaults_to_two() {
+        let cfg = MagiConfig::from_toml_str(
+            "[magi]
+",
+        )
+        .unwrap();
+        assert_eq!(cfg.effective_max_rotations(), 2);
+    }
+
+    /// A declared `0` is the kill-switch and must stay REACHABLE. Collapsing it with
+    /// `unwrap_or_default()` would turn an explicit "no rotation" into "use the default", which is
+    /// the opposite of what the operator wrote.
+    #[test]
+    fn a_declared_zero_is_the_kill_switch_not_an_absent_value() {
+        let cfg = MagiConfig::from_toml_str(
+            "[magi]
+max_rotations = 0
+",
+        )
+        .unwrap();
+        assert_eq!(cfg.effective_max_rotations(), 0);
+    }
+
+    /// REQ-R11: the guard defaults to FALSE, Ollama included. The case it bites is the cold start,
+    /// which is transitory and is the first run anyone makes.
+    #[test]
+    fn strict_context_guard_defaults_to_false() {
+        let cfg = MagiConfig::from_toml_str(
+            "[magi]
+",
+        )
+        .unwrap();
+        assert!(!cfg.declared_strict_context_guard());
+        let on = MagiConfig::from_toml_str(
+            "[magi]
+strict_context_guard = true
+",
+        )
+        .unwrap();
+        assert!(on.declared_strict_context_guard());
+    }
+
+    /// REQ-R29: diversity is REQUIRED by default. A pool without diversity that starts silently is
+    /// a safety net the operator believes they have and do not.
+    #[test]
+    fn enforce_diversity_defaults_to_true() {
+        let cfg = MagiConfig::from_toml_str(
+            "[magi]
+",
+        )
+        .unwrap();
+        assert!(cfg.effective_enforce_diversity());
+        let off = MagiConfig::from_toml_str(
+            "[magi]
+enforce_diversity = false
+",
+        )
+        .unwrap();
+        assert!(!off.effective_enforce_diversity());
+    }
+
+    /// REQ-R13: the pool parses from `[[magi.fallback]]`, in declared order, and is empty when the
+    /// array is absent.
+    #[test]
+    fn the_fallback_pool_parses_in_declared_order() {
+        let cfg = MagiConfig::from_toml_str(
+            "[magi]
+",
+        )
+        .unwrap();
+        assert!(
+            cfg.fallback_pool().is_empty(),
+            "absent array means no rotation, not an error"
+        );
+
+        let cfg = MagiConfig::from_toml_str(concat!(
+            "[magi]
+",
+            "[[magi.fallback]]
+model = \"glm-5.2:cloud\"
+lineage = \"zhipu\"
+",
+            "[[magi.fallback]]
+model = \"minimax-m3:cloud\"
+lineage = \"minimax\"
+",
+        ))
+        .unwrap();
+        let pool = cfg.fallback_pool();
+        assert_eq!(pool.len(), 2);
+        assert_eq!(
+            pool[0].model, "glm-5.2:cloud",
+            "order is rotation preference, strongest first"
+        );
+        assert_eq!(pool[1].lineage.as_str(), "minimax");
+    }
+
+    /// SC-R11: a misspelled key in the rotation section is an explicit parse error, never silently
+    /// ignored. `deny_unknown_fields` gives this for free — the test PINS it, because the new keys
+    /// were added to a struct where dropping the attribute would still compile.
+    #[test]
+    fn a_misspelled_rotation_key_is_a_parse_error() {
+        let err = MagiConfig::from_toml_str(
+            "[magi]
+max_rotation = 2
+",
+        )
+        .expect_err("an unknown key must be rejected, never ignored");
+        assert!(
+            err.to_string().contains("max_rotation"),
+            "the error must name the key: {err}"
         );
     }
 }
