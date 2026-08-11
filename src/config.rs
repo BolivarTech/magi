@@ -1438,6 +1438,25 @@ mod tests {
             Some(crate::defaults::DEFAULT_MAGI_CASPAR),
             "docs/magi.toml.example's caspar_model must mirror DEFAULT_MAGI_CASPAR"
         );
+        // Same drift, one release later: since v0.13.0 each declared model owes a declared
+        // lineage, so the example now carries three more literals that can rot away from
+        // `src/defaults.rs`. That the example still PARSES only proves the labels are present —
+        // it says nothing about them still being the right ones.
+        assert_eq!(
+            parsed.magi.melchior_lineage.as_deref(),
+            Some(crate::defaults::DEFAULT_MAGI_MELCHIOR_LINEAGE),
+            "docs/magi.toml.example's melchior_lineage must mirror DEFAULT_MAGI_MELCHIOR_LINEAGE"
+        );
+        assert_eq!(
+            parsed.magi.balthasar_lineage.as_deref(),
+            Some(crate::defaults::DEFAULT_MAGI_BALTHASAR_LINEAGE),
+            "docs/magi.toml.example's balthasar_lineage must mirror DEFAULT_MAGI_BALTHASAR_LINEAGE"
+        );
+        assert_eq!(
+            parsed.magi.caspar_lineage.as_deref(),
+            Some(crate::defaults::DEFAULT_MAGI_CASPAR_LINEAGE),
+            "docs/magi.toml.example's caspar_lineage must mirror DEFAULT_MAGI_CASPAR_LINEAGE"
+        );
     }
 
     #[test]
