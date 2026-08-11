@@ -4,11 +4,19 @@
 //!
 //! # By composition, not by migration
 //!
-//! `ProviderProbe` is a trait **separate** from `LlmProvider`: an `OllamaProvider` from magi-
-//! core is built **only** to call `.window()` and `.digest()` on it, never to generate. magi-rs
-//! still completes with its own `Provider` — D-A07 and R-A02 remain intact. Only `ollama` is
-//! measurable (`ProviderKind::is_probeable`); `openai-compat` and `anthropic` offer no
-//! introspection and degrade to [`Measurement::NotMeasurable`].
+//! `ProviderProbe` is a trait **separate** from `LlmProvider`: the `OllamaProvider` this module
+//! builds exists **only** to call `.window()` and `.digest()` on it, never to generate. Only
+//! `ollama` is measurable (`ProviderKind::is_probeable`); `openai-compat` and `anthropic` offer
+//! no introspection and degrade to [`Measurement::NotMeasurable`].
+//!
+//! **Since REQ-R30 the trio's `ollama` seats ALSO complete through an `OllamaProvider`** (D-R12
+//! reverted D-A07), so the type is no longer probe-only in this crate. The two roles still use
+//! **separate instances**: this module builds its own for measuring, and `build_native_provider`
+//! builds the seat's. Sharing one is possible and was left as a choice for whoever needs it —
+//! but the constructors are not interchangeable, and that is the part to keep straight. Here
+//! `new` is deliberate and safe, because every probe call is wrapped in its own
+//! [`PROBE_TIMEOUT_SECS`] ceiling, so the client's own 300 s never governs. A **seat** must use
+//! `with_timeout` with the derived value, or it breaks the derived scale in silence.
 //!
 //! # The body-size cap (REQ-A16b / SC-A16c) — satisfied BY COMPOSITION
 //!
@@ -148,7 +156,13 @@ pub trait ProbeFactory: Send + Sync {
     fn probe_for(&self, kind: ProviderKind, base_url: &ResolvedEndpoint, model: &str) -> ProbeSeat;
 }
 
-/// Production: `OllamaProvider` **only as a probe**, never for completions (D-A07).
+/// Production: builds an `OllamaProvider` **to measure with**, never to complete with.
+///
+/// Since REQ-R30 the trio's `ollama` seats complete through their own `OllamaProvider`, built in
+/// `build_native_provider` — a **separate instance**, not this one. `new` is correct *here* and
+/// wrong *there*: every call this factory's result receives is wrapped in its own
+/// [`PROBE_TIMEOUT_SECS`] ceiling, so the client's 300 s default never governs, whereas a seat
+/// has nothing outside it to cut the request short.
 ///
 /// The `base_url` is passed as-is, with its `/v1` if it has one: `OllamaProvider::new` accepts
 /// both forms (with and without `/v1`) and normalizes internally — probe requests always go
@@ -1239,8 +1253,10 @@ mod tests {
         assert!(matches!(m["a"], Measurement::Measured { .. }));
     }
 
-    /// D-A07/R-A02 regression: the REAL factory probes the ROOT of the daemon (`/api/show`),
-    /// never under the `/v1` prefix of completions.
+    /// The REAL factory probes the ROOT of the daemon (`/api/show`), never under the `/v1`
+    /// prefix of completions. The two families are siblings, so a probe that drifted under `/v1`
+    /// would 404 — and, because probing fails **open**, would degrade to "not measured" without
+    /// anyone seeing an error.
     ///
     /// `StubProbes` covers the behavior of `probe_models` and NOT the real construction of the
     /// probe: if `OllamaProbeFactory` started hitting `/v1/api/show`, no other test in this

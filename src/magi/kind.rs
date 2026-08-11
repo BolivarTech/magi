@@ -44,15 +44,21 @@ pub const VALID_PROVIDER_KINDS: &str = "ollama, openai-compat, anthropic";
 pub enum ProviderKind {
     /// Ollama: keyless, and the ONLY measurable one (`/api/show` + `/api/tags`).
     ///
-    /// **Does not use the `OllamaProvider` type from magi-core for completions** (D-A07):
-    /// completions go through the keyless OpenAI-compat transport against `…/v1`, and
-    /// `OllamaProvider` is used only as a probe.
+    /// **Completes through magi-core's `OllamaProvider`** (REQ-R30, which reverts D-A07). Both
+    /// `base_url` spellings are accepted — with `/v1` and without — and identity in errors and
+    /// reports is `"ollama"`, where it used to be `"openai-compat"`.
     ///
-    /// The reason originally recorded for D-A07 — *"its only constructor sets a 300 s client
-    /// timeout with no override, so it cannot meet the scale of REQ-A04"* — **no longer holds**:
-    /// magi-core 3.2.0 added `OllamaProvider::with_timeout`, which bounds both HTTP clients the
-    /// type builds. What survives is narrower: **never build it with `new`**, which still
-    /// delegates with the 300 s default. The current wiring is a choice, not a constraint.
+    /// D-A07 held that this kind must NOT use the type, on the reason that *"its only constructor
+    /// sets a 300 s client timeout with no override, so it cannot meet the scale of REQ-A04"*.
+    /// That was an **impossibility**, and magi-core 3.2.0 removed it by adding `with_timeout`,
+    /// which bounds both HTTP clients the type builds. With the impossibility gone the question
+    /// was decided on its merits — neither option gains capability, since `OllamaProvider::complete`
+    /// delegates to an internal `OpenAiCompatibleProvider` — and legibility won: this variant
+    /// wired to that type is what anyone reading the two names together expects.
+    ///
+    /// **What survives the reversal is narrower and sharper: never build it with `new`.** It
+    /// delegates with the 300 s default, which breaks `operation_budget + client_timeout <=
+    /// ceiling`, and getting it wrong compiles, runs, and breaks the derived scale in silence.
     Ollama,
     /// OpenAI, Groq, OpenRouter — any Chat Completions. With token, no probe.
     OpenAiCompat,

@@ -1425,8 +1425,9 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
     let (provider, provider_info): (Arc<dyn Provider>, String) = match provider_kind {
         // `Ollama` and `OpenAiCompat` share the `[openai]`-transport branch: they
         // speak the same Chat-Completions protocol and differ only in capability
-        // (probeability), never in how the PRINCIPAL provider is built (D-A07 is
-        // about the native trio, not this untouched path).
+        // (probeability), never in how the PRINCIPAL provider is built. REQ-R30
+        // changed which type builds the TRIO's seats; this is the conversational
+        // agent's provider and that milestone does not touch it.
         ProviderKind::Ollama | ProviderKind::OpenAiCompat => {
             // env > vault (REQ-V12); falls back to the local-Ollama dummy so a
             // real OpenAI/Groq/OpenRouter endpoint still fails loudly with 401
@@ -2503,11 +2504,14 @@ fn push_divergence_notice(cfg: &MagiConfig, inference_active: bool, notices: &mu
 /// Normalizes an Ollama root to the OpenAI-compat shape (`…/v1`), idempotent, **and warns when
 /// it had to touch something**.
 ///
-/// Exists because `OllamaProvider` used to do this inside and is no longer in the path (D-A07):
-/// without normalization, a `base_url = "http://localhost:11434"` (which v0.11.0 accepted)
-/// would hit `/chat/completions` at the root and return 404 on first use. It returns the notice
-/// instead of applying it silently — silent normalization makes the effective `base_url` differ
-/// from what was written without anyone knowing.
+/// **It is no longer needed to make the URL work, and is kept anyway.** It was written when
+/// `OllamaProvider` was out of the path (D-A07) and nothing else normalized, so a `base_url =
+/// "http://localhost:11434"` hit `/chat/completions` at the root and 404'd on first use. Since
+/// REQ-R30 the provider accepts both spellings itself — but this function is the only thing that
+/// still knows **which one arrived**, and the notice exists to tell the operator to write down
+/// what actually happens. Dropping it because the URL now works either way would be a silent
+/// behaviour change (R-R04), which is the same objection that made it return the notice instead
+/// of normalizing quietly in the first place.
 ///
 /// **The returned `root` and the notice text do NOT share the same URL** (fix round 2,
 /// C1, REQ-A16c path #2): `base_url` here is already the RESOLVED endpoint — post placeholder

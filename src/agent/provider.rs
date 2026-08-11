@@ -2978,8 +2978,9 @@ mod tests {
     // by two tests that prove different things (fix round 1 — the original
     // single stalling-socket test only caught a regression SHORTER than its
     // 2s stall, missing exactly the realistic shape: someone re-adding a 30s
-    // or 300s total timeout, the latter being what D-A07 rejected outright
-    // for magi-core's `OllamaProvider`):
+    // or 300s total timeout, the latter being magi-core's `OllamaProvider`
+    // default — which REQ-R30 still forbids from reaching a MAGI seat, and
+    // which has no business on this path either):
     //   - `the_principal_providers_client_carries_no_total_timeout_marker`
     //     pins the CLIENT'S CONFIGURATION, instantly and for a timeout of any
     //     duration, via `reqwest::Client`'s `Debug` output.
@@ -3038,7 +3039,8 @@ mod tests {
         // SC-A19 fix round 1: the 2s stalling-socket test below only proves
         // the absence of a timeout SHORTER than its stall. A regression that
         // reintroduces a 30s or 300s total timeout — the latter being
-        // precisely what D-A07 rejected for magi-core's `OllamaProvider` —
+        // magi-core's `OllamaProvider` default, which REQ-R30 keeps off a
+        // MAGI seat and which has no business here either —
         // sails straight through it. `reqwest::Client` exposes no public
         // timeout getter, but its `Debug` impl only ever prints
         // `TOTAL_TIMEOUT_DEBUG_MARKER` when a total timeout is actually set
