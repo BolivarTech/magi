@@ -2600,12 +2600,26 @@ fn build_native_provider(
 }
 
 // Test-only (I2, fix round 2): trace of what the LAST call to `build_magi_orchestrator` wired
-// IN THIS THREAD — (seat, resolved model, wrapped-in-RetryProvider). Exists so a test can
-// assert against the REAL function instead of reconstructing its wiring logic in a custom
-// `MagiBuilder` (which is exactly what let the production wrapper disappear unnoticed). Does
-// not change `build_magi_orchestrator`'s signature — each test in this file runs in its OWN
-// thread (the `#[test]` harness spawns them that way by design), so the thread-local isolates
-// one call from another without extra coordination.
+// IN THIS THREAD — (seat, resolved model, a NEW Arc was allocated around the built provider).
+// Exists so a test can assert against the REAL function instead of reconstructing its wiring
+// logic in a custom `MagiBuilder` (which is exactly what let the production wrapper disappear
+// unnoticed). Does not change `build_magi_orchestrator`'s signature — each test in this file
+// runs in its OWN thread (the `#[test]` harness spawns them that way by design), so the
+// thread-local isolates one call from another without extra coordination.
+//
+// THE THIRD FIELD IS MEASURED, NOT ASSERTED — and it was not, until Task 3.1 ran the mutation
+// (B16). It used to push the literal `true`, under a comment claiming that removing the
+// production wrapper "without touching the trace" would break the count this test verifies.
+// That claim was false: replacing `Arc::new(RetryProvider::with_config(p, retry))` with a bare
+// `p` leaves `seats.push` running and the literal saying `true`, so the guardian went on
+// passing through the exact regression it existed to catch. It now compares the resulting
+// allocation's address against the one it was handed: same address ⇒ nothing wrapped it.
+//
+// What that does and does not prove: it proves a new `Arc` was allocated around `p`, not that
+// the wrapper is specifically a `RetryProvider`. `LlmProvider` is a foreign trait with no
+// `Any` (R-A01 forbids touching magi-core), so there is no downcast to do better — but a
+// measurement that can be wrong for a narrow reason beats a literal that cannot be wrong at
+// all. Both address reads are `cfg(test)`, so production pays nothing and keeps its move.
 #[cfg(test)]
 thread_local! {
     static SEAT_WIRING_TRACE: std::cell::RefCell<Vec<(AgentName, String, bool)>> =
@@ -2727,17 +2741,23 @@ fn build_magi_orchestrator(
             // REQ-A03: `MagiBuilder::build()` does NOT wrap anything, so without this the retry
             // the trio inherited from the adapter is lost.
             Ok(p) => {
-                let wrapped = Arc::new(RetryProvider::with_config(p, retry.clone()));
-                // Recorded ON THE SAME branch that does the real wrap (I2, fix round 2): a test
-                // that asserts against this trace stops passing if the wrap above disappears
-                // AND no one touches this line — which is the most likely regression mode
-                // (deleting the `Arc::new(RetryProvider::…)` above without touching this also
-                // breaks the count the test verifies, because then `seats.push` would still run
-                // but with the shape changed). It is not runtime downcasting — `LlmProvider` is
-                // a foreign trait without `Any` — so it is the strongest approximation possible
-                // without touching magi-core (R-A01).
+                // Read BEFORE the move, so the trace below can compare against it. `*const ()`
+                // takes the data address of what may be a fat pointer; `cfg(test)` only, so
+                // production keeps the move and pays nothing.
                 #[cfg(test)]
-                SEAT_WIRING_TRACE.with(|t| t.borrow_mut().push((seat, model.clone(), true)));
+                let unwrapped_addr = Arc::as_ptr(&p) as *const () as usize;
+                let wrapped = Arc::new(RetryProvider::with_config(p, retry.clone()));
+                // Recorded ON THE SAME branch that does the real wrap (I2, fix round 2), and
+                // MEASURED rather than asserted — see the note on `SEAT_WIRING_TRACE` for the
+                // mutation that proved the previous literal `true` guarded nothing. A different
+                // address means something allocated around the provider; the same one means the
+                // wrap is gone, which is precisely the silent regression this guards.
+                #[cfg(test)]
+                SEAT_WIRING_TRACE.with(|t| {
+                    let wrapped_addr = Arc::as_ptr(&wrapped) as *const () as usize;
+                    t.borrow_mut()
+                        .push((seat, model.clone(), wrapped_addr != unwrapped_addr));
+                });
                 seats.push((seat, wrapped, lineage));
             }
             Err(cause) => failures.push((seat, cause)),
@@ -7017,12 +7037,20 @@ mod tests {
         /// This test calls the REAL function, with `ollama` (keyless, no credential or network
         /// needed to BUILD — it only builds the HTTP client, not use it), and reads
         /// `seat_wiring_trace()` — the trace `build_magi_orchestrator` leaves ONLY in test
-        /// builds, in the SAME branch that does the real wrapping. If someone removes the
-        /// `RetryProvider::with_config(...)` from production without touching the trace, the
-        /// count will stop matching what `seats.push` produces and this test will fail. It is
-        /// not runtime downcasting — `LlmProvider` is a foreign trait from magi-core with no
-        /// `Any` (R-A01 forbids touching that crate) — so this is the strongest approximation
-        /// achievable without modifying it.
+        /// builds, in the SAME branch that does the real wrapping.
+        ///
+        /// # It did not guard until Task 3.1 measured it (B16)
+        ///
+        /// The trace's wrapped flag used to be the literal `true`, and this rustdoc used to
+        /// claim that removing `RetryProvider::with_config(...)` from production "without
+        /// touching the trace" would break the count. The mutation says otherwise: replacing the
+        /// wrap with a bare `p` left `seats.push` running, the literal unchanged, and this test
+        /// **green** — through the exact regression it exists to catch. The flag is now the
+        /// comparison of two allocation addresses, so the same mutation turns it red.
+        ///
+        /// It is still not runtime downcasting — `LlmProvider` is a foreign trait from magi-core
+        /// with no `Any` (R-A01 forbids touching that crate) — so what this proves is that
+        /// *something* wrapped the provider, not that the something is a `RetryProvider`.
         #[test]
         fn build_magi_orchestrator_wires_three_distinct_seats_each_wrapped_in_retry() {
             let cfg = MagiConfig::from_toml_str("provider = \"ollama\"\n").unwrap();
