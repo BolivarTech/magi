@@ -25,9 +25,13 @@
     )
 )]
 
+use std::collections::HashMap;
 use std::fmt;
 
+use magi_core::schema::AgentName;
 use thiserror::Error;
+
+use crate::magi::rotation_config::FallbackEntry;
 
 /// Sentinel key used by [`Lineage::parse`], which cannot know which configuration key produced a
 /// blank value: it is a value parser, not a config reader. Callers that know the key remap the
@@ -55,7 +59,7 @@ impl Lineage {
     /// # Errors
     ///
     /// Returns [`LineageError::Missing`] when `raw` holds no non-whitespace characters. The error
-    /// carries [`UNKNOWN_MISSING_KEY`]: a value parser does not know which key was blank, so a
+    /// carries the unknown-key sentinel: a value parser does not know which key was blank, so a
     /// caller that does should remap it with the real key name.
     pub fn parse(raw: &str) -> Result<Self, LineageError> {
         let trimmed = raw.trim();
@@ -88,7 +92,7 @@ pub enum LineageError {
     Missing {
         /// Configuration key that produced the missing value, when the caller knows it.
         ///
-        /// [`Lineage::parse`] uses [`UNKNOWN_MISSING_KEY`] because a value parser does not know
+        /// [`Lineage::parse`] uses the unknown-key sentinel because a value parser does not know
         /// which key was blank; a caller that does should construct or remap this variant with the
         /// real key name.
         key: &'static str,
@@ -106,6 +110,47 @@ fn key_suffix(key: &str) -> String {
     } else {
         format!("{MISSING_KEY_PREFIX}{key}")
     }
+}
+
+/// Seats that no pool entry can serve.
+///
+/// A seat `S` is covered **iff** the pool holds an entry whose lineage is `lineage(S)` **and no
+/// other seat holds that same lineage**, or an entry with a lineage **no seat** has.
+///
+/// # Why the uniqueness clause is not optional
+///
+/// A rotating seat releases its own lineage, but the *other two* keep theirs in play. So if two
+/// seats share a lineage and one of them rotates, a candidate of that lineage is still blocked —
+/// by the seat that did not rotate. Dropping the clause makes `seats_without_coverage` claim
+/// coverage that rotation will refuse at the moment it matters.
+pub fn seats_without_coverage(
+    seats: &[(AgentName, Lineage)],
+    pool: &[FallbackEntry],
+) -> Vec<AgentName> {
+    // An empty pool is "no rotation", a legitimate choice — not a coverage gap.
+    if pool.is_empty() {
+        return Vec::new();
+    }
+
+    let mut seats_per_lineage: HashMap<&str, usize> = HashMap::new();
+    for (_, lineage) in seats {
+        *seats_per_lineage.entry(lineage.as_str()).or_insert(0) += 1;
+    }
+
+    seats
+        .iter()
+        .filter(|(_, lineage)| {
+            let covered = pool.iter().any(|entry| {
+                let label = entry.lineage.as_str();
+                let foreign = !seats_per_lineage.contains_key(label);
+                let own_and_unique =
+                    label == lineage.as_str() && seats_per_lineage.get(label) == Some(&1);
+                foreign || own_and_unique
+            });
+            !covered
+        })
+        .map(|(seat, _)| *seat)
+        .collect()
 }
 
 /// Unit tests for the [`Lineage`] value type.
@@ -159,5 +204,83 @@ mod tests {
     #[test]
     fn display_prints_the_inner_value() {
         assert_eq!(Lineage::parse("openai").unwrap().to_string(), "openai");
+    }
+
+    fn trio(v: &[(&str, &str)]) -> Vec<(AgentName, Lineage)> {
+        v.iter()
+            .map(|(n, l)| {
+                let seat = match *n {
+                    "melchior" => AgentName::Melchior,
+                    "balthasar" => AgentName::Balthasar,
+                    _ => AgentName::Caspar,
+                };
+                (seat, Lineage::parse(l).unwrap())
+            })
+            .collect()
+    }
+
+    fn pool_of(v: &[(&str, &str)]) -> Vec<FallbackEntry> {
+        v.iter()
+            .map(|(m, l)| FallbackEntry {
+                model: (*m).to_string(),
+                lineage: Lineage::parse(l).unwrap(),
+            })
+            .collect()
+    }
+
+    /// An entry sharing a seat's lineage covers ONLY that seat: the rotating seat releases its own
+    /// lineage, so the entry is blocked for the other two.
+    #[test]
+    fn a_pool_entry_sharing_a_seats_lineage_covers_exactly_that_seat() {
+        let seats = trio(&[
+            ("melchior", "opus"),
+            ("balthasar", "sonnet"),
+            ("caspar", "haiku"),
+        ]);
+        let pool = pool_of(&[("m2", "opus")]);
+        assert_eq!(
+            seats_without_coverage(&seats, &pool),
+            vec![AgentName::Balthasar, AgentName::Caspar],
+            "only Melchior is covered by an `opus` entry"
+        );
+    }
+
+    /// An entry with a label no seat has covers all three.
+    #[test]
+    fn a_pool_entry_with_a_foreign_lineage_covers_all_three_seats() {
+        let seats = trio(&[
+            ("melchior", "opus"),
+            ("balthasar", "sonnet"),
+            ("caspar", "haiku"),
+        ]);
+        assert!(seats_without_coverage(&seats, &pool_of(&[("m2", "zhipu")])).is_empty());
+    }
+
+    /// An empty pool is silence, not a gap: that is "no rotation", a choice.
+    #[test]
+    fn an_empty_pool_reports_no_uncovered_seats() {
+        let seats = trio(&[
+            ("melchior", "opus"),
+            ("balthasar", "sonnet"),
+            ("caspar", "haiku"),
+        ]);
+        assert!(seats_without_coverage(&seats, &[]).is_empty());
+    }
+
+    /// THE CASE THE UNIQUENESS CLAUSE EXISTS FOR. With all three seats on one lineage, a candidate
+    /// of that same lineage covers NOBODY — whichever seat rotates, the other two still hold the
+    /// lineage in play. Only a foreign label covers them.
+    #[test]
+    fn a_single_lineage_trio_is_covered_only_by_a_foreign_label() {
+        let seats = trio(&[
+            ("melchior", "anthropic"),
+            ("balthasar", "anthropic"),
+            ("caspar", "anthropic"),
+        ]);
+        assert_eq!(
+            seats_without_coverage(&seats, &pool_of(&[("m2", "anthropic")])).len(),
+            3
+        );
+        assert!(seats_without_coverage(&seats, &pool_of(&[("m2", "zhipu")])).is_empty());
     }
 }
