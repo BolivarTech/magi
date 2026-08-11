@@ -246,8 +246,12 @@ impl ModelCapabilityCache {
     /// How many rows the table holds. Exists so a test can assert that a failed measurement wrote
     /// **nothing**, which is a property about absence and cannot be observed through `get`.
     ///
+    /// `cfg(test)` because that is the whole truth about it: production never counts rows, and an
+    /// accessor kept alive by an `#[allow]` would claim a caller it does not have.
+    ///
     /// # Errors
     /// [`CacheError::Storage`] on a database failure.
+    #[cfg(test)]
     pub fn row_count(&self) -> Result<usize, CacheError> {
         let c = self.conn.lock().unwrap_or_else(|p| p.into_inner());
         c.query_row("SELECT COUNT(*) FROM model_capabilities", [], |row| {

@@ -26,9 +26,11 @@ use crate::headless_runner::{
 use crate::memory::clock::SystemClock;
 use crate::memory::embedding::OpenAiCompatibleEmbedder;
 use crate::memory::store::SqliteVectorStore;
+use crate::system::cached_probe::CachedProbe;
 use crate::system::database::{EncryptedSqliteMemory, MemoryStore};
 use crate::system::fs::{FileSystem, RealFileSystem};
 use crate::system::grep::RipGrep;
+use crate::system::model_cache::ModelCapabilityCache;
 use crate::system::workspace::Workspace;
 use crate::tools::bash::BashTool;
 use crate::tools::grep::GrepTool;
@@ -44,7 +46,7 @@ use magi_core::provider::{LlmProvider, RetryConfig, RetryProvider};
 use magi_core::providers::claude::ClaudeProvider;
 use magi_core::providers::ollama::OllamaProvider;
 use magi_core::providers::openai_compat::OpenAiCompatibleProvider;
-use magi_core::rotation::{FallbackPool, Lineage as CoreLineage};
+use magi_core::rotation::{FallbackPool, Lineage as CoreLineage, ProviderProbe};
 use magi_core::schema::{AgentName, Mode};
 use magi_rs::headless::exit::exit_code as headless_exit_code;
 use magi_rs::headless::input::{parse_input, read_input_bounded, InputFormat};
@@ -1391,6 +1393,13 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
             MemoryAttachment::Ephemeral => (None, None),
         };
 
+    // REQ-R25: the capability cache rides on the SAME encrypted database as the conversation
+    // history — its own connection would mean a second file and a second key. Absent on the
+    // ephemeral path, and a failure to open it DEGRADES: measurements stop being remembered
+    // between runs, which is slower, not wrong.
+    let capability_cache: Option<Arc<ModelCapabilityCache>> =
+        open_capability_cache(memory_store.as_ref(), &mut startup_notices);
+
     // Config lives in `.magi/magi.toml` (REQ-H16/H17): load it from the
     // discovered `.magi/`, or fall back to built-in defaults when none exists —
     // the legacy loose cwd `magi.toml` is never read. Loaded BEFORE
@@ -1541,12 +1550,15 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
     // the same `String` independently.
     let mut consult_unavailable_message: Option<String> = None;
     let consult_magi: Option<Arc<Magi>> = match build_magi_orchestrator(
-        &magi_config,
-        provider_kind,
-        &endpoints,
-        Some(&creds),
-        warn_tokens,
-        &env_overrides,
+        &TrioBuild {
+            cfg: &magi_config,
+            principal_kind: provider_kind,
+            endpoints: &endpoints,
+            creds: Some(&creds),
+            warn_tokens,
+            env_overrides: &env_overrides,
+            capability_cache: capability_cache.as_ref(),
+        },
         &mut startup_notices,
     ) {
         Ok(magi) => Some(magi),
@@ -2703,6 +2715,74 @@ fn pool_wiring_trace() -> Option<PoolWiring> {
     POOL_WIRING_TRACE.with(|t| t.borrow().clone())
 }
 
+/// Opens the capability cache over an already-open encrypted database (REQ-R25).
+///
+/// `None` means measurements will not be remembered between runs, which is **slower, not wrong**:
+/// every consumer of the cache degrades to measuring. Two distinct paths produce it and both are
+/// legitimate: the ephemeral run has no database at all, and an unreadable or unwritable table is
+/// a degradation the whole measurement subsystem is built to absorb (Task 6.8).
+///
+/// An **absent or empty** table is NOT this case: `init_schema` creates it and the first run fills
+/// it. Confusing the two would mean never persisting anything on exactly the clean start where the
+/// cache pays off most.
+fn open_capability_cache(
+    store: Option<&EncryptedSqliteMemory>,
+    notices: &mut Vec<Notice>,
+) -> Option<Arc<ModelCapabilityCache>> {
+    let store = store?;
+    let dek = match store.data_key() {
+        Ok(d) => d,
+        Err(e) => {
+            notices.push(Notice::resolution(format!(
+                "notice: model measurements will not be remembered between runs                  (could not derive the key: {e})."
+            )));
+            return None;
+        }
+    };
+    match ModelCapabilityCache::new(store.shared_conn(), dek) {
+        Ok(c) => Some(Arc::new(c)),
+        Err(e) => {
+            notices.push(Notice::resolution(format!(
+                "notice: model measurements will not be remembered between runs ({e})."
+            )));
+            None
+        }
+    }
+}
+
+/// Everything `build_magi_orchestrator` needs, bundled.
+///
+/// Seven positional parameters had accumulated and the eighth is what forced the question, but
+/// arity was never the real problem: `&MagiConfig`, `&ResolvedEndpoints` and
+/// `&MagiEnvModelOverrides` are three references a caller passes in a row, and a transposition
+/// among them changes which decision wins with **nothing to catch it** — the same hazard that made
+/// `OpenAiSettings` and `ModeSources` named structs instead of argument lists.
+///
+/// `notices` stays a separate `&mut` parameter on purpose: it is the function's OUTPUT channel,
+/// and folding an out-param into a struct of inputs reads as though it were one.
+struct TrioBuild<'a> {
+    /// Loaded configuration.
+    cfg: &'a MagiConfig,
+    /// The ALREADY-RESOLVED `ProviderKind` of the principal (env `MAGI_PROVIDER` > TOML >
+    /// default), not `cfg.effective_provider()`: before, an absent `[magi].kind` inherited by
+    /// re-reading `provider` from TOML on its own, so `MAGI_PROVIDER` moved the principal without
+    /// moving the trio. This field is what makes inheritance see the SAME decision.
+    principal_kind: ProviderKind,
+    /// ALREADY-RESOLVED endpoints. The builder does not know the vault: resolution is a named step
+    /// of `main.rs`, and `resolve_endpoints` is the sole producer of `ResolvedEndpoints`.
+    endpoints: &'a ResolvedEndpoints,
+    /// Credentials for the kinds that need one; `ollama` is keyless.
+    creds: Option<&'a dyn Credentials>,
+    /// Warning threshold produced by the probe, or `None` to keep magi-core's default.
+    warn_tokens: Option<usize>,
+    /// `MAGI_MODEL_*`, layered ON TOP of `seats(backend_model)` so the chain is
+    /// `env > TOML > backend` without duplicating that resolution.
+    env_overrides: &'a MagiEnvModelOverrides,
+    /// REQ-R10/R25/R28. `None` is the ephemeral path (Task 6.8): no encrypted database means
+    /// nothing to remember measurements in, which degrades measurement — never the run.
+    capability_cache: Option<&'a Arc<ModelCapabilityCache>>,
+}
+
 /// Builds the MAGI trio with the NATIVE providers of magi-core (REQ-A01).
 ///
 /// The adapter disappears and with it the system-prompt doubling: each mage receives its prompt
@@ -2722,27 +2802,18 @@ fn pool_wiring_trace() -> Option<PoolWiring> {
 /// - [`TrioError::UnknownKind`] if `[magi].kind` brings an unrecognized value. It is validated HERE with its own `ProviderKind::parse`, not via `cfg.effective_magi_kind()`: that accessor assumes `validate_vocabulary` already ran and swallows an unrecognized value falling back to inheritance — a correct precondition for its other callers, but exactly the one this point must NOT assume in order to report the error.
 /// - [`TrioError::SeatUnbuildable`] with **all** the seats that could not be built and their cause.
 fn build_magi_orchestrator(
-    cfg: &MagiConfig,
-    // The ALREADY-RESOLVED `ProviderKind` of the principal (env `MAGI_PROVIDER` > TOML >
-    // default — `resolve_effective_provider_kind`), not `cfg.effective_provider()` (fix round
-    // 2, I1): before, an absent `[magi].kind` inherited by re-reading `provider` from TOML on
-    // its own, so `MAGI_PROVIDER` moved the principal without moving the trio. This parameter
-    // is what makes inheritance see the SAME decision.
-    principal_kind: ProviderKind,
-    // ALREADY-RESOLVED endpoints. The builder does not know the vault: resolution is a named
-    // step of `main.rs` (after opening the vault, before the probe and the trio), and
-    // `resolve_endpoints` is the sole producer of `ResolvedEndpoints`.
-    endpoints: &ResolvedEndpoints,
-    creds: Option<&dyn Credentials>,
-    warn_tokens: Option<usize>,
-    // Restored, fix round 1 (coordinator, 2026-08-03): R-A03 only admits the three declared
-    // breakages in REQ-A21/A22/A23, and `MAGI_MODEL_*` is none of them. It is layered ON TOP of
-    // the result of `cfg.magi.seats(backend_model)` (which already resolves TOML-or-backend)
-    // via `resolve_magi_override`, giving the full chain `env > TOML > backend` without
-    // duplicating that resolution.
-    env_overrides: &MagiEnvModelOverrides,
+    b: &TrioBuild<'_>,
     notices: &mut Vec<Notice>,
 ) -> Result<Arc<Magi>, TrioError> {
+    let &TrioBuild {
+        cfg,
+        principal_kind,
+        endpoints,
+        creds,
+        warn_tokens,
+        env_overrides,
+        capability_cache,
+    } = b;
     // Absent/empty `[magi].kind` inherits `principal_kind` — the ALREADY-RESOLVED one, not
     // `cfg.effective_provider()` (TOML-only). Present-but-unrecognized remains a typed error.
     // Task 5.2: extracted to `resolve_magi_kind`, shared with `orchestrate_probes` (B3) —
@@ -2766,7 +2837,7 @@ fn build_magi_orchestrator(
 
     // The THREE seats are built first, so that ALL that fail can be reported.
     let mut failures: Vec<(AgentName, SeatError)> = Vec::new();
-    let mut seats: Vec<(AgentName, Arc<dyn LlmProvider>, CoreLineage)> = Vec::new();
+    let mut seats: Vec<(AgentName, Arc<dyn LlmProvider>, CoreLineage, String)> = Vec::new();
 
     // Test-only (I2, fix round 2): clears the trace of the PREVIOUS call in this thread before
     // starting — a test's `seat_wiring_trace()` must see ONLY what THIS call wired.
@@ -2809,7 +2880,7 @@ fn build_magi_orchestrator(
                     t.borrow_mut()
                         .push((seat, model.clone(), wrapped_addr != unwrapped_addr));
                 });
-                seats.push((seat, wrapped, lineage));
+                seats.push((seat, wrapped, lineage, model.clone()));
             }
             Err(cause) => failures.push((seat, cause)),
         }
@@ -2864,12 +2935,79 @@ fn build_magi_orchestrator(
     // primary declares no probe", `orchestrator.rs:309-320`), so once Phase 6 registers probes
     // through `with_agent_and_probe`, a plain `with_agent` for the SAME seat afterwards would
     // discard that probe in silence. Order is load-bearing here.
-    for (seat, provider, lineage) in seats {
+    // The RESOLVED url dies here: everything downstream of this line — the cache key, the probe,
+    // any notice — sees only the redacted form (REQ-A16c/SC-R58). The encrypted database protects
+    // the file; it does not make writing a credential into it acceptable.
+    let endpoint_redacted = redact_url(base.as_str());
+    let declared_pool = cfg.fallback_pool();
+
+    // REQ-R25: a model that LEFT the configuration stops being referenced. Done ONCE, here, with
+    // this run's configured set. It DEGRADES rather than aborts: a failed prune leaves extra rows,
+    // which is inert — the key is set membership, so an orphan row is simply never read.
+    if let Some(cache) = capability_cache {
+        let configured: Vec<(String, String)> = seats
+            .iter()
+            .map(|(_, _, _, m)| m)
+            .chain(declared_pool.iter().map(|e| &e.model))
+            .map(|m| (endpoint_redacted.clone(), m.clone()))
+            .collect();
+        let _ = cache.prune_absent(&configured);
+    }
+
+    // REQ-R28/D-R15: ONE probe per DISTINCT model. magi-core indexes capabilities by `model_id`
+    // and knows nothing about endpoints, so two probes for one model are the failure mode being
+    // closed — it keeps whichever answered last, in nondeterministic order. Deduplicating at
+    // registration makes that unreachable instead of merely forbidden on paper.
+    //
+    // The map is used ONLY as a dedup set and is never iterated: a `BTreeMap` orders
+    // alphabetically, so building the pool from it would silently reorder rotation preference.
+    // The order that is load-bearing comes from `declared_pool` below.
+    let mut probes: BTreeMap<String, Arc<CachedProbe>> = BTreeMap::new();
+    if let Some(cache) = capability_cache {
+        for model in seats
+            .iter()
+            .map(|(_, _, _, m)| m)
+            .chain(declared_pool.iter().map(|e| &e.model))
+        {
+            probes.entry(model.clone()).or_insert_with(|| {
+                // `OllamaProvider::new` is CORRECT here and wrong for a seat: every call this
+                // probe makes is wrapped in `CachedProbe`'s own ceiling, so the type's 300 s
+                // default never governs. A seat has nothing outside it to cut the request short.
+                let source: Option<Arc<dyn ProviderProbe>> = if kind.is_probeable() {
+                    OllamaProvider::new(base.as_str(), model.clone())
+                        .ok()
+                        .map(|p| Arc::new(p) as Arc<dyn ProviderProbe>)
+                } else {
+                    None
+                };
+                Arc::new(CachedProbe::new(
+                    Arc::clone(cache),
+                    endpoint_redacted.clone(),
+                    model.clone(),
+                    source,
+                ))
+            });
+        }
+    }
+
+    // REQ-R01 + SC-R55. Exactly ONE registration call per seat: `with_agent` after
+    // `with_agent_and_probe` for the same seat would DISCARD the probe in silence
+    // (`orchestrator.rs:309-320`), and nothing about that failure is visible until a rotation
+    // needs the measurement — the worst possible moment.
+    for (seat, provider, lineage, model) in seats {
         // Recorded ON THE SAME loop that registers, for the same reason the wrap trace is
         // recorded on the branch that wraps: a guardian anchored anywhere else stops guarding.
         #[cfg(test)]
         SEAT_LINEAGE_TRACE.with(|t| t.borrow_mut().push((seat, lineage.as_str().to_owned())));
-        builder = builder.with_agent(seat, provider, lineage);
+        builder = match probes.get(&model) {
+            Some(probe) => builder.with_agent_and_probe(
+                seat,
+                provider,
+                lineage,
+                Arc::clone(probe) as Arc<dyn ProviderProbe>,
+            ),
+            None => builder.with_agent(seat, provider, lineage),
+        };
     }
 
     // REQ-R03/R05: the SHARED rotation pool. Shared and not per-seat (D-R02) because the property
@@ -2877,7 +3015,6 @@ fn build_magi_orchestrator(
     // property of the pool's DIVERSITY, not of who owns the list. Three lists would triple what has
     // to be declared for the same guarantee, and would add a failure mode a single pool does not
     // have: one list drying up while the other two still hold candidates.
-    let declared_pool = cfg.fallback_pool();
     if !declared_pool.is_empty() {
         let mut pool = FallbackPool::builder().max_rotations(cfg.effective_max_rotations());
         #[cfg(test)]
@@ -2898,10 +3035,19 @@ fn build_magi_orchestrator(
                     wired.push((entry.model.clone(), entry.lineage.as_str().to_owned()));
                     // Wrapped like the seats: `MagiBuilder::build()` wraps nothing, so a candidate
                     // pushed raw would silently be the one seat in the run without transport retry.
-                    pool = pool.push(
-                        Arc::new(RetryProvider::with_config(candidate, retry.clone())),
-                        CoreLineage::from(entry.lineage.clone()),
-                    );
+                    let wrapped: Arc<dyn LlmProvider> =
+                        Arc::new(RetryProvider::with_config(candidate, retry.clone()));
+                    let lineage = CoreLineage::from(entry.lineage.clone());
+                    // Order comes from `declared_pool`, NEVER from the dedup map: it is the
+                    // rotation preference, strongest to weakest.
+                    pool = match probes.get(&entry.model) {
+                        Some(probe) => pool.push_with_probe(
+                            wrapped,
+                            lineage,
+                            Arc::clone(probe) as Arc<dyn ProviderProbe>,
+                        ),
+                        None => pool.push(wrapped, lineage),
+                    };
                 }
                 Err(cause) => notices.push(Notice::resolution(format!(
                     "notice: fallback candidate `{}` could not be built ({cause}); \
@@ -4169,6 +4315,8 @@ async fn prepare_headless(
     // REQ-A24/A24b/A24c (Task 5.2): same polling as the TUI, see `run()`'s comment — never
     // blocks or fails headless startup.
     let mut trio_notices: Vec<Notice> = Vec::new();
+    // Same wiring as the TUI, through the same opener (B3).
+    let capability_cache = open_capability_cache(memory.as_ref(), &mut trio_notices);
     let warn_tokens = probe_and_report(
         &magi_config,
         &endpoints,
@@ -4179,12 +4327,15 @@ async fn prepare_headless(
     )
     .await;
     let consult_magi = build_magi_orchestrator(
-        &magi_config,
-        provider_kind,
-        &endpoints,
-        Some(&creds),
-        warn_tokens,
-        &env_overrides,
+        &TrioBuild {
+            cfg: &magi_config,
+            principal_kind: provider_kind,
+            endpoints: &endpoints,
+            creds: Some(&creds),
+            warn_tokens,
+            env_overrides: &env_overrides,
+            capability_cache: capability_cache.as_ref(),
+        },
         &mut trio_notices,
     );
     // REQ-A07p/SC-A07p (fix round 4, finding 1): headless is the surface this notice
@@ -7129,12 +7280,15 @@ mod tests {
         fn the_declared_pool_reaches_magi_core_with_its_lineages() {
             let mut notices = Vec::new();
             let magi = build_magi_orchestrator(
-                &cfg_with_pool(2),
-                ProviderKind::Ollama,
-                &test_endpoints(),
-                None,
-                None,
-                &MagiEnvModelOverrides::default(),
+                &TrioBuild {
+                    cfg: &cfg_with_pool(2),
+                    principal_kind: ProviderKind::Ollama,
+                    endpoints: &test_endpoints(),
+                    creds: None,
+                    warn_tokens: None,
+                    env_overrides: &MagiEnvModelOverrides::default(),
+                    capability_cache: None,
+                },
                 &mut notices,
             )
             .expect("ollama is keyless");
@@ -7162,12 +7316,15 @@ mod tests {
         fn max_rotations_zero_is_wired_as_a_declared_kill_switch() {
             let mut notices = Vec::new();
             let magi = build_magi_orchestrator(
-                &cfg_with_pool(0),
-                ProviderKind::Ollama,
-                &test_endpoints(),
-                None,
-                None,
-                &MagiEnvModelOverrides::default(),
+                &TrioBuild {
+                    cfg: &cfg_with_pool(0),
+                    principal_kind: ProviderKind::Ollama,
+                    endpoints: &test_endpoints(),
+                    creds: None,
+                    warn_tokens: None,
+                    env_overrides: &MagiEnvModelOverrides::default(),
+                    capability_cache: None,
+                },
                 &mut notices,
             )
             .expect("ollama is keyless");
@@ -7242,12 +7399,15 @@ mod tests {
             };
             let mut notices = Vec::new();
             let magi = build_magi_orchestrator(
-                &cfg_with_pool(2),
-                ProviderKind::Ollama,
-                &endpoints,
-                None,
-                None,
-                &MagiEnvModelOverrides::default(),
+                &TrioBuild {
+                    cfg: &cfg_with_pool(2),
+                    principal_kind: ProviderKind::Ollama,
+                    endpoints: &endpoints,
+                    creds: None,
+                    warn_tokens: None,
+                    env_overrides: &MagiEnvModelOverrides::default(),
+                    capability_cache: None,
+                },
                 &mut notices,
             )
             .expect("ollama is keyless");
@@ -7367,12 +7527,15 @@ mod tests {
 
             let mut notices = Vec::new();
             let magi = build_magi_orchestrator(
-                &cfg_with_pool(2),
-                ProviderKind::Ollama,
-                &endpoints,
-                None,
-                None,
-                &MagiEnvModelOverrides::default(),
+                &TrioBuild {
+                    cfg: &cfg_with_pool(2),
+                    principal_kind: ProviderKind::Ollama,
+                    endpoints: &endpoints,
+                    creds: None,
+                    warn_tokens: None,
+                    env_overrides: &MagiEnvModelOverrides::default(),
+                    capability_cache: None,
+                },
                 &mut notices,
             )
             .expect("ollama is keyless: the credential rides in the URL, not in a header we set");
@@ -7688,12 +7851,15 @@ mod tests {
             let cfg = MagiConfig::from_toml_str("provider = \"ollama\"\n").unwrap();
             let mut notices = Vec::new();
             let magi = build_magi_orchestrator(
-                &cfg,
-                ProviderKind::Ollama,
-                &test_endpoints(),
-                None,
-                None,
-                &MagiEnvModelOverrides::default(),
+                &TrioBuild {
+                    cfg: &cfg,
+                    principal_kind: ProviderKind::Ollama,
+                    endpoints: &test_endpoints(),
+                    creds: None,
+                    warn_tokens: None,
+                    env_overrides: &MagiEnvModelOverrides::default(),
+                    capability_cache: None,
+                },
                 &mut notices,
             )
             .expect("ollama is keyless: it must build with no credentials or network");
@@ -7742,12 +7908,15 @@ mod tests {
             .expect("a fully declared trio must parse");
             let mut notices = Vec::new();
             let magi = build_magi_orchestrator(
-                &cfg,
-                ProviderKind::Ollama,
-                &test_endpoints(),
-                None,
-                None,
-                &MagiEnvModelOverrides::default(),
+                &TrioBuild {
+                    cfg: &cfg,
+                    principal_kind: ProviderKind::Ollama,
+                    endpoints: &test_endpoints(),
+                    creds: None,
+                    warn_tokens: None,
+                    env_overrides: &MagiEnvModelOverrides::default(),
+                    capability_cache: None,
+                },
                 &mut notices,
             )
             .expect("ollama is keyless: it must build with no credentials or network");
@@ -7784,12 +7953,15 @@ mod tests {
             let cfg = MagiConfig::from_toml_str("provider = \"ollama\"\n").unwrap();
             let mut notices = Vec::new();
             let magi = build_magi_orchestrator(
-                &cfg,
-                ProviderKind::Ollama,
-                &test_endpoints(),
-                None,
-                None,
-                &MagiEnvModelOverrides::default(),
+                &TrioBuild {
+                    cfg: &cfg,
+                    principal_kind: ProviderKind::Ollama,
+                    endpoints: &test_endpoints(),
+                    creds: None,
+                    warn_tokens: None,
+                    env_overrides: &MagiEnvModelOverrides::default(),
+                    capability_cache: None,
+                },
                 &mut notices,
             )
             .expect("the default configuration must still build a trio");
@@ -7849,12 +8021,15 @@ mod tests {
             assert!(
                 matches!(
                     build_magi_orchestrator(
-                        &cfg_with_kind("banana"),
-                        ProviderKind::Ollama,
-                        &test_endpoints(),
-                        None,
-                        None,
-                        &MagiEnvModelOverrides::default(),
+                        &TrioBuild {
+                            cfg: &cfg_with_kind("banana"),
+                            principal_kind: ProviderKind::Ollama,
+                            endpoints: &test_endpoints(),
+                            creds: None,
+                            warn_tokens: None,
+                            env_overrides: &MagiEnvModelOverrides::default(),
+                            capability_cache: None,
+                        },
                         &mut notices,
                     ),
                     Err(TrioError::UnknownKind(_))
@@ -7866,12 +8041,15 @@ mod tests {
             let mut notices = Vec::new();
             assert!(
                 build_magi_orchestrator(
-                    &cfg_with_kind(""),
-                    ProviderKind::Ollama,
-                    &test_endpoints(),
-                    Some(&c),
-                    None,
-                    &MagiEnvModelOverrides::default(),
+                    &TrioBuild {
+                        cfg: &cfg_with_kind(""),
+                        principal_kind: ProviderKind::Ollama,
+                        endpoints: &test_endpoints(),
+                        creds: Some(&c),
+                        warn_tokens: None,
+                        env_overrides: &MagiEnvModelOverrides::default(),
+                        capability_cache: None,
+                    },
                     &mut notices,
                 )
                 .is_ok(),
@@ -7895,12 +8073,15 @@ mod tests {
             let cfg = MagiConfig::from_toml_str("provider = \"ollama\"\n").unwrap();
             let mut notices = Vec::new();
             let err = match build_magi_orchestrator(
-                &cfg,
-                ProviderKind::Anthropic,
-                &test_endpoints(),
-                None,
-                None,
-                &MagiEnvModelOverrides::default(),
+                &TrioBuild {
+                    cfg: &cfg,
+                    principal_kind: ProviderKind::Anthropic,
+                    endpoints: &test_endpoints(),
+                    creds: None,
+                    warn_tokens: None,
+                    env_overrides: &MagiEnvModelOverrides::default(),
+                    capability_cache: None,
+                },
                 &mut notices,
             ) {
                 Ok(_) => panic!(
@@ -7935,12 +8116,15 @@ mod tests {
             // `.expect_err()` needs the `Ok` side (`Arc<Magi>`) to be `Debug`, which
             // it is not — `match` avoids that bound entirely.
             let err = match build_magi_orchestrator(
-                &cfg_openai_compat_without_credentials(),
-                ProviderKind::OpenAiCompat,
-                &test_endpoints(),
-                None,
-                None,
-                &MagiEnvModelOverrides::default(),
+                &TrioBuild {
+                    cfg: &cfg_openai_compat_without_credentials(),
+                    principal_kind: ProviderKind::OpenAiCompat,
+                    endpoints: &test_endpoints(),
+                    creds: None,
+                    warn_tokens: None,
+                    env_overrides: &MagiEnvModelOverrides::default(),
+                    capability_cache: None,
+                },
                 &mut notices,
             ) {
                 Ok(_) => panic!("without credential the trio is not buildable"),
@@ -7968,12 +8152,15 @@ mod tests {
             let c = creds();
             let mut notices = Vec::new();
             let err = match build_magi_orchestrator(
-                &cfg_with_only_caspar_unbuildable(),
-                ProviderKind::Anthropic,
-                &test_endpoints(),
-                Some(&c),
-                None,
-                &MagiEnvModelOverrides::default(),
+                &TrioBuild {
+                    cfg: &cfg_with_only_caspar_unbuildable(),
+                    principal_kind: ProviderKind::Anthropic,
+                    endpoints: &test_endpoints(),
+                    creds: Some(&c),
+                    warn_tokens: None,
+                    env_overrides: &MagiEnvModelOverrides::default(),
+                    capability_cache: None,
+                },
                 &mut notices,
             ) {
                 Ok(_) => panic!("one fallen seat is enough for the trio to be unbuildable"),
@@ -8338,12 +8525,15 @@ mod tests {
             let mut notices = Vec::new();
             assert!(
                 build_magi_orchestrator(
-                    &backend_only,
-                    ProviderKind::Anthropic,
-                    &endpoints,
-                    Some(&c),
-                    None,
-                    &MagiEnvModelOverrides::default(),
+                    &TrioBuild {
+                        cfg: &backend_only,
+                        principal_kind: ProviderKind::Anthropic,
+                        endpoints: &endpoints,
+                        creds: Some(&c),
+                        warn_tokens: None,
+                        env_overrides: &MagiEnvModelOverrides::default(),
+                        capability_cache: None,
+                    },
                     &mut notices,
                 )
                 .is_ok(),
@@ -8355,12 +8545,15 @@ mod tests {
             let mut notices = Vec::new();
             assert!(
                 build_magi_orchestrator(
-                    &toml_override_invalid,
-                    ProviderKind::Anthropic,
-                    &endpoints,
-                    Some(&c),
-                    None,
-                    &MagiEnvModelOverrides::default(),
+                    &TrioBuild {
+                        cfg: &toml_override_invalid,
+                        principal_kind: ProviderKind::Anthropic,
+                        endpoints: &endpoints,
+                        creds: Some(&c),
+                        warn_tokens: None,
+                        env_overrides: &MagiEnvModelOverrides::default(),
+                        capability_cache: None,
+                    },
                     &mut notices,
                 )
                 .is_err(),
@@ -8375,12 +8568,15 @@ mod tests {
             let mut notices = Vec::new();
             assert!(
                 build_magi_orchestrator(
-                    &toml_override_invalid,
-                    ProviderKind::Anthropic,
-                    &endpoints,
-                    Some(&c),
-                    None,
-                    &env_overrides,
+                    &TrioBuild {
+                        cfg: &toml_override_invalid,
+                        principal_kind: ProviderKind::Anthropic,
+                        endpoints: &endpoints,
+                        creds: Some(&c),
+                        warn_tokens: None,
+                        env_overrides: &env_overrides,
+                        capability_cache: None,
+                    },
                     &mut notices,
                 )
                 .is_ok(),
@@ -8428,12 +8624,15 @@ mod tests {
             let mut notices = Vec::new();
 
             let magi = build_magi_orchestrator(
-                &cfg,
-                ProviderKind::Ollama,
-                &test_endpoints(),
-                None,
-                None,
-                &env_overrides,
+                &TrioBuild {
+                    cfg: &cfg,
+                    principal_kind: ProviderKind::Ollama,
+                    endpoints: &test_endpoints(),
+                    creds: None,
+                    warn_tokens: None,
+                    env_overrides: &env_overrides,
+                    capability_cache: None,
+                },
                 &mut notices,
             )
             .expect("ollama is keyless: blank overrides must not break construction");

@@ -80,12 +80,6 @@ impl CachedProbe {
         }
     }
 
-    /// The cache behind this probe.
-    #[must_use]
-    pub fn cache(&self) -> &ModelCapabilityCache {
-        &self.cache
-    }
-
     /// Reads the cached row, treating any cache failure as a miss.
     ///
     /// Failing open here is the same discipline the whole measurement subsystem follows: an
@@ -129,12 +123,35 @@ impl ProviderProbe for CachedProbe {
     /// written and the next start retries — persisting the failure would freeze a cold daemon's
     /// transient silence into a permanent answer.
     async fn window(&self) -> Result<Option<usize>, ProviderError> {
-        Ok(None)
+        if let Some(row) = self.cached() {
+            return Ok(Some(row.window));
+        }
+        let Some(source) = self.source.as_ref() else {
+            return Ok(None);
+        };
+
+        // TWO ceilings, sequential and independent. One `timeout` around both would let a slow
+        // digest discard a window that already resolved — `rotation.rs:756`'s defect.
+        let Some(window) = Self::measure(source.window()).await else {
+            return Ok(None);
+        };
+        let digest = Self::measure(source.digest()).await;
+
+        // A cache write that fails must not fail the measurement: the value is already in hand.
+        let _ = self.cache.put(
+            &self.endpoint_redacted,
+            &self.model,
+            &CachedCapability { window, digest },
+        );
+        Ok(Some(window))
     }
 
-    /// Stub.
+    /// The weights digest, **from the cache only**.
+    ///
+    /// It is never measured here and never re-verified: `window()` wrote it on the first trip. A
+    /// miss answers `None`, which is inert — an unresolved digest cannot collide with anything.
     async fn digest(&self) -> Result<Option<String>, ProviderError> {
-        Ok(None)
+        Ok(self.cached().and_then(|row| row.digest))
     }
 
     /// The model this probe speaks for, so the preflight can check the correspondence for free.
