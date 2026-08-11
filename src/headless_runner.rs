@@ -2963,10 +2963,10 @@ mod tests {
     #[tokio::test]
     async fn run_consult_bounds_the_report_when_it_exceeds_the_configured_output_cap() {
         let cap = magi_rs::magi::mark_overhead() + 20;
-        let cfg = MagiConfig {
-            tool_result_cap_bytes: Some(cap),
-            ..MagiConfig::default()
-        };
+        let cfg = MagiConfig::builder()
+            .tool_result_cap_bytes(Some(cap))
+            .build()
+            .unwrap();
         let sink = RecordingNoticeSink::default();
         let outcome = run_consult(
             resolved_stub(),

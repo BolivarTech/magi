@@ -1476,11 +1476,11 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
     // these are: "the config resolved differently than the file appears to say."
     startup_notices.extend(config_notices.into_iter().map(Notice::resolution));
     // B1: surface invalid memory-config values as a startup notice (never panic).
-    if let Err(e) = magi_config.memory.validate() {
+    if let Err(e) = magi_config.memory().validate() {
         startup_notices.push(Notice::resolution(format!("memory config warning: {e}")));
     }
     // H2: surface invalid embedding-config values alongside memory-config (never panic).
-    if let Err(e) = magi_config.embedding.validate() {
+    if let Err(e) = magi_config.embedding().validate() {
         startup_notices.push(Notice::resolution(format!("embedding config warning: {e}")));
     }
     // RF-9: when there is no magi.toml at all, make the Ollama-first default visible
@@ -1561,7 +1561,7 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
     let (tui_mode_classifier, tui_classifier_notices) =
         tui_mode_classifier_wiring(provider.clone());
     let tui_default_mode = magi_config.effective_default_mode();
-    let tui_untrusted_content = magi_config.magi.untrusted_content.unwrap_or(false);
+    let tui_untrusted_content = magi_config.magi().untrusted_content.unwrap_or(false);
     // REQ-A07p/SC-A07p: `tui_default_mode.is_none()` IS "will this session infer the
     // mode" — the same signal `divergence_notice` needs, already computed above; reusing
     // it (instead of calling `effective_default_mode()` a second time) is B3, not just
@@ -1616,7 +1616,7 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
     register_consult_tool_if_available(
         &mut agent,
         consult_magi.as_ref(),
-        magi_config.magi.auto_approve,
+        magi_config.magi().auto_approve,
         registered_magi_kind(&magi_config, provider_kind),
         magi_config.magi_endpoint_diverges(),
         magi_config.effective_max_query_bytes(),
@@ -1629,11 +1629,11 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
         crate::tui::TuiConsultWiring {
             consult: consult_magi,
             consult_unavailable_message,
-            magi_auto_approve: magi_config.magi.auto_approve,
+            magi_auto_approve: magi_config.magi().auto_approve,
             // M1 fix: threads `[magi].agent_timeout_secs` through to the
             // post-`/login` trio rebuild, which used to hardcode the
             // built-in default regardless of this config.
-            agent_timeout_secs: magi_config.magi.agent_timeout_secs,
+            agent_timeout_secs: magi_config.magi().agent_timeout_secs,
         },
         secret_store,
         crate::tui::TuiMagiRuntimeConfig {
@@ -1781,7 +1781,7 @@ fn resolve_endpoints(
     // The trio inherits the SAME effective root (with its env layer) when it does not declare
     // its own — never bare `effective_magi_base_url()`, which only sees TOML.
     let magi_tpl = match magi_config
-        .magi
+        .magi()
         .base_url
         .as_deref()
         .map(str::trim)
@@ -1816,7 +1816,7 @@ fn resolve_magi_kind(
     principal_kind: ProviderKind,
 ) -> Result<ProviderKind, ProviderKindParseError> {
     Ok(
-        ProviderKind::parse(cfg.magi.kind.as_deref().unwrap_or_default())?
+        ProviderKind::parse(cfg.magi().kind.as_deref().unwrap_or_default())?
             .unwrap_or(principal_kind),
     )
 }
@@ -1863,12 +1863,12 @@ fn registered_magi_kind(cfg: &MagiConfig, principal_kind: ProviderKind) -> Provi
 fn resolve_backend_model(cfg: &MagiConfig, kind: ProviderKind) -> &str {
     match kind {
         ProviderKind::Ollama | ProviderKind::OpenAiCompat => cfg
-            .openai
+            .openai()
             .model
             .as_deref()
             .unwrap_or(crate::defaults::DEFAULT_OPENAI_MODEL),
         ProviderKind::Anthropic => cfg
-            .anthropic
+            .anthropic()
             .model
             .as_deref()
             .unwrap_or(crate::defaults::DEFAULT_ANTHROPIC_MODEL),
@@ -2059,11 +2059,11 @@ async fn probe_and_report(
             notices.push(Notice::resolution(n));
         }
     }
-    if let Some(n) = trio_probe_incomplete_notice(&trio, cfg.magi.input_warn_tokens) {
+    if let Some(n) = trio_probe_incomplete_notice(&trio, cfg.magi().input_warn_tokens) {
         notices.push(Notice::resolution(n));
     }
     // REQ-A24b/SC-A24e: the explicit (`[magi].input_warn_tokens`) wins over the measured.
-    cfg.magi
+    cfg.magi()
         .input_warn_tokens
         .or_else(|| derive_warn_tokens(&trio))
 }
@@ -2361,7 +2361,7 @@ fn seats_with_env_overrides(
     backend_model: &str,
     env_overrides: &MagiEnvModelOverrides,
 ) -> Vec<(AgentName, String)> {
-    cfg.magi
+    cfg.magi()
         .seats(backend_model)
         .into_iter()
         .map(|(seat, toml_or_backend_model)| {
@@ -2658,7 +2658,7 @@ fn build_magi_orchestrator(
     // BACKEND model: the one a seat inherits without its own model, and the builder fallback's.
     // Task 5.2: extracted to `resolve_backend_model`, shared with `orchestrate_probes` (B3).
     let backend_model: &str = resolve_backend_model(cfg, kind);
-    let ceiling = Duration::from_secs(cfg.magi.agent_timeout_secs.unwrap_or(AGENT_TIMEOUT_SECS));
+    let ceiling = Duration::from_secs(cfg.magi().agent_timeout_secs.unwrap_or(AGENT_TIMEOUT_SECS));
 
     // `RetryConfig` is `#[non_exhaustive]`: outside the crate there is NO literal nor
     // `..default()` — it is built with `default()` and adjusted field by field.
@@ -2722,7 +2722,7 @@ fn build_magi_orchestrator(
     let fallback_provider = build_native_provider(
         kind,
         base,
-        cfg.magi.fallback_model(backend_model),
+        cfg.magi().fallback_model(backend_model),
         creds,
         client_timeout,
         &mut sink,
@@ -2740,7 +2740,7 @@ fn build_magi_orchestrator(
     if let Some(warn) = warn_tokens {
         builder = builder.with_input_warn_tokens(warn);
     }
-    if cfg.magi.retry_disabled.unwrap_or(false) {
+    if cfg.magi().retry_disabled.unwrap_or(false) {
         builder = builder.with_retry_disabled();
     }
 
@@ -2915,7 +2915,7 @@ impl AutonomousRunConfig {
             gate_thresholds: crate::config::gate_thresholds_from(config),
             mode_config: magi_rs::magi::mode::ModeConfig {
                 default_mode: config.effective_default_mode(),
-                untrusted_content: config.magi.untrusted_content.unwrap_or(false),
+                untrusted_content: config.magi().untrusted_content.unwrap_or(false),
             },
             telemetry: Arc::new(BufferedGateTelemetry::new()),
         }
@@ -3205,7 +3205,7 @@ async fn attach_persistent_memory(
         // failure (REQ-29): it is never silently swallowed.
         let embedder_result = resolve_effective_embedding_endpoint(magi_config, secret_store)
             .and_then(|url| {
-                let mut cfg = magi_config.embedding.clone();
+                let mut cfg = magi_config.embedding().clone();
                 cfg.base_url = Some(url);
                 OpenAiCompatibleEmbedder::new(&cfg, embed_key).map_err(|e| e.to_string())
             });
@@ -3221,7 +3221,7 @@ async fn attach_persistent_memory(
                 let clock = Arc::new(SystemClock);
                 let vstore = Arc::new(vstore);
                 let vstore_diag = Arc::clone(&vstore);
-                agent.set_memory_subsystem(vstore, embedder, clock, magi_config.memory.clone());
+                agent.set_memory_subsystem(vstore, embedder, clock, magi_config.memory().clone());
                 agent.on_session_open().await.ok();
 
                 // CP2-AN/S: one-line diagnostics summary — never fail startup on error.
@@ -3247,12 +3247,13 @@ async fn attach_persistent_memory(
                 // it is informational, and `load()` does not yet fail closed on a bad
                 // template (that validation is not part of Task 1.1's scope).
                 if let Ok(embedding_url) = magi_config.effective_embedding_base_url() {
-                    if magi_config.memory.distill_enabled && !is_localhost(embedding_url.as_str()) {
+                    if magi_config.memory().distill_enabled && !is_localhost(embedding_url.as_str())
+                    {
                         notices.push(format!(
                             "Memory distiller will send bounded memory batches \
                              (≤ {} tokens) to {} — set distill_enabled = false \
                              in [memory] for zero cloud memory egress.",
-                            magi_config.memory.distill_max_batch_tokens,
+                            magi_config.memory().distill_max_batch_tokens,
                             embedding_url.as_str(),
                         ));
                     }
@@ -3787,7 +3788,7 @@ async fn prepare_headless(
     // operator-lowered `[headless]` cap, spec §11) governs the read itself
     // rather than only the later ceiling — never the module constant alone.
     let limits = resolve_headless_limits(
-        &magi_config.headless,
+        magi_config.headless(),
         magi_config.effective_tool_result_cap(),
     );
 
@@ -3908,7 +3909,7 @@ async fn prepare_headless(
         .unwrap_or(NORMAL_MAX_TOOL_CALLS);
     let allow_system_override = resolve_allow_system_override(
         h.allow_system_override,
-        magi_config.headless.allow_system_override,
+        magi_config.headless().allow_system_override,
     );
     let resolved = resolve_params(
         envelope,
@@ -4028,7 +4029,7 @@ async fn prepare_headless(
         h,
         workspace.as_ref(),
         &limits,
-        magi_config.headless.log_level.as_deref(),
+        magi_config.headless().log_level.as_deref(),
     ) {
         Ok(log) => log,
         Err(e) => {
@@ -4157,7 +4158,7 @@ async fn run_query_subcommand(
     register_consult_tool_if_available(
         &mut agent,
         consult_magi.as_ref(),
-        magi_config.magi.auto_approve,
+        magi_config.magi().auto_approve,
         registered_magi_kind(&magi_config, provider_kind),
         magi_config.magi_endpoint_diverges(),
         magi_config.effective_max_query_bytes(),
@@ -4173,7 +4174,7 @@ async fn run_query_subcommand(
         timeout,
         consult_magi.is_some(),
         magi_config
-            .magi
+            .magi()
             .agent_timeout_secs
             .unwrap_or(magi_rs::magi::AGENT_TIMEOUT_SECS),
     );
@@ -4312,7 +4313,7 @@ async fn run_consult_subcommand(
     // envelope field, and the operator's `magi.toml` — any one activates it.
     let untrusted_content = h.untrusted_content
         || env_untrusted_content
-        || magi_config.magi.untrusted_content.unwrap_or(false);
+        || magi_config.magi().untrusted_content.unwrap_or(false);
     // Fix round 2 (SC-A04d): ONE process-level notice sink, shared by the mode
     // classifier's own notices AND the --timeout-below-formula warning below —
     // one stderr output path, not two, and dedup is per-key so sharing cannot
@@ -4348,7 +4349,7 @@ async fn run_consult_subcommand(
     let timeout_decision = magi_rs::magi::resolve_run_timeout(
         h.timeout,
         magi_config
-            .magi
+            .magi()
             .agent_timeout_secs
             .unwrap_or(magi_rs::magi::AGENT_TIMEOUT_SECS),
     );
@@ -5177,10 +5178,10 @@ mod tests {
     fn test_resolve_effective_provider_kind_wiring() {
         assert_eq!(
             resolve_effective_provider_kind(
-                &MagiConfig {
-                    provider: Some("anthropic".into()),
-                    ..Default::default()
-                },
+                &MagiConfig::builder()
+                    .provider(Some("anthropic".into()))
+                    .build()
+                    .unwrap(),
                 Some("ollama")
             )
             .unwrap(),
@@ -5344,12 +5345,12 @@ mod tests {
             let mut guard = ss.lock().unwrap();
             guard.set("ANTHROPIC_API_KEY", "sk-from-vault").unwrap();
         }
-        let config = MagiConfig {
-            anthropic: crate::config::AnthropicConfig {
+        let config = MagiConfig::builder()
+            .anthropic(crate::config::AnthropicConfig {
                 model: Some("claude-toml-model".into()),
-            },
-            ..Default::default()
-        };
+            })
+            .build()
+            .unwrap();
 
         // No env: the TOML model is honored (was previously ignored entirely).
         with_var("ANTHROPIC_MODEL", None, || {
@@ -6763,14 +6764,15 @@ mod tests {
         /// of `build_magi_orchestrator` on why it does NOT use `cfg.effective_magi_kind()` for
         /// this.
         fn cfg_with_kind(kind: &str) -> MagiConfig {
-            MagiConfig {
-                provider: Some("ollama".to_string()),
-                magi: crate::config::MagiSectionConfig {
+            // `build_unvalidated`, not `build`: this fixture's whole point is a `kind` the
+            // validation would reject, so the validating exit cannot be the one used here.
+            MagiConfig::builder()
+                .provider(Some("ollama".to_string()))
+                .magi(crate::config::MagiSectionConfig {
                     kind: Some(kind.to_string()),
                     ..crate::config::MagiSectionConfig::default()
-                },
-                ..MagiConfig::default()
-            }
+                })
+                .build_unvalidated()
         }
 
         /// Content above any magi-core internal minimum — not the REQ-A20 complexity gate
@@ -7912,14 +7914,14 @@ mod tests {
         /// `[magi].base_url` override — the only pair of fields that `magi_endpoint_diverges()`
         /// looks at.
         fn cfg_with_endpoints(root: &str, magi_override: Option<&str>) -> MagiConfig {
-            MagiConfig {
-                base_url: Some(root.to_string()),
-                magi: crate::config::MagiSectionConfig {
+            MagiConfig::builder()
+                .base_url(Some(root.to_string()))
+                .magi(crate::config::MagiSectionConfig {
                     base_url: magi_override.map(str::to_string),
                     ..crate::config::MagiSectionConfig::default()
-                },
-                ..MagiConfig::default()
-            }
+                })
+                .build()
+                .unwrap()
         }
 
         /// SC-A07p: endpoint divergence is warned, and ONLY when there is divergence AND
@@ -8072,13 +8074,13 @@ mod tests {
             // Literal credential: `EndpointTemplate::parse` rejects it (REQ-A16c), so
             // `effective_magi_base_url()` fails — the precondition that `load()` normally
             // guarantees, deliberately violated.
-            let cfg = MagiConfig {
-                magi: crate::config::MagiSectionConfig {
+            let cfg = MagiConfig::builder()
+                .magi(crate::config::MagiSectionConfig {
                     base_url: Some("https://user:pass@host/v1".to_string()),
                     ..crate::config::MagiSectionConfig::default()
-                },
-                ..MagiConfig::default()
-            };
+                })
+                .build()
+                .unwrap();
             let _ = divergence_notice(&cfg, true);
         }
 
@@ -8831,15 +8833,18 @@ mod tests {
         /// `MagiConfig` whose `[magi]` declares its own `base_url` (and optionally `kind`) —
         /// the pair of fields that `magi_endpoint_diverges()` looks at. Without own section
         /// model: whoever needs one uses [`cfg_diverging_with_models`].
+        ///
+        /// `build_unvalidated`, not `build`: callers pass an unrecognized `kind` on purpose, to
+        /// pin that the trio degrades instead of guessing, so the validating exit would reject
+        /// exactly the cases this fixture exists to produce.
         fn cfg_diverging(kind: Option<&str>) -> MagiConfig {
-            MagiConfig {
-                magi: crate::config::MagiSectionConfig {
+            MagiConfig::builder()
+                .magi(crate::config::MagiSectionConfig {
                     base_url: Some("http://magi-host:11434/v1".to_string()),
                     kind: kind.map(str::to_string),
                     ..crate::config::MagiSectionConfig::default()
-                },
-                ..MagiConfig::default()
-            }
+                })
+                .build_unvalidated()
         }
 
         /// `MagiConfig` with DISTINCT, nameable sections (`[openai].model`,
@@ -8852,33 +8857,36 @@ mod tests {
             openai_model: &str,
             anthropic_model: &str,
         ) -> MagiConfig {
-            MagiConfig {
-                openai: crate::config::OpenAiConfig {
+            MagiConfig::builder()
+                .openai(crate::config::OpenAiConfig {
                     model: Some(openai_model.to_string()),
-                },
-                anthropic: crate::config::AnthropicConfig {
+                })
+                .anthropic(crate::config::AnthropicConfig {
                     model: Some(anthropic_model.to_string()),
-                },
-                ..MagiConfig::default()
-            }
+                })
+                .build()
+                .unwrap()
         }
 
         /// Like [`cfg_diverging`], but with BOTH nameable sections too — the fixture that
         /// exercises the fix-round-1 finding with the trio on a different endpoint AND a
-        /// different kind than the principal at the same time.
+        /// different kind than the principal at the same time. Unvalidated for the same reason
+        /// as [`cfg_diverging`]: one caller passes an unrecognized `kind` deliberately.
         fn cfg_diverging_with_models(
             kind: Option<&str>,
             openai_model: &str,
             anthropic_model: &str,
         ) -> MagiConfig {
-            MagiConfig {
-                magi: crate::config::MagiSectionConfig {
-                    base_url: Some("http://magi-host:11434/v1".to_string()),
-                    kind: kind.map(str::to_string),
-                    ..crate::config::MagiSectionConfig::default()
-                },
-                ..cfg_with_distinct_section_models(openai_model, anthropic_model)
-            }
+            crate::config::MagiConfigBuilder::from(cfg_with_distinct_section_models(
+                openai_model,
+                anthropic_model,
+            ))
+            .magi(crate::config::MagiSectionConfig {
+                base_url: Some("http://magi-host:11434/v1".to_string()),
+                kind: kind.map(str::to_string),
+                ..crate::config::MagiSectionConfig::default()
+            })
+            .build_unvalidated()
         }
 
         // ---- probe_notice / stale_composition_notice (brief contract, Step 1) -----
@@ -9037,18 +9045,18 @@ mod tests {
             balthasar: &str,
             caspar: &str,
         ) -> MagiConfig {
-            MagiConfig {
-                openai: crate::config::OpenAiConfig {
+            MagiConfig::builder()
+                .openai(crate::config::OpenAiConfig {
                     model: Some(principal.to_string()),
-                },
-                magi: crate::config::MagiSectionConfig {
+                })
+                .magi(crate::config::MagiSectionConfig {
                     melchior_model: Some(melchior.to_string()),
                     balthasar_model: Some(balthasar.to_string()),
                     caspar_model: Some(caspar.to_string()),
                     ..crate::config::MagiSectionConfig::default()
-                },
-                ..MagiConfig::default()
-            }
+                })
+                .build()
+                .unwrap()
         }
 
         // ---- orchestrate_probes: shared branch --------------------------------------
@@ -9228,20 +9236,20 @@ mod tests {
         #[tokio::test]
         async fn diverging_endpoint_probes_the_trio_separately_with_its_own_kind() {
             let factory = MappedProbeFactory::new(&[("principal", 64_000), ("m", 128_000)]);
-            let cfg = MagiConfig {
-                openai: crate::config::OpenAiConfig {
+            let cfg = MagiConfig::builder()
+                .openai(crate::config::OpenAiConfig {
                     model: Some("principal".to_string()),
-                },
-                magi: crate::config::MagiSectionConfig {
+                })
+                .magi(crate::config::MagiSectionConfig {
                     base_url: Some("http://magi-host:11434/v1".to_string()),
                     kind: Some("ollama".to_string()),
                     melchior_model: Some("m".to_string()),
                     balthasar_model: Some("m".to_string()),
                     caspar_model: Some("m".to_string()),
                     ..crate::config::MagiSectionConfig::default()
-                },
-                ..MagiConfig::default()
-            };
+                })
+                .build()
+                .unwrap();
             let (principal_model, principal, trio) = orchestrate_probes(
                 &cfg,
                 &diverging_endpoints(),
@@ -9300,17 +9308,17 @@ mod tests {
             );
 
             let factory = MappedProbeFactory::new(&[("m", 128_000)]);
-            let cfg = MagiConfig {
-                magi: crate::config::MagiSectionConfig {
+            let cfg = MagiConfig::builder()
+                .magi(crate::config::MagiSectionConfig {
                     // NOTE: `kind` diverges from the principal; `base_url` does NOT.
                     kind: Some("ollama".to_string()),
                     melchior_model: Some("m".to_string()),
                     balthasar_model: Some("m".to_string()),
                     caspar_model: Some("m".to_string()),
                     ..crate::config::MagiSectionConfig::default()
-                },
-                ..MagiConfig::default()
-            };
+                })
+                .build()
+                .unwrap();
 
             let (_principal_model, principal, trio) = orchestrate_probes(
                 &cfg,
@@ -9435,9 +9443,18 @@ mod tests {
                 ("balthasar", 128_000),
                 ("caspar", 128_000),
             ]);
-            let mut cfg =
+            let base =
                 cfg_with_four_distinct_models("principal", "melchior", "balthasar", "caspar");
-            cfg.magi.input_warn_tokens = Some(999);
+            // `input_warn_tokens` can no longer be poked in after construction (REQ-R23), so the
+            // fixture is reopened and the value declared before the (validating) build.
+            let magi = crate::config::MagiSectionConfig {
+                input_warn_tokens: Some(999),
+                ..base.magi().clone()
+            };
+            let cfg = crate::config::MagiConfigBuilder::from(base)
+                .magi(magi)
+                .build()
+                .unwrap();
             let mut notices = Vec::new();
             let warn_tokens = probe_and_report(
                 &cfg,
@@ -9632,15 +9649,15 @@ mod tests {
         /// `[openai]` serves the first two because they share the protocol.
         #[test]
         fn resolve_backend_model_picks_the_section_matching_the_kind() {
-            let cfg = MagiConfig {
-                openai: crate::config::OpenAiConfig {
+            let cfg = MagiConfig::builder()
+                .openai(crate::config::OpenAiConfig {
                     model: Some("qwen-test".to_string()),
-                },
-                anthropic: crate::config::AnthropicConfig {
+                })
+                .anthropic(crate::config::AnthropicConfig {
                     model: Some("claude-test".to_string()),
-                },
-                ..MagiConfig::default()
-            };
+                })
+                .build()
+                .unwrap();
             assert_eq!(
                 resolve_backend_model(&cfg, ProviderKind::Ollama),
                 "qwen-test"

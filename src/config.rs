@@ -204,27 +204,154 @@ fn line_col_of(raw: &str, offset: usize) -> (usize, usize) {
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MagiConfig {
-    pub provider: Option<String>,
+    /// Backend of the main agent (REQ-A01b). Absent ⇒ the built-in default.
+    provider: Option<String>,
     /// Default endpoint OF THE SYSTEM (REQ-A21): used by the main agent, the trio, and the
     /// embedder unless their own section overrides it. Absent ⇒ the built-in.
     /// **BREAKING**: up to v0.11.0 this key lived in `[openai].base_url`, which no longer
     /// exists — see [`ConfigError::NeedsMigration`].
-    pub base_url: Option<String>,
+    base_url: Option<String>,
     /// Report OUTPUT cap, on ALL THREE paths (TUI, `magi query`, headless consult — REQ-A11b).
     /// Absent ⇒ [`magi_rs::magi::TOOL_RESULT_CAP_BYTES`].
-    pub tool_result_cap_bytes: Option<usize>,
+    tool_result_cap_bytes: Option<usize>,
+    /// `[openai]` section — see [`OpenAiConfig`].
     #[serde(default)]
-    pub openai: OpenAiConfig,
+    openai: OpenAiConfig,
+    /// `[anthropic]` section — see [`AnthropicConfig`].
     #[serde(default)]
-    pub anthropic: AnthropicConfig,
+    anthropic: AnthropicConfig,
+    /// `[magi]` section — see [`MagiSectionConfig`].
     #[serde(default)]
-    pub magi: MagiSectionConfig,
+    magi: MagiSectionConfig,
+    /// `[memory]` section — see [`crate::memory::config::MemoryConfig`].
     #[serde(default)]
-    pub memory: crate::memory::config::MemoryConfig,
+    memory: crate::memory::config::MemoryConfig,
+    /// `[embedding]` section — see [`crate::memory::config::EmbeddingConfig`].
     #[serde(default)]
-    pub embedding: crate::memory::config::EmbeddingConfig,
+    embedding: crate::memory::config::EmbeddingConfig,
+    /// `[headless]` section — see [`HeadlessConfig`].
     #[serde(default)]
-    pub headless: HeadlessConfig,
+    headless: HeadlessConfig,
+}
+
+/// Crate-internal builder: the ONLY way to obtain a [`MagiConfig`] other than `Deserialize`
+/// (REQ-R23). It mirrors the shape `AutonomousRunConfig` already uses in this crate — private
+/// fields, no public literal, a single fallible exit — for the same reason: a type whose invalid
+/// state cannot be NAMED needs no assertion that it never occurs.
+///
+/// **Why `#[cfg(test)]`.** Production builds a configuration exactly one way,
+/// [`MagiConfig::load`], so outside the test profile the builder has no caller and the linter is
+/// right to say so. Compiling it only under `cfg(test)` states that fact instead of hiding it
+/// behind an `#[allow(dead_code)]`, and it costs nothing: SC-R21 is enforced by the fields being
+/// private, which holds in every profile. The first production caller removes this attribute
+/// together with the code that needs it — the compiler will ask.
+///
+/// **Which setters exist, and why not one per field.** Only the six fields with a real call site
+/// have a setter (`provider`, `base_url`, `tool_result_cap_bytes`, `openai`, `anthropic`,
+/// `magi`). `[memory]`, `[embedding]` and `[headless]` are reached exclusively through
+/// [`MagiConfig::from_toml_str`], so a setter for them would be dead code — and adding one to
+/// round out the API would be fabricating a caller. Whichever task first needs one adds it
+/// together with its consumer.
+///
+/// # Examples
+///
+/// ```ignore
+/// let cfg = MagiConfig::builder()
+///     .provider(Some("anthropic".to_string()))
+///     .build()?;
+/// ```
+#[cfg(test)]
+#[derive(Debug, Default)]
+pub(crate) struct MagiConfigBuilder {
+    /// Value under construction. It is never handed out unvalidated: [`MagiConfigBuilder::build`]
+    /// is the only move-out, and it validates first.
+    inner: MagiConfig,
+}
+
+#[cfg(test)]
+impl From<MagiConfig> for MagiConfigBuilder {
+    /// Reopens an already-built configuration for modification — the replacement for the
+    /// functional-update syntax (`..base`) that private fields retire.
+    ///
+    /// It is not a hole in the invariant: the only exit remains [`MagiConfigBuilder::build`], so
+    /// a derived configuration is validated exactly like an original one.
+    fn from(inner: MagiConfig) -> Self {
+        Self { inner }
+    }
+}
+
+#[cfg(test)]
+impl MagiConfigBuilder {
+    /// Sets the root `provider` (REQ-A01b). `None` ⇒ absent, i.e. the built-in default.
+    #[must_use]
+    pub(crate) fn provider(mut self, v: Option<String>) -> Self {
+        self.inner.provider = v;
+        self
+    }
+
+    /// Sets the root `base_url` template (REQ-A21). `None` ⇒ absent, i.e. the built-in default.
+    #[must_use]
+    pub(crate) fn base_url(mut self, v: Option<String>) -> Self {
+        self.inner.base_url = v;
+        self
+    }
+
+    /// Sets the root `tool_result_cap_bytes` (REQ-A11b). `None` ⇒ absent, i.e. the built-in cap.
+    #[must_use]
+    pub(crate) fn tool_result_cap_bytes(mut self, v: Option<usize>) -> Self {
+        self.inner.tool_result_cap_bytes = v;
+        self
+    }
+
+    /// Sets the whole `[openai]` section.
+    #[must_use]
+    pub(crate) fn openai(mut self, v: OpenAiConfig) -> Self {
+        self.inner.openai = v;
+        self
+    }
+
+    /// Sets the whole `[anthropic]` section.
+    #[must_use]
+    pub(crate) fn anthropic(mut self, v: AnthropicConfig) -> Self {
+        self.inner.anthropic = v;
+        self
+    }
+
+    /// Sets the whole `[magi]` section.
+    #[must_use]
+    pub(crate) fn magi(mut self, v: MagiSectionConfig) -> Self {
+        self.inner.magi = v;
+        self
+    }
+
+    /// Validates the accumulated vocabulary and yields the [`MagiConfig`].
+    ///
+    /// It runs exactly the check [`MagiConfig::from_toml_str`] runs, so a builder-built config
+    /// and a file-loaded one are subject to the same rules — a builder that validated less would
+    /// let the suite exercise a state production cannot reach.
+    ///
+    /// # Errors
+    ///
+    /// Whatever [`MagiConfig::validate_vocabulary`] rejects: [`ConfigError::UnknownProviderKind`],
+    /// [`ConfigError::UnknownMode`], [`ConfigError::AgentTimeoutOutOfRange`] or
+    /// [`ConfigError::OutputCapTooSmall`].
+    pub(crate) fn build(self) -> Result<MagiConfig, ConfigError> {
+        self.inner.validate_vocabulary()?;
+        Ok(self.inner)
+    }
+
+    /// Yields the [`MagiConfig`] **without validating**.
+    ///
+    /// It exists because a handful of tests must reach the `assert!` preconditions of
+    /// [`MagiConfig::effective_provider`] / [`MagiConfig::effective_default_mode`], and those are
+    /// only reachable from a config the validation never saw. `Deserialize` is the real remaining
+    /// bypass those assertions defend against, so this reproduces that state directly instead of
+    /// round-tripping through TOML to fake it. Every other caller wants
+    /// [`MagiConfigBuilder::build`].
+    #[must_use]
+    pub(crate) fn build_unvalidated(self) -> MagiConfig {
+        self.inner
+    }
 }
 
 /// `[headless]` section of `magi.toml` (spec §11). Every field is optional; an unset field
@@ -408,6 +535,75 @@ fn default_auto_approve() -> bool {
 }
 
 impl MagiConfig {
+    /// Opens a [`MagiConfigBuilder`] — the only way to hand-build a config (REQ-R23).
+    ///
+    /// Production never calls this: it goes through [`Self::load`]. It exists so crate-internal
+    /// callers get the same validation `load()` gets instead of a field literal that gets none.
+    /// See [`MagiConfigBuilder`] for why it compiles only under `cfg(test)`.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn builder() -> MagiConfigBuilder {
+        MagiConfigBuilder::default()
+    }
+
+    /// Root `provider` exactly as declared — the RAW value, blanks included. For the resolved
+    /// backend, with inheritance and the built-in default applied, use
+    /// [`Self::effective_provider`].
+    ///
+    /// `cfg(test)`: every production path wants the resolved value, not the raw one.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn provider(&self) -> Option<&str> {
+        self.provider.as_deref()
+    }
+
+    /// `[openai]` section, as declared.
+    #[must_use]
+    pub(crate) fn openai(&self) -> &OpenAiConfig {
+        &self.openai
+    }
+
+    /// `[anthropic]` section, as declared.
+    #[must_use]
+    pub(crate) fn anthropic(&self) -> &AnthropicConfig {
+        &self.anthropic
+    }
+
+    /// `[magi]` section, as declared. Prefer the `effective_*` accessors where one exists —
+    /// they apply the inheritance and blank-is-absent rules this raw view does not.
+    #[must_use]
+    pub(crate) fn magi(&self) -> &MagiSectionConfig {
+        &self.magi
+    }
+
+    /// `[memory]` section, as declared.
+    #[must_use]
+    pub(crate) fn memory(&self) -> &crate::memory::config::MemoryConfig {
+        &self.memory
+    }
+
+    /// `[embedding]` section, as declared.
+    #[must_use]
+    pub(crate) fn embedding(&self) -> &crate::memory::config::EmbeddingConfig {
+        &self.embedding
+    }
+
+    /// `[headless]` section, as declared.
+    #[must_use]
+    pub(crate) fn headless(&self) -> &HeadlessConfig {
+        &self.headless
+    }
+
+    /// Root `base_url` exactly as declared — the RAW template, blanks included. For the resolved
+    /// one, with the built-in default applied, use [`Self::effective_base_url`].
+    ///
+    /// `cfg(test)`: every production path wants the resolved template, not the raw string.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn base_url(&self) -> Option<&str> {
+        self.base_url.as_deref()
+    }
+
     /// Parses a `magi.toml` from text, **validating the vocabulary** just like [`Self::load`]
     /// (REQ-A01b).
     ///
@@ -1217,10 +1413,10 @@ mod tests {
     /// S-1: no config, no env → the built-in default (Ollama-first).
     #[test]
     fn test_resolve_effective_provider_kind_precedence() {
-        let c = MagiConfig {
-            provider: Some("anthropic".into()),
-            ..Default::default()
-        };
+        let c = MagiConfig::builder()
+            .provider(Some("anthropic".into()))
+            .build()
+            .unwrap();
         assert_eq!(
             resolve_effective_provider_kind(&c, Some("ollama")).unwrap(),
             ProviderKind::Ollama, // env wins
@@ -1253,10 +1449,10 @@ mod tests {
     /// through to the TOML/default the same as an unset env var.
     #[test]
     fn a_blank_env_provider_falls_through_to_the_toml_default() {
-        let c = MagiConfig {
-            provider: Some("anthropic".into()),
-            ..Default::default()
-        };
+        let c = MagiConfig::builder()
+            .provider(Some("anthropic".into()))
+            .build()
+            .unwrap();
         assert_eq!(
             resolve_effective_provider_kind(&c, Some("   ")).unwrap(),
             ProviderKind::Anthropic,
@@ -1275,12 +1471,12 @@ mod tests {
         );
         // MAGI re-gate WARNING fix: env must win over TOML (not the other way around, which was
         // the bug in the pre-fix headless call site).
-        let c = MagiConfig {
-            openai: OpenAiConfig {
+        let c = MagiConfig::builder()
+            .openai(OpenAiConfig {
                 model: Some("phi4-mini".into()),
-            },
-            ..Default::default()
-        };
+            })
+            .build()
+            .unwrap();
         assert_eq!(resolve_openai_model(&c, None), "phi4-mini");
         assert_eq!(resolve_openai_model(&c, Some("gpt-4o-mini")), "gpt-4o-mini");
     }
@@ -1289,12 +1485,12 @@ mod tests {
     fn test_resolve_anthropic_model_env_wins_over_toml() {
         // Mirrors test_resolve_openai_model_env_wins_over_toml just above: env must win over
         // TOML for the Anthropic model too, not the other way around.
-        let c = MagiConfig {
-            anthropic: AnthropicConfig {
+        let c = MagiConfig::builder()
+            .anthropic(AnthropicConfig {
                 model: Some("claude-toml-model".into()),
-            },
-            ..Default::default()
-        };
+            })
+            .build()
+            .unwrap();
         assert_eq!(
             resolve_anthropic_model(&c, Some("claude-env-model")),
             "claude-env-model"
@@ -1303,12 +1499,12 @@ mod tests {
 
     #[test]
     fn test_resolve_anthropic_model_toml_when_no_env() {
-        let c = MagiConfig {
-            anthropic: AnthropicConfig {
+        let c = MagiConfig::builder()
+            .anthropic(AnthropicConfig {
                 model: Some("claude-toml-model".into()),
-            },
-            ..Default::default()
-        };
+            })
+            .build()
+            .unwrap();
         assert_eq!(resolve_anthropic_model(&c, None), "claude-toml-model");
     }
 
@@ -1329,12 +1525,12 @@ mod tests {
 
     #[test]
     fn test_resolve_openai_model_blank_env_falls_through_to_toml() {
-        let c = MagiConfig {
-            openai: OpenAiConfig {
+        let c = MagiConfig::builder()
+            .openai(OpenAiConfig {
                 model: Some("phi4-mini".into()),
-            },
-            ..Default::default()
-        };
+            })
+            .build()
+            .unwrap();
         assert_eq!(resolve_openai_model(&c, Some("")), "phi4-mini");
         assert_eq!(resolve_openai_model(&c, Some("   ")), "phi4-mini");
     }
@@ -1350,12 +1546,12 @@ mod tests {
 
     #[test]
     fn test_resolve_anthropic_model_blank_env_falls_through_to_toml() {
-        let c = MagiConfig {
-            anthropic: AnthropicConfig {
+        let c = MagiConfig::builder()
+            .anthropic(AnthropicConfig {
                 model: Some("claude-toml-model".into()),
-            },
-            ..Default::default()
-        };
+            })
+            .build()
+            .unwrap();
         assert_eq!(resolve_anthropic_model(&c, Some("")), "claude-toml-model");
         assert_eq!(
             resolve_anthropic_model(&c, Some("   ")),
@@ -1808,10 +2004,10 @@ mod tests {
         );
 
         let above_min = magi_rs::magi::min_viable_output_cap() + 10;
-        let declared = MagiConfig {
-            tool_result_cap_bytes: Some(above_min),
-            ..Default::default()
-        };
+        let declared = MagiConfig::builder()
+            .tool_result_cap_bytes(Some(above_min))
+            .build()
+            .unwrap();
         assert_eq!(declared.effective_tool_result_cap(), above_min);
     }
 
@@ -1926,10 +2122,9 @@ mod tests {
     #[test]
     #[should_panic(expected = "unvalidated config")]
     fn effective_provider_panics_when_validate_vocabulary_was_skipped() {
-        let cfg = MagiConfig {
-            provider: Some("banana".into()),
-            ..Default::default()
-        };
+        let cfg = MagiConfig::builder()
+            .provider(Some("banana".into()))
+            .build_unvalidated();
         let _ = cfg.effective_provider();
     }
 
@@ -1938,13 +2133,12 @@ mod tests {
     #[test]
     #[should_panic(expected = "unvalidated config")]
     fn effective_default_mode_panics_when_validate_vocabulary_was_skipped() {
-        let cfg = MagiConfig {
-            magi: MagiSectionConfig {
+        let cfg = MagiConfig::builder()
+            .magi(MagiSectionConfig {
                 default_mode: Some("banana".into()),
                 ..MagiSectionConfig::default()
-            },
-            ..Default::default()
-        };
+            })
+            .build_unvalidated();
         let _ = cfg.effective_default_mode();
     }
 
@@ -1965,13 +2159,12 @@ mod tests {
     #[test]
     #[should_panic(expected = "unvalidated config")]
     fn effective_magi_kind_panics_via_the_delegated_effective_provider_check_when_invalid() {
-        let cfg = MagiConfig {
-            magi: MagiSectionConfig {
+        let cfg = MagiConfig::builder()
+            .magi(MagiSectionConfig {
                 kind: Some("banana".into()),
                 ..MagiSectionConfig::default()
-            },
-            ..Default::default()
-        };
+            })
+            .build_unvalidated();
         let _ = cfg.effective_magi_kind();
     }
 

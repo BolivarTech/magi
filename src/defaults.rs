@@ -517,16 +517,16 @@ mod tests {
         assert!(s.contains(DEFAULT_MAGI_BALTHASAR));
         assert!(s.contains(DEFAULT_MAGI_CASPAR));
         let parsed = crate::config::MagiConfig::from_toml_str(&s).unwrap();
-        assert_eq!(parsed.provider.as_deref(), Some(DEFAULT_PROVIDER));
-        assert_eq!(parsed.base_url.as_deref(), Some(DEFAULT_OPENAI_BASE_URL));
+        assert_eq!(parsed.provider(), Some(DEFAULT_PROVIDER));
+        assert_eq!(parsed.base_url(), Some(DEFAULT_OPENAI_BASE_URL));
         assert_eq!(
-            parsed.magi.melchior_model.as_deref(),
+            parsed.magi().melchior_model.as_deref(),
             Some(DEFAULT_MAGI_MELCHIOR)
         );
         // Active [memory] section must parse into real values (not just commented stubs).
-        assert_eq!(parsed.memory.mode, "selective");
+        assert_eq!(parsed.memory().mode, "selective");
         // Active [embedding] section must carry the current default model (DRY).
-        assert_eq!(parsed.embedding.model, DEFAULT_EMBEDDING_MODEL);
+        assert_eq!(parsed.embedding().model, DEFAULT_EMBEDDING_MODEL);
     }
 
     /// SC-NEW: `render_default_magi_toml` must include active `[memory]` and
@@ -554,16 +554,18 @@ mod tests {
         let parsed = crate::config::MagiConfig::from_toml_str(&s)
             .expect("render_default_magi_toml() must produce valid TOML");
         assert_eq!(
-            parsed.provider.as_deref(),
+            parsed.provider(),
             Some(DEFAULT_PROVIDER),
             "parsed provider must be the value magi_init/render_default_magi_toml emits"
         );
         assert_eq!(
-            parsed.memory.mode, "selective",
+            parsed.memory().mode,
+            "selective",
             "active [memory] section must parse mode as 'selective'"
         );
         assert_eq!(
-            parsed.embedding.model, DEFAULT_EMBEDDING_MODEL,
+            parsed.embedding().model,
+            DEFAULT_EMBEDDING_MODEL,
             "active [embedding] section must parse model as the current default"
         );
     }
@@ -636,8 +638,8 @@ mod tests {
         // The commented advanced lines must be inert — TOML parses correctly
         let parsed = crate::config::MagiConfig::from_toml_str(&s)
             .expect("render_default_magi_toml() must produce valid TOML (commented lines inert)");
-        assert_eq!(parsed.memory.mode, "selective");
-        assert_eq!(parsed.embedding.model, DEFAULT_EMBEDDING_MODEL);
+        assert_eq!(parsed.memory().mode, "selective");
+        assert_eq!(parsed.embedding().model, DEFAULT_EMBEDDING_MODEL);
     }
 
     /// SC-25: `docs/magi.toml.example` must contain no actual secret material.

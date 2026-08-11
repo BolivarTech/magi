@@ -872,16 +872,16 @@ mod tests {
             .expect("magi init must never write a magi.toml the binary rejects");
 
         assert!(
-            parsed.base_url.is_some(),
+            parsed.base_url().is_some(),
             "base_url must be declared at the root (REQ-A21)"
         );
         assert!(
             matches!(
-                parsed.provider.as_deref(),
+                parsed.provider(),
                 Some("ollama") | Some("openai-compat") | Some("anthropic")
             ),
             "provider must be one of the three REQ-A01b vocabulary values, got {:?}",
-            parsed.provider
+            parsed.provider()
         );
     }
 
