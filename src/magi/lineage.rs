@@ -29,6 +29,14 @@ use std::fmt;
 
 use thiserror::Error;
 
+/// Sentinel key used by [`Lineage::parse`], which cannot know which configuration key produced a
+/// blank value: it is a value parser, not a config reader. Callers that know the key remap the
+/// error with the real name.
+const UNKNOWN_MISSING_KEY: &str = "";
+
+/// Separator placed between the base message and the configuration key, when the key is known.
+const MISSING_KEY_PREFIX: &str = " for key: ";
+
 /// A user-chosen independent failure domain for an LLM model.
 ///
 /// Deliberately opaque: this type does not validate the label against any vendor registry or model
@@ -39,13 +47,25 @@ pub struct Lineage(String);
 impl Lineage {
     /// Parses a raw lineage label.
     ///
+    /// Surrounding whitespace is trimmed. A blank or whitespace-only value is treated as **absent**
+    /// and reported as [`LineageError::Missing`] — never as an invalid value. There is no
+    /// allow-list: any non-blank label is accepted, because the lineage is a semantic choice of the
+    /// user and validating it against a vendor registry would invent a decision that is not ours.
+    ///
     /// # Errors
     ///
-    /// Returns [`LineageError::Missing`] when `raw` holds no non-whitespace characters.
-    pub fn parse(_raw: &str) -> Result<Self, LineageError> {
-        // STUB (Red phase): no real logic yet. The tests below must fail on their assertions,
-        // not on a compile error.
-        Ok(Self(String::new()))
+    /// Returns [`LineageError::Missing`] when `raw` holds no non-whitespace characters. The error
+    /// carries [`UNKNOWN_MISSING_KEY`]: a value parser does not know which key was blank, so a
+    /// caller that does should remap it with the real key name.
+    pub fn parse(raw: &str) -> Result<Self, LineageError> {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            Err(LineageError::Missing {
+                key: UNKNOWN_MISSING_KEY,
+            })
+        } else {
+            Ok(Self(trimmed.to_owned()))
+        }
     }
 
     /// Returns the trimmed lineage label.
@@ -64,11 +84,28 @@ impl fmt::Display for Lineage {
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum LineageError {
     /// The lineage value was absent — blank or whitespace-only.
-    #[error("missing lineage value")]
+    #[error("missing lineage value{}", key_suffix(.key))]
     Missing {
         /// Configuration key that produced the missing value, when the caller knows it.
+        ///
+        /// [`Lineage::parse`] uses [`UNKNOWN_MISSING_KEY`] because a value parser does not know
+        /// which key was blank; a caller that does should construct or remap this variant with the
+        /// real key name.
         key: &'static str,
     },
+}
+
+/// Renders the key suffix of [`LineageError::Missing`], or nothing when the key is unknown.
+///
+/// Keeps the message sensible for the parser, which cannot name a key: `"missing lineage value"`
+/// reads correctly on its own, and `"missing lineage value for key: melchior_lineage"` reads
+/// correctly once a caller supplies one.
+fn key_suffix(key: &str) -> String {
+    if key.is_empty() {
+        String::new()
+    } else {
+        format!("{MISSING_KEY_PREFIX}{key}")
+    }
 }
 
 /// Unit tests for the [`Lineage`] value type.
