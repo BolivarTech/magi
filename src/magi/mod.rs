@@ -27,6 +27,7 @@ pub mod mode;
 pub mod probe;
 pub mod report_anchors;
 pub mod rotation_config;
+pub mod rotation_report;
 
 use std::time::Duration;
 
