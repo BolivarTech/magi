@@ -42,6 +42,7 @@ use magi_core::error::ProviderError;
 use magi_core::orchestrator::{Magi, MagiBuilder};
 use magi_core::provider::{LlmProvider, RetryConfig, RetryProvider};
 use magi_core::providers::claude::ClaudeProvider;
+use magi_core::providers::ollama::OllamaProvider;
 use magi_core::providers::openai_compat::OpenAiCompatibleProvider;
 use magi_core::rotation::Lineage as CoreLineage;
 use magi_core::schema::{AgentName, Mode};
@@ -2533,11 +2534,21 @@ fn openai_compat_root(base_url: &str) -> (String, Option<String>) {
 
 /// Builds ONE native provider from magi-core according to the declared `kind` (REQ-A01b).
 ///
-/// **`ollama` does NOT use magi-core's `OllamaProvider` type for completions** (D-A07):
-/// verified against magi-core 3.1.0 — its only constructor fixes a 300 s client timeout with no
-/// override, incompatible with REQ-A04 (`operation_budget + client_timeout <= ceiling`).
-/// Completions go through the keyless OpenAI-compat transport against `…/v1`; `OllamaProvider`
-/// remains only as a probe (Phase 5).
+/// **`ollama` completes through magi-core's `OllamaProvider`** (REQ-R30, which reverts D-A07).
+/// D-A07 was decided on an *impossibility* — the type's only constructor pinned a 300 s client
+/// timeout with no override, incompatible with REQ-A04 (`operation_budget + client_timeout <=
+/// ceiling`) — and magi-core 3.2.0 removed it by adding `with_timeout`, which bounds **both**
+/// HTTP clients the type builds. So the question of which transport to use was answered on its
+/// merits for the first time, and legibility decided it: `kind = "ollama"` wired to
+/// `OllamaProvider` is what anyone opening this function expects.
+///
+/// It is **not** a protocol change and therefore does not violate R-R04: `OllamaProvider::complete`
+/// delegates to an internal `OpenAiCompatibleProvider`, so the transport is the same one this arm
+/// used before — only its constructor moved.
+///
+/// **What survives D-A07's reversal is the narrower rule: never `new`.** It delegates to
+/// `with_timeout(..., DEFAULT_CLIENT_TIMEOUT)` = 300 s, and getting it wrong compiles, runs, and
+/// breaks the derived scale silently.
 ///
 /// **`ollama` is keyless**: an authenticated `base_url` under this kind does not fail here —
 /// it fails on first use with a 401, which Task 4.4 translates.
@@ -2560,6 +2571,11 @@ fn build_native_provider(
     Ok(match kind {
         // `api_key = None` ⇒ no `Authorization` header, which is what Ollama expects.
         ProviderKind::Ollama => {
+            // The NOTICE is kept even though `OllamaProvider` accepts both spellings itself: it
+            // does not exist to make the URL work, it exists to tell the operator to write down
+            // what actually happens. Losing it would be a silent behaviour change (R-R04), and
+            // `openai_compat_root` is the only thing that still knows which spelling arrived.
+            //
             // `.as_str()`, not `.to_string()` (Melchior, loop 32): `base_url` is a newtype and
             // `with_timeout` takes `impl Into<String>` — `&str` already satisfies it without
             // the intermediate step.
@@ -2567,10 +2583,11 @@ fn build_native_provider(
             if let Some(n) = notice {
                 notices.push(Notice::resolution(n));
             }
-            Arc::new(
-                OpenAiCompatibleProvider::with_timeout(root, model, None, client_timeout)
-                    .map_err(to_seat)?,
-            )
+            // NEVER `new` (REQ-R30): it delegates to `with_timeout(..., DEFAULT_CLIENT_TIMEOUT)`
+            // = 300 s, which cannot satisfy `operation_budget + client_timeout <= ceiling`.
+            // Picking the wrong constructor compiles, runs, and breaks the derived scale in
+            // silence — see `the_ollama_seat_honours_the_client_timeout_it_was_given`.
+            Arc::new(OllamaProvider::with_timeout(root, model, client_timeout).map_err(to_seat)?)
         }
         ProviderKind::OpenAiCompat => {
             let key = creds
