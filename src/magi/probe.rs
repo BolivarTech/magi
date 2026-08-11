@@ -82,6 +82,7 @@ use magi_core::rotation::ProviderProbe;
 use crate::magi::endpoint::ResolvedEndpoint;
 use crate::magi::kind::ProviderKind;
 use crate::magi::{PROBE_TIMEOUT_SECS, PROBE_WINDOW_MAX, PROBE_WINDOW_MIN, WARN_WINDOW_FRACTION};
+use crate::notices::Notice;
 use crate::redact::{redact_foreign_error, SafeErrorText};
 
 /// Exact length of a SHA-256 digest in hexadecimal (REQ-A16b).
@@ -335,6 +336,69 @@ pub fn derive_warn_tokens(mages: &BTreeMap<String, Measurement>) -> Option<usize
         clippy::cast_sign_loss
     )]
     Some((min as f64 * WARN_WINDOW_FRACTION) as usize)
+}
+
+/// Names, at STARTUP, each configured model that this endpoint could not measure **while it was
+/// measuring others** (REQ-R27, second half / SC-R35).
+///
+/// # Why the notice exists at all
+///
+/// A fallback tag that was never `ollama pull`ed is not detected for free: building the provider
+/// does not verify that the model exists, and the probe [fails open][probe_models]. With no
+/// mechanism, the first symptom would be a **degraded run** the day a mage actually falls over —
+/// the latest and worst possible moment. The probe this module already pays for is the signal:
+/// an endpoint that answered for other models and not for this one is not *"not measurable"*, it
+/// is a model that is probably not there.
+///
+/// # Two conditions, and both are contract — without them the notice is noise
+///
+/// 1. **Only where measurement is POSSIBLE.** [`Measurement::NotMeasurable`] means the protocol
+///    exposes no introspection (`openai-compat`, `anthropic`): there is nothing to conclude
+///    about that model, so it is never named. Only [`Measurement::NotMeasuredThisTime`] — the
+///    endpoint *can* answer and this time did not — qualifies.
+/// 2. **Only if at least one model of the SAME endpoint was measured.** That is exactly what
+///    separates *"this model is not there"* from *"this endpoint is not answering"*. Without it
+///    a cold daemon fires the notice over the whole pool on everyone's first run: transient,
+///    noisy, and with no action a user can take.
+///
+/// A model listed in `configured` that has no entry in `measured` was never probed, so nothing
+/// was learned about it either — it is not named, for the same reason as condition 1.
+///
+/// # KNOWN FALSE-POSITIVE MODE — declared, not discovered in production
+///
+/// The two conditions treat the failure of an INDIVIDUAL probe as informative, and with a cold
+/// cache that assumption weakens: magi-core's preflight fans out up to
+/// `MAX_PREFLIGHT_CONCURRENCY = 4` probes (`rotation.rs:721`, with no knob) **plus** the three
+/// mages, against an endpoint whose concurrency cap is **3**. Under that saturation one probe
+/// can fail **by contention, not by absence**, while others on the same endpoint answer fine —
+/// and the notice would point at a model that is perfectly present.
+///
+/// It is bounded noise, not a failure: it blocks nothing and the suggested action is harmless.
+/// Two things bound it, and both are why the text below is worded the way it is:
+/// **the text never states absence as a FACT** — it reports a measurement that did not happen
+/// and offers `ollama pull <tag>` conditionally — and **a warm cache removes the condition
+/// entirely**, because a run with no misses emits no probes at all. A first run against a cold
+/// daemon is not to be judged by its notices.
+///
+/// # Contract
+///
+/// - Returns one [`Notice`] per DISTINCT qualifying model, in the order of `configured` — a pool
+///   that repeats a model does not make the user read the same line twice.
+/// - Tier is `Resolution`, never `Info`: a declared model that is probably not where it was
+///   declared is *"the config resolved differently from what the file looks like"*, not routine
+///   diagnostics.
+/// - Never fails and never panics: like the rest of this module, it fails open.
+///
+/// # Complexity
+///
+/// One `O(m)` scan of `measured` for condition 2, then one `O(n log n)` pass over `configured`
+/// (a `BTreeSet` of names already emitted), with no nested pass.
+#[must_use]
+pub fn missing_model_notices(
+    _measured: &BTreeMap<String, Measurement>,
+    _configured: &[String],
+) -> Vec<Notice> {
+    Vec::new()
 }
 
 #[cfg(test)]
@@ -1180,6 +1244,166 @@ mod tests {
             ),
             "a non-measurable kind produces no probe"
         );
+    }
+
+    /// Builds a measurement table the way ONE endpoint's run would leave it: `Some(window)` is a
+    /// model the endpoint measured, `None` a model it could have measured and did not
+    /// ([`Measurement::NotMeasuredThisTime`]).
+    ///
+    /// It deliberately cannot express [`Measurement::NotMeasurable`]: that state belongs to a
+    /// whole non-introspectable endpoint, and the one test that needs it MIXED with a measured
+    /// model builds its map by hand, so that the mixture is visible at the call site instead of
+    /// hidden behind a fixture flag.
+    fn measurements(rows: &[(&str, Option<usize>)]) -> BTreeMap<String, Measurement> {
+        rows.iter()
+            .map(|(model, window)| {
+                let value = window.map_or(Measurement::NotMeasuredThisTime, |w| {
+                    Measurement::Measured {
+                        window: w,
+                        digest: None,
+                    }
+                });
+                ((*model).to_string(), value)
+            })
+            .collect()
+    }
+
+    /// The models a run declares, in the shape `missing_model_notices` consumes.
+    fn configured(models: &[&str]) -> Vec<String> {
+        models.iter().map(|m| (*m).to_string()).collect()
+    }
+
+    /// SC-R35 (happy): the endpoint measured OTHERS but not this one ⇒ probably a missing tag.
+    /// Named at startup together with the command that fixes it.
+    #[test]
+    fn a_model_that_alone_failed_on_a_responding_endpoint_is_named_at_startup() {
+        let measured = measurements(&[("a", Some(128_000)), ("b", None)]);
+        let notices = missing_model_notices(&measured, &configured(&["a", "b"]));
+        assert_eq!(notices.len(), 1, "only the unmeasured model is named");
+        assert!(
+            notices[0].text.contains("ollama pull b"),
+            "the notice must carry the command that fixes it: {}",
+            notices[0].text
+        );
+        assert!(
+            !notices[0].text.contains("ollama pull a"),
+            "the model that WAS measured must not be named: {}",
+            notices[0].text
+        );
+    }
+
+    /// SC-R35 (second condition): where NOTHING could be measured there is NO such notice — that
+    /// is an endpoint not answering, not a missing model. This is the condition that separates
+    /// the two, and it is what keeps a cold first start from firing over the whole pool.
+    #[test]
+    fn nothing_measured_produces_no_missing_model_notice() {
+        let measured = measurements(&[("a", None), ("b", None)]);
+        assert!(
+            missing_model_notices(&measured, &configured(&["a", "b"])).is_empty(),
+            "an endpoint that measured nothing says nothing about any single model"
+        );
+    }
+
+    /// SC-R35 (first condition): a model the endpoint CANNOT introspect is never named, even
+    /// when another model on that same endpoint was measured.
+    ///
+    /// The mixture is what makes this test a guardian instead of a duplicate of the one above: a
+    /// map of only [`Measurement::NotMeasurable`] would also be caught by condition 2 (nothing
+    /// measured), so it would pass with condition 1 deleted. With one measured model present,
+    /// condition 2 is satisfied and ONLY the *not measurable* vs *not measured this time*
+    /// distinction can keep the notice silent.
+    #[test]
+    fn a_model_the_endpoint_cannot_introspect_is_never_named() {
+        let measured = BTreeMap::from([
+            (
+                "a".to_string(),
+                Measurement::Measured {
+                    window: 128_000,
+                    digest: None,
+                },
+            ),
+            ("b".to_string(), Measurement::NotMeasurable),
+        ]);
+        assert!(
+            missing_model_notices(&measured, &configured(&["a", "b"])).is_empty(),
+            "no introspection is not a failure and concludes nothing about the model"
+        );
+    }
+
+    /// SC-R35 (declared false-positive mode): under saturation a probe can fail by CONTENTION,
+    /// not by absence, so the text must report a measurement that did not happen and offer the
+    /// command conditionally — never assert that the model is gone.
+    #[test]
+    fn the_notice_reports_a_failed_measurement_not_a_confirmed_absence() {
+        let measured = measurements(&[("a", Some(128_000)), ("b", None)]);
+        let notices = missing_model_notices(&measured, &configured(&["a", "b"]));
+        let text = &notices
+            .first()
+            .expect("the qualifying model must produce a notice")
+            .text;
+        assert!(
+            text.contains("could not be measured"),
+            "it must name the measurement failure, which is the only thing observed: {text}"
+        );
+        assert!(
+            text.contains("if"),
+            "the remedy must be offered conditionally, not as a diagnosis: {text}"
+        );
+        for absolute in [
+            "is missing",
+            "is not present",
+            "is not installed",
+            "does not exist",
+        ] {
+            assert!(
+                !text.contains(absolute),
+                "the notice must not state absence as a fact (found {absolute:?}): {text}"
+            );
+        }
+    }
+
+    /// SC-R35 tier (plan §Notice tiers): `Resolution`, never `Info`. A declared model that is
+    /// probably not where it was declared is a config that resolved differently from what the
+    /// file looks like — and `Info` is the tier that `render_notices` is allowed to trim.
+    #[test]
+    fn the_missing_model_notice_survives_the_info_cap() {
+        let measured = measurements(&[("a", Some(128_000)), ("b", None)]);
+        let notices = missing_model_notices(&measured, &configured(&["a", "b"]));
+        assert_eq!(
+            notices
+                .first()
+                .expect("the qualifying model must produce a notice")
+                .tier,
+            crate::notices::NoticeTier::Resolution
+        );
+    }
+
+    /// Edge: a configured model with no entry in the table was never probed, so nothing was
+    /// learned about it — it is not named, for the same reason a non-introspectable one is not.
+    #[test]
+    fn a_configured_model_that_was_never_probed_is_not_named() {
+        let measured = measurements(&[("a", Some(128_000))]);
+        assert!(
+            missing_model_notices(&measured, &configured(&["a", "ghost"])).is_empty(),
+            "a model absent from the table was never measured NOR failed to measure"
+        );
+    }
+
+    /// Edge: a pool that declares the same model twice produces ONE line, not two — the user
+    /// gains nothing from reading the same remedy again.
+    #[test]
+    fn a_model_repeated_in_the_configured_pool_is_named_once() {
+        let measured = measurements(&[("a", Some(128_000)), ("b", None)]);
+        let notices = missing_model_notices(&measured, &configured(&["b", "a", "b"]));
+        assert_eq!(notices.len(), 1, "one line per distinct model: {notices:?}");
+    }
+
+    /// Edge (B13): empty inputs neither panic nor invent a notice.
+    #[test]
+    fn empty_inputs_produce_no_notice() {
+        assert!(missing_model_notices(&BTreeMap::new(), &[]).is_empty());
+        assert!(missing_model_notices(&BTreeMap::new(), &configured(&["a"])).is_empty());
+        assert!(missing_model_notices(&measurements(&[("a", Some(128_000))]), &[]).is_empty());
     }
 
     /// B11: when `OllamaProvider::new` rejects the URL (here, by scheme — `ftp` is not
