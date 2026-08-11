@@ -44,8 +44,11 @@ pub enum ConfigError {
         valid: &'static str,
     },
 
-    /// The file brings v0.11.0 migration patterns (REQ-A21b). The text is already rendered by
-    /// [`migrate::render_migration_error`] — it names each incompatibility and its correction.
+    /// The file brings migration patterns from the previous generation (REQ-A21b). The text is
+    /// already rendered by [`migrate::render_migration_error`] — it names each incompatibility
+    /// and its correction. **Unreachable while the pattern table is empty** (the v0.11.0 set
+    /// retired in v0.13.0, REQ-R22): the variant is kept because reloading the table is what
+    /// brings it back, with no change at this call site.
     #[error("{0}")]
     NeedsMigration(String),
 
@@ -365,8 +368,9 @@ pub struct HeadlessConfig {
     // REQ-A21b): it moved up to the root level because under `[headless]` it only covered batch
     // mode and left interactive mode loose, which is exactly where the report is re-sent on
     // every turn of a long session. A cap that protects the cheap case and not the expensive
-    // one protects the wrong case. A file that still declares it here receives the guided
-    // migration error, not a bare `unknown field` — see `detect_migrations`. Default log level
+    // one protects the wrong case. A file that still declares it here received the guided
+    // migration error until v0.13.0 retired that pattern set (REQ-R22); it now gets serde's bare
+    // `unknown field` — see `detect_migrations`. Default log level
     // (REQ-H24): `error`|`warn`|`info`|`debug`. Overrides `"info"`.
     pub log_level: Option<String>,
     /// Default wall-clock timeout secs for tool-executing tiers (REQ-H36). Overrides
@@ -606,8 +610,9 @@ impl MagiConfig {
     /// swallows an invalid value.
     ///
     /// # Errors
-    /// [`ConfigError::NeedsMigration`] if the file brings v0.11.0 patterns (stub: until Task
-    /// 1.3 it never occurs — see [`migrate`]); [`ConfigError::Parse`] if the TOML does not
+    /// [`ConfigError::NeedsMigration`] if the file brings a declared migration pattern — no set
+    /// is declared today, so it never occurs (see [`migrate`]); [`ConfigError::Parse`] if the
+    /// TOML does not
     /// parse; [`ConfigError::UnknownProviderKind`] / [`ConfigError::UnknownMode`] if
     /// `provider`, `[magi].kind` or `[magi].default_mode` bring a present but unrecognized
     /// value; [`ConfigError::AgentTimeoutOutOfRange`] / [`ConfigError::OutputCapTooSmall`] if
@@ -2065,12 +2070,12 @@ mod tests {
 
     /// SC-A16g: a broken TOML carrying a `[user]:[password]`-style placeholder does not leak,
     /// because `safe_parse_error` (proven above to drop the offending value on ANY input) and
-    /// `detect_migrations` (proven in `migrate.rs`'s
-    /// `a_syntactically_broken_toml_gets_a_syntax_error_not_migration_advice` to require
-    /// structural validity, not a textual match) hold TOGETHER on the real
-    /// `from_toml_str` path — this is the combination the scenario actually describes, not
-    /// either property in isolation. What sits on the offending line is `[password]`, never a
-    /// secret, so a `line`-citing error is safe by construction.
+    /// `detect_migrations` (which reports nothing while no pattern set is declared, and when one
+    /// is reloaded must keep requiring structural validity rather than a textual match — see
+    /// `migrate.rs`'s module docs) hold TOGETHER on the real `from_toml_str` path — this is the
+    /// combination the scenario actually describes, not either property in isolation. What sits
+    /// on the offending line is `[password]`, never a secret, so a `line`-citing error is safe by
+    /// construction.
     #[test]
     fn a_broken_toml_with_a_placeholder_still_only_cites_a_safe_position() {
         // Unterminated string on the base_url line: syntactically broken. It also textually
@@ -2234,8 +2239,8 @@ mod tests {
 
     /// m6 (fix round 2, coordinator, 2026-08-03) / SC-A21f: a PRESENT file but empty or
     /// whitespace-only is also silent — every root field is optional, so a blank TOML is a
-    /// valid TOML that declares zero things. `from_toml_str("")` and `detect_migrations("")`
-    /// were already covered separately; this is the only thing missing: `load()` end-to-end
+    /// valid TOML that declares zero things. `from_toml_str("")` was already covered separately;
+    /// this is the only thing missing: `load()` end-to-end
     /// against a real FILE, which is what its own rustdoc claims as covered.
     #[test]
     fn a_present_but_broken_config_is_fatal_while_an_absent_one_is_silent() {
