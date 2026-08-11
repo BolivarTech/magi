@@ -692,7 +692,7 @@ impl MagiConfig {
     ///
     /// A declared `0` is honoured as the kill-switch; only an **absent** key falls back to
     /// [`DEFAULT_MAX_ROTATIONS`].
-    #[cfg(test)]
+    #[must_use]
     pub(crate) fn effective_max_rotations(&self) -> u32 {
         self.magi
             .max_rotations
@@ -705,7 +705,7 @@ impl MagiConfig {
     /// depends on there being at least one measured candidate window, which this type cannot know.
     /// That decision belongs to the trio construction, and naming it here would invite a caller to
     /// pass this value straight to magi-core — which is the silent-rotation-shutdown bug.
-    #[cfg(test)]
+    #[must_use]
     pub(crate) fn declared_strict_context_guard(&self) -> bool {
         self.magi
             .strict_context_guard
@@ -721,7 +721,7 @@ impl MagiConfig {
     }
 
     /// The shared rotation pool, in declared order (strongest to weakest).
-    #[cfg(test)]
+    #[must_use]
     pub(crate) fn fallback_pool(&self) -> &[magi_rs::magi::rotation_config::FallbackEntry] {
         &self.magi.fallback
     }

@@ -44,7 +44,7 @@ use magi_core::provider::{LlmProvider, RetryConfig, RetryProvider};
 use magi_core::providers::claude::ClaudeProvider;
 use magi_core::providers::ollama::OllamaProvider;
 use magi_core::providers::openai_compat::OpenAiCompatibleProvider;
-use magi_core::rotation::Lineage as CoreLineage;
+use magi_core::rotation::{FallbackPool, Lineage as CoreLineage};
 use magi_core::schema::{AgentName, Mode};
 use magi_rs::headless::exit::exit_code as headless_exit_code;
 use magi_rs::headless::input::{parse_input, read_input_bounded, InputFormat};
@@ -2673,6 +2673,36 @@ fn seat_lineage_trace() -> Vec<(AgentName, String)> {
     SEAT_LINEAGE_TRACE.with(|t| t.borrow().clone())
 }
 
+/// Test-only (Task 4.1): what the LAST call to `build_magi_orchestrator` handed magi-core as a
+/// fallback pool.
+///
+/// Every field is READ BACK from the values that were actually passed, never restated as a
+/// literal — the mistake `SEAT_WIRING_TRACE` made and that Task 3.1's mutation exposed.
+#[cfg(test)]
+#[derive(Debug, Clone)]
+struct PoolWiring {
+    /// `(model, lineage)` per candidate, in the order they were pushed.
+    candidates: Vec<(String, String)>,
+    /// Rotation ceiling handed to the pool. `0` is the declared kill-switch.
+    max_rotations: u32,
+    /// Whether the strict context guard was handed to the builder as `true`.
+    strict_guard: bool,
+}
+
+// Test-only: the pool of the LAST call in this thread. `None` means no pool was declared, which
+// is a different fact from an empty pool and the tests distinguish them.
+#[cfg(test)]
+thread_local! {
+    static POOL_WIRING_TRACE: std::cell::RefCell<Option<PoolWiring>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Test-only: see [`POOL_WIRING_TRACE`].
+#[cfg(test)]
+fn pool_wiring_trace() -> Option<PoolWiring> {
+    POOL_WIRING_TRACE.with(|t| t.borrow().clone())
+}
+
 /// Builds the MAGI trio with the NATIVE providers of magi-core (REQ-A01).
 ///
 /// The adapter disappears and with it the system-prompt doubling: each mage receives its prompt
@@ -2840,6 +2870,64 @@ fn build_magi_orchestrator(
         #[cfg(test)]
         SEAT_LINEAGE_TRACE.with(|t| t.borrow_mut().push((seat, lineage.as_str().to_owned())));
         builder = builder.with_agent(seat, provider, lineage);
+    }
+
+    // REQ-R03/R05: the SHARED rotation pool. Shared and not per-seat (D-R02) because the property
+    // consensus needs — that a rotation lands on a lineage the other two seats do not hold — is a
+    // property of the pool's DIVERSITY, not of who owns the list. Three lists would triple what has
+    // to be declared for the same guarantee, and would add a failure mode a single pool does not
+    // have: one list drying up while the other two still hold candidates.
+    let declared_pool = cfg.fallback_pool();
+    if !declared_pool.is_empty() {
+        let mut pool = FallbackPool::builder().max_rotations(cfg.effective_max_rotations());
+        #[cfg(test)]
+        let mut wired: Vec<(String, String)> = Vec::new();
+
+        for entry in declared_pool {
+            // A candidate that cannot be BUILT is dropped with a notice, never fatal. Same shape
+            // as REQ-R27's missing-model notice, and for the same reason: rotation is a safety
+            // net, and refusing to start because the net is one strand short would deny the
+            // operator the run their seats can perfectly well serve. In practice this is near
+            // unreachable — candidates share endpoint, kind and client timeout with the seats, so
+            // whatever breaks one breaks all three seats first, and THAT is fatal.
+            let mut sink: Vec<Notice> = Vec::new();
+            match build_native_provider(kind, base, &entry.model, creds, client_timeout, &mut sink)
+            {
+                Ok(candidate) => {
+                    #[cfg(test)]
+                    wired.push((entry.model.clone(), entry.lineage.as_str().to_owned()));
+                    // Wrapped like the seats: `MagiBuilder::build()` wraps nothing, so a candidate
+                    // pushed raw would silently be the one seat in the run without transport retry.
+                    pool = pool.push(
+                        Arc::new(RetryProvider::with_config(candidate, retry.clone())),
+                        CoreLineage::from(entry.lineage.clone()),
+                    );
+                }
+                Err(cause) => notices.push(Notice::resolution(format!(
+                    "notice: fallback candidate `{}` could not be built ({cause}); \
+                     rotation will not be able to use it.",
+                    entry.model
+                ))),
+            }
+        }
+
+        #[cfg(test)]
+        POOL_WIRING_TRACE.with(|t| {
+            *t.borrow_mut() = Some(PoolWiring {
+                candidates: wired,
+                max_rotations: cfg.effective_max_rotations(),
+                strict_guard: cfg.declared_strict_context_guard(),
+            });
+        });
+
+        builder = builder
+            .with_fallback_pool(pool.build())
+            // Task 6.4 replaces this with the fail-safe of REQ-R11: magi-rs may only pass `true`
+            // when at least one candidate has a MEASURED window, because a `true` with nothing
+            // measured disqualifies every candidate and switches rotation off in silence. Until
+            // measurement exists there is nothing to be safe about, and the declared value is
+            // forwarded as-is.
+            .with_strict_context_guard(cfg.declared_strict_context_guard());
     }
 
     builder
@@ -7042,6 +7130,12 @@ mod tests {
                 "the candidate must carry its declared lineage, not an inferred one"
             );
             assert_eq!(wired.max_rotations, 2);
+            assert!(
+                !wired.strict_guard,
+                "an undeclared strict_context_guard reaches magi-core as false (REQ-R11): the \
+                 case it would bite is the COLD START, where nothing measured yet means every \
+                 candidate fails the window condition and rotation switches off in silence"
+            );
         }
 
         /// SC-R04/REQ-R05: `max_rotations = 0` is a kill-switch, and it survives as a DECLARED
