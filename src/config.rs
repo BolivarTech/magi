@@ -2077,6 +2077,104 @@ mod tests {
         assert_eq!(seats[2], (AgentName::Caspar, "backend-default".to_string()));
     }
 
+    // -------------------------------------------------------------------------
+    // `lineage_of_seat()` — REQ-R01/R02, SC-R05, SC-R19.
+
+    /// SC-R05: a seat that DECLARES a model without its lineage is an explicit configuration
+    /// error, never an inference from the model name. Guessing it would fabricate the label that
+    /// decides all rotation eligibility, and the lineage is a SEMANTIC CHOICE of the operator
+    /// (R-R03) — the same pair of models can legitimately be two lineages for one user and one
+    /// for another, so there is no observable datum to derive it from without inventing one.
+    #[test]
+    fn a_seat_that_declares_a_model_without_its_lineage_is_an_error_not_an_inference() {
+        let cfg = MagiSectionConfig {
+            melchior_model: Some("qwen3.5:397b-cloud".into()),
+            ..MagiSectionConfig::default()
+        };
+        let err = cfg
+            .lineage_of_seat(AgentName::Melchior)
+            .expect_err("a declared model without its lineage must error");
+        assert!(
+            matches!(
+                err,
+                LineageError::Missing {
+                    key: "melchior_lineage"
+                }
+            ),
+            "the error must name the key the operator has to add: {err:?}"
+        );
+    }
+
+    /// The trigger rule established by Task 2.6, and the half that was NOT wired until now: a seat
+    /// that declares no model runs the built-in one, so it inherits the built-in lineage with it.
+    /// Without this, the default configuration — the one belonging to whoever never touched the
+    /// trio — registers seats with no lineage and rotation has nothing to decide on.
+    #[test]
+    fn a_seat_that_declares_no_model_inherits_the_built_in_lineage() {
+        let cfg = MagiSectionConfig::default();
+        for (seat, expected) in [
+            (
+                AgentName::Melchior,
+                crate::defaults::DEFAULT_MAGI_MELCHIOR_LINEAGE,
+            ),
+            (
+                AgentName::Balthasar,
+                crate::defaults::DEFAULT_MAGI_BALTHASAR_LINEAGE,
+            ),
+            (
+                AgentName::Caspar,
+                crate::defaults::DEFAULT_MAGI_CASPAR_LINEAGE,
+            ),
+        ] {
+            let resolved = cfg
+                .lineage_of_seat(seat)
+                .unwrap_or_else(|e| panic!("{seat:?} must inherit a built-in lineage, got {e:?}"));
+            assert_eq!(resolved.as_str(), expected, "wrong built-in for {seat:?}");
+        }
+    }
+
+    /// SC-R19: blank is ABSENT, never invalid — the rule every text key has followed since MS2.
+    /// An exported-but-unfilled variable in a CI script is an everyday accident, and answering it
+    /// with an "invalid value" the operator cannot act on punishes the accident instead of
+    /// guiding it. On a seat that declares a model, absent means the error above.
+    #[test]
+    fn a_blank_lineage_on_a_declaring_seat_is_absent_not_invalid() {
+        let cfg = MagiSectionConfig {
+            caspar_model: Some("deepseek-v4-pro:cloud".into()),
+            caspar_lineage: Some("   ".into()),
+            ..MagiSectionConfig::default()
+        };
+        let err = cfg
+            .lineage_of_seat(AgentName::Caspar)
+            .expect_err("blank must error as MISSING");
+        assert!(
+            matches!(
+                err,
+                LineageError::Missing {
+                    key: "caspar_lineage"
+                }
+            ),
+            "blank must be MISSING, not an invalid value: {err:?}"
+        );
+    }
+
+    /// A declared lineage wins over the built-in one even when the seat takes the backend model:
+    /// the operator who bothered to label a seat is the authority on what its failure domain is.
+    #[test]
+    fn a_declared_lineage_wins_over_the_built_in_one() {
+        let cfg = MagiSectionConfig {
+            balthasar_lineage: Some("  mi-linaje-raro  ".into()),
+            ..MagiSectionConfig::default()
+        };
+        assert_eq!(
+            cfg.lineage_of_seat(AgentName::Balthasar)
+                .expect("a declared lineage must resolve")
+                .as_str(),
+            "mi-linaje-raro",
+            "the declared label wins, trimmed"
+        );
+    }
+
     /// `magi_endpoint_diverges()` is true if the trio declares its own `kind` or `base_url`,
     /// and blank counts as NOT declared (REQ-A12).
     #[test]

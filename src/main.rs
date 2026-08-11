@@ -7004,6 +7004,98 @@ mod tests {
             );
         }
 
+        /// REQ-R01: each seat is registered with its DECLARED lineage. The registration migrates
+        /// from `with_provider(seat, provider)` — what magi-rs used through v0.12.x — to
+        /// `with_agent(seat, provider, lineage)`, which is the only door that carries the rotation
+        /// diversity key.
+        ///
+        /// Asserted against `seat_lineage_trace()`, recorded in the SAME loop that calls
+        /// `with_agent`, because `MagiBuilder::agent_lineages` is private and `Magi` exposes no
+        /// reader for it: from outside the crate there is no other way to see what was registered.
+        ///
+        /// The RETRY wrap surviving this migration is pinned by
+        /// `build_magi_orchestrator_wires_three_distinct_seats_each_wrapped_in_retry` above, which
+        /// already reads the trace left on the branch that does the real wrapping — no second copy
+        /// of that assertion is written here.
+        #[test]
+        fn each_seat_is_registered_with_its_declared_lineage() {
+            let cfg = MagiConfig::from_toml_str(
+                "provider = \"ollama\"\n\
+                 [magi]\n\
+                 melchior_model    = \"m-model\"\nmelchior_lineage  = \"declared-melchior\"\n\
+                 balthasar_model   = \"b-model\"\nbalthasar_lineage = \"declared-balthasar\"\n\
+                 caspar_model      = \"c-model\"\ncaspar_lineage    = \"declared-caspar\"\n",
+            )
+            .expect("a fully declared trio must parse");
+            let mut notices = Vec::new();
+            let magi = build_magi_orchestrator(
+                &cfg,
+                ProviderKind::Ollama,
+                &test_endpoints(),
+                None,
+                None,
+                &MagiEnvModelOverrides::default(),
+                &mut notices,
+            )
+            .expect("ollama is keyless: it must build with no credentials or network");
+            drop(magi);
+
+            let registered: std::collections::BTreeMap<AgentName, String> =
+                seat_lineage_trace().into_iter().collect();
+            assert_eq!(registered.len(), 3, "all three seats must declare a lineage");
+            for (seat, expected) in [
+                (AgentName::Melchior, "declared-melchior"),
+                (AgentName::Balthasar, "declared-balthasar"),
+                (AgentName::Caspar, "declared-caspar"),
+            ] {
+                assert_eq!(
+                    registered.get(&seat).map(String::as_str),
+                    Some(expected),
+                    "{seat:?} must register its OWN declared lineage: {registered:?}"
+                );
+            }
+        }
+
+        /// The half of the trigger rule that keeps the DEFAULT configuration usable: a seat that
+        /// declares no model runs the built-in one and inherits the built-in lineage with it.
+        ///
+        /// Without this, whoever never touched `[magi]` gets three seats registered with no
+        /// lineage — and `MagiBuilder::build()` rejects a blank one outright
+        /// (`orchestrator.rs:644`), so the trio would not build at all.
+        #[test]
+        fn seats_that_declare_no_model_register_the_built_in_lineages() {
+            let cfg = MagiConfig::from_toml_str("provider = \"ollama\"\n").unwrap();
+            let mut notices = Vec::new();
+            let magi = build_magi_orchestrator(
+                &cfg,
+                ProviderKind::Ollama,
+                &test_endpoints(),
+                None,
+                None,
+                &MagiEnvModelOverrides::default(),
+                &mut notices,
+            )
+            .expect("the default configuration must still build a trio");
+            drop(magi);
+
+            let registered: std::collections::BTreeMap<AgentName, String> =
+                seat_lineage_trace().into_iter().collect();
+            for (seat, expected) in [
+                (AgentName::Melchior, defaults::DEFAULT_MAGI_MELCHIOR_LINEAGE),
+                (
+                    AgentName::Balthasar,
+                    defaults::DEFAULT_MAGI_BALTHASAR_LINEAGE,
+                ),
+                (AgentName::Caspar, defaults::DEFAULT_MAGI_CASPAR_LINEAGE),
+            ] {
+                assert_eq!(
+                    registered.get(&seat).map(String::as_str),
+                    Some(expected),
+                    "{seat:?} must inherit its built-in lineage: {registered:?}"
+                );
+            }
+        }
+
         /// SC-A02: no production path implements `LlmProvider` through an adapter that folds
         /// the prompt.
         ///
