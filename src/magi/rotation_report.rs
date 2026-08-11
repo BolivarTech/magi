@@ -65,6 +65,21 @@ use crate::redact::redact_foreign_text;
 /// the JSON's shape between runs, and a consumer with a strict schema cannot declare it — the
 /// same criterion `extraction_failures` established in the previous milestone.
 ///
+/// # The one case where `model_used` can name the configured model anyway
+///
+/// REQ-R06 says the report names the model that actually produced the verdict, and that holds
+/// **except** for a mage that rotated and whose task then **panicked or was cancelled**. magi-core
+/// documents this as an accepted limitation: that entry shows the *pre-seed* — an empty `chain`
+/// and `model_used == model_configured` — because the hops it made lived on the stack of the task
+/// that died, and recovering them would need a second lock outside the rotation registry, which
+/// its single-lock concurrency design deliberately forbids.
+///
+/// **This cannot be corrected from outside the crate, so it is declared instead of hidden.** It is
+/// exactly the kind of detail somebody discovers while reading a report and concludes magi-rs has
+/// a bug. The signal that such an entry is not to be trusted does exist and is worth naming: that
+/// mage also appears in `failed_agents`, so a `rotations` entry with an empty `chain` for a seat
+/// that failed is *"unknown"*, not *"did not rotate"*.
+///
 /// # Examples
 ///
 /// ```
