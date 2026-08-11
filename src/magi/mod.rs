@@ -22,6 +22,7 @@
 pub mod endpoint;
 pub mod gate;
 pub mod kind;
+pub mod lineage;
 pub mod mode;
 pub mod probe;
 pub mod report_anchors;
