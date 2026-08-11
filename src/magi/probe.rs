@@ -338,6 +338,13 @@ pub fn derive_warn_tokens(mages: &BTreeMap<String, Measurement>) -> Option<usize
     Some((min as f64 * WARN_WINDOW_FRACTION) as usize)
 }
 
+/// The Ollama command that fetches a model manifest, named by [`missing_model_notices`].
+///
+/// It is not a chosen value: it is the literal CLI verb that makes a declared tag resolvable on
+/// the daemon, and it is the ONLY action that fixes the case the notice is about. A constant so
+/// that the notice and any future caller quote the same string (B4).
+const OLLAMA_PULL_COMMAND: &str = "ollama pull";
+
 /// Names, at STARTUP, each configured model that this endpoint could not measure **while it was
 /// measuring others** (REQ-R27, second half / SC-R35).
 ///
@@ -395,10 +402,41 @@ pub fn derive_warn_tokens(mages: &BTreeMap<String, Measurement>) -> Option<usize
 /// (a `BTreeSet` of names already emitted), with no nested pass.
 #[must_use]
 pub fn missing_model_notices(
-    _measured: &BTreeMap<String, Measurement>,
-    _configured: &[String],
+    measured: &BTreeMap<String, Measurement>,
+    configured: &[String],
 ) -> Vec<Notice> {
-    Vec::new()
+    // CONDITION 2, evaluated first and for the whole table: without at least one model of this
+    // same endpoint measured, a single probe's failure says nothing about that model — it says
+    // the endpoint did not answer. Returning early here is what keeps a cold daemon from firing
+    // the notice over the entire pool on a user's first run.
+    if !measured
+        .values()
+        .any(|m| matches!(m, Measurement::Measured { .. }))
+    {
+        return Vec::new();
+    }
+
+    let mut already_named: BTreeSet<&str> = BTreeSet::new();
+    configured
+        .iter()
+        // CONDITION 1: ONLY `NotMeasuredThisTime`. `NotMeasurable` is a protocol that exposes no
+        // introspection and a missing entry was never probed — in both cases nothing was
+        // observed about the model, and naming it would be inventing a conclusion.
+        .filter(|model| {
+            matches!(
+                measured.get(model.as_str()),
+                Some(Measurement::NotMeasuredThisTime)
+            )
+        })
+        .filter(|model| already_named.insert(model.as_str()))
+        .map(|model| {
+            Notice::resolution(format!(
+                "`{model}` could not be measured, on an endpoint that measured other models: \
+                 if that tag is not there, `{OLLAMA_PULL_COMMAND} {model}` fixes it. A probe can \
+                 also fail under load, so this is not proof that the model is absent."
+            ))
+        })
+        .collect()
 }
 
 #[cfg(test)]
