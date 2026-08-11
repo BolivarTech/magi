@@ -6752,7 +6752,8 @@ mod tests {
                  [anthropic]\n\
                  model = \"claude-sonnet-4-6\"\n\
                  [magi]\n\
-                 caspar_model = \"totally-bogus-alias\"\n",
+                 caspar_model = \"totally-bogus-alias\"\n\
+                 caspar_lineage = \"bogus\"\n",
             )
             .unwrap()
         }
@@ -7606,7 +7607,8 @@ mod tests {
         #[test]
         fn a_blank_magi_model_env_override_falls_through_to_the_toml_or_backend_model() {
             let cfg = MagiConfig::from_toml_str(
-                "provider = \"ollama\"\n[magi]\nmelchior_model = \"toml-melchior-model\"\n",
+                "provider = \"ollama\"\n[magi]\nmelchior_model = \"toml-melchior-model\"\n\
+                 melchior_lineage = \"toml-melchior-lineage\"\n",
             )
             .unwrap();
             let env_overrides = MagiEnvModelOverrides {

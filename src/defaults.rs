@@ -31,6 +31,20 @@ pub const DEFAULT_OPENAI_MODEL: &str = "kimi-k2.6:cloud";
 pub const DEFAULT_MAGI_MELCHIOR: &str = "qwen3.5:397b-cloud";
 pub const DEFAULT_MAGI_BALTHASAR: &str = "gpt-oss:120b-cloud";
 pub const DEFAULT_MAGI_CASPAR: &str = "deepseek-v4-pro:cloud";
+/// Lineage of [`DEFAULT_MAGI_MELCHIOR`] — the independent failure domain its model belongs to.
+///
+/// Read off the model tag by hand, once: `qwen3.5` is Alibaba's family. It is **declared**, not
+/// inferred at runtime (R-R03): a label the project writes down for the models the project ships is
+/// a decision, whereas guessing one from an arbitrary user tag would fabricate the value that
+/// decides all rotation eligibility.
+///
+/// It is also the label the guided migration error offers as an example, so what `magi init` writes
+/// and what the error suggests cannot drift apart.
+pub const DEFAULT_MAGI_MELCHIOR_LINEAGE: &str = "alibaba";
+/// Lineage of [`DEFAULT_MAGI_BALTHASAR`] — see [`DEFAULT_MAGI_MELCHIOR_LINEAGE`].
+pub const DEFAULT_MAGI_BALTHASAR_LINEAGE: &str = "openai";
+/// Lineage of [`DEFAULT_MAGI_CASPAR`] — see [`DEFAULT_MAGI_MELCHIOR_LINEAGE`].
+pub const DEFAULT_MAGI_CASPAR_LINEAGE: &str = "deepseek";
 /// Default Anthropic model on the opt-in path (RF-5). Was `main.rs::DEFAULT_MODEL`.
 pub const DEFAULT_ANTHROPIC_MODEL: &str = "claude-sonnet-4-6";
 /// Default embedding model (Ollama-first, local). Single source of truth — also
@@ -173,6 +187,32 @@ pub fn render_default_magi_toml() -> String {
     writeln!(out, "melchior_model  = \"{}\"", DEFAULT_MAGI_MELCHIOR).unwrap();
     writeln!(out, "balthasar_model = \"{}\"", DEFAULT_MAGI_BALTHASAR).unwrap();
     writeln!(out, "caspar_model    = \"{}\"", DEFAULT_MAGI_CASPAR).unwrap();
+    // A seat that declares a model must declare its lineage (REQ-R02/R22): the scaffold has to
+    // satisfy the same rule it teaches, or `magi init` would write a file that does not start.
+    writeln!(
+        out,
+        "# The independent failure domain of each model. Declared, never inferred: rotation only \
+         accepts a candidate from a lineage no OTHER seat is holding."
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "melchior_lineage  = \"{}\"",
+        DEFAULT_MAGI_MELCHIOR_LINEAGE
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "balthasar_lineage = \"{}\"",
+        DEFAULT_MAGI_BALTHASAR_LINEAGE
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "caspar_lineage    = \"{}\"",
+        DEFAULT_MAGI_CASPAR_LINEAGE
+    )
+    .unwrap();
     writeln!(
         out,
         "auto_approve    = false \

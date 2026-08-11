@@ -44,11 +44,14 @@ pub enum ConfigError {
         valid: &'static str,
     },
 
-    /// The file brings migration patterns from the previous generation (REQ-A21b). The text is
-    /// already rendered by [`migrate::render_migration_error`] — it names each incompatibility
-    /// and its correction. **Unreachable while the pattern table is empty** (the v0.11.0 set
-    /// retired in v0.13.0, REQ-R22): the variant is kept because reloading the table is what
-    /// brings it back, with no change at this call site.
+    /// The file brings incompatibilities from the previous generation (REQ-A21b/REQ-R22). The
+    /// text is already rendered by [`migrate::render_migration_error`] — it names each
+    /// incompatibility and its correction, all of them in ONE message.
+    ///
+    /// Reached today by the v0.12.0 → v0.13.0 break: a seat that declares a model and not its
+    /// lineage ([`migrate::missing_seat_lineages`]). The pre-parse half of the pass
+    /// ([`migrate::detect_migrations`]) declares no pattern since the v0.11.0 set retired, and
+    /// feeds this same variant when it is reloaded.
     #[error("{0}")]
     NeedsMigration(String),
 
@@ -429,6 +432,23 @@ pub struct MagiSectionConfig {
     pub balthasar_model: Option<String>,
     /// Override model for Caspar (the Critic). `None` ⇒ principal model.
     pub caspar_model: Option<String>,
+
+    /// Independent failure domain of [`Self::melchior_model`] (REQ-R02).
+    ///
+    /// **Mandatory for a seat that declares a model, and never inferred** (R-R03): the lineage is
+    /// the label that decides all rotation eligibility, and it is a semantic choice of the
+    /// operator — the same two models can legitimately be two lineages for one user and one for
+    /// another. A seat that inherits the built-in model inherits the built-in lineage with it, so
+    /// only a *declared* model obliges a declared lineage. Blank counts as absent, like every
+    /// other text key.
+    ///
+    /// A `magi.toml` from v0.12.0 has none of these keys; that break is reported whole by
+    /// [`migrate::missing_seat_lineages`], never one key per start.
+    pub melchior_lineage: Option<String>,
+    /// Independent failure domain of [`Self::balthasar_model`] — see [`Self::melchior_lineage`].
+    pub balthasar_lineage: Option<String>,
+    /// Independent failure domain of [`Self::caspar_model`] — see [`Self::melchior_lineage`].
+    pub caspar_lineage: Option<String>,
     /// Auto-approve autonomous MAGI (`consult`) launches when the main LLM self-routes to the
     /// `consult` tool in the agent tool loop. Default `false` — the agent asks before launching
     /// the 3-perspective consensus. `true` launches without asking, but announces it in the TUI
@@ -538,6 +558,9 @@ impl Default for MagiSectionConfig {
             melchior_model: None,
             balthasar_model: None,
             caspar_model: None,
+            melchior_lineage: None,
+            balthasar_lineage: None,
+            caspar_lineage: None,
             auto_approve: default_auto_approve(),
             kind: None,
             base_url: None,
@@ -700,6 +723,18 @@ impl MagiConfig {
         }
         let cfg: Self =
             toml::from_str(s).map_err(|e| ConfigError::Parse(safe_parse_error(&e, s)))?;
+        // The v0.13.0 half of the same pass, and it can only run HERE: a MISSING key produces no
+        // serde complaint at all, so there is nothing for a pre-parse pass to get ahead of, and
+        // the typed struct is what a rename would break the compile over (REQ-R22, SC-R46/R47).
+        // Before `validate_vocabulary` for the same reason the pre-parse half goes before the
+        // deserialize: a file one generation behind should be told to migrate, not audited for
+        // vocabulary it is about to rewrite anyway.
+        let missing = migrate::missing_seat_lineages(&cfg.magi);
+        if !missing.is_empty() {
+            return Err(ConfigError::NeedsMigration(
+                migrate::render_migration_error(&missing),
+            ));
+        }
         cfg.validate_vocabulary()?;
         Ok(cfg)
     }
@@ -1649,7 +1684,11 @@ mod tests {
     fn test_parses_magi_section() {
         // S-2
         let c = MagiConfig::from_toml_str(
-            "[magi]\nmelchior_model = \"qwen3:8b\"\ncaspar_model = \"deepseek-r1:32b\"\n",
+            // Both declared seats carry their lineage: since v0.13.0 a declared model without one
+            // is a migration error, so a fixture that omitted it would be testing that error
+            // rather than the section parsing this test is about.
+            "[magi]\nmelchior_model = \"qwen3:8b\"\nmelchior_lineage = \"alibaba\"\n\
+             caspar_model = \"deepseek-r1:32b\"\ncaspar_lineage = \"deepseek\"\n",
         )
         .unwrap();
         assert_eq!(c.magi.melchior_model.as_deref(), Some("qwen3:8b"));
@@ -1704,7 +1743,10 @@ mod tests {
             "auto_approve must default to false (opt-in, never silently enabled)"
         );
         // `[magi] auto_approve = true` must parse to `true`.
-        let c2 = MagiConfig::from_toml_str("[magi]\nmelchior_model = \"qwen3:8b\"").unwrap();
+        let c2 = MagiConfig::from_toml_str(
+            "[magi]\nmelchior_model = \"qwen3:8b\"\nmelchior_lineage = \"alibaba\"\n",
+        )
+        .unwrap();
         assert!(
             !c2.magi.auto_approve,
             "auto_approve must default to false even when [magi] section is present"

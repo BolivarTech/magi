@@ -1,18 +1,20 @@
 // Author: Julian Bolivar Version: 1.0.0 Date: 2026-08-02
 
-//! PRE-parse validation pass, to report all migration incompatibilities of a `magi.toml`
-//! together (REQ-A21b).
+//! Validation pass that reports all migration incompatibilities of a `magi.toml` **together**
+//! (REQ-A21b, REQ-R22).
 //!
-//! `deny_unknown_fields` **aborts on the FIRST unknown key**, so "all together" is impossible
-//! to achieve from serde's error. This pass reads the TOML as a generic document **before**
-//! deserializing, collects the patterns it knows, and emits a single message.
+//! Serde cannot produce that message on its own: `deny_unknown_fields` **aborts on the FIRST
+//! unknown key**, and a missing field is reported one at a time. So this pass collects the
+//! incompatibilities it knows — before deserializing for the ones serde would abort on, after it
+//! for the ones serde stays silent about — and emits a single message.
 //!
 //! # Every pattern SET has a retirement date; the MECHANISM has none
 //!
 //! The v0.11.0 set — `provider = "openai"`, `[openai].base_url`,
 //! `[headless].tool_result_cap_bytes` — was retired in v0.13.0 (MS3, REQ-R22 / SC-R20). That
 //! debt was dated on purpose: those patterns duplicated schema knowledge about a shape that is
-//! no longer in the code, so they could only rot.
+//! no longer in the code, so they could only rot. The same release then put the mechanism
+//! straight back to work on the break it introduced itself — mandatory seat lineages.
 //!
 //! **The mechanism carries no such date, and retiring it with them would be the wrong reading of
 //! that note.** Its reason to exist outlives any single generation: `deny_unknown_fields` aborts
@@ -21,27 +23,43 @@
 //! read one complaint, edit, start again. That is true of every future break, not only of the
 //! one that motivated the pass.
 //!
-//! # What the next author needs to know before reloading the table
+//! # Two halves, because a break arrives in one of two shapes
 //!
-//! **The table is empty today.** [`detect_migrations`] reports nothing for every input, and
-//! [`render_migration_error`] is reachable only from a caller that supplies its own
-//! [`Migration`] values. `MagiConfig::from_toml_str` still runs the pass first, so reloading the
-//! table is enough to bring the guided error back — no call site has to change.
+//! **Unknown keys — [`detect_migrations`], before serde.** `deny_unknown_fields` aborts on the
+//! first one, so the only way to collect them all is to read the document ahead of serde. **No
+//! such pattern is declared today**: the v0.11.0 set retired with v0.13.0, and this half waits for
+//! the next break that arrives in that shape.
 //!
-//! **The message frame still describes the v0.11.0 → v0.12.0 break.** `VERSION_FROM`,
-//! `VERSION_TO`, `MINIMAL_VALID_CONFIG` and `V0_10_X_NOTE` were left as they were rather than
-//! guessed forward, because the wording of the next break belongs to the task that declares its
-//! patterns. Retarget them in the same change that reloads the table, or the user gets a correct
-//! list of incompatibilities under a header naming the wrong pair of versions.
+//! **Missing keys — [`missing_seat_lineages`], after serde.** An absent key with an `Option` field
+//! produces no serde complaint at all, so there is nothing to get ahead of, and reading the typed
+//! struct beats re-reading the raw document: renaming a field breaks the compile, whereas a
+//! string-keyed pattern would go on matching nothing in silence. That silent-rot property is
+//! precisely the debt REQ-R22 retired, so this half deliberately does not re-incur it.
 //!
-//! **Any correction that echoes a value read from the file must be redacted first.** The retired
-//! `[openai].base_url` correction pasted the user's own URL back, so it went through
+//! Both halves produce [`Migration`] values and share one [`render_migration_error`] frame, which
+//! is what keeps "reported whole, in one message" a property of the mechanism rather than of
+//! whichever half happens to be loaded.
+//!
+//! # The frame names ONE break at a time — move it with the patterns
+//!
+//! `VERSION_FROM`, `VERSION_TO`, `V0_11_X_NOTE` and `MINIMAL_VALID_CONFIG` describe the
+//! v0.12.0 → v0.13.0 break (mandatory seat lineages, REQ-R22 / SC-R46 / SC-R47). Whoever declares
+//! the patterns of the NEXT break retargets them in the same change: a correct list of
+//! incompatibilities under a header naming the wrong pair of versions is worse than no message,
+//! because it tells the user their file is a generation older than it is.
+//!
+//! # Any correction that echoes a value read from the file is redacted first
+//!
+//! The retired `[openai].base_url` correction pasted the user's own URL back, so it went through
 //! `redact_url`/`locate_userinfo` and said, in the message, that the value was masked (SC-A21e).
 //! A migration message that leaks a credential to the terminal, the scrollback and CI logs is a
 //! worse problem than a line the user has to complete by hand. That rule belongs to the
-//! mechanism, not to the pattern that first needed it.
+//! mechanism, not to the pattern that first needed it — the current lineage corrections honour it
+//! by quoting nothing from the file at all.
 //!
-//! **The line-locating helpers went with their patterns**, rather than staying behind an
+//! # The line-locating helpers are gone, and the v0.13.0 patterns do not want them back
+//!
+//! **They went with their patterns**, rather than staying behind an
 //! `#[allow(dead_code)]` that would claim a caller they no longer have: `line_of`,
 //! `line_of_in_section` and `is_key_at` are in git history at the v0.13.0 boundary, together
 //! with why they matched on a key boundary and why the section-scoped lookup was needed for a
@@ -65,16 +83,23 @@
     )
 )]
 
+use crate::defaults::{
+    DEFAULT_MAGI_BALTHASAR_LINEAGE, DEFAULT_MAGI_CASPAR_LINEAGE, DEFAULT_MAGI_MELCHIOR_LINEAGE,
+};
+
+use super::MagiSectionConfig;
+
 /// Source version of the migration the message frame describes.
 ///
-/// Frame content of the RETIRED v0.11.0 set, kept dormant on purpose — see the module docs:
-/// whoever reloads the pattern table retargets this pair in the same change.
-const VERSION_FROM: &str = "v0.11.0";
+/// Retargeted from `v0.11.0` when the v0.13.0 break took over the frame: the version pair belongs
+/// to whichever break the pass is actually reporting, and a correct list of incompatibilities under
+/// a header naming the wrong pair sends the user to migrate something they already migrated.
+const VERSION_FROM: &str = "v0.12.0";
 
 /// Target version of the migration the message frame describes.
 ///
-/// Same dormant frame content as [`VERSION_FROM`]; retarget both together.
-const VERSION_TO: &str = "v0.12.0";
+/// Retargeted together with [`VERSION_FROM`] — the pair only ever moves as a pair.
+const VERSION_TO: &str = "v0.13.0";
 
 /// Unconditional note about the jump from two generations back.
 ///
@@ -83,9 +108,27 @@ const VERSION_TO: &str = "v0.12.0";
 /// generic error exactly when it most needs help. Supporting two generations would double the
 /// debt for a jump the user makes in two steps.
 ///
-/// Dormant frame content of the retired v0.11.0 set, like [`VERSION_FROM`].
-const V0_10_X_NOTE: &str =
-    "If you're coming from v0.10.x, migrate to v0.11.0 first and then to v0.12.0: this pass only knows\nthe v0.11.0 patterns.";
+/// Retargeted with the rest of the frame: under v0.13.0 the generation two steps back is v0.11.x,
+/// whose own keys (`provider = "openai"`, `[openai].base_url`,
+/// `[headless].tool_result_cap_bytes`) no longer have patterns of their own (REQ-R22 retired them)
+/// and now surface as plain serde errors.
+const V0_11_X_NOTE: &str =
+    "If you're coming from v0.11.x, migrate to v0.12.0 first and then to v0.13.0: this pass only knows\nwhat changed in v0.13.0, and a v0.11.0 file also gets plain serde errors for its own keys.";
+
+/// Line number reported for a key that is **missing**.
+///
+/// A key the file never wrote has no line to point at — this is the `0` case
+/// [`Migration::line`] documents, and the reason the line-locating helpers of the retired pattern
+/// set were not needed here.
+const MISSING_KEY_HAS_NO_LINE: usize = 0;
+
+/// Trailing hint appended to every lineage correction.
+///
+/// One shared literal because the same sentence is true of all three seats, and because a
+/// correction repeated three times with three slightly different wordings reads like three
+/// different rules.
+const LINEAGE_CORRECTION_HINT: &str =
+    "   # any label you choose; no two seats may share one, and it is never inferred";
 
 /// Backup advice, in the body of the error and not only in the CHANGELOG.
 /// Whoever hits this error got here **by starting the binary**, not by reading release notes.
@@ -101,7 +144,13 @@ const BACKUP_ADVISORY: &str =
 ///
 /// Unlike the rest of the frame, this one is **not** dormant: it is checked against the live
 /// schema by `the_minimal_config_the_error_hands_out_actually_parses_today`, so it cannot rot
-/// silently while the table is empty.
+/// silently.
+///
+/// **Revisited for the v0.13.0 break and deliberately left unchanged.** It declares no seat model,
+/// so it owes no lineage and stays valid under the new rule — which is also what makes it the
+/// escape hatch it is meant to be: whoever cannot decide three lineage labels right now can delete
+/// their `[magi]` block, run on the built-in trio, and come back to it. The per-key corrections
+/// above it are what teach the declaration; this is what unblocks the user who wants to start.
 const MINIMAL_VALID_CONFIG: &str = "provider = \"ollama\"\nbase_url = \"http://localhost:11434/v1\"\n\n[openai]\nmodel = \"kimi-k2.6:cloud\"\n";
 
 /// A detected migration incompatibility, with its correction.
@@ -118,10 +167,16 @@ pub struct Migration {
 
 /// Detects the migration patterns declared for the current generation in a raw `magi.toml`.
 ///
-/// **No pattern is declared today** (REQ-R22, SC-R20): the v0.11.0 set retired with v0.13.0, so
-/// this reports nothing for every input, and a v0.11.0 file gets serde's own errors for its own
-/// keys. The signature, the [`Migration`] contract and [`render_migration_error`] survive that
-/// retirement deliberately — see the module docs.
+/// **No PRE-parse pattern is declared today** (REQ-R22, SC-R20): the v0.11.0 set retired with
+/// v0.13.0, so this reports nothing for every input, and a v0.11.0 file gets serde's own errors
+/// for its own keys.
+///
+/// **That is not the same as saying nothing is reported.** The v0.13.0 break is about keys the
+/// file is MISSING, which serde never aborts on, so it is collected after parsing by
+/// [`missing_seat_lineages`] — through the same [`Migration`] contract and the same
+/// [`render_migration_error`] frame. This half of the pass stays for the next break that arrives
+/// as **unknown** keys, where reading the document before serde does is the only way to collect
+/// more than one.
 ///
 /// The parameter keeps its place for the same reason, with the leading underscore recording that
 /// an empty table reads nothing. A reloaded table reads the document as a **parsed TOML value**,
@@ -135,6 +190,100 @@ pub struct Migration {
 #[must_use]
 pub fn detect_migrations(_raw: &str) -> Vec<Migration> {
     Vec::new()
+}
+
+/// One seat's lineage declaration, as this pass needs to see it.
+///
+/// The four pieces travel together on purpose: two parallel arrays (one of values, one of key
+/// names) would let a later edit reorder one and not the other, and the resulting message would
+/// name the wrong seat while every test still passed.
+struct SeatLineage<'a> {
+    /// Model declared for this seat, if any. Absent ⇒ the seat runs the built-in model, whose
+    /// lineage is built in too, so nothing is owed.
+    model: Option<&'a str>,
+    /// Lineage declared for this seat, if any.
+    lineage: Option<&'a str>,
+    /// Fully-qualified key, so the message says WHERE the line goes, not only what it is called.
+    key: &'static str,
+    /// The bare `key = "value"` line the user has to add, without the section prefix.
+    declaration: &'static str,
+    /// Label shown in the correction — the lineage of the model this seat runs by default, so
+    /// what `magi init` writes and what the error suggests cannot drift apart.
+    example: &'static str,
+}
+
+/// Whether a declared text value counts as **absent**.
+///
+/// Blank is absent, never invalid — the rule every text key in this file has followed since MS2.
+/// An exported-but-unfilled variable in a CI script is an everyday accident, and answering it with
+/// an "invalid value" error the user cannot act on punishes the accident instead of guiding it.
+fn is_absent(value: Option<&str>) -> bool {
+    value.is_none_or(|v| v.trim().is_empty())
+}
+
+/// Detects the v0.12.0 → v0.13.0 break: seats that declare a model but not its lineage.
+///
+/// **Why this one is checked AFTER parsing while [`detect_migrations`] runs before.** The two
+/// halves of the reporting problem are not the same shape. An **unknown** key aborts serde on the
+/// first one it meets, so collecting them all requires reading the document before serde does. A
+/// **missing** key with an `Option` field does not abort serde at all — it produces no complaint
+/// whatsoever — so there is nothing to get ahead of, and reading the typed struct is strictly
+/// better than re-reading the raw document: a rename of `melchior_lineage` breaks this function's
+/// compile, whereas a string-keyed pattern would keep matching nothing, silently. That is the
+/// exact debt REQ-R22 just retired, and re-incurring it one release later would be the wrong
+/// lesson to draw from the retirement.
+///
+/// It reports **only what the file still lacks** (SC-A21h): a half-migrated file gets the two
+/// corrections it is missing and no mention of the seat it already fixed. Repeating a correction
+/// the user already applied makes them doubt whether they applied it correctly.
+///
+/// # Redaction (SC-A21e)
+///
+/// Nothing here echoes a value read from the file: the corrections are built from the built-in
+/// lineage labels, not from the user's models or lineages. The rule the module docs state — any
+/// correction that echoes a value read from the file is redacted first — is therefore honoured by
+/// having nothing to redact, which is the cheapest way to honour it. **A later pattern that wants
+/// to quote the user's own value must route it through `redact_url`/`redact_foreign_text` first**;
+/// a migration message that leaks a credential to the terminal, the scrollback and CI logs is a
+/// worse problem than a line the user completes by hand.
+#[must_use]
+pub fn missing_seat_lineages(magi: &MagiSectionConfig) -> Vec<Migration> {
+    let seats = [
+        SeatLineage {
+            model: magi.melchior_model.as_deref(),
+            lineage: magi.melchior_lineage.as_deref(),
+            key: "[magi].melchior_lineage",
+            declaration: "melchior_lineage",
+            example: DEFAULT_MAGI_MELCHIOR_LINEAGE,
+        },
+        SeatLineage {
+            model: magi.balthasar_model.as_deref(),
+            lineage: magi.balthasar_lineage.as_deref(),
+            key: "[magi].balthasar_lineage",
+            declaration: "balthasar_lineage",
+            example: DEFAULT_MAGI_BALTHASAR_LINEAGE,
+        },
+        SeatLineage {
+            model: magi.caspar_model.as_deref(),
+            lineage: magi.caspar_lineage.as_deref(),
+            key: "[magi].caspar_lineage",
+            declaration: "caspar_lineage",
+            example: DEFAULT_MAGI_CASPAR_LINEAGE,
+        },
+    ];
+
+    seats
+        .into_iter()
+        .filter(|seat| !is_absent(seat.model) && is_absent(seat.lineage))
+        .map(|seat| Migration {
+            key: seat.key,
+            line: MISSING_KEY_HAS_NO_LINE,
+            correction: format!(
+                "{} = \"{}\"{LINEAGE_CORRECTION_HINT}",
+                seat.declaration, seat.example
+            ),
+        })
+        .collect()
 }
 
 /// Renders the full migration error from the found incompatibilities.
@@ -162,10 +311,13 @@ pub fn render_migration_error(found: &[Migration]) -> String {
     }
 
     out.push_str(BACKUP_ADVISORY);
-    out.push_str("\n\nA minimal, valid v0.12.0 magi.toml:\n\n");
+    // Interpolated, never spelled out: a hardcoded version here would keep naming the previous
+    // break while the frame constants above moved on, which is the failure this whole frame exists
+    // to avoid.
+    out.push_str(&format!("\n\nA minimal, valid {VERSION_TO} magi.toml:\n\n"));
     out.push_str(MINIMAL_VALID_CONFIG);
     out.push('\n');
-    out.push_str(V0_10_X_NOTE);
+    out.push_str(V0_11_X_NOTE);
     out.push('\n');
     out
 }
