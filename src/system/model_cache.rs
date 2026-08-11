@@ -143,10 +143,31 @@ impl ModelCapabilityCache {
     /// cannot be opened with this DEK.
     pub fn get(
         &self,
-        _endpoint_redacted: &str,
-        _model: &str,
+        endpoint_redacted: &str,
+        model: &str,
     ) -> Result<Option<CachedCapability>, CacheError> {
-        Ok(None)
+        // Read the raw blob UNDER the lock and decrypt OFF it (R-V08): the crypto is orders of
+        // magnitude slower than the query, and holding a database lock across it serialises every
+        // other reader for no reason.
+        let blob: Option<String> = {
+            let c = self.conn.lock().unwrap_or_else(|p| p.into_inner());
+            c.query_row(
+                "SELECT capability_blob FROM model_capabilities WHERE endpoint = ?1 AND model = ?2",
+                rusqlite::params![endpoint_redacted, model],
+                |row| row.get(0),
+            )
+            .map(Some)
+            .or_else(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                other => Err(CacheError::Storage(other.to_string())),
+            })?
+        };
+
+        let Some(blob) = blob else { return Ok(None) };
+        let plain = self.unseal(&blob)?;
+        serde_json::from_str(&plain)
+            .map(Some)
+            .map_err(|e| CacheError::Crypto(e.to_string()))
     }
 
     /// Persists a measured capability for `(endpoint_redacted, model)`.
@@ -159,11 +180,22 @@ impl ModelCapabilityCache {
     /// failure.
     pub fn put(
         &self,
-        _endpoint_redacted: &str,
-        _model: &str,
-        _capability: &CachedCapability,
+        endpoint_redacted: &str,
+        model: &str,
+        capability: &CachedCapability,
     ) -> Result<(), CacheError> {
-        Ok(())
+        let plain =
+            serde_json::to_string(capability).map_err(|e| CacheError::Crypto(e.to_string()))?;
+        // Sealed BEFORE taking the connection lock, same reason as in `get`.
+        let blob = self.seal(&plain)?;
+        let c = self.conn.lock().unwrap_or_else(|p| p.into_inner());
+        c.execute(
+            "INSERT INTO model_capabilities (endpoint, model, capability_blob) VALUES (?1, ?2, ?3)
+             ON CONFLICT(endpoint, model) DO UPDATE SET capability_blob = excluded.capability_blob",
+            rusqlite::params![endpoint_redacted, model, blob],
+        )
+        .map(|_| ())
+        .map_err(|e| CacheError::Storage(e.to_string()))
     }
 
     /// Drops the rows whose `(endpoint, model)` pair is no longer configured, and returns how many
@@ -177,8 +209,38 @@ impl ModelCapabilityCache {
     ///
     /// # Errors
     /// [`CacheError::Storage`] on a database failure.
-    pub fn prune_absent(&self, _configured: &[(String, String)]) -> Result<usize, CacheError> {
-        Ok(0)
+    pub fn prune_absent(&self, configured: &[(String, String)]) -> Result<usize, CacheError> {
+        let keep: BTreeSet<(&str, &str)> = configured
+            .iter()
+            .map(|(e, m)| (e.as_str(), m.as_str()))
+            .collect();
+
+        let c = self.conn.lock().unwrap_or_else(|p| p.into_inner());
+        let existing: Vec<(String, String)> = {
+            let mut stmt = c
+                .prepare("SELECT endpoint, model FROM model_capabilities")
+                .map_err(|e| CacheError::Storage(e.to_string()))?;
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
+                .map_err(|e| CacheError::Storage(e.to_string()))?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(|e| CacheError::Storage(e.to_string()))?
+        };
+
+        let mut removed = 0usize;
+        for (endpoint, model) in existing {
+            if !keep.contains(&(endpoint.as_str(), model.as_str())) {
+                c.execute(
+                    "DELETE FROM model_capabilities WHERE endpoint = ?1 AND model = ?2",
+                    rusqlite::params![endpoint, model],
+                )
+                .map_err(|e| CacheError::Storage(e.to_string()))?;
+                removed += 1;
+            }
+        }
+        Ok(removed)
     }
 
     /// How many rows the table holds. Exists so a test can assert that a failed measurement wrote

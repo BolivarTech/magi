@@ -1,4 +1,5 @@
 //! This module provides abstractions for system-level operations.
+pub mod cached_probe;
 pub mod database;
 pub mod fs;
 pub mod git;
