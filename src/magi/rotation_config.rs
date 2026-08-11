@@ -1,3 +1,4 @@
+
 // Author: Julian Bolivar
 // Version: 1.0.0
 // Date: 2026-08-11
@@ -25,9 +26,11 @@
     )
 )]
 
+use magi_core::schema::AgentName;
 use serde::Deserialize;
 
-use crate::magi::lineage::Lineage;
+use crate::magi::lineage::{seats_without_coverage, Lineage};
+use crate::notices::Notice;
 
 /// One fallback rotation candidate, deserialized from a `[[magi.fallback]]` entry.
 ///
@@ -62,7 +65,65 @@ where
     Lineage::parse(&raw).map_err(serde::de::Error::custom)
 }
 
-/// Unit tests for `FallbackEntry` deserialization.
+/// Formats a slice of seat names as a lowercase, comma-separated list for user-facing messages.
+fn seat_names(seats: &[AgentName]) -> String {
+    seats
+        .iter()
+        .map(|name| name.display_name().to_lowercase())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Diversity problem detected while validating seat lineages against the fallback pool.
+#[derive(Debug, thiserror::Error)]
+pub enum DiversityError {
+    /// Two or more seats share a lineage, defeating the ensemble even when no rotation occurs.
+    #[error(
+        "the seats {} share lineage '{}'; every mage must run a different lineage. \
+         Declare finer lineage labels by model family, or set enforce_diversity to false.",
+        seat_names(seats),
+        lineage.as_str()
+    )]
+    NonDistinctSeats {
+        /// Seat names that share the duplicated lineage.
+        seats: Vec<AgentName>,
+        /// The lineage shared by those seats.
+        lineage: Lineage,
+    },
+
+    /// One or more seats have no fallback candidate from a different lineage in the pool.
+    #[error(
+        "the seats {} have no fallback coverage; every seat must be rotatable to a different lineage. \
+         Add fallback entries covering these seats, declare finer lineage labels by model family, \
+         or set enforce_diversity to false.",
+        seat_names(seats)
+    )]
+    UncoveredSeats {
+        /// Seat names without fallback coverage.
+        seats: Vec<AgentName>,
+    },
+}
+
+/// Validates that the configured seats are lineage-diverse and covered by the fallback pool.
+///
+/// Distinctness of the seat lineages is required unconditionally. Coverage is evaluated only when
+/// the pool is non-empty, because an empty pool explicitly means "no rotation" and must not
+/// produce warnings. When `enforce` is false, coverage gaps become notices instead of errors.
+///
+/// # Errors
+///
+/// Returns [`DiversityError`] when `enforce` is true and a rule is violated.
+pub fn validate_diversity(
+    seats: &[(AgentName, Lineage)],
+    pool: &[FallbackEntry],
+    enforce: bool,
+) -> Result<Vec<Notice>, DiversityError> {
+    // STUB (Red phase): no real logic yet.
+    let _ = (seats, pool, enforce);
+    Ok(Vec::new())
+}
+
+/// Unit tests for `FallbackEntry` deserialization and diversity validation.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -113,4 +174,92 @@ mod tests {
             "the error must name the key: {err}"
         );
     }
+
+    /// Builds a seat triple from string identifiers for tests.
+    fn trio(entries: &[(&str, &str)]) -> Vec<(AgentName, Lineage)> {
+        entries
+            .iter()
+            .map(|(name, lineage)| {
+                let seat = match *name {
+                    "melchior" => AgentName::Melchior,
+                    "balthasar" => AgentName::Balthasar,
+                    _ => AgentName::Caspar,
+                };
+                (seat, Lineage::parse(lineage).expect("valid lineage"))
+            })
+            .collect()
+    }
+
+    /// Builds a fallback pool from string identifiers for tests.
+    fn pool_of(entries: &[(&str, &str)]) -> Vec<FallbackEntry> {
+        entries
+            .iter()
+            .map(|(model, lineage)| FallbackEntry {
+                model: (*model).to_owned(),
+                lineage: Lineage::parse(lineage).expect("valid lineage"),
+            })
+            .collect()
+    }
+
+    /// Three seats sharing a lineage are rejected even without a pool, because the ensemble is
+    /// degraded regardless of whether rotation ever happens.
+    #[test]
+    fn three_seats_of_the_same_lineage_are_a_load_error_even_without_a_pool() {
+        let seats = trio(&[
+            ("melchior", "anthropic"),
+            ("balthasar", "anthropic"),
+            ("caspar", "anthropic"),
+        ]);
+        let err = validate_diversity(&seats, &[], true)
+            .expect_err("same lineage must fail under true");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("melchior") && msg.contains("balthasar") && msg.contains("caspar"),
+            "the error must name the affected seats: {msg}"
+        );
+        assert!(
+            msg.contains("enforce_diversity"),
+            "the error must carry the ONE-LINE way out: {msg}"
+        );
+    }
+
+    /// Three seats with distinct lineages and no pool start cleanly: no pool means no coverage
+    /// question.
+    #[test]
+    fn a_distinct_lineage_trio_without_a_pool_starts_with_no_notice() {
+        let seats = trio(&[
+            ("melchior", "opus"),
+            ("balthasar", "sonnet"),
+            ("caspar", "haiku"),
+        ]);
+        let notices = validate_diversity(&seats, &[], true).expect("distinct lineages must pass");
+        assert!(notices.is_empty(), "no pool means no coverage question");
+    }
+
+    /// A coverage gap is an error under enforcement and a single notice under lenient mode.
+    #[test]
+    fn a_coverage_gap_is_an_error_under_true_and_a_notice_under_false() {
+        let seats = trio(&[
+            ("melchior", "opus"),
+            ("balthasar", "sonnet"),
+            ("caspar", "haiku"),
+        ]);
+        let pool = pool_of(&[("m2", "opus")]);
+        assert!(validate_diversity(&seats, &pool, true).is_err());
+        let notices = validate_diversity(&seats, &pool, false).expect("false must not error");
+        assert_eq!(notices.len(), 1, "all uncovered seats in ONE message");
+        assert!(
+            notices[0].text.contains("balthasar") && notices[0].text.contains("caspar"),
+            "notice must name the uncovered seats: {}",
+            notices[0].text
+        );
+    }
+
+    /// With enforcement disabled, no configuration produces an error.
+    #[test]
+    fn enforce_false_never_errors_even_on_a_single_lineage_trio() {
+        let seats = trio(&[("melchior", "x"), ("balthasar", "x"), ("caspar", "x")]);
+        assert!(validate_diversity(&seats, &pool_of(&[("m", "x")]), false).is_ok());
+    }
 }
+
