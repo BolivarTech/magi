@@ -2256,4 +2256,114 @@ mod tests {
              having parsed: {notices:?}"
         );
     }
+
+    // Task 1.1 (REQ-R23 / SC-R21): the vocabulary validation must be impossible to bypass by
+    // building a `MagiConfig` as a field literal.
+    // -------------------------------------------------------------------------
+
+    /// SC-R21: a `MagiConfig` cannot be built bypassing validation.
+    ///
+    /// The literal path is gone, so the ONLY way in is the builder, which validates. This is the
+    /// runtime half of the assertion: the builder REJECTS what the literal used to accept
+    /// silently. The compile-time half is
+    /// `no_magi_config_field_is_public_so_no_literal_can_skip_validation`.
+    #[test]
+    fn a_magi_config_with_an_unknown_provider_cannot_be_built() {
+        let err = MagiConfig::builder()
+            .provider(Some("banana".to_string()))
+            .build()
+            .expect_err("an unrecognized provider must not build");
+        assert!(
+            matches!(err, ConfigError::UnknownProviderKind { .. }),
+            "expected UnknownProviderKind, got {err:?}"
+        );
+    }
+
+    /// The builder validates the WHOLE vocabulary, not only the root `provider`: an unknown
+    /// `[magi].default_mode` is rejected on the same call, so no second, unguarded axis is left
+    /// reachable through it.
+    #[test]
+    fn a_magi_config_with_an_unknown_default_mode_cannot_be_built() {
+        let err = MagiConfig::builder()
+            .magi(MagiSectionConfig {
+                default_mode: Some("banana".to_string()),
+                ..MagiSectionConfig::default()
+            })
+            .build()
+            .expect_err("an unrecognized default_mode must not build");
+        assert!(
+            matches!(err, ConfigError::UnknownMode { .. }),
+            "expected UnknownMode, got {err:?}"
+        );
+    }
+
+    /// The valid vocabulary still builds, so the guard is not simply rejecting everything.
+    #[test]
+    fn the_three_vocabulary_values_build() {
+        for p in ["ollama", "openai-compat", "anthropic"] {
+            MagiConfig::builder()
+                .provider(Some(p.to_string()))
+                .build()
+                .unwrap_or_else(|e| panic!("{p} must build, got {e:?}"));
+        }
+    }
+
+    /// Exact source line that opens the `MagiConfig` declaration, once trimmed.
+    ///
+    /// It is matched on the FULL trimmed line rather than by `contains`, so the `const` below
+    /// (whose own source line embeds this same text) cannot match itself.
+    const MAGI_CONFIG_STRUCT_HEADER: &str = "pub struct MagiConfig {";
+
+    /// Line that closes a struct block written in the crate's `rustfmt` style: a lone brace at
+    /// the item's own indentation, which for a top-level item is column zero.
+    const STRUCT_BLOCK_END: &str = "}";
+
+    /// Prefix of a field declared public. Field attributes (`#[serde(default)]`) sit on their
+    /// own line in this crate's `rustfmt` style, so a field's visibility always opens its line.
+    const PUBLIC_FIELD_PREFIX: &str = "pub ";
+
+    /// SC-R21: **no `MagiConfig` field is public**, so `MagiConfig { provider: Some("banana"),
+    /// ..Default::default() }` does not compile and the builder is the only way in.
+    ///
+    /// **Why this is a source-level assertion and not `trybuild`.** SC-R21 is a property of the
+    /// TYPE, not of any value, so no ordinary runtime test can observe it — the plan is right
+    /// about that. Its proposed fixture, however, cannot work here: `trybuild` compiles each
+    /// case against the **library** target (`magi_rs`), and `config` is a **binary-only** module
+    /// (`mod config;` in `main.rs`; `lib.rs` exports only `headless`, `magi`, `notices`,
+    /// `redact` and `vault`). A case naming `magi_rs::config::MagiConfig` therefore fails to
+    /// compile because the PATH does not resolve — and `trybuild` reports a case that fails to
+    /// compile as a **pass**. Restoring `pub` on the fields would not change that outcome, which
+    /// is precisely the mutation the guardian has to detect, so the `trybuild` version would be
+    /// a guardian that guards nothing. The plan's fallback, a `compile_fail` doctest, fails for
+    /// a second, independent reason: Cargo does not collect doctests from binary targets, and
+    /// `cargo nextest` — this project's runner — does not run doctests at all, so it would never
+    /// execute.
+    ///
+    /// This assertion has neither problem: it reads the declaration it guards and fails the
+    /// moment a field becomes public again, which is the mutation B16 asks about.
+    #[test]
+    fn no_magi_config_field_is_public_so_no_literal_can_skip_validation() {
+        let source = include_str!("config.rs");
+        let mut after_header = source
+            .lines()
+            .skip_while(|line| line.trim() != MAGI_CONFIG_STRUCT_HEADER)
+            .skip(1)
+            .peekable();
+        assert!(
+            after_header.peek().is_some(),
+            "the `{MAGI_CONFIG_STRUCT_HEADER}` declaration was not found in this file — \
+             the guardian lost its subject and must be repointed, not deleted"
+        );
+
+        let public_fields: Vec<&str> = after_header
+            .take_while(|line| line.trim() != STRUCT_BLOCK_END)
+            .filter(|line| line.trim().starts_with(PUBLIC_FIELD_PREFIX))
+            .collect();
+
+        assert!(
+            public_fields.is_empty(),
+            "MagiConfig must have no public field, or a field literal can build a \
+             configuration the vocabulary validation never saw; found: {public_fields:?}"
+        );
+    }
 }
