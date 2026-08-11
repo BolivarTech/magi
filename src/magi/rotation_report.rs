@@ -75,8 +75,44 @@ use crate::redact::redact_foreign_text;
 /// assert!(json["ran_unmeasured"].as_array().is_some_and(Vec::is_empty));
 /// ```
 #[must_use]
-pub fn render_rotations(_rotations: &BTreeMap<AgentName, AgentRotation>) -> Value {
-    json!({})
+pub fn render_rotations(rotations: &BTreeMap<AgentName, AgentRotation>) -> Value {
+    let hops: Vec<Value> = rotations
+        .iter()
+        .filter(|(_, r)| !r.chain.is_empty())
+        .map(|(agent, r)| {
+            json!({
+                "agent": seat_label(*agent),
+                "model_configured": r.model_configured,
+                // REQ-R06: what ACTUALLY produced the verdict. A report naming the configured
+                // model when the fallback ran lies about its own evidence base.
+                "model_used": r.model_used,
+                "ran_unmeasured": r.ran_unmeasured,
+                "chain": r.chain.iter().map(|hop| {
+                    // The ONLY foreign-composed string here, and the reason this module exists.
+                    // Bound rather than inlined: `SafeErrorText` deliberately does NOT implement
+                    // `Serialize`, so reaching the JSON has to go through an explicit `as_str`
+                    // — which is the point. A type that serialized itself would let an
+                    // unredacted `String` take its place with nothing to notice.
+                    let detail = redact_foreign_text(hop.detail());
+                    json!({
+                        "from_lineage": hop.from().as_str(),
+                        "to_lineage": hop.to().as_str(),
+                        "model_resolved": hop.model_resolved(),
+                        "cause": cause_label(hop.kind()),
+                        "detail": detail.as_str(),
+                    })
+                }).collect::<Vec<_>>(),
+            })
+        })
+        .collect();
+
+    let unmeasured: Vec<Value> = rotations
+        .iter()
+        .filter(|(_, r)| r.ran_unmeasured)
+        .map(|(agent, _)| json!(seat_label(*agent)))
+        .collect();
+
+    json!({ "rotations": hops, "ran_unmeasured": unmeasured })
 }
 
 /// Renders the rotation telemetry as text lines, already redacted (REQ-R07/R16).
@@ -100,8 +136,39 @@ pub fn render_rotations(_rotations: &BTreeMap<AgentName, AgentRotation>) -> Valu
 /// assert!(rotation_lines(&BTreeMap::new()).is_empty());
 /// ```
 #[must_use]
-pub fn rotation_lines(_rotations: &BTreeMap<AgentName, AgentRotation>) -> Vec<String> {
-    Vec::new()
+pub fn rotation_lines(rotations: &BTreeMap<AgentName, AgentRotation>) -> Vec<String> {
+    rotations
+        .iter()
+        .filter(|(_, r)| !r.chain.is_empty())
+        .map(|(agent, r)| {
+            let hops = r
+                .chain
+                .iter()
+                .map(|hop| {
+                    format!(
+                        "{} -> {} ({}, {}): {}",
+                        hop.from().as_str(),
+                        hop.to().as_str(),
+                        hop.model_resolved(),
+                        cause_label(hop.kind()),
+                        redact_foreign_text(hop.detail()).as_str()
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("; ");
+            let unmeasured = if r.ran_unmeasured {
+                " [ran unmeasured]"
+            } else {
+                ""
+            };
+            format!(
+                "{}: {} -> {}{unmeasured} | {hops}",
+                seat_label(*agent),
+                r.model_configured,
+                r.model_used
+            )
+        })
+        .collect()
 }
 
 /// Lowercase seat label, matching the identity magi-core serializes.

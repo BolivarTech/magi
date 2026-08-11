@@ -7287,6 +7287,136 @@ mod tests {
             );
         }
 
+        /// SC-R12/REQ-R16: with a credential-bearing endpoint and a mage that **really fails and
+        /// rotates**, no output surface carries the credential.
+        ///
+        /// # Why it drives the real path instead of building the error
+        ///
+        /// Every previous no-leak assertion for rotation could have been written by handing
+        /// `redact_foreign_text` a string with a credential in it — and that guardian proves only
+        /// that the redactor redacts, which its own unit tests already prove. It says nothing
+        /// about whether the **composition** calls it. This one goes through
+        /// `build_magi_orchestrator`, a real 400, a real rotation, and the real renderers.
+        ///
+        /// # The honest limit, stated rather than discovered later
+        ///
+        /// Whether the credential ever reaches a `RotationEvent::detail` is **magi-core's**
+        /// choice, and reqwest already strips userinfo from the URL it echoes. So the canary may
+        /// well be absent for reasons that have nothing to do with our redaction — which is
+        /// exactly how a no-leak test becomes a guardian of nothing. That is why the assertions
+        /// come in pairs: each surface must be **non-trivially rendered** before its absence of
+        /// the canary means anything. An empty string contains no secret either.
+        #[tokio::test]
+        async fn no_output_carries_the_credential_when_a_mage_really_fails_and_rotates() {
+            use magi_rs::magi::rotation_report::{render_rotations, rotation_lines};
+            use mockito::Matcher;
+            let canary = super::divergence_and_keyless_auth::SEAT_CANARY;
+            let mut server = mockito::Server::new_async().await;
+
+            let _down = server
+                .mock("POST", "/v1/chat/completions")
+                .match_body(Matcher::AllOf(vec![
+                    Matcher::Regex("(?i)caspar".into()),
+                    Matcher::Regex("down-model".into()),
+                ]))
+                .with_status(400)
+                .with_body("{\"error\":\"model unavailable\"}")
+                .create_async()
+                .await;
+            for (seat, model) in [
+                ("(?i)caspar", "rescue-model"),
+                ("(?i)melchior", "melchior"),
+                ("(?i)balthasar", "balthasar"),
+            ] {
+                let agent = if model == "rescue-model" {
+                    "caspar"
+                } else {
+                    model
+                };
+                server
+                    .mock("POST", "/v1/chat/completions")
+                    .match_body(Matcher::AllOf(vec![
+                        Matcher::Regex(seat.into()),
+                        Matcher::Regex(
+                            if model == "rescue-model" {
+                                "rescue-model"
+                            } else {
+                                "ok-model"
+                            }
+                            .into(),
+                        ),
+                    ]))
+                    .with_status(200)
+                    .with_body(verdict_body(agent))
+                    .create_async()
+                    .await;
+            }
+
+            // The ONLY way to obtain a credential-bearing endpoint: REQ-A16c rejects a literal
+            // one at parse time, so it has to come from placeholders resolved against a vault.
+            let host = server.url().replace("http://", "");
+            let endpoint = super::divergence_and_keyless_auth::credentialed_endpoint(&format!(
+                "http://[user]:[password]@{host}/v1"
+            ));
+            let endpoints = ResolvedEndpoints {
+                root: super::divergence_and_keyless_auth::credentialed_endpoint(&format!(
+                    "http://[user]:[password]@{host}/v1"
+                )),
+                magi: endpoint,
+            };
+
+            let mut notices = Vec::new();
+            let magi = build_magi_orchestrator(
+                &cfg_with_pool(2),
+                ProviderKind::Ollama,
+                &endpoints,
+                None,
+                None,
+                &MagiEnvModelOverrides::default(),
+                &mut notices,
+            )
+            .expect("ollama is keyless: the credential rides in the URL, not in a header we set");
+
+            let report = magi
+                .analyze(
+                    &Mode::Analysis,
+                    "a question long enough to be a real consult",
+                )
+                .await
+                .expect("the consult must complete");
+
+            // FIRST HALF: the telemetry really rendered. Without this, every assertion below
+            // would pass against a run that produced no rotation output at all.
+            assert!(
+                !report.rotations[&AgentName::Caspar].chain.is_empty(),
+                "the canary means nothing unless a rotation actually happened"
+            );
+            let json = render_rotations(&report.rotations).to_string();
+            let lines = rotation_lines(&report.rotations).join("\n");
+            let annotated =
+                crate::tools::consult::annotate_report_text(&report, ProviderKind::Ollama);
+            assert!(
+                json.contains("rescue-model") && lines.contains("rescue-model"),
+                "both renderers must have produced real telemetry: {json} / {lines}"
+            );
+            assert!(
+                annotated.contains("Model rotations"),
+                "the text surface must carry the rotation section: {annotated}"
+            );
+
+            // SECOND HALF: and none of it carries the credential.
+            for surface in [&json, &lines, &annotated] {
+                assert!(
+                    !surface.contains(canary),
+                    "the credential reached an output surface: {surface}"
+                );
+                assert!(
+                    !surface.contains("alice"),
+                    "the username reached an output surface: {surface}"
+                );
+            }
+        }
+
         /// Fixed test credentials, no env or vault behind them.
         struct FixedCreds {
             openai: Option<String>,
@@ -8867,7 +8997,7 @@ mod tests {
 
         /// The canary value substituted into a template's `[password]`. Distinctive enough
         /// that a substring search cannot match it by accident.
-        const SEAT_CANARY: &str = "c4n4ry-s3cr3t";
+        pub(super) const SEAT_CANARY: &str = "c4n4ry-s3cr3t";
 
         /// A [`SecretStore`] over a fixed map, so a credentialed [`ResolvedEndpoint`] can be
         /// built without standing up a real vault.
@@ -8902,7 +9032,7 @@ mod tests {
         /// Resolves `template` against a vault holding [`SEAT_CANARY`] as the root password —
         /// the only way to obtain a credential-bearing endpoint, since REQ-A16c rejects a
         /// literal one at parse time.
-        fn credentialed_endpoint(template: &str) -> ResolvedEndpoint {
+        pub(super) fn credentialed_endpoint(template: &str) -> ResolvedEndpoint {
             let mut vault = FixedVault(
                 [
                     ("BASE_URL_USER", "alice"),
