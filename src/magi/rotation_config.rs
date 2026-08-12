@@ -40,6 +40,7 @@ use crate::notices::Notice;
 #[serde(deny_unknown_fields)]
 pub struct FallbackEntry {
     /// Model tag to rotate to.
+    #[serde(deserialize_with = "deserialize_model")]
     pub model: String,
 
     /// Independent failure domain this candidate belongs to, chosen by the user.
@@ -62,6 +63,36 @@ where
 {
     let raw = String::deserialize(deserializer)?;
     Lineage::parse(&raw).map_err(serde::de::Error::custom)
+}
+
+/// Rejects a blank model tag on a fallback entry.
+///
+/// **Same argument as [`deserialize_lineage`], applied to the field next to it** (S1 Loop 2,
+/// Caspar). `lineage` was defended against blank and `model` was not, in one struct — and the
+/// consequence is worse than an entry that fails at rotation time: a blank model still counts as
+/// **pool coverage**. [`seats_without_coverage`] would report the seat as covered by a candidate
+/// that can never answer, which is the ilusory-safety-net failure the coverage check exists to
+/// prevent. Better to reject the declaration than to certify a net with a hole in it.
+///
+/// Blank is rejected rather than treated as absent because `model` is not optional: the
+/// blank-is-absent rule turns an unfilled value into "the key was not given", and a fallback
+/// entry without a model is not a thing that can exist.
+///
+/// # Errors
+///
+/// Returns a serde error when the value is blank or whitespace-only.
+fn deserialize_model<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = String::deserialize(deserializer)?;
+    if raw.trim().is_empty() {
+        return Err(serde::de::Error::custom(
+            "a [[magi.fallback]] entry needs a model tag: `model` is blank, and a blank candidate \
+             would still count as pool coverage while never being able to answer",
+        ));
+    }
+    Ok(raw)
 }
 
 /// Formats a slice of seat names as a lowercase, comma-separated list for user-facing messages.
@@ -105,9 +136,18 @@ pub enum DiversityError {
 
 /// Validates that the configured seats are lineage-diverse and covered by the fallback pool.
 ///
-/// Distinctness of the seat lineages is required unconditionally. Coverage is evaluated only when
-/// the pool is non-empty, because an empty pool explicitly means "no rotation" and must not
-/// produce warnings. When `enforce` is false, coverage gaps become notices instead of errors.
+/// **Both rules are gated on `enforce`** — the two differ in *scope*, not in whether the flag
+/// governs them. Distinctness of the seat lineages is checked whether or not a pool is declared,
+/// because three mages on one lineage degrade the ensemble even when nobody rotates. Coverage is
+/// evaluated only when the pool is non-empty, because an empty pool explicitly means "no
+/// rotation" and must not produce warnings. With `enforce` false, neither is an error and a
+/// coverage gap becomes a notice instead — that is the mono-provider operator's way out
+/// (REQ-R29, SC-R40).
+///
+/// An earlier version of this sentence said distinctness was required *unconditionally*, which
+/// contradicted the `# Errors` clause three lines below it and, worse, described behaviour that
+/// SC-R40 forbids: a single-lineage trio with `enforce_diversity = false` must start. Anyone
+/// reconciling the code to that sentence would have broken it.
 ///
 /// # Errors
 ///
