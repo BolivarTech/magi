@@ -86,13 +86,18 @@ where
     D: serde::Deserializer<'de>,
 {
     let raw = String::deserialize(deserializer)?;
-    if raw.trim().is_empty() {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
         return Err(serde::de::Error::custom(
             "a [[magi.fallback]] entry needs a model tag: `model` is blank, and a blank candidate \
              would still count as pool coverage while never being able to answer",
         ));
     }
-    Ok(raw)
+    // Trimmed, not just checked. `Lineage::parse` trims its side, and leaving this one raw kept
+    // half of the asymmetry this function was added to remove: `model = " qwen "` would be sent
+    // to the endpoint with its spaces and 404, for a reason invisible in the file (S1 Loop 2,
+    // Caspar). Surrounding whitespace in a model tag is a typo, never an intent.
+    Ok(trimmed.to_string())
 }
 
 /// Formats a slice of seat names as a lowercase, comma-separated list for user-facing messages.
@@ -225,6 +230,16 @@ pub fn validate_diversity(
 /// *"corroborated and fine"* — a different claim from *"there was nothing to corroborate with"*.
 /// The same rule the rest of this milestone follows: a resolution that does not come from what the
 /// operator wrote gets announced.
+///
+/// # Where this is wired
+///
+/// `main.rs::build_magi_orchestrator`, which the TUI and the headless path both call during
+/// startup wiring. Named here because segmented review cannot see `main.rs` from this file, and
+/// three separate review rounds flagged this function as having no production caller — a
+/// reasonable conclusion from the evidence a reviewer had, and wrong. The rule this milestone
+/// learned the expensive way is that a function whose only visible callers are its own tests is
+/// a real and recurring defect here, so the cheap fix is to make the call site checkable from
+/// inside the file rather than to keep re-litigating it.
 ///
 /// # Complexity
 ///

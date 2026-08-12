@@ -344,11 +344,21 @@ mod tests {
         // out, so `DEFAULT_OPENAI_MODEL` can move underneath it and the advice would keep parsing
         // while naming a model the project no longer defaults to — a stuck user copying it would
         // land somewhere the rest of the docs never mention.
-        assert!(
-            MINIMAL_VALID_CONFIG.contains(crate::defaults::DEFAULT_OPENAI_MODEL),
-            "the minimal config must name the CURRENT default model, not a frozen literal: {}",
-            crate::defaults::DEFAULT_OPENAI_MODEL
-        );
+        // All THREE literals, not just the model (S1 Loop 2, Caspar). Pinning one of the three
+        // is the shape of coverage that reads as done while two thirds of the drift stays open —
+        // and `base_url` is the one that would send a migrating user's traffic somewhere the
+        // project no longer defaults to.
+        for (value, what) in [
+            (crate::defaults::DEFAULT_OPENAI_MODEL, "model"),
+            (crate::defaults::DEFAULT_PROVIDER, "provider"),
+            (crate::defaults::DEFAULT_OPENAI_BASE_URL, "base_url"),
+        ] {
+            assert!(
+                MINIMAL_VALID_CONFIG.contains(value),
+                "the minimal config must name the CURRENT default {what} ({value}), not a frozen \
+                 literal"
+            );
+        }
     }
 
     /// A `magi.toml` carrying **all three** retired v0.11.0 patterns at once: `provider =
