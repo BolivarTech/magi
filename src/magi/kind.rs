@@ -92,10 +92,24 @@ impl ProviderKind {
     /// having defined it, and breaking startup for that would punish an everyday accident. A
     /// present and unrecognized value is an error: the user meant to say something and said it wrong.
     ///
-    /// Trims **ASCII** whitespace, just like `ModeExt::parse_config_value`, so the two
-    /// vocabulary keys in the file are read with the same rule.
+    /// Trims with [`str::trim`] — **Unicode** whitespace — matching the blank rule of
+    /// `ModeExt::parse_config_value` and of `config::non_blank`, the shared helper the project
+    /// names for exactly this class of value.
+    ///
+    /// It used to trim ASCII only, "just like `ModeExt::parse_config_value`", and the two agreed
+    /// with each other while both disagreed with `non_blank`. That gap was reachable and it broke
+    /// the project's own rule that **blank is absent, never invalid**: `provider = "\u{a0}"` is
+    /// whitespace-only, so `non_blank` reads it as absent, but `validate_vocabulary` hands this
+    /// function the RAW value, ASCII-trimming left the NBSP standing, and the load failed on a
+    /// value that should have fallen through to the default. Found by S1 Loop 2 (Caspar).
+    ///
+    /// **Why one trim here and two over in `mode`.** `Mode` splits them because
+    /// `normalize_label` is shared with `mode_classifier`, whose input is model output; the
+    /// narrower ASCII rule guards that injection surface. A provider kind has no such path — it
+    /// is only ever read from a config file or an env var — so there is nothing here for a
+    /// second, narrower rule to protect.
     pub fn parse(raw: &str) -> Result<Option<Self>, ProviderKindParseError> {
-        match raw.trim_matches(|c: char| c.is_ascii_whitespace()) {
+        match raw.trim() {
             "" => Ok(None),
             "ollama" => Ok(Some(Self::Ollama)),
             "openai-compat" => Ok(Some(Self::OpenAiCompat)),
@@ -204,5 +218,33 @@ mod tests {
         ] {
             assert_eq!(ProviderKind::parse(&kind.to_string()).unwrap(), Some(kind));
         }
+    }
+
+    /// S1 Loop 2 (Caspar): the blank rule is **Unicode**, because that is what
+    /// `config::non_blank` uses and `provider`/`kind` are on its list.
+    ///
+    /// **Mutation-verified (B16):** restore
+    /// `trim_matches(|c: char| c.is_ascii_whitespace())` and the first assertion goes red —
+    /// the NBSP survives the trim, the value reads as present-and-unrecognized, and
+    /// `validate_vocabulary` fails the whole load over an exported-but-unfilled variable.
+    #[test]
+    fn a_unicode_whitespace_only_kind_is_absent_not_invalid() {
+        assert_eq!(
+            ProviderKind::parse("\u{a0}").unwrap(),
+            None,
+            "NBSP alone is whitespace-only, so it is ABSENT — never invalid"
+        );
+        assert_eq!(ProviderKind::parse("\u{2007}\u{a0}\t ").unwrap(), None);
+
+        assert_eq!(
+            ProviderKind::parse("\u{a0}ollama\u{a0}").unwrap(),
+            Some(ProviderKind::Ollama),
+            "and a real value survives Unicode padding instead of being rejected for it"
+        );
+
+        assert!(
+            ProviderKind::parse("banana").is_err(),
+            "the rule is about BLANKNESS, not leniency: present and unrecognized is still an error"
+        );
     }
 }

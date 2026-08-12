@@ -493,7 +493,20 @@ impl ModeExt for Mode {
     fn parse_config_value(raw: &str) -> Result<Option<Self>, ModeParseError> {
         // Blank = absent: an empty exported variable in a CI script is an everyday accident and
         // must not break startup (REQ-A12).
-        if trim_ascii(raw).is_empty() {
+        //
+        // **`trim()` here, `trim_ascii` below — two threat models, one function used to serve
+        // both.** This value comes from a config file or an env var, i.e. the operator, and the
+        // project names `config::non_blank` (Unicode `trim`) as the shared rule for that class.
+        // Sharing `trim_ascii` with the classifier path left `default_mode = "\u{a0}"` — which is
+        // whitespace-only, hence absent by that rule — failing the load as "present and
+        // unrecognized". Found by S1 Loop 2 (Caspar).
+        //
+        // The LABEL match below deliberately keeps `trim_ascii`: `normalize_label` also serves
+        // `mode_classifier`, whose input is MODEL OUTPUT, and widening normalization there would
+        // enlarge exactly the surface hostile content controls. The blank rule is about an
+        // operator's accident; the label rule is about an injection surface. They are not the
+        // same question and must not share an answer.
+        if raw.trim().is_empty() {
             return Ok(None);
         }
         normalize_label(raw)
@@ -1152,5 +1165,32 @@ mod tests {
     fn the_unguarded_resolver_stays_private() {
         let _: fn(Option<Mode>, Option<Mode>, Option<Mode>, Option<Mode>) -> (Mode, ModeSource) =
             resolve_mode;
+    }
+
+    /// S1 Loop 2 (Caspar): an operator's blank value and a classifier's label are **different
+    /// questions**, and this pins that the fix answered only the first.
+    ///
+    /// **Mutation-verified (B16), and in both directions — which is the point.** Restore
+    /// `trim_ascii(raw).is_empty()` and the first assertion goes red. Widen `normalize_label` to
+    /// `trim()` — the "consistent" fix, and the wrong one — and the **second** goes red, because
+    /// that function also normalizes `mode_classifier`'s input, which is model output.
+    #[test]
+    fn a_unicode_blank_default_mode_is_absent_without_widening_the_classifier() {
+        assert_eq!(
+            <Mode as ModeExt>::parse_config_value("\u{a0}").unwrap(),
+            None,
+            "NBSP alone is whitespace-only, so `default_mode` is ABSENT — never invalid"
+        );
+
+        assert!(
+            normalize_label("\u{a0}analysis").is_none(),
+            "and the classifier's label rule stays ASCII-closed: hostile content must not gain \
+             a wider normalization surface just because the operator's blank rule widened"
+        );
+        assert_eq!(
+            normalize_label(" analysis "),
+            Some(Mode::Analysis),
+            "while the ASCII padding it always accepted still works"
+        );
     }
 }
