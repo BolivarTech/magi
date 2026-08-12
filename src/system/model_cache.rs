@@ -91,6 +91,16 @@ pub struct CachedCapability {
 ///
 /// Every variant is **degradable**: the whole measurement subsystem fails open, so a caller that
 /// cannot read or write the cache measures instead of aborting.
+///
+/// # Both variants carry text composed by ANOTHER crate, so both are redacted at construction
+///
+/// `rusqlite` and `cryptovault` compose these messages, and this error reaches a startup notice.
+/// No path was found by which a credential could land in one — the endpoint is redacted long
+/// before it reaches this module — so this is rule conformance rather than a demonstrated leak,
+/// and it is stated that way instead of dressed up. The rule earns its keep anyway: it is exactly
+/// the shape that produced five findings in the previous milestone, every one green against every
+/// gate, and each of those also looked harmless until the string that carried the credential was
+/// traced to where it ended up.
 #[derive(Debug, Error)]
 pub enum CacheError {
     /// The database rejected the statement.
@@ -124,8 +134,13 @@ impl ModelCapabilityCache {
     pub fn new(conn: Arc<Mutex<Connection>>, dek: MaskedDek) -> Result<Self, CacheError> {
         {
             let c = conn.lock().unwrap_or_else(|p| p.into_inner());
-            crate::system::database::init_schema(&c)
-                .map_err(|e| CacheError::Storage(e.to_string()))?;
+            crate::system::database::init_schema(&c).map_err(|e| {
+                CacheError::Storage(
+                    magi_rs::redact::redact_foreign_error(&e)
+                        .as_str()
+                        .to_owned(),
+                )
+            })?;
         }
         Ok(Self {
             conn,
@@ -159,15 +174,23 @@ impl ModelCapabilityCache {
             .map(Some)
             .or_else(|e| match e {
                 rusqlite::Error::QueryReturnedNoRows => Ok(None),
-                other => Err(CacheError::Storage(other.to_string())),
+                other => Err(CacheError::Storage(
+                    magi_rs::redact::redact_foreign_error(&other)
+                        .as_str()
+                        .to_owned(),
+                )),
             })?
         };
 
         let Some(blob) = blob else { return Ok(None) };
         let plain = self.unseal(&blob)?;
-        serde_json::from_str(&plain)
-            .map(Some)
-            .map_err(|e| CacheError::Crypto(e.to_string()))
+        serde_json::from_str(&plain).map(Some).map_err(|e| {
+            CacheError::Crypto(
+                magi_rs::redact::redact_foreign_error(&e)
+                    .as_str()
+                    .to_owned(),
+            )
+        })
     }
 
     /// Persists a measured capability for `(endpoint_redacted, model)`.
@@ -184,8 +207,13 @@ impl ModelCapabilityCache {
         model: &str,
         capability: &CachedCapability,
     ) -> Result<(), CacheError> {
-        let plain =
-            serde_json::to_string(capability).map_err(|e| CacheError::Crypto(e.to_string()))?;
+        let plain = serde_json::to_string(capability).map_err(|e| {
+            CacheError::Crypto(
+                magi_rs::redact::redact_foreign_error(&e)
+                    .as_str()
+                    .to_owned(),
+            )
+        })?;
         // Sealed BEFORE taking the connection lock, same reason as in `get`.
         let blob = self.seal(&plain)?;
         let c = self.conn.lock().unwrap_or_else(|p| p.into_inner());
@@ -195,7 +223,13 @@ impl ModelCapabilityCache {
             rusqlite::params![endpoint_redacted, model, blob],
         )
         .map(|_| ())
-        .map_err(|e| CacheError::Storage(e.to_string()))
+        .map_err(|e| {
+            CacheError::Storage(
+                magi_rs::redact::redact_foreign_error(&e)
+                    .as_str()
+                    .to_owned(),
+            )
+        })
     }
 
     /// Drops the rows whose `(endpoint, model)` pair is no longer configured, and returns how many
@@ -219,14 +253,31 @@ impl ModelCapabilityCache {
         let existing: Vec<(String, String)> = {
             let mut stmt = c
                 .prepare("SELECT endpoint, model FROM model_capabilities")
-                .map_err(|e| CacheError::Storage(e.to_string()))?;
+                .map_err(|e| {
+                    CacheError::Storage(
+                        magi_rs::redact::redact_foreign_error(&e)
+                            .as_str()
+                            .to_owned(),
+                    )
+                })?;
             let rows = stmt
                 .query_map([], |row| {
                     Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
                 })
-                .map_err(|e| CacheError::Storage(e.to_string()))?;
-            rows.collect::<rusqlite::Result<Vec<_>>>()
-                .map_err(|e| CacheError::Storage(e.to_string()))?
+                .map_err(|e| {
+                    CacheError::Storage(
+                        magi_rs::redact::redact_foreign_error(&e)
+                            .as_str()
+                            .to_owned(),
+                    )
+                })?;
+            rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| {
+                CacheError::Storage(
+                    magi_rs::redact::redact_foreign_error(&e)
+                        .as_str()
+                        .to_owned(),
+                )
+            })?
         };
 
         let mut removed = 0usize;
@@ -236,7 +287,13 @@ impl ModelCapabilityCache {
                     "DELETE FROM model_capabilities WHERE endpoint = ?1 AND model = ?2",
                     rusqlite::params![endpoint, model],
                 )
-                .map_err(|e| CacheError::Storage(e.to_string()))?;
+                .map_err(|e| {
+                    CacheError::Storage(
+                        magi_rs::redact::redact_foreign_error(&e)
+                            .as_str()
+                            .to_owned(),
+                    )
+                })?;
                 removed += 1;
             }
         }
@@ -258,21 +315,39 @@ impl ModelCapabilityCache {
             row.get::<_, i64>(0)
         })
         .map(|n| usize::try_from(n).unwrap_or(0))
-        .map_err(|e| CacheError::Storage(e.to_string()))
+        .map_err(|e| {
+            CacheError::Storage(
+                magi_rs::redact::redact_foreign_error(&e)
+                    .as_str()
+                    .to_owned(),
+            )
+        })
     }
 
     /// Encrypts with the masked DEK. **Never called while holding the connection lock** (R-V08).
     fn seal(&self, plaintext: &str) -> Result<String, CacheError> {
         let mut dek = self.dek.lock().unwrap_or_else(|p| p.into_inner());
         dek.with_dek(|k| self.vault.encrypt_with_key(k, plaintext))
-            .map_err(|e| CacheError::Crypto(e.to_string()))
+            .map_err(|e| {
+                CacheError::Crypto(
+                    magi_rs::redact::redact_foreign_error(&e)
+                        .as_str()
+                        .to_owned(),
+                )
+            })
     }
 
     /// Decrypts with the masked DEK. Same lock contract as [`Self::seal`].
     fn unseal(&self, blob: &str) -> Result<zeroize::Zeroizing<String>, CacheError> {
         let mut dek = self.dek.lock().unwrap_or_else(|p| p.into_inner());
         dek.with_dek(|k| self.vault.decrypt_with_key(k, blob))
-            .map_err(|e| CacheError::Crypto(e.to_string()))
+            .map_err(|e| {
+                CacheError::Crypto(
+                    magi_rs::redact::redact_foreign_error(&e)
+                        .as_str()
+                        .to_owned(),
+                )
+            })
     }
 }
 

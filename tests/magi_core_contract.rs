@@ -126,9 +126,40 @@ fn agent_rotation_shape(a: &AgentRotation) {
 /// would turn an explicit "no rotation" into "use the default" — the opposite instruction.
 fn fallback_pool_surface(p: Arc<dyn LlmProvider>) -> FallbackPool {
     FallbackPool::builder()
-        .push(p, Lineage::new("guardian-lineage"))
+        .push(p.clone(), Lineage::new("guardian-lineage"))
+        // Pinned because PRODUCTION uses this one on every non-ephemeral run: whenever a
+        // capability cache exists, candidates are pushed WITH their probe. Pinning only `push`
+        // left the door production actually walks through unguarded, which defeats this file's
+        // purpose of concentrating API drift in one place.
+        .push_with_probe(p, Lineage::new("guardian-lineage"), guardian_probe())
         .max_rotations(2)
         .build()
+}
+
+/// A probe that answers nothing, for pinning signatures rather than behaviour.
+///
+/// `declared_model` is overridden deliberately: its trait default returns `None`, which silently
+/// opts out of the preflight's correspondence check. A SEMANTIC change to that default would
+/// compile everywhere and disable the check without a word, so overriding it here is what makes
+/// the dependency visible.
+struct GuardianProbe;
+
+#[async_trait::async_trait]
+impl ProviderProbe for GuardianProbe {
+    async fn window(&self) -> Result<Option<usize>, magi_core::error::ProviderError> {
+        Ok(None)
+    }
+    async fn digest(&self) -> Result<Option<String>, magi_core::error::ProviderError> {
+        Ok(None)
+    }
+    fn declared_model(&self) -> Option<&str> {
+        Some(SYNTHETIC_MODEL)
+    }
+}
+
+/// See [`GuardianProbe`].
+fn guardian_probe() -> Arc<dyn ProviderProbe> {
+    Arc::new(GuardianProbe)
 }
 
 /// [`ExtractionFailure`] fields that REQ-A09 requires to surface.
@@ -161,6 +192,14 @@ fn builder_surface(b: MagiBuilder, p: Arc<dyn LlmProvider>) -> MagiBuilder {
             AgentName::Melchior,
             p.clone(),
             Lineage::new("guardian-lineage"),
+        )
+        // Production's door whenever a cache exists, and the one whose ORDER is load-bearing: a
+        // plain `with_agent` after it for the SAME seat discards the probe in silence.
+        .with_agent_and_probe(
+            AgentName::Balthasar,
+            p.clone(),
+            Lineage::new("guardian-lineage"),
+            guardian_probe(),
         )
         .with_fallback_pool(fallback_pool_surface(p))
         .with_strict_context_guard(false)

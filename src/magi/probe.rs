@@ -1925,14 +1925,19 @@ mod tests {
     /// diagnostic the operator cannot act on is noise.
     #[test]
     fn the_assumed_window_notice_is_actionable() {
-        let measured = measurements(&[("a", Some(128_000)), ("c", None)]);
-        let notices = assumed_window_notices(&measured, &pool_of(&[("c", "zhipu")]));
+        // Distinctive names: an assertion that a message contains "c" cannot fail, because "c"
+        // also occurs in "candidate" and "credited".
+        let measured = measurements(&[("seat-model", Some(128_000)), ("unmeasured-cand", None)]);
+        let notices = assumed_window_notices(&measured, &pool_of(&[("unmeasured-cand", "zhipu")]));
         let text = notices
             .first()
             .expect("an assumed candidate must be reported")
             .text
             .clone();
-        assert!(text.contains("c"), "it must name the candidate: {text}");
+        assert!(
+            text.contains("unmeasured-cand"),
+            "it must name the candidate: {text}"
+        );
         assert!(
             text.contains("128000") || text.contains("128,000"),
             "and the window it is being credited with: {text}"
