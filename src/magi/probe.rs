@@ -1681,4 +1681,95 @@ mod tests {
             "with no pool there is no candidate to protect and no surprise to report"
         );
     }
+
+    // ---------------------------------------------------------------------------------------
+    // The assumed window as DIAGNOSTIC — REQ-R26 / D-R13 (Task 6.5).
+
+    /// SC-R29: the smallest MEASURED window is assumed for a candidate that could not be
+    /// measured, and the state says **assumed**, not measured. Reporting a supposition as a fact
+    /// is worse than reporting nothing, which is the whole reason this distinction exists.
+    #[test]
+    fn an_unmeasurable_candidate_is_marked_assumed_not_measured() {
+        let measured = measurements(&[("a", Some(128_000)), ("b", Some(32_000)), ("c", None)]);
+        assert_eq!(window_state(&measured, "a"), WindowState::Measured(128_000));
+        assert_eq!(
+            window_state(&measured, "c"),
+            WindowState::Assumed(32_000),
+            "the assumption is the SMALLEST measured window, not the largest or an average"
+        );
+    }
+
+    /// With NOTHING measured there is no assumption to make: the state is `Unknown` and the
+    /// candidate falls back to today's non-strict behaviour, rather than being handed an invented
+    /// number that would then be trusted.
+    #[test]
+    fn with_nothing_measured_there_is_no_assumption() {
+        assert_eq!(
+            window_state(&measurements(&[("c", None)]), "c"),
+            WindowState::Unknown
+        );
+        assert_eq!(assumed_window(&measurements(&[("c", None)])), None);
+    }
+
+    /// A model absent from the map entirely is `Unknown` too — never silently assumed into
+    /// existence.
+    #[test]
+    fn a_model_that_was_never_probed_is_unknown() {
+        let measured = measurements(&[("a", Some(128_000))]);
+        assert_eq!(window_state(&measured, "absent"), WindowState::Unknown);
+    }
+
+    /// The notice names the candidate, its assumed window and the CONSEQUENCE, because a
+    /// diagnostic the operator cannot act on is noise.
+    #[test]
+    fn the_assumed_window_notice_is_actionable() {
+        let measured = measurements(&[("a", Some(128_000)), ("c", None)]);
+        let notices = assumed_window_notices(&measured, &pool_of(&[("c", "zhipu")]));
+        let text = notices
+            .first()
+            .expect("an assumed candidate must be reported")
+            .text
+            .clone();
+        assert!(text.contains("c"), "it must name the candidate: {text}");
+        assert!(
+            text.contains("128000") || text.contains("128,000"),
+            "and the window it is being credited with: {text}"
+        );
+        assert!(
+            text.contains("rotation"),
+            "and what it means for rotation: {text}"
+        );
+    }
+
+    /// REQ-R27's two conditions, and the case they exist for: a COLD START where nothing was
+    /// measured must produce NO notice.
+    ///
+    /// Without them the warning fires over the entire pool on everyone's very first run —
+    /// transient, noisy, and with no action the operator could take. "Not measured this time" is
+    /// not "not measurable", and a warning that always sounds is ignored.
+    #[test]
+    fn a_cold_start_produces_no_assumed_window_notice() {
+        let cold = measurements(&[("a", None), ("c", None)]);
+        assert!(
+            assumed_window_notices(&cold, &pool_of(&[("c", "zhipu")])).is_empty(),
+            "a cold start has nothing to compare against and nothing to advise"
+        );
+    }
+
+    /// Nor does an endpoint where nothing is MEASURABLE: that candidate is not "worse", it is on
+    /// a protocol that does not expose the datum at all.
+    #[test]
+    fn an_unmeasurable_endpoint_produces_no_assumed_window_notice() {
+        let mut unmeasurable = BTreeMap::new();
+        unmeasurable.insert("a".to_owned(), Measurement::NotMeasurable);
+        unmeasurable.insert("c".to_owned(), Measurement::NotMeasurable);
+        assert!(assumed_window_notices(&unmeasurable, &pool_of(&[("c", "zhipu")])).is_empty());
+    }
+
+    /// A fully measured pool has nothing to assume and says nothing.
+    #[test]
+    fn a_fully_measured_pool_is_silent() {
+        let measured = measurements(&[("a", Some(128_000)), ("c", Some(64_000))]);
+        assert!(assumed_window_notices(&measured, &pool_of(&[("c", "zhipu")])).is_empty());
+    }
 }
