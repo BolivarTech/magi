@@ -184,8 +184,13 @@ impl ModelCapabilityCache {
 
         let Some(blob) = blob else { return Ok(None) };
         let plain = self.unseal(&blob)?;
+        // Storage, not Crypto: the unseal above ALREADY succeeded, so the key and the AEAD tag
+        // were fine and what failed is the shape of the plaintext — a corrupted or
+        // schema-drifted row. Labelling it Crypto sends whoever reads the error to audit the
+        // key handling, which is the one subsystem this error proves is working (S2 Loop 2,
+        // Caspar).
         serde_json::from_str(&plain).map(Some).map_err(|e| {
-            CacheError::Crypto(
+            CacheError::Storage(
                 magi_rs::redact::redact_foreign_error(&e)
                     .as_str()
                     .to_owned(),

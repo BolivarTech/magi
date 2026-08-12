@@ -197,7 +197,13 @@ impl ProbeFactory for OllamaProbeFactory {
 ///
 /// It does not byte-index anything: `str::bytes()` is a total iterator over the bytes of a
 /// valid UTF-8 string, never panicking on a character boundary (unlike `&s[a..b]`).
-fn validate_digest(raw: Option<String>) -> Option<String> {
+///
+/// **Public so the two measurement paths share ONE definition.** It was private, and the
+/// per-consult path in `CachedProbe` therefore persisted whatever the daemon answered while this
+/// one filtered it — the same asymmetry that let an out-of-range window through, one field over
+/// (S2 Loop 2, Caspar). Duplicating the predicate there would have closed the symptom and kept
+/// the shape that produced it: two rules for one question, free to drift apart again.
+pub fn validate_digest(raw: Option<String>) -> Option<String> {
     raw.filter(|d| {
         d.len() == DIGEST_HEX_LEN
             && d.bytes()

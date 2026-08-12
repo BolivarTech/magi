@@ -54,6 +54,7 @@ use std::time::Duration;
 
 use magi_core::error::ProviderError;
 use magi_core::rotation::ProviderProbe;
+use magi_rs::magi::probe::validate_digest;
 use magi_rs::magi::{PROBE_TIMEOUT_SECS, PROBE_WINDOW_MAX, PROBE_WINDOW_MIN};
 
 use super::model_cache::{CachedCapability, ModelCapabilityCache};
@@ -101,6 +102,13 @@ impl CachedProbe {
             .get(&self.endpoint_redacted, &self.model)
             .ok()
             .flatten()
+            // Re-checked on READ, not only on write, because the range is a pair of constants and
+            // the cache outlives the process that filled it. Narrow `PROBE_WINDOW_MIN/MAX` in a
+            // later version and every row written under the old pair is still on disk, valid by a
+            // rule that no longer exists — and nothing re-verifies it, so the stale value would be
+            // served for the life of the install. Costs a comparison on a value already in hand
+            // (S2 Loop 2, Balthasar).
+            .filter(|row| (PROBE_WINDOW_MIN..=PROBE_WINDOW_MAX).contains(&row.window))
     }
 
     /// Measures one value under **its own** ceiling, never a shared one.
@@ -127,9 +135,17 @@ impl ProviderProbe for CachedProbe {
     /// # The whole row is written here, digest included
     ///
     /// A miss measures **both** values — each under its own ceiling — and persists them together,
-    /// because the digest arrives on the same trip and costs no extra request. `digest()` then
-    /// reads what this wrote. That is what makes "measured on the first trip and never
-    /// re-verified" true rather than aspirational.
+    /// while the miss is already being handled. `digest()` then reads what this wrote. That is
+    /// what makes "measured on the first trip and never re-verified" true rather than
+    /// aspirational.
+    ///
+    /// **It is not free, and the comment here used to say it was** (S2 Loop 2, Balthasar).
+    /// `ProviderProbe::digest` is a separate call over a separate endpoint — `/api/tags` against
+    /// `/api/show` for the window — so it costs one more request per model. What the design
+    /// avoids is not that request; it is a SECOND pass later, on every start, to re-verify
+    /// something that only changes when the configuration does. Writing "costs no extra request"
+    /// made the trade sound like a free lunch, which is how a later reader talks themselves into
+    /// re-verifying "since it's cheap anyway".
     ///
     /// **Only a measured window produces a row.** If the window does not resolve, nothing is
     /// written and the next start retries — persisting the failure would freeze a cold daemon's
@@ -160,7 +176,12 @@ impl ProviderProbe for CachedProbe {
             // the next run asks again instead of inheriting this answer forever.
             return Ok(None);
         }
-        let digest = Self::measure(source.digest()).await;
+        // Validated with the SAME predicate the startup path uses, not a second copy of it: a
+        // malformed digest is discarded and the window survives (REQ-R25 persists a digest only
+        // if it resolved AND passed the format check). Without this the cache — which nothing
+        // re-verifies — kept whatever the daemon said, and `corroborate_by_digest` compared
+        // garbage for equality (S2 Loop 2, Caspar).
+        let digest = validate_digest(Self::measure(source.digest()).await);
 
         // A cache write that fails must not fail the measurement: the value is already in hand.
         let _ = self.cache.put(
@@ -267,6 +288,68 @@ mod tests {
         async fn digest(&self) -> Result<Option<String>, ProviderError> {
             self.digest_calls.fetch_add(1, Ordering::SeqCst);
             Ok(Some("a".repeat(64)))
+        }
+    }
+
+    /// A source whose window is fine and whose digest is not 64 lowercase hex.
+    struct WindowOkDigestMalformed {
+        /// What the daemon "answers" for the digest.
+        digest: String,
+    }
+
+    #[async_trait::async_trait]
+    impl ProviderProbe for WindowOkDigestMalformed {
+        async fn window(&self) -> Result<Option<usize>, ProviderError> {
+            Ok(Some(128_000))
+        }
+        async fn digest(&self) -> Result<Option<String>, ProviderError> {
+            Ok(Some(self.digest.clone()))
+        }
+    }
+
+    /// A malformed digest is dropped and the WINDOW survives — the same trade `probe_models`
+    /// makes, now through the same predicate rather than a second copy of it.
+    ///
+    /// REQ-R25 persists a digest only if it resolved **and** passed the format check. This path
+    /// skipped the check, and because nothing re-verifies the cache, whatever the daemon said was
+    /// kept forever and handed to `corroborate_by_digest`, which compares digests for equality —
+    /// so two identically-garbled answers would have read as a lineage collision. Found by S2
+    /// Loop 2 (Caspar).
+    ///
+    /// **Mutation-verified (B16):** drop the `validate_digest` wrapper in `window()` and the
+    /// first case goes red, because the malformed value reaches the row.
+    #[tokio::test]
+    async fn a_malformed_digest_is_dropped_without_costing_the_window() {
+        for bad in [
+            "not-hex".to_owned(),
+            "A".repeat(64), // uppercase: the rule is LOWERCASE hex
+            "a".repeat(63), // one short of the exact length
+            "a".repeat(65), // one over
+            String::new(),
+        ] {
+            let cache = empty_cache();
+            let probe = CachedProbe::new(
+                Arc::clone(&cache),
+                ENDPOINT.to_owned(),
+                MODEL.to_owned(),
+                Some(Arc::new(WindowOkDigestMalformed {
+                    digest: bad.clone(),
+                })),
+            );
+
+            assert_eq!(
+                probe.window().await.expect("fails open"),
+                Some(128_000),
+                "a bad digest must not cost the window it arrived beside"
+            );
+            let row = cache
+                .get(ENDPOINT, MODEL)
+                .expect("cache read")
+                .expect("the window was measured, so there IS a row");
+            assert_eq!(
+                row.digest, None,
+                "but {bad:?} is not 64 lowercase hex and must not have been persisted"
+            );
         }
     }
 
