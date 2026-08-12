@@ -1880,4 +1880,84 @@ mod tests {
         let measured = measurements(&[("a", Some(128_000)), ("c", Some(64_000))]);
         assert!(assumed_window_notices(&measured, &pool_of(&[("c", "zhipu")])).is_empty());
     }
+
+    // ---------------------------------------------------------------------------------------
+    // The warn threshold against the pool — REQ-R21 / D-R09 (Task 6.6).
+
+    /// SC-R17: a pool entry more than [`WARN_POOL_TOLERANCE`] below the trio's base does NOT drag
+    /// the threshold down — it is REPORTED.
+    ///
+    /// Deriving from the whole pool would let an 8 K entry at the END of the list — the LEAST
+    /// likely candidate to ever run — pull every run's threshold down to ~6 K, firing the warning
+    /// on practically every real consult. That is not conservative, it **destroys the signal**:
+    /// a warning that always sounds is ignored, and then the one time it mattered is ignored too.
+    #[test]
+    fn an_out_of_band_pool_entry_is_reported_and_does_not_move_the_threshold() {
+        let (threshold, notices) =
+            derive_input_warn_tokens(&[128_000, 128_000, 128_000], &[("weak", 8_000)]);
+        assert_eq!(
+            threshold,
+            (128_000f64 * WARN_WINDOW_FRACTION) as usize,
+            "the base stays the trio's"
+        );
+        assert_eq!(notices.len(), 1);
+        let t = &notices[0].text;
+        assert!(t.contains("weak"), "the warning must name the model: {t}");
+        assert!(
+            t.contains("8000") && t.contains("128000"),
+            "and both its window and the trio base, or it is not actionable: {t}"
+        );
+    }
+
+    /// An entry INSIDE the band does enter the minimum, with no warning — a free, marginal
+    /// calibration improvement. Documented as exactly that and NOT as a safety mechanism: the
+    /// protection against a too-small candidate is magi-core's condition #6, not this threshold.
+    #[test]
+    fn an_in_band_pool_entry_enters_the_minimum_without_a_warning() {
+        let (threshold, notices) =
+            derive_input_warn_tokens(&[128_000, 128_000, 128_000], &[("close", 120_000)]);
+        assert_eq!(threshold, (120_000f64 * WARN_WINDOW_FRACTION) as usize);
+        assert!(notices.is_empty());
+    }
+
+    /// SC-R32: ALL out-of-band entries in ONE message. Whoever built an unbalanced pool probably
+    /// has more than one, and discovering them one at a time costs a start each.
+    #[test]
+    fn every_out_of_band_entry_is_named_in_a_single_message() {
+        let (_, notices) = derive_input_warn_tokens(&[128_000; 3], &[("a", 8_000), ("b", 16_000)]);
+        assert_eq!(notices.len(), 1, "one message, not one per entry");
+        let t = &notices[0].text;
+        assert!(t.contains("a") && t.contains("b"), "both named: {t}");
+        assert!(
+            t.contains("8000") && t.contains("16000"),
+            "with both windows: {t}"
+        );
+    }
+
+    /// The band's edge belongs to the band: exactly `base * (1 - tolerance)` is IN, so a boundary
+    /// value does not silently flip behaviour depending on floating-point luck.
+    #[test]
+    fn the_band_edge_is_inside_the_band() {
+        let base = 100_000usize;
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let edge = (base as f64 * (1.0 - WARN_POOL_TOLERANCE)) as usize;
+        let (threshold, notices) = derive_input_warn_tokens(&[base, base, base], &[("edge", edge)]);
+        assert_eq!(threshold, (edge as f64 * WARN_WINDOW_FRACTION) as usize);
+        assert!(
+            notices.is_empty(),
+            "the edge is in band, so nothing to report"
+        );
+    }
+
+    /// An empty pool changes nothing and says nothing.
+    #[test]
+    fn an_empty_pool_leaves_the_trio_base_untouched() {
+        let (threshold, notices) = derive_input_warn_tokens(&[64_000, 128_000, 128_000], &[]);
+        assert_eq!(
+            threshold,
+            (64_000f64 * WARN_WINDOW_FRACTION) as usize,
+            "the base is the trio MINIMUM"
+        );
+        assert!(notices.is_empty());
+    }
 }
