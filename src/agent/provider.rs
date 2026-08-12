@@ -64,7 +64,7 @@ pub trait Provider: Send + Sync {
     ///
     /// Retry wrapper; used by non-streaming callers (`LlmDistillJudge`, the MAGI
     /// consult adapter) and by tests; production `query_streaming` calls
-    /// `stream_messages` directly. Retries up to 3 times, waiting with
+    /// `stream_messages` directly. Makes up to 3 ATTEMPTS — two retries — waiting with
     /// exponential backoff (2s, then 4s) between attempts, on rate-limit (429)
     /// or transient connection failures (see [`is_retryable_error`]). A
     /// persistent outage fails after the 3rd attempt with no further wait.

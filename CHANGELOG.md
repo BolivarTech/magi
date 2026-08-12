@@ -84,10 +84,10 @@ consumed a window on the basis of *"if there is a number, it was measured"*, tha
 assumption no longer holds.
 
 **A limitation worth knowing before you file it as a bug:** a mage that rotated and whose
-task then panicked reports the **configured** model, not the one it ended on, with an
-empty hop chain. The chain lived on the stack of the task that died and cannot be
-recovered from outside magi-core. That mage also appears in `failed_agents`, which is the
-signal that its rotation entry is not to be trusted.
+task then panicked **or was cancelled** reports the **configured** model, not the one it
+ended on, with an empty hop chain. The chain lived on the stack of the task that went
+down, either way, and cannot be recovered from outside magi-core. That mage also appears
+in `failed_agents`, which is the signal that its rotation entry is not to be trusted.
 
 ### Added
 

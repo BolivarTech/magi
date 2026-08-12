@@ -325,6 +325,12 @@ async fn analyze_direct(
     // different contract from delivering work that completed on time. That distinction is worth
     // more than the symmetry.
     //
+    // **That arm is live for one of this function's two callers, not both** (S4 Loop 2, Caspar).
+    // Through `run_query` the token belongs to the enclosing agent run and can genuinely fire.
+    // Through `run_consult` it is created fresh a few lines above the call and nothing ever
+    // cancels it, so there the deadline arm is the only stop signal and the ordering question is
+    // purely between completion and the timer.
+    //
     // **UNGUARDED, and said plainly rather than left to look tested.** Every other fix in this
     // gate carries a test that goes red when the fix is reverted; this one does not, because the
     // scenario cannot be expressed with the harness available. Constructing the tie needs a
@@ -614,8 +620,13 @@ pub fn resolve_tier_timeout_default(
 /// Everything `main.rs` resolved for ONE `magi query` run that [`run_query`] cannot derive on
 /// its own.
 ///
-/// **Bundled rather than added as more parameters.** `run_query` already carried six, and the
-/// values that had to arrive were three (`gate_thresholds`, `mode_config`, `gate_telemetry`) —
+/// **Bundled rather than added as more parameters.** Those three values live one level down, in
+/// the [`autonomous`](Self::autonomous) field — this struct carries `timeout`, `autonomous` and
+/// `timeout_below_formula`, and naming the inner three here as if they were its own sent readers
+/// looking for fields that are not on it (S4 Loop 2, Balthasar).
+///
+/// `run_query` already carried six parameters, and the values that had to arrive were three
+/// (`gate_thresholds`, `mode_config`, `gate_telemetry`) —
 /// enough to push the signature past the point where the only remaining move is an
 /// `#[allow(clippy::too_many_arguments)]`, which this repo tracks as priority debt. Grouping
 /// them behind [`AutonomousRunConfig`](crate::AutonomousRunConfig) keeps the arity where it was
