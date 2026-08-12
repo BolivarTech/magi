@@ -127,14 +127,19 @@ pub trait Provider: Send + Sync {
 }
 
 /// Maximum size the SSE accumulation buffer may reach before a complete event boundary — **any**
-/// of [`SSE_EVENT_BOUNDARIES`], not only `"\n\n"` — is found. Guards an unbounded
-/// `buffer: String` from OOM on a malformed/hostile stream (audit finding W1). 8 MiB exceeds any
-/// legitimate single Anthropic SSE event.
+/// of [`SSE_EVENT_BOUNDARIES`], not only `"\n\n"` — is found. Guards an unbounded `Vec<u8>` from
+/// OOM on a malformed/hostile stream (audit finding W1). 8 MiB exceeds any legitimate single
+/// Anthropic SSE event.
 ///
-/// This said `"\n\n"` until S4 Loop 2 (Balthasar): the CRLF and CR forms were added below without
-/// the cap's own doc following, so it described a narrower trigger than the code has. Harmless to
-/// the buffer itself, and precisely the kind of drift that makes a later reader conclude a
-/// CRLF stream is unhandled and "fix" something that already works.
+/// Two drifts, both from the same cause and both found by S4 Loop 2 (Balthasar). It said `"\n\n"`
+/// because the CRLF and CR forms were added below without this doc following, and it said
+/// `String` because the buffer became a `Vec<u8>` when byte-level boundary scanning replaced
+/// char-level. Each is harmless to the cap itself and each is the kind of drift that makes a
+/// later reader "fix" something that already works — or, worse, reason about UTF-8 boundaries in
+/// a buffer that no longer has them.
+///
+/// The second one arrived in the round that fixed the first: correcting one clause of a comment
+/// is not reading the comment.
 const MAX_SSE_BUFFER_BYTES: usize = 8 * 1024 * 1024;
 
 /// Parses an accumulated `tool_use` input-JSON string. Empty/whitespace → a valid

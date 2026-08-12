@@ -1899,11 +1899,56 @@ mod tests {
         let mut agent = Agent::new(provider);
         register_echo(&mut agent, "consult");
 
-        let policy = Policy::new(Tier::Default, 15, None);
+        // `Tier::Auto`, not `Tier::Default` — the tier is scaffolding here and the wrong one was
+        // standing between this test and its own subject. `Default` auto-approves only the
+        // read-only set, so `consult` was refused by the TIER after clearing the complexity
+        // gate: the test could observe the gate's decision and never the consult itself, and its
+        // name promised a consult that got "through" when nothing ran. `Auto` approves every
+        // registered tool, so the whole path is exercised and the name becomes true.
+        let policy = Policy::new(Tier::Auto, 15, None);
         let wiring = wiring_from_toml("[magi.complexity]\nanalysis = 0\n");
         let outcome = run_query(resolved_stub(), policy, &mut agent, "prompt", &wiring, None).await;
 
         assert_eq!(outcome.stop_reason, StopReason::Done);
+
+        // Now assertable end to end: the consult RAN and succeeded.
+        let consult = outcome
+            .tool_calls
+            .iter()
+            .find(|rec| rec.name == "consult")
+            .expect("the model asked for a consult, so a record exists either way");
+        assert!(
+            consult.ok,
+            "with the veto disabled AND the tier approving, the consult must actually run: {}",
+            consult.result
+        );
+
+        // **The discriminating signal is the gate TELEMETRY, and nothing in `tool_calls` is.**
+        // Two earlier drafts of this precondition were themselves vacuous, and mutation testing
+        // — removing `analysis = 0` so the built-in threshold vetoes a six-character prompt —
+        // is what exposed both. `name == "consult"` is recorded whether the gate dispatched or
+        // vetoed. The `result` does not help either: `Tier::Default` does not authorize
+        // `consult`, so the tier refuses it FIRST and the stored text is always the tier
+        // denial — the veto never reaches the record to be looked for.
+        //
+        // That also corrects this test's own story: the consult never RUNS here, it only gets
+        // past the complexity gate, which is the one thing its name should promise.
+        //
+        // `on_gate_evaluation` writes "veto" or "dispatch" per evaluation (SC-A20h) — the one
+        // place the two outcomes differ, and what the neighbouring test reads for the
+        // opposite case.
+        let gate_lines = wiring.autonomous.drain_telemetry();
+        assert_eq!(
+            gate_lines.len(),
+            1,
+            "one evaluation, one line: {gate_lines:?}"
+        );
+        assert!(
+            gate_lines[0].contains("dispatch"),
+            "with `analysis = 0` the veto is disabled for that mode, so the gate records a dispatch: {}",
+            gate_lines[0]
+        );
+
         let response = outcome.response.as_deref().unwrap_or_default();
         assert!(
             !response.contains("NO CONSENSUS"),
