@@ -335,15 +335,21 @@ impl MagiConfigBuilder {
 
     /// Validates the accumulated vocabulary and yields the [`MagiConfig`].
     ///
-    /// It runs exactly the check [`MagiConfig::from_toml_str`] runs, so a builder-built config
-    /// and a file-loaded one are subject to the same rules — a builder that validated less would
-    /// let the suite exercise a state production cannot reach.
+    /// It runs every check [`MagiConfig::from_toml_str`] applies **to a parsed config**, so a
+    /// builder-built config and a file-loaded one are subject to the same rules — a builder that
+    /// validated less would let the suite exercise a state production cannot reach, and it did:
+    /// see `the_builder_rejects_a_seat_that_declares_a_model_without_its_lineage`.
+    ///
+    /// The one thing it cannot run is [`migrate::detect_migrations`], which matches **raw TOML
+    /// text** and so has no input here. That is a difference in kind, not a gap in rigour: a
+    /// builder never has a source file to carry a retired pattern.
     ///
     /// # Errors
     ///
-    /// Whatever [`MagiConfig::validate_vocabulary`] rejects: [`ConfigError::UnknownProviderKind`],
-    /// [`ConfigError::UnknownMode`], [`ConfigError::AgentTimeoutOutOfRange`] or
-    /// [`ConfigError::OutputCapTooSmall`].
+    /// Whatever [`MagiConfig::validate_vocabulary`] rejects: [`ConfigError::NeedsMigration`] for
+    /// a seat declaring a model without its lineage, [`ConfigError::UnknownProviderKind`],
+    /// [`ConfigError::UnknownMode`], [`ConfigError::AgentTimeoutOutOfRange`],
+    /// [`ConfigError::OutputCapTooSmall`] or [`ConfigError::Diversity`].
     pub(crate) fn build(self) -> Result<MagiConfig, ConfigError> {
         self.inner.validate_vocabulary()?;
         Ok(self.inner)
@@ -794,18 +800,8 @@ impl MagiConfig {
         }
         let cfg: Self =
             toml::from_str(s).map_err(|e| ConfigError::Parse(safe_parse_error(&e, s)))?;
-        // The v0.13.0 half of the same pass, and it can only run HERE: a MISSING key produces no
-        // serde complaint at all, so there is nothing for a pre-parse pass to get ahead of, and
-        // the typed struct is what a rename would break the compile over (REQ-R22, SC-R46/R47).
-        // Before `validate_vocabulary` for the same reason the pre-parse half goes before the
-        // deserialize: a file one generation behind should be told to migrate, not audited for
-        // vocabulary it is about to rewrite anyway.
-        let missing = migrate::missing_seat_lineages(&cfg.magi);
-        if !missing.is_empty() {
-            return Err(ConfigError::NeedsMigration(
-                migrate::render_migration_error(&missing),
-            ));
-        }
+        // The v0.13.0 half of the same pass runs INSIDE `validate_vocabulary`, as its first
+        // check — see the comment there for why it lives at that depth rather than here.
         cfg.validate_vocabulary()?;
         Ok(cfg)
     }
@@ -823,6 +819,25 @@ impl MagiConfig {
     /// REQ-A01b forbids. By validating on load, by the time the resolvers run there is nothing
     /// invalid left to swallow.
     fn validate_vocabulary(&self) -> Result<(), ConfigError> {
+        // The v0.13.0 half of the migration pass, and it can only run POST-parse: a MISSING key
+        // produces no serde complaint at all, so there is nothing for a pre-parse pass to get
+        // ahead of, and the typed struct is what a rename would break the compile over (REQ-R22,
+        // SC-R46/R47). It goes FIRST here for the same reason the pre-parse half goes before the
+        // deserialize: a file one generation behind should be told to migrate, not audited for
+        // vocabulary it is about to rewrite anyway.
+        //
+        // **Why inside this function and not in `from_toml_str`.** It used to sit in the caller,
+        // which made the guarantee depend on every caller remembering to run two checks in the
+        // right order — and `MagiConfigBuilder::build` did not, so a builder-built config with no
+        // lineages passed BOTH this check (never called) and `validate_diversity_rules` (which
+        // skips silently, on a premise only `from_toml_str` honoured). Moving it here makes the
+        // premise locally true for every caller instead of a convention two of them share.
+        let missing = migrate::missing_seat_lineages(&self.magi);
+        if !missing.is_empty() {
+            return Err(ConfigError::NeedsMigration(
+                migrate::render_migration_error(&missing),
+            ));
+        }
         ProviderKind::parse(self.provider.as_deref().unwrap_or_default())?;
         ProviderKind::parse(self.magi.kind.as_deref().unwrap_or_default())?;
         <Mode as ModeExt>::parse_config_value(
@@ -1078,6 +1093,16 @@ impl MagiConfig {
             .unwrap_or(None)
             .unwrap_or_else(|| self.effective_provider())
     }
+
+    // S1 Loop 2 (Caspar, INFO) asked why this has no `assert!` of its own on the branch where
+    // `[magi].kind` IS valid, unlike its two siblings. It is deliberate and stays: the assertion
+    // guards "validate_vocabulary was skipped", and on that branch the answer this returns comes
+    // from `magi.kind` alone and is correct regardless. When `magi.kind` is absent or invalid the
+    // call delegates to `effective_provider`, whose assertion does fire — and `validate_vocabulary`
+    // checks `magi.kind` too, so an invalid one cannot reach a caller either way. Adding a direct
+    // assertion would buy no coverage and would change a property that
+    // `effective_magi_kind_panics_via_the_delegated_effective_provider_check_when_invalid` names
+    // and pins. Recorded here so the next reader does not file it a second time.
 
     /// `true` if the trio runs on a different endpoint or kind from the main one.
     ///
@@ -2206,11 +2231,54 @@ mod tests {
         ] {
             let err = MagiConfig::from_toml_str(toml)
                 .expect_err("an api_key in the TOML must be an ERROR, not silent acceptance");
+            // S1 Loop 2 (Balthasar): asserting only that SOME error occurred and that it does not
+            // leak is a guardian that does not guard. Drop `deny_unknown_fields` from the four
+            // structs and the parse SUCCEEDS, the seat-lineage check errors instead, and that
+            // error contains no `sk-secreto` either — so both assertions below used to hold while
+            // an `api_key` was being silently accepted. Naming the field is what ties the test to
+            // the rejection it exists to pin (B16).
+            assert!(
+                err.to_string().contains("api_key"),
+                "and it must be the unknown-field rejection that NAMES the key: {err}"
+            );
             assert!(
                 !err.to_string().contains("sk-secreto"),
                 "and the error must NOT repeat the secret it is rejecting"
             );
         }
+    }
+
+    /// S1 Loop 2 (Caspar and Balthasar, one root cause): [`MagiConfigBuilder::build`] promised
+    /// parity with [`MagiConfig::from_toml_str`] and did not have it. The seat-lineage check ran
+    /// in the CALLER, so `build` skipped it — and [`MagiConfig::validate_diversity_rules`] then
+    /// skipped ITSELF, on the documented premise that the lineage check had already reported.
+    /// A builder-built config declaring a model with no lineage therefore passed **both**, which
+    /// is precisely the "state production cannot reach" the builder's rustdoc claims is
+    /// impossible.
+    ///
+    /// **Mutation-verified (B16):** move `missing_seat_lineages` back out of
+    /// `validate_vocabulary` and into `from_toml_str`, and this test goes green again because
+    /// `build()` accepts the config.
+    #[test]
+    fn the_builder_rejects_a_seat_that_declares_a_model_without_its_lineage() {
+        let magi = MagiSectionConfig {
+            melchior_model: Some("qwen3.5:397b-cloud".into()),
+            ..Default::default()
+        };
+
+        let err = MagiConfig::builder()
+            .magi(magi)
+            .build()
+            .expect_err("a seat with a model and no lineage must not build");
+
+        assert!(
+            matches!(err, ConfigError::NeedsMigration(_)),
+            "and it is the GUIDED migration error, not a bare vocabulary complaint: {err:?}"
+        );
+        assert!(
+            err.to_string().contains("melchior_lineage"),
+            "naming the key the operator has to add: {err}"
+        );
     }
 
     /// REQ-A15: `default_mode` resolves with the same empty=absent rule.
