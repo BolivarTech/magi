@@ -239,9 +239,17 @@ pub const HEADLESS_TIMEOUT_SLACK_PCT: u64 = 20;
 /// exists to eliminate. Deriving by construction is useless if it is derived from the wrong
 /// value.
 ///
-/// The effective value is provided by `MagiConfig::effective_agent_timeout_secs()` (contract),
-/// which is what resolves precedence between the declared value and the default. The two inner
-/// layers are DERIVED from that number, never configured (REQ-A04).
+/// The effective value is resolved by the CALLER, in `main.rs`:
+/// `cfg.magi().agent_timeout_secs.unwrap_or(AGENT_TIMEOUT_SECS)`. The two inner layers are
+/// DERIVED from that number, never configured (REQ-A04).
+///
+/// This used to name a `MagiConfig::effective_agent_timeout_secs()` "contract" that does not
+/// exist and never did (S1 Loop 2, Balthasar). The reason it could sit here unnoticed is worth
+/// keeping: `MagiConfig` is **bin-only** and this module is in the **lib**, so the reference was
+/// prose across a crate boundary — nothing the compiler or `cargo doc` could check, since an
+/// intra-doc link to a type this crate cannot see would not have compiled in the first place.
+/// Anywhere the lib describes a bin-side path, the name is unverified by construction; spell out
+/// the expression rather than a symbol.
 ///
 /// **It is NOT multiplied by 3**: the mages run in parallel (verified, SC-A04e), so the worst
 /// case is that of the slowest mage, not the sum of the three.
