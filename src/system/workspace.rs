@@ -372,12 +372,21 @@ fn volume_prefix(path: &Path) -> Option<std::ffi::OsString> {
 /// Creates `cwd/.magi/` holding `magi.toml` (rendered defaults), an empty `logs/` subdirectory,
 /// and the encrypted-store database with **all five tables** created empty and **no envelope**
 /// (the first real open bootstraps it, MS1 Task 3). The directory is placed **atomically and
-/// no-replace** on
-/// **every** platform: the whole tree is built inside a randomly-named sibling
-/// temp directory (`.magi.tmp.<rand>`, never a half-populated `.magi/` visible to a concurrent
-/// reader — REQ-H07) and then moved into place with a single, platform-appropriate no-replace
-/// rename (Linux: `renameat2(RENAME_NOREPLACE)`; elsewhere: `std::fs::rename`, see
-/// [`rename_no_replace`]) that refuses to replace an existing `.magi/`. Every created object is
+/// no-replace** on **every** platform, with one documented exception below: the whole tree is
+/// built inside a randomly-named sibling temp directory (`.magi.tmp.<rand>`, never a
+/// half-populated `.magi/` visible to a concurrent reader — REQ-H07) and then moved into place
+/// with a single rename (Linux: `renameat2(RENAME_NOREPLACE)`; elsewhere: `std::fs::rename`, see
+/// [`rename_no_replace`]) that refuses to replace an existing `.magi/`.
+///
+/// **The exception, because a doc that rounds it away is how it gets forgotten** (S4 Loop 2,
+/// Balthasar). Only the Linux path has a kernel-level no-replace flag. Elsewhere `std::fs::rename`
+/// will happily replace an existing **empty** directory, so on macOS and Windows an `init` can
+/// take over a `.magi/` that exists but is empty — the state a half-finished earlier `init`
+/// leaves behind. A non-empty one still fails. The residual and its fix (a pre-flight `metadata`
+/// check, non-atomic but closing every case a user can actually produce) are recorded in
+/// `dev-docs/PENDING_IMPLEMENTATION.md`.
+///
+/// Every created object is
 /// restricted to the current user (`0700`/`0600` on unix, an ACL restricted to the current user
 /// on Windows).
 ///

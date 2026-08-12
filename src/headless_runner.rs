@@ -2735,10 +2735,23 @@ mod tests {
             MARKER_WAIT_DEADLINE_MS,
         };
 
-        if !python_available() {
-            eprintln!("skipping: python interpreter not found — cannot spawn a real child");
-            return;
-        }
+        // **Fails closed, where it used to skip** (S4 Loop 2, Balthasar). A `return` here is a
+        // PASS: on a machine without an interpreter the suite reported green while REQ-H36's
+        // guarantee — that the wall-clock bound really terminates the subprocess tree, rather
+        // than merely stopping the wait — went unverified. That is the vacuous guardian in its
+        // purest form: not an assertion that holds trivially, but a test that never ran and
+        // still counted.
+        //
+        // Failing is the honest signal. Every platform in this project's CI ships an
+        // interpreter, so this fires only where the environment genuinely cannot verify a
+        // shipped promise, and that is worth a red build rather than a line on stderr nobody
+        // reads.
+        assert!(
+            python_available(),
+            "no python interpreter: this test spawns a REAL child to prove the --timeout kills \
+             the process tree (REQ-H36), and skipping it would report that guarantee as verified \
+             when nothing checked it"
+        );
         let dir = tempfile::tempdir().expect("tempdir");
         let root = dir.path().canonicalize().expect("canonicalize");
 
