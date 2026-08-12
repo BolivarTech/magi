@@ -1542,6 +1542,7 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
         provider_kind,
         &OllamaProbeFactory,
         &env_overrides,
+        &stateless_extra_models(&magi_config, capability_cache.as_ref()),
         &mut startup_notices,
     )
     .await;
@@ -1943,6 +1944,11 @@ async fn orchestrate_probes(
     // (sixth-pass gate finding, S8, Balthasar: before this parameter, the probe measured the
     // TOML/backend model while the trio ran the env-overridden one).
     env_overrides: &MagiEnvModelOverrides,
+    // SC-R30: models measured ALONGSIDE the trio, on the trio's endpoint and kind. Used by the
+    // stateless path to measure the first pool candidate, which nothing else would measure once
+    // there is no cache to drive a lazy probe. They ride the SAME batch rather than a second one:
+    // an extra batch would make startup cost two ceilings instead of one.
+    extra_models: &[String],
 ) -> (String, Option<Measurement>, BTreeMap<String, Measurement>) {
     let principal_model = resolve_backend_model(cfg, principal_kind).to_string();
 
@@ -1952,7 +1958,8 @@ async fn orchestrate_probes(
         // trivially — the trio's fallback is EXACTLY the same model as the principal's, with no
         // possible ambiguity): ONE batch so as not to probe the same thing four times.
         let trio_seats = seats_with_env_overrides(cfg, &principal_model, env_overrides);
-        let trio_models: Vec<&str> = trio_seats.iter().map(|(_, m)| m.as_str()).collect();
+        let mut trio_models: Vec<&str> = trio_seats.iter().map(|(_, m)| m.as_str()).collect();
+        trio_models.extend(extra_models.iter().map(String::as_str));
         let mut all = trio_models.clone();
         all.push(principal_model.as_str());
         let measured = probe_models(principal_kind, &endpoints.root, &all, factory).await;
@@ -1982,7 +1989,9 @@ async fn orchestrate_probes(
                 // principal's.
                 let trio_model = resolve_backend_model(cfg, magi_kind).to_string();
                 let trio_seats = seats_with_env_overrides(cfg, &trio_model, env_overrides);
-                let trio_models: Vec<&str> = trio_seats.iter().map(|(_, m)| m.as_str()).collect();
+                let mut trio_models: Vec<&str> =
+                    trio_seats.iter().map(|(_, m)| m.as_str()).collect();
+                trio_models.extend(extra_models.iter().map(String::as_str));
 
                 // `join!`, not two `.await`s in a row: in series the worst-case startup would
                 // be TWO ceilings; the required property (SC-A24k, one level up, between
@@ -2040,6 +2049,31 @@ async fn orchestrate_probes(
 /// this function exercises EXACTLY what the two real call sites invoke, closing the gap that
 /// let the original finding through (the round-0 tests built `trio_models` by hand instead of
 /// going through real resolution).
+/// The models the STATELESS path must measure alongside the trio (SC-R30).
+///
+/// With a cache, measurement is lazy: a candidate gets measured the moment rotation reaches for it,
+/// and the answer is remembered. **Without one there is no lazy path at all** — no `CachedProbe` is
+/// built — so a candidate would never be measured, and the strict guard's fail-safe would have
+/// nothing to work with on every run.
+///
+/// It measures **one** candidate, not the pool: the list is ordered strongest to weakest, so the
+/// first entry is the most likely rotation destination, and measuring the rest would pay for
+/// candidates that probably never run — the very cost the cache exists to avoid.
+fn stateless_extra_models(
+    cfg: &MagiConfig,
+    capability_cache: Option<&Arc<ModelCapabilityCache>>,
+) -> Vec<String> {
+    if capability_cache.is_some() {
+        return Vec::new();
+    }
+    cfg.fallback_pool()
+        .first()
+        .map(|entry| vec![entry.model.clone()])
+        .into_iter()
+        .flatten()
+        .collect()
+}
+
 async fn probe_and_report(
     cfg: &MagiConfig,
     endpoints: &ResolvedEndpoints,
@@ -2048,13 +2082,23 @@ async fn probe_and_report(
     // Threaded straight through to `orchestrate_probes` — see its own doc (sixth-pass gate
     // finding, S8).
     env_overrides: &MagiEnvModelOverrides,
+    // SC-R30: see `orchestrate_probes`. Empty when a cache is available, since measurement is
+    // lazy then and a candidate is measured the moment rotation reaches for it.
+    extra_models: &[String],
     notices: &mut Vec<Notice>,
     // REQ-R11 (Task 6.4): the trio measurements come back with the threshold because the guard's
     // fail-safe needs them, and re-probing to recover what this call already learned would pay
     // the cost twice for the same answer.
 ) -> (Option<usize>, BTreeMap<String, Measurement>) {
-    let (principal_model, principal_measurement, trio) =
-        orchestrate_probes(cfg, endpoints, principal_kind, factory, env_overrides).await;
+    let (principal_model, principal_measurement, trio) = orchestrate_probes(
+        cfg,
+        endpoints,
+        principal_kind,
+        factory,
+        env_overrides,
+        extra_models,
+    )
+    .await;
     notices.push(Notice::info(format!(
         "{principal_model}: {}",
         probe_notice(&principal_measurement.unwrap_or(Measurement::NotMeasuredThisTime))
@@ -2969,10 +3013,14 @@ fn build_magi_orchestrator(
     let warn_tokens = if cfg.magi().input_warn_tokens.is_some() {
         warn_tokens
     } else {
-        let trio_windows: Vec<usize> = measured
-            .values()
-            .filter_map(|m| match m {
-                Measurement::Measured { window, .. } => Some(*window),
+        // Filtered BY SEAT, not "every value in the map": the map may also carry pool candidates
+        // (the stateless path measures one), and folding a candidate into the trio base would
+        // defeat the band this derivation exists to enforce — the small candidate would lower the
+        // very base it is supposed to be compared against.
+        let trio_windows: Vec<usize> = seats
+            .iter()
+            .filter_map(|(_, _, _, model)| match measured.get(model) {
+                Some(Measurement::Measured { window, .. }) => Some(*window),
                 _ => None,
             })
             .collect();
@@ -4435,6 +4483,7 @@ async fn prepare_headless(
         provider_kind,
         &OllamaProbeFactory,
         &env_overrides,
+        &stateless_extra_models(&magi_config, capability_cache.as_ref()),
         &mut trio_notices,
     )
     .await;
@@ -7420,6 +7469,39 @@ mod tests {
                 "an undeclared strict_context_guard reaches magi-core as false (REQ-R11): the \
                  case it would bite is the COLD START, where nothing measured yet means every \
                  candidate fails the window condition and rotation switches off in silence"
+            );
+        }
+
+        /// SC-R30: with NO cache the stateless path measures a FOURTH model — the first pool
+        /// candidate — and with a cache it does not.
+        ///
+        /// Both halves are asserted, and the second is what makes the first mean anything: a test
+        /// that only checked "four without a cache" would pass just as well if the extra candidate
+        /// were measured unconditionally, which would pay on every start for a model the lazy path
+        /// already covers.
+        ///
+        /// The FIRST candidate and not the pool: the list is ordered strongest to weakest, so it
+        /// is the most likely rotation destination, and measuring the rest would spend on
+        /// candidates that probably never run.
+        #[test]
+        fn the_stateless_path_measures_the_first_candidate_and_the_cached_one_does_not() {
+            let cfg = cfg_with_pool(2);
+            let stateless = stateless_extra_models(&cfg, None);
+            assert_eq!(
+                stateless,
+                vec!["rescue-model".to_string()],
+                "without a cache nothing else would ever measure a candidate: no CachedProbe is                  built, so there is no lazy path at all"
+            );
+
+            let conn = std::sync::Mutex::new(
+                rusqlite::Connection::open_in_memory().expect("in-memory sqlite"),
+            );
+            let dek = magi_rs::vault::MaskedDek::new(zeroize::Zeroizing::new(vec![3u8; 32]))
+                .expect("32 bytes");
+            let cache = Arc::new(ModelCapabilityCache::new(Arc::new(conn), dek).expect("schema"));
+            assert!(
+                stateless_extra_models(&cfg, Some(&cache)).is_empty(),
+                "with a cache the measurement is lazy: paying for the candidate at every start                  would be the cost the cache exists to avoid"
             );
         }
 
@@ -10488,6 +10570,7 @@ agent_timeout_secs = {CEILING}
                 ProviderKind::Ollama,
                 &factory,
                 &MagiEnvModelOverrides::default(),
+                &[],
             )
             .await;
 
@@ -10531,6 +10614,7 @@ agent_timeout_secs = {CEILING}
                 ProviderKind::Ollama,
                 &factory,
                 &MagiEnvModelOverrides::default(),
+                &[],
             )
             .await;
 
@@ -10566,6 +10650,7 @@ agent_timeout_secs = {CEILING}
                 ProviderKind::Ollama,
                 &factory,
                 &MagiEnvModelOverrides::default(),
+                &[],
             )
             .await;
             let calls_after_the_startup_probe = factory.calls();
@@ -10618,6 +10703,7 @@ agent_timeout_secs = {CEILING}
                 ProviderKind::Ollama,
                 &factory,
                 &env_overrides,
+                &[],
             )
             .await;
 
@@ -10666,6 +10752,7 @@ agent_timeout_secs = {CEILING}
                 ProviderKind::Ollama,
                 &factory,
                 &MagiEnvModelOverrides::default(),
+                &[],
             )
             .await;
             assert_eq!(principal_model, "principal");
@@ -10736,6 +10823,7 @@ agent_timeout_secs = {CEILING}
                 ProviderKind::Anthropic,
                 &factory,
                 &MagiEnvModelOverrides::default(),
+                &[],
             )
             .await;
 
@@ -10785,6 +10873,7 @@ agent_timeout_secs = {CEILING}
                 ProviderKind::Anthropic,
                 &factory,
                 &MagiEnvModelOverrides::default(),
+                &[],
             )
             .await;
 
@@ -10823,6 +10912,7 @@ agent_timeout_secs = {CEILING}
                 ProviderKind::Ollama,
                 &factory,
                 &MagiEnvModelOverrides::default(),
+                &[],
             )
             .await;
             assert_eq!(principal_model, "principal");
@@ -10872,6 +10962,7 @@ agent_timeout_secs = {CEILING}
                 ProviderKind::Ollama,
                 &factory,
                 &MagiEnvModelOverrides::default(),
+                &[],
                 &mut notices,
             )
             .await;
@@ -10900,6 +10991,7 @@ agent_timeout_secs = {CEILING}
                 ProviderKind::Ollama,
                 &factory,
                 &MagiEnvModelOverrides::default(),
+                &[],
                 &mut notices,
             )
             .await;
@@ -10941,6 +11033,7 @@ agent_timeout_secs = {CEILING}
                 ProviderKind::Ollama,
                 &factory,
                 &MagiEnvModelOverrides::default(),
+                &[],
                 &mut notices,
             )
             .await;
