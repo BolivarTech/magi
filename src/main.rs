@@ -3304,11 +3304,21 @@ fn build_magi_orchestrator(
                     };
                 }
                 Err(cause) => notices.push(Notice::resolution(format!(
+                    // `cause` is a `SeatError`, whose `Transport` payload is `SafeErrorText` —
+                    // `build_native_provider::to_seat` redacts before constructing it, so the
+                    // type itself is the guarantee and there is nothing to redact again here.
                     "notice: fallback candidate `{}` could not be built ({cause}); \
                      rotation will not be able to use it.",
                     entry.model
                 ))),
             }
+            // Merged rather than discarded (S3 Loop 2, Balthasar). Its sibling at the top of this
+            // function discards its sink with a comment explaining that the only notice
+            // `build_native_provider` emits is the base_url normalization one, already sent by
+            // the seat loop over the SAME base — true today, and a fact about a function
+            // elsewhere. `render_notices` dedupes, so merging costs a duplicate that never
+            // reaches the screen and buys independence from that fact staying true.
+            notices.append(&mut sink);
         }
 
         #[cfg(test)]
@@ -3642,9 +3652,16 @@ fn resolve_template(
                 magi_rs::redact::redact_foreign_error(&e)
             )
         } else {
+            // Redacted on BOTH branches. The previous round closed the vault-present one and
+            // left this, which is the asymmetry the structural rule exists to prevent: whether a
+            // foreign error is safe to print cannot depend on which arm of a `match` produced it
+            // (S3 Loop 2, Balthasar and Caspar). No `EndpointError` variant can embed a URL
+            // today — every field is `&'static str` — so this is the second layer, not a live
+            // leak; the point is that the layer has no hole for a future variant to find.
             format!(
                 "base_url needs vault-stored credentials, but no vault is open this \
-                 session: {e}"
+                 session: {}",
+                magi_rs::redact::redact_foreign_error(&e)
             )
         }
     })
@@ -4023,7 +4040,16 @@ fn write_output_atomic(
         }
     } else {
         let tmp = parent.join(format!(".magi-out.tmp.{:016x}", rand::random::<u64>()));
-        std::fs::write(&tmp, contents).map_err(|e| HeadlessError::Io(e.to_string()))?;
+        // Cleanup on BOTH failure paths (S3 Loop 2, Balthasar). The rename arm below always had
+        // it; this one did not, so a write that failed partway — a full disk is the ordinary
+        // case — left a `.magi-out.tmp.*` behind in the user's directory, with a random suffix
+        // that makes it look like debris rather than something to delete. Same best-effort
+        // terms as its sibling: the write error is the failure worth reporting, and a cleanup
+        // that itself fails is not a new one.
+        std::fs::write(&tmp, contents).map_err(|e| {
+            let _ = std::fs::remove_file(&tmp);
+            HeadlessError::Io(e.to_string())
+        })?;
         std::fs::rename(&tmp, path).map_err(|e| {
             let _ = std::fs::remove_file(&tmp);
             HeadlessError::Io(e.to_string())
