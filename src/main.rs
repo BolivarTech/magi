@@ -10971,6 +10971,14 @@ agent_timeout_secs = {CEILING}
         /// `MagiConfig` with the trio on the SAME endpoint/kind as the principal (shared branch
         /// of `orchestrate_probes`), but with all FOUR names — principal + three mages —
         /// distinct and test-controllable.
+        ///
+        /// **The three lineages are not decoration.** A seat that declares a model must declare
+        /// its lineage (REQ-R02), and the three must differ while `enforce_diversity` is on
+        /// (REQ-R29) — which is its default. This helper used to omit them and `build()` accepted
+        /// it, because the seat-lineage check ran in `from_toml_str` rather than in
+        /// `validate_vocabulary`; these four probe tests were therefore running against a config
+        /// no operator could ever load. S1 Loop 2 closed that hole, and the full suite is what
+        /// surfaced these — the per-commit scoped run does not reach this module.
         fn cfg_with_four_distinct_models(
             principal: &str,
             melchior: &str,
@@ -10983,8 +10991,11 @@ agent_timeout_secs = {CEILING}
                 })
                 .magi(crate::config::MagiSectionConfig {
                     melchior_model: Some(melchior.to_string()),
+                    melchior_lineage: Some("lineage-m".to_string()),
                     balthasar_model: Some(balthasar.to_string()),
+                    balthasar_lineage: Some("lineage-b".to_string()),
                     caspar_model: Some(caspar.to_string()),
+                    caspar_lineage: Some("lineage-c".to_string()),
                     ..crate::config::MagiSectionConfig::default()
                 })
                 .build()
@@ -11179,9 +11190,15 @@ agent_timeout_secs = {CEILING}
                 .magi(crate::config::MagiSectionConfig {
                     base_url: Some("http://magi-host:11434/v1".to_string()),
                     kind: Some("ollama".to_string()),
+                    // One model across the three seats, three distinct lineages: the seats share
+                    // a model deliberately (probe dedup), and diversity is a property of the
+                    // seats, not of the models (REQ-R29, SC-R52).
                     melchior_model: Some("m".to_string()),
+                    melchior_lineage: Some("lineage-m".to_string()),
                     balthasar_model: Some("m".to_string()),
+                    balthasar_lineage: Some("lineage-b".to_string()),
                     caspar_model: Some("m".to_string()),
+                    caspar_lineage: Some("lineage-c".to_string()),
                     ..crate::config::MagiSectionConfig::default()
                 })
                 .build()
@@ -11249,9 +11266,16 @@ agent_timeout_secs = {CEILING}
                 .magi(crate::config::MagiSectionConfig {
                     // NOTE: `kind` diverges from the principal; `base_url` does NOT.
                     kind: Some("ollama".to_string()),
+                    // The three seats share ONE model on purpose — this pins that the probe
+                    // batch dedupes by model. Their LINEAGES still have to differ, because
+                    // `enforce_diversity` defaults on and it is a property of the seats, not of
+                    // the models they happen to point at (REQ-R29, SC-R52).
                     melchior_model: Some("m".to_string()),
+                    melchior_lineage: Some("lineage-m".to_string()),
                     balthasar_model: Some("m".to_string()),
+                    balthasar_lineage: Some("lineage-b".to_string()),
                     caspar_model: Some("m".to_string()),
+                    caspar_lineage: Some("lineage-c".to_string()),
                     ..crate::config::MagiSectionConfig::default()
                 })
                 .build()
