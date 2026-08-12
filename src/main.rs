@@ -7374,6 +7374,101 @@ mod tests {
             );
         }
 
+        /// SC-R33: the warning threshold does NOT change inside the process — two consults in one
+        /// session keep the same criterion, even when a mage rotated to a smaller-window model in
+        /// between.
+        ///
+        /// Re-deriving would be structurally impossible anyway (`with_input_warn_tokens` is a
+        /// BUILDER method and magi-rs builds the orchestrator once per process), and that is
+        /// exactly why this is worth pinning rather than asserting in prose: the property is
+        /// currently free, so nothing would complain if a later change started rebuilding the
+        /// orchestrator per consult and quietly made the criterion drift between two identical
+        /// questions.
+        #[tokio::test]
+        async fn the_warn_threshold_is_the_same_before_and_after_a_rotation() {
+            use mockito::Matcher;
+            let mut server = mockito::Server::new_async().await;
+            let _down = server
+                .mock("POST", "/v1/chat/completions")
+                .match_body(Matcher::AllOf(vec![
+                    Matcher::Regex("(?i)caspar".into()),
+                    Matcher::Regex("down-model".into()),
+                ]))
+                .with_status(400)
+                .with_body("{\"error\":\"model unavailable\"}")
+                .create_async()
+                .await;
+            for (seat, model, agent) in [
+                ("(?i)caspar", "rescue-model", "caspar"),
+                ("(?i)melchior", "ok-model", "melchior"),
+                ("(?i)balthasar", "ok-model", "balthasar"),
+            ] {
+                server
+                    .mock("POST", "/v1/chat/completions")
+                    .match_body(Matcher::AllOf(vec![
+                        Matcher::Regex(seat.into()),
+                        Matcher::Regex(model.into()),
+                    ]))
+                    .with_status(200)
+                    .with_body(verdict_body(agent))
+                    .expect_at_least(1)
+                    .create_async()
+                    .await;
+            }
+
+            let endpoints = ResolvedEndpoints {
+                root: endpoint_at(&server.url()),
+                magi: endpoint_at(&server.url()),
+            };
+            let mut notices = Vec::new();
+            let magi = build_magi_orchestrator(
+                &TrioBuild {
+                    cfg: &cfg_with_pool(2),
+                    principal_kind: ProviderKind::Ollama,
+                    endpoints: &endpoints,
+                    creds: None,
+                    warn_tokens: Some(96_000),
+                    env_overrides: &MagiEnvModelOverrides::default(),
+                    capability_cache: None,
+                    measured: &BTreeMap::new(),
+                },
+                &mut notices,
+            )
+            .expect("ollama is keyless");
+
+            let prompt = "a question long enough to be a real consult";
+            let first = magi
+                .analyze(&Mode::Analysis, prompt)
+                .await
+                .expect("first consult");
+            let second = magi
+                .analyze(&Mode::Analysis, prompt)
+                .await
+                .expect("second consult");
+
+            assert!(
+                !second.rotations[&AgentName::Caspar].chain.is_empty(),
+                "the second consult must actually have rotated, or this proves nothing"
+            );
+            // Both halves are read as VALUES, not as options: `assert_eq!(None, None)` would pass
+            // just as well if the report never carried a threshold at all, which is the vacuous
+            // shape this milestone has already found five times.
+            let first_threshold = first
+                .input_size
+                .as_ref()
+                .map(|s| s.warn_threshold)
+                .expect("the report must carry a threshold, or there is nothing to compare");
+            let second_threshold = second
+                .input_size
+                .as_ref()
+                .map(|s| s.warn_threshold)
+                .expect("same for the second consult");
+            assert_eq!(
+                first_threshold, second_threshold,
+                "the criterion must not drift between two identical questions in one session"
+            );
+        }
+
         /// SC-R51, the half no unit test can cover: an unmeasured candidate is **announced and
         /// KEPT**.
         ///
