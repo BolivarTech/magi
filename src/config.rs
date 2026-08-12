@@ -103,9 +103,14 @@ pub enum ConfigError {
     /// literal credential instead of the placeholders `[user]:[password]`, an unknown
     /// placeholder, or it could not be traversed (REQ-A16c, SC-A16d).
     ///
-    /// The text never repeats the offending value — that is guaranteed by the `Display` of
-    /// [`EndpointError`] on which it relies, not by this `#[error]`.
-    #[error("{0}")]
+    /// The text never repeats the offending value, and **this variant no longer takes that on
+    /// trust** (S1 Loop 2, Balthasar). It used to render `{0}` directly, with a comment saying
+    /// the guarantee lived in [`EndpointError`]'s `Display` "and not in this `#[error]`" — which
+    /// is precisely the shape CLAUDE.md names as recurrent: a promise held by a type this variant
+    /// does not own, enforced by nothing, and revocable by an edit in another module that would
+    /// pass every gate. `EndpointError`'s own guarantee stays; this is the second layer, so a
+    /// future message that embeds a URL is redacted here instead of printed.
+    #[error("{}", magi_rs::redact::redact_foreign_error(_0))]
     Endpoint(#[from] EndpointError),
 }
 
@@ -2288,6 +2293,66 @@ mod tests {
         assert!(
             err.to_string().contains("melchior_lineage"),
             "naming the key the operator has to add: {err}"
+        );
+    }
+
+    /// S1 Loop 2 (Caspar): a `[[magi.fallback]]` entry with a blank `model` is rejected at parse
+    /// time, the same way its sibling `lineage` field already was.
+    ///
+    /// The consequence of accepting it is worse than an entry that fails when a mage rotates: a
+    /// blank candidate still counts toward **pool coverage**, so `seats_without_coverage` would
+    /// certify a seat as covered by something that can never answer — the illusory safety net the
+    /// coverage check exists to prevent.
+    ///
+    /// **Mutation-verified (B16):** drop the `deserialize_with` on `FallbackEntry::model` and
+    /// this goes green, because the entry parses and joins the pool.
+    #[test]
+    fn a_fallback_entry_with_a_blank_model_is_rejected_at_parse_time() {
+        let toml = "[magi]\n\
+                    melchior_model = \"a\"\nmelchior_lineage = \"la\"\n\
+                    balthasar_model = \"b\"\nbalthasar_lineage = \"lb\"\n\
+                    caspar_model = \"c\"\ncaspar_lineage = \"lc\"\n\
+                    \n[[magi.fallback]]\nmodel = \"   \"\nlineage = \"lz\"\n";
+
+        let err = MagiConfig::from_toml_str(toml)
+            .expect_err("a fallback entry with a blank model must not parse");
+
+        assert!(
+            err.to_string().contains("model"),
+            "and the error must name the field the operator has to fill: {err}"
+        );
+    }
+
+    /// S1 Loop 2 (Balthasar): `ConfigError::Endpoint` now redacts instead of trusting
+    /// [`EndpointError`]'s `Display`, and this pins the half of that change which **can** be
+    /// exercised.
+    ///
+    /// **Said plainly: the leak-blocking half is not testable today, by construction.** All four
+    /// `EndpointError` variants carry fixed messages whose only fields are `&'static str` vault
+    /// entry names, so none of them can embed a URL — there is nothing for the redaction to
+    /// catch, and a test asserting otherwise would have to build the leaking string itself, which
+    /// is the canary B16 calls useless. The layer is defence against a variant someone adds
+    /// later.
+    ///
+    /// What IS at risk right now is the opposite failure, and it is the one CLAUDE.md warns
+    /// about when it says the two redaction helpers are not interchangeable: the wrong one
+    /// collapses a message to `***`. These errors are the operator's instructions for fixing
+    /// their config, so a redaction that ate them would trade a hypothetical leak for a certain
+    /// dead end.
+    #[test]
+    fn wrapping_an_endpoint_error_redacts_without_eating_the_instructions() {
+        let err = ConfigError::from(EndpointError::MissingVaultEntry {
+            entry: "BASE_URL_PASSWORD",
+        });
+        let text = err.to_string();
+
+        assert!(
+            text.contains("BASE_URL_PASSWORD") && text.contains("magi-rs vault set"),
+            "the operator must still be told WHICH entry and HOW to create it: {text}"
+        );
+        assert!(
+            !text.contains("***"),
+            "and nothing here is a credential, so nothing may be blanked: {text}"
         );
     }
 
