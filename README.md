@@ -294,7 +294,7 @@ it is an object with these keys, **all always present**:
 | `endpoint_divergence` | bool | whether this run's content passed through the principal provider (mode classification) before reaching a trio on a different endpoint |
 | `timeout_below_formula` | bool | whether an explicit `--timeout` was below what the derived escalation formula requires |
 | `failed_agents` | object | per-seat failure cause, redacted, for a mage that produced no verdict |
-| `rotations` | object | per-seat rotation chain: from/to lineage, cause, and the model it ended on. An empty object certifies that nobody rotated — it is a positive statement, not silence |
+| `rotations` | array | one entry per seat **that actually rotated** — from/to lineage, cause, and the model it ended on. Empty certifies that nobody did; it is a positive statement, not silence. (`magi-core`'s own report carries a row for every seat, rotated or not; this field is the filtered view.) |
 | `ran_unmeasured` | array | seats that ran without a measured context window, so their verdict carries that caveat |
 
 New fields are added to `consult` without a `schema_version` bump — the same

@@ -466,16 +466,35 @@ fn build_consult_transcript(prompt: &str, report: Option<&str>) -> Vec<Transcrip
 /// produced from a `Value` microseconds earlier; a failure would mean `serde_json` cannot read
 /// back what it just wrote.
 ///
-/// It stays `.ok()` rather than growing an error channel because there is no honest thing to
-/// report through one: this function has no notices sink, and the caller's only recourse for a
-/// self-contradictory record would be the same `None` it already returns. What was missing was
-/// the reasoning, not the handling.
+/// It grows no error channel, because there is no honest thing to report through one: this
+/// function has no notices sink, and the caller's only recourse for a self-contradictory record
+/// would be the same `None` it already returns. What it does carry is a `debug_assert!`, so the
+/// impossibility is checked wherever checking is free rather than merely asserted in prose.
 fn extract_consult_value(calls: &[(String, ToolCallRecord)]) -> Option<Value> {
     calls
         .iter()
         .rev()
         .find(|(_, rec)| rec.name == CONSULT_TOOL && rec.ok)
-        .and_then(|(_, rec)| serde_json::from_str::<Value>(&rec.result).ok())
+        .and_then(
+            |(_, rec)| match serde_json::from_str::<Value>(&rec.result) {
+                Ok(value) => Some(value),
+                Err(e) => {
+                    // The impossibility now SAYS SO when it stops being one (S4 Loop 2, Balthasar,
+                    // whose counter-proposal beat the rejection it answered). The reasoning below
+                    // still holds — there is no honest channel to report through from here — but a
+                    // `debug_assert!` needs none: it costs nothing in release and turns a silent
+                    // swallow into a loud failure in every test and dev build, which is exactly
+                    // where an invariant that quietly stopped holding would otherwise hide.
+                    debug_assert!(
+                        false,
+                        "a consult record marked ok holds JSON this process serialized moments \
+                     earlier; if it no longer parses, the contract between ConsultTool::execute \
+                     and this reader has broken: {e}"
+                    );
+                    None
+                }
+            },
+        )
 }
 
 /// JSON key of the deadline verdict, shared with `report_to_consult_json`'s own literal.
