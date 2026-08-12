@@ -709,6 +709,15 @@ impl MagiConfig {
     ///
     /// A declared `0` is honoured as the kill-switch; only an **absent** key falls back to
     /// [`DEFAULT_MAX_ROTATIONS`].
+    ///
+    /// **No upper bound, and that is deliberate** (asked by S1 Loop 2, Caspar, noting that
+    /// `agent_timeout_secs` and `tool_result_cap_bytes` both carry ranges). Three reasons, in
+    /// order: the arithmetic cannot overflow — `u32::MAX + 1` models times two attempts times a
+    /// ceiling capped at 120 is on the order of `1e12`, against a `u64` headroom of `1.8e19`;
+    /// real rotation is bounded by the POOL, which is finite and declared, so a number past its
+    /// length buys nothing; and REQ-R05 specifies a default and a kill-switch and no range, so
+    /// inventing one here would be behaviour the spec does not define. If a bound is wanted it
+    /// is a spec change, not a hardening patch.
     #[must_use]
     pub(crate) fn effective_max_rotations(&self) -> u32 {
         self.magi
