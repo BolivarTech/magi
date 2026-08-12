@@ -156,29 +156,29 @@ Some decisions carry genuine trade-offs: architecture choices, "should we X vs Y
 
 ### Reading a verdict that involved a rotation
 
-The report tells you a mage rotated. What it cannot tell you is what that means for the
-verdict you are about to act on, so:
+The report tells you a mage rotated. It cannot tell you what that means for the verdict you
+are about to act on, so:
 
-**A rotation is not a degradation, and the distinction is the whole point.** Three mages
-answered, the consensus has three inputs, and the run is as valid as one where nothing
-failed. What changed is *which model* produced one of them — which is why the report names
-the model that actually answered rather than the one you configured. A report naming the
-configured model after a fallback ran would be lying about its own evidence base.
+**A rotation is not a degradation.** Three mages answered, the consensus has three inputs,
+and the run is as valid as one where nothing failed. What changed is *which model* produced
+one of them. That is why the report names the model that actually answered rather than the
+one you configured: a report naming the configured model after a fallback ran would be lying
+about its own evidence base.
 
-There is one exception, and it is worth knowing before you rely on that field. If a mage
-rotates and its task then panics or is cancelled, `magi-core` reports that seat's *pre-seed*
-state — the configured model, with an empty chain — because the chain it actually walked
-lived in the stack that went down with the task. The upstream crate documents this as an
-accepted limitation and it cannot be reconstructed from outside. That seat also appears in
-`failed_agents`, which is the signal that its rotation entry is not to be trusted: when both
-fields mention the same seat, believe `failed_agents`.
+One exception, worth knowing before you lean on that field. If a mage rotates and its task
+then panics or is cancelled, `magi-core` reports that seat's *pre-seed* state: the configured
+model, with an empty chain. The chain it actually walked lived in the stack that went down
+with the task, and the upstream crate documents this as an accepted limitation. It cannot be
+reconstructed from outside. That seat also lands in `failed_agents`, which is your signal
+that its rotation entry is not to be trusted. When both fields name the same seat, believe
+`failed_agents`.
 
 **What a rotation costs you is diversity, not validity.** The three perspectives are
-structural — three roles, three system prompts — and they hold regardless of which weights
-answered. Lineage diversity is the second layer: it is what makes a shared outage unlikely
-to take two mages at once. After a rotation you still have three perspectives; whether you
-still have three independent failure domains depends on where the rotation landed, and the
-report's `from`/`to` lineages are what tell you.
+structural: three roles, three system prompts. They hold regardless of which weights
+answered. Lineage diversity is the second layer, and it is what makes a shared outage
+unlikely to take two mages at once. So after a rotation you still have three perspectives.
+Whether you still have three independent failure domains depends on where the rotation
+landed, and the report's `from`/`to` lineages are what tell you.
 
 **What DOES degrade the run** is a mage exhausting its chain without producing a verdict.
 That shows up as `degraded`, and it means the consensus was computed from fewer than three
