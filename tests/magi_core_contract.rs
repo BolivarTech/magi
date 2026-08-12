@@ -407,7 +407,8 @@ async fn schema_retry_consumes_two_timeout_windows_per_seat() {
 #[tokio::test]
 async fn a_hanging_provider_consumes_one_timeout_window() {
     let ceiling = Duration::from_millis(300);
-    let magi = MagiBuilder::new(Arc::new(support::HangingProvider))
+    let provider = Arc::new(support::HangingProvider::default());
+    let magi = MagiBuilder::new(Arc::clone(&provider) as Arc<dyn LlmProvider>)
         .with_timeout(ceiling)
         .build()
         .expect("the builder accepts a single shared provider");
@@ -415,6 +416,21 @@ async fn a_hanging_provider_consumes_one_timeout_window() {
     let started = Instant::now();
     let _ = magi.analyze(&Mode::Analysis, DISPATCHABLE_CONTENT).await;
     let elapsed = started.elapsed();
+
+    // Presence before the bound (S4 Loop 2, Balthasar). The assertion below is an UPPER bound,
+    // and an upper bound is satisfied perfectly by never dispatching at all: a gate that started
+    // rejecting `DISPATCHABLE_CONTENT`, or a builder change that short-circuited, would leave
+    // this test green while the property it guards went unexercised.
+    assert!(
+        provider.calls() > 0,
+        "precondition: the provider was never entered, so nothing hung and the bound below \
+         measures nothing"
+    );
+    assert!(
+        elapsed >= ceiling,
+        "a hang must consume its window: {elapsed:?} is under the {ceiling:?} ceiling, which \
+         means the call returned by some path other than the timeout"
+    );
 
     assert!(
         elapsed < ceiling * 2,

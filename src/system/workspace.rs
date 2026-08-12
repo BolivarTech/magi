@@ -686,8 +686,15 @@ fn create_db(path: &Path) -> Result<(), HeadlessError> {
 /// Restricts `path`'s DACL to the current user only — the Windows equivalent of unix
 /// `0700`/`0600` (REQ-H38) — using the safe `windows-acl` crate.
 ///
-/// Grants the current user full control (which writes a PROTECTED DACL, severing inheritance)
-/// then removes every other ACE, leaving exactly one allow entry.
+/// Grants the current user full control, then **removes every other ACE**, leaving exactly one
+/// allow entry.
+///
+/// The restriction comes from that removal loop and from nothing else (S4 Loop 2, Balthasar).
+/// This used to credit it to `windows-acl` writing a PROTECTED DACL that severs inheritance —
+/// a claim about another crate's internals that this code neither sets nor verifies, and that a
+/// patch release could change without breaking a build. If the loop were deleted because the
+/// comment made it look redundant, inherited SYSTEM/Administrators/Users entries would survive
+/// and the directory would be readable by exactly the accounts REQ-H38 excludes.
 ///
 /// # Errors
 /// [`HeadlessError::Io`] if the path is not valid UTF-8 or any Win32 ACL call fails (the
@@ -710,8 +717,8 @@ fn restrict_to_current_user(path: &Path) -> Result<(), HeadlessError> {
     let mut acl = ACL::from_file_path(path_str, false)
         .map_err(|code| HeadlessError::Io(format!("read ACL failed (code {code})")))?;
 
-    // Grant the current user full control; windows-acl writes a PROTECTED DACL, severing
-    // inheritance so no parent ACE leaks in.
+    // Grant the current user full control. Whether `windows-acl` also marks the DACL PROTECTED
+    // is not relied upon here — the loop below is what guarantees nothing else survives.
     acl.add_entry(
         user_sid.as_ptr() as _,
         AceType::AccessAllow,
