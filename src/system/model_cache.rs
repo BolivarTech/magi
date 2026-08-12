@@ -408,6 +408,37 @@ mod tests {
         assert!(cache.get(ENDPOINT, "b").expect("get").is_none());
     }
 
+    /// SC-R30, the distinction the plan flags as the easiest to get wrong: an **absent or empty**
+    /// table is NOT "no cache available".
+    ///
+    /// It is created by `init_schema` and filled by the first run. Confusing the two would degrade
+    /// to a stateless measurement and persist **nothing** on exactly the clean start where the
+    /// cache pays off most — and the symptom would be a cache that never warms, which looks like
+    /// slowness rather than a defect.
+    ///
+    /// "No cache available" is exactly two other conditions: no encrypted database open in this
+    /// run, and a table that exists but cannot be read or written. Both produce `None` at
+    /// construction, never an empty table.
+    #[test]
+    fn an_empty_table_persists_normally_instead_of_degrading() {
+        let cache = cache();
+        assert_eq!(
+            cache.row_count().expect("count"),
+            0,
+            "precondition: the table exists and is empty"
+        );
+
+        cache
+            .put(ENDPOINT, "a", &measured(128_000, None))
+            .expect("an empty table must accept a write, not refuse one");
+        assert_eq!(
+            cache.row_count().expect("count"),
+            1,
+            "an empty table PERSISTS; it does not degrade to stateless"
+        );
+        assert!(cache.get(ENDPOINT, "a").expect("get").is_some());
+    }
+
     /// SC-R58: the credential never reaches the database — **not even an encrypted one** — and the
     /// redacted form still hits on the next read.
     ///

@@ -64,7 +64,8 @@ use magi_rs::magi::kind::{ProviderKind, ProviderKindParseError};
 use magi_rs::magi::lineage::LineageError;
 use magi_rs::magi::probe::{
     assumed_window_notices, derive_input_warn_tokens, derive_warn_tokens, effective_strict_guard,
-    min_mage_window, probe_models, Measurement, OllamaProbeFactory, ProbeFactory,
+    min_mage_window, missing_model_notices, probe_models, Measurement, OllamaProbeFactory,
+    ProbeFactory,
 };
 use magi_rs::magi::rotation_config::corroborate_by_digest;
 use magi_rs::magi::{
@@ -3025,6 +3026,24 @@ fn build_magi_orchestrator(
             }
             notices.extend(corroborate_by_digest(&rows));
         }
+    }
+
+    // REQ-R27, second half (HAND-OFF from Task 2.8, which implemented this and left it with no
+    // production caller): name, at STARTUP, each configured model this endpoint could not measure
+    // WHILE it was measuring others. Until this line existed, a user whose fallback tag was never
+    // `ollama pull`ed saw nothing at startup and found out when a mage fell — the worst possible
+    // moment, and literally what the requirement exists to prevent.
+    //
+    // Its two conditions live inside the function: only where measurement is possible, and only if
+    // at least one model of the SAME endpoint was measured. Those are what keep a cold daemon from
+    // firing it over the whole pool on a first run.
+    {
+        let configured: Vec<String> = seats
+            .iter()
+            .map(|(_, _, _, model)| model.clone())
+            .chain(declared_pool.iter().map(|entry| entry.model.clone()))
+            .collect();
+        notices.extend(missing_model_notices(measured, &configured));
     }
 
     // REQ-R26/SC-R51: candidates running on an ASSUMED window are announced — and nothing here
@@ -7401,6 +7420,57 @@ mod tests {
                 "an undeclared strict_context_guard reaches magi-core as false (REQ-R11): the \
                  case it would bite is the COLD START, where nothing measured yet means every \
                  candidate fails the window condition and rotation switches off in silence"
+            );
+        }
+
+        /// REQ-R27 END TO END: a configured model this endpoint could not measure **while it was
+        /// measuring others** is named at STARTUP, with the command that fixes it.
+        ///
+        /// This is the guardian for the wiring, not for the function: `missing_model_notices` was
+        /// implemented and tested in Phase 2 and had **no production caller** until Phase 6, which
+        /// meant the requirement was not delivered at all — the user saw nothing at startup and
+        /// found out when a mage fell. A unit test of the function could never have caught that.
+        #[test]
+        fn a_configured_model_the_endpoint_could_not_measure_is_named_at_startup() {
+            let mut notices = Vec::new();
+            let magi = build_magi_orchestrator(
+                &TrioBuild {
+                    cfg: &cfg_with_pool(2),
+                    principal_kind: ProviderKind::Ollama,
+                    endpoints: &test_endpoints(),
+                    creds: None,
+                    warn_tokens: None,
+                    env_overrides: &MagiEnvModelOverrides::default(),
+                    capability_cache: None,
+                    // The endpoint clearly measures — it answered for `ok-model` — and did not
+                    // answer for the fallback. That is what separates "this model is not there"
+                    // from "this endpoint is not answering".
+                    measured: &[
+                        (
+                            "ok-model".to_string(),
+                            magi_rs::magi::probe::Measurement::Measured {
+                                window: 128_000,
+                                digest: None,
+                            },
+                        ),
+                        (
+                            "rescue-model".to_string(),
+                            magi_rs::magi::probe::Measurement::NotMeasuredThisTime,
+                        ),
+                    ]
+                    .into_iter()
+                    .collect(),
+                },
+                &mut notices,
+            )
+            .expect("ollama is keyless");
+            drop(magi);
+
+            assert!(
+                notices
+                    .iter()
+                    .any(|n| n.text.contains("rescue-model") && n.text.contains("ollama pull")),
+                "the startup notice must name the model AND the command that fixes it: {notices:?}"
             );
         }
 
