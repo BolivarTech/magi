@@ -1,7 +1,24 @@
 # v0.11.0 `magi.toml` fixtures
 
-**Real** magi-rs v0.11.0 configuration files, used by `src/config/migrate.rs` to test the
-migration pass to v0.12.0 (REQ-A21c, SC-A21d).
+**Real** magi-rs v0.11.0 configuration files.
+
+> ## They no longer feed any test — read this before assuming they cover something
+>
+> As of **v0.13.0** the three v0.11.0 migration patterns were retired (REQ-R22), and with them
+> the tests that read these files. **Nothing references this directory.** They are kept as
+> documentation with provenance, not as live fixtures, and finding them here should not be taken
+> as evidence that v0.11.0 compatibility is still exercised anywhere. It is not.
+>
+> **Why keep them rather than delete them.** The reasoning below for committing them instead of
+> generating them is still true, and it cuts harder now: they were produced by the **published
+> v0.11.0 binary**, and that binary will not stay installable indefinitely. Deleting them
+> discards something that cannot be regenerated, in exchange for saving five files. If a future
+> migration pass ever needs to prove its behaviour against a genuine file of that generation,
+> this is the only place one exists.
+
+They were originally used by `src/config/migrate.rs` to test the migration pass to v0.12.0
+(REQ-A21c, SC-A21d); the rest of this file documents that original purpose and their
+provenance.
 
 ## Why they are real and not hand-written
 

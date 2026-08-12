@@ -151,7 +151,34 @@ Some decisions carry genuine trade-offs: architecture choices, "should we X vs Y
 - **Forced.** Type `/consult [--mode <code-review|design|analysis>] <question>` to run the consensus directly, bypassing the router, the complexity gate and the approval gate. The session shows `MAGI deliberating — 3 model calls…` and then renders the verbatim report (the three perspectives + the consensus verdict). `/consult` blocks the session while it runs, like a normal turn.
 - **Mode routing.** See [Mode routing](#mode-routing) below — every consult runs one of three modes (`code-review` / `design` / `analysis`), resolved from an explicit flag, `[magi].default_mode`, the agent's own choice, a classification call, or the `analysis` default, in that order.
 - **Backend.** The trio is built on **`magi-core`'s native providers**, each wrapped in retry and each receiving its own system prompt through the provider's own channel (no more folding it into the user turn). By default the trio runs on the same backend and endpoint already resolved for the main agent — no second config — but `[magi]` can point it at a different `kind` and/or `base_url`. It is unavailable when no seat can be built (e.g. no API key resolved for the configured backend): `/consult` then reports which seat failed and why, and the tool is not registered.
+- **Rotation (v0.13.0).** If a mage's model fails, it **rotates to a declared fallback of a different lineage and still emits a verdict**, instead of taking the whole run down with it. Configure the pool in `[[magi.fallback]]`; `max_rotations = 0` turns it off.
 - **Model capability.** Weak / small local models (e.g. Ollama `phi4-mini`) may fail to emit the strict per-agent JSON the consensus requires; the result is then marked `[DEGRADED: …]` (fewer than three agents responded) and the report names which model failed to adhere and why. A capable model is recommended for reliable consensus.
+
+### Reading a verdict that involved a rotation
+
+The report tells you a mage rotated. What it cannot tell you is what that means for the
+verdict you are about to act on, so:
+
+**A rotation is not a degradation, and the distinction is the whole point.** Three mages
+answered, the consensus has three inputs, and the run is as valid as one where nothing
+failed. What changed is *which model* produced one of them — which is why the report names
+the model that actually answered rather than the one you configured. A report naming the
+configured model after a fallback ran would be lying about its own evidence base.
+
+**What a rotation costs you is diversity, not validity.** The three perspectives are
+structural — three roles, three system prompts — and they hold regardless of which weights
+answered. Lineage diversity is the second layer: it is what makes a shared outage unlikely
+to take two mages at once. After a rotation you still have three perspectives; whether you
+still have three independent failure domains depends on where the rotation landed, and the
+report's `from`/`to` lineages are what tell you.
+
+**What DOES degrade the run** is a mage exhausting its chain without producing a verdict.
+That shows up as `degraded`, and it means the consensus was computed from fewer than three
+— treat it as you would any incomplete vote.
+
+**One qualifier worth looking for:** `ran_unmeasured` marks a mage that ran without a
+measured context window. Its verdict is not wrong, but nothing verified that your prompt
+fit comfortably in it.
 
 ### Mode routing
 

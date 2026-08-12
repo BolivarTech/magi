@@ -106,6 +106,35 @@ agent_timeout_secs = 90
 # `/consult` and `magi consult` are NEVER vetoed. Setting a value to `0` disables the
 # veto for that mode. These thresholds are a starting point, not an empirical
 # calibration.
+# ── Rotation (v0.13.0) ─────────────────────────────────────────────────────────
+# How many times ONE mage may rotate to a fallback before its run degrades. `0` is a
+# kill-switch that restores v0.12.0 behaviour EXACTLY — no rotation, and the same
+# `--timeout` the formula produced before rotation existed.
+#
+# It is a multiplier on the worst case, and the headless `--timeout` default is derived
+# from it: `attempts x (1 + max_rotations) x agent_timeout_secs`, plus slack. With the
+# defaults that is ~11 minutes, which is only ever paid when something is genuinely hung.
+# For a hard cap in CI, pass `--timeout` and take the warning naming the computed minimum.
+# max_rotations = 2
+
+# Refuse fallback candidates whose context window could not be measured.
+#
+# Default `false`, and the case it would bite is the COLD START: a daemon that has not
+# loaded a model yet does not answer the probe in time, so on a first run NOTHING is
+# measured — and with the guard on, every candidate would be rejected and rotation would
+# switch off entirely. magi-rs therefore passes it down ONLY when at least one candidate
+# has a measured window, and announces it when it declines to.
+# strict_context_guard = false
+
+# Require the three seats to declare DIFFERENT lineages.
+#
+# Default `true`: lineage diversity is what a rotation buys, so the system asks for it and
+# whoever cannot supply it turns the check off deliberately rather than discovering later
+# that the safety net was never real. If you only have models from one vendor, either
+# declare finer labels — by model family, e.g. opus/sonnet/haiku, which gives you real
+# rotation — or set:
+# enforce_diversity = false
+
 [magi.complexity]
 code_review = 200
 design      = 500
@@ -117,3 +146,29 @@ dim   = 0
 # Overrides the embedding endpoint. Commented out means it inherits the root `base_url`.
 # BREAKING: until v0.11.0 this key always carried its own value, so it never inherited.
 # base_url = "..."
+
+# ── The rotation pool goes LAST IN THE FILE ────────────────────────────────────
+# Not "last in the [magi] block": in TOML every loose key and sub-table must precede the
+# first array of tables, so a key added to [magi] later could land after this array and
+# parse into the wrong table. "Last in the file" leaves nowhere to get it wrong — which
+# is why [embedding] above sits before it.
+#
+# Ordered STRONGEST to WEAKEST: the order is the rotation preference. It is a SHARED pool,
+# not one list per seat — what consensus needs is that a rotation lands on a lineage the
+# other two seats do not hold, and that is a property of the pool's diversity rather than
+# of who owns the list.
+#
+# A candidate whose lineage NO seat has covers all three seats. One that shares a seat's
+# lineage covers only that seat, because the other two still hold their own lineage in
+# play while it rotates.
+[[magi.fallback]]
+model   = "glm-5.2:cloud"
+lineage = "zhipu"
+
+[[magi.fallback]]
+model   = "minimax-m3:cloud"
+lineage = "minimax"
+
+[[magi.fallback]]
+model   = "gemma4:cloud"
+lineage = "google"
