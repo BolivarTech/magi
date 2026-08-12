@@ -861,7 +861,8 @@ mod tests {
         );
         assert!(
             !DATA_TABLES.contains(&"model_capabilities"),
-            "model_capabilities is a reconstructible cache, not user data — counting it would \n             make a warm cache alone enough to refuse a bootstrap"
+            "model_capabilities is a reconstructible cache, not user data — counting it would \
+             make a warm cache alone enough to refuse a bootstrap"
         );
     }
 

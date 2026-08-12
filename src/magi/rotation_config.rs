@@ -146,10 +146,13 @@ pub fn validate_diversity(
             if enforce {
                 return Err(DiversityError::UncoveredSeats { seats: uncovered });
             }
+            // NOT "or set enforce_diversity to false": this path is only reachable when it
+            // already IS false. Telling the operator to do what they have done reads as though
+            // the message had not looked at their configuration.
             notices.push(Notice::resolution(format!(
-                "the seats {} have no fallback coverage; every seat must be rotatable to a \
-                 different lineage. Add fallback entries covering these seats, declare finer \
-                 lineage labels by model family, or set enforce_diversity to false.",
+                "notice: the seats {} have no fallback coverage, so they cannot rotate anywhere. \
+                 Add a candidate whose lineage no seat holds — that one covers all three — or \
+                 declare finer lineage labels by model family.",
                 seat_names(&uncovered)
             )));
         }

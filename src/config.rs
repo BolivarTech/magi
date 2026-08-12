@@ -866,35 +866,74 @@ impl MagiConfig {
         Ok(())
     }
 
-    /// Notices the load owes about diversity that the checks above do not raise as errors.
+    /// Every diversity notice this configuration owes, given the models the seats will ACTUALLY
+    /// run.
     ///
-    /// # The case this exists for, and why it is a notice
+    /// # It takes the resolved seats instead of re-deriving them
     ///
-    /// `seats()` resolves a seat that declares **no** model to the *backend* model, so a
-    /// configuration that names no trio runs all three mages on the SAME weights while
-    /// `lineage_of_seat` hands each a different built-in label. A distinctness check over labels
-    /// approves that — it is literally the case SC-R44 exists to reject, wearing three names.
+    /// Production resolves a seat's model as `env > TOML > backend`, through
+    /// `seats_with_env_overrides`. Re-deriving here from `seats(backend_model)` would skip the env
+    /// layer and make this a **third** resolver disagreeing with the two the project already
+    /// unified — the same divergence closed once before, when the probe was moved onto that
+    /// resolution so it could not measure a different model from the one the trio runs.
     ///
-    /// It cannot be an error: an absent `magi.toml` must start silently, and someone pointing at
-    /// a single-model endpoint has made a legitimate choice, not a mistake. So the labels stop
-    /// being taken at face value and the resolved models are reported instead.
+    /// It would also print statements that are simply false, in both directions: three distinct
+    /// `MAGI_MODEL_*` over an undeclared trio would be told all three mages share one model, and
+    /// a declared trio collapsed to one model BY those variables would hear nothing.
+    ///
+    /// # The two notices
+    ///
+    /// **Coverage** comes from [`validate_diversity`]'s soft path: under `enforce_diversity =
+    /// false` an uncovered seat is a notice rather than an error, and dropping that vector would
+    /// leave the mono-provider user — the one the requirement exists for — in silence.
+    ///
+    /// **Collapse** is the case labels cannot see. `seats()` falls an undeclared seat back to the
+    /// backend model, so a configuration naming no trio runs one model under three distinct
+    /// built-in labels: literally what a label-distinctness check approves and what SC-R44
+    /// rejects. A notice and not an error, because an absent `magi.toml` must start silently and
+    /// pointing at a single-model endpoint is a choice rather than a mistake.
+    ///
+    /// [`validate_diversity`]: magi_rs::magi::rotation_config::validate_diversity
     #[must_use]
-    pub(crate) fn diversity_notices(&self, backend_model: &str) -> Vec<Notice> {
-        let seats = self.magi.seats(backend_model);
-        let distinct: std::collections::BTreeSet<&str> =
-            seats.iter().map(|(_, model)| model.as_str()).collect();
-        if distinct.len() > 1 {
-            return Vec::new();
+    pub(crate) fn diversity_notices(&self, resolved_seats: &[(AgentName, String)]) -> Vec<Notice> {
+        let mut notices = Vec::new();
+
+        // Coverage. Under `enforce = true` this cannot error here — `load()` already validated and
+        // would have refused the file — so an `Err` is reachable only from the crate-internal
+        // builder, and degrades to silence rather than a panic.
+        let with_lineage: Vec<(AgentName, Lineage)> = resolved_seats
+            .iter()
+            .filter_map(|(seat, _)| self.magi.lineage_of_seat(*seat).ok().map(|l| (*seat, l)))
+            .collect();
+        if with_lineage.len() == resolved_seats.len() {
+            if let Ok(coverage) = magi_rs::magi::rotation_config::validate_diversity(
+                &with_lineage,
+                &self.magi.fallback,
+                self.effective_enforce_diversity(),
+            ) {
+                notices.extend(coverage);
+            }
         }
-        vec![Notice::resolution(format!(
-            "notice: all three mages resolve to the same model (`{}`), so their declared \
-             lineages describe one failure domain rather than three. The consensus still has \
-             three perspectives — those are structural — but a shared outage takes all three at \
-             once. Declare a model per seat in `[magi]` to get the diversity the labels claim.",
-            seats
-                .first()
-                .map_or("<unknown>", |(_, model)| model.as_str())
-        ))]
+
+        // Collapse.
+        let distinct: std::collections::BTreeSet<&str> = resolved_seats
+            .iter()
+            .map(|(_, model)| model.as_str())
+            .collect();
+        if distinct.len() == 1 {
+            notices.push(Notice::resolution(format!(
+                "notice: all three mages resolve to the same model (`{}`), so their declared \
+                 lineages describe one failure domain rather than three. The consensus still has \
+                 three perspectives — those are structural — but a shared outage takes all three \
+                 at once. Declare a model per seat in `[magi]` to get the diversity the labels \
+                 claim.",
+                resolved_seats
+                    .first()
+                    .map_or("<unknown>", |(_, model)| model.as_str())
+            )));
+        }
+
+        notices
     }
 
     /// `agent_timeout_secs` outside the range of §4.9 is a **configuration error**.
@@ -2386,7 +2425,7 @@ mod tests {
     #[test]
     fn three_seats_resolving_to_one_model_are_reported_however_they_are_labelled() {
         let cfg = MagiConfig::from_toml_str("provider = \"ollama\"\n").expect("defaults load");
-        let notices = cfg.diversity_notices("one-backend-model");
+        let notices = cfg.diversity_notices(&cfg.magi().seats("one-backend-model"));
         assert_eq!(
             notices.len(),
             1,
@@ -2407,7 +2446,9 @@ mod tests {
         )
         .expect("a declared trio loads");
         assert!(
-            declared.diversity_notices("unused").is_empty(),
+            declared
+                .diversity_notices(&declared.magi().seats("unused"))
+                .is_empty(),
             "three distinct models say nothing"
         );
     }

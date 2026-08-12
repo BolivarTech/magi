@@ -3082,7 +3082,14 @@ fn build_magi_orchestrator(
     // label-distinctness check approves while it is literally what SC-R44 rejects. The load-time
     // check cannot error on it without denying a fresh clone its first start, so it is reported
     // here instead, where the resolved backend model is known.
-    notices.extend(cfg.diversity_notices(backend_model));
+    // The seats ALREADY resolved through `env > TOML > backend`, not a third derivation: a
+    // separate one would disagree with the trio and the probe, and print statements that are
+    // false in both directions.
+    let resolved_seats: Vec<(AgentName, String)> = seats
+        .iter()
+        .map(|(seat, _, _, model)| (*seat, model.clone()))
+        .collect();
+    notices.extend(cfg.diversity_notices(&resolved_seats));
 
     // REQ-R27, second half (HAND-OFF from Task 2.8, which implemented this and left it with no
     // production caller): name, at STARTUP, each configured model this endpoint could not measure
@@ -7573,6 +7580,51 @@ mod tests {
                 wired.candidates.iter().any(|(model, _)| model == "shared"),
                 "the pool entry repeating a seat's model is KEPT, not pruned: `used` is per mage, \
                  so another seat can still rotate into it: {wired:?}"
+            );
+            // SC-R52's other half, and the reason this assertion is here rather than in a test of
+            // its own: without it the whole notice block can be deleted and the suite stays green.
+            assert!(
+                notices
+                    .iter()
+                    .any(|n| n.text.contains("shared") && n.text.contains("repeats a model")),
+                "the repetition must be announced — silent, it surfaces only as an unexpectedly \
+                 short rotation chain during a real incident: {notices:?}"
+            );
+        }
+
+        /// REQ-R29's collapse notice, driven through `build_magi_orchestrator`.
+        ///
+        /// The unit test for `diversity_notices` calls the function directly, which is exactly the
+        /// shape that let the CRITICAL of this gate's first iteration through — and the commit
+        /// that fixed it stated the rule it then failed to apply here: *only a test that goes
+        /// through the real path can catch a missing wire.*
+        #[test]
+        fn three_seats_on_one_model_are_announced_by_the_builder() {
+            let cfg = MagiConfig::from_toml_str("provider = \"ollama\"\n")
+                .expect("an absent trio must still load");
+            let mut notices = Vec::new();
+            let magi = build_magi_orchestrator(
+                &TrioBuild {
+                    cfg: &cfg,
+                    principal_kind: ProviderKind::Ollama,
+                    endpoints: &test_endpoints(),
+                    creds: None,
+                    warn_tokens: None,
+                    env_overrides: &MagiEnvModelOverrides::default(),
+                    capability_cache: None,
+                    measured: &BTreeMap::new(),
+                },
+                &mut notices,
+            )
+            .expect("the default configuration must still build a trio");
+            drop(magi);
+
+            assert!(
+                notices
+                    .iter()
+                    .any(|n| n.text.contains("resolve to the same model")),
+                "with no trio declared all three seats fall back to the backend model, and their \
+                 three built-in labels describe one failure domain: {notices:?}"
             );
         }
 
