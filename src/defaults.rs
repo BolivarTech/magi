@@ -777,16 +777,37 @@ mod tests {
             .expect("render_default_magi_toml() must produce valid TOML (commented lines inert)");
         assert_eq!(parsed.memory().mode, "selective");
         assert_eq!(parsed.embedding().model, DEFAULT_EMBEDDING_MODEL);
+
+        // S1 Loop 2 (Caspar): the embedding model was pinned against its constant and the other
+        // two were not, so the scaffold could teach a model the project no longer defaults to
+        // and nothing would say so. A scaffold that drifts from `defaults.rs` is worse than no
+        // scaffold: it is documentation that looks authoritative and is wrong.
+        assert_eq!(
+            crate::config::resolve_openai_model(&parsed, None),
+            DEFAULT_OPENAI_MODEL,
+            "the scaffold's [openai].model must track defaults.rs, not a stale literal"
+        );
+        assert!(
+            s.contains(DEFAULT_ANTHROPIC_MODEL),
+            "and so must its [anthropic].model"
+        );
     }
 
     /// SC-25: `docs/magi.toml.example` must contain no actual secret material.
     ///
     /// Checks that:
-    /// - No TOML field named `api_key` (with underscore) is present — keys live
-    ///   in env vars / OS keyring only, never in the config file.
+    /// - No TOML field named `api_key` (with underscore) is present — keys live in env vars or
+    ///   the vault only (`env > vault`, REQ-V12), never in the config file.
     /// - No `sk-` prefix (Anthropic / OpenAI raw key format) appears anywhere.
     ///
     /// The word "key" in prose (e.g. "API keys NEVER live here") is allowed.
+    ///
+    /// **The positive control is not ceremony** (S1 Loop 2, Balthasar). Both assertions are
+    /// ABSENCE claims, and an absence claim holds trivially against nothing: truncate the example
+    /// to an empty file, or replace it with unrelated content, and this test stays green while
+    /// the thing it guards has evaporated. So it first establishes that the file IS the artefact
+    /// under test, then that the two predicates actually discriminate — a scanner that never
+    /// fires is indistinguishable from a file that is clean.
     #[test]
     fn test_config_example_has_no_secret_material() {
         let s = std::fs::read_to_string(concat!(
@@ -794,6 +815,21 @@ mod tests {
             "/docs/magi.toml.example"
         ))
         .unwrap();
+
+        // Control 1: this is the real example, not an empty or unrelated file.
+        assert!(
+            s.contains("[magi]") && s.contains("melchior_lineage"),
+            "precondition: the file scanned below must be the v0.13.0 example itself"
+        );
+
+        // Control 2: the predicates fire on material that SHOULD be caught. Without this, the
+        // two assertions below prove only that some string does not contain some substring.
+        let planted = format!("{s}\napi_key = \"sk-not-a-real-key\"\n");
+        assert!(
+            planted.to_lowercase().contains("api_key") && planted.contains("sk-"),
+            "the scan must detect planted secret material, or it detects nothing at all"
+        );
+
         let low = s.to_lowercase();
         assert!(
             !low.contains("api_key"),

@@ -339,6 +339,16 @@ mod tests {
     fn the_minimal_config_the_error_hands_out_actually_parses_today() {
         super::super::MagiConfig::from_toml_str(MINIMAL_VALID_CONFIG)
             .expect("the minimal magi.toml the error proposes must parse today");
+
+        // S1 Loop 2 (Caspar): parsing is not the only way this literal rots. Its model is spelled
+        // out, so `DEFAULT_OPENAI_MODEL` can move underneath it and the advice would keep parsing
+        // while naming a model the project no longer defaults to — a stuck user copying it would
+        // land somewhere the rest of the docs never mention.
+        assert!(
+            MINIMAL_VALID_CONFIG.contains(crate::defaults::DEFAULT_OPENAI_MODEL),
+            "the minimal config must name the CURRENT default model, not a frozen literal: {}",
+            crate::defaults::DEFAULT_OPENAI_MODEL
+        );
     }
 
     /// A `magi.toml` carrying **all three** retired v0.11.0 patterns at once: `provider =
