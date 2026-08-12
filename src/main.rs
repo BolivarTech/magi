@@ -63,8 +63,8 @@ use magi_rs::magi::endpoint::{EndpointTemplate, ResolvedEndpoint, Scope};
 use magi_rs::magi::kind::{ProviderKind, ProviderKindParseError};
 use magi_rs::magi::lineage::LineageError;
 use magi_rs::magi::probe::{
-    assumed_window_notices, derive_warn_tokens, effective_strict_guard, min_mage_window,
-    probe_models, Measurement, OllamaProbeFactory, ProbeFactory,
+    assumed_window_notices, derive_input_warn_tokens, derive_warn_tokens, effective_strict_guard,
+    min_mage_window, probe_models, Measurement, OllamaProbeFactory, ProbeFactory,
 };
 use magi_rs::magi::{
     bytes_to_tokens_est, derive_client_timeout, derive_operation_budget, AGENT_TIMEOUT_SECS,
@@ -2933,9 +2933,6 @@ fn build_magi_orchestrator(
 
     // REQ-A15: the OTHER TWO exposed keys are also wired. Declaring them in TOML without
     // connecting them would make them decorative.
-    if let Some(warn) = warn_tokens {
-        builder = builder.with_input_warn_tokens(warn);
-    }
     if cfg.magi().retry_disabled.unwrap_or(false) {
         builder = builder.with_retry_disabled();
     }
@@ -2959,6 +2956,46 @@ fn build_magi_orchestrator(
     if let Some(n) = guard_notice {
         notices.push(n);
     }
+
+    // REQ-R21/D-R09: the threshold refines here and not in `probe_and_report`, because at startup
+    // the POOL is not measured — measurement is lazy — so its windows exist only in the cache, and
+    // the builder is the one place that holds both it and the trio's measurements.
+    //
+    // An explicitly declared `[magi].input_warn_tokens` is never touched (REQ-A24b/SC-A24e): the
+    // operator's number wins over anything derived, and refining it would be overriding an
+    // instruction rather than filling a gap.
+    let warn_tokens = if cfg.magi().input_warn_tokens.is_some() {
+        warn_tokens
+    } else {
+        let trio_windows: Vec<usize> = measured
+            .values()
+            .filter_map(|m| match m {
+                Measurement::Measured { window, .. } => Some(*window),
+                _ => None,
+            })
+            .collect();
+        if trio_windows.is_empty() {
+            warn_tokens
+        } else {
+            let pool_windows: Vec<(&str, usize)> = capability_cache
+                .map(|cache| {
+                    declared_pool
+                        .iter()
+                        .filter_map(|entry| {
+                            cache
+                                .get(&endpoint_redacted, &entry.model)
+                                .ok()
+                                .flatten()
+                                .map(|row| (entry.model.as_str(), row.window))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let (threshold, band_notices) = derive_input_warn_tokens(&trio_windows, &pool_windows);
+            notices.extend(band_notices);
+            Some(threshold)
+        }
+    };
 
     // REQ-R26/SC-R51: candidates running on an ASSUMED window are announced — and nothing here
     // removes them. The assumption informs; the filtering stays entirely with magi-core, whose
@@ -3093,6 +3130,13 @@ fn build_magi_orchestrator(
         builder = builder
             .with_fallback_pool(pool.build())
             .with_strict_context_guard(effective_guard);
+    }
+
+    // Applied HERE, after the pool has had its say (REQ-R21): the threshold is only final once
+    // the in-band candidates have been folded in, and a builder method applied earlier would
+    // have captured the trio-only value.
+    if let Some(warn) = warn_tokens {
+        builder = builder.with_input_warn_tokens(warn);
     }
 
     builder

@@ -156,6 +156,23 @@ pub const MAX_QUERY_BYTES: usize = 256 * 1024;
 /// generous hard cap), which is exactly where it still fires.
 pub const WARN_WINDOW_FRACTION: f64 = 0.75;
 
+/// How far below the trio's base a pool candidate's window may sit and still enter the
+/// `input_warn_tokens` minimum (REQ-R21).
+///
+/// Lives here and not in `defaults.rs` for the same reason [`WARN_WINDOW_FRACTION`] does:
+/// `defaults.rs` is bin-only, and the derivation that reads this is in the library.
+///
+/// **0.10 — CHOSEN by the project owner, not measured.** Same honesty as the complexity gate's
+/// built-in thresholds: it is a starting point, and saying so is the difference between a number
+/// someone can recalibrate and one they assume was derived from data.
+///
+/// The band exists because including the pool unconditionally would be the wrong kind of
+/// conservative: one small-window entry at the END of the list — the candidate least likely to
+/// ever run — would pull every run's threshold down and fire the size warning on practically every
+/// real consult. **The protection against a candidate too small for the prompt is magi-core's
+/// condition #6, never this threshold**, which only warns.
+pub const WARN_POOL_TOLERANCE: f64 = 0.10;
+
 /// Floor of the closed range of an acceptable probe window (REQ-A16b).
 ///
 /// Out of range degrades to *unmeasured*, it is NEVER clipped to the extreme: a clipped value

@@ -89,7 +89,10 @@ use magi_core::rotation::ProviderProbe;
 
 use crate::magi::endpoint::ResolvedEndpoint;
 use crate::magi::kind::ProviderKind;
-use crate::magi::{PROBE_TIMEOUT_SECS, PROBE_WINDOW_MAX, PROBE_WINDOW_MIN, WARN_WINDOW_FRACTION};
+use crate::magi::{
+    PROBE_TIMEOUT_SECS, PROBE_WINDOW_MAX, PROBE_WINDOW_MIN, WARN_POOL_TOLERANCE,
+    WARN_WINDOW_FRACTION,
+};
 use crate::notices::Notice;
 use crate::redact::{redact_foreign_error, SafeErrorText};
 
@@ -327,6 +330,86 @@ pub fn min_mage_window(mages: &BTreeMap<String, Measurement>) -> Option<usize> {
             Measurement::NotMeasurable | Measurement::NotMeasuredThisTime => None,
         })
         .min()
+}
+
+/// Derives `input_warn_tokens` from the trio, letting only in-band pool candidates lower it, and
+/// reports the ones that fall outside the band (REQ-R21, D-R09).
+///
+/// # Why the base is the TRIO and not the whole pool
+///
+/// Deriving from every candidate looks conservative and is not. A small-window entry at the end of
+/// the pool — the candidate *least* likely to ever run — would drag the threshold of every run
+/// down with it, and the size warning would fire on practically every real consult. **A warning
+/// that always sounds is ignored**, which is strictly worse than one that occasionally does not
+/// fire.
+///
+/// And the scenario that derivation was meant to protect against **cannot do harm anyway**: by
+/// magi-core's condition #6 a candidate is only selected when the prompt fits its window, so a
+/// small one is never chosen for a payload it could not hold. The real protection is that
+/// condition; this threshold only ever warns.
+///
+/// # What the band buys
+///
+/// A candidate within [`WARN_POOL_TOLERANCE`] of the base enters the minimum because doing so
+/// costs nothing when it barely moves the number — a free, marginal calibration improvement,
+/// **documented as that and not as a safety mechanism**. Everything below the band is reported
+/// instead, with the model, its window and the base, so the operator can replace it with one of
+/// comparable size.
+///
+/// **Every out-of-band entry is named in ONE message** (SC-R32): whoever assembled an unbalanced
+/// pool usually has more than one, and finding them one start at a time costs a start each.
+///
+/// # Returns
+///
+/// The threshold and the notices owed. An empty pool, or one entirely in band, reports nothing.
+///
+/// # Examples
+///
+/// ```
+/// # use magi_rs::magi::probe::derive_input_warn_tokens;
+/// let (threshold, notices) = derive_input_warn_tokens(&[128_000, 128_000, 128_000], &[]);
+/// assert!(threshold < 128_000);
+/// assert!(notices.is_empty());
+/// ```
+#[must_use]
+pub fn derive_input_warn_tokens(trio: &[usize], pool: &[(&str, usize)]) -> (usize, Vec<Notice>) {
+    let base = trio.iter().copied().min().unwrap_or(0);
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss
+    )]
+    let floor = (base as f64 * (1.0 - WARN_POOL_TOLERANCE)) as usize;
+
+    let (in_band, out_of_band): (Vec<_>, Vec<_>) =
+        pool.iter().partition(|(_, window)| *window >= floor);
+
+    let effective = in_band
+        .iter()
+        .map(|(_, window)| *window)
+        .chain(std::iter::once(base))
+        .min()
+        .unwrap_or(base);
+
+    let mut notices = Vec::new();
+    if !out_of_band.is_empty() {
+        let listed = out_of_band
+            .iter()
+            .map(|(model, window)| format!("`{model}` ({window} tokens)"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        notices.push(Notice::resolution(format!(
+            "notice: fallback candidates far below the trio's window are NOT lowering the size              warning threshold, which stays on the trio base of {base} tokens: {listed}.              Replace them with candidates of comparable window if you want the threshold to              reflect them."
+        )));
+    }
+
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss
+    )]
+    let threshold = (effective as f64 * WARN_WINDOW_FRACTION) as usize;
+    (threshold, notices)
 }
 
 /// What is known about one model's context window, in **three** states rather than two (REQ-R26).
