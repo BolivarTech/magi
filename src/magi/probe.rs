@@ -329,6 +329,100 @@ pub fn min_mage_window(mages: &BTreeMap<String, Measurement>) -> Option<usize> {
         .min()
 }
 
+/// What is known about one model's context window, in **three** states rather than two (REQ-R26).
+///
+/// A reported window can be a **measurement** or an **assumption**, and a report that does not
+/// distinguish them is stating a supposition as a fact. That is the entire reason this type exists
+/// instead of an `Option<usize>`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowState {
+    /// The probe answered for this model.
+    Measured(usize),
+    /// Nothing was measured for this model, so the smallest window measured **in this run** is
+    /// credited to it. Derived from the run, never a property of the model — which is why it is
+    /// never persisted.
+    Assumed(usize),
+    /// Nothing measured and nothing to assume from. Falls back to today's non-strict behaviour
+    /// rather than inventing a number, because an invented one would be trusted.
+    Unknown,
+}
+
+/// The window assumed for a model that could not be measured: the **smallest** measured in this
+/// run, or `None` when nothing was measured at all.
+///
+/// The smallest and not an average or the largest: an assumption that overstates a window invites
+/// a rotation into a candidate that cannot hold the prompt, while one that understates it only
+/// costs a warning.
+///
+/// # Examples
+///
+/// ```
+/// # use std::collections::BTreeMap;
+/// # use magi_rs::magi::probe::assumed_window;
+/// assert_eq!(assumed_window(&BTreeMap::new()), None);
+/// ```
+#[must_use]
+pub fn assumed_window(measured: &BTreeMap<String, Measurement>) -> Option<usize> {
+    min_mage_window(measured)
+}
+
+/// What is known about `model`'s window, given everything measured in this run.
+///
+/// **This never removes anything.** The assumption informs; the filtering stays entirely with
+/// magi-core, whose condition #6 compares a candidate's window against a `min_window_tokens`
+/// computed **per consult** from the prompt (`orchestrator.rs:1199`) — a number that does not exist
+/// at the moment the pool is declared, which is why a static elegibility check here is not merely
+/// expensive but unbuildable.
+///
+/// It is also why `CachedProbe::window` answers `None` on a miss rather than the assumed value:
+/// if the probe returned an assumption, magi-core could not tell it from a measurement, and
+/// REQ-R11's fail-safe — *"pass strict only if a candidate has a MEASURED window"* — would become
+/// unverifiable, since every candidate would then have a number.
+#[must_use]
+pub fn window_state(measured: &BTreeMap<String, Measurement>, model: &str) -> WindowState {
+    match measured.get(model) {
+        Some(Measurement::Measured { window, .. }) => WindowState::Measured(*window),
+        _ => assumed_window(measured).map_or(WindowState::Unknown, WindowState::Assumed),
+    }
+}
+
+/// Startup notices for the pool candidates running on an assumed window (REQ-R26/SC-R51).
+///
+/// # The two conditions, and the case they exist for
+///
+/// A notice is emitted **only** when something in this run was actually measured. Without that,
+/// a cold daemon — the ordinary first run of any fresh install — leaves every candidate
+/// unmeasured and the warning fires over the whole pool: transient, noisy, and with no action the
+/// operator could take. *"Not measured this time"* is not *"not measurable"*, and the same
+/// argument the threshold derivation uses applies here — **a warning that always sounds is
+/// ignored**, which costs more than the one it would have delivered.
+///
+/// An endpoint where nothing is measurable is silent for the second reason: that candidate is not
+/// *worse*, it is on a protocol that does not expose the datum at all.
+#[must_use]
+pub fn assumed_window_notices(
+    measured: &BTreeMap<String, Measurement>,
+    pool: &[crate::magi::rotation_config::FallbackEntry],
+) -> Vec<Notice> {
+    let Some(assumed) = assumed_window(measured) else {
+        return Vec::new();
+    };
+    pool.iter()
+        .filter(|candidate| {
+            !matches!(
+                measured.get(&candidate.model),
+                Some(Measurement::Measured { .. })
+            )
+        })
+        .map(|candidate| {
+            Notice::info(format!(
+                "notice: fallback candidate `{}` has no measured window; it is credited with                  {assumed} tokens, the smallest measured this run. It stays eligible, but a                  rotation into it may fail for a prompt larger than that.",
+                candidate.model
+            ))
+        })
+        .collect()
+}
+
 /// Whether `strict_context_guard` may actually be handed to magi-core, and the notice owed when it
 /// may not (REQ-R11).
 ///
@@ -1711,12 +1805,26 @@ mod tests {
         assert_eq!(assumed_window(&measurements(&[("c", None)])), None);
     }
 
-    /// A model absent from the map entirely is `Unknown` too — never silently assumed into
-    /// existence.
+    /// A model ABSENT from the map is treated exactly like one that was probed and did not
+    /// answer: assumed, not unknown.
+    ///
+    /// This corrects the expectation this test was first written with. The distinction between
+    /// "never probed" and "probed without an answer" carries **no information for the consumer**:
+    /// in both cases nothing is known about the model, and the honest credit is still the run's
+    /// smallest measured window. `Unknown` is reserved for the case where there is nothing to
+    /// assume FROM — which is a statement about the run, not about one model.
     #[test]
-    fn a_model_that_was_never_probed_is_unknown() {
+    fn a_model_absent_from_the_map_is_assumed_like_one_that_did_not_answer() {
         let measured = measurements(&[("a", Some(128_000))]);
-        assert_eq!(window_state(&measured, "absent"), WindowState::Unknown);
+        assert_eq!(
+            window_state(&measured, "absent"),
+            WindowState::Assumed(128_000)
+        );
+        // And `Unknown` really is about the run having measured nothing at all.
+        assert_eq!(
+            window_state(&measurements(&[("a", None)]), "absent"),
+            WindowState::Unknown
+        );
     }
 
     /// The notice names the candidate, its assumed window and the CONSEQUENCE, because a

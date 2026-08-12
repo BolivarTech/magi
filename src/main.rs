@@ -63,8 +63,8 @@ use magi_rs::magi::endpoint::{EndpointTemplate, ResolvedEndpoint, Scope};
 use magi_rs::magi::kind::{ProviderKind, ProviderKindParseError};
 use magi_rs::magi::lineage::LineageError;
 use magi_rs::magi::probe::{
-    derive_warn_tokens, effective_strict_guard, min_mage_window, probe_models, Measurement,
-    OllamaProbeFactory, ProbeFactory,
+    assumed_window_notices, derive_warn_tokens, effective_strict_guard, min_mage_window,
+    probe_models, Measurement, OllamaProbeFactory, ProbeFactory,
 };
 use magi_rs::magi::{
     bytes_to_tokens_est, derive_client_timeout, derive_operation_budget, AGENT_TIMEOUT_SECS,
@@ -2959,6 +2959,11 @@ fn build_magi_orchestrator(
     if let Some(n) = guard_notice {
         notices.push(n);
     }
+
+    // REQ-R26/SC-R51: candidates running on an ASSUMED window are announced — and nothing here
+    // removes them. The assumption informs; the filtering stays entirely with magi-core, whose
+    // condition #6 needs a per-consult prompt size that does not exist at this point.
+    notices.extend(assumed_window_notices(measured, declared_pool));
 
     // REQ-R25: a model that LEFT the configuration stops being referenced. Done ONCE, here, with
     // this run's configured set. It DEGRADES rather than aborts: a failed prune leaves extra rows,
@@ -7322,6 +7327,65 @@ mod tests {
                 "an undeclared strict_context_guard reaches magi-core as false (REQ-R11): the \
                  case it would bite is the COLD START, where nothing measured yet means every \
                  candidate fails the window condition and rotation switches off in silence"
+            );
+        }
+
+        /// SC-R51, the half no unit test can cover: an unmeasured candidate is **announced and
+        /// KEPT**.
+        ///
+        /// A test that only checked the notice exists would pass just as well if magi-rs were
+        /// quietly dropping the candidate — the operator would see a warning about a candidate
+        /// that is no longer there. Reading the pool magi-core actually received is what
+        /// separates "informed" from "filtered".
+        #[test]
+        fn an_unmeasured_candidate_is_reported_and_still_reaches_the_pool() {
+            let mut notices = Vec::new();
+            let magi = build_magi_orchestrator(
+                &TrioBuild {
+                    cfg: &cfg_with_pool(2),
+                    principal_kind: ProviderKind::Ollama,
+                    endpoints: &test_endpoints(),
+                    creds: None,
+                    warn_tokens: None,
+                    env_overrides: &MagiEnvModelOverrides::default(),
+                    capability_cache: None,
+                    // The trio measured; the candidate did not — exactly the shape that would
+                    // tempt an implementation to "protect" the run by dropping it.
+                    measured: &[
+                        (
+                            "ok-model".to_string(),
+                            magi_rs::magi::probe::Measurement::Measured {
+                                window: 128_000,
+                                digest: None,
+                            },
+                        ),
+                        (
+                            "rescue-model".to_string(),
+                            magi_rs::magi::probe::Measurement::NotMeasuredThisTime,
+                        ),
+                    ]
+                    .into_iter()
+                    .collect(),
+                },
+                &mut notices,
+            )
+            .expect("ollama is keyless");
+            drop(magi);
+
+            assert!(
+                notices
+                    .iter()
+                    .any(|n| n.text.contains("rescue-model")
+                        && n.text.contains("no measured window")),
+                "the assumption must be announced: {notices:?}"
+            );
+            let wired = pool_wiring_trace().expect("the pool is declared");
+            assert!(
+                wired
+                    .candidates
+                    .iter()
+                    .any(|(model, _)| model == "rescue-model"),
+                "and the candidate must STILL be in the pool magi-core received: {wired:?}"
             );
         }
 
