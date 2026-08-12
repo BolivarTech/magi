@@ -374,7 +374,13 @@ impl Args {
     /// stays as the CLI-parsing-level assertion surface: covered by
     /// `untrusted_content_is_declarable_where_the_threat_lives` and
     /// `mode_and_untrusted_content_are_absent_without_a_subcommand`.
-    #[allow(dead_code)]
+    /// **`#[cfg(test)]`, not `#[allow(dead_code)]`** (S3 Loop 2, Balthasar). It carried the
+    /// `allow` and a comment explaining that production reads the field directly — which is a
+    /// tested-only accessor sitting in production code, telling the linter something untrue about
+    /// the crate. §6.1.8 is explicit that an `#[allow]` must never be fabricated to quiet a gate.
+    /// Compiling it only under `cfg(test)` says the same thing honestly: this exists for the two
+    /// tests that pin the CLI-parsing property, and for nothing else.
+    #[cfg(test)]
     fn untrusted_content(&self) -> bool {
         match &self.command {
             Some(TopCmd::Query(h)) | Some(TopCmd::Consult(h)) => h.untrusted_content,
@@ -2530,6 +2536,23 @@ fn divergence_notice(cfg: &MagiConfig, inference_active: bool) -> Option<Notice>
     // notice is emitted ANYWAY, with the error text in place of the endpoint — the property
     // that matters is that the EMISSION of this notice never silently depends on whether
     // parsing succeeded.
+    // `debug_assert!` and NOT `assert!`, deliberately — asked again by S3 Loop 2 (Melchior), who
+    // read it as the "precondition that matters in release" pattern CLAUDE.md warns about. It is
+    // the opposite case: this precondition does NOT matter in release, because the paragraph above
+    // already handles its violation. `endpoint_display_text` renders the `Err` as redacted text
+    // and the notice is emitted regardless, so the property worth protecting — that a PRIVACY
+    // notice never silently disappears — holds in every build profile by construction rather than
+    // by an assertion. An `assert!` here would trade a degraded-but-present notice for a panic,
+    // which is strictly worse for the user it exists to warn.
+    //
+    // The suggested alternative, returning `None` on an invalid template, is the one thing that
+    // must not happen: that is the silent disappearance, spelled differently.
+    //
+    // Note for whoever tries to test the release path: they cannot, from the default profile.
+    // `cfg(debug_assertions)` is on under `cargo test`, so these fire before the fallback is
+    // reached — which is why the fallback's RENDERING is pinned one level down instead, by
+    // `endpoint_display_text_redacts_a_credential_a_future_error_variant_might_embed` and
+    // `endpoint_display_text_leaves_a_valid_template_untouched`.
     let magi_url = cfg.effective_magi_base_url();
     let root_url = cfg.effective_base_url();
     debug_assert!(magi_url.is_ok(), "load() must have validated");
@@ -10033,6 +10056,17 @@ mod tests {
             // could not exist in this field (proven by the test above).
             let cfg = cfg_with_endpoints("http://a/v1", Some("https://[user]:[password]@b/v1"));
             let notice = divergence_notice(&cfg, true).expect("diverges with inference active");
+            // Presence BEFORE absence (S3 Loop 2, Balthasar). `!x.contains(CANARY)` holds
+            // trivially for an empty string, so a notice whose text stopped being produced —
+            // or a redaction that collapsed the whole message — would leave this test green
+            // while the surface it guards had vanished. Pin that the message is still the one
+            // being scanned, then that the secret is not in it.
+            assert!(
+                notice.text.contains("the trio runs on") && notice.text.contains("[user]"),
+                "precondition: the scanned notice must still be the divergence message, with \
+                 the endpoint rendered in it: {}",
+                notice.text
+            );
             assert!(!notice.text.contains(CANARY));
 
             // Path 3 — `trio_unavailable_message`: the foreign cause goes through
@@ -10047,7 +10081,18 @@ mod tests {
                     SeatError::Transport(redact_foreign_error(&foreign)),
                 )],
             };
-            assert!(!trio_unavailable_message(&err).contains(CANARY));
+            let message = trio_unavailable_message(&err);
+            assert!(
+                message.contains("melchior") || message.contains("Melchior"),
+                "precondition: the message must still name the seat that failed, or there is \
+                 nothing here for the canary check to be about: {message}"
+            );
+            assert!(
+                message.contains("host/v1"),
+                "and it must still carry the redacted endpoint — a redaction that ate the whole \
+                 cause would pass the canary check while destroying the diagnostic: {message}"
+            );
+            assert!(!message.contains(CANARY));
         }
 
         /// The canary value substituted into a template's `[password]`. Distinctive enough
