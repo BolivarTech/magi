@@ -330,7 +330,7 @@ full explanation of each.
 
 ### Notes
 
-- 969 tests pass. Line coverage is 90.13 %.
+- 1088 tests pass. Line coverage is 90.13 %.
 - `magi-core` stays at 3.1.0. Lineage rotation, the fallback pool and the context guard
   are the next milestone.
 
