@@ -2150,19 +2150,43 @@ async fn probe_and_report(
     // The two conditions are not mutually exclusive: a trio can simultaneously have a
     // measured-but-stale minimum window AND an unmeasured seat, and both notices are
     // independently actionable, so both must be free to fire.
-    if let Some(min_window) = min_mage_window(&trio) {
+    // The map `orchestrate_probes` returns is the trio's table PLUS whatever `extra_models`
+    // rode the same batch (SC-R30's stateless pool candidate), because the CALLER needs those
+    // candidates: REQ-R11's guard predicate is over candidates, and `assumed_window` reads them
+    // too. The three consumers below are about the TRIO, and were reading the merged map —
+    // which is wrong in two distinct ways (S3 Loop 2, Balthasar). `trio_probe_incomplete_notice`
+    // named a pool candidate as an unmeasured MAGE, telling the operator a seat is cold when no
+    // seat is; and `derive_warn_tokens` takes a plain minimum, so a small candidate dragged the
+    // threshold down with none of the tolerance band D-R09 requires — the very outcome REQ-R21
+    // exists to prevent, arriving through a path that bypasses the function that implements it.
+    //
+    // **Residual, stated rather than hidden.** The split is by NAME, so a pool entry declaring
+    // the same model as a seat — legal, and warned about by SC-R52 — drops that seat from this
+    // view: the threshold would then be the minimum over two seats instead of three, and one
+    // seat fewer would be checked for coldness. It needs the stateless path AND that
+    // duplication, it degrades mildly (a slightly higher warn threshold, i.e. warning later),
+    // and closing it exactly means returning the seat list from `orchestrate_probes` — a
+    // four-element tuple across nine call sites. Recorded so the next reader can price that
+    // trade with the facts rather than rediscover it.
+    let trio_seats: BTreeMap<String, Measurement> = trio
+        .iter()
+        .filter(|(model, _)| !extra_models.iter().any(|extra| extra == *model))
+        .map(|(model, m)| (model.clone(), m.clone()))
+        .collect();
+
+    if let Some(min_window) = min_mage_window(&trio_seats) {
         if let Some(n) = stale_composition_notice(min_window, cfg.effective_max_query_bytes()) {
             notices.push(Notice::resolution(n));
         }
     }
-    if let Some(n) = trio_probe_incomplete_notice(&trio, cfg.magi().input_warn_tokens) {
+    if let Some(n) = trio_probe_incomplete_notice(&trio_seats, cfg.magi().input_warn_tokens) {
         notices.push(Notice::resolution(n));
     }
     // REQ-A24b/SC-A24e: the explicit (`[magi].input_warn_tokens`) wins over the measured.
     let warn = cfg
         .magi()
         .input_warn_tokens
-        .or_else(|| derive_warn_tokens(&trio));
+        .or_else(|| derive_warn_tokens(&trio_seats));
     (warn, trio)
 }
 
@@ -6541,8 +6565,18 @@ mod tests {
             let tmp = tempfile::tempdir().unwrap();
             let cwd = dunce::canonicalize(tmp.path()).unwrap();
             assert_eq!(run_init(&cwd, None), 0);
+            // Presence before absence (S3 Loop 2, Balthasar): "zero envelope rows" is also true
+            // of a database that was never created, so without this the test would keep passing
+            // if `run_init` silently stopped scaffolding at all — which is the opposite of what
+            // it is here to prove.
+            let db_path = cwd.join(".magi/.magi-rs-memory.db");
+            assert!(
+                db_path.exists(),
+                "precondition: run_init must have created the DB whose envelope count is checked \
+                 below, or that count means nothing"
+            );
             assert_eq!(
-                envelope_row_count(&cwd.join(".magi/.magi-rs-memory.db")),
+                envelope_row_count(&db_path),
                 0,
                 "no passphrase must leave the DB without an envelope"
             );
@@ -11753,6 +11787,66 @@ agent_timeout_secs = {CEILING}
                 warn_tokens,
                 Some(999),
                 "the declared value wins even though the probe DID measure something different"
+            );
+        }
+
+        /// REQ-R21/D-R09: a pool candidate measured alongside the trio must NOT drag the derived
+        /// threshold, nor be named as an unmeasured mage.
+        ///
+        /// `orchestrate_probes` folds `extra_models` (SC-R30's stateless candidate) into the map
+        /// it returns, because the caller needs candidates for the guard predicate. The trio-only
+        /// consumers read that same map and so inherited the pool: `derive_warn_tokens` takes a
+        /// plain minimum, so a small candidate lowered the threshold with none of the tolerance
+        /// band D-R09 requires — the outcome REQ-R21 exists to prevent, reached through a path
+        /// that never calls the function implementing it.
+        ///
+        /// **Mutation-verified (B16):** pass `&trio` instead of `&trio_seats` to any of the three
+        /// consumers and this goes red.
+        #[tokio::test]
+        async fn a_pool_candidate_measured_with_the_trio_does_not_drag_the_threshold() {
+            let factory = MappedProbeFactory::new(&[
+                ("principal", 200_000),
+                ("melchior", 128_000),
+                ("balthasar", 128_000),
+                ("caspar", 128_000),
+                // An order of magnitude below the seats: if it reaches the minimum, it dominates.
+                ("rescue-model", 8_192),
+            ]);
+            let cfg = cfg_with_four_distinct_models("principal", "melchior", "balthasar", "caspar");
+
+            let mut notices = Vec::new();
+            let (warn_tokens, measured) = probe_and_report(
+                &cfg,
+                &test_endpoints(),
+                ProviderKind::Ollama,
+                &factory,
+                &MagiEnvModelOverrides::default(),
+                &["rescue-model".to_string()],
+                &mut notices,
+            )
+            .await;
+
+            let from_seats = 128_000 * 3 / 4; // WARN_WINDOW_FRACTION over the seat minimum
+            assert_eq!(
+                warn_tokens,
+                Some(from_seats),
+                "the threshold is the trio's, not the pool's: a candidate at 8192 would have \
+                 produced {} instead",
+                8_192 * 3 / 4
+            );
+            assert!(
+                !notices.iter().any(|n| n.text.contains("rescue-model")),
+                "and no trio notice may name a pool candidate as a mage: {notices:?}"
+            );
+
+            // The candidate must still be MEASURED and returned — that is what it rode the batch
+            // for, and REQ-R11's guard predicate is over candidates.
+            assert!(
+                matches!(
+                    measured.get("rescue-model"),
+                    Some(Measurement::Measured { window: 8_192, .. })
+                ),
+                "excluding it from the trio VIEW must not stop it being measured: {measured:?}"
             );
         }
 
