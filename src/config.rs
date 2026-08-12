@@ -2236,6 +2236,56 @@ mod tests {
         );
     }
 
+    /// SC-R37: a loose `[magi]` key placed AFTER the first `[[magi.fallback]]` does NOT parse
+    /// silently into the wrong table — it lands inside the pool entry and `deny_unknown_fields`
+    /// rejects it, naming the key.
+    ///
+    /// This is why the convention is "the pool goes last in the FILE" rather than "last in the
+    /// `[magi]` block": in TOML every loose key must precede the first array of tables, so a key
+    /// added to `[magi]` later could end up here.
+    ///
+    /// **What this does NOT claim.** A SUB-TABLE after the pool — `[embedding]`, say — is
+    /// perfectly valid TOML and lands where it should: a table header closes the preceding array
+    /// of tables. There is nothing to detect there, and demanding an error would mean rejecting a
+    /// correct file. The convention still stands as guidance; only this half is enforceable.
+    #[test]
+    fn a_loose_magi_key_after_the_pool_is_rejected_by_name() {
+        let err = MagiConfig::from_toml_str(
+            "provider = \"ollama\"\n\
+             [magi]\n\
+             melchior_model    = \"m\"\nmelchior_lineage  = \"a\"\n\
+             balthasar_model   = \"b\"\nbalthasar_lineage = \"b\"\n\
+             caspar_model      = \"c\"\ncaspar_lineage    = \"c\"\n\
+             [[magi.fallback]]\n\
+             model   = \"x\"\nlineage = \"x\"\n\
+             max_rotations = 2\n",
+        )
+        .expect_err("a loose key after the pool must not be accepted");
+        assert!(
+            err.to_string().contains("max_rotations"),
+            "the error must name the misplaced key: {err}"
+        );
+    }
+
+    /// And the half that must KEEP working: a sub-table after the pool is valid TOML and parses
+    /// where it belongs.
+    #[test]
+    fn a_sub_table_after_the_pool_is_valid_and_parses_where_it_belongs() {
+        let cfg = MagiConfig::from_toml_str(
+            "provider = \"ollama\"\n\
+             [magi]\n\
+             melchior_model    = \"m\"\nmelchior_lineage  = \"a\"\n\
+             balthasar_model   = \"b\"\nbalthasar_lineage = \"b\"\n\
+             caspar_model      = \"c\"\ncaspar_lineage    = \"c\"\n\
+             [[magi.fallback]]\n\
+             model   = \"x\"\nlineage = \"x\"\n\
+             [embedding]\n\
+             model = \"nomic-embed-text\"\n",
+        )
+        .expect("a table header closes the array: this is correct TOML");
+        assert_eq!(cfg.fallback_pool().len(), 1);
+    }
+
     /// `magi_endpoint_diverges()` is true if the trio declares its own `kind` or `base_url`,
     /// and blank counts as NOT declared (REQ-A12).
     #[test]

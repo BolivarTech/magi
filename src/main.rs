@@ -3153,6 +3153,25 @@ fn build_magi_orchestrator(
     // (`orchestrator.rs:309-320`), and nothing about that failure is visible until a rotation
     // needs the measurement — the worst possible moment.
     for (seat, provider, lineage, model) in seats {
+        // REQ-R28/SC-R56: the probe and the completions provider are declared APART, so keeping
+        // them pointed at the same model is the caller's job. magi-core checks it too and warns —
+        // but through `tracing::warn!`, and magi-rs has no subscriber, so that event is emitted
+        // into the void. The comparison is ours to make and costs nothing: both names are in hand
+        // here, and it is a string equality with no I/O.
+        //
+        // It NEVER rejects, for the same reason the crate does not: a probe is not authoritative
+        // over which model a provider serves. But a mis-pointed probe files the window under
+        // another model's name AND feeds the digest collision check, which is the one fail-closed
+        // direction in this subsystem — it can reject a candidate that was healthy.
+        if let Some(probe) = probes.get(&model) {
+            if probe.declared_model() != Some(provider.model()) {
+                notices.push(Notice::resolution(format!(
+                    "notice: the probe registered for {seat:?} measures `{}` while its provider                      serves `{}`. The measurement will be filed under the wrong model; rotation                      still runs.",
+                    probe.declared_model().unwrap_or("<unknown>"),
+                    provider.model()
+                )));
+            }
+        }
         // Recorded ON THE SAME loop that registers, for the same reason the wrap trace is
         // recorded on the branch that wraps: a guardian anchored anywhere else stops guarding.
         #[cfg(test)]
@@ -7469,6 +7488,189 @@ mod tests {
                 "an undeclared strict_context_guard reaches magi-core as false (REQ-R11): the \
                  case it would bite is the COLD START, where nothing measured yet means every \
                  candidate fails the window condition and rotation switches off in silence"
+            );
+        }
+
+        /// SC-R52/D-R15: a model declared TWICE registers exactly ONE probe.
+        ///
+        /// magi-core indexes capabilities by `model_id` and knows nothing about endpoints, so two
+        /// probes for one model leave it keeping whichever answered last, **in nondeterministic
+        /// order**. Deduplicating at registration makes that unreachable instead of merely
+        /// forbidden on paper — and two seats on the same model stay LEGAL, as they were in
+        /// v0.12.0, since prohibiting them would be a configuration break bought for nothing.
+        #[test]
+        fn a_model_declared_twice_registers_a_single_probe() {
+            let cfg = MagiConfig::from_toml_str(
+                "provider = \"ollama\"\n\
+                 [magi]\n\
+                 melchior_model    = \"shared\"\nmelchior_lineage  = \"lin-a\"\n\
+                 balthasar_model   = \"shared\"\nbalthasar_lineage = \"lin-b\"\n\
+                 caspar_model      = \"other\"\ncaspar_lineage    = \"lin-c\"\n\
+                 [[magi.fallback]]\n\
+                 model   = \"shared\"\nlineage = \"lin-rescue\"\n",
+            )
+            .expect("two seats on one model is legal");
+
+            let cache = {
+                let conn = std::sync::Mutex::new(
+                    rusqlite::Connection::open_in_memory().expect("in-memory sqlite"),
+                );
+                let dek = magi_rs::vault::MaskedDek::new(zeroize::Zeroizing::new(vec![5u8; 32]))
+                    .expect("32 bytes");
+                Arc::new(ModelCapabilityCache::new(Arc::new(conn), dek).expect("schema"))
+            };
+            let mut notices = Vec::new();
+            let magi = build_magi_orchestrator(
+                &TrioBuild {
+                    cfg: &cfg,
+                    principal_kind: ProviderKind::Ollama,
+                    endpoints: &test_endpoints(),
+                    creds: None,
+                    warn_tokens: None,
+                    env_overrides: &MagiEnvModelOverrides::default(),
+                    capability_cache: Some(&cache),
+                    measured: &BTreeMap::new(),
+                },
+                &mut notices,
+            )
+            .expect("a repeated model must not fail the build");
+            drop(magi);
+
+            let wired = pool_wiring_trace().expect("the pool is declared");
+            assert!(
+                wired.candidates.iter().any(|(model, _)| model == "shared"),
+                "the pool entry repeating a seat's model is KEPT, not pruned: `used` is per mage, \
+                 so another seat can still rotate into it: {wired:?}"
+            );
+        }
+
+        /// SC-R24: rotation does NOT depend on the probe. With nothing measured at all, a failing
+        /// mage still rotates — measurement improves the decision, it does not enable it.
+        #[tokio::test]
+        async fn rotation_works_with_no_measurement_at_all() {
+            use mockito::Matcher;
+            let mut server = mockito::Server::new_async().await;
+            let _down = server
+                .mock("POST", "/v1/chat/completions")
+                .match_body(Matcher::AllOf(vec![
+                    Matcher::Regex("(?i)caspar".into()),
+                    Matcher::Regex("down-model".into()),
+                ]))
+                .with_status(400)
+                .with_body("{\"error\":\"unavailable\"}")
+                .create_async()
+                .await;
+            for (seat, model, agent) in [
+                ("(?i)caspar", "rescue-model", "caspar"),
+                ("(?i)melchior", "ok-model", "melchior"),
+                ("(?i)balthasar", "ok-model", "balthasar"),
+            ] {
+                server
+                    .mock("POST", "/v1/chat/completions")
+                    .match_body(Matcher::AllOf(vec![
+                        Matcher::Regex(seat.into()),
+                        Matcher::Regex(model.into()),
+                    ]))
+                    .with_status(200)
+                    .with_body(verdict_body(agent))
+                    .create_async()
+                    .await;
+            }
+            let endpoints = ResolvedEndpoints {
+                root: endpoint_at(&server.url()),
+                magi: endpoint_at(&server.url()),
+            };
+            let mut notices = Vec::new();
+            let magi = build_magi_orchestrator(
+                &TrioBuild {
+                    cfg: &cfg_with_pool(2),
+                    principal_kind: ProviderKind::Ollama,
+                    endpoints: &endpoints,
+                    creds: None,
+                    warn_tokens: None,
+                    env_overrides: &MagiEnvModelOverrides::default(),
+                    capability_cache: None,
+                    // NOTHING measured — the cold-start state.
+                    measured: &BTreeMap::new(),
+                },
+                &mut notices,
+            )
+            .expect("ollama is keyless");
+
+            let report = magi
+                .analyze(
+                    &Mode::Analysis,
+                    "a question long enough to be a real consult",
+                )
+                .await
+                .expect("the consult must complete");
+            assert!(
+                !report.rotations[&AgentName::Caspar].chain.is_empty(),
+                "rotation must work with no measurement: the probe improves the decision, it does \
+                 not enable it"
+            );
+            assert!(!report.degraded, "and the run is not degraded");
+        }
+
+        /// SC-R02: exhausting the chain WITHOUT a verdict does degrade the run — the other half of
+        /// SC-R01, and the one that keeps "a rotation is not a degradation" from quietly becoming
+        /// "nothing degrades any more".
+        #[tokio::test]
+        async fn exhausting_the_rotation_chain_degrades_the_run() {
+            use mockito::Matcher;
+            let mut server = mockito::Server::new_async().await;
+            // EVERY model Caspar can reach fails, primary and candidate alike.
+            let _all_down = server
+                .mock("POST", "/v1/chat/completions")
+                .match_body(Matcher::Regex("(?i)caspar".into()))
+                .with_status(400)
+                .with_body("{\"error\":\"unavailable\"}")
+                .create_async()
+                .await;
+            for (seat, agent) in [("(?i)melchior", "melchior"), ("(?i)balthasar", "balthasar")] {
+                server
+                    .mock("POST", "/v1/chat/completions")
+                    .match_body(Matcher::Regex(seat.into()))
+                    .with_status(200)
+                    .with_body(verdict_body(agent))
+                    .create_async()
+                    .await;
+            }
+            let endpoints = ResolvedEndpoints {
+                root: endpoint_at(&server.url()),
+                magi: endpoint_at(&server.url()),
+            };
+            let mut notices = Vec::new();
+            let magi = build_magi_orchestrator(
+                &TrioBuild {
+                    cfg: &cfg_with_pool(2),
+                    principal_kind: ProviderKind::Ollama,
+                    endpoints: &endpoints,
+                    creds: None,
+                    warn_tokens: None,
+                    env_overrides: &MagiEnvModelOverrides::default(),
+                    capability_cache: None,
+                    measured: &BTreeMap::new(),
+                },
+                &mut notices,
+            )
+            .expect("ollama is keyless");
+
+            let report = magi
+                .analyze(
+                    &Mode::Analysis,
+                    "a question long enough to be a real consult",
+                )
+                .await
+                .expect("the consult must return even when a seat is lost");
+            assert!(
+                report.degraded,
+                "no verdict after the whole chain IS degradation"
+            );
+            assert!(
+                report.failed_agents.contains_key(&AgentName::Caspar),
+                "and the lost seat is named: {:?}",
+                report.failed_agents
             );
         }
 
