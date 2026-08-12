@@ -1774,11 +1774,18 @@ fn effective_root_template(
     env_base_url: Option<&str>,
 ) -> Result<EndpointTemplate, String> {
     match env_base_url.map(str::trim).filter(|s| !s.is_empty()) {
-        Some(env_val) => EndpointTemplate::parse(env_val, Scope::Root)
-            .map_err(|e| format!("OPENAI_BASE_URL is invalid: {e}")),
-        None => magi_config
-            .effective_base_url()
-            .map_err(|e| format!("base_url is invalid: {e}")),
+        Some(env_val) => EndpointTemplate::parse(env_val, Scope::Root).map_err(|e| {
+            format!(
+                "OPENAI_BASE_URL is invalid: {}",
+                magi_rs::redact::redact_foreign_error(&e)
+            )
+        }),
+        None => magi_config.effective_base_url().map_err(|e| {
+            format!(
+                "base_url is invalid: {}",
+                magi_rs::redact::redact_foreign_error(&e)
+            )
+        }),
     }
 }
 
@@ -1813,8 +1820,12 @@ fn resolve_endpoints(
         .map(str::trim)
         .filter(|s| !s.is_empty())
     {
-        Some(own) => EndpointTemplate::parse(own, Scope::Magi)
-            .map_err(|e| format!("magi base_url is invalid: {e}"))?,
+        Some(own) => EndpointTemplate::parse(own, Scope::Magi).map_err(|e| {
+            format!(
+                "magi base_url is invalid: {}",
+                magi_rs::redact::redact_foreign_error(&e)
+            )
+        })?,
         None => root_tpl.clone(),
     };
 
@@ -2925,6 +2936,12 @@ fn build_magi_orchestrator(
     SEAT_WIRING_TRACE.with(|t| t.borrow_mut().clear());
     #[cfg(test)]
     SEAT_LINEAGE_TRACE.with(|t| t.borrow_mut().clear());
+    // The pool trace needs the same clear, and for a sharper reason than the other two: it is
+    // written only INSIDE the `if` that wires a declared pool, so a call with no pool left the
+    // previous call's value standing and a test would read a pool this call never wired — the
+    // failure mode being that it passes (S3 Loop 2, Balthasar).
+    #[cfg(test)]
+    POOL_WIRING_TRACE.with(|t| *t.borrow_mut() = None);
 
     // `env > TOML > backend`, via `seats_with_env_overrides` — the SAME resolution
     // `orchestrate_probes` now applies (B3, sixth-pass gate finding S8), so the two cannot see
@@ -3299,7 +3316,7 @@ fn build_magi_orchestrator(
             *t.borrow_mut() = Some(PoolWiring {
                 candidates: wired,
                 max_rotations: cfg.effective_max_rotations(),
-                strict_guard: cfg.declared_strict_context_guard(),
+                strict_guard: effective_guard,
             });
         });
 
@@ -3620,7 +3637,10 @@ fn resolve_template(
     };
     resolution.map_err(|e| {
         if secret_store.is_some() {
-            format!("base_url credential error: {e}")
+            format!(
+                "base_url credential error: {}",
+                magi_rs::redact::redact_foreign_error(&e)
+            )
         } else {
             format!(
                 "base_url needs vault-stored credentials, but no vault is open this \
@@ -3654,9 +3674,12 @@ fn resolve_effective_embedding_endpoint(
     magi_config: &MagiConfig,
     secret_store: Option<&SharedSecretStore>,
 ) -> Result<String, String> {
-    let template = magi_config
-        .effective_embedding_base_url()
-        .map_err(|e| format!("embedding base_url is invalid: {e}"))?;
+    let template = magi_config.effective_embedding_base_url().map_err(|e| {
+        format!(
+            "embedding base_url is invalid: {}",
+            magi_rs::redact::redact_foreign_error(&e)
+        )
+    })?;
     resolve_template(&template, Scope::Embedding, secret_store).map(|r| r.as_str().to_string())
 }
 
@@ -7510,6 +7533,76 @@ mod tests {
                  model   = \"rescue-model\"\nlineage = \"lin-rescue\"\n"
             ))
             .expect("the rotation config must parse")
+        }
+
+        /// SC-R23/REQ-R11: a **declared** `strict_context_guard = true` reaches magi-core as
+        /// `false` when no candidate has a measured window.
+        ///
+        /// This is the case the fail-safe exists for and the only one that discriminates. Its
+        /// neighbour below asserts `!wired.strict_guard` on a config that never declares the key,
+        /// where declared and effective are both `false` — so it holds whether or not the
+        /// fail-safe works, and the trace it reads recorded
+        /// `cfg.declared_strict_context_guard()` rather than the value actually handed to the
+        /// builder. Two halves of one blind spot: a trace reporting the wrong number, and the
+        /// only test of it unable to tell (S3 Loop 2, Balthasar).
+        ///
+        /// What is at stake is not cosmetic. A `true` with nothing measured makes **every**
+        /// candidate fail magi-core's condition #6, so rotation switches off whole — silently,
+        /// on the cold start that is any fresh install's first run.
+        ///
+        /// **Mutation-verified (B16):** put `cfg.declared_strict_context_guard()` back in the
+        /// trace and this goes red; the neighbour below stays green.
+        #[test]
+        fn a_declared_strict_guard_reaches_magi_core_as_false_when_nothing_is_measured() {
+            let cfg = MagiConfig::from_toml_str(
+                "provider = \"ollama\"\n\
+                 [magi]\n\
+                 melchior_model    = \"ok-model\"\nmelchior_lineage  = \"lin-melchior\"\n\
+                 balthasar_model   = \"ok-model\"\nbalthasar_lineage = \"lin-balthasar\"\n\
+                 caspar_model      = \"down-model\"\ncaspar_lineage    = \"lin-caspar\"\n\
+                 agent_timeout_secs = 30\n\
+                 max_rotations = 2\n\
+                 strict_context_guard = true\n\
+                 [[magi.fallback]]\n\
+                 model   = \"rescue-model\"\nlineage = \"lin-rescue\"\n",
+            )
+            .expect("the rotation config must parse");
+            assert!(
+                cfg.declared_strict_context_guard(),
+                "precondition: the operator DID declare it, or this test proves nothing"
+            );
+
+            let mut notices = Vec::new();
+            let magi = build_magi_orchestrator(
+                &TrioBuild {
+                    cfg: &cfg,
+                    principal_kind: ProviderKind::Ollama,
+                    endpoints: &test_endpoints(),
+                    creds: None,
+                    warn_tokens: None,
+                    env_overrides: &MagiEnvModelOverrides::default(),
+                    capability_cache: None,
+                    // Nothing measured: the cold start.
+                    measured: &BTreeMap::new(),
+                },
+                &mut notices,
+            )
+            .expect("ollama is keyless");
+            drop(magi);
+
+            let wired = pool_wiring_trace().expect("a declared pool must be wired");
+            assert!(
+                !wired.strict_guard,
+                "declared true, but no candidate measured — magi-core must receive false or the \
+                 pool it was given was never eligible"
+            );
+            assert!(
+                notices
+                    .iter()
+                    .any(|n| n.text.contains("strict_context_guard")),
+                "and the override must be announced: a setting the operator wrote and the system \
+                 did not apply is exactly what the notice rule exists for"
+            );
         }
 
         /// SC-R01/REQ-R03: the pool declared in `[[magi.fallback]]` reaches magi-core with each
