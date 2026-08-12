@@ -296,4 +296,99 @@ mod tests {
         let seats = trio(&[("melchior", "x"), ("balthasar", "x"), ("caspar", "x")]);
         assert!(validate_diversity(&seats, &pool_of(&[("m", "x")]), false).is_ok());
     }
+
+    // ---------------------------------------------------------------------------------------
+    // Digest corroboration — REQ-R29 (second half) / SC-R45 (Task 6.7).
+
+    /// A digest of the right shape: 64 lowercase hex.
+    const DIGEST: &str = "d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2";
+
+    /// Builds `(model, lineage, digest)` rows the way the cache hands them over.
+    fn rows(entries: &[(&str, &str, Option<&str>)]) -> Vec<(String, Lineage, Option<String>)> {
+        entries
+            .iter()
+            .map(|(model, lineage, digest)| {
+                (
+                    (*model).to_owned(),
+                    Lineage::parse(lineage).expect("valid lineage"),
+                    digest.map(str::to_owned),
+                )
+            })
+            .collect()
+    }
+
+    /// SC-R45: two models of DECLARED DISTINCT lineages sharing a cached digest produce a WARNING
+    /// naming both, and the process STARTS.
+    ///
+    /// Never an error, and the reason is the nature of the evidence: the cached digest can be
+    /// weeks old — the cache only changes when the configuration does — so refusing to start over
+    /// a collision that may no longer exist is a worse failure than the one it prevents.
+    #[test]
+    fn two_distinct_lineages_with_the_same_digest_warn_and_start() {
+        let notices = corroborate_by_digest(&rows(&[
+            ("a", "zhipu", Some(DIGEST)),
+            ("b", "minimax", Some(DIGEST)),
+        ]));
+        assert_eq!(notices.len(), 1, "one message naming the pair");
+        let t = &notices[0].text;
+        assert!(t.contains('a') && t.contains('b'), "both models named: {t}");
+        assert!(
+            t.contains("zhipu") && t.contains("minimax"),
+            "and both declared lineages, or the operator cannot act: {t}"
+        );
+    }
+
+    /// Two models of the SAME declared lineage sharing a digest is not a contradiction — it is the
+    /// declaration being accurate. Nothing to report.
+    #[test]
+    fn the_same_lineage_sharing_a_digest_is_not_reported() {
+        let notices = corroborate_by_digest(&rows(&[
+            ("a", "zhipu", Some(DIGEST)),
+            ("b", "zhipu", Some(DIGEST)),
+        ]));
+        assert!(
+            notices.is_empty(),
+            "the declaration agreed with the evidence"
+        );
+    }
+
+    /// With UNRESOLVED digests the corroboration cannot happen, and a notice says so.
+    ///
+    /// MS2's rule: any resolution that does not come from what the user wrote is announced.
+    /// Silence here would read as "corroborated and fine", which is a different claim from
+    /// "there was nothing to corroborate with".
+    #[test]
+    fn unresolved_digests_skip_corroboration_and_say_so() {
+        let notices = corroborate_by_digest(&rows(&[("a", "zhipu", None), ("b", "minimax", None)]));
+        assert!(
+            notices.iter().any(|n| n.text.contains("not corroborated")),
+            "the absence of evidence must be stated, not implied: {notices:?}"
+        );
+    }
+
+    /// A single unresolved digest among resolved ones does not silence the check for the rest.
+    #[test]
+    fn one_unresolved_digest_does_not_silence_the_others() {
+        let notices = corroborate_by_digest(&rows(&[
+            ("a", "zhipu", Some(DIGEST)),
+            ("b", "minimax", Some(DIGEST)),
+            ("c", "google", None),
+        ]));
+        assert!(
+            notices
+                .iter()
+                .any(|n| n.text.contains('a') && n.text.contains('b')),
+            "the resolved pair is still corroborated: {notices:?}"
+        );
+    }
+
+    /// Distinct digests are exactly what the declaration promised: silence.
+    #[test]
+    fn distinct_digests_are_silent() {
+        let notices = corroborate_by_digest(&rows(&[
+            ("a", "zhipu", Some(DIGEST)),
+            ("b", "minimax", Some(&DIGEST.replace('d', "e"))),
+        ]));
+        assert!(notices.is_empty());
+    }
 }
