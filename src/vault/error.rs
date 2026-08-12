@@ -15,7 +15,7 @@ use thiserror::Error;
 ///
 /// Each variant names a failure stage distinguishable by the caller; the underlying AEAD
 /// prevents forgery regardless of which one is exposed.
-#[derive(Debug, Error)]
+#[derive(Debug, Clone, Error)]
 pub enum VaultError {
     /// The DEK unwrap failed the AEAD tag after FEC correction — that is, the master key is
     /// **incorrect**.

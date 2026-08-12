@@ -4,11 +4,19 @@
 //!
 //! # By composition, not by migration
 //!
-//! `ProviderProbe` is a trait **separate** from `LlmProvider`: an `OllamaProvider` from magi-
-//! core is built **only** to call `.window()` and `.digest()` on it, never to generate. magi-rs
-//! still completes with its own `Provider` — D-A07 and R-A02 remain intact. Only `ollama` is
-//! measurable (`ProviderKind::is_probeable`); `openai-compat` and `anthropic` offer no
-//! introspection and degrade to [`Measurement::NotMeasurable`].
+//! `ProviderProbe` is a trait **separate** from `LlmProvider`: the `OllamaProvider` this module
+//! builds exists **only** to call `.window()` and `.digest()` on it, never to generate. Only
+//! `ollama` is measurable (`ProviderKind::is_probeable`); `openai-compat` and `anthropic` offer
+//! no introspection and degrade to [`Measurement::NotMeasurable`].
+//!
+//! **Since REQ-R30 the trio's `ollama` seats ALSO complete through an `OllamaProvider`** (D-R12
+//! reverted D-A07), so the type is no longer probe-only in this crate. The two roles still use
+//! **separate instances**: this module builds its own for measuring, and `build_native_provider`
+//! builds the seat's. Sharing one is possible and was left as a choice for whoever needs it —
+//! but the constructors are not interchangeable, and that is the part to keep straight. Here
+//! `new` is deliberate and safe, because every probe call is wrapped in its own
+//! [`PROBE_TIMEOUT_SECS`] ceiling, so the client's own 300 s never governs. A **seat** must use
+//! `with_timeout` with the derived value, or it breaks the derived scale in silence.
 //!
 //! # The body-size cap (REQ-A16b / SC-A16c) — satisfied BY COMPOSITION
 //!
@@ -81,7 +89,11 @@ use magi_core::rotation::ProviderProbe;
 
 use crate::magi::endpoint::ResolvedEndpoint;
 use crate::magi::kind::ProviderKind;
-use crate::magi::{PROBE_TIMEOUT_SECS, PROBE_WINDOW_MAX, PROBE_WINDOW_MIN, WARN_WINDOW_FRACTION};
+use crate::magi::{
+    PROBE_TIMEOUT_SECS, PROBE_WINDOW_MAX, PROBE_WINDOW_MIN, WARN_POOL_TOLERANCE,
+    WARN_WINDOW_FRACTION,
+};
+use crate::notices::Notice;
 use crate::redact::{redact_foreign_error, SafeErrorText};
 
 /// Exact length of a SHA-256 digest in hexadecimal (REQ-A16b).
@@ -147,7 +159,13 @@ pub trait ProbeFactory: Send + Sync {
     fn probe_for(&self, kind: ProviderKind, base_url: &ResolvedEndpoint, model: &str) -> ProbeSeat;
 }
 
-/// Production: `OllamaProvider` **only as a probe**, never for completions (D-A07).
+/// Production: builds an `OllamaProvider` **to measure with**, never to complete with.
+///
+/// Since REQ-R30 the trio's `ollama` seats complete through their own `OllamaProvider`, built in
+/// `build_native_provider` — a **separate instance**, not this one. `new` is correct *here* and
+/// wrong *there*: every call this factory's result receives is wrapped in its own
+/// [`PROBE_TIMEOUT_SECS`] ceiling, so the client's 300 s default never governs, whereas a seat
+/// has nothing outside it to cut the request short.
 ///
 /// The `base_url` is passed as-is, with its `/v1` if it has one: `OllamaProvider::new` accepts
 /// both forms (with and without `/v1`) and normalizes internally — probe requests always go
@@ -179,7 +197,13 @@ impl ProbeFactory for OllamaProbeFactory {
 ///
 /// It does not byte-index anything: `str::bytes()` is a total iterator over the bytes of a
 /// valid UTF-8 string, never panicking on a character boundary (unlike `&s[a..b]`).
-fn validate_digest(raw: Option<String>) -> Option<String> {
+///
+/// **Public so the two measurement paths share ONE definition.** It was private, and the
+/// per-consult path in `CachedProbe` therefore persisted whatever the daemon answered while this
+/// one filtered it — the same asymmetry that let an out-of-range window through, one field over
+/// (S2 Loop 2, Caspar). Duplicating the predicate there would have closed the symptom and kept
+/// the shape that produced it: two rules for one question, free to drift apart again.
+pub fn validate_digest(raw: Option<String>) -> Option<String> {
     raw.filter(|d| {
         d.len() == DIGEST_HEX_LEN
             && d.bytes()
@@ -314,6 +338,282 @@ pub fn min_mage_window(mages: &BTreeMap<String, Measurement>) -> Option<usize> {
         .min()
 }
 
+/// Derives `input_warn_tokens` from the trio, letting only in-band pool candidates lower it, and
+/// reports the ones that fall outside the band (REQ-R21, D-R09).
+///
+/// # Why the base is the TRIO and not the whole pool
+///
+/// Deriving from every candidate looks conservative and is not. A small-window entry at the end of
+/// the pool — the candidate *least* likely to ever run — would drag the threshold of every run
+/// down with it, and the size warning would fire on practically every real consult. **A warning
+/// that always sounds is ignored**, which is strictly worse than one that occasionally does not
+/// fire.
+///
+/// And the scenario that derivation was meant to protect against **cannot do harm anyway**: by
+/// magi-core's condition #6 a candidate is only selected when the prompt fits its window, so a
+/// small one is never chosen for a payload it could not hold. The real protection is that
+/// condition; this threshold only ever warns.
+///
+/// # What the band buys
+///
+/// A candidate within [`WARN_POOL_TOLERANCE`] of the base enters the minimum because doing so
+/// costs nothing when it barely moves the number — a free, marginal calibration improvement,
+/// **documented as that and not as a safety mechanism**. Everything below the band is reported
+/// instead, with the model, its window and the base, so the operator can replace it with one of
+/// comparable size.
+///
+/// **Every out-of-band entry is named in ONE message** (SC-R32): whoever assembled an unbalanced
+/// pool usually has more than one, and finding them one start at a time costs a start each.
+///
+/// # Returns
+///
+/// The threshold and the notices owed. An empty pool, or one entirely in band, reports nothing.
+///
+/// # Examples
+///
+/// ```
+/// # use magi_rs::magi::probe::derive_input_warn_tokens;
+/// let (threshold, notices) = derive_input_warn_tokens(&[128_000, 128_000, 128_000], &[]);
+/// assert!(threshold < 128_000);
+/// assert!(notices.is_empty());
+/// ```
+#[must_use]
+pub fn derive_input_warn_tokens(trio: &[usize], pool: &[(&str, usize)]) -> (usize, Vec<Notice>) {
+    let base = trio.iter().copied().min().unwrap_or(0);
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss
+    )]
+    let floor = (base as f64 * (1.0 - WARN_POOL_TOLERANCE)) as usize;
+
+    let (in_band, out_of_band): (Vec<_>, Vec<_>) =
+        pool.iter().partition(|(_, window)| *window >= floor);
+
+    let effective = in_band
+        .iter()
+        .map(|(_, window)| *window)
+        .chain(std::iter::once(base))
+        .min()
+        .unwrap_or(base);
+
+    let mut notices = Vec::new();
+    if !out_of_band.is_empty() {
+        let listed = out_of_band
+            .iter()
+            .map(|(model, window)| format!("`{model}` ({window} tokens)"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        notices.push(Notice::resolution(format!(
+            "notice: fallback candidates far below the trio's window are NOT lowering the size \
+             warning threshold, which stays on the trio base of {base} tokens: {listed}. \
+             Replace them with candidates of comparable window if you want the threshold to \
+             reflect them."
+        )));
+    }
+
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss
+    )]
+    let threshold = (effective as f64 * WARN_WINDOW_FRACTION) as usize;
+    (threshold, notices)
+}
+
+/// What is known about one model's context window, in **three** states rather than two (REQ-R26).
+///
+/// A reported window can be a **measurement** or an **assumption**, and a report that does not
+/// distinguish them is stating a supposition as a fact. That is the entire reason this type exists
+/// instead of an `Option<usize>`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowState {
+    /// The probe answered for this model.
+    Measured(usize),
+    /// Nothing was measured for this model, so the smallest window measured **in this run** is
+    /// credited to it. Derived from the run, never a property of the model — which is why it is
+    /// never persisted.
+    Assumed(usize),
+    /// Nothing measured and nothing to assume from. Falls back to today's non-strict behaviour
+    /// rather than inventing a number, because an invented one would be trusted.
+    Unknown,
+}
+
+/// The window assumed for a model that could not be measured: the **smallest** measured in this
+/// run, or `None` when nothing was measured at all.
+///
+/// The smallest and not an average or the largest: an assumption that overstates a window invites
+/// a rotation into a candidate that cannot hold the prompt, while one that understates it only
+/// costs a warning.
+///
+/// # Examples
+///
+/// ```
+/// # use std::collections::BTreeMap;
+/// # use magi_rs::magi::probe::assumed_window;
+/// assert_eq!(assumed_window(&BTreeMap::new()), None);
+/// ```
+#[must_use]
+pub fn assumed_window(measured: &BTreeMap<String, Measurement>) -> Option<usize> {
+    min_mage_window(measured)
+}
+
+/// What is known about `model`'s window, given everything measured in this run.
+///
+/// **This never removes anything.** The assumption informs; the filtering stays entirely with
+/// magi-core, whose condition #6 compares a candidate's window against a `min_window_tokens`
+/// computed **per consult** from the prompt (`orchestrator.rs:1199`) — a number that does not exist
+/// at the moment the pool is declared, which is why a static elegibility check here is not merely
+/// expensive but unbuildable.
+///
+/// It is also why `CachedProbe::window` answers `None` on a miss rather than the assumed value:
+/// if the probe returned an assumption, magi-core could not tell it from a measurement, and
+/// REQ-R11's fail-safe — *"pass strict only if a candidate has a MEASURED window"* — would become
+/// unverifiable, since every candidate would then have a number.
+#[must_use]
+pub fn window_state(measured: &BTreeMap<String, Measurement>, model: &str) -> WindowState {
+    match measured.get(model) {
+        Some(Measurement::Measured { window, .. }) => WindowState::Measured(*window),
+        _ => assumed_window(measured).map_or(WindowState::Unknown, WindowState::Assumed),
+    }
+}
+
+/// Startup notices for the pool candidates running on an assumed window (REQ-R26/SC-R51).
+///
+/// # The two conditions, and the case they exist for
+///
+/// A notice is emitted **only** when something in this run was actually measured. Without that,
+/// a cold daemon — the ordinary first run of any fresh install — leaves every candidate
+/// unmeasured and the warning fires over the whole pool: transient, noisy, and with no action the
+/// operator could take. *"Not measured this time"* is not *"not measurable"*, and the same
+/// argument the threshold derivation uses applies here — **a warning that always sounds is
+/// ignored**, which costs more than the one it would have delivered.
+///
+/// An endpoint where nothing is measurable is silent for the second reason: that candidate is not
+/// *worse*, it is on a protocol that does not expose the datum at all.
+#[must_use]
+pub fn assumed_window_notices(
+    measured: &BTreeMap<String, Measurement>,
+    pool: &[crate::magi::rotation_config::FallbackEntry],
+) -> Vec<Notice> {
+    let Some(assumed) = assumed_window(measured) else {
+        return Vec::new();
+    };
+    pool.iter()
+        // Routed through [`window_state`] rather than an ad-hoc "not Measured" test: the three
+        // states are the point of that type, and having the only place that reports them compute
+        // the distinction some other way is how the two drift apart.
+        .filter(|candidate| {
+            // NOT measurable is not the same as not measured, and only the second earns a notice
+            // (SC-R51). `window_state` credits both with the assumption, which REQ-R26's headline
+            // supports — the assumption is informational and applies to any unmeasured candidate.
+            // The NOTICE is narrower: telling an operator that a candidate on a protocol with no
+            // introspection endpoint "has no measured window" reads as a defect in their setup,
+            // when it is a property of the protocol and there is no action to take.
+            //
+            // Today this cannot fire — one orchestrator construction has one endpoint and one
+            // `kind`, so either everything is measurable or nothing is, and nothing-measurable
+            // already returned above with no assumption to make. It is written out anyway
+            // because that is an emergent invariant nothing enforces: per-seat endpoints would
+            // make the mixed case real, and the failure would be a confusing notice rather than
+            // anything that breaks (S2 Loop 2, Balthasar).
+            !matches!(
+                measured.get(&candidate.model),
+                Some(Measurement::NotMeasurable)
+            ) && matches!(
+                window_state(measured, &candidate.model),
+                WindowState::Assumed(_)
+            )
+        })
+        .map(|candidate| {
+            Notice::info(format!(
+                "notice: fallback candidate `{}` has no measured window; it is credited with \
+                 {assumed} tokens, the smallest measured this run. It stays eligible, but a \
+                 rotation into it may fail for a prompt larger than that.",
+                candidate.model
+            ))
+        })
+        .collect()
+}
+
+/// Whether `strict_context_guard` may actually be handed to magi-core, and the notice owed when it
+/// may not (REQ-R11).
+///
+/// # The predicate is over CANDIDATES, which is why the pool is a parameter
+///
+/// magi-core applies the guard as condition **#6** of candidate selection: a candidate whose window
+/// is unknown is admitted while the guard is off and **rejected** while it is on. So a `true` handed
+/// down when nothing among the candidates was measured rejects **every** one of them — rotation
+/// switches off entirely, and nothing fails visibly. That is not a guard; it is a declared pool that
+/// was never eligible.
+///
+/// `measured` carries everything this run measured, **the trio included**, so a predicate over the
+/// whole map is wrong in a specific and silent way: the trio measures, no candidate does, the
+/// predicate answers `true`, and the pool dies. The question is only ever *"did any CANDIDATE get a
+/// window?"*.
+///
+/// # It is NOT tied to the transport kind
+///
+/// Since magi-core 3.2.0 a probe is declared apart from the completions provider, so the `kind` no
+/// longer predicts whether anything was measured. Deciding on it produces both symmetric errors:
+/// denying the guard to an `openai-compat` that measured through a declared probe, and granting it
+/// to an `ollama` whose daemon was cold — which is exactly the case the `false` default exists to
+/// protect, and the first run of any fresh install.
+///
+/// This is the same predicate magi-core computes internally as `strict_guard_is_inert`
+/// (`rotation.rs:839`), which is `pub(crate)` and therefore uncallable from here; it is recomputed
+/// from this crate's own measurements rather than approximated.
+///
+/// # Returns
+///
+/// The value to hand magi-core, and `Some(notice)` **only** when a declared `true` had to be
+/// overridden. A declared `false` reports nothing — the operator asked for the default and got it —
+/// and neither does an empty pool: with no candidates there is nothing to protect and no surprise.
+///
+/// # Examples
+///
+/// ```
+/// # use std::collections::BTreeMap;
+/// # use magi_rs::magi::probe::effective_strict_guard;
+/// let (effective, notice) = effective_strict_guard(true, &BTreeMap::new(), &[]);
+/// assert!(!effective);
+/// assert!(notice.is_none());
+/// ```
+#[must_use]
+pub fn effective_strict_guard(
+    declared: bool,
+    measured: &BTreeMap<String, Measurement>,
+    pool: &[crate::magi::rotation_config::FallbackEntry],
+) -> (bool, Option<Notice>) {
+    if !declared {
+        return (false, None);
+    }
+    let any_candidate_measured = pool.iter().any(|candidate| {
+        matches!(
+            measured.get(&candidate.model),
+            Some(Measurement::Measured { .. })
+        )
+    });
+    if any_candidate_measured {
+        return (true, None);
+    }
+    // An empty pool is "no rotation", a deliberate choice — the same case magi-core excludes from
+    // its own inert-guard warning. Overriding it is not a surprise worth a line at startup.
+    if pool.is_empty() {
+        return (false, None);
+    }
+    (
+        false,
+        Some(Notice::resolution(
+            "notice: `strict_context_guard = true` was declared but is NOT being applied, \
+             because no candidate has a measured window. Applying it would reject every \
+             fallback candidate and switch rotation off entirely. It takes effect on its own \
+             once a measurement succeeds."
+                .to_owned(),
+        )),
+    )
+}
+
 /// Derives `input_warn_tokens` from the **minimum** of the measured windows of the mages
 /// (REQ-A24b).
 ///
@@ -335,6 +635,107 @@ pub fn derive_warn_tokens(mages: &BTreeMap<String, Measurement>) -> Option<usize
         clippy::cast_sign_loss
     )]
     Some((min as f64 * WARN_WINDOW_FRACTION) as usize)
+}
+
+/// The Ollama command that fetches a model manifest, named by [`missing_model_notices`].
+///
+/// It is not a chosen value: it is the literal CLI verb that makes a declared tag resolvable on
+/// the daemon, and it is the ONLY action that fixes the case the notice is about. A constant so
+/// that the notice and any future caller quote the same string (B4).
+const OLLAMA_PULL_COMMAND: &str = "ollama pull";
+
+/// Names, at STARTUP, each configured model that this endpoint could not measure **while it was
+/// measuring others** (REQ-R27, second half / SC-R35).
+///
+/// # Why the notice exists at all
+///
+/// A fallback tag that was never `ollama pull`ed is not detected for free: building the provider
+/// does not verify that the model exists, and the probe [fails open][probe_models]. With no
+/// mechanism, the first symptom would be a **degraded run** the day a mage actually falls over —
+/// the latest and worst possible moment. The probe this module already pays for is the signal:
+/// an endpoint that answered for other models and not for this one is not *"not measurable"*, it
+/// is a model that is probably not there.
+///
+/// # Two conditions, and both are contract — without them the notice is noise
+///
+/// 1. **Only where measurement is POSSIBLE.** [`Measurement::NotMeasurable`] means the protocol
+///    exposes no introspection (`openai-compat`, `anthropic`): there is nothing to conclude
+///    about that model, so it is never named. Only [`Measurement::NotMeasuredThisTime`] — the
+///    endpoint *can* answer and this time did not — qualifies.
+/// 2. **Only if at least one model of the SAME endpoint was measured.** That is exactly what
+///    separates *"this model is not there"* from *"this endpoint is not answering"*. Without it
+///    a cold daemon fires the notice over the whole pool on everyone's first run: transient,
+///    noisy, and with no action a user can take.
+///
+/// A model listed in `configured` that has no entry in `measured` was never probed, so nothing
+/// was learned about it either — it is not named, for the same reason as condition 1.
+///
+/// # KNOWN FALSE-POSITIVE MODE — declared, not discovered in production
+///
+/// The two conditions treat the failure of an INDIVIDUAL probe as informative, and with a cold
+/// cache that assumption weakens: magi-core's preflight fans out up to
+/// `MAX_PREFLIGHT_CONCURRENCY = 4` probes (`rotation.rs:721`, with no knob) **plus** the three
+/// mages, against an endpoint whose concurrency cap is **3**. Under that saturation one probe
+/// can fail **by contention, not by absence**, while others on the same endpoint answer fine —
+/// and the notice would point at a model that is perfectly present.
+///
+/// It is bounded noise, not a failure: it blocks nothing and the suggested action is harmless.
+/// Two things bound it, and both are why the text below is worded the way it is:
+/// **the text never states absence as a FACT** — it reports a measurement that did not happen
+/// and offers `ollama pull <tag>` conditionally — and **a warm cache removes the condition
+/// entirely**, because a run with no misses emits no probes at all. A first run against a cold
+/// daemon is not to be judged by its notices.
+///
+/// # Contract
+///
+/// - Returns one [`Notice`] per DISTINCT qualifying model, in the order of `configured` — a pool
+///   that repeats a model does not make the user read the same line twice.
+/// - Tier is `Resolution`, never `Info`: a declared model that is probably not where it was
+///   declared is *"the config resolved differently from what the file looks like"*, not routine
+///   diagnostics.
+/// - Never fails and never panics: like the rest of this module, it fails open.
+///
+/// # Complexity
+///
+/// One `O(m)` scan of `measured` for condition 2, then one `O(n log n)` pass over `configured`
+/// (a `BTreeSet` of names already emitted), with no nested pass.
+#[must_use]
+pub fn missing_model_notices(
+    measured: &BTreeMap<String, Measurement>,
+    configured: &[String],
+) -> Vec<Notice> {
+    // CONDITION 2, evaluated first and for the whole table: without at least one model of this
+    // same endpoint measured, a single probe's failure says nothing about that model — it says
+    // the endpoint did not answer. Returning early here is what keeps a cold daemon from firing
+    // the notice over the entire pool on a user's first run.
+    if !measured
+        .values()
+        .any(|m| matches!(m, Measurement::Measured { .. }))
+    {
+        return Vec::new();
+    }
+
+    let mut already_named: BTreeSet<&str> = BTreeSet::new();
+    configured
+        .iter()
+        // CONDITION 1: ONLY `NotMeasuredThisTime`. `NotMeasurable` is a protocol that exposes no
+        // introspection and a missing entry was never probed — in both cases nothing was
+        // observed about the model, and naming it would be inventing a conclusion.
+        .filter(|model| {
+            matches!(
+                measured.get(model.as_str()),
+                Some(Measurement::NotMeasuredThisTime)
+            )
+        })
+        .filter(|model| already_named.insert(model.as_str()))
+        .map(|model| {
+            Notice::resolution(format!(
+                "`{model}` could not be measured, on an endpoint that measured other models: \
+                 if that tag is not there, `{OLLAMA_PULL_COMMAND} {model}` fixes it. A probe can \
+                 also fail under load, so this is not proof that the model is absent."
+            ))
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -1137,8 +1538,10 @@ mod tests {
         assert!(matches!(m["a"], Measurement::Measured { .. }));
     }
 
-    /// D-A07/R-A02 regression: the REAL factory probes the ROOT of the daemon (`/api/show`),
-    /// never under the `/v1` prefix of completions.
+    /// The REAL factory probes the ROOT of the daemon (`/api/show`), never under the `/v1`
+    /// prefix of completions. The two families are siblings, so a probe that drifted under `/v1`
+    /// would 404 — and, because probing fails **open**, would degrade to "not measured" without
+    /// anyone seeing an error.
     ///
     /// `StubProbes` covers the behavior of `probe_models` and NOT the real construction of the
     /// probe: if `OllamaProbeFactory` started hitting `/v1/api/show`, no other test in this
@@ -1182,6 +1585,166 @@ mod tests {
         );
     }
 
+    /// Builds a measurement table the way ONE endpoint's run would leave it: `Some(window)` is a
+    /// model the endpoint measured, `None` a model it could have measured and did not
+    /// ([`Measurement::NotMeasuredThisTime`]).
+    ///
+    /// It deliberately cannot express [`Measurement::NotMeasurable`]: that state belongs to a
+    /// whole non-introspectable endpoint, and the one test that needs it MIXED with a measured
+    /// model builds its map by hand, so that the mixture is visible at the call site instead of
+    /// hidden behind a fixture flag.
+    fn measurements(rows: &[(&str, Option<usize>)]) -> BTreeMap<String, Measurement> {
+        rows.iter()
+            .map(|(model, window)| {
+                let value = window.map_or(Measurement::NotMeasuredThisTime, |w| {
+                    Measurement::Measured {
+                        window: w,
+                        digest: None,
+                    }
+                });
+                ((*model).to_string(), value)
+            })
+            .collect()
+    }
+
+    /// The models a run declares, in the shape `missing_model_notices` consumes.
+    fn configured(models: &[&str]) -> Vec<String> {
+        models.iter().map(|m| (*m).to_string()).collect()
+    }
+
+    /// SC-R35 (happy): the endpoint measured OTHERS but not this one ⇒ probably a missing tag.
+    /// Named at startup together with the command that fixes it.
+    #[test]
+    fn a_model_that_alone_failed_on_a_responding_endpoint_is_named_at_startup() {
+        let measured = measurements(&[("a", Some(128_000)), ("b", None)]);
+        let notices = missing_model_notices(&measured, &configured(&["a", "b"]));
+        assert_eq!(notices.len(), 1, "only the unmeasured model is named");
+        assert!(
+            notices[0].text.contains("ollama pull b"),
+            "the notice must carry the command that fixes it: {}",
+            notices[0].text
+        );
+        assert!(
+            !notices[0].text.contains("ollama pull a"),
+            "the model that WAS measured must not be named: {}",
+            notices[0].text
+        );
+    }
+
+    /// SC-R35 (second condition): where NOTHING could be measured there is NO such notice — that
+    /// is an endpoint not answering, not a missing model. This is the condition that separates
+    /// the two, and it is what keeps a cold first start from firing over the whole pool.
+    #[test]
+    fn nothing_measured_produces_no_missing_model_notice() {
+        let measured = measurements(&[("a", None), ("b", None)]);
+        assert!(
+            missing_model_notices(&measured, &configured(&["a", "b"])).is_empty(),
+            "an endpoint that measured nothing says nothing about any single model"
+        );
+    }
+
+    /// SC-R35 (first condition): a model the endpoint CANNOT introspect is never named, even
+    /// when another model on that same endpoint was measured.
+    ///
+    /// The mixture is what makes this test a guardian instead of a duplicate of the one above: a
+    /// map of only [`Measurement::NotMeasurable`] would also be caught by condition 2 (nothing
+    /// measured), so it would pass with condition 1 deleted. With one measured model present,
+    /// condition 2 is satisfied and ONLY the *not measurable* vs *not measured this time*
+    /// distinction can keep the notice silent.
+    #[test]
+    fn a_model_the_endpoint_cannot_introspect_is_never_named() {
+        let measured = BTreeMap::from([
+            (
+                "a".to_string(),
+                Measurement::Measured {
+                    window: 128_000,
+                    digest: None,
+                },
+            ),
+            ("b".to_string(), Measurement::NotMeasurable),
+        ]);
+        assert!(
+            missing_model_notices(&measured, &configured(&["a", "b"])).is_empty(),
+            "no introspection is not a failure and concludes nothing about the model"
+        );
+    }
+
+    /// SC-R35 (declared false-positive mode): under saturation a probe can fail by CONTENTION,
+    /// not by absence, so the text must report a measurement that did not happen and offer the
+    /// command conditionally — never assert that the model is gone.
+    #[test]
+    fn the_notice_reports_a_failed_measurement_not_a_confirmed_absence() {
+        let measured = measurements(&[("a", Some(128_000)), ("b", None)]);
+        let notices = missing_model_notices(&measured, &configured(&["a", "b"]));
+        let text = &notices
+            .first()
+            .expect("the qualifying model must produce a notice")
+            .text;
+        assert!(
+            text.contains("could not be measured"),
+            "it must name the measurement failure, which is the only thing observed: {text}"
+        );
+        assert!(
+            text.contains("if"),
+            "the remedy must be offered conditionally, not as a diagnosis: {text}"
+        );
+        for absolute in [
+            "is missing",
+            "is not present",
+            "is not installed",
+            "does not exist",
+        ] {
+            assert!(
+                !text.contains(absolute),
+                "the notice must not state absence as a fact (found {absolute:?}): {text}"
+            );
+        }
+    }
+
+    /// SC-R35 tier (plan §Notice tiers): `Resolution`, never `Info`. A declared model that is
+    /// probably not where it was declared is a config that resolved differently from what the
+    /// file looks like — and `Info` is the tier that `render_notices` is allowed to trim.
+    #[test]
+    fn the_missing_model_notice_survives_the_info_cap() {
+        let measured = measurements(&[("a", Some(128_000)), ("b", None)]);
+        let notices = missing_model_notices(&measured, &configured(&["a", "b"]));
+        assert_eq!(
+            notices
+                .first()
+                .expect("the qualifying model must produce a notice")
+                .tier,
+            crate::notices::NoticeTier::Resolution
+        );
+    }
+
+    /// Edge: a configured model with no entry in the table was never probed, so nothing was
+    /// learned about it — it is not named, for the same reason a non-introspectable one is not.
+    #[test]
+    fn a_configured_model_that_was_never_probed_is_not_named() {
+        let measured = measurements(&[("a", Some(128_000))]);
+        assert!(
+            missing_model_notices(&measured, &configured(&["a", "ghost"])).is_empty(),
+            "a model absent from the table was never measured NOR failed to measure"
+        );
+    }
+
+    /// Edge: a pool that declares the same model twice produces ONE line, not two — the user
+    /// gains nothing from reading the same remedy again.
+    #[test]
+    fn a_model_repeated_in_the_configured_pool_is_named_once() {
+        let measured = measurements(&[("a", Some(128_000)), ("b", None)]);
+        let notices = missing_model_notices(&measured, &configured(&["b", "a", "b"]));
+        assert_eq!(notices.len(), 1, "one line per distinct model: {notices:?}");
+    }
+
+    /// Edge (B13): empty inputs neither panic nor invent a notice.
+    #[test]
+    fn empty_inputs_produce_no_notice() {
+        assert!(missing_model_notices(&BTreeMap::new(), &[]).is_empty());
+        assert!(missing_model_notices(&BTreeMap::new(), &configured(&["a"])).is_empty());
+        assert!(missing_model_notices(&measurements(&[("a", Some(128_000))]), &[]).is_empty());
+    }
+
     /// B11: when `OllamaProvider::new` rejects the URL (here, by scheme — `ftp` is not
     /// `http`/`https`), the real factory reports `Unbuildable` with a reason already passed
     /// through `redact_foreign_error`, never raw `e.to_string()`. There is no credential to
@@ -1205,5 +1768,317 @@ mod tests {
                 panic!("ollama is measurable, this is a construction failure, not a capability one")
             }
         }
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // `effective_strict_guard` — REQ-R11, the fail-safe (Task 6.4).
+
+    // `measurements` already exists above in this module (B3): reused, not re-declared.
+
+    /// A pool from `(model, lineage)` pairs.
+    ///
+    /// Uses the real [`FallbackEntry`], not a stand-in: the predicate under test reads `model`
+    /// off it, and a local shape would let the two drift.
+    fn pool_of(entries: &[(&str, &str)]) -> Vec<crate::magi::rotation_config::FallbackEntry> {
+        entries
+            .iter()
+            .map(
+                |(model, lineage)| crate::magi::rotation_config::FallbackEntry {
+                    model: (*model).to_owned(),
+                    lineage: crate::magi::lineage::Lineage::parse(lineage).expect("valid lineage"),
+                },
+            )
+            .collect()
+    }
+
+    /// SC-R23: a declared `true` with NO measured window is NOT passed down, a notice names THAT
+    /// reason, and rotation keeps working — never the silent shutdown of every candidate.
+    #[test]
+    fn a_declared_guard_with_nothing_measured_is_not_passed_and_is_announced() {
+        let (effective, notice) = effective_strict_guard(
+            true,
+            &measurements(&[("m2", None)]),
+            &pool_of(&[("m2", "zhipu")]),
+        );
+        assert!(
+            !effective,
+            "passing true here would make EVERY candidate fail condition #6: rotation dies whole"
+        );
+        let n = notice.expect("a declared true that is not applied must be announced");
+        assert!(
+            n.text.contains("measured window"),
+            "the notice must name the REAL reason: {}",
+            n.text
+        );
+        assert!(
+            !n.text.contains("kind"),
+            "not a derived reason like the transport kind: {}",
+            n.text
+        );
+    }
+
+    /// SC-R38: the criterion is MEASUREMENT, not transport. Tying it to the declared `kind`
+    /// produces both symmetric errors — denying the guard to an `openai-compat` that did measure
+    /// through a declared probe, and granting it to a cold `ollama` that measured nothing.
+    #[test]
+    fn the_criterion_is_measurement_not_the_declared_kind() {
+        let pool = pool_of(&[("m2", "zhipu")]);
+        let (warm, _) =
+            effective_strict_guard(true, &measurements(&[("m2", Some(128_000))]), &pool);
+        assert!(warm, "a measured candidate must not be denied the guard");
+        let (cold, _) = effective_strict_guard(true, &measurements(&[("m2", None)]), &pool);
+        assert!(!cold, "a cold candidate must not be granted it");
+    }
+
+    /// THE CASE THAT MAKES THE `pool` PARAMETER NECESSARY, and it is silent without it: the TRIO
+    /// measured and NO CANDIDATE did.
+    ///
+    /// `measured` carries everything measured, trio included, so a predicate over the whole map
+    /// answers `true` here — and passing `strict = true` makes every candidate fail condition #6.
+    /// Rotation dies entirely, with nothing failing visibly. The predicate is over CANDIDATES.
+    #[test]
+    fn a_measured_trio_with_no_measured_candidate_does_not_enable_the_guard() {
+        let measured =
+            measurements(&[("melchior-model", Some(262_144)), ("candidate-model", None)]);
+        let (effective, notice) =
+            effective_strict_guard(true, &measured, &pool_of(&[("candidate-model", "zhipu")]));
+        assert!(
+            !effective,
+            "the predicate is over CANDIDATES, not over everything that was measured"
+        );
+        assert!(notice.is_some(), "and the override is announced");
+    }
+
+    /// SC-R15: the cold start takes candidates away from nobody, under EITHER declared value.
+    #[test]
+    fn a_cold_start_never_removes_candidates_regardless_of_the_declared_guard() {
+        let pool = pool_of(&[("m2", "zhipu"), ("m3", "minimax")]);
+        for declared in [false, true] {
+            let (effective, _) = effective_strict_guard(
+                declared,
+                &measurements(&[("m2", None), ("m3", None)]),
+                &pool,
+            );
+            assert!(
+                !effective,
+                "declared={declared}: a cold start must never end up filtering candidates"
+            );
+        }
+    }
+
+    /// A declared `false` is passed through untouched and says nothing: the operator asked for the
+    /// default and got it, so there is no resolution to announce.
+    #[test]
+    fn a_declared_false_is_never_announced() {
+        let pool = pool_of(&[("m2", "zhipu")]);
+        let (effective, notice) =
+            effective_strict_guard(false, &measurements(&[("m2", Some(128_000))]), &pool);
+        assert!(!effective);
+        assert!(
+            notice.is_none(),
+            "nothing was overridden, so there is nothing to report"
+        );
+    }
+
+    /// An empty pool is "no rotation", a choice — and there is nothing for the guard to filter,
+    /// so a declared `true` is still not passed, and silently: it is not an override of intent.
+    #[test]
+    fn an_empty_pool_disables_the_guard_without_a_notice() {
+        let (effective, notice) = effective_strict_guard(true, &measurements(&[]), &[]);
+        assert!(!effective);
+        assert!(
+            notice.is_none(),
+            "with no pool there is no candidate to protect and no surprise to report"
+        );
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // The assumed window as DIAGNOSTIC — REQ-R26 / D-R13 (Task 6.5).
+
+    /// SC-R29: the smallest MEASURED window is assumed for a candidate that could not be
+    /// measured, and the state says **assumed**, not measured. Reporting a supposition as a fact
+    /// is worse than reporting nothing, which is the whole reason this distinction exists.
+    #[test]
+    fn an_unmeasurable_candidate_is_marked_assumed_not_measured() {
+        let measured = measurements(&[("a", Some(128_000)), ("b", Some(32_000)), ("c", None)]);
+        assert_eq!(window_state(&measured, "a"), WindowState::Measured(128_000));
+        assert_eq!(
+            window_state(&measured, "c"),
+            WindowState::Assumed(32_000),
+            "the assumption is the SMALLEST measured window, not the largest or an average"
+        );
+    }
+
+    /// With NOTHING measured there is no assumption to make: the state is `Unknown` and the
+    /// candidate falls back to today's non-strict behaviour, rather than being handed an invented
+    /// number that would then be trusted.
+    #[test]
+    fn with_nothing_measured_there_is_no_assumption() {
+        assert_eq!(
+            window_state(&measurements(&[("c", None)]), "c"),
+            WindowState::Unknown
+        );
+        assert_eq!(assumed_window(&measurements(&[("c", None)])), None);
+    }
+
+    /// A model ABSENT from the map is treated exactly like one that was probed and did not
+    /// answer: assumed, not unknown.
+    ///
+    /// This corrects the expectation this test was first written with. The distinction between
+    /// "never probed" and "probed without an answer" carries **no information for the consumer**:
+    /// in both cases nothing is known about the model, and the honest credit is still the run's
+    /// smallest measured window. `Unknown` is reserved for the case where there is nothing to
+    /// assume FROM — which is a statement about the run, not about one model.
+    #[test]
+    fn a_model_absent_from_the_map_is_assumed_like_one_that_did_not_answer() {
+        let measured = measurements(&[("a", Some(128_000))]);
+        assert_eq!(
+            window_state(&measured, "absent"),
+            WindowState::Assumed(128_000)
+        );
+        // And `Unknown` really is about the run having measured nothing at all.
+        assert_eq!(
+            window_state(&measurements(&[("a", None)]), "absent"),
+            WindowState::Unknown
+        );
+    }
+
+    /// The notice names the candidate, its assumed window and the CONSEQUENCE, because a
+    /// diagnostic the operator cannot act on is noise.
+    #[test]
+    fn the_assumed_window_notice_is_actionable() {
+        // Distinctive names: an assertion that a message contains "c" cannot fail, because "c"
+        // also occurs in "candidate" and "credited".
+        let measured = measurements(&[("seat-model", Some(128_000)), ("unmeasured-cand", None)]);
+        let notices = assumed_window_notices(&measured, &pool_of(&[("unmeasured-cand", "zhipu")]));
+        let text = notices
+            .first()
+            .expect("an assumed candidate must be reported")
+            .text
+            .clone();
+        assert!(
+            text.contains("unmeasured-cand"),
+            "it must name the candidate: {text}"
+        );
+        assert!(
+            text.contains("128000") || text.contains("128,000"),
+            "and the window it is being credited with: {text}"
+        );
+        assert!(
+            text.contains("rotation"),
+            "and what it means for rotation: {text}"
+        );
+    }
+
+    /// REQ-R27's two conditions, and the case they exist for: a COLD START where nothing was
+    /// measured must produce NO notice.
+    ///
+    /// Without them the warning fires over the entire pool on everyone's very first run —
+    /// transient, noisy, and with no action the operator could take. "Not measured this time" is
+    /// not "not measurable", and a warning that always sounds is ignored.
+    #[test]
+    fn a_cold_start_produces_no_assumed_window_notice() {
+        let cold = measurements(&[("a", None), ("c", None)]);
+        assert!(
+            assumed_window_notices(&cold, &pool_of(&[("c", "zhipu")])).is_empty(),
+            "a cold start has nothing to compare against and nothing to advise"
+        );
+    }
+
+    /// Nor does an endpoint where nothing is MEASURABLE: that candidate is not "worse", it is on
+    /// a protocol that does not expose the datum at all.
+    #[test]
+    fn an_unmeasurable_endpoint_produces_no_assumed_window_notice() {
+        let mut unmeasurable = BTreeMap::new();
+        unmeasurable.insert("a".to_owned(), Measurement::NotMeasurable);
+        unmeasurable.insert("c".to_owned(), Measurement::NotMeasurable);
+        assert!(assumed_window_notices(&unmeasurable, &pool_of(&[("c", "zhipu")])).is_empty());
+    }
+
+    /// A fully measured pool has nothing to assume and says nothing.
+    #[test]
+    fn a_fully_measured_pool_is_silent() {
+        let measured = measurements(&[("a", Some(128_000)), ("c", Some(64_000))]);
+        assert!(assumed_window_notices(&measured, &pool_of(&[("c", "zhipu")])).is_empty());
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // The warn threshold against the pool — REQ-R21 / D-R09 (Task 6.6).
+
+    /// SC-R17: a pool entry more than [`WARN_POOL_TOLERANCE`] below the trio's base does NOT drag
+    /// the threshold down — it is REPORTED.
+    ///
+    /// Deriving from the whole pool would let an 8 K entry at the END of the list — the LEAST
+    /// likely candidate to ever run — pull every run's threshold down to ~6 K, firing the warning
+    /// on practically every real consult. That is not conservative, it **destroys the signal**:
+    /// a warning that always sounds is ignored, and then the one time it mattered is ignored too.
+    #[test]
+    fn an_out_of_band_pool_entry_is_reported_and_does_not_move_the_threshold() {
+        let (threshold, notices) =
+            derive_input_warn_tokens(&[128_000, 128_000, 128_000], &[("weak", 8_000)]);
+        assert_eq!(
+            threshold,
+            (128_000f64 * WARN_WINDOW_FRACTION) as usize,
+            "the base stays the trio's"
+        );
+        assert_eq!(notices.len(), 1);
+        let t = &notices[0].text;
+        assert!(t.contains("weak"), "the warning must name the model: {t}");
+        assert!(
+            t.contains("8000") && t.contains("128000"),
+            "and both its window and the trio base, or it is not actionable: {t}"
+        );
+    }
+
+    /// An entry INSIDE the band does enter the minimum, with no warning — a free, marginal
+    /// calibration improvement. Documented as exactly that and NOT as a safety mechanism: the
+    /// protection against a too-small candidate is magi-core's condition #6, not this threshold.
+    #[test]
+    fn an_in_band_pool_entry_enters_the_minimum_without_a_warning() {
+        let (threshold, notices) =
+            derive_input_warn_tokens(&[128_000, 128_000, 128_000], &[("close", 120_000)]);
+        assert_eq!(threshold, (120_000f64 * WARN_WINDOW_FRACTION) as usize);
+        assert!(notices.is_empty());
+    }
+
+    /// SC-R32: ALL out-of-band entries in ONE message. Whoever built an unbalanced pool probably
+    /// has more than one, and discovering them one at a time costs a start each.
+    #[test]
+    fn every_out_of_band_entry_is_named_in_a_single_message() {
+        let (_, notices) = derive_input_warn_tokens(&[128_000; 3], &[("a", 8_000), ("b", 16_000)]);
+        assert_eq!(notices.len(), 1, "one message, not one per entry");
+        let t = &notices[0].text;
+        assert!(t.contains("a") && t.contains("b"), "both named: {t}");
+        assert!(
+            t.contains("8000") && t.contains("16000"),
+            "with both windows: {t}"
+        );
+    }
+
+    /// The band's edge belongs to the band: exactly `base * (1 - tolerance)` is IN, so a boundary
+    /// value does not silently flip behaviour depending on floating-point luck.
+    #[test]
+    fn the_band_edge_is_inside_the_band() {
+        let base = 100_000usize;
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let edge = (base as f64 * (1.0 - WARN_POOL_TOLERANCE)) as usize;
+        let (threshold, notices) = derive_input_warn_tokens(&[base, base, base], &[("edge", edge)]);
+        assert_eq!(threshold, (edge as f64 * WARN_WINDOW_FRACTION) as usize);
+        assert!(
+            notices.is_empty(),
+            "the edge is in band, so nothing to report"
+        );
+    }
+
+    /// An empty pool changes nothing and says nothing.
+    #[test]
+    fn an_empty_pool_leaves_the_trio_base_untouched() {
+        let (threshold, notices) = derive_input_warn_tokens(&[64_000, 128_000, 128_000], &[]);
+        assert_eq!(
+            threshold,
+            (64_000f64 * WARN_WINDOW_FRACTION) as usize,
+            "the base is the trio MINIMUM"
+        );
+        assert!(notices.is_empty());
     }
 }

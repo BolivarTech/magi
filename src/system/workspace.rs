@@ -372,12 +372,21 @@ fn volume_prefix(path: &Path) -> Option<std::ffi::OsString> {
 /// Creates `cwd/.magi/` holding `magi.toml` (rendered defaults), an empty `logs/` subdirectory,
 /// and the encrypted-store database with **all five tables** created empty and **no envelope**
 /// (the first real open bootstraps it, MS1 Task 3). The directory is placed **atomically and
-/// no-replace** on
-/// **every** platform: the whole tree is built inside a randomly-named sibling
-/// temp directory (`.magi.tmp.<rand>`, never a half-populated `.magi/` visible to a concurrent
-/// reader — REQ-H07) and then moved into place with a single, platform-appropriate no-replace
-/// rename (Linux: `renameat2(RENAME_NOREPLACE)`; elsewhere: `std::fs::rename`, see
-/// [`rename_no_replace`]) that refuses to replace an existing `.magi/`. Every created object is
+/// no-replace** on **every** platform, with one documented exception below: the whole tree is
+/// built inside a randomly-named sibling temp directory (`.magi.tmp.<rand>`, never a
+/// half-populated `.magi/` visible to a concurrent reader — REQ-H07) and then moved into place
+/// with a single rename (Linux: `renameat2(RENAME_NOREPLACE)`; elsewhere: `std::fs::rename`, see
+/// [`rename_no_replace`]) that refuses to replace an existing `.magi/`.
+///
+/// **The exception, because a doc that rounds it away is how it gets forgotten** (S4 Loop 2,
+/// Balthasar). Only the Linux path has a kernel-level no-replace flag. Elsewhere `std::fs::rename`
+/// will happily replace an existing **empty** directory, so on macOS and Windows an `init` can
+/// take over a `.magi/` that exists but is empty — the state a half-finished earlier `init`
+/// leaves behind. A non-empty one still fails. The residual and its fix (a pre-flight `metadata`
+/// check, non-atomic but closing every case a user can actually produce) are recorded in
+/// `dev-docs/PENDING_IMPLEMENTATION.md`.
+///
+/// Every created object is
 /// restricted to the current user (`0700`/`0600` on unix, an ACL restricted to the current user
 /// on Windows).
 ///
@@ -686,8 +695,15 @@ fn create_db(path: &Path) -> Result<(), HeadlessError> {
 /// Restricts `path`'s DACL to the current user only — the Windows equivalent of unix
 /// `0700`/`0600` (REQ-H38) — using the safe `windows-acl` crate.
 ///
-/// Grants the current user full control (which writes a PROTECTED DACL, severing inheritance)
-/// then removes every other ACE, leaving exactly one allow entry.
+/// Grants the current user full control, then **removes every other ACE**, leaving exactly one
+/// allow entry.
+///
+/// The restriction comes from that removal loop and from nothing else (S4 Loop 2, Balthasar).
+/// This used to credit it to `windows-acl` writing a PROTECTED DACL that severs inheritance —
+/// a claim about another crate's internals that this code neither sets nor verifies, and that a
+/// patch release could change without breaking a build. If the loop were deleted because the
+/// comment made it look redundant, inherited SYSTEM/Administrators/Users entries would survive
+/// and the directory would be readable by exactly the accounts REQ-H38 excludes.
 ///
 /// # Errors
 /// [`HeadlessError::Io`] if the path is not valid UTF-8 or any Win32 ACL call fails (the
@@ -710,8 +726,8 @@ fn restrict_to_current_user(path: &Path) -> Result<(), HeadlessError> {
     let mut acl = ACL::from_file_path(path_str, false)
         .map_err(|code| HeadlessError::Io(format!("read ACL failed (code {code})")))?;
 
-    // Grant the current user full control; windows-acl writes a PROTECTED DACL, severing
-    // inheritance so no parent ACE leaks in.
+    // Grant the current user full control. Whether `windows-acl` also marks the DACL PROTECTED
+    // is not relied upon here — the loop below is what guarantees nothing else survives.
     acl.add_entry(
         user_sid.as_ptr() as _,
         AceType::AccessAllow,
@@ -872,16 +888,16 @@ mod tests {
             .expect("magi init must never write a magi.toml the binary rejects");
 
         assert!(
-            parsed.base_url.is_some(),
+            parsed.base_url().is_some(),
             "base_url must be declared at the root (REQ-A21)"
         );
         assert!(
             matches!(
-                parsed.provider.as_deref(),
+                parsed.provider(),
                 Some("ollama") | Some("openai-compat") | Some("anthropic")
             ),
             "provider must be one of the three REQ-A01b vocabulary values, got {:?}",
-            parsed.provider
+            parsed.provider()
         );
     }
 

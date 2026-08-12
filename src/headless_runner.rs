@@ -194,9 +194,13 @@ pub(crate) async fn resolve_direct_mode(
 /// - `timeout_decision` — the REAL [`TimeoutDecision`] (SC-A04d), computed by the caller via `magi_rs::magi::resolve_run_timeout` for its `below_formula` flag — **not recomputed here**. Its `effective_secs` is deliberately NOT used to override the enforced `timeout` parameter this call already takes: this struct exists to make the JSON's telemetry honest, not to change which timeout is actually enforced (a larger, separate, pre-existing gap — see this fix round's report).
 /// - `notice_sink` — where [`analyze_direct`] emits `timeout_decision.warning` (fix round 2, SC-A04d's other half: the JSON flag alone isn't the whole requirement — a human running the command by hand needs the same fact on stderr). Production shares ONE [`ProcessNoticeSink`](crate::agent::mode_classifier::ProcessNoticeSink) instance with the mode classifier's own notices (`run_consult_subcommand`) rather than opening a second output path — dedup is per-key, so the two notices cannot suppress each other.
 ///
-/// `pub(crate)`, same reasoning as [`resolve_direct_mode`] above: constructed
-/// from `main.rs`'s `run_consult_subcommand`, which builds it from its own
+/// `pub(crate)` because `main.rs`'s `run_consult_subcommand` constructs it, from its own
 /// already-resolved `classifier`/`configured_mode`/`untrusted_content`.
+///
+/// This used to add "same reasoning as `resolve_direct_mode` above", and that reasoning is the
+/// opposite one (S4 Loop 2, Balthasar): `resolve_direct_mode` is `#[cfg(test)]` precisely
+/// because it has NO production caller left. Borrowing its justification for a struct that does
+/// have one invites the next reader to conclude this is test scaffolding and gate it away.
 pub(crate) struct MagiRuntimeParams<'a> {
     /// The `ProviderKind` the trio runs under (REQ-A12c).
     pub(crate) kind: ProviderKind,
@@ -306,17 +310,56 @@ async fn analyze_direct(
     };
     tokio::pin!(deadline);
 
+    // **`biased;` makes the ORDER a decision, and the middle arm was in the wrong place**
+    // (S4 Loop 2, Balthasar). With the deadline ahead of the join handle, a consult that
+    // finished in the same poll as the timer expiring was thrown away and reported as a
+    // `Timeout`: three model calls already paid for, discarded over a race the operator cannot
+    // influence, to enforce a bound that had just been met anyway.
+    //
+    // Completion first, then the two stop signals. The wall-clock guarantee is untouched — if
+    // the handle is not ready, the deadline arm is polled in the same pass and still fires — but
+    // a finished answer is now never discarded in favour of a tie.
+    //
+    // `cancel` stays FIRST, deliberately. It is external cancellation, not this consult's own
+    // budget: the caller is tearing down, and handing it a report it asked not to receive is a
+    // different contract from delivering work that completed on time. That distinction is worth
+    // more than the symmetry.
+    //
+    // **As it stands that arm is UNREACHABLE, and the ordering above is about the other two.**
+    // `analyze_direct` has exactly one caller — `run_consult` — which creates the token two
+    // lines before the call and never cancels it. So the deadline is the only stop signal today
+    // and the completion-vs-timer order is the whole of the decision.
+    //
+    // Said carefully because the two previous attempts at this comment were both wrong, in
+    // opposite directions, and each was written confidently (S4 Loop 2, Caspar then Balthasar).
+    // The first justified the order by "external cancellation"; the second attributed that to
+    // `run_query`, which does not call this function at all. The arm and its parameter stay:
+    // `ConsultTool::execute` runs the same shape over a token that IS live, so the signature is
+    // the one a second caller would need — but nothing here exercises it, and a comment that
+    // implies otherwise is how this got documented wrong twice.
+    //
+    // **UNGUARDED, and said plainly rather than left to look tested.** Every other fix in this
+    // gate carries a test that goes red when the fix is reverted; this one does not, because the
+    // scenario cannot be expressed with the harness available. Constructing the tie needs a
+    // paused clock, and under `start_paused` the analysis never completes at all — magi-core's
+    // internal tasks do not participate in the auto-advance, so the double's `tokio::time::sleep`
+    // never resolves and the run times out with or without a deadline. A test built anyway would
+    // pass for a reason unrelated to arm order, which is worse than none.
+    //
+    // What stands in for it is that the change is small and total: three arms, one moved, and
+    // `biased;` means the order is the whole behaviour. If someone reorders these again, this
+    // paragraph is the only thing that will stop them.
     let joined = tokio::select! {
         biased;
         () = cancel.cancelled() => {
             abort_guard.abort();
             return Err(ConsultRunError::Timeout);
         }
+        joined = handle => joined,
         () = &mut deadline => {
             abort_guard.abort();
             return Err(ConsultRunError::Timeout);
         }
-        joined = handle => joined,
     };
 
     match joined {
@@ -413,12 +456,45 @@ fn build_consult_transcript(prompt: &str, report: Option<&str>) -> Vec<Transcrip
 /// Extracts the MAGI object of the last **successful** `consult` tool call from a
 /// finished run's records (REQ-H22): the forced or proactive consult result, or
 /// `None` when no consult succeeded (e.g. denied by the tier).
+///
+/// # The `.ok()` is a documented impossibility, not a swallowed error
+///
+/// B9 forbids discarding a parse failure, and S4 Loop 2 (Caspar) rightly asked about this one.
+/// The filter above it already required `rec.ok`, and a `consult` record is `ok` only when
+/// `ConsultTool::execute` returned — which returns `report_to_consult_json`'s value, serialized
+/// by `serde_json` immediately before. So the string being parsed here is one this process
+/// produced from a `Value` microseconds earlier; a failure would mean `serde_json` cannot read
+/// back what it just wrote.
+///
+/// It grows no error channel, because there is no honest thing to report through one: this
+/// function has no notices sink, and the caller's only recourse for a self-contradictory record
+/// would be the same `None` it already returns. What it does carry is a `debug_assert!`, so the
+/// impossibility is checked wherever checking is free rather than merely asserted in prose.
 fn extract_consult_value(calls: &[(String, ToolCallRecord)]) -> Option<Value> {
     calls
         .iter()
         .rev()
         .find(|(_, rec)| rec.name == CONSULT_TOOL && rec.ok)
-        .and_then(|(_, rec)| serde_json::from_str::<Value>(&rec.result).ok())
+        .and_then(
+            |(_, rec)| match serde_json::from_str::<Value>(&rec.result) {
+                Ok(value) => Some(value),
+                Err(e) => {
+                    // The impossibility now SAYS SO when it stops being one (S4 Loop 2, Balthasar,
+                    // whose counter-proposal beat the rejection it answered). The reasoning below
+                    // still holds — there is no honest channel to report through from here — but a
+                    // `debug_assert!` needs none: it costs nothing in release and turns a silent
+                    // swallow into a loud failure in every test and dev build, which is exactly
+                    // where an invariant that quietly stopped holding would otherwise hide.
+                    debug_assert!(
+                        false,
+                        "a consult record marked ok holds JSON this process serialized moments \
+                     earlier; if it no longer parses, the contract between ConsultTool::execute \
+                     and this reader has broken: {e}"
+                    );
+                    None
+                }
+            },
+        )
 }
 
 /// JSON key of the deadline verdict, shared with `report_to_consult_json`'s own literal.
@@ -570,8 +646,13 @@ pub fn resolve_tier_timeout_default(
 /// Everything `main.rs` resolved for ONE `magi query` run that [`run_query`] cannot derive on
 /// its own.
 ///
-/// **Bundled rather than added as more parameters.** `run_query` already carried six, and the
-/// values that had to arrive were three (`gate_thresholds`, `mode_config`, `gate_telemetry`) —
+/// **Bundled rather than added as more parameters.** Those three values live one level down, in
+/// the [`autonomous`](Self::autonomous) field — this struct carries `timeout`, `autonomous` and
+/// `timeout_below_formula`, and naming the inner three here as if they were its own sent readers
+/// looking for fields that are not on it (S4 Loop 2, Balthasar).
+///
+/// `run_query` already carried six parameters, and the values that had to arrive were three
+/// (`gate_thresholds`, `mode_config`, `gate_telemetry`) —
 /// enough to push the signature past the point where the only remaining move is an
 /// `#[allow(clippy::too_many_arguments)]`, which this repo tracks as priority debt. Grouping
 /// them behind [`AutonomousRunConfig`](crate::AutonomousRunConfig) keeps the arity where it was
@@ -764,9 +845,13 @@ pub async fn run_consult(
     runtime: &MagiRuntimeParams<'_>,
     mut run_log: Option<&mut RunLog>,
 ) -> RunOutcome {
-    // A fresh token: the direct consult has no enclosing agent run to inherit a
-    // cancellation from, so `analyze_direct`'s cancel arm only fires if this run's
-    // own `timeout` deadline elapses.
+    // A fresh token: the direct consult has no enclosing agent run to inherit a cancellation
+    // from — and nothing here ever cancels it, so `analyze_direct`'s cancel arm never fires.
+    // The `timeout` argument on the next line is what stops a long run, through that function's
+    // own deadline arm.
+    //
+    // This used to say the cancel arm "only fires if this run's own `timeout` deadline elapses",
+    // which named the wrong arm for the right event (S4 Loop 2, Balthasar).
     let cancel = CancellationToken::new();
     let run_start = Instant::now();
     let result = analyze_direct(&magi, prompt, &cancel, timeout, explicit_mode, runtime).await;
@@ -1229,6 +1314,56 @@ mod tests {
     /// answering — used to make a forced/direct consult deterministically exhaust
     /// its wall-clock budget (the reply content is irrelevant; the deadline fires
     /// first and the analysis task is aborted).
+    /// The cancel arm of `analyze_direct` works — reachable, and now exercised.
+    ///
+    /// Three review rounds went into describing that arm, and two of the three descriptions were
+    /// wrong, because `run_consult` (its only caller) creates a token it never cancels. Melchior
+    /// offered two ways out in S4 Loop 2: delete the arm, or drive it from a test double. Driving
+    /// it is the better trade — the arm is a real safety path that `ConsultTool::execute` relies
+    /// on in the same shape, and deleting a working guard because today's single caller happens
+    /// not to use it trades a defence for a line count.
+    ///
+    /// **Mutation-verified (B16):** remove the `cancel.cancelled()` arm and this hangs on the
+    /// hour-long analysis instead of returning; drop the `.abort()` inside it and the spawned
+    /// task outlives the call.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_cancel_arm_stops_an_analysis_that_would_otherwise_run_for_an_hour() {
+        let magi = slow_magi(Duration::from_secs(3_600));
+        let cfg = MagiConfig::default();
+        let sink = RecordingNoticeSink::default();
+        let runtime = MagiRuntimeParams {
+            kind: ProviderKind::OpenAiCompat,
+            classifier: &NeverClassifier,
+            configured_mode: None,
+            untrusted_content: false,
+            magi_config: &cfg,
+            timeout_decision: neutral_timeout_decision(),
+            notice_sink: &sink,
+        };
+
+        let cancel = CancellationToken::new();
+        // Cancelled BEFORE the call, so the arm is ready on the first poll: no sleep, no
+        // tolerance, and no dependence on how loaded the box is (R-R05).
+        cancel.cancel();
+
+        // `None` timeout: the deadline arm parks forever, so nothing but cancellation can end
+        // this — which is what makes the result attributable.
+        let result = analyze_direct(
+            &magi,
+            "should we migrate X to Y?",
+            &cancel,
+            None,
+            Some(Mode::Analysis),
+            &runtime,
+        )
+        .await;
+
+        assert!(
+            matches!(result, Err(ConsultRunError::Timeout)),
+            "a cancelled run must end promptly with the typed stop, not wait out the analysis"
+        );
+    }
+
     fn slow_magi(delay: Duration) -> Arc<Magi> {
         use magi_core::error::ProviderError;
         use magi_core::provider::{CompletionConfig, LlmProvider};
@@ -1885,11 +2020,58 @@ mod tests {
         let mut agent = Agent::new(provider);
         register_echo(&mut agent, "consult");
 
-        let policy = Policy::new(Tier::Default, 15, None);
+        // `Tier::Auto`, not `Tier::Default` — the tier is scaffolding here and the wrong one was
+        // standing between this test and its own subject. `Default` auto-approves only the
+        // read-only set, so `consult` was refused by the TIER after clearing the complexity
+        // gate: the test could observe the gate's decision and never the consult itself, and its
+        // name promised a consult that got "through" when nothing ran. `Auto` approves every
+        // registered tool, so the whole path is exercised and the name becomes true.
+        let policy = Policy::new(Tier::Auto, 15, None);
         let wiring = wiring_from_toml("[magi.complexity]\nanalysis = 0\n");
         let outcome = run_query(resolved_stub(), policy, &mut agent, "prompt", &wiring, None).await;
 
         assert_eq!(outcome.stop_reason, StopReason::Done);
+
+        // Now assertable end to end: the consult RAN and succeeded.
+        let consult = outcome
+            .tool_calls
+            .iter()
+            .find(|rec| rec.name == "consult")
+            .expect("the model asked for a consult, so a record exists either way");
+        assert!(
+            consult.ok,
+            "with the veto disabled AND the tier approving, the consult must actually run: {}",
+            consult.result
+        );
+
+        // **The discriminating signal is the gate TELEMETRY, and nothing in `tool_calls` is.**
+        // Two earlier drafts of this precondition were themselves vacuous, and mutation testing
+        // — removing `analysis = 0` so the built-in threshold vetoes a six-character prompt —
+        // is what exposed both. `name == "consult"` is recorded whether the gate dispatched or
+        // vetoed. The `result` does not help either: `Tier::Default` does not authorize
+        // `consult`, so the tier refuses it FIRST and the stored text is always the tier
+        // denial — the veto never reaches the record to be looked for.
+        //
+        // Finding that out is also what corrected the fixture: under `Tier::Default` the consult
+        // only ever got past the complexity gate and was then refused, so the test could not
+        // observe the thing its name promises. `Tier::Auto` approves every registered tool, the
+        // whole path runs, and the `ok` assertion above became possible.
+        //
+        // `on_gate_evaluation` writes "veto" or "dispatch" per evaluation (SC-A20h) — the one
+        // place the two outcomes differ, and what the neighbouring test reads for the
+        // opposite case.
+        let gate_lines = wiring.autonomous.drain_telemetry();
+        assert_eq!(
+            gate_lines.len(),
+            1,
+            "one evaluation, one line: {gate_lines:?}"
+        );
+        assert!(
+            gate_lines[0].contains("dispatch"),
+            "with `analysis = 0` the veto is disabled for that mode, so the gate records a dispatch: {}",
+            gate_lines[0]
+        );
+
         let response = outcome.response.as_deref().unwrap_or_default();
         assert!(
             !response.contains("NO CONSENSUS"),
@@ -2553,10 +2735,23 @@ mod tests {
             MARKER_WAIT_DEADLINE_MS,
         };
 
-        if !python_available() {
-            eprintln!("skipping: python interpreter not found — cannot spawn a real child");
-            return;
-        }
+        // **Fails closed, where it used to skip** (S4 Loop 2, Balthasar). A `return` here is a
+        // PASS: on a machine without an interpreter the suite reported green while REQ-H36's
+        // guarantee — that the wall-clock bound really terminates the subprocess tree, rather
+        // than merely stopping the wait — went unverified. That is the vacuous guardian in its
+        // purest form: not an assertion that holds trivially, but a test that never ran and
+        // still counted.
+        //
+        // Failing is the honest signal. Every platform in this project's CI ships an
+        // interpreter, so this fires only where the environment genuinely cannot verify a
+        // shipped promise, and that is worth a red build rather than a line on stderr nobody
+        // reads.
+        assert!(
+            python_available(),
+            "no python interpreter: this test spawns a REAL child to prove the --timeout kills \
+             the process tree (REQ-H36), and skipping it would report that guarantee as verified \
+             when nothing checked it"
+        );
         let dir = tempfile::tempdir().expect("tempdir");
         let root = dir.path().canonicalize().expect("canonicalize");
 
@@ -2771,7 +2966,7 @@ mod tests {
         let cfg = MagiConfig::default();
         let ceiling = magi_rs::magi::AGENT_TIMEOUT_SECS;
         // An `asked` well below `headless_consult_timeout_secs(ceiling)`.
-        let decision = magi_rs::magi::resolve_run_timeout(Some(1), ceiling);
+        let decision = magi_rs::magi::resolve_run_timeout(Some(1), ceiling, 0, false);
         assert!(
             decision.below_formula,
             "test setup: this must actually trigger the formula check"
@@ -2811,7 +3006,7 @@ mod tests {
     async fn sc_a04d_warning_reaches_the_notice_sink_from_a_real_run() {
         let cfg = MagiConfig::default();
         let ceiling = magi_rs::magi::AGENT_TIMEOUT_SECS;
-        let decision = magi_rs::magi::resolve_run_timeout(Some(1), ceiling);
+        let decision = magi_rs::magi::resolve_run_timeout(Some(1), ceiling, 0, false);
         assert!(
             decision.below_formula && decision.warning.is_some(),
             "test setup: this must actually trigger the warning"
@@ -2853,7 +3048,7 @@ mod tests {
         let cfg = MagiConfig::default();
         let ceiling = magi_rs::magi::AGENT_TIMEOUT_SECS;
 
-        let generous = magi_rs::magi::resolve_run_timeout(Some(100_000), ceiling);
+        let generous = magi_rs::magi::resolve_run_timeout(Some(100_000), ceiling, 0, false);
         assert!(
             !generous.below_formula && generous.warning.is_none(),
             "test setup: this must NOT trigger the formula check"
@@ -2883,7 +3078,7 @@ mod tests {
             sink_generous.emitted()
         );
 
-        let absent = magi_rs::magi::resolve_run_timeout(None, ceiling);
+        let absent = magi_rs::magi::resolve_run_timeout(None, ceiling, 0, false);
         assert!(
             absent.warning.is_none(),
             "test setup: no --timeout, no warning"
@@ -2963,10 +3158,10 @@ mod tests {
     #[tokio::test]
     async fn run_consult_bounds_the_report_when_it_exceeds_the_configured_output_cap() {
         let cap = magi_rs::magi::mark_overhead() + 20;
-        let cfg = MagiConfig {
-            tool_result_cap_bytes: Some(cap),
-            ..MagiConfig::default()
-        };
+        let cfg = MagiConfig::builder()
+            .tool_result_cap_bytes(Some(cap))
+            .build()
+            .unwrap();
         let sink = RecordingNoticeSink::default();
         let outcome = run_consult(
             resolved_stub(),

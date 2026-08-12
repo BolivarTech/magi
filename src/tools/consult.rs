@@ -15,6 +15,7 @@ use magi_core::schema::{AgentName, Mode};
 use magi_rs::magi::kind::ProviderKind;
 use magi_rs::magi::mode::{read_resolved_mode, ModeResolution, ModeSource};
 use magi_rs::magi::report_anchors::{CONTRACTUAL_ANCHORS, SECTION_ANCHORS};
+use magi_rs::magi::rotation_report::{render_rotations, rotation_lines};
 use magi_rs::magi::{
     bytes_to_tokens_est, mark_overhead, TimeoutDecision, MAX_QUERY_BYTES, TOOL_RESULT_CAP_BYTES,
     TRUNCATION_MARK,
@@ -455,6 +456,22 @@ pub(crate) fn annotate_report_text(report: &MagiReport, kind: ProviderKind) -> S
             ));
         }
     }
+    // REQ-R07/R16 on the TEXT surface. This function is the single point the three text surfaces
+    // share — the consult JSON's `report`, headless stderr and the TUI `/consult` (B3) — so
+    // appending here reaches all of them with one wording and one redaction, instead of a fourth
+    // independent composition that could forget either.
+    //
+    // Nothing is appended when nobody rotated: a heading with nothing under it reads as a section
+    // that lost its content, and it is also the exact shape of a guardian this project already
+    // found useless — a truncation test that asserted on a heading which survives whether or not
+    // the finding beneath it does.
+    let rotations = rotation_lines(&report.rotations);
+    if !rotations.is_empty() {
+        text.push_str("\n\n## Model rotations");
+        for line in rotations {
+            text.push_str(&format!("\n- {line}"));
+        }
+    }
     text
 }
 
@@ -741,8 +758,15 @@ fn input_size_json(s: Option<&InputSize>, fallback_tokens: Option<usize>) -> Val
 ///
 /// # Returns
 /// A JSON object with `report`, `degraded`, `mode`, `mode_source`, `extraction_failures`,
-/// `input_size`, `report_truncated`, `endpoint_divergence`, `timeout_below_formula` and
-/// `failed_agents` — every key always present.
+/// `input_size`, `report_truncated`, `endpoint_divergence`, `timeout_below_formula`,
+/// `failed_agents`, `rotations` and `ran_unmeasured` — every key always present.
+///
+/// The last two are v0.13.0's (REQ-R07/R08), and "always present" carries the same weight for
+/// them as for `extraction_failures`: an EMPTY `rotations` is the positive certificate that no
+/// mage rotated, not silence about whether any did. A key that appeared only when non-empty
+/// would change the shape of the object between runs and no strict-schema consumer could
+/// declare it. This list omitted them until S2 Loop 2 (Balthasar) — a doc that under-reports
+/// the contract is how a consumer ends up treating a guaranteed key as optional.
 ///
 /// # `report` (`truncated.text`) is NOT redacted, unlike `failed_agents` — a deliberate decision
 ///
@@ -774,7 +798,7 @@ pub(crate) fn report_to_consult_json(
     res: &ModeResolution,
     ctx: &RunContext,
 ) -> Value {
-    json!({
+    let mut out = json!({
         // The (possibly annotated, possibly truncated) text — never the raw report: text and
         // level travel together in `truncated`, so `report_truncated` can never assert a
         // guarantee about text it does not describe.
@@ -799,7 +823,19 @@ pub(crate) fn report_to_consult_json(
         // latter does not exist on `MagiReport` (verified against magi-core 3.1.0; rotation-
         // only telemetry, unreachable in MS2 without `FallbackPool`).
         "failed_agents": failed_agents_json(&report.failed_agents),
-    })
+    });
+
+    // REQ-R07/R08. `render_rotations` owns the shape of BOTH keys and, more importantly, owns
+    // their REDACTION: `RotationEvent::detail` is composed by magi-core and can carry a URL with
+    // a resolved credential in it. This site only PLACES them — a second wording here would be a
+    // second chance to forget the redaction, which is the exact defect that appeared five
+    // separate times in the previous milestone's gate, green against all seven build gates.
+    if let (Value::Object(dst), Value::Object(src)) =
+        (&mut out, render_rotations(&report.rotations))
+    {
+        dst.extend(src);
+    }
+    out
 }
 
 /// Explains —ADDING to `err`'s message, never replacing it— a `MagiError::InsufficientAgents`
@@ -1933,9 +1969,19 @@ mod tests {
             "extraction_failures",
             "input_size",
             "report_truncated",
+            // MS3 (REQ-R07/R08). Both ALWAYS present, empty included: a field that appears and
+            // disappears changes the JSON's shape between runs, and a consumer with a strict
+            // schema cannot declare it. `schema_version` still does not move for it — pre-1.0
+            // the channel for a shape change is the documentation, by decision.
+            "rotations",
+            "ran_unmeasured",
         ] {
             assert!(v.get(key).is_some(), "missing {key}");
         }
+        assert!(
+            v["rotations"].as_array().is_some_and(Vec::is_empty),
+            "a clean report rotated nowhere: empty is the POSITIVE CERTIFICATE, not silence"
+        );
         // SC-A07 (magi-rs half): the mode that comes out is the one that was resolved, and
         // it carries its origin. Asserting only the key's presence would pass even if the
         // builder emitted a different lens than the caller resolved.
@@ -2170,7 +2216,7 @@ mod tests {
             "base_url = \"http://a/v1\"\n[magi]\nbase_url = \"http://b/v1\"\n",
         )
         .expect("valid toml");
-        let dec = resolve_run_timeout(None, AGENT_TIMEOUT_SECS);
+        let dec = resolve_run_timeout(None, AGENT_TIMEOUT_SECS, 0, false);
 
         let ctx = RunContext::build(&diverged, &resolution(true), &dec);
         assert!(ctx.endpoint_divergence);
@@ -2202,7 +2248,7 @@ mod tests {
             "base_url = \"http://a/v1\"\n[magi]\nbase_url = \"http://b/v1\"\n",
         )
         .expect("valid toml");
-        let dec = resolve_run_timeout(None, AGENT_TIMEOUT_SECS);
+        let dec = resolve_run_timeout(None, AGENT_TIMEOUT_SECS, 0, false);
 
         let ctx = RunContext::build(&diverged, &resolution(true), &dec);
         assert!(

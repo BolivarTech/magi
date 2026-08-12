@@ -2,7 +2,7 @@
 // Version: 1.0.0
 // Date: 2026-08-02
 
-//! Guardian of the `magi-core 3.1.0` API surface (Task 0.0, MS2 Phase 0).
+//! Guardian of the `magi-core 3.2.0` API surface (Task 0.0, MS2 Phase 0; extended in MS3 Phase 4).
 //!
 //! # What it tests, and what it does NOT
 //!
@@ -15,10 +15,14 @@
 //!
 //! The MS2 TDD plan assumed an API surface nobody had verified, and the first read of the
 //! crate found **five** false assumptions in one pass: `with_client` does not exist on any
-//! provider, `OllamaProvider` fixes a 300 s client timeout with no override (which takes it
-//! out of the completions path — D-A07), `RetryConfig` is `#[non_exhaustive]`, `ClaudeProvider`
-//! takes `api_key` **first**, and `Mode` has no parsing method at all. Five failures in a
-//! single pass is the measure of how much surface there is.
+//! provider, `OllamaProvider` fixed a 300 s client timeout with no override, `RetryConfig` is
+//! `#[non_exhaustive]`, `ClaudeProvider` takes `api_key` **first**, and `Mode` has no parsing
+//! method at all. Five failures in a single pass is the measure of how much surface there is.
+//!
+//! **The second of those five stopped being true in 3.2.0**, which is the whole argument for this
+//! file: `OllamaProvider::with_timeout` bounds both clients the type builds, so the impossibility
+//! D-A07 rested on is gone and MS3 reverted it (REQ-R30). A reading of the crate goes stale in a
+//! patch release — this one took **one day** — and the compiler does not.
 //!
 //! **The reading does not replace this file, it justifies it**: a reading goes stale the
 //! moment magi-core publishes a new version; the compiler does not.
@@ -51,7 +55,7 @@ use magi_core::providers::claude::ClaudeProvider;
 use magi_core::providers::ollama::OllamaProvider;
 use magi_core::providers::openai_compat::OpenAiCompatibleProvider;
 use magi_core::reporting::{ExtractionFailure, InputSize, MagiReport};
-use magi_core::rotation::ProviderProbe;
+use magi_core::rotation::{AgentRotation, FallbackPool, Lineage, ProviderProbe, RotationEvent};
 use magi_core::schema::{AgentName, AgentOutput, Mode};
 use magi_core::verdict_markers::{VERDICT_CLOSE, VERDICT_OPEN};
 use magi_rs::magi::report_anchors::{CONTRACTUAL_ANCHORS, SECTION_ANCHORS};
@@ -96,8 +100,66 @@ fn report_shape(r: &MagiReport) {
     // Sustains SC-A11g: it being empty IS "zero valid verdicts", which is not a degraded
     // consensus but the absence of consensus.
     let _: &Vec<AgentOutput> = &r.agents;
-    // MS3. Only its existence is checked here; that milestone fixes its shape.
-    let _ = &r.rotations;
+    // MS3 (REQ-R07) pins the shape the placeholder deferred. It is a MAP KEYED BY SEAT and
+    // populated for EVERY agent, rotated or not — its own rustdoc calls it "always present" —
+    // so "did this mage rotate?" is `chain` being non-empty, NEVER the map's length. A test
+    // written against `rotations.len() == 1` would be false for every possible run.
+    let _: &BTreeMap<AgentName, AgentRotation> = &r.rotations;
+}
+
+/// [`AgentRotation`] fields that REQ-R06/R07/R08 surface, **with annotated types**.
+///
+/// `model_used` is the one that cannot be missing: a report naming the CONFIGURED model when the
+/// fallback is what ran lies about its own evidence base. `ran_unmeasured` qualifies the verdict
+/// (REQ-R08), and `chain` is the ordered list of hops.
+fn agent_rotation_shape(a: &AgentRotation) {
+    let _: &str = &a.model_configured;
+    let _: &str = &a.model_used;
+    let _: &Vec<RotationEvent> = &a.chain;
+    let _: bool = a.ran_unmeasured;
+}
+
+/// The pool construction chain MS3 wires (Task 4.1), chained so each step must return `Self`.
+///
+/// `max_rotations` takes a `u32` and `0` is the kill-switch that must survive as a DECLARED
+/// value: if this ever became `Option<u32>` or a `usize`, the collapse of `None` and `Some(0)`
+/// would turn an explicit "no rotation" into "use the default" — the opposite instruction.
+fn fallback_pool_surface(p: Arc<dyn LlmProvider>) -> FallbackPool {
+    FallbackPool::builder()
+        .push(p.clone(), Lineage::new("guardian-lineage"))
+        // Pinned because PRODUCTION uses this one on every non-ephemeral run: whenever a
+        // capability cache exists, candidates are pushed WITH their probe. Pinning only `push`
+        // left the door production actually walks through unguarded, which defeats this file's
+        // purpose of concentrating API drift in one place.
+        .push_with_probe(p, Lineage::new("guardian-lineage"), guardian_probe())
+        .max_rotations(2)
+        .build()
+}
+
+/// A probe that answers nothing, for pinning signatures rather than behaviour.
+///
+/// `declared_model` is overridden deliberately: its trait default returns `None`, which silently
+/// opts out of the preflight's correspondence check. A SEMANTIC change to that default would
+/// compile everywhere and disable the check without a word, so overriding it here is what makes
+/// the dependency visible.
+struct GuardianProbe;
+
+#[async_trait::async_trait]
+impl ProviderProbe for GuardianProbe {
+    async fn window(&self) -> Result<Option<usize>, magi_core::error::ProviderError> {
+        Ok(None)
+    }
+    async fn digest(&self) -> Result<Option<String>, magi_core::error::ProviderError> {
+        Ok(None)
+    }
+    fn declared_model(&self) -> Option<&str> {
+        Some(SYNTHETIC_MODEL)
+    }
+}
+
+/// See [`GuardianProbe`].
+fn guardian_probe() -> Arc<dyn ProviderProbe> {
+    Arc::new(GuardianProbe)
 }
 
 /// [`ExtractionFailure`] fields that REQ-A09 requires to surface.
@@ -123,7 +185,24 @@ fn input_size_shape(s: &InputSize) {
 /// `&mut Self`, the chain would stop compiling here instead of in Phase 4.
 fn builder_surface(b: MagiBuilder, p: Arc<dyn LlmProvider>) -> MagiBuilder {
     b.with_timeout(Duration::from_secs(90))
-        .with_provider(AgentName::Melchior, p)
+        // MS3 (REQ-R01): `with_agent`, not `with_provider` — the only door that carries the
+        // rotation diversity key. `with_provider` still exists and still compiles, which is
+        // exactly why the migration needed pinning: nothing about it fails on its own.
+        .with_agent(
+            AgentName::Melchior,
+            p.clone(),
+            Lineage::new("guardian-lineage"),
+        )
+        // Production's door whenever a cache exists, and the one whose ORDER is load-bearing: a
+        // plain `with_agent` after it for the SAME seat discards the probe in silence.
+        .with_agent_and_probe(
+            AgentName::Balthasar,
+            p.clone(),
+            Lineage::new("guardian-lineage"),
+            guardian_probe(),
+        )
+        .with_fallback_pool(fallback_pool_surface(p))
+        .with_strict_context_guard(false)
         .with_input_warn_tokens(96_000)
         .with_retry_disabled()
 }
@@ -206,13 +285,25 @@ fn magi_core_api_surface_is_what_the_plan_assumes() {
     );
     assert_is_provider(&openai);
 
-    // `OllamaProvider` still exists, but ONLY as a probe: its sole constructor fixes a 300 s
-    // client with no override, which makes REQ-A04's relation
-    // (`operation_budget + client_timeout <= ceiling`) impossible to satisfy. It returns a
-    // `Result` because it normalizes the URL — and that normalization is exactly what REQ-A01b
-    // requires to be announced in a notice.
+    // `OllamaProvider` serves BOTH roles as of v0.13.0, and `with_timeout` is the load-bearing
+    // constructor — the one REQ-R30 requires and §7 of the spec names in the only remaining
+    // prohibition on this type: never `new`, because it delegates with a 300 s default that
+    // cannot satisfy `operation_budget + client_timeout <= ceiling` and does so while compiling
+    // and running perfectly.
+    //
+    // This comment used to say the opposite — "ONLY as a probe: its sole constructor fixes a
+    // 300 s client with no override" — which was the state before 3.2.0 added `with_timeout` and
+    // before this milestone reverted D-A07 on the strength of it. The module header nine lines
+    // into this file already said so, so the file contradicted itself (S4 Loop 2, Caspar).
+    //
+    // Both constructors are pinned. `new` because `src/magi/probe.rs` still uses it deliberately
+    // and safely, under its own 5 s ceiling; `with_timeout` because everything that completes
+    // through this type depends on it existing with this arity. Either one disappearing upstream
+    // must break here rather than at a call site.
     let ollama =
         OllamaProvider::new(SYNTHETIC_BASE_URL, SYNTHETIC_MODEL).expect("valid synthetic base_url");
+    let _ =
+        OllamaProvider::with_timeout(SYNTHETIC_BASE_URL, SYNTHETIC_MODEL, Duration::from_secs(27));
     assert_is_provider(&ollama);
     assert_is_probe(&ollama);
 
@@ -242,6 +333,8 @@ fn magi_core_api_surface_is_what_the_plan_assumes() {
     let _ = extraction_failure_shape;
     let _ = input_size_shape;
     let _ = builder_surface;
+    // MS3 (Phase 4). `fallback_pool_surface` needs no entry: `builder_surface` calls it.
+    let _ = agent_rotation_shape;
 }
 
 /// Content long enough for the orchestrator to dispatch all three seats.
@@ -326,7 +419,8 @@ async fn schema_retry_consumes_two_timeout_windows_per_seat() {
 #[tokio::test]
 async fn a_hanging_provider_consumes_one_timeout_window() {
     let ceiling = Duration::from_millis(300);
-    let magi = MagiBuilder::new(Arc::new(support::HangingProvider))
+    let provider = Arc::new(support::HangingProvider::default());
+    let magi = MagiBuilder::new(Arc::clone(&provider) as Arc<dyn LlmProvider>)
         .with_timeout(ceiling)
         .build()
         .expect("the builder accepts a single shared provider");
@@ -334,6 +428,21 @@ async fn a_hanging_provider_consumes_one_timeout_window() {
     let started = Instant::now();
     let _ = magi.analyze(&Mode::Analysis, DISPATCHABLE_CONTENT).await;
     let elapsed = started.elapsed();
+
+    // Presence before the bound (S4 Loop 2, Balthasar). The assertion below is an UPPER bound,
+    // and an upper bound is satisfied perfectly by never dispatching at all: a gate that started
+    // rejecting `DISPATCHABLE_CONTENT`, or a builder change that short-circuited, would leave
+    // this test green while the property it guards went unexercised.
+    assert!(
+        provider.calls() > 0,
+        "precondition: the provider was never entered, so nothing hung and the bound below \
+         measures nothing"
+    );
+    assert!(
+        elapsed >= ceiling,
+        "a hang must consume its window: {elapsed:?} is under the {ceiling:?} ceiling, which \
+         means the call returned by some path other than the timeout"
+    );
 
     assert!(
         elapsed < ceiling * 2,
@@ -444,6 +553,14 @@ async fn report_shape_matches_what_the_truncation_design_assumes() {
         anchors.findings_start,
         anchors.findings_end,
     ] {
+        // `contains("")` is ALWAYS true, so an anchor emptied by a refactor would satisfy every
+        // check below and turn this whole guardian decorative — it would keep passing while
+        // `Structural` truncation silently stopped being reachable, which is the one outcome it
+        // exists to catch (S4 Loop 2, Balthasar).
+        assert!(
+            !anchor.is_empty(),
+            "an empty section anchor makes every `contains` below vacuously true"
+        );
         assert!(
             report.report.contains(anchor),
             "missing section anchor: {anchor:?}. magi-core changed its rendering and REQ-A11b's \
@@ -454,6 +571,10 @@ async fn report_shape_matches_what_the_truncation_design_assumes() {
         );
     }
     for anchor in CONTRACTUAL_ANCHORS {
+        assert!(
+            !anchor.is_empty(),
+            "an empty contractual anchor makes the check below vacuously true"
+        );
         assert!(
             report.report.contains(anchor),
             "missing contractual anchor: {anchor:?}. These are the ones magi-core ALWAYS \

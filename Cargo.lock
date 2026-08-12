@@ -1703,7 +1703,7 @@ dependencies = [
 
 [[package]]
 name = "magi-rs"
-version = "0.12.2"
+version = "0.13.0"
 dependencies = [
  "anyhow",
  "arboard",

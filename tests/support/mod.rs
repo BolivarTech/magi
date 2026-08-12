@@ -245,7 +245,25 @@ impl LlmProvider for SchemaFailsOnceProvider {
 
 /// Never responds. Sustains the other half of SC-A04b: a hang consumes **one** window, because
 /// a provider timeout does **not** trigger the corrective schema retry.
-pub struct HangingProvider;
+///
+/// **It COUNTS its calls, and that is not bookkeeping** (S4 Loop 2, Balthasar). A test that bounds
+/// elapsed time only from ABOVE passes trivially when the provider was never entered at all —
+/// "it was fast and returned nothing" is equally true of doing nothing. The count is what turns
+/// the timing assertion into a claim about a hang, and it is the technique the schema-violating
+/// double above already uses through `calls_by_seat`.
+#[derive(Default)]
+pub struct HangingProvider {
+    /// How many times `complete` was entered.
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+impl HangingProvider {
+    /// Calls entered so far.
+    #[must_use]
+    pub fn calls(&self) -> usize {
+        self.calls.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
 
 #[async_trait]
 impl LlmProvider for HangingProvider {
@@ -255,6 +273,7 @@ impl LlmProvider for HangingProvider {
         _user_prompt: &str,
         _config: &CompletionConfig,
     ) -> Result<String, ProviderError> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         std::future::pending::<()>().await;
         Err(ProviderError::external(
             "unreachable",

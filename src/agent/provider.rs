@@ -64,7 +64,7 @@ pub trait Provider: Send + Sync {
     ///
     /// Retry wrapper; used by non-streaming callers (`LlmDistillJudge`, the MAGI
     /// consult adapter) and by tests; production `query_streaming` calls
-    /// `stream_messages` directly. Retries up to 3 times, waiting with
+    /// `stream_messages` directly. Makes up to 3 ATTEMPTS — two retries — waiting with
     /// exponential backoff (2s, then 4s) between attempts, on rate-limit (429)
     /// or transient connection failures (see [`is_retryable_error`]). A
     /// persistent outage fails after the 3rd attempt with no further wait.
@@ -126,10 +126,20 @@ pub trait Provider: Send + Sync {
     }
 }
 
-/// Maximum size the SSE accumulation buffer may reach before a complete event
-/// boundary (`"\n\n"`) is found. Guards an unbounded `buffer: String` from OOM on
-/// a malformed/hostile stream (audit finding W1). 8 MiB exceeds any legitimate
-/// single Anthropic SSE event.
+/// Maximum size the SSE accumulation buffer may reach before a complete event boundary — **any**
+/// of [`SSE_EVENT_BOUNDARIES`], not only `"\n\n"` — is found. Guards an unbounded `Vec<u8>` from
+/// OOM on a malformed/hostile stream (audit finding W1). 8 MiB exceeds any legitimate single
+/// Anthropic SSE event.
+///
+/// Two drifts, both from the same cause and both found by S4 Loop 2 (Balthasar). It said `"\n\n"`
+/// because the CRLF and CR forms were added below without this doc following, and it said
+/// `String` because the buffer became a `Vec<u8>` when byte-level boundary scanning replaced
+/// char-level. Each is harmless to the cap itself and each is the kind of drift that makes a
+/// later reader "fix" something that already works — or, worse, reason about UTF-8 boundaries in
+/// a buffer that no longer has them.
+///
+/// The second one arrived in the round that fixed the first: correcting one clause of a comment
+/// is not reading the comment.
 const MAX_SSE_BUFFER_BYTES: usize = 8 * 1024 * 1024;
 
 /// Parses an accumulated `tool_use` input-JSON string. Empty/whitespace → a valid
@@ -2978,8 +2988,9 @@ mod tests {
     // by two tests that prove different things (fix round 1 — the original
     // single stalling-socket test only caught a regression SHORTER than its
     // 2s stall, missing exactly the realistic shape: someone re-adding a 30s
-    // or 300s total timeout, the latter being what D-A07 rejected outright
-    // for magi-core's `OllamaProvider`):
+    // or 300s total timeout, the latter being magi-core's `OllamaProvider`
+    // default — which REQ-R30 still forbids from reaching a MAGI seat, and
+    // which has no business on this path either):
     //   - `the_principal_providers_client_carries_no_total_timeout_marker`
     //     pins the CLIENT'S CONFIGURATION, instantly and for a timeout of any
     //     duration, via `reqwest::Client`'s `Debug` output.
@@ -3038,7 +3049,8 @@ mod tests {
         // SC-A19 fix round 1: the 2s stalling-socket test below only proves
         // the absence of a timeout SHORTER than its stall. A regression that
         // reintroduces a 30s or 300s total timeout — the latter being
-        // precisely what D-A07 rejected for magi-core's `OllamaProvider` —
+        // magi-core's `OllamaProvider` default, which REQ-R30 keeps off a
+        // MAGI seat and which has no business here either —
         // sails straight through it. `reqwest::Client` exposes no public
         // timeout getter, but its `Debug` impl only ever prints
         // `TOTAL_TIMEOUT_DEBUG_MARKER` when a total timeout is actually set

@@ -1135,16 +1135,19 @@ mod tests {
     fn test_absent_memory_section_uses_documented_defaults() {
         // Task 1.1: `"openai"` is no longer a valid `provider` value (REQ-A01b).
         let c = MagiConfig::from_toml_str("provider = \"anthropic\"").unwrap();
-        assert_eq!(c.memory.mode, "selective");
-        assert_eq!(c.memory.chars_per_token, 3.5);
-        assert_eq!(c.memory.safety_margin_ratio, 0.1);
-        assert_eq!(c.memory.seed, 42);
-        assert_eq!(c.memory.max_records, 50_000);
-        assert_eq!(c.memory.index, "exact");
-        assert!(c.memory.distill_enabled);
-        assert_eq!(c.embedding.model, crate::defaults::DEFAULT_EMBEDDING_MODEL);
-        assert_eq!(c.embedding.dim, 0);
-        assert_eq!(c.embedding.query_prefix, "search_query: ");
+        assert_eq!(c.memory().mode, "selective");
+        assert_eq!(c.memory().chars_per_token, 3.5);
+        assert_eq!(c.memory().safety_margin_ratio, 0.1);
+        assert_eq!(c.memory().seed, 42);
+        assert_eq!(c.memory().max_records, 50_000);
+        assert_eq!(c.memory().index, "exact");
+        assert!(c.memory().distill_enabled);
+        assert_eq!(
+            c.embedding().model,
+            crate::defaults::DEFAULT_EMBEDDING_MODEL
+        );
+        assert_eq!(c.embedding().dim, 0);
+        assert_eq!(c.embedding().query_prefix, "search_query: ");
     }
 
     #[test]
@@ -1295,11 +1298,11 @@ model = \"nomic-embed-text\"
 dim = 768
 ";
         let c = MagiConfig::from_toml_str(toml).unwrap();
-        assert_eq!(c.memory.mode, "load_all");
-        assert_eq!(c.memory.context_budget_tokens, 4000);
-        assert_eq!(c.memory.evicted_retention_days, -1);
-        assert_eq!(c.memory.index, "ann");
-        assert_eq!(c.memory.seed, 42); // omitted field → documented default
-        assert_eq!(c.embedding.model, "nomic-embed-text");
+        assert_eq!(c.memory().mode, "load_all");
+        assert_eq!(c.memory().context_budget_tokens, 4000);
+        assert_eq!(c.memory().evicted_retention_days, -1);
+        assert_eq!(c.memory().index, "ann");
+        assert_eq!(c.memory().seed, 42); // omitted field → documented default
+        assert_eq!(c.embedding().model, "nomic-embed-text");
     }
 }

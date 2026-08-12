@@ -9,6 +9,119 @@ changes and the **patch** position signals backward-compatible fixes.
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-08-12
+
+Lineage rotation: a mage whose model fails now **rotates to a declared fallback of a
+different lineage and still emits a verdict**, instead of degrading the whole run. Around
+that sit the measurement that decides where a rotation may land, a persistent cache so it
+is paid once, and the telemetry that says what actually happened.
+
+### BREAKING — a v0.12.0 `magi.toml` will not start
+
+**The lineage is now mandatory for any seat that declares a model.** A lineage is the
+independent failure domain you consider that model to belong to, and it is what decides
+every rotation eligibility question. It is never inferred — not from the model name, not
+from the endpoint. The same pair of models can legitimately be two lineages for one user
+and one for another, so guessing would fabricate a decision that is not ours to make.
+
+```toml
+[magi]
+melchior_model    = "qwen3.5:397b-cloud"
+melchior_lineage  = "alibaba"
+balthasar_model   = "gpt-oss:120b-cloud"
+balthasar_lineage = "openai"
+caspar_model      = "deepseek-v4-pro:cloud"
+caspar_lineage    = "deepseek"
+```
+
+The startup error names **all** the missing keys at once, with the line to add for each. A
+seat left on the built-in model inherits the built-in lineage and owes nothing.
+
+**`enforce_diversity` defaults to `true`**, so the three seats must declare *different*
+lineages. Three mages on the same weights add nothing an ensemble can use, and a pool with
+no diversity is a safety net the operator believes they have and does not. If you only
+have models from one vendor, the better exit is finer labels — by model family, e.g.
+`opus`/`sonnet`/`haiku`, which gives you real rotation because they are different weights
+with different failure modes. If there is genuinely nothing to diversify with:
+
+```toml
+[magi]
+enforce_diversity = false
+```
+
+**The three v0.11.0 patterns are retired** (`provider = "openai"`, `[openai].base_url`,
+`[headless].tool_result_cap_bytes`). A file from that version now receives the v0.13.0
+guidance for its missing lineages **plus** generic serde errors for its own stale keys.
+That is two versions of distance and it is accepted — but stated here rather than
+discovered.
+
+### BREAKING — two observable outputs changed
+
+`kind = "ollama"` now completes through magi-core's `OllamaProvider` rather than the
+OpenAI-compatible transport directly. It is not a protocol change — that type delegates to
+the same transport internally — but two things you can see are different:
+
+- **`name()` reports `"ollama"`** where it used to report `"openai-compat"`, in errors and
+  reports.
+- **A `base_url` without `/v1` no longer 404s** under this kind. Both spellings are
+  accepted and reach the same endpoint.
+
+### The report's JSON changed shape AND meaning
+
+`schema_version` stays at `1` — it does not move before 1.0, by decision — so this section
+is the only channel for both.
+
+**Added, always present:** `rotations` (which mage hopped, from which lineage to which,
+why, and the model it ended on) and `ran_unmeasured` (mages that ran without a measured
+window, which qualifies confidence in their verdict). Empty is a *positive certificate*
+that nobody rotated, not silence — a field that appears and disappears cannot be declared
+by a consumer with a strict schema.
+
+**Changed meaning, and this one needs reading:** a reported context window may now be
+**assumed** rather than measured. When a candidate could not be measured, it is credited
+with the smallest window measured in that run, and the output marks it as assumed. If you
+consumed a window on the basis of *"if there is a number, it was measured"*, that
+assumption no longer holds.
+
+**A limitation worth knowing before you file it as a bug:** a mage that rotated and whose
+task then panicked **or was cancelled** reports the **configured** model, not the one it
+ended on, with an empty hop chain. The chain lived on the stack of the task that went
+down, either way, and cannot be recovered from outside magi-core. That mage also appears
+in `failed_agents`, which is the signal that its rotation entry is not to be trusted.
+
+### Added
+
+- **Rotation.** A shared `[[magi.fallback]]` pool, ordered strongest to weakest, with
+  `max_rotations` (default `2`; `0` is a kill-switch restoring v0.12.0 exactly). Shared
+  and not per-seat: what consensus needs is that a rotation lands on a lineage the other
+  two seats do not hold, which is a property of the pool's diversity rather than of who
+  owns the list.
+- **Lazy measurement with a persistent cache**, in a new table of the encrypted database.
+  Only successful measurements are stored — a cold daemon's silence is transient and must
+  never be frozen into a permanent answer — and the key is the `(endpoint, model)` pair,
+  because a tag is only unique within an endpoint. Reordering the pool measures nothing:
+  the order is rotation preference, not identity.
+- **`strict_context_guard`** (default `false`), passed to magi-core **only** when at least
+  one candidate has a measured window. A `true` with nothing measured would reject every
+  candidate and switch rotation off entirely, which is not a guard.
+- **Startup notices** naming a configured model this endpoint could not measure while it
+  was measuring others, together with the command that fixes it.
+
+### Changed
+
+- **The headless `--timeout` default now follows `max_rotations` and `retry_disabled`.**
+  Both were already exposed, so the worst case is calculated from what you declared rather
+  than from a new knob. With the defaults it is ~11 minutes, paid only when something is
+  genuinely hung; `--timeout` still overrides it, with a warning naming the computed
+  minimum.
+- **`input_warn_tokens` stays on the trio's window**, and a pool candidate only lowers it
+  when it sits within 10 % of that base. Deriving from the whole pool would let the
+  candidate least likely to ever run pull the threshold down on every run, firing the size
+  warning on practically every real consult — which does not make it conservative, it
+  destroys the signal. Candidates outside the band are reported instead, all in one
+  message.
+
+
 ## [0.12.2] - 2026-08-10
 
 Dependency-only patch: `magi-core` moves from 3.1.0 to **3.2.0**. Nothing in this
@@ -217,7 +330,7 @@ full explanation of each.
 
 ### Notes
 
-- 969 tests pass. Line coverage is 90.13 %.
+- 1088 tests pass. Line coverage is 90.13 %.
 - `magi-core` stays at 3.1.0. Lineage rotation, the fallback pool and the context guard
   are the next milestone.
 
@@ -872,7 +985,9 @@ Initial pre-release, published primarily to reserve the `magi-rs` crate name.
 - `ratatui` TUI with Normal / Selection / Visual modes and Unicode-safe input.
 - OAuth (PKCE) login and OS keyring integration, with `magi-rust` legacy migration.
 
-[Unreleased]: https://github.com/BolivarTech/magi/compare/v0.12.0...HEAD
+[Unreleased]: https://github.com/BolivarTech/magi/compare/v0.13.0...HEAD
+[0.13.0]: https://github.com/BolivarTech/magi/compare/v0.12.2...v0.13.0
+[0.12.2]: https://github.com/BolivarTech/magi/compare/v0.12.0...v0.12.2
 [0.12.0]: https://github.com/BolivarTech/magi/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/BolivarTech/magi/compare/v0.10.4...v0.11.0
 [0.10.4]: https://github.com/BolivarTech/magi/compare/v0.10.3...v0.10.4
@@ -884,6 +999,10 @@ Initial pre-release, published primarily to reserve the `magi-rs` crate name.
 [0.8.0]: https://github.com/BolivarTech/magi/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/BolivarTech/magi/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/BolivarTech/magi/compare/v0.5.2...v0.6.0
+[0.5.2]: https://github.com/BolivarTech/magi/compare/v0.5.1...v0.5.2
+[0.5.1]: https://github.com/BolivarTech/magi/compare/v0.5.0...v0.5.1
+[0.5.0]: https://github.com/BolivarTech/magi/compare/v0.4.0...v0.5.0
+[0.4.0]: https://github.com/BolivarTech/magi/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/BolivarTech/magi/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/BolivarTech/magi/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/BolivarTech/magi/releases/tag/v0.2.1

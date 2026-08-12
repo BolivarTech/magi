@@ -488,11 +488,24 @@ fn bootstrap_fresh_envelope(
 /// Single source of truth for the schema shared by three call sites: the
 /// encrypted store bootstrap ([`EncryptedSqliteMemory::new_with_vault`]), the
 /// vector store ([`crate::memory::store::SqliteVectorStore::new`]), and the
-/// headless `magi init` scaffold ([`crate::system::workspace::init`]). The five
-/// tables — `sessions`, `messages`, `knowledge`, `vault_meta`, `memories` — are
-/// exactly the set the bootstrap state machine (MS1 Task 3) row-counts; keeping
+/// headless `magi init` scaffold ([`crate::system::workspace::init`]). Keeping
 /// them in one place guarantees a freshly-`init`ed DB never self-reports
-/// `DbCorrupt` for a missing table. All statements use `IF NOT EXISTS`, so
+/// `DbCorrupt` for a missing table.
+///
+/// **Six tables, in three roles — and they are not interchangeable.** The four
+/// of [`DATA_TABLES`] (`sessions`, `messages`, `knowledge`, `memories`) are the
+/// ones the bootstrap state machine (MS1 Task 3) row-counts; `vault_meta` holds
+/// the envelope, and `model_capabilities` the measurement cache (REQ-R25).
+///
+/// The distinction is load-bearing, and this comment used to erase it by calling
+/// all of them "exactly the set the bootstrap state machine row-counts" — wrong
+/// about `vault_meta` before MS3 even existed, and wrong about the count after
+/// it (S2 Loop 2, Balthasar). `vault_meta` cannot participate in that count:
+/// whether its envelope row is PRESENT is precisely what separates "bootstrap a
+/// fresh DB" from "this DB is corrupt", so counting it as data would collapse
+/// the two states the machine exists to tell apart.
+///
+/// All statements use `IF NOT EXISTS`, so
 /// re-running against an initialized DB is a no-op. Does **not** set any
 /// `PRAGMA` (WAL/synchronous) — those stay at the connection-open call sites.
 ///
@@ -521,6 +534,12 @@ pub(crate) fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
         CREATE TABLE IF NOT EXISTS vault_meta (
             key TEXT PRIMARY KEY,
             value BLOB NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS model_capabilities (
+            endpoint TEXT NOT NULL,
+            model TEXT NOT NULL,
+            capability_blob TEXT NOT NULL,
+            PRIMARY KEY (endpoint, model)
         );
         CREATE TABLE IF NOT EXISTS memories (
             id TEXT PRIMARY KEY,
@@ -825,6 +844,13 @@ mod tests {
             DATA_TABLES.iter().map(|t| (*t).to_string()).collect();
         // The envelope table is created by `init_schema` but is never a DATA_TABLE.
         expected.insert("vault_meta".to_string());
+        // Neither is the model capability cache (MS3/REQ-R25), and the reason is the same shape
+        // as `vault_meta`'s: DATA_TABLES is what never-delete ROW-COUNTS to decide whether a
+        // database without an envelope already holds user data. Measurements are **derived and
+        // reconstructible** — probing again rebuilds them — so counting them would classify a
+        // database holding nothing but a warm cache as `DbCorrupt` and refuse to bootstrap it,
+        // over data whose entire purpose is to be disposable.
+        expected.insert("model_capabilities".to_string());
 
         assert_eq!(
             created, expected,
@@ -845,6 +871,11 @@ mod tests {
         assert!(
             !DATA_TABLES.contains(&"vault_meta"),
             "vault_meta is the envelope, not user data — it must not be a DATA_TABLE"
+        );
+        assert!(
+            !DATA_TABLES.contains(&"model_capabilities"),
+            "model_capabilities is a reconstructible cache, not user data — counting it would \
+             make a warm cache alone enough to refuse a bootstrap"
         );
     }
 

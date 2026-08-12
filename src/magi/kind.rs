@@ -44,15 +44,21 @@ pub const VALID_PROVIDER_KINDS: &str = "ollama, openai-compat, anthropic";
 pub enum ProviderKind {
     /// Ollama: keyless, and the ONLY measurable one (`/api/show` + `/api/tags`).
     ///
-    /// **Does not use the `OllamaProvider` type from magi-core for completions** (D-A07):
-    /// completions go through the keyless OpenAI-compat transport against `…/v1`, and
-    /// `OllamaProvider` is used only as a probe.
+    /// **Completes through magi-core's `OllamaProvider`** (REQ-R30, which reverts D-A07). Both
+    /// `base_url` spellings are accepted — with `/v1` and without — and identity in errors and
+    /// reports is `"ollama"`, where it used to be `"openai-compat"`.
     ///
-    /// The reason originally recorded for D-A07 — *"its only constructor sets a 300 s client
-    /// timeout with no override, so it cannot meet the scale of REQ-A04"* — **no longer holds**:
-    /// magi-core 3.2.0 added `OllamaProvider::with_timeout`, which bounds both HTTP clients the
-    /// type builds. What survives is narrower: **never build it with `new`**, which still
-    /// delegates with the 300 s default. The current wiring is a choice, not a constraint.
+    /// D-A07 held that this kind must NOT use the type, on the reason that *"its only constructor
+    /// sets a 300 s client timeout with no override, so it cannot meet the scale of REQ-A04"*.
+    /// That was an **impossibility**, and magi-core 3.2.0 removed it by adding `with_timeout`,
+    /// which bounds both HTTP clients the type builds. With the impossibility gone the question
+    /// was decided on its merits — neither option gains capability, since `OllamaProvider::complete`
+    /// delegates to an internal `OpenAiCompatibleProvider` — and legibility won: this variant
+    /// wired to that type is what anyone reading the two names together expects.
+    ///
+    /// **What survives the reversal is narrower and sharper: never build it with `new`.** It
+    /// delegates with the 300 s default, which breaks `operation_budget + client_timeout <=
+    /// ceiling`, and getting it wrong compiles, runs, and breaks the derived scale in silence.
     Ollama,
     /// OpenAI, Groq, OpenRouter — any Chat Completions. With token, no probe.
     OpenAiCompat,
@@ -86,10 +92,24 @@ impl ProviderKind {
     /// having defined it, and breaking startup for that would punish an everyday accident. A
     /// present and unrecognized value is an error: the user meant to say something and said it wrong.
     ///
-    /// Trims **ASCII** whitespace, just like `ModeExt::parse_config_value`, so the two
-    /// vocabulary keys in the file are read with the same rule.
+    /// Trims with [`str::trim`] — **Unicode** whitespace — matching the blank rule of
+    /// `ModeExt::parse_config_value` and of `config::non_blank`, the shared helper the project
+    /// names for exactly this class of value.
+    ///
+    /// It used to trim ASCII only, "just like `ModeExt::parse_config_value`", and the two agreed
+    /// with each other while both disagreed with `non_blank`. That gap was reachable and it broke
+    /// the project's own rule that **blank is absent, never invalid**: `provider = "\u{a0}"` is
+    /// whitespace-only, so `non_blank` reads it as absent, but `validate_vocabulary` hands this
+    /// function the RAW value, ASCII-trimming left the NBSP standing, and the load failed on a
+    /// value that should have fallen through to the default. Found by S1 Loop 2 (Caspar).
+    ///
+    /// **Why one trim here and two over in `mode`.** `Mode` splits them because
+    /// `normalize_label` is shared with `mode_classifier`, whose input is model output; the
+    /// narrower ASCII rule guards that injection surface. A provider kind has no such path — it
+    /// is only ever read from a config file or an env var — so there is nothing here for a
+    /// second, narrower rule to protect.
     pub fn parse(raw: &str) -> Result<Option<Self>, ProviderKindParseError> {
-        match raw.trim_matches(|c: char| c.is_ascii_whitespace()) {
+        match raw.trim() {
             "" => Ok(None),
             "ollama" => Ok(Some(Self::Ollama)),
             "openai-compat" => Ok(Some(Self::OpenAiCompat)),
@@ -198,5 +218,33 @@ mod tests {
         ] {
             assert_eq!(ProviderKind::parse(&kind.to_string()).unwrap(), Some(kind));
         }
+    }
+
+    /// S1 Loop 2 (Caspar): the blank rule is **Unicode**, because that is what
+    /// `config::non_blank` uses and `provider`/`kind` are on its list.
+    ///
+    /// **Mutation-verified (B16):** restore
+    /// `trim_matches(|c: char| c.is_ascii_whitespace())` and the first assertion goes red —
+    /// the NBSP survives the trim, the value reads as present-and-unrecognized, and
+    /// `validate_vocabulary` fails the whole load over an exported-but-unfilled variable.
+    #[test]
+    fn a_unicode_whitespace_only_kind_is_absent_not_invalid() {
+        assert_eq!(
+            ProviderKind::parse("\u{a0}").unwrap(),
+            None,
+            "NBSP alone is whitespace-only, so it is ABSENT — never invalid"
+        );
+        assert_eq!(ProviderKind::parse("\u{2007}\u{a0}\t ").unwrap(), None);
+
+        assert_eq!(
+            ProviderKind::parse("\u{a0}ollama\u{a0}").unwrap(),
+            Some(ProviderKind::Ollama),
+            "and a real value survives Unicode padding instead of being rejected for it"
+        );
+
+        assert!(
+            ProviderKind::parse("banana").is_err(),
+            "the rule is about BLANKNESS, not leniency: present and unrecognized is still an error"
+        );
     }
 }

@@ -14,8 +14,10 @@ use magi_core::schema::{AgentName, Mode};
 use magi_rs::magi::endpoint::{EndpointError, EndpointTemplate};
 use magi_rs::magi::gate::{GateOverrides, GateThresholds};
 use magi_rs::magi::kind::{ProviderKind, ProviderKindParseError};
+use magi_rs::magi::lineage::{Lineage, LineageError};
 use magi_rs::magi::mode::{ModeExt, ModeParseError};
 use magi_rs::magi::{min_viable_output_cap, AGENT_TIMEOUT_MAX_SECS, AGENT_TIMEOUT_MIN_SECS};
+use magi_rs::notices::Notice;
 use serde::Deserialize;
 
 /// Configuration errors from `magi.toml` (Task 1.1, REQ-A01b/A04/A11b/A21b).
@@ -26,6 +28,15 @@ use serde::Deserialize;
 /// lib cannot know a type from the bin).
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
+    /// The declared lineages do not satisfy `enforce_diversity` (REQ-R29).
+    ///
+    /// A load error and not a notice because the evidence is **declarative**: three distinct seat
+    /// lineages and pool coverage are free to check and true right now. The empirical half —
+    /// two models sharing a weights digest — only ever warns, because that evidence can have
+    /// aged.
+    #[error("{0}")]
+    Diversity(#[from] magi_rs::magi::rotation_config::DiversityError),
+
     /// `provider` or `[magi].kind` bring a present but unrecognized value.
     #[error("unknown provider: {got:?} (valid: {valid})")]
     UnknownProviderKind {
@@ -44,8 +55,14 @@ pub enum ConfigError {
         valid: &'static str,
     },
 
-    /// The file brings v0.11.0 migration patterns (REQ-A21b). The text is already rendered by
-    /// [`migrate::render_migration_error`] — it names each incompatibility and its correction.
+    /// The file brings incompatibilities from the previous generation (REQ-A21b/REQ-R22). The
+    /// text is already rendered by [`migrate::render_migration_error`] — it names each
+    /// incompatibility and its correction, all of them in ONE message.
+    ///
+    /// Reached today by the v0.12.0 → v0.13.0 break: a seat that declares a model and not its
+    /// lineage ([`migrate::missing_seat_lineages`]). The pre-parse half of the pass
+    /// ([`migrate::detect_migrations`]) declares no pattern since the v0.11.0 set retired, and
+    /// feeds this same variant when it is reloaded.
     #[error("{0}")]
     NeedsMigration(String),
 
@@ -56,8 +73,9 @@ pub enum ConfigError {
     /// `[magi].agent_timeout_secs` falls outside the acceptable range of §4.9.
     #[error(
         "agent_timeout_secs = {got} out of range [{min}, {max}]: below {min}s a legitimate \
-         generation does not fit; above {max}s a consult's worst case (2 attempts per mage) \
-         exceeds 4 minutes. Not clamped to the extreme — rejected."
+         generation does not fit; above {max}s a consult's worst case — 2 attempts per mage on \
+         each of `1 + max_rotations` models — reaches 12 minutes at the default two rotations, \
+         and grows from there. Not clamped to the extreme — rejected."
     )]
     AgentTimeoutOutOfRange {
         /// The declared value.
@@ -85,9 +103,14 @@ pub enum ConfigError {
     /// literal credential instead of the placeholders `[user]:[password]`, an unknown
     /// placeholder, or it could not be traversed (REQ-A16c, SC-A16d).
     ///
-    /// The text never repeats the offending value — that is guaranteed by the `Display` of
-    /// [`EndpointError`] on which it relies, not by this `#[error]`.
-    #[error("{0}")]
+    /// The text never repeats the offending value, and **this variant no longer takes that on
+    /// trust** (S1 Loop 2, Balthasar). It used to render `{0}` directly, with a comment saying
+    /// the guarantee lived in [`EndpointError`]'s `Display` "and not in this `#[error]`" — which
+    /// is precisely the shape CLAUDE.md names as recurrent: a promise held by a type this variant
+    /// does not own, enforced by nothing, and revocable by an edit in another module that would
+    /// pass every gate. `EndpointError`'s own guarantee stays; this is the second layer, so a
+    /// future message that embeds a URL is redacted here instead of printed.
+    #[error("{}", magi_rs::redact::redact_foreign_error(_0))]
     Endpoint(#[from] EndpointError),
 }
 
@@ -176,55 +199,193 @@ fn line_col_of(raw: &str, offset: usize) -> (usize, usize) {
     (line, column)
 }
 
-/// Loop 2 (S1) construction-boundary note: fields are `pub` and this derives `Default` on
-/// purpose, for `serde` and for the many `MagiConfig { .. }` test literals across `main.rs`/
-/// `headless_runner.rs`. That means the vocabulary [`Self::validate_vocabulary`] enforces is
-/// **not** enforced at the type level — a hand-built literal with `provider: Some("banana")`
-/// compiles. The two production accessors that would otherwise silently misbehave on such a
-/// value (`effective_provider`, `effective_default_mode`) each `assert!` the precondition
-/// instead, which panics in every build profile — see their rustdoc for why that is the chosen
-/// trade-off over a private-fields/builder restructuring.
+/// Construction boundary (REQ-R23, SC-R21): **every field is private**, so there is no
+/// `MagiConfig { provider: Some("banana"), ..Default::default() }` to write. The two ways in are
+/// [`Self::load`]/[`Self::from_toml_str`] — the production path — and [`MagiConfigBuilder`],
+/// both of which run [`Self::validate_vocabulary`]. The vocabulary is therefore enforced at the
+/// TYPE level and not merely asserted after the fact.
 ///
-/// # Accepted technical debt, scheduled
+/// This closes the debt the MS2 §6 gate raised three times and the project owner accepted as a
+/// documented residual on 2026-08-09. It was deferred then because it touches dozens of
+/// construction sites in `main.rs` and `headless_runner.rs`, and doing that inside a quality gate
+/// would have invalidated verdicts already earned for a change with no behavioural effect.
 ///
-/// The MS2 §6 gate raised this three times and it was **accepted as a documented residual by the
-/// project owner on 2026-08-09**, to be repaid in the next patch or release. Recording it here
-/// rather than only in a local note is deliberate: `dev-docs/` is git-ignored, so a note there
-/// would not reach whoever plans that release.
+/// **`Default` and the `assert!`s stay, and that is not leftover caution.** `Deserialize` is
+/// still a way to materialize this struct without passing through either constructor — a plain
+/// `toml::from_str::<MagiConfig>` does exactly that — so the preconditions of
+/// [`Self::effective_provider`] and [`Self::effective_default_mode`] remain reachable, and they
+/// remain `assert!` (every build profile), not `debug_assert!`. Private fields removed the
+/// *literal* bypass, which was the wide one; they did not remove the deserialization one.
 ///
-/// The repayment is private fields plus a crate-internal builder, which makes the invalid state
-/// unconstructible instead of merely asserted against. It was deferred because it touches dozens
-/// of `MagiConfig { .. }` literals in `main.rs` and `headless_runner.rs`, and doing that late in a
-/// quality gate would have invalidated verdicts already earned for a change with no behavioural
-/// effect.
+/// # Rule for any NEW production path
 ///
-/// What keeps the risk low in the meantime, and it is worth being precise: every production path
-/// builds this through [`Self::load`], which validates. A hand-built invalid literal therefore
-/// fails **loudly, at the point of misuse, in release builds too** — not silently and not later.
+/// Obtain a `MagiConfig` from [`Self::load`] or [`Self::from_toml_str`]. Never from a bare
+/// `toml::from_str::<MagiConfig>`, and never from [`MagiConfigBuilder::build_unvalidated`] —
+/// both skip [`Self::validate_vocabulary`], and the `assert!`s above are a backstop that turns
+/// the mistake into a panic, not a design that makes it safe. [`MagiConfigBuilder`] itself is
+/// `#[cfg(test)]` today precisely because no production path needs it; if one ever does, the
+/// builder is promoted and its `build` (the validating exit) is the one to use.
+///
+/// This is written here rather than only in the project runbook because the runbook is not
+/// tracked in git, so it reaches neither a reviewer reading this file nor a developer who
+/// clones the repository (asked for by S1 Loop 2, Balthasar).
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MagiConfig {
-    pub provider: Option<String>,
+    /// Backend of the main agent (REQ-A01b). Absent ⇒ the built-in default.
+    provider: Option<String>,
     /// Default endpoint OF THE SYSTEM (REQ-A21): used by the main agent, the trio, and the
     /// embedder unless their own section overrides it. Absent ⇒ the built-in.
     /// **BREAKING**: up to v0.11.0 this key lived in `[openai].base_url`, which no longer
     /// exists — see [`ConfigError::NeedsMigration`].
-    pub base_url: Option<String>,
+    base_url: Option<String>,
     /// Report OUTPUT cap, on ALL THREE paths (TUI, `magi query`, headless consult — REQ-A11b).
     /// Absent ⇒ [`magi_rs::magi::TOOL_RESULT_CAP_BYTES`].
-    pub tool_result_cap_bytes: Option<usize>,
+    tool_result_cap_bytes: Option<usize>,
+    /// `[openai]` section — see [`OpenAiConfig`].
     #[serde(default)]
-    pub openai: OpenAiConfig,
+    openai: OpenAiConfig,
+    /// `[anthropic]` section — see [`AnthropicConfig`].
     #[serde(default)]
-    pub anthropic: AnthropicConfig,
+    anthropic: AnthropicConfig,
+    /// `[magi]` section — see [`MagiSectionConfig`].
     #[serde(default)]
-    pub magi: MagiSectionConfig,
+    magi: MagiSectionConfig,
+    /// `[memory]` section — see [`crate::memory::config::MemoryConfig`].
     #[serde(default)]
-    pub memory: crate::memory::config::MemoryConfig,
+    memory: crate::memory::config::MemoryConfig,
+    /// `[embedding]` section — see [`crate::memory::config::EmbeddingConfig`].
     #[serde(default)]
-    pub embedding: crate::memory::config::EmbeddingConfig,
+    embedding: crate::memory::config::EmbeddingConfig,
+    /// `[headless]` section — see [`HeadlessConfig`].
     #[serde(default)]
-    pub headless: HeadlessConfig,
+    headless: HeadlessConfig,
+}
+
+/// Crate-internal builder: the ONLY way to obtain a [`MagiConfig`] other than `Deserialize`
+/// (REQ-R23). It mirrors the shape `AutonomousRunConfig` already uses in this crate — private
+/// fields, no public literal, a single fallible exit — for the same reason: a type whose invalid
+/// state cannot be NAMED needs no assertion that it never occurs.
+///
+/// **Why `#[cfg(test)]`.** Production builds a configuration exactly one way,
+/// [`MagiConfig::load`], so outside the test profile the builder has no caller and the linter is
+/// right to say so. Compiling it only under `cfg(test)` states that fact instead of hiding it
+/// behind an `#[allow(dead_code)]`, and it costs nothing: SC-R21 is enforced by the fields being
+/// private, which holds in every profile. The first production caller removes this attribute
+/// together with the code that needs it — the compiler will ask.
+///
+/// **Which setters exist, and why not one per field.** Only the six fields with a real call site
+/// have a setter (`provider`, `base_url`, `tool_result_cap_bytes`, `openai`, `anthropic`,
+/// `magi`). `[memory]`, `[embedding]` and `[headless]` are reached exclusively through
+/// [`MagiConfig::from_toml_str`], so a setter for them would be dead code — and adding one to
+/// round out the API would be fabricating a caller. Whichever task first needs one adds it
+/// together with its consumer.
+///
+/// # Examples
+///
+/// ```ignore
+/// let cfg = MagiConfig::builder()
+///     .provider(Some("anthropic".to_string()))
+///     .build()?;
+/// ```
+#[cfg(test)]
+#[derive(Debug, Default)]
+pub(crate) struct MagiConfigBuilder {
+    /// Value under construction. It is never handed out unvalidated: [`MagiConfigBuilder::build`]
+    /// is the only move-out, and it validates first.
+    inner: MagiConfig,
+}
+
+#[cfg(test)]
+impl From<MagiConfig> for MagiConfigBuilder {
+    /// Reopens an already-built configuration for modification — the replacement for the
+    /// functional-update syntax (`..base`) that private fields retire.
+    ///
+    /// It is not a hole in the invariant: the only exit remains [`MagiConfigBuilder::build`], so
+    /// a derived configuration is validated exactly like an original one.
+    fn from(inner: MagiConfig) -> Self {
+        Self { inner }
+    }
+}
+
+#[cfg(test)]
+impl MagiConfigBuilder {
+    /// Sets the root `provider` (REQ-A01b). `None` ⇒ absent, i.e. the built-in default.
+    #[must_use]
+    pub(crate) fn provider(mut self, v: Option<String>) -> Self {
+        self.inner.provider = v;
+        self
+    }
+
+    /// Sets the root `base_url` template (REQ-A21). `None` ⇒ absent, i.e. the built-in default.
+    #[must_use]
+    pub(crate) fn base_url(mut self, v: Option<String>) -> Self {
+        self.inner.base_url = v;
+        self
+    }
+
+    /// Sets the root `tool_result_cap_bytes` (REQ-A11b). `None` ⇒ absent, i.e. the built-in cap.
+    #[must_use]
+    pub(crate) fn tool_result_cap_bytes(mut self, v: Option<usize>) -> Self {
+        self.inner.tool_result_cap_bytes = v;
+        self
+    }
+
+    /// Sets the whole `[openai]` section.
+    #[must_use]
+    pub(crate) fn openai(mut self, v: OpenAiConfig) -> Self {
+        self.inner.openai = v;
+        self
+    }
+
+    /// Sets the whole `[anthropic]` section.
+    #[must_use]
+    pub(crate) fn anthropic(mut self, v: AnthropicConfig) -> Self {
+        self.inner.anthropic = v;
+        self
+    }
+
+    /// Sets the whole `[magi]` section.
+    #[must_use]
+    pub(crate) fn magi(mut self, v: MagiSectionConfig) -> Self {
+        self.inner.magi = v;
+        self
+    }
+
+    /// Validates the accumulated vocabulary and yields the [`MagiConfig`].
+    ///
+    /// It runs every check [`MagiConfig::from_toml_str`] applies **to a parsed config**, so a
+    /// builder-built config and a file-loaded one are subject to the same rules — a builder that
+    /// validated less would let the suite exercise a state production cannot reach, and it did:
+    /// see `the_builder_rejects_a_seat_that_declares_a_model_without_its_lineage`.
+    ///
+    /// The one thing it cannot run is [`migrate::detect_migrations`], which matches **raw TOML
+    /// text** and so has no input here. That is a difference in kind, not a gap in rigour: a
+    /// builder never has a source file to carry a retired pattern.
+    ///
+    /// # Errors
+    ///
+    /// Whatever [`MagiConfig::validate_vocabulary`] rejects: [`ConfigError::NeedsMigration`] for
+    /// a seat declaring a model without its lineage, [`ConfigError::UnknownProviderKind`],
+    /// [`ConfigError::UnknownMode`], [`ConfigError::AgentTimeoutOutOfRange`],
+    /// [`ConfigError::OutputCapTooSmall`] or [`ConfigError::Diversity`].
+    pub(crate) fn build(self) -> Result<MagiConfig, ConfigError> {
+        self.inner.validate_vocabulary()?;
+        Ok(self.inner)
+    }
+
+    /// Yields the [`MagiConfig`] **without validating**.
+    ///
+    /// It exists because a handful of tests must reach the `assert!` preconditions of
+    /// [`MagiConfig::effective_provider`] / [`MagiConfig::effective_default_mode`], and those are
+    /// only reachable from a config the validation never saw. `Deserialize` is the real remaining
+    /// bypass those assertions defend against, so this reproduces that state directly instead of
+    /// round-tripping through TOML to fake it. Every other caller wants
+    /// [`MagiConfigBuilder::build`].
+    #[must_use]
+    pub(crate) fn build_unvalidated(self) -> MagiConfig {
+        self.inner
+    }
 }
 
 /// `[headless]` section of `magi.toml` (spec §11). Every field is optional; an unset field
@@ -246,8 +407,9 @@ pub struct HeadlessConfig {
     // REQ-A21b): it moved up to the root level because under `[headless]` it only covered batch
     // mode and left interactive mode loose, which is exactly where the report is re-sent on
     // every turn of a long session. A cap that protects the cheap case and not the expensive
-    // one protects the wrong case. A file that still declares it here receives the guided
-    // migration error, not a bare `unknown field` — see `detect_migrations`. Default log level
+    // one protects the wrong case. A file that still declares it here received the guided
+    // migration error until v0.13.0 retired that pattern set (REQ-R22); it now gets serde's bare
+    // `unknown field` — see `detect_migrations`. Default log level
     // (REQ-H24): `error`|`warn`|`info`|`debug`. Overrides `"info"`.
     pub log_level: Option<String>,
     /// Default wall-clock timeout secs for tool-executing tiers (REQ-H36). Overrides
@@ -306,6 +468,23 @@ pub struct MagiSectionConfig {
     pub balthasar_model: Option<String>,
     /// Override model for Caspar (the Critic). `None` ⇒ principal model.
     pub caspar_model: Option<String>,
+
+    /// Independent failure domain of [`Self::melchior_model`] (REQ-R02).
+    ///
+    /// **Mandatory for a seat that declares a model, and never inferred** (R-R03): the lineage is
+    /// the label that decides all rotation eligibility, and it is a semantic choice of the
+    /// operator — the same two models can legitimately be two lineages for one user and one for
+    /// another. A seat that inherits the built-in model inherits the built-in lineage with it, so
+    /// only a *declared* model obliges a declared lineage. Blank counts as absent, like every
+    /// other text key.
+    ///
+    /// A `magi.toml` from v0.12.0 has none of these keys; that break is reported whole by
+    /// [`migrate::missing_seat_lineages`], never one key per start.
+    pub melchior_lineage: Option<String>,
+    /// Independent failure domain of [`Self::balthasar_model`] — see [`Self::melchior_lineage`].
+    pub balthasar_lineage: Option<String>,
+    /// Independent failure domain of [`Self::caspar_model`] — see [`Self::melchior_lineage`].
+    pub caspar_lineage: Option<String>,
     /// Auto-approve autonomous MAGI (`consult`) launches when the main LLM self-routes to the
     /// `consult` tool in the agent tool loop. Default `false` — the agent asks before launching
     /// the 3-perspective consensus. `true` launches without asking, but announces it in the TUI
@@ -337,6 +516,34 @@ pub struct MagiSectionConfig {
     pub retry_disabled: Option<bool>,
     /// Complexity gate thresholds per mode; absent ⇒ built-ins (REQ-A20b).
     pub complexity: Option<ComplexityConfig>,
+
+    /// Fallback models a mage may rotate through; absent ⇒ [`DEFAULT_MAX_ROTATIONS`] (REQ-R05).
+    ///
+    /// **`0` is the kill-switch**, and it must survive as a declared value: collapsing `None` and
+    /// `Some(0)` would turn an explicit "no rotation" into "use the default".
+    pub max_rotations: Option<u32>,
+    /// Refuse fallback candidates whose window could not be measured; absent ⇒
+    /// [`DEFAULT_STRICT_CONTEXT_GUARD`] (REQ-R11).
+    ///
+    /// What the operator **declares**. Whether it is **applied** is another matter: magi-rs passes
+    /// it down only when at least one candidate has a measured window, because a `true` with
+    /// nothing measured would disqualify every candidate and switch rotation off in silence.
+    pub strict_context_guard: Option<bool>,
+    /// Require the three seats to declare distinct lineages; absent ⇒
+    /// [`DEFAULT_ENFORCE_DIVERSITY`] (REQ-R29).
+    ///
+    /// **Exclusive to magi-rs** — never forwarded to magi-core, which treats the lineage as an
+    /// opaque string.
+    pub enforce_diversity: Option<bool>,
+
+    /// The shared rotation pool, ordered strongest to weakest (REQ-R13).
+    ///
+    /// **Goes LAST in the file, not last in the `[magi]` block.** In TOML every loose key and
+    /// sub-table must precede the first array of tables, so a rule phrased as "last in the block"
+    /// would let a later addition to `[magi]` land after the array and parse into the wrong table.
+    /// "Last in the file" leaves nowhere to get it wrong.
+    #[serde(default)]
+    pub fallback: Vec<magi_rs::magi::rotation_config::FallbackEntry>,
 }
 
 impl MagiSectionConfig {
@@ -366,6 +573,66 @@ impl MagiSectionConfig {
         ]
     }
 
+    /// The independent failure domain of one seat: the declared label, or the built-in one when
+    /// the seat declares no model (REQ-R01/R02).
+    ///
+    /// # The trigger rule, and why it has two halves
+    ///
+    /// A seat that **declares a model** owes a lineage: the label decides every rotation
+    /// eligibility question, it is a semantic choice of the operator, and there is no observable
+    /// datum to derive it from without inventing one (R-R03). A seat that **declares no model**
+    /// runs the built-in model, whose lineage is built in too — so it inherits both together and
+    /// owes nothing. Without that second half the default configuration, belonging to whoever
+    /// never touched `[magi]`, would register three seats with no lineage, and
+    /// `MagiBuilder::build()` rejects a blank one outright.
+    ///
+    /// A declared lineage wins in both cases: the operator who bothered to label a seat is the
+    /// authority on what its failure domain is.
+    ///
+    /// Blank counts as **absent**, never invalid — the rule every text key has followed since MS2.
+    ///
+    /// # Errors
+    ///
+    /// [`LineageError::Missing`] naming the configuration key, when a seat declares a model and no
+    /// lineage. `MagiConfig::load` already rejects that file through
+    /// [`migrate::missing_seat_lineages`], which reports all three seats at once; this is the same
+    /// rule enforced at the point of use, for the crate-internal builder that bypasses `load`.
+    #[must_use = "the resolved lineage is what the seat registers with"]
+    pub fn lineage_of_seat(&self, seat: AgentName) -> Result<Lineage, LineageError> {
+        let (declared, model, key, built_in) = match seat {
+            AgentName::Melchior => (
+                &self.melchior_lineage,
+                &self.melchior_model,
+                "melchior_lineage",
+                crate::defaults::DEFAULT_MAGI_MELCHIOR_LINEAGE,
+            ),
+            AgentName::Balthasar => (
+                &self.balthasar_lineage,
+                &self.balthasar_model,
+                "balthasar_lineage",
+                crate::defaults::DEFAULT_MAGI_BALTHASAR_LINEAGE,
+            ),
+            AgentName::Caspar => (
+                &self.caspar_lineage,
+                &self.caspar_model,
+                "caspar_lineage",
+                crate::defaults::DEFAULT_MAGI_CASPAR_LINEAGE,
+            ),
+        };
+
+        match declared.as_deref().map(Lineage::parse) {
+            // Declared and non-blank: the operator's label wins, trimmed.
+            Some(Ok(lineage)) => Ok(lineage),
+            // Absent or blank. `Lineage::parse` cannot name the key that was empty — it is a value
+            // parser — so the error is remapped here, where the key IS known.
+            _ if model.as_deref().is_some_and(|m| !m.trim().is_empty()) => {
+                Err(LineageError::Missing { key })
+            }
+            // No model declared either: the seat runs the built-in model and inherits its lineage.
+            _ => Lineage::parse(built_in),
+        }
+    }
+
     /// Model of the **builder fallback** — the one magi-core would use for an agent without an
     /// override.
     ///
@@ -387,6 +654,9 @@ impl Default for MagiSectionConfig {
             melchior_model: None,
             balthasar_model: None,
             caspar_model: None,
+            melchior_lineage: None,
+            balthasar_lineage: None,
+            caspar_lineage: None,
             auto_approve: default_auto_approve(),
             kind: None,
             base_url: None,
@@ -397,6 +667,10 @@ impl Default for MagiSectionConfig {
             input_warn_tokens: None,
             retry_disabled: None,
             complexity: None,
+            max_rotations: None,
+            strict_context_guard: None,
+            enforce_diversity: None,
+            fallback: Vec::new(),
         }
     }
 }
@@ -408,6 +682,122 @@ fn default_auto_approve() -> bool {
 }
 
 impl MagiConfig {
+    /// Opens a [`MagiConfigBuilder`] — the only way to hand-build a config (REQ-R23).
+    ///
+    /// Production never calls this: it goes through [`Self::load`]. It exists so crate-internal
+    /// callers get the same validation `load()` gets instead of a field literal that gets none.
+    /// See [`MagiConfigBuilder`] for why it compiles only under `cfg(test)`.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn builder() -> MagiConfigBuilder {
+        MagiConfigBuilder::default()
+    }
+
+    /// Root `provider` exactly as declared — the RAW value, blanks included. For the resolved
+    /// backend, with inheritance and the built-in default applied, use
+    /// [`Self::effective_provider`].
+    ///
+    /// `cfg(test)`: every production path wants the resolved value, not the raw one.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn provider(&self) -> Option<&str> {
+        self.provider.as_deref()
+    }
+
+    /// `[openai]` section, as declared.
+    #[must_use]
+    pub(crate) fn openai(&self) -> &OpenAiConfig {
+        &self.openai
+    }
+
+    /// `[anthropic]` section, as declared.
+    #[must_use]
+    pub(crate) fn anthropic(&self) -> &AnthropicConfig {
+        &self.anthropic
+    }
+
+    /// `[magi]` section, as declared. Prefer the `effective_*` accessors where one exists —
+    /// they apply the inheritance and blank-is-absent rules this raw view does not.
+    #[must_use]
+    pub(crate) fn magi(&self) -> &MagiSectionConfig {
+        &self.magi
+    }
+
+    /// Fallback models a mage may rotate through (REQ-R05).
+    ///
+    /// A declared `0` is honoured as the kill-switch; only an **absent** key falls back to
+    /// [`DEFAULT_MAX_ROTATIONS`].
+    ///
+    /// **No upper bound, and that is deliberate** (asked by S1 Loop 2, Caspar, noting that
+    /// `agent_timeout_secs` and `tool_result_cap_bytes` both carry ranges). Three reasons, in
+    /// order: the arithmetic cannot overflow — `u32::MAX + 1` models times two attempts times a
+    /// ceiling capped at 120 is on the order of `1e12`, against a `u64` headroom of `1.8e19`;
+    /// real rotation is bounded by the POOL, which is finite and declared, so a number past its
+    /// length buys nothing; and REQ-R05 specifies a default and a kill-switch and no range, so
+    /// inventing one here would be behaviour the spec does not define. If a bound is wanted it
+    /// is a spec change, not a hardening patch.
+    #[must_use]
+    pub(crate) fn effective_max_rotations(&self) -> u32 {
+        self.magi
+            .max_rotations
+            .unwrap_or(crate::defaults::DEFAULT_MAX_ROTATIONS)
+    }
+
+    /// What the operator **declared** for the context guard (REQ-R11).
+    ///
+    /// Deliberately named `declared_`, not `effective_`: whether the guard is actually applied
+    /// depends on there being at least one measured candidate window, which this type cannot know.
+    /// That decision belongs to the trio construction, and naming it here would invite a caller to
+    /// pass this value straight to magi-core — which is the silent-rotation-shutdown bug.
+    #[must_use]
+    pub(crate) fn declared_strict_context_guard(&self) -> bool {
+        self.magi
+            .strict_context_guard
+            .unwrap_or(crate::defaults::DEFAULT_STRICT_CONTEXT_GUARD)
+    }
+
+    /// Whether the three seats must declare distinct lineages (REQ-R29).
+    #[must_use]
+    pub(crate) fn effective_enforce_diversity(&self) -> bool {
+        self.magi
+            .enforce_diversity
+            .unwrap_or(crate::defaults::DEFAULT_ENFORCE_DIVERSITY)
+    }
+
+    /// The shared rotation pool, in declared order (strongest to weakest).
+    #[must_use]
+    pub(crate) fn fallback_pool(&self) -> &[magi_rs::magi::rotation_config::FallbackEntry] {
+        &self.magi.fallback
+    }
+
+    /// `[memory]` section, as declared.
+    #[must_use]
+    pub(crate) fn memory(&self) -> &crate::memory::config::MemoryConfig {
+        &self.memory
+    }
+
+    /// `[embedding]` section, as declared.
+    #[must_use]
+    pub(crate) fn embedding(&self) -> &crate::memory::config::EmbeddingConfig {
+        &self.embedding
+    }
+
+    /// `[headless]` section, as declared.
+    #[must_use]
+    pub(crate) fn headless(&self) -> &HeadlessConfig {
+        &self.headless
+    }
+
+    /// Root `base_url` exactly as declared — the RAW template, blanks included. For the resolved
+    /// one, with the built-in default applied, use [`Self::effective_base_url`].
+    ///
+    /// `cfg(test)`: every production path wants the resolved template, not the raw string.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn base_url(&self) -> Option<&str> {
+        self.base_url.as_deref()
+    }
+
     /// Parses a `magi.toml` from text, **validating the vocabulary** just like [`Self::load`]
     /// (REQ-A01b).
     ///
@@ -418,8 +808,9 @@ impl MagiConfig {
     /// swallows an invalid value.
     ///
     /// # Errors
-    /// [`ConfigError::NeedsMigration`] if the file brings v0.11.0 patterns (stub: until Task
-    /// 1.3 it never occurs — see [`migrate`]); [`ConfigError::Parse`] if the TOML does not
+    /// [`ConfigError::NeedsMigration`] if the file brings a declared migration pattern — no set
+    /// is declared today, so it never occurs (see [`migrate`]); [`ConfigError::Parse`] if the
+    /// TOML does not
     /// parse; [`ConfigError::UnknownProviderKind`] / [`ConfigError::UnknownMode`] if
     /// `provider`, `[magi].kind` or `[magi].default_mode` bring a present but unrecognized
     /// value; [`ConfigError::AgentTimeoutOutOfRange`] / [`ConfigError::OutputCapTooSmall`] if
@@ -437,6 +828,8 @@ impl MagiConfig {
         }
         let cfg: Self =
             toml::from_str(s).map_err(|e| ConfigError::Parse(safe_parse_error(&e, s)))?;
+        // The v0.13.0 half of the same pass runs INSIDE `validate_vocabulary`, as its first
+        // check — see the comment there for why it lives at that depth rather than here.
         cfg.validate_vocabulary()?;
         Ok(cfg)
     }
@@ -454,6 +847,25 @@ impl MagiConfig {
     /// REQ-A01b forbids. By validating on load, by the time the resolvers run there is nothing
     /// invalid left to swallow.
     fn validate_vocabulary(&self) -> Result<(), ConfigError> {
+        // The v0.13.0 half of the migration pass, and it can only run POST-parse: a MISSING key
+        // produces no serde complaint at all, so there is nothing for a pre-parse pass to get
+        // ahead of, and the typed struct is what a rename would break the compile over (REQ-R22,
+        // SC-R46/R47). It goes FIRST here for the same reason the pre-parse half goes before the
+        // deserialize: a file one generation behind should be told to migrate, not audited for
+        // vocabulary it is about to rewrite anyway.
+        //
+        // **Why inside this function and not in `from_toml_str`.** It used to sit in the caller,
+        // which made the guarantee depend on every caller remembering to run two checks in the
+        // right order — and `MagiConfigBuilder::build` did not, so a builder-built config with no
+        // lineages passed BOTH this check (never called) and `validate_diversity_rules` (which
+        // skips silently, on a premise only `from_toml_str` honoured). Moving it here makes the
+        // premise locally true for every caller instead of a convention two of them share.
+        let missing = migrate::missing_seat_lineages(&self.magi);
+        if !missing.is_empty() {
+            return Err(ConfigError::NeedsMigration(
+                migrate::render_migration_error(&missing),
+            ));
+        }
         ProviderKind::parse(self.provider.as_deref().unwrap_or_default())?;
         ProviderKind::parse(self.magi.kind.as_deref().unwrap_or_default())?;
         <Mode as ModeExt>::parse_config_value(
@@ -461,7 +873,124 @@ impl MagiConfig {
         )?;
         self.validate_agent_timeout()?;
         self.validate_output_cap()?;
+        self.validate_diversity_rules()?;
         Ok(())
+    }
+
+    /// Enforces REQ-R29's **declarative** half at load time.
+    ///
+    /// # Why this lives here and not in the trio builder
+    ///
+    /// It is a property of the configuration, knowable the moment the file parses, and a load
+    /// error is the only thing that reaches an operator *before* they depend on the safety net.
+    /// Discovering it at rotation time means discovering it when a mage has already fallen —
+    /// the worst moment, and the one the requirement exists to avoid.
+    ///
+    /// # Errors
+    ///
+    /// [`ConfigError::Diversity`] when `enforce_diversity` is on and either two seats share a
+    /// lineage or a declared pool leaves a seat uncovered.
+    fn validate_diversity_rules(&self) -> Result<(), ConfigError> {
+        // A seat whose lineage cannot be resolved is already reported by
+        // `migrate::missing_seat_lineages`, which names ALL of them at once. Failing here on the
+        // first would replace a complete message with a partial one.
+        //
+        // **That premise is now local, not a convention between callers** (S1 Loop 2). The check
+        // it defers to runs at the head of `validate_vocabulary`, which is the only function that
+        // calls this one — so by the time control reaches here, a missing lineage has already
+        // returned an error and this `Err` arm is unreachable from every validating path. It
+        // stays because `build_unvalidated` exists and reaching it must degrade to silence
+        // rather than panic, not because anything on the way in might still forget.
+        let mut seats = Vec::new();
+        for name in [AgentName::Melchior, AgentName::Balthasar, AgentName::Caspar] {
+            match self.magi.lineage_of_seat(name) {
+                Ok(lineage) => seats.push((name, lineage)),
+                Err(_) => return Ok(()),
+            }
+        }
+        magi_rs::magi::rotation_config::validate_diversity(
+            &seats,
+            &self.magi.fallback,
+            self.effective_enforce_diversity(),
+        )?;
+        Ok(())
+    }
+
+    /// Every diversity notice this configuration owes, given the models the seats will ACTUALLY
+    /// run.
+    ///
+    /// # It takes the resolved seats instead of re-deriving them
+    ///
+    /// Production resolves a seat's model as `env > TOML > backend`, through
+    /// `seats_with_env_overrides`. Re-deriving here from `seats(backend_model)` would skip the env
+    /// layer and make this a **third** resolver disagreeing with the two the project already
+    /// unified — the same divergence closed once before, when the probe was moved onto that
+    /// resolution so it could not measure a different model from the one the trio runs.
+    ///
+    /// It would also print statements that are simply false, in both directions: three distinct
+    /// `MAGI_MODEL_*` over an undeclared trio would be told all three mages share one model, and
+    /// a declared trio collapsed to one model BY those variables would hear nothing.
+    ///
+    /// # The two notices
+    ///
+    /// **Coverage** comes from [`validate_diversity`]'s soft path: under `enforce_diversity =
+    /// false` an uncovered seat is a notice rather than an error, and dropping that vector would
+    /// leave the mono-provider user — the one the requirement exists for — in silence.
+    ///
+    /// **Collapse** is the case labels cannot see. `seats()` falls an undeclared seat back to the
+    /// backend model, so a configuration naming no trio runs one model under three distinct
+    /// built-in labels: literally what a label-distinctness check approves and what SC-R44
+    /// rejects. A notice and not an error, because an absent `magi.toml` must start silently and
+    /// pointing at a single-model endpoint is a choice rather than a mistake.
+    ///
+    /// [`validate_diversity`]: magi_rs::magi::rotation_config::validate_diversity
+    #[must_use]
+    pub(crate) fn diversity_notices(&self, resolved_seats: &[(AgentName, String)]) -> Vec<Notice> {
+        let mut notices = Vec::new();
+
+        // Coverage. Under `enforce = true` this cannot error here — `load()` already validated and
+        // would have refused the file — and since S1 Loop 2 the same is true of the builder's
+        // validating exit, which now runs the seat-lineage check too. What remains reachable is
+        // `build_unvalidated` alone, and it degrades to silence rather than a panic.
+        let with_lineage: Vec<(AgentName, Lineage)> = resolved_seats
+            .iter()
+            .filter_map(|(seat, _)| self.magi.lineage_of_seat(*seat).ok().map(|l| (*seat, l)))
+            .collect();
+        if with_lineage.len() == resolved_seats.len() {
+            if let Ok(coverage) = magi_rs::magi::rotation_config::validate_diversity(
+                &with_lineage,
+                &self.magi.fallback,
+                self.effective_enforce_diversity(),
+            ) {
+                notices.extend(coverage);
+            }
+        }
+
+        // Collapse.
+        let distinct: std::collections::BTreeSet<&str> = resolved_seats
+            .iter()
+            .map(|(_, model)| model.as_str())
+            .collect();
+        if let Some((_, model)) = resolved_seats.first().filter(|_| distinct.len() == 1) {
+            // BOTH levers are named. The collapse can come from the TOML *or* from three
+            // identical `MAGI_MODEL_*`, and the environment wins — so telling someone who has
+            // already declared a model per seat to go declare one is advice they have followed
+            // and that cannot help. The sibling notice in `rotation_config.rs` had exactly this
+            // defect one iteration ago.
+            //
+            // Binding the model through `first()` also retires a `map_or("<unknown>", …)` that
+            // `distinct.len() == 1` had made unreachable: a fallback string describing a state
+            // that cannot occur reads as though the state can.
+            notices.push(Notice::resolution(format!(
+                "notice: all three mages resolve to the same model (`{model}`), so their declared \
+                 lineages describe one failure domain rather than three. The consensus still has \
+                 three perspectives — those are structural — but a shared outage takes all three \
+                 at once. Declare a model per seat in `[magi]`, or check whether `MAGI_MODEL_*` \
+                 is overriding them — the environment wins over the file."
+            )));
+        }
+
+        notices
     }
 
     /// `agent_timeout_secs` outside the range of §4.9 is a **configuration error**.
@@ -516,10 +1045,9 @@ impl MagiConfig {
     /// inheritance). Covered by `blank_string_keys_are_absent_not_invalid` and
     /// `magi_kind_inherits_from_root_provider_when_absent`.
     ///
-    /// I5 (review round 2): restored. `MagiConfig`'s fields are `pub` and it derives `Default`,
-    /// so `MagiConfig { provider: Some("banana".into()), ..Default::default() }` compiles and,
-    /// without this, would silently return `Ollama` — the precondition this function's own doc
-    /// calls "infallible by precondition" is exactly what this checks.
+    /// I5 (review round 2): restored, because without it an unvalidated config would silently
+    /// return `Ollama` — the precondition this function's own doc calls "infallible by
+    /// precondition" is exactly what this checks.
     ///
     /// Loop 2 fix (Melchior/Balthasar, S1): **`assert!`, not `debug_assert!`.** The original
     /// version only checked in debug builds, so a release binary had **no check at all** for a
@@ -530,25 +1058,21 @@ impl MagiConfig {
     ///
     /// **Why `assert!` and not a `Result`.** This function's signature (`-> ProviderKind`,
     /// consumed by every call site as infallible) is load-bearing across the bin — turning it
-    /// fallible would ripple a `?`/`.unwrap()` decision through every caller. The only way to
-    /// reach this precondition violation is a caller that hand-builds a `MagiConfig` literal
-    /// skipping `from_toml_str`/`load()`, which is a programmer bug, not a runtime input —
-    /// `assert!` is the idiomatic response to a violated contract, not a recoverable error.
+    /// fallible would ripple a `?`/`.unwrap()` decision through every caller. Reaching this
+    /// precondition violation is a programmer bug, not a runtime input, and `assert!` is the
+    /// idiomatic response to a violated contract rather than a recoverable error.
     ///
-    /// **Why the fields stay `pub` instead of removing this class of bug at the type level.**
-    /// The ideal fix makes an invalid `MagiConfig` unconstructible (private fields, a single
-    /// validated constructor, the same shape as `AutonomousRunConfig` in `main.rs`). That would
-    /// require touching every `MagiConfig { .. }` struct-literal test in `main.rs` and
-    /// `headless_runner.rs` (dozens of sites, several deliberately constructing an invalid value
-    /// to exercise this exact panic) — out of scope for this fix, which is confined to
-    /// `config.rs`. `assert!` closes the concrete release-mode gap the review raised without
-    /// that wider, cross-file restructuring.
+    /// **Why the check survives Task 1.1's private fields (REQ-R23).** Making the struct literal
+    /// unconstructible removed the WIDE bypass, not every one: `Deserialize` still materializes a
+    /// `MagiConfig` without either validating constructor (`toml::from_str::<MagiConfig>`, and
+    /// `MagiConfigBuilder::build_unvalidated` in tests). This assertion is what those remaining
+    /// paths run into, and it is still `assert!`, never `debug_assert!`.
     #[must_use]
     pub fn effective_provider(&self) -> ProviderKind {
         assert!(
             self.validate_vocabulary().is_ok(),
             "MagiConfig::effective_provider called on an unvalidated config — \
-             construct it via from_toml_str()/load(), never as a raw struct literal"
+             construct it via from_toml_str()/load(), never by deserializing it directly"
         );
         ProviderKind::parse(self.provider.as_deref().unwrap_or_default())
             .unwrap_or(None)
@@ -570,8 +1094,9 @@ impl MagiConfig {
     /// I5 (review round 2): restored — same precondition/rationale as `effective_provider`'s
     /// assertion.
     ///
-    /// Loop 2 fix (Melchior/Balthasar, S1): same `assert!`-not-`debug_assert!` and
-    /// pub-fields-stay-pub reasoning as [`Self::effective_provider`] — see its rustdoc for the
+    /// Loop 2 fix (Melchior/Balthasar, S1), and Task 1.1's private fields (REQ-R23): same
+    /// `assert!`-not-`debug_assert!` reasoning, and the same reason the check outlives the
+    /// literal it used to guard against — see [`Self::effective_provider`]'s rustdoc for the
     /// full explanation.
     #[must_use]
     pub fn effective_default_mode(&self) -> Option<Mode> {
@@ -579,7 +1104,7 @@ impl MagiConfig {
         assert!(
             self.validate_vocabulary().is_ok(),
             "MagiConfig::effective_default_mode called on an unvalidated config — \
-             construct it via from_toml_str()/load(), never as a raw struct literal"
+             construct it via from_toml_str()/load(), never by deserializing it directly"
         );
         <Mode as ModeExt>::parse_config_value(self.magi.default_mode.as_deref().unwrap_or_default())
             .unwrap_or(None)
@@ -604,6 +1129,16 @@ impl MagiConfig {
             .unwrap_or(None)
             .unwrap_or_else(|| self.effective_provider())
     }
+
+    // S1 Loop 2 (Caspar, INFO) asked why this has no `assert!` of its own on the branch where
+    // `[magi].kind` IS valid, unlike its two siblings. It is deliberate and stays: the assertion
+    // guards "validate_vocabulary was skipped", and on that branch the answer this returns comes
+    // from `magi.kind` alone and is correct regardless. When `magi.kind` is absent or invalid the
+    // call delegates to `effective_provider`, whose assertion does fire — and `validate_vocabulary`
+    // checks `magi.kind` too, so an invalid one cannot reach a caller either way. Adding a direct
+    // assertion would buy no coverage and would change a property that
+    // `effective_magi_kind_panics_via_the_delegated_effective_provider_check_when_invalid` names
+    // and pins. Recorded here so the next reader does not file it a second time.
 
     /// `true` if the trio runs on a different endpoint or kind from the main one.
     ///
@@ -1144,6 +1679,25 @@ mod tests {
             Some(crate::defaults::DEFAULT_MAGI_CASPAR),
             "docs/magi.toml.example's caspar_model must mirror DEFAULT_MAGI_CASPAR"
         );
+        // Same drift, one release later: since v0.13.0 each declared model owes a declared
+        // lineage, so the example now carries three more literals that can rot away from
+        // `src/defaults.rs`. That the example still PARSES only proves the labels are present —
+        // it says nothing about them still being the right ones.
+        assert_eq!(
+            parsed.magi.melchior_lineage.as_deref(),
+            Some(crate::defaults::DEFAULT_MAGI_MELCHIOR_LINEAGE),
+            "docs/magi.toml.example's melchior_lineage must mirror DEFAULT_MAGI_MELCHIOR_LINEAGE"
+        );
+        assert_eq!(
+            parsed.magi.balthasar_lineage.as_deref(),
+            Some(crate::defaults::DEFAULT_MAGI_BALTHASAR_LINEAGE),
+            "docs/magi.toml.example's balthasar_lineage must mirror DEFAULT_MAGI_BALTHASAR_LINEAGE"
+        );
+        assert_eq!(
+            parsed.magi.caspar_lineage.as_deref(),
+            Some(crate::defaults::DEFAULT_MAGI_CASPAR_LINEAGE),
+            "docs/magi.toml.example's caspar_lineage must mirror DEFAULT_MAGI_CASPAR_LINEAGE"
+        );
     }
 
     #[test]
@@ -1217,10 +1771,10 @@ mod tests {
     /// S-1: no config, no env → the built-in default (Ollama-first).
     #[test]
     fn test_resolve_effective_provider_kind_precedence() {
-        let c = MagiConfig {
-            provider: Some("anthropic".into()),
-            ..Default::default()
-        };
+        let c = MagiConfig::builder()
+            .provider(Some("anthropic".into()))
+            .build()
+            .unwrap();
         assert_eq!(
             resolve_effective_provider_kind(&c, Some("ollama")).unwrap(),
             ProviderKind::Ollama, // env wins
@@ -1253,10 +1807,10 @@ mod tests {
     /// through to the TOML/default the same as an unset env var.
     #[test]
     fn a_blank_env_provider_falls_through_to_the_toml_default() {
-        let c = MagiConfig {
-            provider: Some("anthropic".into()),
-            ..Default::default()
-        };
+        let c = MagiConfig::builder()
+            .provider(Some("anthropic".into()))
+            .build()
+            .unwrap();
         assert_eq!(
             resolve_effective_provider_kind(&c, Some("   ")).unwrap(),
             ProviderKind::Anthropic,
@@ -1275,12 +1829,12 @@ mod tests {
         );
         // MAGI re-gate WARNING fix: env must win over TOML (not the other way around, which was
         // the bug in the pre-fix headless call site).
-        let c = MagiConfig {
-            openai: OpenAiConfig {
+        let c = MagiConfig::builder()
+            .openai(OpenAiConfig {
                 model: Some("phi4-mini".into()),
-            },
-            ..Default::default()
-        };
+            })
+            .build()
+            .unwrap();
         assert_eq!(resolve_openai_model(&c, None), "phi4-mini");
         assert_eq!(resolve_openai_model(&c, Some("gpt-4o-mini")), "gpt-4o-mini");
     }
@@ -1289,12 +1843,12 @@ mod tests {
     fn test_resolve_anthropic_model_env_wins_over_toml() {
         // Mirrors test_resolve_openai_model_env_wins_over_toml just above: env must win over
         // TOML for the Anthropic model too, not the other way around.
-        let c = MagiConfig {
-            anthropic: AnthropicConfig {
+        let c = MagiConfig::builder()
+            .anthropic(AnthropicConfig {
                 model: Some("claude-toml-model".into()),
-            },
-            ..Default::default()
-        };
+            })
+            .build()
+            .unwrap();
         assert_eq!(
             resolve_anthropic_model(&c, Some("claude-env-model")),
             "claude-env-model"
@@ -1303,12 +1857,12 @@ mod tests {
 
     #[test]
     fn test_resolve_anthropic_model_toml_when_no_env() {
-        let c = MagiConfig {
-            anthropic: AnthropicConfig {
+        let c = MagiConfig::builder()
+            .anthropic(AnthropicConfig {
                 model: Some("claude-toml-model".into()),
-            },
-            ..Default::default()
-        };
+            })
+            .build()
+            .unwrap();
         assert_eq!(resolve_anthropic_model(&c, None), "claude-toml-model");
     }
 
@@ -1329,12 +1883,12 @@ mod tests {
 
     #[test]
     fn test_resolve_openai_model_blank_env_falls_through_to_toml() {
-        let c = MagiConfig {
-            openai: OpenAiConfig {
+        let c = MagiConfig::builder()
+            .openai(OpenAiConfig {
                 model: Some("phi4-mini".into()),
-            },
-            ..Default::default()
-        };
+            })
+            .build()
+            .unwrap();
         assert_eq!(resolve_openai_model(&c, Some("")), "phi4-mini");
         assert_eq!(resolve_openai_model(&c, Some("   ")), "phi4-mini");
     }
@@ -1350,12 +1904,12 @@ mod tests {
 
     #[test]
     fn test_resolve_anthropic_model_blank_env_falls_through_to_toml() {
-        let c = MagiConfig {
-            anthropic: AnthropicConfig {
+        let c = MagiConfig::builder()
+            .anthropic(AnthropicConfig {
                 model: Some("claude-toml-model".into()),
-            },
-            ..Default::default()
-        };
+            })
+            .build()
+            .unwrap();
         assert_eq!(resolve_anthropic_model(&c, Some("")), "claude-toml-model");
         assert_eq!(
             resolve_anthropic_model(&c, Some("   ")),
@@ -1390,7 +1944,11 @@ mod tests {
     fn test_parses_magi_section() {
         // S-2
         let c = MagiConfig::from_toml_str(
-            "[magi]\nmelchior_model = \"qwen3:8b\"\ncaspar_model = \"deepseek-r1:32b\"\n",
+            // Both declared seats carry their lineage: since v0.13.0 a declared model without one
+            // is a migration error, so a fixture that omitted it would be testing that error
+            // rather than the section parsing this test is about.
+            "[magi]\nmelchior_model = \"qwen3:8b\"\nmelchior_lineage = \"alibaba\"\n\
+             caspar_model = \"deepseek-r1:32b\"\ncaspar_lineage = \"deepseek\"\n",
         )
         .unwrap();
         assert_eq!(c.magi.melchior_model.as_deref(), Some("qwen3:8b"));
@@ -1445,7 +2003,10 @@ mod tests {
             "auto_approve must default to false (opt-in, never silently enabled)"
         );
         // `[magi] auto_approve = true` must parse to `true`.
-        let c2 = MagiConfig::from_toml_str("[magi]\nmelchior_model = \"qwen3:8b\"").unwrap();
+        let c2 = MagiConfig::from_toml_str(
+            "[magi]\nmelchior_model = \"qwen3:8b\"\nmelchior_lineage = \"alibaba\"\n",
+        )
+        .unwrap();
         assert!(
             !c2.magi.auto_approve,
             "auto_approve must default to false even when [magi] section is present"
@@ -1706,11 +2267,132 @@ mod tests {
         ] {
             let err = MagiConfig::from_toml_str(toml)
                 .expect_err("an api_key in the TOML must be an ERROR, not silent acceptance");
+            // S1 Loop 2 (Balthasar): asserting only that SOME error occurred and that it does not
+            // leak is a guardian that does not guard. Drop `deny_unknown_fields` from the four
+            // structs and the parse SUCCEEDS, the seat-lineage check errors instead, and that
+            // error contains no `sk-secreto` either — so both assertions below used to hold while
+            // an `api_key` was being silently accepted. Naming the field is what ties the test to
+            // the rejection it exists to pin (B16).
+            assert!(
+                err.to_string().contains("api_key"),
+                "and it must be the unknown-field rejection that NAMES the key: {err}"
+            );
             assert!(
                 !err.to_string().contains("sk-secreto"),
                 "and the error must NOT repeat the secret it is rejecting"
             );
         }
+    }
+
+    /// S1 Loop 2 (Caspar and Balthasar, one root cause): [`MagiConfigBuilder::build`] promised
+    /// parity with [`MagiConfig::from_toml_str`] and did not have it. The seat-lineage check ran
+    /// in the CALLER, so `build` skipped it — and [`MagiConfig::validate_diversity_rules`] then
+    /// skipped ITSELF, on the documented premise that the lineage check had already reported.
+    /// A builder-built config declaring a model with no lineage therefore passed **both**, which
+    /// is precisely the "state production cannot reach" the builder's rustdoc claims is
+    /// impossible.
+    ///
+    /// **Mutation-verified (B16):** move `missing_seat_lineages` back out of
+    /// `validate_vocabulary` and into `from_toml_str`, and this test goes green again because
+    /// `build()` accepts the config.
+    #[test]
+    fn the_builder_rejects_a_seat_that_declares_a_model_without_its_lineage() {
+        let magi = MagiSectionConfig {
+            melchior_model: Some("qwen3.5:397b-cloud".into()),
+            ..Default::default()
+        };
+
+        let err = MagiConfig::builder()
+            .magi(magi)
+            .build()
+            .expect_err("a seat with a model and no lineage must not build");
+
+        assert!(
+            matches!(err, ConfigError::NeedsMigration(_)),
+            "and it is the GUIDED migration error, not a bare vocabulary complaint: {err:?}"
+        );
+        assert!(
+            err.to_string().contains("melchior_lineage"),
+            "naming the key the operator has to add: {err}"
+        );
+    }
+
+    /// S1 Loop 2 (Caspar): a `[[magi.fallback]]` entry with a blank `model` is rejected at parse
+    /// time, the same way its sibling `lineage` field already was.
+    ///
+    /// The consequence of accepting it is worse than an entry that fails when a mage rotates: a
+    /// blank candidate still counts toward **pool coverage**, so `seats_without_coverage` would
+    /// certify a seat as covered by something that can never answer — the illusory safety net the
+    /// coverage check exists to prevent.
+    ///
+    /// **Mutation-verified (B16):** drop the `deserialize_with` on `FallbackEntry::model` and
+    /// this goes green, because the entry parses and joins the pool.
+    #[test]
+    fn a_fallback_entry_with_a_blank_model_is_rejected_at_parse_time() {
+        let toml = "[magi]\n\
+                    melchior_model = \"a\"\nmelchior_lineage = \"la\"\n\
+                    balthasar_model = \"b\"\nbalthasar_lineage = \"lb\"\n\
+                    caspar_model = \"c\"\ncaspar_lineage = \"lc\"\n\
+                    \n[[magi.fallback]]\nmodel = \"   \"\nlineage = \"lz\"\n";
+
+        let err = MagiConfig::from_toml_str(toml)
+            .expect_err("a fallback entry with a blank model must not parse");
+
+        assert!(
+            err.to_string().contains("model"),
+            "and the error must name the field the operator has to fill: {err}"
+        );
+
+        // And the surviving half of the same asymmetry: `lineage` is trimmed by `Lineage::parse`,
+        // so `model` is too. Untrimmed, ` qwen ` reaches the endpoint with its spaces and 404s
+        // for a reason that is invisible in the file.
+        let padded = "[magi]\n\
+                      melchior_model = \"a\"\nmelchior_lineage = \"la\"\n\
+                      balthasar_model = \"b\"\nbalthasar_lineage = \"lb\"\n\
+                      caspar_model = \"c\"\ncaspar_lineage = \"lc\"\n\
+                      \n[[magi.fallback]]\nmodel = \"  qwen3.5:397b-cloud  \"\nlineage = \"lz\"\n";
+        let cfg = MagiConfig::from_toml_str(padded).expect("a padded model tag still parses");
+        assert_eq!(
+            cfg.fallback_pool()
+                .first()
+                .expect("the pool has the declared entry")
+                .model,
+            "qwen3.5:397b-cloud",
+            "the tag must be stored trimmed, the same way its sibling lineage is"
+        );
+    }
+
+    /// S1 Loop 2 (Balthasar): `ConfigError::Endpoint` now redacts instead of trusting
+    /// [`EndpointError`]'s `Display`, and this pins the half of that change which **can** be
+    /// exercised.
+    ///
+    /// **Said plainly: the leak-blocking half is not testable today, by construction.** All four
+    /// `EndpointError` variants carry fixed messages whose only fields are `&'static str` vault
+    /// entry names, so none of them can embed a URL — there is nothing for the redaction to
+    /// catch, and a test asserting otherwise would have to build the leaking string itself, which
+    /// is the canary B16 calls useless. The layer is defence against a variant someone adds
+    /// later.
+    ///
+    /// What IS at risk right now is the opposite failure, and it is the one CLAUDE.md warns
+    /// about when it says the two redaction helpers are not interchangeable: the wrong one
+    /// collapses a message to `***`. These errors are the operator's instructions for fixing
+    /// their config, so a redaction that ate them would trade a hypothetical leak for a certain
+    /// dead end.
+    #[test]
+    fn wrapping_an_endpoint_error_redacts_without_eating_the_instructions() {
+        let err = ConfigError::from(EndpointError::MissingVaultEntry {
+            entry: "BASE_URL_PASSWORD",
+        });
+        let text = err.to_string();
+
+        assert!(
+            text.contains("BASE_URL_PASSWORD") && text.contains("magi-rs vault set"),
+            "the operator must still be told WHICH entry and HOW to create it: {text}"
+        );
+        assert!(
+            !text.contains("***"),
+            "and nothing here is a credential, so nothing may be blanked: {text}"
+        );
     }
 
     /// REQ-A15: `default_mode` resolves with the same empty=absent rule.
@@ -1755,6 +2437,258 @@ mod tests {
             (AgentName::Balthasar, "backend-default".to_string())
         );
         assert_eq!(seats[2], (AgentName::Caspar, "backend-default".to_string()));
+    }
+
+    // -------------------------------------------------------------------------
+    // `lineage_of_seat()` — REQ-R01/R02, SC-R05, SC-R19.
+
+    /// SC-R05: a seat that DECLARES a model without its lineage is an explicit configuration
+    /// error, never an inference from the model name. Guessing it would fabricate the label that
+    /// decides all rotation eligibility, and the lineage is a SEMANTIC CHOICE of the operator
+    /// (R-R03) — the same pair of models can legitimately be two lineages for one user and one
+    /// for another, so there is no observable datum to derive it from without inventing one.
+    #[test]
+    fn a_seat_that_declares_a_model_without_its_lineage_is_an_error_not_an_inference() {
+        let cfg = MagiSectionConfig {
+            melchior_model: Some("qwen3.5:397b-cloud".into()),
+            ..MagiSectionConfig::default()
+        };
+        let err = cfg
+            .lineage_of_seat(AgentName::Melchior)
+            .expect_err("a declared model without its lineage must error");
+        assert!(
+            matches!(
+                err,
+                LineageError::Missing {
+                    key: "melchior_lineage"
+                }
+            ),
+            "the error must name the key the operator has to add: {err:?}"
+        );
+    }
+
+    /// The trigger rule established by Task 2.6, and the half that was NOT wired until now: a seat
+    /// that declares no model runs the built-in one, so it inherits the built-in lineage with it.
+    /// Without this, the default configuration — the one belonging to whoever never touched the
+    /// trio — registers seats with no lineage and rotation has nothing to decide on.
+    #[test]
+    fn a_seat_that_declares_no_model_inherits_the_built_in_lineage() {
+        let cfg = MagiSectionConfig::default();
+        for (seat, expected) in [
+            (
+                AgentName::Melchior,
+                crate::defaults::DEFAULT_MAGI_MELCHIOR_LINEAGE,
+            ),
+            (
+                AgentName::Balthasar,
+                crate::defaults::DEFAULT_MAGI_BALTHASAR_LINEAGE,
+            ),
+            (
+                AgentName::Caspar,
+                crate::defaults::DEFAULT_MAGI_CASPAR_LINEAGE,
+            ),
+        ] {
+            let resolved = cfg
+                .lineage_of_seat(seat)
+                .unwrap_or_else(|e| panic!("{seat:?} must inherit a built-in lineage, got {e:?}"));
+            assert_eq!(resolved.as_str(), expected, "wrong built-in for {seat:?}");
+        }
+    }
+
+    /// SC-R19: blank is ABSENT, never invalid — the rule every text key has followed since MS2.
+    /// An exported-but-unfilled variable in a CI script is an everyday accident, and answering it
+    /// with an "invalid value" the operator cannot act on punishes the accident instead of
+    /// guiding it. On a seat that declares a model, absent means the error above.
+    #[test]
+    fn a_blank_lineage_on_a_declaring_seat_is_absent_not_invalid() {
+        let cfg = MagiSectionConfig {
+            caspar_model: Some("deepseek-v4-pro:cloud".into()),
+            caspar_lineage: Some("   ".into()),
+            ..MagiSectionConfig::default()
+        };
+        let err = cfg
+            .lineage_of_seat(AgentName::Caspar)
+            .expect_err("blank must error as MISSING");
+        assert!(
+            matches!(
+                err,
+                LineageError::Missing {
+                    key: "caspar_lineage"
+                }
+            ),
+            "blank must be MISSING, not an invalid value: {err:?}"
+        );
+    }
+
+    /// A declared lineage wins over the built-in one even when the seat takes the backend model:
+    /// the operator who bothered to label a seat is the authority on what its failure domain is.
+    #[test]
+    fn a_declared_lineage_wins_over_the_built_in_one() {
+        let cfg = MagiSectionConfig {
+            balthasar_lineage: Some("  mi-linaje-raro  ".into()),
+            ..MagiSectionConfig::default()
+        };
+        assert_eq!(
+            cfg.lineage_of_seat(AgentName::Balthasar)
+                .expect("a declared lineage must resolve")
+                .as_str(),
+            "mi-linaje-raro",
+            "the declared label wins, trimmed"
+        );
+    }
+
+    /// SC-R44 THROUGH THE REAL LOAD PATH: a single-lineage trio does not parse.
+    ///
+    /// This is the WIRING guardian, and it is the one that was missing. `validate_diversity` had
+    /// unit tests from the day it was written and **no production caller for the whole
+    /// milestone**, so the requirement was not delivered at all while its tests were green and
+    /// the CHANGELOG announced it as a breaking change. A test that calls the function directly
+    /// can never catch that; only one that drives `from_toml_str` can.
+    #[test]
+    fn a_single_lineage_trio_fails_to_load_under_the_default() {
+        let err = MagiConfig::from_toml_str(
+            "provider = \"ollama\"\n\
+             [magi]\n\
+             melchior_model    = \"m1\"\nmelchior_lineage  = \"anthropic\"\n\
+             balthasar_model   = \"m2\"\nbalthasar_lineage = \"anthropic\"\n\
+             caspar_model      = \"m3\"\ncaspar_lineage    = \"anthropic\"\n",
+        )
+        .expect_err("three seats on one lineage must not load under enforce_diversity = true");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("melchior") && msg.contains("balthasar") && msg.contains("caspar"),
+            "the error must name the affected seats: {msg}"
+        );
+        assert!(
+            msg.contains("enforce_diversity"),
+            "and carry the ONE-LINE way out: {msg}"
+        );
+    }
+
+    /// SC-R43 through the load path: a pool that leaves a seat uncovered is an error under the
+    /// default, and a config that declares `enforce_diversity = false` loads.
+    #[test]
+    fn an_uncovered_seat_fails_under_the_default_and_loads_when_disabled() {
+        let toml = |extra: &str| {
+            format!(
+                "provider = \"ollama\"\n\
+                 [magi]\n\
+                 melchior_model    = \"m1\"\nmelchior_lineage  = \"opus\"\n\
+                 balthasar_model   = \"m2\"\nbalthasar_lineage = \"sonnet\"\n\
+                 caspar_model      = \"m3\"\ncaspar_lineage    = \"haiku\"\n\
+                 {extra}\
+                 [[magi.fallback]]\n\
+                 model   = \"rescue\"\nlineage = \"opus\"\n"
+            )
+        };
+        assert!(
+            MagiConfig::from_toml_str(&toml("")).is_err(),
+            "an `opus` candidate covers only Melchior; the other two have nowhere to rotate"
+        );
+        assert!(
+            MagiConfig::from_toml_str(&toml("enforce_diversity = false\n")).is_ok(),
+            "the mono-provider exit must still load"
+        );
+    }
+
+    /// The DEFAULT install still loads. Nothing about REQ-R29 may cost a fresh clone its start:
+    /// an absent `magi.toml` is a silent default, and a user who declared no trio has asserted
+    /// nothing about diversity to be wrong about.
+    #[test]
+    fn a_config_that_declares_no_trio_still_loads() {
+        assert!(MagiConfig::from_toml_str("provider = \"ollama\"\n").is_ok());
+        assert!(MagiConfig::from_toml_str("").is_ok());
+    }
+
+    /// The hand-off the plan left open, answered: three seats that resolve to the SAME model are
+    /// reported, whatever their labels say.
+    ///
+    /// `seats()` falls an undeclared seat back to the BACKEND model, so a config naming no trio
+    /// runs one model under three built-in labels — literally the case SC-R44 rejects, wearing
+    /// three names. A distinctness check over labels approves it, which is why the resolved
+    /// models are checked separately.
+    ///
+    /// It is a NOTICE and not an error on purpose: an absent file must start silently, and
+    /// pointing at a single-model endpoint is a legitimate choice rather than a mistake.
+    #[test]
+    fn three_seats_resolving_to_one_model_are_reported_however_they_are_labelled() {
+        let cfg = MagiConfig::from_toml_str("provider = \"ollama\"\n").expect("defaults load");
+        let notices = cfg.diversity_notices(&cfg.magi().seats("one-backend-model"));
+        assert_eq!(
+            notices.len(),
+            1,
+            "the collapse must be reported: {notices:?}"
+        );
+        assert!(
+            notices[0].text.contains("one-backend-model"),
+            "and name the model they all resolve to: {}",
+            notices[0].text
+        );
+
+        let declared = MagiConfig::from_toml_str(
+            "provider = \"ollama\"\n\
+             [magi]\n\
+             melchior_model    = \"a\"\nmelchior_lineage  = \"la\"\n\
+             balthasar_model   = \"b\"\nbalthasar_lineage = \"lb\"\n\
+             caspar_model      = \"c\"\ncaspar_lineage    = \"lc\"\n",
+        )
+        .expect("a declared trio loads");
+        assert!(
+            declared
+                .diversity_notices(&declared.magi().seats("unused"))
+                .is_empty(),
+            "three distinct models say nothing"
+        );
+    }
+
+    /// SC-R37: a loose `[magi]` key placed AFTER the first `[[magi.fallback]]` does NOT parse
+    /// silently into the wrong table — it lands inside the pool entry and `deny_unknown_fields`
+    /// rejects it, naming the key.
+    ///
+    /// This is why the convention is "the pool goes last in the FILE" rather than "last in the
+    /// `[magi]` block": in TOML every loose key must precede the first array of tables, so a key
+    /// added to `[magi]` later could end up here.
+    ///
+    /// **What this does NOT claim.** A SUB-TABLE after the pool — `[embedding]`, say — is
+    /// perfectly valid TOML and lands where it should: a table header closes the preceding array
+    /// of tables. There is nothing to detect there, and demanding an error would mean rejecting a
+    /// correct file. The convention still stands as guidance; only this half is enforceable.
+    #[test]
+    fn a_loose_magi_key_after_the_pool_is_rejected_by_name() {
+        let err = MagiConfig::from_toml_str(
+            "provider = \"ollama\"\n\
+             [magi]\n\
+             melchior_model    = \"m\"\nmelchior_lineage  = \"a\"\n\
+             balthasar_model   = \"b\"\nbalthasar_lineage = \"b\"\n\
+             caspar_model      = \"c\"\ncaspar_lineage    = \"c\"\n\
+             [[magi.fallback]]\n\
+             model   = \"x\"\nlineage = \"x\"\n\
+             max_rotations = 2\n",
+        )
+        .expect_err("a loose key after the pool must not be accepted");
+        assert!(
+            err.to_string().contains("max_rotations"),
+            "the error must name the misplaced key: {err}"
+        );
+    }
+
+    /// And the half that must KEEP working: a sub-table after the pool is valid TOML and parses
+    /// where it belongs.
+    #[test]
+    fn a_sub_table_after_the_pool_is_valid_and_parses_where_it_belongs() {
+        let cfg = MagiConfig::from_toml_str(
+            "provider = \"ollama\"\n\
+             [magi]\n\
+             melchior_model    = \"m\"\nmelchior_lineage  = \"a\"\n\
+             balthasar_model   = \"b\"\nbalthasar_lineage = \"b\"\n\
+             caspar_model      = \"c\"\ncaspar_lineage    = \"c\"\n\
+             [[magi.fallback]]\n\
+             model   = \"x\"\nlineage = \"x\"\n\
+             [embedding]\n\
+             model = \"nomic-embed-text\"\n",
+        )
+        .expect("a table header closes the array: this is correct TOML");
+        assert_eq!(cfg.fallback_pool().len(), 1);
     }
 
     /// `magi_endpoint_diverges()` is true if the trio declares its own `kind` or `base_url`,
@@ -1808,10 +2742,10 @@ mod tests {
         );
 
         let above_min = magi_rs::magi::min_viable_output_cap() + 10;
-        let declared = MagiConfig {
-            tool_result_cap_bytes: Some(above_min),
-            ..Default::default()
-        };
+        let declared = MagiConfig::builder()
+            .tool_result_cap_bytes(Some(above_min))
+            .build()
+            .unwrap();
         assert_eq!(declared.effective_tool_result_cap(), above_min);
     }
 
@@ -1881,12 +2815,12 @@ mod tests {
 
     /// SC-A16g: a broken TOML carrying a `[user]:[password]`-style placeholder does not leak,
     /// because `safe_parse_error` (proven above to drop the offending value on ANY input) and
-    /// `detect_migrations` (proven in `migrate.rs`'s
-    /// `a_syntactically_broken_toml_gets_a_syntax_error_not_migration_advice` to require
-    /// structural validity, not a textual match) hold TOGETHER on the real
-    /// `from_toml_str` path — this is the combination the scenario actually describes, not
-    /// either property in isolation. What sits on the offending line is `[password]`, never a
-    /// secret, so a `line`-citing error is safe by construction.
+    /// `detect_migrations` (which reports nothing while no pattern set is declared, and when one
+    /// is reloaded must keep requiring structural validity rather than a textual match — see
+    /// `migrate.rs`'s module docs) hold TOGETHER on the real `from_toml_str` path — this is the
+    /// combination the scenario actually describes, not either property in isolation. What sits
+    /// on the offending line is `[password]`, never a secret, so a `line`-citing error is safe by
+    /// construction.
     #[test]
     fn a_broken_toml_with_a_placeholder_still_only_cites_a_safe_position() {
         // Unterminated string on the base_url line: syntactically broken. It also textually
@@ -1912,9 +2846,10 @@ mod tests {
     }
 
     /// I5: `effective_provider` is documented "infallible by precondition" — that precondition
-    /// is `validate_vocabulary` having already run. `MagiConfig`'s fields are `pub` and it
-    /// derives `Default`, so nothing at the type level stops a caller from skipping
-    /// `from_toml_str`/`load()` and constructing an invalid config directly.
+    /// is `validate_vocabulary` having already run. Task 1.1's private fields (REQ-R23) closed
+    /// the struct-literal way of skipping it, but not `Deserialize` — reproduced here by
+    /// `build_unvalidated`, the builder's test-only exit — so the precondition is still
+    /// violable and still worth asserting.
     ///
     /// Loop 2 fix (Melchior/Balthasar, S1): the guard is now `assert!`, which panics in EVERY
     /// build profile, not only under `debug_assertions` — a release binary hitting this misuse
@@ -1926,10 +2861,9 @@ mod tests {
     #[test]
     #[should_panic(expected = "unvalidated config")]
     fn effective_provider_panics_when_validate_vocabulary_was_skipped() {
-        let cfg = MagiConfig {
-            provider: Some("banana".into()),
-            ..Default::default()
-        };
+        let cfg = MagiConfig::builder()
+            .provider(Some("banana".into()))
+            .build_unvalidated();
         let _ = cfg.effective_provider();
     }
 
@@ -1938,13 +2872,12 @@ mod tests {
     #[test]
     #[should_panic(expected = "unvalidated config")]
     fn effective_default_mode_panics_when_validate_vocabulary_was_skipped() {
-        let cfg = MagiConfig {
-            magi: MagiSectionConfig {
+        let cfg = MagiConfig::builder()
+            .magi(MagiSectionConfig {
                 default_mode: Some("banana".into()),
                 ..MagiSectionConfig::default()
-            },
-            ..Default::default()
-        };
+            })
+            .build_unvalidated();
         let _ = cfg.effective_default_mode();
     }
 
@@ -1965,13 +2898,12 @@ mod tests {
     #[test]
     #[should_panic(expected = "unvalidated config")]
     fn effective_magi_kind_panics_via_the_delegated_effective_provider_check_when_invalid() {
-        let cfg = MagiConfig {
-            magi: MagiSectionConfig {
+        let cfg = MagiConfig::builder()
+            .magi(MagiSectionConfig {
                 kind: Some("banana".into()),
                 ..MagiSectionConfig::default()
-            },
-            ..Default::default()
-        };
+            })
+            .build_unvalidated();
         let _ = cfg.effective_magi_kind();
     }
 
@@ -2052,8 +2984,8 @@ mod tests {
 
     /// m6 (fix round 2, coordinator, 2026-08-03) / SC-A21f: a PRESENT file but empty or
     /// whitespace-only is also silent — every root field is optional, so a blank TOML is a
-    /// valid TOML that declares zero things. `from_toml_str("")` and `detect_migrations("")`
-    /// were already covered separately; this is the only thing missing: `load()` end-to-end
+    /// valid TOML that declares zero things. `from_toml_str("")` was already covered separately;
+    /// this is the only thing missing: `load()` end-to-end
     /// against a real FILE, which is what its own rustdoc claims as covered.
     #[test]
     fn a_present_but_broken_config_is_fatal_while_an_absent_one_is_silent() {
@@ -2254,6 +3186,232 @@ mod tests {
             notices.iter().any(|n| n.contains("NOT used")),
             "the Anthropic incoherence notice must not depend on the root template \
              having parsed: {notices:?}"
+        );
+    }
+
+    // Task 1.1 (REQ-R23 / SC-R21): the vocabulary validation must be impossible to bypass by
+    // building a `MagiConfig` as a field literal.
+    // -------------------------------------------------------------------------
+
+    /// SC-R21: a `MagiConfig` cannot be built bypassing validation.
+    ///
+    /// The literal path is gone, so the ONLY way in is the builder, which validates. This is the
+    /// runtime half of the assertion: the builder REJECTS what the literal used to accept
+    /// silently. The compile-time half is
+    /// `no_magi_config_field_is_public_so_no_literal_can_skip_validation`.
+    #[test]
+    fn a_magi_config_with_an_unknown_provider_cannot_be_built() {
+        let err = MagiConfig::builder()
+            .provider(Some("banana".to_string()))
+            .build()
+            .expect_err("an unrecognized provider must not build");
+        assert!(
+            matches!(err, ConfigError::UnknownProviderKind { .. }),
+            "expected UnknownProviderKind, got {err:?}"
+        );
+    }
+
+    /// The builder validates the WHOLE vocabulary, not only the root `provider`: an unknown
+    /// `[magi].default_mode` is rejected on the same call, so no second, unguarded axis is left
+    /// reachable through it.
+    #[test]
+    fn a_magi_config_with_an_unknown_default_mode_cannot_be_built() {
+        let err = MagiConfig::builder()
+            .magi(MagiSectionConfig {
+                default_mode: Some("banana".to_string()),
+                ..MagiSectionConfig::default()
+            })
+            .build()
+            .expect_err("an unrecognized default_mode must not build");
+        assert!(
+            matches!(err, ConfigError::UnknownMode { .. }),
+            "expected UnknownMode, got {err:?}"
+        );
+    }
+
+    /// The valid vocabulary still builds, so the guard is not simply rejecting everything.
+    #[test]
+    fn the_three_vocabulary_values_build() {
+        for p in ["ollama", "openai-compat", "anthropic"] {
+            MagiConfig::builder()
+                .provider(Some(p.to_string()))
+                .build()
+                .unwrap_or_else(|e| panic!("{p} must build, got {e:?}"));
+        }
+    }
+
+    /// Exact source line that opens the `MagiConfig` declaration, once trimmed.
+    ///
+    /// It is matched on the FULL trimmed line rather than by `contains`, so the `const` below
+    /// (whose own source line embeds this same text) cannot match itself.
+    const MAGI_CONFIG_STRUCT_HEADER: &str = "pub struct MagiConfig {";
+
+    /// Line that closes a struct block written in the crate's `rustfmt` style: a lone brace at
+    /// the item's own indentation, which for a top-level item is column zero.
+    const STRUCT_BLOCK_END: &str = "}";
+
+    /// Prefix of a field declared public. Field attributes (`#[serde(default)]`) sit on their
+    /// own line in this crate's `rustfmt` style, so a field's visibility always opens its line.
+    const PUBLIC_FIELD_PREFIX: &str = "pub ";
+
+    /// SC-R21: **no `MagiConfig` field is public**, so `MagiConfig { provider: Some("banana"),
+    /// ..Default::default() }` does not compile and the builder is the only way in.
+    ///
+    /// **Why this is a source-level assertion and not `trybuild`.** SC-R21 is a property of the
+    /// TYPE, not of any value, so no ordinary runtime test can observe it — the plan is right
+    /// about that. Its proposed fixture, however, cannot work here: `trybuild` compiles each
+    /// case against the **library** target (`magi_rs`), and `config` is a **binary-only** module
+    /// (`mod config;` in `main.rs`; `lib.rs` exports only `headless`, `magi`, `notices`,
+    /// `redact` and `vault`). A case naming `magi_rs::config::MagiConfig` therefore fails to
+    /// compile because the PATH does not resolve — and `trybuild` reports a case that fails to
+    /// compile as a **pass**. Restoring `pub` on the fields would not change that outcome, which
+    /// is precisely the mutation the guardian has to detect, so the `trybuild` version would be
+    /// a guardian that guards nothing. The plan's fallback, a `compile_fail` doctest, fails for
+    /// a second, independent reason: Cargo does not collect doctests from binary targets, and
+    /// `cargo nextest` — this project's runner — does not run doctests at all, so it would never
+    /// execute.
+    ///
+    /// This assertion has neither problem: it reads the declaration it guards and fails the
+    /// moment a field becomes public again, which is the mutation B16 asks about.
+    #[test]
+    fn no_magi_config_field_is_public_so_no_literal_can_skip_validation() {
+        let source = include_str!("config.rs");
+        let mut after_header = source
+            .lines()
+            .skip_while(|line| line.trim() != MAGI_CONFIG_STRUCT_HEADER)
+            .skip(1)
+            .peekable();
+        assert!(
+            after_header.peek().is_some(),
+            "the `{MAGI_CONFIG_STRUCT_HEADER}` declaration was not found in this file — \
+             the guardian lost its subject and must be repointed, not deleted"
+        );
+
+        let public_fields: Vec<&str> = after_header
+            .take_while(|line| line.trim() != STRUCT_BLOCK_END)
+            .filter(|line| line.trim().starts_with(PUBLIC_FIELD_PREFIX))
+            .collect();
+
+        assert!(
+            public_fields.is_empty(),
+            "MagiConfig must have no public field, or a field literal can build a \
+             configuration the vocabulary validation never saw; found: {public_fields:?}"
+        );
+    }
+
+    /// REQ-R05 / D-R14: magi-rs ships the crate's own `DEFAULT_MAX_ROTATIONS`, not one of its own.
+    #[test]
+    fn max_rotations_defaults_to_two() {
+        let cfg = MagiConfig::from_toml_str(
+            "[magi]
+",
+        )
+        .unwrap();
+        assert_eq!(cfg.effective_max_rotations(), 2);
+    }
+
+    /// A declared `0` is the kill-switch and must stay REACHABLE. Collapsing it with
+    /// `unwrap_or_default()` would turn an explicit "no rotation" into "use the default", which is
+    /// the opposite of what the operator wrote.
+    #[test]
+    fn a_declared_zero_is_the_kill_switch_not_an_absent_value() {
+        let cfg = MagiConfig::from_toml_str(
+            "[magi]
+max_rotations = 0
+",
+        )
+        .unwrap();
+        assert_eq!(cfg.effective_max_rotations(), 0);
+    }
+
+    /// REQ-R11: the guard defaults to FALSE, Ollama included. The case it bites is the cold start,
+    /// which is transitory and is the first run anyone makes.
+    #[test]
+    fn strict_context_guard_defaults_to_false() {
+        let cfg = MagiConfig::from_toml_str(
+            "[magi]
+",
+        )
+        .unwrap();
+        assert!(!cfg.declared_strict_context_guard());
+        let on = MagiConfig::from_toml_str(
+            "[magi]
+strict_context_guard = true
+",
+        )
+        .unwrap();
+        assert!(on.declared_strict_context_guard());
+    }
+
+    /// REQ-R29: diversity is REQUIRED by default. A pool without diversity that starts silently is
+    /// a safety net the operator believes they have and do not.
+    #[test]
+    fn enforce_diversity_defaults_to_true() {
+        let cfg = MagiConfig::from_toml_str(
+            "[magi]
+",
+        )
+        .unwrap();
+        assert!(cfg.effective_enforce_diversity());
+        let off = MagiConfig::from_toml_str(
+            "[magi]
+enforce_diversity = false
+",
+        )
+        .unwrap();
+        assert!(!off.effective_enforce_diversity());
+    }
+
+    /// REQ-R13: the pool parses from `[[magi.fallback]]`, in declared order, and is empty when the
+    /// array is absent.
+    #[test]
+    fn the_fallback_pool_parses_in_declared_order() {
+        let cfg = MagiConfig::from_toml_str(
+            "[magi]
+",
+        )
+        .unwrap();
+        assert!(
+            cfg.fallback_pool().is_empty(),
+            "absent array means no rotation, not an error"
+        );
+
+        let cfg = MagiConfig::from_toml_str(concat!(
+            "[magi]
+",
+            "[[magi.fallback]]
+model = \"glm-5.2:cloud\"
+lineage = \"zhipu\"
+",
+            "[[magi.fallback]]
+model = \"minimax-m3:cloud\"
+lineage = \"minimax\"
+",
+        ))
+        .unwrap();
+        let pool = cfg.fallback_pool();
+        assert_eq!(pool.len(), 2);
+        assert_eq!(
+            pool[0].model, "glm-5.2:cloud",
+            "order is rotation preference, strongest first"
+        );
+        assert_eq!(pool[1].lineage.as_str(), "minimax");
+    }
+
+    /// SC-R11: a misspelled key in the rotation section is an explicit parse error, never silently
+    /// ignored. `deny_unknown_fields` gives this for free — the test PINS it, because the new keys
+    /// were added to a struct where dropping the attribute would still compile.
+    #[test]
+    fn a_misspelled_rotation_key_is_a_parse_error() {
+        let err = MagiConfig::from_toml_str(
+            "[magi]
+max_rotation = 2
+",
+        )
+        .expect_err("an unknown key must be rejected, never ignored");
+        assert!(
+            err.to_string().contains("max_rotation"),
+            "the error must name the key: {err}"
         );
     }
 }

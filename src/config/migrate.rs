@@ -1,19 +1,70 @@
 // Author: Julian Bolivar Version: 1.0.0 Date: 2026-08-02
 
-//! PRE-parse validation pass, to report all migration incompatibilities of a v0.11.0
-//! `magi.toml` together (REQ-A21b).
+//! Validation pass that reports all migration incompatibilities of a `magi.toml` **together**
+//! (REQ-A21b, REQ-R22).
 //!
-//! `deny_unknown_fields` **aborts on the FIRST unknown key**, so "all together" is impossible
-//! to achieve from serde's error. This pass reads the TOML as a generic document **before**
-//! deserializing, collects the known patterns, and emits a single message. Without it the user
-//! pays two edit-start-fail cycles.
+//! Serde cannot produce that message on its own: `deny_unknown_fields` **aborts on the FIRST
+//! unknown key**, and a missing field is reported one at a time. So this pass collects the
+//! incompatibilities it knows — before deserializing for the ones serde would abort on, after it
+//! for the ones serde stays silent about — and emits a single message.
 //!
-//! # Dated technical debt
+//! # Every pattern SET has a retirement date; the MECHANISM has none
 //!
-//! **Removed in v0.13.0 (MS3)**, once migration is no longer the common case. It duplicates a
-//! little schema knowledge — the patterns are about the **old** shape, which is no longer in
-//! the code — and that duplication is accepted knowingly: it is bounded to three patterns and
-//! is covered by tests against real v0.11.0 files.
+//! The v0.11.0 set — `provider = "openai"`, `[openai].base_url`,
+//! `[headless].tool_result_cap_bytes` — was retired in v0.13.0 (MS3, REQ-R22 / SC-R20). That
+//! debt was dated on purpose: those patterns duplicated schema knowledge about a shape that is
+//! no longer in the code, so they could only rot. The same release then put the mechanism
+//! straight back to work on the break it introduced itself — mandatory seat lineages.
+//!
+//! **The mechanism carries no such date, and retiring it with them would be the wrong reading of
+//! that note.** Its reason to exist outlives any single generation: `deny_unknown_fields` aborts
+//! on the FIRST unknown key and serde reports one missing field at a time, so without a pass
+//! that collects them all, the user pays one edit-start-fail cycle per incompatibility — start,
+//! read one complaint, edit, start again. That is true of every future break, not only of the
+//! one that motivated the pass.
+//!
+//! # Two halves, because a break arrives in one of two shapes
+//!
+//! **Unknown keys — [`detect_migrations`], before serde.** `deny_unknown_fields` aborts on the
+//! first one, so the only way to collect them all is to read the document ahead of serde. **No
+//! such pattern is declared today**: the v0.11.0 set retired with v0.13.0, and this half waits for
+//! the next break that arrives in that shape.
+//!
+//! **Missing keys — [`missing_seat_lineages`], after serde.** An absent key with an `Option` field
+//! produces no serde complaint at all, so there is nothing to get ahead of, and reading the typed
+//! struct beats re-reading the raw document: renaming a field breaks the compile, whereas a
+//! string-keyed pattern would go on matching nothing in silence. That silent-rot property is
+//! precisely the debt REQ-R22 retired, so this half deliberately does not re-incur it.
+//!
+//! Both halves produce [`Migration`] values and share one [`render_migration_error`] frame, which
+//! is what keeps "reported whole, in one message" a property of the mechanism rather than of
+//! whichever half happens to be loaded.
+//!
+//! # The frame names ONE break at a time — move it with the patterns
+//!
+//! `VERSION_FROM`, `VERSION_TO`, `V0_11_X_NOTE` and `MINIMAL_VALID_CONFIG` describe the
+//! v0.12.0 → v0.13.0 break (mandatory seat lineages, REQ-R22 / SC-R46 / SC-R47). Whoever declares
+//! the patterns of the NEXT break retargets them in the same change: a correct list of
+//! incompatibilities under a header naming the wrong pair of versions is worse than no message,
+//! because it tells the user their file is a generation older than it is.
+//!
+//! # Any correction that echoes a value read from the file is redacted first
+//!
+//! The retired `[openai].base_url` correction pasted the user's own URL back, so it went through
+//! `redact_url`/`locate_userinfo` and said, in the message, that the value was masked (SC-A21e).
+//! A migration message that leaks a credential to the terminal, the scrollback and CI logs is a
+//! worse problem than a line the user has to complete by hand. That rule belongs to the
+//! mechanism, not to the pattern that first needed it — the current lineage corrections honour it
+//! by quoting nothing from the file at all.
+//!
+//! # The line-locating helpers are gone, and the v0.13.0 patterns do not want them back
+//!
+//! **They went with their patterns**, rather than staying behind an
+//! `#[allow(dead_code)]` that would claim a caller they no longer have: `line_of`,
+//! `line_of_in_section` and `is_key_at` are in git history at the v0.13.0 boundary, together
+//! with why they matched on a key boundary and why the section-scoped lookup was needed for a
+//! half-migrated file. [`Migration::line`] still accepts `0` for "could not be located", which
+//! is what a pattern about a MISSING key reports.
 
 #![deny(missing_docs)]
 #![deny(clippy::missing_docs_in_private_items)]
@@ -32,91 +83,52 @@
     )
 )]
 
-use magi_rs::redact::{locate_userinfo, redact_url, UserinfoLocation};
-use toml::Value;
+use crate::defaults::{
+    DEFAULT_MAGI_BALTHASAR_LINEAGE, DEFAULT_MAGI_CASPAR_LINEAGE, DEFAULT_MAGI_MELCHIOR_LINEAGE,
+};
 
-/// Root provider key in `magi.toml`.
-const PROVIDER_KEY: &str = "provider";
+use super::MagiSectionConfig;
 
-/// Value of `provider` in v0.11.0 that ceased to exist in v0.12.0.
+/// Source version of the migration the message frame describes.
 ///
-/// **Not auto-migrated, and that is deliberate.** `"openai"` was ambiguous — it could mean a
-/// local Ollama without credentials or an authenticated endpoint — and splitting that ambiguity
-/// is half the point of the change. Choosing for the user would be guessing exactly what D-A01
-/// forbids.
-const PROVIDER_V0_11_0: &str = "openai";
+/// Retargeted from `v0.11.0` when the v0.13.0 break took over the frame: the version pair belongs
+/// to whichever break the pass is actually reporting, and a correct list of incompatibilities under
+/// a header naming the wrong pair sends the user to migrate something they already migrated.
+const VERSION_FROM: &str = "v0.12.0";
 
-/// v0.11.0 `[openai]` section; from v0.12.0 `base_url` no longer lives there.
-const OPENAI_SECTION: &str = "openai";
-
-/// v0.11.0 `[headless]` section; from v0.12.0 `tool_result_cap_bytes` moves to root.
-const HEADLESS_SECTION: &str = "headless";
-
-/// Key `base_url`, which in v0.11.0 lived inside `[openai]`.
-const BASE_URL_KEY: &str = "base_url";
-
-/// Key `tool_result_cap_bytes`, which in v0.11.0 lived inside `[headless]`.
-const TOOL_RESULT_CAP_BYTES_KEY: &str = "tool_result_cap_bytes";
-
-/// Label shown for `[openai].base_url`.
-const OPENAI_BASE_URL_LABEL: &str = "[openai].base_url";
-
-/// Label shown for `[headless].tool_result_cap_bytes`.
-const HEADLESS_CAP_LABEL: &str = "[headless].tool_result_cap_bytes";
-
-/// Source version of the migration.
-const VERSION_FROM: &str = "v0.11.0";
-
-/// Target version of the migration.
-const VERSION_TO: &str = "v0.12.0";
-
-/// Correction for `provider = "openai"`: names both options and the criterion for choosing.
-const PROVIDER_CORRECTION: &str = "provider = \"ollama\"        # if it points to a local Ollama daemon, no credential\n           provider = \"openai-compat\" # for OpenAI, Groq, OpenRouter and other authenticated endpoints";
-
-/// Prefix of the `[openai].base_url` correction, before the redacted value.
-const BASE_URL_CORRECTION_PREFIX: &str = "base_url = \"";
-
-/// Common closing clause of the `[openai].base_url` correction, said either way (SC-A21e).
-const BASE_URL_CORRECTION_TAIL: &str = "\"   # at the root level, above every section.";
-
-/// States that the value is **redacted**: with embedded credentials, redaction wins over ready-
-/// to-paste (SC-A21e). A migration message that leaks a credential to the terminal, the
-/// scrollback, and CI logs is a worse problem than a line that must be completed.
+/// Target version of the migration the message frame describes.
 ///
-/// **Used only when `url` actually carried a `userinfo`** (loop 1 fix round CE, F21) —
-/// unconditionally appending it made the message lie for the common, credential-free case: the
-/// value shown was already the real, pasteable one, while the text told the user it was not.
-const BASE_URL_CORRECTION_SUFFIX_REDACTED: &str =
-    " Value redacted: copy the real one from the old file.";
+/// Retargeted together with [`VERSION_FROM`] — the pair only ever moves as a pair.
+const VERSION_TO: &str = "v0.13.0";
 
-/// States that the value is **masked in full**, for a `base_url` that never parsed as a URL to
-/// begin with (loop 1 fix round CF, F21 follow-up).
+/// Unconditional note about the jump from two generations back.
 ///
-/// `redact_url` masks `UserinfoLocation::Unparseable` to the literal `"***"` just like it masks
-/// a located credential — it is the same "safe failure direction" rule, applied because a string
-/// with no `"://"` might hide a secret anywhere. The wording deliberately differs from
-/// [`BASE_URL_CORRECTION_SUFFIX_REDACTED`]: there is no credential to "copy from the old file"
-/// here, because the value never had URL structure to extract one from. Telling the user to copy
-/// a credential that was never identified would send them looking for something that is not
-/// there.
-const BASE_URL_CORRECTION_SUFFIX_UNPARSEABLE: &str =
-    " Value masked: the original did not parse as a URL at all — check the old file directly.";
-
-/// Prefix of the `[headless].tool_result_cap_bytes` correction.
-const CAP_CORRECTION_PREFIX: &str = "tool_result_cap_bytes = ";
-
-/// Suffix of the `[headless].tool_result_cap_bytes` correction.
-const CAP_CORRECTION_SUFFIX: &str =
-    "   # at the root level: now governs all THREE routes (TUI, magi query and headless consult).";
-
-/// **There is NO v0.10.x detection**: the pass only knows the v0.11.0 patterns. A v0.10.x file
-/// may additionally carry earlier incompatibilities that nobody audited, and it would receive
-/// the generic error exactly when it most needs help. Supporting two generations would double
-/// the debt for a jump the user makes in two steps.
+/// **There is NO detection for a generation older than the declared set**: a file that old may
+/// additionally carry earlier incompatibilities that nobody audited, and it would receive the
+/// generic error exactly when it most needs help. Supporting two generations would double the
+/// debt for a jump the user makes in two steps.
 ///
-/// Unconditional note about the jump from v0.10.x.
-const V0_10_X_NOTE: &str =
-    "If you're coming from v0.10.x, migrate to v0.11.0 first and then to v0.12.0: this pass only knows\nthe v0.11.0 patterns.";
+/// Retargeted with the rest of the frame: under v0.13.0 the generation two steps back is v0.11.x,
+/// whose own keys (`provider = "openai"`, `[openai].base_url`,
+/// `[headless].tool_result_cap_bytes`) no longer have patterns of their own (REQ-R22 retired them)
+/// and now surface as plain serde errors.
+const V0_11_X_NOTE: &str =
+    "If you're coming from v0.11.x, migrate to v0.12.0 first and then to v0.13.0: this pass only knows\nwhat changed in v0.13.0, and a v0.11.0 file also gets plain serde errors for its own keys.";
+
+/// Line number reported for a key that is **missing**.
+///
+/// A key the file never wrote has no line to point at — this is the `0` case
+/// [`Migration::line`] documents, and the reason the line-locating helpers of the retired pattern
+/// set were not needed here.
+const MISSING_KEY_HAS_NO_LINE: usize = 0;
+
+/// Trailing hint appended to every lineage correction.
+///
+/// One shared literal because the same sentence is true of all three seats, and because a
+/// correction repeated three times with three slightly different wordings reads like three
+/// different rules.
+const LINEAGE_CORRECTION_HINT: &str =
+    "   # any label you choose; no two seats may share one, and it is never inferred";
 
 /// Backup advice, in the body of the error and not only in the CHANGELOG.
 /// Whoever hits this error got here **by starting the binary**, not by reading release notes.
@@ -124,15 +136,25 @@ const V0_10_X_NOTE: &str =
 const BACKUP_ADVISORY: &str =
     "Save a copy of your magi.toml BEFORE editing it: this migration is one-way.";
 
-/// A minimal and valid v0.12.0 `magi.toml`, ready to paste.
+/// A minimal and valid `magi.toml`, ready to paste.
 ///
 /// **It goes in the body of the error and not in `docs/magi.toml.example`**: whoever installed
 /// with `cargo install` or downloaded a release binary does NOT have the example file, and
 /// without an escape flag (REQ-A23) this message is the only defense. It is six lines.
+///
+/// Unlike the rest of the frame, this one is **not** dormant: it is checked against the live
+/// schema by `the_minimal_config_the_error_hands_out_actually_parses_today`, so it cannot rot
+/// silently.
+///
+/// **Revisited for the v0.13.0 break and deliberately left unchanged.** It declares no seat model,
+/// so it owes no lineage and stays valid under the new rule — which is also what makes it the
+/// escape hatch it is meant to be: whoever cannot decide three lineage labels right now can delete
+/// their `[magi]` block, run on the built-in trio, and come back to it. The per-key corrections
+/// above it are what teach the declaration; this is what unblocks the user who wants to start.
 const MINIMAL_VALID_CONFIG: &str = "provider = \"ollama\"\nbase_url = \"http://localhost:11434/v1\"\n\n[openai]\nmodel = \"kimi-k2.6:cloud\"\n";
 
 /// A detected migration incompatibility, with its correction.
-/// The shape is the contract shared by `from_toml_str` and [`render_migration_error`].
+/// The shape is the contract shared by [`detect_migrations`] and [`render_migration_error`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Migration {
     /// Affected key, as it appears in the file (e.g., `"[openai].base_url"`).
@@ -143,181 +165,134 @@ pub struct Migration {
     pub correction: String,
 }
 
-/// Detects the three v0.11.0 migration patterns in a raw `magi.toml`.
-/// The patterns are `provider = "openai"` at root, `[openai].base_url`, and
-/// `[headless].tool_result_cap_bytes`.
+/// Detects the migration patterns declared for the current generation in a raw `magi.toml`.
 ///
-/// Returns empty if the document **does not parse as TOML**: without structure there is nowhere
-/// to look, and rescuing it by textual search would give advice about a shape nobody knows
-/// which one it is (SC-A21g). A syntactically broken file receives its syntax error, with line
-/// and column, not migration advice.
+/// **No PRE-parse pattern is declared today** (REQ-R22, SC-R20): the v0.11.0 set retired with
+/// v0.13.0, so this reports nothing for every input, and a v0.11.0 file gets serde's own errors
+/// for its own keys.
 ///
-/// Reports **only what that file has wrong**: a half-migrated file receives only the missing
-/// correction (SC-A21h). Repeating one the user already applied would make them doubt whether
-/// they applied it correctly, which is the opposite mental state from what this message aims
-/// for.
+/// **That is not the same as saying nothing is reported.** The v0.13.0 break is about keys the
+/// file is MISSING, which serde never aborts on, so it is collected after parsing by
+/// [`missing_seat_lineages`] — through the same [`Migration`] contract and the same
+/// [`render_migration_error`] frame. This half of the pass stays for the next break that arrives
+/// as **unknown** keys, where reading the document before serde does is the only way to collect
+/// more than one.
 ///
-/// **Deliberately NOT a fourth pattern: `[embedding].provider = "openai"` (Loop 2, S1,
-/// verified false positive).** `tests/fixtures/v0.11.0/full.toml` carries that exact line and
-/// `every_real_v0_11_0_fixture_reports_its_own_incompatibilities` asserts it is NOT flagged —
-/// which looked, from this module alone, like it could leave the user with a second, unguided
-/// parse error after applying the two named corrections. It does not: `[embedding].provider` is
-/// a **different vocabulary** from the root `provider`/`[magi].kind` this pass polices — see
-/// [`crate::memory::config::EmbeddingConfig::provider`], which only requires non-empty and never
-/// compares against [`magi_rs::magi::kind::ProviderKind`]. `"openai"` is literally that field's
-/// own built-in default, so it round-trips through v0.12.0 without error — verified by reading
-/// `EmbeddingConfig::validate` and its default provider function.
+/// The parameter keeps its place for the same reason, with the leading underscore recording that
+/// an empty table reads nothing. A reloaded table reads the document as a **parsed TOML value**,
+/// never by textual search: a syntactically broken file must get its syntax error, with line and
+/// column, instead of advice about a shape nobody can tell which one it is (SC-A21g).
+///
+/// Whatever it reports must be **only what that file has wrong**: a half-migrated file receives
+/// only the missing correction (SC-A21h). Repeating one the user already applied would make them
+/// doubt whether they applied it correctly, which is the opposite mental state from what this
+/// message aims for.
 #[must_use]
-pub fn detect_migrations(raw: &str) -> Vec<Migration> {
-    let Ok(doc) = raw.parse::<Value>() else {
-        return Vec::new();
-    };
+pub fn detect_migrations(_raw: &str) -> Vec<Migration> {
+    Vec::new()
+}
 
-    let mut found = Vec::new();
+/// One seat's lineage declaration, as this pass needs to see it.
+///
+/// The four pieces travel together on purpose: two parallel arrays (one of values, one of key
+/// names) would let a later edit reorder one and not the other, and the resulting message would
+/// name the wrong seat while every test still passed.
+struct SeatLineage<'a> {
+    /// Model declared for this seat, if any. Absent ⇒ the seat runs the built-in model, whose
+    /// lineage is built in too, so nothing is owed.
+    model: Option<&'a str>,
+    /// Lineage declared for this seat, if any.
+    lineage: Option<&'a str>,
+    /// Fully-qualified key, so the message says WHERE the line goes, not only what it is called.
+    key: &'static str,
+    /// The bare `key = "value"` line the user has to add, without the section prefix.
+    declaration: &'static str,
+    /// Label shown in the correction — the lineage of the model this seat runs by default, so
+    /// what `magi init` writes and what the error suggests cannot drift apart.
+    example: &'static str,
+}
 
-    if let Some(provider) = doc.get(PROVIDER_KEY).and_then(Value::as_str) {
-        if provider.trim() == PROVIDER_V0_11_0 {
-            found.push(Migration {
-                key: PROVIDER_KEY,
-                line: line_of(raw, PROVIDER_KEY),
-                correction: PROVIDER_CORRECTION.to_owned(),
-            });
-        }
-    }
+/// Whether a declared text value counts as **absent**.
+///
+/// Blank is absent, never invalid — the rule every text key in this file has followed since MS2.
+/// An exported-but-unfilled variable in a CI script is an everyday accident, and answering it with
+/// an "invalid value" error the user cannot act on punishes the accident instead of guiding it.
+fn is_absent(value: Option<&str>) -> bool {
+    value.is_none_or(|v| v.trim().is_empty())
+}
 
-    if let Some(url) = doc
-        .get(OPENAI_SECTION)
-        .and_then(Value::as_table)
-        .and_then(|t| t.get(BASE_URL_KEY))
-        .and_then(Value::as_str)
-    {
-        // Exhaustive over `UserinfoLocation` on purpose (loop 1 fix round CF): a positive check
-        // against `Found` alone left `Unparseable` — a DIFFERENT outcome where `redact_url` also
-        // shows a value that is not the real one — silently undisclosed. Matching means a future
-        // fourth variant fails to compile here instead of falling into the wrong branch, which is
-        // exactly how this bug happened the first time.
-        let redacted_clause = match locate_userinfo(url) {
-            // The shown value equals the real one: nothing was hidden, nothing to disclose
-            // (SC-A21e, F21).
-            UserinfoLocation::Absent => "",
-            // A credential was located and masked: point the user at the old file to recover it.
-            UserinfoLocation::Found { .. } => BASE_URL_CORRECTION_SUFFIX_REDACTED,
-            // The whole value was masked because it never parsed as a URL: different disclosure,
-            // since there is no credential to "copy" (F21 follow-up).
-            UserinfoLocation::Unparseable => BASE_URL_CORRECTION_SUFFIX_UNPARSEABLE,
-        };
-        found.push(Migration {
-            key: OPENAI_BASE_URL_LABEL,
-            line: line_of_in_section(raw, OPENAI_SECTION, BASE_URL_KEY),
+/// Detects the v0.12.0 → v0.13.0 break: seats that declare a model but not its lineage.
+///
+/// **Why this one is checked AFTER parsing while [`detect_migrations`] runs before.** The two
+/// halves of the reporting problem are not the same shape. An **unknown** key aborts serde on the
+/// first one it meets, so collecting them all requires reading the document before serde does. A
+/// **missing** key with an `Option` field does not abort serde at all — it produces no complaint
+/// whatsoever — so there is nothing to get ahead of, and reading the typed struct is strictly
+/// better than re-reading the raw document: a rename of `melchior_lineage` breaks this function's
+/// compile, whereas a string-keyed pattern would keep matching nothing, silently. That is the
+/// exact debt REQ-R22 just retired, and re-incurring it one release later would be the wrong
+/// lesson to draw from the retirement.
+///
+/// It reports **only what the file still lacks** (SC-A21h): a half-migrated file gets the two
+/// corrections it is missing and no mention of the seat it already fixed. Repeating a correction
+/// the user already applied makes them doubt whether they applied it correctly.
+///
+/// # Redaction (SC-A21e)
+///
+/// Nothing here echoes a value read from the file: the corrections are built from the built-in
+/// lineage labels, not from the user's models or lineages. The rule the module docs state — any
+/// correction that echoes a value read from the file is redacted first — is therefore honoured by
+/// having nothing to redact, which is the cheapest way to honour it. **A later pattern that wants
+/// to quote the user's own value must route it through `redact_url`/`redact_foreign_text` first**;
+/// a migration message that leaks a credential to the terminal, the scrollback and CI logs is a
+/// worse problem than a line the user completes by hand.
+#[must_use]
+pub fn missing_seat_lineages(magi: &MagiSectionConfig) -> Vec<Migration> {
+    let seats = [
+        SeatLineage {
+            model: magi.melchior_model.as_deref(),
+            lineage: magi.melchior_lineage.as_deref(),
+            key: "[magi].melchior_lineage",
+            declaration: "melchior_lineage",
+            example: DEFAULT_MAGI_MELCHIOR_LINEAGE,
+        },
+        SeatLineage {
+            model: magi.balthasar_model.as_deref(),
+            lineage: magi.balthasar_lineage.as_deref(),
+            key: "[magi].balthasar_lineage",
+            declaration: "balthasar_lineage",
+            example: DEFAULT_MAGI_BALTHASAR_LINEAGE,
+        },
+        SeatLineage {
+            model: magi.caspar_model.as_deref(),
+            lineage: magi.caspar_lineage.as_deref(),
+            key: "[magi].caspar_lineage",
+            declaration: "caspar_lineage",
+            example: DEFAULT_MAGI_CASPAR_LINEAGE,
+        },
+    ];
+
+    seats
+        .into_iter()
+        .filter(|seat| !is_absent(seat.model) && is_absent(seat.lineage))
+        .map(|seat| Migration {
+            key: seat.key,
+            line: MISSING_KEY_HAS_NO_LINE,
             correction: format!(
-                "{BASE_URL_CORRECTION_PREFIX}{}{BASE_URL_CORRECTION_TAIL}{redacted_clause}",
-                redact_url(url)
+                "{} = \"{}\"{LINEAGE_CORRECTION_HINT}",
+                seat.declaration, seat.example
             ),
-        });
-    }
-
-    if let Some(cap) = doc
-        .get(HEADLESS_SECTION)
-        .and_then(Value::as_table)
-        .and_then(|t| t.get(TOOL_RESULT_CAP_BYTES_KEY))
-    {
-        found.push(Migration {
-            key: HEADLESS_CAP_LABEL,
-            line: line_of_in_section(raw, HEADLESS_SECTION, TOOL_RESULT_CAP_BYTES_KEY),
-            correction: format!("{CAP_CORRECTION_PREFIX}{cap}{CAP_CORRECTION_SUFFIX}"),
-        });
-    }
-
-    found
-}
-
-/// True when the already-trimmed `line` is a TOML key assignment for exactly `needle`, not
-/// merely a line that happens to start with the same characters.
-///
-/// **Why a boundary check and not bare `starts_with` (Loop 1 gate S1-f finding, Caspar).**
-/// `starts_with` alone would also match a key that has `needle` as a literal prefix — e.g. a
-/// hypothetical `provider_timeout` key would match the needle `"provider"`. No such colliding
-/// key exists in the schema today for any of the three needles this module uses (verified: the
-/// only fields whose full name contains "provider" / "base_url" / "tool_result_cap_bytes" are
-/// the exact keys these patterns already look for), so today this cannot misfire — but that
-/// safety is a property of the CURRENT field list, not of the matching logic, and the matching
-/// logic does not know it. A future field rename or addition one prefix away would silently
-/// point the user at the wrong line, which this module's own `detect_migrations` doc calls
-/// worse than no line at all — a wrong line is trusted; an absent one is not.
-///
-/// The boundary mirrors TOML key syntax: a bare key is followed by whitespace, `=`, or the end
-/// of the line — never by another identifier character (TOML bare keys are
-/// `[A-Za-z0-9_-]+`, so a real continuation is alphanumeric, `_`, or `-`).
-fn is_key_at(line: &str, needle: &str) -> bool {
-    match line.strip_prefix(needle) {
-        Some(rest) => rest
-            .chars()
-            .next()
-            .is_none_or(|c| c.is_whitespace() || c == '='),
-        None => false,
-    }
-}
-
-/// 1-indexed line number where a `needle` key **starts**, or 0 if it does not appear.
-///
-/// Compares against the start of the already-trimmed line, not with `contains`: a `contains`
-/// would match a key mentioned inside a comment, and the default v0.11.0 file is full of
-/// comments that name their own keys. It is only for the message — a wrong line confuses, but
-/// does not change what was detected.
-///
-/// **Unscoped, used only for `provider` at the root** (Loop 2, S1): TOML syntax forces every
-/// root-level key to appear textually before the first `[section]` header in the file, so a
-/// root `provider` line is always the FIRST line starting with `"provider"` regardless of what
-/// sections follow — there is no section-scoped `provider` occurrence that could sit earlier in
-/// the file and get matched by mistake, unlike `base_url`/`tool_result_cap_bytes` below.
-fn line_of(raw: &str, needle: &str) -> usize {
-    raw.lines()
-        .position(|line| is_key_at(line.trim_start(), needle))
-        .map_or(0, |idx| idx + 1)
-}
-
-/// 1-indexed line where `needle` starts **inside** the named TOML `section`, or 0 if the section
-/// is absent or does not contain it.
-///
-/// **Why scoped, and not just [`line_of`] (Loop 2 fix, Caspar, S1).** A half-migrated
-/// `magi.toml` can legally carry BOTH the new root-level key (`base_url`,
-/// `tool_result_cap_bytes`) and the leftover old section-scoped one with the exact same
-/// trailing name — that overlap is precisely what makes the file "half-migrated" rather than
-/// simply old. An unscoped search for `"base_url"` finds whichever line comes first in the
-/// file, which is the ROOT one in the common layout (the reshaped v0.12.0 template puts
-/// `base_url` above every section), and reports that line for an incompatibility that is
-/// actually about the `[openai]` occurrence — pointing the user at the wrong line to fix.
-///
-/// Scans forward from the `[section]` header (matched at the start of a trimmed line, so a
-/// mention inside a comment or a differently-named table like `[embedding]` cannot match) and
-/// stops at the next `[`-prefixed line, so a needle appearing in a LATER section is correctly
-/// treated as absent from this one.
-fn line_of_in_section(raw: &str, section: &str, needle: &str) -> usize {
-    let header = format!("[{section}]");
-    let mut in_section = false;
-    for (idx, line) in raw.lines().enumerate() {
-        let trimmed = line.trim_start();
-        if in_section {
-            if trimmed.starts_with('[') {
-                break; // Entered the next table without finding the needle in this one.
-            }
-            if is_key_at(trimmed, needle) {
-                return idx + 1;
-            }
-        } else if trimmed.starts_with(&header) {
-            in_section = true;
-        }
-    }
-    0
+        })
+        .collect()
 }
 
 /// Renders the full migration error from the found incompatibilities.
 ///
 /// The message is **self-contained** and does not send the user to any file in the repo: it
 /// includes each correction, the backup advice, a minimal valid `magi.toml` to paste, and the
-/// unconditional note about v0.10.x. Whoever installed via `cargo install` or downloaded a
-/// binary **does not have** the source tree, and sending them there leaves them just as stuck
-/// as no message.
+/// unconditional note about the older generation. Whoever installed via `cargo install` or
+/// downloaded a binary **does not have** the source tree, and sending them there leaves them just
+/// as stuck as no message.
 #[must_use]
 pub fn render_migration_error(found: &[Migration]) -> String {
     let mut out = format!(
@@ -336,200 +311,25 @@ pub fn render_migration_error(found: &[Migration]) -> String {
     }
 
     out.push_str(BACKUP_ADVISORY);
-    out.push_str("\n\nA minimal, valid v0.12.0 magi.toml:\n\n");
+    // Interpolated, never spelled out: a hardcoded version here would keep naming the previous
+    // break while the frame constants above moved on, which is the failure this whole frame exists
+    // to avoid.
+    out.push_str(&format!("\n\nA minimal, valid {VERSION_TO} magi.toml:\n\n"));
     out.push_str(MINIMAL_VALID_CONFIG);
     out.push('\n');
-    out.push_str(V0_10_X_NOTE);
+    out.push_str(V0_11_X_NOTE);
     out.push('\n');
     out
 }
 
-/// Unit tests for migration detection and rendering.
+/// Unit tests for the retired pattern table and the surviving reporting mechanism.
 ///
-/// SC-A21: both incompatibilities are reported together.
+/// SC-R20: the v0.11.0 patterns are gone; the pass that reports incompatibilities is not.
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// SC-A21: the v0.11.0 config fails with both incompatibilities named together, the
-    /// `base_url` already rewritten, and the criterion for choosing `ollama` vs `openai-compat`.
-    #[test]
-    fn a_v0_11_0_config_reports_both_incompatibilities_at_once() {
-        let toml = include_str!("../../tests/fixtures/v0.11.0/default.toml");
-        let found = detect_migrations(toml);
-        assert_eq!(found.len(), 2, "expected provider + [openai].base_url");
-        let rendered = render_migration_error(&found);
-        assert!(rendered.contains("provider"));
-        assert!(rendered.contains("base_url"));
-        assert!(
-            rendered.contains("ollama") && rendered.contains("openai-compat"),
-            "must say HOW to choose between the two"
-        );
-    }
-
-    /// SC-A21h: a half-migrated file receives ONLY what is missing.
-    #[test]
-    fn a_partially_migrated_file_reports_only_what_is_missing() {
-        let toml = "provider = \"openai\"\nbase_url = \"http://x/v1\"\n[openai]\nmodel = \"m\"\n";
-        let found = detect_migrations(toml);
-        assert_eq!(found.len(), 1);
-        assert_eq!(found[0].key, "provider");
-    }
-
-    /// SC-A21e: embedded credentials in `base_url` are redacted in the migration message — the
-    /// host stays visible, and the message states the value is redacted.
-    #[test]
-    fn embedded_credentials_are_redacted_in_the_migration_message() {
-        let toml = "[openai]\nbase_url = \"https://user:s3cr3t@host/v1\"\n";
-        let rendered = render_migration_error(&detect_migrations(toml));
-        assert!(
-            !rendered.contains("s3cr3t"),
-            "the credential must NOT appear"
-        );
-        assert!(
-            rendered.contains("host"),
-            "the host must, though — it is what makes the message actionable"
-        );
-        assert!(
-            rendered.contains("redacted"),
-            "and the message must say it is redacted"
-        );
-    }
-
-    /// SC-A21e, negative clause (loop 1 fix round CE, F21): a `base_url` WITHOUT credentials is
-    /// pasted literally — the message must not claim it was redacted, because there is nothing
-    /// left to copy from the old file. Covers three of the four real v0.11.0 fixtures, the
-    /// common case (an unauthenticated local Ollama).
-    #[test]
-    fn a_credential_free_base_url_is_not_claimed_to_be_redacted() {
-        let toml = "[openai]\nbase_url = \"http://localhost:11434/v1\"\n";
-        let rendered = render_migration_error(&detect_migrations(toml));
-        assert!(
-            rendered.contains("http://localhost:11434/v1"),
-            "the full value must remain paste-ready: {rendered}"
-        );
-        assert!(
-            !rendered.contains("redacted"),
-            "with no credentials there is nothing to redact, so there is nothing to \
-             copy from the old file: {rendered}"
-        );
-    }
-
-    /// Loop 1 fix round CF (finding F21 follow-up): a scheme-less/malformed `base_url` hits
-    /// `UserinfoLocation::Unparseable`, which `redact_url` masks to the literal `"***"` — not
-    /// the real value, exactly like the credential case, just for a different reason. The
-    /// disclaimer must cover this outcome too, with wording that does not tell the user to
-    /// "copy the real one" (there is no credential to extract) but instead that the original
-    /// never parsed as a URL at all.
-    #[test]
-    fn an_unparseable_base_url_states_it_is_masked_and_not_paste_ready() {
-        let toml = "[openai]\nbase_url = \"localhost:11434/v1\"\n";
-        let rendered = render_migration_error(&detect_migrations(toml));
-        assert!(
-            rendered.contains("***"),
-            "the value shown must be the full mask: {rendered}"
-        );
-        assert!(
-            rendered.contains("did not parse as a URL"),
-            "must say the original did not parse as a URL: {rendered}"
-        );
-        assert!(
-            !rendered.contains("copy the real one"),
-            "that phrase is only for the case with a credential, it does not apply here: {rendered}"
-        );
-    }
-
-    /// SC-A21g: a syntactically broken TOML does NOT receive migration advice — without
-    /// structure, `detect_migrations` finds nothing to search patterns against.
-    #[test]
-    fn a_syntactically_broken_toml_gets_a_syntax_error_not_migration_advice() {
-        let toml = "provider = \"sin cerrar\n[magi]\n";
-        assert!(
-            detect_migrations(toml).is_empty(),
-            "with no structure there is nowhere to search for patterns; the pass does \
-             not rescue via grep"
-        );
-    }
-
-    /// SC-A21f: an empty TOML parses and triggers nothing.
-    #[test]
-    fn an_empty_toml_is_valid_and_triggers_no_migration() {
-        assert!(detect_migrations("").is_empty());
-        assert!(detect_migrations("   \n\n  ").is_empty());
-    }
-
-    /// SC-A21i: the jump from v0.10.x is declared unsupported, in EVERY config error — this
-    /// pass only knows the v0.11.0 patterns, so the unconditional note is exercised here via a
-    /// v0.11.0 fixture rather than a v0.10.x one.
-    #[test]
-    fn every_config_error_mentions_the_v0_10_x_path() {
-        let rendered = render_migration_error(&detect_migrations(include_str!(
-            "../../tests/fixtures/v0.11.0/default.toml"
-        )));
-        assert!(
-            rendered.contains("v0.11.0"),
-            "there is no v0.10.x detection: there is an unconditional note"
-        );
-    }
-
-    /// SC-A21d: the message is validated against the FOUR real v0.11.0 files, each reporting
-    /// all of its own incompatibilities. The four were generated or derived from the published
-    /// v0.11.0 binary and verified against it — see `tests/fixtures/v0.11.0/README.md`. They
-    /// share the same two incompatibilities because the three variants are derived from the
-    /// canonical `default.toml` without adding or removing migratable keys.
-    #[test]
-    fn every_real_v0_11_0_fixture_reports_its_own_incompatibilities() {
-        for (name, toml) in [
-            (
-                "default",
-                include_str!("../../tests/fixtures/v0.11.0/default.toml"),
-            ),
-            (
-                "with-models",
-                include_str!("../../tests/fixtures/v0.11.0/with-models.toml"),
-            ),
-            (
-                "full",
-                include_str!("../../tests/fixtures/v0.11.0/full.toml"),
-            ),
-            (
-                "with-credentials",
-                include_str!("../../tests/fixtures/v0.11.0/with-credentials.toml"),
-            ),
-        ] {
-            let found = detect_migrations(toml);
-            assert_eq!(
-                found.len(),
-                2,
-                "{name}: expected provider + [openai].base_url"
-            );
-            let rendered = render_migration_error(&found);
-            assert!(rendered.contains(PROVIDER_KEY), "{name}: names provider");
-            assert!(rendered.contains(BASE_URL_KEY), "{name}: names base_url");
-        }
-    }
-
-    /// SC-A21e on the REAL file: the fixture's credential never reaches the rendered message.
-    ///
-    /// The test above (`embedded_credentials_are_redacted_in_the_migration_message`) uses an
-    /// inline TOML; this one uses the committed file, which is what a user would actually have.
-    /// They are different on purpose: the inline test pins the rule, this one pins that the rule
-    /// survives the real file.
-    #[test]
-    fn the_real_credentials_fixture_never_leaks_its_secret() {
-        let toml = include_str!("../../tests/fixtures/v0.11.0/with-credentials.toml");
-        let rendered = render_migration_error(&detect_migrations(toml));
-        assert!(
-            !rendered.contains("s3cr3t"),
-            "the fixture's credential must not appear in the message"
-        );
-        assert!(
-            rendered.contains("host"),
-            "the host must, so it stays actionable"
-        );
-    }
-
-    /// SC-A21d, second half: **what the message proposes parses without error in v0.12.0**.
+    /// SC-A21d, second half: **what the message proposes parses without error today**.
     ///
     /// This is the part that makes the message useful and the part most likely to rot: the
     /// minimal TOML is a literal, so nothing ties it to the schema except this test. If a later
@@ -538,119 +338,245 @@ mod tests {
     #[test]
     fn the_minimal_config_the_error_hands_out_actually_parses_today() {
         super::super::MagiConfig::from_toml_str(MINIMAL_VALID_CONFIG)
-            .expect("the minimal magi.toml the error proposes must parse in v0.12.0");
+            .expect("the minimal magi.toml the error proposes must parse today");
+
+        // S1 Loop 2 (Caspar): parsing is not the only way this literal rots. Its model is spelled
+        // out, so `DEFAULT_OPENAI_MODEL` can move underneath it and the advice would keep parsing
+        // while naming a model the project no longer defaults to — a stuck user copying it would
+        // land somewhere the rest of the docs never mention.
+        // All THREE literals, not just the model (S1 Loop 2, Caspar). Pinning one of the three
+        // is the shape of coverage that reads as done while two thirds of the drift stays open —
+        // and `base_url` is the one that would send a migrating user's traffic somewhere the
+        // project no longer defaults to.
+        for (value, what) in [
+            (crate::defaults::DEFAULT_OPENAI_MODEL, "model"),
+            (crate::defaults::DEFAULT_PROVIDER, "provider"),
+            (crate::defaults::DEFAULT_OPENAI_BASE_URL, "base_url"),
+        ] {
+            assert!(
+                MINIMAL_VALID_CONFIG.contains(value),
+                "the minimal config must name the CURRENT default {what} ({value}), not a frozen \
+                 literal"
+            );
+        }
     }
 
-    /// `line_of` returns 0 when the pattern does not appear in the text.
-    #[test]
-    fn line_of_returns_zero_when_needle_is_absent() {
-        assert_eq!(line_of("foo\nbar\n", "baz"), 0);
-    }
+    /// A `magi.toml` carrying **all three** retired v0.11.0 patterns at once: `provider =
+    /// "openai"` at the root, `[openai].base_url` and `[headless].tool_result_cap_bytes`.
+    ///
+    /// One shared literal because both retirement tests need the same file and a second copy
+    /// could drift from this one, which would let one of them keep passing for the wrong reason.
+    const V0_11_0_SAMPLE: &str = "provider = \"openai\"\n\
+                                  [openai]\n\
+                                  base_url = \"http://localhost:11434/v1\"\n\
+                                  [headless]\n\
+                                  tool_result_cap_bytes = 65536\n";
 
-    /// `line_of` returns the 1-based line number.
+    /// SC-R20: a v0.11.0 file no longer receives ITS guided error — the patterns retired with the
+    /// milestone that owed them. It gets generic serde errors for its own keys instead, and the
+    /// CHANGELOG says so.
+    ///
+    /// **What this test can and cannot catch (B16 honesty).** Once the pattern table is empty,
+    /// [`detect_migrations`] reports nothing for *any* input, so no mutation of the current body
+    /// turns this red — it is a **regression pin**, not a behavioral guardian: it goes red the day
+    /// someone re-adds a v0.11.0 pattern to the table (verified by mutation: restoring the
+    /// `provider = "openai"` arm alone makes it fail).
     #[test]
-    fn line_of_returns_one_indexed_line_number() {
-        assert_eq!(line_of("foo\nbar\nbaz", "bar"), 2);
-    }
-
-    /// Loop 2 fix (Caspar, S1): a half-migrated file that already has the NEW root-level
-    /// `base_url` but has not yet removed the OLD `[openai].base_url` must report the line of
-    /// the `[openai]` occurrence, not the root one. `line_of` searched the whole file for the
-    /// first line starting with `"base_url"`, which — with the root key written first, the
-    /// common layout — pointed the user at the wrong line.
-    #[test]
-    fn a_half_migrated_files_openai_base_url_reports_its_own_line_not_the_roots() {
-        let toml = "base_url = \"http://root/v1\"\n\n[openai]\nbase_url = \"http://old/v1\"\n";
-        let found = detect_migrations(toml);
-        assert_eq!(found.len(), 1, "only the leftover [openai].base_url");
-        assert_eq!(found[0].key, OPENAI_BASE_URL_LABEL);
-        assert_eq!(
-            found[0].line, 4,
-            "must point at the [openai] section's own base_url line, not the root's (line 1)"
+    fn the_three_v0_11_0_patterns_are_no_longer_detected() {
+        let found = detect_migrations(V0_11_0_SAMPLE);
+        assert!(
+            found.is_empty(),
+            "v0.11.0 patterns must no longer be detected, got {found:?}"
         );
     }
 
-    /// Same defect, mirrored for `[headless].tool_result_cap_bytes` against a root-level key
-    /// that happens to start the same way in the file.
+    /// The retirement removes the **patterns**, never the **pass**: [`detect_migrations`] and
+    /// [`render_migration_error`] keep their signatures and their behavior, so a later task can
+    /// reload the table with a new generation's patterns without rebuilding the reporting side.
+    ///
+    /// **Why the emptiness precondition is part of THIS test and not just a duplicate of the one
+    /// above.** It is what makes the assertion a *survival* claim — "the renderer still works even
+    /// though the pass itself now declares no pattern" — instead of a plain rendering test that
+    /// would have been just as green before the retirement. It is also what makes this test red
+    /// before Green, so the guardian was watched failing like any other.
+    ///
+    /// Mutation that verifies it: deleting the per-migration loop, the backup advisory or the
+    /// minimal-config block from [`render_migration_error`] turns it red.
     #[test]
-    fn a_half_migrated_files_headless_cap_reports_its_own_line_not_an_earlier_namesake() {
-        let toml = "tool_result_cap_bytes = 4096\n\n[headless]\ntool_result_cap_bytes = 2048\n";
-        let found = detect_migrations(toml);
-        assert_eq!(found.len(), 1);
-        assert_eq!(found[0].key, HEADLESS_CAP_LABEL);
-        assert_eq!(
-            found[0].line, 4,
-            "must point at the [headless] section's own line, not the root's (line 1)"
+    fn the_reporting_mechanism_still_renders_after_the_patterns_are_retired() {
+        assert!(
+            detect_migrations(V0_11_0_SAMPLE).is_empty(),
+            "precondition: no pattern is declared today"
+        );
+
+        let rendered = render_migration_error(&[Migration {
+            key: "[magi].melchior_lineage",
+            line: 7,
+            correction: "melchior_lineage = \"alibaba\"".to_owned(),
+        }]);
+
+        assert!(
+            rendered.contains("[magi].melchior_lineage"),
+            "the caller's key must reach the message: {rendered}"
+        );
+        assert!(
+            rendered.contains("line 7"),
+            "the caller's line must reach the message: {rendered}"
+        );
+        assert!(
+            rendered.contains("melchior_lineage = \"alibaba\""),
+            "the caller's correction must reach the message: {rendered}"
+        );
+        assert!(
+            rendered.contains(BACKUP_ADVISORY),
+            "the backup advisory is part of the frame, not of any pattern: {rendered}"
+        );
+        assert!(
+            rendered.contains(MINIMAL_VALID_CONFIG),
+            "so is the ready-to-paste minimal config: {rendered}"
         );
     }
 
-    /// Detects the third pattern: `[headless].tool_result_cap_bytes`.
+    /// A `magi.toml` exactly as v0.12.0 wrote it: the three seats declared **by model**, and not
+    /// one lineage anywhere.
+    ///
+    /// One shared literal for every test of the v0.13.0 break, for the same reason
+    /// [`V0_11_0_SAMPLE`] is shared: a second copy could drift from this one and let a test keep
+    /// passing for the wrong reason.
+    const V0_12_0_SAMPLE: &str = "[magi]\n\
+                                  melchior_model = \"qwen3.5:397b-cloud\"\n\
+                                  balthasar_model = \"gpt-oss:120b-cloud\"\n\
+                                  caspar_model = \"deepseek-v4-pro:cloud\"\n";
+
+    /// SC-R47: the break is reported WHOLE, never one incompatibility per start.
+    ///
+    /// That is the mechanism's reason to exist: serde reports **one** missing field at a time (and
+    /// `deny_unknown_fields` aborts on the FIRST unknown key), so without a pass that collects them
+    /// all the user pays three edit-start-fail cycles for one migration.
+    ///
+    /// The variant assertion is not decoration: it is what separates "the file failed" from "the
+    /// file failed through the GUIDED path". A bare serde error would satisfy `expect_err` and
+    /// leave the user exactly as stuck as SC-R46 forbids.
     #[test]
-    fn headless_tool_result_cap_bytes_is_detected() {
-        let toml = "[headless]\ntool_result_cap_bytes = 4096\n";
-        let found = detect_migrations(toml);
-        assert_eq!(found.len(), 1);
-        assert_eq!(found[0].key, "[headless].tool_result_cap_bytes");
-        assert!(found[0].correction.contains("tool_result_cap_bytes"));
+    fn all_three_missing_lineages_are_reported_in_one_message() {
+        let err = super::super::MagiConfig::from_toml_str(V0_12_0_SAMPLE)
+            .expect_err("a v0.12.0 magi.toml must not start under v0.13.0");
+        assert!(
+            matches!(err, super::super::ConfigError::NeedsMigration(_)),
+            "the break must take the guided path, not serde's generic one: {err}"
+        );
+        let msg = err.to_string();
+        for key in ["melchior_lineage", "balthasar_lineage", "caspar_lineage"] {
+            assert!(msg.contains(key), "the message must name {key}: {msg}");
+        }
     }
 
-    /// The three old patterns in the same file are all reported together.
+    /// SC-R46: and it must EXPLAIN — naming a key the user has never seen, without showing the
+    /// line that declares it, only tells them they are stuck in more words.
     #[test]
-    fn all_three_patterns_together_are_reported() {
-        let toml = "provider = \"openai\"\n[openai]\nbase_url = \"http://x/v1\"\n\
-                    [headless]\ntool_result_cap_bytes = 2048\n";
-        let found = detect_migrations(toml);
-        assert_eq!(found.len(), 3);
+    fn the_v0_12_0_error_says_how_to_declare_the_missing_keys() {
+        let msg = super::super::MagiConfig::from_toml_str(V0_12_0_SAMPLE)
+            .expect_err("a v0.12.0 magi.toml must not start under v0.13.0")
+            .to_string();
+        for key in ["melchior_lineage", "balthasar_lineage", "caspar_lineage"] {
+            assert!(
+                msg.contains(&format!("{key} = \"")),
+                "the message must show HOW to declare {key}, not just that it is missing: {msg}"
+            );
+        }
     }
 
-    /// Loop 1 gate S1-f finding (Caspar): `line_of` must not mistake a key that merely has
-    /// `needle` as a literal PREFIX for `needle` itself. Without a boundary check, a
-    /// `provider_timeout` key would be reported as the `provider` line, even though it is a
-    /// different key entirely.
+    /// SC-A21h: a half-migrated file is told **only what it still lacks**.
+    ///
+    /// Repeating a correction the user already applied makes them doubt whether they applied it
+    /// correctly, which is the opposite of the mental state this message exists to produce.
     #[test]
-    fn line_of_does_not_match_a_key_that_merely_has_the_needle_as_a_prefix() {
-        assert_eq!(
-            line_of("provider_timeout = 5\nprovider = \"openai\"\n", "provider"),
-            2,
-            "must skip the prefix-colliding key and find the real one"
+    fn a_half_migrated_file_is_told_only_what_it_still_lacks() {
+        let half = "[magi]\n\
+                    melchior_model = \"qwen3.5:397b-cloud\"\n\
+                    melchior_lineage = \"alibaba\"\n\
+                    balthasar_model = \"gpt-oss:120b-cloud\"\n\
+                    caspar_model = \"deepseek-v4-pro:cloud\"\n";
+        let msg = super::super::MagiConfig::from_toml_str(half)
+            .expect_err("two lineages are still missing")
+            .to_string();
+        assert!(
+            !msg.contains("melchior_lineage"),
+            "the seat that IS declared must not be mentioned at all: {msg}"
+        );
+        assert!(
+            msg.contains("balthasar_lineage") && msg.contains("caspar_lineage"),
+            "the two that are still missing must both appear: {msg}"
         );
     }
 
-    /// Companion: when ONLY the prefix-colliding key is present, the real needle is correctly
-    /// reported absent (line 0), not misattributed to the colliding key's line.
+    /// SC-R19: blank is **absent**, never invalid — the same rule every text key has followed
+    /// since MS2. An exported-but-unfilled variable in a CI script is an everyday accident, and a
+    /// blank lineage must therefore land in the guided migration message rather than in a separate
+    /// "invalid value" error the user cannot act on.
     #[test]
-    fn line_of_returns_zero_when_only_a_prefix_colliding_key_is_present() {
-        assert_eq!(line_of("provider_timeout = 5\n", "provider"), 0);
-    }
-
-    /// Same guard, for the section-scoped lookup.
-    #[test]
-    fn line_of_in_section_does_not_match_a_prefix_colliding_key() {
-        let toml = "[openai]\nbase_url_backup = \"http://old/v1\"\nbase_url = \"http://real/v1\"\n";
-        assert_eq!(
-            line_of_in_section(toml, OPENAI_SECTION, BASE_URL_KEY),
-            3,
-            "must skip base_url_backup and find the real base_url line"
+    fn a_blank_lineage_is_absent_and_therefore_reported_as_missing() {
+        let blank = "[magi]\n\
+                     melchior_model = \"qwen3.5:397b-cloud\"\n\
+                     melchior_lineage = \"   \"\n";
+        let msg = super::super::MagiConfig::from_toml_str(blank)
+            .expect_err("a blank lineage is an absent lineage")
+            .to_string();
+        assert!(
+            msg.contains("melchior_lineage = \""),
+            "a blank lineage must get the same guided correction as an absent one: {msg}"
         );
     }
 
-    /// `is_key_at` directly: a bare key with nothing trailing (end-of-line boundary) still
-    /// counts as a match.
+    /// The **scope fence** of the new rule, and the reason it is phrased per seat: a file that
+    /// declares no seat model declares no lineage either, and must keep starting.
+    ///
+    /// **What it can and cannot catch (B16 honesty).** It is green before Green, because today
+    /// nothing rejects these files. Its job is the opposite direction: it turns red the moment the
+    /// implementation over-reaches — demanding lineages from every `[magi]` section, or from every
+    /// file — which would break every user who never configured the trio, for a break that is not
+    /// theirs.
     #[test]
-    fn is_key_at_accepts_a_bare_key_with_no_trailing_content() {
-        assert!(is_key_at("provider", "provider"));
+    fn a_file_that_declares_no_seat_model_is_not_broken_by_the_new_rule() {
+        super::super::MagiConfig::from_toml_str("")
+            .expect("an empty magi.toml still means 'all defaults'");
+        super::super::MagiConfig::from_toml_str("provider = \"ollama\"\n")
+            .expect("a file that never configures the trio has no lineage to declare");
+        super::super::MagiConfig::from_toml_str("[magi]\nauto_approve = true\n")
+            .expect("a [magi] section without seat models declares no seat to give a lineage to");
     }
 
-    /// Both forms TOML allows around `=` must still match.
+    /// The message frame must name **this** break, not the retired one.
+    ///
+    /// A correct list of incompatibilities under a header naming the wrong pair of versions is
+    /// worse than no message: it tells the user their file is a generation older than it is, and
+    /// sends them to migrate something they already migrated.
+    ///
+    /// Mutation that verifies it: reverting `VERSION_TO` to `"v0.12.0"` (or `VERSION_FROM` to
+    /// `"v0.11.0"`) turns it red.
     #[test]
-    fn is_key_at_matches_with_and_without_space_before_equals() {
-        assert!(is_key_at("provider = \"openai\"", "provider"));
-        assert!(is_key_at("provider=\"openai\"", "provider"));
+    fn the_message_frame_names_the_versions_of_the_break_it_reports() {
+        let msg = super::super::MagiConfig::from_toml_str(V0_12_0_SAMPLE)
+            .expect_err("a v0.12.0 magi.toml must not start under v0.13.0")
+            .to_string();
+        assert!(
+            msg.contains("magi-rs v0.13.0 (coming from v0.12.0)"),
+            "the frame must name the break it is actually reporting: {msg}"
+        );
     }
 
-    /// The exact collision this fix closes.
+    /// SC-A21g: a syntactically broken file gets its **syntax error**, with line and column, not
+    /// advice about a shape nobody can tell which one it is.
+    ///
+    /// Green before Green, like the scope fence above: it turns red if the implementation ever
+    /// starts guessing at text it could not parse.
     #[test]
-    fn is_key_at_rejects_a_longer_key_sharing_the_prefix() {
-        assert!(!is_key_at("provider_timeout = 5", "provider"));
+    fn a_syntactically_broken_file_gets_its_syntax_error_not_migration_advice() {
+        let err = super::super::MagiConfig::from_toml_str("[magi\nmelchior_model = ")
+            .expect_err("broken TOML must not parse");
+        assert!(
+            matches!(err, super::super::ConfigError::Parse(_)),
+            "a syntax error must stay a syntax error: {err}"
+        );
     }
 }

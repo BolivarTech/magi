@@ -31,11 +31,79 @@ pub const DEFAULT_OPENAI_MODEL: &str = "kimi-k2.6:cloud";
 pub const DEFAULT_MAGI_MELCHIOR: &str = "qwen3.5:397b-cloud";
 pub const DEFAULT_MAGI_BALTHASAR: &str = "gpt-oss:120b-cloud";
 pub const DEFAULT_MAGI_CASPAR: &str = "deepseek-v4-pro:cloud";
+/// Lineage of [`DEFAULT_MAGI_MELCHIOR`] — the independent failure domain its model belongs to.
+///
+/// Read off the model tag by hand, once: `qwen3.5` is Alibaba's family. It is **declared**, not
+/// inferred at runtime (R-R03): a label the project writes down for the models the project ships is
+/// a decision, whereas guessing one from an arbitrary user tag would fabricate the value that
+/// decides all rotation eligibility.
+///
+/// It is also the label the guided migration error offers as an example, so what `magi init` writes
+/// and what the error suggests cannot drift apart.
+pub const DEFAULT_MAGI_MELCHIOR_LINEAGE: &str = "alibaba";
+/// Lineage of [`DEFAULT_MAGI_BALTHASAR`] — see [`DEFAULT_MAGI_MELCHIOR_LINEAGE`].
+pub const DEFAULT_MAGI_BALTHASAR_LINEAGE: &str = "openai";
+/// Lineage of [`DEFAULT_MAGI_CASPAR`] — see [`DEFAULT_MAGI_MELCHIOR_LINEAGE`].
+pub const DEFAULT_MAGI_CASPAR_LINEAGE: &str = "deepseek";
 /// Default Anthropic model on the opt-in path (RF-5). Was `main.rs::DEFAULT_MODEL`.
 pub const DEFAULT_ANTHROPIC_MODEL: &str = "claude-sonnet-4-6";
 /// Default embedding model (Ollama-first, local). Single source of truth — also
 /// re-exported by `memory::config::d::emb_model` so both resolve identically.
 pub const DEFAULT_EMBEDDING_MODEL: &str = "nomic-embed-text-v2-moe:latest";
+
+// ── Lineage rotation (MS3) ────────────────────────────────────────────────────
+
+// These three were `cfg(test)` while nothing in production read them — the honest way to say "no
+// caller yet", as opposed to an `#[allow(dead_code)]` or a fabricated caller, which are both lies
+// the linter cannot catch. The scaffold below is that first production caller, so the gate is gone.
+
+/// Fallback models a mage may rotate through before its run degrades (REQ-R05).
+///
+/// **2 — the same value magi-core ships, deliberately not a default of our own** (D-R14). A
+/// divergent default would have to be explained in the CHANGELOG and defended on every upgrade.
+///
+/// The cost is the worst case it implies: with the 90 s ceiling and retry enabled the derived
+/// headless `--timeout` becomes `2 attempts x 3 models x 90 s` plus slack, i.e. ~654 s. That is
+/// paid **only when something is genuinely hung** — a healthy consult never approaches it — and the
+/// escape valve already shipped: `--timeout 300` with a notice naming the computed minimum.
+///
+/// **`0` is the kill-switch** and must stay reachable: it restores v0.12.0 behaviour exactly.
+pub const DEFAULT_MAX_ROTATIONS: u32 = 2;
+
+/// Whether a candidate whose context window could not be measured is refused (REQ-R11).
+///
+/// **`false`, including on Ollama.** The case the guard bites is the **cold start**: a daemon that
+/// has not warmed up answers no probe inside the 5 s ceiling, so with the guard on, the first run
+/// anyone makes would find no eligible candidate. That is the worst possible first impression and
+/// it is transitory.
+pub const DEFAULT_STRICT_CONTEXT_GUARD: bool = false;
+
+/// Whether distinct lineages are required rather than merely encouraged (REQ-R29).
+///
+/// **`true`.** Lineage diversity is what makes rotation worth anything, so the system demands it and
+/// whoever genuinely cannot meet it opts out in one line. It is the correct failure direction: a
+/// pool without diversity that starts silently is a safety net the operator believes they have and
+/// do not — and they find out when a model falls over, which is the worst moment to find out.
+///
+/// This key is **exclusive to magi-rs**: magi-core treats the lineage as an opaque string and is
+/// agnostic to it, so the value is never passed down.
+pub const DEFAULT_ENFORCE_DIVERSITY: bool = true;
+
+/// Fallback pool that `magi init` scaffolds, ordered strongest to weakest (REQ-R27).
+///
+/// **Every label here is one NO SEAT HAS**, and that is the point rather than a stylistic choice.
+/// An entry whose lineage matches a seat covers **only that seat**; an entry with a foreign label
+/// covers **all three**. Three foreign labels therefore buy three-way coverage for the same three
+/// declared lines that a matching-label pool would spend one per seat.
+///
+/// The scaffold ships this pool **ACTIVE, not commented**: a commented pool next to a live
+/// `max_rotations` tells the operator they have a safety net while they silently fall back to
+/// no-rotation behaviour — the same shape of defect as a setting that is declared and not applied.
+pub const DEFAULT_SCAFFOLD_POOL: [(&str, &str); 3] = [
+    ("glm-5.2:cloud", "zhipu"),
+    ("minimax-m3:cloud", "minimax"),
+    ("gemma4:cloud", "google"),
+];
 
 // ── Headless mode constants ───────────────────────────────────────────────────
 //
@@ -131,12 +199,57 @@ pub fn render_default_magi_toml() -> String {
     writeln!(out, "melchior_model  = \"{}\"", DEFAULT_MAGI_MELCHIOR).unwrap();
     writeln!(out, "balthasar_model = \"{}\"", DEFAULT_MAGI_BALTHASAR).unwrap();
     writeln!(out, "caspar_model    = \"{}\"", DEFAULT_MAGI_CASPAR).unwrap();
+    // A seat that declares a model must declare its lineage (REQ-R02/R22): the scaffold has to
+    // satisfy the same rule it teaches, or `magi init` would write a file that does not start.
+    writeln!(
+        out,
+        "# The independent failure domain of each model. Declared, never inferred: rotation only \
+         accepts a candidate from a lineage no OTHER seat is holding."
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "melchior_lineage  = \"{}\"",
+        DEFAULT_MAGI_MELCHIOR_LINEAGE
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "balthasar_lineage = \"{}\"",
+        DEFAULT_MAGI_BALTHASAR_LINEAGE
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "caspar_lineage    = \"{}\"",
+        DEFAULT_MAGI_CASPAR_LINEAGE
+    )
+    .unwrap();
     writeln!(
         out,
         "auto_approve    = false \
          # true = launch MAGI consult automatically (announces in TUI); \
          false = ask before each autonomous launch (default). \
          The explicit /consult TUI command is always user-initiated and never gated."
+    )
+    .unwrap();
+    writeln!(out).unwrap();
+    writeln!(
+        out,
+        "# Rotation. 0 disables it and restores the pre-rotation behaviour exactly."
+    )
+    .unwrap();
+    writeln!(out, "max_rotations   = {DEFAULT_MAX_ROTATIONS}").unwrap();
+    writeln!(
+        out,
+        "# enforce_diversity = {DEFAULT_ENFORCE_DIVERSITY}  \
+         # require three distinct lineages; set false if every model you have shares one"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "# strict_context_guard = {DEFAULT_STRICT_CONTEXT_GUARD}  \
+         # refuse candidates whose context window could not be measured"
     )
     .unwrap();
     writeln!(out).unwrap();
@@ -427,6 +540,30 @@ pub fn render_default_magi_toml() -> String {
     )
     .unwrap();
 
+    // ── The pool goes LAST IN THE FILE, and that is a TOML rule, not a style choice ──────────
+    // Every loose key and every sub-table must precede the first array of tables. A rule phrased
+    // as "last in the [magi] block" would let a later addition to [magi] — or a new sub-table —
+    // land after the array and parse into the wrong table. "Last in the file" leaves nowhere to
+    // get it wrong, which is why [embedding] above is deliberately emitted before this point.
+    writeln!(out).unwrap();
+    writeln!(
+        out,
+        "# ---------------------------------------------------------------------------"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "# Rotation pool, shared by the three seats, strongest first. Every label here is one no \
+         seat holds, so each entry can serve any of the three."
+    )
+    .unwrap();
+    for (model, lineage) in DEFAULT_SCAFFOLD_POOL {
+        writeln!(out).unwrap();
+        writeln!(out, "[[magi.fallback]]").unwrap();
+        writeln!(out, "model   = \"{model}\"").unwrap();
+        writeln!(out, "lineage = \"{lineage}\"").unwrap();
+    }
+
     out
 }
 
@@ -517,16 +654,16 @@ mod tests {
         assert!(s.contains(DEFAULT_MAGI_BALTHASAR));
         assert!(s.contains(DEFAULT_MAGI_CASPAR));
         let parsed = crate::config::MagiConfig::from_toml_str(&s).unwrap();
-        assert_eq!(parsed.provider.as_deref(), Some(DEFAULT_PROVIDER));
-        assert_eq!(parsed.base_url.as_deref(), Some(DEFAULT_OPENAI_BASE_URL));
+        assert_eq!(parsed.provider(), Some(DEFAULT_PROVIDER));
+        assert_eq!(parsed.base_url(), Some(DEFAULT_OPENAI_BASE_URL));
         assert_eq!(
-            parsed.magi.melchior_model.as_deref(),
+            parsed.magi().melchior_model.as_deref(),
             Some(DEFAULT_MAGI_MELCHIOR)
         );
         // Active [memory] section must parse into real values (not just commented stubs).
-        assert_eq!(parsed.memory.mode, "selective");
+        assert_eq!(parsed.memory().mode, "selective");
         // Active [embedding] section must carry the current default model (DRY).
-        assert_eq!(parsed.embedding.model, DEFAULT_EMBEDDING_MODEL);
+        assert_eq!(parsed.embedding().model, DEFAULT_EMBEDDING_MODEL);
     }
 
     /// SC-NEW: `render_default_magi_toml` must include active `[memory]` and
@@ -554,16 +691,18 @@ mod tests {
         let parsed = crate::config::MagiConfig::from_toml_str(&s)
             .expect("render_default_magi_toml() must produce valid TOML");
         assert_eq!(
-            parsed.provider.as_deref(),
+            parsed.provider(),
             Some(DEFAULT_PROVIDER),
             "parsed provider must be the value magi_init/render_default_magi_toml emits"
         );
         assert_eq!(
-            parsed.memory.mode, "selective",
+            parsed.memory().mode,
+            "selective",
             "active [memory] section must parse mode as 'selective'"
         );
         assert_eq!(
-            parsed.embedding.model, DEFAULT_EMBEDDING_MODEL,
+            parsed.embedding().model,
+            DEFAULT_EMBEDDING_MODEL,
             "active [embedding] section must parse model as the current default"
         );
     }
@@ -636,18 +775,39 @@ mod tests {
         // The commented advanced lines must be inert — TOML parses correctly
         let parsed = crate::config::MagiConfig::from_toml_str(&s)
             .expect("render_default_magi_toml() must produce valid TOML (commented lines inert)");
-        assert_eq!(parsed.memory.mode, "selective");
-        assert_eq!(parsed.embedding.model, DEFAULT_EMBEDDING_MODEL);
+        assert_eq!(parsed.memory().mode, "selective");
+        assert_eq!(parsed.embedding().model, DEFAULT_EMBEDDING_MODEL);
+
+        // S1 Loop 2 (Caspar): the embedding model was pinned against its constant and the other
+        // two were not, so the scaffold could teach a model the project no longer defaults to
+        // and nothing would say so. A scaffold that drifts from `defaults.rs` is worse than no
+        // scaffold: it is documentation that looks authoritative and is wrong.
+        assert_eq!(
+            crate::config::resolve_openai_model(&parsed, None),
+            DEFAULT_OPENAI_MODEL,
+            "the scaffold's [openai].model must track defaults.rs, not a stale literal"
+        );
+        assert!(
+            s.contains(DEFAULT_ANTHROPIC_MODEL),
+            "and so must its [anthropic].model"
+        );
     }
 
     /// SC-25: `docs/magi.toml.example` must contain no actual secret material.
     ///
     /// Checks that:
-    /// - No TOML field named `api_key` (with underscore) is present — keys live
-    ///   in env vars / OS keyring only, never in the config file.
+    /// - No TOML field named `api_key` (with underscore) is present — keys live in env vars or
+    ///   the vault only (`env > vault`, REQ-V12), never in the config file.
     /// - No `sk-` prefix (Anthropic / OpenAI raw key format) appears anywhere.
     ///
     /// The word "key" in prose (e.g. "API keys NEVER live here") is allowed.
+    ///
+    /// **The positive control is not ceremony** (S1 Loop 2, Balthasar). Both assertions are
+    /// ABSENCE claims, and an absence claim holds trivially against nothing: truncate the example
+    /// to an empty file, or replace it with unrelated content, and this test stays green while
+    /// the thing it guards has evaporated. So it first establishes that the file IS the artefact
+    /// under test, then that the two predicates actually discriminate — a scanner that never
+    /// fires is indistinguishable from a file that is clean.
     #[test]
     fn test_config_example_has_no_secret_material() {
         let s = std::fs::read_to_string(concat!(
@@ -655,6 +815,21 @@ mod tests {
             "/docs/magi.toml.example"
         ))
         .unwrap();
+
+        // Control 1: this is the real example, not an empty or unrelated file.
+        assert!(
+            s.contains("[magi]") && s.contains("melchior_lineage"),
+            "precondition: the file scanned below must be the v0.13.0 example itself"
+        );
+
+        // Control 2: the predicates fire on material that SHOULD be caught. Without this, the
+        // two assertions below prove only that some string does not contain some substring.
+        let planted = format!("{s}\napi_key = \"sk-not-a-real-key\"\n");
+        assert!(
+            planted.to_lowercase().contains("api_key") && planted.contains("sk-"),
+            "the scan must detect planted secret material, or it detects nothing at all"
+        );
+
         let low = s.to_lowercase();
         assert!(
             !low.contains("api_key"),
@@ -664,5 +839,60 @@ mod tests {
             !s.contains("sk-"),
             "docs/magi.toml.example must not contain 'sk-' key prefix"
         );
+    }
+
+    /// SC-R34: `magi init` ships REAL rotation, not decorative.
+    ///
+    /// A commented pool next to an active `max_rotations` makes the operator believe they have a
+    /// safety net while they fall back to no-rotation behaviour — the same shape of defect as a
+    /// setting that is declared and never applied.
+    #[test]
+    fn the_scaffold_ships_an_active_pool_with_lineages_no_seat_has() {
+        let scaffold = render_default_magi_toml();
+        let cfg = crate::config::MagiConfig::from_toml_str(&scaffold)
+            .expect("the scaffold must pass the very validation it teaches");
+
+        let pool = cfg.fallback_pool();
+        assert_eq!(pool.len(), 3, "the pool must be ACTIVE, not commented out");
+
+        let seat_lineages = [
+            DEFAULT_MAGI_MELCHIOR_LINEAGE,
+            DEFAULT_MAGI_BALTHASAR_LINEAGE,
+            DEFAULT_MAGI_CASPAR_LINEAGE,
+        ];
+        for entry in pool {
+            assert!(
+                !seat_lineages.contains(&entry.lineage.as_str()),
+                "each pool entry must carry a label NO seat holds, so it covers all three: {entry:?}"
+            );
+        }
+
+        assert_eq!(
+            cfg.effective_max_rotations(),
+            DEFAULT_MAX_ROTATIONS,
+            "the scaffold must declare rotation, not leave it implicit"
+        );
+    }
+
+    /// The pool must be the LAST thing in the file. In TOML every loose key and sub-table has to
+    /// precede the first array of tables, so anything emitted after it would parse into the pool
+    /// entry instead of its own table — silently, which is the part that makes it dangerous.
+    #[test]
+    fn nothing_is_emitted_after_the_fallback_pool() {
+        let scaffold = render_default_magi_toml();
+        let first_pool = scaffold
+            .find("[[magi.fallback]]")
+            .expect("the scaffold must declare a pool");
+        let tail = &scaffold[first_pool..];
+        for line in tail.lines() {
+            let t = line.trim();
+            if t.is_empty() || t.starts_with('#') || t.starts_with("[[magi.fallback]]") {
+                continue;
+            }
+            assert!(
+                t.starts_with("model") || t.starts_with("lineage"),
+                "only pool entries may follow the pool; found: {t}"
+            );
+        }
     }
 }

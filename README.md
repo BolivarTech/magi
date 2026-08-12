@@ -151,7 +151,42 @@ Some decisions carry genuine trade-offs: architecture choices, "should we X vs Y
 - **Forced.** Type `/consult [--mode <code-review|design|analysis>] <question>` to run the consensus directly, bypassing the router, the complexity gate and the approval gate. The session shows `MAGI deliberating — 3 model calls…` and then renders the verbatim report (the three perspectives + the consensus verdict). `/consult` blocks the session while it runs, like a normal turn.
 - **Mode routing.** See [Mode routing](#mode-routing) below — every consult runs one of three modes (`code-review` / `design` / `analysis`), resolved from an explicit flag, `[magi].default_mode`, the agent's own choice, a classification call, or the `analysis` default, in that order.
 - **Backend.** The trio is built on **`magi-core`'s native providers**, each wrapped in retry and each receiving its own system prompt through the provider's own channel (no more folding it into the user turn). By default the trio runs on the same backend and endpoint already resolved for the main agent — no second config — but `[magi]` can point it at a different `kind` and/or `base_url`. It is unavailable when no seat can be built (e.g. no API key resolved for the configured backend): `/consult` then reports which seat failed and why, and the tool is not registered.
+- **Rotation (v0.13.0).** If a mage's model fails, it **rotates to a declared fallback of a different lineage and still emits a verdict**, instead of taking the whole run down with it. Configure the pool in `[[magi.fallback]]`; `max_rotations = 0` turns it off.
 - **Model capability.** Weak / small local models (e.g. Ollama `phi4-mini`) may fail to emit the strict per-agent JSON the consensus requires; the result is then marked `[DEGRADED: …]` (fewer than three agents responded) and the report names which model failed to adhere and why. A capable model is recommended for reliable consensus.
+
+### Reading a verdict that involved a rotation
+
+The report tells you a mage rotated. It cannot tell you what that means for the verdict you
+are about to act on, so:
+
+**A rotation is not a degradation.** Three mages answered, the consensus has three inputs,
+and the run is as valid as one where nothing failed. What changed is *which model* produced
+one of them. That is why the report names the model that actually answered rather than the
+one you configured: a report naming the configured model after a fallback ran would be lying
+about its own evidence base.
+
+One exception, worth knowing before you lean on that field. If a mage rotates and its task
+then panics or is cancelled, `magi-core` reports that seat's *pre-seed* state: the configured
+model, with an empty chain. The chain it actually walked lived in the stack that went down
+with the task, and the upstream crate documents this as an accepted limitation. It cannot be
+reconstructed from outside. That seat also lands in `failed_agents`, which is your signal
+that its rotation entry is not to be trusted. When both fields name the same seat, believe
+`failed_agents`.
+
+**What a rotation costs you is diversity, not validity.** The three perspectives are
+structural: three roles, three system prompts. They hold regardless of which weights
+answered. Lineage diversity is the second layer, and it is what makes a shared outage
+unlikely to take two mages at once. So after a rotation you still have three perspectives.
+Whether you still have three independent failure domains depends on where the rotation
+landed, and the report's `from`/`to` lineages are what tell you.
+
+**What DOES degrade the run** is a mage exhausting its chain without producing a verdict.
+That shows up as `degraded`, and it means the consensus was computed from fewer than three
+— treat it as you would any incomplete vote.
+
+**One qualifier worth looking for:** `ran_unmeasured` marks a mage that ran without a
+measured context window. Its verdict is not wrong, but nothing verified that your prompt
+fit comfortably in it.
 
 ### Mode routing
 
@@ -259,6 +294,8 @@ it is an object with these keys, **all always present**:
 | `endpoint_divergence` | bool | whether this run's content passed through the principal provider (mode classification) before reaching a trio on a different endpoint |
 | `timeout_below_formula` | bool | whether an explicit `--timeout` was below what the derived escalation formula requires |
 | `failed_agents` | object | per-seat failure cause, redacted, for a mage that produced no verdict |
+| `rotations` | array | one entry per seat **that actually rotated** — from/to lineage, cause, and the model it ended on. Empty certifies that nobody did; it is a positive statement, not silence. (`magi-core`'s own report carries a row for every seat, rotated or not; this field is the filtered view.) |
+| `ran_unmeasured` | array | seats that ran without a measured context window, so their verdict carries that caveat |
 
 New fields are added to `consult` without a `schema_version` bump — the same
 consumer contract above applies to it.
@@ -723,9 +760,9 @@ Override any of them per-section in `magi.toml` (`[openai]`, `[embedding]`, `[ma
 |------|---------------|---------|
 | Chat (principal) | `kimi-k2.6:cloud` | `magi-rs` agent — live replies |
 | Embedding | `nomic-embed-text-v2-moe:latest` | `magi-rs` tiered memory (`selective`) — `ollama pull` it |
-| Melchior (Scientist) | `qwen3.5:397b-cloud` | `magi-core` multi-perspective consensus (`consult` / `/magi`) |
-| Balthasar (Pragmatist) | `gpt-oss:120b-cloud` | `magi-core` multi-perspective consensus (`consult` / `/magi`) |
-| Caspar (Critic) | `deepseek-v4-pro:cloud` | `magi-core` multi-perspective consensus (`consult` / `/magi`) |
+| Melchior (Scientist) | `qwen3.5:397b-cloud` | `magi-core` multi-perspective consensus (`consult` tool / `/consult`) |
+| Balthasar (Pragmatist) | `gpt-oss:120b-cloud` | `magi-core` multi-perspective consensus (`consult` tool / `/consult`) |
+| Caspar (Critic) | `deepseek-v4-pro:cloud` | `magi-core` multi-perspective consensus (`consult` tool / `/consult`) |
 
 > The MAGI trio deliberately runs three distinct model families (Alibaba / OpenAI / DeepSeek) for genuine
 > cross-lineage diversity. The `consult` tool (and the `/magi` command) only need these when a

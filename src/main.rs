@@ -26,9 +26,11 @@ use crate::headless_runner::{
 use crate::memory::clock::SystemClock;
 use crate::memory::embedding::OpenAiCompatibleEmbedder;
 use crate::memory::store::SqliteVectorStore;
+use crate::system::cached_probe::CachedProbe;
 use crate::system::database::{EncryptedSqliteMemory, MemoryStore};
 use crate::system::fs::{FileSystem, RealFileSystem};
 use crate::system::grep::RipGrep;
+use crate::system::model_cache::ModelCapabilityCache;
 use crate::system::workspace::Workspace;
 use crate::tools::bash::BashTool;
 use crate::tools::grep::GrepTool;
@@ -42,7 +44,9 @@ use magi_core::error::ProviderError;
 use magi_core::orchestrator::{Magi, MagiBuilder};
 use magi_core::provider::{LlmProvider, RetryConfig, RetryProvider};
 use magi_core::providers::claude::ClaudeProvider;
+use magi_core::providers::ollama::OllamaProvider;
 use magi_core::providers::openai_compat::OpenAiCompatibleProvider;
+use magi_core::rotation::{FallbackPool, Lineage as CoreLineage, ProviderProbe};
 use magi_core::schema::{AgentName, Mode};
 use magi_rs::headless::exit::exit_code as headless_exit_code;
 use magi_rs::headless::input::{parse_input, read_input_bounded, InputFormat};
@@ -57,10 +61,13 @@ use magi_rs::headless::types::{ErrorKind, RunOutcome, StopReason};
 use magi_rs::headless::HeadlessError;
 use magi_rs::magi::endpoint::{EndpointTemplate, ResolvedEndpoint, Scope};
 use magi_rs::magi::kind::{ProviderKind, ProviderKindParseError};
+use magi_rs::magi::lineage::LineageError;
 use magi_rs::magi::probe::{
-    derive_warn_tokens, min_mage_window, probe_models, Measurement, OllamaProbeFactory,
+    assumed_window_notices, derive_input_warn_tokens, derive_warn_tokens, effective_strict_guard,
+    min_mage_window, missing_model_notices, probe_models, Measurement, OllamaProbeFactory,
     ProbeFactory,
 };
+use magi_rs::magi::rotation_config::corroborate_by_digest;
 use magi_rs::magi::{
     bytes_to_tokens_est, derive_client_timeout, derive_operation_budget, AGENT_TIMEOUT_SECS,
     CHARS_PER_TOKEN_EST, STALE_NOTICE_RATIO,
@@ -367,7 +374,13 @@ impl Args {
     /// stays as the CLI-parsing-level assertion surface: covered by
     /// `untrusted_content_is_declarable_where_the_threat_lives` and
     /// `mode_and_untrusted_content_are_absent_without_a_subcommand`.
-    #[allow(dead_code)]
+    /// **`#[cfg(test)]`, not `#[allow(dead_code)]`** (S3 Loop 2, Balthasar). It carried the
+    /// `allow` and a comment explaining that production reads the field directly — which is a
+    /// tested-only accessor sitting in production code, telling the linter something untrue about
+    /// the crate. §6.1.8 is explicit that an `#[allow]` must never be fabricated to quiet a gate.
+    /// Compiling it only under `cfg(test)` says the same thing honestly: this exists for the two
+    /// tests that pin the CLI-parsing property, and for nothing else.
+    #[cfg(test)]
     fn untrusted_content(&self) -> bool {
         match &self.command {
             Some(TopCmd::Query(h)) | Some(TopCmd::Consult(h)) => h.untrusted_content,
@@ -650,10 +663,19 @@ fn resolve_master_passphrase(
 /// the original `VaultError` behind the `anyhow::Error` (via `.into()`, not
 /// a formatted string) so it can be recovered with `downcast_ref`.
 fn is_wrong_passphrase(e: &anyhow::Error) -> bool {
-    matches!(
-        e.downcast_ref::<VaultError>(),
-        Some(VaultError::WrongPassphrase)
-    )
+    // Walks the whole SOURCE chain, not just the root (S3 Loop 2, Balthasar). `anyhow`'s own
+    // `downcast_ref` already sees through `.context(..)` layers, so this held for every caller
+    // that used them — but it silently stops at the first typed wrapper: interpose any error
+    // carrying `VaultError` as a `#[source]` and the root type becomes that wrapper, the match
+    // fails, and the user who merely mistyped their passphrase gets a fatal generic error where
+    // a retry prompt belongs. That is a recovery path resting on an upstream convention nobody
+    // enforces; the chain walk does not rest on anything.
+    e.chain().any(|c| {
+        matches!(
+            c.downcast_ref::<VaultError>(),
+            Some(VaultError::WrongPassphrase)
+        )
+    })
 }
 
 /// Resolves the passphrase and opens the encrypted store for the TUI,
@@ -807,13 +829,22 @@ fn vault_error_exit_code(e: &VaultError) -> i32 {
 /// the rare case (a raw schema anomaly) that is not one. Returns the
 /// process exit code to use.
 fn report_open_failure(e: &anyhow::Error) -> i32 {
-    match e.downcast_ref::<VaultError>() {
+    // Chain walk for the same reason as `is_wrong_passphrase`: rooting the search at the
+    // outermost type makes both the message AND the exit code depend on nobody ever wrapping a
+    // `VaultError` in another typed error. Here the cost of missing it is bigger — the operator
+    // loses the actionable vault message and the specific exit code, and gets a generic 2.
+    match e.chain().find_map(|c| c.downcast_ref::<VaultError>()) {
         Some(ve) => {
             eprintln!("error: {ve}");
             vault_error_exit_code(ve)
         }
         None => {
-            eprintln!("error: {e}");
+            // Redacted, like every other foreign error that reaches a user surface in this file
+            // (S3 Loop 2, Balthasar). This arm is the one that fires when the failure is NOT a
+            // typed `VaultError` — that is, precisely when the error came from somewhere this
+            // module does not control and cannot vouch for, which is the case the rule is about.
+            // Leaving the unknown one raw while redacting the known one inverts the reasoning.
+            eprintln!("error: {}", redact_foreign_error(e.as_ref()));
             2
         }
     }
@@ -1388,6 +1419,13 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
             MemoryAttachment::Ephemeral => (None, None),
         };
 
+    // REQ-R25: the capability cache rides on the SAME encrypted database as the conversation
+    // history — its own connection would mean a second file and a second key. Absent on the
+    // ephemeral path, and a failure to open it DEGRADES: measurements stop being remembered
+    // between runs, which is slower, not wrong.
+    let capability_cache: Option<Arc<ModelCapabilityCache>> =
+        open_capability_cache(memory_store.as_ref(), &mut startup_notices);
+
     // Config lives in `.magi/magi.toml` (REQ-H16/H17): load it from the
     // discovered `.magi/`, or fall back to built-in defaults when none exists —
     // the legacy loose cwd `magi.toml` is never read. Loaded BEFORE
@@ -1422,8 +1460,9 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
     let (provider, provider_info): (Arc<dyn Provider>, String) = match provider_kind {
         // `Ollama` and `OpenAiCompat` share the `[openai]`-transport branch: they
         // speak the same Chat-Completions protocol and differ only in capability
-        // (probeability), never in how the PRINCIPAL provider is built (D-A07 is
-        // about the native trio, not this untouched path).
+        // (probeability), never in how the PRINCIPAL provider is built. REQ-R30
+        // changed which type builds the TRIO's seats; this is the conversational
+        // agent's provider and that milestone does not touch it.
         ProviderKind::Ollama | ProviderKind::OpenAiCompat => {
             // env > vault (REQ-V12); falls back to the local-Ollama dummy so a
             // real OpenAI/Groq/OpenRouter endpoint still fails loudly with 401
@@ -1476,11 +1515,11 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
     // these are: "the config resolved differently than the file appears to say."
     startup_notices.extend(config_notices.into_iter().map(Notice::resolution));
     // B1: surface invalid memory-config values as a startup notice (never panic).
-    if let Err(e) = magi_config.memory.validate() {
+    if let Err(e) = magi_config.memory().validate() {
         startup_notices.push(Notice::resolution(format!("memory config warning: {e}")));
     }
     // H2: surface invalid embedding-config values alongside memory-config (never panic).
-    if let Err(e) = magi_config.embedding.validate() {
+    if let Err(e) = magi_config.embedding().validate() {
         startup_notices.push(Notice::resolution(format!("embedding config warning: {e}")));
     }
     // RF-9: when there is no magi.toml at all, make the Ollama-first default visible
@@ -1521,12 +1560,13 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
     // `input_warn_tokens` can be derived from the MAGES window (REQ-A24b) and startup announces
     // the three measurement states (REQ-A24c). Never blocks or fails startup: each probe fails
     // open inside `probe_models`/`orchestrate_probes`.
-    let warn_tokens = probe_and_report(
+    let (warn_tokens, measured) = probe_and_report(
         &magi_config,
         &endpoints,
         provider_kind,
         &OllamaProbeFactory,
         &env_overrides,
+        &stateless_extra_models(&magi_config, capability_cache.as_ref()),
         &mut startup_notices,
     )
     .await;
@@ -1537,12 +1577,16 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
     // the same `String` independently.
     let mut consult_unavailable_message: Option<String> = None;
     let consult_magi: Option<Arc<Magi>> = match build_magi_orchestrator(
-        &magi_config,
-        provider_kind,
-        &endpoints,
-        Some(&creds),
-        warn_tokens,
-        &env_overrides,
+        &TrioBuild {
+            cfg: &magi_config,
+            principal_kind: provider_kind,
+            endpoints: &endpoints,
+            creds: Some(&creds),
+            warn_tokens,
+            env_overrides: &env_overrides,
+            capability_cache: capability_cache.as_ref(),
+            measured: &measured,
+        },
         &mut startup_notices,
     ) {
         Ok(magi) => Some(magi),
@@ -1561,7 +1605,7 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
     let (tui_mode_classifier, tui_classifier_notices) =
         tui_mode_classifier_wiring(provider.clone());
     let tui_default_mode = magi_config.effective_default_mode();
-    let tui_untrusted_content = magi_config.magi.untrusted_content.unwrap_or(false);
+    let tui_untrusted_content = magi_config.magi().untrusted_content.unwrap_or(false);
     // REQ-A07p/SC-A07p: `tui_default_mode.is_none()` IS "will this session infer the
     // mode" — the same signal `divergence_notice` needs, already computed above; reusing
     // it (instead of calling `effective_default_mode()` a second time) is B3, not just
@@ -1616,7 +1660,7 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
     register_consult_tool_if_available(
         &mut agent,
         consult_magi.as_ref(),
-        magi_config.magi.auto_approve,
+        magi_config.magi().auto_approve,
         registered_magi_kind(&magi_config, provider_kind),
         magi_config.magi_endpoint_diverges(),
         magi_config.effective_max_query_bytes(),
@@ -1629,11 +1673,11 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
         crate::tui::TuiConsultWiring {
             consult: consult_magi,
             consult_unavailable_message,
-            magi_auto_approve: magi_config.magi.auto_approve,
+            magi_auto_approve: magi_config.magi().auto_approve,
             // M1 fix: threads `[magi].agent_timeout_secs` through to the
             // post-`/login` trio rebuild, which used to hardcode the
             // built-in default regardless of this config.
-            agent_timeout_secs: magi_config.magi.agent_timeout_secs,
+            agent_timeout_secs: magi_config.magi().agent_timeout_secs,
         },
         secret_store,
         crate::tui::TuiMagiRuntimeConfig {
@@ -1748,11 +1792,18 @@ fn effective_root_template(
     env_base_url: Option<&str>,
 ) -> Result<EndpointTemplate, String> {
     match env_base_url.map(str::trim).filter(|s| !s.is_empty()) {
-        Some(env_val) => EndpointTemplate::parse(env_val, Scope::Root)
-            .map_err(|e| format!("OPENAI_BASE_URL is invalid: {e}")),
-        None => magi_config
-            .effective_base_url()
-            .map_err(|e| format!("base_url is invalid: {e}")),
+        Some(env_val) => EndpointTemplate::parse(env_val, Scope::Root).map_err(|e| {
+            format!(
+                "OPENAI_BASE_URL is invalid: {}",
+                magi_rs::redact::redact_foreign_error(&e)
+            )
+        }),
+        None => magi_config.effective_base_url().map_err(|e| {
+            format!(
+                "base_url is invalid: {}",
+                magi_rs::redact::redact_foreign_error(&e)
+            )
+        }),
     }
 }
 
@@ -1781,14 +1832,18 @@ fn resolve_endpoints(
     // The trio inherits the SAME effective root (with its env layer) when it does not declare
     // its own — never bare `effective_magi_base_url()`, which only sees TOML.
     let magi_tpl = match magi_config
-        .magi
+        .magi()
         .base_url
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty())
     {
-        Some(own) => EndpointTemplate::parse(own, Scope::Magi)
-            .map_err(|e| format!("magi base_url is invalid: {e}"))?,
+        Some(own) => EndpointTemplate::parse(own, Scope::Magi).map_err(|e| {
+            format!(
+                "magi base_url is invalid: {}",
+                magi_rs::redact::redact_foreign_error(&e)
+            )
+        })?,
         None => root_tpl.clone(),
     };
 
@@ -1816,7 +1871,7 @@ fn resolve_magi_kind(
     principal_kind: ProviderKind,
 ) -> Result<ProviderKind, ProviderKindParseError> {
     Ok(
-        ProviderKind::parse(cfg.magi.kind.as_deref().unwrap_or_default())?
+        ProviderKind::parse(cfg.magi().kind.as_deref().unwrap_or_default())?
             .unwrap_or(principal_kind),
     )
 }
@@ -1863,12 +1918,12 @@ fn registered_magi_kind(cfg: &MagiConfig, principal_kind: ProviderKind) -> Provi
 fn resolve_backend_model(cfg: &MagiConfig, kind: ProviderKind) -> &str {
     match kind {
         ProviderKind::Ollama | ProviderKind::OpenAiCompat => cfg
-            .openai
+            .openai()
             .model
             .as_deref()
             .unwrap_or(crate::defaults::DEFAULT_OPENAI_MODEL),
         ProviderKind::Anthropic => cfg
-            .anthropic
+            .anthropic()
             .model
             .as_deref()
             .unwrap_or(crate::defaults::DEFAULT_ANTHROPIC_MODEL),
@@ -1924,7 +1979,24 @@ async fn orchestrate_probes(
     // (sixth-pass gate finding, S8, Balthasar: before this parameter, the probe measured the
     // TOML/backend model while the trio ran the env-overridden one).
     env_overrides: &MagiEnvModelOverrides,
-) -> (String, Option<Measurement>, BTreeMap<String, Measurement>) {
+    // SC-R30: models measured ALONGSIDE the trio, on the trio's endpoint and kind. Used by the
+    // stateless path to measure the first pool candidate, which nothing else would measure once
+    // there is no cache to drive a lazy probe. They ride the SAME batch rather than a second one:
+    // an extra batch would make startup cost two ceilings instead of one.
+    extra_models: &[String],
+) -> (
+    String,
+    Option<Measurement>,
+    BTreeMap<String, Measurement>,
+    // The THREE seat models, so the caller can tell a seat from an `extra_models` candidate in
+    // the merged table above. Filtering the table by NAME cannot do it: a pool entry declaring
+    // a seat's model is legal (SC-R52), the `BTreeMap` collapses them into one row, and that row
+    // IS the seat — so excluding by name drops a real mage from cold-start detection and from
+    // the threshold. Returned rather than recomputed because the resolution lives here, and a
+    // second one in the caller would be the third resolver of the same question (S3 Loop 2,
+    // Balthasar, who asked twice: once against the documented residual, once as a finding).
+    Vec<String>,
+) {
     let principal_model = resolve_backend_model(cfg, principal_kind).to_string();
 
     if !cfg.magi_endpoint_diverges() {
@@ -1933,7 +2005,8 @@ async fn orchestrate_probes(
         // trivially — the trio's fallback is EXACTLY the same model as the principal's, with no
         // possible ambiguity): ONE batch so as not to probe the same thing four times.
         let trio_seats = seats_with_env_overrides(cfg, &principal_model, env_overrides);
-        let trio_models: Vec<&str> = trio_seats.iter().map(|(_, m)| m.as_str()).collect();
+        let mut trio_models: Vec<&str> = trio_seats.iter().map(|(_, m)| m.as_str()).collect();
+        trio_models.extend(extra_models.iter().map(String::as_str));
         let mut all = trio_models.clone();
         all.push(principal_model.as_str());
         let measured = probe_models(principal_kind, &endpoints.root, &all, factory).await;
@@ -1952,7 +2025,13 @@ async fn orchestrate_probes(
             })
             .collect();
         let principal_measurement = measured.get(principal_model.as_str()).cloned();
-        (principal_model, principal_measurement, trio_only)
+        let seat_models: Vec<String> = trio_seats.iter().map(|(_, m)| m.clone()).collect();
+        (
+            principal_model,
+            principal_measurement,
+            trio_only,
+            seat_models,
+        )
     } else {
         match resolve_magi_kind(cfg, principal_kind) {
             Ok(magi_kind) => {
@@ -1963,7 +2042,9 @@ async fn orchestrate_probes(
                 // principal's.
                 let trio_model = resolve_backend_model(cfg, magi_kind).to_string();
                 let trio_seats = seats_with_env_overrides(cfg, &trio_model, env_overrides);
-                let trio_models: Vec<&str> = trio_seats.iter().map(|(_, m)| m.as_str()).collect();
+                let mut trio_models: Vec<&str> =
+                    trio_seats.iter().map(|(_, m)| m.as_str()).collect();
+                trio_models.extend(extra_models.iter().map(String::as_str));
 
                 // `join!`, not two `.await`s in a row: in series the worst-case startup would
                 // be TWO ceilings; the required property (SC-A24k, one level up, between
@@ -1979,7 +2060,8 @@ async fn orchestrate_probes(
                     probe_models(magi_kind, &endpoints.magi, &trio_models, factory),
                 );
                 let principal_measurement = principal.get(principal_model.as_str()).cloned();
-                (principal_model, principal_measurement, trio)
+                let seat_models: Vec<String> = trio_seats.iter().map(|(_, m)| m.clone()).collect();
+                (principal_model, principal_measurement, trio, seat_models)
             }
             Err(_) => {
                 // Invalid `[magi].kind`: `build_magi_orchestrator` reports it with its own
@@ -1997,12 +2079,13 @@ async fn orchestrate_probes(
                 // name cannot poison anything: the three values are `NotMeasuredThisTime` by
                 // construction, not by probing.
                 let trio_seats = seats_with_env_overrides(cfg, &principal_model, env_overrides);
+                let seat_models: Vec<String> = trio_seats.iter().map(|(_, m)| m.clone()).collect();
                 let trio = trio_seats
                     .into_iter()
                     .map(|(_, m)| (m, Measurement::NotMeasuredThisTime))
                     .collect();
                 let principal_measurement = principal.get(principal_model.as_str()).cloned();
-                (principal_model, principal_measurement, trio)
+                (principal_model, principal_measurement, trio, seat_models)
             }
         }
     }
@@ -2021,6 +2104,31 @@ async fn orchestrate_probes(
 /// this function exercises EXACTLY what the two real call sites invoke, closing the gap that
 /// let the original finding through (the round-0 tests built `trio_models` by hand instead of
 /// going through real resolution).
+/// The models the STATELESS path must measure alongside the trio (SC-R30).
+///
+/// With a cache, measurement is lazy: a candidate gets measured the moment rotation reaches for it,
+/// and the answer is remembered. **Without one there is no lazy path at all** — no `CachedProbe` is
+/// built — so a candidate would never be measured, and the strict guard's fail-safe would have
+/// nothing to work with on every run.
+///
+/// It measures **one** candidate, not the pool: the list is ordered strongest to weakest, so the
+/// first entry is the most likely rotation destination, and measuring the rest would pay for
+/// candidates that probably never run — the very cost the cache exists to avoid.
+fn stateless_extra_models(
+    cfg: &MagiConfig,
+    capability_cache: Option<&Arc<ModelCapabilityCache>>,
+) -> Vec<String> {
+    if capability_cache.is_some() {
+        return Vec::new();
+    }
+    cfg.fallback_pool()
+        .first()
+        .map(|entry| vec![entry.model.clone()])
+        .into_iter()
+        .flatten()
+        .collect()
+}
+
 async fn probe_and_report(
     cfg: &MagiConfig,
     endpoints: &ResolvedEndpoints,
@@ -2029,10 +2137,23 @@ async fn probe_and_report(
     // Threaded straight through to `orchestrate_probes` — see its own doc (sixth-pass gate
     // finding, S8).
     env_overrides: &MagiEnvModelOverrides,
+    // SC-R30: see `orchestrate_probes`. Empty when a cache is available, since measurement is
+    // lazy then and a candidate is measured the moment rotation reaches for it.
+    extra_models: &[String],
     notices: &mut Vec<Notice>,
-) -> Option<usize> {
-    let (principal_model, principal_measurement, trio) =
-        orchestrate_probes(cfg, endpoints, principal_kind, factory, env_overrides).await;
+    // REQ-R11 (Task 6.4): the trio measurements come back with the threshold because the guard's
+    // fail-safe needs them, and re-probing to recover what this call already learned would pay
+    // the cost twice for the same answer.
+) -> (Option<usize>, BTreeMap<String, Measurement>) {
+    let (principal_model, principal_measurement, trio, seat_models) = orchestrate_probes(
+        cfg,
+        endpoints,
+        principal_kind,
+        factory,
+        env_overrides,
+        extra_models,
+    )
+    .await;
     notices.push(Notice::info(format!(
         "{principal_model}: {}",
         probe_notice(&principal_measurement.unwrap_or(Measurement::NotMeasuredThisTime))
@@ -2054,18 +2175,43 @@ async fn probe_and_report(
     // The two conditions are not mutually exclusive: a trio can simultaneously have a
     // measured-but-stale minimum window AND an unmeasured seat, and both notices are
     // independently actionable, so both must be free to fire.
-    if let Some(min_window) = min_mage_window(&trio) {
+    // The map `orchestrate_probes` returns is the trio's table PLUS whatever `extra_models`
+    // rode the same batch (SC-R30's stateless pool candidate), because the CALLER needs those
+    // candidates: REQ-R11's guard predicate is over candidates, and `assumed_window` reads them
+    // too. The three consumers below are about the TRIO, and were reading the merged map —
+    // which is wrong in two distinct ways (S3 Loop 2, Balthasar). `trio_probe_incomplete_notice`
+    // named a pool candidate as an unmeasured MAGE, telling the operator a seat is cold when no
+    // seat is; and `derive_warn_tokens` takes a plain minimum, so a small candidate dragged the
+    // threshold down with none of the tolerance band D-R09 requires — the very outcome REQ-R21
+    // exists to prevent, arriving through a path that bypasses the function that implements it.
+    //
+    // Built by SELECTING the seats, never by excluding the extras. A first version filtered by
+    // name and carried a documented residual: a pool entry declaring a seat's model is legal
+    // (SC-R52), the map collapses the two into one row, and that row is the seat — so excluding
+    // by name dropped a real mage from cold detection and from the threshold. Selecting cannot
+    // have that failure, because a name that is a seat is a seat regardless of what else
+    // declares it. The seat list comes back from `orchestrate_probes`, which is where the
+    // env-override resolution already happens.
+    let trio_seats: BTreeMap<String, Measurement> = seat_models
+        .iter()
+        .filter_map(|model| trio.get_key_value(model))
+        .map(|(model, m)| (model.clone(), m.clone()))
+        .collect();
+
+    if let Some(min_window) = min_mage_window(&trio_seats) {
         if let Some(n) = stale_composition_notice(min_window, cfg.effective_max_query_bytes()) {
             notices.push(Notice::resolution(n));
         }
     }
-    if let Some(n) = trio_probe_incomplete_notice(&trio, cfg.magi.input_warn_tokens) {
+    if let Some(n) = trio_probe_incomplete_notice(&trio_seats, cfg.magi().input_warn_tokens) {
         notices.push(Notice::resolution(n));
     }
     // REQ-A24b/SC-A24e: the explicit (`[magi].input_warn_tokens`) wins over the measured.
-    cfg.magi
+    let warn = cfg
+        .magi()
         .input_warn_tokens
-        .or_else(|| derive_warn_tokens(&trio))
+        .or_else(|| derive_warn_tokens(&trio_seats));
+    (warn, trio)
 }
 
 /// Builds the notice for when at least one mage of the trio is `NotMeasuredThisTime` (cold) —
@@ -2196,6 +2342,18 @@ enum SeatError {
     /// [`redact_foreign_error`].
     #[error("could not build the HTTP client: {0}")]
     Transport(SafeErrorText),
+    /// The seat declares a model but not the lineage that model belongs to (REQ-R02).
+    ///
+    /// A `SeatError` rather than its own `TrioError` variant so it joins the mechanism that
+    /// reports **every** failing seat at once: an operator who forgot one lineage has usually
+    /// forgotten more than one, and discovering them one start at a time costs a start each.
+    /// `MagiConfig::load` rejects such a file earlier and more completely; this arm is the same
+    /// rule enforced at the point of use, for the crate-internal builder that bypasses `load`.
+    #[error("missing lineage: declare [magi].{key} for this seat's model")]
+    MissingLineage {
+        /// Configuration key the operator has to add.
+        key: &'static str,
+    },
 }
 
 /// Renders ONE `(seat, cause)` as `"Melchior: missing credential …"`.
@@ -2361,7 +2519,7 @@ fn seats_with_env_overrides(
     backend_model: &str,
     env_overrides: &MagiEnvModelOverrides,
 ) -> Vec<(AgentName, String)> {
-    cfg.magi
+    cfg.magi()
         .seats(backend_model)
         .into_iter()
         .map(|(seat, toml_or_backend_model)| {
@@ -2450,6 +2608,23 @@ fn divergence_notice(cfg: &MagiConfig, inference_active: bool) -> Option<Notice>
     // notice is emitted ANYWAY, with the error text in place of the endpoint — the property
     // that matters is that the EMISSION of this notice never silently depends on whether
     // parsing succeeded.
+    // `debug_assert!` and NOT `assert!`, deliberately — asked again by S3 Loop 2 (Melchior), who
+    // read it as the "precondition that matters in release" pattern CLAUDE.md warns about. It is
+    // the opposite case: this precondition does NOT matter in release, because the paragraph above
+    // already handles its violation. `endpoint_display_text` renders the `Err` as redacted text
+    // and the notice is emitted regardless, so the property worth protecting — that a PRIVACY
+    // notice never silently disappears — holds in every build profile by construction rather than
+    // by an assertion. An `assert!` here would trade a degraded-but-present notice for a panic,
+    // which is strictly worse for the user it exists to warn.
+    //
+    // The suggested alternative, returning `None` on an invalid template, is the one thing that
+    // must not happen: that is the silent disappearance, spelled differently.
+    //
+    // Note for whoever tries to test the release path: they cannot, from the default profile.
+    // `cfg(debug_assertions)` is on under `cargo test`, so these fire before the fallback is
+    // reached — which is why the fallback's RENDERING is pinned one level down instead, by
+    // `endpoint_display_text_redacts_a_credential_a_future_error_variant_might_embed` and
+    // `endpoint_display_text_leaves_a_valid_template_untouched`.
     let magi_url = cfg.effective_magi_base_url();
     let root_url = cfg.effective_base_url();
     debug_assert!(magi_url.is_ok(), "load() must have validated");
@@ -2488,11 +2663,14 @@ fn push_divergence_notice(cfg: &MagiConfig, inference_active: bool, notices: &mu
 /// Normalizes an Ollama root to the OpenAI-compat shape (`…/v1`), idempotent, **and warns when
 /// it had to touch something**.
 ///
-/// Exists because `OllamaProvider` used to do this inside and is no longer in the path (D-A07):
-/// without normalization, a `base_url = "http://localhost:11434"` (which v0.11.0 accepted)
-/// would hit `/chat/completions` at the root and return 404 on first use. It returns the notice
-/// instead of applying it silently — silent normalization makes the effective `base_url` differ
-/// from what was written without anyone knowing.
+/// **It is no longer needed to make the URL work, and is kept anyway.** It was written when
+/// `OllamaProvider` was out of the path (D-A07) and nothing else normalized, so a `base_url =
+/// "http://localhost:11434"` hit `/chat/completions` at the root and 404'd on first use. Since
+/// REQ-R30 the provider accepts both spellings itself — but this function is the only thing that
+/// still knows **which one arrived**, and the notice exists to tell the operator to write down
+/// what actually happens. Dropping it because the URL now works either way would be a silent
+/// behaviour change (R-R04), which is the same objection that made it return the notice instead
+/// of normalizing quietly in the first place.
 ///
 /// **The returned `root` and the notice text do NOT share the same URL** (fix round 2,
 /// C1, REQ-A16c path #2): `base_url` here is already the RESOLVED endpoint — post placeholder
@@ -2519,11 +2697,21 @@ fn openai_compat_root(base_url: &str) -> (String, Option<String>) {
 
 /// Builds ONE native provider from magi-core according to the declared `kind` (REQ-A01b).
 ///
-/// **`ollama` does NOT use magi-core's `OllamaProvider` type for completions** (D-A07):
-/// verified against magi-core 3.1.0 — its only constructor fixes a 300 s client timeout with no
-/// override, incompatible with REQ-A04 (`operation_budget + client_timeout <= ceiling`).
-/// Completions go through the keyless OpenAI-compat transport against `…/v1`; `OllamaProvider`
-/// remains only as a probe (Phase 5).
+/// **`ollama` completes through magi-core's `OllamaProvider`** (REQ-R30, which reverts D-A07).
+/// D-A07 was decided on an *impossibility* — the type's only constructor pinned a 300 s client
+/// timeout with no override, incompatible with REQ-A04 (`operation_budget + client_timeout <=
+/// ceiling`) — and magi-core 3.2.0 removed it by adding `with_timeout`, which bounds **both**
+/// HTTP clients the type builds. So the question of which transport to use was answered on its
+/// merits for the first time, and legibility decided it: `kind = "ollama"` wired to
+/// `OllamaProvider` is what anyone opening this function expects.
+///
+/// It is **not** a protocol change and therefore does not violate R-R04: `OllamaProvider::complete`
+/// delegates to an internal `OpenAiCompatibleProvider`, so the transport is the same one this arm
+/// used before — only its constructor moved.
+///
+/// **What survives D-A07's reversal is the narrower rule: never `new`.** It delegates to
+/// `with_timeout(..., DEFAULT_CLIENT_TIMEOUT)` = 300 s, and getting it wrong compiles, runs, and
+/// breaks the derived scale silently.
 ///
 /// **`ollama` is keyless**: an authenticated `base_url` under this kind does not fail here —
 /// it fails on first use with a 401, which Task 4.4 translates.
@@ -2546,6 +2734,11 @@ fn build_native_provider(
     Ok(match kind {
         // `api_key = None` ⇒ no `Authorization` header, which is what Ollama expects.
         ProviderKind::Ollama => {
+            // The NOTICE is kept even though `OllamaProvider` accepts both spellings itself: it
+            // does not exist to make the URL work, it exists to tell the operator to write down
+            // what actually happens. Losing it would be a silent behaviour change (R-R04), and
+            // `openai_compat_root` is the only thing that still knows which spelling arrived.
+            //
             // `.as_str()`, not `.to_string()` (Melchior, loop 32): `base_url` is a newtype and
             // `with_timeout` takes `impl Into<String>` — `&str` already satisfies it without
             // the intermediate step.
@@ -2553,10 +2746,11 @@ fn build_native_provider(
             if let Some(n) = notice {
                 notices.push(Notice::resolution(n));
             }
-            Arc::new(
-                OpenAiCompatibleProvider::with_timeout(root, model, None, client_timeout)
-                    .map_err(to_seat)?,
-            )
+            // NEVER `new` (REQ-R30): it delegates to `with_timeout(..., DEFAULT_CLIENT_TIMEOUT)`
+            // = 300 s, which cannot satisfy `operation_budget + client_timeout <= ceiling`.
+            // Picking the wrong constructor compiles, runs, and breaks the derived scale in
+            // silence — see `the_ollama_seat_honours_the_client_timeout_it_was_given`.
+            Arc::new(OllamaProvider::with_timeout(root, model, client_timeout).map_err(to_seat)?)
         }
         ProviderKind::OpenAiCompat => {
             let key = creds
@@ -2586,12 +2780,26 @@ fn build_native_provider(
 }
 
 // Test-only (I2, fix round 2): trace of what the LAST call to `build_magi_orchestrator` wired
-// IN THIS THREAD — (seat, resolved model, wrapped-in-RetryProvider). Exists so a test can
-// assert against the REAL function instead of reconstructing its wiring logic in a custom
-// `MagiBuilder` (which is exactly what let the production wrapper disappear unnoticed). Does
-// not change `build_magi_orchestrator`'s signature — each test in this file runs in its OWN
-// thread (the `#[test]` harness spawns them that way by design), so the thread-local isolates
-// one call from another without extra coordination.
+// IN THIS THREAD — (seat, resolved model, a NEW Arc was allocated around the built provider).
+// Exists so a test can assert against the REAL function instead of reconstructing its wiring
+// logic in a custom `MagiBuilder` (which is exactly what let the production wrapper disappear
+// unnoticed). Does not change `build_magi_orchestrator`'s signature — each test in this file
+// runs in its OWN thread (the `#[test]` harness spawns them that way by design), so the
+// thread-local isolates one call from another without extra coordination.
+//
+// THE THIRD FIELD IS MEASURED, NOT ASSERTED — and it was not, until Task 3.1 ran the mutation
+// (B16). It used to push the literal `true`, under a comment claiming that removing the
+// production wrapper "without touching the trace" would break the count this test verifies.
+// That claim was false: replacing `Arc::new(RetryProvider::with_config(p, retry))` with a bare
+// `p` leaves `seats.push` running and the literal saying `true`, so the guardian went on
+// passing through the exact regression it existed to catch. It now compares the resulting
+// allocation's address against the one it was handed: same address ⇒ nothing wrapped it.
+//
+// What that does and does not prove: it proves a new `Arc` was allocated around `p`, not that
+// the wrapper is specifically a `RetryProvider`. `LlmProvider` is a foreign trait with no
+// `Any` (R-A01 forbids touching magi-core), so there is no downcast to do better — but a
+// measurement that can be wrong for a narrow reason beats a literal that cannot be wrong at
+// all. Both address reads are `cfg(test)`, so production pays nothing and keeps its move.
 #[cfg(test)]
 thread_local! {
     static SEAT_WIRING_TRACE: std::cell::RefCell<Vec<(AgentName, String, bool)>> =
@@ -2603,6 +2811,127 @@ thread_local! {
 #[cfg(test)]
 fn seat_wiring_trace() -> Vec<(AgentName, String, bool)> {
     SEAT_WIRING_TRACE.with(|t| t.borrow().clone())
+}
+
+// Test-only (Task 3.1): the lineage each seat was REGISTERED with — recorded in the loop that
+// calls `with_agent`, not in the one that builds the providers. The two facts have two different
+// sites and each guardian is anchored at its own: the retry wrap can only disappear where the
+// wrapping happens, and the lineage can only be wrong where the registration happens. Reading it
+// from the built `Magi` is not an option — `MagiBuilder::agent_lineages` is private and the
+// orchestrator exposes no reader (R-A01 forbids touching that crate).
+#[cfg(test)]
+thread_local! {
+    static SEAT_LINEAGE_TRACE: std::cell::RefCell<Vec<(AgentName, String)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Test-only: the lineages the LAST call to `build_magi_orchestrator` registered in this thread.
+/// See [`SEAT_LINEAGE_TRACE`].
+#[cfg(test)]
+fn seat_lineage_trace() -> Vec<(AgentName, String)> {
+    SEAT_LINEAGE_TRACE.with(|t| t.borrow().clone())
+}
+
+/// Test-only (Task 4.1): what the LAST call to `build_magi_orchestrator` handed magi-core as a
+/// fallback pool.
+///
+/// Every field is READ BACK from the values that were actually passed, never restated as a
+/// literal — the mistake `SEAT_WIRING_TRACE` made and that Task 3.1's mutation exposed.
+#[cfg(test)]
+#[derive(Debug, Clone)]
+struct PoolWiring {
+    /// `(model, lineage)` per candidate, in the order they were pushed.
+    candidates: Vec<(String, String)>,
+    /// Rotation ceiling handed to the pool. `0` is the declared kill-switch.
+    max_rotations: u32,
+    /// Whether the strict context guard was handed to the builder as `true`.
+    strict_guard: bool,
+}
+
+// Test-only: the pool of the LAST call in this thread. `None` means no pool was declared, which
+// is a different fact from an empty pool and the tests distinguish them.
+#[cfg(test)]
+thread_local! {
+    static POOL_WIRING_TRACE: std::cell::RefCell<Option<PoolWiring>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Test-only: see [`POOL_WIRING_TRACE`].
+#[cfg(test)]
+fn pool_wiring_trace() -> Option<PoolWiring> {
+    POOL_WIRING_TRACE.with(|t| t.borrow().clone())
+}
+
+/// Opens the capability cache over an already-open encrypted database (REQ-R25).
+///
+/// `None` means measurements will not be remembered between runs, which is **slower, not wrong**:
+/// every consumer of the cache degrades to measuring. Two distinct paths produce it and both are
+/// legitimate: the ephemeral run has no database at all, and an unreadable or unwritable table is
+/// a degradation the whole measurement subsystem is built to absorb (Task 6.8).
+///
+/// An **absent or empty** table is NOT this case: `init_schema` creates it and the first run fills
+/// it. Confusing the two would mean never persisting anything on exactly the clean start where the
+/// cache pays off most.
+fn open_capability_cache(
+    store: Option<&EncryptedSqliteMemory>,
+    notices: &mut Vec<Notice>,
+) -> Option<Arc<ModelCapabilityCache>> {
+    let store = store?;
+    let dek = match store.data_key() {
+        Ok(d) => d,
+        Err(e) => {
+            notices.push(Notice::resolution(format!(
+                "notice: model measurements will not be remembered between runs \
+                 (could not derive the key: {e})."
+            )));
+            return None;
+        }
+    };
+    match ModelCapabilityCache::new(store.shared_conn(), dek) {
+        Ok(c) => Some(Arc::new(c)),
+        Err(e) => {
+            notices.push(Notice::resolution(format!(
+                "notice: model measurements will not be remembered between runs ({e})."
+            )));
+            None
+        }
+    }
+}
+
+/// Everything `build_magi_orchestrator` needs, bundled.
+///
+/// Seven positional parameters had accumulated and the eighth is what forced the question, but
+/// arity was never the real problem: `&MagiConfig`, `&ResolvedEndpoints` and
+/// `&MagiEnvModelOverrides` are three references a caller passes in a row, and a transposition
+/// among them changes which decision wins with **nothing to catch it** — the same hazard that made
+/// `OpenAiSettings` and `ModeSources` named structs instead of argument lists.
+///
+/// `notices` stays a separate `&mut` parameter on purpose: it is the function's OUTPUT channel,
+/// and folding an out-param into a struct of inputs reads as though it were one.
+struct TrioBuild<'a> {
+    /// Loaded configuration.
+    cfg: &'a MagiConfig,
+    /// The ALREADY-RESOLVED `ProviderKind` of the principal (env `MAGI_PROVIDER` > TOML >
+    /// default), not `cfg.effective_provider()`: before, an absent `[magi].kind` inherited by
+    /// re-reading `provider` from TOML on its own, so `MAGI_PROVIDER` moved the principal without
+    /// moving the trio. This field is what makes inheritance see the SAME decision.
+    principal_kind: ProviderKind,
+    /// ALREADY-RESOLVED endpoints. The builder does not know the vault: resolution is a named step
+    /// of `main.rs`, and `resolve_endpoints` is the sole producer of `ResolvedEndpoints`.
+    endpoints: &'a ResolvedEndpoints,
+    /// Credentials for the kinds that need one; `ollama` is keyless.
+    creds: Option<&'a dyn Credentials>,
+    /// Warning threshold produced by the probe, or `None` to keep magi-core's default.
+    warn_tokens: Option<usize>,
+    /// `MAGI_MODEL_*`, layered ON TOP of `seats(backend_model)` so the chain is
+    /// `env > TOML > backend` without duplicating that resolution.
+    env_overrides: &'a MagiEnvModelOverrides,
+    /// REQ-R10/R25/R28. `None` is the ephemeral path (Task 6.8): no encrypted database means
+    /// nothing to remember measurements in, which degrades measurement — never the run.
+    capability_cache: Option<&'a Arc<ModelCapabilityCache>>,
+    /// What the startup probe measured, keyed by model (REQ-R11). Feeds the strict-guard
+    /// fail-safe, which must know whether any CANDIDATE got a window.
+    measured: &'a BTreeMap<String, Measurement>,
 }
 
 /// Builds the MAGI trio with the NATIVE providers of magi-core (REQ-A01).
@@ -2624,27 +2953,19 @@ fn seat_wiring_trace() -> Vec<(AgentName, String, bool)> {
 /// - [`TrioError::UnknownKind`] if `[magi].kind` brings an unrecognized value. It is validated HERE with its own `ProviderKind::parse`, not via `cfg.effective_magi_kind()`: that accessor assumes `validate_vocabulary` already ran and swallows an unrecognized value falling back to inheritance — a correct precondition for its other callers, but exactly the one this point must NOT assume in order to report the error.
 /// - [`TrioError::SeatUnbuildable`] with **all** the seats that could not be built and their cause.
 fn build_magi_orchestrator(
-    cfg: &MagiConfig,
-    // The ALREADY-RESOLVED `ProviderKind` of the principal (env `MAGI_PROVIDER` > TOML >
-    // default — `resolve_effective_provider_kind`), not `cfg.effective_provider()` (fix round
-    // 2, I1): before, an absent `[magi].kind` inherited by re-reading `provider` from TOML on
-    // its own, so `MAGI_PROVIDER` moved the principal without moving the trio. This parameter
-    // is what makes inheritance see the SAME decision.
-    principal_kind: ProviderKind,
-    // ALREADY-RESOLVED endpoints. The builder does not know the vault: resolution is a named
-    // step of `main.rs` (after opening the vault, before the probe and the trio), and
-    // `resolve_endpoints` is the sole producer of `ResolvedEndpoints`.
-    endpoints: &ResolvedEndpoints,
-    creds: Option<&dyn Credentials>,
-    warn_tokens: Option<usize>,
-    // Restored, fix round 1 (coordinator, 2026-08-03): R-A03 only admits the three declared
-    // breakages in REQ-A21/A22/A23, and `MAGI_MODEL_*` is none of them. It is layered ON TOP of
-    // the result of `cfg.magi.seats(backend_model)` (which already resolves TOML-or-backend)
-    // via `resolve_magi_override`, giving the full chain `env > TOML > backend` without
-    // duplicating that resolution.
-    env_overrides: &MagiEnvModelOverrides,
+    b: &TrioBuild<'_>,
     notices: &mut Vec<Notice>,
 ) -> Result<Arc<Magi>, TrioError> {
+    let &TrioBuild {
+        cfg,
+        principal_kind,
+        endpoints,
+        creds,
+        warn_tokens,
+        env_overrides,
+        capability_cache,
+        measured,
+    } = b;
     // Absent/empty `[magi].kind` inherits `principal_kind` — the ALREADY-RESOLVED one, not
     // `cfg.effective_provider()` (TOML-only). Present-but-unrecognized remains a typed error.
     // Task 5.2: extracted to `resolve_magi_kind`, shared with `orchestrate_probes` (B3) —
@@ -2658,7 +2979,7 @@ fn build_magi_orchestrator(
     // BACKEND model: the one a seat inherits without its own model, and the builder fallback's.
     // Task 5.2: extracted to `resolve_backend_model`, shared with `orchestrate_probes` (B3).
     let backend_model: &str = resolve_backend_model(cfg, kind);
-    let ceiling = Duration::from_secs(cfg.magi.agent_timeout_secs.unwrap_or(AGENT_TIMEOUT_SECS));
+    let ceiling = Duration::from_secs(cfg.magi().agent_timeout_secs.unwrap_or(AGENT_TIMEOUT_SECS));
 
     // `RetryConfig` is `#[non_exhaustive]`: outside the crate there is NO literal nor
     // `..default()` — it is built with `default()` and adjusted field by field.
@@ -2668,33 +2989,56 @@ fn build_magi_orchestrator(
 
     // The THREE seats are built first, so that ALL that fail can be reported.
     let mut failures: Vec<(AgentName, SeatError)> = Vec::new();
-    let mut seats: Vec<(AgentName, Arc<dyn LlmProvider>)> = Vec::new();
+    let mut seats: Vec<(AgentName, Arc<dyn LlmProvider>, CoreLineage, String)> = Vec::new();
 
     // Test-only (I2, fix round 2): clears the trace of the PREVIOUS call in this thread before
     // starting — a test's `seat_wiring_trace()` must see ONLY what THIS call wired.
     #[cfg(test)]
     SEAT_WIRING_TRACE.with(|t| t.borrow_mut().clear());
+    #[cfg(test)]
+    SEAT_LINEAGE_TRACE.with(|t| t.borrow_mut().clear());
+    // The pool trace needs the same clear, and for a sharper reason than the other two: it is
+    // written only INSIDE the `if` that wires a declared pool, so a call with no pool left the
+    // previous call's value standing and a test would read a pool this call never wired — the
+    // failure mode being that it passes (S3 Loop 2, Balthasar).
+    #[cfg(test)]
+    POOL_WIRING_TRACE.with(|t| *t.borrow_mut() = None);
 
     // `env > TOML > backend`, via `seats_with_env_overrides` — the SAME resolution
     // `orchestrate_probes` now applies (B3, sixth-pass gate finding S8), so the two cannot see
     // a different model for the same seat.
     for (seat, model) in seats_with_env_overrides(cfg, backend_model, env_overrides) {
+        // REQ-R01/R02: resolved BEFORE the provider, so a seat missing its lineage joins the same
+        // "report every failing seat at once" pass instead of aborting on the first one.
+        let lineage = match cfg.magi().lineage_of_seat(seat) {
+            Ok(l) => CoreLineage::from(l),
+            Err(LineageError::Missing { key }) => {
+                failures.push((seat, SeatError::MissingLineage { key }));
+                continue;
+            }
+        };
         match build_native_provider(kind, base, &model, creds, client_timeout, notices) {
             // REQ-A03: `MagiBuilder::build()` does NOT wrap anything, so without this the retry
             // the trio inherited from the adapter is lost.
             Ok(p) => {
-                let wrapped = Arc::new(RetryProvider::with_config(p, retry.clone()));
-                // Recorded ON THE SAME branch that does the real wrap (I2, fix round 2): a test
-                // that asserts against this trace stops passing if the wrap above disappears
-                // AND no one touches this line — which is the most likely regression mode
-                // (deleting the `Arc::new(RetryProvider::…)` above without touching this also
-                // breaks the count the test verifies, because then `seats.push` would still run
-                // but with the shape changed). It is not runtime downcasting — `LlmProvider` is
-                // a foreign trait without `Any` — so it is the strongest approximation possible
-                // without touching magi-core (R-A01).
+                // Read BEFORE the move, so the trace below can compare against it. `*const ()`
+                // takes the data address of what may be a fat pointer; `cfg(test)` only, so
+                // production keeps the move and pays nothing.
                 #[cfg(test)]
-                SEAT_WIRING_TRACE.with(|t| t.borrow_mut().push((seat, model.clone(), true)));
-                seats.push((seat, wrapped));
+                let unwrapped_addr = Arc::as_ptr(&p) as *const () as usize;
+                let wrapped = Arc::new(RetryProvider::with_config(p, retry.clone()));
+                // Recorded ON THE SAME branch that does the real wrap (I2, fix round 2), and
+                // MEASURED rather than asserted — see the note on `SEAT_WIRING_TRACE` for the
+                // mutation that proved the previous literal `true` guarded nothing. A different
+                // address means something allocated around the provider; the same one means the
+                // wrap is gone, which is precisely the silent regression this guards.
+                #[cfg(test)]
+                SEAT_WIRING_TRACE.with(|t| {
+                    let wrapped_addr = Arc::as_ptr(&wrapped) as *const () as usize;
+                    t.borrow_mut()
+                        .push((seat, model.clone(), wrapped_addr != unwrapped_addr));
+                });
+                seats.push((seat, wrapped, lineage, model.clone()));
             }
             Err(cause) => failures.push((seat, cause)),
         }
@@ -2715,19 +3059,27 @@ fn build_magi_orchestrator(
     // With all three seats overridden this provider is never used, and that is precisely why it
     // is useful for it to be a written decision.
     //
-    // `&mut sink` discardable: the normalization notice already went out in the seat loop with
-    // the SAME `base_url`. Pushing it again would duplicate it on screen (and `render_notices`
-    // would dedupe it anyway, but it is not worth building it twice).
+    // Merged, not discarded — the pool loop's sink was fixed for this last round and leaving
+    // this one behind would have kept the same reasoning applied inconsistently in one function
+    // (S3 Loop 2, Balthasar, raising it a second time and rightly).
+    //
+    // The old argument was sound and still is: the only notice `build_native_provider` emits is
+    // the base_url normalization one, which the seat loop already sent over the SAME `base_url`,
+    // so `render_notices` would dedupe it anyway and building it twice is waste. What it is not
+    // is durable — it is a fact about a function in another part of this file, and the cost of
+    // it turning false is a notice that never reaches the user, which is the failure mode this
+    // project keeps paying for.
     let mut sink: Vec<Notice> = Vec::new();
     let fallback_provider = build_native_provider(
         kind,
         base,
-        cfg.magi.fallback_model(backend_model),
+        cfg.magi().fallback_model(backend_model),
         creds,
         client_timeout,
         &mut sink,
     )
     .map_err(|e| TrioError::Builder(redact_foreign_error(&e)))?;
+    notices.append(&mut sink);
 
     let mut builder = MagiBuilder::new(Arc::new(RetryProvider::with_config(
         fallback_provider,
@@ -2737,15 +3089,335 @@ fn build_magi_orchestrator(
 
     // REQ-A15: the OTHER TWO exposed keys are also wired. Declaring them in TOML without
     // connecting them would make them decorative.
-    if let Some(warn) = warn_tokens {
-        builder = builder.with_input_warn_tokens(warn);
-    }
-    if cfg.magi.retry_disabled.unwrap_or(false) {
+    if cfg.magi().retry_disabled.unwrap_or(false) {
         builder = builder.with_retry_disabled();
     }
 
-    for (seat, provider) in seats {
-        builder = builder.with_provider(seat, provider);
+    // REQ-R01: `with_agent`, not `with_provider` — the only door that carries the rotation
+    // diversity key. Note that `with_agent` also does `primary_probes.remove(&agent)` ("a plain
+    // primary declares no probe", `orchestrator.rs:309-320`), so once Phase 6 registers probes
+    // through `with_agent_and_probe`, a plain `with_agent` for the SAME seat afterwards would
+    // discard that probe in silence. Order is load-bearing here.
+    // The RESOLVED url dies here: everything downstream of this line — the cache key, the probe,
+    // any notice — sees only the redacted form (REQ-A16c/SC-R58). The encrypted database protects
+    // the file; it does not make writing a credential into it acceptable.
+    let endpoint_redacted = redact_url(base.as_str());
+    let declared_pool = cfg.fallback_pool();
+
+    // REQ-R11: the declared value is NOT what reaches magi-core. A `true` with no measured
+    // candidate rejects every one of them at condition #6 and switches rotation off whole, so
+    // the fail-safe resolves it and announces the override with its REAL reason.
+    let (effective_guard, guard_notice) =
+        effective_strict_guard(cfg.declared_strict_context_guard(), measured, declared_pool);
+    if let Some(n) = guard_notice {
+        notices.push(n);
+    }
+
+    // REQ-R21/D-R09: the threshold refines here and not in `probe_and_report`, because at startup
+    // the POOL is not measured — measurement is lazy — so its windows exist only in the cache, and
+    // the builder is the one place that holds both it and the trio's measurements.
+    //
+    // An explicitly declared `[magi].input_warn_tokens` is never touched (REQ-A24b/SC-A24e): the
+    // operator's number wins over anything derived, and refining it would be overriding an
+    // instruction rather than filling a gap.
+    let warn_tokens = if cfg.magi().input_warn_tokens.is_some() {
+        warn_tokens
+    } else {
+        // Filtered BY SEAT, not "every value in the map": the map may also carry pool candidates
+        // (the stateless path measures one), and folding a candidate into the trio base would
+        // defeat the band this derivation exists to enforce — the small candidate would lower the
+        // very base it is supposed to be compared against.
+        let trio_windows: Vec<usize> = seats
+            .iter()
+            .filter_map(|(_, _, _, model)| match measured.get(model) {
+                Some(Measurement::Measured { window, .. }) => Some(*window),
+                _ => None,
+            })
+            .collect();
+        if trio_windows.is_empty() {
+            warn_tokens
+        } else {
+            let pool_windows: Vec<(&str, usize)> = capability_cache
+                .map(|cache| {
+                    declared_pool
+                        .iter()
+                        .filter_map(|entry| {
+                            cache
+                                .get(&endpoint_redacted, &entry.model)
+                                .ok()
+                                .flatten()
+                                .map(|row| (entry.model.as_str(), row.window))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let (threshold, band_notices) = derive_input_warn_tokens(&trio_windows, &pool_windows);
+            notices.extend(band_notices);
+            Some(threshold)
+        }
+    };
+
+    // REQ-R29, second half: corroborate the DECLARED lineages against the cached digests. Only
+    // under `enforce_diversity`, and only ever as a warning — the declarative half already ran at
+    // load time and errored there if it had to. Reads the cache; never probes (SC-R42).
+    if cfg.effective_enforce_diversity() {
+        if let Some(cache) = capability_cache {
+            let mut rows: Vec<(String, magi_rs::magi::lineage::Lineage, Option<String>)> =
+                Vec::new();
+            for (seat, _, _, model) in &seats {
+                if let Ok(lineage) = cfg.magi().lineage_of_seat(*seat) {
+                    let digest = cache
+                        .get(&endpoint_redacted, model)
+                        .ok()
+                        .flatten()
+                        .and_then(|row| row.digest);
+                    rows.push((model.clone(), lineage, digest));
+                }
+            }
+            for entry in declared_pool {
+                let digest = cache
+                    .get(&endpoint_redacted, &entry.model)
+                    .ok()
+                    .flatten()
+                    .and_then(|row| row.digest);
+                rows.push((entry.model.clone(), entry.lineage.clone(), digest));
+            }
+            notices.extend(corroborate_by_digest(&rows));
+        }
+    }
+
+    // REQ-R29's resolved-model half. `seats()` falls an undeclared seat back to the backend
+    // model, so a config naming no trio runs ONE model under three built-in labels — the case a
+    // label-distinctness check approves while it is literally what SC-R44 rejects. The load-time
+    // check cannot error on it without denying a fresh clone its first start, so it is reported
+    // here instead, where the resolved backend model is known.
+    // The seats ALREADY resolved through `env > TOML > backend`, not a third derivation: a
+    // separate one would disagree with the trio and the probe, and print statements that are
+    // false in both directions.
+    let resolved_seats: Vec<(AgentName, String)> = seats
+        .iter()
+        .map(|(seat, _, _, model)| (*seat, model.clone()))
+        .collect();
+    notices.extend(cfg.diversity_notices(&resolved_seats));
+
+    // REQ-R27, second half (HAND-OFF from Task 2.8, which implemented this and left it with no
+    // production caller): name, at STARTUP, each configured model this endpoint could not measure
+    // WHILE it was measuring others. Until this line existed, a user whose fallback tag was never
+    // `ollama pull`ed saw nothing at startup and found out when a mage fell — the worst possible
+    // moment, and literally what the requirement exists to prevent.
+    //
+    // Its two conditions live inside the function: only where measurement is possible, and only if
+    // at least one model of the SAME endpoint was measured. Those are what keep a cold daemon from
+    // firing it over the whole pool on a first run.
+    {
+        let configured: Vec<String> = seats
+            .iter()
+            .map(|(_, _, _, model)| model.clone())
+            .chain(declared_pool.iter().map(|entry| entry.model.clone()))
+            .collect();
+        notices.extend(missing_model_notices(measured, &configured));
+    }
+
+    // REQ-R26/SC-R51: candidates running on an ASSUMED window are announced — and nothing here
+    // removes them. The assumption informs; the filtering stays entirely with magi-core, whose
+    // condition #6 needs a per-consult prompt size that does not exist at this point.
+    notices.extend(assumed_window_notices(measured, declared_pool));
+
+    // REQ-R25: a model that LEFT the configuration stops being referenced. Done ONCE, here, with
+    // this run's configured set. It DEGRADES rather than aborts: a failed prune leaves extra rows,
+    // which is inert — the key is set membership, so an orphan row is simply never read.
+    if let Some(cache) = capability_cache {
+        let configured: Vec<(String, String)> = seats
+            .iter()
+            .map(|(_, _, _, m)| m)
+            .chain(declared_pool.iter().map(|e| &e.model))
+            .map(|m| (endpoint_redacted.clone(), m.clone()))
+            .collect();
+        let _ = cache.prune_absent(&configured);
+    }
+
+    // REQ-R28/D-R15: ONE probe per DISTINCT model. magi-core indexes capabilities by `model_id`
+    // and knows nothing about endpoints, so two probes for one model are the failure mode being
+    // closed — it keeps whichever answered last, in nondeterministic order. Deduplicating at
+    // registration makes that unreachable instead of merely forbidden on paper.
+    //
+    // The map is used ONLY as a dedup set and is never iterated: a `BTreeMap` orders
+    // alphabetically, so building the pool from it would silently reorder rotation preference.
+    // The order that is load-bearing comes from `declared_pool` below.
+    let mut probes: BTreeMap<String, Arc<CachedProbe>> = BTreeMap::new();
+    if let Some(cache) = capability_cache {
+        for model in seats
+            .iter()
+            .map(|(_, _, _, m)| m)
+            .chain(declared_pool.iter().map(|e| &e.model))
+        {
+            probes.entry(model.clone()).or_insert_with(|| {
+                // `with_timeout`, like every other construction of this type — §7's rule is
+                // "never `new`", full stop (S3 Loop 2, Caspar). The comment here used to argue
+                // `new` was safe because `CachedProbe` wraps every call in its own ceiling, and
+                // that argument is TRUE; it is just the wrong kind of safe. It makes the 300 s
+                // default harmless only for as long as the wrapper stays, so deleting the
+                // wrapper silently restores a timeout two orders of magnitude past the derived
+                // scale. Passing the probe's own ceiling removes the dependency instead of
+                // documenting it: whichever bound fires first, the answer is the same `None`.
+                let source: Option<Arc<dyn ProviderProbe>> = if kind.is_probeable() {
+                    OllamaProvider::with_timeout(
+                        base.as_str(),
+                        model.clone(),
+                        Duration::from_secs(magi_rs::magi::PROBE_TIMEOUT_SECS),
+                    )
+                    .ok()
+                    .map(|p| Arc::new(p) as Arc<dyn ProviderProbe>)
+                } else {
+                    None
+                };
+                Arc::new(CachedProbe::new(
+                    Arc::clone(cache),
+                    endpoint_redacted.clone(),
+                    model.clone(),
+                    source,
+                ))
+            });
+        }
+    }
+
+    // SC-R52, second half: a pool entry that repeats a model a SEAT already declares is
+    // announced. It is NOT pruned — `used` is per mage (`rotation.rs:213`), so another seat can
+    // still rotate into it, and dropping it would take a usable candidate away from the other
+    // two. But it is almost certainly a copy-paste, and left silent it surfaces only as an
+    // unexpectedly short rotation chain during a real incident.
+    {
+        let seat_models: std::collections::BTreeSet<&str> =
+            seats.iter().map(|(_, _, _, m)| m.as_str()).collect();
+        for entry in declared_pool {
+            if seat_models.contains(entry.model.as_str()) {
+                notices.push(Notice::info(format!(
+                    "notice: the fallback candidate `{}` repeats a model one of the mages already \
+                     runs. It stays in the pool — another seat can still rotate into it — but it \
+                     buys that seat nothing.",
+                    entry.model
+                )));
+            }
+        }
+    }
+
+    // REQ-R01 + SC-R55. Exactly ONE registration call per seat: `with_agent` after
+    // `with_agent_and_probe` for the same seat would DISCARD the probe in silence
+    // (`orchestrator.rs:309-320`), and nothing about that failure is visible until a rotation
+    // needs the measurement — the worst possible moment.
+    for (seat, provider, lineage, model) in seats {
+        // REQ-R28/SC-R56: the probe and the completions provider are declared APART, so keeping
+        // them pointed at the same model is the caller's job. magi-core checks it too and warns —
+        // but through `tracing::warn!`, and magi-rs has no subscriber, so that event is emitted
+        // into the void. The comparison is ours to make and costs nothing: both names are in hand
+        // here, and it is a string equality with no I/O.
+        //
+        // It NEVER rejects, for the same reason the crate does not: a probe is not authoritative
+        // over which model a provider serves. But a mis-pointed probe files the window under
+        // another model's name AND feeds the digest collision check, which is the one fail-closed
+        // direction in this subsystem — it can reject a candidate that was healthy.
+        if let Some(probe) = probes.get(&model) {
+            if probe.declared_model() != Some(provider.model()) {
+                notices.push(Notice::resolution(format!(
+                    "notice: the probe registered for {seat:?} measures `{}` while its provider \
+                     serves `{}`. The measurement will be filed under the wrong model; rotation \
+                     still runs.",
+                    probe.declared_model().unwrap_or("<unknown>"),
+                    provider.model()
+                )));
+            }
+        }
+        // Recorded ON THE SAME loop that registers, for the same reason the wrap trace is
+        // recorded on the branch that wraps: a guardian anchored anywhere else stops guarding.
+        #[cfg(test)]
+        SEAT_LINEAGE_TRACE.with(|t| t.borrow_mut().push((seat, lineage.as_str().to_owned())));
+        builder = match probes.get(&model) {
+            Some(probe) => builder.with_agent_and_probe(
+                seat,
+                provider,
+                lineage,
+                Arc::clone(probe) as Arc<dyn ProviderProbe>,
+            ),
+            None => builder.with_agent(seat, provider, lineage),
+        };
+    }
+
+    // REQ-R03/R05: the SHARED rotation pool. Shared and not per-seat (D-R02) because the property
+    // consensus needs — that a rotation lands on a lineage the other two seats do not hold — is a
+    // property of the pool's DIVERSITY, not of who owns the list. Three lists would triple what has
+    // to be declared for the same guarantee, and would add a failure mode a single pool does not
+    // have: one list drying up while the other two still hold candidates.
+    if !declared_pool.is_empty() {
+        let mut pool = FallbackPool::builder().max_rotations(cfg.effective_max_rotations());
+        #[cfg(test)]
+        let mut wired: Vec<(String, String)> = Vec::new();
+
+        for entry in declared_pool {
+            // A candidate that cannot be BUILT is dropped with a notice, never fatal. Same shape
+            // as REQ-R27's missing-model notice, and for the same reason: rotation is a safety
+            // net, and refusing to start because the net is one strand short would deny the
+            // operator the run their seats can perfectly well serve. In practice this is near
+            // unreachable — candidates share endpoint, kind and client timeout with the seats, so
+            // whatever breaks one breaks all three seats first, and THAT is fatal.
+            let mut sink: Vec<Notice> = Vec::new();
+            match build_native_provider(kind, base, &entry.model, creds, client_timeout, &mut sink)
+            {
+                Ok(candidate) => {
+                    #[cfg(test)]
+                    wired.push((entry.model.clone(), entry.lineage.as_str().to_owned()));
+                    // Wrapped like the seats: `MagiBuilder::build()` wraps nothing, so a candidate
+                    // pushed raw would silently be the one seat in the run without transport retry.
+                    let wrapped: Arc<dyn LlmProvider> =
+                        Arc::new(RetryProvider::with_config(candidate, retry.clone()));
+                    let lineage = CoreLineage::from(entry.lineage.clone());
+                    // Order comes from `declared_pool`, NEVER from the dedup map: it is the
+                    // rotation preference, strongest to weakest.
+                    pool = match probes.get(&entry.model) {
+                        Some(probe) => pool.push_with_probe(
+                            wrapped,
+                            lineage,
+                            Arc::clone(probe) as Arc<dyn ProviderProbe>,
+                        ),
+                        None => pool.push(wrapped, lineage),
+                    };
+                }
+                Err(cause) => notices.push(Notice::resolution(format!(
+                    // `cause` is a `SeatError`, whose `Transport` payload is `SafeErrorText` —
+                    // `build_native_provider::to_seat` redacts before constructing it, so the
+                    // type itself is the guarantee and there is nothing to redact again here.
+                    "notice: fallback candidate `{}` could not be built ({cause}); \
+                     rotation will not be able to use it.",
+                    entry.model
+                ))),
+            }
+            // Merged rather than discarded (S3 Loop 2, Balthasar). Its sibling at the top of this
+            // function discards its sink with a comment explaining that the only notice
+            // `build_native_provider` emits is the base_url normalization one, already sent by
+            // the seat loop over the SAME base — true today, and a fact about a function
+            // elsewhere. `render_notices` dedupes, so merging costs a duplicate that never
+            // reaches the screen and buys independence from that fact staying true.
+            notices.append(&mut sink);
+        }
+
+        #[cfg(test)]
+        POOL_WIRING_TRACE.with(|t| {
+            *t.borrow_mut() = Some(PoolWiring {
+                candidates: wired,
+                max_rotations: cfg.effective_max_rotations(),
+                strict_guard: effective_guard,
+            });
+        });
+
+        builder = builder
+            .with_fallback_pool(pool.build())
+            .with_strict_context_guard(effective_guard);
+    }
+
+    // Applied HERE, after the pool has had its say (REQ-R21): the threshold is only final once
+    // the in-band candidates have been folded in, and a builder method applied earlier would
+    // have captured the trio-only value.
+    if let Some(warn) = warn_tokens {
+        builder = builder.with_input_warn_tokens(warn);
     }
 
     builder
@@ -2915,7 +3587,7 @@ impl AutonomousRunConfig {
             gate_thresholds: crate::config::gate_thresholds_from(config),
             mode_config: magi_rs::magi::mode::ModeConfig {
                 default_mode: config.effective_default_mode(),
-                untrusted_content: config.magi.untrusted_content.unwrap_or(false),
+                untrusted_content: config.magi().untrusted_content.unwrap_or(false),
             },
             telemetry: Arc::new(BufferedGateTelemetry::new()),
         }
@@ -3053,11 +3725,21 @@ fn resolve_template(
     };
     resolution.map_err(|e| {
         if secret_store.is_some() {
-            format!("base_url credential error: {e}")
+            format!(
+                "base_url credential error: {}",
+                magi_rs::redact::redact_foreign_error(&e)
+            )
         } else {
+            // Redacted on BOTH branches. The previous round closed the vault-present one and
+            // left this, which is the asymmetry the structural rule exists to prevent: whether a
+            // foreign error is safe to print cannot depend on which arm of a `match` produced it
+            // (S3 Loop 2, Balthasar and Caspar). No `EndpointError` variant can embed a URL
+            // today — every field is `&'static str` — so this is the second layer, not a live
+            // leak; the point is that the layer has no hole for a future variant to find.
             format!(
                 "base_url needs vault-stored credentials, but no vault is open this \
-                 session: {e}"
+                 session: {}",
+                magi_rs::redact::redact_foreign_error(&e)
             )
         }
     })
@@ -3087,9 +3769,12 @@ fn resolve_effective_embedding_endpoint(
     magi_config: &MagiConfig,
     secret_store: Option<&SharedSecretStore>,
 ) -> Result<String, String> {
-    let template = magi_config
-        .effective_embedding_base_url()
-        .map_err(|e| format!("embedding base_url is invalid: {e}"))?;
+    let template = magi_config.effective_embedding_base_url().map_err(|e| {
+        format!(
+            "embedding base_url is invalid: {}",
+            magi_rs::redact::redact_foreign_error(&e)
+        )
+    })?;
     resolve_template(&template, Scope::Embedding, secret_store).map(|r| r.as_str().to_string())
 }
 
@@ -3205,7 +3890,7 @@ async fn attach_persistent_memory(
         // failure (REQ-29): it is never silently swallowed.
         let embedder_result = resolve_effective_embedding_endpoint(magi_config, secret_store)
             .and_then(|url| {
-                let mut cfg = magi_config.embedding.clone();
+                let mut cfg = magi_config.embedding().clone();
                 cfg.base_url = Some(url);
                 OpenAiCompatibleEmbedder::new(&cfg, embed_key).map_err(|e| e.to_string())
             });
@@ -3221,7 +3906,7 @@ async fn attach_persistent_memory(
                 let clock = Arc::new(SystemClock);
                 let vstore = Arc::new(vstore);
                 let vstore_diag = Arc::clone(&vstore);
-                agent.set_memory_subsystem(vstore, embedder, clock, magi_config.memory.clone());
+                agent.set_memory_subsystem(vstore, embedder, clock, magi_config.memory().clone());
                 agent.on_session_open().await.ok();
 
                 // CP2-AN/S: one-line diagnostics summary — never fail startup on error.
@@ -3247,12 +3932,13 @@ async fn attach_persistent_memory(
                 // it is informational, and `load()` does not yet fail closed on a bad
                 // template (that validation is not part of Task 1.1's scope).
                 if let Ok(embedding_url) = magi_config.effective_embedding_base_url() {
-                    if magi_config.memory.distill_enabled && !is_localhost(embedding_url.as_str()) {
+                    if magi_config.memory().distill_enabled && !is_localhost(embedding_url.as_str())
+                    {
                         notices.push(format!(
                             "Memory distiller will send bounded memory batches \
                              (≤ {} tokens) to {} — set distill_enabled = false \
                              in [memory] for zero cloud memory egress.",
-                            magi_config.memory.distill_max_batch_tokens,
+                            magi_config.memory().distill_max_batch_tokens,
                             embedding_url.as_str(),
                         ));
                     }
@@ -3279,10 +3965,19 @@ fn open_headless_memory(
 ) -> Result<Option<EncryptedSqliteMemory>, HeadlessError> {
     match EncryptedSqliteMemory::new(db_path.to_path_buf(), passphrase) {
         Ok(store) => Ok(Some(store)),
-        Err(e) => Err(match e.downcast::<VaultError>() {
-            Ok(ve) => HeadlessError::from(ve),
-            Err(other) => HeadlessError::Storage(other.to_string()),
-        }),
+        // Chain walk, like `is_wrong_passphrase` and `report_open_failure` (S3 Loop 2, Caspar).
+        // Those two were converted last round and this one was left rooted at the outermost
+        // type, so the headless path and the TUI path classified the SAME error differently —
+        // an inconsistency introduced by the fix, which is the shape this gate keeps finding.
+        // Here the cost of missing it is the whole typed mapping: a `WrongPassphrase` behind a
+        // wrapper would surface as an opaque `Storage`, losing the exit code the caller branches
+        // on.
+        Err(e) => Err(
+            match e.chain().find_map(|c| c.downcast_ref::<VaultError>()) {
+                Some(ve) => HeadlessError::from(ve.clone()),
+                None => HeadlessError::Storage(e.to_string()),
+            },
+        ),
     }
 }
 
@@ -3432,7 +4127,16 @@ fn write_output_atomic(
         }
     } else {
         let tmp = parent.join(format!(".magi-out.tmp.{:016x}", rand::random::<u64>()));
-        std::fs::write(&tmp, contents).map_err(|e| HeadlessError::Io(e.to_string()))?;
+        // Cleanup on BOTH failure paths (S3 Loop 2, Balthasar). The rename arm below always had
+        // it; this one did not, so a write that failed partway — a full disk is the ordinary
+        // case — left a `.magi-out.tmp.*` behind in the user's directory, with a random suffix
+        // that makes it look like debris rather than something to delete. Same best-effort
+        // terms as its sibling: the write error is the failure worth reporting, and a cleanup
+        // that itself fails is not a new one.
+        std::fs::write(&tmp, contents).map_err(|e| {
+            let _ = std::fs::remove_file(&tmp);
+            HeadlessError::Io(e.to_string())
+        })?;
         std::fs::rename(&tmp, path).map_err(|e| {
             let _ = std::fs::remove_file(&tmp);
             HeadlessError::Io(e.to_string())
@@ -3636,10 +4340,14 @@ struct HeadlessContext {
     /// parallel-test-safe to redirect), so a test asserts on this field directly
     /// instead — see `test_prepare_headless_carries_the_divergence_notice_when_it_applies`.
     ///
-    /// `#[allow(dead_code)]`: no dispatcher's PRODUCTION code reads it back off `ctx` (both
-    /// destructure `HeadlessContext` with `..` for this field) — it exists purely so a test can
-    /// assert against the real `prepare_headless` output instead of a hand-rolled stand-in.
-    #[allow(dead_code)]
+    /// **`#[cfg(test)]`, not `#[allow(dead_code)]`** (S3 Loop 2, Balthasar, applying the
+    /// precedent set for `Args::untrusted_content` earlier in this same file). No dispatcher's
+    /// production code reads it back off `ctx` — both destructure `HeadlessContext` with `..`
+    /// here — so it exists purely so a test can assert against the real `prepare_headless`
+    /// output instead of a hand-rolled stand-in. The `allow` said "trust me, this is used";
+    /// the `cfg` makes that true by construction, and §6.1.8 forbids the former precisely
+    /// because the linter is telling the truth about the crate as it stands.
+    #[cfg(test)]
     divergence_notice: Option<Notice>,
 }
 
@@ -3787,7 +4495,7 @@ async fn prepare_headless(
     // operator-lowered `[headless]` cap, spec §11) governs the read itself
     // rather than only the later ceiling — never the module constant alone.
     let limits = resolve_headless_limits(
-        &magi_config.headless,
+        magi_config.headless(),
         magi_config.effective_tool_result_cap(),
     );
 
@@ -3908,7 +4616,7 @@ async fn prepare_headless(
         .unwrap_or(NORMAL_MAX_TOOL_CALLS);
     let allow_system_override = resolve_allow_system_override(
         h.allow_system_override,
-        magi_config.headless.allow_system_override,
+        magi_config.headless().allow_system_override,
     );
     let resolved = resolve_params(
         envelope,
@@ -3986,22 +4694,29 @@ async fn prepare_headless(
     // REQ-A24/A24b/A24c (Task 5.2): same polling as the TUI, see `run()`'s comment — never
     // blocks or fails headless startup.
     let mut trio_notices: Vec<Notice> = Vec::new();
-    let warn_tokens = probe_and_report(
+    // Same wiring as the TUI, through the same opener (B3).
+    let capability_cache = open_capability_cache(memory.as_ref(), &mut trio_notices);
+    let (warn_tokens, measured) = probe_and_report(
         &magi_config,
         &endpoints,
         provider_kind,
         &OllamaProbeFactory,
         &env_overrides,
+        &stateless_extra_models(&magi_config, capability_cache.as_ref()),
         &mut trio_notices,
     )
     .await;
     let consult_magi = build_magi_orchestrator(
-        &magi_config,
-        provider_kind,
-        &endpoints,
-        Some(&creds),
-        warn_tokens,
-        &env_overrides,
+        &TrioBuild {
+            cfg: &magi_config,
+            principal_kind: provider_kind,
+            endpoints: &endpoints,
+            creds: Some(&creds),
+            warn_tokens,
+            env_overrides: &env_overrides,
+            capability_cache: capability_cache.as_ref(),
+            measured: &measured,
+        },
         &mut trio_notices,
     );
     // REQ-A07p/SC-A07p (fix round 4, finding 1): headless is the surface this notice
@@ -4028,7 +4743,7 @@ async fn prepare_headless(
         h,
         workspace.as_ref(),
         &limits,
-        magi_config.headless.log_level.as_deref(),
+        magi_config.headless().log_level.as_deref(),
     ) {
         Ok(log) => log,
         Err(e) => {
@@ -4053,6 +4768,7 @@ async fn prepare_headless(
         limits,
         env_mode,
         env_untrusted_content,
+        #[cfg(test)]
         divergence_notice: headless_divergence_notice,
     })
 }
@@ -4157,7 +4873,7 @@ async fn run_query_subcommand(
     register_consult_tool_if_available(
         &mut agent,
         consult_magi.as_ref(),
-        magi_config.magi.auto_approve,
+        magi_config.magi().auto_approve,
         registered_magi_kind(&magi_config, provider_kind),
         magi_config.magi_endpoint_diverges(),
         magi_config.effective_max_query_bytes(),
@@ -4169,14 +4885,7 @@ async fn run_query_subcommand(
     // SC-A04c/d: this route shares its single deadline with a forced/proactive consult
     // (REQ-H22), so REQ-A04's minimum applies here too. The deadline is obeyed either way;
     // what the check adds is the heads-up on stderr and the flag in the JSON.
-    let timeout_decision = query_timeout_decision(
-        timeout,
-        consult_magi.is_some(),
-        magi_config
-            .magi
-            .agent_timeout_secs
-            .unwrap_or(magi_rs::magi::AGENT_TIMEOUT_SECS),
-    );
+    let timeout_decision = query_timeout_decision(timeout, consult_magi.is_some(), &magi_config);
     if let Some(w) = timeout_decision.as_ref().and_then(|d| d.warning.as_ref()) {
         eprintln!("{w}");
     }
@@ -4230,11 +4939,31 @@ async fn run_query_subcommand(
 /// # Returns
 /// `None` when the check does not apply; otherwise the decision, whose `warning` names the
 /// computed minimum and whose `below_formula` feeds the run's JSON.
+/// The three configuration values REQ-R20's formula needs, resolved ONCE.
+///
+/// They travel together because they are read together at every site that asks *"how long may
+/// this run take?"*, and resolving them separately at each site is exactly how two call sites end
+/// up disagreeing about the same run's worst case — the failure mode being that a `--timeout`
+/// computed from a stale worst case cuts off a healthy consult, and only when a rotation also
+/// happened, which is very hard to reproduce.
+///
+/// A tuple and not a struct: the three types are distinct, so the compiler catches a
+/// transposition, and the values are destructured at the single point of use.
+fn timeout_scale(cfg: &MagiConfig) -> (u64, u32, bool) {
+    (
+        cfg.magi()
+            .agent_timeout_secs
+            .unwrap_or(magi_rs::magi::AGENT_TIMEOUT_SECS),
+        cfg.effective_max_rotations(),
+        cfg.magi().retry_disabled.unwrap_or(false),
+    )
+}
+
 #[must_use]
 fn query_timeout_decision(
     deadline: Option<Duration>,
     consult_capable: bool,
-    ceiling: u64,
+    cfg: &MagiConfig,
 ) -> Option<magi_rs::magi::TimeoutDecision> {
     if !consult_capable {
         return None;
@@ -4246,7 +4975,13 @@ fn query_timeout_decision(
     // explicit `--timeout`, `[headless] timeout_secs`, or the tier default. All three are
     // operator declarations, so all three are obeyed and all three deserve the same heads-up
     // when they are structurally too short.
-    Some(magi_rs::magi::resolve_run_timeout(Some(secs), ceiling))
+    let (ceiling, max_rotations, retry_disabled) = timeout_scale(cfg);
+    Some(magi_rs::magi::resolve_run_timeout(
+        Some(secs),
+        ceiling,
+        max_rotations,
+        retry_disabled,
+    ))
 }
 
 /// Resolves the wall-clock deadline actually enforced for a `magi consult` run
@@ -4312,7 +5047,7 @@ async fn run_consult_subcommand(
     // envelope field, and the operator's `magi.toml` — any one activates it.
     let untrusted_content = h.untrusted_content
         || env_untrusted_content
-        || magi_config.magi.untrusted_content.unwrap_or(false);
+        || magi_config.magi().untrusted_content.unwrap_or(false);
     // Fix round 2 (SC-A04d): ONE process-level notice sink, shared by the mode
     // classifier's own notices AND the --timeout-below-formula warning below —
     // one stderr output path, not two, and dedup is per-key so sharing cannot
@@ -4345,13 +5080,9 @@ async fn run_consult_subcommand(
     // `analyze_direct`'s deadline arm never fired). `.below_formula`/`.warning`
     // — the JSON telemetry and the stderr notice, emitted by `analyze_direct`
     // via `runtime.notice_sink` — were already wired by Task 6.1.
-    let timeout_decision = magi_rs::magi::resolve_run_timeout(
-        h.timeout,
-        magi_config
-            .magi
-            .agent_timeout_secs
-            .unwrap_or(magi_rs::magi::AGENT_TIMEOUT_SECS),
-    );
+    let (ceiling, max_rotations, retry_disabled) = timeout_scale(&magi_config);
+    let timeout_decision =
+        magi_rs::magi::resolve_run_timeout(h.timeout, ceiling, max_rotations, retry_disabled);
     let timeout = Some(consult_deadline(&timeout_decision));
     let runtime = MagiRuntimeParams {
         kind: registered_magi_kind(&magi_config, provider_kind),
@@ -4405,6 +5136,87 @@ mod tests {
     /// `render_help` helpers this heading used to say did not exist. The
     /// coordinator confirmed this reassignment; see the task report for the full
     /// six-way mapping to Task 2.3/2.4.
+    /// The two vault-error classifiers, neither of which had a test before S3 Loop 2.
+    mod vault_error_classification {
+        use super::*;
+
+        /// A `VaultError` reached through a TYPED wrapper is still recognised.
+        ///
+        /// `anyhow`'s `downcast_ref` already sees through `.context(..)` layers, so rooting the
+        /// search at the outermost type held for every caller that used them — and stopped dead
+        /// at the first error that carries `VaultError` as a `#[source]`. The consequence is not
+        /// a worse message: `is_wrong_passphrase` gates the RETRY, so a user who merely mistyped
+        /// their passphrase would get a fatal error where a second prompt belongs, and
+        /// `report_open_failure` would drop both the actionable text and the specific exit code
+        /// for a generic 2.
+        ///
+        /// **Mutation-verified (B16):** put `e.downcast_ref::<VaultError>()` back in either
+        /// function and its half goes red, while the `.context(..)` case below stays green —
+        /// which is exactly why the old form looked correct.
+        #[test]
+        fn a_vault_error_behind_a_typed_wrapper_is_still_classified() {
+            #[derive(Debug, thiserror::Error)]
+            #[error("opening the store failed")]
+            struct Wrapper(#[source] VaultError);
+
+            let wrapped = anyhow::Error::from(Wrapper(VaultError::WrongPassphrase));
+            assert!(
+                is_wrong_passphrase(&wrapped),
+                "a wrong passphrase behind a typed wrapper must still offer a retry"
+            );
+            assert_eq!(
+                report_open_failure(&wrapped),
+                vault_error_exit_code(&VaultError::WrongPassphrase),
+                "and must still report the vault-specific exit code, not a generic 2"
+            );
+
+            // The case the old form DID handle, kept so a future change cannot fix the wrapper
+            // by breaking the context chain.
+            let contextual =
+                anyhow::Error::from(VaultError::WrongPassphrase).context("while opening .magi");
+            assert!(is_wrong_passphrase(&contextual));
+
+            // And a vault error that is NOT a wrong passphrase must not be mistaken for one.
+            let other = anyhow::Error::from(Wrapper(VaultError::VaultMetaCorrupt));
+            assert!(
+                !is_wrong_passphrase(&other),
+                "the chain walk must match the VARIANT, not merely the type"
+            );
+        }
+
+        /// The passphrase never reaches [`VaultError::WeakPassphrase`]'s message.
+        ///
+        /// Raised as a possible echo by S3 Loop 2 (Balthasar) and verified false: `check_strength`
+        /// builds the text from a fixed length message or from `zxcvbn`'s `warning()` and
+        /// `suggestions()`, which are catalogue strings that do not interpolate the input. What
+        /// the rustdoc on that variant promises had no test, and the promise is worth one —
+        /// **this** is the guard, not a redaction call, because `redact_foreign_text` finds
+        /// credentials inside URLs and would not catch a bare secret in prose even if one
+        /// appeared. Wrapping the call site would have looked like protection and been ritual.
+        #[test]
+        fn a_rejected_passphrase_is_never_echoed_in_the_message_explaining_why() {
+            // Deliberately un-English canaries. The first draft used "short" and "password123"
+            // and failed on its own terms: the length message contains "too short", and zxcvbn's
+            // warning for a common one contains "password", so the substring check fired on the
+            // ADVICE rather than on any echo. A canary that can occur incidentally inside the
+            // text being scanned does not test what it claims to.
+            for weak in ["zq7", "zzzzzzzzzzzzzz", "qqqqqqqqqqqqqqqq", "vvvv"] {
+                let Err(e) = magi_rs::vault::check_strength(weak) else {
+                    continue; // strong enough: nothing to echo
+                };
+                let text = e.to_string();
+                assert!(
+                    !text.contains(weak),
+                    "the reason must explain the weakness without repeating the secret: {text}"
+                );
+                assert!(
+                    text.len() > "passphrase rejected: ".len(),
+                    "precondition: there IS a reason here to scan, or the check above is vacuous"
+                );
+            }
+        }
+    }
+
     mod mode_surfaces {
         use super::*;
 
@@ -5177,10 +5989,10 @@ mod tests {
     fn test_resolve_effective_provider_kind_wiring() {
         assert_eq!(
             resolve_effective_provider_kind(
-                &MagiConfig {
-                    provider: Some("anthropic".into()),
-                    ..Default::default()
-                },
+                &MagiConfig::builder()
+                    .provider(Some("anthropic".into()))
+                    .build()
+                    .unwrap(),
                 Some("ollama")
             )
             .unwrap(),
@@ -5344,12 +6156,12 @@ mod tests {
             let mut guard = ss.lock().unwrap();
             guard.set("ANTHROPIC_API_KEY", "sk-from-vault").unwrap();
         }
-        let config = MagiConfig {
-            anthropic: crate::config::AnthropicConfig {
+        let config = MagiConfig::builder()
+            .anthropic(crate::config::AnthropicConfig {
                 model: Some("claude-toml-model".into()),
-            },
-            ..Default::default()
-        };
+            })
+            .build()
+            .unwrap();
 
         // No env: the TOML model is honored (was previously ignored entirely).
         with_var("ANTHROPIC_MODEL", None, || {
@@ -5782,8 +6594,18 @@ mod tests {
             let tmp = tempfile::tempdir().unwrap();
             let cwd = dunce::canonicalize(tmp.path()).unwrap();
             assert_eq!(run_init(&cwd, None), 0);
+            // Presence before absence (S3 Loop 2, Balthasar): "zero envelope rows" is also true
+            // of a database that was never created, so without this the test would keep passing
+            // if `run_init` silently stopped scaffolding at all — which is the opposite of what
+            // it is here to prove.
+            let db_path = cwd.join(".magi/.magi-rs-memory.db");
+            assert!(
+                db_path.exists(),
+                "precondition: run_init must have created the DB whose envelope count is checked \
+                 below, or that count means nothing"
+            );
             assert_eq!(
-                envelope_row_count(&cwd.join(".magi/.magi-rs-memory.db")),
+                envelope_row_count(&db_path),
                 0,
                 "no passphrase must leave the DB without an envelope"
             );
@@ -6379,6 +7201,13 @@ mod tests {
             MagiConfig::from_toml_str("[embedding]\nbase_url = \"https://user:hunter2@host/v1\"\n")
                 .unwrap();
         let err = resolve_effective_embedding_endpoint(&cfg, None).unwrap_err();
+        // Presence before absence (S3 Loop 2, Balthasar, found by sweeping the class rather than
+        // the one site reported). `unwrap_err` proves an error happened; it does not prove the
+        // error SAYS anything, and an empty message satisfies the leak check perfectly.
+        assert!(
+            err.contains("vault set"),
+            "precondition: the error must be the actionable one, naming how to fix it: {err}"
+        );
         assert!(!err.contains("hunter2"), "leaked the credential: {err}");
     }
 
@@ -6465,6 +7294,11 @@ mod tests {
         let cfg =
             MagiConfig::from_toml_str("base_url = \"https://user:hunter2@host/v1\"\n").unwrap();
         let err = resolve_effective_principal_endpoint(&cfg, None, None).unwrap_err();
+        // Presence before absence — same reasoning as its embedding-side twin above.
+        assert!(
+            err.contains("vault set"),
+            "precondition: the error must be the actionable one, naming how to fix it: {err}"
+        );
         assert!(!err.contains("hunter2"), "leaked the credential: {err}");
     }
 
@@ -6656,11 +7490,13 @@ mod tests {
     #[test]
     fn consult_deadline_falls_back_to_the_formula_minimum_when_absent() {
         let ceiling = magi_rs::magi::AGENT_TIMEOUT_SECS;
-        let decision = magi_rs::magi::resolve_run_timeout(None, ceiling);
+        let decision = magi_rs::magi::resolve_run_timeout(None, ceiling, 0, false);
         let deadline = consult_deadline(&decision);
         assert_eq!(
             deadline,
-            Duration::from_secs(magi_rs::magi::headless_consult_timeout_secs(ceiling)),
+            Duration::from_secs(magi_rs::magi::headless_consult_timeout_secs(
+                ceiling, 0, false
+            )),
             "an absent --timeout must fall back to the formula-derived minimum"
         );
         assert!(
@@ -6677,7 +7513,7 @@ mod tests {
     #[test]
     fn consult_deadline_obeys_an_explicit_timeout_even_below_the_formula() {
         let ceiling = magi_rs::magi::AGENT_TIMEOUT_SECS;
-        let decision = magi_rs::magi::resolve_run_timeout(Some(1), ceiling);
+        let decision = magi_rs::magi::resolve_run_timeout(Some(1), ceiling, 0, false);
         assert_eq!(
             consult_deadline(&decision),
             Duration::from_secs(1),
@@ -6708,6 +7544,1219 @@ mod tests {
             ResolvedEndpoints {
                 root: tpl.resolve(&mut NoVaultInScope, Scope::Root).unwrap(),
                 magi: tpl.resolve(&mut NoVaultInScope, Scope::Magi).unwrap(),
+            }
+        }
+
+        /// Resolves an arbitrary flat `base_url` into a [`ResolvedEndpoint`], for the tests that
+        /// need a real listening socket rather than the fixed `localhost:11434` above.
+        fn endpoint_at(base_url: &str) -> ResolvedEndpoint {
+            EndpointTemplate::parse(base_url, Scope::Root)
+                .expect("a flat test URL must parse")
+                .resolve(&mut NoVaultInScope, Scope::Magi)
+                .expect("a URL with no placeholders needs no vault")
+        }
+
+        /// A local listener that accepts one connection and **answers nothing**, so a request
+        /// against it can only end by the CLIENT's timeout.
+        ///
+        /// `127.0.0.1:0` picks a free port and the whole exchange stays on the machine — no real
+        /// network, which R-R05 forbids. The returned guard keeps the task alive; dropping it
+        /// closes the listener.
+        async fn silent_listener() -> (String, tokio::task::JoinHandle<()>) {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("binding a loopback port must succeed");
+            let addr = listener
+                .local_addr()
+                .expect("a bound listener has an address");
+            let guard = tokio::spawn(async move {
+                if let Ok((socket, _)) = listener.accept().await {
+                    // Held open, unanswered, for as long as the test runs.
+                    let _held = socket;
+                    std::future::pending::<()>().await;
+                }
+            });
+            (format!("http://{addr}"), guard)
+        }
+
+        /// A local listener that records the FIRST request line it receives, answers 404 so the
+        /// client stops waiting, and hands that line back.
+        ///
+        /// This is what makes "both spellings reach the same endpoint" an observation instead of
+        /// a restatement of the code: the assertion reads the path the provider actually put on
+        /// the wire.
+        async fn recording_listener() -> (String, tokio::task::JoinHandle<String>) {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("binding a loopback port must succeed");
+            let addr = listener
+                .local_addr()
+                .expect("a bound listener has an address");
+            let handle = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.expect("the client must connect");
+                let mut buf = vec![0u8; 1024];
+                let read = socket.read(&mut buf).await.unwrap_or(0);
+                let text = String::from_utf8_lossy(&buf[..read]).into_owned();
+                let _ = socket
+                    .write_all(b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\n\r\n")
+                    .await;
+                text.lines().next().unwrap_or_default().to_owned()
+            });
+            (format!("http://{addr}"), handle)
+        }
+
+        /// SC-R48: the client timeout a seat is built with is the one it HONOURS — never the
+        /// crate's 300 s default.
+        ///
+        /// `OllamaProvider::new` delegates to `with_timeout(..., DEFAULT_CLIENT_TIMEOUT)` = 300 s,
+        /// which breaks `operation_budget + client_timeout <= agent_timeout_secs`. Picking the
+        /// wrong constructor COMPILES, RUNS, and breaks the derived scale SILENTLY — the exact
+        /// defect D-A07 existed to prevent, which survives its reversal (D-R12).
+        ///
+        /// Observed through BEHAVIOUR, not through the value: neither `reqwest::Client` nor
+        /// `OllamaProvider` exposes its timeout, so a test that re-reads the argument it just
+        /// passed would assert nothing. This one points the seat at a socket that never answers
+        /// and requires the request to end anyway.
+        ///
+        /// The discriminating property is **"not the crate's 300 s"**, not "under 400 ms", so the
+        /// deadline is generous on purpose: that keeps the test meaningful AND immune to load
+        /// (R-R05 — wait on conditions, never on durations).
+        #[tokio::test]
+        async fn the_ollama_seat_honours_the_client_timeout_it_was_given() {
+            let (base, _guard) = silent_listener().await;
+            let mut notices = Vec::new();
+            let provider = build_native_provider(
+                ProviderKind::Ollama,
+                &endpoint_at(&base),
+                "any-model",
+                None,
+                Duration::from_millis(400),
+                &mut notices,
+            )
+            .expect("ollama is keyless: it must build with no credentials");
+
+            let outcome = tokio::time::timeout(
+                Duration::from_secs(30),
+                provider.complete("s", "u", &CompletionConfig::default()),
+            )
+            .await;
+
+            let ended = outcome.expect(
+                "the request must end by the client timeout the seat was BUILT with; \
+                 hitting this deadline means the 300 s crate default reached the seat",
+            );
+            assert!(
+                ended.is_err(),
+                "a server that never answers must surface as an error, not a completion"
+            );
+        }
+
+        /// SC-R49: both `base_url` spellings reach the same completions endpoint. Under
+        /// `kind = "ollama"` a URL without `/v1` used to end in 404.
+        #[tokio::test]
+        async fn both_base_url_spellings_reach_the_same_completions_endpoint() {
+            for suffix in ["", "/v1"] {
+                let (host, recorded) = recording_listener().await;
+                let mut notices = Vec::new();
+                let provider = build_native_provider(
+                    ProviderKind::Ollama,
+                    &endpoint_at(&format!("{host}{suffix}")),
+                    "any-model",
+                    None,
+                    Duration::from_secs(10),
+                    &mut notices,
+                )
+                .expect("ollama is keyless");
+                // The 404 is expected; what matters is the path that reached the wire.
+                let _ = provider
+                    .complete("s", "u", &CompletionConfig::default())
+                    .await;
+                let line = recorded.await.expect("the listener task must finish");
+                assert!(
+                    line.starts_with("POST /v1/chat/completions"),
+                    "base_url ending in {suffix:?} put {line:?} on the wire"
+                );
+            }
+        }
+
+        /// SC-R50: `openai-compat` does NOT change transport, even pointing at an Ollama daemon.
+        /// The partition is by DECLARED kind, never by what happens to be on the other side.
+        ///
+        /// Also pins the observable REQ-R30 declares changed, and which the CHANGELOG has to
+        /// name: under `kind = "ollama"` the provider now identifies itself as `"ollama"` in
+        /// errors and reports, where it used to say `"openai-compat"`.
+        #[test]
+        fn the_declared_kind_decides_the_transport_not_the_daemon_behind_it() {
+            let mut notices = Vec::new();
+            let creds = FixedCreds {
+                openai: Some("test-key".to_string()),
+                anthropic: None,
+            };
+            let compat = build_native_provider(
+                ProviderKind::OpenAiCompat,
+                &test_endpoints().magi,
+                "any-model",
+                Some(&creds),
+                Duration::from_secs(10),
+                &mut notices,
+            )
+            .expect("openai-compat with a key must build");
+            assert_eq!(
+                compat.name(),
+                "openai-compat",
+                "an Ollama daemon behind the URL must not change the declared transport"
+            );
+
+            let ollama = build_native_provider(
+                ProviderKind::Ollama,
+                &test_endpoints().magi,
+                "any-model",
+                None,
+                Duration::from_secs(10),
+                &mut notices,
+            )
+            .expect("ollama is keyless");
+            assert_eq!(
+                ollama.name(),
+                "ollama",
+                "REQ-R30: the ollama kind completes through OllamaProvider now"
+            );
+        }
+
+        /// Body of an OpenAI-compatible response carrying a valid verdict for `agent`.
+        ///
+        /// Built with `serde_json` rather than by string interpolation: the verdict itself is
+        /// JSON **inside** a JSON string field, and hand-escaping that is how a mock ends up
+        /// serving something the parser rejects for a reason unrelated to the test.
+        fn verdict_body(agent: &str) -> String {
+            use magi_core::verdict_markers::{VERDICT_CLOSE, VERDICT_OPEN};
+            let verdict = format!(
+                "{VERDICT_OPEN}\n{{\"agent\":\"{agent}\",\"verdict\":\"approve\",\
+                 \"confidence\":0.9,\"summary\":\"ok\",\"reasoning\":\"r\",\
+                 \"recommendation\":\"go\",\"findings\":[]}}\n{VERDICT_CLOSE}"
+            );
+            serde_json::json!({ "choices": [ { "message": { "content": verdict } } ] }).to_string()
+        }
+
+        /// A `magi.toml` declaring the three seats, their lineages and one pool candidate.
+        fn cfg_with_pool(max_rotations: u32) -> MagiConfig {
+            MagiConfig::from_toml_str(&format!(
+                "provider = \"ollama\"\n\
+                 [magi]\n\
+                 melchior_model    = \"ok-model\"\nmelchior_lineage  = \"lin-melchior\"\n\
+                 balthasar_model   = \"ok-model\"\nbalthasar_lineage = \"lin-balthasar\"\n\
+                 caspar_model \
+                  = \"down-model\"\ncaspar_lineage    = \"lin-caspar\"\n\
+                 agent_timeout_secs = 30\n\
+                 max_rotations = {max_rotations}\n\
+                 [[magi.fallback]]\n\
+                 model   = \"rescue-model\"\nlineage = \"lin-rescue\"\n"
+            ))
+            .expect("the rotation config must parse")
+        }
+
+        /// SC-R23/REQ-R11: a **declared** `strict_context_guard = true` reaches magi-core as
+        /// `false` when no candidate has a measured window.
+        ///
+        /// This is the case the fail-safe exists for and the only one that discriminates. Its
+        /// neighbour below asserts `!wired.strict_guard` on a config that never declares the key,
+        /// where declared and effective are both `false` — so it holds whether or not the
+        /// fail-safe works, and the trace it reads recorded
+        /// `cfg.declared_strict_context_guard()` rather than the value actually handed to the
+        /// builder. Two halves of one blind spot: a trace reporting the wrong number, and the
+        /// only test of it unable to tell (S3 Loop 2, Balthasar).
+        ///
+        /// What is at stake is not cosmetic. A `true` with nothing measured makes **every**
+        /// candidate fail magi-core's condition #6, so rotation switches off whole — silently,
+        /// on the cold start that is any fresh install's first run.
+        ///
+        /// **Mutation-verified (B16):** put `cfg.declared_strict_context_guard()` back in the
+        /// trace and this goes red; the neighbour below stays green.
+        #[test]
+        fn a_declared_strict_guard_reaches_magi_core_as_false_when_nothing_is_measured() {
+            let cfg = MagiConfig::from_toml_str(
+                "provider = \"ollama\"\n\
+                 [magi]\n\
+                 melchior_model    = \"ok-model\"\nmelchior_lineage  = \"lin-melchior\"\n\
+                 balthasar_model   = \"ok-model\"\nbalthasar_lineage = \"lin-balthasar\"\n\
+                 caspar_model      = \"down-model\"\ncaspar_lineage    = \"lin-caspar\"\n\
+                 agent_timeout_secs = 30\n\
+                 max_rotations = 2\n\
+                 strict_context_guard = true\n\
+                 [[magi.fallback]]\n\
+                 model   = \"rescue-model\"\nlineage = \"lin-rescue\"\n",
+            )
+            .expect("the rotation config must parse");
+            assert!(
+                cfg.declared_strict_context_guard(),
+                "precondition: the operator DID declare it, or this test proves nothing"
+            );
+
+            let mut notices = Vec::new();
+            let magi = build_magi_orchestrator(
+                &TrioBuild {
+                    cfg: &cfg,
+                    principal_kind: ProviderKind::Ollama,
+                    endpoints: &test_endpoints(),
+                    creds: None,
+                    warn_tokens: None,
+                    env_overrides: &MagiEnvModelOverrides::default(),
+                    capability_cache: None,
+                    // Nothing measured: the cold start.
+                    measured: &BTreeMap::new(),
+                },
+                &mut notices,
+            )
+            .expect("ollama is keyless");
+            drop(magi);
+
+            let wired = pool_wiring_trace().expect("a declared pool must be wired");
+            assert!(
+                !wired.strict_guard,
+                "declared true, but no candidate measured — magi-core must receive false or the \
+                 pool it was given was never eligible"
+            );
+            assert!(
+                notices
+                    .iter()
+                    .any(|n| n.text.contains("strict_context_guard")),
+                "and the override must be announced: a setting the operator wrote and the system \
+                 did not apply is exactly what the notice rule exists for"
+            );
+        }
+
+        /// SC-R01/REQ-R03: the pool declared in `[[magi.fallback]]` reaches magi-core with each
+        /// candidate's model AND its lineage, in the declared order (strongest first).
+        ///
+        /// Read from `pool_wiring_trace()`, recorded in the same place the pool is handed to the
+        /// builder: `MagiBuilder` keeps `fallback_pool` private and `Magi` exposes no reader, so
+        /// from outside the crate there is nothing else to observe.
+        #[test]
+        fn the_declared_pool_reaches_magi_core_with_its_lineages() {
+            let mut notices = Vec::new();
+            let magi = build_magi_orchestrator(
+                &TrioBuild {
+                    cfg: &cfg_with_pool(2),
+                    principal_kind: ProviderKind::Ollama,
+                    endpoints: &test_endpoints(),
+                    creds: None,
+                    warn_tokens: None,
+                    env_overrides: &MagiEnvModelOverrides::default(),
+                    capability_cache: None,
+                    measured: &BTreeMap::new(),
+                },
+                &mut notices,
+            )
+            .expect("ollama is keyless");
+            drop(magi);
+
+            let wired = pool_wiring_trace().expect("a declared pool must be wired");
+            assert_eq!(
+                wired.candidates,
+                vec![("rescue-model".to_string(), "lin-rescue".to_string())],
+                "the candidate must carry its declared lineage, not an inferred one"
+            );
+            assert_eq!(wired.max_rotations, 2);
+            assert!(
+                !wired.strict_guard,
+                "an undeclared strict_context_guard reaches magi-core as false (REQ-R11): the \
+                 case it would bite is the COLD START, where nothing measured yet means every \
+                 candidate fails the window condition and rotation switches off in silence"
+            );
+        }
+
+        /// SC-R52/D-R15: a model declared TWICE registers exactly ONE probe.
+        ///
+        /// magi-core indexes capabilities by `model_id` and knows nothing about endpoints, so two
+        /// probes for one model leave it keeping whichever answered last, **in nondeterministic
+        /// order**. Deduplicating at registration makes that unreachable instead of merely
+        /// forbidden on paper — and two seats on the same model stay LEGAL, as they were in
+        /// v0.12.0, since prohibiting them would be a configuration break bought for nothing.
+        #[test]
+        fn a_model_declared_twice_registers_a_single_probe() {
+            let cfg = MagiConfig::from_toml_str(
+                "provider = \"ollama\"\n\
+                 [magi]\n\
+                 melchior_model    = \"shared\"\nmelchior_lineage  = \"lin-a\"\n\
+                 balthasar_model   = \"shared\"\nbalthasar_lineage = \"lin-b\"\n\
+                 caspar_model \
+                  = \"other\"\ncaspar_lineage    = \"lin-c\"\n\
+                 [[magi.fallback]]\n\
+                 model   = \"shared\"\nlineage = \"lin-rescue\"\n",
+            )
+            .expect("two seats on one model is legal");
+
+            let cache = {
+                let conn = std::sync::Mutex::new(
+                    rusqlite::Connection::open_in_memory().expect("in-memory sqlite"),
+                );
+                let dek = magi_rs::vault::MaskedDek::new(zeroize::Zeroizing::new(vec![5u8; 32]))
+                    .expect("32 bytes");
+                Arc::new(ModelCapabilityCache::new(Arc::new(conn), dek).expect("schema"))
+            };
+            let mut notices = Vec::new();
+            let magi = build_magi_orchestrator(
+                &TrioBuild {
+                    cfg: &cfg,
+                    principal_kind: ProviderKind::Ollama,
+                    endpoints: &test_endpoints(),
+                    creds: None,
+                    warn_tokens: None,
+                    env_overrides: &MagiEnvModelOverrides::default(),
+                    capability_cache: Some(&cache),
+                    measured: &BTreeMap::new(),
+                },
+                &mut notices,
+            )
+            .expect("a repeated model must not fail the build");
+            drop(magi);
+
+            let wired = pool_wiring_trace().expect("the pool is declared");
+            assert!(
+                wired.candidates.iter().any(|(model, _)| model == "shared"),
+                "the pool entry repeating a seat's model is KEPT, not pruned: `used` is per mage, \
+                 so another seat can still rotate into it: {wired:?}"
+            );
+            // SC-R52's other half, and the reason this assertion is here rather than in a test of
+            // its own: without it the whole notice block can be deleted and the suite stays green.
+            assert!(
+                notices
+                    .iter()
+                    .any(|n| n.text.contains("shared") && n.text.contains("repeats a model")),
+                "the repetition must be announced — silent, it surfaces only as an unexpectedly \
+                 short rotation chain during a real incident: {notices:?}"
+            );
+        }
+
+        /// The env layer is what the collapse notice must see, and the ONLY thing that pins it.
+        ///
+        /// The fix for this gate's first CRITICAL moved correctness from inside
+        /// `diversity_notices` — where it could not be got wrong — out to the CALLER, which is
+        /// `pub(crate)` and can be handed anything. Reverting the call site to
+        /// `cfg.magi().seats(backend_model)` compiles, and every other test here uses
+        /// `MagiEnvModelOverrides::default()`, so the env layer is never in play and the whole
+        /// regression comes back green. This test is the one that goes red.
+        ///
+        /// Both directions, because the fix claimed both: a DECLARED, distinct trio collapsed by
+        /// three identical overrides must be reported, and an undeclared trio pulled apart by
+        /// three distinct ones must NOT be.
+        #[test]
+        fn the_collapse_notice_reads_the_env_overrides_not_the_declared_models() {
+            let declared_distinct = MagiConfig::from_toml_str(
+                "provider = \"ollama\"\n\
+                 [magi]\n\
+                 melchior_model    = \"m-a\"\nmelchior_lineage  = \"la\"\n\
+                 balthasar_model   = \"m-b\"\nbalthasar_lineage = \"lb\"\n\
+                 caspar_model      = \"m-c\"\ncaspar_lineage    = \"lc\"\n",
+            )
+            .expect("a declared, distinct trio loads");
+
+            let collapsed_by_env = MagiEnvModelOverrides {
+                melchior: Some("one-model".to_string()),
+                balthasar: Some("one-model".to_string()),
+                caspar: Some("one-model".to_string()),
+            };
+            let mut notices = Vec::new();
+            let magi = build_magi_orchestrator(
+                &TrioBuild {
+                    cfg: &declared_distinct,
+                    principal_kind: ProviderKind::Ollama,
+                    endpoints: &test_endpoints(),
+                    creds: None,
+                    warn_tokens: None,
+                    env_overrides: &collapsed_by_env,
+                    capability_cache: None,
+                    measured: &BTreeMap::new(),
+                },
+                &mut notices,
+            )
+            .expect("ollama is keyless");
+            drop(magi);
+            assert!(
+                notices
+                    .iter()
+                    .any(|n| n.text.contains("resolve to the same model")),
+                "the TOML says three models; the env says one, and the env is what runs: \
+                 {notices:?}"
+            );
+
+            // The mirror. Without this half, a notice that fired unconditionally would pass.
+            let pulled_apart_by_env = MagiEnvModelOverrides {
+                melchior: Some("m-1".to_string()),
+                balthasar: Some("m-2".to_string()),
+                caspar: Some("m-3".to_string()),
+            };
+            let undeclared =
+                MagiConfig::from_toml_str("provider = \"ollama\"\n").expect("defaults load");
+            let mut notices = Vec::new();
+            let magi = build_magi_orchestrator(
+                &TrioBuild {
+                    cfg: &undeclared,
+                    principal_kind: ProviderKind::Ollama,
+                    endpoints: &test_endpoints(),
+                    creds: None,
+                    warn_tokens: None,
+                    env_overrides: &pulled_apart_by_env,
+                    capability_cache: None,
+                    measured: &BTreeMap::new(),
+                },
+                &mut notices,
+            )
+            .expect("ollama is keyless");
+            drop(magi);
+            assert!(
+                !notices
+                    .iter()
+                    .any(|n| n.text.contains("resolve to the same model")),
+                "three distinct overrides ARE three models; saying otherwise is a false \
+                 statement about the user's own configuration: {notices:?}"
+            );
+        }
+
+        /// REQ-R15/SC-R22's soft path, driven through the builder.
+        ///
+        /// `validate_diversity` returns coverage gaps as NOTICES when `enforce_diversity` is
+        /// false, and that vector was being discarded. The unit tests of `diversity_notices`
+        /// cannot catch its return: they use configs with no `[[magi.fallback]]`, so the coverage
+        /// branch is skipped entirely and their notice count is satisfied by the collapse notice
+        /// alone. Only a config with a pool that covers nobody exercises it.
+        #[test]
+        fn an_uncovered_seat_is_announced_by_the_builder_when_enforcement_is_off() {
+            let cfg = MagiConfig::from_toml_str(
+                "provider = \"ollama\"\n\
+                 [magi]\n\
+                 melchior_model    = \"m-a\"\nmelchior_lineage  = \"opus\"\n\
+                 balthasar_model   = \"m-b\"\nbalthasar_lineage = \"sonnet\"\n\
+                 caspar_model      = \"m-c\"\ncaspar_lineage    = \"haiku\"\n\
+                 enforce_diversity = false\n\
+                 [[magi.fallback]]\n\
+                 model   = \"rescue\"\nlineage = \"opus\"\n",
+            )
+            .expect("the mono-provider exit must load");
+
+            let mut notices = Vec::new();
+            let magi = build_magi_orchestrator(
+                &TrioBuild {
+                    cfg: &cfg,
+                    principal_kind: ProviderKind::Ollama,
+                    endpoints: &test_endpoints(),
+                    creds: None,
+                    warn_tokens: None,
+                    env_overrides: &MagiEnvModelOverrides::default(),
+                    capability_cache: None,
+                    measured: &BTreeMap::new(),
+                },
+                &mut notices,
+            )
+            .expect("ollama is keyless");
+            drop(magi);
+
+            let text = notices
+                .iter()
+                .map(|n| n.text.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(
+                text.contains("no fallback coverage"),
+                "an `opus` candidate covers only Melchior; the other two must be named: {text}"
+            );
+            assert!(
+                text.contains("balthasar") && text.contains("caspar"),
+                "and both named: {text}"
+            );
+            // "All of them in ONE message" is asserted HERE as a count, not implied by the
+            // message above: `text` is the join of every notice, so a version that emitted one
+            // per seat would read identically. The stronger `notices.len() == 1` would be wrong
+            // at this layer — other notices are legitimate in a builder run — so the count is
+            // scoped to the ones this property is about.
+            assert_eq!(
+                notices
+                    .iter()
+                    .filter(|n| n.text.contains("no fallback coverage"))
+                    .count(),
+                1,
+                "one message for all uncovered seats, not one per seat: {text}"
+            );
+        }
+
+        /// REQ-R29's collapse notice, driven through `build_magi_orchestrator`.
+        ///
+        /// The unit test for `diversity_notices` calls the function directly, which is exactly the
+        /// shape that let the CRITICAL of this gate's first iteration through — and the commit
+        /// that fixed it stated the rule it then failed to apply here: *only a test that goes
+        /// through the real path can catch a missing wire.*
+        #[test]
+        fn three_seats_on_one_model_are_announced_by_the_builder() {
+            let cfg = MagiConfig::from_toml_str("provider = \"ollama\"\n")
+                .expect("an absent trio must still load");
+            let mut notices = Vec::new();
+            let magi = build_magi_orchestrator(
+                &TrioBuild {
+                    cfg: &cfg,
+                    principal_kind: ProviderKind::Ollama,
+                    endpoints: &test_endpoints(),
+                    creds: None,
+                    warn_tokens: None,
+                    env_overrides: &MagiEnvModelOverrides::default(),
+                    capability_cache: None,
+                    measured: &BTreeMap::new(),
+                },
+                &mut notices,
+            )
+            .expect("the default configuration must still build a trio");
+            drop(magi);
+
+            assert!(
+                notices
+                    .iter()
+                    .any(|n| n.text.contains("resolve to the same model")),
+                "with no trio declared all three seats fall back to the backend model, and their \
+                 three built-in labels describe one failure domain: {notices:?}"
+            );
+        }
+
+        /// SC-R24: rotation does NOT depend on the probe. With nothing measured at all, a failing
+        /// mage still rotates — measurement improves the decision, it does not enable it.
+        #[tokio::test]
+        async fn rotation_works_with_no_measurement_at_all() {
+            use mockito::Matcher;
+            let mut server = mockito::Server::new_async().await;
+            let _down = server
+                .mock("POST", "/v1/chat/completions")
+                .match_body(Matcher::AllOf(vec![
+                    Matcher::Regex("(?i)caspar".into()),
+                    Matcher::Regex("down-model".into()),
+                ]))
+                .with_status(400)
+                .with_body("{\"error\":\"unavailable\"}")
+                .create_async()
+                .await;
+            for (seat, model, agent) in [
+                ("(?i)caspar", "rescue-model", "caspar"),
+                ("(?i)melchior", "ok-model", "melchior"),
+                ("(?i)balthasar", "ok-model", "balthasar"),
+            ] {
+                server
+                    .mock("POST", "/v1/chat/completions")
+                    .match_body(Matcher::AllOf(vec![
+                        Matcher::Regex(seat.into()),
+                        Matcher::Regex(model.into()),
+                    ]))
+                    .with_status(200)
+                    .with_body(verdict_body(agent))
+                    .create_async()
+                    .await;
+            }
+            let endpoints = ResolvedEndpoints {
+                root: endpoint_at(&server.url()),
+                magi: endpoint_at(&server.url()),
+            };
+            let mut notices = Vec::new();
+            let magi = build_magi_orchestrator(
+                &TrioBuild {
+                    cfg: &cfg_with_pool(2),
+                    principal_kind: ProviderKind::Ollama,
+                    endpoints: &endpoints,
+                    creds: None,
+                    warn_tokens: None,
+                    env_overrides: &MagiEnvModelOverrides::default(),
+                    capability_cache: None,
+                    // NOTHING measured — the cold-start state.
+                    measured: &BTreeMap::new(),
+                },
+                &mut notices,
+            )
+            .expect("ollama is keyless");
+
+            let report = magi
+                .analyze(
+                    &Mode::Analysis,
+                    "a question long enough to be a real consult",
+                )
+                .await
+                .expect("the consult must complete");
+            assert!(
+                !report.rotations[&AgentName::Caspar].chain.is_empty(),
+                "rotation must work with no measurement: the probe improves the decision, it does \
+                 not enable it"
+            );
+            assert!(!report.degraded, "and the run is not degraded");
+        }
+
+        /// SC-R02: exhausting the chain WITHOUT a verdict does degrade the run — the other half of
+        /// SC-R01, and the one that keeps "a rotation is not a degradation" from quietly becoming
+        /// "nothing degrades any more".
+        #[tokio::test]
+        async fn exhausting_the_rotation_chain_degrades_the_run() {
+            use mockito::Matcher;
+            let mut server = mockito::Server::new_async().await;
+            // EVERY model Caspar can reach fails, primary and candidate alike.
+            let _all_down = server
+                .mock("POST", "/v1/chat/completions")
+                .match_body(Matcher::Regex("(?i)caspar".into()))
+                .with_status(400)
+                .with_body("{\"error\":\"unavailable\"}")
+                .create_async()
+                .await;
+            for (seat, agent) in [("(?i)melchior", "melchior"), ("(?i)balthasar", "balthasar")] {
+                server
+                    .mock("POST", "/v1/chat/completions")
+                    .match_body(Matcher::Regex(seat.into()))
+                    .with_status(200)
+                    .with_body(verdict_body(agent))
+                    .create_async()
+                    .await;
+            }
+            let endpoints = ResolvedEndpoints {
+                root: endpoint_at(&server.url()),
+                magi: endpoint_at(&server.url()),
+            };
+            let mut notices = Vec::new();
+            let magi = build_magi_orchestrator(
+                &TrioBuild {
+                    cfg: &cfg_with_pool(2),
+                    principal_kind: ProviderKind::Ollama,
+                    endpoints: &endpoints,
+                    creds: None,
+                    warn_tokens: None,
+                    env_overrides: &MagiEnvModelOverrides::default(),
+                    capability_cache: None,
+                    measured: &BTreeMap::new(),
+                },
+                &mut notices,
+            )
+            .expect("ollama is keyless");
+
+            let report = magi
+                .analyze(
+                    &Mode::Analysis,
+                    "a question long enough to be a real consult",
+                )
+                .await
+                .expect("the consult must return even when a seat is lost");
+            assert!(
+                report.degraded,
+                "no verdict after the whole chain IS degradation"
+            );
+            assert!(
+                report.failed_agents.contains_key(&AgentName::Caspar),
+                "and the lost seat is named: {:?}",
+                report.failed_agents
+            );
+        }
+
+        /// SC-R30: with NO cache the stateless path measures a FOURTH model — the first pool
+        /// candidate — and with a cache it does not.
+        ///
+        /// Both halves are asserted, and the second is what makes the first mean anything: a test
+        /// that only checked "four without a cache" would pass just as well if the extra candidate
+        /// were measured unconditionally, which would pay on every start for a model the lazy path
+        /// already covers.
+        ///
+        /// The FIRST candidate and not the pool: the list is ordered strongest to weakest, so it
+        /// is the most likely rotation destination, and measuring the rest would spend on
+        /// candidates that probably never run.
+        #[test]
+        fn the_stateless_path_measures_the_first_candidate_and_the_cached_one_does_not() {
+            let cfg = cfg_with_pool(2);
+            let stateless = stateless_extra_models(&cfg, None);
+            assert_eq!(
+                stateless,
+                vec!["rescue-model".to_string()],
+                "without a cache nothing else would ever measure a candidate: no CachedProbe is \
+                 built, so there is no lazy path at all"
+            );
+
+            let conn = std::sync::Mutex::new(
+                rusqlite::Connection::open_in_memory().expect("in-memory sqlite"),
+            );
+            let dek = magi_rs::vault::MaskedDek::new(zeroize::Zeroizing::new(vec![3u8; 32]))
+                .expect("32 bytes");
+            let cache = Arc::new(ModelCapabilityCache::new(Arc::new(conn), dek).expect("schema"));
+            assert!(
+                stateless_extra_models(&cfg, Some(&cache)).is_empty(),
+                "with a cache the measurement is lazy: paying for the candidate at every start \
+                 would be the cost the cache exists to avoid"
+            );
+        }
+
+        /// REQ-R27 END TO END: a configured model this endpoint could not measure **while it was
+        /// measuring others** is named at STARTUP, with the command that fixes it.
+        ///
+        /// This is the guardian for the wiring, not for the function: `missing_model_notices` was
+        /// implemented and tested in Phase 2 and had **no production caller** until Phase 6, which
+        /// meant the requirement was not delivered at all — the user saw nothing at startup and
+        /// found out when a mage fell. A unit test of the function could never have caught that.
+        #[test]
+        fn a_configured_model_the_endpoint_could_not_measure_is_named_at_startup() {
+            let mut notices = Vec::new();
+            let magi = build_magi_orchestrator(
+                &TrioBuild {
+                    cfg: &cfg_with_pool(2),
+                    principal_kind: ProviderKind::Ollama,
+                    endpoints: &test_endpoints(),
+                    creds: None,
+                    warn_tokens: None,
+                    env_overrides: &MagiEnvModelOverrides::default(),
+                    capability_cache: None,
+                    // The endpoint clearly measures — it answered for `ok-model` — and did not
+                    // answer for the fallback. That is what separates "this model is not there"
+                    // from "this endpoint is not answering".
+                    measured: &[
+                        (
+                            "ok-model".to_string(),
+                            magi_rs::magi::probe::Measurement::Measured {
+                                window: 128_000,
+                                digest: None,
+                            },
+                        ),
+                        (
+                            "rescue-model".to_string(),
+                            magi_rs::magi::probe::Measurement::NotMeasuredThisTime,
+                        ),
+                    ]
+                    .into_iter()
+                    .collect(),
+                },
+                &mut notices,
+            )
+            .expect("ollama is keyless");
+            drop(magi);
+
+            assert!(
+                notices
+                    .iter()
+                    .any(|n| n.text.contains("rescue-model") && n.text.contains("ollama pull")),
+                "the startup notice must name the model AND the command that fixes it: {notices:?}"
+            );
+        }
+
+        /// SC-R33: the warning threshold does NOT change inside the process — two consults in one
+        /// session keep the same criterion, even when a mage rotated to a smaller-window model in
+        /// between.
+        ///
+        /// Re-deriving would be structurally impossible anyway (`with_input_warn_tokens` is a
+        /// BUILDER method and magi-rs builds the orchestrator once per process), and that is
+        /// exactly why this is worth pinning rather than asserting in prose: the property is
+        /// currently free, so nothing would complain if a later change started rebuilding the
+        /// orchestrator per consult and quietly made the criterion drift between two identical
+        /// questions.
+        #[tokio::test]
+        async fn the_warn_threshold_is_the_same_before_and_after_a_rotation() {
+            use mockito::Matcher;
+            let mut server = mockito::Server::new_async().await;
+            let _down = server
+                .mock("POST", "/v1/chat/completions")
+                .match_body(Matcher::AllOf(vec![
+                    Matcher::Regex("(?i)caspar".into()),
+                    Matcher::Regex("down-model".into()),
+                ]))
+                .with_status(400)
+                .with_body("{\"error\":\"model unavailable\"}")
+                .create_async()
+                .await;
+            for (seat, model, agent) in [
+                ("(?i)caspar", "rescue-model", "caspar"),
+                ("(?i)melchior", "ok-model", "melchior"),
+                ("(?i)balthasar", "ok-model", "balthasar"),
+            ] {
+                server
+                    .mock("POST", "/v1/chat/completions")
+                    .match_body(Matcher::AllOf(vec![
+                        Matcher::Regex(seat.into()),
+                        Matcher::Regex(model.into()),
+                    ]))
+                    .with_status(200)
+                    .with_body(verdict_body(agent))
+                    .expect_at_least(1)
+                    .create_async()
+                    .await;
+            }
+
+            let endpoints = ResolvedEndpoints {
+                root: endpoint_at(&server.url()),
+                magi: endpoint_at(&server.url()),
+            };
+            let mut notices = Vec::new();
+            let magi = build_magi_orchestrator(
+                &TrioBuild {
+                    cfg: &cfg_with_pool(2),
+                    principal_kind: ProviderKind::Ollama,
+                    endpoints: &endpoints,
+                    creds: None,
+                    warn_tokens: Some(96_000),
+                    env_overrides: &MagiEnvModelOverrides::default(),
+                    capability_cache: None,
+                    measured: &BTreeMap::new(),
+                },
+                &mut notices,
+            )
+            .expect("ollama is keyless");
+
+            let prompt = "a question long enough to be a real consult";
+            let first = magi
+                .analyze(&Mode::Analysis, prompt)
+                .await
+                .expect("first consult");
+            let second = magi
+                .analyze(&Mode::Analysis, prompt)
+                .await
+                .expect("second consult");
+
+            assert!(
+                !second.rotations[&AgentName::Caspar].chain.is_empty(),
+                "the second consult must actually have rotated, or this proves nothing"
+            );
+            // Both halves are read as VALUES, not as options: `assert_eq!(None, None)` would pass
+            // just as well if the report never carried a threshold at all, which is the vacuous
+            // shape this milestone has already found five times.
+            let first_threshold = first
+                .input_size
+                .as_ref()
+                .map(|s| s.warn_threshold)
+                .expect("the report must carry a threshold, or there is nothing to compare");
+            let second_threshold = second
+                .input_size
+                .as_ref()
+                .map(|s| s.warn_threshold)
+                .expect("same for the second consult");
+            assert_eq!(
+                first_threshold, second_threshold,
+                "the criterion must not drift between two identical questions in one session"
+            );
+        }
+
+        /// SC-R51, the half no unit test can cover: an unmeasured candidate is **announced and
+        /// KEPT**.
+        ///
+        /// A test that only checked the notice exists would pass just as well if magi-rs were
+        /// quietly dropping the candidate — the operator would see a warning about a candidate
+        /// that is no longer there. Reading the pool magi-core actually received is what
+        /// separates "informed" from "filtered".
+        #[test]
+        fn an_unmeasured_candidate_is_reported_and_still_reaches_the_pool() {
+            let mut notices = Vec::new();
+            let magi = build_magi_orchestrator(
+                &TrioBuild {
+                    cfg: &cfg_with_pool(2),
+                    principal_kind: ProviderKind::Ollama,
+                    endpoints: &test_endpoints(),
+                    creds: None,
+                    warn_tokens: None,
+                    env_overrides: &MagiEnvModelOverrides::default(),
+                    capability_cache: None,
+                    // The trio measured; the candidate did not — exactly the shape that would
+                    // tempt an implementation to "protect" the run by dropping it.
+                    measured: &[
+                        (
+                            "ok-model".to_string(),
+                            magi_rs::magi::probe::Measurement::Measured {
+                                window: 128_000,
+                                digest: None,
+                            },
+                        ),
+                        (
+                            "rescue-model".to_string(),
+                            magi_rs::magi::probe::Measurement::NotMeasuredThisTime,
+                        ),
+                    ]
+                    .into_iter()
+                    .collect(),
+                },
+                &mut notices,
+            )
+            .expect("ollama is keyless");
+            drop(magi);
+
+            assert!(
+                notices
+                    .iter()
+                    .any(|n| n.text.contains("rescue-model")
+                        && n.text.contains("no measured window")),
+                "the assumption must be announced: {notices:?}"
+            );
+            let wired = pool_wiring_trace().expect("the pool is declared");
+            assert!(
+                wired
+                    .candidates
+                    .iter()
+                    .any(|(model, _)| model == "rescue-model"),
+                "and the candidate must STILL be in the pool magi-core received: {wired:?}"
+            );
+        }
+
+        /// SC-R04/REQ-R05: `max_rotations = 0` is a kill-switch, and it survives as a DECLARED
+        /// value — collapsing `None` and `Some(0)` would turn an explicit "no rotation" into
+        /// "use the default", which is the opposite instruction.
+        #[test]
+        fn max_rotations_zero_is_wired_as_a_declared_kill_switch() {
+            let mut notices = Vec::new();
+            let magi = build_magi_orchestrator(
+                &TrioBuild {
+                    cfg: &cfg_with_pool(0),
+                    principal_kind: ProviderKind::Ollama,
+                    endpoints: &test_endpoints(),
+                    creds: None,
+                    warn_tokens: None,
+                    env_overrides: &MagiEnvModelOverrides::default(),
+                    capability_cache: None,
+                    measured: &BTreeMap::new(),
+                },
+                &mut notices,
+            )
+            .expect("ollama is keyless");
+            drop(magi);
+
+            let wired = pool_wiring_trace().expect("the pool is still declared");
+            assert_eq!(
+                wired.max_rotations, 0,
+                "0 must reach magi-core as 0, never as the default"
+            );
+        }
+
+        /// SC-R01 END TO END: a mage whose model fails **rotates to the declared candidate** and
+        /// still emits a verdict, driven through the REAL `build_magi_orchestrator` rather than a
+        /// hand-built `MagiBuilder`.
+        ///
+        /// This is the only test in the milestone that exercises the whole chain — config →
+        /// pool → provider → rotation → report — so it is the one that would catch a wiring
+        /// mistake the trace-based tests above cannot see, such as a pool built from the right
+        /// models against the wrong endpoint.
+        ///
+        /// The server discriminates by **model**, which is what the request body carries, and the
+        /// matchers are mutually exclusive so the result does not depend on mockito's matching
+        /// order. `down-model` answers **400**: a non-retryable status, so `RetryProvider` gives
+        /// up at once and the rotation is what is being measured, not the retry backoff.
+        #[tokio::test]
+        async fn a_mage_whose_model_fails_rotates_to_the_declared_candidate() {
+            use mockito::Matcher;
+            let mut server = mockito::Server::new_async().await;
+
+            let _down = server
+                .mock("POST", "/v1/chat/completions")
+                .match_body(Matcher::AllOf(vec![
+                    Matcher::Regex("(?i)caspar".into()),
+                    Matcher::Regex("down-model".into()),
+                ]))
+                .with_status(400)
+                .with_body("{\"error\":\"model unavailable\"}")
+                .expect_at_least(1)
+                .create_async()
+                .await;
+            let _rescue = server
+                .mock("POST", "/v1/chat/completions")
+                .match_body(Matcher::AllOf(vec![
+                    Matcher::Regex("(?i)caspar".into()),
+                    Matcher::Regex("rescue-model".into()),
+                ]))
+                .with_status(200)
+                .with_body(verdict_body("caspar"))
+                .expect_at_least(1)
+                .create_async()
+                .await;
+            let _melchior = server
+                .mock("POST", "/v1/chat/completions")
+                .match_body(Matcher::Regex("(?i)melchior".into()))
+                .with_status(200)
+                .with_body(verdict_body("melchior"))
+                .create_async()
+                .await;
+            let _balthasar = server
+                .mock("POST", "/v1/chat/completions")
+                .match_body(Matcher::Regex("(?i)balthasar".into()))
+                .with_status(200)
+                .with_body(verdict_body("balthasar"))
+                .create_async()
+                .await;
+
+            let endpoint = endpoint_at(&server.url());
+            let endpoints = ResolvedEndpoints {
+                root: endpoint_at(&server.url()),
+                magi: endpoint,
+            };
+            let mut notices = Vec::new();
+            let magi = build_magi_orchestrator(
+                &TrioBuild {
+                    cfg: &cfg_with_pool(2),
+                    principal_kind: ProviderKind::Ollama,
+                    endpoints: &endpoints,
+                    creds: None,
+                    warn_tokens: None,
+                    env_overrides: &MagiEnvModelOverrides::default(),
+                    capability_cache: None,
+                    measured: &BTreeMap::new(),
+                },
+                &mut notices,
+            )
+            .expect("ollama is keyless");
+
+            let report = magi
+                .analyze(
+                    &Mode::Analysis,
+                    "a question long enough to be a real consult",
+                )
+                .await
+                .expect("the consult must complete");
+
+            assert_eq!(
+                report.agents.len(),
+                3,
+                "the consensus must still have three"
+            );
+            assert!(!report.degraded, "a rotation is NOT degradation (REQ-R04)");
+
+            // `rotations` is populated for EVERY agent, rotated or not — its rustdoc calls it
+            // "always present". What distinguishes the one that rotated is a non-empty `chain`.
+            let caspar = report
+                .rotations
+                .get(&AgentName::Caspar)
+                .expect("rotations is always present, for every agent");
+            assert!(
+                !caspar.chain.is_empty(),
+                "Caspar's model was down: it must have hopped"
+            );
+            assert_eq!(
+                caspar.model_used, "rescue-model",
+                "REQ-R06: the report must name the model that ACTUALLY produced the verdict"
+            );
+            assert!(
+                report.rotations[&AgentName::Melchior].chain.is_empty(),
+                "nobody else had a reason to rotate"
+            );
+        }
+
+        /// SC-R12/REQ-R16: with a credential-bearing endpoint and a mage that **really fails and
+        /// rotates**, no output surface carries the credential.
+        ///
+        /// # Why it drives the real path instead of building the error
+        ///
+        /// Every previous no-leak assertion for rotation could have been written by handing
+        /// `redact_foreign_text` a string with a credential in it — and that guardian proves only
+        /// that the redactor redacts, which its own unit tests already prove. It says nothing
+        /// about whether the **composition** calls it. This one goes through
+        /// `build_magi_orchestrator`, a real 400, a real rotation, and the real renderers.
+        ///
+        /// # The honest limit, stated rather than discovered later
+        ///
+        /// Whether the credential ever reaches a `RotationEvent::detail` is **magi-core's**
+        /// choice, and reqwest already strips userinfo from the URL it echoes. So the canary may
+        /// well be absent for reasons that have nothing to do with our redaction — which is
+        /// exactly how a no-leak test becomes a guardian of nothing. That is why the assertions
+        /// come in pairs: each surface must be **non-trivially rendered** before its absence of
+        /// the canary means anything. An empty string contains no secret either.
+        #[tokio::test]
+        async fn no_output_carries_the_credential_when_a_mage_really_fails_and_rotates() {
+            use magi_rs::magi::rotation_report::{render_rotations, rotation_lines};
+            use mockito::Matcher;
+            let canary = super::divergence_and_keyless_auth::SEAT_CANARY;
+            let mut server = mockito::Server::new_async().await;
+
+            let _down = server
+                .mock("POST", "/v1/chat/completions")
+                .match_body(Matcher::AllOf(vec![
+                    Matcher::Regex("(?i)caspar".into()),
+                    Matcher::Regex("down-model".into()),
+                ]))
+                .with_status(400)
+                .with_body("{\"error\":\"model unavailable\"}")
+                .create_async()
+                .await;
+            for (seat, model) in [
+                ("(?i)caspar", "rescue-model"),
+                ("(?i)melchior", "melchior"),
+                ("(?i)balthasar", "balthasar"),
+            ] {
+                let agent = if model == "rescue-model" {
+                    "caspar"
+                } else {
+                    model
+                };
+                server
+                    .mock("POST", "/v1/chat/completions")
+                    .match_body(Matcher::AllOf(vec![
+                        Matcher::Regex(seat.into()),
+                        Matcher::Regex(
+                            if model == "rescue-model" {
+                                "rescue-model"
+                            } else {
+                                "ok-model"
+                            }
+                            .into(),
+                        ),
+                    ]))
+                    .with_status(200)
+                    .with_body(verdict_body(agent))
+                    .create_async()
+                    .await;
+            }
+
+            // The ONLY way to obtain a credential-bearing endpoint: REQ-A16c rejects a literal
+            // one at parse time, so it has to come from placeholders resolved against a vault.
+            let host = server.url().replace("http://", "");
+            let endpoint = super::divergence_and_keyless_auth::credentialed_endpoint(&format!(
+                "http://[user]:[password]@{host}/v1"
+            ));
+            let endpoints = ResolvedEndpoints {
+                root: super::divergence_and_keyless_auth::credentialed_endpoint(&format!(
+                    "http://[user]:[password]@{host}/v1"
+                )),
+                magi: endpoint,
+            };
+
+            let mut notices = Vec::new();
+            let magi = build_magi_orchestrator(
+                &TrioBuild {
+                    cfg: &cfg_with_pool(2),
+                    principal_kind: ProviderKind::Ollama,
+                    endpoints: &endpoints,
+                    creds: None,
+                    warn_tokens: None,
+                    env_overrides: &MagiEnvModelOverrides::default(),
+                    capability_cache: None,
+                    measured: &BTreeMap::new(),
+                },
+                &mut notices,
+            )
+            .expect("ollama is keyless: the credential rides in the URL, not in a header we set");
+
+            let report = magi
+                .analyze(
+                    &Mode::Analysis,
+                    "a question long enough to be a real consult",
+                )
+                .await
+                .expect("the consult must complete");
+
+            // FIRST HALF: the telemetry really rendered. Without this, every assertion below
+            // would pass against a run that produced no rotation output at all.
+            assert!(
+                !report.rotations[&AgentName::Caspar].chain.is_empty(),
+                "the canary means nothing unless a rotation actually happened"
+            );
+            let json = render_rotations(&report.rotations).to_string();
+            let lines = rotation_lines(&report.rotations).join("\n");
+            let annotated =
+                crate::tools::consult::annotate_report_text(&report, ProviderKind::Ollama);
+            assert!(
+                json.contains("rescue-model") && lines.contains("rescue-model"),
+                "both renderers must have produced real telemetry: {json} / {lines}"
+            );
+            assert!(
+                annotated.contains("Model rotations"),
+                "the text surface must carry the rotation section: {annotated}"
+            );
+
+            // SECOND HALF: and none of it carries the credential.
+            for surface in [&json, &lines, &annotated] {
+                assert!(
+                    !surface.contains(canary),
+                    "the credential reached an output surface: {surface}"
+                );
+                assert!(
+                    !surface.contains("alice"),
+                    "the username reached an output surface: {surface}"
+                );
             }
         }
 
@@ -6751,7 +8800,8 @@ mod tests {
                  [anthropic]\n\
                  model = \"claude-sonnet-4-6\"\n\
                  [magi]\n\
-                 caspar_model = \"totally-bogus-alias\"\n",
+                 caspar_model = \"totally-bogus-alias\"\n\
+                 caspar_lineage = \"bogus\"\n",
             )
             .unwrap()
         }
@@ -6763,14 +8813,15 @@ mod tests {
         /// of `build_magi_orchestrator` on why it does NOT use `cfg.effective_magi_kind()` for
         /// this.
         fn cfg_with_kind(kind: &str) -> MagiConfig {
-            MagiConfig {
-                provider: Some("ollama".to_string()),
-                magi: crate::config::MagiSectionConfig {
+            // `build_unvalidated`, not `build`: this fixture's whole point is a `kind` the
+            // validation would reject, so the validating exit cannot be the one used here.
+            MagiConfig::builder()
+                .provider(Some("ollama".to_string()))
+                .magi(crate::config::MagiSectionConfig {
                     kind: Some(kind.to_string()),
                     ..crate::config::MagiSectionConfig::default()
-                },
-                ..MagiConfig::default()
-            }
+                })
+                .build_unvalidated()
         }
 
         /// Content above any magi-core internal minimum — not the REQ-A20 complexity gate
@@ -6961,23 +9012,35 @@ mod tests {
         /// This test calls the REAL function, with `ollama` (keyless, no credential or network
         /// needed to BUILD — it only builds the HTTP client, not use it), and reads
         /// `seat_wiring_trace()` — the trace `build_magi_orchestrator` leaves ONLY in test
-        /// builds, in the SAME branch that does the real wrapping. If someone removes the
-        /// `RetryProvider::with_config(...)` from production without touching the trace, the
-        /// count will stop matching what `seats.push` produces and this test will fail. It is
-        /// not runtime downcasting — `LlmProvider` is a foreign trait from magi-core with no
-        /// `Any` (R-A01 forbids touching that crate) — so this is the strongest approximation
-        /// achievable without modifying it.
+        /// builds, in the SAME branch that does the real wrapping.
+        ///
+        /// # It did not guard until Task 3.1 measured it (B16)
+        ///
+        /// The trace's wrapped flag used to be the literal `true`, and this rustdoc used to
+        /// claim that removing `RetryProvider::with_config(...)` from production "without
+        /// touching the trace" would break the count. The mutation says otherwise: replacing the
+        /// wrap with a bare `p` left `seats.push` running, the literal unchanged, and this test
+        /// **green** — through the exact regression it exists to catch. The flag is now the
+        /// comparison of two allocation addresses, so the same mutation turns it red.
+        ///
+        /// It is still not runtime downcasting — `LlmProvider` is a foreign trait from magi-core
+        /// with no `Any` (R-A01 forbids touching that crate) — so what this proves is that
+        /// *something* wrapped the provider, not that the something is a `RetryProvider`.
         #[test]
         fn build_magi_orchestrator_wires_three_distinct_seats_each_wrapped_in_retry() {
             let cfg = MagiConfig::from_toml_str("provider = \"ollama\"\n").unwrap();
             let mut notices = Vec::new();
             let magi = build_magi_orchestrator(
-                &cfg,
-                ProviderKind::Ollama,
-                &test_endpoints(),
-                None,
-                None,
-                &MagiEnvModelOverrides::default(),
+                &TrioBuild {
+                    cfg: &cfg,
+                    principal_kind: ProviderKind::Ollama,
+                    endpoints: &test_endpoints(),
+                    creds: None,
+                    warn_tokens: None,
+                    env_overrides: &MagiEnvModelOverrides::default(),
+                    capability_cache: None,
+                    measured: &BTreeMap::new(),
+                },
                 &mut notices,
             )
             .expect("ollama is keyless: it must build with no credentials or network");
@@ -7001,6 +9064,111 @@ mod tests {
             );
         }
 
+        /// REQ-R01: each seat is registered with its DECLARED lineage. The registration migrates
+        /// from `with_provider(seat, provider)` — what magi-rs used through v0.12.x — to
+        /// `with_agent(seat, provider, lineage)`, which is the only door that carries the rotation
+        /// diversity key.
+        ///
+        /// Asserted against `seat_lineage_trace()`, recorded in the SAME loop that calls
+        /// `with_agent`, because `MagiBuilder::agent_lineages` is private and `Magi` exposes no
+        /// reader for it: from outside the crate there is no other way to see what was registered.
+        ///
+        /// The RETRY wrap surviving this migration is pinned by
+        /// `build_magi_orchestrator_wires_three_distinct_seats_each_wrapped_in_retry` above, which
+        /// already reads the trace left on the branch that does the real wrapping — no second copy
+        /// of that assertion is written here.
+        #[test]
+        fn each_seat_is_registered_with_its_declared_lineage() {
+            let cfg = MagiConfig::from_toml_str(
+                "provider = \"ollama\"\n\
+                 [magi]\n\
+                 melchior_model    = \"m-model\"\nmelchior_lineage  = \"declared-melchior\"\n\
+                 balthasar_model   = \"b-model\"\nbalthasar_lineage = \"declared-balthasar\"\n\
+                 caspar_model \
+                  = \"c-model\"\ncaspar_lineage    = \"declared-caspar\"\n",
+            )
+            .expect("a fully declared trio must parse");
+            let mut notices = Vec::new();
+            let magi = build_magi_orchestrator(
+                &TrioBuild {
+                    cfg: &cfg,
+                    principal_kind: ProviderKind::Ollama,
+                    endpoints: &test_endpoints(),
+                    creds: None,
+                    warn_tokens: None,
+                    env_overrides: &MagiEnvModelOverrides::default(),
+                    capability_cache: None,
+                    measured: &BTreeMap::new(),
+                },
+                &mut notices,
+            )
+            .expect("ollama is keyless: it must build with no credentials or network");
+            drop(magi);
+
+            let registered: std::collections::BTreeMap<AgentName, String> =
+                seat_lineage_trace().into_iter().collect();
+            assert_eq!(
+                registered.len(),
+                3,
+                "all three seats must declare a lineage"
+            );
+            for (seat, expected) in [
+                (AgentName::Melchior, "declared-melchior"),
+                (AgentName::Balthasar, "declared-balthasar"),
+                (AgentName::Caspar, "declared-caspar"),
+            ] {
+                assert_eq!(
+                    registered.get(&seat).map(String::as_str),
+                    Some(expected),
+                    "{seat:?} must register its OWN declared lineage: {registered:?}"
+                );
+            }
+        }
+
+        /// The half of the trigger rule that keeps the DEFAULT configuration usable: a seat that
+        /// declares no model runs the built-in one and inherits the built-in lineage with it.
+        ///
+        /// Without this, whoever never touched `[magi]` gets three seats registered with no
+        /// lineage — and `MagiBuilder::build()` rejects a blank one outright
+        /// (`orchestrator.rs:644`), so the trio would not build at all.
+        #[test]
+        fn seats_that_declare_no_model_register_the_built_in_lineages() {
+            let cfg = MagiConfig::from_toml_str("provider = \"ollama\"\n").unwrap();
+            let mut notices = Vec::new();
+            let magi = build_magi_orchestrator(
+                &TrioBuild {
+                    cfg: &cfg,
+                    principal_kind: ProviderKind::Ollama,
+                    endpoints: &test_endpoints(),
+                    creds: None,
+                    warn_tokens: None,
+                    env_overrides: &MagiEnvModelOverrides::default(),
+                    capability_cache: None,
+                    measured: &BTreeMap::new(),
+                },
+                &mut notices,
+            )
+            .expect("the default configuration must still build a trio");
+            drop(magi);
+
+            let registered: std::collections::BTreeMap<AgentName, String> =
+                seat_lineage_trace().into_iter().collect();
+            for (seat, expected) in [
+                (AgentName::Melchior, defaults::DEFAULT_MAGI_MELCHIOR_LINEAGE),
+                (
+                    AgentName::Balthasar,
+                    defaults::DEFAULT_MAGI_BALTHASAR_LINEAGE,
+                ),
+                (AgentName::Caspar, defaults::DEFAULT_MAGI_CASPAR_LINEAGE),
+            ] {
+                assert_eq!(
+                    registered.get(&seat).map(String::as_str),
+                    Some(expected),
+                    "{seat:?} must inherit its built-in lineage: {registered:?}"
+                );
+            }
+        }
+
         /// SC-A02: no production path implements `LlmProvider` through an adapter that folds
         /// the prompt.
         ///
@@ -7019,14 +9187,49 @@ mod tests {
             // grep's OWN needle on THIS line, in THIS file — a self-referential false
             // positive that would make the test permanently red the moment it exists.
             let needle = format!("{}{}", "MagiCoreProviderAdapter", "::new");
-            let out = std::process::Command::new("grep")
-                .args(["-rl", &needle, "src/"])
-                .current_dir(env!("CARGO_MANIFEST_DIR"))
-                .output()
-                .expect("grep must run");
+
+            // Pure Rust, not `Command::new("grep")` (S3 Loop 2, Balthasar). The shell-out worked
+            // wherever a POSIX toolchain happened to be on PATH and turned this guardian into a
+            // hard failure everywhere else — and this project ships CI on four platforms, one of
+            // which has no `grep` unless git-bash supplies it. A test that cannot run is not a
+            // weaker guardian, it is a red build for a reason unrelated to what it guards.
+            fn find(dir: &Path, needle: &str, hits: &mut Vec<PathBuf>) {
+                let Ok(entries) = std::fs::read_dir(dir) else {
+                    return;
+                };
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_dir() {
+                        find(&path, needle, hits);
+                    } else if path.extension().is_some_and(|e| e == "rs")
+                        && std::fs::read_to_string(&path).is_ok_and(|body| body.contains(needle))
+                    {
+                        hits.push(path);
+                    }
+                }
+            }
+
+            let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+            let mut hits = Vec::new();
+            find(&src, &needle, &mut hits);
+
+            // The search itself has to be known-working, or "no hits" means nothing: this file
+            // is under `src/` and contains a string only it contains.
+            let mut control = Vec::new();
+            find(
+                &src,
+                "no_production_path_implements_llm_provider_via_a_folding_adapter",
+                &mut control,
+            );
             assert!(
-                String::from_utf8_lossy(&out.stdout).trim().is_empty(),
-                "the retired adapter type must never be CONSTRUCTED again in src/"
+                !control.is_empty(),
+                "precondition: the source walk must actually be reading files under {}",
+                src.display()
+            );
+
+            assert!(
+                hits.is_empty(),
+                "the retired adapter type must never be CONSTRUCTED again in src/: {hits:?}"
             );
         }
 
@@ -7037,12 +9240,16 @@ mod tests {
             assert!(
                 matches!(
                     build_magi_orchestrator(
-                        &cfg_with_kind("banana"),
-                        ProviderKind::Ollama,
-                        &test_endpoints(),
-                        None,
-                        None,
-                        &MagiEnvModelOverrides::default(),
+                        &TrioBuild {
+                            cfg: &cfg_with_kind("banana"),
+                            principal_kind: ProviderKind::Ollama,
+                            endpoints: &test_endpoints(),
+                            creds: None,
+                            warn_tokens: None,
+                            env_overrides: &MagiEnvModelOverrides::default(),
+                            capability_cache: None,
+                            measured: &BTreeMap::new(),
+                        },
                         &mut notices,
                     ),
                     Err(TrioError::UnknownKind(_))
@@ -7054,12 +9261,16 @@ mod tests {
             let mut notices = Vec::new();
             assert!(
                 build_magi_orchestrator(
-                    &cfg_with_kind(""),
-                    ProviderKind::Ollama,
-                    &test_endpoints(),
-                    Some(&c),
-                    None,
-                    &MagiEnvModelOverrides::default(),
+                    &TrioBuild {
+                        cfg: &cfg_with_kind(""),
+                        principal_kind: ProviderKind::Ollama,
+                        endpoints: &test_endpoints(),
+                        creds: Some(&c),
+                        warn_tokens: None,
+                        env_overrides: &MagiEnvModelOverrides::default(),
+                        capability_cache: None,
+                        measured: &BTreeMap::new(),
+                    },
                     &mut notices,
                 )
                 .is_ok(),
@@ -7083,12 +9294,16 @@ mod tests {
             let cfg = MagiConfig::from_toml_str("provider = \"ollama\"\n").unwrap();
             let mut notices = Vec::new();
             let err = match build_magi_orchestrator(
-                &cfg,
-                ProviderKind::Anthropic,
-                &test_endpoints(),
-                None,
-                None,
-                &MagiEnvModelOverrides::default(),
+                &TrioBuild {
+                    cfg: &cfg,
+                    principal_kind: ProviderKind::Anthropic,
+                    endpoints: &test_endpoints(),
+                    creds: None,
+                    warn_tokens: None,
+                    env_overrides: &MagiEnvModelOverrides::default(),
+                    capability_cache: None,
+                    measured: &BTreeMap::new(),
+                },
                 &mut notices,
             ) {
                 Ok(_) => panic!(
@@ -7123,12 +9338,16 @@ mod tests {
             // `.expect_err()` needs the `Ok` side (`Arc<Magi>`) to be `Debug`, which
             // it is not — `match` avoids that bound entirely.
             let err = match build_magi_orchestrator(
-                &cfg_openai_compat_without_credentials(),
-                ProviderKind::OpenAiCompat,
-                &test_endpoints(),
-                None,
-                None,
-                &MagiEnvModelOverrides::default(),
+                &TrioBuild {
+                    cfg: &cfg_openai_compat_without_credentials(),
+                    principal_kind: ProviderKind::OpenAiCompat,
+                    endpoints: &test_endpoints(),
+                    creds: None,
+                    warn_tokens: None,
+                    env_overrides: &MagiEnvModelOverrides::default(),
+                    capability_cache: None,
+                    measured: &BTreeMap::new(),
+                },
                 &mut notices,
             ) {
                 Ok(_) => panic!("without credential the trio is not buildable"),
@@ -7156,12 +9375,16 @@ mod tests {
             let c = creds();
             let mut notices = Vec::new();
             let err = match build_magi_orchestrator(
-                &cfg_with_only_caspar_unbuildable(),
-                ProviderKind::Anthropic,
-                &test_endpoints(),
-                Some(&c),
-                None,
-                &MagiEnvModelOverrides::default(),
+                &TrioBuild {
+                    cfg: &cfg_with_only_caspar_unbuildable(),
+                    principal_kind: ProviderKind::Anthropic,
+                    endpoints: &test_endpoints(),
+                    creds: Some(&c),
+                    warn_tokens: None,
+                    env_overrides: &MagiEnvModelOverrides::default(),
+                    capability_cache: None,
+                    measured: &BTreeMap::new(),
+                },
                 &mut notices,
             ) {
                 Ok(_) => panic!("one fallen seat is enough for the trio to be unbuildable"),
@@ -7526,12 +9749,16 @@ mod tests {
             let mut notices = Vec::new();
             assert!(
                 build_magi_orchestrator(
-                    &backend_only,
-                    ProviderKind::Anthropic,
-                    &endpoints,
-                    Some(&c),
-                    None,
-                    &MagiEnvModelOverrides::default(),
+                    &TrioBuild {
+                        cfg: &backend_only,
+                        principal_kind: ProviderKind::Anthropic,
+                        endpoints: &endpoints,
+                        creds: Some(&c),
+                        warn_tokens: None,
+                        env_overrides: &MagiEnvModelOverrides::default(),
+                        capability_cache: None,
+                        measured: &BTreeMap::new(),
+                    },
                     &mut notices,
                 )
                 .is_ok(),
@@ -7543,12 +9770,16 @@ mod tests {
             let mut notices = Vec::new();
             assert!(
                 build_magi_orchestrator(
-                    &toml_override_invalid,
-                    ProviderKind::Anthropic,
-                    &endpoints,
-                    Some(&c),
-                    None,
-                    &MagiEnvModelOverrides::default(),
+                    &TrioBuild {
+                        cfg: &toml_override_invalid,
+                        principal_kind: ProviderKind::Anthropic,
+                        endpoints: &endpoints,
+                        creds: Some(&c),
+                        warn_tokens: None,
+                        env_overrides: &MagiEnvModelOverrides::default(),
+                        capability_cache: None,
+                        measured: &BTreeMap::new(),
+                    },
                     &mut notices,
                 )
                 .is_err(),
@@ -7563,12 +9794,16 @@ mod tests {
             let mut notices = Vec::new();
             assert!(
                 build_magi_orchestrator(
-                    &toml_override_invalid,
-                    ProviderKind::Anthropic,
-                    &endpoints,
-                    Some(&c),
-                    None,
-                    &env_overrides,
+                    &TrioBuild {
+                        cfg: &toml_override_invalid,
+                        principal_kind: ProviderKind::Anthropic,
+                        endpoints: &endpoints,
+                        creds: Some(&c),
+                        warn_tokens: None,
+                        env_overrides: &env_overrides,
+                        capability_cache: None,
+                        measured: &BTreeMap::new(),
+                    },
                     &mut notices,
                 )
                 .is_ok(),
@@ -7604,7 +9839,8 @@ mod tests {
         #[test]
         fn a_blank_magi_model_env_override_falls_through_to_the_toml_or_backend_model() {
             let cfg = MagiConfig::from_toml_str(
-                "provider = \"ollama\"\n[magi]\nmelchior_model = \"toml-melchior-model\"\n",
+                "provider = \"ollama\"\n[magi]\nmelchior_model = \"toml-melchior-model\"\n\
+                 melchior_lineage = \"toml-melchior-lineage\"\n",
             )
             .unwrap();
             let env_overrides = MagiEnvModelOverrides {
@@ -7615,12 +9851,16 @@ mod tests {
             let mut notices = Vec::new();
 
             let magi = build_magi_orchestrator(
-                &cfg,
-                ProviderKind::Ollama,
-                &test_endpoints(),
-                None,
-                None,
-                &env_overrides,
+                &TrioBuild {
+                    cfg: &cfg,
+                    principal_kind: ProviderKind::Ollama,
+                    endpoints: &test_endpoints(),
+                    creds: None,
+                    warn_tokens: None,
+                    env_overrides: &env_overrides,
+                    capability_cache: None,
+                    measured: &BTreeMap::new(),
+                },
                 &mut notices,
             )
             .expect("ollama is keyless: blank overrides must not break construction");
@@ -7912,14 +10152,14 @@ mod tests {
         /// `[magi].base_url` override — the only pair of fields that `magi_endpoint_diverges()`
         /// looks at.
         fn cfg_with_endpoints(root: &str, magi_override: Option<&str>) -> MagiConfig {
-            MagiConfig {
-                base_url: Some(root.to_string()),
-                magi: crate::config::MagiSectionConfig {
+            MagiConfig::builder()
+                .base_url(Some(root.to_string()))
+                .magi(crate::config::MagiSectionConfig {
                     base_url: magi_override.map(str::to_string),
                     ..crate::config::MagiSectionConfig::default()
-                },
-                ..MagiConfig::default()
-            }
+                })
+                .build()
+                .unwrap()
         }
 
         /// SC-A07p: endpoint divergence is warned, and ONLY when there is divergence AND
@@ -8072,13 +10312,13 @@ mod tests {
             // Literal credential: `EndpointTemplate::parse` rejects it (REQ-A16c), so
             // `effective_magi_base_url()` fails — the precondition that `load()` normally
             // guarantees, deliberately violated.
-            let cfg = MagiConfig {
-                magi: crate::config::MagiSectionConfig {
+            let cfg = MagiConfig::builder()
+                .magi(crate::config::MagiSectionConfig {
                     base_url: Some("https://user:pass@host/v1".to_string()),
                     ..crate::config::MagiSectionConfig::default()
-                },
-                ..MagiConfig::default()
-            };
+                })
+                .build()
+                .unwrap();
             let _ = divergence_notice(&cfg, true);
         }
 
@@ -8165,6 +10405,17 @@ mod tests {
             // could not exist in this field (proven by the test above).
             let cfg = cfg_with_endpoints("http://a/v1", Some("https://[user]:[password]@b/v1"));
             let notice = divergence_notice(&cfg, true).expect("diverges with inference active");
+            // Presence BEFORE absence (S3 Loop 2, Balthasar). `!x.contains(CANARY)` holds
+            // trivially for an empty string, so a notice whose text stopped being produced —
+            // or a redaction that collapsed the whole message — would leave this test green
+            // while the surface it guards had vanished. Pin that the message is still the one
+            // being scanned, then that the secret is not in it.
+            assert!(
+                notice.text.contains("the trio runs on") && notice.text.contains("[user]"),
+                "precondition: the scanned notice must still be the divergence message, with \
+                 the endpoint rendered in it: {}",
+                notice.text
+            );
             assert!(!notice.text.contains(CANARY));
 
             // Path 3 — `trio_unavailable_message`: the foreign cause goes through
@@ -8179,12 +10430,23 @@ mod tests {
                     SeatError::Transport(redact_foreign_error(&foreign)),
                 )],
             };
-            assert!(!trio_unavailable_message(&err).contains(CANARY));
+            let message = trio_unavailable_message(&err);
+            assert!(
+                message.contains("melchior") || message.contains("Melchior"),
+                "precondition: the message must still name the seat that failed, or there is \
+                 nothing here for the canary check to be about: {message}"
+            );
+            assert!(
+                message.contains("host/v1"),
+                "and it must still carry the redacted endpoint — a redaction that ate the whole \
+                 cause would pass the canary check while destroying the diagnostic: {message}"
+            );
+            assert!(!message.contains(CANARY));
         }
 
         /// The canary value substituted into a template's `[password]`. Distinctive enough
         /// that a substring search cannot match it by accident.
-        const SEAT_CANARY: &str = "c4n4ry-s3cr3t";
+        pub(super) const SEAT_CANARY: &str = "c4n4ry-s3cr3t";
 
         /// A [`SecretStore`] over a fixed map, so a credentialed [`ResolvedEndpoint`] can be
         /// built without standing up a real vault.
@@ -8219,7 +10481,7 @@ mod tests {
         /// Resolves `template` against a vault holding [`SEAT_CANARY`] as the root password —
         /// the only way to obtain a credential-bearing endpoint, since REQ-A16c rejects a
         /// literal one at parse time.
-        fn credentialed_endpoint(template: &str) -> ResolvedEndpoint {
+        pub(super) fn credentialed_endpoint(template: &str) -> ResolvedEndpoint {
             let mut vault = FixedVault(
                 [
                     ("BASE_URL_USER", "alice"),
@@ -8362,14 +10624,40 @@ mod tests {
         /// a check that ignored it would not accidentally agree.
         const CEILING: u64 = 60;
 
+        /// A config declaring [`CEILING`], so the check reads its scale where production reads it.
+        fn cfg_with_ceiling() -> MagiConfig {
+            MagiConfig::from_toml_str(&format!(
+                "[magi]
+agent_timeout_secs = {CEILING}
+"
+            ))
+            .expect("a ceiling inside the admissible range must parse")
+        }
+
+        /// The formula minimum for that config, resolved THROUGH `timeout_scale` — the same
+        /// resolution production uses.
+        ///
+        /// Deriving it rather than writing a literal is deliberate here and would be wrong in
+        /// `magi::tests`: there the arithmetic itself is under test and is pinned against literal
+        /// values; here what is under test is the WIRING — that the decision consults the config
+        /// at all — so an expectation computed any other way would just be a second, drifting
+        /// copy of the formula.
+        fn formula_minimum() -> u64 {
+            let (ceiling, max_rotations, retry_disabled) = timeout_scale(&cfg_with_ceiling());
+            magi_rs::magi::headless_consult_timeout_secs(ceiling, max_rotations, retry_disabled)
+        }
+
         /// A deadline below `classification + 2 × ceiling + slack` is reported, and the warning
         /// names the computed minimum so the operator can act on it.
         #[test]
         fn a_deadline_below_the_formula_is_reported_with_its_minimum() {
-            let minimum = magi_rs::magi::headless_consult_timeout_secs(CEILING);
-            let decision =
-                query_timeout_decision(Some(Duration::from_secs(minimum - 1)), true, CEILING)
-                    .expect("a bounded, consult-capable run is exactly the checked case");
+            let minimum = formula_minimum();
+            let decision = query_timeout_decision(
+                Some(Duration::from_secs(minimum - 1)),
+                true,
+                &cfg_with_ceiling(),
+            )
+            .expect("a bounded, consult-capable run is exactly the checked case");
 
             assert!(decision.below_formula);
             let warning = decision.warning.expect("below the formula ⇒ a warning");
@@ -8379,14 +10667,50 @@ mod tests {
             );
         }
 
+        /// REQ-R20: the run's minimum FOLLOWS `[magi].max_rotations`, so a deadline that was
+        /// generous before rotation existed can become too short once a pool is declared.
+        ///
+        /// Without this, `query_timeout_decision` could read the ceiling and ignore the rotation
+        /// ceiling entirely and every other test here would still pass — they all compare against
+        /// a minimum derived the same way. This one compares two DIFFERENT configs against each
+        /// other, which is the only shape that can catch it.
+        #[test]
+        fn the_minimum_grows_with_the_declared_rotation_ceiling() {
+            let no_rotation = MagiConfig::from_toml_str(&format!(
+                "[magi]\nagent_timeout_secs = {CEILING}\nmax_rotations = 0\n"
+            ))
+            .expect("valid");
+            let two_rotations = MagiConfig::from_toml_str(&format!(
+                "[magi]\nagent_timeout_secs = {CEILING}\nmax_rotations = 2\n"
+            ))
+            .expect("valid");
+
+            let minimum_of = |cfg: &MagiConfig| {
+                // A deadline of 1 s is below any minimum, so the decision always carries one.
+                query_timeout_decision(Some(Duration::from_secs(1)), true, cfg)
+                    .expect("bounded and consult-capable")
+                    .warning
+                    .expect("below the formula ⇒ a warning naming the minimum")
+            };
+
+            assert_ne!(
+                minimum_of(&no_rotation),
+                minimum_of(&two_rotations),
+                "declaring a rotation ceiling MUST move the minimum; if these agree, the \
+                 decision is ignoring max_rotations and a healthy consult that rotates will be \
+                 cut off — a symptom that only appears WHEN a rotation also happened"
+            );
+        }
+
         /// The operator's value is never overridden: a wall-clock cap is an instruction, not a
         /// safety invariant.
         #[test]
         fn the_requested_deadline_is_obeyed_even_when_it_is_too_short() {
-            let minimum = magi_rs::magi::headless_consult_timeout_secs(CEILING);
+            let minimum = formula_minimum();
             let asked = minimum - 1;
             let decision =
-                query_timeout_decision(Some(Duration::from_secs(asked)), true, CEILING).unwrap();
+                query_timeout_decision(Some(Duration::from_secs(asked)), true, &cfg_with_ceiling())
+                    .unwrap();
             assert_eq!(
                 decision.effective_secs, asked,
                 "obeying the request is the point; the check only adds the heads-up"
@@ -8396,10 +10720,13 @@ mod tests {
         /// A generous deadline warns about nothing.
         #[test]
         fn a_deadline_above_the_formula_is_silent() {
-            let minimum = magi_rs::magi::headless_consult_timeout_secs(CEILING);
-            let decision =
-                query_timeout_decision(Some(Duration::from_secs(minimum + 1)), true, CEILING)
-                    .unwrap();
+            let minimum = formula_minimum();
+            let decision = query_timeout_decision(
+                Some(Duration::from_secs(minimum + 1)),
+                true,
+                &cfg_with_ceiling(),
+            )
+            .unwrap();
             assert!(!decision.below_formula);
             assert!(decision.warning.is_none());
         }
@@ -8409,11 +10736,12 @@ mod tests {
         #[test]
         fn the_check_does_not_apply_without_a_deadline_or_without_a_trio() {
             assert!(
-                query_timeout_decision(None, true, CEILING).is_none(),
+                query_timeout_decision(None, true, &cfg_with_ceiling()).is_none(),
                 "an unbounded run cannot be below any minimum"
             );
             assert!(
-                query_timeout_decision(Some(Duration::from_secs(1)), false, CEILING).is_none(),
+                query_timeout_decision(Some(Duration::from_secs(1)), false, &cfg_with_ceiling())
+                    .is_none(),
                 "with no trio built there is no consult to warn about — warning would be noise"
             );
         }
@@ -8831,15 +11159,18 @@ mod tests {
         /// `MagiConfig` whose `[magi]` declares its own `base_url` (and optionally `kind`) —
         /// the pair of fields that `magi_endpoint_diverges()` looks at. Without own section
         /// model: whoever needs one uses [`cfg_diverging_with_models`].
+        ///
+        /// `build_unvalidated`, not `build`: callers pass an unrecognized `kind` on purpose, to
+        /// pin that the trio degrades instead of guessing, so the validating exit would reject
+        /// exactly the cases this fixture exists to produce.
         fn cfg_diverging(kind: Option<&str>) -> MagiConfig {
-            MagiConfig {
-                magi: crate::config::MagiSectionConfig {
+            MagiConfig::builder()
+                .magi(crate::config::MagiSectionConfig {
                     base_url: Some("http://magi-host:11434/v1".to_string()),
                     kind: kind.map(str::to_string),
                     ..crate::config::MagiSectionConfig::default()
-                },
-                ..MagiConfig::default()
-            }
+                })
+                .build_unvalidated()
         }
 
         /// `MagiConfig` with DISTINCT, nameable sections (`[openai].model`,
@@ -8852,33 +11183,36 @@ mod tests {
             openai_model: &str,
             anthropic_model: &str,
         ) -> MagiConfig {
-            MagiConfig {
-                openai: crate::config::OpenAiConfig {
+            MagiConfig::builder()
+                .openai(crate::config::OpenAiConfig {
                     model: Some(openai_model.to_string()),
-                },
-                anthropic: crate::config::AnthropicConfig {
+                })
+                .anthropic(crate::config::AnthropicConfig {
                     model: Some(anthropic_model.to_string()),
-                },
-                ..MagiConfig::default()
-            }
+                })
+                .build()
+                .unwrap()
         }
 
         /// Like [`cfg_diverging`], but with BOTH nameable sections too — the fixture that
         /// exercises the fix-round-1 finding with the trio on a different endpoint AND a
-        /// different kind than the principal at the same time.
+        /// different kind than the principal at the same time. Unvalidated for the same reason
+        /// as [`cfg_diverging`]: one caller passes an unrecognized `kind` deliberately.
         fn cfg_diverging_with_models(
             kind: Option<&str>,
             openai_model: &str,
             anthropic_model: &str,
         ) -> MagiConfig {
-            MagiConfig {
-                magi: crate::config::MagiSectionConfig {
-                    base_url: Some("http://magi-host:11434/v1".to_string()),
-                    kind: kind.map(str::to_string),
-                    ..crate::config::MagiSectionConfig::default()
-                },
-                ..cfg_with_distinct_section_models(openai_model, anthropic_model)
-            }
+            crate::config::MagiConfigBuilder::from(cfg_with_distinct_section_models(
+                openai_model,
+                anthropic_model,
+            ))
+            .magi(crate::config::MagiSectionConfig {
+                base_url: Some("http://magi-host:11434/v1".to_string()),
+                kind: kind.map(str::to_string),
+                ..crate::config::MagiSectionConfig::default()
+            })
+            .build_unvalidated()
         }
 
         // ---- probe_notice / stale_composition_notice (brief contract, Step 1) -----
@@ -9031,24 +11365,35 @@ mod tests {
         /// `MagiConfig` with the trio on the SAME endpoint/kind as the principal (shared branch
         /// of `orchestrate_probes`), but with all FOUR names — principal + three mages —
         /// distinct and test-controllable.
+        ///
+        /// **The three lineages are not decoration.** A seat that declares a model must declare
+        /// its lineage (REQ-R02), and the three must differ while `enforce_diversity` is on
+        /// (REQ-R29) — which is its default. This helper used to omit them and `build()` accepted
+        /// it, because the seat-lineage check ran in `from_toml_str` rather than in
+        /// `validate_vocabulary`; these four probe tests were therefore running against a config
+        /// no operator could ever load. S1 Loop 2 closed that hole, and the full suite is what
+        /// surfaced these — the per-commit scoped run does not reach this module.
         fn cfg_with_four_distinct_models(
             principal: &str,
             melchior: &str,
             balthasar: &str,
             caspar: &str,
         ) -> MagiConfig {
-            MagiConfig {
-                openai: crate::config::OpenAiConfig {
+            MagiConfig::builder()
+                .openai(crate::config::OpenAiConfig {
                     model: Some(principal.to_string()),
-                },
-                magi: crate::config::MagiSectionConfig {
+                })
+                .magi(crate::config::MagiSectionConfig {
                     melchior_model: Some(melchior.to_string()),
+                    melchior_lineage: Some("lineage-m".to_string()),
                     balthasar_model: Some(balthasar.to_string()),
+                    balthasar_lineage: Some("lineage-b".to_string()),
                     caspar_model: Some(caspar.to_string()),
+                    caspar_lineage: Some("lineage-c".to_string()),
                     ..crate::config::MagiSectionConfig::default()
-                },
-                ..MagiConfig::default()
-            }
+                })
+                .build()
+                .unwrap()
         }
 
         // ---- orchestrate_probes: shared branch --------------------------------------
@@ -9064,12 +11409,13 @@ mod tests {
                 ("caspar", 256_000),
             ]);
             let cfg = cfg_with_four_distinct_models("principal", "melchior", "balthasar", "caspar");
-            let (principal_model, principal, trio) = orchestrate_probes(
+            let (principal_model, principal, trio, _seats) = orchestrate_probes(
                 &cfg,
                 &test_endpoints(),
                 ProviderKind::Ollama,
                 &factory,
                 &MagiEnvModelOverrides::default(),
+                &[],
             )
             .await;
 
@@ -9107,12 +11453,13 @@ mod tests {
                 ("caspar", 256_000),
             ]);
             let cfg = cfg_with_four_distinct_models("principal", "melchior", "balthasar", "caspar");
-            let (_principal_model, _principal, trio) = orchestrate_probes(
+            let (_principal_model, _principal, trio, _seats) = orchestrate_probes(
                 &cfg,
                 &test_endpoints(),
                 ProviderKind::Ollama,
                 &factory,
                 &MagiEnvModelOverrides::default(),
+                &[],
             )
             .await;
 
@@ -9142,12 +11489,13 @@ mod tests {
         async fn the_probe_runs_once_and_the_threshold_stays_put() {
             let factory = MappedProbeFactory::new(&[("principal", 128_000), ("m", 256_000)]);
             let cfg = cfg_with_four_distinct_models("principal", "m", "m", "m");
-            let (_principal_model, _principal, trio) = orchestrate_probes(
+            let (_principal_model, _principal, trio, _seats) = orchestrate_probes(
                 &cfg,
                 &test_endpoints(),
                 ProviderKind::Ollama,
                 &factory,
                 &MagiEnvModelOverrides::default(),
+                &[],
             )
             .await;
             let calls_after_the_startup_probe = factory.calls();
@@ -9194,12 +11542,13 @@ mod tests {
                 cfg_with_four_distinct_models("principal", "toml-melchior", "balthasar", "caspar");
             let env_overrides = MagiEnvModelOverrides::from_raw(Some("env-melchior"), None, None);
 
-            let (_principal_model, _principal, trio) = orchestrate_probes(
+            let (_principal_model, _principal, trio, _seats) = orchestrate_probes(
                 &cfg,
                 &test_endpoints(),
                 ProviderKind::Ollama,
                 &factory,
                 &env_overrides,
+                &[],
             )
             .await;
 
@@ -9228,26 +11577,33 @@ mod tests {
         #[tokio::test]
         async fn diverging_endpoint_probes_the_trio_separately_with_its_own_kind() {
             let factory = MappedProbeFactory::new(&[("principal", 64_000), ("m", 128_000)]);
-            let cfg = MagiConfig {
-                openai: crate::config::OpenAiConfig {
+            let cfg = MagiConfig::builder()
+                .openai(crate::config::OpenAiConfig {
                     model: Some("principal".to_string()),
-                },
-                magi: crate::config::MagiSectionConfig {
+                })
+                .magi(crate::config::MagiSectionConfig {
                     base_url: Some("http://magi-host:11434/v1".to_string()),
                     kind: Some("ollama".to_string()),
+                    // One model across the three seats, three distinct lineages: the seats share
+                    // a model deliberately (probe dedup), and diversity is a property of the
+                    // seats, not of the models (REQ-R29, SC-R52).
                     melchior_model: Some("m".to_string()),
+                    melchior_lineage: Some("lineage-m".to_string()),
                     balthasar_model: Some("m".to_string()),
+                    balthasar_lineage: Some("lineage-b".to_string()),
                     caspar_model: Some("m".to_string()),
+                    caspar_lineage: Some("lineage-c".to_string()),
                     ..crate::config::MagiSectionConfig::default()
-                },
-                ..MagiConfig::default()
-            };
-            let (principal_model, principal, trio) = orchestrate_probes(
+                })
+                .build()
+                .unwrap();
+            let (principal_model, principal, trio, _seats) = orchestrate_probes(
                 &cfg,
                 &diverging_endpoints(),
                 ProviderKind::Ollama,
                 &factory,
                 &MagiEnvModelOverrides::default(),
+                &[],
             )
             .await;
             assert_eq!(principal_model, "principal");
@@ -9300,24 +11656,32 @@ mod tests {
             );
 
             let factory = MappedProbeFactory::new(&[("m", 128_000)]);
-            let cfg = MagiConfig {
-                magi: crate::config::MagiSectionConfig {
+            let cfg = MagiConfig::builder()
+                .magi(crate::config::MagiSectionConfig {
                     // NOTE: `kind` diverges from the principal; `base_url` does NOT.
                     kind: Some("ollama".to_string()),
+                    // The three seats share ONE model on purpose — this pins that the probe
+                    // batch dedupes by model. Their LINEAGES still have to differ, because
+                    // `enforce_diversity` defaults on and it is a property of the seats, not of
+                    // the models they happen to point at (REQ-R29, SC-R52).
                     melchior_model: Some("m".to_string()),
+                    melchior_lineage: Some("lineage-m".to_string()),
                     balthasar_model: Some("m".to_string()),
+                    balthasar_lineage: Some("lineage-b".to_string()),
                     caspar_model: Some("m".to_string()),
+                    caspar_lineage: Some("lineage-c".to_string()),
                     ..crate::config::MagiSectionConfig::default()
-                },
-                ..MagiConfig::default()
-            };
+                })
+                .build()
+                .unwrap();
 
-            let (_principal_model, principal, trio) = orchestrate_probes(
+            let (_principal_model, principal, trio, _seats) = orchestrate_probes(
                 &cfg,
                 &endpoints,
                 ProviderKind::Anthropic,
                 &factory,
                 &MagiEnvModelOverrides::default(),
+                &[],
             )
             .await;
 
@@ -9361,12 +11725,13 @@ mod tests {
             ]);
             let cfg = cfg_diverging_with_models(Some("ollama"), "qwen-test", "claude-test");
 
-            let (principal_model, _principal, trio) = orchestrate_probes(
+            let (principal_model, _principal, trio, _seats) = orchestrate_probes(
                 &cfg,
                 &diverging_endpoints(),
                 ProviderKind::Anthropic,
                 &factory,
                 &MagiEnvModelOverrides::default(),
+                &[],
             )
             .await;
 
@@ -9399,12 +11764,13 @@ mod tests {
         async fn an_invalid_magi_kind_degrades_the_trio_without_guessing() {
             let factory = MappedProbeFactory::new(&[("principal", 64_000)]);
             let cfg = cfg_diverging_with_models(Some("banana"), "principal", "irrelevant");
-            let (principal_model, principal, trio) = orchestrate_probes(
+            let (principal_model, principal, trio, _seats) = orchestrate_probes(
                 &cfg,
                 &diverging_endpoints(),
                 ProviderKind::Ollama,
                 &factory,
                 &MagiEnvModelOverrides::default(),
+                &[],
             )
             .await;
             assert_eq!(principal_model, "principal");
@@ -9435,16 +11801,26 @@ mod tests {
                 ("balthasar", 128_000),
                 ("caspar", 128_000),
             ]);
-            let mut cfg =
+            let base =
                 cfg_with_four_distinct_models("principal", "melchior", "balthasar", "caspar");
-            cfg.magi.input_warn_tokens = Some(999);
+            // `input_warn_tokens` can no longer be poked in after construction (REQ-R23), so the
+            // fixture is reopened and the value declared before the (validating) build.
+            let magi = crate::config::MagiSectionConfig {
+                input_warn_tokens: Some(999),
+                ..base.magi().clone()
+            };
+            let cfg = crate::config::MagiConfigBuilder::from(base)
+                .magi(magi)
+                .build()
+                .unwrap();
             let mut notices = Vec::new();
-            let warn_tokens = probe_and_report(
+            let (warn_tokens, _measured) = probe_and_report(
                 &cfg,
                 &test_endpoints(),
                 ProviderKind::Ollama,
                 &factory,
                 &MagiEnvModelOverrides::default(),
+                &[],
                 &mut notices,
             )
             .await;
@@ -9452,6 +11828,112 @@ mod tests {
                 warn_tokens,
                 Some(999),
                 "the declared value wins even though the probe DID measure something different"
+            );
+        }
+
+        /// REQ-R21/D-R09: a pool candidate measured alongside the trio must NOT drag the derived
+        /// threshold, nor be named as an unmeasured mage.
+        ///
+        /// `orchestrate_probes` folds `extra_models` (SC-R30's stateless candidate) into the map
+        /// it returns, because the caller needs candidates for the guard predicate. The trio-only
+        /// consumers read that same map and so inherited the pool: `derive_warn_tokens` takes a
+        /// plain minimum, so a small candidate lowered the threshold with none of the tolerance
+        /// band D-R09 requires — the outcome REQ-R21 exists to prevent, reached through a path
+        /// that never calls the function implementing it.
+        ///
+        /// **Mutation-verified (B16):** pass `&trio` instead of `&trio_seats` to any of the three
+        /// consumers and this goes red.
+        #[tokio::test]
+        async fn a_pool_candidate_measured_with_the_trio_does_not_drag_the_threshold() {
+            let factory = MappedProbeFactory::new(&[
+                ("principal", 200_000),
+                ("melchior", 128_000),
+                ("balthasar", 128_000),
+                ("caspar", 128_000),
+                // An order of magnitude below the seats: if it reaches the minimum, it dominates.
+                ("rescue-model", 8_192),
+            ]);
+            let cfg = cfg_with_four_distinct_models("principal", "melchior", "balthasar", "caspar");
+
+            let mut notices = Vec::new();
+            let (warn_tokens, measured) = probe_and_report(
+                &cfg,
+                &test_endpoints(),
+                ProviderKind::Ollama,
+                &factory,
+                &MagiEnvModelOverrides::default(),
+                &["rescue-model".to_string()],
+                &mut notices,
+            )
+            .await;
+
+            let from_seats = 128_000 * 3 / 4; // WARN_WINDOW_FRACTION over the seat minimum
+            assert_eq!(
+                warn_tokens,
+                Some(from_seats),
+                "the threshold is the trio's, not the pool's: a candidate at 8192 would have \
+                 produced {} instead",
+                8_192 * 3 / 4
+            );
+            assert!(
+                !notices.iter().any(|n| n.text.contains("rescue-model")),
+                "and no trio notice may name a pool candidate as a mage: {notices:?}"
+            );
+
+            // The candidate must still be MEASURED and returned — that is what it rode the batch
+            // for, and REQ-R11's guard predicate is over candidates.
+            assert!(
+                matches!(
+                    measured.get("rescue-model"),
+                    Some(Measurement::Measured { window: 8_192, .. })
+                ),
+                "excluding it from the trio VIEW must not stop it being measured: {measured:?}"
+            );
+        }
+
+        /// SC-R52 edge: a pool entry declaring a SEAT's model must not remove that seat from the
+        /// trio's view.
+        ///
+        /// The first fix for the previous test filtered the merged table by name, which cannot
+        /// distinguish the two — the `BTreeMap` collapses them into one row and that row is the
+        /// seat. So the mage with the smallest window vanished from the threshold and from cold
+        /// detection, in the one configuration where it is also a rotation candidate. Selecting
+        /// by the returned seat list cannot fail that way.
+        ///
+        /// **Mutation-verified (B16):** rebuild `trio_seats` by excluding `extra_models` by name
+        /// and this goes red while its neighbour above stays green — the two differ only in
+        /// whether the extra collides with a seat.
+        #[tokio::test]
+        async fn a_pool_entry_declaring_a_seats_model_leaves_that_seat_in_the_trio() {
+            let factory = MappedProbeFactory::new(&[
+                ("principal", 200_000),
+                // The colliding seat is ALSO the smallest, so its presence is observable in the
+                // threshold: drop it and the minimum jumps to the other two.
+                ("melchior", 8_192),
+                ("balthasar", 128_000),
+                ("caspar", 128_000),
+            ]);
+            let cfg = cfg_with_four_distinct_models("principal", "melchior", "balthasar", "caspar");
+
+            let mut notices = Vec::new();
+            let (warn_tokens, _measured) = probe_and_report(
+                &cfg,
+                &test_endpoints(),
+                ProviderKind::Ollama,
+                &factory,
+                &MagiEnvModelOverrides::default(),
+                // The pool's first candidate happens to be the same model Melchior runs.
+                &["melchior".to_string()],
+                &mut notices,
+            )
+            .await;
+
+            assert_eq!(
+                warn_tokens,
+                Some(8_192 * 3 / 4),
+                "melchior is a SEAT that the pool also lists; excluding it by name would have \
+                 derived {} from the other two",
+                128_000 * 3 / 4
             );
         }
 
@@ -9467,12 +11949,13 @@ mod tests {
             ]);
             let cfg = cfg_with_four_distinct_models("principal", "melchior", "balthasar", "caspar");
             let mut notices = Vec::new();
-            let warn_tokens = probe_and_report(
+            let (warn_tokens, _measured) = probe_and_report(
                 &cfg,
                 &test_endpoints(),
                 ProviderKind::Ollama,
                 &factory,
                 &MagiEnvModelOverrides::default(),
+                &[],
                 &mut notices,
             )
             .await;
@@ -9508,12 +11991,13 @@ mod tests {
             ]);
             let cfg = cfg_with_four_distinct_models("principal", "melchior", "balthasar", "caspar");
             let mut notices = Vec::new();
-            let warn_tokens = probe_and_report(
+            let (warn_tokens, _measured) = probe_and_report(
                 &cfg,
                 &test_endpoints(),
                 ProviderKind::Ollama,
                 &factory,
                 &MagiEnvModelOverrides::default(),
+                &[],
                 &mut notices,
             )
             .await;
@@ -9632,15 +12116,15 @@ mod tests {
         /// `[openai]` serves the first two because they share the protocol.
         #[test]
         fn resolve_backend_model_picks_the_section_matching_the_kind() {
-            let cfg = MagiConfig {
-                openai: crate::config::OpenAiConfig {
+            let cfg = MagiConfig::builder()
+                .openai(crate::config::OpenAiConfig {
                     model: Some("qwen-test".to_string()),
-                },
-                anthropic: crate::config::AnthropicConfig {
+                })
+                .anthropic(crate::config::AnthropicConfig {
                     model: Some("claude-test".to_string()),
-                },
-                ..MagiConfig::default()
-            };
+                })
+                .build()
+                .unwrap();
             assert_eq!(
                 resolve_backend_model(&cfg, ProviderKind::Ollama),
                 "qwen-test"
