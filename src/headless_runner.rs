@@ -413,6 +413,20 @@ fn build_consult_transcript(prompt: &str, report: Option<&str>) -> Vec<Transcrip
 /// Extracts the MAGI object of the last **successful** `consult` tool call from a
 /// finished run's records (REQ-H22): the forced or proactive consult result, or
 /// `None` when no consult succeeded (e.g. denied by the tier).
+///
+/// # The `.ok()` is a documented impossibility, not a swallowed error
+///
+/// B9 forbids discarding a parse failure, and S4 Loop 2 (Caspar) rightly asked about this one.
+/// The filter above it already required `rec.ok`, and a `consult` record is `ok` only when
+/// `ConsultTool::execute` returned — which returns `report_to_consult_json`'s value, serialized
+/// by `serde_json` immediately before. So the string being parsed here is one this process
+/// produced from a `Value` microseconds earlier; a failure would mean `serde_json` cannot read
+/// back what it just wrote.
+///
+/// It stays `.ok()` rather than growing an error channel because there is no honest thing to
+/// report through one: this function has no notices sink, and the caller's only recourse for a
+/// self-contradictory record would be the same `None` it already returns. What was missing was
+/// the reasoning, not the handling.
 fn extract_consult_value(calls: &[(String, ToolCallRecord)]) -> Option<Value> {
     calls
         .iter()

@@ -126,10 +126,15 @@ pub trait Provider: Send + Sync {
     }
 }
 
-/// Maximum size the SSE accumulation buffer may reach before a complete event
-/// boundary (`"\n\n"`) is found. Guards an unbounded `buffer: String` from OOM on
-/// a malformed/hostile stream (audit finding W1). 8 MiB exceeds any legitimate
-/// single Anthropic SSE event.
+/// Maximum size the SSE accumulation buffer may reach before a complete event boundary — **any**
+/// of [`SSE_EVENT_BOUNDARIES`], not only `"\n\n"` — is found. Guards an unbounded
+/// `buffer: String` from OOM on a malformed/hostile stream (audit finding W1). 8 MiB exceeds any
+/// legitimate single Anthropic SSE event.
+///
+/// This said `"\n\n"` until S4 Loop 2 (Balthasar): the CRLF and CR forms were added below without
+/// the cap's own doc following, so it described a narrower trigger than the code has. Harmless to
+/// the buffer itself, and precisely the kind of drift that makes a later reader conclude a
+/// CRLF stream is unhandled and "fix" something that already works.
 const MAX_SSE_BUFFER_BYTES: usize = 8 * 1024 * 1024;
 
 /// Parses an accumulated `tool_use` input-JSON string. Empty/whitespace → a valid
