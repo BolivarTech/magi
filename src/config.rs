@@ -920,16 +920,22 @@ impl MagiConfig {
             .iter()
             .map(|(_, model)| model.as_str())
             .collect();
-        if distinct.len() == 1 {
+        if let Some((_, model)) = resolved_seats.first().filter(|_| distinct.len() == 1) {
+            // BOTH levers are named. The collapse can come from the TOML *or* from three
+            // identical `MAGI_MODEL_*`, and the environment wins — so telling someone who has
+            // already declared a model per seat to go declare one is advice they have followed
+            // and that cannot help. The sibling notice in `rotation_config.rs` had exactly this
+            // defect one iteration ago.
+            //
+            // Binding the model through `first()` also retires a `map_or("<unknown>", …)` that
+            // `distinct.len() == 1` had made unreachable: a fallback string describing a state
+            // that cannot occur reads as though the state can.
             notices.push(Notice::resolution(format!(
-                "notice: all three mages resolve to the same model (`{}`), so their declared \
+                "notice: all three mages resolve to the same model (`{model}`), so their declared \
                  lineages describe one failure domain rather than three. The consensus still has \
                  three perspectives — those are structural — but a shared outage takes all three \
-                 at once. Declare a model per seat in `[magi]` to get the diversity the labels \
-                 claim.",
-                resolved_seats
-                    .first()
-                    .map_or("<unknown>", |(_, model)| model.as_str())
+                 at once. Declare a model per seat in `[magi]`, or check whether `MAGI_MODEL_*` \
+                 is overriding them — the environment wins over the file."
             )));
         }
 

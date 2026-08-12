@@ -7592,6 +7592,144 @@ mod tests {
             );
         }
 
+        /// The env layer is what the collapse notice must see, and the ONLY thing that pins it.
+        ///
+        /// The fix for this gate's first CRITICAL moved correctness from inside
+        /// `diversity_notices` — where it could not be got wrong — out to the CALLER, which is
+        /// `pub(crate)` and can be handed anything. Reverting the call site to
+        /// `cfg.magi().seats(backend_model)` compiles, and every other test here uses
+        /// `MagiEnvModelOverrides::default()`, so the env layer is never in play and the whole
+        /// regression comes back green. This test is the one that goes red.
+        ///
+        /// Both directions, because the fix claimed both: a DECLARED, distinct trio collapsed by
+        /// three identical overrides must be reported, and an undeclared trio pulled apart by
+        /// three distinct ones must NOT be.
+        #[test]
+        fn the_collapse_notice_reads_the_env_overrides_not_the_declared_models() {
+            let declared_distinct = MagiConfig::from_toml_str(
+                "provider = \"ollama\"\n\
+                 [magi]\n\
+                 melchior_model    = \"m-a\"\nmelchior_lineage  = \"la\"\n\
+                 balthasar_model   = \"m-b\"\nbalthasar_lineage = \"lb\"\n\
+                 caspar_model      = \"m-c\"\ncaspar_lineage    = \"lc\"\n",
+            )
+            .expect("a declared, distinct trio loads");
+
+            let collapsed_by_env = MagiEnvModelOverrides {
+                melchior: Some("one-model".to_string()),
+                balthasar: Some("one-model".to_string()),
+                caspar: Some("one-model".to_string()),
+            };
+            let mut notices = Vec::new();
+            let magi = build_magi_orchestrator(
+                &TrioBuild {
+                    cfg: &declared_distinct,
+                    principal_kind: ProviderKind::Ollama,
+                    endpoints: &test_endpoints(),
+                    creds: None,
+                    warn_tokens: None,
+                    env_overrides: &collapsed_by_env,
+                    capability_cache: None,
+                    measured: &BTreeMap::new(),
+                },
+                &mut notices,
+            )
+            .expect("ollama is keyless");
+            drop(magi);
+            assert!(
+                notices
+                    .iter()
+                    .any(|n| n.text.contains("resolve to the same model")),
+                "the TOML says three models; the env says one, and the env is what runs: \
+                 {notices:?}"
+            );
+
+            // The mirror. Without this half, a notice that fired unconditionally would pass.
+            let pulled_apart_by_env = MagiEnvModelOverrides {
+                melchior: Some("m-1".to_string()),
+                balthasar: Some("m-2".to_string()),
+                caspar: Some("m-3".to_string()),
+            };
+            let undeclared =
+                MagiConfig::from_toml_str("provider = \"ollama\"\n").expect("defaults load");
+            let mut notices = Vec::new();
+            let magi = build_magi_orchestrator(
+                &TrioBuild {
+                    cfg: &undeclared,
+                    principal_kind: ProviderKind::Ollama,
+                    endpoints: &test_endpoints(),
+                    creds: None,
+                    warn_tokens: None,
+                    env_overrides: &pulled_apart_by_env,
+                    capability_cache: None,
+                    measured: &BTreeMap::new(),
+                },
+                &mut notices,
+            )
+            .expect("ollama is keyless");
+            drop(magi);
+            assert!(
+                !notices
+                    .iter()
+                    .any(|n| n.text.contains("resolve to the same model")),
+                "three distinct overrides ARE three models; saying otherwise is a false \
+                 statement about the user's own configuration: {notices:?}"
+            );
+        }
+
+        /// REQ-R15/SC-R22's soft path, driven through the builder.
+        ///
+        /// `validate_diversity` returns coverage gaps as NOTICES when `enforce_diversity` is
+        /// false, and that vector was being discarded. The unit tests of `diversity_notices`
+        /// cannot catch its return: they use configs with no `[[magi.fallback]]`, so the coverage
+        /// branch is skipped entirely and their notice count is satisfied by the collapse notice
+        /// alone. Only a config with a pool that covers nobody exercises it.
+        #[test]
+        fn an_uncovered_seat_is_announced_by_the_builder_when_enforcement_is_off() {
+            let cfg = MagiConfig::from_toml_str(
+                "provider = \"ollama\"\n\
+                 [magi]\n\
+                 melchior_model    = \"m-a\"\nmelchior_lineage  = \"opus\"\n\
+                 balthasar_model   = \"m-b\"\nbalthasar_lineage = \"sonnet\"\n\
+                 caspar_model      = \"m-c\"\ncaspar_lineage    = \"haiku\"\n\
+                 enforce_diversity = false\n\
+                 [[magi.fallback]]\n\
+                 model   = \"rescue\"\nlineage = \"opus\"\n",
+            )
+            .expect("the mono-provider exit must load");
+
+            let mut notices = Vec::new();
+            let magi = build_magi_orchestrator(
+                &TrioBuild {
+                    cfg: &cfg,
+                    principal_kind: ProviderKind::Ollama,
+                    endpoints: &test_endpoints(),
+                    creds: None,
+                    warn_tokens: None,
+                    env_overrides: &MagiEnvModelOverrides::default(),
+                    capability_cache: None,
+                    measured: &BTreeMap::new(),
+                },
+                &mut notices,
+            )
+            .expect("ollama is keyless");
+            drop(magi);
+
+            let text = notices
+                .iter()
+                .map(|n| n.text.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(
+                text.contains("no fallback coverage"),
+                "an `opus` candidate covers only Melchior; the other two must be named: {text}"
+            );
+            assert!(
+                text.contains("balthasar") && text.contains("caspar"),
+                "and named individually, in ONE message: {text}"
+            );
+        }
+
         /// REQ-R29's collapse notice, driven through `build_magi_orchestrator`.
         ///
         /// The unit test for `diversity_notices` calls the function directly, which is exactly the
