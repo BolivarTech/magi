@@ -1984,7 +1984,19 @@ async fn orchestrate_probes(
     // there is no cache to drive a lazy probe. They ride the SAME batch rather than a second one:
     // an extra batch would make startup cost two ceilings instead of one.
     extra_models: &[String],
-) -> (String, Option<Measurement>, BTreeMap<String, Measurement>) {
+) -> (
+    String,
+    Option<Measurement>,
+    BTreeMap<String, Measurement>,
+    // The THREE seat models, so the caller can tell a seat from an `extra_models` candidate in
+    // the merged table above. Filtering the table by NAME cannot do it: a pool entry declaring
+    // a seat's model is legal (SC-R52), the `BTreeMap` collapses them into one row, and that row
+    // IS the seat — so excluding by name drops a real mage from cold-start detection and from
+    // the threshold. Returned rather than recomputed because the resolution lives here, and a
+    // second one in the caller would be the third resolver of the same question (S3 Loop 2,
+    // Balthasar, who asked twice: once against the documented residual, once as a finding).
+    Vec<String>,
+) {
     let principal_model = resolve_backend_model(cfg, principal_kind).to_string();
 
     if !cfg.magi_endpoint_diverges() {
@@ -2013,7 +2025,13 @@ async fn orchestrate_probes(
             })
             .collect();
         let principal_measurement = measured.get(principal_model.as_str()).cloned();
-        (principal_model, principal_measurement, trio_only)
+        let seat_models: Vec<String> = trio_seats.iter().map(|(_, m)| m.clone()).collect();
+        (
+            principal_model,
+            principal_measurement,
+            trio_only,
+            seat_models,
+        )
     } else {
         match resolve_magi_kind(cfg, principal_kind) {
             Ok(magi_kind) => {
@@ -2042,7 +2060,8 @@ async fn orchestrate_probes(
                     probe_models(magi_kind, &endpoints.magi, &trio_models, factory),
                 );
                 let principal_measurement = principal.get(principal_model.as_str()).cloned();
-                (principal_model, principal_measurement, trio)
+                let seat_models: Vec<String> = trio_seats.iter().map(|(_, m)| m.clone()).collect();
+                (principal_model, principal_measurement, trio, seat_models)
             }
             Err(_) => {
                 // Invalid `[magi].kind`: `build_magi_orchestrator` reports it with its own
@@ -2060,12 +2079,13 @@ async fn orchestrate_probes(
                 // name cannot poison anything: the three values are `NotMeasuredThisTime` by
                 // construction, not by probing.
                 let trio_seats = seats_with_env_overrides(cfg, &principal_model, env_overrides);
+                let seat_models: Vec<String> = trio_seats.iter().map(|(_, m)| m.clone()).collect();
                 let trio = trio_seats
                     .into_iter()
                     .map(|(_, m)| (m, Measurement::NotMeasuredThisTime))
                     .collect();
                 let principal_measurement = principal.get(principal_model.as_str()).cloned();
-                (principal_model, principal_measurement, trio)
+                (principal_model, principal_measurement, trio, seat_models)
             }
         }
     }
@@ -2125,7 +2145,7 @@ async fn probe_and_report(
     // fail-safe needs them, and re-probing to recover what this call already learned would pay
     // the cost twice for the same answer.
 ) -> (Option<usize>, BTreeMap<String, Measurement>) {
-    let (principal_model, principal_measurement, trio) = orchestrate_probes(
+    let (principal_model, principal_measurement, trio, seat_models) = orchestrate_probes(
         cfg,
         endpoints,
         principal_kind,
@@ -2165,17 +2185,16 @@ async fn probe_and_report(
     // threshold down with none of the tolerance band D-R09 requires — the very outcome REQ-R21
     // exists to prevent, arriving through a path that bypasses the function that implements it.
     //
-    // **Residual, stated rather than hidden.** The split is by NAME, so a pool entry declaring
-    // the same model as a seat — legal, and warned about by SC-R52 — drops that seat from this
-    // view: the threshold would then be the minimum over two seats instead of three, and one
-    // seat fewer would be checked for coldness. It needs the stateless path AND that
-    // duplication, it degrades mildly (a slightly higher warn threshold, i.e. warning later),
-    // and closing it exactly means returning the seat list from `orchestrate_probes` — a
-    // four-element tuple across nine call sites. Recorded so the next reader can price that
-    // trade with the facts rather than rediscover it.
-    let trio_seats: BTreeMap<String, Measurement> = trio
+    // Built by SELECTING the seats, never by excluding the extras. A first version filtered by
+    // name and carried a documented residual: a pool entry declaring a seat's model is legal
+    // (SC-R52), the map collapses the two into one row, and that row is the seat — so excluding
+    // by name dropped a real mage from cold detection and from the threshold. Selecting cannot
+    // have that failure, because a name that is a seat is a seat regardless of what else
+    // declares it. The seat list comes back from `orchestrate_probes`, which is where the
+    // env-override resolution already happens.
+    let trio_seats: BTreeMap<String, Measurement> = seat_models
         .iter()
-        .filter(|(model, _)| !extra_models.iter().any(|extra| extra == *model))
+        .filter_map(|model| trio.get_key_value(model))
         .map(|(model, m)| (model.clone(), m.clone()))
         .collect();
 
@@ -11385,7 +11404,7 @@ agent_timeout_secs = {CEILING}
                 ("caspar", 256_000),
             ]);
             let cfg = cfg_with_four_distinct_models("principal", "melchior", "balthasar", "caspar");
-            let (principal_model, principal, trio) = orchestrate_probes(
+            let (principal_model, principal, trio, _seats) = orchestrate_probes(
                 &cfg,
                 &test_endpoints(),
                 ProviderKind::Ollama,
@@ -11429,7 +11448,7 @@ agent_timeout_secs = {CEILING}
                 ("caspar", 256_000),
             ]);
             let cfg = cfg_with_four_distinct_models("principal", "melchior", "balthasar", "caspar");
-            let (_principal_model, _principal, trio) = orchestrate_probes(
+            let (_principal_model, _principal, trio, _seats) = orchestrate_probes(
                 &cfg,
                 &test_endpoints(),
                 ProviderKind::Ollama,
@@ -11465,7 +11484,7 @@ agent_timeout_secs = {CEILING}
         async fn the_probe_runs_once_and_the_threshold_stays_put() {
             let factory = MappedProbeFactory::new(&[("principal", 128_000), ("m", 256_000)]);
             let cfg = cfg_with_four_distinct_models("principal", "m", "m", "m");
-            let (_principal_model, _principal, trio) = orchestrate_probes(
+            let (_principal_model, _principal, trio, _seats) = orchestrate_probes(
                 &cfg,
                 &test_endpoints(),
                 ProviderKind::Ollama,
@@ -11518,7 +11537,7 @@ agent_timeout_secs = {CEILING}
                 cfg_with_four_distinct_models("principal", "toml-melchior", "balthasar", "caspar");
             let env_overrides = MagiEnvModelOverrides::from_raw(Some("env-melchior"), None, None);
 
-            let (_principal_model, _principal, trio) = orchestrate_probes(
+            let (_principal_model, _principal, trio, _seats) = orchestrate_probes(
                 &cfg,
                 &test_endpoints(),
                 ProviderKind::Ollama,
@@ -11573,7 +11592,7 @@ agent_timeout_secs = {CEILING}
                 })
                 .build()
                 .unwrap();
-            let (principal_model, principal, trio) = orchestrate_probes(
+            let (principal_model, principal, trio, _seats) = orchestrate_probes(
                 &cfg,
                 &diverging_endpoints(),
                 ProviderKind::Ollama,
@@ -11651,7 +11670,7 @@ agent_timeout_secs = {CEILING}
                 .build()
                 .unwrap();
 
-            let (_principal_model, principal, trio) = orchestrate_probes(
+            let (_principal_model, principal, trio, _seats) = orchestrate_probes(
                 &cfg,
                 &endpoints,
                 ProviderKind::Anthropic,
@@ -11701,7 +11720,7 @@ agent_timeout_secs = {CEILING}
             ]);
             let cfg = cfg_diverging_with_models(Some("ollama"), "qwen-test", "claude-test");
 
-            let (principal_model, _principal, trio) = orchestrate_probes(
+            let (principal_model, _principal, trio, _seats) = orchestrate_probes(
                 &cfg,
                 &diverging_endpoints(),
                 ProviderKind::Anthropic,
@@ -11740,7 +11759,7 @@ agent_timeout_secs = {CEILING}
         async fn an_invalid_magi_kind_degrades_the_trio_without_guessing() {
             let factory = MappedProbeFactory::new(&[("principal", 64_000)]);
             let cfg = cfg_diverging_with_models(Some("banana"), "principal", "irrelevant");
-            let (principal_model, principal, trio) = orchestrate_probes(
+            let (principal_model, principal, trio, _seats) = orchestrate_probes(
                 &cfg,
                 &diverging_endpoints(),
                 ProviderKind::Ollama,
@@ -11864,6 +11883,52 @@ agent_timeout_secs = {CEILING}
                     Some(Measurement::Measured { window: 8_192, .. })
                 ),
                 "excluding it from the trio VIEW must not stop it being measured: {measured:?}"
+            );
+        }
+
+        /// SC-R52 edge: a pool entry declaring a SEAT's model must not remove that seat from the
+        /// trio's view.
+        ///
+        /// The first fix for the previous test filtered the merged table by name, which cannot
+        /// distinguish the two — the `BTreeMap` collapses them into one row and that row is the
+        /// seat. So the mage with the smallest window vanished from the threshold and from cold
+        /// detection, in the one configuration where it is also a rotation candidate. Selecting
+        /// by the returned seat list cannot fail that way.
+        ///
+        /// **Mutation-verified (B16):** rebuild `trio_seats` by excluding `extra_models` by name
+        /// and this goes red while its neighbour above stays green — the two differ only in
+        /// whether the extra collides with a seat.
+        #[tokio::test]
+        async fn a_pool_entry_declaring_a_seats_model_leaves_that_seat_in_the_trio() {
+            let factory = MappedProbeFactory::new(&[
+                ("principal", 200_000),
+                // The colliding seat is ALSO the smallest, so its presence is observable in the
+                // threshold: drop it and the minimum jumps to the other two.
+                ("melchior", 8_192),
+                ("balthasar", 128_000),
+                ("caspar", 128_000),
+            ]);
+            let cfg = cfg_with_four_distinct_models("principal", "melchior", "balthasar", "caspar");
+
+            let mut notices = Vec::new();
+            let (warn_tokens, _measured) = probe_and_report(
+                &cfg,
+                &test_endpoints(),
+                ProviderKind::Ollama,
+                &factory,
+                &MagiEnvModelOverrides::default(),
+                // The pool's first candidate happens to be the same model Melchior runs.
+                &["melchior".to_string()],
+                &mut notices,
+            )
+            .await;
+
+            assert_eq!(
+                warn_tokens,
+                Some(8_192 * 3 / 4),
+                "melchior is a SEAT that the pool also lists; excluding it by name would have \
+                 derived {} from the other two",
+                128_000 * 3 / 4
             );
         }
 
