@@ -1314,6 +1314,56 @@ mod tests {
     /// answering — used to make a forced/direct consult deterministically exhaust
     /// its wall-clock budget (the reply content is irrelevant; the deadline fires
     /// first and the analysis task is aborted).
+    /// The cancel arm of `analyze_direct` works — reachable, and now exercised.
+    ///
+    /// Three review rounds went into describing that arm, and two of the three descriptions were
+    /// wrong, because `run_consult` (its only caller) creates a token it never cancels. Melchior
+    /// offered two ways out in S4 Loop 2: delete the arm, or drive it from a test double. Driving
+    /// it is the better trade — the arm is a real safety path that `ConsultTool::execute` relies
+    /// on in the same shape, and deleting a working guard because today's single caller happens
+    /// not to use it trades a defence for a line count.
+    ///
+    /// **Mutation-verified (B16):** remove the `cancel.cancelled()` arm and this hangs on the
+    /// hour-long analysis instead of returning; drop the `.abort()` inside it and the spawned
+    /// task outlives the call.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_cancel_arm_stops_an_analysis_that_would_otherwise_run_for_an_hour() {
+        let magi = slow_magi(Duration::from_secs(3_600));
+        let cfg = MagiConfig::default();
+        let sink = RecordingNoticeSink::default();
+        let runtime = MagiRuntimeParams {
+            kind: ProviderKind::OpenAiCompat,
+            classifier: &NeverClassifier,
+            configured_mode: None,
+            untrusted_content: false,
+            magi_config: &cfg,
+            timeout_decision: neutral_timeout_decision(),
+            notice_sink: &sink,
+        };
+
+        let cancel = CancellationToken::new();
+        // Cancelled BEFORE the call, so the arm is ready on the first poll: no sleep, no
+        // tolerance, and no dependence on how loaded the box is (R-R05).
+        cancel.cancel();
+
+        // `None` timeout: the deadline arm parks forever, so nothing but cancellation can end
+        // this — which is what makes the result attributable.
+        let result = analyze_direct(
+            &magi,
+            "should we migrate X to Y?",
+            &cancel,
+            None,
+            Some(Mode::Analysis),
+            &runtime,
+        )
+        .await;
+
+        assert!(
+            matches!(result, Err(ConsultRunError::Timeout)),
+            "a cancelled run must end promptly with the typed stop, not wait out the analysis"
+        );
+    }
+
     fn slow_magi(delay: Duration) -> Arc<Magi> {
         use magi_core::error::ProviderError;
         use magi_core::provider::{CompletionConfig, LlmProvider};

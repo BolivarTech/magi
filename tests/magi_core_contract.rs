@@ -285,13 +285,25 @@ fn magi_core_api_surface_is_what_the_plan_assumes() {
     );
     assert_is_provider(&openai);
 
-    // `OllamaProvider` still exists, but ONLY as a probe: its sole constructor fixes a 300 s
-    // client with no override, which makes REQ-A04's relation
-    // (`operation_budget + client_timeout <= ceiling`) impossible to satisfy. It returns a
-    // `Result` because it normalizes the URL — and that normalization is exactly what REQ-A01b
-    // requires to be announced in a notice.
+    // `OllamaProvider` serves BOTH roles as of v0.13.0, and `with_timeout` is the load-bearing
+    // constructor — the one REQ-R30 requires and §7 of the spec names in the only remaining
+    // prohibition on this type: never `new`, because it delegates with a 300 s default that
+    // cannot satisfy `operation_budget + client_timeout <= ceiling` and does so while compiling
+    // and running perfectly.
+    //
+    // This comment used to say the opposite — "ONLY as a probe: its sole constructor fixes a
+    // 300 s client with no override" — which was the state before 3.2.0 added `with_timeout` and
+    // before this milestone reverted D-A07 on the strength of it. The module header nine lines
+    // into this file already said so, so the file contradicted itself (S4 Loop 2, Caspar).
+    //
+    // Both constructors are pinned. `new` because `src/magi/probe.rs` still uses it deliberately
+    // and safely, under its own 5 s ceiling; `with_timeout` because everything that completes
+    // through this type depends on it existing with this arity. Either one disappearing upstream
+    // must break here rather than at a call site.
     let ollama =
         OllamaProvider::new(SYNTHETIC_BASE_URL, SYNTHETIC_MODEL).expect("valid synthetic base_url");
+    let _ =
+        OllamaProvider::with_timeout(SYNTHETIC_BASE_URL, SYNTHETIC_MODEL, Duration::from_secs(27));
     assert_is_provider(&ollama);
     assert_is_probe(&ollama);
 
