@@ -2786,7 +2786,8 @@ fn open_capability_cache(
         Ok(d) => d,
         Err(e) => {
             notices.push(Notice::resolution(format!(
-                "notice: model measurements will not be remembered between runs                  (could not derive the key: {e})."
+                "notice: model measurements will not be remembered between runs \
+                 (could not derive the key: {e})."
             )));
             return None;
         }
@@ -3076,6 +3077,13 @@ fn build_magi_orchestrator(
         }
     }
 
+    // REQ-R29's resolved-model half. `seats()` falls an undeclared seat back to the backend
+    // model, so a config naming no trio runs ONE model under three built-in labels — the case a
+    // label-distinctness check approves while it is literally what SC-R44 rejects. The load-time
+    // check cannot error on it without denying a fresh clone its first start, so it is reported
+    // here instead, where the resolved backend model is known.
+    notices.extend(cfg.diversity_notices(backend_model));
+
     // REQ-R27, second half (HAND-OFF from Task 2.8, which implemented this and left it with no
     // production caller): name, at STARTUP, each configured model this endpoint could not measure
     // WHILE it was measuring others. Until this line existed, a user whose fallback tag was never
@@ -3148,6 +3156,26 @@ fn build_magi_orchestrator(
         }
     }
 
+    // SC-R52, second half: a pool entry that repeats a model a SEAT already declares is
+    // announced. It is NOT pruned — `used` is per mage (`rotation.rs:213`), so another seat can
+    // still rotate into it, and dropping it would take a usable candidate away from the other
+    // two. But it is almost certainly a copy-paste, and left silent it surfaces only as an
+    // unexpectedly short rotation chain during a real incident.
+    {
+        let seat_models: std::collections::BTreeSet<&str> =
+            seats.iter().map(|(_, _, _, m)| m.as_str()).collect();
+        for entry in declared_pool {
+            if seat_models.contains(entry.model.as_str()) {
+                notices.push(Notice::info(format!(
+                    "notice: the fallback candidate `{}` repeats a model one of the mages already \
+                     runs. It stays in the pool — another seat can still rotate into it — but it \
+                     buys that seat nothing.",
+                    entry.model
+                )));
+            }
+        }
+    }
+
     // REQ-R01 + SC-R55. Exactly ONE registration call per seat: `with_agent` after
     // `with_agent_and_probe` for the same seat would DISCARD the probe in silence
     // (`orchestrator.rs:309-320`), and nothing about that failure is visible until a rotation
@@ -3166,7 +3194,9 @@ fn build_magi_orchestrator(
         if let Some(probe) = probes.get(&model) {
             if probe.declared_model() != Some(provider.model()) {
                 notices.push(Notice::resolution(format!(
-                    "notice: the probe registered for {seat:?} measures `{}` while its provider                      serves `{}`. The measurement will be filed under the wrong model; rotation                      still runs.",
+                    "notice: the probe registered for {seat:?} measures `{}` while its provider \
+                     serves `{}`. The measurement will be filed under the wrong model; rotation \
+                     still runs.",
                     probe.declared_model().unwrap_or("<unknown>"),
                     provider.model()
                 )));
@@ -7442,7 +7472,8 @@ mod tests {
                  [magi]\n\
                  melchior_model    = \"ok-model\"\nmelchior_lineage  = \"lin-melchior\"\n\
                  balthasar_model   = \"ok-model\"\nbalthasar_lineage = \"lin-balthasar\"\n\
-                 caspar_model      = \"down-model\"\ncaspar_lineage    = \"lin-caspar\"\n\
+                 caspar_model \
+                  = \"down-model\"\ncaspar_lineage    = \"lin-caspar\"\n\
                  agent_timeout_secs = 30\n\
                  max_rotations = {max_rotations}\n\
                  [[magi.fallback]]\n\
@@ -7505,7 +7536,8 @@ mod tests {
                  [magi]\n\
                  melchior_model    = \"shared\"\nmelchior_lineage  = \"lin-a\"\n\
                  balthasar_model   = \"shared\"\nbalthasar_lineage = \"lin-b\"\n\
-                 caspar_model      = \"other\"\ncaspar_lineage    = \"lin-c\"\n\
+                 caspar_model \
+                  = \"other\"\ncaspar_lineage    = \"lin-c\"\n\
                  [[magi.fallback]]\n\
                  model   = \"shared\"\nlineage = \"lin-rescue\"\n",
             )
@@ -7692,7 +7724,8 @@ mod tests {
             assert_eq!(
                 stateless,
                 vec!["rescue-model".to_string()],
-                "without a cache nothing else would ever measure a candidate: no CachedProbe is                  built, so there is no lazy path at all"
+                "without a cache nothing else would ever measure a candidate: no CachedProbe is \
+                 built, so there is no lazy path at all"
             );
 
             let conn = std::sync::Mutex::new(
@@ -7703,7 +7736,8 @@ mod tests {
             let cache = Arc::new(ModelCapabilityCache::new(Arc::new(conn), dek).expect("schema"));
             assert!(
                 stateless_extra_models(&cfg, Some(&cache)).is_empty(),
-                "with a cache the measurement is lazy: paying for the candidate at every start                  would be the cost the cache exists to avoid"
+                "with a cache the measurement is lazy: paying for the candidate at every start \
+                 would be the cost the cache exists to avoid"
             );
         }
 
@@ -8510,7 +8544,8 @@ mod tests {
                  [magi]\n\
                  melchior_model    = \"m-model\"\nmelchior_lineage  = \"declared-melchior\"\n\
                  balthasar_model   = \"b-model\"\nbalthasar_lineage = \"declared-balthasar\"\n\
-                 caspar_model      = \"c-model\"\ncaspar_lineage    = \"declared-caspar\"\n",
+                 caspar_model \
+                  = \"c-model\"\ncaspar_lineage    = \"declared-caspar\"\n",
             )
             .expect("a fully declared trio must parse");
             let mut notices = Vec::new();

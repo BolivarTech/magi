@@ -199,7 +199,11 @@ pub fn corroborate_by_digest(entries: &[(String, Lineage, Option<String>)]) -> V
             // Same lineage sharing a digest is the declaration being ACCURATE: nothing to report.
             if digest_a == digest_b && lineage_a != lineage_b {
                 notices.push(Notice::info(format!(
-                    "notice: `{model_a}` (lineage `{lineage_a}`) and `{model_b}` (lineage                      `{lineage_b}`) are declared as different failure domains but share the same                      cached weights digest, so rotating between them may buy no diversity. The                      digest is the one recorded when they were measured and is not re-checked, so                      this is a hint rather than a finding."
+                    "notice: `{model_a}` (lineage `{lineage_a}`) and `{model_b}` (lineage \
+                     `{lineage_b}`) are declared as different failure domains but share the same \
+                     cached weights digest, so rotating between them may buy no diversity. The \
+                     digest is the one recorded when they were measured and is not re-checked, so \
+                     this is a hint rather than a finding."
                 )));
             }
         }
@@ -207,7 +211,9 @@ pub fn corroborate_by_digest(entries: &[(String, Lineage, Option<String>)]) -> V
 
     if entries.iter().any(|(_, _, digest)| digest.is_none()) {
         notices.push(Notice::info(
-            "notice: lineage diversity was not corroborated against weights digests for every              declared model, because some digests are unresolved. The declarative checks still              applied."
+            "notice: lineage diversity was not corroborated against weights digests for every \
+             declared model, because some digests are unresolved. The declarative checks still \
+             applied."
                 .to_owned(),
         ));
     }

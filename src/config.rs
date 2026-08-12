@@ -17,6 +17,7 @@ use magi_rs::magi::kind::{ProviderKind, ProviderKindParseError};
 use magi_rs::magi::lineage::{Lineage, LineageError};
 use magi_rs::magi::mode::{ModeExt, ModeParseError};
 use magi_rs::magi::{min_viable_output_cap, AGENT_TIMEOUT_MAX_SECS, AGENT_TIMEOUT_MIN_SECS};
+use magi_rs::notices::Notice;
 use serde::Deserialize;
 
 /// Configuration errors from `magi.toml` (Task 1.1, REQ-A01b/A04/A11b/A21b).
@@ -27,6 +28,15 @@ use serde::Deserialize;
 /// lib cannot know a type from the bin).
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
+    /// The declared lineages do not satisfy `enforce_diversity` (REQ-R29).
+    ///
+    /// A load error and not a notice because the evidence is **declarative**: three distinct seat
+    /// lineages and pool coverage are free to check and true right now. The empirical half —
+    /// two models sharing a weights digest — only ever warns, because that evidence can have
+    /// aged.
+    #[error("{0}")]
+    Diversity(#[from] magi_rs::magi::rotation_config::DiversityError),
+
     /// `provider` or `[magi].kind` bring a present but unrecognized value.
     #[error("unknown provider: {got:?} (valid: {valid})")]
     UnknownProviderKind {
@@ -820,7 +830,71 @@ impl MagiConfig {
         )?;
         self.validate_agent_timeout()?;
         self.validate_output_cap()?;
+        self.validate_diversity_rules()?;
         Ok(())
+    }
+
+    /// Enforces REQ-R29's **declarative** half at load time.
+    ///
+    /// # Why this lives here and not in the trio builder
+    ///
+    /// It is a property of the configuration, knowable the moment the file parses, and a load
+    /// error is the only thing that reaches an operator *before* they depend on the safety net.
+    /// Discovering it at rotation time means discovering it when a mage has already fallen —
+    /// the worst moment, and the one the requirement exists to avoid.
+    ///
+    /// # Errors
+    ///
+    /// [`ConfigError::Diversity`] when `enforce_diversity` is on and either two seats share a
+    /// lineage or a declared pool leaves a seat uncovered.
+    fn validate_diversity_rules(&self) -> Result<(), ConfigError> {
+        // A seat whose lineage cannot be resolved is already reported by
+        // `migrate::missing_seat_lineages`, which names ALL of them at once. Failing here on the
+        // first would replace a complete message with a partial one.
+        let mut seats = Vec::new();
+        for name in [AgentName::Melchior, AgentName::Balthasar, AgentName::Caspar] {
+            match self.magi.lineage_of_seat(name) {
+                Ok(lineage) => seats.push((name, lineage)),
+                Err(_) => return Ok(()),
+            }
+        }
+        magi_rs::magi::rotation_config::validate_diversity(
+            &seats,
+            &self.magi.fallback,
+            self.effective_enforce_diversity(),
+        )?;
+        Ok(())
+    }
+
+    /// Notices the load owes about diversity that the checks above do not raise as errors.
+    ///
+    /// # The case this exists for, and why it is a notice
+    ///
+    /// `seats()` resolves a seat that declares **no** model to the *backend* model, so a
+    /// configuration that names no trio runs all three mages on the SAME weights while
+    /// `lineage_of_seat` hands each a different built-in label. A distinctness check over labels
+    /// approves that — it is literally the case SC-R44 exists to reject, wearing three names.
+    ///
+    /// It cannot be an error: an absent `magi.toml` must start silently, and someone pointing at
+    /// a single-model endpoint has made a legitimate choice, not a mistake. So the labels stop
+    /// being taken at face value and the resolved models are reported instead.
+    #[must_use]
+    pub(crate) fn diversity_notices(&self, backend_model: &str) -> Vec<Notice> {
+        let seats = self.magi.seats(backend_model);
+        let distinct: std::collections::BTreeSet<&str> =
+            seats.iter().map(|(_, model)| model.as_str()).collect();
+        if distinct.len() > 1 {
+            return Vec::new();
+        }
+        vec![Notice::resolution(format!(
+            "notice: all three mages resolve to the same model (`{}`), so their declared \
+             lineages describe one failure domain rather than three. The consensus still has \
+             three perspectives — those are structural — but a shared outage takes all three at \
+             once. Declare a model per seat in `[magi]` to get the diversity the labels claim.",
+            seats
+                .first()
+                .map_or("<unknown>", |(_, model)| model.as_str())
+        ))]
     }
 
     /// `agent_timeout_secs` outside the range of §4.9 is a **configuration error**.
@@ -2233,6 +2307,108 @@ mod tests {
                 .as_str(),
             "mi-linaje-raro",
             "the declared label wins, trimmed"
+        );
+    }
+
+    /// SC-R44 THROUGH THE REAL LOAD PATH: a single-lineage trio does not parse.
+    ///
+    /// This is the WIRING guardian, and it is the one that was missing. `validate_diversity` had
+    /// unit tests from the day it was written and **no production caller for the whole
+    /// milestone**, so the requirement was not delivered at all while its tests were green and
+    /// the CHANGELOG announced it as a breaking change. A test that calls the function directly
+    /// can never catch that; only one that drives `from_toml_str` can.
+    #[test]
+    fn a_single_lineage_trio_fails_to_load_under_the_default() {
+        let err = MagiConfig::from_toml_str(
+            "provider = \"ollama\"\n\
+             [magi]\n\
+             melchior_model    = \"m1\"\nmelchior_lineage  = \"anthropic\"\n\
+             balthasar_model   = \"m2\"\nbalthasar_lineage = \"anthropic\"\n\
+             caspar_model      = \"m3\"\ncaspar_lineage    = \"anthropic\"\n",
+        )
+        .expect_err("three seats on one lineage must not load under enforce_diversity = true");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("melchior") && msg.contains("balthasar") && msg.contains("caspar"),
+            "the error must name the affected seats: {msg}"
+        );
+        assert!(
+            msg.contains("enforce_diversity"),
+            "and carry the ONE-LINE way out: {msg}"
+        );
+    }
+
+    /// SC-R43 through the load path: a pool that leaves a seat uncovered is an error under the
+    /// default, and a config that declares `enforce_diversity = false` loads.
+    #[test]
+    fn an_uncovered_seat_fails_under_the_default_and_loads_when_disabled() {
+        let toml = |extra: &str| {
+            format!(
+                "provider = \"ollama\"\n\
+                 [magi]\n\
+                 melchior_model    = \"m1\"\nmelchior_lineage  = \"opus\"\n\
+                 balthasar_model   = \"m2\"\nbalthasar_lineage = \"sonnet\"\n\
+                 caspar_model      = \"m3\"\ncaspar_lineage    = \"haiku\"\n\
+                 {extra}\
+                 [[magi.fallback]]\n\
+                 model   = \"rescue\"\nlineage = \"opus\"\n"
+            )
+        };
+        assert!(
+            MagiConfig::from_toml_str(&toml("")).is_err(),
+            "an `opus` candidate covers only Melchior; the other two have nowhere to rotate"
+        );
+        assert!(
+            MagiConfig::from_toml_str(&toml("enforce_diversity = false\n")).is_ok(),
+            "the mono-provider exit must still load"
+        );
+    }
+
+    /// The DEFAULT install still loads. Nothing about REQ-R29 may cost a fresh clone its start:
+    /// an absent `magi.toml` is a silent default, and a user who declared no trio has asserted
+    /// nothing about diversity to be wrong about.
+    #[test]
+    fn a_config_that_declares_no_trio_still_loads() {
+        assert!(MagiConfig::from_toml_str("provider = \"ollama\"\n").is_ok());
+        assert!(MagiConfig::from_toml_str("").is_ok());
+    }
+
+    /// The hand-off the plan left open, answered: three seats that resolve to the SAME model are
+    /// reported, whatever their labels say.
+    ///
+    /// `seats()` falls an undeclared seat back to the BACKEND model, so a config naming no trio
+    /// runs one model under three built-in labels — literally the case SC-R44 rejects, wearing
+    /// three names. A distinctness check over labels approves it, which is why the resolved
+    /// models are checked separately.
+    ///
+    /// It is a NOTICE and not an error on purpose: an absent file must start silently, and
+    /// pointing at a single-model endpoint is a legitimate choice rather than a mistake.
+    #[test]
+    fn three_seats_resolving_to_one_model_are_reported_however_they_are_labelled() {
+        let cfg = MagiConfig::from_toml_str("provider = \"ollama\"\n").expect("defaults load");
+        let notices = cfg.diversity_notices("one-backend-model");
+        assert_eq!(
+            notices.len(),
+            1,
+            "the collapse must be reported: {notices:?}"
+        );
+        assert!(
+            notices[0].text.contains("one-backend-model"),
+            "and name the model they all resolve to: {}",
+            notices[0].text
+        );
+
+        let declared = MagiConfig::from_toml_str(
+            "provider = \"ollama\"\n\
+             [magi]\n\
+             melchior_model    = \"a\"\nmelchior_lineage  = \"la\"\n\
+             balthasar_model   = \"b\"\nbalthasar_lineage = \"lb\"\n\
+             caspar_model      = \"c\"\ncaspar_lineage    = \"lc\"\n",
+        )
+        .expect("a declared trio loads");
+        assert!(
+            declared.diversity_notices("unused").is_empty(),
+            "three distinct models say nothing"
         );
     }
 

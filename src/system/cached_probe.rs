@@ -36,6 +36,18 @@
 #![deny(clippy::missing_docs_in_private_items)]
 #![deny(rustdoc::broken_intra_doc_links)]
 #![deny(clippy::missing_errors_doc, clippy::missing_panics_doc)]
+#![cfg_attr(
+    not(test),
+    deny(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::todo,
+        clippy::unimplemented,
+        clippy::indexing_slicing,
+        clippy::string_slice
+    )
+)]
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -330,7 +342,7 @@ mod tests {
         assert_eq!(
             source.window_calls.load(Ordering::SeqCst),
             1,
-            "the miss must have REACHED the source; a ceiling assertion against a probe that              never measured passes for the wrong reason"
+            "the miss must have REACHED the source; a ceiling assertion against a probe that \n             never measured passes for the wrong reason"
         );
         assert!(
             elapsed <= Duration::from_secs(PROBE_TIMEOUT_SECS + 1),

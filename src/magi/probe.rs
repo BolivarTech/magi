@@ -399,7 +399,10 @@ pub fn derive_input_warn_tokens(trio: &[usize], pool: &[(&str, usize)]) -> (usiz
             .collect::<Vec<_>>()
             .join(", ");
         notices.push(Notice::resolution(format!(
-            "notice: fallback candidates far below the trio's window are NOT lowering the size              warning threshold, which stays on the trio base of {base} tokens: {listed}.              Replace them with candidates of comparable window if you want the threshold to              reflect them."
+            "notice: fallback candidates far below the trio's window are NOT lowering the size \
+             warning threshold, which stays on the trio base of {base} tokens: {listed}. \
+             Replace them with candidates of comparable window if you want the threshold to \
+             reflect them."
         )));
     }
 
@@ -491,15 +494,20 @@ pub fn assumed_window_notices(
         return Vec::new();
     };
     pool.iter()
+        // Routed through [`window_state`] rather than an ad-hoc "not Measured" test: the three
+        // states are the point of that type, and having the only place that reports them compute
+        // the distinction some other way is how the two drift apart.
         .filter(|candidate| {
-            !matches!(
-                measured.get(&candidate.model),
-                Some(Measurement::Measured { .. })
+            matches!(
+                window_state(measured, &candidate.model),
+                WindowState::Assumed(_)
             )
         })
         .map(|candidate| {
             Notice::info(format!(
-                "notice: fallback candidate `{}` has no measured window; it is credited with                  {assumed} tokens, the smallest measured this run. It stays eligible, but a                  rotation into it may fail for a prompt larger than that.",
+                "notice: fallback candidate `{}` has no measured window; it is credited with \
+                 {assumed} tokens, the smallest measured this run. It stays eligible, but a \
+                 rotation into it may fail for a prompt larger than that.",
                 candidate.model
             ))
         })
@@ -575,7 +583,10 @@ pub fn effective_strict_guard(
     (
         false,
         Some(Notice::resolution(
-            "notice: `strict_context_guard = true` was declared but is NOT being applied,              because no candidate has a measured window. Applying it would reject every              fallback candidate and switch rotation off entirely. It takes effect on its own              once a measurement succeeds."
+            "notice: `strict_context_guard = true` was declared but is NOT being applied, \
+             because no candidate has a measured window. Applying it would reject every \
+             fallback candidate and switch rotation off entirely. It takes effect on its own \
+             once a measurement succeeds."
                 .to_owned(),
         )),
     )
