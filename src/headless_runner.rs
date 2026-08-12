@@ -194,9 +194,13 @@ pub(crate) async fn resolve_direct_mode(
 /// - `timeout_decision` — the REAL [`TimeoutDecision`] (SC-A04d), computed by the caller via `magi_rs::magi::resolve_run_timeout` for its `below_formula` flag — **not recomputed here**. Its `effective_secs` is deliberately NOT used to override the enforced `timeout` parameter this call already takes: this struct exists to make the JSON's telemetry honest, not to change which timeout is actually enforced (a larger, separate, pre-existing gap — see this fix round's report).
 /// - `notice_sink` — where [`analyze_direct`] emits `timeout_decision.warning` (fix round 2, SC-A04d's other half: the JSON flag alone isn't the whole requirement — a human running the command by hand needs the same fact on stderr). Production shares ONE [`ProcessNoticeSink`](crate::agent::mode_classifier::ProcessNoticeSink) instance with the mode classifier's own notices (`run_consult_subcommand`) rather than opening a second output path — dedup is per-key, so the two notices cannot suppress each other.
 ///
-/// `pub(crate)`, same reasoning as [`resolve_direct_mode`] above: constructed
-/// from `main.rs`'s `run_consult_subcommand`, which builds it from its own
+/// `pub(crate)` because `main.rs`'s `run_consult_subcommand` constructs it, from its own
 /// already-resolved `classifier`/`configured_mode`/`untrusted_content`.
+///
+/// This used to add "same reasoning as `resolve_direct_mode` above", and that reasoning is the
+/// opposite one (S4 Loop 2, Balthasar): `resolve_direct_mode` is `#[cfg(test)]` precisely
+/// because it has NO production caller left. Borrowing its justification for a struct that does
+/// have one invites the next reader to conclude this is test scaffolding and gate it away.
 pub(crate) struct MagiRuntimeParams<'a> {
     /// The `ProviderKind` the trio runs under (REQ-A12c).
     pub(crate) kind: ProviderKind,
@@ -1957,8 +1961,10 @@ mod tests {
         // `consult`, so the tier refuses it FIRST and the stored text is always the tier
         // denial — the veto never reaches the record to be looked for.
         //
-        // That also corrects this test's own story: the consult never RUNS here, it only gets
-        // past the complexity gate, which is the one thing its name should promise.
+        // Finding that out is also what corrected the fixture: under `Tier::Default` the consult
+        // only ever got past the complexity gate and was then refused, so the test could not
+        // observe the thing its name promises. `Tier::Auto` approves every registered tool, the
+        // whole path runs, and the `ok` assertion above became possible.
         //
         // `on_gate_evaluation` writes "veto" or "dispatch" per evaluation (SC-A20h) — the one
         // place the two outcomes differ, and what the neighbouring test reads for the

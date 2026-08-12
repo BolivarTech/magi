@@ -760,9 +760,9 @@ Override any of them per-section in `magi.toml` (`[openai]`, `[embedding]`, `[ma
 |------|---------------|---------|
 | Chat (principal) | `kimi-k2.6:cloud` | `magi-rs` agent — live replies |
 | Embedding | `nomic-embed-text-v2-moe:latest` | `magi-rs` tiered memory (`selective`) — `ollama pull` it |
-| Melchior (Scientist) | `qwen3.5:397b-cloud` | `magi-core` multi-perspective consensus (`consult` / `/magi`) |
-| Balthasar (Pragmatist) | `gpt-oss:120b-cloud` | `magi-core` multi-perspective consensus (`consult` / `/magi`) |
-| Caspar (Critic) | `deepseek-v4-pro:cloud` | `magi-core` multi-perspective consensus (`consult` / `/magi`) |
+| Melchior (Scientist) | `qwen3.5:397b-cloud` | `magi-core` multi-perspective consensus (`consult` tool / `/consult`) |
+| Balthasar (Pragmatist) | `gpt-oss:120b-cloud` | `magi-core` multi-perspective consensus (`consult` tool / `/consult`) |
+| Caspar (Critic) | `deepseek-v4-pro:cloud` | `magi-core` multi-perspective consensus (`consult` tool / `/consult`) |
 
 > The MAGI trio deliberately runs three distinct model families (Alibaba / OpenAI / DeepSeek) for genuine
 > cross-lineage diversity. The `consult` tool (and the `/magi` command) only need these when a
