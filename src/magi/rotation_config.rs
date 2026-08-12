@@ -158,6 +158,63 @@ pub fn validate_diversity(
     Ok(notices)
 }
 
+/// Corroborates the declared lineages against the **cached** weights digests (REQ-R29, SC-R45).
+///
+/// # Why this warns and the declarative half errors
+///
+/// The dividing line is the **nature of the evidence**, not the setting. Three distinct seat
+/// lineages and pool coverage are *declarative*: free to check, and **true right now**, so they are
+/// required and a violation is a load error. A shared digest is *empirical* corroboration, and the
+/// evidence can have aged — the cache only changes when the configuration does, so a stored digest
+/// may be weeks old. Denying a start over a collision that might no longer exist is a worse failure
+/// than the one it prevents.
+///
+/// # It never probes
+///
+/// Everything here is read from what a measurement already stored. `ProviderProbe::digest` is
+/// per-instance rather than per-model, so re-verifying would cost one request **per model on every
+/// start** — and buy a check that is secondary and advisory. The digest is measured on the first
+/// trip and never re-read (SC-R42), at either value of `enforce_diversity`.
+///
+/// # Unresolved digests are reported, not passed over in silence
+///
+/// A `None` digest cannot prove or disprove anything, and saying nothing would read as
+/// *"corroborated and fine"* — a different claim from *"there was nothing to corroborate with"*.
+/// The same rule the rest of this milestone follows: a resolution that does not come from what the
+/// operator wrote gets announced.
+///
+/// # Complexity
+///
+/// `O(n²)` over the declared models, with `n` bounded by the three seats plus the pool — a handful
+/// of entries read once at startup. A map keyed by digest would be `O(n)` and less legible for a
+/// gain that does not exist at this size.
+#[must_use]
+pub fn corroborate_by_digest(entries: &[(String, Lineage, Option<String>)]) -> Vec<Notice> {
+    let mut notices = Vec::new();
+
+    for (i, (model_a, lineage_a, digest_a)) in entries.iter().enumerate() {
+        let Some(digest_a) = digest_a else { continue };
+        for (model_b, lineage_b, digest_b) in entries.iter().skip(i + 1) {
+            let Some(digest_b) = digest_b else { continue };
+            // Same lineage sharing a digest is the declaration being ACCURATE: nothing to report.
+            if digest_a == digest_b && lineage_a != lineage_b {
+                notices.push(Notice::info(format!(
+                    "notice: `{model_a}` (lineage `{lineage_a}`) and `{model_b}` (lineage                      `{lineage_b}`) are declared as different failure domains but share the same                      cached weights digest, so rotating between them may buy no diversity. The                      digest is the one recorded when they were measured and is not re-checked, so                      this is a hint rather than a finding."
+                )));
+            }
+        }
+    }
+
+    if entries.iter().any(|(_, _, digest)| digest.is_none()) {
+        notices.push(Notice::info(
+            "notice: lineage diversity was not corroborated against weights digests for every              declared model, because some digests are unresolved. The declarative checks still              applied."
+                .to_owned(),
+        ));
+    }
+
+    notices
+}
+
 /// Unit tests for `FallbackEntry` deserialization and diversity validation.
 #[cfg(test)]
 mod tests {

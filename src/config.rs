@@ -713,7 +713,7 @@ impl MagiConfig {
     }
 
     /// Whether the three seats must declare distinct lineages (REQ-R29).
-    #[cfg(test)]
+    #[must_use]
     pub(crate) fn effective_enforce_diversity(&self) -> bool {
         self.magi
             .enforce_diversity

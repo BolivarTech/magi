@@ -66,6 +66,7 @@ use magi_rs::magi::probe::{
     assumed_window_notices, derive_input_warn_tokens, derive_warn_tokens, effective_strict_guard,
     min_mage_window, probe_models, Measurement, OllamaProbeFactory, ProbeFactory,
 };
+use magi_rs::magi::rotation_config::corroborate_by_digest;
 use magi_rs::magi::{
     bytes_to_tokens_est, derive_client_timeout, derive_operation_budget, AGENT_TIMEOUT_SECS,
     CHARS_PER_TOKEN_EST, STALE_NOTICE_RATIO,
@@ -2996,6 +2997,35 @@ fn build_magi_orchestrator(
             Some(threshold)
         }
     };
+
+    // REQ-R29, second half: corroborate the DECLARED lineages against the cached digests. Only
+    // under `enforce_diversity`, and only ever as a warning — the declarative half already ran at
+    // load time and errored there if it had to. Reads the cache; never probes (SC-R42).
+    if cfg.effective_enforce_diversity() {
+        if let Some(cache) = capability_cache {
+            let mut rows: Vec<(String, magi_rs::magi::lineage::Lineage, Option<String>)> =
+                Vec::new();
+            for (seat, _, _, model) in &seats {
+                if let Ok(lineage) = cfg.magi().lineage_of_seat(*seat) {
+                    let digest = cache
+                        .get(&endpoint_redacted, model)
+                        .ok()
+                        .flatten()
+                        .and_then(|row| row.digest);
+                    rows.push((model.clone(), lineage, digest));
+                }
+            }
+            for entry in declared_pool {
+                let digest = cache
+                    .get(&endpoint_redacted, &entry.model)
+                    .ok()
+                    .flatten()
+                    .and_then(|row| row.digest);
+                rows.push((entry.model.clone(), entry.lineage.clone(), digest));
+            }
+            notices.extend(corroborate_by_digest(&rows));
+        }
+    }
 
     // REQ-R26/SC-R51: candidates running on an ASSUMED window are announced — and nothing here
     // removes them. The assumption informs; the filtering stays entirely with magi-core, whose
