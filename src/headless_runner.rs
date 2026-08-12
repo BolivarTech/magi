@@ -306,17 +306,43 @@ async fn analyze_direct(
     };
     tokio::pin!(deadline);
 
+    // **`biased;` makes the ORDER a decision, and the middle arm was in the wrong place**
+    // (S4 Loop 2, Balthasar). With the deadline ahead of the join handle, a consult that
+    // finished in the same poll as the timer expiring was thrown away and reported as a
+    // `Timeout`: three model calls already paid for, discarded over a race the operator cannot
+    // influence, to enforce a bound that had just been met anyway.
+    //
+    // Completion first, then the two stop signals. The wall-clock guarantee is untouched — if
+    // the handle is not ready, the deadline arm is polled in the same pass and still fires — but
+    // a finished answer is now never discarded in favour of a tie.
+    //
+    // `cancel` stays FIRST, deliberately. It is external cancellation, not this consult's own
+    // budget: the caller is tearing down, and handing it a report it asked not to receive is a
+    // different contract from delivering work that completed on time. That distinction is worth
+    // more than the symmetry.
+    //
+    // **UNGUARDED, and said plainly rather than left to look tested.** Every other fix in this
+    // gate carries a test that goes red when the fix is reverted; this one does not, because the
+    // scenario cannot be expressed with the harness available. Constructing the tie needs a
+    // paused clock, and under `start_paused` the analysis never completes at all — magi-core's
+    // internal tasks do not participate in the auto-advance, so the double's `tokio::time::sleep`
+    // never resolves and the run times out with or without a deadline. A test built anyway would
+    // pass for a reason unrelated to arm order, which is worse than none.
+    //
+    // What stands in for it is that the change is small and total: three arms, one moved, and
+    // `biased;` means the order is the whole behaviour. If someone reorders these again, this
+    // paragraph is the only thing that will stop them.
     let joined = tokio::select! {
         biased;
         () = cancel.cancelled() => {
             abort_guard.abort();
             return Err(ConsultRunError::Timeout);
         }
+        joined = handle => joined,
         () = &mut deadline => {
             abort_guard.abort();
             return Err(ConsultRunError::Timeout);
         }
-        joined = handle => joined,
     };
 
     match joined {

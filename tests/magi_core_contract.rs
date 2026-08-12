@@ -541,6 +541,14 @@ async fn report_shape_matches_what_the_truncation_design_assumes() {
         anchors.findings_start,
         anchors.findings_end,
     ] {
+        // `contains("")` is ALWAYS true, so an anchor emptied by a refactor would satisfy every
+        // check below and turn this whole guardian decorative — it would keep passing while
+        // `Structural` truncation silently stopped being reachable, which is the one outcome it
+        // exists to catch (S4 Loop 2, Balthasar).
+        assert!(
+            !anchor.is_empty(),
+            "an empty section anchor makes every `contains` below vacuously true"
+        );
         assert!(
             report.report.contains(anchor),
             "missing section anchor: {anchor:?}. magi-core changed its rendering and REQ-A11b's \
@@ -551,6 +559,10 @@ async fn report_shape_matches_what_the_truncation_design_assumes() {
         );
     }
     for anchor in CONTRACTUAL_ANCHORS {
+        assert!(
+            !anchor.is_empty(),
+            "an empty contractual anchor makes the check below vacuously true"
+        );
         assert!(
             report.report.contains(anchor),
             "missing contractual anchor: {anchor:?}. These are the ones magi-core ALWAYS \

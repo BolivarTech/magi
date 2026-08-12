@@ -165,6 +165,14 @@ failed. What changed is *which model* produced one of them — which is why the 
 the model that actually answered rather than the one you configured. A report naming the
 configured model after a fallback ran would be lying about its own evidence base.
 
+There is one exception, and it is worth knowing before you rely on that field. If a mage
+rotates and its task then panics or is cancelled, `magi-core` reports that seat's *pre-seed*
+state — the configured model, with an empty chain — because the chain it actually walked
+lived in the stack that went down with the task. The upstream crate documents this as an
+accepted limitation and it cannot be reconstructed from outside. That seat also appears in
+`failed_agents`, which is the signal that its rotation entry is not to be trusted: when both
+fields mention the same seat, believe `failed_agents`.
+
 **What a rotation costs you is diversity, not validity.** The three perspectives are
 structural — three roles, three system prompts — and they hold regardless of which weights
 answered. Lineage diversity is the second layer: it is what makes a shared outage unlikely
@@ -286,6 +294,8 @@ it is an object with these keys, **all always present**:
 | `endpoint_divergence` | bool | whether this run's content passed through the principal provider (mode classification) before reaching a trio on a different endpoint |
 | `timeout_below_formula` | bool | whether an explicit `--timeout` was below what the derived escalation formula requires |
 | `failed_agents` | object | per-seat failure cause, redacted, for a mage that produced no verdict |
+| `rotations` | object | per-seat rotation chain: from/to lineage, cause, and the model it ended on. An empty object certifies that nobody rotated — it is a positive statement, not silence |
+| `ran_unmeasured` | array | seats that ran without a measured context window, so their verdict carries that caveat |
 
 New fields are added to `consult` without a `schema_version` bump — the same
 consumer contract above applies to it.
