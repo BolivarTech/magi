@@ -839,7 +839,12 @@ fn report_open_failure(e: &anyhow::Error) -> i32 {
             vault_error_exit_code(ve)
         }
         None => {
-            eprintln!("error: {e}");
+            // Redacted, like every other foreign error that reaches a user surface in this file
+            // (S3 Loop 2, Balthasar). This arm is the one that fires when the failure is NOT a
+            // typed `VaultError` — that is, precisely when the error came from somewhere this
+            // module does not control and cannot vouch for, which is the case the rule is about.
+            // Leaving the unknown one raw while redacting the known one inverts the reasoning.
+            eprintln!("error: {}", redact_foreign_error(e.as_ref()));
             2
         }
     }
@@ -7172,6 +7177,13 @@ mod tests {
             MagiConfig::from_toml_str("[embedding]\nbase_url = \"https://user:hunter2@host/v1\"\n")
                 .unwrap();
         let err = resolve_effective_embedding_endpoint(&cfg, None).unwrap_err();
+        // Presence before absence (S3 Loop 2, Balthasar, found by sweeping the class rather than
+        // the one site reported). `unwrap_err` proves an error happened; it does not prove the
+        // error SAYS anything, and an empty message satisfies the leak check perfectly.
+        assert!(
+            err.contains("vault set"),
+            "precondition: the error must be the actionable one, naming how to fix it: {err}"
+        );
         assert!(!err.contains("hunter2"), "leaked the credential: {err}");
     }
 
@@ -7258,6 +7270,11 @@ mod tests {
         let cfg =
             MagiConfig::from_toml_str("base_url = \"https://user:hunter2@host/v1\"\n").unwrap();
         let err = resolve_effective_principal_endpoint(&cfg, None, None).unwrap_err();
+        // Presence before absence — same reasoning as its embedding-side twin above.
+        assert!(
+            err.contains("vault set"),
+            "precondition: the error must be the actionable one, naming how to fix it: {err}"
+        );
         assert!(!err.contains("hunter2"), "leaked the credential: {err}");
     }
 
