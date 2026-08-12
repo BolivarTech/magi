@@ -4340,10 +4340,14 @@ struct HeadlessContext {
     /// parallel-test-safe to redirect), so a test asserts on this field directly
     /// instead — see `test_prepare_headless_carries_the_divergence_notice_when_it_applies`.
     ///
-    /// `#[allow(dead_code)]`: no dispatcher's PRODUCTION code reads it back off `ctx` (both
-    /// destructure `HeadlessContext` with `..` for this field) — it exists purely so a test can
-    /// assert against the real `prepare_headless` output instead of a hand-rolled stand-in.
-    #[allow(dead_code)]
+    /// **`#[cfg(test)]`, not `#[allow(dead_code)]`** (S3 Loop 2, Balthasar, applying the
+    /// precedent set for `Args::untrusted_content` earlier in this same file). No dispatcher's
+    /// production code reads it back off `ctx` — both destructure `HeadlessContext` with `..`
+    /// here — so it exists purely so a test can assert against the real `prepare_headless`
+    /// output instead of a hand-rolled stand-in. The `allow` said "trust me, this is used";
+    /// the `cfg` makes that true by construction, and §6.1.8 forbids the former precisely
+    /// because the linter is telling the truth about the crate as it stands.
+    #[cfg(test)]
     divergence_notice: Option<Notice>,
 }
 
@@ -4764,6 +4768,7 @@ async fn prepare_headless(
         limits,
         env_mode,
         env_untrusted_content,
+        #[cfg(test)]
         divergence_notice: headless_divergence_notice,
     })
 }
