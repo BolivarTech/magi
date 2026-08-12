@@ -498,7 +498,23 @@ pub fn assumed_window_notices(
         // states are the point of that type, and having the only place that reports them compute
         // the distinction some other way is how the two drift apart.
         .filter(|candidate| {
-            matches!(
+            // NOT measurable is not the same as not measured, and only the second earns a notice
+            // (SC-R51). `window_state` credits both with the assumption, which REQ-R26's headline
+            // supports — the assumption is informational and applies to any unmeasured candidate.
+            // The NOTICE is narrower: telling an operator that a candidate on a protocol with no
+            // introspection endpoint "has no measured window" reads as a defect in their setup,
+            // when it is a property of the protocol and there is no action to take.
+            //
+            // Today this cannot fire — one orchestrator construction has one endpoint and one
+            // `kind`, so either everything is measurable or nothing is, and nothing-measurable
+            // already returned above with no assumption to make. It is written out anyway
+            // because that is an emergent invariant nothing enforces: per-seat endpoints would
+            // make the mixed case real, and the failure would be a confusing notice rather than
+            // anything that breaks (S2 Loop 2, Balthasar).
+            !matches!(
+                measured.get(&candidate.model),
+                Some(Measurement::NotMeasurable)
+            ) && matches!(
                 window_state(measured, &candidate.model),
                 WindowState::Assumed(_)
             )

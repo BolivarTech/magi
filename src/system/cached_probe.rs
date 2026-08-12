@@ -54,7 +54,7 @@ use std::time::Duration;
 
 use magi_core::error::ProviderError;
 use magi_core::rotation::ProviderProbe;
-use magi_rs::magi::PROBE_TIMEOUT_SECS;
+use magi_rs::magi::{PROBE_TIMEOUT_SECS, PROBE_WINDOW_MAX, PROBE_WINDOW_MIN};
 
 use super::model_cache::{CachedCapability, ModelCapabilityCache};
 
@@ -134,6 +134,14 @@ impl ProviderProbe for CachedProbe {
     /// **Only a measured window produces a row.** If the window does not resolve, nothing is
     /// written and the next start retries — persisting the failure would freeze a cold daemon's
     /// transient silence into a permanent answer.
+    ///
+    /// **"Resolve" includes being in range**, on the same terms `probe_models` applies at startup
+    /// (`probe.rs`: `Some(w) if (PROBE_WINDOW_MIN..=PROBE_WINDOW_MAX).contains(&w)`). This path
+    /// used to skip that check, so the same daemon answer degraded to *not measured* during
+    /// startup and was accepted here — and accepted meant **cached**, which the design never
+    /// re-verifies, so one absurd reading became this process's permanent truth and every later
+    /// one's. It then reached magi-core's condition #6 as if it were a fact. Found by S2 Loop 2
+    /// (Caspar and Balthasar, independently).
     async fn window(&self) -> Result<Option<usize>, ProviderError> {
         if let Some(row) = self.cached() {
             return Ok(Some(row.window));
@@ -147,6 +155,11 @@ impl ProviderProbe for CachedProbe {
         let Some(window) = Self::measure(source.window()).await else {
             return Ok(None);
         };
+        if !(PROBE_WINDOW_MIN..=PROBE_WINDOW_MAX).contains(&window) {
+            // Out of range is a failed measurement, not a small one: return without caching, so
+            // the next run asks again instead of inheriting this answer forever.
+            return Ok(None);
+        }
         let digest = Self::measure(source.digest()).await;
 
         // A cache write that fails must not fail the measurement: the value is already in hand.
@@ -234,6 +247,29 @@ mod tests {
         }
     }
 
+    /// A source answering a window **outside** `[PROBE_WINDOW_MIN, PROBE_WINDOW_MAX]`.
+    ///
+    /// It counts digest calls for the same reason `WindowOkDigestHangs` does: an out-of-range
+    /// window must be abandoned BEFORE the second trip, so proving the digest was never asked is
+    /// what separates "rejected the reading" from "rejected it after paying for it anyway".
+    struct WindowOutOfRange {
+        /// The out-of-range value to answer.
+        window: usize,
+        /// Digest attempts, which must stay at zero.
+        digest_calls: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl ProviderProbe for WindowOutOfRange {
+        async fn window(&self) -> Result<Option<usize>, ProviderError> {
+            Ok(Some(self.window))
+        }
+        async fn digest(&self) -> Result<Option<String>, ProviderError> {
+            self.digest_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(Some("a".repeat(64)))
+        }
+    }
+
     /// A source that never answers anything, standing in for a dead endpoint.
     ///
     /// It COUNTS its calls, and that is not bookkeeping: a timing assertion against a probe that
@@ -263,6 +299,52 @@ mod tests {
         let dek = magi_rs::vault::MaskedDek::new(zeroize::Zeroizing::new(vec![9u8; 32]))
             .expect("32 bytes");
         Arc::new(ModelCapabilityCache::new(Arc::new(Mutex::new(conn)), dek).expect("schema"))
+    }
+
+    /// An out-of-range window is a FAILED measurement here, exactly as it is at startup — and
+    /// above all it must not reach the cache.
+    ///
+    /// `probe_models` degrades a window outside `[PROBE_WINDOW_MIN, PROBE_WINDOW_MAX]` to *not
+    /// measured*. This path did not, and the asymmetry was not merely inconsistent: what this
+    /// path accepts it **writes**, and the design re-verifies nothing, so a single absurd reading
+    /// outlived the process that took it and answered magi-core's condition #6 as a fact from
+    /// then on. Found by S2 Loop 2 (Caspar and Balthasar, independently).
+    ///
+    /// **Mutation-verified (B16):** remove the range guard in `window()` and both halves go red.
+    #[tokio::test]
+    async fn an_out_of_range_window_is_refused_and_never_cached() {
+        for window in [PROBE_WINDOW_MIN - 1, PROBE_WINDOW_MAX + 1, 0] {
+            let source = Arc::new(WindowOutOfRange {
+                window,
+                digest_calls: AtomicUsize::new(0),
+            });
+            let cache = empty_cache();
+            let probe = CachedProbe::new(
+                Arc::clone(&cache),
+                ENDPOINT.to_owned(),
+                MODEL.to_owned(),
+                Some(Arc::clone(&source) as Arc<dyn ProviderProbe>),
+            );
+
+            assert_eq!(
+                probe
+                    .window()
+                    .await
+                    .expect("the probe fails open, never errors"),
+                None,
+                "{window} is outside the admissible range, so it is NOT a measurement"
+            );
+            assert!(
+                cache.get(ENDPOINT, MODEL).expect("cache read").is_none(),
+                "and it must leave NO row: the cache is never re-verified, so a value written \
+                 here is inherited by every later run of this install"
+            );
+            assert_eq!(
+                source.digest_calls.load(Ordering::SeqCst),
+                0,
+                "the reading is abandoned before the second trip, not after paying for it"
+            );
+        }
     }
 
     /// SC-R54: a slow digest must NOT throw away an already-measured window, **in the same
