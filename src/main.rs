@@ -7726,7 +7726,20 @@ mod tests {
             );
             assert!(
                 text.contains("balthasar") && text.contains("caspar"),
-                "and named individually, in ONE message: {text}"
+                "and both named: {text}"
+            );
+            // "All of them in ONE message" is asserted HERE as a count, not implied by the
+            // message above: `text` is the join of every notice, so a version that emitted one
+            // per seat would read identically. The stronger `notices.len() == 1` would be wrong
+            // at this layer — other notices are legitimate in a builder run — so the count is
+            // scoped to the ones this property is about.
+            assert_eq!(
+                notices
+                    .iter()
+                    .filter(|n| n.text.contains("no fallback coverage"))
+                    .count(),
+                1,
+                "one message for all uncovered seats, not one per seat: {text}"
             );
         }
 
