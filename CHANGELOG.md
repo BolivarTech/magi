@@ -9,7 +9,7 @@ changes and the **patch** position signals backward-compatible fixes.
 
 ## [Unreleased]
 
-## [0.13.0] - 2026-08-11
+## [0.13.0] - 2026-08-12
 
 Lineage rotation: a mage whose model fails now **rotates to a declared fallback of a
 different lineage and still emits a verdict**, instead of degrading the whole run. Around
