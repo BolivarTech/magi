@@ -325,11 +325,18 @@ async fn analyze_direct(
     // different contract from delivering work that completed on time. That distinction is worth
     // more than the symmetry.
     //
-    // **That arm is live for one of this function's two callers, not both** (S4 Loop 2, Caspar).
-    // Through `run_query` the token belongs to the enclosing agent run and can genuinely fire.
-    // Through `run_consult` it is created fresh a few lines above the call and nothing ever
-    // cancels it, so there the deadline arm is the only stop signal and the ordering question is
-    // purely between completion and the timer.
+    // **As it stands that arm is UNREACHABLE, and the ordering above is about the other two.**
+    // `analyze_direct` has exactly one caller — `run_consult` — which creates the token two
+    // lines before the call and never cancels it. So the deadline is the only stop signal today
+    // and the completion-vs-timer order is the whole of the decision.
+    //
+    // Said carefully because the two previous attempts at this comment were both wrong, in
+    // opposite directions, and each was written confidently (S4 Loop 2, Caspar then Balthasar).
+    // The first justified the order by "external cancellation"; the second attributed that to
+    // `run_query`, which does not call this function at all. The arm and its parameter stay:
+    // `ConsultTool::execute` runs the same shape over a token that IS live, so the signature is
+    // the one a second caller would need — but nothing here exercises it, and a comment that
+    // implies otherwise is how this got documented wrong twice.
     //
     // **UNGUARDED, and said plainly rather than left to look tested.** Every other fix in this
     // gate carries a test that goes red when the fix is reverted; this one does not, because the
@@ -819,9 +826,13 @@ pub async fn run_consult(
     runtime: &MagiRuntimeParams<'_>,
     mut run_log: Option<&mut RunLog>,
 ) -> RunOutcome {
-    // A fresh token: the direct consult has no enclosing agent run to inherit a
-    // cancellation from, so `analyze_direct`'s cancel arm only fires if this run's
-    // own `timeout` deadline elapses.
+    // A fresh token: the direct consult has no enclosing agent run to inherit a cancellation
+    // from — and nothing here ever cancels it, so `analyze_direct`'s cancel arm never fires.
+    // The `timeout` argument on the next line is what stops a long run, through that function's
+    // own deadline arm.
+    //
+    // This used to say the cancel arm "only fires if this run's own `timeout` deadline elapses",
+    // which named the wrong arm for the right event (S4 Loop 2, Balthasar).
     let cancel = CancellationToken::new();
     let run_start = Instant::now();
     let result = analyze_direct(&magi, prompt, &cancel, timeout, explicit_mode, runtime).await;
