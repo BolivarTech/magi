@@ -329,6 +329,81 @@ pub fn min_mage_window(mages: &BTreeMap<String, Measurement>) -> Option<usize> {
         .min()
 }
 
+/// Whether `strict_context_guard` may actually be handed to magi-core, and the notice owed when it
+/// may not (REQ-R11).
+///
+/// # The predicate is over CANDIDATES, which is why the pool is a parameter
+///
+/// magi-core applies the guard as condition **#6** of candidate selection: a candidate whose window
+/// is unknown is admitted while the guard is off and **rejected** while it is on. So a `true` handed
+/// down when nothing among the candidates was measured rejects **every** one of them — rotation
+/// switches off entirely, and nothing fails visibly. That is not a guard; it is a declared pool that
+/// was never eligible.
+///
+/// `measured` carries everything this run measured, **the trio included**, so a predicate over the
+/// whole map is wrong in a specific and silent way: the trio measures, no candidate does, the
+/// predicate answers `true`, and the pool dies. The question is only ever *"did any CANDIDATE get a
+/// window?"*.
+///
+/// # It is NOT tied to the transport kind
+///
+/// Since magi-core 3.2.0 a probe is declared apart from the completions provider, so the `kind` no
+/// longer predicts whether anything was measured. Deciding on it produces both symmetric errors:
+/// denying the guard to an `openai-compat` that measured through a declared probe, and granting it
+/// to an `ollama` whose daemon was cold — which is exactly the case the `false` default exists to
+/// protect, and the first run of any fresh install.
+///
+/// This is the same predicate magi-core computes internally as `strict_guard_is_inert`
+/// (`rotation.rs:839`), which is `pub(crate)` and therefore uncallable from here; it is recomputed
+/// from this crate's own measurements rather than approximated.
+///
+/// # Returns
+///
+/// The value to hand magi-core, and `Some(notice)` **only** when a declared `true` had to be
+/// overridden. A declared `false` reports nothing — the operator asked for the default and got it —
+/// and neither does an empty pool: with no candidates there is nothing to protect and no surprise.
+///
+/// # Examples
+///
+/// ```
+/// # use std::collections::BTreeMap;
+/// # use magi_rs::magi::probe::effective_strict_guard;
+/// let (effective, notice) = effective_strict_guard(true, &BTreeMap::new(), &[]);
+/// assert!(!effective);
+/// assert!(notice.is_none());
+/// ```
+#[must_use]
+pub fn effective_strict_guard(
+    declared: bool,
+    measured: &BTreeMap<String, Measurement>,
+    pool: &[crate::magi::rotation_config::FallbackEntry],
+) -> (bool, Option<Notice>) {
+    if !declared {
+        return (false, None);
+    }
+    let any_candidate_measured = pool.iter().any(|candidate| {
+        matches!(
+            measured.get(&candidate.model),
+            Some(Measurement::Measured { .. })
+        )
+    });
+    if any_candidate_measured {
+        return (true, None);
+    }
+    // An empty pool is "no rotation", a deliberate choice — the same case magi-core excludes from
+    // its own inert-guard warning. Overriding it is not a surprise worth a line at startup.
+    if pool.is_empty() {
+        return (false, None);
+    }
+    (
+        false,
+        Some(Notice::resolution(
+            "notice: `strict_context_guard = true` was declared but is NOT being applied,              because no candidate has a measured window. Applying it would reject every              fallback candidate and switch rotation off entirely. It takes effect on its own              once a measurement succeeds."
+                .to_owned(),
+        )),
+    )
+}
+
 /// Derives `input_warn_tokens` from the **minimum** of the measured windows of the mages
 /// (REQ-A24b).
 ///

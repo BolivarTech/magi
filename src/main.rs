@@ -63,8 +63,8 @@ use magi_rs::magi::endpoint::{EndpointTemplate, ResolvedEndpoint, Scope};
 use magi_rs::magi::kind::{ProviderKind, ProviderKindParseError};
 use magi_rs::magi::lineage::LineageError;
 use magi_rs::magi::probe::{
-    derive_warn_tokens, min_mage_window, probe_models, Measurement, OllamaProbeFactory,
-    ProbeFactory,
+    derive_warn_tokens, effective_strict_guard, min_mage_window, probe_models, Measurement,
+    OllamaProbeFactory, ProbeFactory,
 };
 use magi_rs::magi::{
     bytes_to_tokens_est, derive_client_timeout, derive_operation_budget, AGENT_TIMEOUT_SECS,
@@ -1534,7 +1534,7 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
     // `input_warn_tokens` can be derived from the MAGES window (REQ-A24b) and startup announces
     // the three measurement states (REQ-A24c). Never blocks or fails startup: each probe fails
     // open inside `probe_models`/`orchestrate_probes`.
-    let warn_tokens = probe_and_report(
+    let (warn_tokens, measured) = probe_and_report(
         &magi_config,
         &endpoints,
         provider_kind,
@@ -1558,6 +1558,7 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
             warn_tokens,
             env_overrides: &env_overrides,
             capability_cache: capability_cache.as_ref(),
+            measured: &measured,
         },
         &mut startup_notices,
     ) {
@@ -2046,7 +2047,10 @@ async fn probe_and_report(
     // finding, S8).
     env_overrides: &MagiEnvModelOverrides,
     notices: &mut Vec<Notice>,
-) -> Option<usize> {
+    // REQ-R11 (Task 6.4): the trio measurements come back with the threshold because the guard's
+    // fail-safe needs them, and re-probing to recover what this call already learned would pay
+    // the cost twice for the same answer.
+) -> (Option<usize>, BTreeMap<String, Measurement>) {
     let (principal_model, principal_measurement, trio) =
         orchestrate_probes(cfg, endpoints, principal_kind, factory, env_overrides).await;
     notices.push(Notice::info(format!(
@@ -2079,9 +2083,11 @@ async fn probe_and_report(
         notices.push(Notice::resolution(n));
     }
     // REQ-A24b/SC-A24e: the explicit (`[magi].input_warn_tokens`) wins over the measured.
-    cfg.magi()
+    let warn = cfg
+        .magi()
         .input_warn_tokens
-        .or_else(|| derive_warn_tokens(&trio))
+        .or_else(|| derive_warn_tokens(&trio));
+    (warn, trio)
 }
 
 /// Builds the notice for when at least one mage of the trio is `NotMeasuredThisTime` (cold) —
@@ -2781,6 +2787,9 @@ struct TrioBuild<'a> {
     /// REQ-R10/R25/R28. `None` is the ephemeral path (Task 6.8): no encrypted database means
     /// nothing to remember measurements in, which degrades measurement — never the run.
     capability_cache: Option<&'a Arc<ModelCapabilityCache>>,
+    /// What the startup probe measured, keyed by model (REQ-R11). Feeds the strict-guard
+    /// fail-safe, which must know whether any CANDIDATE got a window.
+    measured: &'a BTreeMap<String, Measurement>,
 }
 
 /// Builds the MAGI trio with the NATIVE providers of magi-core (REQ-A01).
@@ -2813,6 +2822,7 @@ fn build_magi_orchestrator(
         warn_tokens,
         env_overrides,
         capability_cache,
+        measured,
     } = b;
     // Absent/empty `[magi].kind` inherits `principal_kind` — the ALREADY-RESOLVED one, not
     // `cfg.effective_provider()` (TOML-only). Present-but-unrecognized remains a typed error.
@@ -2941,6 +2951,15 @@ fn build_magi_orchestrator(
     let endpoint_redacted = redact_url(base.as_str());
     let declared_pool = cfg.fallback_pool();
 
+    // REQ-R11: the declared value is NOT what reaches magi-core. A `true` with no measured
+    // candidate rejects every one of them at condition #6 and switches rotation off whole, so
+    // the fail-safe resolves it and announces the override with its REAL reason.
+    let (effective_guard, guard_notice) =
+        effective_strict_guard(cfg.declared_strict_context_guard(), measured, declared_pool);
+    if let Some(n) = guard_notice {
+        notices.push(n);
+    }
+
     // REQ-R25: a model that LEFT the configuration stops being referenced. Done ONCE, here, with
     // this run's configured set. It DEGRADES rather than aborts: a failed prune leaves extra rows,
     // which is inert — the key is set membership, so an orphan row is simply never read.
@@ -3068,12 +3087,7 @@ fn build_magi_orchestrator(
 
         builder = builder
             .with_fallback_pool(pool.build())
-            // Task 6.4 replaces this with the fail-safe of REQ-R11: magi-rs may only pass `true`
-            // when at least one candidate has a MEASURED window, because a `true` with nothing
-            // measured disqualifies every candidate and switches rotation off in silence. Until
-            // measurement exists there is nothing to be safe about, and the declared value is
-            // forwarded as-is.
-            .with_strict_context_guard(cfg.declared_strict_context_guard());
+            .with_strict_context_guard(effective_guard);
     }
 
     builder
@@ -4317,7 +4331,7 @@ async fn prepare_headless(
     let mut trio_notices: Vec<Notice> = Vec::new();
     // Same wiring as the TUI, through the same opener (B3).
     let capability_cache = open_capability_cache(memory.as_ref(), &mut trio_notices);
-    let warn_tokens = probe_and_report(
+    let (warn_tokens, measured) = probe_and_report(
         &magi_config,
         &endpoints,
         provider_kind,
@@ -4335,6 +4349,7 @@ async fn prepare_headless(
             warn_tokens,
             env_overrides: &env_overrides,
             capability_cache: capability_cache.as_ref(),
+            measured: &measured,
         },
         &mut trio_notices,
     );
@@ -7288,6 +7303,7 @@ mod tests {
                     warn_tokens: None,
                     env_overrides: &MagiEnvModelOverrides::default(),
                     capability_cache: None,
+                    measured: &BTreeMap::new(),
                 },
                 &mut notices,
             )
@@ -7324,6 +7340,7 @@ mod tests {
                     warn_tokens: None,
                     env_overrides: &MagiEnvModelOverrides::default(),
                     capability_cache: None,
+                    measured: &BTreeMap::new(),
                 },
                 &mut notices,
             )
@@ -7407,6 +7424,7 @@ mod tests {
                     warn_tokens: None,
                     env_overrides: &MagiEnvModelOverrides::default(),
                     capability_cache: None,
+                    measured: &BTreeMap::new(),
                 },
                 &mut notices,
             )
@@ -7535,6 +7553,7 @@ mod tests {
                     warn_tokens: None,
                     env_overrides: &MagiEnvModelOverrides::default(),
                     capability_cache: None,
+                    measured: &BTreeMap::new(),
                 },
                 &mut notices,
             )
@@ -7859,6 +7878,7 @@ mod tests {
                     warn_tokens: None,
                     env_overrides: &MagiEnvModelOverrides::default(),
                     capability_cache: None,
+                    measured: &BTreeMap::new(),
                 },
                 &mut notices,
             )
@@ -7916,6 +7936,7 @@ mod tests {
                     warn_tokens: None,
                     env_overrides: &MagiEnvModelOverrides::default(),
                     capability_cache: None,
+                    measured: &BTreeMap::new(),
                 },
                 &mut notices,
             )
@@ -7961,6 +7982,7 @@ mod tests {
                     warn_tokens: None,
                     env_overrides: &MagiEnvModelOverrides::default(),
                     capability_cache: None,
+                    measured: &BTreeMap::new(),
                 },
                 &mut notices,
             )
@@ -8029,6 +8051,7 @@ mod tests {
                             warn_tokens: None,
                             env_overrides: &MagiEnvModelOverrides::default(),
                             capability_cache: None,
+                            measured: &BTreeMap::new(),
                         },
                         &mut notices,
                     ),
@@ -8049,6 +8072,7 @@ mod tests {
                         warn_tokens: None,
                         env_overrides: &MagiEnvModelOverrides::default(),
                         capability_cache: None,
+                        measured: &BTreeMap::new(),
                     },
                     &mut notices,
                 )
@@ -8081,6 +8105,7 @@ mod tests {
                     warn_tokens: None,
                     env_overrides: &MagiEnvModelOverrides::default(),
                     capability_cache: None,
+                    measured: &BTreeMap::new(),
                 },
                 &mut notices,
             ) {
@@ -8124,6 +8149,7 @@ mod tests {
                     warn_tokens: None,
                     env_overrides: &MagiEnvModelOverrides::default(),
                     capability_cache: None,
+                    measured: &BTreeMap::new(),
                 },
                 &mut notices,
             ) {
@@ -8160,6 +8186,7 @@ mod tests {
                     warn_tokens: None,
                     env_overrides: &MagiEnvModelOverrides::default(),
                     capability_cache: None,
+                    measured: &BTreeMap::new(),
                 },
                 &mut notices,
             ) {
@@ -8533,6 +8560,7 @@ mod tests {
                         warn_tokens: None,
                         env_overrides: &MagiEnvModelOverrides::default(),
                         capability_cache: None,
+                        measured: &BTreeMap::new(),
                     },
                     &mut notices,
                 )
@@ -8553,6 +8581,7 @@ mod tests {
                         warn_tokens: None,
                         env_overrides: &MagiEnvModelOverrides::default(),
                         capability_cache: None,
+                        measured: &BTreeMap::new(),
                     },
                     &mut notices,
                 )
@@ -8576,6 +8605,7 @@ mod tests {
                         warn_tokens: None,
                         env_overrides: &env_overrides,
                         capability_cache: None,
+                        measured: &BTreeMap::new(),
                     },
                     &mut notices,
                 )
@@ -8632,6 +8662,7 @@ mod tests {
                     warn_tokens: None,
                     env_overrides: &env_overrides,
                     capability_cache: None,
+                    measured: &BTreeMap::new(),
                 },
                 &mut notices,
             )
@@ -10532,7 +10563,7 @@ agent_timeout_secs = {CEILING}
                 .build()
                 .unwrap();
             let mut notices = Vec::new();
-            let warn_tokens = probe_and_report(
+            let (warn_tokens, _measured) = probe_and_report(
                 &cfg,
                 &test_endpoints(),
                 ProviderKind::Ollama,
@@ -10560,7 +10591,7 @@ agent_timeout_secs = {CEILING}
             ]);
             let cfg = cfg_with_four_distinct_models("principal", "melchior", "balthasar", "caspar");
             let mut notices = Vec::new();
-            let warn_tokens = probe_and_report(
+            let (warn_tokens, _measured) = probe_and_report(
                 &cfg,
                 &test_endpoints(),
                 ProviderKind::Ollama,
@@ -10601,7 +10632,7 @@ agent_timeout_secs = {CEILING}
             ]);
             let cfg = cfg_with_four_distinct_models("principal", "melchior", "balthasar", "caspar");
             let mut notices = Vec::new();
-            let warn_tokens = probe_and_report(
+            let (warn_tokens, _measured) = probe_and_report(
                 &cfg,
                 &test_endpoints(),
                 ProviderKind::Ollama,
