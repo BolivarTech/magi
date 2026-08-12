@@ -216,6 +216,19 @@ fn line_col_of(raw: &str, offset: usize) -> (usize, usize) {
 /// [`Self::effective_provider`] and [`Self::effective_default_mode`] remain reachable, and they
 /// remain `assert!` (every build profile), not `debug_assert!`. Private fields removed the
 /// *literal* bypass, which was the wide one; they did not remove the deserialization one.
+///
+/// # Rule for any NEW production path
+///
+/// Obtain a `MagiConfig` from [`Self::load`] or [`Self::from_toml_str`]. Never from a bare
+/// `toml::from_str::<MagiConfig>`, and never from [`MagiConfigBuilder::build_unvalidated`] —
+/// both skip [`Self::validate_vocabulary`], and the `assert!`s above are a backstop that turns
+/// the mistake into a panic, not a design that makes it safe. [`MagiConfigBuilder`] itself is
+/// `#[cfg(test)]` today precisely because no production path needs it; if one ever does, the
+/// builder is promoted and its `build` (the validating exit) is the one to use.
+///
+/// This is written here rather than only in the project runbook because the runbook is not
+/// tracked in git, so it reaches neither a reviewer reading this file nor a developer who
+/// clones the repository (asked for by S1 Loop 2, Balthasar).
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MagiConfig {
@@ -881,6 +894,13 @@ impl MagiConfig {
         // A seat whose lineage cannot be resolved is already reported by
         // `migrate::missing_seat_lineages`, which names ALL of them at once. Failing here on the
         // first would replace a complete message with a partial one.
+        //
+        // **That premise is now local, not a convention between callers** (S1 Loop 2). The check
+        // it defers to runs at the head of `validate_vocabulary`, which is the only function that
+        // calls this one — so by the time control reaches here, a missing lineage has already
+        // returned an error and this `Err` arm is unreachable from every validating path. It
+        // stays because `build_unvalidated` exists and reaching it must degrade to silence
+        // rather than panic, not because anything on the way in might still forget.
         let mut seats = Vec::new();
         for name in [AgentName::Melchior, AgentName::Balthasar, AgentName::Caspar] {
             match self.magi.lineage_of_seat(name) {
@@ -929,8 +949,9 @@ impl MagiConfig {
         let mut notices = Vec::new();
 
         // Coverage. Under `enforce = true` this cannot error here — `load()` already validated and
-        // would have refused the file — so an `Err` is reachable only from the crate-internal
-        // builder, and degrades to silence rather than a panic.
+        // would have refused the file — and since S1 Loop 2 the same is true of the builder's
+        // validating exit, which now runs the seat-lineage check too. What remains reachable is
+        // `build_unvalidated` alone, and it degrades to silence rather than a panic.
         let with_lineage: Vec<(AgentName, Lineage)> = resolved_seats
             .iter()
             .filter_map(|(seat, _)| self.magi.lineage_of_seat(*seat).ok().map(|l| (*seat, l)))
@@ -2320,6 +2341,24 @@ mod tests {
         assert!(
             err.to_string().contains("model"),
             "and the error must name the field the operator has to fill: {err}"
+        );
+
+        // And the surviving half of the same asymmetry: `lineage` is trimmed by `Lineage::parse`,
+        // so `model` is too. Untrimmed, ` qwen ` reaches the endpoint with its spaces and 404s
+        // for a reason that is invisible in the file.
+        let padded = "[magi]\n\
+                      melchior_model = \"a\"\nmelchior_lineage = \"la\"\n\
+                      balthasar_model = \"b\"\nbalthasar_lineage = \"lb\"\n\
+                      caspar_model = \"c\"\ncaspar_lineage = \"lc\"\n\
+                      \n[[magi.fallback]]\nmodel = \"  qwen3.5:397b-cloud  \"\nlineage = \"lz\"\n";
+        let cfg = MagiConfig::from_toml_str(padded).expect("a padded model tag still parses");
+        assert_eq!(
+            cfg.fallback_pool()
+                .first()
+                .expect("the pool has the declared entry")
+                .model,
+            "qwen3.5:397b-cloud",
+            "the tag must be stored trimmed, the same way its sibling lineage is"
         );
     }
 
