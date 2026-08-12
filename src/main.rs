@@ -3917,10 +3917,19 @@ fn open_headless_memory(
 ) -> Result<Option<EncryptedSqliteMemory>, HeadlessError> {
     match EncryptedSqliteMemory::new(db_path.to_path_buf(), passphrase) {
         Ok(store) => Ok(Some(store)),
-        Err(e) => Err(match e.downcast::<VaultError>() {
-            Ok(ve) => HeadlessError::from(ve),
-            Err(other) => HeadlessError::Storage(other.to_string()),
-        }),
+        // Chain walk, like `is_wrong_passphrase` and `report_open_failure` (S3 Loop 2, Caspar).
+        // Those two were converted last round and this one was left rooted at the outermost
+        // type, so the headless path and the TUI path classified the SAME error differently —
+        // an inconsistency introduced by the fix, which is the shape this gate keeps finding.
+        // Here the cost of missing it is the whole typed mapping: a `WrongPassphrase` behind a
+        // wrapper would surface as an opaque `Storage`, losing the exit code the caller branches
+        // on.
+        Err(e) => Err(
+            match e.chain().find_map(|c| c.downcast_ref::<VaultError>()) {
+                Some(ve) => HeadlessError::from(ve.clone()),
+                None => HeadlessError::Storage(e.to_string()),
+            },
+        ),
     }
 }
 
@@ -5120,6 +5129,38 @@ mod tests {
                 !is_wrong_passphrase(&other),
                 "the chain walk must match the VARIANT, not merely the type"
             );
+        }
+
+        /// The passphrase never reaches [`VaultError::WeakPassphrase`]'s message.
+        ///
+        /// Raised as a possible echo by S3 Loop 2 (Balthasar) and verified false: `check_strength`
+        /// builds the text from a fixed length message or from `zxcvbn`'s `warning()` and
+        /// `suggestions()`, which are catalogue strings that do not interpolate the input. What
+        /// the rustdoc on that variant promises had no test, and the promise is worth one —
+        /// **this** is the guard, not a redaction call, because `redact_foreign_text` finds
+        /// credentials inside URLs and would not catch a bare secret in prose even if one
+        /// appeared. Wrapping the call site would have looked like protection and been ritual.
+        #[test]
+        fn a_rejected_passphrase_is_never_echoed_in_the_message_explaining_why() {
+            // Deliberately un-English canaries. The first draft used "short" and "password123"
+            // and failed on its own terms: the length message contains "too short", and zxcvbn's
+            // warning for a common one contains "password", so the substring check fired on the
+            // ADVICE rather than on any echo. A canary that can occur incidentally inside the
+            // text being scanned does not test what it claims to.
+            for weak in ["zq7", "zzzzzzzzzzzzzz", "qqqqqqqqqqqqqqqq", "vvvv"] {
+                let Err(e) = magi_rs::vault::check_strength(weak) else {
+                    continue; // strong enough: nothing to echo
+                };
+                let text = e.to_string();
+                assert!(
+                    !text.contains(weak),
+                    "the reason must explain the weakness without repeating the secret: {text}"
+                );
+                assert!(
+                    text.len() > "passphrase rejected: ".len(),
+                    "precondition: there IS a reason here to scan, or the check above is vacuous"
+                );
+            }
         }
     }
 
@@ -9071,14 +9112,49 @@ mod tests {
             // grep's OWN needle on THIS line, in THIS file — a self-referential false
             // positive that would make the test permanently red the moment it exists.
             let needle = format!("{}{}", "MagiCoreProviderAdapter", "::new");
-            let out = std::process::Command::new("grep")
-                .args(["-rl", &needle, "src/"])
-                .current_dir(env!("CARGO_MANIFEST_DIR"))
-                .output()
-                .expect("grep must run");
+
+            // Pure Rust, not `Command::new("grep")` (S3 Loop 2, Balthasar). The shell-out worked
+            // wherever a POSIX toolchain happened to be on PATH and turned this guardian into a
+            // hard failure everywhere else — and this project ships CI on four platforms, one of
+            // which has no `grep` unless git-bash supplies it. A test that cannot run is not a
+            // weaker guardian, it is a red build for a reason unrelated to what it guards.
+            fn find(dir: &Path, needle: &str, hits: &mut Vec<PathBuf>) {
+                let Ok(entries) = std::fs::read_dir(dir) else {
+                    return;
+                };
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_dir() {
+                        find(&path, needle, hits);
+                    } else if path.extension().is_some_and(|e| e == "rs")
+                        && std::fs::read_to_string(&path).is_ok_and(|body| body.contains(needle))
+                    {
+                        hits.push(path);
+                    }
+                }
+            }
+
+            let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+            let mut hits = Vec::new();
+            find(&src, &needle, &mut hits);
+
+            // The search itself has to be known-working, or "no hits" means nothing: this file
+            // is under `src/` and contains a string only it contains.
+            let mut control = Vec::new();
+            find(
+                &src,
+                "no_production_path_implements_llm_provider_via_a_folding_adapter",
+                &mut control,
+            );
             assert!(
-                String::from_utf8_lossy(&out.stdout).trim().is_empty(),
-                "the retired adapter type must never be CONSTRUCTED again in src/"
+                !control.is_empty(),
+                "precondition: the source walk must actually be reading files under {}",
+                src.display()
+            );
+
+            assert!(
+                hits.is_empty(),
+                "the retired adapter type must never be CONSTRUCTED again in src/: {hits:?}"
             );
         }
 
