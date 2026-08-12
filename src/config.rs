@@ -73,8 +73,9 @@ pub enum ConfigError {
     /// `[magi].agent_timeout_secs` falls outside the acceptable range of §4.9.
     #[error(
         "agent_timeout_secs = {got} out of range [{min}, {max}]: below {min}s a legitimate \
-         generation does not fit; above {max}s a consult's worst case (2 attempts per mage) \
-         exceeds 4 minutes. Not clamped to the extreme — rejected."
+         generation does not fit; above {max}s a consult's worst case — 2 attempts per mage on \
+         each of `1 + max_rotations` models — reaches 12 minutes at the default two rotations, \
+         and grows from there. Not clamped to the extreme — rejected."
     )]
     AgentTimeoutOutOfRange {
         /// The declared value.
