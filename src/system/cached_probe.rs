@@ -184,6 +184,35 @@ mod tests {
     const ENDPOINT: &str = "http://localhost:11434/v1";
     const MODEL: &str = "qwen3.5:397b-cloud";
 
+    /// Our two independent ceilings must fit, **summed**, inside the crate's single outer one.
+    ///
+    /// REQ-R12 has this probe apply its own ceiling to `window()` and to `digest()` separately,
+    /// so a slow digest cannot throw away a window that already resolved — the shared-deadline
+    /// defect `run_preflight` itself commits (`rotation.rs:756`, one `timeout` around both) and
+    /// that `SC-R54` pins from the inside.
+    ///
+    /// **This pins it from the outside, which is the half that was open.** Our ceilings are
+    /// sequential inside that outer 30 s, so the worst case we can spend is
+    /// `2 × PROBE_TIMEOUT_SECS`. Raise that constant past half the crate's budget and the outer
+    /// timeout fires first, discarding **both** measurements — reintroducing the exact defect
+    /// from the opposite direction, with no test to notice, and a symptom (a window that
+    /// sometimes is not measured) that looks like a flaky daemon rather than a config change.
+    ///
+    /// Anchored to `DEFAULT_PREFLIGHT_TIMEOUT` rather than to a literal `30` on purpose: the
+    /// number belongs to magi-core, so a future release that lowers it must break this test
+    /// rather than silently shrink the room we assumed. Found by S2 Loop 2 (Caspar).
+    #[test]
+    fn our_two_ceilings_fit_inside_the_crate_preflight_budget() {
+        let ours = Duration::from_secs(PROBE_TIMEOUT_SECS) * 2;
+        let theirs = magi_core::rotation::DEFAULT_PREFLIGHT_TIMEOUT;
+
+        assert!(
+            ours <= theirs,
+            "window + digest may spend {ours:?} but run_preflight wraps both in {theirs:?}; \
+             above half of it the crate's timeout wins and discards a window we already had"
+        );
+    }
+
     /// A source whose window answers and whose digest hangs past any sane ceiling.
     ///
     /// The hang is **far** longer than the ceiling on purpose: the discriminating property is

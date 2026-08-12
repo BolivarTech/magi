@@ -758,8 +758,15 @@ fn input_size_json(s: Option<&InputSize>, fallback_tokens: Option<usize>) -> Val
 ///
 /// # Returns
 /// A JSON object with `report`, `degraded`, `mode`, `mode_source`, `extraction_failures`,
-/// `input_size`, `report_truncated`, `endpoint_divergence`, `timeout_below_formula` and
-/// `failed_agents` — every key always present.
+/// `input_size`, `report_truncated`, `endpoint_divergence`, `timeout_below_formula`,
+/// `failed_agents`, `rotations` and `ran_unmeasured` — every key always present.
+///
+/// The last two are v0.13.0's (REQ-R07/R08), and "always present" carries the same weight for
+/// them as for `extraction_failures`: an EMPTY `rotations` is the positive certificate that no
+/// mage rotated, not silence about whether any did. A key that appeared only when non-empty
+/// would change the shape of the object between runs and no strict-schema consumer could
+/// declare it. This list omitted them until S2 Loop 2 (Balthasar) — a doc that under-reports
+/// the contract is how a consumer ends up treating a guaranteed key as optional.
 ///
 /// # `report` (`truncated.text`) is NOT redacted, unlike `failed_agents` — a deliberate decision
 ///
