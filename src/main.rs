@@ -663,10 +663,19 @@ fn resolve_master_passphrase(
 /// the original `VaultError` behind the `anyhow::Error` (via `.into()`, not
 /// a formatted string) so it can be recovered with `downcast_ref`.
 fn is_wrong_passphrase(e: &anyhow::Error) -> bool {
-    matches!(
-        e.downcast_ref::<VaultError>(),
-        Some(VaultError::WrongPassphrase)
-    )
+    // Walks the whole SOURCE chain, not just the root (S3 Loop 2, Balthasar). `anyhow`'s own
+    // `downcast_ref` already sees through `.context(..)` layers, so this held for every caller
+    // that used them — but it silently stops at the first typed wrapper: interpose any error
+    // carrying `VaultError` as a `#[source]` and the root type becomes that wrapper, the match
+    // fails, and the user who merely mistyped their passphrase gets a fatal generic error where
+    // a retry prompt belongs. That is a recovery path resting on an upstream convention nobody
+    // enforces; the chain walk does not rest on anything.
+    e.chain().any(|c| {
+        matches!(
+            c.downcast_ref::<VaultError>(),
+            Some(VaultError::WrongPassphrase)
+        )
+    })
 }
 
 /// Resolves the passphrase and opens the encrypted store for the TUI,
@@ -820,7 +829,11 @@ fn vault_error_exit_code(e: &VaultError) -> i32 {
 /// the rare case (a raw schema anomaly) that is not one. Returns the
 /// process exit code to use.
 fn report_open_failure(e: &anyhow::Error) -> i32 {
-    match e.downcast_ref::<VaultError>() {
+    // Chain walk for the same reason as `is_wrong_passphrase`: rooting the search at the
+    // outermost type makes both the message AND the exit code depend on nobody ever wrapping a
+    // `VaultError` in another typed error. Here the cost of missing it is bigger — the operator
+    // loses the actionable vault message and the specific exit code, and gets a generic 2.
+    match e.chain().find_map(|c| c.downcast_ref::<VaultError>()) {
         Some(ve) => {
             eprintln!("error: {ve}");
             vault_error_exit_code(ve)
@@ -2998,9 +3011,16 @@ fn build_magi_orchestrator(
     // With all three seats overridden this provider is never used, and that is precisely why it
     // is useful for it to be a written decision.
     //
-    // `&mut sink` discardable: the normalization notice already went out in the seat loop with
-    // the SAME `base_url`. Pushing it again would duplicate it on screen (and `render_notices`
-    // would dedupe it anyway, but it is not worth building it twice).
+    // Merged, not discarded — the pool loop's sink was fixed for this last round and leaving
+    // this one behind would have kept the same reasoning applied inconsistently in one function
+    // (S3 Loop 2, Balthasar, raising it a second time and rightly).
+    //
+    // The old argument was sound and still is: the only notice `build_native_provider` emits is
+    // the base_url normalization one, which the seat loop already sent over the SAME `base_url`,
+    // so `render_notices` would dedupe it anyway and building it twice is waste. What it is not
+    // is durable — it is a fact about a function in another part of this file, and the cost of
+    // it turning false is a notice that never reaches the user, which is the failure mode this
+    // project keeps paying for.
     let mut sink: Vec<Notice> = Vec::new();
     let fallback_provider = build_native_provider(
         kind,
@@ -3011,6 +3031,7 @@ fn build_magi_orchestrator(
         &mut sink,
     )
     .map_err(|e| TrioError::Builder(redact_foreign_error(&e)))?;
+    notices.append(&mut sink);
 
     let mut builder = MagiBuilder::new(Arc::new(RetryProvider::with_config(
         fallback_provider,
@@ -3183,13 +3204,22 @@ fn build_magi_orchestrator(
             .chain(declared_pool.iter().map(|e| &e.model))
         {
             probes.entry(model.clone()).or_insert_with(|| {
-                // `OllamaProvider::new` is CORRECT here and wrong for a seat: every call this
-                // probe makes is wrapped in `CachedProbe`'s own ceiling, so the type's 300 s
-                // default never governs. A seat has nothing outside it to cut the request short.
+                // `with_timeout`, like every other construction of this type — §7's rule is
+                // "never `new`", full stop (S3 Loop 2, Caspar). The comment here used to argue
+                // `new` was safe because `CachedProbe` wraps every call in its own ceiling, and
+                // that argument is TRUE; it is just the wrong kind of safe. It makes the 300 s
+                // default harmless only for as long as the wrapper stays, so deleting the
+                // wrapper silently restores a timeout two orders of magnitude past the derived
+                // scale. Passing the probe's own ceiling removes the dependency instead of
+                // documenting it: whichever bound fires first, the answer is the same `None`.
                 let source: Option<Arc<dyn ProviderProbe>> = if kind.is_probeable() {
-                    OllamaProvider::new(base.as_str(), model.clone())
-                        .ok()
-                        .map(|p| Arc::new(p) as Arc<dyn ProviderProbe>)
+                    OllamaProvider::with_timeout(
+                        base.as_str(),
+                        model.clone(),
+                        Duration::from_secs(magi_rs::magi::PROBE_TIMEOUT_SECS),
+                    )
+                    .ok()
+                    .map(|p| Arc::new(p) as Arc<dyn ProviderProbe>)
                 } else {
                     None
                 };
@@ -5044,6 +5074,55 @@ mod tests {
     /// `render_help` helpers this heading used to say did not exist. The
     /// coordinator confirmed this reassignment; see the task report for the full
     /// six-way mapping to Task 2.3/2.4.
+    /// The two vault-error classifiers, neither of which had a test before S3 Loop 2.
+    mod vault_error_classification {
+        use super::*;
+
+        /// A `VaultError` reached through a TYPED wrapper is still recognised.
+        ///
+        /// `anyhow`'s `downcast_ref` already sees through `.context(..)` layers, so rooting the
+        /// search at the outermost type held for every caller that used them — and stopped dead
+        /// at the first error that carries `VaultError` as a `#[source]`. The consequence is not
+        /// a worse message: `is_wrong_passphrase` gates the RETRY, so a user who merely mistyped
+        /// their passphrase would get a fatal error where a second prompt belongs, and
+        /// `report_open_failure` would drop both the actionable text and the specific exit code
+        /// for a generic 2.
+        ///
+        /// **Mutation-verified (B16):** put `e.downcast_ref::<VaultError>()` back in either
+        /// function and its half goes red, while the `.context(..)` case below stays green —
+        /// which is exactly why the old form looked correct.
+        #[test]
+        fn a_vault_error_behind_a_typed_wrapper_is_still_classified() {
+            #[derive(Debug, thiserror::Error)]
+            #[error("opening the store failed")]
+            struct Wrapper(#[source] VaultError);
+
+            let wrapped = anyhow::Error::from(Wrapper(VaultError::WrongPassphrase));
+            assert!(
+                is_wrong_passphrase(&wrapped),
+                "a wrong passphrase behind a typed wrapper must still offer a retry"
+            );
+            assert_eq!(
+                report_open_failure(&wrapped),
+                vault_error_exit_code(&VaultError::WrongPassphrase),
+                "and must still report the vault-specific exit code, not a generic 2"
+            );
+
+            // The case the old form DID handle, kept so a future change cannot fix the wrapper
+            // by breaking the context chain.
+            let contextual =
+                anyhow::Error::from(VaultError::WrongPassphrase).context("while opening .magi");
+            assert!(is_wrong_passphrase(&contextual));
+
+            // And a vault error that is NOT a wrong passphrase must not be mistaken for one.
+            let other = anyhow::Error::from(Wrapper(VaultError::VaultMetaCorrupt));
+            assert!(
+                !is_wrong_passphrase(&other),
+                "the chain walk must match the VARIANT, not merely the type"
+            );
+        }
+    }
+
     mod mode_surfaces {
         use super::*;
 
