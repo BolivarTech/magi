@@ -1484,4 +1484,126 @@ mod tests {
             }
         }
     }
+
+    // ---------------------------------------------------------------------------------------
+    // `effective_strict_guard` — REQ-R11, the fail-safe (Task 6.4).
+
+    // `measurements` already exists above in this module (B3): reused, not re-declared.
+
+    /// A pool from `(model, lineage)` pairs.
+    ///
+    /// Uses the real [`FallbackEntry`], not a stand-in: the predicate under test reads `model`
+    /// off it, and a local shape would let the two drift.
+    fn pool_of(entries: &[(&str, &str)]) -> Vec<crate::magi::rotation_config::FallbackEntry> {
+        entries
+            .iter()
+            .map(
+                |(model, lineage)| crate::magi::rotation_config::FallbackEntry {
+                    model: (*model).to_owned(),
+                    lineage: crate::magi::lineage::Lineage::parse(lineage).expect("valid lineage"),
+                },
+            )
+            .collect()
+    }
+
+    /// SC-R23: a declared `true` with NO measured window is NOT passed down, a notice names THAT
+    /// reason, and rotation keeps working — never the silent shutdown of every candidate.
+    #[test]
+    fn a_declared_guard_with_nothing_measured_is_not_passed_and_is_announced() {
+        let (effective, notice) = effective_strict_guard(
+            true,
+            &measurements(&[("m2", None)]),
+            &pool_of(&[("m2", "zhipu")]),
+        );
+        assert!(
+            !effective,
+            "passing true here would make EVERY candidate fail condition #6: rotation dies whole"
+        );
+        let n = notice.expect("a declared true that is not applied must be announced");
+        assert!(
+            n.text.contains("measured window"),
+            "the notice must name the REAL reason: {}",
+            n.text
+        );
+        assert!(
+            !n.text.contains("kind"),
+            "not a derived reason like the transport kind: {}",
+            n.text
+        );
+    }
+
+    /// SC-R38: the criterion is MEASUREMENT, not transport. Tying it to the declared `kind`
+    /// produces both symmetric errors — denying the guard to an `openai-compat` that did measure
+    /// through a declared probe, and granting it to a cold `ollama` that measured nothing.
+    #[test]
+    fn the_criterion_is_measurement_not_the_declared_kind() {
+        let pool = pool_of(&[("m2", "zhipu")]);
+        let (warm, _) =
+            effective_strict_guard(true, &measurements(&[("m2", Some(128_000))]), &pool);
+        assert!(warm, "a measured candidate must not be denied the guard");
+        let (cold, _) = effective_strict_guard(true, &measurements(&[("m2", None)]), &pool);
+        assert!(!cold, "a cold candidate must not be granted it");
+    }
+
+    /// THE CASE THAT MAKES THE `pool` PARAMETER NECESSARY, and it is silent without it: the TRIO
+    /// measured and NO CANDIDATE did.
+    ///
+    /// `measured` carries everything measured, trio included, so a predicate over the whole map
+    /// answers `true` here — and passing `strict = true` makes every candidate fail condition #6.
+    /// Rotation dies entirely, with nothing failing visibly. The predicate is over CANDIDATES.
+    #[test]
+    fn a_measured_trio_with_no_measured_candidate_does_not_enable_the_guard() {
+        let measured =
+            measurements(&[("melchior-model", Some(262_144)), ("candidate-model", None)]);
+        let (effective, notice) =
+            effective_strict_guard(true, &measured, &pool_of(&[("candidate-model", "zhipu")]));
+        assert!(
+            !effective,
+            "the predicate is over CANDIDATES, not over everything that was measured"
+        );
+        assert!(notice.is_some(), "and the override is announced");
+    }
+
+    /// SC-R15: the cold start takes candidates away from nobody, under EITHER declared value.
+    #[test]
+    fn a_cold_start_never_removes_candidates_regardless_of_the_declared_guard() {
+        let pool = pool_of(&[("m2", "zhipu"), ("m3", "minimax")]);
+        for declared in [false, true] {
+            let (effective, _) = effective_strict_guard(
+                declared,
+                &measurements(&[("m2", None), ("m3", None)]),
+                &pool,
+            );
+            assert!(
+                !effective,
+                "declared={declared}: a cold start must never end up filtering candidates"
+            );
+        }
+    }
+
+    /// A declared `false` is passed through untouched and says nothing: the operator asked for the
+    /// default and got it, so there is no resolution to announce.
+    #[test]
+    fn a_declared_false_is_never_announced() {
+        let pool = pool_of(&[("m2", "zhipu")]);
+        let (effective, notice) =
+            effective_strict_guard(false, &measurements(&[("m2", Some(128_000))]), &pool);
+        assert!(!effective);
+        assert!(
+            notice.is_none(),
+            "nothing was overridden, so there is nothing to report"
+        );
+    }
+
+    /// An empty pool is "no rotation", a choice — and there is nothing for the guard to filter,
+    /// so a declared `true` is still not passed, and silently: it is not an override of intent.
+    #[test]
+    fn an_empty_pool_disables_the_guard_without_a_notice() {
+        let (effective, notice) = effective_strict_guard(true, &measurements(&[]), &[]);
+        assert!(!effective);
+        assert!(
+            notice.is_none(),
+            "with no pool there is no candidate to protect and no surprise to report"
+        );
+    }
 }
