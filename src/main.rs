@@ -451,9 +451,21 @@ fn resolve_workspace_root(
         Some(dir) if dir.is_dir() => Ok(dir),
         // Phrased to read well AFTER the variant's own `invalid input: ` prefix, which the
         // user sees: `error: invalid input: --workdir <path>: not an existing directory`.
+        //
+        // The path is SANITIZED because echoing it back is the whole point of the message,
+        // and that turns an operator-supplied string into terminal output. A `-w` carrying an
+        // ANSI sequence would otherwise repaint or clear the screen, letting a hostile value
+        // forge lines the reader attributes to magi. Same treatment every `TextDelta` gets,
+        // applied here for the same reason.
+        //
+        // Scope, deliberately: **stderr diagnostics only**. `run_init`'s stdout line and
+        // `run_vault_diagnose`'s "no database found at …" stay raw, because stdout is this
+        // program's machine-readable channel — its rustdoc calls the created path "the sole
+        // stdout line" — and mangling a path a script is about to consume trades a cosmetic
+        // spoof for a broken pipeline.
         Some(dir) => Err(magi_rs::headless::HeadlessError::InputInvalid(format!(
             "--workdir {}: not an existing directory",
-            dir.display()
+            crate::agent::Agent::sanitize_text(&dir.display().to_string())
         ))),
     }
 }
