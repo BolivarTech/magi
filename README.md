@@ -251,6 +251,21 @@ magi vault diagnose
 and `--untrusted-content` (see [Mode routing](#mode-routing)); the JSON envelope
 carries the same two as fields.
 
+**`-w` / `--workdir` works on all four subcommands** (v0.13.1 — it was `query` and
+`consult` only before). It is the base for the `.magi/` walk-up, and on the headless
+pair it is also the file-tool sandbox root:
+
+```bash
+magi init -w /srv/project           # scaffold .magi/ over there, not in $PWD
+magi vault ls -w /srv/project       # and -w may also precede: magi vault -w /srv/project ls
+magi query -w /srv/project -i q.txt
+```
+
+A `-w` that is not an existing directory is rejected up front, naming the path —
+it is never created. Without the flag every subcommand keeps using the current
+directory, exactly as before. Running `magi` with no subcommand (the TUI) does not
+take `-w`; `cd` first.
+
 **Input** is auto-detected: a JSON object with a top-level `prompt` string is a
 rich **envelope** (`{prompt, system?, model?, provider?, max_tool_calls?,
 consult?, mode?, untrusted_content?}`); anything else is a plain-text prompt.
@@ -378,6 +393,10 @@ magi-rs vault passwd                   # rotate the passphrase (re-wraps the sam
 ```
 
 There is **no `get`/`cat`/`show` command**. A stored value is never printed, by design.
+
+Every one of them accepts `-w <dir>` to operate on a workspace other than the current
+directory, on either side of the subcommand (`vault -w <dir> ls` and `vault ls -w <dir>`
+are the same command).
 
 ### Default backend — Ollama-first (v0.6.0, BREAKING)
 

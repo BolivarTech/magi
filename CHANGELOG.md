@@ -9,6 +9,34 @@ changes and the **patch** position signals backward-compatible fixes.
 
 ## [Unreleased]
 
+## [0.13.1] - 2026-08-12
+
+### Added
+
+- **`-w` / `--workdir` now works on `init` and `vault`**, not just `query` and `consult`.
+  It is the base for the `.magi/` walk-up, so `magi init -w /srv/project` scaffolds over
+  there and `magi vault ls -w /srv/project` reads that workspace, with the current
+  directory untouched in both cases. On `vault` the flag parses on either side of the
+  nested subcommand — `vault -w <dir> ls` and `vault ls -w <dir>` are the same command.
+
+  A `-w` that is not an existing directory is now rejected before dispatch, with the path
+  in the message. That check exists because the same typo used to fail two different
+  misleading ways: `init` surfaced a bare I/O error from the staging sibling it builds in
+  the target's parent, and `vault` reported `no .magi/ state directory found`, which sends
+  the reader looking for a workspace when the problem is the path. A missing directory is
+  never created — `init` refuses to nest and refuses to overwrite, and quietly building a
+  directory tree does not belong with that.
+
+### Unchanged
+
+- **`query` and `consult` keep their own `-w`**, resolved where it always was. The two are
+  separate declarations on purpose: the headless one is also the file-tool sandbox root and
+  is resolved after dispatch, while `init`/`vault` need the root *before* it, to decide
+  where to look. One `global` flag covering all four is what the code reaches for first, and
+  clap rejects it — a global colliding with an arg in its propagation subtree is a
+  build-time panic.
+- **The TUI (no subcommand) still uses the current directory** and takes no `-w`.
+
 ## [0.13.0] - 2026-08-12
 
 Lineage rotation: a mage whose model fails now **rotates to a declared fallback of a
