@@ -290,7 +290,7 @@ fn vault_takes_the_innermost_workdir_when_given_twice() {
     // double here — would need the parse restructured away from the derive API to see both
     // occurrences at all, in exchange for being stricter than the ecosystem norm on a
     // mistake nobody has made yet.
-    let (code, _stdout, stderr) = run(magi_in(cwd.as_path())
+    let (code, stdout, stderr) = run(magi_in(cwd.as_path())
         .args(["-p", TEST_PASSPHRASE, "vault", "-w"])
         .arg(outer.as_path())
         .arg("ls")
@@ -300,6 +300,15 @@ fn vault_takes_the_innermost_workdir_when_given_twice() {
     assert_eq!(
         code, 0,
         "the innermost -w must win, and it is the one with the workspace; stderr: {stderr}"
+    );
+    // The exit code alone already discriminates here — only `inner` was seeded, so `outer`
+    // winning yields a non-zero "no .magi/" — and a mutation run confirmed it. The stdout
+    // assertion is belt-and-braces for a case the exit code could not tell apart on its own:
+    // if some future change made `vault ls` report an unreadable workspace as success, the
+    // code would stop carrying the signal and this test would go quiet rather than red.
+    assert!(
+        stdout.contains("vault empty") || stdout.contains("name"),
+        "the listing must come from the workspace under the innermost -w (got: {stdout:?})"
     );
 }
 
