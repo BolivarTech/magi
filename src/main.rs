@@ -449,8 +449,10 @@ fn resolve_workspace_root(
     match flag {
         None => Ok(cwd.to_path_buf()),
         Some(dir) if dir.is_dir() => Ok(dir),
+        // Phrased to read well AFTER the variant's own `invalid input: ` prefix, which the
+        // user sees: `error: invalid input: --workdir <path>: not an existing directory`.
         Some(dir) => Err(magi_rs::headless::HeadlessError::InputInvalid(format!(
-            "--workdir is not an existing directory: {}",
+            "--workdir {}: not an existing directory",
             dir.display()
         ))),
     }
