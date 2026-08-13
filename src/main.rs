@@ -8008,7 +8008,12 @@ mod tests {
             h.input = Some(prompt);
             h.output = Some(out.clone());
             h.workdir = Some(cwd.clone());
-            h.no_memory = true;
+            // NOT stateless, and that is the whole mechanism of this test. With `no_memory = true`
+            // the setup succeeds anyway, so the check returns 2 from either side of it and the
+            // ordering — the actual requirement — goes unguarded. Stateful means `prepare_headless`
+            // needs a passphrase it has no way to get here and would fail with exit 1, so a 2 can
+            // only mean the check ran FIRST.
+            h.no_memory = false;
             // Left at the default, which is TEXT — the case the flag cannot serve.
             h.output_format = None;
 
