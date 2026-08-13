@@ -8634,6 +8634,46 @@ mod tests {
             );
         }
 
+        /// A shared endpoint is NOT a shared pair when the kinds differ.
+        ///
+        /// `[magi].kind = "anthropic"` with no `[magi].base_url` inherits the root URL, so the two
+        /// endpoints are the same string and only the KIND separates them. Without that half of
+        /// the predicate a window measured over Ollama would be lent to a candidate reached over
+        /// Anthropic — a measurement of a different pair, presented as this one's.
+        ///
+        /// Asserted against `candidate_window_view` rather than a full build: an `anthropic` seat
+        /// needs credentials this fixture has no reason to invent, and the wiring from the view to
+        /// every consumer is already pinned by the tests above.
+        #[test]
+        fn a_shared_endpoint_with_a_different_kind_is_not_a_shared_pair() {
+            let cfg = cfg_principal_is_also_a_candidate("kind = \"anthropic\"\n");
+            let endpoints = test_endpoints();
+            assert_eq!(
+                endpoints.root.as_str(),
+                endpoints.magi.as_str(),
+                "precondition: the endpoint is literally shared — the KIND is the only difference, \
+                 or this test would pass for the wrong reason"
+            );
+            let probe = ProbeOutcome {
+                trio: trio_table_without_the_principal(),
+                principal: Some((
+                    "principal-model".to_string(),
+                    magi_rs::magi::probe::Measurement::Measured {
+                        window: 262_144,
+                        digest: None,
+                    },
+                )),
+            };
+
+            let view = candidate_window_view(&cfg, &endpoints, ProviderKind::Ollama, &probe);
+
+            assert!(
+                !view.contains_key("principal-model"),
+                "the principal was measured over Ollama; the trio reaches that tag over \
+                 Anthropic. Same URL, different transport, different pair: {view:?}"
+            );
+        }
+
         /// SC-R01/REQ-R03: the pool declared in `[[magi.fallback]]` reaches magi-core with each
         /// candidate's model AND its lineage, in the declared order (strongest first).
         ///
