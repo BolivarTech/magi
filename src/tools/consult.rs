@@ -2180,6 +2180,42 @@ mod tests {
         );
     }
 
+    /// REQ-EA02: `Omit` — the agent-facing default — yields NEITHER key, with a report that has
+    /// three verdicts to give.
+    ///
+    /// This is the test that protects the tool-result cap. `report_to_consult_json` feeds two
+    /// surfaces: this one, whose value goes back into the agent's context window bounded by
+    /// `tool_result_cap`, and the headless CLI's stdout. `agents` carries the same model-authored
+    /// text the rendered `report` is built from, so emitting it here would return the trio's full
+    /// output to the agent through a key the cap does not bound — defeating it while
+    /// `report_truncated` still announced a guarantee.
+    ///
+    /// Driven through the ACTUAL `ConsultTool::execute`, never by handing the emitter `Omit` by
+    /// hand: a test that passes `Omit` itself asserts what it just supplied, and stays green while
+    /// the production call site says `Include`. Verified by mutation — flip that call site and
+    /// this reddens.
+    #[tokio::test]
+    async fn the_agent_facing_path_never_carries_the_structured_verdicts() {
+        let tool = ConsultTool::new(magi_all_ok(), false);
+        let out = tool
+            .execute(
+                json!({"query": "should we migrate X to Y?"}),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("a healthy trio");
+        assert_eq!(
+            out["degraded"],
+            json!(false),
+            "precondition: the seats DID complete, so there is something to leak"
+        );
+        assert!(
+            out.get("agents").is_none() && out.get("consensus").is_none(),
+            "the tool result is bounded by `tool_result_cap`; these keys are not, and the text \
+             in them is what the cap exists to bound: {out:?}"
+        );
+    }
+
     /// SC-A09 / SC-A09c / SC-A10b / SC-A10c: the shape does NOT vary with the outcome, and a
     /// clean run's empty `extraction_failures` is the positive certificate SC-A09 asks for.
     #[test]
