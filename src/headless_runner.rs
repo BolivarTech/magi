@@ -220,9 +220,10 @@ pub(crate) struct MagiRuntimeParams<'a> {
     /// positional argument down the chain, for the same reason `OpenAiSettings` and `ModeSources`
     /// are named structs: several same-typed arguments in a row are a silent transposition hazard.
     ///
-    /// Only the headless CLI can set it. The agent-facing `ConsultTool` never constructs these
-    /// params, so that path cannot express `Include` at all (REQ-EA02).
-    pub(crate) structured_verdicts: bool,
+    /// Carried as the enum rather than a `bool` for the reason the enum exists: a bare `false`
+    /// at a call site says nothing about why. Only the headless CLI ever sets `Include` —
+    /// `ConsultTool` builds its own literal `Omit` and never these params (REQ-EA02).
+    pub(crate) structured_verdicts: StructuredVerdicts,
 }
 
 /// Runs `prompt` directly through the 3-perspective MAGI consensus, off the agent
@@ -396,11 +397,7 @@ async fn analyze_direct(
                 &truncated,
                 &resolution,
                 &ctx,
-                if runtime.structured_verdicts {
-                    StructuredVerdicts::Include
-                } else {
-                    StructuredVerdicts::Omit
-                },
+                runtime.structured_verdicts,
             ))
         }
         Ok(Err(e)) => Err(ConsultRunError::Runtime(explain_magi_error(
@@ -1353,7 +1350,7 @@ mod tests {
             magi_config: &cfg,
             timeout_decision: neutral_timeout_decision(),
             notice_sink: &sink,
-            structured_verdicts: false,
+            structured_verdicts: StructuredVerdicts::Omit,
         };
 
         let cancel = CancellationToken::new();
@@ -2873,7 +2870,7 @@ mod tests {
                 magi_config: &cfg,
                 timeout_decision: neutral_timeout_decision(),
                 notice_sink: &sink,
-                structured_verdicts: false,
+                structured_verdicts: StructuredVerdicts::Omit,
             },
             None,
         )
@@ -2924,7 +2921,7 @@ mod tests {
                 magi_config: &diverged,
                 timeout_decision: neutral_timeout_decision(),
                 notice_sink: &sink,
-                structured_verdicts: false,
+                structured_verdicts: StructuredVerdicts::Omit,
             },
             None,
         )
@@ -2962,7 +2959,7 @@ mod tests {
                 magi_config: &diverged,
                 timeout_decision: neutral_timeout_decision(),
                 notice_sink: &sink,
-                structured_verdicts: false,
+                structured_verdicts: StructuredVerdicts::Omit,
             },
             None,
         )
@@ -3005,7 +3002,7 @@ mod tests {
                 magi_config: &cfg,
                 timeout_decision: decision,
                 notice_sink: &sink,
-                structured_verdicts: false,
+                structured_verdicts: StructuredVerdicts::Omit,
             },
             None,
         )
@@ -3046,7 +3043,7 @@ mod tests {
                 magi_config: &cfg,
                 timeout_decision: decision,
                 notice_sink: &sink,
-                structured_verdicts: false,
+                structured_verdicts: StructuredVerdicts::Omit,
             },
             None,
         )
@@ -3088,7 +3085,7 @@ mod tests {
                 magi_config: &cfg,
                 timeout_decision: generous,
                 notice_sink: &sink_generous,
-                structured_verdicts: false,
+                structured_verdicts: StructuredVerdicts::Omit,
             },
             None,
         )
@@ -3119,7 +3116,7 @@ mod tests {
                 magi_config: &cfg,
                 timeout_decision: absent,
                 notice_sink: &sink_absent,
-                structured_verdicts: false,
+                structured_verdicts: StructuredVerdicts::Omit,
             },
             None,
         )
@@ -3154,7 +3151,7 @@ mod tests {
                 magi_config: &cfg,
                 timeout_decision: neutral_timeout_decision(),
                 notice_sink: &sink,
-                structured_verdicts: false,
+                structured_verdicts: StructuredVerdicts::Omit,
             },
             None,
         )
@@ -3200,7 +3197,7 @@ mod tests {
                 magi_config: &cfg,
                 timeout_decision: neutral_timeout_decision(),
                 notice_sink: &sink,
-                structured_verdicts: false,
+                structured_verdicts: StructuredVerdicts::Omit,
             },
             None,
         )
@@ -3243,7 +3240,7 @@ mod tests {
                 magi_config: &cfg,
                 timeout_decision: neutral_timeout_decision(),
                 notice_sink: &sink,
-                structured_verdicts: false,
+                structured_verdicts: StructuredVerdicts::Omit,
             },
             None,
         )
@@ -3297,7 +3294,7 @@ mod tests {
             magi_config: &cfg,
             timeout_decision: neutral_timeout_decision(),
             notice_sink: &sink,
-            structured_verdicts: false,
+            structured_verdicts: StructuredVerdicts::Omit,
         };
 
         {

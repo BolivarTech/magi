@@ -5466,7 +5466,11 @@ async fn run_consult_subcommand(
         magi_config: &magi_config,
         timeout_decision,
         notice_sink: notice_sink.as_ref(),
-        structured_verdicts,
+        structured_verdicts: if structured_verdicts {
+            crate::tools::consult::StructuredVerdicts::Include
+        } else {
+            crate::tools::consult::StructuredVerdicts::Omit
+        },
     };
     let outcome = run_consult(
         resolved,
