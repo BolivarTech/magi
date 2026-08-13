@@ -8489,6 +8489,67 @@ mod tests {
             );
         }
 
+        /// Folding the principal in moves a table-wide AGGREGATE, and that is deliberate.
+        ///
+        /// `missing_model_notices` fires only when at least one model of the same endpoint was
+        /// measured — the condition that keeps a cold daemon from accusing the whole pool on a
+        /// first run. Under a shared pair the principal now satisfies it on its own. That is
+        /// faithful rather than lax: the principal genuinely was probed on that endpoint, so the
+        /// mages it unlocks the notice for genuinely did not answer a probe that others answered.
+        ///
+        /// Pinned because it is a decision, not a side effect — and because nothing else in the
+        /// suite would notice it flipping back.
+        #[test]
+        fn a_measured_principal_alone_unlocks_the_missing_model_notices() {
+            let cfg = cfg_principal_is_also_a_candidate("");
+            let cold_trio: BTreeMap<String, Measurement> = ["mel", "bal", "cas"]
+                .into_iter()
+                .map(|m| {
+                    (
+                        m.to_string(),
+                        magi_rs::magi::probe::Measurement::NotMeasuredThisTime,
+                    )
+                })
+                .collect();
+            let probe = ProbeOutcome {
+                trio: cold_trio,
+                principal: Some((
+                    "principal-model".to_string(),
+                    magi_rs::magi::probe::Measurement::Measured {
+                        window: 262_144,
+                        digest: None,
+                    },
+                )),
+            };
+
+            let mut notices = Vec::new();
+            let magi = build_magi_orchestrator(
+                &TrioBuild {
+                    cfg: &cfg,
+                    principal_kind: ProviderKind::Ollama,
+                    endpoints: &test_endpoints(),
+                    creds: None,
+                    warn_tokens: None,
+                    env_overrides: &MagiEnvModelOverrides::default(),
+                    capability_cache: None,
+                    probe: &probe,
+                },
+                &mut notices,
+            )
+            .expect("ollama is keyless");
+            drop(magi);
+
+            for seat in ["mel", "bal", "cas"] {
+                assert!(
+                    notices.iter().any(|n| n
+                        .text
+                        .contains(&format!("`{seat}` could not be measured"))),
+                    "the endpoint DID measure something this run — the principal — so a mage that \
+                     failed its own probe is a real finding, not endpoint-wide silence: {notices:?}"
+                );
+            }
+        }
+
         /// SC-R01/REQ-R03: the pool declared in `[[magi.fallback]]` reaches magi-core with each
         /// candidate's model AND its lineage, in the declared order (strongest first).
         ///
