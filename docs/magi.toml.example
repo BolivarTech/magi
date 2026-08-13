@@ -12,7 +12,12 @@
 # Credentials NEVER live here: they travel by env (the Anthropic and OpenAI
 # credential env vars) or in the vault (`magi-rs vault set NAME`). An unknown
 # field is a PARSE ERROR, and a file that exists but does not parse is FATAL.
-provider = "ollama"          # ollama | openai-compat | anthropic
+# `provider` accepts exactly three values:
+#   ollama         local or remote Ollama daemon (this file's default)
+#   openai-compat  any OpenAI-shaped endpoint — OpenAI, Groq, OpenRouter, vLLM, …
+#   anthropic      the Anthropic Messages API (key from the env or the vault)
+# Anything else is a parse error, and a magi.toml that fails to parse is fatal.
+provider = "ollama"
 
 # System-wide DEFAULT endpoint: used by the main agent, the trio and the embedder
 # unless their own section overrides it.
@@ -166,8 +171,16 @@ model   = "glm-5.2:cloud"
 lineage = "zhipu"
 
 [[magi.fallback]]
+model   = "kimi-k2.6:cloud"
+lineage = "moonshot"
+
+[[magi.fallback]]
 model   = "minimax-m3:cloud"
 lineage = "minimax"
+
+[[magi.fallback]]
+model   = "nemotron-3-super:cloud"
+lineage = "nvidia"
 
 [[magi.fallback]]
 model   = "gemma4:cloud"
