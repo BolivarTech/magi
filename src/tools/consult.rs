@@ -2190,6 +2190,48 @@ mod tests {
     /// output to the agent through a key the cap does not bound — defeating it while
     /// `report_truncated` still announced a guarantee.
     ///
+    /// REQ-EA03: asked for, both keys are present even when NOTHING completed.
+    ///
+    /// This is the property the spec, the README and the CHANGELOG all lead with — an empty
+    /// `agents` is the positive certificate that no seat produced a verdict — and it is the one a
+    /// strict-schema consumer depends on, because a key that came and went with the outcome could
+    /// not be declared. Nothing else covers it: the seven-key test only ever sees a full report,
+    /// and `the_shape_does_not_vary_with_the_outcome` passes `Omit` on both sides, so it never
+    /// observes these keys at all. Wrapping the insert in `if !agents.is_empty()` reddens this and
+    /// only this.
+    #[test]
+    fn the_structured_keys_are_present_even_when_no_seat_completed() {
+        let r = report_fixture(
+            json!([]),
+            json!({}),
+            json!({}),
+            json!({ "estimated_tokens": 10, "warn_threshold": 150_000, "exceeded": false }),
+            true,
+            "a fully degraded report",
+        );
+        assert!(
+            r.agents.is_empty(),
+            "precondition: nothing completed, which is the case under test"
+        );
+        let v = report_to_consult_json(
+            &r,
+            &untruncated(&r),
+            &res_of(Mode::Analysis, ModeSource::Default),
+            &ctx_plain(),
+            StructuredVerdicts::Include,
+        );
+
+        assert_eq!(
+            v["agents"],
+            json!([]),
+            "present AND empty: the certificate is the empty array, not the missing key"
+        );
+        assert!(
+            v.get("consensus").is_some(),
+            "`consensus` travels on a degraded run too — it is what says HOW degraded: {v:?}"
+        );
+    }
+
     /// Driven through the ACTUAL `ConsultTool::execute`, never by handing the emitter `Omit` by
     /// hand: a test that passes `Omit` itself asserts what it just supplied, and stays green while
     /// the production call site says `Include`. Verified by mutation — flip that call site and
