@@ -142,6 +142,24 @@
 # duration. The real remedy is to derive the delay from a MEASURED cold start instead of a
 # constant, which is tracked as follow-up. Until that lands, a heavier CI runner can
 # reproduce this.
+#
+# ## The FOURTH hit, and why the measured remedy was not enough (v0.14.1)
+#
+# The remedy above landed -- the delay is derived from a measured cold start -- and the test
+# still failed twice in a row on the v0.14.0 release run. The measurement was the problem: it
+# timed `python probe.py` DIRECTLY, while the worker runs through the `bash` tool, which wraps
+# every command in `powershell -NoProfile -Command` on Windows. Measured side by side on the
+# dev box: **84 ms direct against ~900 ms wrapped**, more than 10x. The probe was not
+# imprecise, it was measuring a different thing than the number it predicted; the 5 s floor
+# hid that on a fast machine, and on the runner the cheap probe reported 1282 ms while the
+# wrapped path went past the floor.
+#
+# The probe now launches through the same wrapper, and a test asserts the RELATION rather than
+# a threshold, so it stays honest on any machine.
+#
+# The lesson generalises past this test: a measurement used to predict a cost has to traverse
+# the same path as the thing it predicts. Two of the four hits here were spent on remedies
+# that made the budget bigger instead of asking what the budget was measuring.
 
 # ## An INTEGRATION binary joins, and it needed a different kind of pattern (v0.13.1)
 #

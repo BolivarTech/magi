@@ -546,8 +546,13 @@ open(os.path.join(d, 'exfil.marker'), 'w').write(','.join(found))\n";
         marker.exists().then(|| started.elapsed())
     }
 
-    /// Measures interpreter cold start **on this machine, under the load present
-    /// right now**, by running a script that does nothing but write a marker.
+    /// Measures cold start **on this machine, under the load present right now, through the
+    /// same shell wrapper the `bash` tool uses**, by running a script that does nothing but
+    /// write a marker.
+    ///
+    /// The wrapper is the point, not an implementation detail: the worker this number sizes a
+    /// kill for is launched as `powershell -NoProfile -Command ...` (or `bash -c ...`), and
+    /// measuring a bare `python` launch instead reports roughly a tenth of what that costs.
     ///
     /// [`CANCEL_FIRE_DELAY_MS`] is a constant calibrated against one machine's
     /// contention, and a constant cannot know what else is running. It was grown from
@@ -573,12 +578,28 @@ open(os.path.join(d, 'exfil.marker'), 'w').write(','.join(found))\n";
         )
         .expect("write cold-start probe");
 
+        // Launched through the SAME shell wrapper the `bash` tool uses, because that is the
+        // path whose latency this number is used to predict. Running `python` directly measured
+        // a cheaper thing than the worker pays: 84 ms against ~900 ms on the development box,
+        // more than 10x, and the gap is what put the timeout test in CI's failure column twice
+        // in a row. The floor hid it on a fast machine; on the runner the cheap probe reported
+        // 1282 ms while the wrapped path went past the 5 s floor, so the kill fired before the
+        // worker had written START and the test failed on its own precondition -- which reads
+        // exactly like a broken process-group kill and is not one.
         let started = std::time::Instant::now();
-        let status = tokio::process::Command::new("python")
-            .arg(&script)
-            .current_dir(root)
-            .status()
-            .await;
+        let status = if cfg!(windows) {
+            tokio::process::Command::new("powershell")
+                .args(["-NoProfile", "-Command", "python cold_start_probe.py"])
+                .current_dir(root)
+                .status()
+                .await
+        } else {
+            tokio::process::Command::new("bash")
+                .args(["-c", "python cold_start_probe.py"])
+                .current_dir(root)
+                .status()
+                .await
+        };
         let elapsed = started.elapsed().as_millis() as u64;
 
         let measured = matches!(status, Ok(s) if s.success()) && marker.exists();
@@ -590,5 +611,76 @@ open(os.path.join(d, 'exfil.marker'), 'w').write(','.join(found))\n";
         } else {
             CANCEL_FIRE_DELAY_MS
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::test_support::measure_cold_start_ms;
+
+    /// The cold-start probe must measure the SAME launch path the worker pays for.
+    ///
+    /// It did not, and that is what put this module's timeout test in CI's failure column
+    /// twice in a row. The probe ran `python probe.py` directly; the worker runs through the
+    /// `bash` tool, which on Windows wraps every command in `powershell -NoProfile -Command`
+    /// and on Unix in `bash -c`. Measured on the development box: **84 ms direct against
+    /// ~900 ms wrapped** — more than 10x. The probe was not merely imprecise, it was
+    /// measuring a different thing than the number it was used to predict.
+    ///
+    /// On a fast machine the 5 s floor hid the gap. On the CI runner the cheap probe still
+    /// reported 1282 ms — already 15x this box — while the wrapped path went past 5 s, so the
+    /// kill fired before the child had written START and the test failed on its own
+    /// precondition. That reads exactly like a broken process-group kill and is not one.
+    ///
+    /// The assertion is a RELATION, not a threshold, so it stays honest on any machine: the
+    /// probe must land within the same order of magnitude as a shell-wrapped no-op measured
+    /// right here, right now. Half is generous enough to absorb ordinary jitter and still far
+    /// tighter than the 10x error it exists to catch.
+    #[tokio::test]
+    async fn the_cold_start_probe_measures_the_shell_wrapped_path() {
+        if !crate::tools::proc_group::test_support::python_available() {
+            // Consistent with the timeout test this supports: no interpreter means the
+            // measurement cannot be taken at all, and asserting on a fabricated number would
+            // be worse than saying so.
+            panic!(
+                "no python interpreter: this test compares two REAL launches to prove the \
+                 cold-start probe measures the path the worker actually takes"
+            );
+        }
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().canonicalize().expect("canonicalize");
+
+        let probe_ms = measure_cold_start_ms(&root).await;
+
+        // The same trivial script, launched the way the bash tool launches things.
+        let script = root.join("wrapped_probe.py");
+        std::fs::write(&script, "pass\n").expect("write script");
+        let started = std::time::Instant::now();
+        let status = if cfg!(windows) {
+            tokio::process::Command::new("powershell")
+                .args(["-NoProfile", "-Command", "python wrapped_probe.py"])
+                .current_dir(&root)
+                .status()
+                .await
+        } else {
+            tokio::process::Command::new("bash")
+                .args(["-c", "python wrapped_probe.py"])
+                .current_dir(&root)
+                .status()
+                .await
+        };
+        assert!(
+            matches!(status, Ok(s) if s.success()),
+            "fixture: the wrapped launch must succeed for the comparison to mean anything"
+        );
+        let wrapped_ms = started.elapsed().as_millis() as u64;
+
+        assert!(
+            probe_ms * 2 >= wrapped_ms,
+            "the cold-start probe measured {probe_ms} ms while the shell-wrapped path this \
+             machine actually runs took {wrapped_ms} ms. The probe is used to size a kill that \
+             must land AFTER the worker starts, so measuring a cheaper path than the worker \
+             takes makes it fire early and fail on its own precondition."
+        );
     }
 }
