@@ -298,9 +298,10 @@ struct HeadlessArgs {
     /// runner has), while that one is resolved *before* it, because `init` and `vault` need
     /// the root to decide where to look. Collapsing them into one `global` arg is what a
     /// reader reaches for first, and clap rejects it: a global whose id collides with an arg
-    /// in its propagation subtree is a **build-time panic**, so the binary would stop
-    /// starting rather than fail to parse. Change the flag name or the short letter in one
-    /// place and it must change in the other.
+    /// in its propagation subtree trips a `debug_assert!` during `Command` construction, so
+    /// the binary panics **at startup under `debug_assertions`** rather than failing to
+    /// parse — and a `--release` build may not catch it at all. Change the flag name or the
+    /// short letter in one place and it must change in the other.
     #[arg(short = 'w', long)]
     workdir: Option<PathBuf>,
     /// Stateless: do not persist session/history/memories (REQ-H18).
@@ -421,26 +422,37 @@ impl Args {
 /// the `-w`/`--workdir` value when given, the process's current directory otherwise.
 ///
 /// # Errors
-/// A human-readable message naming the offending path when `flag` is not an existing
-/// directory. Validating once, here, is what keeps a typo'd path from turning into two
-/// different misleading failures downstream: `init` would surface a bare I/O error from
-/// inside the scaffolder (it stages its `.magi.tmp.*` sibling in the target's parent), and
-/// `vault` would report "no .magi/ state directory found" — which sends the reader hunting
-/// for a workspace when the real problem is a mistyped path.
+/// [`HeadlessError::InputInvalid`], naming the offending path, when `flag` is not an existing
+/// directory. That variant is not decoration: [`headless_error_exit_code`] maps it to **2**,
+/// the operator-misuse code, so this rejection lands in the same bucket as the symlink
+/// rejection a `-w` can also trigger downstream. Returning a bare `String` here (or an
+/// `anyhow::Error`) would have meant choosing the exit code a second time, in a second place,
+/// with nothing keeping the two agreed.
 ///
-/// The check is `is_dir`, which follows symlinks by design: a `-w` pointing at a symlinked
-/// directory is a legitimate thing for an operator to type. The hardening against a symlink
-/// *inside* the resolved chain stays where it already is and is not duplicated here —
-/// [`crate::system::workspace::init`] and `discover` both run it on whatever root they are
-/// handed, so it applies to a `-w` path exactly as it applied to the current directory.
-fn resolve_workspace_root(flag: Option<PathBuf>, cwd: &std::path::Path) -> Result<PathBuf, String> {
+/// Validating once, here, is what keeps a typo'd path from turning into two different
+/// misleading failures: `init` would surface a bare I/O error from inside the scaffolder (it
+/// stages its `.magi.tmp.*` sibling in the target's parent, and that error does not carry the
+/// path), and `vault` would report "no .magi/ state directory found" — which sends the reader
+/// hunting for a workspace when the real problem is a mistyped path.
+///
+/// # What this check does NOT accept
+/// `is_dir` follows symlinks, so a symlinked `-w` passes **here** and is then rejected
+/// downstream by `ensure_raw_chain_symlink_free`, which tests every component of the absolute
+/// path **including the last**. The rejection is deliberate (REQ-H30) and is left where it is
+/// rather than duplicated — but note it is a real behavior difference from the current
+/// directory: `getcwd` returns the resolved physical path, so reaching a directory by `cd`
+/// through a symlink never tripped it, while naming that same directory with `-w` does.
+fn resolve_workspace_root(
+    flag: Option<PathBuf>,
+    cwd: &std::path::Path,
+) -> Result<PathBuf, magi_rs::headless::HeadlessError> {
     match flag {
         None => Ok(cwd.to_path_buf()),
         Some(dir) if dir.is_dir() => Ok(dir),
-        Some(dir) => Err(format!(
+        Some(dir) => Err(magi_rs::headless::HeadlessError::InputInvalid(format!(
             "--workdir is not an existing directory: {}",
             dir.display()
-        )),
+        ))),
     }
 }
 
@@ -451,11 +463,23 @@ fn resolve_workspace_root(flag: Option<PathBuf>, cwd: &std::path::Path) -> Resul
 ///
 /// It is **not** declared `global` on [`Args`], which would be the obvious way to reach every
 /// subcommand at once. [`HeadlessArgs`] already owns an arg with this id for `query`/`consult`,
-/// and clap rejects a global that collides with an arg in its propagation subtree — the
-/// collision is a build-time panic, not a parse error, so it would surface as "the binary
-/// stopped starting". Declaring it here instead keeps `query`/`consult` byte-for-byte
+/// and clap rejects a global that collides with an arg in its propagation subtree. That
+/// rejection is a `debug_assert!` while the `Command` is being built — so it panics **at
+/// startup under `debug_assertions`**, not at compile time, and in a `--release` build it may
+/// not fire at all. Either way the symptom is "the binary stopped starting", never a parse
+/// error a user could read. Declaring it here instead keeps `query`/`consult` byte-for-byte
 /// unchanged, which is the other half of why this shape was chosen.
-#[derive(clap::Args, Debug, Default)]
+///
+/// # Given twice
+/// `global` also means clap accepts `-w` on both sides of the nested `vault` subcommand, and
+/// the **innermost occurrence wins** with no diagnostic. That is clap's own semantics for a
+/// global and the convention every CLI carrying one follows (`git -C`, `docker`, `kubectl`),
+/// so it is adopted deliberately and pinned by
+/// `vault_takes_the_innermost_workdir_when_given_twice` rather than left as emergent behavior.
+/// It is asymmetric with `init`, whose `-w` is not global and which clap therefore rejects
+/// outright when repeated; making `vault` reject it too would mean parsing away from the
+/// derive API to see both occurrences, in exchange for being stricter than the norm.
+#[derive(clap::Args, Debug)]
 struct WorkdirArgs {
     /// Working directory: base for the `.magi/` walk-up (default: the current directory).
     ///
@@ -1364,7 +1388,7 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
         Ok(root) => root,
         Err(e) => {
             eprintln!("error: {e}");
-            return Ok(exit_code(1));
+            return Ok(exit_code(headless_error_exit_code(&e)));
         }
     };
 
@@ -6722,8 +6746,16 @@ mod tests {
         let err = resolve_workspace_root(Some(missing.clone()), cwd.path())
             .expect_err("a missing directory must be rejected");
         assert!(
-            err.contains("no-such-directory"),
+            err.to_string().contains("no-such-directory"),
             "the message must name the path (got: {err:?})"
+        );
+        // The VARIANT is the contract, not just the text: `headless_error_exit_code` maps
+        // `InputInvalid` to 2, so classifying this as anything else silently moves a mistyped
+        // path out of the operator-misuse bucket and into the runtime-failure one.
+        assert_eq!(
+            headless_error_exit_code(&err),
+            2,
+            "a mistyped -w is operator misuse, which this project's taxonomy codes as 2"
         );
         assert!(
             !missing.exists(),
@@ -6735,9 +6767,10 @@ mod tests {
         let err = resolve_workspace_root(Some(file), cwd.path())
             .expect_err("a file must be rejected as a working directory");
         assert!(
-            err.contains("a-file.txt"),
+            err.to_string().contains("a-file.txt"),
             "the message must name the path (got: {err:?})"
         );
+        assert_eq!(headless_error_exit_code(&err), 2);
     }
 
     /// Returns how many envelope rows (`wrapped_dek`) a freshly-`init`ed DB has:
