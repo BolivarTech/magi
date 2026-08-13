@@ -3162,7 +3162,14 @@ fn normalized_pair_key(kind: ProviderKind, endpoint: &ResolvedEndpoint) -> Strin
         ProviderKind::Ollama | ProviderKind::OpenAiCompat => {
             openai_compat_root(endpoint.as_str()).0
         }
-        ProviderKind::Anthropic => endpoint.as_str().to_string(),
+        // No normalization of its own, so the trailing slash `openai_compat_root` trims for the
+        // other kinds has to be trimmed here — otherwise `…/v1` and `…/v1/` are two pairs.
+        //
+        // Accepted residual: a default port written out (`…:443`) still compares unequal to the
+        // same host without it. Normalizing that needs real URL parsing for a spelling nobody
+        // writes in a `base_url`, and the failure is the conservative one — the fold is blocked,
+        // never lent across genuinely different pairs.
+        ProviderKind::Anthropic => endpoint.as_str().trim_end_matches('/').to_string(),
     };
     magi_rs::redact::redact_url(&dialled)
 }
