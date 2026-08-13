@@ -1584,6 +1584,66 @@ pub fn gate_thresholds_from(config: &MagiConfig) -> GateThresholds {
 
 #[cfg(test)]
 mod tests {
+
+    /// A commented-out `[embedding].base_url` INHERITS the root endpoint.
+    ///
+    /// This is the behaviour `magi init`'s scaffold now depends on: it emits the key commented
+    /// so the embedder follows whatever the operator sets at the root, instead of pinning
+    /// localhost forever. Before v0.14.0 the scaffold emitted it ACTIVE, so the inheritance
+    /// path existed in `override_or_inherit_base_url` and the generated file never took it.
+    ///
+    /// Characterization test, stated plainly: it passed the moment it was written, because the
+    /// resolver was always correct. What was wrong was the file feeding it. Its value is as a
+    /// **lock** — the scaffold's decision to omit the key is only safe while omission means
+    /// inheritance, and nothing else in the suite says so.
+    #[test]
+    fn an_absent_embedding_base_url_inherits_the_root_endpoint() {
+        let toml = r#"
+provider = "ollama"
+base_url = "http://remote-host:11434/v1"
+
+[embedding]
+model = "nomic-embed-text-v2-moe:latest"
+"#;
+        let cfg = MagiConfig::from_toml_str(toml).expect("valid config");
+
+        let root = cfg.effective_base_url().expect("root endpoint");
+        let embedding = cfg
+            .effective_embedding_base_url()
+            .expect("embedding endpoint");
+        assert_eq!(
+            embedding,
+            root,
+            "an absent [embedding].base_url must resolve to the ROOT endpoint, not to the              built-in localhost default"
+        );
+        assert!(
+            root.as_str().contains("remote-host"),
+            "precondition: the root must be the non-default value, or this test cannot tell              inheritance from a coincidence with the built-in default"
+        );
+    }
+
+    /// And a DECLARED `[embedding].base_url` still overrides, so the inheritance above is a
+    /// consequence of absence rather than the key having stopped working.
+    #[test]
+    fn a_declared_embedding_base_url_still_overrides_the_root() {
+        let toml = r#"
+provider = "ollama"
+base_url = "http://remote-host:11434/v1"
+
+[embedding]
+model = "nomic-embed-text-v2-moe:latest"
+base_url = "http://embedder-host:11434/v1"
+"#;
+        let cfg = MagiConfig::from_toml_str(toml).expect("valid config");
+        let embedding = cfg
+            .effective_embedding_base_url()
+            .expect("embedding endpoint");
+        assert!(
+            embedding.as_str().contains("embedder-host"),
+            "a declared override must win over the root"
+        );
+    }
+
     use super::*;
 
     // Task 3.1: `gate_thresholds_from` — breaks `[magi.complexity]` into `GateThresholds`
