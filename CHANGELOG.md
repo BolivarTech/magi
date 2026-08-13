@@ -9,6 +9,8 @@ changes and the **patch** position signals backward-compatible fixes.
 
 ## [Unreleased]
 
+## [0.14.3] - 2026-08-13
+
 ### Added
 
 - **`magi consult --structured-verdicts` adds `agents` and `consensus` to the JSON output.**
@@ -1155,7 +1157,8 @@ Initial pre-release, published primarily to reserve the `magi-rs` crate name.
 - `ratatui` TUI with Normal / Selection / Visual modes and Unicode-safe input.
 - OAuth (PKCE) login and OS keyring integration, with `magi-rust` legacy migration.
 
-[Unreleased]: https://github.com/BolivarTech/magi/compare/v0.14.2...HEAD
+[Unreleased]: https://github.com/BolivarTech/magi/compare/v0.14.3...HEAD
+[0.14.3]: https://github.com/BolivarTech/magi/compare/v0.14.2...v0.14.3
 [0.14.2]: https://github.com/BolivarTech/magi/compare/v0.14.1...v0.14.2
 [0.14.1]: https://github.com/BolivarTech/magi/compare/v0.13.1...v0.14.1
 [0.13.1]: https://github.com/BolivarTech/magi/compare/v0.13.0...v0.13.1
