@@ -146,9 +146,15 @@
 # ## An INTEGRATION binary joins, and it needed a different kind of pattern (v0.13.1)
 #
 # `tests/workdir_flag.rs` spawns the real `magi-rs` binary to prove `-w` reaches the
-# filesystem. Two of its five tests run `init -p` / `vault ls`, so each one pays a full
-# Argon2id KDF **in a child process** — measured at ~17 s apiece. It produces the load this
-# group exists to throttle, so it belongs here by the rule the sections above establish.
+# filesystem. Several of its tests seed a workspace and then read it back, so each pays a
+# full Argon2id KDF **in a child process** — measured at ~17 s apiece. It produces the load
+# this group exists to throttle, so it belongs here by the rule the sections above establish.
+#
+# The count is stated as "several" on purpose. An earlier draft of this comment said "two of
+# its five", and by the time the branch was reviewed the file had ten tests and four of them
+# paid the KDF — a MAGI reviewer caught the drift. A number pinned in prose next to a filter
+# that matches the WHOLE binary is a maintenance liability with no reader benefit: the filter
+# does not depend on it, and nothing fails when it rots.
 #
 # Every pattern above is `test(/…::/)`, and **not one of them can match it**: an integration
 # test's name has no `::` path — it is the bare function name, `init_scaffolds_…`. Reaching it
@@ -157,8 +163,9 @@
 # equivalent for an integration target: renaming or adding a test inside the file cannot drop
 # it out of the group, and only deleting the file itself changes what it matches.
 #
-# Matched test count went 555 -> 560 (`cargo nextest list -E '<filter>' | grep -c '^magi-rs'`),
-# a delta of exactly the five tests in that file. The control the section above demands was run
+# Matched test count went 555 -> 565 (`cargo nextest list -E '<filter>' | grep -c '^magi-rs'`),
+# a delta of exactly the tests in that file (10 on Windows; the `#[cfg(unix)]` symlink case
+# makes it 11 on Linux). The control the section above demands was run
 # first and mattered twice: the initial command counted `'    '` and reported **0** for the
 # known-good filter, and the corrected `'^magi-rs '` still reported 73, because integration
 # binaries print `magi-rs::<binary> <test>` while the bin target prints `magi-rs <test>` — a
