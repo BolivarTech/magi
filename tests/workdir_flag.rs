@@ -353,3 +353,66 @@ fn a_symlinked_workdir_is_rejected_and_creates_nothing() {
         "nothing may be created through the rejected symlink"
     );
 }
+
+#[cfg(windows)]
+#[test]
+fn a_junctioned_workdir_is_rejected_and_creates_nothing() {
+    let (_cwd_guard, cwd) = tempdir_canonical();
+    let real = cwd.as_path().join("real");
+    std::fs::create_dir_all(&real).expect("fixture dir");
+    let link = cwd.as_path().join("link");
+
+    // A junction, not a symlink: `std::os::windows::fs::symlink_dir` needs a privilege an
+    // ordinary CI account does not have, while `mklink /J` does not. It is the same reparse
+    // point `ensure_raw_chain_symlink_free` classifies, so it exercises the same guard.
+    let mk = Command::new("cmd")
+        .args(["/C", "mklink", "/J"])
+        .arg(&link)
+        .arg(&real)
+        .output()
+        .expect("mklink must run");
+    assert!(
+        mk.status.success(),
+        "fixture: mklink /J failed: {}",
+        String::from_utf8_lossy(&mk.stderr)
+    );
+
+    let (code, _stdout, stderr) = run(magi_in(cwd.as_path()).args(["init", "-w"]).arg(&link));
+
+    assert_eq!(
+        code, EXIT_MISUSE,
+        "a junctioned -w must be rejected; stderr: {stderr}"
+    );
+    assert!(
+        !real.join(MAGI_DIR).exists(),
+        "nothing may be created through the rejected junction"
+    );
+}
+
+#[test]
+fn a_hostile_workdir_cannot_smuggle_control_characters_into_the_diagnostic() {
+    let (_cwd_guard, cwd) = tempdir_canonical();
+
+    // The rejection message echoes the path back, which is the point of the message — and it
+    // makes an operator-supplied string a terminal output. A `-w` carrying an ANSI sequence
+    // would otherwise clear the screen or repaint earlier lines, letting a hostile value
+    // forge output the user believes came from magi. The path never has to exist: it is
+    // rejected before anything touches the filesystem, which is exactly when it is echoed.
+    let hostile = "\u{1b}[2J\u{1b}[1;31mFORGED\u{7}";
+    let (code, _stdout, stderr) = run(magi_in(cwd.as_path()).args(["init", "-w"]).arg(hostile));
+
+    assert_eq!(code, EXIT_MISUSE, "a hostile -w is still just misuse");
+    assert!(
+        !stderr.contains('\u{1b}'),
+        "no escape byte may survive into the diagnostic (got: {stderr:?})"
+    );
+    assert!(
+        !stderr.contains('\u{7}'),
+        "no control character may survive either (got: {stderr:?})"
+    );
+    assert!(
+        stderr.contains("FORGED"),
+        "the printable part must still be shown — sanitizing must not blank the path, or the \
+         message stops naming what was wrong (got: {stderr:?})"
+    );
+}
