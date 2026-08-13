@@ -342,6 +342,31 @@ it is an object with these keys, **all always present**:
 New fields are added to `consult` without a `schema_version` bump — the same
 consumer contract above applies to it.
 
+#### `--structured-verdicts` (opt-in)
+
+`magi consult --output-format json --structured-verdicts` adds two more keys, for a machine
+consumer that wants the trio's verdicts typed rather than rendered:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `agents` | array | one entry per seat that produced a verdict, each with `agent`, `verdict`, `confidence`, `summary`, `reasoning`, `findings`, `recommendation`; each finding with `severity`, `title`, `detail`, `file`, `line`, `category` (`file`/`line` null when the seat did not locate it) |
+| `consensus` | object | magi-core's own `consensus`, `consensus_verdict`, `confidence`, `score`, `agent_count`, `votes`, `majority_summary` |
+
+Both are **always present when the flag is passed**, empty array included — an empty `agents`
+certifies that no seat completed. Without the flag, neither appears.
+
+**The shape varies by FLAG, never by DATA.** That is what keeps the always-present rule intact: a
+key that came and went with the outcome would break a strict schema, while a key you asked for by
+name gives you the same shape on every run.
+
+The flag exists on `consult` only — `magi query --structured-verdicts` is a parse error, not an
+accepted no-op — and it requires `--output-format json`; with text output it exits **2**.
+
+It is opt-in rather than default because the same text already travels rendered in `report`, and
+`report` is bounded by the tool-result cap. The agent-facing `/consult` tool never emits these
+keys at all: returning the trio's full output there would put it straight into the agent's context
+window, which is what that cap exists to prevent.
+
 ### Authorization tiers
 
 Secure by default: a read-only CI job cannot mutate or execute:
