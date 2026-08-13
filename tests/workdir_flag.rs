@@ -425,3 +425,62 @@ fn a_hostile_workdir_cannot_smuggle_control_characters_into_the_diagnostic() {
          message stops naming what was wrong (got: {stderr:?})"
     );
 }
+
+/// `query` and `consult` reject a `-w` that names no directory, the same way and with the
+/// same exit code as `init` and `vault`.
+///
+/// Until v0.14.0 they did not: the flag was resolved later, in `prepare_headless`, with no
+/// validation at all, so a mistyped path fell through to `no .magi/ state directory found`
+/// (exit 1) — the misleading message the pre-dispatch check was written to remove, still
+/// reachable on half the surface. Worse, the nonexistent path was then handed on as the
+/// **file-tool sandbox root**, so every later tool call failed for a second unrelated reason.
+///
+/// The exit code moving 1 -> 2 is why this landed in a minor rather than a patch.
+#[test]
+fn the_headless_pair_rejects_a_missing_workdir_the_same_way_init_does() {
+    let (_cwd_guard, cwd) = tempdir_canonical();
+    let missing = cwd.as_path().join("no-such-directory");
+
+    for sub in ["query", "consult"] {
+        let (code, _stdout, stderr) = run(magi_in(cwd.as_path())
+            .args([sub, "-w"])
+            .arg(&missing)
+            .args(["-i", "/dev/null"]));
+
+        assert_eq!(
+            code, EXIT_MISUSE,
+            "`{sub} -w <missing>` must be operator misuse (2), not a runtime failure (1); \
+             stderr: {stderr}"
+        );
+        assert!(
+            stderr.contains("no-such-directory"),
+            "`{sub}` must name the offending path (got: {stderr:?})"
+        );
+        assert!(
+            !stderr.contains("no .magi/ state directory found"),
+            "`{sub}` must not report a missing workspace when the real problem is the path \
+             (got: {stderr:?})"
+        );
+    }
+}
+
+/// The rejection happens **before** anything touches the filesystem or the network, so a
+/// hostile `-w` cannot smuggle control characters into the diagnostic on these two either.
+#[test]
+fn the_headless_pair_sanitizes_a_hostile_workdir_too() {
+    let (_cwd_guard, cwd) = tempdir_canonical();
+    let hostile = "\u{1b}[2J\u{1b}[1;31mFORGED\u{7}";
+
+    let (code, _stdout, stderr) =
+        run(magi_in(cwd.as_path()).args(["query", "-w", hostile, "-i", "/dev/null"]));
+
+    assert_eq!(code, EXIT_MISUSE, "a hostile -w is still just misuse");
+    assert!(
+        !stderr.contains('\u{1b}') && !stderr.contains('\u{7}'),
+        "no control character may survive into the diagnostic (got: {stderr:?})"
+    );
+    assert!(
+        stderr.contains("FORGED"),
+        "the printable part must still be shown (got: {stderr:?})"
+    );
+}

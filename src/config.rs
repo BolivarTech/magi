@@ -1586,6 +1586,65 @@ pub fn gate_thresholds_from(config: &MagiConfig) -> GateThresholds {
 mod tests {
     use super::*;
 
+    /// A commented-out `[embedding].base_url` INHERITS the root endpoint.
+    ///
+    /// This is the behaviour `magi init`'s scaffold now depends on: it emits the key commented
+    /// so the embedder follows whatever the operator sets at the root, instead of pinning
+    /// localhost forever. Before v0.14.0 the scaffold emitted it ACTIVE, so the inheritance
+    /// path existed in `override_or_inherit_base_url` and the generated file never took it.
+    ///
+    /// Characterization test, stated plainly: it passed the moment it was written, because the
+    /// resolver was always correct. What was wrong was the file feeding it. Its value is as a
+    /// **lock** — the scaffold's decision to omit the key is only safe while omission means
+    /// inheritance, and nothing else in the suite says so.
+    #[test]
+    fn an_absent_embedding_base_url_inherits_the_root_endpoint() {
+        let toml = r#"
+provider = "ollama"
+base_url = "http://remote-host:11434/v1"
+
+[embedding]
+model = "nomic-embed-text-v2-moe:latest"
+"#;
+        let cfg = MagiConfig::from_toml_str(toml).expect("valid config");
+
+        let root = cfg.effective_base_url().expect("root endpoint");
+        let embedding = cfg
+            .effective_embedding_base_url()
+            .expect("embedding endpoint");
+        assert_eq!(
+            embedding,
+            root,
+            "an absent [embedding].base_url must resolve to the ROOT endpoint, not to the built-in localhost default"
+        );
+        assert!(
+            root.as_str().contains("remote-host"),
+            "precondition: the root must be the non-default value, or this test cannot tell inheritance from a coincidence with the built-in default"
+        );
+    }
+
+    /// And a DECLARED `[embedding].base_url` still overrides, so the inheritance above is a
+    /// consequence of absence rather than the key having stopped working.
+    #[test]
+    fn a_declared_embedding_base_url_still_overrides_the_root() {
+        let toml = r#"
+provider = "ollama"
+base_url = "http://remote-host:11434/v1"
+
+[embedding]
+model = "nomic-embed-text-v2-moe:latest"
+base_url = "http://embedder-host:11434/v1"
+"#;
+        let cfg = MagiConfig::from_toml_str(toml).expect("valid config");
+        let embedding = cfg
+            .effective_embedding_base_url()
+            .expect("embedding endpoint");
+        assert!(
+            embedding.as_str().contains("embedder-host"),
+            "a declared override must win over the root"
+        );
+    }
+
     // Task 3.1: `gate_thresholds_from` — breaks `[magi.complexity]` into `GateThresholds`
     // (REQ-A20b). `gate.rs` lives in the lib and cannot know the shape of the TOML; this
     // function is the only one that breaks it apart.
@@ -1654,6 +1713,43 @@ mod tests {
     /// Same fix shape: pin the example's parsed values against the single source of truth so a
     /// future edit to either side that breaks the match fails this test instead of shipping a
     /// stale example silently.
+    /// The example's rotation pool must equal `DEFAULT_SCAFFOLD_POOL` — model AND lineage, in
+    /// order.
+    ///
+    /// Its neighbours already mirror the trio's models and lineages and the complexity
+    /// thresholds against `defaults.rs`; the pool was the largest set of literals left
+    /// hand-synced, and v0.14.0 grew it from three pairs to five across two separate commits —
+    /// one editing the generator, one editing the example. That manual mirror step is exactly
+    /// what this file's neighbouring rustdoc warns about: the example still PARSING proves the
+    /// labels are present, and says nothing about them still being the right ones.
+    ///
+    /// Order matters and is asserted: the pool is rotation PREFERENCE, strongest first, so a
+    /// reordered example teaches a different fallback order than the tool generates.
+    #[test]
+    fn example_toml_fallback_pool_matches_the_builtin_scaffold_pool() {
+        let raw = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/docs/magi.toml.example"
+        ))
+        .expect("docs/magi.toml.example must be readable");
+        let parsed = MagiConfig::from_toml_str(&raw).expect("the example must parse");
+
+        let actual: Vec<(String, String)> = parsed
+            .fallback_pool()
+            .iter()
+            .map(|e| (e.model.clone(), e.lineage.to_string()))
+            .collect();
+        let expected: Vec<(String, String)> = crate::defaults::DEFAULT_SCAFFOLD_POOL
+            .iter()
+            .map(|(m, l)| ((*m).to_string(), (*l).to_string()))
+            .collect();
+
+        assert_eq!(
+            actual, expected,
+            "docs/magi.toml.example's [[magi.fallback]] entries must match              DEFAULT_SCAFFOLD_POOL exactly, in order"
+        );
+    }
+
     #[test]
     fn example_toml_magi_models_match_the_builtin_defaults() {
         let raw = std::fs::read_to_string(concat!(

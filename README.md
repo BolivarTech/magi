@@ -261,12 +261,16 @@ magi vault ls -w /srv/project       # and -w may also precede: magi vault -w /sr
 magi query -w /srv/project -i q.txt
 ```
 
-**On `init` and `vault`**, a `-w` that is not an existing directory is rejected up
-front with exit code 2, naming the path — and it is never created. `query` and
-`consult` do **not** perform that check: their `-w` predates it and an invalid path
-there still surfaces as `no .magi/ state directory found` (exit 1). Extending the
-check to them is deliberately left for a minor release, since it would change an
-exit code scripts may key on.
+**On all four subcommands**, a `-w` that is not an existing directory is rejected
+up front with **exit code 2**, naming the path — and it is never created. The check
+runs before the workspace walk-up, the vault and the input read, so a mistyped path
+fails as a mistyped path rather than as a missing workspace.
+
+> **Changed in v0.14.0.** `query` and `consult` used to skip this check: an invalid
+> `-w` fell through to `no .magi/ state directory found` at **exit 1**, and the
+> unvalidated path then became the file-tool sandbox root, failing a second time
+> somewhere unrelated. A script keying on `1` for a bad `-w` on those two
+> subcommands needs updating; every other failure class keeps its code.
 
 On `vault` the flag may appear **before or after** the nested subcommand — both
 `vault -w <dir> ls` and `vault ls -w <dir>` are the same command. Given once on each

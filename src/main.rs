@@ -404,8 +404,9 @@ impl Args {
     /// Deliberately does **not** answer for `query`/`consult`, which resolve their own
     /// `HeadlessArgs.workdir` further down (`run_query_subcommand`/`run_consult_subcommand`).
     /// Two arg definitions with the same name is a fact worth reading twice: this accessor
-    /// covers the two subcommands whose root is decided *before* dispatch, and the headless
-    /// pair keeps deciding it after, exactly as it did before this flag existed.
+    /// covers the two subcommands whose root is decided *before* dispatch; the headless pair
+    /// still decides it after, in `prepare_headless` — but since v0.14.0 through the **same**
+    /// resolver, so *where* it is decided still differs while *what happens* no longer does.
     ///
     /// Read **before** `self.command.take()` in `run()`, same constraint as
     /// [`Self::mode_of_consult`] — after the `take` it would always answer `None`.
@@ -4544,7 +4545,22 @@ async fn prepare_headless(
     anthropic_key: Option<String>,
     openai_key: Option<String>,
 ) -> Result<HeadlessContext, i32> {
-    let workdir = h.workdir.clone().unwrap_or_else(|| cwd.to_path_buf());
+    // Validated through the SAME resolver `init`/`vault` use (v0.14.0). Until then this line
+    // was a bare `unwrap_or_else`, and the two halves of the CLI disagreed about what a
+    // mistyped `-w` is: `init` rejected it up front naming the path (exit 2), while `query`
+    // let it through to surface as `no .magi/ state directory found` (exit 1) — the misleading
+    // message the pre-dispatch check exists to remove, still reachable on half the surface.
+    //
+    // The second half of the bug was quieter: the unvalidated path also became the file-tool
+    // sandbox root a few lines down, so every later tool call failed for a second reason that
+    // pointed nowhere near the typo.
+    let workdir = match resolve_workspace_root(h.workdir.clone(), cwd) {
+        Ok(root) => root,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return Err(headless_error_exit_code(&e));
+        }
+    };
 
     // `.magi/` discovery (walk-up, nearest ancestor, hardened, REQ-H16/H30).
     // A discovery `Err` is security-relevant — it is the REQ-H30 rejection of a
