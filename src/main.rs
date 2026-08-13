@@ -3208,11 +3208,22 @@ fn build_magi_orchestrator(
         capability_cache,
         probe,
     } = b;
-    // Every use of `measured` below is a per-candidate decision — the strict-guard fail-safe, the
-    // missing-model notices, the assumed-window notices. None of them is the D-R09 threshold,
-    // which `probe_and_report` already derived from the SEATS before this call.
+    // What every consumer below reads, and NOT the D-R09 threshold — `probe_and_report` already
+    // derived that from the SEATS before this call. Named apart from `ProbeOutcome::trio` so each
+    // use site has to say which of the two views it means.
+    //
+    // Two of the four are per-candidate lookups (`get` by model: the seat-window filter, and
+    // `assumed_window_notices`' own per-entry check). The other two are table-wide AGGREGATES, and
+    // folding the principal in moves both — deliberately, in both cases:
+    //   - `assumed_window` takes the minimum over everything measured, so a small principal can
+    //     lower the window credited to unmeasured candidates. It was measured on this endpoint
+    //     this run, so "the smallest measured this run" stays literally true.
+    //   - `missing_model_notices`' second condition ("at least one model of the SAME endpoint was
+    //     measured") becomes satisfiable by the principal alone. That is faithful to the wording:
+    //     under a shared pair the principal genuinely was probed there, so the notices it unlocks
+    //     name models that genuinely did not answer.
     let candidate_view = candidate_window_view(cfg, endpoints, principal_kind, probe);
-    let measured = &candidate_view;
+    let candidate_windows = &candidate_view;
     // Absent/empty `[magi].kind` inherits `principal_kind` — the ALREADY-RESOLVED one, not
     // `cfg.effective_provider()` (TOML-only). Present-but-unrecognized remains a typed error.
     // Task 5.2: extracted to `resolve_magi_kind`, shared with `orchestrate_probes` (B3) —
@@ -3354,8 +3365,11 @@ fn build_magi_orchestrator(
     // REQ-R11: the declared value is NOT what reaches magi-core. A `true` with no measured
     // candidate rejects every one of them at condition #6 and switches rotation off whole, so
     // the fail-safe resolves it and announces the override with its REAL reason.
-    let (effective_guard, guard_notice) =
-        effective_strict_guard(cfg.declared_strict_context_guard(), measured, declared_pool);
+    let (effective_guard, guard_notice) = effective_strict_guard(
+        cfg.declared_strict_context_guard(),
+        candidate_windows,
+        declared_pool,
+    );
     if let Some(n) = guard_notice {
         notices.push(n);
     }
@@ -3376,7 +3390,7 @@ fn build_magi_orchestrator(
         // very base it is supposed to be compared against.
         let trio_windows: Vec<usize> = seats
             .iter()
-            .filter_map(|(_, _, _, model)| match measured.get(model) {
+            .filter_map(|(_, _, _, model)| match candidate_windows.get(model) {
                 Some(Measurement::Measured { window, .. }) => Some(*window),
                 _ => None,
             })
@@ -3462,13 +3476,13 @@ fn build_magi_orchestrator(
             .map(|(_, _, _, model)| model.clone())
             .chain(declared_pool.iter().map(|entry| entry.model.clone()))
             .collect();
-        notices.extend(missing_model_notices(measured, &configured));
+        notices.extend(missing_model_notices(candidate_windows, &configured));
     }
 
     // REQ-R26/SC-R51: candidates running on an ASSUMED window are announced — and nothing here
     // removes them. The assumption informs; the filtering stays entirely with magi-core, whose
     // condition #6 needs a per-consult prompt size that does not exist at this point.
-    notices.extend(assumed_window_notices(measured, declared_pool));
+    notices.extend(assumed_window_notices(candidate_windows, declared_pool));
 
     // REQ-R25: a model that LEFT the configuration stops being referenced. Done ONCE, here, with
     // this run's configured set. It DEGRADES rather than aborts: a failed prune leaves extra rows,
