@@ -291,6 +291,16 @@ struct HeadlessArgs {
     output_format: Option<CliOutputFormat>,
     /// Working directory: file-tool sandbox root and `.magi/` walk-up base
     /// (default cwd, REQ-H05).
+    ///
+    /// **There is a second `-w` in this CLI**: [`WorkdirArgs`], carried by `init` and
+    /// `vault`. The two are deliberately separate declarations, not an oversight — this one
+    /// is resolved *after* dispatch (it is also the sandbox root, which only the headless
+    /// runner has), while that one is resolved *before* it, because `init` and `vault` need
+    /// the root to decide where to look. Collapsing them into one `global` arg is what a
+    /// reader reaches for first, and clap rejects it: a global whose id collides with an arg
+    /// in its propagation subtree is a **build-time panic**, so the binary would stop
+    /// starting rather than fail to parse. Change the flag name or the short letter in one
+    /// place and it must change in the other.
     #[arg(short = 'w', long)]
     workdir: Option<PathBuf>,
     /// Stateless: do not persist session/history/memories (REQ-H18).
