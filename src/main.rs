@@ -8741,6 +8741,56 @@ mod tests {
             );
         }
 
+        /// Between two observations of ONE pair, the one that actually measured wins.
+        ///
+        /// Under a redundant declaration the principal and the trio are probed in separate
+        /// `join!` batches against the same daemon, and separate batches can disagree: one can
+        /// time out under the endpoint's concurrency cap while its twin answers. When a seat
+        /// resolves to the principal's own tag, that produced a row saying `NotMeasuredThisTime`
+        /// beside a real window for the very same `(endpoint, model)` pair — and the unmeasured
+        /// one was kept.
+        ///
+        /// Keeping it was never a D-R09 protection, though an earlier comment here claimed it
+        /// was: `derive_warn_tokens` runs on `trio_seats` inside `probe_and_report`, before this
+        /// view exists, so nothing computed here can reach the threshold. The only question is
+        /// which observation is more useful to a per-candidate decision, and a window that was
+        /// observed beats one that was not.
+        #[test]
+        fn a_real_measurement_beats_a_timed_out_probe_of_the_same_pair() {
+            let cfg = cfg_principal_is_also_a_candidate("kind = \"ollama\"\n");
+            let trio_with_a_cold_twin: BTreeMap<String, Measurement> = [(
+                "principal-model".to_string(),
+                magi_rs::magi::probe::Measurement::NotMeasuredThisTime,
+            )]
+            .into_iter()
+            .collect();
+            let probe = ProbeOutcome {
+                trio: trio_with_a_cold_twin,
+                principal: Some((
+                    "principal-model".to_string(),
+                    magi_rs::magi::probe::Measurement::Measured {
+                        window: 262_144,
+                        digest: None,
+                    },
+                )),
+            };
+
+            let view = candidate_window_view(&cfg, &test_endpoints(), ProviderKind::Ollama, &probe);
+
+            assert!(
+                matches!(
+                    view.get("principal-model"),
+                    Some(Measurement::Measured {
+                        window: 262_144,
+                        ..
+                    })
+                ),
+                "one batch timed out, its twin measured the SAME pair — discarding the real \
+                 window credits the candidate with the smallest measured this run all over \
+                 again: {view:?}"
+            );
+        }
+
         /// SC-R01/REQ-R03: the pool declared in `[[magi.fallback]]` reaches magi-core with each
         /// candidate's model AND its lineage, in the declared order (strongest first).
         ///
