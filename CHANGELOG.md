@@ -9,7 +9,25 @@ changes and the **patch** position signals backward-compatible fixes.
 
 ## [Unreleased]
 
-## [0.14.0] - 2026-08-13
+## [0.14.1] - 2026-08-13
+
+> **Supersedes 0.14.0, which was never published.** Its release pipeline failed before the
+> publish step on a test whose kill fired before the process it was meant to kill had started
+> — a defect in the test's own timing estimate, not in the code under test. Nothing reached
+> crates.io under 0.14.0, so its entry is folded here rather than left pointing at a tag that
+> does not exist.
+
+### Fixed — release tooling
+
+- **The process-group kill test stopped racing its own worker.** It sizes the kill from a
+  measured cold start, and that measurement timed a bare `python` launch while the worker it
+  predicts runs through the `bash` tool's shell wrapper — 84 ms against ~900 ms on the
+  development box, more than 10x. On a fast machine the floor hid the gap; on the CI runner
+  the cheap probe reported 1282 ms while the wrapped path exceeded the floor, so the kill
+  landed before the child had written its START marker and the test failed on its own
+  precondition. The probe now launches through the same wrapper, and a new test asserts the
+  relation between the two rather than a threshold, so it stays honest on any machine.
+
 
 ### Changed — BREAKING (exit code)
 
@@ -1077,8 +1095,8 @@ Initial pre-release, published primarily to reserve the `magi-rs` crate name.
 - `ratatui` TUI with Normal / Selection / Visual modes and Unicode-safe input.
 - OAuth (PKCE) login and OS keyring integration, with `magi-rust` legacy migration.
 
-[Unreleased]: https://github.com/BolivarTech/magi/compare/v0.14.0...HEAD
-[0.14.0]: https://github.com/BolivarTech/magi/compare/v0.13.1...v0.14.0
+[Unreleased]: https://github.com/BolivarTech/magi/compare/v0.14.1...HEAD
+[0.14.1]: https://github.com/BolivarTech/magi/compare/v0.13.1...v0.14.1
 [0.13.1]: https://github.com/BolivarTech/magi/compare/v0.13.0...v0.13.1
 [0.13.0]: https://github.com/BolivarTech/magi/compare/v0.12.2...v0.13.0
 [0.12.2]: https://github.com/BolivarTech/magi/compare/v0.12.0...v0.12.2
