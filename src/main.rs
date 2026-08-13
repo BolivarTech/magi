@@ -413,11 +413,25 @@ impl Args {
 /// # Errors
 /// A human-readable message naming the offending path when `flag` is not an existing
 /// directory. Validating once, here, is what keeps a typo'd path from turning into two
-/// different misleading failures downstream.
+/// different misleading failures downstream: `init` would surface a bare I/O error from
+/// inside the scaffolder (it stages its `.magi.tmp.*` sibling in the target's parent), and
+/// `vault` would report "no .magi/ state directory found" — which sends the reader hunting
+/// for a workspace when the real problem is a mistyped path.
+///
+/// The check is `is_dir`, which follows symlinks by design: a `-w` pointing at a symlinked
+/// directory is a legitimate thing for an operator to type. The hardening against a symlink
+/// *inside* the resolved chain stays where it already is and is not duplicated here —
+/// [`crate::system::workspace::init`] and `discover` both run it on whatever root they are
+/// handed, so it applies to a `-w` path exactly as it applied to the current directory.
 fn resolve_workspace_root(flag: Option<PathBuf>, cwd: &std::path::Path) -> Result<PathBuf, String> {
-    // RED-phase stub: ignores the flag and validates nothing. Green implements it.
-    let _ = flag;
-    Ok(cwd.to_path_buf())
+    match flag {
+        None => Ok(cwd.to_path_buf()),
+        Some(dir) if dir.is_dir() => Ok(dir),
+        Some(dir) => Err(format!(
+            "--workdir is not an existing directory: {}",
+            dir.display()
+        )),
+    }
 }
 
 /// The `-w`/`--workdir` flag, shared by `init` and `vault`.

@@ -143,9 +143,32 @@
 # constant, which is tracked as follow-up. Until that lands, a heavier CI runner can
 # reproduce this.
 
+# ## An INTEGRATION binary joins, and it needed a different kind of pattern (v0.13.1)
+#
+# `tests/workdir_flag.rs` spawns the real `magi-rs` binary to prove `-w` reaches the
+# filesystem. Two of its five tests run `init -p` / `vault ls`, so each one pays a full
+# Argon2id KDF **in a child process** — measured at ~17 s apiece. It produces the load this
+# group exists to throttle, so it belongs here by the rule the sections above establish.
+#
+# Every pattern above is `test(/…::/)`, and **not one of them can match it**: an integration
+# test's name has no `::` path — it is the bare function name, `init_scaffolds_…`. Reaching it
+# by name would mean `test(/init_scaffolds/)`, which is a leaf pattern of the exact kind this
+# file has now watched rot three times. `binary(workdir_flag)` is the subsystem-level
+# equivalent for an integration target: renaming or adding a test inside the file cannot drop
+# it out of the group, and only deleting the file itself changes what it matches.
+#
+# Matched test count went 555 -> 560 (`cargo nextest list -E '<filter>' | grep -c '^magi-rs'`),
+# a delta of exactly the five tests in that file. The control the section above demands was run
+# first and mattered twice: the initial command counted `'    '` and reported **0** for the
+# known-good filter, and the corrected `'^magi-rs '` still reported 73, because integration
+# binaries print `magi-rs::<binary> <test>` while the bin target prints `magi-rs <test>` — a
+# trailing space silently excluded every binary except one. Only the third form is right. The
+# 555 also reconciles with the 538 recorded above: MS3 added tests to subsystems already in
+# the group.
+
 [test-groups]
 heavy = { max-threads = 3 }
 
 [[profile.default.overrides]]
-filter = 'test(/vault::/) | test(/system::/) | test(/agent::/) | test(/memory::/) | test(/tools::/) | test(/headless_runner::/)'
+filter = 'test(/vault::/) | test(/system::/) | test(/agent::/) | test(/memory::/) | test(/tools::/) | test(/headless_runner::/) | binary(workdir_flag)'
 test-group = "heavy"
