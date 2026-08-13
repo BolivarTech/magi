@@ -1694,7 +1694,7 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
     // `input_warn_tokens` can be derived from the MAGES window (REQ-A24b) and startup announces
     // the three measurement states (REQ-A24c). Never blocks or fails startup: each probe fails
     // open inside `probe_models`/`orchestrate_probes`.
-    let (warn_tokens, measured) = probe_and_report(
+    let (warn_tokens, probe) = probe_and_report(
         &magi_config,
         &endpoints,
         provider_kind,
@@ -1719,7 +1719,7 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
             warn_tokens,
             env_overrides: &env_overrides,
             capability_cache: capability_cache.as_ref(),
-            measured: &measured,
+            probe: &probe,
         },
         &mut startup_notices,
     ) {
@@ -2278,7 +2278,7 @@ async fn probe_and_report(
     // REQ-R11 (Task 6.4): the trio measurements come back with the threshold because the guard's
     // fail-safe needs them, and re-probing to recover what this call already learned would pay
     // the cost twice for the same answer.
-) -> (Option<usize>, BTreeMap<String, Measurement>) {
+) -> (Option<usize>, ProbeOutcome) {
     let (principal_model, principal_measurement, trio, seat_models) = orchestrate_probes(
         cfg,
         endpoints,
@@ -2290,7 +2290,11 @@ async fn probe_and_report(
     .await;
     notices.push(Notice::info(format!(
         "{principal_model}: {}",
-        probe_notice(&principal_measurement.unwrap_or(Measurement::NotMeasuredThisTime))
+        probe_notice(
+            principal_measurement
+                .as_ref()
+                .unwrap_or(&Measurement::NotMeasuredThisTime)
+        )
     )));
     // MAGI S3 re-gate (Caspar): the principal's own notice above only ever reports the
     // PRINCIPAL's measurement — on a cold daemon the trio's models (usually different from
@@ -2345,7 +2349,17 @@ async fn probe_and_report(
         .magi()
         .input_warn_tokens
         .or_else(|| derive_warn_tokens(&trio_seats));
-    (warn, trio)
+    // The threshold above is derived from `trio_seats` — the SEATS, principal excluded (D-R09).
+    // What travels onward is the whole outcome, because every consumer downstream of here asks
+    // the per-candidate question instead, and answering it with the trio's table alone is the
+    // defect [`ProbeOutcome`] documents.
+    (
+        warn,
+        ProbeOutcome {
+            trio,
+            principal: principal_measurement.map(|m| (principal_model, m)),
+        },
+    )
 }
 
 /// Builds the notice for when at least one mage of the trio is `NotMeasuredThisTime` (cold) —
@@ -3063,9 +3077,155 @@ struct TrioBuild<'a> {
     /// REQ-R10/R25/R28. `None` is the ephemeral path (Task 6.8): no encrypted database means
     /// nothing to remember measurements in, which degrades measurement — never the run.
     capability_cache: Option<&'a Arc<ModelCapabilityCache>>,
-    /// What the startup probe measured, keyed by model (REQ-R11). Feeds the strict-guard
-    /// fail-safe, which must know whether any CANDIDATE got a window.
-    measured: &'a BTreeMap<String, Measurement>,
+    /// Everything the startup probe learned (REQ-R11). Feeds the strict-guard fail-safe, which
+    /// must know whether any CANDIDATE got a window.
+    ///
+    /// It is the WHOLE [`ProbeOutcome`] and not just the trio's table because the principal's
+    /// measurement is load-bearing here too, and a separate field for it is a field a call site
+    /// can leave at its default while everything still compiles — the defect this type exists to
+    /// make unconstructible.
+    probe: &'a ProbeOutcome,
+}
+
+/// Everything one startup probe learned, kept together so no consumer can take the trio's table
+/// without the principal's measurement.
+///
+/// # Why one value and not two parameters
+///
+/// The trio's table deliberately **excludes** the principal: that exclusion is what keeps a small
+/// principal from lowering the mage-derived `input_warn_tokens` (D-R09), and a test pins it. But a
+/// measurement is a property of the `(endpoint, model)` **pair** — the very pair the capability
+/// cache keys on — not of the role a model plays, and the principal may legitimately also be a
+/// fallback candidate: the magi-rs agent and the multi-perspective tool are two levels free to name
+/// the same model.
+///
+/// So there are two different questions over one probe, and the answer to each is a different view:
+/// *"what did the MAGES measure?"* (the threshold) and *"what did this ENDPOINT measure?"* (any
+/// per-candidate decision). Handing consumers the first when they ask the second is what made one
+/// startup say both of these about one model in one run:
+///
+/// ```text
+/// kimi-k2.6:cloud: probe: window 262144 tokens, digest a90cd0d1590c...
+/// notice: fallback candidate `kimi-k2.6:cloud` has no measured window; it is credited
+///         with 131072 tokens, the smallest measured this run.
+/// ```
+///
+/// crediting a candidate with half its real window — the number that decides whether a rotation
+/// into it can accept a large prompt.
+#[derive(Debug, Default)]
+struct ProbeOutcome {
+    /// The trio's table, principal excluded (D-R09), plus whatever `extra_models` rode the batch.
+    trio: BTreeMap<String, Measurement>,
+    /// The principal's resolved model tag and what the probe measured for it, `None` when the
+    /// probe produced nothing.
+    ///
+    /// One `Option` over the PAIR rather than a tag beside an optional measurement: the tag alone
+    /// answers nothing here, and separate fields make `Some(measurement)` next to an empty tag a
+    /// constructible state — the kind of unreachable-but-representable hole this whole type exists
+    /// to close one level up.
+    principal: Option<(String, Measurement)>,
+}
+
+/// The measurement view for any **per-candidate** decision: the trio's table plus the principal's
+/// own measurement.
+///
+/// # Why the principal may be folded in at all
+///
+/// [`ProbeOutcome::trio`] excludes it on purpose (D-R09) and that exclusion is right for the
+/// question it answers — the mage-derived threshold. Every consumer here asks the other question,
+/// *"what did this endpoint measure?"*, and the principal is a legitimate answer to it: the
+/// magi-rs agent and magi-core's pool are two different levels, free to name the same model.
+///
+/// # Why divergence blocks it
+///
+/// A measurement is a property of the `(endpoint, model)` pair. Once `[magi].base_url`/`kind`
+/// sends the trio elsewhere, the same tag on the two hosts is **two pairs**, and nobody measured
+/// the candidate's. Reporting it as measured would not be an optimistic guess — it would erase the
+/// distinction between *measured*, *not measured* and *not measurable* that every consumer below
+/// depends on, and REQ-R11's fail-safe would become unverifiable.
+///
+/// The gate lives here rather than at the call sites so that no caller can get the semantics wrong
+/// by pre-filtering what it passes.
+/// One half of a measurement pair, spelled as the TRANSPORT will see it.
+///
+/// The OpenAI-compatible kinds get a missing `/v1` added downstream by `openai_compat_root`, so
+/// `http://host:11434` and `http://host:11434/v1` reach the same daemon. Comparing what was typed
+/// instead of what will be dialled judges one daemon as two, which blocks the fold exactly as a
+/// redundant `kind` did. `anthropic` is passed through, because nothing normalizes it and two
+/// spellings there really are two endpoints.
+///
+/// Redacted last — the same equivalence the capability cache keys on (REQ-R25): two URLs differing
+/// only in credentials are one pair, because a credential moves neither a model's context window
+/// nor its digest.
+fn normalized_pair_key(kind: ProviderKind, endpoint: &ResolvedEndpoint) -> String {
+    let dialled = match kind {
+        ProviderKind::Ollama | ProviderKind::OpenAiCompat => {
+            openai_compat_root(endpoint.as_str()).0
+        }
+        // No normalization of its own, so the trailing slash `openai_compat_root` trims for the
+        // other kinds has to be trimmed here — otherwise `…/v1` and `…/v1/` are two pairs.
+        //
+        // ACCEPTED RESIDUAL, and it is a class rather than a case: two spellings of one authority
+        // that differ in anything this function does not normalize — an explicit default port
+        // (`…:443`), host case, an IPv6 literal written two ways, redundant percent-encoding —
+        // still compare unequal and block the fold. Closing that properly means full URL
+        // canonicalization, which is more machinery than the defect warrants and more than the
+        // capability cache itself applies to the key this mirrors (REQ-R25).
+        //
+        // It is tolerable because the whole class fails in the SAFE direction: an unrecognized
+        // spelling blocks the fold and degrades to the pre-v0.14.2 behaviour. The direction that
+        // would matter — judging two genuinely different pairs as one, and lending a measurement
+        // across them — is unreachable here, because every transformation applied above maps
+        // distinct authorities to distinct strings.
+        ProviderKind::Anthropic => endpoint.as_str().trim_end_matches('/').to_string(),
+    };
+    magi_rs::redact::redact_url(&dialled)
+}
+
+fn candidate_window_view(
+    cfg: &MagiConfig,
+    endpoints: &ResolvedEndpoints,
+    principal_kind: ProviderKind,
+    probe: &ProbeOutcome,
+) -> BTreeMap<String, Measurement> {
+    // RESOLVED endpoint and RESOLVED kind, never `magi_endpoint_diverges()`: that predicate answers
+    // whether the operator DECLARED a separate trio backend, and a declaration that resolves back
+    // to the root (`kind = "ollama"` under an `ollama` root, a `base_url` written out equal to it)
+    // would block the fold over a pair that is in fact identical. Compared through `redact_url`,
+    // the same equivalence the capability cache keys on (REQ-R25): a credential difference moves
+    // neither a model's window nor its digest.
+    let shares_the_trios_pair = resolve_magi_kind(cfg, principal_kind)
+        .is_ok_and(|trio_kind| trio_kind == principal_kind)
+        && normalized_pair_key(principal_kind, &endpoints.root)
+            == normalized_pair_key(principal_kind, &endpoints.magi);
+    let mut view = probe.trio.clone();
+    if let (true, Some((model, m))) = (shares_the_trios_pair, probe.principal.as_ref()) {
+        // A seat may legally resolve to the principal's own tag (`seats_with_env_overrides` falls
+        // an undeclared seat back to exactly that model), so the two can name the same row — and
+        // the two-batch case is LIVE, not hypothetical: `orchestrate_probes` still branches on
+        // `magi_endpoint_diverges()`, so a redundant declaration (the very case the predicate
+        // above was widened to admit) probes the principal and the trio in separate `join!`
+        // batches against the same daemon. Those can disagree: one may time out under the
+        // endpoint's concurrency cap while its twin answers.
+        //
+        // When they do, the observation that actually MEASURED wins. It is the same
+        // `(endpoint, model)` pair either way, so a real window is simply better evidence than a
+        // probe that gave up — and discarding it would credit the candidate with the smallest
+        // window measured this run, which is the defect this whole function exists to remove.
+        //
+        // This is NOT a D-R09 question, though an earlier version of this comment claimed it was:
+        // `derive_warn_tokens` runs on `trio_seats` inside `probe_and_report`, before this view
+        // exists, so nothing decided here can reach the threshold.
+        // On a tie the TRIO wins: if both batches measured the same pair and reported different
+        // windows, this keeps the trio's. Neither is more truthful — they are two observations of
+        // one daemon — so the tie-break is arbitrary and chosen for stability, not accuracy: the
+        // trio's row is the one every other consumer of this map already agrees with.
+        let keep_existing = matches!(view.get(model), Some(Measurement::Measured { .. }));
+        if !keep_existing {
+            view.insert(model.clone(), m.clone());
+        }
+    }
+    view
 }
 
 /// Builds the MAGI trio with the NATIVE providers of magi-core (REQ-A01).
@@ -3098,8 +3258,24 @@ fn build_magi_orchestrator(
         warn_tokens,
         env_overrides,
         capability_cache,
-        measured,
+        probe,
     } = b;
+    // What every consumer below reads, and NOT the D-R09 threshold — `probe_and_report` already
+    // derived that from the SEATS before this call. Named apart from `ProbeOutcome::trio` so each
+    // use site has to say which of the two views it means.
+    //
+    // Two of the four are pure per-candidate lookups: `effective_strict_guard` (the only one whose
+    // output reaches magi-core) and the seat-window filter. The other two carry a table-wide
+    // AGGREGATE, and folding the principal in moves both — deliberately, in both cases:
+    //   - `assumed_window` takes the minimum over everything measured, so a small principal can
+    //     lower the window credited to unmeasured candidates. It was measured on this endpoint
+    //     this run, so "the smallest measured this run" stays literally true.
+    //   - `missing_model_notices`' second condition ("at least one model of the SAME endpoint was
+    //     measured") becomes satisfiable by the principal alone. That is faithful to the wording:
+    //     under a shared pair the principal genuinely was probed there, so the notices it unlocks
+    //     name models that genuinely did not answer.
+    let candidate_view = candidate_window_view(cfg, endpoints, principal_kind, probe);
+    let candidate_windows = &candidate_view;
     // Absent/empty `[magi].kind` inherits `principal_kind` — the ALREADY-RESOLVED one, not
     // `cfg.effective_provider()` (TOML-only). Present-but-unrecognized remains a typed error.
     // Task 5.2: extracted to `resolve_magi_kind`, shared with `orchestrate_probes` (B3) —
@@ -3241,8 +3417,11 @@ fn build_magi_orchestrator(
     // REQ-R11: the declared value is NOT what reaches magi-core. A `true` with no measured
     // candidate rejects every one of them at condition #6 and switches rotation off whole, so
     // the fail-safe resolves it and announces the override with its REAL reason.
-    let (effective_guard, guard_notice) =
-        effective_strict_guard(cfg.declared_strict_context_guard(), measured, declared_pool);
+    let (effective_guard, guard_notice) = effective_strict_guard(
+        cfg.declared_strict_context_guard(),
+        candidate_windows,
+        declared_pool,
+    );
     if let Some(n) = guard_notice {
         notices.push(n);
     }
@@ -3263,7 +3442,7 @@ fn build_magi_orchestrator(
         // very base it is supposed to be compared against.
         let trio_windows: Vec<usize> = seats
             .iter()
-            .filter_map(|(_, _, _, model)| match measured.get(model) {
+            .filter_map(|(_, _, _, model)| match candidate_windows.get(model) {
                 Some(Measurement::Measured { window, .. }) => Some(*window),
                 _ => None,
             })
@@ -3349,13 +3528,13 @@ fn build_magi_orchestrator(
             .map(|(_, _, _, model)| model.clone())
             .chain(declared_pool.iter().map(|entry| entry.model.clone()))
             .collect();
-        notices.extend(missing_model_notices(measured, &configured));
+        notices.extend(missing_model_notices(candidate_windows, &configured));
     }
 
     // REQ-R26/SC-R51: candidates running on an ASSUMED window are announced — and nothing here
     // removes them. The assumption informs; the filtering stays entirely with magi-core, whose
     // condition #6 needs a per-consult prompt size that does not exist at this point.
-    notices.extend(assumed_window_notices(measured, declared_pool));
+    notices.extend(assumed_window_notices(candidate_windows, declared_pool));
 
     // REQ-R25: a model that LEFT the configuration stops being referenced. Done ONCE, here, with
     // this run's configured set. It DEGRADES rather than aborts: a failed prune leaves extra rows,
@@ -4845,7 +5024,7 @@ async fn prepare_headless(
     let mut trio_notices: Vec<Notice> = Vec::new();
     // Same wiring as the TUI, through the same opener (B3).
     let capability_cache = open_capability_cache(memory.as_ref(), &mut trio_notices);
-    let (warn_tokens, measured) = probe_and_report(
+    let (warn_tokens, probe) = probe_and_report(
         &magi_config,
         &endpoints,
         provider_kind,
@@ -4864,7 +5043,7 @@ async fn prepare_headless(
             warn_tokens,
             env_overrides: &env_overrides,
             capability_cache: capability_cache.as_ref(),
-            measured: &measured,
+            probe: &probe,
         },
         &mut trio_notices,
     );
@@ -8063,7 +8242,7 @@ mod tests {
                     env_overrides: &MagiEnvModelOverrides::default(),
                     capability_cache: None,
                     // Nothing measured: the cold start.
-                    measured: &BTreeMap::new(),
+                    probe: &ProbeOutcome::default(),
                 },
                 &mut notices,
             )
@@ -8085,6 +8264,553 @@ mod tests {
             );
         }
 
+        /// A config whose PRINCIPAL model is also declared as a fallback candidate.
+        ///
+        /// `extra` is appended verbatim to `[magi]`, so a caller can add `base_url` (divergence)
+        /// or `strict_context_guard` without a second near-identical fixture.
+        fn cfg_principal_is_also_a_candidate(extra: &str) -> MagiConfig {
+            MagiConfig::from_toml_str(&format!(
+                "provider = \"ollama\"\n\
+                 [openai]\n\
+                 model = \"principal-model\"\n\
+                 [magi]\n\
+                 melchior_model    = \"mel\"\nmelchior_lineage  = \"lin-m\"\n\
+                 balthasar_model   = \"bal\"\nbalthasar_lineage = \"lin-b\"\n\
+                 caspar_model      = \"cas\"\ncaspar_lineage    = \"lin-c\"\n\
+                 agent_timeout_secs = 30\n\
+                 max_rotations = 2\n\
+                 {extra}\
+                 [[magi.fallback]]\n\
+                 model   = \"principal-model\"\nlineage = \"lin-rescue\"\n"
+            ))
+            .expect("the principal's model is legal as a fallback candidate")
+        }
+
+        /// The trio's table as the probe returns it: the three seats, principal EXCLUDED (D-R09).
+        ///
+        /// Caspar is the smallest, so `assumed_window` credits an unmeasured candidate with
+        /// 131072 — half of what `principal-model` actually measures.
+        fn trio_table_without_the_principal() -> BTreeMap<String, Measurement> {
+            [("mel", 262_144_usize), ("bal", 262_144), ("cas", 131_072)]
+                .into_iter()
+                .map(|(m, window)| {
+                    (
+                        m.to_string(),
+                        magi_rs::magi::probe::Measurement::Measured {
+                            window,
+                            digest: None,
+                        },
+                    )
+                })
+                .collect()
+        }
+
+        /// REQ-R26/SC-R51: a principal that is ALSO a fallback candidate keeps its OWN measured
+        /// window instead of being credited with the smallest one measured this run.
+        ///
+        /// The two are different levels — the magi-rs agent on one side, magi-core's trio and pool
+        /// on the other — so the same tag naming both is ordinary configuration, not a mistake. A
+        /// measurement belongs to the `(endpoint, model)` pair, never to the role, and the trio's
+        /// table excludes the principal ON PURPOSE (D-R09, so a small principal cannot lower the
+        /// mage-derived threshold). Asking that table a per-candidate question is what produced a
+        /// startup that reported one model as both measured at 262144 and unmeasured at 131072.
+        #[test]
+        fn a_measured_principal_that_is_also_a_candidate_keeps_its_own_window() {
+            let cfg = cfg_principal_is_also_a_candidate("");
+            assert!(
+                !cfg.magi_endpoint_diverges(),
+                "precondition: one endpoint, so the principal's measurement DOES describe the \
+                 candidate's pair — the whole reason it may be folded in"
+            );
+            let probe = ProbeOutcome {
+                trio: trio_table_without_the_principal(),
+                principal: Some((
+                    "principal-model".to_string(),
+                    magi_rs::magi::probe::Measurement::Measured {
+                        window: 262_144,
+                        digest: None,
+                    },
+                )),
+            };
+            assert!(
+                !probe.trio.contains_key("principal-model"),
+                "precondition: the trio's table must NOT already carry the principal, or this \
+                 test passes without the fix it exists to force"
+            );
+
+            let mut notices = Vec::new();
+            let magi = build_magi_orchestrator(
+                &TrioBuild {
+                    cfg: &cfg,
+                    principal_kind: ProviderKind::Ollama,
+                    endpoints: &test_endpoints(),
+                    creds: None,
+                    warn_tokens: None,
+                    env_overrides: &MagiEnvModelOverrides::default(),
+                    capability_cache: None,
+                    probe: &probe,
+                },
+                &mut notices,
+            )
+            .expect("ollama is keyless");
+            drop(magi);
+
+            assert!(
+                !notices
+                    .iter()
+                    .any(|n| n.text.contains("`principal-model` has no measured window")),
+                "the probe measured it at 262144 this very run; crediting it with 131072 is the \
+                 number that decides whether a rotation into it accepts a large prompt: {notices:?}"
+            );
+        }
+
+        /// The other half of the same rule: across a DIVERGING endpoint the principal's
+        /// measurement says nothing about a same-named candidate, and must not be lent to it.
+        ///
+        /// This one cannot go red before the fold exists — there was nothing to over-fold. It pins
+        /// the boundary the fold must not cross, so it is verified by MUTATION (drop the
+        /// `magi_endpoint_diverges` gate and watch it fail), never by watching it pass.
+        #[test]
+        fn a_principal_on_a_diverging_endpoint_never_lends_its_window_to_a_candidate() {
+            let cfg =
+                cfg_principal_is_also_a_candidate("base_url = \"http://magi-host:11434/v1\"\n");
+            assert!(
+                cfg.magi_endpoint_diverges(),
+                "precondition: the trio declares its own base_url, so the same tag on the two \
+                 hosts is two different pairs"
+            );
+            let endpoints = ResolvedEndpoints {
+                root: EndpointTemplate::parse("http://root-host:11434/v1", Scope::Root)
+                    .expect("a flat test URL must parse")
+                    .resolve(&mut NoVaultInScope, Scope::Root)
+                    .expect("no placeholders, no vault"),
+                magi: endpoint_at("http://magi-host:11434/v1"),
+            };
+            let probe = ProbeOutcome {
+                trio: trio_table_without_the_principal(),
+                // Measured on the ROOT host — a different pair from the candidate's.
+                principal: Some((
+                    "principal-model".to_string(),
+                    magi_rs::magi::probe::Measurement::Measured {
+                        window: 262_144,
+                        digest: None,
+                    },
+                )),
+            };
+
+            let mut notices = Vec::new();
+            let magi = build_magi_orchestrator(
+                &TrioBuild {
+                    cfg: &cfg,
+                    principal_kind: ProviderKind::Ollama,
+                    endpoints: &endpoints,
+                    creds: None,
+                    warn_tokens: None,
+                    env_overrides: &MagiEnvModelOverrides::default(),
+                    capability_cache: None,
+                    probe: &probe,
+                },
+                &mut notices,
+            )
+            .expect("ollama is keyless");
+            drop(magi);
+
+            assert!(
+                notices
+                    .iter()
+                    .any(|n| n.text.contains("`principal-model` has no measured window")),
+                "nobody measured that tag on the TRIO's host; reporting it as measured would \
+                 erase the distinction between measured, not measured and not measurable that \
+                 every consumer here depends on: {notices:?}"
+            );
+        }
+
+        /// The same defect seen where it costs the most: `strict_context_guard`.
+        ///
+        /// REQ-R11 runs the guard's predicate over CANDIDATES, so a pool whose only candidate is
+        /// the principal read as "nothing measured", the fail-safe turned the guard off, and the
+        /// operator's declared setting silently did not apply. Its neighbour above observes the
+        /// notice; this one observes what actually reaches magi-core.
+        #[test]
+        fn a_measured_principal_candidate_lets_the_declared_strict_guard_survive() {
+            let cfg = cfg_principal_is_also_a_candidate("strict_context_guard = true\n");
+            assert!(
+                cfg.declared_strict_context_guard(),
+                "precondition: the operator DID declare it, or this test proves nothing"
+            );
+            let probe = ProbeOutcome {
+                trio: trio_table_without_the_principal(),
+                principal: Some((
+                    "principal-model".to_string(),
+                    magi_rs::magi::probe::Measurement::Measured {
+                        window: 262_144,
+                        digest: None,
+                    },
+                )),
+            };
+
+            let mut notices = Vec::new();
+            let magi = build_magi_orchestrator(
+                &TrioBuild {
+                    cfg: &cfg,
+                    principal_kind: ProviderKind::Ollama,
+                    endpoints: &test_endpoints(),
+                    creds: None,
+                    warn_tokens: None,
+                    env_overrides: &MagiEnvModelOverrides::default(),
+                    capability_cache: None,
+                    probe: &probe,
+                },
+                &mut notices,
+            )
+            .expect("ollama is keyless");
+            drop(magi);
+
+            let wired = pool_wiring_trace().expect("a declared pool must be wired");
+            assert!(
+                wired.strict_guard,
+                "the only candidate WAS measured this run, so the fail-safe has no reason to \
+                 fire — turning the guard off here switches rotation's window check off over a \
+                 pool that was perfectly eligible"
+            );
+        }
+
+        /// A REDUNDANTLY declared `[magi].kind` must not block the fold: the pair is still the
+        /// same pair.
+        ///
+        /// `magi_endpoint_diverges()` answers *"did the operator declare a separate trio
+        /// backend?"* — decided on DECLARATION, not resolution, deliberately, because that is what
+        /// the divergence notice is about. The question here is different: *"was the principal
+        /// measured on the candidate's `(endpoint, model)` pair?"* The two disagree whenever a
+        /// declaration resolves back to the root, and writing `kind = "ollama"` under a root that
+        /// is already `ollama` is an ordinary, honest thing to write.
+        ///
+        /// Answering the pair question with the intent predicate is conservative — it degrades to
+        /// the old behaviour rather than lending a measurement — but "conservative" here means the
+        /// reported defect returns in full for that config, `strict_context_guard` included.
+        #[test]
+        fn a_redundantly_declared_trio_kind_still_shares_the_principals_pair() {
+            let cfg = cfg_principal_is_also_a_candidate("kind = \"ollama\"\n");
+            assert!(
+                cfg.magi_endpoint_diverges(),
+                "precondition: the DECLARATION predicate says diverging — that is exactly the \
+                 disagreement this test exists for"
+            );
+            let endpoints = test_endpoints();
+            assert_eq!(
+                endpoints.root.as_str(),
+                endpoints.magi.as_str(),
+                "precondition: and yet the RESOLVED endpoints are the same one, because an \
+                 absent [magi].base_url inherits the root"
+            );
+
+            let probe = ProbeOutcome {
+                trio: trio_table_without_the_principal(),
+                principal: Some((
+                    "principal-model".to_string(),
+                    magi_rs::magi::probe::Measurement::Measured {
+                        window: 262_144,
+                        digest: None,
+                    },
+                )),
+            };
+
+            let mut notices = Vec::new();
+            let magi = build_magi_orchestrator(
+                &TrioBuild {
+                    cfg: &cfg,
+                    principal_kind: ProviderKind::Ollama,
+                    endpoints: &endpoints,
+                    creds: None,
+                    warn_tokens: None,
+                    env_overrides: &MagiEnvModelOverrides::default(),
+                    capability_cache: None,
+                    probe: &probe,
+                },
+                &mut notices,
+            )
+            .expect("ollama is keyless");
+            drop(magi);
+
+            assert!(
+                !notices
+                    .iter()
+                    .any(|n| n.text.contains("`principal-model` has no measured window")),
+                "same host, same kind, same model, measured this run — a redundant declaration \
+                 changes none of that: {notices:?}"
+            );
+        }
+
+        /// Folding the principal in moves a table-wide AGGREGATE, and that is deliberate.
+        ///
+        /// `missing_model_notices` fires only when at least one model of the same endpoint was
+        /// measured — the condition that keeps a cold daemon from accusing the whole pool on a
+        /// first run. Under a shared pair the principal now satisfies it on its own. That is
+        /// faithful rather than lax: the principal genuinely was probed on that endpoint, so the
+        /// mages it unlocks the notice for genuinely did not answer a probe that others answered.
+        ///
+        /// Pinned because it is a decision, not a side effect — and because nothing else in the
+        /// suite would notice it flipping back.
+        #[test]
+        fn a_measured_principal_alone_unlocks_the_missing_model_notices() {
+            let cfg = cfg_principal_is_also_a_candidate("");
+            let cold_trio: BTreeMap<String, Measurement> = ["mel", "bal", "cas"]
+                .into_iter()
+                .map(|m| {
+                    (
+                        m.to_string(),
+                        magi_rs::magi::probe::Measurement::NotMeasuredThisTime,
+                    )
+                })
+                .collect();
+            let probe = ProbeOutcome {
+                trio: cold_trio,
+                principal: Some((
+                    "principal-model".to_string(),
+                    magi_rs::magi::probe::Measurement::Measured {
+                        window: 262_144,
+                        digest: None,
+                    },
+                )),
+            };
+
+            let mut notices = Vec::new();
+            let magi = build_magi_orchestrator(
+                &TrioBuild {
+                    cfg: &cfg,
+                    principal_kind: ProviderKind::Ollama,
+                    endpoints: &test_endpoints(),
+                    creds: None,
+                    warn_tokens: None,
+                    env_overrides: &MagiEnvModelOverrides::default(),
+                    capability_cache: None,
+                    probe: &probe,
+                },
+                &mut notices,
+            )
+            .expect("ollama is keyless");
+            drop(magi);
+
+            for seat in ["mel", "bal", "cas"] {
+                assert!(
+                    notices.iter().any(|n| n
+                        .text
+                        .contains(&format!("`{seat}` could not be measured"))),
+                    "the endpoint DID measure something this run — the principal — so a mage that \
+                     failed its own probe is a real finding, not endpoint-wide silence: {notices:?}"
+                );
+            }
+        }
+
+        /// The `/v1` spelling is not a pair difference: the same daemon written two ways is one
+        /// pair.
+        ///
+        /// `openai_compat_root` normalises a missing `/v1` downstream, in `build_native_provider`,
+        /// so `http://host:11434` and `http://host:11434/v1` reach the SAME endpoint. Comparing
+        /// the un-normalised strings therefore judges one daemon as two, blocks the fold and
+        /// restores the whole defect — `strict_context_guard` included — for a config that is the
+        /// same "ordinary, honest thing to write" class as the redundant `kind` beside it.
+        #[test]
+        fn the_v1_spelling_of_one_daemon_is_still_one_pair() {
+            let cfg = cfg_principal_is_also_a_candidate(
+                "base_url = \"http://localhost:11434\"\n", // same daemon, written without /v1
+            );
+            let endpoints = ResolvedEndpoints {
+                root: EndpointTemplate::parse("http://localhost:11434/v1", Scope::Root)
+                    .expect("a flat test URL must parse")
+                    .resolve(&mut NoVaultInScope, Scope::Root)
+                    .expect("no placeholders, no vault"),
+                magi: endpoint_at("http://localhost:11434"),
+            };
+            assert_ne!(
+                endpoints.root.as_str(),
+                endpoints.magi.as_str(),
+                "precondition: the two spellings differ as STRINGS — that is the whole trap"
+            );
+
+            let probe = ProbeOutcome {
+                trio: trio_table_without_the_principal(),
+                principal: Some((
+                    "principal-model".to_string(),
+                    magi_rs::magi::probe::Measurement::Measured {
+                        window: 262_144,
+                        digest: None,
+                    },
+                )),
+            };
+
+            let mut notices = Vec::new();
+            let magi = build_magi_orchestrator(
+                &TrioBuild {
+                    cfg: &cfg,
+                    principal_kind: ProviderKind::Ollama,
+                    endpoints: &endpoints,
+                    creds: None,
+                    warn_tokens: None,
+                    env_overrides: &MagiEnvModelOverrides::default(),
+                    capability_cache: None,
+                    probe: &probe,
+                },
+                &mut notices,
+            )
+            .expect("ollama is keyless");
+            drop(magi);
+
+            assert!(
+                !notices
+                    .iter()
+                    .any(|n| n.text.contains("`principal-model` has no measured window")),
+                "one daemon, one kind, one model — a `/v1` the operator did not type is not a \
+                 second endpoint: {notices:?}"
+            );
+        }
+
+        /// A shared endpoint is NOT a shared pair when the kinds differ.
+        ///
+        /// `[magi].kind = "anthropic"` with no `[magi].base_url` inherits the root URL, so the two
+        /// endpoints are the same string and only the KIND separates them. Without that half of
+        /// the predicate a window measured over Ollama would be lent to a candidate reached over
+        /// Anthropic — a measurement of a different pair, presented as this one's.
+        ///
+        /// Asserted against `candidate_window_view` rather than a full build: an `anthropic` seat
+        /// needs credentials this fixture has no reason to invent, and the wiring from the view to
+        /// every consumer is already pinned by the tests above.
+        #[test]
+        fn a_shared_endpoint_with_a_different_kind_is_not_a_shared_pair() {
+            let cfg = cfg_principal_is_also_a_candidate("kind = \"anthropic\"\n");
+            let endpoints = test_endpoints();
+            assert_eq!(
+                endpoints.root.as_str(),
+                endpoints.magi.as_str(),
+                "precondition: the endpoint is literally shared — the KIND is the only difference, \
+                 or this test would pass for the wrong reason"
+            );
+            let probe = ProbeOutcome {
+                trio: trio_table_without_the_principal(),
+                principal: Some((
+                    "principal-model".to_string(),
+                    magi_rs::magi::probe::Measurement::Measured {
+                        window: 262_144,
+                        digest: None,
+                    },
+                )),
+            };
+
+            let view = candidate_window_view(&cfg, &endpoints, ProviderKind::Ollama, &probe);
+
+            assert!(
+                !view.contains_key("principal-model"),
+                "the principal was measured over Ollama; the trio reaches that tag over \
+                 Anthropic. Same URL, different transport, different pair: {view:?}"
+            );
+        }
+
+        /// A trailing slash is not a pair difference on `anthropic` either.
+        ///
+        /// The OpenAI-compatible kinds get this for free — `openai_compat_root` trims before it
+        /// appends `/v1`. `anthropic` is passed through untouched, so `…/v1` and `…/v1/` compared
+        /// as two pairs and the fold was blocked: the same "ordinary thing to write" class as the
+        /// `/v1` spelling beside it, and the same conservative-but-wrong outcome.
+        #[test]
+        fn a_trailing_slash_is_not_a_second_anthropic_endpoint() {
+            let cfg = MagiConfig::from_toml_str(
+                "provider = \"anthropic\"\n\
+                 [anthropic]\n\
+                 model = \"principal-model\"\n\
+                 [magi]\n\
+                 kind = \"anthropic\"\n\
+                 base_url = \"https://api.anthropic.com/v1/\"\n\
+                 melchior_model    = \"mel\"\nmelchior_lineage  = \"lin-m\"\n\
+                 balthasar_model   = \"bal\"\nbalthasar_lineage = \"lin-b\"\n\
+                 caspar_model      = \"cas\"\ncaspar_lineage    = \"lin-c\"\n\
+                 [[magi.fallback]]\n\
+                 model   = \"principal-model\"\nlineage = \"lin-rescue\"\n",
+            )
+            .expect("an anthropic trio with its own base_url is legal");
+
+            let endpoints = ResolvedEndpoints {
+                root: EndpointTemplate::parse("https://api.anthropic.com/v1", Scope::Root)
+                    .expect("a flat test URL must parse")
+                    .resolve(&mut NoVaultInScope, Scope::Root)
+                    .expect("no placeholders, no vault"),
+                magi: endpoint_at("https://api.anthropic.com/v1/"),
+            };
+            assert_ne!(
+                endpoints.root.as_str(),
+                endpoints.magi.as_str(),
+                "precondition: the two spellings differ as STRINGS"
+            );
+
+            let probe = ProbeOutcome {
+                trio: trio_table_without_the_principal(),
+                principal: Some((
+                    "principal-model".to_string(),
+                    magi_rs::magi::probe::Measurement::Measured {
+                        window: 262_144,
+                        digest: None,
+                    },
+                )),
+            };
+
+            let view = candidate_window_view(&cfg, &endpoints, ProviderKind::Anthropic, &probe);
+
+            assert!(
+                view.contains_key("principal-model"),
+                "one host, one kind, one model — a trailing slash is not a second endpoint: \
+                 {view:?}"
+            );
+        }
+
+        /// Between two observations of ONE pair, the one that actually measured wins.
+        ///
+        /// Under a redundant declaration the principal and the trio are probed in separate
+        /// `join!` batches against the same daemon, and separate batches can disagree: one can
+        /// time out under the endpoint's concurrency cap while its twin answers. When a seat
+        /// resolves to the principal's own tag, that produced a row saying `NotMeasuredThisTime`
+        /// beside a real window for the very same `(endpoint, model)` pair — and the unmeasured
+        /// one was kept.
+        ///
+        /// Keeping it was never a D-R09 protection, though an earlier comment here claimed it
+        /// was: `derive_warn_tokens` runs on `trio_seats` inside `probe_and_report`, before this
+        /// view exists, so nothing computed here can reach the threshold. The only question is
+        /// which observation is more useful to a per-candidate decision, and a window that was
+        /// observed beats one that was not.
+        #[test]
+        fn a_real_measurement_beats_a_timed_out_probe_of_the_same_pair() {
+            let cfg = cfg_principal_is_also_a_candidate("kind = \"ollama\"\n");
+            let trio_with_a_cold_twin: BTreeMap<String, Measurement> = [(
+                "principal-model".to_string(),
+                magi_rs::magi::probe::Measurement::NotMeasuredThisTime,
+            )]
+            .into_iter()
+            .collect();
+            let probe = ProbeOutcome {
+                trio: trio_with_a_cold_twin,
+                principal: Some((
+                    "principal-model".to_string(),
+                    magi_rs::magi::probe::Measurement::Measured {
+                        window: 262_144,
+                        digest: None,
+                    },
+                )),
+            };
+
+            let view = candidate_window_view(&cfg, &test_endpoints(), ProviderKind::Ollama, &probe);
+
+            assert!(
+                matches!(
+                    view.get("principal-model"),
+                    Some(Measurement::Measured {
+                        window: 262_144,
+                        ..
+                    })
+                ),
+                "one batch timed out, its twin measured the SAME pair — discarding the real \
+                 window credits the candidate with the smallest measured this run all over \
+                 again: {view:?}"
+            );
+        }
+
         /// SC-R01/REQ-R03: the pool declared in `[[magi.fallback]]` reaches magi-core with each
         /// candidate's model AND its lineage, in the declared order (strongest first).
         ///
@@ -8103,7 +8829,7 @@ mod tests {
                     warn_tokens: None,
                     env_overrides: &MagiEnvModelOverrides::default(),
                     capability_cache: None,
-                    measured: &BTreeMap::new(),
+                    probe: &ProbeOutcome::default(),
                 },
                 &mut notices,
             )
@@ -8164,7 +8890,7 @@ mod tests {
                     warn_tokens: None,
                     env_overrides: &MagiEnvModelOverrides::default(),
                     capability_cache: Some(&cache),
-                    measured: &BTreeMap::new(),
+                    probe: &ProbeOutcome::default(),
                 },
                 &mut notices,
             )
@@ -8226,7 +8952,7 @@ mod tests {
                     warn_tokens: None,
                     env_overrides: &collapsed_by_env,
                     capability_cache: None,
-                    measured: &BTreeMap::new(),
+                    probe: &ProbeOutcome::default(),
                 },
                 &mut notices,
             )
@@ -8258,7 +8984,7 @@ mod tests {
                     warn_tokens: None,
                     env_overrides: &pulled_apart_by_env,
                     capability_cache: None,
-                    measured: &BTreeMap::new(),
+                    probe: &ProbeOutcome::default(),
                 },
                 &mut notices,
             )
@@ -8304,7 +9030,7 @@ mod tests {
                     warn_tokens: None,
                     env_overrides: &MagiEnvModelOverrides::default(),
                     capability_cache: None,
-                    measured: &BTreeMap::new(),
+                    probe: &ProbeOutcome::default(),
                 },
                 &mut notices,
             )
@@ -8359,7 +9085,7 @@ mod tests {
                     warn_tokens: None,
                     env_overrides: &MagiEnvModelOverrides::default(),
                     capability_cache: None,
-                    measured: &BTreeMap::new(),
+                    probe: &ProbeOutcome::default(),
                 },
                 &mut notices,
             )
@@ -8422,7 +9148,7 @@ mod tests {
                     env_overrides: &MagiEnvModelOverrides::default(),
                     capability_cache: None,
                     // NOTHING measured — the cold-start state.
-                    measured: &BTreeMap::new(),
+                    probe: &ProbeOutcome::default(),
                 },
                 &mut notices,
             )
@@ -8481,7 +9207,7 @@ mod tests {
                     warn_tokens: None,
                     env_overrides: &MagiEnvModelOverrides::default(),
                     capability_cache: None,
-                    measured: &BTreeMap::new(),
+                    probe: &ProbeOutcome::default(),
                 },
                 &mut notices,
             )
@@ -8562,21 +9288,24 @@ mod tests {
                     // The endpoint clearly measures — it answered for `ok-model` — and did not
                     // answer for the fallback. That is what separates "this model is not there"
                     // from "this endpoint is not answering".
-                    measured: &[
-                        (
-                            "ok-model".to_string(),
-                            magi_rs::magi::probe::Measurement::Measured {
-                                window: 128_000,
-                                digest: None,
-                            },
-                        ),
-                        (
-                            "rescue-model".to_string(),
-                            magi_rs::magi::probe::Measurement::NotMeasuredThisTime,
-                        ),
-                    ]
-                    .into_iter()
-                    .collect(),
+                    probe: &ProbeOutcome {
+                        trio: [
+                            (
+                                "ok-model".to_string(),
+                                magi_rs::magi::probe::Measurement::Measured {
+                                    window: 128_000,
+                                    digest: None,
+                                },
+                            ),
+                            (
+                                "rescue-model".to_string(),
+                                magi_rs::magi::probe::Measurement::NotMeasuredThisTime,
+                            ),
+                        ]
+                        .into_iter()
+                        .collect(),
+                        ..Default::default()
+                    },
                 },
                 &mut notices,
             )
@@ -8647,7 +9376,7 @@ mod tests {
                     warn_tokens: Some(96_000),
                     env_overrides: &MagiEnvModelOverrides::default(),
                     capability_cache: None,
-                    measured: &BTreeMap::new(),
+                    probe: &ProbeOutcome::default(),
                 },
                 &mut notices,
             )
@@ -8707,21 +9436,24 @@ mod tests {
                     capability_cache: None,
                     // The trio measured; the candidate did not — exactly the shape that would
                     // tempt an implementation to "protect" the run by dropping it.
-                    measured: &[
-                        (
-                            "ok-model".to_string(),
-                            magi_rs::magi::probe::Measurement::Measured {
-                                window: 128_000,
-                                digest: None,
-                            },
-                        ),
-                        (
-                            "rescue-model".to_string(),
-                            magi_rs::magi::probe::Measurement::NotMeasuredThisTime,
-                        ),
-                    ]
-                    .into_iter()
-                    .collect(),
+                    probe: &ProbeOutcome {
+                        trio: [
+                            (
+                                "ok-model".to_string(),
+                                magi_rs::magi::probe::Measurement::Measured {
+                                    window: 128_000,
+                                    digest: None,
+                                },
+                            ),
+                            (
+                                "rescue-model".to_string(),
+                                magi_rs::magi::probe::Measurement::NotMeasuredThisTime,
+                            ),
+                        ]
+                        .into_iter()
+                        .collect(),
+                        ..Default::default()
+                    },
                 },
                 &mut notices,
             )
@@ -8760,7 +9492,7 @@ mod tests {
                     warn_tokens: None,
                     env_overrides: &MagiEnvModelOverrides::default(),
                     capability_cache: None,
-                    measured: &BTreeMap::new(),
+                    probe: &ProbeOutcome::default(),
                 },
                 &mut notices,
             )
@@ -8844,7 +9576,7 @@ mod tests {
                     warn_tokens: None,
                     env_overrides: &MagiEnvModelOverrides::default(),
                     capability_cache: None,
-                    measured: &BTreeMap::new(),
+                    probe: &ProbeOutcome::default(),
                 },
                 &mut notices,
             )
@@ -8973,7 +9705,7 @@ mod tests {
                     warn_tokens: None,
                     env_overrides: &MagiEnvModelOverrides::default(),
                     capability_cache: None,
-                    measured: &BTreeMap::new(),
+                    probe: &ProbeOutcome::default(),
                 },
                 &mut notices,
             )
@@ -9298,7 +10030,7 @@ mod tests {
                     warn_tokens: None,
                     env_overrides: &MagiEnvModelOverrides::default(),
                     capability_cache: None,
-                    measured: &BTreeMap::new(),
+                    probe: &ProbeOutcome::default(),
                 },
                 &mut notices,
             )
@@ -9357,7 +10089,7 @@ mod tests {
                     warn_tokens: None,
                     env_overrides: &MagiEnvModelOverrides::default(),
                     capability_cache: None,
-                    measured: &BTreeMap::new(),
+                    probe: &ProbeOutcome::default(),
                 },
                 &mut notices,
             )
@@ -9403,7 +10135,7 @@ mod tests {
                     warn_tokens: None,
                     env_overrides: &MagiEnvModelOverrides::default(),
                     capability_cache: None,
-                    measured: &BTreeMap::new(),
+                    probe: &ProbeOutcome::default(),
                 },
                 &mut notices,
             )
@@ -9507,7 +10239,7 @@ mod tests {
                             warn_tokens: None,
                             env_overrides: &MagiEnvModelOverrides::default(),
                             capability_cache: None,
-                            measured: &BTreeMap::new(),
+                            probe: &ProbeOutcome::default(),
                         },
                         &mut notices,
                     ),
@@ -9528,7 +10260,7 @@ mod tests {
                         warn_tokens: None,
                         env_overrides: &MagiEnvModelOverrides::default(),
                         capability_cache: None,
-                        measured: &BTreeMap::new(),
+                        probe: &ProbeOutcome::default(),
                     },
                     &mut notices,
                 )
@@ -9561,7 +10293,7 @@ mod tests {
                     warn_tokens: None,
                     env_overrides: &MagiEnvModelOverrides::default(),
                     capability_cache: None,
-                    measured: &BTreeMap::new(),
+                    probe: &ProbeOutcome::default(),
                 },
                 &mut notices,
             ) {
@@ -9605,7 +10337,7 @@ mod tests {
                     warn_tokens: None,
                     env_overrides: &MagiEnvModelOverrides::default(),
                     capability_cache: None,
-                    measured: &BTreeMap::new(),
+                    probe: &ProbeOutcome::default(),
                 },
                 &mut notices,
             ) {
@@ -9642,7 +10374,7 @@ mod tests {
                     warn_tokens: None,
                     env_overrides: &MagiEnvModelOverrides::default(),
                     capability_cache: None,
-                    measured: &BTreeMap::new(),
+                    probe: &ProbeOutcome::default(),
                 },
                 &mut notices,
             ) {
@@ -10016,7 +10748,7 @@ mod tests {
                         warn_tokens: None,
                         env_overrides: &MagiEnvModelOverrides::default(),
                         capability_cache: None,
-                        measured: &BTreeMap::new(),
+                        probe: &ProbeOutcome::default(),
                     },
                     &mut notices,
                 )
@@ -10037,7 +10769,7 @@ mod tests {
                         warn_tokens: None,
                         env_overrides: &MagiEnvModelOverrides::default(),
                         capability_cache: None,
-                        measured: &BTreeMap::new(),
+                        probe: &ProbeOutcome::default(),
                     },
                     &mut notices,
                 )
@@ -10061,7 +10793,7 @@ mod tests {
                         warn_tokens: None,
                         env_overrides: &env_overrides,
                         capability_cache: None,
-                        measured: &BTreeMap::new(),
+                        probe: &ProbeOutcome::default(),
                     },
                     &mut notices,
                 )
@@ -10118,7 +10850,7 @@ mod tests {
                     warn_tokens: None,
                     env_overrides: &env_overrides,
                     capability_cache: None,
-                    measured: &BTreeMap::new(),
+                    probe: &ProbeOutcome::default(),
                 },
                 &mut notices,
             )
@@ -12115,7 +12847,7 @@ agent_timeout_secs = {CEILING}
             let cfg = cfg_with_four_distinct_models("principal", "melchior", "balthasar", "caspar");
 
             let mut notices = Vec::new();
-            let (warn_tokens, measured) = probe_and_report(
+            let (warn_tokens, probe) = probe_and_report(
                 &cfg,
                 &test_endpoints(),
                 ProviderKind::Ollama,
@@ -12143,10 +12875,10 @@ agent_timeout_secs = {CEILING}
             // for, and REQ-R11's guard predicate is over candidates.
             assert!(
                 matches!(
-                    measured.get("rescue-model"),
+                    probe.trio.get("rescue-model"),
                     Some(Measurement::Measured { window: 8_192, .. })
                 ),
-                "excluding it from the trio VIEW must not stop it being measured: {measured:?}"
+                "excluding it from the trio VIEW must not stop it being measured: {probe:?}"
             );
         }
 
