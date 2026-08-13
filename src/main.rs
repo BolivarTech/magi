@@ -3118,16 +3118,37 @@ struct ProbeOutcome {
     /// The trio's table, principal excluded (D-R09), plus whatever `extra_models` rode the batch.
     trio: BTreeMap<String, Measurement>,
     /// The principal's resolved model tag.
-    #[expect(
-        dead_code,
-        reason = "RED phase: carried but not yet folded into the per-candidate view. `expect` \
-                  rather than `allow` on purpose — it becomes an unfulfilled-expectation warning \
-                  the moment GREEN reads it, so the marker cannot outlive the phase it documents."
-    )]
     principal_model: String,
     /// What the probe measured for the principal, `None` when it produced nothing.
-    #[expect(dead_code, reason = "RED phase — see `principal_model` above.")]
     principal: Option<Measurement>,
+}
+
+/// The measurement view for any **per-candidate** decision: the trio's table plus the principal's
+/// own measurement.
+///
+/// # Why the principal may be folded in at all
+///
+/// [`ProbeOutcome::trio`] excludes it on purpose (D-R09) and that exclusion is right for the
+/// question it answers — the mage-derived threshold. Every consumer here asks the other question,
+/// *"what did this endpoint measure?"*, and the principal is a legitimate answer to it: the
+/// magi-rs agent and magi-core's pool are two different levels, free to name the same model.
+///
+/// # Why divergence blocks it
+///
+/// A measurement is a property of the `(endpoint, model)` pair. Once `[magi].base_url`/`kind`
+/// sends the trio elsewhere, the same tag on the two hosts is **two pairs**, and nobody measured
+/// the candidate's. Reporting it as measured would not be an optimistic guess — it would erase the
+/// distinction between *measured*, *not measured* and *not measurable* that every consumer below
+/// depends on, and REQ-R11's fail-safe would become unverifiable.
+///
+/// The gate lives here rather than at the call sites so that no caller can get the semantics wrong
+/// by pre-filtering what it passes.
+fn candidate_window_view(cfg: &MagiConfig, probe: &ProbeOutcome) -> BTreeMap<String, Measurement> {
+    let mut view = probe.trio.clone();
+    if let (false, Some(m)) = (cfg.magi_endpoint_diverges(), probe.principal.as_ref()) {
+        view.insert(probe.principal_model.clone(), m.clone());
+    }
+    view
 }
 
 /// Builds the MAGI trio with the NATIVE providers of magi-core (REQ-A01).
@@ -3162,9 +3183,11 @@ fn build_magi_orchestrator(
         capability_cache,
         probe,
     } = b;
-    // RED: the per-candidate view is still the trio's table alone — the principal's own
-    // measurement is carried this far and not yet folded in.
-    let measured = &probe.trio;
+    // Every use of `measured` below is a per-candidate decision — the strict-guard fail-safe, the
+    // missing-model notices, the assumed-window notices. None of them is the D-R09 threshold,
+    // which `probe_and_report` already derived from the SEATS before this call.
+    let candidate_view = candidate_window_view(cfg, probe);
+    let measured = &candidate_view;
     // Absent/empty `[magi].kind` inherits `principal_kind` — the ALREADY-RESOLVED one, not
     // `cfg.effective_provider()` (TOML-only). Present-but-unrecognized remains a typed error.
     // Task 5.2: extracted to `resolve_magi_kind`, shared with `orchestrate_probes` (B3) —
