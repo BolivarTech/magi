@@ -355,6 +355,11 @@ consumer that wants the trio's verdicts typed rather than rendered:
 Both are **always present when the flag is passed**, empty array included — an empty `agents`
 certifies that no seat completed. Without the flag, neither appears.
 
+**`report_truncated` describes `report` alone.** With the flag on, `report` is still bounded by the
+tool-result cap while `agents` and `consensus` are emitted in full — so a `report_truncated` other
+than `none` says nothing about the structured keys, which are always complete. Passing the flag
+therefore makes stdout unbounded; bound it on your side if that matters.
+
 **The shape varies by FLAG, never by DATA.** That is what keeps the always-present rule intact: a
 key that came and went with the outcome would break a strict schema, while a key you asked for by
 name gives you the same shape on every run.

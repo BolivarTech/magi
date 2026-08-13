@@ -6936,14 +6936,6 @@ mod tests {
         assert_eq!(b.passphrase.as_deref(), Some("hunter2"));
         assert!(matches!(b.command, Some(TopCmd::Init(_))));
     }
-
-    /// `-w` must reach `init` and `vault`, and on `vault` it must parse on **both** sides of
-    /// the nested subcommand.
-    ///
-    /// The two orders are not a stylistic nicety: `vault -w <dir> ls` and `vault ls -w <dir>`
-    /// are both what a person types, and which one comes to mind first is a coin flip.
-    /// Accepting only one turns that coin flip into a usage error, on a subcommand whose
-    /// whole job is to be scriptable.
     /// REQ-EA01: `--structured-verdicts` belongs to `consult` alone, and `query` must REJECT it
     /// rather than accept an argument that means nothing there.
     ///
@@ -6954,6 +6946,13 @@ mod tests {
     /// worst possible moment and the hardest to attribute.
     #[test]
     fn structured_verdicts_is_a_consult_flag_and_query_rejects_it() {
+        /// `-w` must reach `init` and `vault`, and on `vault` it must parse on **both** sides of
+        /// the nested subcommand.
+        ///
+        /// The two orders are not a stylistic nicety: `vault -w <dir> ls` and `vault ls -w <dir>`
+        /// are both what a person types, and which one comes to mind first is a coin flip.
+        /// Accepting only one turns that coin flip into a usage error, on a subcommand whose
+        /// whole job is to be scriptable.
         use clap::Parser;
 
         assert!(

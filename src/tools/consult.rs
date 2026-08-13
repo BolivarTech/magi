@@ -739,6 +739,18 @@ fn input_size_json(s: Option<&InputSize>, fallback_tokens: Option<usize>) -> Val
         }
     }
 }
+/// Whether a call site wants the structured verdicts (`agents`, `consensus`) in the object.
+///
+/// An enum rather than a `bool` because the two call sites answer it differently and permanently,
+/// and `false` at a call site says nothing about why.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StructuredVerdicts {
+    /// The agent-facing tool result: never. See [`REQ-EA02`] — the trio's full output would land
+    /// in the agent's context window, which is exactly what the tool-result cap bounds.
+    Omit,
+    /// The headless CLI, when the operator asked with `--structured-verdicts`.
+    Include,
+}
 
 /// Builds the stable `consult` JSON object from a finished MAGI report.
 ///
@@ -792,19 +804,6 @@ fn input_size_json(s: Option<&InputSize>, fallback_tokens: Option<usize>) -> Val
 /// `redact_foreign_text` over the ENTIRE verdict text on every consult would also risk mangling
 /// a legitimate URL the mages correctly discuss as PART of their analysis (e.g. reviewing an API
 /// design), for zero security benefit against the one leak vector output redaction cannot close.
-/// Whether a call site wants the structured verdicts (`agents`, `consensus`) in the object.
-///
-/// An enum rather than a `bool` because the two call sites answer it differently and permanently,
-/// and `false` at a call site says nothing about why.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum StructuredVerdicts {
-    /// The agent-facing tool result: never. See [`REQ-EA02`] — the trio's full output would land
-    /// in the agent's context window, which is exactly what the tool-result cap bounds.
-    Omit,
-    /// The headless CLI, when the operator asked with `--structured-verdicts`.
-    Include,
-}
-
 pub(crate) fn report_to_consult_json(
     report: &MagiReport,
     truncated: &Truncated,
@@ -872,6 +871,14 @@ pub(crate) fn report_to_consult_json(
 /// this **public output contract** with no code change and no review here — and the consumer this
 /// key exists for is a downstream tool that declares a strict schema. Naming the fields makes the
 /// contract ours to state and a magi-core addition a deliberate decision rather than an arrival.
+///
+/// The guard is over KEYS, not values. `AgentName`/`Verdict`/`Severity` serialize through their own
+/// `Serialize` because magi-core withheld `#[non_exhaustive]` from them deliberately — its rustdoc
+/// says a new variant **should** break exhaustive matches — so those domains are closed by
+/// contract. `Category` is the exception: it IS `#[non_exhaustive]`, so a future variant arrives as
+/// a new string in an existing field. That is the right trade, not an oversight: hand-mapping its
+/// sixteen variants with an `other` fallback would silently mislabel real new categories, and would
+/// still need touching on every upstream addition.
 ///
 /// # Redaction posture, unchanged (REQ-EA05)
 ///
@@ -1965,8 +1972,9 @@ mod tests {
     }
 
     /// A report where nothing went wrong: no extraction failures, no execution failures, input
-    /// under threshold. `agents` is irrelevant to `report_to_consult_json` (it never reads that
-    /// field), so it stays empty here.
+    /// under threshold. `agents` stays empty because these tests exercise the telemetry keys;
+    /// the structured-verdict tests use `report_with_three_verdicts` instead. (It used to say
+    /// `report_to_consult_json` never reads that field — true until v0.14.3, false since.)
     fn clean_report() -> MagiReport {
         report_fixture(
             json!([]),
