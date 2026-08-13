@@ -355,6 +355,16 @@ consumer that wants the trio's verdicts typed rather than rendered:
 Both are **always present when the flag is passed**, empty array included — an empty `agents`
 certifies that no seat completed. Without the flag, neither appears.
 
+**`category` is an OPEN string set, not a closed enum.** magi-core may add a category in a minor
+release, so a strict validator should treat an unknown value as a new category rather than a schema
+violation. The other enum-valued fields (`agent`, `verdict`, `severity`) are closed by upstream
+contract and will not gain values without a breaking change.
+
+**`consensus` is a documented SUBSET** — the seven fields in the table above. `dissent`,
+`findings`, `conditions` and `recommendations` are not forwarded: the key exists so a consumer that
+computes its own consensus can contrast the headline result, and the per-finding material is
+already in `agents`. Ask if you need them.
+
 **`report_truncated` describes `report` alone.** With the flag on, `report` is still bounded by the
 tool-result cap while `agents` and `consensus` are emitted in full — so a `report_truncated` other
 than `none` says nothing about the structured keys, which are always complete. Passing the flag

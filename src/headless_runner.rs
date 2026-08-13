@@ -2849,6 +2849,50 @@ mod tests {
 
     // ── REQ-H21/H22: consult (direct + forced) ─────────────────────────────────
 
+    /// REQ-EA01/EA03, the POSITIVE path through the runner: `Include` on the params actually
+    /// reaches the emitted object.
+    ///
+    /// The other tests cover the emitter given its answer, the CLI given its flag, and the agent
+    /// path's permanent `Omit`. None of them covers the segment between: a flag that parses, is
+    /// stored on `MagiRuntimeParams` and is never applied would satisfy every one of them. That
+    /// exact defect — a config bundle threaded past its consumer and quietly not used — has
+    /// happened in this codebase before (`AutonomousRunConfig`), which is why the wiring gets its
+    /// own test rather than being inferred from the parts (S1 gate, Balthasar).
+    #[tokio::test]
+    async fn test_run_consult_include_reaches_the_emitted_object() {
+        let cfg = MagiConfig::default();
+        let sink = RecordingNoticeSink::default();
+        let outcome = run_consult(
+            resolved_stub(),
+            canned_magi(),
+            "should we migrate X to Y?",
+            None,
+            Some(Mode::Analysis),
+            &MagiRuntimeParams {
+                kind: ProviderKind::OpenAiCompat,
+                classifier: &NeverClassifier,
+                configured_mode: None,
+                untrusted_content: false,
+                magi_config: &cfg,
+                timeout_decision: neutral_timeout_decision(),
+                notice_sink: &sink,
+                structured_verdicts: StructuredVerdicts::Include,
+            },
+            None,
+        )
+        .await;
+
+        let consult = outcome.consult.expect("the MAGI object must be present");
+        assert!(
+            consult["agents"].as_array().is_some_and(|a| !a.is_empty()),
+            "the seats that answered must reach the object: {consult:?}"
+        );
+        assert!(
+            consult["consensus"]["consensus_verdict"].is_string(),
+            "and so must the consensus: {consult:?}"
+        );
+    }
+
     /// `magi consult` direct path: the 3 perspectives run off the agent loop and
     /// `RunOutcome.consult` is the (non-null) MAGI object; `response` is the report
     /// and no tool calls are recorded (REQ-H21).

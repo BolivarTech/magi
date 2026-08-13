@@ -2198,6 +2198,63 @@ mod tests {
     /// output to the agent through a key the cap does not bound — defeating it while
     /// `report_truncated` still announced a guarantee.
     ///
+    /// REQ-EA04: each entry carries EXACTLY the seven keys, and each finding exactly the six.
+    ///
+    /// **This test does NOT go red today if the mapper is replaced by `json!(report.agents)` — I
+    /// mutated it and watched it pass.** That is not a weakness to fix but a fact worth stating:
+    /// `AgentOutput` currently has exactly these seven fields, so the wholesale serialization and
+    /// the explicit mapping are observationally identical, and no test can separate them until
+    /// upstream diverges. Serde cannot help either — it drops unknown fields on deserialize, so a
+    /// fixture cannot manufacture the divergence.
+    ///
+    /// What this is, then, is a TRIPWIRE rather than a guard: it fires on the day magi-core adds a
+    /// field, which is precisely the event the explicit mapper exists for. Until then the mapper's
+    /// justification rests on its rustdoc, and saying so is better than implying a coverage that
+    /// does not exist (S1 gate, Balthasar).
+    #[test]
+    fn the_structured_verdicts_carry_no_key_beyond_the_declared_contract() {
+        let r = report_with_three_verdicts();
+        let v = report_to_consult_json(
+            &r,
+            &untruncated(&r),
+            &res_of(Mode::CodeReview, ModeSource::Explicit),
+            &ctx_plain(),
+            StructuredVerdicts::Include,
+        );
+
+        let keys_of = |value: &Value| -> Vec<String> {
+            let mut k: Vec<String> = value.as_object().expect("object").keys().cloned().collect();
+            k.sort();
+            k
+        };
+        let mut expected_agent = vec![
+            "agent",
+            "confidence",
+            "findings",
+            "reasoning",
+            "recommendation",
+            "summary",
+            "verdict",
+        ];
+        expected_agent.sort_unstable();
+        let mut expected_finding = vec!["category", "detail", "file", "line", "severity", "title"];
+        expected_finding.sort_unstable();
+
+        for a in v["agents"].as_array().expect("array") {
+            assert_eq!(
+                keys_of(a),
+                expected_agent,
+                "the contract is exactly these seven — no more, or an upstream addition arrived \
+                 in a public output nobody reviewed"
+            );
+        }
+        assert_eq!(
+            keys_of(&v["agents"][0]["findings"][0]),
+            expected_finding,
+            "and exactly these six one level down"
+        );
+    }
+
     /// REQ-EA03: asked for, both keys are present even when NOTHING completed.
     ///
     /// This is the property the spec, the README and the CHANGELOG all lead with — an empty
