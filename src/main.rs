@@ -8550,6 +8550,69 @@ mod tests {
             }
         }
 
+        /// The `/v1` spelling is not a pair difference: the same daemon written two ways is one
+        /// pair.
+        ///
+        /// `openai_compat_root` normalises a missing `/v1` downstream, in `build_native_provider`,
+        /// so `http://host:11434` and `http://host:11434/v1` reach the SAME endpoint. Comparing
+        /// the un-normalised strings therefore judges one daemon as two, blocks the fold and
+        /// restores the whole defect — `strict_context_guard` included — for a config that is the
+        /// same "ordinary, honest thing to write" class as the redundant `kind` beside it.
+        #[test]
+        fn the_v1_spelling_of_one_daemon_is_still_one_pair() {
+            let cfg = cfg_principal_is_also_a_candidate(
+                "base_url = \"http://localhost:11434\"\n", // same daemon, written without /v1
+            );
+            let endpoints = ResolvedEndpoints {
+                root: EndpointTemplate::parse("http://localhost:11434/v1", Scope::Root)
+                    .expect("a flat test URL must parse")
+                    .resolve(&mut NoVaultInScope, Scope::Root)
+                    .expect("no placeholders, no vault"),
+                magi: endpoint_at("http://localhost:11434"),
+            };
+            assert_ne!(
+                endpoints.root.as_str(),
+                endpoints.magi.as_str(),
+                "precondition: the two spellings differ as STRINGS — that is the whole trap"
+            );
+
+            let probe = ProbeOutcome {
+                trio: trio_table_without_the_principal(),
+                principal: Some((
+                    "principal-model".to_string(),
+                    magi_rs::magi::probe::Measurement::Measured {
+                        window: 262_144,
+                        digest: None,
+                    },
+                )),
+            };
+
+            let mut notices = Vec::new();
+            let magi = build_magi_orchestrator(
+                &TrioBuild {
+                    cfg: &cfg,
+                    principal_kind: ProviderKind::Ollama,
+                    endpoints: &endpoints,
+                    creds: None,
+                    warn_tokens: None,
+                    env_overrides: &MagiEnvModelOverrides::default(),
+                    capability_cache: None,
+                    probe: &probe,
+                },
+                &mut notices,
+            )
+            .expect("ollama is keyless");
+            drop(magi);
+
+            assert!(
+                !notices
+                    .iter()
+                    .any(|n| n.text.contains("`principal-model` has no measured window")),
+                "one daemon, one kind, one model — a `/v1` the operator did not type is not a \
+                 second endpoint: {notices:?}"
+            );
+        }
+
         /// SC-R01/REQ-R03: the pool declared in `[[magi.fallback]]` reaches magi-core with each
         /// candidate's model AND its lineage, in the declared order (strongest first).
         ///

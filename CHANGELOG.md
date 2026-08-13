@@ -9,6 +9,40 @@ changes and the **patch** position signals backward-compatible fixes.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A model that is both the principal and a fallback candidate keeps its measured window.**
+  The magi-rs agent and magi-core's trio/pool are two different levels, so one tag naming both
+  is ordinary configuration — and with a handful of good local models it is the common case.
+  The startup probe's trio table excludes the principal **on purpose** (a small principal must
+  not lower the mage-derived `input_warn_tokens`), but every *per-candidate* decision was asking
+  that same table, so a principal measured moments earlier read as unmeasured. One startup said
+  both of these about one model in one run:
+
+  ```
+  kimi-k2.6:cloud: probe: window 262144 tokens, digest a90cd0d1590c...
+  notice: fallback candidate `kimi-k2.6:cloud` has no measured window; it is credited
+          with 131072 tokens, the smallest measured this run.
+  ```
+
+  Half the real window, on the number that decides whether a rotation into that candidate can
+  accept a large prompt. The two views are now distinct values over one probe, and the
+  per-candidate one includes the principal.
+
+- **`strict_context_guard = true` is no longer silently downgraded when the only pool candidate
+  is the principal.** Same root cause, worse consequence: the guard's fail-safe asks whether any
+  *candidate* has a measured window, read "none", and switched the window check off over a pool
+  that was in fact eligible. A setting the operator wrote and the system did not apply.
+
+- **The fold is decided on the resolved `(endpoint, model)` pair, not on what the configuration
+  declares.** A measurement belongs to the pair, so the principal's measurement may only be
+  reused where the pair is genuinely the same one. Deciding that from `[magi].base_url`/`kind`
+  being *declared* looks equivalent and is not: writing `kind = "ollama"` under a root that is
+  already `ollama` resolves back to the identical endpoint, and would have restored the whole
+  defect for that configuration. Endpoints are compared through the same redaction the
+  capability cache keys on — a credential difference moves neither a model's window nor its
+  digest.
+
 ## [0.14.1] - 2026-08-13
 
 > **Supersedes 0.14.0, which was never published.** Its release pipeline failed before the
