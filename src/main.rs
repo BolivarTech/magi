@@ -3143,9 +3143,24 @@ struct ProbeOutcome {
 ///
 /// The gate lives here rather than at the call sites so that no caller can get the semantics wrong
 /// by pre-filtering what it passes.
-fn candidate_window_view(cfg: &MagiConfig, probe: &ProbeOutcome) -> BTreeMap<String, Measurement> {
+fn candidate_window_view(
+    cfg: &MagiConfig,
+    endpoints: &ResolvedEndpoints,
+    principal_kind: ProviderKind,
+    probe: &ProbeOutcome,
+) -> BTreeMap<String, Measurement> {
+    // RESOLVED endpoint and RESOLVED kind, never `magi_endpoint_diverges()`: that predicate answers
+    // whether the operator DECLARED a separate trio backend, and a declaration that resolves back
+    // to the root (`kind = "ollama"` under an `ollama` root, a `base_url` written out equal to it)
+    // would block the fold over a pair that is in fact identical. Compared through `redact_url`,
+    // the same equivalence the capability cache keys on (REQ-R25): a credential difference moves
+    // neither a model's window nor its digest.
+    let shares_the_trios_pair = resolve_magi_kind(cfg, principal_kind)
+        .is_ok_and(|trio_kind| trio_kind == principal_kind)
+        && magi_rs::redact::redact_url(endpoints.root.as_str())
+            == magi_rs::redact::redact_url(endpoints.magi.as_str());
     let mut view = probe.trio.clone();
-    if let (false, Some(m)) = (cfg.magi_endpoint_diverges(), probe.principal.as_ref()) {
+    if let (true, Some(m)) = (shares_the_trios_pair, probe.principal.as_ref()) {
         view.insert(probe.principal_model.clone(), m.clone());
     }
     view
@@ -3186,7 +3201,7 @@ fn build_magi_orchestrator(
     // Every use of `measured` below is a per-candidate decision — the strict-guard fail-safe, the
     // missing-model notices, the assumed-window notices. None of them is the D-R09 threshold,
     // which `probe_and_report` already derived from the SEATS before this call.
-    let candidate_view = candidate_window_view(cfg, probe);
+    let candidate_view = candidate_window_view(cfg, endpoints, principal_kind, probe);
     let measured = &candidate_view;
     // Absent/empty `[magi].kind` inherits `principal_kind` — the ALREADY-RESOLVED one, not
     // `cfg.effective_provider()` (TOML-only). Present-but-unrecognized remains a typed error.
