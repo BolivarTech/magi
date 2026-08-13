@@ -19,22 +19,37 @@ changes and the **patch** position signals backward-compatible fixes.
   directory untouched in both cases. On `vault` the flag parses on either side of the
   nested subcommand — `vault -w <dir> ls` and `vault ls -w <dir>` are the same command.
 
-  A `-w` that is not an existing directory is now rejected before dispatch, with the path
-  in the message. That check exists because the same typo used to fail two different
-  misleading ways: `init` surfaced a bare I/O error from the staging sibling it builds in
-  the target's parent, and `vault` reported `no .magi/ state directory found`, which sends
-  the reader looking for a workspace when the problem is the path. A missing directory is
-  never created — `init` refuses to nest and refuses to overwrite, and quietly building a
-  directory tree does not belong with that.
+  A `-w` that is not an existing directory is now rejected before dispatch, **exit code 2**
+  (operator misuse, matching this project's existing taxonomy — the same code a symlinked
+  `-w` already produced), with the path in the message. That check exists because the same
+  typo used to fail two different misleading ways: `init` surfaced a bare I/O error from the
+  staging sibling it builds in the target's parent, and `vault` reported `no .magi/ state
+  directory found`, which sends the reader looking for a workspace when the problem is the
+  path. A missing directory is never created — `init` refuses to nest and refuses to
+  overwrite, and quietly building a directory tree does not belong with that.
+
+  Given twice on `vault`, the **innermost `-w` wins**, the convention `git -C` and `docker`
+  follow. On `init`, which carries no global, repeating it is an error — an asymmetry that
+  comes from clap and is now documented and pinned rather than emergent.
+
+  A `-w` whose path contains a symlinked component is rejected, **including when the target
+  itself is the symlink**. This is the pre-existing REQ-H30 hardening applying to the new
+  surface, and it is a real difference from the current directory: `getcwd` hands back the
+  resolved physical path, so reaching the same directory with `cd` never tripped it.
 
 ### Unchanged
 
-- **`query` and `consult` keep their own `-w`**, resolved where it always was. The two are
-  separate declarations on purpose: the headless one is also the file-tool sandbox root and
-  is resolved after dispatch, while `init`/`vault` need the root *before* it, to decide
-  where to look. One `global` flag covering all four is what the code reaches for first, and
-  clap rejects it — a global colliding with an arg in its propagation subtree is a
-  build-time panic.
+- **`query` and `consult` keep their own `-w`**, resolved where it always was, and it is
+  **not** covered by the new validation: an invalid path there still surfaces as
+  `no .magi/ state directory found` (exit 1). Extending the check to them is tracked in
+  `dev-docs/PENDING_IMPLEMENTATION.md` rather than done here, to keep this release additive.
+
+  The two declarations are separate on purpose: the headless one is also the file-tool
+  sandbox root and is resolved after dispatch, while `init`/`vault` need the root *before*
+  it, to decide where to look. One `global` flag covering all four is what the code reaches
+  for first, and clap rejects it — a global colliding with an arg in its propagation subtree
+  trips a `debug_assert!` while the command is built, so the binary panics at startup under
+  `debug_assertions` instead of failing to parse.
 - **The TUI (no subcommand) still uses the current directory** and takes no `-w`.
 
 ## [0.13.0] - 2026-08-12
@@ -1013,7 +1028,8 @@ Initial pre-release, published primarily to reserve the `magi-rs` crate name.
 - `ratatui` TUI with Normal / Selection / Visual modes and Unicode-safe input.
 - OAuth (PKCE) login and OS keyring integration, with `magi-rust` legacy migration.
 
-[Unreleased]: https://github.com/BolivarTech/magi/compare/v0.13.0...HEAD
+[Unreleased]: https://github.com/BolivarTech/magi/compare/v0.13.1...HEAD
+[0.13.1]: https://github.com/BolivarTech/magi/compare/v0.13.0...v0.13.1
 [0.13.0]: https://github.com/BolivarTech/magi/compare/v0.12.2...v0.13.0
 [0.12.2]: https://github.com/BolivarTech/magi/compare/v0.12.0...v0.12.2
 [0.12.0]: https://github.com/BolivarTech/magi/compare/v0.11.0...v0.12.0

@@ -261,10 +261,25 @@ magi vault ls -w /srv/project       # and -w may also precede: magi vault -w /sr
 magi query -w /srv/project -i q.txt
 ```
 
-A `-w` that is not an existing directory is rejected up front, naming the path —
-it is never created. Without the flag every subcommand keeps using the current
-directory, exactly as before. Running `magi` with no subcommand (the TUI) does not
-take `-w`; `cd` first.
+**On `init` and `vault`**, a `-w` that is not an existing directory is rejected up
+front with exit code 2, naming the path — and it is never created. `query` and
+`consult` do **not** perform that check: their `-w` predates it and an invalid path
+there still surfaces as `no .magi/ state directory found` (exit 1). Extending the
+check to them is tracked in `dev-docs/PENDING_IMPLEMENTATION.md`.
+
+On `vault` the flag may appear on either side of the subcommand, and if given on
+both the **innermost wins** — the same rule `git -C` and `docker` follow. On `init`,
+which does not carry a global, repeating it is an error.
+
+A `-w` whose path contains a symlinked component is rejected (exit 2), including
+when the target itself is the symlink. This is deliberate hardening, and it is a
+real difference from the current directory: reaching the same place with `cd` first
+resolves the symlink, so it never triggered.
+
+Without the flag every subcommand keeps using the current directory, exactly as
+before. Running `magi` with no subcommand (the TUI) does not take `-w`; `cd` first.
+Note `-w` is **not** global the way `-p` is: it goes after the subcommand
+(`magi vault ls -w <dir>`), not before it.
 
 **Input** is auto-detected: a JSON object with a top-level `prompt` string is a
 rich **envelope** (`{prompt, system?, model?, provider?, max_tool_calls?,
