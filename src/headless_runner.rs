@@ -55,7 +55,7 @@ use crate::config::MagiConfig;
 use crate::task::AbortOnDrop;
 use crate::tools::consult::{
     annotate_report_text, check_query_size, explain_magi_error, report_to_consult_json,
-    truncate_report, RunContext,
+    truncate_report, RunContext, StructuredVerdicts,
 };
 
 /// Dedup key for [`NoticeSink::once`] — the SC-A04d warning, distinct from the
@@ -387,6 +387,7 @@ async fn analyze_direct(
                 &truncated,
                 &resolution,
                 &ctx,
+                StructuredVerdicts::Omit,
             ))
         }
         Ok(Err(e)) => Err(ConsultRunError::Runtime(explain_magi_error(

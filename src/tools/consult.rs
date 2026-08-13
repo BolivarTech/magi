@@ -792,12 +792,40 @@ fn input_size_json(s: Option<&InputSize>, fallback_tokens: Option<usize>) -> Val
 /// `redact_foreign_text` over the ENTIRE verdict text on every consult would also risk mangling
 /// a legitimate URL the mages correctly discuss as PART of their analysis (e.g. reviewing an API
 /// design), for zero security benefit against the one leak vector output redaction cannot close.
+/// Whether a call site wants the structured verdicts (`agents`, `consensus`) in the object.
+///
+/// An enum rather than a `bool` because the two call sites answer it differently and permanently,
+/// and `false` at a call site says nothing about why.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StructuredVerdicts {
+    /// The agent-facing tool result: never. See [`REQ-EA02`] — the trio's full output would land
+    /// in the agent's context window, which is exactly what the tool-result cap bounds.
+    Omit,
+    /// The headless CLI, when the operator asked with `--structured-verdicts`.
+    // Scoped to the non-test build on purpose: `--all-targets` compiles both, and the test target
+    // DOES construct this variant, so an unscoped `expect` is unfulfilled there and fails the
+    // gate. `expect` rather than `allow` so the marker cannot outlive its reason — the moment the
+    // CLI flag constructs it in production, this becomes an unfulfilled-expectation error and has
+    // to be deleted.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "constructed by the CLI flag, wired in a later cycle of this feature"
+        )
+    )]
+    Include,
+}
+
 pub(crate) fn report_to_consult_json(
     report: &MagiReport,
     truncated: &Truncated,
     res: &ModeResolution,
     ctx: &RunContext,
+    structured: StructuredVerdicts,
 ) -> Value {
+    // RED: carried, not yet applied.
+    let _ = structured;
     let mut out = json!({
         // The (possibly annotated, possibly truncated) text — never the raw report: text and
         // level travel together in `truncated`, so `report_truncated` can never assert a
@@ -1186,7 +1214,16 @@ impl Tool for ConsultTool {
             // `None` arm instead of the `0` it used to fabricate.
             unmeasured_fallback_tokens: Some(bytes_to_tokens_est(query.len())),
         };
-        Ok(report_to_consult_json(&report, &truncated, &res, &ctx))
+        // REQ-EA02: the AGENT-facing path, permanently `Omit`. Emitting the structured verdicts
+        // here would put the trio's full output into the agent's context window — precisely what
+        // `tool_result_cap` (the cap `truncated` above was built with) exists to bound.
+        Ok(report_to_consult_json(
+            &report,
+            &truncated,
+            &res,
+            &ctx,
+            StructuredVerdicts::Omit,
+        ))
     }
 }
 
@@ -1960,6 +1997,7 @@ mod tests {
             &untruncated(&r),
             &res_of(Mode::CodeReview, ModeSource::Inferred),
             &ctx_plain(),
+            StructuredVerdicts::Omit,
         );
         for key in [
             "report",
@@ -1989,6 +2027,86 @@ mod tests {
         assert_eq!(v["mode_source"], "inferred");
     }
 
+    /// A report carrying three real verdicts, for the structured-verdict tests (REQ-EA03/EA04).
+    fn report_with_three_verdicts() -> MagiReport {
+        report_fixture(
+            json!([
+                {
+                    "agent": "melchior", "verdict": "approve", "confidence": 0.9,
+                    "summary": "s-mel", "reasoning": "r-mel", "recommendation": "rec-mel",
+                    "findings": [{
+                        "severity": "critical", "title": "t-1", "detail": "d-1",
+                        "file": "src/lib.rs", "line": 42, "category": "correctness",
+                    }],
+                },
+                {
+                    "agent": "balthasar", "verdict": "conditional", "confidence": 0.8,
+                    "summary": "s-bal", "reasoning": "r-bal", "recommendation": "rec-bal",
+                    "findings": [],
+                },
+                {
+                    "agent": "caspar", "verdict": "reject", "confidence": 0.7,
+                    "summary": "s-cas", "reasoning": "r-cas", "recommendation": "rec-cas",
+                    "findings": [],
+                },
+            ]),
+            json!({}),
+            json!({}),
+            json!({ "estimated_tokens": 10, "warn_threshold": 150_000, "exceeded": false }),
+            false,
+            "a report with three verdicts",
+        )
+    }
+
+    /// REQ-EA03/EA04: asked for them, the object carries `agents` and `consensus`, and every
+    /// entry exposes the seven-key contract a downstream consumer relies on.
+    ///
+    /// The keys are declared field by field rather than serialized wholesale: `AgentOutput` and
+    /// `ConsensusResult` are `#[non_exhaustive]`, so interpolating the structs would put whatever
+    /// magi-core adds in a future minor release into this public object with no code change and
+    /// no review here.
+    #[test]
+    fn the_structured_verdicts_carry_the_seven_key_contract_when_asked() {
+        let r = report_with_three_verdicts();
+        let v = report_to_consult_json(
+            &r,
+            &untruncated(&r),
+            &res_of(Mode::CodeReview, ModeSource::Explicit),
+            &ctx_plain(),
+            StructuredVerdicts::Include,
+        );
+
+        let agents = v["agents"]
+            .as_array()
+            .expect("`agents` must be an array when asked for");
+        assert_eq!(agents.len(), 3, "three seats reported: {agents:?}");
+        for a in agents {
+            for k in [
+                "agent",
+                "verdict",
+                "confidence",
+                "summary",
+                "reasoning",
+                "findings",
+                "recommendation",
+            ] {
+                assert!(a.get(k).is_some(), "AgentOutput must expose `{k}`: {a:?}");
+            }
+        }
+        // The nested contract, with the same optionality the consumer declares.
+        let f = &agents[0]["findings"][0];
+        for k in ["severity", "title", "detail", "file", "line", "category"] {
+            assert!(f.get(k).is_some(), "Finding must expose `{k}`: {f:?}");
+        }
+        assert_eq!(f["file"], "src/lib.rs");
+        assert_eq!(f["line"], 42);
+        assert!(
+            v["consensus"]["consensus_verdict"].is_string(),
+            "`consensus` travels too, so the consumer's own verdict stays contrastable: {:?}",
+            v["consensus"]
+        );
+    }
+
     /// SC-A09 / SC-A09c / SC-A10b / SC-A10c: the shape does NOT vary with the outcome, and a
     /// clean run's empty `extraction_failures` is the positive certificate SC-A09 asks for.
     #[test]
@@ -2000,12 +2118,14 @@ mod tests {
             &untruncated(&clean_r),
             &res_of(Mode::Analysis, ModeSource::Default),
             &ctx_plain(),
+            StructuredVerdicts::Omit,
         );
         let noisy = report_to_consult_json(
             &noisy_r,
             &untruncated(&noisy_r),
             &res_of(Mode::Analysis, ModeSource::Default),
             &ctx_plain(),
+            StructuredVerdicts::Omit,
         );
         let keys_of = |v: &Value| -> Vec<String> {
             let mut ks: Vec<String> = v.as_object().unwrap().keys().cloned().collect();
@@ -2041,6 +2161,7 @@ mod tests {
             &untruncated(&r),
             &res_of(Mode::Analysis, ModeSource::Default),
             &ctx_with_fallback(42),
+            StructuredVerdicts::Omit,
         );
         assert_eq!(
             v["input_size"]["estimated_tokens"], 42,
@@ -2069,6 +2190,7 @@ mod tests {
             &untruncated(&r),
             &res_of(Mode::Analysis, ModeSource::Default),
             &ctx_plain(),
+            StructuredVerdicts::Omit,
         );
         assert_eq!(v["input_size"]["estimated_tokens"], 0);
         assert!(!v["input_size"]["exceeded"].as_bool().unwrap());
@@ -2084,6 +2206,7 @@ mod tests {
             &untruncated(&r),
             &res_of(Mode::Analysis, ModeSource::Default),
             &ctx_plain(),
+            StructuredVerdicts::Omit,
         );
         let f = &v["extraction_failures"]["caspar"][0];
         assert!(
@@ -2104,6 +2227,7 @@ mod tests {
             &untruncated(&diverged_r),
             &res_of(Mode::Analysis, ModeSource::Inferred),
             &ctx_with_divergent_endpoint(),
+            StructuredVerdicts::Omit,
         );
         assert_eq!(
             diverged["endpoint_divergence"], true,
@@ -2117,6 +2241,7 @@ mod tests {
             &untruncated(&failed_r),
             &res_of(Mode::Analysis, ModeSource::Default),
             &ctx_plain(),
+            StructuredVerdicts::Omit,
         );
         assert!(
             failed["failed_agents"]
@@ -2162,6 +2287,7 @@ mod tests {
             &untruncated(&r),
             &res_of(Mode::Analysis, ModeSource::Default),
             &ctx_plain(),
+            StructuredVerdicts::Omit,
         );
         let rendered = v.to_string();
         assert!(
@@ -2192,6 +2318,7 @@ mod tests {
                 },
                 &res_of(Mode::Analysis, ModeSource::Default),
                 &ctx_plain(),
+                StructuredVerdicts::Omit,
             );
             assert_eq!(v["report_truncated"], expected);
         }
