@@ -291,6 +291,17 @@ struct HeadlessArgs {
     output_format: Option<CliOutputFormat>,
     /// Working directory: file-tool sandbox root and `.magi/` walk-up base
     /// (default cwd, REQ-H05).
+    ///
+    /// **There is a second `-w` in this CLI**: [`WorkdirArgs`], carried by `init` and
+    /// `vault`. The two are deliberately separate declarations, not an oversight — this one
+    /// is resolved *after* dispatch (it is also the sandbox root, which only the headless
+    /// runner has), while that one is resolved *before* it, because `init` and `vault` need
+    /// the root to decide where to look. Collapsing them into one `global` arg is what a
+    /// reader reaches for first, and clap rejects it: a global whose id collides with an arg
+    /// in its propagation subtree trips a `debug_assert!` during `Command` construction, so
+    /// the binary panics **at startup under `debug_assertions`** rather than failing to
+    /// parse — and a `--release` build may not catch it at all. Change the flag name or the
+    /// short letter in one place and it must change in the other.
     #[arg(short = 'w', long)]
     workdir: Option<PathBuf>,
     /// Stateless: do not persist session/history/memories (REQ-H18).
@@ -387,6 +398,110 @@ impl Args {
             _ => false,
         }
     }
+
+    /// The `-w`/`--workdir` declared on `init` or `vault`; `None` on every other surface.
+    ///
+    /// Deliberately does **not** answer for `query`/`consult`, which resolve their own
+    /// `HeadlessArgs.workdir` further down (`run_query_subcommand`/`run_consult_subcommand`).
+    /// Two arg definitions with the same name is a fact worth reading twice: this accessor
+    /// covers the two subcommands whose root is decided *before* dispatch, and the headless
+    /// pair keeps deciding it after, exactly as it did before this flag existed.
+    ///
+    /// Read **before** `self.command.take()` in `run()`, same constraint as
+    /// [`Self::mode_of_consult`] — after the `take` it would always answer `None`.
+    fn workdir_flag(&self) -> Option<&std::path::Path> {
+        match &self.command {
+            Some(TopCmd::Init(wd)) => wd.workdir.as_deref(),
+            Some(TopCmd::Vault { wd, .. }) => wd.workdir.as_deref(),
+            _ => None,
+        }
+    }
+}
+
+/// Resolves the workspace root the pre-dispatch subcommands (`init`, `vault`) operate on:
+/// the `-w`/`--workdir` value when given, the process's current directory otherwise.
+///
+/// # Errors
+/// [`HeadlessError::InputInvalid`], naming the offending path, when `flag` is not an existing
+/// directory. That variant is not decoration: [`headless_error_exit_code`] maps it to **2**,
+/// the operator-misuse code, so this rejection lands in the same bucket as the symlink
+/// rejection a `-w` can also trigger downstream. Returning a bare `String` here (or an
+/// `anyhow::Error`) would have meant choosing the exit code a second time, in a second place,
+/// with nothing keeping the two agreed.
+///
+/// Validating once, here, is what keeps a typo'd path from turning into two different
+/// misleading failures: `init` would surface a bare I/O error from inside the scaffolder (it
+/// stages its `.magi.tmp.*` sibling in the target's parent, and that error does not carry the
+/// path), and `vault` would report "no .magi/ state directory found" — which sends the reader
+/// hunting for a workspace when the real problem is a mistyped path.
+///
+/// # What this check does NOT accept
+/// `is_dir` follows symlinks, so a symlinked `-w` passes **here** and is then rejected
+/// downstream by `ensure_raw_chain_symlink_free`, which tests every component of the absolute
+/// path **including the last**. The rejection is deliberate (REQ-H30) and is left where it is
+/// rather than duplicated — but note it is a real behavior difference from the current
+/// directory: `getcwd` returns the resolved physical path, so reaching a directory by `cd`
+/// through a symlink never tripped it, while naming that same directory with `-w` does.
+fn resolve_workspace_root(
+    flag: Option<PathBuf>,
+    cwd: &std::path::Path,
+) -> Result<PathBuf, magi_rs::headless::HeadlessError> {
+    match flag {
+        None => Ok(cwd.to_path_buf()),
+        Some(dir) if dir.is_dir() => Ok(dir),
+        // Phrased to read well AFTER the variant's own `invalid input: ` prefix, which the
+        // user sees: `error: invalid input: --workdir <path>: not an existing directory`.
+        //
+        // The path is SANITIZED because echoing it back is the whole point of the message,
+        // and that turns an operator-supplied string into terminal output. A `-w` carrying an
+        // ANSI sequence would otherwise repaint or clear the screen, letting a hostile value
+        // forge lines the reader attributes to magi. Same treatment every `TextDelta` gets,
+        // applied here for the same reason.
+        //
+        // Scope, deliberately: **stderr diagnostics only**. `run_init`'s stdout line and
+        // `run_vault_diagnose`'s "no database found at …" stay raw, because stdout is this
+        // program's machine-readable channel — its rustdoc calls the created path "the sole
+        // stdout line" — and mangling a path a script is about to consume trades a cosmetic
+        // spoof for a broken pipeline.
+        Some(dir) => Err(magi_rs::headless::HeadlessError::InputInvalid(format!(
+            "--workdir {}: not an existing directory",
+            crate::agent::Agent::sanitize_text(&dir.display().to_string())
+        ))),
+    }
+}
+
+/// The `-w`/`--workdir` flag, shared by `init` and `vault`.
+///
+/// One definition flattened into both, rather than two copies: the help text, the short
+/// letter and the default are a single fact about the CLI, and two copies of a fact drift.
+///
+/// It is **not** declared `global` on [`Args`], which would be the obvious way to reach every
+/// subcommand at once. [`HeadlessArgs`] already owns an arg with this id for `query`/`consult`,
+/// and clap rejects a global that collides with an arg in its propagation subtree. That
+/// rejection is a `debug_assert!` while the `Command` is being built — so it panics **at
+/// startup under `debug_assertions`**, not at compile time, and in a `--release` build it may
+/// not fire at all. Either way the symptom is "the binary stopped starting", never a parse
+/// error a user could read. Declaring it here instead keeps `query`/`consult` byte-for-byte
+/// unchanged, which is the other half of why this shape was chosen.
+///
+/// # Given twice
+/// `global` also means clap accepts `-w` on both sides of the nested `vault` subcommand, and
+/// the **innermost occurrence wins** with no diagnostic. That is clap's own semantics for a
+/// global and the convention every CLI carrying one follows (`git -C`, `docker`, `kubectl`),
+/// so it is adopted deliberately and pinned by
+/// `vault_takes_the_innermost_workdir_when_given_twice` rather than left as emergent behavior.
+/// It is asymmetric with `init`, whose `-w` is not global and which clap therefore rejects
+/// outright when repeated; making `vault` reject it too would mean parsing away from the
+/// derive API to see both occurrences, in exchange for being stricter than the norm.
+#[derive(clap::Args, Debug)]
+struct WorkdirArgs {
+    /// Working directory: base for the `.magi/` walk-up (default: the current directory).
+    ///
+    /// `global` propagates it to the nested `vault` subcommands, so `vault -w <dir> ls` and
+    /// `vault ls -w <dir>` both parse. The propagation is confined to the subtree this arg is
+    /// declared in, so it never reaches `query`/`consult` and cannot collide with theirs.
+    #[arg(short = 'w', long, global = true)]
+    workdir: Option<PathBuf>,
 }
 
 /// Top-level subcommands beyond the default TUI launch.
@@ -396,12 +511,18 @@ impl Args {
 #[derive(clap::Subcommand, Debug)]
 enum TopCmd {
     /// Encrypted, zero-knowledge secret store (`ls`/`set`/`rm`/`passwd`).
-    #[command(subcommand)]
-    Vault(VaultCmd),
+    Vault {
+        /// The vault operation to run.
+        #[command(subcommand)]
+        cmd: VaultCmd,
+        /// Working directory override.
+        #[command(flatten)]
+        wd: WorkdirArgs,
+    },
 
     /// Scaffold a fresh `.magi/` state directory in the working directory
     /// (config, encrypted DB, logs); refuses to nest or overwrite (REQ-H01).
-    Init,
+    Init(WorkdirArgs),
 
     /// Run the agent headless over a prompt with structured I/O (REQ-H02).
     Query(HeadlessArgs),
@@ -1274,7 +1395,16 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
         .take()
         .map(|s| s.0)
         .or_else(|| env_passphrase.filter(|p| !p.is_empty()));
-    let workspace_root = env::current_dir()?;
+    // Read the `-w` BEFORE `args.command.take()` below empties `args.command` (same
+    // constraint as `mode_of_consult`, and the same failure if ignored: a silent `None`).
+    let workdir_flag = args.workdir_flag().map(std::path::Path::to_path_buf);
+    let workspace_root = match resolve_workspace_root(workdir_flag, &env::current_dir()?) {
+        Ok(root) => root,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return Ok(exit_code(headless_error_exit_code(&e)));
+        }
+    };
 
     // REQ-H31: loose legacy state with no `.magi/` ⇒ a visible stderr warning
     // (detect only — never read or migrate the legacy files, D-H07).
@@ -1293,10 +1423,13 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
     match args.command.take() {
         // REQ-H32: intercepted BEFORE `run_vault_subcommand` so a diagnose
         // never resolves a passphrase or opens/unlocks the vault.
-        Some(TopCmd::Vault(VaultCmd::Diagnose { names })) => {
+        Some(TopCmd::Vault {
+            cmd: VaultCmd::Diagnose { names },
+            ..
+        }) => {
             return Ok(exit_code(run_vault_diagnose(&workspace_root, names)));
         }
-        Some(TopCmd::Vault(cmd)) => {
+        Some(TopCmd::Vault { cmd, .. }) => {
             return Ok(exit_code(run_vault_subcommand(
                 cmd,
                 passphrase_flag,
@@ -1304,7 +1437,7 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
                 &hardening_warnings,
             )));
         }
-        Some(TopCmd::Init) => {
+        Some(TopCmd::Init(_)) => {
             return Ok(exit_code(run_init(&workspace_root, passphrase_flag)));
         }
         Some(TopCmd::Query(h)) => {
@@ -6048,12 +6181,24 @@ mod tests {
         assert!(a.command.is_none());
 
         let b = Args::parse_from(["magi-rs", "vault", "ls"]);
-        assert!(matches!(b.command, Some(TopCmd::Vault(VaultCmd::Ls))));
+        assert!(matches!(
+            b.command,
+            Some(TopCmd::Vault {
+                cmd: VaultCmd::Ls,
+                ..
+            })
+        ));
 
         // `-p` is global: it also parses ahead of the `vault` subcommand.
         let c = Args::parse_from(["magi-rs", "-p", "hunter2", "vault", "ls"]);
         assert_eq!(c.passphrase.as_deref(), Some("hunter2"));
-        assert!(matches!(c.command, Some(TopCmd::Vault(VaultCmd::Ls))));
+        assert!(matches!(
+            c.command,
+            Some(TopCmd::Vault {
+                cmd: VaultCmd::Ls,
+                ..
+            })
+        ));
     }
 
     #[test]
@@ -6543,11 +6688,103 @@ mod tests {
     fn test_args_parses_init_subcommand() {
         use clap::Parser;
         let a = Args::parse_from(["magi-rs", "init"]);
-        assert!(matches!(a.command, Some(TopCmd::Init)));
+        assert!(matches!(a.command, Some(TopCmd::Init(_))));
         // `-p` remains global ahead of `init` (mirrors the vault subcommand).
         let b = Args::parse_from(["magi-rs", "-p", "hunter2", "init"]);
         assert_eq!(b.passphrase.as_deref(), Some("hunter2"));
-        assert!(matches!(b.command, Some(TopCmd::Init)));
+        assert!(matches!(b.command, Some(TopCmd::Init(_))));
+    }
+
+    /// `-w` must reach `init` and `vault`, and on `vault` it must parse on **both** sides of
+    /// the nested subcommand.
+    ///
+    /// The two orders are not a stylistic nicety: `vault -w <dir> ls` and `vault ls -w <dir>`
+    /// are both what a person types, and which one comes to mind first is a coin flip.
+    /// Accepting only one turns that coin flip into a usage error, on a subcommand whose
+    /// whole job is to be scriptable.
+    #[test]
+    fn workdir_flag_parses_on_init_and_on_vault_in_either_position() {
+        use clap::Parser;
+        let dir = std::path::PathBuf::from("/some/dir");
+
+        let init = Args::try_parse_from(["magi-rs", "init", "-w", "/some/dir"])
+            .expect("`init -w` must parse");
+        assert_eq!(init.workdir_flag(), Some(dir.as_path()));
+
+        let after = Args::try_parse_from(["magi-rs", "vault", "ls", "-w", "/some/dir"])
+            .expect("`vault ls -w` must parse");
+        assert_eq!(after.workdir_flag(), Some(dir.as_path()));
+
+        let before = Args::try_parse_from(["magi-rs", "vault", "-w", "/some/dir", "ls"])
+            .expect("`vault -w ... ls` must parse");
+        assert_eq!(before.workdir_flag(), Some(dir.as_path()));
+
+        // Absent on the surfaces that never had it, and absent when simply not passed.
+        assert_eq!(Args::parse_from(["magi-rs", "init"]).workdir_flag(), None);
+        assert_eq!(Args::parse_from(["magi-rs"]).workdir_flag(), None);
+    }
+
+    /// The whole point of the flag: when present it **wins** over the process's current
+    /// directory. A resolver that quietly kept returning `cwd` would satisfy every parsing
+    /// assertion above and change nothing observable.
+    #[test]
+    fn resolve_workspace_root_prefers_the_flag_over_the_current_directory() {
+        let cwd = tempfile::tempdir().expect("cwd tempdir");
+        let target = tempfile::tempdir().expect("target tempdir");
+
+        let got = resolve_workspace_root(Some(target.path().to_path_buf()), cwd.path())
+            .expect("an existing directory must resolve");
+        assert_eq!(
+            got.canonicalize().expect("canonicalize resolved"),
+            target.path().canonicalize().expect("canonicalize target"),
+            "the flag must win over the current directory"
+        );
+
+        let fallback =
+            resolve_workspace_root(None, cwd.path()).expect("no flag must fall back to cwd");
+        assert_eq!(fallback, cwd.path());
+    }
+
+    /// A `-w` that is not an existing directory fails **here**, once, with the path in the
+    /// message — rather than travelling on to produce a subcommand-specific mystery.
+    ///
+    /// Without this the two subcommands fail in two different misleading ways: `init` surfaces
+    /// a bare I/O error from inside the scaffolder (it creates its staging sibling in the
+    /// target's parent), and `vault` reports "no .magi/ state directory found", which sends
+    /// the reader looking for a workspace when the real problem is a typo'd path.
+    #[test]
+    fn resolve_workspace_root_rejects_a_workdir_that_is_not_an_existing_directory() {
+        let cwd = tempfile::tempdir().expect("cwd tempdir");
+
+        let missing = cwd.path().join("no-such-directory");
+        let err = resolve_workspace_root(Some(missing.clone()), cwd.path())
+            .expect_err("a missing directory must be rejected");
+        assert!(
+            err.to_string().contains("no-such-directory"),
+            "the message must name the path (got: {err:?})"
+        );
+        // The VARIANT is the contract, not just the text: `headless_error_exit_code` maps
+        // `InputInvalid` to 2, so classifying this as anything else silently moves a mistyped
+        // path out of the operator-misuse bucket and into the runtime-failure one.
+        assert_eq!(
+            headless_error_exit_code(&err),
+            2,
+            "a mistyped -w is operator misuse, which this project's taxonomy codes as 2"
+        );
+        assert!(
+            !missing.exists(),
+            "rejecting must not create the directory as a side effect"
+        );
+
+        let file = cwd.path().join("a-file.txt");
+        std::fs::write(&file, b"not a directory").expect("fixture file");
+        let err = resolve_workspace_root(Some(file), cwd.path())
+            .expect_err("a file must be rejected as a working directory");
+        assert!(
+            err.to_string().contains("a-file.txt"),
+            "the message must name the path (got: {err:?})"
+        );
+        assert_eq!(headless_error_exit_code(&err), 2);
     }
 
     /// Returns how many envelope rows (`wrapped_dek`) a freshly-`init`ed DB has:
@@ -6636,12 +6873,18 @@ mod tests {
         let a = Args::parse_from(["magi-rs", "vault", "diagnose"]);
         assert!(matches!(
             a.command,
-            Some(TopCmd::Vault(VaultCmd::Diagnose { names: false }))
+            Some(TopCmd::Vault {
+                cmd: VaultCmd::Diagnose { names: false },
+                ..
+            })
         ));
         let b = Args::parse_from(["magi-rs", "vault", "diagnose", "--names"]);
         assert!(matches!(
             b.command,
-            Some(TopCmd::Vault(VaultCmd::Diagnose { names: true }))
+            Some(TopCmd::Vault {
+                cmd: VaultCmd::Diagnose { names: true },
+                ..
+            })
         ));
     }
 

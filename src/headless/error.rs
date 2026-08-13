@@ -18,10 +18,20 @@ use crate::vault::VaultError;
 /// mapped to an actionable exit code (REQ-H23).
 #[derive(Debug, Error)]
 pub enum HeadlessError {
-    /// The input (`-i`/stdin) is syntactically invalid: non-UTF8, envelope without `prompt`
-    /// under `--input-format json`, unknown field, duplicate key, or pathological nesting. The
-    /// message **never** includes the raw prompt content (it could be sensitive). Maps to exit
-    /// 2.
+    /// **Operator input is invalid** — the misuse class, as opposed to a run that failed.
+    ///
+    /// Two families produce it. The prompt input (`-i`/stdin): non-UTF8, envelope without
+    /// `prompt` under `--input-format json`, unknown field, duplicate key, or pathological
+    /// nesting. And **paths named on the command line**: a `-w`/`--workdir` that is not an
+    /// existing directory, or one whose chain contains a symlinked component
+    /// (`ensure_raw_chain_symlink_free`).
+    ///
+    /// The second family is the reason this doc no longer says "the input (`-i`/stdin)" — a
+    /// variant whose rustdoc enumerates its producers goes stale silently when a new call site
+    /// picks it up, and the exit-code mapping is what makes the choice load bearing.
+    ///
+    /// The message **never** includes the raw prompt content (it could be sensitive); a path
+    /// the operator typed is included, since naming it is the whole point. Maps to exit 2.
     #[error("invalid input: {0}")]
     InputInvalid(String),
 
