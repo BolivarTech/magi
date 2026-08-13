@@ -8378,6 +8378,70 @@ mod tests {
             );
         }
 
+        /// A REDUNDANTLY declared `[magi].kind` must not block the fold: the pair is still the
+        /// same pair.
+        ///
+        /// `magi_endpoint_diverges()` answers *"did the operator declare a separate trio
+        /// backend?"* — decided on DECLARATION, not resolution, deliberately, because that is what
+        /// the divergence notice is about. The question here is different: *"was the principal
+        /// measured on the candidate's `(endpoint, model)` pair?"* The two disagree whenever a
+        /// declaration resolves back to the root, and writing `kind = "ollama"` under a root that
+        /// is already `ollama` is an ordinary, honest thing to write.
+        ///
+        /// Answering the pair question with the intent predicate is conservative — it degrades to
+        /// the old behaviour rather than lending a measurement — but "conservative" here means the
+        /// reported defect returns in full for that config, `strict_context_guard` included.
+        #[test]
+        fn a_redundantly_declared_trio_kind_still_shares_the_principals_pair() {
+            let cfg = cfg_principal_is_also_a_candidate("kind = \"ollama\"\n");
+            assert!(
+                cfg.magi_endpoint_diverges(),
+                "precondition: the DECLARATION predicate says diverging — that is exactly the \
+                 disagreement this test exists for"
+            );
+            let endpoints = test_endpoints();
+            assert_eq!(
+                endpoints.root.as_str(),
+                endpoints.magi.as_str(),
+                "precondition: and yet the RESOLVED endpoints are the same one, because an \
+                 absent [magi].base_url inherits the root"
+            );
+
+            let probe = ProbeOutcome {
+                trio: trio_table_without_the_principal(),
+                principal_model: "principal-model".to_string(),
+                principal: Some(magi_rs::magi::probe::Measurement::Measured {
+                    window: 262_144,
+                    digest: None,
+                }),
+            };
+
+            let mut notices = Vec::new();
+            let magi = build_magi_orchestrator(
+                &TrioBuild {
+                    cfg: &cfg,
+                    principal_kind: ProviderKind::Ollama,
+                    endpoints: &endpoints,
+                    creds: None,
+                    warn_tokens: None,
+                    env_overrides: &MagiEnvModelOverrides::default(),
+                    capability_cache: None,
+                    probe: &probe,
+                },
+                &mut notices,
+            )
+            .expect("ollama is keyless");
+            drop(magi);
+
+            assert!(
+                !notices
+                    .iter()
+                    .any(|n| n.text.contains("`principal-model` has no measured window")),
+                "same host, same kind, same model, measured this run — a redundant declaration \
+                 changes none of that: {notices:?}"
+            );
+        }
+
         /// SC-R01/REQ-R03: the pool declared in `[[magi.fallback]]` reaches magi-core with each
         /// candidate's model AND its lineage, in the declared order (strongest first).
         ///
