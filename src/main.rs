@@ -3165,10 +3165,18 @@ fn normalized_pair_key(kind: ProviderKind, endpoint: &ResolvedEndpoint) -> Strin
         // No normalization of its own, so the trailing slash `openai_compat_root` trims for the
         // other kinds has to be trimmed here — otherwise `…/v1` and `…/v1/` are two pairs.
         //
-        // Accepted residual: a default port written out (`…:443`) still compares unequal to the
-        // same host without it. Normalizing that needs real URL parsing for a spelling nobody
-        // writes in a `base_url`, and the failure is the conservative one — the fold is blocked,
-        // never lent across genuinely different pairs.
+        // ACCEPTED RESIDUAL, and it is a class rather than a case: two spellings of one authority
+        // that differ in anything this function does not normalize — an explicit default port
+        // (`…:443`), host case, an IPv6 literal written two ways, redundant percent-encoding —
+        // still compare unequal and block the fold. Closing that properly means full URL
+        // canonicalization, which is more machinery than the defect warrants and more than the
+        // capability cache itself applies to the key this mirrors (REQ-R25).
+        //
+        // It is tolerable because the whole class fails in the SAFE direction: an unrecognized
+        // spelling blocks the fold and degrades to the pre-v0.14.2 behaviour. The direction that
+        // would matter — judging two genuinely different pairs as one, and lending a measurement
+        // across them — is unreachable here, because every transformation applied above maps
+        // distinct authorities to distinct strings.
         ProviderKind::Anthropic => endpoint.as_str().trim_end_matches('/').to_string(),
     };
     magi_rs::redact::redact_url(&dialled)
@@ -3208,6 +3216,10 @@ fn candidate_window_view(
         // This is NOT a D-R09 question, though an earlier version of this comment claimed it was:
         // `derive_warn_tokens` runs on `trio_seats` inside `probe_and_report`, before this view
         // exists, so nothing decided here can reach the threshold.
+        // On a tie the TRIO wins: if both batches measured the same pair and reported different
+        // windows, this keeps the trio's. Neither is more truthful — they are two observations of
+        // one daemon — so the tie-break is arbitrary and chosen for stability, not accuracy: the
+        // trio's row is the one every other consumer of this map already agrees with.
         let keep_existing = matches!(view.get(model), Some(Measurement::Measured { .. }));
         if !keep_existing {
             view.insert(model.clone(), m.clone());
