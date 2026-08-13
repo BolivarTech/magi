@@ -1694,7 +1694,7 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
     // `input_warn_tokens` can be derived from the MAGES window (REQ-A24b) and startup announces
     // the three measurement states (REQ-A24c). Never blocks or fails startup: each probe fails
     // open inside `probe_models`/`orchestrate_probes`.
-    let (warn_tokens, measured) = probe_and_report(
+    let (warn_tokens, probe) = probe_and_report(
         &magi_config,
         &endpoints,
         provider_kind,
@@ -1719,7 +1719,7 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
             warn_tokens,
             env_overrides: &env_overrides,
             capability_cache: capability_cache.as_ref(),
-            measured: &measured,
+            probe: &probe,
         },
         &mut startup_notices,
     ) {
@@ -2278,7 +2278,7 @@ async fn probe_and_report(
     // REQ-R11 (Task 6.4): the trio measurements come back with the threshold because the guard's
     // fail-safe needs them, and re-probing to recover what this call already learned would pay
     // the cost twice for the same answer.
-) -> (Option<usize>, BTreeMap<String, Measurement>) {
+) -> (Option<usize>, ProbeOutcome) {
     let (principal_model, principal_measurement, trio, seat_models) = orchestrate_probes(
         cfg,
         endpoints,
@@ -2290,7 +2290,11 @@ async fn probe_and_report(
     .await;
     notices.push(Notice::info(format!(
         "{principal_model}: {}",
-        probe_notice(&principal_measurement.unwrap_or(Measurement::NotMeasuredThisTime))
+        probe_notice(
+            &principal_measurement
+                .clone()
+                .unwrap_or(Measurement::NotMeasuredThisTime)
+        )
     )));
     // MAGI S3 re-gate (Caspar): the principal's own notice above only ever reports the
     // PRINCIPAL's measurement — on a cold daemon the trio's models (usually different from
@@ -2345,7 +2349,18 @@ async fn probe_and_report(
         .magi()
         .input_warn_tokens
         .or_else(|| derive_warn_tokens(&trio_seats));
-    (warn, trio)
+    // The threshold above is derived from `trio_seats` — the SEATS, principal excluded (D-R09).
+    // What travels onward is the whole outcome, because every consumer downstream of here asks
+    // the per-candidate question instead, and answering it with the trio's table alone is the
+    // defect [`ProbeOutcome`] documents.
+    (
+        warn,
+        ProbeOutcome {
+            trio,
+            principal_model,
+            principal: principal_measurement,
+        },
+    )
 }
 
 /// Builds the notice for when at least one mage of the trio is `NotMeasuredThisTime` (cold) —
@@ -3063,9 +3078,56 @@ struct TrioBuild<'a> {
     /// REQ-R10/R25/R28. `None` is the ephemeral path (Task 6.8): no encrypted database means
     /// nothing to remember measurements in, which degrades measurement — never the run.
     capability_cache: Option<&'a Arc<ModelCapabilityCache>>,
-    /// What the startup probe measured, keyed by model (REQ-R11). Feeds the strict-guard
-    /// fail-safe, which must know whether any CANDIDATE got a window.
-    measured: &'a BTreeMap<String, Measurement>,
+    /// Everything the startup probe learned (REQ-R11). Feeds the strict-guard fail-safe, which
+    /// must know whether any CANDIDATE got a window.
+    ///
+    /// It is the WHOLE [`ProbeOutcome`] and not just the trio's table because the principal's
+    /// measurement is load-bearing here too, and a separate field for it is a field a call site
+    /// can leave at its default while everything still compiles — the defect this type exists to
+    /// make unconstructible.
+    probe: &'a ProbeOutcome,
+}
+
+/// Everything one startup probe learned, kept together so no consumer can take the trio's table
+/// without the principal's measurement.
+///
+/// # Why one value and not two parameters
+///
+/// The trio's table deliberately **excludes** the principal: that exclusion is what keeps a small
+/// principal from lowering the mage-derived `input_warn_tokens` (D-R09), and a test pins it. But a
+/// measurement is a property of the `(endpoint, model)` **pair** — the very pair the capability
+/// cache keys on — not of the role a model plays, and the principal may legitimately also be a
+/// fallback candidate: the magi-rs agent and the multi-perspective tool are two levels free to name
+/// the same model.
+///
+/// So there are two different questions over one probe, and the answer to each is a different view:
+/// *"what did the MAGES measure?"* (the threshold) and *"what did this ENDPOINT measure?"* (any
+/// per-candidate decision). Handing consumers the first when they ask the second is what made one
+/// startup say both of these about one model in one run:
+///
+/// ```text
+/// kimi-k2.6:cloud: probe: window 262144 tokens, digest a90cd0d1590c...
+/// notice: fallback candidate `kimi-k2.6:cloud` has no measured window; it is credited
+///         with 131072 tokens, the smallest measured this run.
+/// ```
+///
+/// crediting a candidate with half its real window — the number that decides whether a rotation
+/// into it can accept a large prompt.
+#[derive(Debug, Default)]
+struct ProbeOutcome {
+    /// The trio's table, principal excluded (D-R09), plus whatever `extra_models` rode the batch.
+    trio: BTreeMap<String, Measurement>,
+    /// The principal's resolved model tag.
+    #[expect(
+        dead_code,
+        reason = "RED phase: carried but not yet folded into the per-candidate view. `expect` \
+                  rather than `allow` on purpose — it becomes an unfulfilled-expectation warning \
+                  the moment GREEN reads it, so the marker cannot outlive the phase it documents."
+    )]
+    principal_model: String,
+    /// What the probe measured for the principal, `None` when it produced nothing.
+    #[expect(dead_code, reason = "RED phase — see `principal_model` above.")]
+    principal: Option<Measurement>,
 }
 
 /// Builds the MAGI trio with the NATIVE providers of magi-core (REQ-A01).
@@ -3098,8 +3160,11 @@ fn build_magi_orchestrator(
         warn_tokens,
         env_overrides,
         capability_cache,
-        measured,
+        probe,
     } = b;
+    // RED: the per-candidate view is still the trio's table alone — the principal's own
+    // measurement is carried this far and not yet folded in.
+    let measured = &probe.trio;
     // Absent/empty `[magi].kind` inherits `principal_kind` — the ALREADY-RESOLVED one, not
     // `cfg.effective_provider()` (TOML-only). Present-but-unrecognized remains a typed error.
     // Task 5.2: extracted to `resolve_magi_kind`, shared with `orchestrate_probes` (B3) —
@@ -4845,7 +4910,7 @@ async fn prepare_headless(
     let mut trio_notices: Vec<Notice> = Vec::new();
     // Same wiring as the TUI, through the same opener (B3).
     let capability_cache = open_capability_cache(memory.as_ref(), &mut trio_notices);
-    let (warn_tokens, measured) = probe_and_report(
+    let (warn_tokens, probe) = probe_and_report(
         &magi_config,
         &endpoints,
         provider_kind,
@@ -4864,7 +4929,7 @@ async fn prepare_headless(
             warn_tokens,
             env_overrides: &env_overrides,
             capability_cache: capability_cache.as_ref(),
-            measured: &measured,
+            probe: &probe,
         },
         &mut trio_notices,
     );
@@ -8063,7 +8128,7 @@ mod tests {
                     env_overrides: &MagiEnvModelOverrides::default(),
                     capability_cache: None,
                     // Nothing measured: the cold start.
-                    measured: &BTreeMap::new(),
+                    probe: &ProbeOutcome::default(),
                 },
                 &mut notices,
             )
@@ -8085,6 +8150,104 @@ mod tests {
             );
         }
 
+        /// A config whose PRINCIPAL model is also declared as a fallback candidate.
+        ///
+        /// `extra` is appended verbatim to `[magi]`, so a caller can add `base_url` (divergence)
+        /// or `strict_context_guard` without a second near-identical fixture.
+        fn cfg_principal_is_also_a_candidate(extra: &str) -> MagiConfig {
+            MagiConfig::from_toml_str(&format!(
+                "provider = \"ollama\"\n\
+                 [openai]\n\
+                 model = \"principal-model\"\n\
+                 [magi]\n\
+                 melchior_model    = \"mel\"\nmelchior_lineage  = \"lin-m\"\n\
+                 balthasar_model   = \"bal\"\nbalthasar_lineage = \"lin-b\"\n\
+                 caspar_model      = \"cas\"\ncaspar_lineage    = \"lin-c\"\n\
+                 agent_timeout_secs = 30\n\
+                 max_rotations = 2\n\
+                 {extra}\
+                 [[magi.fallback]]\n\
+                 model   = \"principal-model\"\nlineage = \"lin-rescue\"\n"
+            ))
+            .expect("the principal's model is legal as a fallback candidate")
+        }
+
+        /// The trio's table as the probe returns it: the three seats, principal EXCLUDED (D-R09).
+        ///
+        /// Caspar is the smallest, so `assumed_window` credits an unmeasured candidate with
+        /// 131072 — half of what `principal-model` actually measures.
+        fn trio_table_without_the_principal() -> BTreeMap<String, Measurement> {
+            [("mel", 262_144_usize), ("bal", 262_144), ("cas", 131_072)]
+                .into_iter()
+                .map(|(m, window)| {
+                    (
+                        m.to_string(),
+                        magi_rs::magi::probe::Measurement::Measured {
+                            window,
+                            digest: None,
+                        },
+                    )
+                })
+                .collect()
+        }
+
+        /// REQ-R26/SC-R51: a principal that is ALSO a fallback candidate keeps its OWN measured
+        /// window instead of being credited with the smallest one measured this run.
+        ///
+        /// The two are different levels — the magi-rs agent on one side, magi-core's trio and pool
+        /// on the other — so the same tag naming both is ordinary configuration, not a mistake. A
+        /// measurement belongs to the `(endpoint, model)` pair, never to the role, and the trio's
+        /// table excludes the principal ON PURPOSE (D-R09, so a small principal cannot lower the
+        /// mage-derived threshold). Asking that table a per-candidate question is what produced a
+        /// startup that reported one model as both measured at 262144 and unmeasured at 131072.
+        #[test]
+        fn a_measured_principal_that_is_also_a_candidate_keeps_its_own_window() {
+            let cfg = cfg_principal_is_also_a_candidate("");
+            assert!(
+                !cfg.magi_endpoint_diverges(),
+                "precondition: one endpoint, so the principal's measurement DOES describe the \
+                 candidate's pair — the whole reason it may be folded in"
+            );
+            let probe = ProbeOutcome {
+                trio: trio_table_without_the_principal(),
+                principal_model: "principal-model".to_string(),
+                principal: Some(magi_rs::magi::probe::Measurement::Measured {
+                    window: 262_144,
+                    digest: None,
+                }),
+            };
+            assert!(
+                !probe.trio.contains_key("principal-model"),
+                "precondition: the trio's table must NOT already carry the principal, or this \
+                 test passes without the fix it exists to force"
+            );
+
+            let mut notices = Vec::new();
+            let magi = build_magi_orchestrator(
+                &TrioBuild {
+                    cfg: &cfg,
+                    principal_kind: ProviderKind::Ollama,
+                    endpoints: &test_endpoints(),
+                    creds: None,
+                    warn_tokens: None,
+                    env_overrides: &MagiEnvModelOverrides::default(),
+                    capability_cache: None,
+                    probe: &probe,
+                },
+                &mut notices,
+            )
+            .expect("ollama is keyless");
+            drop(magi);
+
+            assert!(
+                !notices
+                    .iter()
+                    .any(|n| n.text.contains("`principal-model` has no measured window")),
+                "the probe measured it at 262144 this very run; crediting it with 131072 is the \
+                 number that decides whether a rotation into it accepts a large prompt: {notices:?}"
+            );
+        }
+
         /// SC-R01/REQ-R03: the pool declared in `[[magi.fallback]]` reaches magi-core with each
         /// candidate's model AND its lineage, in the declared order (strongest first).
         ///
@@ -8103,7 +8266,7 @@ mod tests {
                     warn_tokens: None,
                     env_overrides: &MagiEnvModelOverrides::default(),
                     capability_cache: None,
-                    measured: &BTreeMap::new(),
+                    probe: &ProbeOutcome::default(),
                 },
                 &mut notices,
             )
@@ -8164,7 +8327,7 @@ mod tests {
                     warn_tokens: None,
                     env_overrides: &MagiEnvModelOverrides::default(),
                     capability_cache: Some(&cache),
-                    measured: &BTreeMap::new(),
+                    probe: &ProbeOutcome::default(),
                 },
                 &mut notices,
             )
@@ -8226,7 +8389,7 @@ mod tests {
                     warn_tokens: None,
                     env_overrides: &collapsed_by_env,
                     capability_cache: None,
-                    measured: &BTreeMap::new(),
+                    probe: &ProbeOutcome::default(),
                 },
                 &mut notices,
             )
@@ -8258,7 +8421,7 @@ mod tests {
                     warn_tokens: None,
                     env_overrides: &pulled_apart_by_env,
                     capability_cache: None,
-                    measured: &BTreeMap::new(),
+                    probe: &ProbeOutcome::default(),
                 },
                 &mut notices,
             )
@@ -8304,7 +8467,7 @@ mod tests {
                     warn_tokens: None,
                     env_overrides: &MagiEnvModelOverrides::default(),
                     capability_cache: None,
-                    measured: &BTreeMap::new(),
+                    probe: &ProbeOutcome::default(),
                 },
                 &mut notices,
             )
@@ -8359,7 +8522,7 @@ mod tests {
                     warn_tokens: None,
                     env_overrides: &MagiEnvModelOverrides::default(),
                     capability_cache: None,
-                    measured: &BTreeMap::new(),
+                    probe: &ProbeOutcome::default(),
                 },
                 &mut notices,
             )
@@ -8422,7 +8585,7 @@ mod tests {
                     env_overrides: &MagiEnvModelOverrides::default(),
                     capability_cache: None,
                     // NOTHING measured — the cold-start state.
-                    measured: &BTreeMap::new(),
+                    probe: &ProbeOutcome::default(),
                 },
                 &mut notices,
             )
@@ -8481,7 +8644,7 @@ mod tests {
                     warn_tokens: None,
                     env_overrides: &MagiEnvModelOverrides::default(),
                     capability_cache: None,
-                    measured: &BTreeMap::new(),
+                    probe: &ProbeOutcome::default(),
                 },
                 &mut notices,
             )
@@ -8562,21 +8725,24 @@ mod tests {
                     // The endpoint clearly measures — it answered for `ok-model` — and did not
                     // answer for the fallback. That is what separates "this model is not there"
                     // from "this endpoint is not answering".
-                    measured: &[
-                        (
-                            "ok-model".to_string(),
-                            magi_rs::magi::probe::Measurement::Measured {
-                                window: 128_000,
-                                digest: None,
-                            },
-                        ),
-                        (
-                            "rescue-model".to_string(),
-                            magi_rs::magi::probe::Measurement::NotMeasuredThisTime,
-                        ),
-                    ]
-                    .into_iter()
-                    .collect(),
+                    probe: &ProbeOutcome {
+                        trio: [
+                            (
+                                "ok-model".to_string(),
+                                magi_rs::magi::probe::Measurement::Measured {
+                                    window: 128_000,
+                                    digest: None,
+                                },
+                            ),
+                            (
+                                "rescue-model".to_string(),
+                                magi_rs::magi::probe::Measurement::NotMeasuredThisTime,
+                            ),
+                        ]
+                        .into_iter()
+                        .collect(),
+                        ..Default::default()
+                    },
                 },
                 &mut notices,
             )
@@ -8647,7 +8813,7 @@ mod tests {
                     warn_tokens: Some(96_000),
                     env_overrides: &MagiEnvModelOverrides::default(),
                     capability_cache: None,
-                    measured: &BTreeMap::new(),
+                    probe: &ProbeOutcome::default(),
                 },
                 &mut notices,
             )
@@ -8707,21 +8873,24 @@ mod tests {
                     capability_cache: None,
                     // The trio measured; the candidate did not — exactly the shape that would
                     // tempt an implementation to "protect" the run by dropping it.
-                    measured: &[
-                        (
-                            "ok-model".to_string(),
-                            magi_rs::magi::probe::Measurement::Measured {
-                                window: 128_000,
-                                digest: None,
-                            },
-                        ),
-                        (
-                            "rescue-model".to_string(),
-                            magi_rs::magi::probe::Measurement::NotMeasuredThisTime,
-                        ),
-                    ]
-                    .into_iter()
-                    .collect(),
+                    probe: &ProbeOutcome {
+                        trio: [
+                            (
+                                "ok-model".to_string(),
+                                magi_rs::magi::probe::Measurement::Measured {
+                                    window: 128_000,
+                                    digest: None,
+                                },
+                            ),
+                            (
+                                "rescue-model".to_string(),
+                                magi_rs::magi::probe::Measurement::NotMeasuredThisTime,
+                            ),
+                        ]
+                        .into_iter()
+                        .collect(),
+                        ..Default::default()
+                    },
                 },
                 &mut notices,
             )
@@ -8760,7 +8929,7 @@ mod tests {
                     warn_tokens: None,
                     env_overrides: &MagiEnvModelOverrides::default(),
                     capability_cache: None,
-                    measured: &BTreeMap::new(),
+                    probe: &ProbeOutcome::default(),
                 },
                 &mut notices,
             )
@@ -8844,7 +9013,7 @@ mod tests {
                     warn_tokens: None,
                     env_overrides: &MagiEnvModelOverrides::default(),
                     capability_cache: None,
-                    measured: &BTreeMap::new(),
+                    probe: &ProbeOutcome::default(),
                 },
                 &mut notices,
             )
@@ -8973,7 +9142,7 @@ mod tests {
                     warn_tokens: None,
                     env_overrides: &MagiEnvModelOverrides::default(),
                     capability_cache: None,
-                    measured: &BTreeMap::new(),
+                    probe: &ProbeOutcome::default(),
                 },
                 &mut notices,
             )
@@ -9298,7 +9467,7 @@ mod tests {
                     warn_tokens: None,
                     env_overrides: &MagiEnvModelOverrides::default(),
                     capability_cache: None,
-                    measured: &BTreeMap::new(),
+                    probe: &ProbeOutcome::default(),
                 },
                 &mut notices,
             )
@@ -9357,7 +9526,7 @@ mod tests {
                     warn_tokens: None,
                     env_overrides: &MagiEnvModelOverrides::default(),
                     capability_cache: None,
-                    measured: &BTreeMap::new(),
+                    probe: &ProbeOutcome::default(),
                 },
                 &mut notices,
             )
@@ -9403,7 +9572,7 @@ mod tests {
                     warn_tokens: None,
                     env_overrides: &MagiEnvModelOverrides::default(),
                     capability_cache: None,
-                    measured: &BTreeMap::new(),
+                    probe: &ProbeOutcome::default(),
                 },
                 &mut notices,
             )
@@ -9507,7 +9676,7 @@ mod tests {
                             warn_tokens: None,
                             env_overrides: &MagiEnvModelOverrides::default(),
                             capability_cache: None,
-                            measured: &BTreeMap::new(),
+                            probe: &ProbeOutcome::default(),
                         },
                         &mut notices,
                     ),
@@ -9528,7 +9697,7 @@ mod tests {
                         warn_tokens: None,
                         env_overrides: &MagiEnvModelOverrides::default(),
                         capability_cache: None,
-                        measured: &BTreeMap::new(),
+                        probe: &ProbeOutcome::default(),
                     },
                     &mut notices,
                 )
@@ -9561,7 +9730,7 @@ mod tests {
                     warn_tokens: None,
                     env_overrides: &MagiEnvModelOverrides::default(),
                     capability_cache: None,
-                    measured: &BTreeMap::new(),
+                    probe: &ProbeOutcome::default(),
                 },
                 &mut notices,
             ) {
@@ -9605,7 +9774,7 @@ mod tests {
                     warn_tokens: None,
                     env_overrides: &MagiEnvModelOverrides::default(),
                     capability_cache: None,
-                    measured: &BTreeMap::new(),
+                    probe: &ProbeOutcome::default(),
                 },
                 &mut notices,
             ) {
@@ -9642,7 +9811,7 @@ mod tests {
                     warn_tokens: None,
                     env_overrides: &MagiEnvModelOverrides::default(),
                     capability_cache: None,
-                    measured: &BTreeMap::new(),
+                    probe: &ProbeOutcome::default(),
                 },
                 &mut notices,
             ) {
@@ -10016,7 +10185,7 @@ mod tests {
                         warn_tokens: None,
                         env_overrides: &MagiEnvModelOverrides::default(),
                         capability_cache: None,
-                        measured: &BTreeMap::new(),
+                        probe: &ProbeOutcome::default(),
                     },
                     &mut notices,
                 )
@@ -10037,7 +10206,7 @@ mod tests {
                         warn_tokens: None,
                         env_overrides: &MagiEnvModelOverrides::default(),
                         capability_cache: None,
-                        measured: &BTreeMap::new(),
+                        probe: &ProbeOutcome::default(),
                     },
                     &mut notices,
                 )
@@ -10061,7 +10230,7 @@ mod tests {
                         warn_tokens: None,
                         env_overrides: &env_overrides,
                         capability_cache: None,
-                        measured: &BTreeMap::new(),
+                        probe: &ProbeOutcome::default(),
                     },
                     &mut notices,
                 )
@@ -10118,7 +10287,7 @@ mod tests {
                     warn_tokens: None,
                     env_overrides: &env_overrides,
                     capability_cache: None,
-                    measured: &BTreeMap::new(),
+                    probe: &ProbeOutcome::default(),
                 },
                 &mut notices,
             )
@@ -12115,7 +12284,7 @@ agent_timeout_secs = {CEILING}
             let cfg = cfg_with_four_distinct_models("principal", "melchior", "balthasar", "caspar");
 
             let mut notices = Vec::new();
-            let (warn_tokens, measured) = probe_and_report(
+            let (warn_tokens, probe) = probe_and_report(
                 &cfg,
                 &test_endpoints(),
                 ProviderKind::Ollama,
@@ -12143,10 +12312,10 @@ agent_timeout_secs = {CEILING}
             // for, and REQ-R11's guard predicate is over candidates.
             assert!(
                 matches!(
-                    measured.get("rescue-model"),
+                    probe.trio.get("rescue-model"),
                     Some(Measurement::Measured { window: 8_192, .. })
                 ),
-                "excluding it from the trio VIEW must not stop it being measured: {measured:?}"
+                "excluding it from the trio VIEW must not stop it being measured: {probe:?}"
             );
         }
 
