@@ -2357,8 +2357,7 @@ async fn probe_and_report(
         warn,
         ProbeOutcome {
             trio,
-            principal_model,
-            principal: principal_measurement,
+            principal: principal_measurement.map(|m| (principal_model, m)),
         },
     )
 }
@@ -3117,10 +3116,14 @@ struct TrioBuild<'a> {
 struct ProbeOutcome {
     /// The trio's table, principal excluded (D-R09), plus whatever `extra_models` rode the batch.
     trio: BTreeMap<String, Measurement>,
-    /// The principal's resolved model tag.
-    principal_model: String,
-    /// What the probe measured for the principal, `None` when it produced nothing.
-    principal: Option<Measurement>,
+    /// The principal's resolved model tag and what the probe measured for it, `None` when the
+    /// probe produced nothing.
+    ///
+    /// One `Option` over the PAIR rather than a tag beside an optional measurement: the tag alone
+    /// answers nothing here, and separate fields make `Some(measurement)` next to an empty tag a
+    /// constructible state — the kind of unreachable-but-representable hole this whole type exists
+    /// to close one level up.
+    principal: Option<(String, Measurement)>,
 }
 
 /// The measurement view for any **per-candidate** decision: the trio's table plus the principal's
@@ -3160,7 +3163,7 @@ fn candidate_window_view(
         && magi_rs::redact::redact_url(endpoints.root.as_str())
             == magi_rs::redact::redact_url(endpoints.magi.as_str());
     let mut view = probe.trio.clone();
-    if let (true, Some(m)) = (shares_the_trios_pair, probe.principal.as_ref()) {
+    if let (true, Some((model, m))) = (shares_the_trios_pair, probe.principal.as_ref()) {
         // `or_insert`, never `insert`: the trio's table stays authoritative for the keys it owns.
         // A seat may legally resolve to the principal's own tag (`seats_with_env_overrides` falls
         // an undeclared seat back to exactly that model), and today both values come from ONE
@@ -3168,8 +3171,7 @@ fn candidate_window_view(
         // from here, though, and if the principal ever gets its own batch on this path an
         // overwrite would move a SEAT's measurement — and with it `input_warn_tokens`, breaking
         // D-R09 with nothing to catch it. Local guarantee instead of a remote invariant.
-        view.entry(probe.principal_model.clone())
-            .or_insert_with(|| m.clone());
+        view.entry(model.clone()).or_insert_with(|| m.clone());
     }
     view
 }
@@ -8256,11 +8258,13 @@ mod tests {
             );
             let probe = ProbeOutcome {
                 trio: trio_table_without_the_principal(),
-                principal_model: "principal-model".to_string(),
-                principal: Some(magi_rs::magi::probe::Measurement::Measured {
-                    window: 262_144,
-                    digest: None,
-                }),
+                principal: Some((
+                    "principal-model".to_string(),
+                    magi_rs::magi::probe::Measurement::Measured {
+                        window: 262_144,
+                        digest: None,
+                    },
+                )),
             };
             assert!(
                 !probe.trio.contains_key("principal-model"),
@@ -8318,12 +8322,14 @@ mod tests {
             };
             let probe = ProbeOutcome {
                 trio: trio_table_without_the_principal(),
-                principal_model: "principal-model".to_string(),
                 // Measured on the ROOT host — a different pair from the candidate's.
-                principal: Some(magi_rs::magi::probe::Measurement::Measured {
-                    window: 262_144,
-                    digest: None,
-                }),
+                principal: Some((
+                    "principal-model".to_string(),
+                    magi_rs::magi::probe::Measurement::Measured {
+                        window: 262_144,
+                        digest: None,
+                    },
+                )),
             };
 
             let mut notices = Vec::new();
@@ -8368,11 +8374,13 @@ mod tests {
             );
             let probe = ProbeOutcome {
                 trio: trio_table_without_the_principal(),
-                principal_model: "principal-model".to_string(),
-                principal: Some(magi_rs::magi::probe::Measurement::Measured {
-                    window: 262_144,
-                    digest: None,
-                }),
+                principal: Some((
+                    "principal-model".to_string(),
+                    magi_rs::magi::probe::Measurement::Measured {
+                        window: 262_144,
+                        digest: None,
+                    },
+                )),
             };
 
             let mut notices = Vec::new();
@@ -8432,11 +8440,13 @@ mod tests {
 
             let probe = ProbeOutcome {
                 trio: trio_table_without_the_principal(),
-                principal_model: "principal-model".to_string(),
-                principal: Some(magi_rs::magi::probe::Measurement::Measured {
-                    window: 262_144,
-                    digest: None,
-                }),
+                principal: Some((
+                    "principal-model".to_string(),
+                    magi_rs::magi::probe::Measurement::Measured {
+                        window: 262_144,
+                        digest: None,
+                    },
+                )),
             };
 
             let mut notices = Vec::new();
