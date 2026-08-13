@@ -8271,6 +8271,113 @@ mod tests {
             );
         }
 
+        /// The other half of the same rule: across a DIVERGING endpoint the principal's
+        /// measurement says nothing about a same-named candidate, and must not be lent to it.
+        ///
+        /// This one cannot go red before the fold exists — there was nothing to over-fold. It pins
+        /// the boundary the fold must not cross, so it is verified by MUTATION (drop the
+        /// `magi_endpoint_diverges` gate and watch it fail), never by watching it pass.
+        #[test]
+        fn a_principal_on_a_diverging_endpoint_never_lends_its_window_to_a_candidate() {
+            let cfg =
+                cfg_principal_is_also_a_candidate("base_url = \"http://magi-host:11434/v1\"\n");
+            assert!(
+                cfg.magi_endpoint_diverges(),
+                "precondition: the trio declares its own base_url, so the same tag on the two \
+                 hosts is two different pairs"
+            );
+            let endpoints = ResolvedEndpoints {
+                root: EndpointTemplate::parse("http://root-host:11434/v1", Scope::Root)
+                    .expect("a flat test URL must parse")
+                    .resolve(&mut NoVaultInScope, Scope::Root)
+                    .expect("no placeholders, no vault"),
+                magi: endpoint_at("http://magi-host:11434/v1"),
+            };
+            let probe = ProbeOutcome {
+                trio: trio_table_without_the_principal(),
+                principal_model: "principal-model".to_string(),
+                // Measured on the ROOT host — a different pair from the candidate's.
+                principal: Some(magi_rs::magi::probe::Measurement::Measured {
+                    window: 262_144,
+                    digest: None,
+                }),
+            };
+
+            let mut notices = Vec::new();
+            let magi = build_magi_orchestrator(
+                &TrioBuild {
+                    cfg: &cfg,
+                    principal_kind: ProviderKind::Ollama,
+                    endpoints: &endpoints,
+                    creds: None,
+                    warn_tokens: None,
+                    env_overrides: &MagiEnvModelOverrides::default(),
+                    capability_cache: None,
+                    probe: &probe,
+                },
+                &mut notices,
+            )
+            .expect("ollama is keyless");
+            drop(magi);
+
+            assert!(
+                notices
+                    .iter()
+                    .any(|n| n.text.contains("`principal-model` has no measured window")),
+                "nobody measured that tag on the TRIO's host; reporting it as measured would \
+                 erase the distinction between measured, not measured and not measurable that \
+                 every consumer here depends on: {notices:?}"
+            );
+        }
+
+        /// The same defect seen where it costs the most: `strict_context_guard`.
+        ///
+        /// REQ-R11 runs the guard's predicate over CANDIDATES, so a pool whose only candidate is
+        /// the principal read as "nothing measured", the fail-safe turned the guard off, and the
+        /// operator's declared setting silently did not apply. Its neighbour above observes the
+        /// notice; this one observes what actually reaches magi-core.
+        #[test]
+        fn a_measured_principal_candidate_lets_the_declared_strict_guard_survive() {
+            let cfg = cfg_principal_is_also_a_candidate("strict_context_guard = true\n");
+            assert!(
+                cfg.declared_strict_context_guard(),
+                "precondition: the operator DID declare it, or this test proves nothing"
+            );
+            let probe = ProbeOutcome {
+                trio: trio_table_without_the_principal(),
+                principal_model: "principal-model".to_string(),
+                principal: Some(magi_rs::magi::probe::Measurement::Measured {
+                    window: 262_144,
+                    digest: None,
+                }),
+            };
+
+            let mut notices = Vec::new();
+            let magi = build_magi_orchestrator(
+                &TrioBuild {
+                    cfg: &cfg,
+                    principal_kind: ProviderKind::Ollama,
+                    endpoints: &test_endpoints(),
+                    creds: None,
+                    warn_tokens: None,
+                    env_overrides: &MagiEnvModelOverrides::default(),
+                    capability_cache: None,
+                    probe: &probe,
+                },
+                &mut notices,
+            )
+            .expect("ollama is keyless");
+            drop(magi);
+
+            let wired = pool_wiring_trace().expect("a declared pool must be wired");
+            assert!(
+                wired.strict_guard,
+                "the only candidate WAS measured this run, so the fail-safe has no reason to \
+                 fire — turning the guard off here switches rotation's window check off over a \
+                 pool that was perfectly eligible"
+            );
+        }
+
         /// SC-R01/REQ-R03: the pool declared in `[[magi.fallback]]` reaches magi-core with each
         /// candidate's model AND its lineage, in the declared order (strongest first).
         ///
