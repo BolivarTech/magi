@@ -9,6 +9,53 @@ changes and the **patch** position signals backward-compatible fixes.
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-08-13
+
+### Changed — BREAKING (exit code)
+
+- **`query` and `consult` now validate `-w`/`--workdir` like `init` and `vault` do.** A path
+  that names no existing directory is rejected before dispatch, **exit 2** (operator misuse)
+  with the path in the message. It used to be accepted and fall through to
+  `no .magi/ state directory found` at **exit 1** — the misleading message the pre-dispatch
+  check was written to remove, still reachable on half the CLI. The quieter half of that bug:
+  the unvalidated path also became the file-tool sandbox root, so every later tool call failed
+  for a second reason pointing nowhere near the typo.
+
+  The exit code moving `1 -> 2` is the breaking part, and the reason this is a minor. A script
+  keying on `1` for a bad `-w` on those two subcommands needs updating; every other failure
+  class keeps its code.
+
+### Fixed
+
+- **`magi init` no longer pins the embedding endpoint.** The scaffold emitted
+  `[embedding].base_url` **active**, so the embedder overrode the root endpoint instead of
+  inheriting it — while the comment three lines above it in the generator said the field is
+  left unset precisely *so it can inherit*. The operator-visible cost: run `magi init`, point
+  the root `base_url` at a remote host, and the agent and trio move while the embedder keeps
+  talking to localhost, with nothing in the file looking wrong because the value it pinned is a
+  real endpoint. The key is now emitted **commented**, and two tests lock the behaviour that
+  makes omitting it safe: absent inherits the root, declared still overrides.
+
+### Changed
+
+- **The scaffolded rotation pool ships five candidates, up from three**, matching the trio
+  configuration this project runs alongside so an operator moving between the two finds the
+  same depth. Two of that file's entries could not be copied verbatim — `deepseek-v4-pro` and
+  `gpt-oss` are foreign to *its* trio but are two of *this* trio's seats, model and lineage
+  both, so copying them would have cut each entry's coverage from three seats to one. The two
+  substitutes are the remaining labels from that same file that no seat here holds.
+- **`magi init`'s generated header names all three accepted `provider` values.** It mentioned
+  only `anthropic`, which reads as a binary choice and hid `openai-compat` entirely — leaving
+  an operator pointing at Groq or OpenRouter no way to learn the value from the file they were
+  handed, while `deny_unknown_fields` makes a wrong guess fatal rather than a warning.
+- **`run-tests.py` now runs doctests and forwards arguments to nextest.** The project copy had
+  fallen behind the seed: `cargo nextest` does not execute doctests and `cargo doc` only
+  compiles them, so every rustdoc example in this crate sat outside all seven gates. Seven pass
+  today. Argument forwarding lets a red-green inner loop be scoped instead of paying eight
+  minutes per iteration — the absence of which quietly pushed anyone in a hurry toward plain
+  `cargo nextest run`, which is exactly what leaves the TDD-Guard reporter's `test.json` stale.
+
+
 ## [0.13.1] - 2026-08-12
 
 ### Added
@@ -1030,7 +1077,8 @@ Initial pre-release, published primarily to reserve the `magi-rs` crate name.
 - `ratatui` TUI with Normal / Selection / Visual modes and Unicode-safe input.
 - OAuth (PKCE) login and OS keyring integration, with `magi-rust` legacy migration.
 
-[Unreleased]: https://github.com/BolivarTech/magi/compare/v0.13.1...HEAD
+[Unreleased]: https://github.com/BolivarTech/magi/compare/v0.14.0...HEAD
+[0.14.0]: https://github.com/BolivarTech/magi/compare/v0.13.1...v0.14.0
 [0.13.1]: https://github.com/BolivarTech/magi/compare/v0.13.0...v0.13.1
 [0.13.0]: https://github.com/BolivarTech/magi/compare/v0.12.2...v0.13.0
 [0.12.2]: https://github.com/BolivarTech/magi/compare/v0.12.0...v0.12.2
