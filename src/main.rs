@@ -2291,9 +2291,9 @@ async fn probe_and_report(
     notices.push(Notice::info(format!(
         "{principal_model}: {}",
         probe_notice(
-            &principal_measurement
-                .clone()
-                .unwrap_or(Measurement::NotMeasuredThisTime)
+            principal_measurement
+                .as_ref()
+                .unwrap_or(&Measurement::NotMeasuredThisTime)
         )
     )));
     // MAGI S3 re-gate (Caspar): the principal's own notice above only ever reports the
