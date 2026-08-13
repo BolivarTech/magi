@@ -233,6 +233,10 @@ Running `magi` with no subcommand still launches the TUI, unchanged.
 # headless runs need no interaction. Refuses to overwrite an existing .magi/.
 magi init -p "correct horse battery staple"
 
+# Without -p (and without MAGI_PASSPHRASE) it still succeeds and exits 0, but the
+# DB is left WITHOUT its encryption envelope — see "Running init without -p" below.
+magi init
+
 # Prompt from stdin, streamed text answer to stdout.
 echo "explain the retry logic in provider.rs" | magi query
 
@@ -405,6 +409,38 @@ The model is read from `ANTHROPIC_MODEL`, defaulting to `claude-sonnet-4-6`. Wit
 ### The vault & passphrase (v0.9.0)
 
 The DB and every secret are unlocked by a **user passphrase**, resolved as `-p <passphrase>` > `MAGI_PASSPHRASE` env var > interactive hidden prompt. On first run you create one (double entry; `zxcvbn` score ≥ 3 and ≥ 12 chars enforced, no override). **Zero-knowledge: nothing persisted opens the DB without the passphrase. Forget it and the data is unrecoverable.** `-p`/`MAGI_PASSPHRASE` make headless/CI use and moving the `.db` between machines possible.
+
+#### Running `init` without `-p`
+
+`magi init` **never prompts**. It takes the passphrase from `-p` or `MAGI_PASSPHRASE`,
+and *absent* is not an error — it is a valid outcome. Prompting would hang the command
+in a Dockerfile or a CI step, waiting on input nobody is there to type.
+
+So without a passphrase the command **succeeds and exits 0**, creating the full `.magi/`
+— `magi.toml`, `logs/` and the database with its schema — but it stops short of deriving
+the key that wraps the data key. `magi vault diagnose` reports the result:
+
+```
+envelope: absent
+verdict: fresh
+```
+
+The envelope is created on the **first interactive run** instead, which is where you are
+asked to choose a passphrase (entered twice; `zxcvbn` score ≥ 3 and ≥ 12 characters, with
+no flag to skip it). From then on the DB is encrypted and every later open requires it.
+
+Two consequences worth knowing:
+
+- **An `init` without `-p` is not headless-ready.** A later `magi query` with no TTY and no
+  `-p`/`MAGI_PASSPHRASE` fails closed with `PassphraseUnavailable` rather than reading
+  stdin — that stream is reserved for a `vault set` *value*, never for the passphrase. For
+  an image or a pipeline, use `magi init -p "…"`, which bootstraps the envelope in the same
+  step.
+- **`envelope: absent` is not corruption.** It is the legitimate `fresh` state. The
+  neighbouring state — envelope *present* but not opening — is a different thing entirely:
+  it reports `WrongPassphrase`, it is retryable, and it **never wipes the DB**. Under the
+  envelope a wrong passphrase and a damaged `wrapped_dek` fail the same GCM-SIV tag, so
+  wiping on failure would turn a typo into total data loss.
 
 Secrets live in an encrypted `vault` table, managed by the CLI:
 
