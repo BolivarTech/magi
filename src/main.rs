@@ -3146,6 +3146,27 @@ struct ProbeOutcome {
 ///
 /// The gate lives here rather than at the call sites so that no caller can get the semantics wrong
 /// by pre-filtering what it passes.
+/// One half of a measurement pair, spelled as the TRANSPORT will see it.
+///
+/// The OpenAI-compatible kinds get a missing `/v1` added downstream by `openai_compat_root`, so
+/// `http://host:11434` and `http://host:11434/v1` reach the same daemon. Comparing what was typed
+/// instead of what will be dialled judges one daemon as two, which blocks the fold exactly as a
+/// redundant `kind` did. `anthropic` is passed through, because nothing normalizes it and two
+/// spellings there really are two endpoints.
+///
+/// Redacted last — the same equivalence the capability cache keys on (REQ-R25): two URLs differing
+/// only in credentials are one pair, because a credential moves neither a model's context window
+/// nor its digest.
+fn normalized_pair_key(kind: ProviderKind, endpoint: &ResolvedEndpoint) -> String {
+    let dialled = match kind {
+        ProviderKind::Ollama | ProviderKind::OpenAiCompat => {
+            openai_compat_root(endpoint.as_str()).0
+        }
+        ProviderKind::Anthropic => endpoint.as_str().to_string(),
+    };
+    magi_rs::redact::redact_url(&dialled)
+}
+
 fn candidate_window_view(
     cfg: &MagiConfig,
     endpoints: &ResolvedEndpoints,
@@ -3160,8 +3181,8 @@ fn candidate_window_view(
     // neither a model's window nor its digest.
     let shares_the_trios_pair = resolve_magi_kind(cfg, principal_kind)
         .is_ok_and(|trio_kind| trio_kind == principal_kind)
-        && magi_rs::redact::redact_url(endpoints.root.as_str())
-            == magi_rs::redact::redact_url(endpoints.magi.as_str());
+        && normalized_pair_key(principal_kind, &endpoints.root)
+            == normalized_pair_key(principal_kind, &endpoints.magi);
     let mut view = probe.trio.clone();
     if let (true, Some((model, m))) = (shares_the_trios_pair, probe.principal.as_ref()) {
         // `or_insert`, never `insert`: the trio's table stays authoritative for the keys it owns.
