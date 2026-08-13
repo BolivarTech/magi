@@ -3161,7 +3161,15 @@ fn candidate_window_view(
             == magi_rs::redact::redact_url(endpoints.magi.as_str());
     let mut view = probe.trio.clone();
     if let (true, Some(m)) = (shares_the_trios_pair, probe.principal.as_ref()) {
-        view.insert(probe.principal_model.clone(), m.clone());
+        // `or_insert`, never `insert`: the trio's table stays authoritative for the keys it owns.
+        // A seat may legally resolve to the principal's own tag (`seats_with_env_overrides` falls
+        // an undeclared seat back to exactly that model), and today both values come from ONE
+        // `probe_models` batch so they cannot disagree. That is a coupling a thousand lines away
+        // from here, though, and if the principal ever gets its own batch on this path an
+        // overwrite would move a SEAT's measurement — and with it `input_warn_tokens`, breaking
+        // D-R09 with nothing to catch it. Local guarantee instead of a remote invariant.
+        view.entry(probe.principal_model.clone())
+            .or_insert_with(|| m.clone());
     }
     view
 }
