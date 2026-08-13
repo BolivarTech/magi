@@ -1584,6 +1584,7 @@ pub fn gate_thresholds_from(config: &MagiConfig) -> GateThresholds {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
 
     /// A commented-out `[embedding].base_url` INHERITS the root endpoint.
     ///
@@ -1614,11 +1615,11 @@ model = "nomic-embed-text-v2-moe:latest"
         assert_eq!(
             embedding,
             root,
-            "an absent [embedding].base_url must resolve to the ROOT endpoint, not to the              built-in localhost default"
+            "an absent [embedding].base_url must resolve to the ROOT endpoint, not to the built-in localhost default"
         );
         assert!(
             root.as_str().contains("remote-host"),
-            "precondition: the root must be the non-default value, or this test cannot tell              inheritance from a coincidence with the built-in default"
+            "precondition: the root must be the non-default value, or this test cannot tell inheritance from a coincidence with the built-in default"
         );
     }
 
@@ -1643,8 +1644,6 @@ base_url = "http://embedder-host:11434/v1"
             "a declared override must win over the root"
         );
     }
-
-    use super::*;
 
     // Task 3.1: `gate_thresholds_from` — breaks `[magi.complexity]` into `GateThresholds`
     // (REQ-A20b). `gate.rs` lives in the lib and cannot know the shape of the TOML; this
