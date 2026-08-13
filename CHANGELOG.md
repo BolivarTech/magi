@@ -28,9 +28,10 @@ changes and the **patch** position signals backward-compatible fixes.
   path. A missing directory is never created — `init` refuses to nest and refuses to
   overwrite, and quietly building a directory tree does not belong with that.
 
-  Given twice on `vault`, the **innermost `-w` wins**, the convention `git -C` and `docker`
-  follow. On `init`, which carries no global, repeating it is an error — an asymmetry that
-  comes from clap and is now documented and pinned rather than emergent.
+  On `vault` the flag may appear **before or after** the nested subcommand. Given once on
+  each side, the **innermost wins** — the convention `git -C` and `docker` follow; given
+  twice on the *same* side it is an error, as it is on `init`, which carries no global. The
+  asymmetry comes from clap and is now documented and pinned rather than emergent.
 
   A `-w` whose path contains a symlinked component is rejected, **including when the target
   itself is the symlink**. This is the pre-existing REQ-H30 hardening applying to the new
@@ -41,8 +42,9 @@ changes and the **patch** position signals backward-compatible fixes.
 
 - **`query` and `consult` keep their own `-w`**, resolved where it always was, and it is
   **not** covered by the new validation: an invalid path there still surfaces as
-  `no .magi/ state directory found` (exit 1). Extending the check to them is tracked in
-  `dev-docs/PENDING_IMPLEMENTATION.md` rather than done here, to keep this release additive.
+  `no .magi/ state directory found` (exit 1). Extending the check to them is deliberately
+  left for a minor release rather than done here: it would move that failure from exit 1 to
+  exit 2, which a script may key on, and this release is additive.
 
   The two declarations are separate on purpose: the headless one is also the file-tool
   sandbox root and is resolved after dispatch, while `init`/`vault` need the root *before*

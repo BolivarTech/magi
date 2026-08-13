@@ -265,11 +265,17 @@ magi query -w /srv/project -i q.txt
 front with exit code 2, naming the path — and it is never created. `query` and
 `consult` do **not** perform that check: their `-w` predates it and an invalid path
 there still surfaces as `no .magi/ state directory found` (exit 1). Extending the
-check to them is tracked in `dev-docs/PENDING_IMPLEMENTATION.md`.
+check to them is deliberately left for a minor release, since it would change an
+exit code scripts may key on.
 
-On `vault` the flag may appear on either side of the subcommand, and if given on
-both the **innermost wins** — the same rule `git -C` and `docker` follow. On `init`,
-which does not carry a global, repeating it is an error.
+On `vault` the flag may appear **before or after** the nested subcommand — both
+`vault -w <dir> ls` and `vault ls -w <dir>` are the same command. Given once on each
+side, the **innermost wins**, the rule `git -C` and `docker` follow; given twice on
+the *same* side it is an error. On `init` it may only appear after the subcommand,
+and repeating it is an error.
+
+`-w` is **not** a top-level flag the way `-p` is: `magi -w <dir> vault ls` is a usage
+error, because the flag belongs to the subcommand rather than to `magi` itself.
 
 A `-w` whose path contains a symlinked component is rejected (exit 2), including
 when the target itself is the symlink. This is deliberate hardening, and it is a
@@ -278,8 +284,6 @@ resolves the symlink, so it never triggered.
 
 Without the flag every subcommand keeps using the current directory, exactly as
 before. Running `magi` with no subcommand (the TUI) does not take `-w`; `cd` first.
-Note `-w` is **not** global the way `-p` is: it goes after the subcommand
-(`magi vault ls -w <dir>`), not before it.
 
 **Input** is auto-detected: a JSON object with a top-level `prompt` string is a
 rich **envelope** (`{prompt, system?, model?, provider?, max_tool_calls?,
