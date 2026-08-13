@@ -3187,11 +3187,15 @@ fn candidate_window_view(
     if let (true, Some((model, m))) = (shares_the_trios_pair, probe.principal.as_ref()) {
         // `or_insert`, never `insert`: the trio's table stays authoritative for the keys it owns.
         // A seat may legally resolve to the principal's own tag (`seats_with_env_overrides` falls
-        // an undeclared seat back to exactly that model), and today both values come from ONE
-        // `probe_models` batch so they cannot disagree. That is a coupling a thousand lines away
-        // from here, though, and if the principal ever gets its own batch on this path an
-        // overwrite would move a SEAT's measurement — and with it `input_warn_tokens`, breaking
-        // D-R09 with nothing to catch it. Local guarantee instead of a remote invariant.
+        // an undeclared seat back to exactly that model), so the two can name the same row.
+        //
+        // The two-batch case is LIVE, not hypothetical: `orchestrate_probes` still branches on
+        // `magi_endpoint_diverges()`, so a redundant declaration — the very case the predicate
+        // above was widened to admit — probes the principal and the trio in separate `join!`
+        // batches against the same daemon. Separate batches can disagree even there: one can time
+        // out under the endpoint's concurrency cap while its twin answers. Taking the trio's row
+        // when it exists means such a disagreement can never move a SEAT's measurement, and with
+        // it `input_warn_tokens` — which would break D-R09 with nothing to catch it.
         view.entry(model.clone()).or_insert_with(|| m.clone());
     }
     view
@@ -3233,9 +3237,9 @@ fn build_magi_orchestrator(
     // derived that from the SEATS before this call. Named apart from `ProbeOutcome::trio` so each
     // use site has to say which of the two views it means.
     //
-    // Two of the four are per-candidate lookups (`get` by model: the seat-window filter, and
-    // `assumed_window_notices`' own per-entry check). The other two are table-wide AGGREGATES, and
-    // folding the principal in moves both — deliberately, in both cases:
+    // Two of the four are pure per-candidate lookups: `effective_strict_guard` (the only one whose
+    // output reaches magi-core) and the seat-window filter. The other two carry a table-wide
+    // AGGREGATE, and folding the principal in moves both — deliberately, in both cases:
     //   - `assumed_window` takes the minimum over everything measured, so a small principal can
     //     lower the window credited to unmeasured candidates. It was measured on this endpoint
     //     this run, so "the smallest measured this run" stays literally true.
