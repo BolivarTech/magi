@@ -802,18 +802,6 @@ pub(crate) enum StructuredVerdicts {
     /// in the agent's context window, which is exactly what the tool-result cap bounds.
     Omit,
     /// The headless CLI, when the operator asked with `--structured-verdicts`.
-    // Scoped to the non-test build on purpose: `--all-targets` compiles both, and the test target
-    // DOES construct this variant, so an unscoped `expect` is unfulfilled there and fails the
-    // gate. `expect` rather than `allow` so the marker cannot outlive its reason — the moment the
-    // CLI flag constructs it in production, this becomes an unfulfilled-expectation error and has
-    // to be deleted.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "constructed by the CLI flag, wired in a later cycle of this feature"
-        )
-    )]
     Include,
 }
 
@@ -824,8 +812,6 @@ pub(crate) fn report_to_consult_json(
     ctx: &RunContext,
     structured: StructuredVerdicts,
 ) -> Value {
-    // RED: carried, not yet applied.
-    let _ = structured;
     let mut out = json!({
         // The (possibly annotated, possibly truncated) text — never the raw report: text and
         // level travel together in `truncated`, so `report_truncated` can never assert a
@@ -863,7 +849,94 @@ pub(crate) fn report_to_consult_json(
     {
         dst.extend(src);
     }
+
+    // REQ-EA03: opt-in, and when opted in BOTH keys are always present — an empty `agents` is the
+    // positive certificate that no seat completed, the same reasoning as `extraction_failures`.
+    // The shape varies by FLAG, never by DATA: a consumer that passes the flag gets one shape
+    // every run, which is the property the always-present rule actually protects.
+    if structured == StructuredVerdicts::Include {
+        if let Value::Object(dst) = &mut out {
+            dst.insert("agents".to_string(), agents_json(&report.agents));
+            dst.insert("consensus".to_string(), consensus_json(&report.consensus));
+        }
+    }
     out
+}
+
+/// The trio's verdicts, mapped FIELD BY FIELD (REQ-EA04).
+///
+/// # Why not `json!(report.agents)`
+///
+/// `AgentOutput`, `Finding` and `ConsensusResult` are all `#[non_exhaustive]`, so magi-core may add
+/// fields in a minor release. Serializing the structs wholesale would put whatever it adds into
+/// this **public output contract** with no code change and no review here — and the consumer this
+/// key exists for is a downstream tool that declares a strict schema. Naming the fields makes the
+/// contract ours to state and a magi-core addition a deliberate decision rather than an arrival.
+///
+/// # Redaction posture, unchanged (REQ-EA05)
+///
+/// Everything here is either model-authored text (`summary`, `reasoning`, `recommendation`,
+/// `findings[].detail`) or a computed label (`verdict`, `confidence`, `score`, `votes`). None of it
+/// is composed by the HTTP client, which is what forces the redaction on `failed_agents`' `cause`
+/// — see this module's note there. The endpoint structurally cannot reach these strings: a
+/// `base_url` is consumed as a client target and never interpolated into a mage's prompt. This is
+/// the same line already drawn for `report`, which is why it needs no new machinery — but it needs
+/// saying, because a foreign crate's string reaching output unredacted is this codebase's most
+/// recurrent defect.
+fn agents_json(agents: &[magi_core::schema::AgentOutput]) -> Value {
+    Value::Array(
+        agents
+            .iter()
+            .map(|a| {
+                json!({
+                    "agent": a.agent,
+                    "verdict": a.verdict,
+                    "confidence": a.confidence,
+                    "summary": a.summary,
+                    "reasoning": a.reasoning,
+                    "findings": findings_json(&a.findings),
+                    "recommendation": a.recommendation,
+                })
+            })
+            .collect(),
+    )
+}
+
+/// The six-field `Finding` contract. `file`/`line` stay nullable rather than being omitted when
+/// absent — the same shape-stability rule one level down.
+fn findings_json(findings: &[magi_core::schema::Finding]) -> Value {
+    Value::Array(
+        findings
+            .iter()
+            .map(|f| {
+                json!({
+                    "severity": f.severity,
+                    "title": f.title,
+                    "detail": f.detail,
+                    "file": f.file,
+                    "line": f.line,
+                    "category": f.category,
+                })
+            })
+            .collect(),
+    )
+}
+
+/// magi-core's own consensus, forwarded so the consumer's can be CONTRASTED with it.
+///
+/// It does not replace a downstream consensus engine: the two are independently written weight and
+/// confidence formulas that need not agree, and a divergence between them is a quality signal
+/// nobody could see if only one of them travelled.
+fn consensus_json(c: &magi_core::consensus::ConsensusResult) -> Value {
+    json!({
+        "consensus": c.consensus,
+        "consensus_verdict": c.consensus_verdict,
+        "confidence": c.confidence,
+        "score": c.score,
+        "agent_count": c.agent_count,
+        "votes": c.votes,
+        "majority_summary": c.majority_summary,
+    })
 }
 
 /// Explains —ADDING to `err`'s message, never replacing it— a `MagiError::InsufficientAgents`
