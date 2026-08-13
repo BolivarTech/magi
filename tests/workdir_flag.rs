@@ -80,6 +80,24 @@ fn run(cmd: &mut Command) -> (i32, String, String) {
     )
 }
 
+/// Creates a workspace **in** `dir` without going through `-w`.
+///
+/// The distinction is the whole reason this helper exists. Seeding with `init -w <dir>` makes
+/// a test's setup depend on the very mechanism the test evaluates: with `-w` ignored, the
+/// `.magi/` lands in the current directory instead, the assertion then resolves that same
+/// current directory, finds the workspace there, and the test passes while measuring nothing.
+/// A mutation run proved it — the first version of `vault_diagnose_also_honors_the_workdir`
+/// stayed green with the flag disabled, and no amount of strengthening its assertions fixed
+/// that, because setup and assertion moved together.
+///
+/// Running `init` with `dir` as the process's current directory removes the coupling: the
+/// workspace exists at a known place no matter what `-w` does.
+fn seed_workspace(dir: &Path) -> Command {
+    let mut c = magi_in(dir);
+    c.args(["-p", TEST_PASSPHRASE, "init"]);
+    c
+}
+
 #[test]
 fn init_scaffolds_into_the_named_workdir_and_not_the_current_directory() {
     let (_cwd_guard, cwd) = tempdir_canonical();
@@ -152,9 +170,7 @@ fn vault_ls_resolves_the_workspace_from_the_named_workdir() {
     let (_cwd_guard, cwd) = tempdir_canonical();
     let (_target_guard, target) = tempdir_canonical();
 
-    let (init_code, _, init_err) = run(magi_in(cwd.as_path())
-        .args(["-p", TEST_PASSPHRASE, "init", "-w"])
-        .arg(target.as_path()));
+    let (init_code, _, init_err) = run(&mut seed_workspace(target.as_path()));
     assert_eq!(
         init_code, 0,
         "precondition: init -w must succeed ({init_err})"
@@ -183,9 +199,7 @@ fn vault_accepts_the_workdir_before_its_own_subcommand_too() {
     let (_cwd_guard, cwd) = tempdir_canonical();
     let (_target_guard, target) = tempdir_canonical();
 
-    let (init_code, _, init_err) = run(magi_in(cwd.as_path())
-        .args(["-p", TEST_PASSPHRASE, "init", "-w"])
-        .arg(target.as_path()));
+    let (init_code, _, init_err) = run(&mut seed_workspace(target.as_path()));
     assert_eq!(
         init_code, 0,
         "precondition: init -w must succeed ({init_err})"
@@ -217,9 +231,7 @@ fn vault_diagnose_also_honors_the_workdir() {
     let (_cwd_guard, cwd) = tempdir_canonical();
     let (_target_guard, target) = tempdir_canonical();
 
-    let (init_code, _, init_err) = run(magi_in(cwd.as_path())
-        .args(["-p", TEST_PASSPHRASE, "init", "-w"])
-        .arg(target.as_path()));
+    let (init_code, _, init_err) = run(&mut seed_workspace(target.as_path()));
     assert_eq!(
         init_code, 0,
         "precondition: init -w must succeed ({init_err})"
@@ -230,13 +242,28 @@ fn vault_diagnose_also_honors_the_workdir() {
     // reads the same resolved root as the others, which is a property of where the resolution
     // happens rather than of anything `diagnose` does — and that is exactly the kind of thing
     // a later refactor breaks silently, since nothing about the early return mentions `-w`.
-    let (code, _stdout, stderr) = run(magi_in(cwd.as_path())
+    let (code, stdout, stderr) = run(magi_in(cwd.as_path())
         .args(["vault", "diagnose", "-w"])
         .arg(target.as_path()));
 
     assert_eq!(
         code, 0,
         "vault diagnose must resolve -w too; stderr: {stderr}"
+    );
+    // The exit code alone proves NOTHING here, and asserting only on it is how the first
+    // version of this test came to guard nothing: `run_vault_diagnose` treats an absent DB as
+    // a report, not an error, and returns 0 after printing "no database found at …". So with
+    // `-w` ignored it would resolve the empty current directory, find no database, print that
+    // line, exit 0 — and a code-only assertion would pass. Both halves below are needed: the
+    // positive says it read the target's DB, the negative says it did not fall through.
+    assert!(
+        stdout.contains("envelope:"),
+        "diagnose must have read the workspace under -w (got: {stdout:?})"
+    );
+    assert!(
+        !stdout.contains("no database found"),
+        "diagnose resolved somewhere other than -w — this is the exact pass-for-the-wrong-\
+         reason the assertion above exists to rule out (got: {stdout:?})"
     );
 }
 
@@ -247,9 +274,7 @@ fn vault_takes_the_innermost_workdir_when_given_twice() {
     let (_inner_guard, inner) = tempdir_canonical();
 
     // Only `inner` gets a workspace, so "which one won" is observable rather than inferred.
-    let (init_code, _, init_err) = run(magi_in(cwd.as_path())
-        .args(["-p", TEST_PASSPHRASE, "init", "-w"])
-        .arg(inner.as_path()));
+    let (init_code, _, init_err) = run(&mut seed_workspace(inner.as_path()));
     assert_eq!(
         init_code, 0,
         "precondition: init -w must succeed ({init_err})"
