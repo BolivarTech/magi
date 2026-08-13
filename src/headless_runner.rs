@@ -216,6 +216,13 @@ pub(crate) struct MagiRuntimeParams<'a> {
     pub(crate) timeout_decision: TimeoutDecision,
     /// Where `timeout_decision.warning` is emitted, if present (SC-A04d).
     pub(crate) notice_sink: &'a dyn NoticeSink,
+    /// REQ-EA01/EA03: `consult --structured-verdicts`. It rides HERE rather than as one more
+    /// positional argument down the chain, for the same reason `OpenAiSettings` and `ModeSources`
+    /// are named structs: several same-typed arguments in a row are a silent transposition hazard.
+    ///
+    /// Only the headless CLI can set it. The agent-facing `ConsultTool` never constructs these
+    /// params, so that path cannot express `Include` at all (REQ-EA02).
+    pub(crate) structured_verdicts: bool,
 }
 
 /// Runs `prompt` directly through the 3-perspective MAGI consensus, off the agent
@@ -382,12 +389,18 @@ async fn analyze_direct(
             // them with `resolution` exactly as its own contract specifies.
             let ctx =
                 RunContext::build(runtime.magi_config, &resolution, &runtime.timeout_decision);
+            // REQ-EA01/EA03: the ONLY surface that can ask for them. `ConsultTool` never builds
+            // these params, so the agent-facing path cannot reach `Include` even by accident.
             Ok(report_to_consult_json(
                 &report,
                 &truncated,
                 &resolution,
                 &ctx,
-                StructuredVerdicts::Omit,
+                if runtime.structured_verdicts {
+                    StructuredVerdicts::Include
+                } else {
+                    StructuredVerdicts::Omit
+                },
             ))
         }
         Ok(Err(e)) => Err(ConsultRunError::Runtime(explain_magi_error(
@@ -1340,6 +1353,7 @@ mod tests {
             magi_config: &cfg,
             timeout_decision: neutral_timeout_decision(),
             notice_sink: &sink,
+            structured_verdicts: false,
         };
 
         let cancel = CancellationToken::new();
@@ -2859,6 +2873,7 @@ mod tests {
                 magi_config: &cfg,
                 timeout_decision: neutral_timeout_decision(),
                 notice_sink: &sink,
+                structured_verdicts: false,
             },
             None,
         )
@@ -2909,6 +2924,7 @@ mod tests {
                 magi_config: &diverged,
                 timeout_decision: neutral_timeout_decision(),
                 notice_sink: &sink,
+                structured_verdicts: false,
             },
             None,
         )
@@ -2946,6 +2962,7 @@ mod tests {
                 magi_config: &diverged,
                 timeout_decision: neutral_timeout_decision(),
                 notice_sink: &sink,
+                structured_verdicts: false,
             },
             None,
         )
@@ -2988,6 +3005,7 @@ mod tests {
                 magi_config: &cfg,
                 timeout_decision: decision,
                 notice_sink: &sink,
+                structured_verdicts: false,
             },
             None,
         )
@@ -3028,6 +3046,7 @@ mod tests {
                 magi_config: &cfg,
                 timeout_decision: decision,
                 notice_sink: &sink,
+                structured_verdicts: false,
             },
             None,
         )
@@ -3069,6 +3088,7 @@ mod tests {
                 magi_config: &cfg,
                 timeout_decision: generous,
                 notice_sink: &sink_generous,
+                structured_verdicts: false,
             },
             None,
         )
@@ -3099,6 +3119,7 @@ mod tests {
                 magi_config: &cfg,
                 timeout_decision: absent,
                 notice_sink: &sink_absent,
+                structured_verdicts: false,
             },
             None,
         )
@@ -3133,6 +3154,7 @@ mod tests {
                 magi_config: &cfg,
                 timeout_decision: neutral_timeout_decision(),
                 notice_sink: &sink,
+                structured_verdicts: false,
             },
             None,
         )
@@ -3178,6 +3200,7 @@ mod tests {
                 magi_config: &cfg,
                 timeout_decision: neutral_timeout_decision(),
                 notice_sink: &sink,
+                structured_verdicts: false,
             },
             None,
         )
@@ -3220,6 +3243,7 @@ mod tests {
                 magi_config: &cfg,
                 timeout_decision: neutral_timeout_decision(),
                 notice_sink: &sink,
+                structured_verdicts: false,
             },
             None,
         )
@@ -3273,6 +3297,7 @@ mod tests {
             magi_config: &cfg,
             timeout_decision: neutral_timeout_decision(),
             notice_sink: &sink,
+            structured_verdicts: false,
         };
 
         {

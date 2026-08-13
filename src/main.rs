@@ -368,7 +368,8 @@ impl Args {
     /// `cli_mode_casing_matches_the_shared_mode_vocabulary`.
     fn mode_of_consult(&self) -> Option<Mode> {
         match &self.command {
-            Some(TopCmd::Query(h)) | Some(TopCmd::Consult(h)) => h.mode.map(CliMode::into_mode),
+            Some(TopCmd::Query(h)) => h.mode.map(CliMode::into_mode),
+            Some(TopCmd::Consult(c)) => c.headless.mode.map(CliMode::into_mode),
             _ => None,
         }
     }
@@ -394,7 +395,8 @@ impl Args {
     #[cfg(test)]
     fn untrusted_content(&self) -> bool {
         match &self.command {
-            Some(TopCmd::Query(h)) | Some(TopCmd::Consult(h)) => h.untrusted_content,
+            Some(TopCmd::Query(h)) => h.untrusted_content,
+            Some(TopCmd::Consult(c)) => c.headless.untrusted_content,
             _ => false,
         }
     }
@@ -529,7 +531,34 @@ enum TopCmd {
     Query(HeadlessArgs),
 
     /// Force a MAGI multi-perspective analysis over the prompt (REQ-H02/H21).
-    Consult(HeadlessArgs),
+    Consult(ConsultArgs),
+}
+
+/// `consult`'s arguments: everything `query` takes, plus what only `consult` can mean (REQ-EA01).
+///
+/// # Why a separate struct and not one more field on [`HeadlessArgs`]
+///
+/// The two subcommands shared `HeadlessArgs` outright, and `--mode` already lives there while
+/// meaning nothing to `query` — so the shape was available and the precedent was to accept it.
+/// Flattening instead makes `magi query --structured-verdicts` a **clap parse error** rather than
+/// an argument that parses and then does nothing, which is a failure an operator only discovers
+/// when the field they expected is missing from a batch run's output.
+///
+/// This is NOT the `-w` situation ([`WorkdirArgs`]): nothing here is `global`, so there is no id
+/// collision to trip clap's `debug_assert!` during `Command` construction.
+#[derive(clap::Args, Debug)]
+struct ConsultArgs {
+    /// Everything `query` accepts, unchanged.
+    #[command(flatten)]
+    headless: HeadlessArgs,
+
+    /// Add `agents` and `consensus` — the trio's structured verdicts — to the JSON output.
+    ///
+    /// Opt-in because the same text already travels rendered in `report`, which the tool-result
+    /// cap bounds; a machine consumer that wants the typed form declares it and bounds its own
+    /// payload. Requires `--output-format json`.
+    #[arg(long)]
+    structured_verdicts: bool,
 }
 
 #[derive(Debug)]
@@ -1453,10 +1482,12 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
                 .await,
             ));
         }
-        Some(TopCmd::Consult(h)) => {
+        Some(TopCmd::Consult(c)) => {
+            let structured = c.structured_verdicts;
             return Ok(exit_code(
                 run_consult_subcommand(
-                    h,
+                    c.headless,
+                    structured,
                     explicit_consult_mode,
                     passphrase_flag,
                     &workspace_root,
@@ -5340,6 +5371,9 @@ fn consult_deadline(decision: &magi_rs::magi::TimeoutDecision) -> Duration {
 /// `model`/`provider` above.
 async fn run_consult_subcommand(
     h: HeadlessArgs,
+    // REQ-EA01: `--structured-verdicts`, carried separately because it lives on `ConsultArgs`
+    // and not on the shared `HeadlessArgs`.
+    structured_verdicts: bool,
     explicit_mode: Option<Mode>,
     passphrase_flag: Option<Zeroizing<String>>,
     cwd: &Path,
@@ -5420,6 +5454,7 @@ async fn run_consult_subcommand(
         magi_config: &magi_config,
         timeout_decision,
         notice_sink: notice_sink.as_ref(),
+        structured_verdicts,
     };
     let outcome = run_consult(
         resolved,
@@ -6897,6 +6932,28 @@ mod tests {
     /// are both what a person types, and which one comes to mind first is a coin flip.
     /// Accepting only one turns that coin flip into a usage error, on a subcommand whose
     /// whole job is to be scriptable.
+    /// REQ-EA01: `--structured-verdicts` belongs to `consult` alone, and `query` must REJECT it
+    /// rather than accept an argument that means nothing there.
+    ///
+    /// `query` and `consult` shared one `HeadlessArgs`, and `--mode` still lives there while
+    /// meaning nothing to `query` — so accepting a dead flag was the available, precedented
+    /// shape. The rejection is the point: a flag that parses and silently does nothing is
+    /// discovered when a batch consumer finds the field missing from its output, which is the
+    /// worst possible moment and the hardest to attribute.
+    #[test]
+    fn structured_verdicts_is_a_consult_flag_and_query_rejects_it() {
+        use clap::Parser;
+
+        assert!(
+            Args::try_parse_from(["magi-rs", "consult", "--structured-verdicts"]).is_ok(),
+            "`consult --structured-verdicts` must parse"
+        );
+        assert!(
+            Args::try_parse_from(["magi-rs", "query", "--structured-verdicts"]).is_err(),
+            "`query` must REJECT it at parse time — not accept a no-op it can never honour"
+        );
+    }
+
     #[test]
     fn workdir_flag_parses_on_init_and_on_vault_in_either_position() {
         use clap::Parser;
@@ -7393,9 +7450,12 @@ mod tests {
             "json",
         ]);
         match c.command {
-            Some(TopCmd::Consult(h)) => {
-                assert!(h.full_auto);
-                assert!(matches!(h.output_format, Some(CliOutputFormat::Json)));
+            Some(TopCmd::Consult(c)) => {
+                assert!(c.headless.full_auto);
+                assert!(matches!(
+                    c.headless.output_format,
+                    Some(CliOutputFormat::Json)
+                ));
             }
             _ => panic!("expected the consult subcommand"),
         }
@@ -7897,6 +7957,7 @@ mod tests {
             // (R-A04).
             let code = rt.block_on(run_consult_subcommand(
                 h,
+                false,
                 None,
                 None,
                 &cwd,
@@ -11116,7 +11177,9 @@ mod tests {
                     h.no_memory = true;
 
                     let rt = tokio::runtime::Runtime::new().unwrap();
-                    let code = rt.block_on(run_consult_subcommand(h, None, None, &cwd, None, None));
+                    let code = rt.block_on(run_consult_subcommand(
+                        h, false, None, None, &cwd, None, None,
+                    ));
 
                     assert_ne!(
                         code, 0,
