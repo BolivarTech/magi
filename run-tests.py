@@ -42,8 +42,18 @@ Feature parity: both steps run with **default features**, and neither passes
 `cargo test --doc --all-features` separately when that matters.
 
 Any other argument is forwarded verbatim to `cargo nextest run`, so the inner loop
-of a red-green cycle can be scoped instead of paying for the whole suite. Only
-`--no-doc` is consumed here and withheld from nextest, which would reject it.
+of a red-green cycle can be scoped instead of paying for the whole suite. Two
+exceptions, and both are about the contract above:
+
+* `--no-doc` is CONSUMED here and withheld from nextest, which would reject it.
+* `--message-format`, `--no-capture` and `--nocapture` are REFUSED (exit 2). The
+  first is last-wins in clap, so forwarding one overrides the pinned
+  `libtest-json-plus` and feeds human-readable text to the reporter; the others let
+  test stdout inherit the same pipe and interleave with the JSON. Either leaves
+  test.json stale or garbled -- the failure step 1 exists to prevent, reachable by a
+  shorter path than the one this docstring warns about. Refused loudly rather than
+  stripped, because silently dropping a flag someone typed ends a debugging session
+  in confusion about why it did nothing.
 
 Usage:
     python run-tests.py                          # nextest + reporter + doctests
@@ -108,6 +118,26 @@ def main() -> int:
     # travel on: nextest rejects an unknown flag and the whole run dies, which
     # would read as "the test runner is broken" rather than "that flag is mine".
     nextest_args = [arg for arg in sys.argv[1:] if arg != "--no-doc"]
+
+    # Two forwarded flags would silently break the very contract step 1 exists to keep, so they
+    # are refused rather than passed on. `--message-format` is last-wins in clap, so a
+    # forwarded one overrides the pinned `libtest-json-plus` and feeds human-readable text to
+    # the reporter; `--no-capture` lets test stdout inherit the same pipe and interleave with
+    # the JSON. Either leaves `test.json` stale or garbled -- the failure this file's docstring
+    # spends a paragraph explaining, reachable by a shorter path than the one it warns about.
+    #
+    # Refused loudly instead of stripped: silently dropping a flag someone typed is how a
+    # debugging session ends in confusion about why `--no-capture` printed nothing.
+    for banned in ("--message-format", "--no-capture", "--nocapture"):
+        if any(a == banned or a.startswith(banned + "=") for a in nextest_args):
+            print(
+                f"run-tests.py: refusing to forward {banned} -- it breaks the "
+                "libtest-JSON stream the TDD-Guard reporter parses, leaving "
+                ".claude/tdd-guard/data/test.json stale. Run cargo nextest directly if you "
+                "need it, and re-run this script afterwards to resync the guard.",
+                file=sys.stderr,
+            )
+            return 2
 
     env = dict(os.environ)
     env["NEXTEST_EXPERIMENTAL_LIBTEST_JSON"] = "1"

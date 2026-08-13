@@ -135,13 +135,22 @@ pub fn no_config_notice() -> String {
     format!(
         "No magi.toml — using Ollama defaults ({base}, {model}, \
          Melchior: {mel}, Balthasar: {bal}, Caspar: {cas}). Copy \
-         docs/magi.toml.example to customize, or set provider=\"anthropic\" \
-         for Anthropic.",
+         docs/magi.toml.example to customize; `provider` accepts {vocab}.",
         base = DEFAULT_OPENAI_BASE_URL,
         model = DEFAULT_OPENAI_MODEL,
         mel = DEFAULT_MAGI_MELCHIOR,
         bal = DEFAULT_MAGI_BALTHASAR,
         cas = DEFAULT_MAGI_CASPAR,
+        // Derived from the vocabulary, never a hand-written fourth copy. This notice reaches
+        // the operator who has NOT run `magi init` — precisely the one who never sees the
+        // scaffold's improved comment — so naming only `anthropic` here left the openai-compat
+        // user, pointing at Groq or OpenRouter, with no surface at all to learn the value
+        // from, while a wrong guess is a fatal parse error rather than a warning.
+        vocab = magi_rs::magi::kind::ProviderKind::VOCABULARY
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(" | "),
     )
 }
 
@@ -155,9 +164,11 @@ pub fn no_config_notice() -> String {
 /// # Layout
 /// - **Active**: `provider`, `[openai]`, `[anthropic]`, `[magi]`, the five `[memory]`
 ///   essentials (`mode`, `context_budget_tokens`, `distill_enabled`,
-///   `evicted_retention_days`, `max_records`), and the three `[embedding]` essentials
-///   (`base_url`, `model`, `dim`).
-/// - **Commented**: all remaining `[memory]` and `[embedding]` fields with inline
+///   `evicted_retention_days`, `max_records`), and the `[embedding]` essentials
+///   (`model`, `dim` — `base_url` is deliberately NOT among them).
+/// - **Commented**: `[embedding].base_url`, whose whole purpose is to be ABSENT so the embedder
+///   inherits the root endpoint (REQ-A21); emitting it active pins a value and silently ends
+///   that inheritance. Plus all remaining `[memory]`/`[embedding]` fields with inline
 ///   documentation, ready to uncomment.
 pub fn render_default_magi_toml() -> String {
     use crate::memory::config::{EmbeddingConfig, MemoryConfig};
@@ -953,6 +964,24 @@ mod tests {
             assert!(
                 t.starts_with("model") || t.starts_with("lineage"),
                 "only pool entries may follow the pool; found: {t}"
+            );
+        }
+    }
+
+    /// The no-config startup notice must name every accepted `provider` value too.
+    ///
+    /// This is the MORE operator-visible of the two surfaces: it fires for whoever has not run
+    /// `magi init`, which is exactly the person who never sees the scaffold comment. Naming
+    /// only `anthropic` there left the `openai-compat` user — pointing at Groq, OpenRouter or a
+    /// vLLM server — with no surface at all to learn the value from, while a wrong guess is a
+    /// fatal parse error rather than a warning.
+    #[test]
+    fn the_no_config_notice_names_every_accepted_provider_value() {
+        let notice = no_config_notice();
+        for kind in magi_rs::magi::kind::ProviderKind::VOCABULARY {
+            assert!(
+                notice.contains(&kind.to_string()),
+                "the no-config notice must name `{kind}`; it said: {notice:?}"
             );
         }
     }

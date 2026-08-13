@@ -81,6 +81,16 @@ pub struct ProviderKindParseError {
 }
 
 impl ProviderKind {
+    /// Every accepted value, in declaration order.
+    ///
+    /// Exists so no surface has to hand-write the list a fourth time. `parse` and `Display`
+    /// already carry the three literals once each and are kept honest by each other; anything
+    /// that has to SHOW the operator what is accepted — the scaffold header, the no-config
+    /// startup notice, an error message — iterates this instead. A fourth copy is a fourth
+    /// place to forget when a value is added, and the ones that only ever get read by a human
+    /// are exactly the copies nothing would catch.
+    pub const VOCABULARY: [Self; 3] = [Self::Ollama, Self::OpenAiCompat, Self::Anthropic];
+
     /// Parses a configuration value.
     ///
     /// # Errors

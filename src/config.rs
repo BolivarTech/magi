@@ -1714,6 +1714,43 @@ base_url = "http://embedder-host:11434/v1"
     /// Same fix shape: pin the example's parsed values against the single source of truth so a
     /// future edit to either side that breaks the match fails this test instead of shipping a
     /// stale example silently.
+    /// The example's rotation pool must equal `DEFAULT_SCAFFOLD_POOL` — model AND lineage, in
+    /// order.
+    ///
+    /// Its neighbours already mirror the trio's models and lineages and the complexity
+    /// thresholds against `defaults.rs`; the pool was the largest set of literals left
+    /// hand-synced, and v0.14.0 grew it from three pairs to five across two separate commits —
+    /// one editing the generator, one editing the example. That manual mirror step is exactly
+    /// what this file's neighbouring rustdoc warns about: the example still PARSING proves the
+    /// labels are present, and says nothing about them still being the right ones.
+    ///
+    /// Order matters and is asserted: the pool is rotation PREFERENCE, strongest first, so a
+    /// reordered example teaches a different fallback order than the tool generates.
+    #[test]
+    fn example_toml_fallback_pool_matches_the_builtin_scaffold_pool() {
+        let raw = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/docs/magi.toml.example"
+        ))
+        .expect("docs/magi.toml.example must be readable");
+        let parsed = MagiConfig::from_toml_str(&raw).expect("the example must parse");
+
+        let actual: Vec<(String, String)> = parsed
+            .fallback_pool()
+            .iter()
+            .map(|e| (e.model.clone(), e.lineage.to_string()))
+            .collect();
+        let expected: Vec<(String, String)> = crate::defaults::DEFAULT_SCAFFOLD_POOL
+            .iter()
+            .map(|(m, l)| ((*m).to_string(), (*l).to_string()))
+            .collect();
+
+        assert_eq!(
+            actual, expected,
+            "docs/magi.toml.example's [[magi.fallback]] entries must match              DEFAULT_SCAFFOLD_POOL exactly, in order"
+        );
+    }
+
     #[test]
     fn example_toml_magi_models_match_the_builtin_defaults() {
         let raw = std::fs::read_to_string(concat!(

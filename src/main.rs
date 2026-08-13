@@ -404,8 +404,9 @@ impl Args {
     /// Deliberately does **not** answer for `query`/`consult`, which resolve their own
     /// `HeadlessArgs.workdir` further down (`run_query_subcommand`/`run_consult_subcommand`).
     /// Two arg definitions with the same name is a fact worth reading twice: this accessor
-    /// covers the two subcommands whose root is decided *before* dispatch, and the headless
-    /// pair keeps deciding it after, exactly as it did before this flag existed.
+    /// covers the two subcommands whose root is decided *before* dispatch; the headless pair
+    /// still decides it after, in `prepare_headless` — but since v0.14.0 through the **same**
+    /// resolver, so *where* it is decided still differs while *what happens* no longer does.
     ///
     /// Read **before** `self.command.take()` in `run()`, same constraint as
     /// [`Self::mode_of_consult`] — after the `take` it would always answer `None`.
