@@ -8678,6 +8678,62 @@ mod tests {
             );
         }
 
+        /// A trailing slash is not a pair difference on `anthropic` either.
+        ///
+        /// The OpenAI-compatible kinds get this for free — `openai_compat_root` trims before it
+        /// appends `/v1`. `anthropic` is passed through untouched, so `…/v1` and `…/v1/` compared
+        /// as two pairs and the fold was blocked: the same "ordinary thing to write" class as the
+        /// `/v1` spelling beside it, and the same conservative-but-wrong outcome.
+        #[test]
+        fn a_trailing_slash_is_not_a_second_anthropic_endpoint() {
+            let cfg = MagiConfig::from_toml_str(
+                "provider = \"anthropic\"\n\
+                 [anthropic]\n\
+                 model = \"principal-model\"\n\
+                 [magi]\n\
+                 kind = \"anthropic\"\n\
+                 base_url = \"https://api.anthropic.com/v1/\"\n\
+                 melchior_model    = \"mel\"\nmelchior_lineage  = \"lin-m\"\n\
+                 balthasar_model   = \"bal\"\nbalthasar_lineage = \"lin-b\"\n\
+                 caspar_model      = \"cas\"\ncaspar_lineage    = \"lin-c\"\n\
+                 [[magi.fallback]]\n\
+                 model   = \"principal-model\"\nlineage = \"lin-rescue\"\n",
+            )
+            .expect("an anthropic trio with its own base_url is legal");
+
+            let endpoints = ResolvedEndpoints {
+                root: EndpointTemplate::parse("https://api.anthropic.com/v1", Scope::Root)
+                    .expect("a flat test URL must parse")
+                    .resolve(&mut NoVaultInScope, Scope::Root)
+                    .expect("no placeholders, no vault"),
+                magi: endpoint_at("https://api.anthropic.com/v1/"),
+            };
+            assert_ne!(
+                endpoints.root.as_str(),
+                endpoints.magi.as_str(),
+                "precondition: the two spellings differ as STRINGS"
+            );
+
+            let probe = ProbeOutcome {
+                trio: trio_table_without_the_principal(),
+                principal: Some((
+                    "principal-model".to_string(),
+                    magi_rs::magi::probe::Measurement::Measured {
+                        window: 262_144,
+                        digest: None,
+                    },
+                )),
+            };
+
+            let view = candidate_window_view(&cfg, &endpoints, ProviderKind::Anthropic, &probe);
+
+            assert!(
+                view.contains_key("principal-model"),
+                "one host, one kind, one model — a trailing slash is not a second endpoint: \
+                 {view:?}"
+            );
+        }
+
         /// SC-R01/REQ-R03: the pool declared in `[[magi.fallback]]` reaches magi-core with each
         /// candidate's model AND its lineage, in the declared order (strongest first).
         ///
