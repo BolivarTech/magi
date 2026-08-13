@@ -3192,18 +3192,26 @@ fn candidate_window_view(
             == normalized_pair_key(principal_kind, &endpoints.magi);
     let mut view = probe.trio.clone();
     if let (true, Some((model, m))) = (shares_the_trios_pair, probe.principal.as_ref()) {
-        // `or_insert`, never `insert`: the trio's table stays authoritative for the keys it owns.
         // A seat may legally resolve to the principal's own tag (`seats_with_env_overrides` falls
-        // an undeclared seat back to exactly that model), so the two can name the same row.
+        // an undeclared seat back to exactly that model), so the two can name the same row — and
+        // the two-batch case is LIVE, not hypothetical: `orchestrate_probes` still branches on
+        // `magi_endpoint_diverges()`, so a redundant declaration (the very case the predicate
+        // above was widened to admit) probes the principal and the trio in separate `join!`
+        // batches against the same daemon. Those can disagree: one may time out under the
+        // endpoint's concurrency cap while its twin answers.
         //
-        // The two-batch case is LIVE, not hypothetical: `orchestrate_probes` still branches on
-        // `magi_endpoint_diverges()`, so a redundant declaration — the very case the predicate
-        // above was widened to admit — probes the principal and the trio in separate `join!`
-        // batches against the same daemon. Separate batches can disagree even there: one can time
-        // out under the endpoint's concurrency cap while its twin answers. Taking the trio's row
-        // when it exists means such a disagreement can never move a SEAT's measurement, and with
-        // it `input_warn_tokens` — which would break D-R09 with nothing to catch it.
-        view.entry(model.clone()).or_insert_with(|| m.clone());
+        // When they do, the observation that actually MEASURED wins. It is the same
+        // `(endpoint, model)` pair either way, so a real window is simply better evidence than a
+        // probe that gave up — and discarding it would credit the candidate with the smallest
+        // window measured this run, which is the defect this whole function exists to remove.
+        //
+        // This is NOT a D-R09 question, though an earlier version of this comment claimed it was:
+        // `derive_warn_tokens` runs on `trio_seats` inside `probe_and_report`, before this view
+        // exists, so nothing decided here can reach the threshold.
+        let keep_existing = matches!(view.get(model), Some(Measurement::Measured { .. }));
+        if !keep_existing {
+            view.insert(model.clone(), m.clone());
+        }
     }
     view
 }
