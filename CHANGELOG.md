@@ -9,6 +9,32 @@ changes and the **patch** position signals backward-compatible fixes.
 
 ## [Unreleased]
 
+## [0.14.3] - 2026-08-13
+
+### Added
+
+- **`magi consult --structured-verdicts` adds `agents` and `consensus` to the JSON output.**
+  A machine consumer gets the trio's verdicts typed — each seat's `verdict`, `confidence`,
+  `summary`, `reasoning`, `recommendation` and per-finding `severity`/`title`/`detail`/`file`/
+  `line`/`category` — instead of recovering them from rendered markdown. `consensus` carries
+  magi-core's own computation so a consumer that runs its own can **contrast** the two; a
+  divergence between independently written formulas is a signal nobody could see if only one
+  travelled.
+
+  Opt-in, and deliberately so. The same text already travels rendered in `report`, which is
+  bounded by the tool-result cap, so emitting it unconditionally would return the bytes that cap
+  exists to bound through a second key. The agent-facing `/consult` tool never emits them at all:
+  there the value goes straight into the agent's context window.
+
+  The keys are **always present when the flag is passed**, empty array included — an empty
+  `agents` certifies that no seat completed. The output shape varies by flag, never by data, so a
+  strict-schema consumer still gets one shape on every run. The flag lives on `consult` alone
+  (`magi query --structured-verdicts` is a parse error, not an accepted no-op) and requires
+  `--output-format json`; with text output it exits **2** rather than being ignored.
+
+  Requested by `magi-claude` (ref E-A) to delete ~11 Python modules that reimplement what this
+  crate already does.
+
 ## [0.14.2] - 2026-08-13
 
 ### Fixed
@@ -1131,7 +1157,8 @@ Initial pre-release, published primarily to reserve the `magi-rs` crate name.
 - `ratatui` TUI with Normal / Selection / Visual modes and Unicode-safe input.
 - OAuth (PKCE) login and OS keyring integration, with `magi-rust` legacy migration.
 
-[Unreleased]: https://github.com/BolivarTech/magi/compare/v0.14.2...HEAD
+[Unreleased]: https://github.com/BolivarTech/magi/compare/v0.14.3...HEAD
+[0.14.3]: https://github.com/BolivarTech/magi/compare/v0.14.2...v0.14.3
 [0.14.2]: https://github.com/BolivarTech/magi/compare/v0.14.1...v0.14.2
 [0.14.1]: https://github.com/BolivarTech/magi/compare/v0.13.1...v0.14.1
 [0.13.1]: https://github.com/BolivarTech/magi/compare/v0.13.0...v0.13.1

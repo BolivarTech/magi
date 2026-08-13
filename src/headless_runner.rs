@@ -55,7 +55,7 @@ use crate::config::MagiConfig;
 use crate::task::AbortOnDrop;
 use crate::tools::consult::{
     annotate_report_text, check_query_size, explain_magi_error, report_to_consult_json,
-    truncate_report, RunContext,
+    truncate_report, RunContext, StructuredVerdicts,
 };
 
 /// Dedup key for [`NoticeSink::once`] — the SC-A04d warning, distinct from the
@@ -216,6 +216,14 @@ pub(crate) struct MagiRuntimeParams<'a> {
     pub(crate) timeout_decision: TimeoutDecision,
     /// Where `timeout_decision.warning` is emitted, if present (SC-A04d).
     pub(crate) notice_sink: &'a dyn NoticeSink,
+    /// REQ-EA01/EA03: `consult --structured-verdicts`. It rides HERE rather than as one more
+    /// positional argument down the chain, for the same reason `OpenAiSettings` and `ModeSources`
+    /// are named structs: several same-typed arguments in a row are a silent transposition hazard.
+    ///
+    /// Carried as the enum rather than a `bool` for the reason the enum exists: a bare `false`
+    /// at a call site says nothing about why. Only the headless CLI ever sets `Include` —
+    /// `ConsultTool` builds its own literal `Omit` and never these params (REQ-EA02).
+    pub(crate) structured_verdicts: StructuredVerdicts,
 }
 
 /// Runs `prompt` directly through the 3-perspective MAGI consensus, off the agent
@@ -382,11 +390,14 @@ async fn analyze_direct(
             // them with `resolution` exactly as its own contract specifies.
             let ctx =
                 RunContext::build(runtime.magi_config, &resolution, &runtime.timeout_decision);
+            // REQ-EA01/EA03: the ONLY surface that can ask for them. `ConsultTool` never builds
+            // these params, so the agent-facing path cannot reach `Include` even by accident.
             Ok(report_to_consult_json(
                 &report,
                 &truncated,
                 &resolution,
                 &ctx,
+                runtime.structured_verdicts,
             ))
         }
         Ok(Err(e)) => Err(ConsultRunError::Runtime(explain_magi_error(
@@ -1339,6 +1350,7 @@ mod tests {
             magi_config: &cfg,
             timeout_decision: neutral_timeout_decision(),
             notice_sink: &sink,
+            structured_verdicts: StructuredVerdicts::Omit,
         };
 
         let cancel = CancellationToken::new();
@@ -2837,6 +2849,50 @@ mod tests {
 
     // ── REQ-H21/H22: consult (direct + forced) ─────────────────────────────────
 
+    /// REQ-EA01/EA03, the POSITIVE path through the runner: `Include` on the params actually
+    /// reaches the emitted object.
+    ///
+    /// The other tests cover the emitter given its answer, the CLI given its flag, and the agent
+    /// path's permanent `Omit`. None of them covers the segment between: a flag that parses, is
+    /// stored on `MagiRuntimeParams` and is never applied would satisfy every one of them. That
+    /// exact defect — a config bundle threaded past its consumer and quietly not used — has
+    /// happened in this codebase before (`AutonomousRunConfig`), which is why the wiring gets its
+    /// own test rather than being inferred from the parts (S1 gate, Balthasar).
+    #[tokio::test]
+    async fn test_run_consult_include_reaches_the_emitted_object() {
+        let cfg = MagiConfig::default();
+        let sink = RecordingNoticeSink::default();
+        let outcome = run_consult(
+            resolved_stub(),
+            canned_magi(),
+            "should we migrate X to Y?",
+            None,
+            Some(Mode::Analysis),
+            &MagiRuntimeParams {
+                kind: ProviderKind::OpenAiCompat,
+                classifier: &NeverClassifier,
+                configured_mode: None,
+                untrusted_content: false,
+                magi_config: &cfg,
+                timeout_decision: neutral_timeout_decision(),
+                notice_sink: &sink,
+                structured_verdicts: StructuredVerdicts::Include,
+            },
+            None,
+        )
+        .await;
+
+        let consult = outcome.consult.expect("the MAGI object must be present");
+        assert!(
+            consult["agents"].as_array().is_some_and(|a| !a.is_empty()),
+            "the seats that answered must reach the object: {consult:?}"
+        );
+        assert!(
+            consult["consensus"]["consensus_verdict"].is_string(),
+            "and so must the consensus: {consult:?}"
+        );
+    }
+
     /// `magi consult` direct path: the 3 perspectives run off the agent loop and
     /// `RunOutcome.consult` is the (non-null) MAGI object; `response` is the report
     /// and no tool calls are recorded (REQ-H21).
@@ -2858,6 +2914,7 @@ mod tests {
                 magi_config: &cfg,
                 timeout_decision: neutral_timeout_decision(),
                 notice_sink: &sink,
+                structured_verdicts: StructuredVerdicts::Omit,
             },
             None,
         )
@@ -2908,6 +2965,7 @@ mod tests {
                 magi_config: &diverged,
                 timeout_decision: neutral_timeout_decision(),
                 notice_sink: &sink,
+                structured_verdicts: StructuredVerdicts::Omit,
             },
             None,
         )
@@ -2945,6 +3003,7 @@ mod tests {
                 magi_config: &diverged,
                 timeout_decision: neutral_timeout_decision(),
                 notice_sink: &sink,
+                structured_verdicts: StructuredVerdicts::Omit,
             },
             None,
         )
@@ -2987,6 +3046,7 @@ mod tests {
                 magi_config: &cfg,
                 timeout_decision: decision,
                 notice_sink: &sink,
+                structured_verdicts: StructuredVerdicts::Omit,
             },
             None,
         )
@@ -3027,6 +3087,7 @@ mod tests {
                 magi_config: &cfg,
                 timeout_decision: decision,
                 notice_sink: &sink,
+                structured_verdicts: StructuredVerdicts::Omit,
             },
             None,
         )
@@ -3068,6 +3129,7 @@ mod tests {
                 magi_config: &cfg,
                 timeout_decision: generous,
                 notice_sink: &sink_generous,
+                structured_verdicts: StructuredVerdicts::Omit,
             },
             None,
         )
@@ -3098,6 +3160,7 @@ mod tests {
                 magi_config: &cfg,
                 timeout_decision: absent,
                 notice_sink: &sink_absent,
+                structured_verdicts: StructuredVerdicts::Omit,
             },
             None,
         )
@@ -3132,6 +3195,7 @@ mod tests {
                 magi_config: &cfg,
                 timeout_decision: neutral_timeout_decision(),
                 notice_sink: &sink,
+                structured_verdicts: StructuredVerdicts::Omit,
             },
             None,
         )
@@ -3177,6 +3241,7 @@ mod tests {
                 magi_config: &cfg,
                 timeout_decision: neutral_timeout_decision(),
                 notice_sink: &sink,
+                structured_verdicts: StructuredVerdicts::Omit,
             },
             None,
         )
@@ -3219,6 +3284,7 @@ mod tests {
                 magi_config: &cfg,
                 timeout_decision: neutral_timeout_decision(),
                 notice_sink: &sink,
+                structured_verdicts: StructuredVerdicts::Omit,
             },
             None,
         )
@@ -3272,6 +3338,7 @@ mod tests {
             magi_config: &cfg,
             timeout_decision: neutral_timeout_decision(),
             notice_sink: &sink,
+            structured_verdicts: StructuredVerdicts::Omit,
         };
 
         {
