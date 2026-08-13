@@ -5380,6 +5380,18 @@ async fn run_consult_subcommand(
     anthropic_key: Option<String>,
     openai_key: Option<String>,
 ) -> i32 {
+    // REQ-EA06, BEFORE `prepare_headless`: the flag only has somewhere to put its output in the
+    // JSON object, so under text output it is operator misuse — exit 2, named, nothing written.
+    // Accepting it silently would be a no-op discovered when a downstream consumer finds the
+    // field missing, which is both the latest and the hardest-to-attribute moment. Checked here
+    // rather than after setup so a mistyped invocation costs no workspace, vault or trio.
+    if structured_verdicts && !matches!(h.output_format, Some(CliOutputFormat::Json)) {
+        eprintln!(
+            "error: --structured-verdicts needs --output-format json; \
+             the structured verdicts have nowhere to go in text output"
+        );
+        return 2;
+    }
     let ctx = match prepare_headless(&h, passphrase_flag, cwd, anthropic_key, openai_key).await {
         Ok(c) => c,
         Err(code) => return code,
@@ -7967,6 +7979,51 @@ mod tests {
             assert_eq!(
                 code, 2,
                 "an over-cap consult prompt ⇒ exit 2 (rejected, not truncated)"
+            );
+        });
+    }
+
+    /// REQ-EA06: `--structured-verdicts` without `--output-format json` ⇒ exit 2, before any
+    /// work is done.
+    ///
+    /// The flag only has meaning in the JSON object; text output has nowhere to put it. Ignoring
+    /// it silently would be a no-op the operator discovers when a downstream consumer finds the
+    /// field missing — the same misattribution `-w` on a nonexistent directory used to produce,
+    /// and the reason that one was moved to a pre-dispatch check with exit 2.
+    ///
+    /// Asserted through `run_consult_subcommand` with a workspace that could otherwise run, so a
+    /// non-zero code cannot come from some unrelated failure: the neighbouring over-cap test
+    /// needs a fake key to get that far, and this one deliberately does NOT — it must reject
+    /// before credentials, workspace or trio are ever consulted.
+    #[test]
+    #[serial_test::serial]
+    fn structured_verdicts_without_json_output_is_rejected_before_any_work() {
+        with_var("MAGI_PROVIDER", None, || {
+            let (_tmp, cwd) = init_static_workspace();
+            let prompt = cwd.join("prompt.txt");
+            std::fs::write(&prompt, "should we migrate X to Y?").unwrap();
+            let out = cwd.join("out.json");
+
+            let mut h = base_hargs();
+            h.input = Some(prompt);
+            h.output = Some(out.clone());
+            h.workdir = Some(cwd.clone());
+            h.no_memory = true;
+            // Left at the default, which is TEXT — the case the flag cannot serve.
+            h.output_format = None;
+
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            let code = rt.block_on(run_consult_subcommand(
+                h, true, None, None, &cwd, None, None,
+            ));
+
+            assert_eq!(
+                code, 2,
+                "operator misuse, not a run failure: the flag has nowhere to put its output"
+            );
+            assert!(
+                !out.exists(),
+                "rejected BEFORE any work: nothing may be written"
             );
         });
     }
