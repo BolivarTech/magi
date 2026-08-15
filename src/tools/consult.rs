@@ -1002,7 +1002,20 @@ pub(crate) fn explain_magi_error(err: &MagiError, kind: ProviderKind) -> String 
     let base = redact_foreign_error(err);
     match (err, kind) {
         (MagiError::InsufficientAgents { .. }, ProviderKind::Ollama) => {
-            format!("{base} — possible cause: {KEYLESS_AUTH_EXPLANATION}")
+            // Narrowed (E-B, spec §6): a prior wording read as a diagnosis ("possible cause:
+            // <keyless>") and sent a requester down the wrong path — their endpoint had already
+            // proven itself keyless-compatible on a previous run, so THIS total failure had a
+            // different cause. `InsufficientAgents` never carries a per-agent cause (the `failed`
+            // map is discarded before this error is built — see the rustdoc above), so the most
+            // honest and still-actionable framing names keyless auth as ONE hypothesis among
+            // several rather than the explanation, and points at the counts already in `base` —
+            // the succeeded/required numbers — as the concrete thing to weigh it against.
+            format!(
+                "{base} — one possible cause (not the only one): {KEYLESS_AUTH_EXPLANATION} A \
+                 total failure can equally mean the endpoint was unreachable, timed out, or \
+                 served an unavailable model; weigh this against the succeeded/required counts \
+                 above and any per-seat detail your logs captured before assuming it is the cause."
+            )
         }
         _ => base.to_string(),
     }
