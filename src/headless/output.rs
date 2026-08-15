@@ -946,9 +946,13 @@ mod tests {
     ///
     /// A coarse ceiling, not a precise wall-clock budget (this repo's own documented
     /// flakiness lesson: assert on a generous failure deadline, never on duration). At this
-    /// input size a genuine quadratic regression would take on the order of minutes; this
-    /// gives tens of seconds of headroom above the sub-second time linear scaling actually
-    /// takes, so ordinary CI/CPU contention cannot false-fail it.
+    /// input size a genuine quadratic regression would take on the order of minutes; the
+    /// deadline below is deliberately widened to 60s, well above the sub-second time linear
+    /// scaling actually takes, so it stays a *failure* bound rather than a performance target
+    /// and cannot false-fail under the Argon2-driven CPU contention this repo's `nextest`
+    /// suite is known to produce under load (see `CLAUDE.md`'s section on intermittent test
+    /// failures under load) — losing no signal, since a real quadratic blowup on 640 KB would
+    /// still overshoot it by orders of magnitude.
     #[test]
     fn redact_secret_patterns_stays_linear_on_the_adversarial_near_miss_pattern() {
         let block = "a".repeat(GENERIC_SECRET_RUN_MIN_LEN - 1) + "!";
@@ -959,7 +963,7 @@ mod tests {
             let _ = tx.send(());
         });
         assert!(
-            rx.recv_timeout(std::time::Duration::from_secs(15)).is_ok(),
+            rx.recv_timeout(std::time::Duration::from_secs(60)).is_ok(),
             "redact_secret_patterns did not return within a generous ceiling on the \
              near-miss-run pattern; this is the signal of a regression to quadratic \
              behavior, not ordinary CI slowness"

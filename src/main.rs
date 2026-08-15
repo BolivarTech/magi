@@ -5509,6 +5509,14 @@ async fn run_query_subcommand(
 ///
 /// A tuple and not a struct: the three types are distinct, so the compiler catches a
 /// transposition, and the values are destructured at the single point of use.
+///
+/// That three-distinct-types property is an unstated assumption load-bearing for this
+/// choice, not a permanent guarantee: it is what makes positional destructuring safe here.
+/// If any of these fields is ever changed to share a type with another — for example, if
+/// `effective_max_rotations` started returning `u64` instead of `u32`, matching the first
+/// element — a transposed pair would compile and run silently, feeding the REQ-R20 formula
+/// a wrong ceiling and rotation count. Should that happen, return a named struct instead of
+/// continuing to rely on this tuple's positions.
 fn timeout_scale(cfg: &MagiConfig) -> (u64, u32, bool) {
     (
         cfg.magi()

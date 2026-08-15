@@ -107,6 +107,10 @@ pub struct TranscriptEntry {
 }
 
 /// Effective limits applied to the run (makes the REQ-H12b clamp visible).
+///
+/// This struct's own serialized field count is mirrored by hand in `APPLIED_CAPS_OWN_FIELDS`
+/// in this module's tests. Adding or removing a field here means updating that constant too;
+/// the flatten collision guard test will fail loudly if you forget.
 #[derive(Debug, Clone, Serialize)]
 pub struct AppliedCaps {
     /// Effective tool invocation cap after applying the operator cap.
