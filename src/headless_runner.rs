@@ -1252,11 +1252,7 @@ mod tests {
     /// filler for tests in this module that do not care about `timeout_below_
     /// formula` (fix round 1, Finding 1's `MagiRuntimeParams.timeout_decision`).
     fn neutral_timeout_decision() -> TimeoutDecision {
-        TimeoutDecision {
-            effective_secs: magi_rs::magi::AGENT_TIMEOUT_SECS,
-            warning: None,
-            below_formula: false,
-        }
+        TimeoutDecision::obeyed(magi_rs::magi::AGENT_TIMEOUT_SECS)
     }
 
     /// Sink double: records emitted messages in memory instead of touching
