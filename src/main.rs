@@ -3259,6 +3259,22 @@ fn candidate_window_view(
     view
 }
 
+// RED-phase stubs (Task 3, E-B): minimal bodies so the test module compiles and the new tests
+// below fail on their ASSERTIONS rather than a compile error (per the controller ruling — a
+// compile-error Red never shows an assertion failing, so it never proves the assertion is wired
+// to the value its name claims). `#[cfg(test)]` because at this point in the sequence nothing in
+// production calls them yet; Green phase drops the attribute and wires them into
+// `prepare_headless`'s two call sites, at which point they stop being test-only.
+#[cfg(test)]
+fn floored_ceiling_notice(_b: &magi_rs::magi::BudgetTelemetry) -> Option<Notice> {
+    unimplemented!("wired with real logic in Task 3's Green phase")
+}
+
+#[cfg(test)]
+fn above_sanity_notice(_ceiling_secs: u64, _b: &magi_rs::magi::BudgetTelemetry) -> Option<Notice> {
+    unimplemented!("wired with real logic in Task 3's Green phase")
+}
+
 /// Builds the MAGI trio with the NATIVE providers of magi-core (REQ-A01).
 ///
 /// The adapter disappears and with it the system-prompt doubling: each mage receives its prompt
@@ -8083,6 +8099,136 @@ mod tests {
             Duration::from_secs(1),
             "the operator's explicit value must be obeyed even under the formula's minimum"
         );
+    }
+
+    /// SC-EB06b: the TUI path passes `None` and its ceiling is unchanged. `None` does not
+    /// mean "unbounded" — it means "use the configured source", which is the only source a
+    /// TUI has. The TUI has no `--timeout` and is not getting one: `--timeout` is a
+    /// `HeadlessArgs` flag whose meaning (a wall clock for an unattended run) has no
+    /// analogue in a session where a human watches and can interrupt.
+    #[test]
+    fn the_tui_path_keeps_the_configured_ceiling() {
+        let cfg = MagiConfig::default();
+        let (ceiling, max_rotations, retry_disabled) = timeout_scale(&cfg);
+        let (effective, telemetry) =
+            magi_rs::magi::BudgetTelemetry::derive(None, ceiling, max_rotations, retry_disabled);
+        // `ResolvedCeiling` has no `PartialEq<u64>` on purpose (it would blur the provenance
+        // the type exists to record), so the comparison goes through `.secs()`.
+        assert_eq!(effective.secs(), ceiling);
+        assert_eq!(
+            telemetry.operation_budget_secs,
+            derive_operation_budget(ceiling).as_secs(),
+            "byte-identical to v0.14.3"
+        );
+    }
+
+    /// The floor notice must name BOTH knobs. The operator has two ways out — raise the
+    /// clock or lower the rotations — and the pre-existing warning mentions only the first.
+    #[test]
+    fn the_floor_notice_names_both_the_clock_and_the_rotations() {
+        let n = floored_ceiling_notice(&magi_rs::magi::BudgetTelemetry {
+            operation_budget_secs: 10,
+            ceiling_floored: true,
+            floor_activation_threshold_secs: 114,
+            max_rotations_effective: 2,
+            ceiling_above_sanity: false,
+        })
+        .expect("a floored run must produce a notice");
+        assert!(n.text.contains("114"), "the number it must be raised to");
+        assert!(
+            n.text.contains("max_rotations"),
+            "the second lever, which the existing below-formula warning never mentions"
+        );
+    }
+
+    /// A run that did not floor produces no floor notice — a notice that always fires is
+    /// noise, and noise is what makes operators stop reading notices.
+    #[test]
+    fn a_healthy_run_produces_no_floor_notice() {
+        assert!(floored_ceiling_notice(&magi_rs::magi::BudgetTelemetry {
+            operation_budget_secs: 149,
+            ceiling_floored: false,
+            floor_activation_threshold_secs: 114,
+            max_rotations_effective: 2,
+            ceiling_above_sanity: false,
+        })
+        .is_none());
+    }
+
+    /// REQ-EB03: the ceiling is derived from the RESOLVED wall clock, not the raw flag.
+    /// This is what makes the startup `assert!` an earlier draft carried unnecessary —
+    /// the two values cannot diverge if only one of them is ever read.
+    ///
+    /// **Verify by MUTATION, because reading cannot see it:** today `resolve_run_timeout`
+    /// always obeys, so raw and resolved are the same number and the test passes either
+    /// way. Temporarily make it return `effective_secs / 2` for the explicit case; this
+    /// test must go red. Restore it afterwards.
+    #[test]
+    fn the_ceiling_is_derived_from_the_resolved_timeout_not_the_raw_flag() {
+        let cfg = MagiConfig::default();
+        let (configured, rotations, retry_disabled) = timeout_scale(&cfg);
+        let asked = 1800_u64;
+        let decision =
+            magi_rs::magi::resolve_run_timeout(Some(asked), configured, rotations, retry_disabled);
+        let (from_resolved, _) = magi_rs::magi::BudgetTelemetry::derive(
+            Some(&decision),
+            configured,
+            rotations,
+            retry_disabled,
+        );
+        assert_eq!(
+            from_resolved.secs(),
+            magi_rs::magi::derive_ceiling_from_timeout(
+                decision.effective_secs,
+                rotations,
+                retry_disabled
+            ),
+            "the trio's ceiling must come from the clock the run will actually enforce"
+        );
+    }
+
+    /// The absent case does NOT round-trip through the resolver. With no `--timeout`,
+    /// `resolve_run_timeout` returns the formula minimum; feeding that back through the
+    /// inverse lands in `[c-1, c]`, and that one second of drift is exactly what SC-EB01
+    /// forbids. The configured ceiling is passed through verbatim instead.
+    #[test]
+    fn an_absent_timeout_does_not_round_trip_through_the_resolver() {
+        let cfg = MagiConfig::default();
+        let (configured, rotations, retry_disabled) = timeout_scale(&cfg);
+        let decision =
+            magi_rs::magi::resolve_run_timeout(None, configured, rotations, retry_disabled);
+        let drifted = magi_rs::magi::derive_ceiling_from_timeout(
+            decision.effective_secs,
+            rotations,
+            retry_disabled,
+        );
+        let (actual, _) =
+            magi_rs::magi::BudgetTelemetry::derive(None, configured, rotations, retry_disabled);
+        assert_eq!(actual.secs(), configured, "byte-identical to v0.14.3");
+        assert!(
+            drifted <= configured,
+            "and the path NOT taken would have drifted downward: {drifted} vs {configured}"
+        );
+    }
+
+    /// The sanity condition reaches the operator too, and as a `Resolution` notice rather
+    /// than `Info`: `render_notices` caps how many `Info` lines survive, and a probable
+    /// typo in the run's wall clock must not be the line that gets dropped.
+    #[test]
+    fn the_sanity_notice_survives_the_info_cap() {
+        let n = above_sanity_notice(
+            900,
+            &magi_rs::magi::BudgetTelemetry {
+                operation_budget_secs: 540,
+                ceiling_floored: false,
+                floor_activation_threshold_secs: 114,
+                max_rotations_effective: 2,
+                ceiling_above_sanity: true,
+            },
+        )
+        .expect("an above-sanity ceiling must produce a notice");
+        assert_eq!(n.tier, NoticeTier::Resolution);
+        assert!(n.text.contains("900"));
     }
 
     /// Task 4.1 — native provider trio construction.
