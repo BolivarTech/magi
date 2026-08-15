@@ -685,4 +685,153 @@ mod tests {
             "the built-in default must sit comfortably above the minimum viable value"
         );
     }
+
+    /// SC-EB02: a generous `--timeout` unlocks a budget far above the 72 s that the
+    /// validated `agent_timeout_secs` range could ever reach. This is the requirement.
+    #[test]
+    fn a_generous_timeout_derives_a_ceiling_above_the_configured_maximum() {
+        // 2 attempts x 3 models x 1.2 slack = 7.2; (1800 - 6) / 7.2 = 249.16 -> 249
+        let ceiling = derive_ceiling_from_timeout(1800, 2, false);
+        assert_eq!(ceiling, 249, "the inverse of the formula that produced 1800");
+        assert!(
+            ceiling > AGENT_TIMEOUT_MAX_SECS,
+            "the whole point of E-B: the derived path is NOT capped by the configured range"
+        );
+        assert_eq!(derive_operation_budget(ceiling).as_secs(), 149);
+    }
+
+    /// SC-EB04: round-trip, bounded to the range where it is TRUE. The inverse never
+    /// returns MORE than the ceiling that produced the timeout — integer division
+    /// truncates downward, which is the safe direction.
+    ///
+    /// **The upper bound is `u64::MAX / factor`, and it is not decorative.** Above it the
+    /// forward direction's `saturating_mul` clamps, so the timeout no longer encodes the
+    /// ceiling and the inverse cannot recover it. Stating the bound is the difference
+    /// between a property and a claim that happens to hold on the samples chosen —
+    /// `the_round_trip_breaks_above_its_stated_bound` pins the other side.
+    #[test]
+    fn the_round_trip_never_overshoots_the_ceiling_that_produced_it() {
+        for ceiling in [15_u64, 16, 30, 45, 90, 120, 249, 600, 3600, 86_400] {
+            for max_rotations in [0_u32, 1, 2, 5] {
+                for retry_disabled in [false, true] {
+                    let factor = attempt_factor(max_rotations, retry_disabled);
+                    assert!(ceiling <= u64::MAX / factor, "sample outside the stated bound");
+                    let t = headless_consult_timeout_secs(ceiling, max_rotations, retry_disabled);
+                    let back = derive_ceiling_from_timeout(t, max_rotations, retry_disabled);
+                    assert!(
+                        back <= ceiling && back >= ceiling.saturating_sub(1),
+                        "round-trip out of band: ceiling={ceiling} rotations={max_rotations} \
+                         retry_disabled={retry_disabled} timeout={t} back={back}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// And OUTSIDE the bound the property is false — asserted rather than left implied,
+    /// because a bound that lives only in a doc comment drifts without failing anything.
+    #[test]
+    fn the_round_trip_breaks_above_its_stated_bound() {
+        let factor = attempt_factor(2, false);
+        let beyond = u64::MAX / factor + 1;
+        let t = headless_consult_timeout_secs(beyond, 2, false);
+        let back = derive_ceiling_from_timeout(t, 2, false);
+        assert!(
+            back < beyond,
+            "saturation must LOSE information here; if this ever passes as an equality the \
+             bound moved and the doc comments above are wrong"
+        );
+    }
+
+    /// SC-EB04c: the complement of the round-trip. BELOW the floor the property is
+    /// false by design — the floor wins — so that half of the domain gets its own
+    /// assertion instead of being silently excluded.
+    #[test]
+    fn a_ceiling_below_the_absolute_floor_comes_back_as_exactly_the_floor() {
+        for ceiling in [1_u64, 5, 10, 14] {
+            let t = headless_consult_timeout_secs(ceiling, 2, false);
+            assert_eq!(
+                derive_ceiling_from_timeout(t, 2, false),
+                AGENT_TIMEOUT_ABSOLUTE_FLOOR_SECS,
+                "below the floor the round-trip is FALSE on purpose: REQ-A04's invariant \
+                 outranks it"
+            );
+        }
+    }
+
+    /// SC-EB04b: effective vs configured `max_rotations` differ when the TOML declares
+    /// nothing — the DEFAULT case, not a rare one. Both directions must be fed the same
+    /// number or the round-trip breaks in the configuration almost everyone has.
+    ///
+    /// **The literal 2 is deliberate and must NOT be replaced by
+    /// `crate::defaults::DEFAULT_MAX_ROTATIONS`.** `mod defaults` is declared only in
+    /// `src/main.rs`, so it is bin-only and unreachable from this library module — the
+    /// reference would not compile. Naming the coupling here is the substitute for the
+    /// intra-crate link Rust cannot give us across that boundary.
+    ///
+    /// **A comment is not enough on its own, and the failure mode is silent:** if the default
+    /// moves from 2 to 3, this test keeps passing — it simply stops testing the DEFAULT case
+    /// and starts testing an arbitrary rotation count, while its name still claims otherwise
+    /// (Checkpoint 2 loop 10, Caspar). The mechanical half of the guard therefore lives on the
+    /// BIN side, where the constant is visible: see
+    /// `the_lib_side_default_rotations_mirror_is_still_accurate` in `src/main.rs`, which fails
+    /// if the two ever diverge. Neither test can enforce this alone; the pair can.
+    #[test]
+    fn both_directions_agree_when_max_rotations_comes_from_the_default() {
+        // Mirrors `defaults::DEFAULT_MAX_ROTATIONS` (bin-only; see above).
+        let effective = 2_u32;
+        let t = headless_consult_timeout_secs(90, effective, false);
+        assert_eq!(derive_ceiling_from_timeout(t, effective, false), 90);
+    }
+
+    /// SC-EB04d: the slack factor is DERIVED, never a literal. `attempt_factor` is the
+    /// single place both directions read it from, so this test pins that they share it.
+    #[test]
+    fn the_slack_factor_is_shared_by_both_directions() {
+        // attempt_factor returns attempts * models * (100 + SLACK_PCT).
+        assert_eq!(
+            attempt_factor(2, false),
+            2 * 3 * (100 + HEADLESS_TIMEOUT_SLACK_PCT),
+            "written as a literal 120, a change to HEADLESS_TIMEOUT_SLACK_PCT would move \
+             the forward function and silently leave the inverse behind"
+        );
+        assert_eq!(attempt_factor(0, true), 1 * 1 * (100 + HEADLESS_TIMEOUT_SLACK_PCT));
+    }
+
+    /// SC-EB05c: the degenerate values. Without `saturating_sub`, `timeout - 6` underflows
+    /// in u64 and the ceiling comes out ASTRONOMICAL instead of minimal — the error
+    /// pointing at exactly the wrong side. `--timeout 0` means zero, never "unbounded".
+    #[test]
+    fn timeouts_at_or_below_the_classify_cost_produce_the_floor_and_never_underflow() {
+        for timeout in [0_u64, 1, 5, 6, 7] {
+            let ceiling = derive_ceiling_from_timeout(timeout, 2, false);
+            assert_eq!(
+                ceiling, AGENT_TIMEOUT_ABSOLUTE_FLOOR_SECS,
+                "--timeout {timeout} must floor, not wrap"
+            );
+        }
+    }
+
+    /// SC-EB05: REQ-A04's invariant survives the derived path across the representable
+    /// range. The bound is `u64::MAX / 100` because the formula multiplies by 100 before
+    /// dividing — stating the bound rather than claiming a universality that is false.
+    #[test]
+    fn the_derived_scale_upholds_req_a04_across_the_representable_range() {
+        let samples = [
+            0_u64, 1, 6, 7, 60, 90, 600, 1800, 2166, 86_400, 1_000_000, u64::MAX / 100,
+        ];
+        for timeout in samples {
+            for max_rotations in [0_u32, 1, 2, 7] {
+                for retry_disabled in [false, true] {
+                    let c = derive_ceiling_from_timeout(timeout, max_rotations, retry_disabled);
+                    let sum = derive_operation_budget(c).as_secs() + derive_client_timeout(c).as_secs();
+                    assert!(
+                        sum <= c,
+                        "REQ-A04 broken: timeout={timeout} rotations={max_rotations} \
+                         retry_disabled={retry_disabled} ceiling={c} sum={sum}"
+                    );
+                }
+            }
+        }
+    }
 }
