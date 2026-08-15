@@ -8544,9 +8544,18 @@ mod tests {
         );
     }
 
-    /// Both paths resolve the rotation scale through ONE function. A second hand-written
-    /// copy would compile, pass every other test, and diverge only when one of the three
-    /// fields gains a rule the other copy never learns.
+    /// `timeout_scale`'s three resolved fields agree with a restatement of its own body — NOT
+    /// a tautology: it is falsifiable against a mutation inside the function (drop an
+    /// `unwrap_or`, or swap in a different rotations accessor) and would go red.
+    ///
+    /// **What this test does NOT prove (Loop 1 finding, cheap doc correction 2): that both call
+    /// sites actually GO THROUGH `timeout_scale`.** An earlier version of this rustdoc claimed
+    /// exactly that ("both paths resolve... through ONE function"), which this assertion cannot
+    /// show — a hand-inlined copy of the body at either call site (the TUI's `run()` or
+    /// headless's `prepare_headless`) would restate the same expression here and still pass.
+    /// That property, if it matters, needs a source-level check (grep for the call, the way
+    /// `the_consult_subcommand_does_not_resolve_the_clock_itself` below does for a sibling
+    /// function) — not a value comparison against the function's own body.
     #[test]
     fn both_paths_resolve_the_scale_through_timeout_scale() {
         let cfg = MagiConfig::default();
@@ -8649,8 +8658,16 @@ mod tests {
         );
     }
 
-    /// The two clocks agree whenever the operator gave one, and when they cannot, the
-    /// existing SC-A04d machinery is what catches it — not silence.
+    /// The two clocks agree whenever the operator gave one. When they cannot — a tool-executing
+    /// tier synthesising its own deadline — `query_timeout_decision`'s `below_formula` flag
+    /// reports the comparison honestly either way, but the WARNING it feeds only fires when the
+    /// synthesised deadline is too short (`below_formula == true`). A generous synthesised
+    /// deadline (`--auto`'s tier default, `[headless] timeout_secs`) is `below_formula == false`
+    /// and emits nothing — `applied_caps` then pairs that large `timeout_secs` with an unscaled
+    /// `operation_budget_secs`, silently. **`--timeout` remains the only knob that scales the
+    /// per-mage budget.** This test pins the FIELD's accuracy in both directions, not a claim
+    /// that a notice always fires (Loop 1 finding, cheap doc correction 4 — an earlier version
+    /// of this rustdoc said "not silence" without that qualifier).
     ///
     /// Pinned because R-EB03's "honest limit" is otherwise only prose, and prose does not
     /// fail when someone changes `resolve_tier_timeout_default`.
@@ -8714,7 +8731,10 @@ mod tests {
         );
 
         // 3. The asymmetry lives HERE: a tool-executing tier synthesises a default the
-        //    operator never typed. It is allowed, but never unreported.
+        //    operator never typed. `below_formula` reports the comparison honestly either way —
+        //    it is a WARNING only when the synthesised deadline is too short, not a guarantee
+        //    that every asymmetry is announced (FULL_AUTO_TIMEOUT_SECS is generous, so this
+        //    branch is expected to land `below_formula == false`, silent by design).
         let d = resolve_tier_timeout_default(
             &Policy::new(Tier::Auto, 15, None),
             FULL_AUTO_TIMEOUT_SECS,
@@ -8730,7 +8750,8 @@ mod tests {
         assert_eq!(
             decision.map(|x| x.below_formula),
             Some(d.as_secs() < minimum),
-            "the asymmetry is allowed, but never unreported"
+            "below_formula must report the comparison ACCURATELY, whichever way it falls — \
+             that accuracy is what the field promises, not that a notice always fires"
         );
     }
 

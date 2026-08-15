@@ -352,6 +352,11 @@ pub fn attempt_factor(max_rotations: u32, retry_disabled: bool) -> u64 {
 /// optional on any public path (see [`derive_ceiling_from_timeout`]), and taking the factor
 /// directly lets the property tests sweep the whole factor space — covering every slack percentage
 /// the constant could hold — without a parallel slack-parameterized copy of each public function.
+///
+/// `factor` must be non-zero (undocumented, not guarded — a division by it follows below).
+/// Every production caller reaches this through [`attempt_factor`], whose minimum output is
+/// `120` (`1 * 1 * (100 + HEADLESS_TIMEOUT_SLACK_PCT)`), so the precondition is documentation
+/// for a reader, not a guard against a value this module can actually produce.
 fn raw_ceiling_from_factor(timeout_secs: u64, factor: u64) -> u64 {
     // `saturating_sub` is the load-bearing guard: with `timeout <= CLASSIFY_TIMEOUT_SECS` a plain
     // subtraction underflows in u64 and yields an ASTRONOMICAL ceiling instead of a minimal one —
@@ -386,6 +391,10 @@ fn raw_ceiling_from_factor(timeout_secs: u64, factor: u64) -> u64 {
 /// `the_threshold_is_the_exact_boundary_of_floor_activation` makes for every factor. Neither half
 /// is decorative: sufficiency alone would be satisfied by any large number, and minimality alone
 /// by any small one.
+///
+/// Unlike [`raw_ceiling_from_factor`], `factor` carries no non-zero precondition here: the
+/// division below is by the literal `100`, never by `factor` itself, so `factor = 0` is a
+/// well-defined (if degenerate) input that simply yields `needed = 0`.
 fn threshold_from_factor(factor: u64) -> u64 {
     // `div_ceil`: we need the smallest dividend whose TRUNCATING division still reaches the floor.
     let needed = AGENT_TIMEOUT_ABSOLUTE_FLOOR_SECS
@@ -1318,10 +1327,16 @@ mod tests {
         }
     }
 
-    /// An absurd `max_rotations` degrades to the floor rather than wrapping. `attempt_factor`
-    /// saturates, the saturated divisor drives the raw ceiling to 0, and the floor catches it —
-    /// so the "no upper bound on max_rotations" the gate noted is bounded in effect even though
-    /// it is not bounded in type.
+    /// An absurd `max_rotations` degrades to the floor rather than wrapping — but not because
+    /// `attempt_factor` saturates. At `max_rotations = u32::MAX` the factor is
+    /// `2 * (u32::MAX + 1) * 120 ≈ 1.03e12`, nowhere near `u64::MAX`: both saturation points
+    /// inside `attempt_factor` are unreachable at every `u32` input this function can be given.
+    /// The ceiling reaches 0 through ORDINARY truncating division — `raw_ceiling_from_factor`
+    /// divides a small dividend by that ~1e12 factor — and the floor's `.max()` catches the
+    /// result. So the "no upper bound on max_rotations" the gate noted is bounded in effect
+    /// even though it is not bounded in type; the two `saturating_mul` calls in
+    /// `attempt_factor` remain declared defence for a caller that could somehow reach them, not
+    /// what this test actually exercises.
     #[test]
     fn an_absurd_rotation_count_degrades_to_the_floor() {
         for max_rotations in [1_000_u32, u32::MAX / 2, u32::MAX] {
