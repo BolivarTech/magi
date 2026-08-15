@@ -557,6 +557,16 @@ impl TimeoutDecision {
 /// Resolves the run wall-clock. **It always obeys the explicit value**, and warns when that
 /// value makes it impossible to complete a consult with schema retry.
 ///
+/// # The warning names the deadline, never the flag
+///
+/// `asked` is not always an operator-typed `--timeout`: `main.rs` also reaches this with a
+/// `--auto` tier default or with `[headless] timeout_secs` from the config, and in both of
+/// those cases the operator never passed `--timeout` at all. The emitted warning therefore
+/// names *the run's wall-clock deadline*, in seconds, rather than the flag — a message that
+/// says "`--timeout {secs}s`" sends an operator who configured `timeout_secs` looking for a
+/// flag they did not set. Keep it source-agnostic: it is deliberate, not an oversight to "fix"
+/// back to naming the flag.
+///
 /// # A consumer derives the per-mage ceiling from `effective_secs`
 ///
 /// `prepare_headless` in `main.rs` calls this **before** building the trio and feeds
@@ -573,7 +583,9 @@ impl TimeoutDecision {
 /// function, not reading that one.
 ///
 /// # Arguments
-/// * `asked` - the explicit `--timeout`, if the operator gave one.
+/// * `asked` - the run's resolved wall-clock deadline, if one applies. This is `Some` for an
+///   explicit `--timeout`, but also for `[headless] timeout_secs` or an `--auto` tier default —
+///   see the note above on why the warning does not name the flag.
 /// * `configured_ceiling` - `[magi].agent_timeout_secs`, resolved.
 /// * `max_rotations` - `[magi].max_rotations`, resolved (REQ-R20).
 /// * `retry_disabled` - `[magi].retry_disabled`, resolved.
@@ -598,9 +610,9 @@ pub fn resolve_run_timeout(
         effective_secs: secs,
         warning: below.then(|| {
             format!(
-                "warning: --timeout {secs}s is below the {minimum}s the scale requires for \
-                 `agent_timeout_secs = {configured_ceiling}`; a consult that needs its schema \
-                 retry will NOT complete. Using the requested value anyway."
+                "warning: the run's wall-clock deadline of {secs}s is below the {minimum}s the \
+                 scale requires for `agent_timeout_secs = {configured_ceiling}`; a consult that \
+                 needs its schema retry will NOT complete. Using the requested value anyway."
             )
         }),
         below_formula: below,

@@ -3106,6 +3106,11 @@ mod tests {
     /// exactly like the JSON-flag test above — a hand-built `TimeoutDecision`
     /// asserted against in isolation would prove nothing about whether
     /// `analyze_direct` actually reads `runtime.notice_sink`.
+    ///
+    /// Asserts on "wall-clock deadline", not "--timeout": the message is deliberately
+    /// source-agnostic (`resolve_run_timeout`'s rustdoc explains why — this same deadline can
+    /// come from a tier default or `[headless] timeout_secs`, not only the flag), so do not
+    /// "fix" this assertion back to the flag string.
     #[tokio::test]
     async fn sc_a04d_warning_reaches_the_notice_sink_from_a_real_run() {
         let cfg = MagiConfig::default();
@@ -3139,7 +3144,7 @@ mod tests {
         .await;
 
         assert!(
-            sink.emitted().contains("--timeout"),
+            sink.emitted().contains("wall-clock deadline"),
             "the human-facing warning must reach the sink: {}",
             sink.emitted()
         );
