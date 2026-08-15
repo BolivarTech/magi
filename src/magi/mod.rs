@@ -481,11 +481,14 @@ pub fn derive_ceiling_from_timeout(
 /// Wall-clock decision for a run, with its warning if applicable (SC-A04d).
 ///
 /// `#[allow(clippy::manual_non_exhaustive)]`: clippy's suggested substitute, `#[non_exhaustive]`,
-/// is not equivalent here and would silently weaken the guarantee. That attribute only blocks
-/// struct-literal construction from OTHER CRATES; every field on this struct is already `pub`
-/// and this crate's own `headless_runner.rs` (a different module, same crate) is exactly the site
-/// the private `_resolved` field must block. A crate-boundary seal would not have caught the
-/// construction this field exists to prevent.
+/// is not equivalent here and would silently weaken the guarantee. `#[non_exhaustive]` only blocks
+/// struct-literal construction across a CRATE boundary — and `headless_runner.rs` (`main.rs`'s
+/// binary crate, reaching this type through `use magi_rs::…`) already sits across one, so that
+/// attribute would in fact have caught the specific construction site fixed alongside this seal.
+/// What it would NOT catch is a sibling **library** module — `src/headless/`, for instance —
+/// reaching in and forging a decision via the same crate's own field visibility. The private
+/// `_resolved` field blocks that too, because it is scoped to this module, not to this crate. That
+/// wider reach is the guarantee actually wanted, and it is what `#[non_exhaustive]` cannot give.
 #[allow(clippy::manual_non_exhaustive)]
 pub struct TimeoutDecision {
     /// Effective seconds: what the operator asked for, or the derived default.
@@ -582,10 +585,9 @@ pub const CEILING_SANITY_SECS: u64 = 600;
 /// [`BudgetTelemetry::derive`] so no caller can obtain a ceiling without also seeing why it was
 /// chosen.
 ///
-/// The inner value is private; comparisons against a raw `u64` (`==`, `>`, …) are provided
-/// directly, so most call sites never need [`ResolvedCeiling::secs`] at all. Full rationale for
-/// the privacy — what it guarantees, and just as importantly what it does not — lands in Task 3
-/// Step 4a.
+/// The inner value is private; call sites read it back with [`ResolvedCeiling::secs`]. Full
+/// rationale for the privacy — what it guarantees, and just as importantly what it does not —
+/// lands in Task 3 Step 4a.
 #[derive(Debug, Clone, Copy)]
 pub struct ResolvedCeiling(u64);
 
@@ -602,21 +604,6 @@ impl ResolvedCeiling {
     #[must_use]
     pub const fn configured(secs: u64) -> Self {
         Self(secs)
-    }
-}
-
-/// Compares the resolved ceiling directly against a raw second count, so call sites do not need
-/// [`ResolvedCeiling::secs`] just to check a threshold.
-impl PartialEq<u64> for ResolvedCeiling {
-    fn eq(&self, other: &u64) -> bool {
-        self.0 == *other
-    }
-}
-
-/// Same comparison as `PartialEq<u64>` above, extended to ordering.
-impl PartialOrd<u64> for ResolvedCeiling {
-    fn partial_cmp(&self, other: &u64) -> Option<std::cmp::Ordering> {
-        self.0.partial_cmp(other)
     }
 }
 
@@ -640,8 +627,17 @@ pub struct BudgetTelemetry {
     pub ceiling_floored: bool,
     /// The smallest `--timeout` that does **not** activate the floor, under this run's rotation
     /// settings.
+    ///
+    /// **Present always**, not only when degraded: its most useful reading is how much margin
+    /// remains *before* degrading, which a field that only appears after the fact cannot give.
+    ///
+    /// It means "minimum to avoid the floor", **not** "minimum for the run to succeed". Meeting it
+    /// guarantees the rotation arithmetic closes, never that the models answer in time — a slow
+    /// mage can still exhaust its budget far above this number, which is the very case that
+    /// motivated E-B.
     pub floor_activation_threshold_secs: u64,
-    /// The rotation count the formula actually used.
+    /// The rotation count the formula actually used, so a consumer can evaluate the second lever
+    /// (fewer rotations buy a larger budget at the same clock) without guessing our resolution.
     pub max_rotations_effective: u32,
     /// The derived ceiling exceeded [`CEILING_SANITY_SECS`] — a probable `--timeout` typo. The
     /// value is **not** clamped.
@@ -659,8 +655,8 @@ impl BudgetTelemetry {
     /// # Arguments
     /// * `run` - the run's **resolved** wall clock, or `None` for the configured/TUI path, which
     ///   keeps `configured_ceiling` untouched and is byte-identical to v0.14.3.
-    ///   **It is a [`TimeoutDecision`], not a `u64`, and that is deliberate** — see
-    ///   "Why the parameter is the decision" below.
+    ///   **It is a [`TimeoutDecision`], not a `u64`, and that is deliberate**: the raw `--timeout`
+    ///   flag cannot reach the derived path directly, only the already-resolved decision can.
     /// * `configured_ceiling` - `[magi].agent_timeout_secs`, resolved.
     /// * `max_rotations` - resolved (effective) rotation count.
     /// * `retry_disabled` - `[magi].retry_disabled`, resolved.
@@ -1420,19 +1416,22 @@ mod tests {
         }
     }
 
-    /// And the public entry point agrees with the factor-level property for every
-    /// rotation configuration the production path can produce.
+    /// SC-EB04c: the public threshold is composed, not hardcoded.
+    ///
+    /// **Asserted against a number derived OUTSIDE the function**, not against the function's own
+    /// body. The previous version compared `floor_activation_threshold_secs(r, d)` to
+    /// `threshold_from_factor(attempt_factor(r, d))` — which is that function's definition, so it
+    /// held no matter what either helper computed, and it passed unchanged during the Red phase.
+    ///
+    /// 114 is the spec's documented boundary for the shipped configuration:
+    /// `2 attempts x 3 models x 15 s floor x 1.2 slack + 6 s classify = 114`.
     #[test]
     fn the_public_threshold_composes_attempt_factor_with_the_boundary() {
-        for max_rotations in [0_u32, 1, 2, 5, 20] {
-            for retry_disabled in [false, true] {
-                assert_eq!(
-                    floor_activation_threshold_secs(max_rotations, retry_disabled),
-                    threshold_from_factor(attempt_factor(max_rotations, retry_disabled)),
-                    "rotations={max_rotations} retry_disabled={retry_disabled}"
-                );
-            }
-        }
+        assert_eq!(
+            floor_activation_threshold_secs(2, false),
+            114,
+            "the shipped configuration's floor-activation boundary"
+        );
     }
 
     /// The sanity flag catches the likeliest error in this whole interface: one extra
@@ -1443,10 +1442,10 @@ mod tests {
     fn a_ceiling_above_the_sanity_threshold_is_flagged_but_never_clamped() {
         let (ceiling, t) =
             BudgetTelemetry::derive(Some(&TimeoutDecision::obeyed(18_000)), 90, 2, false);
-        assert!(ceiling > CEILING_SANITY_SECS);
+        assert!(ceiling.secs() > CEILING_SANITY_SECS);
         assert!(t.ceiling_above_sanity, "a probable typo must be observable");
         assert_eq!(
-            ceiling,
+            ceiling.secs(),
             derive_ceiling_from_timeout(18_000, 2, false),
             "flagged, NOT clamped: an upper bound is exactly what E-B removes"
         );
