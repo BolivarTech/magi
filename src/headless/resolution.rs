@@ -20,6 +20,7 @@
 
 use super::input::Envelope;
 use super::types::{AppliedCaps, SystemPolicy};
+use crate::magi::BudgetTelemetry;
 
 /// Defaults derived from `magi.toml` (plus built-in) filled in by the bin.
 ///
@@ -147,6 +148,9 @@ pub fn resolve(
             max_tool_calls_clamped,
             timeout_secs: None,
             system_override_applied,
+            // Placeholder: this layer cannot know the ceiling (it is resolved in main.rs). The
+            // runner stamps the real one, exactly as it does for timeout_secs.
+            budget: BudgetTelemetry::default(),
         },
     }
 }

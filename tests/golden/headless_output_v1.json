@@ -1,7 +1,12 @@
 {
   "applied_caps": {
+    "ceiling_above_sanity": false,
+    "ceiling_floored": false,
+    "floor_activation_threshold_secs": 114,
+    "max_rotations_effective": 2,
     "max_tool_calls": 15,
     "max_tool_calls_clamped": false,
+    "operation_budget_secs": 149,
     "system_override_applied": false,
     "timeout_secs": null
   },

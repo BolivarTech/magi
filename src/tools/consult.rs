@@ -1002,7 +1002,20 @@ pub(crate) fn explain_magi_error(err: &MagiError, kind: ProviderKind) -> String 
     let base = redact_foreign_error(err);
     match (err, kind) {
         (MagiError::InsufficientAgents { .. }, ProviderKind::Ollama) => {
-            format!("{base} — possible cause: {KEYLESS_AUTH_EXPLANATION}")
+            // Narrowed (E-B, spec §6): a prior wording read as a diagnosis ("possible cause:
+            // <keyless>") and sent a requester down the wrong path — their endpoint had already
+            // proven itself keyless-compatible on a previous run, so THIS total failure had a
+            // different cause. `InsufficientAgents` never carries a per-agent cause (the `failed`
+            // map is discarded before this error is built — see the rustdoc above), so the most
+            // honest and still-actionable framing names keyless auth as ONE hypothesis among
+            // several rather than the explanation, and points at the counts already in `base` —
+            // the succeeded/required numbers — as the concrete thing to weigh it against.
+            format!(
+                "{base} — one possible cause (not the only one): {KEYLESS_AUTH_EXPLANATION} A \
+                 total failure can equally mean the endpoint was unreachable, timed out, or \
+                 served an unavailable model; weigh this against the succeeded/required counts \
+                 above and any per-seat detail your logs captured before assuming it is the cause."
+            )
         }
         _ => base.to_string(),
     }
@@ -1314,7 +1327,7 @@ mod tests {
     use magi_core::provider::{CompletionConfig, LlmProvider};
     use magi_core::test_support::RoutingMockProvider;
     use magi_core::verdict_markers::{VERDICT_CLOSE, VERDICT_OPEN};
-    use magi_rs::magi::{resolve_run_timeout, AGENT_TIMEOUT_SECS};
+    use magi_rs::magi::{resolve_run_timeout, TimeoutMeasure, AGENT_TIMEOUT_SECS};
     use std::time::Duration;
 
     /// Upper bound on how long a *cancelled* `execute` may take to return. The cancel path
@@ -1586,6 +1599,21 @@ mod tests {
         assert!(
             !msg.contains("rejected due to authentication"),
             "no per-agent evidence here: must not claim auth was the cause: {msg}"
+        );
+        // Loop 1 finding (cheap doc correction 5): the two substrings above survive ANY
+        // rewording, including the earlier one this hint was narrowed away from ("possible
+        // cause: <keyless>", which read as a diagnosis and sent a requester down the wrong
+        // path). Pin the narrowing itself — keyless auth presented as ONE hypothesis, not THE
+        // cause — so a future edit can't silently drift back to the confident framing.
+        assert!(
+            msg.contains("one possible cause (not the only one)"),
+            "the hint must present keyless auth as ONE hypothesis among several, never as the \
+             diagnosis: {msg}"
+        );
+        assert!(
+            msg.contains("A total failure can equally mean"),
+            "the hint must name the sibling hypotheses (unreachable endpoint, timeout, \
+             unavailable model) that a confident framing would crowd out: {msg}"
         );
     }
 
@@ -2559,7 +2587,13 @@ mod tests {
             "base_url = \"http://a/v1\"\n[magi]\nbase_url = \"http://b/v1\"\n",
         )
         .expect("valid toml");
-        let dec = resolve_run_timeout(None, AGENT_TIMEOUT_SECS, 0, false);
+        let dec = resolve_run_timeout(
+            None,
+            AGENT_TIMEOUT_SECS,
+            0,
+            false,
+            TimeoutMeasure::ConfiguredCeiling,
+        );
 
         let ctx = RunContext::build(&diverged, &resolution(true), &dec);
         assert!(ctx.endpoint_divergence);
@@ -2591,7 +2625,13 @@ mod tests {
             "base_url = \"http://a/v1\"\n[magi]\nbase_url = \"http://b/v1\"\n",
         )
         .expect("valid toml");
-        let dec = resolve_run_timeout(None, AGENT_TIMEOUT_SECS, 0, false);
+        let dec = resolve_run_timeout(
+            None,
+            AGENT_TIMEOUT_SECS,
+            0,
+            false,
+            TimeoutMeasure::ConfiguredCeiling,
+        );
 
         let ctx = RunContext::build(&diverged, &resolution(true), &dec);
         assert!(

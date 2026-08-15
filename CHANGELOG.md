@@ -9,6 +9,50 @@ changes and the **patch** position signals backward-compatible fixes.
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-08-15
+
+Each MAGI mage's per-attempt operation budget used to cap out at 72 s regardless of the run's
+`--timeout`. A user reported 2 of 3 mages failing on a 24k-token payload with `--timeout` set
+high, and had to read the source to find out why: the budget derived from
+`[magi].agent_timeout_secs`, which `config.rs` validates into `30..=120`, so a generous
+`--timeout` bought nothing. On the headless path the budget now derives from `--timeout` itself.
+
+### Breaking
+
+- **`TimeoutDecision` is sealed.** A private marker field blocks external construction via a
+  struct literal. Replace any such construction with `TimeoutDecision::obeyed(secs)`, a one-line
+  change. This seal is why the release takes the minor position rather than a patch.
+- **`headless_consult_timeout_secs`'s overflow behaviour changed.** The function is `pub`, and
+  folding the slack into `attempt_factor`'s hundredths moved its overflow point roughly 100x
+  closer. A `saturating_mul` now guards it, so a caller passing an enormous ceiling gets
+  saturation where it previously got a correct result or a panic. Nobody passes a ceiling above
+  ~1.8e15 to a timeout calculator, so this is almost certainly inert in practice. Still, it is a
+  behavioural change to a published function, and a red build is the wrong place to discover it.
+
+### Added
+
+- **The per-mage operation budget derives from an explicit `--timeout` on the headless path**,
+  by inverting the formula that already computed the required wall clock from the ceiling. Both
+  directions share one `attempt_factor` function, so they cannot drift apart. Concretely,
+  `--timeout 1800` yields a **249 s ceiling and a 149 s per-attempt budget** (the divisor is
+  2 attempts x 3 models x 1.2 slack, then x 0.6), against a flat 72 s before this release. The
+  TUI path is unchanged: it still reads `agent_timeout_secs` directly.
+- **A 15 s floor applies to the derived ceiling** (`AGENT_TIMEOUT_ABSOLUTE_FLOOR_SECS`). It is
+  not defensive padding: the derived path bypasses `config.rs`'s validation, and without a floor
+  a small `--timeout` would send both internal layers to their minimums, whose sum exceeds the
+  ceiling and breaks the relation between them. When the floor fires, the run starts anyway and
+  emits one notice naming both levers: the timeout and the rotation count.
+- **No upper bound on the derived ceiling.** A `--timeout` with one extra digit buys hours per
+  attempt; a `ceiling_above_sanity` flag reports the situation and the run proceeds regardless.
+  This is deliberate: capping the value to protect an operator from their own typo is exactly the
+  paternalism this change removes. `--timeout` is also the only knob that scales the per-mage
+  budget. A tier default under `--auto`, or `[headless] timeout_secs`, sets the run's wall clock
+  without scaling the budget.
+- **`applied_caps` gains five fields**: `operation_budget_secs`, `ceiling_floored`,
+  `floor_activation_threshold_secs`, `max_rotations_effective`, `ceiling_above_sanity`. See the
+  [README](README.md#applied_caps) for the full field table. Additive under the existing envelope
+  policy, with no `schema_version` bump.
+
 ## [0.14.3] - 2026-08-13
 
 ### Added
@@ -1157,7 +1201,8 @@ Initial pre-release, published primarily to reserve the `magi-rs` crate name.
 - `ratatui` TUI with Normal / Selection / Visual modes and Unicode-safe input.
 - OAuth (PKCE) login and OS keyring integration, with `magi-rust` legacy migration.
 
-[Unreleased]: https://github.com/BolivarTech/magi/compare/v0.14.3...HEAD
+[Unreleased]: https://github.com/BolivarTech/magi/compare/v0.15.0...HEAD
+[0.15.0]: https://github.com/BolivarTech/magi/compare/v0.14.3...v0.15.0
 [0.14.3]: https://github.com/BolivarTech/magi/compare/v0.14.2...v0.14.3
 [0.14.2]: https://github.com/BolivarTech/magi/compare/v0.14.1...v0.14.2
 [0.14.1]: https://github.com/BolivarTech/magi/compare/v0.13.1...v0.14.1

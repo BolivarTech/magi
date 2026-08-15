@@ -46,14 +46,24 @@ pub const AGENT_TIMEOUT_MAX_SECS: u64 = 120;
 /// the retry chain unreachable.
 pub const AGENT_TIMEOUT_SECS: u64 = 90;
 
-/// Fraction of the ceiling for the total retry budget.
+/// Numerator/denominator for the fraction of the ceiling given to the total retry budget.
 ///
-/// 0.6 + 0.3 = 0.9 < 1.0: leaves a 10 % margin so that abandonment is **TYPED**
-/// (`OperationBudgetExhausted`) and not an opaque cut from the external ceiling.
-const OPERATION_BUDGET_FRACTION: f64 = 0.6;
-/// Fraction of the ceiling for the timeout of ONE HTTP request. See
-/// [`OPERATION_BUDGET_FRACTION`].
-const CLIENT_TIMEOUT_FRACTION: f64 = 0.3;
+/// `6 / 10 = 0.6`. Kept as an exact integer ratio (rather than an `f64` fraction) so
+/// [`derive_operation_budget`] can compute `ceiling_secs.saturating_mul(6) / 10` with no
+/// precision loss, at any `u64` magnitude — see that function's rustdoc.
+///
+/// `OPERATION_BUDGET_FRACTION_NUM / OPERATION_BUDGET_FRACTION_DEN` +
+/// `CLIENT_TIMEOUT_FRACTION_NUM / CLIENT_TIMEOUT_FRACTION_DEN` = `0.6 + 0.3 = 0.9 < 1.0`:
+/// leaves a 10 % margin so that abandonment is **TYPED** (`OperationBudgetExhausted`) and not
+/// an opaque cut from the external ceiling.
+const OPERATION_BUDGET_FRACTION_NUM: u64 = 6;
+/// See [`OPERATION_BUDGET_FRACTION_NUM`].
+const OPERATION_BUDGET_FRACTION_DEN: u64 = 10;
+/// Numerator for the fraction of the ceiling given to the timeout of ONE HTTP request. See
+/// [`OPERATION_BUDGET_FRACTION_NUM`].
+const CLIENT_TIMEOUT_FRACTION_NUM: u64 = 3;
+/// See [`CLIENT_TIMEOUT_FRACTION_NUM`].
+const CLIENT_TIMEOUT_FRACTION_DEN: u64 = 10;
 
 /// Absolute floors: below them, no real request completes.
 const MIN_OPERATION_BUDGET: Duration = Duration::from_secs(10);
@@ -97,26 +107,37 @@ pub const AGENT_TIMEOUT_ABSOLUTE_FLOOR_SECS: u64 =
 /// client_timeout` that legitimately exceeds `ceiling_secs` — the floors win over the fraction,
 /// as `derived_scale_satisfies_invariant_across_the_whole_admissible_range` deliberately
 /// exercises down to that exact floor to prove.
+///
+/// # Exact integer arithmetic
+///
+/// The fraction is applied as `ceiling_secs.saturating_mul(6) / 10`: exact integer
+/// multiply-then-divide, not a float cast. This agrees with `(ceiling_secs as f64 * 0.6) as
+/// u64` for every `u64` this crate ever derives from (checked exhaustively for `0..=400` plus
+/// the out-of-range probes `600`, `1000`, `3600`, `1_000_000` — zero divergences), and it is
+/// *more* correct beyond `2^53`, where an `f64` cast silently loses integer precision while
+/// this stays exact. `saturating_mul` means an absurd ceiling clamps to `u64::MAX` instead of
+/// wrapping.
+///
+/// The `.max(MIN_OPERATION_BUDGET)` floor below is not defensive padding — it is the REQ-A04
+/// guarantee itself: it is what keeps the derivation from producing an unusably small budget
+/// for ceilings under [`AGENT_TIMEOUT_ABSOLUTE_FLOOR_SECS`] (see that constant's rustdoc).
 #[must_use]
 pub fn derive_operation_budget(ceiling_secs: u64) -> Duration {
-    #[allow(
-        clippy::cast_precision_loss,
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss
-    )]
-    let derived = Duration::from_secs((ceiling_secs as f64 * OPERATION_BUDGET_FRACTION) as u64);
+    let derived = Duration::from_secs(
+        ceiling_secs.saturating_mul(OPERATION_BUDGET_FRACTION_NUM) / OPERATION_BUDGET_FRACTION_DEN,
+    );
     derived.max(MIN_OPERATION_BUDGET)
 }
 
 /// Timeout for ONE HTTP request, DERIVED from the ceiling. See [`derive_operation_budget`].
+///
+/// Same exact-integer-arithmetic treatment: `ceiling_secs.saturating_mul(3) / 10`, and the
+/// `.max(MIN_CLIENT_TIMEOUT)` floor is the REQ-A04 guarantee, not defensive padding.
 #[must_use]
 pub fn derive_client_timeout(ceiling_secs: u64) -> Duration {
-    #[allow(
-        clippy::cast_precision_loss,
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss
-    )]
-    let derived = Duration::from_secs((ceiling_secs as f64 * CLIENT_TIMEOUT_FRACTION) as u64);
+    let derived = Duration::from_secs(
+        ceiling_secs.saturating_mul(CLIENT_TIMEOUT_FRACTION_NUM) / CLIENT_TIMEOUT_FRACTION_DEN,
+    );
     derived.max(MIN_CLIENT_TIMEOUT)
 }
 
@@ -296,16 +317,209 @@ pub fn headless_consult_timeout_secs(
     max_rotations: u32,
     retry_disabled: bool,
 ) -> u64 {
-    let attempts_per_model = if retry_disabled { 1 } else { 2 };
-    let models_per_mage = u64::from(max_rotations) + 1;
-    let dominant = attempts_per_model * models_per_mage * configured_ceiling;
-    let minimum = CLASSIFY_TIMEOUT_SECS + dominant;
-    // §4.9: the slack is 10–30 % of the LARGER TERM, not of the total — over the total it
+    // §4.9: the slack is 10-30 % of the LARGER TERM, not of the total — over the total it
     // inflates proportionally to the small term, which is not the one that dominates the risk.
-    minimum + dominant * HEADLESS_TIMEOUT_SLACK_PCT / 100
+    // `attempt_factor` already folds the slack in (it returns hundredths), so the division by
+    // 100 below is what turns it back into seconds.
+    //
+    // Saturating: this function is `pub` and takes an arbitrary ceiling. The pre-E-B version
+    // multiplied by a factor ~100x smaller, so plain arithmetic had far more headroom; folding the
+    // hundredths into `attempt_factor` moved the overflow point a hundredfold closer. The
+    // validated config path (30..=120) is nowhere near it, but a caller outside that path — and
+    // SC-EB04 is one, sweeping up to 3600 — must not wrap.
+    CLASSIFY_TIMEOUT_SECS.saturating_add(
+        configured_ceiling.saturating_mul(attempt_factor(max_rotations, retry_disabled)) / 100,
+    )
+}
+
+/// The multiplier both timeout directions share, scaled by 100.
+///
+/// Returns `attempts * models * (100 + HEADLESS_TIMEOUT_SLACK_PCT)`, i.e. the `x1.2` of the
+/// forward formula expressed in integer hundredths so the inverse can divide by it exactly.
+///
+/// # Why this is one function and not two equivalent expressions
+///
+/// [`headless_consult_timeout_secs`] and [`derive_ceiling_from_timeout`] are inverses, and the
+/// round-trip property that pins them is only true while they agree on this factor. Two
+/// equivalent expressions in two places diverge at the first refactor that touches one of them,
+/// and neither side's own tests notice — the forward test still passes, the inverse test still
+/// passes, and only the round-trip between them is wrong. With one function, changing it moves
+/// both directions at once.
+///
+/// The `100 + HEADLESS_TIMEOUT_SLACK_PCT` is **derived, never a literal `120`**: writing the
+/// number by hand means raising the slack updates the forward direction and leaves the inverse
+/// silently behind — the exact drift this extraction exists to prevent, reproduced one level down.
+///
+/// # Arguments
+/// * `max_rotations` - `[magi].max_rotations`, **resolved** (effective, not the raw `Option`).
+/// * `retry_disabled` - `[magi].retry_disabled`, resolved.
+#[must_use]
+pub fn attempt_factor(max_rotations: u32, retry_disabled: bool) -> u64 {
+    let attempts_per_model: u64 = if retry_disabled { 1 } else { 2 };
+    // Saturation point 1 of 3: the model count.
+    let models_per_mage = u64::from(max_rotations).saturating_add(1);
+    // Saturation point 2 of 3: the product. A saturated factor yields ceiling 0 in the inverse,
+    // which floors — the correct degradation. Unreachable in the real range, but an overflow on
+    // the path that computes a timeout produces a nonsensical ceiling, so the guard is cheap
+    // insurance on the dangerous side.
+    attempts_per_model
+        .saturating_mul(models_per_mage)
+        .saturating_mul(100 + HEADLESS_TIMEOUT_SLACK_PCT)
+}
+
+/// The derived ceiling BEFORE the floor is applied, from an already-computed factor.
+///
+/// Private, and factor-level rather than rotation-level, for two reasons: the floor is not
+/// optional on any public path (see [`derive_ceiling_from_timeout`]), and taking the factor
+/// directly lets the property tests sweep the whole factor space — covering every slack percentage
+/// the constant could hold — without a parallel slack-parameterized copy of each public function.
+///
+/// `factor` must be non-zero (undocumented, not guarded — a division by it follows below).
+/// Every production caller reaches this through [`attempt_factor`], whose minimum output is
+/// `120` (`1 * 1 * (100 + HEADLESS_TIMEOUT_SLACK_PCT)`), so the precondition is documentation
+/// for a reader, not a guard against a value this module can actually produce.
+fn raw_ceiling_from_factor(timeout_secs: u64, factor: u64) -> u64 {
+    // `saturating_sub` is the load-bearing guard: with `timeout <= CLASSIFY_TIMEOUT_SECS` a plain
+    // subtraction underflows in u64 and yields an ASTRONOMICAL ceiling instead of a minimal one —
+    // the error pointing at the opposite of the safe side. The `* 100` undoes the hundredths
+    // `attempt_factor` folds in, and overflows only above ~1.8e17 seconds.
+    timeout_secs
+        .saturating_sub(CLASSIFY_TIMEOUT_SECS)
+        .saturating_mul(100)
+        / factor
+}
+
+/// The smallest `--timeout` whose derived ceiling still reaches
+/// [`AGENT_TIMEOUT_ABSOLUTE_FLOOR_SECS`], from an already-computed factor.
+///
+/// # Why this is not `headless_consult_timeout_secs(FLOOR, ..)`
+///
+/// That answers a **different question** — the timeout the floor ceiling *produces* — and the two
+/// coincide only when the division is exact. `raw_ceiling_from_factor` truncates downward, so the
+/// forward value can land one second short and feed back as `FLOOR - 1`: the number published as
+/// "the `--timeout` that avoids the floor" would be the exact value that trips it. They coincide
+/// at the shipped 20 % slack and diverge at 25 % or 33 %, so the bug would be latent, not visible.
+///
+/// # The `div_ceil` boundary, stated exactly
+///
+/// [`raw_ceiling_from_factor`] divides with truncation, so reaching a ceiling of `FLOOR` needs a
+/// dividend of **at least** `FLOOR * factor` — any less truncates to `FLOOR - 1`. `div_ceil` is
+/// what converts "at least" into the smallest integer that satisfies it; plain division would
+/// answer the largest that does not.
+///
+/// The result is therefore both **sufficient** (the threshold does not floor) and **minimal**
+/// (`threshold - 1` does), which is exactly the pair of assertions
+/// `the_threshold_is_the_exact_boundary_of_floor_activation` makes for every factor. Neither half
+/// is decorative: sufficiency alone would be satisfied by any large number, and minimality alone
+/// by any small one.
+///
+/// Unlike [`raw_ceiling_from_factor`], `factor` carries no non-zero precondition here: the
+/// division below is by the literal `100`, never by `factor` itself, so `factor = 0` is a
+/// well-defined (if degenerate) input that simply yields `needed = 0`.
+fn threshold_from_factor(factor: u64) -> u64 {
+    // `div_ceil`: we need the smallest dividend whose TRUNCATING division still reaches the floor.
+    let needed = AGENT_TIMEOUT_ABSOLUTE_FLOOR_SECS
+        .saturating_mul(factor)
+        .div_ceil(100);
+    CLASSIFY_TIMEOUT_SECS.saturating_add(needed)
+}
+
+/// The smallest `--timeout` that does **not** activate the ceiling floor, for this run's rotation
+/// settings (REQ-EB02b).
+///
+/// It means "minimum to avoid the floor", **not** "minimum for the run to succeed": meeting it
+/// guarantees the rotation arithmetic closes, never that the models answer in time.
+///
+/// The boundary is exact and tested as such: `threshold - 1` derives a ceiling below the floor and
+/// `threshold` does not, for every factor — not merely for the slack percentage shipped today.
+///
+/// # Arguments
+/// * `max_rotations` - `[magi].max_rotations`, **resolved** (effective, not the raw `Option`).
+/// * `retry_disabled` - `[magi].retry_disabled`, resolved.
+#[must_use]
+pub fn floor_activation_threshold_secs(max_rotations: u32, retry_disabled: bool) -> u64 {
+    threshold_from_factor(attempt_factor(max_rotations, retry_disabled))
+}
+
+/// The INVERSE of [`headless_consult_timeout_secs`]: the per-mage ceiling that fits inside an
+/// explicit run deadline (REQ-EB01).
+///
+/// # Why this exists
+///
+/// `[magi].agent_timeout_secs` is validated into `30..=120`, so the per-attempt budget it derives
+/// tops out at 72 s — regardless of how generous the run's `--timeout` is. A caller that grants
+/// 1800 s of wall clock still gets 72 s per attempt, and a mage that needs more simply never
+/// finishes. Deriving the ceiling from the deadline instead makes the budget scale with what the
+/// operator actually granted.
+///
+/// # Why the floor is mandatory, not defensive
+///
+/// [`derive_operation_budget`]'s caller contract holds only for
+/// `ceiling >= AGENT_TIMEOUT_ABSOLUTE_FLOOR_SECS`, and `config.rs` upholds it by validating
+/// `agent_timeout_secs` before that function ever runs. **This function is precisely the caller
+/// outside that validated path.** Without the floor, a small `--timeout` derives a ceiling below
+/// 15 s, both inner layers hit their own minimums, and `operation_budget + client_timeout >
+/// ceiling` — REQ-A04's invariant, broken. The floor is what keeps the guarantee true on a path
+/// `config.rs` cannot see.
+///
+/// # Rounding, and why downward is the safe direction
+///
+/// Integer division truncates. A ceiling one second smaller can never make the run exceed its own
+/// `--timeout`; rounding up could. The cost is at most 1 s of budget against a ceiling of
+/// hundreds.
+///
+/// `--timeout 0` means **zero**, not "unbounded": it saturates to the floor like any other
+/// insufficient deadline. The convention that 0 means infinite is common elsewhere, which is
+/// exactly why this is stated rather than assumed.
+///
+/// # Arguments
+/// * `timeout_secs` - the run's **RESOLVED** wall clock — `TimeoutDecision::effective_secs` from
+///   [`resolve_run_timeout`], not the raw flag (REQ-EB03). The two are the same number whenever
+///   the operator passed `--timeout`, since that function always obeys an explicit value; taking
+///   the resolved one is what makes a future change there propagate here instead of silently
+///   leaving the trio on a budget the run no longer uses.
+///
+///   The caller passes `Some` **only when the operator actually asked**. With no `--timeout`,
+///   `resolve_run_timeout` returns the formula minimum, and feeding that back through this inverse
+///   lands in `[c - 1, c]` — one second of drift that SC-EB01 forbids. The absent case keeps
+///   `[magi].agent_timeout_secs` verbatim and never reaches this function.
+/// * `max_rotations` - `[magi].max_rotations`, **resolved** (effective, not the raw `Option`).
+/// * `retry_disabled` - `[magi].retry_disabled`, resolved.
+#[must_use]
+pub fn derive_ceiling_from_timeout(
+    timeout_secs: u64,
+    max_rotations: u32,
+    retry_disabled: bool,
+) -> u64 {
+    // The floor is applied HERE and again in `BudgetTelemetry::derive`, and the duplication is
+    // deliberate rather than an oversight (Checkpoint 2 loop 9, Caspar). `derive` cannot delegate
+    // to this function, because it needs the RAW pre-floor value to answer `ceiling_floored` —
+    // delegating would return the floored number and the flag could only ever report `false`.
+    // So the two share the CONSTANT, not the expression: `AGENT_TIMEOUT_ABSOLUTE_FLOOR_SECS` has
+    // one definition, and changing the floor's VALUE is still a one-line change in one place.
+    // What is duplicated is a `.max()` against it, and the boundary that `.max()` produces is
+    // pinned from both sides by `the_threshold_is_the_exact_boundary_of_floor_activation` and
+    // `a_ceiling_landing_exactly_on_the_floor_is_not_reported_as_floored`.
+    //
+    // This is a weaker situation than `attempt_factor`'s and worth not conflating with it: there,
+    // two copies of an ARITHMETIC EXPRESSION could drift while each side's tests passed. Here the
+    // only thing that could drift is the policy "clamp up to the floor", which is one token.
+    raw_ceiling_from_factor(timeout_secs, attempt_factor(max_rotations, retry_disabled))
+        .max(AGENT_TIMEOUT_ABSOLUTE_FLOOR_SECS)
 }
 
 /// Wall-clock decision for a run, with its warning if applicable (SC-A04d).
+///
+/// `#[allow(clippy::manual_non_exhaustive)]`: clippy's suggested substitute, `#[non_exhaustive]`,
+/// is not equivalent here and would silently weaken the guarantee. `#[non_exhaustive]` only blocks
+/// struct-literal construction across a CRATE boundary — and `headless_runner.rs` (`main.rs`'s
+/// binary crate, reaching this type through `use magi_rs::…`) already sits across one, so that
+/// attribute would in fact have caught the specific construction site fixed alongside this seal.
+/// What it would NOT catch is a sibling **library** module — `src/headless/`, for instance —
+/// reaching in and forging a decision via the same crate's own field visibility. The private
+/// `_resolved` field blocks that too, because it is scoped to this module, not to this crate. That
+/// wider reach is the guarantee actually wanted, and it is what `#[non_exhaustive]` cannot give.
+#[allow(clippy::manual_non_exhaustive)]
 pub struct TimeoutDecision {
     /// Effective seconds: what the operator asked for, or the derived default.
     pub effective_secs: u64,
@@ -313,42 +527,371 @@ pub struct TimeoutDecision {
     pub warning: Option<String>,
     /// Goes to the run JSON (REQ-A11d).
     pub below_formula: bool,
+    /// Private marker that seals the struct against a field-by-field literal outside this
+    /// module. Only [`resolve_run_timeout`] and [`TimeoutDecision::obeyed`] may construct one —
+    /// both live here, and a construction site anywhere else is exactly the accidental literal
+    /// this field exists to block. How strong that guarantee is (and is not) is written out in
+    /// Task 3 Step 4a.
+    _resolved: (),
+}
+
+impl TimeoutDecision {
+    /// Builds a decision for a value that is **already** the run's effective clock.
+    ///
+    /// For tests and the TUI path, which have exactly that: an already-resolved timeout with
+    /// nothing left to compare against a formula minimum. Production headless code does not have
+    /// this — it must go through [`resolve_run_timeout`], which knows the configured ceiling and
+    /// can warn when the requested value falls short. Calling `obeyed` from that path would be a
+    /// deliberate false statement about a value nobody has actually resolved.
+    #[must_use]
+    pub const fn obeyed(secs: u64) -> Self {
+        Self {
+            effective_secs: secs,
+            warning: None,
+            below_formula: false,
+            _resolved: (),
+        }
+    }
+}
+
+/// Which ceiling a [`resolve_run_timeout`] caller's `asked` deadline is measured against.
+///
+/// Named explicitly at every call site rather than inferred from `asked`'s source: a same-typed
+/// positional argument here is exactly the transposition hazard `OpenAiSettings`/`ModeSources`
+/// exist to avoid elsewhere in this crate, and getting this one wrong does not fail to compile —
+/// it prints a confidently wrong number in a warning an operator is meant to act on.
+///
+/// # Why two variants, not one formula
+///
+/// Before `prepare_headless` learned to derive the trio's per-mage ceiling FROM `asked`
+/// (REQ-EB01), every caller's mages ran at `configured_ceiling` regardless of what `asked` was,
+/// so comparing `asked` against `headless_consult_timeout_secs(configured_ceiling, ..)` answered
+/// the right question everywhere. That stopped being true for `prepare_headless`'s own
+/// `resolve_run_timeout` call, which feeds the SAME `asked` into `BudgetTelemetry::derive`'s
+/// `Some` branch: its mages now run at a ceiling *derived from* `asked`, not at
+/// `configured_ceiling`, so the old comparison measures a requirement the run no longer has.
+///
+/// `main.rs`'s `query_timeout_decision` is a SECOND caller, and (fix round 4) it is not pinned
+/// to one variant: on `magi query --timeout N --auto --consult`, `prepare_headless` runs first
+/// and, because `N` was explicit, derives the trio's ceiling from that SAME `N` — so
+/// `query_timeout_decision` must measure against [`DerivesCeiling`](Self::DerivesCeiling) too,
+/// or it compares a healthy run against a requirement the run's trio was never asked to meet
+/// (measured case: `--timeout 200` warned that 654s were required when the derived ceiling
+/// truly needed 193s — a 3.3x overstatement, firing on a run that was fine). It only stays on
+/// [`ConfiguredCeiling`](Self::ConfiguredCeiling) when `prepare_headless` derived nothing — a
+/// tier default or `[headless] timeout_secs` with no explicit `--timeout` — because then the
+/// trio genuinely runs at `configured_ceiling` verbatim. The discriminator is
+/// `h.timeout.is_some()`, the exact condition `prepare_headless` itself branches on to decide
+/// whether to derive at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimeoutMeasure {
+    /// The caller feeds `asked` into [`derive_ceiling_from_timeout`]/[`BudgetTelemetry::derive`]
+    /// to become the per-mage ceiling itself (`prepare_headless`'s route).
+    ///
+    /// By the round-trip property `derive_ceiling_from_timeout` and
+    /// [`headless_consult_timeout_secs`] share (`fwd(inv(asked)) ≈ asked`), a derived ceiling
+    /// fits `asked` almost by construction — so [`TimeoutDecision::below_formula`] stays
+    /// `false`, UNLESS the derived ceiling gets raised to
+    /// [`AGENT_TIMEOUT_ABSOLUTE_FLOOR_SECS`]. In that case `asked` is measured against
+    /// [`floor_activation_threshold_secs`], not `headless_consult_timeout_secs(configured_ceiling,
+    /// ..)` — the two diverge once derivation is in play, and only the floor threshold describes
+    /// what THIS run's ceiling actually needs.
+    ///
+    /// **`below_formula` is accurate here, but [`TimeoutDecision::warning`] stays `None`
+    /// regardless** (fix round 3, audit finding 3): `main.rs`'s `prepare_headless` computes this
+    /// SAME floored condition independently, as `BudgetTelemetry::ceiling_floored` — the two
+    /// cannot disagree, since both compose over this module's own
+    /// [`floor_activation_threshold_secs`] — and prints `floored_ceiling_notice` for it
+    /// unconditionally, on every headless run, `magi query` and `magi consult` alike. That notice
+    /// is strictly more complete than anything this function could say on its own (it also names
+    /// the `max_rotations` lever), so a second, narrower text here would only duplicate it on
+    /// the one route (`magi consult`) where both happen to reach stderr. The JSON contract
+    /// (SC-A04d/REQ-A11d) is unaffected: `below_formula` still reports the comparison honestly.
+    DerivesCeiling,
+    /// The caller runs the mages at `configured_ceiling` VERBATIM; `asked` only bounds the run's
+    /// own outer wall clock and never reaches `BudgetTelemetry::derive` as the `Some` branch.
+    /// Compare against `headless_consult_timeout_secs(configured_ceiling, ..)` — the pre-E-B
+    /// behavior, unchanged for this branch. `query_timeout_decision`'s tier-default /
+    /// `[headless] timeout_secs` route (no explicit `--timeout`) lands here; its
+    /// explicit-`--timeout` route lands on [`DerivesCeiling`](Self::DerivesCeiling) instead,
+    /// because `prepare_headless` already derived the trio's ceiling from that same value.
+    ConfiguredCeiling,
 }
 
 /// Resolves the run wall-clock. **It always obeys the explicit value**, and warns when that
 /// value makes it impossible to complete a consult with schema retry.
 ///
+/// # The warning names the deadline, never the flag
+///
+/// `asked` is not always an operator-typed `--timeout`: `main.rs` also reaches this with a
+/// `--auto` tier default or with `[headless] timeout_secs` from the config, and in both of
+/// those cases the operator never passed `--timeout` at all. The emitted warning therefore
+/// names *the run's wall-clock deadline*, in seconds, rather than the flag — a message that
+/// says "`--timeout {secs}s`" sends an operator who configured `timeout_secs` looking for a
+/// flag they did not set. Keep it source-agnostic: it is deliberate, not an oversight to "fix"
+/// back to naming the flag.
+///
+/// # A consumer derives the per-mage ceiling from `effective_secs` — sometimes
+///
+/// `prepare_headless` in `main.rs` calls this **before** building the trio and feeds
+/// `effective_secs` into `BudgetTelemetry::derive`, so this function's answer decides the budget
+/// every mage runs under — not just the run's outer deadline (REQ-EB01/EB03). That caller always
+/// passes [`TimeoutMeasure::DerivesCeiling`]. `main.rs`'s `query_timeout_decision` passes
+/// whichever variant matches what `prepare_headless` already did with the SAME `--timeout`:
+/// [`TimeoutMeasure::DerivesCeiling`] when the operator gave one explicitly (the trio's ceiling
+/// was derived from it), [`TimeoutMeasure::ConfiguredCeiling`] otherwise — a tier default or
+/// `[headless] timeout_secs`, where the trio runs at `configured_ceiling` verbatim — see
+/// [`TimeoutMeasure`]'s rustdoc for why the two cannot share one formula.
+///
+/// That makes the ordering load-bearing: **the resolution must stay ahead of trio construction.**
+/// Moving this call after it would put the trio back on a ceiling derived from a number the run
+/// does not use, which is the defect the current ordering exists to make unreachable. Changing
+/// *what* this function returns is fine and propagates correctly; changing *when* it is called
+/// relative to the trio is not.
+///
+/// Documented here as well as at the call site on purpose: whoever breaks it will be editing this
+/// function, not reading that one.
+///
 /// # Arguments
-/// * `asked` - the explicit `--timeout`, if the operator gave one.
+/// * `asked` - the run's resolved wall-clock deadline, if one applies. This is `Some` for an
+///   explicit `--timeout`, but also for `[headless] timeout_secs` or an `--auto` tier default —
+///   see the note above on why the warning does not name the flag.
 /// * `configured_ceiling` - `[magi].agent_timeout_secs`, resolved.
 /// * `max_rotations` - `[magi].max_rotations`, resolved (REQ-R20).
 /// * `retry_disabled` - `[magi].retry_disabled`, resolved.
+/// * `measure` - which ceiling `asked` is measured against; see [`TimeoutMeasure`].
 #[must_use]
 pub fn resolve_run_timeout(
     asked: Option<u64>,
     configured_ceiling: u64,
     max_rotations: u32,
     retry_disabled: bool,
+    measure: TimeoutMeasure,
 ) -> TimeoutDecision {
-    let minimum = headless_consult_timeout_secs(configured_ceiling, max_rotations, retry_disabled);
+    let formula_minimum =
+        headless_consult_timeout_secs(configured_ceiling, max_rotations, retry_disabled);
     let Some(secs) = asked else {
         return TimeoutDecision {
-            effective_secs: minimum,
+            effective_secs: formula_minimum,
             warning: None,
             below_formula: false,
+            _resolved: (),
         };
     };
+    // Composes over `floor_activation_threshold_secs` rather than recomputing its arithmetic —
+    // that function already IS the exact boundary of floor activation (its own rustdoc proves
+    // both halves: sufficient AND minimal), so `secs < minimum` here is equivalent to "the
+    // ceiling `derive_ceiling_from_timeout(secs, ..)` would produce gets floored", without this
+    // function ever calling that deriver itself.
+    let minimum = match measure {
+        TimeoutMeasure::ConfiguredCeiling => formula_minimum,
+        TimeoutMeasure::DerivesCeiling => {
+            floor_activation_threshold_secs(max_rotations, retry_disabled)
+        }
+    };
     let below = secs < minimum;
-    TimeoutDecision {
-        effective_secs: secs,
-        warning: below.then(|| {
+    // `DerivesCeiling` never populates free text (fix round 3, Task 3 audit finding 3): its
+    // `below` condition is, by construction, the SAME boolean `main.rs`'s
+    // `BudgetTelemetry::derive` already reports as `ceiling_floored` — both sides compose over
+    // this module's OWN `floor_activation_threshold_secs`, so they cannot disagree — and
+    // `prepare_headless` ALREADY prints a human-readable notice for exactly that condition
+    // (`floored_ceiling_notice`, fired unconditionally for every headless run, `magi query` and
+    // `magi consult` alike, and strictly more complete: it also names the `max_rotations`
+    // lever this message cannot). Populating a second, narrower message here — reaching stderr
+    // only on the `magi consult` route, via `analyze_direct`'s notice_sink — would print the
+    // same fact twice on that one route. `below_formula` still reports the comparison
+    // accurately for the JSON (SC-A04d/REQ-A11d); only the redundant TEXT is suppressed.
+    let warning = match measure {
+        TimeoutMeasure::ConfiguredCeiling => below.then(|| {
             format!(
-                "warning: --timeout {secs}s is below the {minimum}s the scale requires for \
-                 `agent_timeout_secs = {configured_ceiling}`; a consult that needs its schema \
-                 retry will NOT complete. Using the requested value anyway."
+                "warning: the run's wall-clock deadline of {secs}s is below the {minimum}s the \
+                 scale requires for `agent_timeout_secs = {configured_ceiling}`; a consult that \
+                 needs its schema retry will NOT complete. Using the requested value anyway."
             )
         }),
+        TimeoutMeasure::DerivesCeiling => None,
+    };
+    TimeoutDecision {
+        effective_secs: secs,
+        warning,
         below_formula: below,
+        _resolved: (),
+    }
+}
+
+/// Derived ceiling above which a `--timeout` is more likely a typo than an intention.
+///
+/// 600 s. **Not a cap** — E-B exists to remove the cap, and this value clamps nothing. It marks
+/// the point past which one extra digit is the likelier explanation: `--timeout 18000` typed for
+/// `1800` buys ~1500 s per attempt, so a hung mage burns 25 minutes before giving up while the
+/// operator believes they asked for 149 s. That is the single error this interface cannot
+/// distinguish from a legitimate intention by arithmetic alone, so it is reported and obeyed.
+///
+/// **Chosen, not measured** — same honesty as the complexity gate's built-in thresholds. It sits
+/// well above any ceiling a plausible `--timeout` derives (1800 s derives 249) and well below what
+/// a fat-fingered order of magnitude produces.
+///
+/// **Operationally tunable.** It gates a warning and clamps nothing, so moving it changes only how
+/// noisy the run is, never what the run does. If real deployments legitimately derive ceilings
+/// above it, raise it — a warning that fires on correct configurations trains operators to ignore
+/// warnings, which costs more than the typo it was meant to catch.
+pub const CEILING_SANITY_SECS: u64 = 600;
+
+/// A per-mage ceiling that **names where it came from** (REQ-EB01, R-EB03), paired with
+/// [`BudgetTelemetry`] by [`BudgetTelemetry::derive`] so no caller can obtain a ceiling without
+/// also seeing why it was chosen.
+///
+/// # Why a newtype instead of a `u64`
+///
+/// The correctness of E-B is temporal: the run's clock must be resolved *before* the trio is
+/// built, or the mages get a budget derived from a number the run does not enforce. An earlier
+/// design guarded that with a startup `assert!`, then with rustdoc at both ends. Both are checks
+/// a refactor can walk past — the `assert!` because it only fires at runtime on a divergence that
+/// cannot happen *yet*, the rustdoc because it lives in the file nobody is editing.
+///
+/// A `u64` in `TrioBuild` accepts any number from anywhere: the raw `--timeout`, a tier default,
+/// a literal. This type does not. Every value is produced by one of exactly two routes, and
+/// **each route states which path it represents**:
+///
+/// * [`BudgetTelemetry::derive`] with `Some(&TimeoutDecision)` — the derived path. The
+///   `TimeoutDecision` is obtainable only from [`resolve_run_timeout`] or the explicitly-named
+///   [`TimeoutDecision::obeyed`], so a bare `--timeout` cannot reach it.
+/// * [`ResolvedCeiling::configured`] — the configured/TUI path, where **no clock is resolved at
+///   all** and `[magi].agent_timeout_secs` is used verbatim. This is the same value
+///   `derive(None, secs, …)` returns; it exists as a named constructor because otherwise every
+///   unrelated test literal would have to call the deriver to obtain one.
+///
+/// # What this does and does not guarantee — read before strengthening the claim
+///
+/// It makes a ceiling **traceable**, not provably-resolved. `ResolvedCeiling::configured(raw)`
+/// is one line and it compiles. What the type removes is the *silent* version: a bare integer
+/// flowing into the trio with nothing at the call site saying which clock it came from. Anyone
+/// bypassing it now has to write a constructor whose name asserts something false, in a function
+/// whose rustdoc says so. That is a speed bump plus documentation — good, and worth having — but
+/// it is **not** a proof.
+///
+/// It deliberately does **not** implement `From<u64>`, `Default` or `Deserialize`. `From<u64>`
+/// would erase the provenance the two named routes exist to record, and `Deserialize` constructs
+/// field-by-field without any constructor at all — the exact bypass `CLAUDE.md` records for
+/// `MagiConfig`.
+///
+/// The inner value is private; call sites read it back with [`ResolvedCeiling::secs`].
+#[derive(Debug, Clone, Copy)]
+pub struct ResolvedCeiling(u64);
+
+impl ResolvedCeiling {
+    /// The resolved ceiling, in seconds.
+    #[must_use]
+    pub const fn secs(self) -> u64 {
+        self.0
+    }
+
+    /// Builds a `ResolvedCeiling` directly from a value already known to be the effective
+    /// ceiling — the construction route for callers (tests, the TUI path) that already have the
+    /// number and only need the type, alongside [`BudgetTelemetry::derive`] for the derived path.
+    #[must_use]
+    pub const fn configured(secs: u64) -> Self {
+        Self(secs)
+    }
+}
+
+/// What the run's budget derivation decided, in a form a machine can read (REQ-EB02b).
+///
+/// # Why these five and not a boolean
+///
+/// A consumer that only learns *that* something degraded knows something is wrong and not what to
+/// ask for. [`Self::floor_activation_threshold_secs`] lets it remediate itself — retry with that
+/// value, or report it — without replicating our arithmetic on its side. A consumer forced to
+/// replicate the formula is a consumer that will replicate it wrong; the review of this very
+/// design found two arithmetic errors in that same calculation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize)]
+pub struct BudgetTelemetry {
+    /// Per-attempt budget governing this run.
+    pub operation_budget_secs: u64,
+    /// The derived ceiling was raised to [`AGENT_TIMEOUT_ABSOLUTE_FLOOR_SECS`].
+    ///
+    /// **Strictly `derived < FLOOR`.** A ceiling that lands exactly on the floor was reached, not
+    /// clamped. `<` and `<=` read identically and disagree in exactly the boundary case.
+    pub ceiling_floored: bool,
+    /// The smallest `--timeout` that does **not** activate the floor, under this run's rotation
+    /// settings.
+    ///
+    /// **Present always**, not only when degraded: its most useful reading is how much margin
+    /// remains *before* degrading, which a field that only appears after the fact cannot give.
+    ///
+    /// It means "minimum to avoid the floor", **not** "minimum for the run to succeed". Meeting it
+    /// guarantees the rotation arithmetic closes, never that the models answer in time — a slow
+    /// mage can still exhaust its budget far above this number, which is the very case that
+    /// motivated E-B.
+    pub floor_activation_threshold_secs: u64,
+    /// The rotation count the formula actually used, so a consumer can evaluate the second lever
+    /// (fewer rotations buy a larger budget at the same clock) without guessing our resolution.
+    pub max_rotations_effective: u32,
+    /// The derived ceiling exceeded [`CEILING_SANITY_SECS`] — a probable `--timeout` typo. The
+    /// value is **not** clamped.
+    pub ceiling_above_sanity: bool,
+}
+
+impl BudgetTelemetry {
+    /// Resolves the effective ceiling for a run and describes the decision.
+    ///
+    /// Returns `(ResolvedCeiling, telemetry)`. **They are returned together on purpose:**
+    /// the ceiling governs the run and the telemetry explains it, and a caller that could obtain
+    /// one without the other could ship a budget nobody can see — which is the defect E-B was
+    /// filed against.
+    ///
+    /// # Arguments
+    /// * `run` - the run's **resolved** wall clock, or `None` for the configured/TUI path, which
+    ///   keeps `configured_ceiling` untouched and is byte-identical to v0.14.3.
+    ///   **It is a [`TimeoutDecision`], not a `u64`, and that is deliberate**: the raw `--timeout`
+    ///   flag cannot reach the derived path directly, only the already-resolved decision can.
+    /// * `configured_ceiling` - `[magi].agent_timeout_secs`, resolved.
+    /// * `max_rotations` - resolved (effective) rotation count.
+    /// * `retry_disabled` - `[magi].retry_disabled`, resolved.
+    #[must_use]
+    pub fn derive(
+        run: Option<&TimeoutDecision>,
+        configured_ceiling: u64,
+        max_rotations: u32,
+        retry_disabled: bool,
+    ) -> (ResolvedCeiling, Self) {
+        // The raw derivation runs ONCE, and the ceiling is the floored form of it. An earlier
+        // draft called `derive_ceiling_from_timeout` and then recomputed the raw value separately,
+        // running the same arithmetic twice — harmless numerically, but two call sites that must
+        // agree is the shape of defect this whole change is about.
+        //
+        // Strictly `<` for `ceiling_floored`: a raw derivation landing exactly on the floor was
+        // reached, not clamped.
+        let raw = run
+            .map(|d| {
+                raw_ceiling_from_factor(
+                    d.effective_secs,
+                    attempt_factor(max_rotations, retry_disabled),
+                )
+            })
+            .unwrap_or(configured_ceiling);
+        // The floor applies to BOTH branches, and the `None` one is not defensive padding.
+        // `config.rs` validates `agent_timeout_secs` into `30..=120`, so a below-floor configured
+        // ceiling is unreachable through the loaded config — but this function is `pub`, and
+        // `derive_operation_budget`'s own rustdoc already records that its "impossible by
+        // construction" claim holds only above the floor. Leaving `None` unfloored would keep a
+        // path on which REQ-A04's invariant is breakable, guarded by a precondition living in a
+        // different module. One `.max()` makes it hold universally, and inside the validated
+        // range it changes nothing at all.
+        let ceiling = raw.max(AGENT_TIMEOUT_ABSOLUTE_FLOOR_SECS);
+        (
+            ResolvedCeiling(ceiling),
+            Self {
+                operation_budget_secs: derive_operation_budget(ceiling).as_secs(),
+                ceiling_floored: raw < AGENT_TIMEOUT_ABSOLUTE_FLOOR_SECS,
+                floor_activation_threshold_secs: floor_activation_threshold_secs(
+                    max_rotations,
+                    retry_disabled,
+                ),
+                max_rotations_effective: max_rotations,
+                ceiling_above_sanity: ceiling > CEILING_SANITY_SECS,
+            },
+        )
     }
 }
 
@@ -547,6 +1090,14 @@ mod tests {
 
     /// SC-A04d: an explicit `--timeout` below the minimum is OBEYED, with a warning.
     ///
+    /// `TimeoutMeasure::ConfiguredCeiling`: this is the branch whose mages run at
+    /// `configured_ceiling` regardless of `asked` — `query_timeout_decision`'s tier-default /
+    /// `[headless] timeout_secs` route, with no explicit `--timeout` — so the warning must still
+    /// name `headless_consult_timeout_secs(configured_ceiling, ..)`, exactly as before the
+    /// `DerivesCeiling` variant existed. See
+    /// `a_derived_timeout_at_the_floor_threshold_does_not_warn_against_the_configured_ceiling`
+    /// for the sibling case this test would get wrong if it used `DerivesCeiling` instead.
+    ///
     /// The flag is an operator wall-clock cap, not a safety invariant: whoever asks for
     /// `--timeout 5` wants to cut at 5 seconds, and forcing it to respect the formula would
     /// disobey a clear order. But a value below the minimum guarantees that **no consult with
@@ -554,7 +1105,13 @@ mod tests {
     #[test]
     fn an_explicit_timeout_below_the_formula_is_obeyed_and_warned_about() {
         let asked = 5_u64;
-        let decision = resolve_run_timeout(Some(asked), AGENT_TIMEOUT_SECS, 0, false);
+        let decision = resolve_run_timeout(
+            Some(asked),
+            AGENT_TIMEOUT_SECS,
+            0,
+            false,
+            TimeoutMeasure::ConfiguredCeiling,
+        );
         assert_eq!(
             decision.effective_secs, asked,
             "the operator's order is obeyed"
@@ -574,15 +1131,152 @@ mod tests {
         );
 
         assert!(
-            resolve_run_timeout(None, AGENT_TIMEOUT_SECS, 0, false)
-                .warning
-                .is_none(),
+            resolve_run_timeout(
+                None,
+                AGENT_TIMEOUT_SECS,
+                0,
+                false,
+                TimeoutMeasure::ConfiguredCeiling
+            )
+            .warning
+            .is_none(),
             "the default does not warn about itself"
         );
+        assert!(resolve_run_timeout(
+            Some(1_000),
+            AGENT_TIMEOUT_SECS,
+            0,
+            false,
+            TimeoutMeasure::ConfiguredCeiling
+        )
+        .warning
+        .is_none());
+    }
+
+    /// The fix round 3 regression table, `TimeoutMeasure::DerivesCeiling` half
+    /// (`prepare_headless`'s route): with `agent_timeout_secs = 90`, `max_rotations = 2`,
+    /// retry on, `--timeout 114` derives a ceiling that lands EXACTLY on
+    /// `AGENT_TIMEOUT_ABSOLUTE_FLOOR_SECS` — reached, not clamped
+    /// (`floor_activation_threshold_secs`'s own contract: `threshold - 1` floors, `threshold`
+    /// does not) — so this must NOT warn, and must NEVER name `654`
+    /// (`headless_consult_timeout_secs(90, 2, false)`, the configured-ceiling minimum a
+    /// `DerivesCeiling` caller has no use for). Before this fix, `resolve_run_timeout` compared
+    /// every caller against that 654s figure regardless of route, so a run that is exactly
+    /// adequate got told it needed 5.7x more.
+    #[test]
+    fn a_derived_timeout_at_the_floor_threshold_does_not_warn_against_the_configured_ceiling() {
+        let threshold = floor_activation_threshold_secs(2, false);
+        assert_eq!(threshold, 114, "pins the worked example from the report");
+        let decision = resolve_run_timeout(
+            Some(threshold),
+            90,
+            2,
+            false,
+            TimeoutMeasure::DerivesCeiling,
+        );
         assert!(
-            resolve_run_timeout(Some(1_000), AGENT_TIMEOUT_SECS, 0, false)
-                .warning
-                .is_none()
+            !decision.below_formula,
+            "the threshold IS the boundary: reached, not below it"
+        );
+        assert!(
+            decision.warning.is_none(),
+            "a run at exactly the floor threshold does not floor and must stay silent: {:?}",
+            decision.warning
+        );
+    }
+
+    /// The sibling half one second below the threshold: the derived ceiling DOES floor, so
+    /// `below_formula` must be measured against `floor_activation_threshold_secs` (114), never
+    /// against `headless_consult_timeout_secs(90, 2, false)` (654) — which is what the pre-fix
+    /// comparison claimed regardless of which ceiling the run's mages actually use. Proven
+    /// WITHOUT reading warning text: `below_formula` alone already answers "measured against
+    /// which number", since 113 sits below 114 but far below 654 too — the sharp case is the
+    /// NEXT test's symmetric pair around 114 itself (`a_derived_timeout_at_the_floor_threshold_…`
+    /// above already covers the "at 114, not below" half).
+    ///
+    /// `.warning` stays `None` even though the run DID floor — see
+    /// `TimeoutMeasure::DerivesCeiling`'s rustdoc: `prepare_headless`'s `floored_ceiling_notice`
+    /// already reports this exact condition on stderr, unconditionally, for both `magi query`
+    /// and `magi consult`, and more completely (it names the `max_rotations` lever too). A
+    /// second, narrower text reaching stderr only on the `magi consult` route would duplicate
+    /// it — the audit finding this fix round closed.
+    #[test]
+    fn a_derived_timeout_below_the_floor_threshold_floors_but_leaves_the_text_to_the_floor_notice()
+    {
+        let threshold = floor_activation_threshold_secs(2, false);
+        assert_eq!(threshold, 114, "pins the worked example");
+        let configured_minimum = headless_consult_timeout_secs(90, 2, false);
+        assert_eq!(configured_minimum, 654, "pins the worked example");
+        let decision = resolve_run_timeout(
+            Some(threshold - 1),
+            90,
+            2,
+            false,
+            TimeoutMeasure::DerivesCeiling,
+        );
+        assert!(
+            decision.below_formula,
+            "one second below the floor threshold DOES floor — measured against 114, not 654"
+        );
+        assert!(
+            decision.warning.is_none(),
+            "the free text is suppressed on this route: floored_ceiling_notice covers it. \
+             Present: {:?}",
+            decision.warning
+        );
+    }
+
+    /// A generous `--timeout` on the `DerivesCeiling` route stays silent, both far below and
+    /// far above the old (wrong) configured-ceiling minimum — the round-trip property means the
+    /// derived ceiling fits `asked` regardless of how large `asked` is, so nothing ever floors.
+    #[test]
+    fn a_generous_derived_timeout_stays_silent() {
+        for asked in [200_u64, 1800] {
+            let decision =
+                resolve_run_timeout(Some(asked), 90, 2, false, TimeoutMeasure::DerivesCeiling);
+            assert!(
+                !decision.below_formula && decision.warning.is_none(),
+                "--timeout {asked} must stay silent on the DerivesCeiling route: {:?}",
+                decision.warning
+            );
+        }
+    }
+
+    /// The non-deriving route (`query_timeout_decision`'s `ConfiguredCeiling` branch, taken
+    /// with no explicit `--timeout`) must keep warning against
+    /// `headless_consult_timeout_secs(configured_ceiling, ..)` exactly as before — this is the
+    /// branch whose mages genuinely run at `configured_ceiling` regardless of `asked`, so the
+    /// pre-E-B comparison is still the right one for it.
+    #[test]
+    fn the_non_deriving_route_still_warns_against_the_configured_ceiling() {
+        let configured_minimum = headless_consult_timeout_secs(90, 2, false);
+        assert_eq!(configured_minimum, 654, "pins the worked example");
+        let decision = resolve_run_timeout(
+            Some(configured_minimum - 1),
+            90,
+            2,
+            false,
+            TimeoutMeasure::ConfiguredCeiling,
+        );
+        assert!(decision.below_formula);
+        let warning = decision
+            .warning
+            .expect("below the configured minimum must warn");
+        assert!(
+            warning.contains(&configured_minimum.to_string()),
+            "must name the configured-ceiling minimum ({configured_minimum}): {warning}"
+        );
+
+        let decision = resolve_run_timeout(
+            Some(configured_minimum),
+            90,
+            2,
+            false,
+            TimeoutMeasure::ConfiguredCeiling,
+        );
+        assert!(
+            !decision.below_formula && decision.warning.is_none(),
+            "at or above the configured minimum, silence"
         );
     }
 
@@ -683,6 +1377,422 @@ mod tests {
         assert!(
             TOOL_RESULT_CAP_BYTES > min_viable_output_cap(),
             "the built-in default must sit comfortably above the minimum viable value"
+        );
+    }
+
+    /// SC-EB02: a generous `--timeout` unlocks a budget far above the 72 s that the
+    /// validated `agent_timeout_secs` range could ever reach. This is the requirement.
+    #[test]
+    fn a_generous_timeout_derives_a_ceiling_above_the_configured_maximum() {
+        // 2 attempts x 3 models x 1.2 slack = 7.2; (1800 - 6) / 7.2 = 249.16 -> 249
+        let ceiling = derive_ceiling_from_timeout(1800, 2, false);
+        assert_eq!(
+            ceiling, 249,
+            "the inverse of the formula that produced 1800"
+        );
+        assert!(
+            ceiling > AGENT_TIMEOUT_MAX_SECS,
+            "the whole point of E-B: the derived path is NOT capped by the configured range"
+        );
+        assert_eq!(derive_operation_budget(ceiling).as_secs(), 149);
+    }
+
+    /// SC-EB04: round-trip, bounded to the range where it is TRUE. The inverse never
+    /// returns MORE than the ceiling that produced the timeout — integer division
+    /// truncates downward, which is the safe direction.
+    ///
+    /// **The upper bound is `u64::MAX / factor`, and it is not decorative.** Above it the
+    /// forward direction's `saturating_mul` clamps, so the timeout no longer encodes the
+    /// ceiling and the inverse cannot recover it. Stating the bound is the difference
+    /// between a property and a claim that happens to hold on the samples chosen —
+    /// `the_round_trip_breaks_above_its_stated_bound` pins the other side.
+    #[test]
+    fn the_round_trip_never_overshoots_the_ceiling_that_produced_it() {
+        for ceiling in [15_u64, 16, 30, 45, 90, 120, 249, 600, 3600, 86_400] {
+            for max_rotations in [0_u32, 1, 2, 5] {
+                for retry_disabled in [false, true] {
+                    let factor = attempt_factor(max_rotations, retry_disabled);
+                    assert!(
+                        ceiling <= u64::MAX / factor,
+                        "sample outside the stated bound"
+                    );
+                    let t = headless_consult_timeout_secs(ceiling, max_rotations, retry_disabled);
+                    let back = derive_ceiling_from_timeout(t, max_rotations, retry_disabled);
+                    assert!(
+                        back <= ceiling && back >= ceiling.saturating_sub(1),
+                        "round-trip out of band: ceiling={ceiling} rotations={max_rotations} \
+                         retry_disabled={retry_disabled} timeout={t} back={back}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// And OUTSIDE the bound the property is false — asserted rather than left implied,
+    /// because a bound that lives only in a doc comment drifts without failing anything.
+    #[test]
+    fn the_round_trip_breaks_above_its_stated_bound() {
+        let factor = attempt_factor(2, false);
+        let beyond = u64::MAX / factor + 1;
+        let t = headless_consult_timeout_secs(beyond, 2, false);
+        let back = derive_ceiling_from_timeout(t, 2, false);
+        assert!(
+            back < beyond,
+            "saturation must LOSE information here; if this ever passes as an equality the \
+             bound moved and the doc comments above are wrong"
+        );
+    }
+
+    /// SC-EB04c: the complement of the round-trip. BELOW the floor the property is
+    /// false by design — the floor wins — so that half of the domain gets its own
+    /// assertion instead of being silently excluded.
+    #[test]
+    fn a_ceiling_below_the_absolute_floor_comes_back_as_exactly_the_floor() {
+        for ceiling in [1_u64, 5, 10, 14] {
+            let t = headless_consult_timeout_secs(ceiling, 2, false);
+            assert_eq!(
+                derive_ceiling_from_timeout(t, 2, false),
+                AGENT_TIMEOUT_ABSOLUTE_FLOOR_SECS,
+                "below the floor the round-trip is FALSE on purpose: REQ-A04's invariant \
+                 outranks it"
+            );
+        }
+    }
+
+    /// SC-EB04b: effective vs configured `max_rotations` differ when the TOML declares
+    /// nothing — the DEFAULT case, not a rare one. Both directions must be fed the same
+    /// number or the round-trip breaks in the configuration almost everyone has.
+    ///
+    /// **The literal 2 is deliberate and must NOT be replaced by
+    /// `crate::defaults::DEFAULT_MAX_ROTATIONS`.** `mod defaults` is declared only in
+    /// `src/main.rs`, so it is bin-only and unreachable from this library module — the
+    /// reference would not compile. Naming the coupling here is the substitute for the
+    /// intra-crate link Rust cannot give us across that boundary.
+    ///
+    /// **A comment is not enough on its own, and the failure mode is silent:** if the default
+    /// moves from 2 to 3, this test keeps passing — it simply stops testing the DEFAULT case
+    /// and starts testing an arbitrary rotation count, while its name still claims otherwise
+    /// (Checkpoint 2 loop 10, Caspar). The mechanical half of the guard therefore lives on the
+    /// BIN side, where the constant is visible: see
+    /// `the_lib_side_default_rotations_mirror_is_still_accurate` in `src/main.rs`, which fails
+    /// if the two ever diverge. Neither test can enforce this alone; the pair can.
+    #[test]
+    fn both_directions_agree_when_max_rotations_comes_from_the_default() {
+        // Mirrors `defaults::DEFAULT_MAX_ROTATIONS` (bin-only; see above).
+        let effective = 2_u32;
+        let t = headless_consult_timeout_secs(90, effective, false);
+        assert_eq!(derive_ceiling_from_timeout(t, effective, false), 90);
+    }
+
+    /// SC-EB04d: the slack factor is DERIVED, never a literal. `attempt_factor` is the
+    /// single place both directions read it from, so this test pins that they share it.
+    #[test]
+    fn the_slack_factor_is_shared_by_both_directions() {
+        // attempt_factor returns attempts * models * (100 + SLACK_PCT).
+        assert_eq!(
+            attempt_factor(2, false),
+            2 * 3 * (100 + HEADLESS_TIMEOUT_SLACK_PCT),
+            "written as a literal 120, a change to HEADLESS_TIMEOUT_SLACK_PCT would move \
+             the forward function and silently leave the inverse behind"
+        );
+        // 1 attempt x 1 model x slack factor: the identity multiplications are elided because
+        // `clippy::identity_op` denies them under `-D warnings`; the value is unchanged.
+        assert_eq!(attempt_factor(0, true), 100 + HEADLESS_TIMEOUT_SLACK_PCT);
+    }
+
+    /// SC-EB05c: the degenerate values. Without `saturating_sub`, `timeout - 6` underflows
+    /// in u64 and the ceiling comes out ASTRONOMICAL instead of minimal — the error
+    /// pointing at exactly the wrong side. `--timeout 0` means zero, never "unbounded".
+    #[test]
+    fn timeouts_at_or_below_the_classify_cost_produce_the_floor_and_never_underflow() {
+        for timeout in [0_u64, 1, 5, 6, 7] {
+            let ceiling = derive_ceiling_from_timeout(timeout, 2, false);
+            assert_eq!(
+                ceiling, AGENT_TIMEOUT_ABSOLUTE_FLOOR_SECS,
+                "--timeout {timeout} must floor, not wrap"
+            );
+        }
+    }
+
+    /// SC-EB05: REQ-A04's invariant survives the derived path across the representable
+    /// range. The bound is `u64::MAX / 100` because the formula multiplies by 100 before
+    /// dividing — stating the bound rather than claiming a universality that is false.
+    #[test]
+    fn the_derived_scale_upholds_req_a04_across_the_representable_range() {
+        let samples = [
+            0_u64,
+            1,
+            6,
+            7,
+            60,
+            90,
+            600,
+            1800,
+            2166,
+            86_400,
+            1_000_000,
+            u64::MAX / 100,
+        ];
+        for timeout in samples {
+            for max_rotations in [0_u32, 1, 2, 7] {
+                for retry_disabled in [false, true] {
+                    let c = derive_ceiling_from_timeout(timeout, max_rotations, retry_disabled);
+                    let sum =
+                        derive_operation_budget(c).as_secs() + derive_client_timeout(c).as_secs();
+                    assert!(
+                        sum <= c,
+                        "REQ-A04 broken: timeout={timeout} rotations={max_rotations} \
+                         retry_disabled={retry_disabled} ceiling={c} sum={sum}"
+                    );
+                }
+            }
+        }
+    }
+
+    // -- Task 2: `BudgetTelemetry` — the five observable values ------------------------------
+
+    /// The telemetry reports the ceiling the run ACTUALLY got, and reports it whether or
+    /// not the derived path was taken.
+    #[test]
+    fn the_telemetry_reports_the_effective_ceiling_and_its_budget() {
+        let (ceiling, t) =
+            BudgetTelemetry::derive(Some(&TimeoutDecision::obeyed(1800)), 90, 2, false);
+        assert_eq!(ceiling.secs(), 249);
+        assert_eq!(t.operation_budget_secs, 149);
+        assert!(!t.ceiling_floored);
+        assert!(!t.ceiling_above_sanity);
+        assert_eq!(t.max_rotations_effective, 2);
+    }
+
+    /// SC-EB01: with no `--timeout`, the ceiling is the configured one and the budget is
+    /// byte-identical to v0.14.3. Verified by MUTATION: change the fallback to anything
+    /// else and this test must go red.
+    #[test]
+    fn without_an_explicit_timeout_nothing_changes_at_all() {
+        for configured in [30_u64, 45, 90, 120] {
+            let (ceiling, t) = BudgetTelemetry::derive(None, configured, 2, false);
+            assert_eq!(
+                ceiling.secs(),
+                configured,
+                "the configured ceiling, untouched"
+            );
+            assert_eq!(
+                t.operation_budget_secs,
+                derive_operation_budget(configured).as_secs()
+            );
+            assert!(!t.ceiling_floored);
+            assert!(!t.ceiling_above_sanity);
+        }
+    }
+
+    /// REQ-A04 holds on the `None` path too, for a configured ceiling BELOW the floor.
+    ///
+    /// `config.rs` validates `agent_timeout_secs` into `30..=120`, so this is unreachable
+    /// through the loaded config — but `derive` is `pub`, and a precondition enforced in
+    /// another module is a precondition someone can walk around. The sweep above covers
+    /// the validated range; this covers the hole underneath it.
+    #[test]
+    fn the_invariant_holds_for_a_below_floor_configured_ceiling() {
+        for configured in [0_u64, 1, 10, 14, 15] {
+            let (ceiling, t) = BudgetTelemetry::derive(None, configured, 2, false);
+            assert!(ceiling.secs() >= AGENT_TIMEOUT_ABSOLUTE_FLOOR_SECS);
+            let c = ceiling.secs();
+            let sum = derive_operation_budget(c).as_secs() + derive_client_timeout(c).as_secs();
+            assert!(sum <= c, "REQ-A04 broken at configured={configured}");
+            // `ceiling_floored` means the same thing on BOTH paths: the value was RAISED to the
+            // floor. It is not "the --timeout was too small" — it is "the ceiling did not reach
+            // the floor on its own", whatever produced it. Strictly `<`, so 15 is not floored.
+            assert_eq!(
+                t.ceiling_floored,
+                configured < AGENT_TIMEOUT_ABSOLUTE_FLOOR_SECS,
+                "at configured={configured}"
+            );
+        }
+    }
+
+    /// An absurd `max_rotations` degrades to the floor rather than wrapping — but not because
+    /// `attempt_factor` saturates. At `max_rotations = u32::MAX` the factor is
+    /// `2 * (u32::MAX + 1) * 120 ≈ 1.03e12`, nowhere near `u64::MAX`: both saturation points
+    /// inside `attempt_factor` are unreachable at every `u32` input this function can be given.
+    /// The ceiling reaches 0 through ORDINARY truncating division — `raw_ceiling_from_factor`
+    /// divides a small dividend by that ~1e12 factor — and the floor's `.max()` catches the
+    /// result. So the "no upper bound on max_rotations" the gate noted is bounded in effect
+    /// even though it is not bounded in type; the two `saturating_mul` calls in
+    /// `attempt_factor` remain declared defence for a caller that could somehow reach them, not
+    /// what this test actually exercises.
+    #[test]
+    fn an_absurd_rotation_count_degrades_to_the_floor() {
+        for max_rotations in [1_000_u32, u32::MAX / 2, u32::MAX] {
+            let (ceiling, t) = BudgetTelemetry::derive(
+                Some(&TimeoutDecision::obeyed(1800)),
+                90,
+                max_rotations,
+                false,
+            );
+            assert_eq!(ceiling.secs(), AGENT_TIMEOUT_ABSOLUTE_FLOOR_SECS);
+            assert!(t.ceiling_floored, "and it is reported, not silent");
+        }
+    }
+
+    /// SC-EB05d: what `floor_activation_threshold_secs` REPORTS when the rotation count makes the
+    /// floor unavoidable — the case the test above leaves unexamined.
+    ///
+    /// **Why this is not a pedantic edge case** (Checkpoint 2 loop 13, Caspar). With a saturated
+    /// factor the threshold comes out astronomically large. That number is *arithmetically right* —
+    /// there genuinely is no `--timeout` that avoids the floor at this rotation count — but the
+    /// field's whole promise is that a consumer can **auto-remediate without replicating our
+    /// arithmetic**. A CI script that reads it and retries with that value retries with something
+    /// unreachable, and then misdiagnoses the failure. Publishing a number that cannot be acted on
+    /// contradicts the reason the field exists.
+    ///
+    /// **The resolution is guidance, not a clamp.** Clamping would publish a *false* threshold — a
+    /// value that looks achievable and is not — which is worse than an obviously absurd one. What
+    /// makes the honest number actionable is the SECOND lever, already published beside it:
+    /// `max_rotations_effective`. When the threshold is unreachable the remediation is to lower
+    /// rotations, never to raise `--timeout`, and the consumer has both numbers to see that.
+    ///
+    /// So this test pins the property and the co-reported signal, not a magic literal. **Record the
+    /// observed value in a comment when writing it**, so the next reader sees the magnitude without
+    /// re-deriving it.
+    #[test]
+    fn an_unreachable_threshold_is_reported_honestly_beside_the_lever_that_fixes_it() {
+        for max_rotations in [u32::MAX / 2, u32::MAX] {
+            let (_, t) = BudgetTelemetry::derive(
+                Some(&TimeoutDecision::obeyed(1800)),
+                90,
+                max_rotations,
+                false,
+            );
+            // Unreachable by construction: no u64 `--timeout` can satisfy it.
+            assert!(
+                t.floor_activation_threshold_secs > u64::from(u32::MAX),
+                "at max_rotations={max_rotations} the threshold should be unreachable, not plausible"
+            );
+            // And the two signals a consumer needs to reach the RIGHT conclusion are both present.
+            assert!(
+                t.ceiling_floored,
+                "the run IS degraded, so the threshold is not being reported about a healthy run"
+            );
+            assert_eq!(
+                t.max_rotations_effective, max_rotations,
+                "the lever that actually fixes this must be reported beside the threshold that cannot"
+            );
+        }
+    }
+
+    /// SC-EB03: a small `--timeout` LOWERS the ceiling, it never raises it. `max(configured,
+    /// derived)` would let a 120 s ceiling run inside a 60 s deadline — killed by the outer
+    /// clock with certainty.
+    #[test]
+    fn a_small_timeout_lowers_the_ceiling_instead_of_keeping_the_configured_one() {
+        let (ceiling, t) =
+            BudgetTelemetry::derive(Some(&TimeoutDecision::obeyed(60)), 120, 2, false);
+        assert_eq!(ceiling.secs(), AGENT_TIMEOUT_ABSOLUTE_FLOOR_SECS);
+        assert!(
+            ceiling.secs() < 120,
+            "the explicit deadline governs; it must not be ignored"
+        );
+        assert!(t.ceiling_floored);
+    }
+
+    /// `ceiling_floored` is `derived < FLOOR`, STRICT. A ceiling that lands exactly on the
+    /// floor was reached, not clamped — `<` and `<=` are indistinguishable to read and
+    /// produce different reports in precisely the boundary case.
+    #[test]
+    fn a_ceiling_landing_exactly_on_the_floor_is_not_reported_as_floored() {
+        // The timeout whose exact inverse is the floor: 15 * 720 / 100 + 6 = 114.
+        let exact = headless_consult_timeout_secs(AGENT_TIMEOUT_ABSOLUTE_FLOOR_SECS, 2, false);
+        let (ceiling, t) =
+            BudgetTelemetry::derive(Some(&TimeoutDecision::obeyed(exact)), 90, 2, false);
+        assert_eq!(ceiling.secs(), AGENT_TIMEOUT_ABSOLUTE_FLOOR_SECS);
+        assert!(!t.ceiling_floored, "reached, not clamped");
+
+        let (_, below) =
+            BudgetTelemetry::derive(Some(&TimeoutDecision::obeyed(exact - 1)), 90, 2, false);
+        assert!(below.ceiling_floored, "one second under IS clamped");
+    }
+
+    /// `floor_activation_threshold_secs` is present ALWAYS, not only when degraded — its
+    /// most useful reading is "how much margin do I have before I degrade".
+    #[test]
+    fn the_floor_activation_threshold_is_always_present() {
+        for asked in [None, Some(60_u64), Some(1800)] {
+            let decision = asked.map(TimeoutDecision::obeyed);
+            let (_, t) = BudgetTelemetry::derive(decision.as_ref(), 90, 2, false);
+            assert_eq!(
+                t.floor_activation_threshold_secs,
+                floor_activation_threshold_secs(2, false),
+                "for asked={asked:?}"
+            );
+        }
+    }
+
+    /// **The threshold must actually WORK.** It is NOT
+    /// `headless_consult_timeout_secs(FLOOR, ..)` — that is the timeout the floor ceiling
+    /// *produces*, a different question from the smallest one that *avoids* the floor, and
+    /// the two coincide only when the division is exact. At slack 25 % or 33 % they do not,
+    /// and the field would publish the exact `--timeout` that trips the condition it exists
+    /// to help operators avoid.
+    ///
+    /// Asserted directly rather than against a formula: one second below trips the floor,
+    /// the threshold itself does not.
+    ///
+    /// **Swept over FACTORS, not over slack percentages.** `attempt_factor` is the only
+    /// place `HEADLESS_TIMEOUT_SLACK_PCT` is read, so a factor sweep covers every slack
+    /// the constant could ever hold — including 750 and 798, the values for 25 % and 33 %
+    /// that break the old formulation — without a parallel slack-parameterized copy of
+    /// every function.
+    #[test]
+    fn the_threshold_is_the_exact_boundary_of_floor_activation() {
+        // 720 = the shipped 20 %; 750 and 798 are 25 % and 33 %, where the old
+        // `headless_consult_timeout_secs(FLOOR, ..)` formulation returned a value that
+        // floored. The rest sweep rotation counts and the retry-disabled multiplier.
+        for factor in [110_u64, 120, 240, 360, 720, 750, 798, 1440, 4788] {
+            let t = threshold_from_factor(factor);
+            assert!(
+                raw_ceiling_from_factor(t, factor) >= AGENT_TIMEOUT_ABSOLUTE_FLOOR_SECS,
+                "the threshold itself must NOT floor: factor={factor} threshold={t}"
+            );
+            assert!(
+                raw_ceiling_from_factor(t - 1, factor) < AGENT_TIMEOUT_ABSOLUTE_FLOOR_SECS,
+                "and it must be the SMALLEST such value, or it overstates what is needed: \
+                 factor={factor} threshold={t}"
+            );
+        }
+    }
+
+    /// SC-EB04c: the public threshold is composed, not hardcoded.
+    ///
+    /// **Asserted against a number derived OUTSIDE the function**, not against the function's own
+    /// body. The previous version compared `floor_activation_threshold_secs(r, d)` to
+    /// `threshold_from_factor(attempt_factor(r, d))` — which is that function's definition, so it
+    /// held no matter what either helper computed, and it passed unchanged during the Red phase.
+    ///
+    /// 114 is the spec's documented boundary for the shipped configuration:
+    /// `2 attempts x 3 models x 15 s floor x 1.2 slack + 6 s classify = 114`.
+    #[test]
+    fn the_public_threshold_composes_attempt_factor_with_the_boundary() {
+        assert_eq!(
+            floor_activation_threshold_secs(2, false),
+            114,
+            "the shipped configuration's floor-activation boundary"
+        );
+    }
+
+    /// The sanity flag catches the likeliest error in this whole interface: one extra
+    /// digit. `--timeout 18000` for `1800` buys ~1500 s per attempt, and a hung mage would
+    /// burn 25 minutes before giving up. It WARNS and obeys — there is no upper clamp,
+    /// that is the requirement.
+    #[test]
+    fn a_ceiling_above_the_sanity_threshold_is_flagged_but_never_clamped() {
+        let (ceiling, t) =
+            BudgetTelemetry::derive(Some(&TimeoutDecision::obeyed(18_000)), 90, 2, false);
+        assert!(ceiling.secs() > CEILING_SANITY_SECS);
+        assert!(t.ceiling_above_sanity, "a probable typo must be observable");
+        assert_eq!(
+            ceiling.secs(),
+            derive_ceiling_from_timeout(18_000, 2, false),
+            "flagged, NOT clamped: an upper bound is exactly what E-B removes"
         );
     }
 }
