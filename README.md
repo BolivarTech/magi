@@ -382,6 +382,26 @@ It is opt-in rather than default because the same text already travels rendered 
 keys at all: returning the trio's full output there would put it straight into the agent's context
 window, which is what that cap exists to prevent.
 
+#### `applied_caps`
+
+`applied_caps` reports the limits actually enforced on this run, so a caller can tell an operator
+cap from a request that was simply honored as asked. It carries nine keys, all always present:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `max_tool_calls` | number | the effective tool-invocation cap after applying the operator cap |
+| `max_tool_calls_clamped` | bool | `true` if the envelope's `max_tool_calls` was cut down to that cap |
+| `timeout_secs` | number \| null | the wall-clock cap in seconds, if one was set |
+| `system_override_applied` | bool | `true` if the envelope's `system` prompt was applied (requires the operator flag) |
+| `operation_budget_secs` | number | the per-attempt budget each mage ran under during this run |
+| `ceiling_floored` | bool | `true` if the derived ceiling was raised to the 15 s floor. Strictly "raised": a ceiling that lands exactly on the floor was reached, not clamped, and reports `false` |
+| `floor_activation_threshold_secs` | number | the smallest `--timeout` that avoids the floor under this run's rotation settings. This is not "the minimum for the run to succeed": a script that retries at this value can still exhaust its budget against a slow model. When it comes back unreasonably large, the fix is to lower `max_rotations`, not to raise `--timeout` |
+| `max_rotations_effective` | number | the rotation count the budget was computed with, so a caller can weigh that second lever without redoing the arithmetic |
+| `ceiling_above_sanity` | bool | `true` if the derived ceiling exceeded a sanity threshold, which usually means a mistyped `--timeout`. Worth watching in CI, where stderr is unreliable and this flag is the only signal |
+
+The last five are new in v0.15.0 and additive under the same policy as `consult` above, with no
+`schema_version` bump: the tolerate-new-fields rule applies here too.
+
 ### Authorization tiers
 
 Secure by default: a read-only CI job cannot mutate or execute:
@@ -625,7 +645,7 @@ subset of what `magi-core`'s builder offers, not the whole surface:
 
 | Key | Purpose |
 |-----|---------|
-| `agent_timeout_secs` | Per-mage ceiling. The two internal timeout layers (retry budget, per-request client timeout) are **derived** from this value, not configured separately — no combination of settings can break the relation between them. |
+| `agent_timeout_secs` | Per-mage ceiling on the TUI path, and the fallback on the headless path when no explicit `--timeout` is given. When `--timeout` is given, headless derives the ceiling from it instead (see [`applied_caps`](#applied_caps) above). Either way, the two internal timeout layers (retry budget, per-request client timeout) are **derived** from the ceiling, not configured separately: no combination of settings can break the relation between them. |
 | `max_query_bytes` | Input cap applied by magi-rs itself, before `magi-core` sees the payload — rejects rather than truncates, since a silently shortened payload would produce a verdict indistinguishable from a legitimate one. Sized for a real review diff (hundreds of KB), not the old 8 KiB limit. |
 | `input_warn_tokens` | Threshold for the oversized-input warning. Left unset, it is **measured** by a startup probe against the smallest context window across the trio (only possible when the trio's `kind` is `ollama`, the only measurable one); declaring it overrides the measurement. |
 | `retry_disabled` | Disables the trio's inherited retry, for a deployment where 2× the per-mage timeout is unacceptable. |
