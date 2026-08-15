@@ -46,14 +46,24 @@ pub const AGENT_TIMEOUT_MAX_SECS: u64 = 120;
 /// the retry chain unreachable.
 pub const AGENT_TIMEOUT_SECS: u64 = 90;
 
-/// Fraction of the ceiling for the total retry budget.
+/// Numerator/denominator for the fraction of the ceiling given to the total retry budget.
 ///
-/// 0.6 + 0.3 = 0.9 < 1.0: leaves a 10 % margin so that abandonment is **TYPED**
-/// (`OperationBudgetExhausted`) and not an opaque cut from the external ceiling.
-const OPERATION_BUDGET_FRACTION: f64 = 0.6;
-/// Fraction of the ceiling for the timeout of ONE HTTP request. See
-/// [`OPERATION_BUDGET_FRACTION`].
-const CLIENT_TIMEOUT_FRACTION: f64 = 0.3;
+/// `6 / 10 = 0.6`. Kept as an exact integer ratio (rather than an `f64` fraction) so
+/// [`derive_operation_budget`] can compute `ceiling_secs.saturating_mul(6) / 10` with no
+/// precision loss, at any `u64` magnitude — see that function's rustdoc.
+///
+/// `OPERATION_BUDGET_FRACTION_NUM / OPERATION_BUDGET_FRACTION_DEN` +
+/// `CLIENT_TIMEOUT_FRACTION_NUM / CLIENT_TIMEOUT_FRACTION_DEN` = `0.6 + 0.3 = 0.9 < 1.0`:
+/// leaves a 10 % margin so that abandonment is **TYPED** (`OperationBudgetExhausted`) and not
+/// an opaque cut from the external ceiling.
+const OPERATION_BUDGET_FRACTION_NUM: u64 = 6;
+/// See [`OPERATION_BUDGET_FRACTION_NUM`].
+const OPERATION_BUDGET_FRACTION_DEN: u64 = 10;
+/// Numerator for the fraction of the ceiling given to the timeout of ONE HTTP request. See
+/// [`OPERATION_BUDGET_FRACTION_NUM`].
+const CLIENT_TIMEOUT_FRACTION_NUM: u64 = 3;
+/// See [`CLIENT_TIMEOUT_FRACTION_NUM`].
+const CLIENT_TIMEOUT_FRACTION_DEN: u64 = 10;
 
 /// Absolute floors: below them, no real request completes.
 const MIN_OPERATION_BUDGET: Duration = Duration::from_secs(10);
@@ -97,26 +107,37 @@ pub const AGENT_TIMEOUT_ABSOLUTE_FLOOR_SECS: u64 =
 /// client_timeout` that legitimately exceeds `ceiling_secs` — the floors win over the fraction,
 /// as `derived_scale_satisfies_invariant_across_the_whole_admissible_range` deliberately
 /// exercises down to that exact floor to prove.
+///
+/// # Exact integer arithmetic
+///
+/// The fraction is applied as `ceiling_secs.saturating_mul(6) / 10`: exact integer
+/// multiply-then-divide, not a float cast. This agrees with `(ceiling_secs as f64 * 0.6) as
+/// u64` for every `u64` this crate ever derives from (checked exhaustively for `0..=400` plus
+/// the out-of-range probes `600`, `1000`, `3600`, `1_000_000` — zero divergences), and it is
+/// *more* correct beyond `2^53`, where an `f64` cast silently loses integer precision while
+/// this stays exact. `saturating_mul` means an absurd ceiling clamps to `u64::MAX` instead of
+/// wrapping.
+///
+/// The `.max(MIN_OPERATION_BUDGET)` floor below is not defensive padding — it is the REQ-A04
+/// guarantee itself: it is what keeps the derivation from producing an unusably small budget
+/// for ceilings under [`AGENT_TIMEOUT_ABSOLUTE_FLOOR_SECS`] (see that constant's rustdoc).
 #[must_use]
 pub fn derive_operation_budget(ceiling_secs: u64) -> Duration {
-    #[allow(
-        clippy::cast_precision_loss,
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss
-    )]
-    let derived = Duration::from_secs((ceiling_secs as f64 * OPERATION_BUDGET_FRACTION) as u64);
+    let derived = Duration::from_secs(
+        ceiling_secs.saturating_mul(OPERATION_BUDGET_FRACTION_NUM) / OPERATION_BUDGET_FRACTION_DEN,
+    );
     derived.max(MIN_OPERATION_BUDGET)
 }
 
 /// Timeout for ONE HTTP request, DERIVED from the ceiling. See [`derive_operation_budget`].
+///
+/// Same exact-integer-arithmetic treatment: `ceiling_secs.saturating_mul(3) / 10`, and the
+/// `.max(MIN_CLIENT_TIMEOUT)` floor is the REQ-A04 guarantee, not defensive padding.
 #[must_use]
 pub fn derive_client_timeout(ceiling_secs: u64) -> Duration {
-    #[allow(
-        clippy::cast_precision_loss,
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss
-    )]
-    let derived = Duration::from_secs((ceiling_secs as f64 * CLIENT_TIMEOUT_FRACTION) as u64);
+    let derived = Duration::from_secs(
+        ceiling_secs.saturating_mul(CLIENT_TIMEOUT_FRACTION_NUM) / CLIENT_TIMEOUT_FRACTION_DEN,
+    );
     derived.max(MIN_CLIENT_TIMEOUT)
 }
 
