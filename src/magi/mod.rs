@@ -554,6 +554,57 @@ impl TimeoutDecision {
     }
 }
 
+/// Which ceiling a [`resolve_run_timeout`] caller's `asked` deadline is measured against.
+///
+/// Named explicitly at every call site rather than inferred from `asked`'s source: a same-typed
+/// positional argument here is exactly the transposition hazard `OpenAiSettings`/`ModeSources`
+/// exist to avoid elsewhere in this crate, and getting this one wrong does not fail to compile —
+/// it prints a confidently wrong number in a warning an operator is meant to act on.
+///
+/// # Why two variants, not one formula
+///
+/// Before `prepare_headless` learned to derive the trio's per-mage ceiling FROM `asked`
+/// (REQ-EB01), every caller's mages ran at `configured_ceiling` regardless of what `asked` was,
+/// so comparing `asked` against `headless_consult_timeout_secs(configured_ceiling, ..)` answered
+/// the right question everywhere. That stopped being true for exactly one caller
+/// (`prepare_headless`'s own `resolve_run_timeout` call, which feeds the SAME `asked` into
+/// `BudgetTelemetry::derive`'s `Some` branch): its mages now run at a ceiling *derived from*
+/// `asked`, not at `configured_ceiling`, so the old comparison measures a requirement the run no
+/// longer has. `query_timeout_decision` in `main.rs` is not this caller — see
+/// [`ConfiguredCeiling`](Self::ConfiguredCeiling).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimeoutMeasure {
+    /// The caller feeds `asked` into [`derive_ceiling_from_timeout`]/[`BudgetTelemetry::derive`]
+    /// to become the per-mage ceiling itself (`prepare_headless`'s route).
+    ///
+    /// By the round-trip property `derive_ceiling_from_timeout` and
+    /// [`headless_consult_timeout_secs`] share (`fwd(inv(asked)) ≈ asked`), a derived ceiling
+    /// fits `asked` almost by construction — so [`TimeoutDecision::below_formula`] stays
+    /// `false`, UNLESS the derived ceiling gets raised to
+    /// [`AGENT_TIMEOUT_ABSOLUTE_FLOOR_SECS`]. In that case `asked` is measured against
+    /// [`floor_activation_threshold_secs`], not `headless_consult_timeout_secs(configured_ceiling,
+    /// ..)` — the two diverge once derivation is in play, and only the floor threshold describes
+    /// what THIS run's ceiling actually needs.
+    ///
+    /// **`below_formula` is accurate here, but [`TimeoutDecision::warning`] stays `None`
+    /// regardless** (fix round 3, audit finding 3): `main.rs`'s `prepare_headless` computes this
+    /// SAME floored condition independently, as `BudgetTelemetry::ceiling_floored` — the two
+    /// cannot disagree, since both compose over this module's own
+    /// [`floor_activation_threshold_secs`] — and prints `floored_ceiling_notice` for it
+    /// unconditionally, on every headless run, `magi query` and `magi consult` alike. That notice
+    /// is strictly more complete than anything this function could say on its own (it also names
+    /// the `max_rotations` lever), so a second, narrower text here would only duplicate it on
+    /// the one route (`magi consult`) where both happen to reach stderr. The JSON contract
+    /// (SC-A04d/REQ-A11d) is unaffected: `below_formula` still reports the comparison honestly.
+    DerivesCeiling,
+    /// The caller runs the mages at `configured_ceiling` VERBATIM; `asked` only bounds the run's
+    /// own outer wall clock and never reaches `BudgetTelemetry::derive` as the `Some` branch
+    /// (`query_timeout_decision`'s route). Compare against
+    /// `headless_consult_timeout_secs(configured_ceiling, ..)` — the pre-E-B behavior, unchanged
+    /// for this caller.
+    ConfiguredCeiling,
+}
+
 /// Resolves the run wall-clock. **It always obeys the explicit value**, and warns when that
 /// value makes it impossible to complete a consult with schema retry.
 ///
@@ -567,11 +618,15 @@ impl TimeoutDecision {
 /// flag they did not set. Keep it source-agnostic: it is deliberate, not an oversight to "fix"
 /// back to naming the flag.
 ///
-/// # A consumer derives the per-mage ceiling from `effective_secs`
+/// # A consumer derives the per-mage ceiling from `effective_secs` — sometimes
 ///
 /// `prepare_headless` in `main.rs` calls this **before** building the trio and feeds
 /// `effective_secs` into `BudgetTelemetry::derive`, so this function's answer decides the budget
-/// every mage runs under — not just the run's outer deadline (REQ-EB01/EB03).
+/// every mage runs under — not just the run's outer deadline (REQ-EB01/EB03). That caller passes
+/// [`TimeoutMeasure::DerivesCeiling`]. A caller whose mages run at `configured_ceiling`
+/// regardless of `asked` (`query_timeout_decision`) passes
+/// [`TimeoutMeasure::ConfiguredCeiling`] instead — see that type's rustdoc for why the two
+/// cannot share one formula.
 ///
 /// That makes the ordering load-bearing: **the resolution must stay ahead of trio construction.**
 /// Moving this call after it would put the trio back on a ceiling derived from a number the run
@@ -589,32 +644,61 @@ impl TimeoutDecision {
 /// * `configured_ceiling` - `[magi].agent_timeout_secs`, resolved.
 /// * `max_rotations` - `[magi].max_rotations`, resolved (REQ-R20).
 /// * `retry_disabled` - `[magi].retry_disabled`, resolved.
+/// * `measure` - which ceiling `asked` is measured against; see [`TimeoutMeasure`].
 #[must_use]
 pub fn resolve_run_timeout(
     asked: Option<u64>,
     configured_ceiling: u64,
     max_rotations: u32,
     retry_disabled: bool,
+    measure: TimeoutMeasure,
 ) -> TimeoutDecision {
-    let minimum = headless_consult_timeout_secs(configured_ceiling, max_rotations, retry_disabled);
+    let formula_minimum =
+        headless_consult_timeout_secs(configured_ceiling, max_rotations, retry_disabled);
     let Some(secs) = asked else {
         return TimeoutDecision {
-            effective_secs: minimum,
+            effective_secs: formula_minimum,
             warning: None,
             below_formula: false,
             _resolved: (),
         };
     };
+    // Composes over `floor_activation_threshold_secs` rather than recomputing its arithmetic —
+    // that function already IS the exact boundary of floor activation (its own rustdoc proves
+    // both halves: sufficient AND minimal), so `secs < minimum` here is equivalent to "the
+    // ceiling `derive_ceiling_from_timeout(secs, ..)` would produce gets floored", without this
+    // function ever calling that deriver itself.
+    let minimum = match measure {
+        TimeoutMeasure::ConfiguredCeiling => formula_minimum,
+        TimeoutMeasure::DerivesCeiling => {
+            floor_activation_threshold_secs(max_rotations, retry_disabled)
+        }
+    };
     let below = secs < minimum;
-    TimeoutDecision {
-        effective_secs: secs,
-        warning: below.then(|| {
+    // `DerivesCeiling` never populates free text (fix round 3, Task 3 audit finding 3): its
+    // `below` condition is, by construction, the SAME boolean `main.rs`'s
+    // `BudgetTelemetry::derive` already reports as `ceiling_floored` — both sides compose over
+    // this module's OWN `floor_activation_threshold_secs`, so they cannot disagree — and
+    // `prepare_headless` ALREADY prints a human-readable notice for exactly that condition
+    // (`floored_ceiling_notice`, fired unconditionally for every headless run, `magi query` and
+    // `magi consult` alike, and strictly more complete: it also names the `max_rotations`
+    // lever this message cannot). Populating a second, narrower message here — reaching stderr
+    // only on the `magi consult` route, via `analyze_direct`'s notice_sink — would print the
+    // same fact twice on that one route. `below_formula` still reports the comparison
+    // accurately for the JSON (SC-A04d/REQ-A11d); only the redundant TEXT is suppressed.
+    let warning = match measure {
+        TimeoutMeasure::ConfiguredCeiling => below.then(|| {
             format!(
                 "warning: the run's wall-clock deadline of {secs}s is below the {minimum}s the \
                  scale requires for `agent_timeout_secs = {configured_ceiling}`; a consult that \
                  needs its schema retry will NOT complete. Using the requested value anyway."
             )
         }),
+        TimeoutMeasure::DerivesCeiling => None,
+    };
+    TimeoutDecision {
+        effective_secs: secs,
+        warning,
         below_formula: below,
         _resolved: (),
     }
@@ -991,6 +1075,13 @@ mod tests {
 
     /// SC-A04d: an explicit `--timeout` below the minimum is OBEYED, with a warning.
     ///
+    /// `TimeoutMeasure::ConfiguredCeiling`: this is `query_timeout_decision`'s route, whose
+    /// mages run at `configured_ceiling` regardless of `asked` — so the warning must still name
+    /// `headless_consult_timeout_secs(configured_ceiling, ..)`, exactly as before the
+    /// `DerivesCeiling` variant existed. See
+    /// `a_derived_timeout_at_the_floor_threshold_does_not_warn_against_the_configured_ceiling`
+    /// for the sibling case this test would get wrong if it used `DerivesCeiling` instead.
+    ///
     /// The flag is an operator wall-clock cap, not a safety invariant: whoever asks for
     /// `--timeout 5` wants to cut at 5 seconds, and forcing it to respect the formula would
     /// disobey a clear order. But a value below the minimum guarantees that **no consult with
@@ -998,7 +1089,13 @@ mod tests {
     #[test]
     fn an_explicit_timeout_below_the_formula_is_obeyed_and_warned_about() {
         let asked = 5_u64;
-        let decision = resolve_run_timeout(Some(asked), AGENT_TIMEOUT_SECS, 0, false);
+        let decision = resolve_run_timeout(
+            Some(asked),
+            AGENT_TIMEOUT_SECS,
+            0,
+            false,
+            TimeoutMeasure::ConfiguredCeiling,
+        );
         assert_eq!(
             decision.effective_secs, asked,
             "the operator's order is obeyed"
@@ -1018,15 +1115,151 @@ mod tests {
         );
 
         assert!(
-            resolve_run_timeout(None, AGENT_TIMEOUT_SECS, 0, false)
-                .warning
-                .is_none(),
+            resolve_run_timeout(
+                None,
+                AGENT_TIMEOUT_SECS,
+                0,
+                false,
+                TimeoutMeasure::ConfiguredCeiling
+            )
+            .warning
+            .is_none(),
             "the default does not warn about itself"
         );
+        assert!(resolve_run_timeout(
+            Some(1_000),
+            AGENT_TIMEOUT_SECS,
+            0,
+            false,
+            TimeoutMeasure::ConfiguredCeiling
+        )
+        .warning
+        .is_none());
+    }
+
+    /// The fix round 3 regression table, `TimeoutMeasure::DerivesCeiling` half
+    /// (`prepare_headless`'s route): with `agent_timeout_secs = 90`, `max_rotations = 2`,
+    /// retry on, `--timeout 114` derives a ceiling that lands EXACTLY on
+    /// `AGENT_TIMEOUT_ABSOLUTE_FLOOR_SECS` — reached, not clamped
+    /// (`floor_activation_threshold_secs`'s own contract: `threshold - 1` floors, `threshold`
+    /// does not) — so this must NOT warn, and must NEVER name `654`
+    /// (`headless_consult_timeout_secs(90, 2, false)`, the configured-ceiling minimum a
+    /// `DerivesCeiling` caller has no use for). Before this fix, `resolve_run_timeout` compared
+    /// every caller against that 654s figure regardless of route, so a run that is exactly
+    /// adequate got told it needed 5.7x more.
+    #[test]
+    fn a_derived_timeout_at_the_floor_threshold_does_not_warn_against_the_configured_ceiling() {
+        let threshold = floor_activation_threshold_secs(2, false);
+        assert_eq!(threshold, 114, "pins the worked example from the report");
+        let decision = resolve_run_timeout(
+            Some(threshold),
+            90,
+            2,
+            false,
+            TimeoutMeasure::DerivesCeiling,
+        );
         assert!(
-            resolve_run_timeout(Some(1_000), AGENT_TIMEOUT_SECS, 0, false)
-                .warning
-                .is_none()
+            !decision.below_formula,
+            "the threshold IS the boundary: reached, not below it"
+        );
+        assert!(
+            decision.warning.is_none(),
+            "a run at exactly the floor threshold does not floor and must stay silent: {:?}",
+            decision.warning
+        );
+    }
+
+    /// The sibling half one second below the threshold: the derived ceiling DOES floor, so
+    /// `below_formula` must be measured against `floor_activation_threshold_secs` (114), never
+    /// against `headless_consult_timeout_secs(90, 2, false)` (654) — which is what the pre-fix
+    /// comparison claimed regardless of which ceiling the run's mages actually use. Proven
+    /// WITHOUT reading warning text: `below_formula` alone already answers "measured against
+    /// which number", since 113 sits below 114 but far below 654 too — the sharp case is the
+    /// NEXT test's symmetric pair around 114 itself (`a_derived_timeout_at_the_floor_threshold_…`
+    /// above already covers the "at 114, not below" half).
+    ///
+    /// `.warning` stays `None` even though the run DID floor — see
+    /// `TimeoutMeasure::DerivesCeiling`'s rustdoc: `prepare_headless`'s `floored_ceiling_notice`
+    /// already reports this exact condition on stderr, unconditionally, for both `magi query`
+    /// and `magi consult`, and more completely (it names the `max_rotations` lever too). A
+    /// second, narrower text reaching stderr only on the `magi consult` route would duplicate
+    /// it — the audit finding this fix round closed.
+    #[test]
+    fn a_derived_timeout_below_the_floor_threshold_floors_but_leaves_the_text_to_the_floor_notice()
+    {
+        let threshold = floor_activation_threshold_secs(2, false);
+        assert_eq!(threshold, 114, "pins the worked example");
+        let configured_minimum = headless_consult_timeout_secs(90, 2, false);
+        assert_eq!(configured_minimum, 654, "pins the worked example");
+        let decision = resolve_run_timeout(
+            Some(threshold - 1),
+            90,
+            2,
+            false,
+            TimeoutMeasure::DerivesCeiling,
+        );
+        assert!(
+            decision.below_formula,
+            "one second below the floor threshold DOES floor — measured against 114, not 654"
+        );
+        assert!(
+            decision.warning.is_none(),
+            "the free text is suppressed on this route: floored_ceiling_notice covers it. \
+             Present: {:?}",
+            decision.warning
+        );
+    }
+
+    /// A generous `--timeout` on the `DerivesCeiling` route stays silent, both far below and
+    /// far above the old (wrong) configured-ceiling minimum — the round-trip property means the
+    /// derived ceiling fits `asked` regardless of how large `asked` is, so nothing ever floors.
+    #[test]
+    fn a_generous_derived_timeout_stays_silent() {
+        for asked in [200_u64, 1800] {
+            let decision =
+                resolve_run_timeout(Some(asked), 90, 2, false, TimeoutMeasure::DerivesCeiling);
+            assert!(
+                !decision.below_formula && decision.warning.is_none(),
+                "--timeout {asked} must stay silent on the DerivesCeiling route: {:?}",
+                decision.warning
+            );
+        }
+    }
+
+    /// The non-deriving route (`query_timeout_decision`'s `ConfiguredCeiling`) must keep
+    /// warning against `headless_consult_timeout_secs(configured_ceiling, ..)` exactly as
+    /// before — this is the caller whose mages genuinely run at `configured_ceiling`
+    /// regardless of `asked`, so the pre-E-B comparison is still the right one for it.
+    #[test]
+    fn the_non_deriving_route_still_warns_against_the_configured_ceiling() {
+        let configured_minimum = headless_consult_timeout_secs(90, 2, false);
+        assert_eq!(configured_minimum, 654, "pins the worked example");
+        let decision = resolve_run_timeout(
+            Some(configured_minimum - 1),
+            90,
+            2,
+            false,
+            TimeoutMeasure::ConfiguredCeiling,
+        );
+        assert!(decision.below_formula);
+        let warning = decision
+            .warning
+            .expect("below the configured minimum must warn");
+        assert!(
+            warning.contains(&configured_minimum.to_string()),
+            "must name the configured-ceiling minimum ({configured_minimum}): {warning}"
+        );
+
+        let decision = resolve_run_timeout(
+            Some(configured_minimum),
+            90,
+            2,
+            false,
+            TimeoutMeasure::ConfiguredCeiling,
+        );
+        assert!(
+            !decision.below_formula && decision.warning.is_none(),
+            "at or above the configured minimum, silence"
         );
     }
 

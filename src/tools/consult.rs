@@ -1327,7 +1327,7 @@ mod tests {
     use magi_core::provider::{CompletionConfig, LlmProvider};
     use magi_core::test_support::RoutingMockProvider;
     use magi_core::verdict_markers::{VERDICT_CLOSE, VERDICT_OPEN};
-    use magi_rs::magi::{resolve_run_timeout, AGENT_TIMEOUT_SECS};
+    use magi_rs::magi::{resolve_run_timeout, TimeoutMeasure, AGENT_TIMEOUT_SECS};
     use std::time::Duration;
 
     /// Upper bound on how long a *cancelled* `execute` may take to return. The cancel path
@@ -2587,7 +2587,13 @@ mod tests {
             "base_url = \"http://a/v1\"\n[magi]\nbase_url = \"http://b/v1\"\n",
         )
         .expect("valid toml");
-        let dec = resolve_run_timeout(None, AGENT_TIMEOUT_SECS, 0, false);
+        let dec = resolve_run_timeout(
+            None,
+            AGENT_TIMEOUT_SECS,
+            0,
+            false,
+            TimeoutMeasure::ConfiguredCeiling,
+        );
 
         let ctx = RunContext::build(&diverged, &resolution(true), &dec);
         assert!(ctx.endpoint_divergence);
@@ -2619,7 +2625,13 @@ mod tests {
             "base_url = \"http://a/v1\"\n[magi]\nbase_url = \"http://b/v1\"\n",
         )
         .expect("valid toml");
-        let dec = resolve_run_timeout(None, AGENT_TIMEOUT_SECS, 0, false);
+        let dec = resolve_run_timeout(
+            None,
+            AGENT_TIMEOUT_SECS,
+            0,
+            false,
+            TimeoutMeasure::ConfiguredCeiling,
+        );
 
         let ctx = RunContext::build(&diverged, &resolution(true), &dec);
         assert!(

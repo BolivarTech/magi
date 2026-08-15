@@ -5243,11 +5243,17 @@ async fn prepare_headless(
     // future change to `resolve_run_timeout` moves this automatically instead of silently leaving
     // the trio on a budget the run no longer uses.
     let (configured_ceiling, max_rotations, retry_disabled) = timeout_scale(&magi_config);
+    // `TimeoutMeasure::DerivesCeiling`: `h.timeout`, when `Some`, is fed straight into
+    // `BudgetTelemetry::derive`'s `Some` branch below — this run's mages run at a ceiling
+    // DERIVED from it, not at `configured_ceiling`, so the warning must be measured against
+    // `floor_activation_threshold_secs`, not `headless_consult_timeout_secs(configured_ceiling,
+    // ..)` (fix round 3, SC-EB05d's mirror on the warning side).
     let timeout_decision = magi_rs::magi::resolve_run_timeout(
         h.timeout,
         configured_ceiling,
         max_rotations,
         retry_disabled,
+        magi_rs::magi::TimeoutMeasure::DerivesCeiling,
     );
     // `Some` only when the OPERATOR asked. With no `--timeout`, `resolve_run_timeout` returns the
     // formula minimum, and feeding that back through the inverse would land in `[c-1, c]` — one
@@ -5543,12 +5549,21 @@ fn query_timeout_decision(
     // explicit `--timeout`, `[headless] timeout_secs`, or the tier default. All three are
     // operator declarations, so all three are obeyed and all three deserve the same heads-up
     // when they are structurally too short.
+    //
+    // `TimeoutMeasure::ConfiguredCeiling`: unlike `prepare_headless`'s own `resolve_run_timeout`
+    // call, this decision's `asked` never reaches `BudgetTelemetry::derive` as the `Some`
+    // branch — this route only bounds the run's own tool-loop wall clock, while the trio's
+    // mages (built earlier, once, in `prepare_headless`) already run at whatever ceiling that
+    // separate call resolved. So the requirement this warning names is genuinely
+    // `headless_consult_timeout_secs(configured_ceiling, ..)`, unchanged from before
+    // `TimeoutMeasure` existed.
     let (ceiling, max_rotations, retry_disabled) = timeout_scale(cfg);
     Some(magi_rs::magi::resolve_run_timeout(
         Some(secs),
         ceiling,
         max_rotations,
         retry_disabled,
+        magi_rs::magi::TimeoutMeasure::ConfiguredCeiling,
     ))
 }
 
@@ -8270,7 +8285,13 @@ mod tests {
     #[test]
     fn consult_deadline_falls_back_to_the_formula_minimum_when_absent() {
         let ceiling = magi_rs::magi::AGENT_TIMEOUT_SECS;
-        let decision = magi_rs::magi::resolve_run_timeout(None, ceiling, 0, false);
+        let decision = magi_rs::magi::resolve_run_timeout(
+            None,
+            ceiling,
+            0,
+            false,
+            magi_rs::magi::TimeoutMeasure::DerivesCeiling,
+        );
         let deadline = consult_deadline(&decision);
         assert_eq!(
             deadline,
@@ -8293,7 +8314,13 @@ mod tests {
     #[test]
     fn consult_deadline_obeys_an_explicit_timeout_even_below_the_formula() {
         let ceiling = magi_rs::magi::AGENT_TIMEOUT_SECS;
-        let decision = magi_rs::magi::resolve_run_timeout(Some(1), ceiling, 0, false);
+        let decision = magi_rs::magi::resolve_run_timeout(
+            Some(1),
+            ceiling,
+            0,
+            false,
+            magi_rs::magi::TimeoutMeasure::DerivesCeiling,
+        );
         assert_eq!(
             consult_deadline(&decision),
             Duration::from_secs(1),
@@ -8410,8 +8437,13 @@ mod tests {
         let cfg = MagiConfig::default();
         let (configured, rotations, retry_disabled) = timeout_scale(&cfg);
         let asked = 1800_u64;
-        let decision =
-            magi_rs::magi::resolve_run_timeout(Some(asked), configured, rotations, retry_disabled);
+        let decision = magi_rs::magi::resolve_run_timeout(
+            Some(asked),
+            configured,
+            rotations,
+            retry_disabled,
+            magi_rs::magi::TimeoutMeasure::DerivesCeiling,
+        );
         let (from_resolved, _) = magi_rs::magi::BudgetTelemetry::derive(
             Some(&decision),
             configured,
@@ -8433,8 +8465,13 @@ mod tests {
     fn an_absent_timeout_does_not_round_trip_through_the_resolver() {
         let cfg = MagiConfig::default();
         let (configured, rotations, retry_disabled) = timeout_scale(&cfg);
-        let decision =
-            magi_rs::magi::resolve_run_timeout(None, configured, rotations, retry_disabled);
+        let decision = magi_rs::magi::resolve_run_timeout(
+            None,
+            configured,
+            rotations,
+            retry_disabled,
+            magi_rs::magi::TimeoutMeasure::DerivesCeiling,
+        );
         let drifted = magi_rs::magi::derive_ceiling_from_timeout(
             decision.effective_secs,
             rotations,

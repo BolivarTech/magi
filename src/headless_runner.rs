@@ -3068,7 +3068,13 @@ mod tests {
         let cfg = MagiConfig::default();
         let ceiling = magi_rs::magi::AGENT_TIMEOUT_SECS;
         // An `asked` well below `headless_consult_timeout_secs(ceiling)`.
-        let decision = magi_rs::magi::resolve_run_timeout(Some(1), ceiling, 0, false);
+        let decision = magi_rs::magi::resolve_run_timeout(
+            Some(1),
+            ceiling,
+            0,
+            false,
+            magi_rs::magi::TimeoutMeasure::DerivesCeiling,
+        );
         assert!(
             decision.below_formula,
             "test setup: this must actually trigger the formula check"
@@ -3111,11 +3117,24 @@ mod tests {
     /// source-agnostic (`resolve_run_timeout`'s rustdoc explains why — this same deadline can
     /// come from a tier default or `[headless] timeout_secs`, not only the flag), so do not
     /// "fix" this assertion back to the flag string.
+    ///
+    /// **`TimeoutMeasure::ConfiguredCeiling`, deliberately, not `DerivesCeiling`** (fix round 3):
+    /// this test proves the PLUMBING (a populated `.warning` reaches `notice_sink`), not which
+    /// route production actually takes. `DerivesCeiling` never populates `.warning` — see its
+    /// rustdoc — because `prepare_headless` already reports that route's floored condition via
+    /// `floored_ceiling_notice`, and this test would fail its own setup assertion if it used
+    /// that variant.
     #[tokio::test]
     async fn sc_a04d_warning_reaches_the_notice_sink_from_a_real_run() {
         let cfg = MagiConfig::default();
         let ceiling = magi_rs::magi::AGENT_TIMEOUT_SECS;
-        let decision = magi_rs::magi::resolve_run_timeout(Some(1), ceiling, 0, false);
+        let decision = magi_rs::magi::resolve_run_timeout(
+            Some(1),
+            ceiling,
+            0,
+            false,
+            magi_rs::magi::TimeoutMeasure::ConfiguredCeiling,
+        );
         assert!(
             decision.below_formula && decision.warning.is_some(),
             "test setup: this must actually trigger the warning"
@@ -3159,7 +3178,13 @@ mod tests {
         let cfg = MagiConfig::default();
         let ceiling = magi_rs::magi::AGENT_TIMEOUT_SECS;
 
-        let generous = magi_rs::magi::resolve_run_timeout(Some(100_000), ceiling, 0, false);
+        let generous = magi_rs::magi::resolve_run_timeout(
+            Some(100_000),
+            ceiling,
+            0,
+            false,
+            magi_rs::magi::TimeoutMeasure::DerivesCeiling,
+        );
         assert!(
             !generous.below_formula && generous.warning.is_none(),
             "test setup: this must NOT trigger the formula check"
@@ -3191,7 +3216,13 @@ mod tests {
             sink_generous.emitted()
         );
 
-        let absent = magi_rs::magi::resolve_run_timeout(None, ceiling, 0, false);
+        let absent = magi_rs::magi::resolve_run_timeout(
+            None,
+            ceiling,
+            0,
+            false,
+            magi_rs::magi::TimeoutMeasure::DerivesCeiling,
+        );
         assert!(
             absent.warning.is_none(),
             "test setup: no --timeout, no warning"
