@@ -583,6 +583,32 @@ mod tests {
         assert!(r.len() <= 64 * 1024 + 32 && r.ends_with("bytes]"));
     }
 
+    /// REQ-H14: the five budget keys sit FLAT inside `applied_caps`, as siblings of
+    /// `timeout_secs`. Additive, no `schema_version` bump — a consumer reading by key is
+    /// unaffected, which is the policy this envelope has published since MS2.
+    #[test]
+    fn test_applied_caps_carries_the_budget_decision_flat() {
+        let o = RunOutcome::sample();
+        let mut buf = Vec::new();
+        write_json(&mut buf, &o, TOOL_RESULT_CAP).unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&buf).unwrap();
+
+        let caps = &v["applied_caps"];
+        assert!(caps["operation_budget_secs"].is_u64());
+        assert!(caps["ceiling_floored"].is_boolean());
+        assert!(caps["floor_activation_threshold_secs"].is_u64());
+        assert!(caps["max_rotations_effective"].is_u64());
+        assert!(caps["ceiling_above_sanity"].is_boolean());
+        assert!(
+            caps["budget"].is_null(),
+            "flattened, not nested: a consumer must not have to learn a new object"
+        );
+        assert_eq!(
+            v["schema_version"], 1,
+            "additive fields never bump the version"
+        );
+    }
+
     /// The emitted JSON object has `schema_version` as the FIRST physical field and respects
     /// the fixed REQ-H14 order for the remaining fields.
     #[test]
