@@ -8659,6 +8659,17 @@ mod tests {
     /// is what "reads only the one function" actually requires here.
     #[test]
     fn the_consult_subcommand_does_not_resolve_the_clock_itself() {
+        // MAINTAINERS: this test reads `run_consult_subcommand`'s own SOURCE TEXT — it is not a
+        // behavioural assertion. Renaming that function, or restructuring its body enough to move
+        // where the balanced-brace scan lands, breaks this test MECHANICALLY, for reasons that
+        // have nothing to do with whether the code is still correct. If it fails after such a
+        // change: update the anchor string below (and the brace-matching logic if the function's
+        // shape changed), do NOT delete the test. No behavioural test can replace it — see "Why a
+        // source grep rather than a behavioural test" above: a reintroduced
+        // `resolve_run_timeout(h.timeout, …)` inside `run_consult_subcommand` produces the SAME
+        // number as `ctx.timeout_decision`, the value the context already carries from
+        // `prepare_headless`, so no assertion on the *result* can tell a correct read from a
+        // regressed re-resolution apart. Only the source text distinguishes them.
         let src = include_str!("main.rs");
         let start = src
             .find("fn run_consult_subcommand")
