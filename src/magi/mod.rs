@@ -348,22 +348,50 @@ pub fn attempt_factor(max_rotations: u32, retry_disabled: bool) -> u64 {
 
 /// The derived ceiling BEFORE the floor is applied, from an already-computed factor.
 ///
-/// Stub for Task 2's Red phase — the real derivation (extracted from
-/// [`derive_ceiling_from_timeout`]) lands in the Green commit that follows, together with its
-/// rustdoc. Invoked from [`BudgetTelemetry::derive`] so it stays reachable from production code
-/// while the stub stands.
-fn raw_ceiling_from_factor(_timeout_secs: u64, _factor: u64) -> u64 {
-    0
+/// Private, and factor-level rather than rotation-level, for two reasons: the floor is not
+/// optional on any public path (see [`derive_ceiling_from_timeout`]), and taking the factor
+/// directly lets the property tests sweep the whole factor space — covering every slack percentage
+/// the constant could hold — without a parallel slack-parameterized copy of each public function.
+fn raw_ceiling_from_factor(timeout_secs: u64, factor: u64) -> u64 {
+    // `saturating_sub` is the load-bearing guard: with `timeout <= CLASSIFY_TIMEOUT_SECS` a plain
+    // subtraction underflows in u64 and yields an ASTRONOMICAL ceiling instead of a minimal one —
+    // the error pointing at the opposite of the safe side. The `* 100` undoes the hundredths
+    // `attempt_factor` folds in, and overflows only above ~1.8e17 seconds.
+    timeout_secs
+        .saturating_sub(CLASSIFY_TIMEOUT_SECS)
+        .saturating_mul(100)
+        / factor
 }
 
 /// The smallest `--timeout` whose derived ceiling still reaches
 /// [`AGENT_TIMEOUT_ABSOLUTE_FLOOR_SECS`], from an already-computed factor.
 ///
-/// Stub for Task 2's Red phase — see [`raw_ceiling_from_factor`]. Returns an obviously-wrong
-/// sentinel rather than `0`, so it cannot coincidentally match a [`BudgetTelemetry::default`]
-/// zeroed field.
-fn threshold_from_factor(_factor: u64) -> u64 {
-    u64::MAX
+/// # Why this is not `headless_consult_timeout_secs(FLOOR, ..)`
+///
+/// That answers a **different question** — the timeout the floor ceiling *produces* — and the two
+/// coincide only when the division is exact. `raw_ceiling_from_factor` truncates downward, so the
+/// forward value can land one second short and feed back as `FLOOR - 1`: the number published as
+/// "the `--timeout` that avoids the floor" would be the exact value that trips it. They coincide
+/// at the shipped 20 % slack and diverge at 25 % or 33 %, so the bug would be latent, not visible.
+///
+/// # The `div_ceil` boundary, stated exactly
+///
+/// [`raw_ceiling_from_factor`] divides with truncation, so reaching a ceiling of `FLOOR` needs a
+/// dividend of **at least** `FLOOR * factor` — any less truncates to `FLOOR - 1`. `div_ceil` is
+/// what converts "at least" into the smallest integer that satisfies it; plain division would
+/// answer the largest that does not.
+///
+/// The result is therefore both **sufficient** (the threshold does not floor) and **minimal**
+/// (`threshold - 1` does), which is exactly the pair of assertions
+/// `the_threshold_is_the_exact_boundary_of_floor_activation` makes for every factor. Neither half
+/// is decorative: sufficiency alone would be satisfied by any large number, and minimality alone
+/// by any small one.
+fn threshold_from_factor(factor: u64) -> u64 {
+    // `div_ceil`: we need the smallest dividend whose TRUNCATING division still reaches the floor.
+    let needed = AGENT_TIMEOUT_ABSOLUTE_FLOOR_SECS
+        .saturating_mul(factor)
+        .div_ceil(100);
+    CLASSIFY_TIMEOUT_SECS.saturating_add(needed)
 }
 
 /// The smallest `--timeout` that does **not** activate the ceiling floor, for this run's rotation
@@ -430,15 +458,6 @@ pub fn derive_ceiling_from_timeout(
     max_rotations: u32,
     retry_disabled: bool,
 ) -> u64 {
-    // Saturation point 3 of 3: the dividend. `saturating_sub` is the load-bearing one — with
-    // `--timeout <= CLASSIFY_TIMEOUT_SECS` a plain subtraction underflows in u64 and the ceiling
-    // comes out astronomical instead of minimal, the error pointing at the opposite of the safe
-    // side. The `* 100` undoes `attempt_factor`'s hundredths and overflows only above
-    // ~1.8e17 seconds.
-    let dividend = timeout_secs
-        .saturating_sub(CLASSIFY_TIMEOUT_SECS)
-        .saturating_mul(100);
-    let divisor = attempt_factor(max_rotations, retry_disabled);
     // The floor is applied HERE and again in `BudgetTelemetry::derive`, and the duplication is
     // deliberate rather than an oversight (Checkpoint 2 loop 9, Caspar). `derive` cannot delegate
     // to this function, because it needs the RAW pre-floor value to answer `ceiling_floored` —
@@ -452,7 +471,8 @@ pub fn derive_ceiling_from_timeout(
     // This is a weaker situation than `attempt_factor`'s and worth not conflating with it: there,
     // two copies of an ARITHMETIC EXPRESSION could drift while each side's tests passed. Here the
     // only thing that could drift is the policy "clamp up to the floor", which is one token.
-    (dividend / divisor).max(AGENT_TIMEOUT_ABSOLUTE_FLOOR_SECS)
+    raw_ceiling_from_factor(timeout_secs, attempt_factor(max_rotations, retry_disabled))
+        .max(AGENT_TIMEOUT_ABSOLUTE_FLOOR_SECS)
 }
 
 /// Wall-clock decision for a run, with its warning if applicable (SC-A04d).
@@ -587,7 +607,13 @@ impl PartialOrd<u64> for ResolvedCeiling {
 
 /// What the run's budget derivation decided, in a form a machine can read (REQ-EB02b).
 ///
-/// Full rationale for the five fields lands in the Green commit that follows.
+/// # Why these five and not a boolean
+///
+/// A consumer that only learns *that* something degraded knows something is wrong and not what to
+/// ask for. [`Self::floor_activation_threshold_secs`] lets it remediate itself — retry with that
+/// value, or report it — without replicating our arithmetic on its side. A consumer forced to
+/// replicate the formula is a consumer that will replicate it wrong; the review of this very
+/// design found two arithmetic errors in that same calculation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize)]
 pub struct BudgetTelemetry {
     /// Per-attempt budget governing this run.
@@ -610,9 +636,19 @@ pub struct BudgetTelemetry {
 impl BudgetTelemetry {
     /// Resolves the effective ceiling for a run and describes the decision.
     ///
-    /// Stub for Task 2's Red phase: always reports a zeroed decision, regardless of the
-    /// arguments. The real composition, and the full rustdoc for this method's contract, land in
-    /// the Green commit that follows.
+    /// Returns `(ResolvedCeiling, telemetry)`. **They are returned together on purpose:**
+    /// the ceiling governs the run and the telemetry explains it, and a caller that could obtain
+    /// one without the other could ship a budget nobody can see — which is the defect E-B was
+    /// filed against.
+    ///
+    /// # Arguments
+    /// * `run` - the run's **resolved** wall clock, or `None` for the configured/TUI path, which
+    ///   keeps `configured_ceiling` untouched and is byte-identical to v0.14.3.
+    ///   **It is a [`TimeoutDecision`], not a `u64`, and that is deliberate** — see
+    ///   "Why the parameter is the decision" below.
+    /// * `configured_ceiling` - `[magi].agent_timeout_secs`, resolved.
+    /// * `max_rotations` - resolved (effective) rotation count.
+    /// * `retry_disabled` - `[magi].retry_disabled`, resolved.
     #[must_use]
     pub fn derive(
         run: Option<&TimeoutDecision>,
@@ -620,17 +656,43 @@ impl BudgetTelemetry {
         max_rotations: u32,
         retry_disabled: bool,
     ) -> (ResolvedCeiling, Self) {
-        // `raw_ceiling_from_factor` is invoked and discarded here only to keep it reachable from
-        // production code while this stub stands; `threshold_from_factor` already has a
-        // production caller in `floor_activation_threshold_secs`.
-        let _ = run.map(|d| {
-            raw_ceiling_from_factor(
-                d.effective_secs,
-                attempt_factor(max_rotations, retry_disabled),
-            )
-        });
-        let _ = configured_ceiling;
-        (ResolvedCeiling(0), Self::default())
+        // The raw derivation runs ONCE, and the ceiling is the floored form of it. An earlier
+        // draft called `derive_ceiling_from_timeout` and then recomputed the raw value separately,
+        // running the same arithmetic twice — harmless numerically, but two call sites that must
+        // agree is the shape of defect this whole change is about.
+        //
+        // Strictly `<` for `ceiling_floored`: a raw derivation landing exactly on the floor was
+        // reached, not clamped.
+        let raw = run
+            .map(|d| {
+                raw_ceiling_from_factor(
+                    d.effective_secs,
+                    attempt_factor(max_rotations, retry_disabled),
+                )
+            })
+            .unwrap_or(configured_ceiling);
+        // The floor applies to BOTH branches, and the `None` one is not defensive padding.
+        // `config.rs` validates `agent_timeout_secs` into `30..=120`, so a below-floor configured
+        // ceiling is unreachable through the loaded config — but this function is `pub`, and
+        // `derive_operation_budget`'s own rustdoc already records that its "impossible by
+        // construction" claim holds only above the floor. Leaving `None` unfloored would keep a
+        // path on which REQ-A04's invariant is breakable, guarded by a precondition living in a
+        // different module. One `.max()` makes it hold universally, and inside the validated
+        // range it changes nothing at all.
+        let ceiling = raw.max(AGENT_TIMEOUT_ABSOLUTE_FLOOR_SECS);
+        (
+            ResolvedCeiling(ceiling),
+            Self {
+                operation_budget_secs: derive_operation_budget(ceiling).as_secs(),
+                ceiling_floored: raw < AGENT_TIMEOUT_ABSOLUTE_FLOOR_SECS,
+                floor_activation_threshold_secs: floor_activation_threshold_secs(
+                    max_rotations,
+                    retry_disabled,
+                ),
+                max_rotations_effective: max_rotations,
+                ceiling_above_sanity: ceiling > CEILING_SANITY_SECS,
+            },
+        )
     }
 }
 
