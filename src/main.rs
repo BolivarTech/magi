@@ -4840,12 +4840,12 @@ struct HeadlessContext {
     /// because the trio is configured from it — a second derivation downstream could disagree
     /// with the ceiling the mages are already running under.
     ///
-    /// **`#[cfg(test)]`, not `#[allow(dead_code)]`** — same precedent as
-    /// [`Self::divergence_notice`] above: no dispatcher's production code reads this back off
-    /// `ctx` yet (Task 4 is what makes the decision machine-readable), so it exists purely so a
-    /// test can assert against the real `prepare_headless` output instead of a hand-rolled
-    /// stand-in.
-    #[cfg(test)]
+    /// **No longer `#[cfg(test)]`** (Task 4): both dispatchers now read this back off `ctx` and
+    /// thread it into `RunWiring`/`MagiRuntimeParams` so it reaches `RunOutcome.applied_caps.budget`
+    /// (machine-readable, REQ-EB04), rather than only a stderr notice. Before Task 4 wired a
+    /// production reader, this field existed purely so a test could assert against the real
+    /// `prepare_headless` output instead of a hand-rolled stand-in — see
+    /// [`Self::divergence_notice`] above for the precedent that pattern followed.
     budget: BudgetTelemetry,
 }
 
@@ -5307,7 +5307,6 @@ async fn prepare_headless(
         env_mode,
         env_untrusted_content,
         timeout_decision,
-        #[cfg(test)]
         budget,
         #[cfg(test)]
         divergence_notice: headless_divergence_notice,
@@ -5366,6 +5365,7 @@ async fn run_query_subcommand(
         memory,
         mut run_log,
         limits,
+        budget,
         ..
     } = ctx;
 
@@ -5434,6 +5434,7 @@ async fn run_query_subcommand(
         timeout,
         autonomous: AutonomousRunConfig::from_magi_config(&magi_config),
         timeout_below_formula: timeout_decision.is_some_and(|d| d.below_formula),
+        budget,
     };
     let outcome = run_query(
         resolved,
@@ -5590,6 +5591,7 @@ async fn run_consult_subcommand(
         env_mode,
         env_untrusted_content,
         timeout_decision,
+        budget,
         ..
     } = ctx;
 
@@ -5657,6 +5659,7 @@ async fn run_consult_subcommand(
         } else {
             crate::tools::consult::StructuredVerdicts::Omit
         },
+        budget,
     };
     let outcome = run_consult(
         resolved,
@@ -7493,6 +7496,7 @@ mod tests {
                 max_tool_calls_clamped: false,
                 timeout_secs: None,
                 system_override_applied: false,
+                budget: BudgetTelemetry::default(),
             },
             error: error_kind.map(|kind| ErrorPayload {
                 message: String::new(),
@@ -12011,9 +12015,11 @@ mod tests {
                         assert!(notice.text.contains("main provider"), "{}", notice.text);
                         // Task 3 (E-B): this run had no `--timeout`, so `prepare_headless` must
                         // have taken the configured path — `ctx.budget` is the ONLY place that
-                        // is observable from outside the function (REQ-EB02b). Same precedent as
-                        // `divergence_notice` above: no dispatcher reads it back yet, so this is
-                        // the real end-to-end proof that `prepare_headless` populates it.
+                        // is observable from outside the function (REQ-EB02b). As of Task 4 both
+                        // dispatchers also read it back (into `RunWiring`/`MagiRuntimeParams`),
+                        // but this direct assertion on `ctx` remains the real end-to-end proof
+                        // that `prepare_headless` itself populates it, independent of either
+                        // dispatcher's own wiring.
                         assert_eq!(
                             ctx.budget.operation_budget_secs,
                             derive_operation_budget(magi_rs::magi::AGENT_TIMEOUT_SECS).as_secs(),

@@ -635,7 +635,7 @@ pub const CEILING_SANITY_SECS: u64 = 600;
 /// `MagiConfig`.
 ///
 /// The inner value is private; call sites read it back with [`ResolvedCeiling::secs`].
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ResolvedCeiling(u64);
 
 impl ResolvedCeiling {

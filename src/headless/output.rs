@@ -25,6 +25,8 @@ use super::types::{
     Usage,
 };
 use super::HeadlessError;
+#[cfg(test)]
+use crate::magi::BudgetTelemetry;
 
 /// JSON output contract version (REQ-H14).
 ///
@@ -556,6 +558,17 @@ impl RunOutcome {
                 max_tool_calls_clamped: false,
                 timeout_secs: None,
                 system_override_applied: false,
+                // Realistic values (unlike the zeroed `BudgetTelemetry::default()` used
+                // elsewhere as a placeholder): `sample()` stands in for a FINISHED run whose
+                // budget has already been stamped by the runner, the values a `--timeout 1800`
+                // run produces.
+                budget: BudgetTelemetry {
+                    operation_budget_secs: 149,
+                    ceiling_floored: false,
+                    floor_activation_threshold_secs: 114,
+                    max_rotations_effective: 2,
+                    ceiling_above_sanity: false,
+                },
             },
             error: None,
         }

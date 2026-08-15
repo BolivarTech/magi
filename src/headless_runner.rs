@@ -46,7 +46,7 @@ use magi_rs::headless::types::{
 };
 use magi_rs::magi::kind::ProviderKind;
 use magi_rs::magi::mode::{resolve_mode_guarded, ModeClassifier, ModeError, ModeSources};
-use magi_rs::magi::TimeoutDecision;
+use magi_rs::magi::{BudgetTelemetry, TimeoutDecision};
 
 use crate::agent::messages::{Content, Message, Role};
 use crate::agent::mode_classifier::NoticeSink;
@@ -224,6 +224,11 @@ pub(crate) struct MagiRuntimeParams<'a> {
     /// at a call site says nothing about why. Only the headless CLI ever sets `Include` —
     /// `ConsultTool` builds its own literal `Omit` and never these params (REQ-EA02).
     pub(crate) structured_verdicts: StructuredVerdicts,
+    /// How this run's per-mage budget was decided (REQ-EB02b/EB04), read off
+    /// `HeadlessContext::budget` — `run_consult` stamps it into `RunOutcome.applied_caps.budget`
+    /// next to `timeout_secs`, the same override the `run_query` path applies via
+    /// [`RunWiring::budget`].
+    pub(crate) budget: BudgetTelemetry,
 }
 
 /// Runs `prompt` directly through the 3-perspective MAGI consensus, off the agent
@@ -674,6 +679,7 @@ pub fn resolve_tier_timeout_default(
 /// - `timeout` — wall-clock ceiling for the whole run (REQ-H36). `None` ⇒ unbounded. On elapse the agent future is dropped (cancelling the in-flight LLM stream), the run's [`CancellationToken`] fires so any `bash` subprocess *tree* is killed, and a partial outcome with `stop_reason = Error` / `error.kind = Timeout` is returned.
 /// - `autonomous` — the operator's autonomous-consult configuration (`[magi.complexity]`, `[magi].default_mode`, `[magi].untrusted_content`, the gate telemetry sink), overlaid on the tier-resolved [`AgentRunConfig`] so the tool loop's self-routed `consult` obeys `magi.toml` (REQ-A20/A20b, REQ-A07/A07d).
 /// - `timeout_below_formula` — whether `timeout` is shorter than REQ-A04's minimum for a run that can dispatch a consult (`classification_ceiling + 2 × agent_timeout_secs + slack`). The value is still obeyed — a wall-clock cap is the operator's call, not a safety invariant — but a consult that needs its schema retry cannot complete under it, and SC-A04d requires that fact to reach the JSON as well as stderr: whoever passes an explicit `--timeout` is running a pipeline, i.e. exactly who will not read stderr.
+/// - `budget` — how `main.rs` derived this run's per-mage budget (REQ-EB02b/EB04), stamped into `RunOutcome.applied_caps.budget` so the decision is machine-readable rather than only a stderr notice.
 pub struct RunWiring {
     /// Wall-clock ceiling for the whole run (REQ-H36).
     pub timeout: Option<Duration>,
@@ -681,6 +687,10 @@ pub struct RunWiring {
     pub autonomous: crate::AutonomousRunConfig,
     /// Whether `timeout` falls below REQ-A04's minimum for a consult-capable run (SC-A04d).
     pub timeout_below_formula: bool,
+    /// How this run's per-mage budget was decided (REQ-EB02b/EB04), read off
+    /// `HeadlessContext::budget` and stamped into `RunOutcome.applied_caps.budget` — the
+    /// placeholder `resolution::resolve` built the `Resolved` with cannot know this value.
+    pub budget: BudgetTelemetry,
 }
 
 /// Wall-clock milliseconds elapsed since `start`, saturating instead of wrapping.
@@ -915,6 +925,7 @@ pub async fn run_consult(
             // its own effective ceiling as the `timeout` parameter and must stamp it
             // here (MS2 gate S6 finding 1).
             timeout_secs: timeout.map(|d| d.as_secs()),
+            budget: runtime.budget,
             ..resolved.applied_caps
         },
         error,
@@ -1190,6 +1201,7 @@ pub async fn run_query(
             // rather than leaving the static `None` it was built with (MS2 gate S6
             // finding 1).
             timeout_secs: wiring.timeout.map(|d| d.as_secs()),
+            budget: wiring.budget,
             ..resolved.applied_caps
         },
         error,
@@ -1347,6 +1359,7 @@ mod tests {
             timeout_decision: neutral_timeout_decision(),
             notice_sink: &sink,
             structured_verdicts: StructuredVerdicts::Omit,
+            budget: BudgetTelemetry::default(),
         };
 
         let cancel = CancellationToken::new();
@@ -1736,6 +1749,7 @@ mod tests {
                 max_tool_calls_clamped: false,
                 timeout_secs: None,
                 system_override_applied: false,
+                budget: BudgetTelemetry::default(),
             },
         }
     }
@@ -1753,6 +1767,7 @@ mod tests {
                 &crate::config::MagiConfig::default(),
             ),
             timeout_below_formula: false,
+            budget: BudgetTelemetry::default(),
         }
     }
 
@@ -1766,6 +1781,7 @@ mod tests {
                 &crate::config::MagiConfig::from_toml_str(toml).expect("fixture parses"),
             ),
             timeout_below_formula: false,
+            budget: BudgetTelemetry::default(),
         }
     }
 
@@ -1884,6 +1900,32 @@ mod tests {
         )
         .await;
         assert_eq!(outcome.applied_caps.timeout_secs, None);
+    }
+
+    /// The placeholder from `resolution::resolve` must be OVERRIDDEN, not published.
+    /// A defaulted budget in the envelope is not a missing value but a FALSE one:
+    /// `operation_budget_secs: 0` and `floor_activation_threshold_secs: 0` read as real
+    /// numbers, and a consumer auto-remediating on that threshold would retry with
+    /// `--timeout 0`. Zero is indistinguishable from a genuine reading by shape, which is
+    /// why this is a test rather than a review item.
+    #[tokio::test]
+    async fn run_query_publishes_the_wirings_budget_not_the_placeholder() {
+        let expected = BudgetTelemetry {
+            operation_budget_secs: 149,
+            ceiling_floored: false,
+            floor_activation_threshold_secs: 114,
+            max_rotations_effective: 2,
+            ceiling_above_sanity: false,
+        };
+        let provider = ScriptedProvider::new(vec![Turn::Text("hi".to_string())]);
+        let mut agent = Agent::new(provider);
+        let policy = Policy::new(Tier::Default, 15, None);
+        let mut w = wiring(None);
+        w.budget = expected;
+        // `resolved_stub()` carries `BudgetTelemetry::default()`, exactly as `resolution::resolve`
+        // produces it — so a run that forgets to stamp fails here rather than in production.
+        let outcome = run_query(resolved_stub(), policy, &mut agent, "prompt", &w, None).await;
+        assert_eq!(outcome.applied_caps.budget, expected);
     }
 
     /// Default tier denies `edit`; the agent still answers, so the run is `Done`
@@ -2136,6 +2178,7 @@ mod tests {
             timeout: None,
             autonomous: crate::AutonomousRunConfig::from_magi_config(&MagiConfig::default()),
             timeout_below_formula,
+            budget: BudgetTelemetry::default(),
         };
         run_query(
             forced_resolved(),
@@ -2873,6 +2916,7 @@ mod tests {
                 timeout_decision: neutral_timeout_decision(),
                 notice_sink: &sink,
                 structured_verdicts: StructuredVerdicts::Include,
+                budget: BudgetTelemetry::default(),
             },
             None,
         )
@@ -2911,6 +2955,7 @@ mod tests {
                 timeout_decision: neutral_timeout_decision(),
                 notice_sink: &sink,
                 structured_verdicts: StructuredVerdicts::Omit,
+                budget: BudgetTelemetry::default(),
             },
             None,
         )
@@ -2962,6 +3007,7 @@ mod tests {
                 timeout_decision: neutral_timeout_decision(),
                 notice_sink: &sink,
                 structured_verdicts: StructuredVerdicts::Omit,
+                budget: BudgetTelemetry::default(),
             },
             None,
         )
@@ -3000,6 +3046,7 @@ mod tests {
                 timeout_decision: neutral_timeout_decision(),
                 notice_sink: &sink,
                 structured_verdicts: StructuredVerdicts::Omit,
+                budget: BudgetTelemetry::default(),
             },
             None,
         )
@@ -3043,6 +3090,7 @@ mod tests {
                 timeout_decision: decision,
                 notice_sink: &sink,
                 structured_verdicts: StructuredVerdicts::Omit,
+                budget: BudgetTelemetry::default(),
             },
             None,
         )
@@ -3084,6 +3132,7 @@ mod tests {
                 timeout_decision: decision,
                 notice_sink: &sink,
                 structured_verdicts: StructuredVerdicts::Omit,
+                budget: BudgetTelemetry::default(),
             },
             None,
         )
@@ -3126,6 +3175,7 @@ mod tests {
                 timeout_decision: generous,
                 notice_sink: &sink_generous,
                 structured_verdicts: StructuredVerdicts::Omit,
+                budget: BudgetTelemetry::default(),
             },
             None,
         )
@@ -3157,6 +3207,7 @@ mod tests {
                 timeout_decision: absent,
                 notice_sink: &sink_absent,
                 structured_verdicts: StructuredVerdicts::Omit,
+                budget: BudgetTelemetry::default(),
             },
             None,
         )
@@ -3192,6 +3243,7 @@ mod tests {
                 timeout_decision: neutral_timeout_decision(),
                 notice_sink: &sink,
                 structured_verdicts: StructuredVerdicts::Omit,
+                budget: BudgetTelemetry::default(),
             },
             None,
         )
@@ -3238,6 +3290,7 @@ mod tests {
                 timeout_decision: neutral_timeout_decision(),
                 notice_sink: &sink,
                 structured_verdicts: StructuredVerdicts::Omit,
+                budget: BudgetTelemetry::default(),
             },
             None,
         )
@@ -3281,6 +3334,7 @@ mod tests {
                 timeout_decision: neutral_timeout_decision(),
                 notice_sink: &sink,
                 structured_verdicts: StructuredVerdicts::Omit,
+                budget: BudgetTelemetry::default(),
             },
             None,
         )
@@ -3291,6 +3345,45 @@ mod tests {
             Some(77),
             "run_consult's `timeout` parameter must surface in applied_caps.timeout_secs"
         );
+    }
+
+    /// Mirror of `run_query_publishes_the_wirings_budget_not_the_placeholder` for the direct
+    /// `magi consult` route: its budget arrives through `MagiRuntimeParams::budget` rather than
+    /// `RunWiring`, a SEPARATE literal — a fix applied to one does not reach the other, which is
+    /// exactly how `timeout_secs` needed the same correction twice during the MS2 gate.
+    #[tokio::test]
+    async fn run_consult_publishes_the_runtimes_budget_not_the_placeholder() {
+        let expected = BudgetTelemetry {
+            operation_budget_secs: 149,
+            ceiling_floored: false,
+            floor_activation_threshold_secs: 114,
+            max_rotations_effective: 2,
+            ceiling_above_sanity: false,
+        };
+        let cfg = MagiConfig::default();
+        let sink = RecordingNoticeSink::default();
+        let outcome = run_consult(
+            resolved_stub(),
+            canned_magi(),
+            "should we migrate X to Y?",
+            None,
+            Some(Mode::Analysis),
+            &MagiRuntimeParams {
+                kind: ProviderKind::OpenAiCompat,
+                classifier: &NeverClassifier,
+                configured_mode: None,
+                untrusted_content: false,
+                magi_config: &cfg,
+                timeout_decision: neutral_timeout_decision(),
+                notice_sink: &sink,
+                structured_verdicts: StructuredVerdicts::Omit,
+                budget: expected,
+            },
+            None,
+        )
+        .await;
+
+        assert_eq!(outcome.applied_caps.budget, expected);
     }
 
     /// Dropping the `run_consult` future itself — NOT via the `--timeout`
@@ -3335,6 +3428,7 @@ mod tests {
             timeout_decision: neutral_timeout_decision(),
             notice_sink: &sink,
             structured_verdicts: StructuredVerdicts::Omit,
+            budget: BudgetTelemetry::default(),
         };
 
         {

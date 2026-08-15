@@ -117,6 +117,34 @@ pub struct AppliedCaps {
     pub timeout_secs: Option<u64>,
     /// `true` if the envelope's `system` was applied (requires the operator flag).
     pub system_override_applied: bool,
+    /// How this run's per-mage budget was decided (REQ-EB02b/EB04).
+    ///
+    /// **Flattened**: its five fields serialize as siblings of the ones above, not as a nested
+    /// object, so a consumer reads `applied_caps.operation_budget_secs` and never learns a new
+    /// shape. Additive under REQ-H14 — no `schema_version` bump.
+    ///
+    /// One field rather than five because the values travel together from `main.rs` through
+    /// `RunWiring`, exactly as `timeout_secs` does: five loose fields would be five things to
+    /// thread twice and five chances to drop one.
+    ///
+    /// # INVARIANT: the two field-name sets must stay DISJOINT
+    ///
+    /// Flattening makes `BudgetTelemetry`'s names siblings of this struct's own. If a field added
+    /// to **either** struct ever collides by name, `serde_json` writes the key twice into one
+    /// map — the second write wins and the first value **vanishes from the output with no error,
+    /// no warning, and a still-valid JSON document**. Nothing in the type system prevents it: the
+    /// two structs are in different files and neither mentions the other's names.
+    ///
+    /// Before adding a field to `AppliedCaps` or to `BudgetTelemetry`, check the other one.
+    /// `the_flattened_budget_keeps_every_key_of_both_structs` is what fails if you forget.
+    ///
+    /// **`Deserialize` note (Step 5b):** `AppliedCaps` derives `Serialize` only — this crate
+    /// writes the envelope and never reads it back, so flatten's known interaction problems with
+    /// `deny_unknown_fields` and non-self-describing formats do not apply today. If `Deserialize`
+    /// is ever added to this struct, `BudgetTelemetry` would need it too, and those limitations
+    /// come back into scope — revisit this field at that point.
+    #[serde(flatten)]
+    pub budget: crate::magi::BudgetTelemetry,
 }
 
 /// Structured detail of a run error in the JSON output.
@@ -182,3 +210,75 @@ impl SystemPolicy {
 // NOTE: `InputFormat` is defined in `input.rs` (parser-local, `pub` for the fuzz target), not
 // here — it is a parser input, not part of the output contract. The former duplicate
 // declaration in this module was removed.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::magi::BudgetTelemetry;
+
+    /// `#[serde(flatten)]` merges `BudgetTelemetry`'s keys into `AppliedCaps`'s own map. A name
+    /// collision would silently drop one value: same map, second write wins, output still valid
+    /// JSON, nothing errors. This is the only thing standing between that and a consumer reading a
+    /// stale number.
+    ///
+    /// **How it detects a collision without a hand-written list:** the flattened map must contain
+    /// every key the inner struct produces on its own, and its size must be the sum of both
+    /// contributions. A collision makes the second write overwrite the first, so the total comes
+    /// out one short — which is the assertion below, and it holds for field names nobody has
+    /// written yet.
+    ///
+    /// **Mutation-verify it** (Step 4b, required): rename `BudgetTelemetry::ceiling_floored` to
+    /// `timeout_secs` and this test must fail on the count. Restore it afterwards.
+    #[test]
+    fn the_flattened_budget_keeps_every_key_of_both_structs() {
+        /// `AppliedCaps`' OWN serialized fields, excluding the flattened `budget`. The one value
+        /// that must move by hand — and only when `AppliedCaps` itself gains or loses a field,
+        /// never when `BudgetTelemetry` does.
+        const APPLIED_CAPS_OWN_FIELDS: usize = 4;
+
+        let budget = BudgetTelemetry::default();
+        let inner = serde_json::to_value(budget).expect("BudgetTelemetry serializes");
+        let inner_keys: std::collections::BTreeSet<String> = inner
+            .as_object()
+            .expect("a JSON object")
+            .keys()
+            .cloned()
+            .collect();
+
+        let caps = AppliedCaps {
+            max_tool_calls: 15,
+            max_tool_calls_clamped: false,
+            timeout_secs: Some(1800),
+            system_override_applied: false,
+            budget,
+        };
+        let flat = serde_json::to_value(&caps).expect("AppliedCaps serializes");
+        let flat_keys: std::collections::BTreeSet<String> = flat
+            .as_object()
+            .expect("a JSON object")
+            .keys()
+            .cloned()
+            .collect();
+
+        // 1. Flattened, not nested: every inner key is a sibling of the outer ones.
+        let missing: Vec<&String> = inner_keys.difference(&flat_keys).collect();
+        assert!(
+            missing.is_empty(),
+            "BudgetTelemetry keys absent from the flattened output: {missing:?}. Either the flatten \
+             attribute is gone (they would be nested under \"budget\") or a name collides with one \
+             of AppliedCaps' own fields and serde dropped it."
+        );
+
+        // 2. No collision: the flattened map is the SUM of both contributions. One short means
+        //    two fields shared a name and the second write silently won.
+        assert_eq!(
+            flat_keys.len(),
+            APPLIED_CAPS_OWN_FIELDS + inner_keys.len(),
+            "flattened key count is not the sum of both structs' fields. If it is LOWER, the two \
+             structs collide on a name and a value is being dropped silently — fix the collision, \
+             never this assertion. If HIGHER, AppliedCaps gained a field: update \
+             APPLIED_CAPS_OWN_FIELDS after checking BudgetTelemetry does not already use that name. \
+             inner keys were: {inner_keys:?}"
+        );
+    }
+}
