@@ -3356,18 +3356,36 @@ fn budget_notice(ceiling_secs: u64, asked: Option<u64>, b: &BudgetTelemetry) -> 
 /// contradict a rule that already covers this case from the other side. And the operator may
 /// know something the formula does not — a small payload where no rotation is ever needed.
 ///
-/// The message names **both** levers. The pre-existing below-formula warning names only the
-/// clock, leaving an operator who cannot raise it with nothing to do.
+/// The message names **both** levers, when both exist. The pre-existing below-formula warning
+/// names only the clock, leaving an operator who cannot raise it with nothing to do.
+///
+/// **Deliberately silent on retry status (Loop 1 finding, IMPORTANT 2).** An earlier draft
+/// said "with the retry enabled" unconditionally, which is false whenever
+/// `[magi].retry_disabled = true` — an ordinary operator setting: with retry off,
+/// `attempt_factor` drops (attempts-per-model halves), the floor can activate at a SMALLER
+/// `--timeout`, and the operator who already disabled retry gets sent looking for a knob they
+/// had already turned. `BudgetTelemetry` carries no `retry_disabled` field, and this notice
+/// must say only what the telemetry can vouch for — widening the struct to make one sentence
+/// true would grow a published JSON contract (REQ-EB04) to fix prose.
+///
+/// **The rotations lever is conditional.** With the kill-switch
+/// (`max_rotations_effective == 0`), "lower `[magi].max_rotations`" is not an available lever —
+/// there is nothing left to lower — so that half of the sentence is omitted rather than printed
+/// unactionable.
 fn floored_ceiling_notice(b: &BudgetTelemetry) -> Option<Notice> {
     b.ceiling_floored.then(|| {
+        let rotations_lever = if b.max_rotations_effective > 0 {
+            ", or lower [magi].max_rotations"
+        } else {
+            ""
+        };
         Notice::resolution(format!(
-            "magi: --timeout is too small for max_rotations={} with the retry enabled; the \
-             per-mage ceiling was raised to its {}s floor. Either raise --timeout to at least \
-             {}s, or lower [magi].max_rotations. The run will start and is likely to hit its \
-             own deadline.",
+            "magi: --timeout is too small for max_rotations={}; the per-mage ceiling was \
+             raised to its {}s floor. Raise --timeout to at least {}s{rotations_lever}. The \
+             run will start and is likely to hit its own deadline.",
             b.max_rotations_effective,
             magi_rs::magi::AGENT_TIMEOUT_ABSOLUTE_FLOOR_SECS,
-            b.floor_activation_threshold_secs
+            b.floor_activation_threshold_secs,
         ))
     })
 }
@@ -8298,6 +8316,11 @@ mod tests {
 
     /// The floor notice must name BOTH knobs. The operator has two ways out — raise the
     /// clock or lower the rotations — and the pre-existing warning mentions only the first.
+    ///
+    /// Loop 1 finding (IMPORTANT 2): the original assertions (`"114"` and `"max_rotations"`)
+    /// survive ANY rewording, including the false one this test was written against — the
+    /// message used to claim "with the retry enabled" unconditionally, which is untrue whenever
+    /// `[magi].retry_disabled = true`. Pin what was actually removed, not just what survived.
     #[test]
     fn the_floor_notice_names_both_the_clock_and_the_rotations() {
         let n = floored_ceiling_notice(&magi_rs::magi::BudgetTelemetry {
@@ -8312,6 +8335,33 @@ mod tests {
         assert!(
             n.text.contains("max_rotations"),
             "the second lever, which the existing below-formula warning never mentions"
+        );
+        assert!(
+            !n.text.contains("retry"),
+            "BudgetTelemetry carries no retry_disabled field, so the notice must not claim a \
+             retry status it cannot vouch for: {}",
+            n.text
+        );
+    }
+
+    /// Loop 1 finding (IMPORTANT 2), the other half: under the rotation kill-switch
+    /// (`max_rotations_effective == 0`), "lower [magi].max_rotations" is not an available
+    /// lever — there is nothing left to lower — so the notice must not offer it.
+    #[test]
+    fn the_floor_notice_omits_the_rotations_lever_under_the_kill_switch() {
+        let n = floored_ceiling_notice(&magi_rs::magi::BudgetTelemetry {
+            operation_budget_secs: 10,
+            ceiling_floored: true,
+            floor_activation_threshold_secs: 42,
+            max_rotations_effective: 0,
+            ceiling_above_sanity: false,
+        })
+        .expect("a floored run must produce a notice");
+        assert!(n.text.contains("42"), "the number it must be raised to");
+        assert!(
+            !n.text.contains("lower [magi].max_rotations"),
+            "with max_rotations_effective == 0 there is no rotations lever to offer: {}",
+            n.text
         );
     }
 
