@@ -400,6 +400,9 @@ fn threshold_from_factor(factor: u64) -> u64 {
 /// It means "minimum to avoid the floor", **not** "minimum for the run to succeed": meeting it
 /// guarantees the rotation arithmetic closes, never that the models answer in time.
 ///
+/// The boundary is exact and tested as such: `threshold - 1` derives a ceiling below the floor and
+/// `threshold` does not, for every factor — not merely for the slack percentage shipped today.
+///
 /// # Arguments
 /// * `max_rotations` - `[magi].max_rotations`, **resolved** (effective, not the raw `Option`).
 /// * `retry_disabled` - `[magi].retry_disabled`, resolved.
@@ -557,10 +560,22 @@ pub fn resolve_run_timeout(
     }
 }
 
-/// Derived ceiling above which a `--timeout` is more likely a typo than an intention (600 s).
+/// Derived ceiling above which a `--timeout` is more likely a typo than an intention.
 ///
-/// Full rationale for the value lands in the Green commit that follows; the "operationally
-/// tunable" note is added in the Refactor commit after that.
+/// 600 s. **Not a cap** — E-B exists to remove the cap, and this value clamps nothing. It marks
+/// the point past which one extra digit is the likelier explanation: `--timeout 18000` typed for
+/// `1800` buys ~1500 s per attempt, so a hung mage burns 25 minutes before giving up while the
+/// operator believes they asked for 149 s. That is the single error this interface cannot
+/// distinguish from a legitimate intention by arithmetic alone, so it is reported and obeyed.
+///
+/// **Chosen, not measured** — same honesty as the complexity gate's built-in thresholds. It sits
+/// well above any ceiling a plausible `--timeout` derives (1800 s derives 249) and well below what
+/// a fat-fingered order of magnitude produces.
+///
+/// **Operationally tunable.** It gates a warning and clamps nothing, so moving it changes only how
+/// noisy the run is, never what the run does. If real deployments legitimately derive ceilings
+/// above it, raise it — a warning that fires on correct configurations trains operators to ignore
+/// warnings, which costs more than the typo it was meant to catch.
 pub const CEILING_SANITY_SECS: u64 = 600;
 
 /// The per-mage ceiling a run actually got, paired with [`BudgetTelemetry`] by
