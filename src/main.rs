@@ -5477,28 +5477,6 @@ async fn run_query_subcommand(
     finish_headless(&h, &outcome, limits.tool_result_cap)
 }
 
-/// REQ-A04's coherence check for a `magi query` run that can dispatch a consult (SC-A04c/d).
-///
-/// **Why `magi query` needs it at all.** A forced `--consult`, or a proactive one under
-/// `--auto`, runs inside the tool loop and therefore shares the run's single wall-clock
-/// deadline (REQ-H22). That deadline came from the tier default or `[headless] timeout_secs`,
-/// neither of which has any relation to `agent_timeout_secs` — so a run configured below
-/// `classification_ceiling + 2 × agent_timeout_secs + slack` could not complete a consult whose
-/// first attempt failed schema validation, and said so only as an opaque `error.kind = timeout`.
-/// The identical misconfiguration on `magi consult` warned on both channels.
-///
-/// **The value is never overridden.** A wall-clock cap is an operator instruction, not a safety
-/// invariant: someone asking for `--timeout 30` in a pipeline wants a cut at 30 seconds. What
-/// was missing is the heads-up that this particular cut has a structural consequence.
-///
-/// # Parameters
-/// * `deadline` - the deadline the tier policy resolved; `None` means unbounded, which cannot be too short.
-/// * `consult_capable` - whether this run can dispatch a consult at all (a trio was built). With no trio there is no consult to be too short for, and warning would be noise.
-/// * `ceiling` - the effective `[magi].agent_timeout_secs`.
-///
-/// # Returns
-/// `None` when the check does not apply; otherwise the decision, whose `warning` names the
-/// computed minimum and whose `below_formula` feeds the run's JSON.
 /// The three configuration values REQ-R20's formula needs, resolved ONCE.
 ///
 /// They travel together because they are read together at every site that asks *"how long may
@@ -5527,6 +5505,28 @@ fn timeout_scale(cfg: &MagiConfig) -> (u64, u32, bool) {
     )
 }
 
+/// REQ-A04's coherence check for a `magi query` run that can dispatch a consult (SC-A04c/d).
+///
+/// **Why `magi query` needs it at all.** A forced `--consult`, or a proactive one under
+/// `--auto`, runs inside the tool loop and therefore shares the run's single wall-clock
+/// deadline (REQ-H22). That deadline came from the tier default or `[headless] timeout_secs`,
+/// neither of which has any relation to `agent_timeout_secs` — so a run configured below
+/// `classification_ceiling + 2 × agent_timeout_secs + slack` could not complete a consult whose
+/// first attempt failed schema validation, and said so only as an opaque `error.kind = timeout`.
+/// The identical misconfiguration on `magi consult` warned on both channels.
+///
+/// **The value is never overridden.** A wall-clock cap is an operator instruction, not a safety
+/// invariant: someone asking for `--timeout 30` in a pipeline wants a cut at 30 seconds. What
+/// was missing is the heads-up that this particular cut has a structural consequence.
+///
+/// # Parameters
+/// * `deadline` - the deadline the tier policy resolved; `None` means unbounded, which cannot be too short.
+/// * `consult_capable` - whether this run can dispatch a consult at all (a trio was built). With no trio there is no consult to be too short for, and warning would be noise.
+/// * `cfg` - the config from which the effective `[magi].agent_timeout_secs` ceiling is resolved.
+///
+/// # Returns
+/// `None` when the check does not apply; otherwise the decision, whose `warning` names the
+/// computed minimum and whose `below_formula` feeds the run's JSON.
 #[must_use]
 fn query_timeout_decision(
     deadline: Option<Duration>,
