@@ -296,13 +296,129 @@ pub fn headless_consult_timeout_secs(
     max_rotations: u32,
     retry_disabled: bool,
 ) -> u64 {
-    let attempts_per_model = if retry_disabled { 1 } else { 2 };
-    let models_per_mage = u64::from(max_rotations) + 1;
-    let dominant = attempts_per_model * models_per_mage * configured_ceiling;
-    let minimum = CLASSIFY_TIMEOUT_SECS + dominant;
-    // §4.9: the slack is 10–30 % of the LARGER TERM, not of the total — over the total it
+    // §4.9: the slack is 10-30 % of the LARGER TERM, not of the total — over the total it
     // inflates proportionally to the small term, which is not the one that dominates the risk.
-    minimum + dominant * HEADLESS_TIMEOUT_SLACK_PCT / 100
+    // `attempt_factor` already folds the slack in (it returns hundredths), so the division by
+    // 100 below is what turns it back into seconds.
+    //
+    // Saturating: this function is `pub` and takes an arbitrary ceiling. The pre-E-B version
+    // multiplied by a factor ~100x smaller, so plain arithmetic had far more headroom; folding the
+    // hundredths into `attempt_factor` moved the overflow point a hundredfold closer. The
+    // validated config path (30..=120) is nowhere near it, but a caller outside that path — and
+    // SC-EB04 is one, sweeping up to 3600 — must not wrap.
+    CLASSIFY_TIMEOUT_SECS.saturating_add(
+        configured_ceiling.saturating_mul(attempt_factor(max_rotations, retry_disabled)) / 100,
+    )
+}
+
+/// The multiplier both timeout directions share, scaled by 100.
+///
+/// Returns `attempts * models * (100 + HEADLESS_TIMEOUT_SLACK_PCT)`, i.e. the `x1.2` of the
+/// forward formula expressed in integer hundredths so the inverse can divide by it exactly.
+///
+/// # Why this is one function and not two equivalent expressions
+///
+/// [`headless_consult_timeout_secs`] and [`derive_ceiling_from_timeout`] are inverses, and the
+/// round-trip property that pins them is only true while they agree on this factor. Two
+/// equivalent expressions in two places diverge at the first refactor that touches one of them,
+/// and neither side's own tests notice — the forward test still passes, the inverse test still
+/// passes, and only the round-trip between them is wrong. With one function, changing it moves
+/// both directions at once.
+///
+/// The `100 + HEADLESS_TIMEOUT_SLACK_PCT` is **derived, never a literal `120`**: writing the
+/// number by hand means raising the slack updates the forward direction and leaves the inverse
+/// silently behind — the exact drift this extraction exists to prevent, reproduced one level down.
+///
+/// # Arguments
+/// * `max_rotations` - `[magi].max_rotations`, **resolved** (effective, not the raw `Option`).
+/// * `retry_disabled` - `[magi].retry_disabled`, resolved.
+#[must_use]
+pub fn attempt_factor(max_rotations: u32, retry_disabled: bool) -> u64 {
+    let attempts_per_model: u64 = if retry_disabled { 1 } else { 2 };
+    // Saturation point 1 of 3: the model count.
+    let models_per_mage = u64::from(max_rotations).saturating_add(1);
+    // Saturation point 2 of 3: the product. A saturated factor yields ceiling 0 in the inverse,
+    // which floors — the correct degradation. Unreachable in the real range, but an overflow on
+    // the path that computes a timeout produces a nonsensical ceiling, so the guard is cheap
+    // insurance on the dangerous side.
+    attempts_per_model
+        .saturating_mul(models_per_mage)
+        .saturating_mul(100 + HEADLESS_TIMEOUT_SLACK_PCT)
+}
+
+/// The INVERSE of [`headless_consult_timeout_secs`]: the per-mage ceiling that fits inside an
+/// explicit run deadline (REQ-EB01).
+///
+/// # Why this exists
+///
+/// `[magi].agent_timeout_secs` is validated into `30..=120`, so the per-attempt budget it derives
+/// tops out at 72 s — regardless of how generous the run's `--timeout` is. A caller that grants
+/// 1800 s of wall clock still gets 72 s per attempt, and a mage that needs more simply never
+/// finishes. Deriving the ceiling from the deadline instead makes the budget scale with what the
+/// operator actually granted.
+///
+/// # Why the floor is mandatory, not defensive
+///
+/// [`derive_operation_budget`]'s caller contract holds only for
+/// `ceiling >= AGENT_TIMEOUT_ABSOLUTE_FLOOR_SECS`, and `config.rs` upholds it by validating
+/// `agent_timeout_secs` before that function ever runs. **This function is precisely the caller
+/// outside that validated path.** Without the floor, a small `--timeout` derives a ceiling below
+/// 15 s, both inner layers hit their own minimums, and `operation_budget + client_timeout >
+/// ceiling` — REQ-A04's invariant, broken. The floor is what keeps the guarantee true on a path
+/// `config.rs` cannot see.
+///
+/// # Rounding, and why downward is the safe direction
+///
+/// Integer division truncates. A ceiling one second smaller can never make the run exceed its own
+/// `--timeout`; rounding up could. The cost is at most 1 s of budget against a ceiling of
+/// hundreds.
+///
+/// `--timeout 0` means **zero**, not "unbounded": it saturates to the floor like any other
+/// insufficient deadline. The convention that 0 means infinite is common elsewhere, which is
+/// exactly why this is stated rather than assumed.
+///
+/// # Arguments
+/// * `timeout_secs` - the run's **RESOLVED** wall clock — `TimeoutDecision::effective_secs` from
+///   [`resolve_run_timeout`], not the raw flag (REQ-EB03). The two are the same number whenever
+///   the operator passed `--timeout`, since that function always obeys an explicit value; taking
+///   the resolved one is what makes a future change there propagate here instead of silently
+///   leaving the trio on a budget the run no longer uses.
+///
+///   The caller passes `Some` **only when the operator actually asked**. With no `--timeout`,
+///   `resolve_run_timeout` returns the formula minimum, and feeding that back through this inverse
+///   lands in `[c - 1, c]` — one second of drift that SC-EB01 forbids. The absent case keeps
+///   `[magi].agent_timeout_secs` verbatim and never reaches this function.
+/// * `max_rotations` - `[magi].max_rotations`, **resolved** (effective, not the raw `Option`).
+/// * `retry_disabled` - `[magi].retry_disabled`, resolved.
+#[must_use]
+pub fn derive_ceiling_from_timeout(
+    timeout_secs: u64,
+    max_rotations: u32,
+    retry_disabled: bool,
+) -> u64 {
+    // Saturation point 3 of 3: the dividend. `saturating_sub` is the load-bearing one — with
+    // `--timeout <= CLASSIFY_TIMEOUT_SECS` a plain subtraction underflows in u64 and the ceiling
+    // comes out astronomical instead of minimal, the error pointing at the opposite of the safe
+    // side. The `* 100` undoes `attempt_factor`'s hundredths and overflows only above
+    // ~1.8e17 seconds.
+    let dividend = timeout_secs
+        .saturating_sub(CLASSIFY_TIMEOUT_SECS)
+        .saturating_mul(100);
+    let divisor = attempt_factor(max_rotations, retry_disabled);
+    // The floor is applied HERE and again in `BudgetTelemetry::derive`, and the duplication is
+    // deliberate rather than an oversight (Checkpoint 2 loop 9, Caspar). `derive` cannot delegate
+    // to this function, because it needs the RAW pre-floor value to answer `ceiling_floored` —
+    // delegating would return the floored number and the flag could only ever report `false`.
+    // So the two share the CONSTANT, not the expression: `AGENT_TIMEOUT_ABSOLUTE_FLOOR_SECS` has
+    // one definition, and changing the floor's VALUE is still a one-line change in one place.
+    // What is duplicated is a `.max()` against it, and the boundary that `.max()` produces is
+    // pinned from both sides by `the_threshold_is_the_exact_boundary_of_floor_activation` and
+    // `a_ceiling_landing_exactly_on_the_floor_is_not_reported_as_floored`.
+    //
+    // This is a weaker situation than `attempt_factor`'s and worth not conflating with it: there,
+    // two copies of an ARITHMETIC EXPRESSION could drift while each side's tests passed. Here the
+    // only thing that could drift is the policy "clamp up to the floor", which is one token.
+    (dividend / divisor).max(AGENT_TIMEOUT_ABSOLUTE_FLOOR_SECS)
 }
 
 /// Wall-clock decision for a run, with its warning if applicable (SC-A04d).
@@ -692,7 +808,10 @@ mod tests {
     fn a_generous_timeout_derives_a_ceiling_above_the_configured_maximum() {
         // 2 attempts x 3 models x 1.2 slack = 7.2; (1800 - 6) / 7.2 = 249.16 -> 249
         let ceiling = derive_ceiling_from_timeout(1800, 2, false);
-        assert_eq!(ceiling, 249, "the inverse of the formula that produced 1800");
+        assert_eq!(
+            ceiling, 249,
+            "the inverse of the formula that produced 1800"
+        );
         assert!(
             ceiling > AGENT_TIMEOUT_MAX_SECS,
             "the whole point of E-B: the derived path is NOT capped by the configured range"
@@ -715,7 +834,10 @@ mod tests {
             for max_rotations in [0_u32, 1, 2, 5] {
                 for retry_disabled in [false, true] {
                     let factor = attempt_factor(max_rotations, retry_disabled);
-                    assert!(ceiling <= u64::MAX / factor, "sample outside the stated bound");
+                    assert!(
+                        ceiling <= u64::MAX / factor,
+                        "sample outside the stated bound"
+                    );
                     let t = headless_consult_timeout_secs(ceiling, max_rotations, retry_disabled);
                     let back = derive_ceiling_from_timeout(t, max_rotations, retry_disabled);
                     assert!(
@@ -795,7 +917,9 @@ mod tests {
             "written as a literal 120, a change to HEADLESS_TIMEOUT_SLACK_PCT would move \
              the forward function and silently leave the inverse behind"
         );
-        assert_eq!(attempt_factor(0, true), 1 * 1 * (100 + HEADLESS_TIMEOUT_SLACK_PCT));
+        // 1 attempt x 1 model x slack factor: the identity multiplications are elided because
+        // `clippy::identity_op` denies them under `-D warnings`; the value is unchanged.
+        assert_eq!(attempt_factor(0, true), 100 + HEADLESS_TIMEOUT_SLACK_PCT);
     }
 
     /// SC-EB05c: the degenerate values. Without `saturating_sub`, `timeout - 6` underflows
@@ -818,13 +942,25 @@ mod tests {
     #[test]
     fn the_derived_scale_upholds_req_a04_across_the_representable_range() {
         let samples = [
-            0_u64, 1, 6, 7, 60, 90, 600, 1800, 2166, 86_400, 1_000_000, u64::MAX / 100,
+            0_u64,
+            1,
+            6,
+            7,
+            60,
+            90,
+            600,
+            1800,
+            2166,
+            86_400,
+            1_000_000,
+            u64::MAX / 100,
         ];
         for timeout in samples {
             for max_rotations in [0_u32, 1, 2, 7] {
                 for retry_disabled in [false, true] {
                     let c = derive_ceiling_from_timeout(timeout, max_rotations, retry_disabled);
-                    let sum = derive_operation_budget(c).as_secs() + derive_client_timeout(c).as_secs();
+                    let sum =
+                        derive_operation_budget(c).as_secs() + derive_client_timeout(c).as_secs();
                     assert!(
                         sum <= c,
                         "REQ-A04 broken: timeout={timeout} rotations={max_rotations} \
