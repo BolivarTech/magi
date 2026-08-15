@@ -566,12 +566,23 @@ impl TimeoutDecision {
 /// Before `prepare_headless` learned to derive the trio's per-mage ceiling FROM `asked`
 /// (REQ-EB01), every caller's mages ran at `configured_ceiling` regardless of what `asked` was,
 /// so comparing `asked` against `headless_consult_timeout_secs(configured_ceiling, ..)` answered
-/// the right question everywhere. That stopped being true for exactly one caller
-/// (`prepare_headless`'s own `resolve_run_timeout` call, which feeds the SAME `asked` into
-/// `BudgetTelemetry::derive`'s `Some` branch): its mages now run at a ceiling *derived from*
-/// `asked`, not at `configured_ceiling`, so the old comparison measures a requirement the run no
-/// longer has. `query_timeout_decision` in `main.rs` is not this caller — see
-/// [`ConfiguredCeiling`](Self::ConfiguredCeiling).
+/// the right question everywhere. That stopped being true for `prepare_headless`'s own
+/// `resolve_run_timeout` call, which feeds the SAME `asked` into `BudgetTelemetry::derive`'s
+/// `Some` branch: its mages now run at a ceiling *derived from* `asked`, not at
+/// `configured_ceiling`, so the old comparison measures a requirement the run no longer has.
+///
+/// `main.rs`'s `query_timeout_decision` is a SECOND caller, and (fix round 4) it is not pinned
+/// to one variant: on `magi query --timeout N --auto --consult`, `prepare_headless` runs first
+/// and, because `N` was explicit, derives the trio's ceiling from that SAME `N` — so
+/// `query_timeout_decision` must measure against [`DerivesCeiling`](Self::DerivesCeiling) too,
+/// or it compares a healthy run against a requirement the run's trio was never asked to meet
+/// (measured case: `--timeout 200` warned that 654s were required when the derived ceiling
+/// truly needed 193s — a 3.3x overstatement, firing on a run that was fine). It only stays on
+/// [`ConfiguredCeiling`](Self::ConfiguredCeiling) when `prepare_headless` derived nothing — a
+/// tier default or `[headless] timeout_secs` with no explicit `--timeout` — because then the
+/// trio genuinely runs at `configured_ceiling` verbatim. The discriminator is
+/// `h.timeout.is_some()`, the exact condition `prepare_headless` itself branches on to decide
+/// whether to derive at all.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TimeoutMeasure {
     /// The caller feeds `asked` into [`derive_ceiling_from_timeout`]/[`BudgetTelemetry::derive`]
@@ -598,10 +609,12 @@ pub enum TimeoutMeasure {
     /// (SC-A04d/REQ-A11d) is unaffected: `below_formula` still reports the comparison honestly.
     DerivesCeiling,
     /// The caller runs the mages at `configured_ceiling` VERBATIM; `asked` only bounds the run's
-    /// own outer wall clock and never reaches `BudgetTelemetry::derive` as the `Some` branch
-    /// (`query_timeout_decision`'s route). Compare against
-    /// `headless_consult_timeout_secs(configured_ceiling, ..)` — the pre-E-B behavior, unchanged
-    /// for this caller.
+    /// own outer wall clock and never reaches `BudgetTelemetry::derive` as the `Some` branch.
+    /// Compare against `headless_consult_timeout_secs(configured_ceiling, ..)` — the pre-E-B
+    /// behavior, unchanged for this branch. `query_timeout_decision`'s tier-default /
+    /// `[headless] timeout_secs` route (no explicit `--timeout`) lands here; its
+    /// explicit-`--timeout` route lands on [`DerivesCeiling`](Self::DerivesCeiling) instead,
+    /// because `prepare_headless` already derived the trio's ceiling from that same value.
     ConfiguredCeiling,
 }
 
@@ -622,11 +635,13 @@ pub enum TimeoutMeasure {
 ///
 /// `prepare_headless` in `main.rs` calls this **before** building the trio and feeds
 /// `effective_secs` into `BudgetTelemetry::derive`, so this function's answer decides the budget
-/// every mage runs under — not just the run's outer deadline (REQ-EB01/EB03). That caller passes
-/// [`TimeoutMeasure::DerivesCeiling`]. A caller whose mages run at `configured_ceiling`
-/// regardless of `asked` (`query_timeout_decision`) passes
-/// [`TimeoutMeasure::ConfiguredCeiling`] instead — see that type's rustdoc for why the two
-/// cannot share one formula.
+/// every mage runs under — not just the run's outer deadline (REQ-EB01/EB03). That caller always
+/// passes [`TimeoutMeasure::DerivesCeiling`]. `main.rs`'s `query_timeout_decision` passes
+/// whichever variant matches what `prepare_headless` already did with the SAME `--timeout`:
+/// [`TimeoutMeasure::DerivesCeiling`] when the operator gave one explicitly (the trio's ceiling
+/// was derived from it), [`TimeoutMeasure::ConfiguredCeiling`] otherwise — a tier default or
+/// `[headless] timeout_secs`, where the trio runs at `configured_ceiling` verbatim — see
+/// [`TimeoutMeasure`]'s rustdoc for why the two cannot share one formula.
 ///
 /// That makes the ordering load-bearing: **the resolution must stay ahead of trio construction.**
 /// Moving this call after it would put the trio back on a ceiling derived from a number the run
@@ -1075,9 +1090,10 @@ mod tests {
 
     /// SC-A04d: an explicit `--timeout` below the minimum is OBEYED, with a warning.
     ///
-    /// `TimeoutMeasure::ConfiguredCeiling`: this is `query_timeout_decision`'s route, whose
-    /// mages run at `configured_ceiling` regardless of `asked` — so the warning must still name
-    /// `headless_consult_timeout_secs(configured_ceiling, ..)`, exactly as before the
+    /// `TimeoutMeasure::ConfiguredCeiling`: this is the branch whose mages run at
+    /// `configured_ceiling` regardless of `asked` — `query_timeout_decision`'s tier-default /
+    /// `[headless] timeout_secs` route, with no explicit `--timeout` — so the warning must still
+    /// name `headless_consult_timeout_secs(configured_ceiling, ..)`, exactly as before the
     /// `DerivesCeiling` variant existed. See
     /// `a_derived_timeout_at_the_floor_threshold_does_not_warn_against_the_configured_ceiling`
     /// for the sibling case this test would get wrong if it used `DerivesCeiling` instead.
@@ -1226,10 +1242,11 @@ mod tests {
         }
     }
 
-    /// The non-deriving route (`query_timeout_decision`'s `ConfiguredCeiling`) must keep
-    /// warning against `headless_consult_timeout_secs(configured_ceiling, ..)` exactly as
-    /// before — this is the caller whose mages genuinely run at `configured_ceiling`
-    /// regardless of `asked`, so the pre-E-B comparison is still the right one for it.
+    /// The non-deriving route (`query_timeout_decision`'s `ConfiguredCeiling` branch, taken
+    /// with no explicit `--timeout`) must keep warning against
+    /// `headless_consult_timeout_secs(configured_ceiling, ..)` exactly as before — this is the
+    /// branch whose mages genuinely run at `configured_ceiling` regardless of `asked`, so the
+    /// pre-E-B comparison is still the right one for it.
     #[test]
     fn the_non_deriving_route_still_warns_against_the_configured_ceiling() {
         let configured_minimum = headless_consult_timeout_secs(90, 2, false);

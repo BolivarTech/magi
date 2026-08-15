@@ -5450,7 +5450,25 @@ async fn run_query_subcommand(
     // SC-A04c/d: this route shares its single deadline with a forced/proactive consult
     // (REQ-H22), so REQ-A04's minimum applies here too. The deadline is obeyed either way;
     // what the check adds is the heads-up on stderr and the flag in the JSON.
-    let timeout_decision = query_timeout_decision(timeout, consult_magi.is_some(), &magi_config);
+    //
+    // The measure mirrors the choice `prepare_headless` already made for this SAME `h.timeout`
+    // (fix round 4): an explicit `--timeout` was fed into that call's `resolve_run_timeout` as
+    // `DerivesCeiling` — the trio's per-mage ceiling was derived from it — so this check must
+    // compare against that same ceiling, not `configured_ceiling`, or it overstates the
+    // requirement (measured: 3.3x on `--timeout 200`). With no explicit `--timeout` nothing was
+    // derived and the trio runs at `configured_ceiling` verbatim, so `ConfiguredCeiling` is
+    // still right. See `query_timeout_decision`'s rustdoc.
+    let timeout_measure = if h.timeout.is_some() {
+        magi_rs::magi::TimeoutMeasure::DerivesCeiling
+    } else {
+        magi_rs::magi::TimeoutMeasure::ConfiguredCeiling
+    };
+    let timeout_decision = query_timeout_decision(
+        timeout,
+        consult_magi.is_some(),
+        &magi_config,
+        timeout_measure,
+    );
     if let Some(w) = timeout_decision.as_ref().and_then(|d| d.warning.as_ref()) {
         eprintln!("{w}");
     }
@@ -5525,10 +5543,31 @@ fn timeout_scale(cfg: &MagiConfig) -> (u64, u32, bool) {
 /// invariant: someone asking for `--timeout 30` in a pipeline wants a cut at 30 seconds. What
 /// was missing is the heads-up that this particular cut has a structural consequence.
 ///
+/// # Which ceiling `deadline` is measured against (fix round 4)
+///
+/// `prepare_headless` runs BEFORE this check and, when the operator passed an explicit
+/// `--timeout`, derives the trio's per-mage ceiling FROM that same value (REQ-EB01) — the trio
+/// this run's consult dispatches to is already built by the time `deadline` reaches here. So on
+/// that route this check must measure against [`TimeoutMeasure::DerivesCeiling`] too, or it
+/// compares the deadline against a requirement the run's trio was never asked to meet: measured
+/// on `magi query --timeout 200 --auto --consult`, the old hardcoded `ConfiguredCeiling`
+/// comparison warned that 654s were required when the derived ceiling (26s) truly needed only
+/// 193s — firing on a healthy run and demanding 3.3x. With no explicit `--timeout` (a tier
+/// default or `[headless] timeout_secs`), `prepare_headless` derived nothing and the trio runs
+/// at `configured_ceiling` verbatim, so [`TimeoutMeasure::ConfiguredCeiling`] is still the right
+/// measure there — unchanged from before `TimeoutMeasure` existed.
+///
+/// The caller passes `measure` rather than this function re-deriving it, because the caller
+/// already knows which knob produced `deadline` (`h.timeout.is_some()`) — inferring that fact
+/// back out of a `Duration` that has already been stripped of its provenance is exactly how the
+/// round-3 defect this fix corrects was introduced.
+///
 /// # Parameters
 /// * `deadline` - the deadline the tier policy resolved; `None` means unbounded, which cannot be too short.
 /// * `consult_capable` - whether this run can dispatch a consult at all (a trio was built). With no trio there is no consult to be too short for, and warning would be noise.
 /// * `cfg` - the config from which the effective `[magi].agent_timeout_secs` ceiling is resolved.
+/// * `measure` - which ceiling `deadline` is measured against; see the section above and
+///   [`magi_rs::magi::TimeoutMeasure`].
 ///
 /// # Returns
 /// `None` when the check does not apply; otherwise the decision, whose `warning` names the
@@ -5538,6 +5577,7 @@ fn query_timeout_decision(
     deadline: Option<Duration>,
     consult_capable: bool,
     cfg: &MagiConfig,
+    measure: magi_rs::magi::TimeoutMeasure,
 ) -> Option<magi_rs::magi::TimeoutDecision> {
     if !consult_capable {
         return None;
@@ -5548,22 +5588,15 @@ fn query_timeout_decision(
     // The resolved deadline is fed in as the "asked" value whatever knob produced it — an
     // explicit `--timeout`, `[headless] timeout_secs`, or the tier default. All three are
     // operator declarations, so all three are obeyed and all three deserve the same heads-up
-    // when they are structurally too short.
-    //
-    // `TimeoutMeasure::ConfiguredCeiling`: unlike `prepare_headless`'s own `resolve_run_timeout`
-    // call, this decision's `asked` never reaches `BudgetTelemetry::derive` as the `Some`
-    // branch — this route only bounds the run's own tool-loop wall clock, while the trio's
-    // mages (built earlier, once, in `prepare_headless`) already run at whatever ceiling that
-    // separate call resolved. So the requirement this warning names is genuinely
-    // `headless_consult_timeout_secs(configured_ceiling, ..)`, unchanged from before
-    // `TimeoutMeasure` existed.
+    // when they are structurally too short. Which ceiling that heads-up is measured against
+    // depends on `measure` — see the rustdoc above.
     let (ceiling, max_rotations, retry_disabled) = timeout_scale(cfg);
     Some(magi_rs::magi::resolve_run_timeout(
         Some(secs),
         ceiling,
         max_rotations,
         retry_disabled,
-        magi_rs::magi::TimeoutMeasure::ConfiguredCeiling,
+        measure,
     ))
 }
 
@@ -8799,7 +8832,12 @@ mod tests {
             "a tool-executing tier always synthesises a deadline; a None here is the \
                  defect this test exists to catch, not a case to skip",
         );
-        let decision = query_timeout_decision(Some(d), true, &cfg);
+        let decision = query_timeout_decision(
+            Some(d),
+            true,
+            &cfg,
+            magi_rs::magi::TimeoutMeasure::ConfiguredCeiling,
+        );
         let (ceiling, rotations, retry_disabled) = timeout_scale(&cfg);
         let minimum =
             magi_rs::magi::headless_consult_timeout_secs(ceiling, rotations, retry_disabled);
@@ -12669,6 +12707,11 @@ agent_timeout_secs = {CEILING}
 
         /// A deadline below `classification + 2 × ceiling + slack` is reported, and the warning
         /// names the computed minimum so the operator can act on it.
+        ///
+        /// `ConfiguredCeiling`: these deadlines stand in for the tier-default /
+        /// `[headless] timeout_secs` route — no explicit `--timeout`, so `prepare_headless`
+        /// derived nothing and the trio runs at `configured_ceiling` verbatim. The sibling
+        /// `DerivesCeiling` route (an explicit `--timeout`) is covered separately below.
         #[test]
         fn a_deadline_below_the_formula_is_reported_with_its_minimum() {
             let minimum = formula_minimum();
@@ -12676,6 +12719,7 @@ agent_timeout_secs = {CEILING}
                 Some(Duration::from_secs(minimum - 1)),
                 true,
                 &cfg_with_ceiling(),
+                magi_rs::magi::TimeoutMeasure::ConfiguredCeiling,
             )
             .expect("a bounded, consult-capable run is exactly the checked case");
 
@@ -12707,10 +12751,15 @@ agent_timeout_secs = {CEILING}
 
             let minimum_of = |cfg: &MagiConfig| {
                 // A deadline of 1 s is below any minimum, so the decision always carries one.
-                query_timeout_decision(Some(Duration::from_secs(1)), true, cfg)
-                    .expect("bounded and consult-capable")
-                    .warning
-                    .expect("below the formula ⇒ a warning naming the minimum")
+                query_timeout_decision(
+                    Some(Duration::from_secs(1)),
+                    true,
+                    cfg,
+                    magi_rs::magi::TimeoutMeasure::ConfiguredCeiling,
+                )
+                .expect("bounded and consult-capable")
+                .warning
+                .expect("below the formula ⇒ a warning naming the minimum")
             };
 
             assert_ne!(
@@ -12728,9 +12777,13 @@ agent_timeout_secs = {CEILING}
         fn the_requested_deadline_is_obeyed_even_when_it_is_too_short() {
             let minimum = formula_minimum();
             let asked = minimum - 1;
-            let decision =
-                query_timeout_decision(Some(Duration::from_secs(asked)), true, &cfg_with_ceiling())
-                    .unwrap();
+            let decision = query_timeout_decision(
+                Some(Duration::from_secs(asked)),
+                true,
+                &cfg_with_ceiling(),
+                magi_rs::magi::TimeoutMeasure::ConfiguredCeiling,
+            )
+            .unwrap();
             assert_eq!(
                 decision.effective_secs, asked,
                 "obeying the request is the point; the check only adds the heads-up"
@@ -12745,6 +12798,7 @@ agent_timeout_secs = {CEILING}
                 Some(Duration::from_secs(minimum + 1)),
                 true,
                 &cfg_with_ceiling(),
+                magi_rs::magi::TimeoutMeasure::ConfiguredCeiling,
             )
             .unwrap();
             assert!(!decision.below_formula);
@@ -12756,13 +12810,104 @@ agent_timeout_secs = {CEILING}
         #[test]
         fn the_check_does_not_apply_without_a_deadline_or_without_a_trio() {
             assert!(
-                query_timeout_decision(None, true, &cfg_with_ceiling()).is_none(),
+                query_timeout_decision(
+                    None,
+                    true,
+                    &cfg_with_ceiling(),
+                    magi_rs::magi::TimeoutMeasure::ConfiguredCeiling,
+                )
+                .is_none(),
                 "an unbounded run cannot be below any minimum"
             );
             assert!(
-                query_timeout_decision(Some(Duration::from_secs(1)), false, &cfg_with_ceiling())
-                    .is_none(),
+                query_timeout_decision(
+                    Some(Duration::from_secs(1)),
+                    false,
+                    &cfg_with_ceiling(),
+                    magi_rs::magi::TimeoutMeasure::ConfiguredCeiling,
+                )
+                .is_none(),
                 "with no trio built there is no consult to warn about — warning would be noise"
+            );
+        }
+
+        /// Fix round 4 / SC-A04c's second half, worked example: `magi query --timeout 200
+        /// --auto --consult`. `prepare_headless` runs first and, because `--timeout` was
+        /// explicit, derives the trio's per-mage ceiling FROM 200 — so this check must measure
+        /// against `DerivesCeiling`, not `ConfiguredCeiling`. Regression check: before this fix
+        /// the measure was hardcoded to `ConfiguredCeiling`, which warned that 654s were
+        /// required — the healthy run demanding 3.3x more than the 193s its derived ceiling
+        /// (26s) truly needed.
+        #[test]
+        fn an_explicit_timeout_on_the_deriving_route_does_not_overstate_the_requirement() {
+            let cfg = MagiConfig::default();
+            let (configured, rotations, retry_disabled) = timeout_scale(&cfg);
+            assert_eq!(
+                configured, 90,
+                "pins the worked example's configured ceiling"
+            );
+
+            let derived =
+                magi_rs::magi::derive_ceiling_from_timeout(200, rotations, retry_disabled);
+            assert_eq!(
+                derived, 26,
+                "pins the worked example: --timeout 200 derives a 26s ceiling"
+            );
+            let true_requirement =
+                magi_rs::magi::headless_consult_timeout_secs(derived, rotations, retry_disabled);
+            assert_eq!(
+                true_requirement, 193,
+                "pins the worked example: the derived ceiling truly needs 193s, not 654s"
+            );
+
+            let decision = query_timeout_decision(
+                Some(Duration::from_secs(200)),
+                true,
+                &cfg,
+                magi_rs::magi::TimeoutMeasure::DerivesCeiling,
+            )
+            .expect("a bounded, consult-capable run is exactly the checked case");
+
+            assert!(
+                decision.warning.is_none(),
+                "the deriving route suppresses free text (`floored_ceiling_notice` already \
+                 covers it); a regression to `ConfiguredCeiling` would print a 654s warning \
+                 here on a healthy run: {:?}",
+                decision.warning
+            );
+            assert!(
+                !decision.below_formula,
+                "200s clears the deriving route's own floor-activation threshold; a healthy \
+                 run must not be flagged"
+            );
+        }
+
+        /// The sibling of the test above: with NO explicit `--timeout` (a tier default or
+        /// `[headless] timeout_secs`), `prepare_headless` derives nothing and the trio runs at
+        /// `configured_ceiling` verbatim — so a deadline too short for THAT ceiling must still
+        /// warn, naming the configured-ceiling minimum, exactly as before `TimeoutMeasure`
+        /// existed.
+        #[test]
+        fn a_tier_default_deadline_still_warns_against_the_configured_ceiling() {
+            let minimum = formula_minimum();
+            // Stands in for `resolve_tier_timeout_default`'s synthesized deadline when the
+            // operator passed no `--timeout` — short enough to trip the configured-ceiling
+            // minimum.
+            let decision = query_timeout_decision(
+                Some(Duration::from_secs(minimum - 1)),
+                true,
+                &cfg_with_ceiling(),
+                magi_rs::magi::TimeoutMeasure::ConfiguredCeiling,
+            )
+            .expect("a bounded, consult-capable run is exactly the checked case");
+
+            assert!(decision.below_formula);
+            let warning = decision
+                .warning
+                .expect("below the configured minimum must still warn on the non-deriving route");
+            assert!(
+                warning.contains(&minimum.to_string()),
+                "must name the configured-ceiling minimum: {warning}"
             );
         }
     }
