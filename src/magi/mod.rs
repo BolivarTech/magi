@@ -527,6 +527,21 @@ impl TimeoutDecision {
 /// Resolves the run wall-clock. **It always obeys the explicit value**, and warns when that
 /// value makes it impossible to complete a consult with schema retry.
 ///
+/// # A consumer derives the per-mage ceiling from `effective_secs`
+///
+/// `prepare_headless` in `main.rs` calls this **before** building the trio and feeds
+/// `effective_secs` into `BudgetTelemetry::derive`, so this function's answer decides the budget
+/// every mage runs under — not just the run's outer deadline (REQ-EB01/EB03).
+///
+/// That makes the ordering load-bearing: **the resolution must stay ahead of trio construction.**
+/// Moving this call after it would put the trio back on a ceiling derived from a number the run
+/// does not use, which is the defect the current ordering exists to make unreachable. Changing
+/// *what* this function returns is fine and propagates correctly; changing *when* it is called
+/// relative to the trio is not.
+///
+/// Documented here as well as at the call site on purpose: whoever breaks it will be editing this
+/// function, not reading that one.
+///
 /// # Arguments
 /// * `asked` - the explicit `--timeout`, if the operator gave one.
 /// * `configured_ceiling` - `[magi].agent_timeout_secs`, resolved.
@@ -581,13 +596,45 @@ pub fn resolve_run_timeout(
 /// warnings, which costs more than the typo it was meant to catch.
 pub const CEILING_SANITY_SECS: u64 = 600;
 
-/// The per-mage ceiling a run actually got, paired with [`BudgetTelemetry`] by
-/// [`BudgetTelemetry::derive`] so no caller can obtain a ceiling without also seeing why it was
-/// chosen.
+/// A per-mage ceiling that **names where it came from** (REQ-EB01, R-EB03), paired with
+/// [`BudgetTelemetry`] by [`BudgetTelemetry::derive`] so no caller can obtain a ceiling without
+/// also seeing why it was chosen.
 ///
-/// The inner value is private; call sites read it back with [`ResolvedCeiling::secs`]. Full
-/// rationale for the privacy — what it guarantees, and just as importantly what it does not —
-/// lands in Task 3 Step 4a.
+/// # Why a newtype instead of a `u64`
+///
+/// The correctness of E-B is temporal: the run's clock must be resolved *before* the trio is
+/// built, or the mages get a budget derived from a number the run does not enforce. An earlier
+/// design guarded that with a startup `assert!`, then with rustdoc at both ends. Both are checks
+/// a refactor can walk past — the `assert!` because it only fires at runtime on a divergence that
+/// cannot happen *yet*, the rustdoc because it lives in the file nobody is editing.
+///
+/// A `u64` in `TrioBuild` accepts any number from anywhere: the raw `--timeout`, a tier default,
+/// a literal. This type does not. Every value is produced by one of exactly two routes, and
+/// **each route states which path it represents**:
+///
+/// * [`BudgetTelemetry::derive`] with `Some(&TimeoutDecision)` — the derived path. The
+///   `TimeoutDecision` is obtainable only from [`resolve_run_timeout`] or the explicitly-named
+///   [`TimeoutDecision::obeyed`], so a bare `--timeout` cannot reach it.
+/// * [`ResolvedCeiling::configured`] — the configured/TUI path, where **no clock is resolved at
+///   all** and `[magi].agent_timeout_secs` is used verbatim. This is the same value
+///   `derive(None, secs, …)` returns; it exists as a named constructor because otherwise every
+///   unrelated test literal would have to call the deriver to obtain one.
+///
+/// # What this does and does not guarantee — read before strengthening the claim
+///
+/// It makes a ceiling **traceable**, not provably-resolved. `ResolvedCeiling::configured(raw)`
+/// is one line and it compiles. What the type removes is the *silent* version: a bare integer
+/// flowing into the trio with nothing at the call site saying which clock it came from. Anyone
+/// bypassing it now has to write a constructor whose name asserts something false, in a function
+/// whose rustdoc says so. That is a speed bump plus documentation — good, and worth having — but
+/// it is **not** a proof.
+///
+/// It deliberately does **not** implement `From<u64>`, `Default` or `Deserialize`. `From<u64>`
+/// would erase the provenance the two named routes exist to record, and `Deserialize` constructs
+/// field-by-field without any constructor at all — the exact bypass `CLAUDE.md` records for
+/// `MagiConfig`.
+///
+/// The inner value is private; call sites read it back with [`ResolvedCeiling::secs`].
 #[derive(Debug, Clone, Copy)]
 pub struct ResolvedCeiling(u64);
 

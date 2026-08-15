@@ -69,8 +69,8 @@ use magi_rs::magi::probe::{
 };
 use magi_rs::magi::rotation_config::corroborate_by_digest;
 use magi_rs::magi::{
-    bytes_to_tokens_est, derive_client_timeout, derive_operation_budget, AGENT_TIMEOUT_SECS,
-    CHARS_PER_TOKEN_EST, STALE_NOTICE_RATIO,
+    bytes_to_tokens_est, derive_client_timeout, derive_operation_budget, BudgetTelemetry,
+    ResolvedCeiling, TimeoutDecision, CHARS_PER_TOKEN_EST, STALE_NOTICE_RATIO,
 };
 use magi_rs::notices::{render_notices, Notice};
 use magi_rs::redact::{redact_foreign_error, redact_foreign_text, redact_url, SafeErrorText};
@@ -1741,6 +1741,19 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
     // that equality verifiable instead of relying on this site and `run_tui_ext` constructing
     // the same `String` independently.
     let mut consult_unavailable_message: Option<String> = None;
+    // SC-EB06b: the TUI has no `--timeout` and is not getting one — the flag belongs to
+    // `HeadlessArgs`, and a wall clock for an unattended run has no analogue in a session a human
+    // is watching and can interrupt. `None` here means "use the configured source", NEVER
+    // "unbounded", and yields v0.14.3's ceiling byte for byte.
+    // Through `timeout_scale`, NOT by re-resolving the three fields by hand. Spelling out
+    // `agent_timeout_secs.unwrap_or(..)` / `effective_max_rotations()` / `retry_disabled` here
+    // would be a second copy of a resolution that already exists eleven lines away, and the two
+    // copies drift the moment one of the three gains a rule the other does not learn. That is the
+    // same defect `attempt_factor` exists to prevent, one level up.
+    let (tui_ceiling, tui_rotations, tui_retry_disabled) = timeout_scale(&magi_config);
+    let (tui_resolved, tui_budget) =
+        BudgetTelemetry::derive(None, tui_ceiling, tui_rotations, tui_retry_disabled);
+    startup_notices.push(budget_notice(tui_resolved.secs(), None, &tui_budget));
     let consult_magi: Option<Arc<Magi>> = match build_magi_orchestrator(
         &TrioBuild {
             cfg: &magi_config,
@@ -1751,6 +1764,7 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
             env_overrides: &env_overrides,
             capability_cache: capability_cache.as_ref(),
             probe: &probe,
+            ceiling: tui_resolved,
         },
         &mut startup_notices,
     ) {
@@ -2979,16 +2993,40 @@ fn build_native_provider(
 // `Any` (R-A01 forbids touching magi-core), so there is no downcast to do better — but a
 // measurement that can be wrong for a narrow reason beats a literal that cannot be wrong at
 // all. Both address reads are `cfg(test)`, so production pays nothing and keeps its move.
+/// Test-only: one seat's wiring, as recorded by `build_magi_orchestrator` (see
+/// [`SEAT_WIRING_TRACE`]).
+///
+/// A named struct rather than a 4-tuple (Task 3, E-B): a positional `(AgentName, String, bool,
+/// Duration)` would put `bool` and `Duration` next to two other same-typed-shaped neighbours —
+/// the same transposition hazard this repo already refuses for `OpenAiSettings` and
+/// `ModeSources` (`CLAUDE.md`).
+#[cfg(test)]
+#[derive(Debug, Clone)]
+struct SeatWiring {
+    /// Which of the three mages this is.
+    seat: AgentName,
+    /// The resolved model tag this seat was wired with.
+    model: String,
+    /// Measured, not asserted: a different `Arc` address means something wrapped the provider.
+    /// See the note on [`SEAT_WIRING_TRACE`] for the mutation that proved a literal `true`
+    /// guarded nothing.
+    retry_wrapped: bool,
+    /// NEW for E-B: the per-seat client timeout, which is what makes
+    /// `the_derived_ceiling_reaches_the_seats` possible at all — without it, a ceiling that
+    /// stops at the telemetry and never reaches the seat would still pass every other test.
+    client_timeout: Duration,
+}
+
 #[cfg(test)]
 thread_local! {
-    static SEAT_WIRING_TRACE: std::cell::RefCell<Vec<(AgentName, String, bool)>> =
+    static SEAT_WIRING_TRACE: std::cell::RefCell<Vec<SeatWiring>> =
         const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// Test-only: the trace left by the LAST call to `build_magi_orchestrator` in this thread. See
 /// [`SEAT_WIRING_TRACE`].
 #[cfg(test)]
-fn seat_wiring_trace() -> Vec<(AgentName, String, bool)> {
+fn seat_wiring_trace() -> Vec<SeatWiring> {
     SEAT_WIRING_TRACE.with(|t| t.borrow().clone())
 }
 
@@ -3116,6 +3154,27 @@ struct TrioBuild<'a> {
     /// can leave at its default while everything still compiles — the defect this type exists to
     /// make unconstructible.
     probe: &'a ProbeOutcome,
+    /// The per-mage ceiling this run will use, in seconds — **already resolved** (REQ-EB01).
+    ///
+    /// Derived by the caller through `BudgetTelemetry::derive`: from the run's explicit
+    /// `--timeout` on the headless path, or from `[magi].agent_timeout_secs` on the TUI path,
+    /// which is byte-identical to v0.14.3.
+    ///
+    /// # Why the decision and not the input
+    ///
+    /// This function cannot own the derivation, because it returns only `Arc<Magi>` — a
+    /// `BudgetTelemetry` computed here would have no way out, and `applied_caps` would have
+    /// nothing to report. Deriving in the caller lets one call produce both the ceiling that
+    /// configures the trio and the telemetry that explains it, which is also why
+    /// `BudgetTelemetry::derive` returns them as a pair.
+    ///
+    /// It is a field on this struct rather than an argument for the same reason `probe` is:
+    /// every construction site is an explicit literal, so a new field is a compile error at each
+    /// one instead of a value someone can leave defaulted.
+    ///
+    /// **Its type is [`ResolvedCeiling`], not `u64`, and that is what makes the ordering
+    /// structural** rather than documented — see its rustdoc in `src/magi/mod.rs`.
+    ceiling: ResolvedCeiling,
 }
 
 /// Everything one startup probe learned, kept together so no consumer can take the trio's table
@@ -3259,20 +3318,75 @@ fn candidate_window_view(
     view
 }
 
-// RED-phase stubs (Task 3, E-B): minimal bodies so the test module compiles and the new tests
-// below fail on their ASSERTIONS rather than a compile error (per the controller ruling — a
-// compile-error Red never shows an assertion failing, so it never proves the assertion is wired
-// to the value its name claims). `#[cfg(test)]` because at this point in the sequence nothing in
-// production calls them yet; Green phase drops the attribute and wires them into
-// `prepare_headless`'s two call sites, at which point they stop being test-only.
-#[cfg(test)]
-fn floored_ceiling_notice(_b: &magi_rs::magi::BudgetTelemetry) -> Option<Notice> {
-    unimplemented!("wired with real logic in Task 3's Green phase")
+/// The one line that makes the run's budget observable instead of arithmetic (REQ-EB04).
+///
+/// It ships with the formula change and not after it. A behavioural change to the per-attempt
+/// budget with no way to see which budget is in force is the exact situation that produced this
+/// requirement: the requester had to read our source to work out that their number was 72.
+///
+/// Tier depends on what happened, and the distinction is real rather than cosmetic. A ceiling
+/// derived from `--timeout` **is** the config resolving differently from what `magi.toml` says,
+/// so it is `Resolution` and always survives `render_notices`' cap. The configured path resolved
+/// exactly as written, so it is `Info` and may be capped away without losing anything.
+/// `asked` is the **RAW `--timeout`**, deliberately: the notice's job is to connect the number
+/// the operator typed to the ceiling it bought, so it must print their input. It is the one place
+/// the raw flag legitimately appears. Naming it `run_timeout` — as an earlier draft did — read
+/// like a resolved value and invited someone to "fix" it by passing `resolved.secs()`, which
+/// would print the ceiling twice and drop the only fact that makes the notice useful.
+fn budget_notice(ceiling_secs: u64, asked: Option<u64>, b: &BudgetTelemetry) -> Notice {
+    match asked {
+        Some(t) => Notice::resolution(format!(
+            "magi: per-mage ceiling {ceiling_secs}s derived from --timeout {t}s \
+             (operation budget {}s/attempt, max_rotations={})",
+            b.operation_budget_secs, b.max_rotations_effective
+        )),
+        None => Notice::info(format!(
+            "magi: per-mage ceiling {ceiling_secs}s from [magi].agent_timeout_secs \
+             (operation budget {}s/attempt)",
+            b.operation_budget_secs
+        )),
+    }
 }
 
-#[cfg(test)]
-fn above_sanity_notice(_ceiling_secs: u64, _b: &magi_rs::magi::BudgetTelemetry) -> Option<Notice> {
-    unimplemented!("wired with real logic in Task 3's Green phase")
+/// The `--timeout` was too small for the rotation arithmetic to close, so the ceiling was raised
+/// to the absolute floor (REQ-EB02b).
+///
+/// The run **starts anyway**. `resolve_run_timeout`'s contract is that it always obeys the
+/// explicit value and warns when that value makes completion impossible; refusing here would
+/// contradict a rule that already covers this case from the other side. And the operator may
+/// know something the formula does not — a small payload where no rotation is ever needed.
+///
+/// The message names **both** levers. The pre-existing below-formula warning names only the
+/// clock, leaving an operator who cannot raise it with nothing to do.
+fn floored_ceiling_notice(b: &BudgetTelemetry) -> Option<Notice> {
+    b.ceiling_floored.then(|| {
+        Notice::resolution(format!(
+            "magi: --timeout is too small for max_rotations={} with the retry enabled; the \
+             per-mage ceiling was raised to its {}s floor. Either raise --timeout to at least \
+             {}s, or lower [magi].max_rotations. The run will start and is likely to hit its \
+             own deadline.",
+            b.max_rotations_effective,
+            magi_rs::magi::AGENT_TIMEOUT_ABSOLUTE_FLOOR_SECS,
+            b.floor_activation_threshold_secs
+        ))
+    })
+}
+
+/// The derived ceiling is large enough that a mistyped `--timeout` is the likelier explanation.
+///
+/// Warns and **obeys** — there is no upper clamp, which is the requirement. `Resolution` rather
+/// than `Info` for the same reason as the floor notice: `render_notices` caps `Info`, and this
+/// one must not be the line that gets dropped.
+fn above_sanity_notice(ceiling_secs: u64, b: &BudgetTelemetry) -> Option<Notice> {
+    b.ceiling_above_sanity.then(|| {
+        Notice::resolution(format!(
+            "magi: --timeout derives a per-mage ceiling of {ceiling_secs}s (over {}s), giving \
+             {}s per attempt. If that was not intended, check --timeout for an extra digit. \
+             Using the requested value anyway.",
+            magi_rs::magi::CEILING_SANITY_SECS,
+            b.operation_budget_secs
+        ))
+    })
 }
 
 /// Builds the MAGI trio with the NATIVE providers of magi-core (REQ-A01).
@@ -3306,6 +3420,7 @@ fn build_magi_orchestrator(
         env_overrides,
         capability_cache,
         probe,
+        ceiling,
     } = b;
     // What every consumer below reads, and NOT the D-R09 threshold — `probe_and_report` already
     // derived that from the SEATS before this call. Named apart from `ProbeOutcome::trio` so each
@@ -3336,7 +3451,9 @@ fn build_magi_orchestrator(
     // BACKEND model: the one a seat inherits without its own model, and the builder fallback's.
     // Task 5.2: extracted to `resolve_backend_model`, shared with `orchestrate_probes` (B3).
     let backend_model: &str = resolve_backend_model(cfg, kind);
-    let ceiling = Duration::from_secs(cfg.magi().agent_timeout_secs.unwrap_or(AGENT_TIMEOUT_SECS));
+    // Already decided by the caller (see `TrioBuild::ceiling`). Nothing is derived here: this
+    // function configures a trio, it does not resolve policy.
+    let ceiling = Duration::from_secs(ceiling.secs());
 
     // `RetryConfig` is `#[non_exhaustive]`: outside the crate there is NO literal nor
     // `..default()` — it is built with `default()` and adjusted field by field.
@@ -3392,8 +3509,12 @@ fn build_magi_orchestrator(
                 #[cfg(test)]
                 SEAT_WIRING_TRACE.with(|t| {
                     let wrapped_addr = Arc::as_ptr(&wrapped) as *const () as usize;
-                    t.borrow_mut()
-                        .push((seat, model.clone(), wrapped_addr != unwrapped_addr));
+                    t.borrow_mut().push(SeatWiring {
+                        seat,
+                        model: model.clone(),
+                        retry_wrapped: wrapped_addr != unwrapped_addr,
+                        client_timeout,
+                    });
                 });
                 seats.push((seat, wrapped, lineage, model.clone()));
             }
@@ -4709,6 +4830,23 @@ struct HeadlessContext {
     /// because the linter is telling the truth about the crate as it stands.
     #[cfg(test)]
     divergence_notice: Option<Notice>,
+    /// The resolved wall clock (SC-A04d), computed once here rather than again in each
+    /// subcommand. `run_consult_subcommand` reads this field instead of calling
+    /// `timeout_scale`/`resolve_run_timeout` itself — see
+    /// `the_consult_subcommand_does_not_resolve_the_clock_itself` for the guard against that
+    /// recomputation coming back.
+    timeout_decision: TimeoutDecision,
+    /// How this run's per-mage budget was decided (REQ-EB02b). Produced beside the trio,
+    /// because the trio is configured from it — a second derivation downstream could disagree
+    /// with the ceiling the mages are already running under.
+    ///
+    /// **`#[cfg(test)]`, not `#[allow(dead_code)]`** — same precedent as
+    /// [`Self::divergence_notice`] above: no dispatcher's production code reads this back off
+    /// `ctx` yet (Task 4 is what makes the decision machine-readable), so it exists purely so a
+    /// test can assert against the real `prepare_headless` output instead of a hand-rolled
+    /// stand-in.
+    #[cfg(test)]
+    budget: BudgetTelemetry,
 }
 
 /// Resolves the effective `allow_system_override` gate (REQ-H12b, spec §11):
@@ -5081,6 +5219,30 @@ async fn prepare_headless(
         &mut trio_notices,
     )
     .await;
+    // REQ-EB03: resolve the wall clock FIRST, then derive the ceiling from the value the run will
+    // actually enforce. Ordering it this way is what removes the need for a startup `assert!`
+    // reconciling the raw `--timeout` with the resolved one: derived from `effective_secs`, a
+    // future change to `resolve_run_timeout` moves this automatically instead of silently leaving
+    // the trio on a budget the run no longer uses.
+    let (configured_ceiling, max_rotations, retry_disabled) = timeout_scale(&magi_config);
+    let timeout_decision = magi_rs::magi::resolve_run_timeout(
+        h.timeout,
+        configured_ceiling,
+        max_rotations,
+        retry_disabled,
+    );
+    // `Some` only when the OPERATOR asked. With no `--timeout`, `resolve_run_timeout` returns the
+    // formula minimum, and feeding that back through the inverse would land in `[c-1, c]` — one
+    // second of drift that SC-EB01 forbids. The absent case keeps the configured ceiling verbatim.
+    //
+    // Note this passes the DECISION, not `effective_secs`: `h.timeout.map(...)` selects which
+    // branch, and `.then_some(&timeout_decision)` is what hands `derive` a value it can accept.
+    let run = h.timeout.is_some().then_some(&timeout_decision);
+    let (resolved_ceiling, budget) =
+        BudgetTelemetry::derive(run, configured_ceiling, max_rotations, retry_disabled);
+    trio_notices.push(budget_notice(resolved_ceiling.secs(), h.timeout, &budget));
+    trio_notices.extend(floored_ceiling_notice(&budget));
+    trio_notices.extend(above_sanity_notice(resolved_ceiling.secs(), &budget));
     let consult_magi = build_magi_orchestrator(
         &TrioBuild {
             cfg: &magi_config,
@@ -5091,6 +5253,7 @@ async fn prepare_headless(
             env_overrides: &env_overrides,
             capability_cache: capability_cache.as_ref(),
             probe: &probe,
+            ceiling: resolved_ceiling,
         },
         &mut trio_notices,
     );
@@ -5143,6 +5306,9 @@ async fn prepare_headless(
         limits,
         env_mode,
         env_untrusted_content,
+        timeout_decision,
+        #[cfg(test)]
+        budget,
         #[cfg(test)]
         divergence_notice: headless_divergence_notice,
     })
@@ -5423,6 +5589,7 @@ async fn run_consult_subcommand(
         limits,
         env_mode,
         env_untrusted_content,
+        timeout_decision,
         ..
     } = ctx;
 
@@ -5470,9 +5637,12 @@ async fn run_consult_subcommand(
     // `analyze_direct`'s deadline arm never fired). `.below_formula`/`.warning`
     // — the JSON telemetry and the stderr notice, emitted by `analyze_direct`
     // via `runtime.notice_sink` — were already wired by Task 6.1.
-    let (ceiling, max_rotations, retry_disabled) = timeout_scale(&magi_config);
-    let timeout_decision =
-        magi_rs::magi::resolve_run_timeout(h.timeout, ceiling, max_rotations, retry_disabled);
+    //
+    // REQ-EB03 (Task 3): `timeout_decision` is READ off `ctx`, not resolved again here — it is
+    // the SAME decision `prepare_headless` already used to derive the trio's per-mage ceiling. A
+    // second resolution from `h.timeout` would agree with it in every ordinary case and diverge
+    // only when the two are allowed to drift, which is exactly the class of bug this reuse
+    // removes by construction. See `the_consult_subcommand_does_not_resolve_the_clock_itself`.
     let timeout = Some(consult_deadline(&timeout_decision));
     let runtime = MagiRuntimeParams {
         kind: registered_magi_kind(&magi_config, provider_kind),
@@ -8163,6 +8333,16 @@ mod tests {
     /// always obeys, so raw and resolved are the same number and the test passes either
     /// way. Temporarily make it return `effective_secs / 2` for the explicit case; this
     /// test must go red. Restore it afterwards.
+    ///
+    /// **The expected side is computed from `asked`, the RAW flag — not from
+    /// `decision.effective_secs` — and that is the whole point.** An earlier draft compared
+    /// against `derive_ceiling_from_timeout(decision.effective_secs, …)`: since
+    /// `BudgetTelemetry::derive`'s own `Some` branch runs the identical formula over that same
+    /// field, both sides of the assertion always read from `decision.effective_secs`, so the
+    /// mutation above changes them together and the test stays green regardless — verified by
+    /// actually running the mutation, not by reading. Comparing against `asked` instead is what
+    /// makes the two sides read from DIFFERENT inputs, so a `resolve_run_timeout` that stops
+    /// obeying the explicit value is exactly what turns this red.
     #[test]
     fn the_ceiling_is_derived_from_the_resolved_timeout_not_the_raw_flag() {
         let cfg = MagiConfig::default();
@@ -8178,11 +8358,7 @@ mod tests {
         );
         assert_eq!(
             from_resolved.secs(),
-            magi_rs::magi::derive_ceiling_from_timeout(
-                decision.effective_secs,
-                rotations,
-                retry_disabled
-            ),
+            magi_rs::magi::derive_ceiling_from_timeout(asked, rotations, retry_disabled),
             "the trio's ceiling must come from the clock the run will actually enforce"
         );
     }
@@ -8229,6 +8405,196 @@ mod tests {
         .expect("an above-sanity ceiling must produce a notice");
         assert_eq!(n.tier, NoticeTier::Resolution);
         assert!(n.text.contains("900"));
+    }
+
+    /// Both paths resolve the rotation scale through ONE function. A second hand-written
+    /// copy would compile, pass every other test, and diverge only when one of the three
+    /// fields gains a rule the other copy never learns.
+    #[test]
+    fn both_paths_resolve_the_scale_through_timeout_scale() {
+        let cfg = MagiConfig::default();
+        let (ceiling, rotations, retry_disabled) = timeout_scale(&cfg);
+        assert_eq!(
+            ceiling,
+            cfg.magi()
+                .agent_timeout_secs
+                .unwrap_or(magi_rs::magi::AGENT_TIMEOUT_SECS)
+        );
+        assert_eq!(rotations, cfg.effective_max_rotations());
+        assert_eq!(retry_disabled, cfg.magi().retry_disabled.unwrap_or(false));
+    }
+
+    /// The lib-side round-trip test
+    /// `magi::tests::both_directions_agree_when_max_rotations_comes_from_the_default` mirrors
+    /// `crate::defaults::DEFAULT_MAX_ROTATIONS` as a literal `2`, because `mod defaults` is
+    /// bin-only and unreachable from `magi_rs::magi`. This test is the other half of that
+    /// coupling: it fails the moment the default moves, pointing at the mirror that has to move
+    /// with it.
+    ///
+    /// **Not a tautology, and worth being clear about why.** It does not assert `2 == 2`; it
+    /// asserts that a value defined in THIS crate still equals the literal a DIFFERENT crate's
+    /// test depends on. That is an assertion about a cross-crate coupling Rust cannot express,
+    /// and it is the only mechanical statement of it that exists.
+    #[test]
+    fn the_lib_side_default_rotations_mirror_is_still_accurate() {
+        assert_eq!(
+            crate::defaults::DEFAULT_MAX_ROTATIONS,
+            2,
+            "DEFAULT_MAX_ROTATIONS changed. `magi::tests::\
+             both_directions_agree_when_max_rotations_comes_from_the_default` hardcodes 2 to \
+             stand for it (mod defaults is bin-only, so it cannot reference this constant). \
+             Update that literal, then this one — otherwise that test silently stops covering \
+             the default case."
+        );
+    }
+
+    /// `run_consult_subcommand` must READ `ctx.timeout_decision`, never resolve the clock again.
+    ///
+    /// **Why a source grep rather than a behavioural test.** A reintroduced
+    /// `resolve_run_timeout(h.timeout, …)` produces the SAME number as the decision the context
+    /// carries, so no assertion on the result can tell the two apart (Checkpoint 2 loops 13-14).
+    /// The difference is visible only in the text. This is a weaker instrument than a real test
+    /// and is not pretending otherwise — but it fires in CI, which review does not.
+    ///
+    /// Brittle in one direction only: renaming the function or reformatting its body can make
+    /// this stop matching. If it fails after a rename, fix the anchors — do not delete the test.
+    ///
+    /// **The window is brace-matched to the function's own closing `}`, not bounded at "the
+    /// next top-level `fn`".** `run_consult_subcommand` is the LAST top-level function before
+    /// `mod tests` in this file — there is no following `fn` to stop at, so that heuristic would
+    /// run to end-of-file and swallow the entire test module, which is full of legitimate
+    /// `resolve_run_timeout` calls (including this one) and would fail the assertion below
+    /// regardless of what production code does. Brace-matching from the function's opening `{`
+    /// is what "reads only the one function" actually requires here.
+    #[test]
+    fn the_consult_subcommand_does_not_resolve_the_clock_itself() {
+        let src = include_str!("main.rs");
+        let start = src
+            .find("fn run_consult_subcommand")
+            .expect("run_consult_subcommand not found — fix this test's anchor, do not delete it");
+        let after_sig = &src[start..];
+        let body_open = after_sig
+            .find('{')
+            .expect("run_consult_subcommand has no body — fix this test's anchor");
+        // Balanced-brace scan from the body's opening `{` to its matching `}`. Rust `format!`-
+        // style placeholders (`"error: {}"`) are always balanced pairs, so they never perturb the
+        // running depth — only a genuinely unmatched brace would, and this function has none.
+        let mut depth = 0i32;
+        let mut close = None;
+        for (i, ch) in after_sig[body_open..].char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        close = Some(body_open + i + 1);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let end = close.expect(
+            "run_consult_subcommand's closing brace was not found — fix this test's anchor",
+        );
+        let body = &after_sig[..end];
+
+        assert!(
+            !body.contains("resolve_run_timeout"),
+            "run_consult_subcommand resolves the wall clock itself. It must read \
+             ctx.timeout_decision — the decision the trio was already built from. A second \
+             resolution agrees with the first today, which is exactly why nothing else catches \
+             it."
+        );
+        assert!(
+            body.contains("timeout_decision"),
+            "run_consult_subcommand no longer reads ctx.timeout_decision at all"
+        );
+    }
+
+    /// The two clocks agree whenever the operator gave one, and when they cannot, the
+    /// existing SC-A04d machinery is what catches it — not silence.
+    ///
+    /// Pinned because R-EB03's "honest limit" is otherwise only prose, and prose does not
+    /// fail when someone changes `resolve_tier_timeout_default`.
+    ///
+    /// **Not one assertion is conditional, and that is the fix.** An earlier draft wrapped
+    /// the whole second half in `if let Some(d) = deadline` over a `Tier::Default` policy —
+    /// which returns `None` **unconditionally** (`headless_runner.rs:651-654`, pinned by that
+    /// module's own `test_resolve_tier_timeout_default_applies_tier_default`). The body
+    /// therefore never executed: the half of the test whose comment claimed to pin SC-A04d
+    /// reporting was unreachable code, and the test passed having verified nothing
+    /// (Checkpoint 2, loop 6, Caspar — who called it "can pass vacuously"; it was vacuous
+    /// always). Each tier is asserted outright, and the tier that actually carries the
+    /// asymmetry is `Auto`/`FullAuto`, never `Default`.
+    #[test]
+    fn the_query_routes_deadline_matches_the_trio_when_the_operator_set_one() {
+        use magi_rs::headless::limits::FULL_AUTO_TIMEOUT_SECS;
+
+        let cfg = MagiConfig::default();
+
+        // 1. An explicit --timeout reaches the query route unchanged, in any tier.
+        let policy = Policy::new(Tier::Default, 15, Some(1800));
+        let enforced = resolve_tier_timeout_default(&policy, FULL_AUTO_TIMEOUT_SECS)
+            .expect("an explicit --timeout is always carried by the policy");
+        assert_eq!(
+            enforced,
+            Duration::from_secs(1800),
+            "an explicit --timeout reaches the query route unchanged, so the trio's derived \
+             ceiling and the enforced deadline come from the same number"
+        );
+        // …and the ceiling is derived FROM that number, not from the configured default.
+        // Asserting only the line above pins policy resolution and leaves the derivation path
+        // uncovered (Checkpoint 2, loop 6, Melchior — his one finding that was a real gap and
+        // not a re-raise of Caspar's).
+        let (configured, rotations, retry_disabled) = timeout_scale(&cfg);
+        let from_enforced = magi_rs::magi::derive_ceiling_from_timeout(
+            enforced.as_secs(),
+            rotations,
+            retry_disabled,
+        );
+        assert_eq!(
+            from_enforced, 249,
+            "the spec's worked example: --timeout 1800 derives 249 s per mage. A literal, so a \
+             change to the derivation fails HERE and not only in the arithmetic's own tests"
+        );
+        assert_ne!(
+            from_enforced, configured,
+            "and it is NOT [magi].agent_timeout_secs — this is the discriminator. Comparing the \
+             derivation against itself would restate the line above and prove nothing about \
+             WHICH number the trio was configured from"
+        );
+
+        // 2. The read-only tier synthesises no deadline, so no second number exists to
+        //    diverge from. Asserted, never branched over.
+        assert_eq!(
+            resolve_tier_timeout_default(
+                &Policy::new(Tier::Default, 15, None),
+                FULL_AUTO_TIMEOUT_SECS
+            ),
+            None,
+            "the read-only default tier carries no wall clock, so the asymmetry cannot arise here"
+        );
+
+        // 3. The asymmetry lives HERE: a tool-executing tier synthesises a default the
+        //    operator never typed. It is allowed, but never unreported.
+        let d = resolve_tier_timeout_default(
+            &Policy::new(Tier::Auto, 15, None),
+            FULL_AUTO_TIMEOUT_SECS,
+        )
+        .expect(
+            "a tool-executing tier always synthesises a deadline; a None here is the \
+                 defect this test exists to catch, not a case to skip",
+        );
+        let decision = query_timeout_decision(Some(d), true, &cfg);
+        let (ceiling, rotations, retry_disabled) = timeout_scale(&cfg);
+        let minimum =
+            magi_rs::magi::headless_consult_timeout_secs(ceiling, rotations, retry_disabled);
+        assert_eq!(
+            decision.map(|x| x.below_formula),
+            Some(d.as_secs() < minimum),
+            "the asymmetry is allowed, but never unreported"
+        );
     }
 
     /// Task 4.1 — native provider trio construction.
@@ -8515,6 +8881,7 @@ mod tests {
                     capability_cache: None,
                     // Nothing measured: the cold start.
                     probe: &ProbeOutcome::default(),
+                    ceiling: ResolvedCeiling::configured(magi_rs::magi::AGENT_TIMEOUT_SECS),
                 },
                 &mut notices,
             )
@@ -8621,6 +8988,7 @@ mod tests {
                     env_overrides: &MagiEnvModelOverrides::default(),
                     capability_cache: None,
                     probe: &probe,
+                    ceiling: ResolvedCeiling::configured(magi_rs::magi::AGENT_TIMEOUT_SECS),
                 },
                 &mut notices,
             )
@@ -8681,6 +9049,7 @@ mod tests {
                     env_overrides: &MagiEnvModelOverrides::default(),
                     capability_cache: None,
                     probe: &probe,
+                    ceiling: ResolvedCeiling::configured(magi_rs::magi::AGENT_TIMEOUT_SECS),
                 },
                 &mut notices,
             )
@@ -8732,6 +9101,7 @@ mod tests {
                     env_overrides: &MagiEnvModelOverrides::default(),
                     capability_cache: None,
                     probe: &probe,
+                    ceiling: ResolvedCeiling::configured(magi_rs::magi::AGENT_TIMEOUT_SECS),
                 },
                 &mut notices,
             )
@@ -8798,6 +9168,7 @@ mod tests {
                     env_overrides: &MagiEnvModelOverrides::default(),
                     capability_cache: None,
                     probe: &probe,
+                    ceiling: ResolvedCeiling::configured(magi_rs::magi::AGENT_TIMEOUT_SECS),
                 },
                 &mut notices,
             )
@@ -8857,6 +9228,7 @@ mod tests {
                     env_overrides: &MagiEnvModelOverrides::default(),
                     capability_cache: None,
                     probe: &probe,
+                    ceiling: ResolvedCeiling::configured(magi_rs::magi::AGENT_TIMEOUT_SECS),
                 },
                 &mut notices,
             )
@@ -8922,6 +9294,7 @@ mod tests {
                     env_overrides: &MagiEnvModelOverrides::default(),
                     capability_cache: None,
                     probe: &probe,
+                    ceiling: ResolvedCeiling::configured(magi_rs::magi::AGENT_TIMEOUT_SECS),
                 },
                 &mut notices,
             )
@@ -9102,6 +9475,7 @@ mod tests {
                     env_overrides: &MagiEnvModelOverrides::default(),
                     capability_cache: None,
                     probe: &ProbeOutcome::default(),
+                    ceiling: ResolvedCeiling::configured(magi_rs::magi::AGENT_TIMEOUT_SECS),
                 },
                 &mut notices,
             )
@@ -9163,6 +9537,7 @@ mod tests {
                     env_overrides: &MagiEnvModelOverrides::default(),
                     capability_cache: Some(&cache),
                     probe: &ProbeOutcome::default(),
+                    ceiling: ResolvedCeiling::configured(magi_rs::magi::AGENT_TIMEOUT_SECS),
                 },
                 &mut notices,
             )
@@ -9225,6 +9600,7 @@ mod tests {
                     env_overrides: &collapsed_by_env,
                     capability_cache: None,
                     probe: &ProbeOutcome::default(),
+                    ceiling: ResolvedCeiling::configured(magi_rs::magi::AGENT_TIMEOUT_SECS),
                 },
                 &mut notices,
             )
@@ -9257,6 +9633,7 @@ mod tests {
                     env_overrides: &pulled_apart_by_env,
                     capability_cache: None,
                     probe: &ProbeOutcome::default(),
+                    ceiling: ResolvedCeiling::configured(magi_rs::magi::AGENT_TIMEOUT_SECS),
                 },
                 &mut notices,
             )
@@ -9303,6 +9680,7 @@ mod tests {
                     env_overrides: &MagiEnvModelOverrides::default(),
                     capability_cache: None,
                     probe: &ProbeOutcome::default(),
+                    ceiling: ResolvedCeiling::configured(magi_rs::magi::AGENT_TIMEOUT_SECS),
                 },
                 &mut notices,
             )
@@ -9358,6 +9736,7 @@ mod tests {
                     env_overrides: &MagiEnvModelOverrides::default(),
                     capability_cache: None,
                     probe: &ProbeOutcome::default(),
+                    ceiling: ResolvedCeiling::configured(magi_rs::magi::AGENT_TIMEOUT_SECS),
                 },
                 &mut notices,
             )
@@ -9421,6 +9800,7 @@ mod tests {
                     capability_cache: None,
                     // NOTHING measured — the cold-start state.
                     probe: &ProbeOutcome::default(),
+                    ceiling: ResolvedCeiling::configured(magi_rs::magi::AGENT_TIMEOUT_SECS),
                 },
                 &mut notices,
             )
@@ -9480,6 +9860,7 @@ mod tests {
                     env_overrides: &MagiEnvModelOverrides::default(),
                     capability_cache: None,
                     probe: &ProbeOutcome::default(),
+                    ceiling: ResolvedCeiling::configured(magi_rs::magi::AGENT_TIMEOUT_SECS),
                 },
                 &mut notices,
             )
@@ -9578,6 +9959,7 @@ mod tests {
                         .collect(),
                         ..Default::default()
                     },
+                    ceiling: ResolvedCeiling::configured(magi_rs::magi::AGENT_TIMEOUT_SECS),
                 },
                 &mut notices,
             )
@@ -9649,6 +10031,7 @@ mod tests {
                     env_overrides: &MagiEnvModelOverrides::default(),
                     capability_cache: None,
                     probe: &ProbeOutcome::default(),
+                    ceiling: ResolvedCeiling::configured(magi_rs::magi::AGENT_TIMEOUT_SECS),
                 },
                 &mut notices,
             )
@@ -9726,6 +10109,7 @@ mod tests {
                         .collect(),
                         ..Default::default()
                     },
+                    ceiling: ResolvedCeiling::configured(magi_rs::magi::AGENT_TIMEOUT_SECS),
                 },
                 &mut notices,
             )
@@ -9765,6 +10149,7 @@ mod tests {
                     env_overrides: &MagiEnvModelOverrides::default(),
                     capability_cache: None,
                     probe: &ProbeOutcome::default(),
+                    ceiling: ResolvedCeiling::configured(magi_rs::magi::AGENT_TIMEOUT_SECS),
                 },
                 &mut notices,
             )
@@ -9849,6 +10234,7 @@ mod tests {
                     env_overrides: &MagiEnvModelOverrides::default(),
                     capability_cache: None,
                     probe: &ProbeOutcome::default(),
+                    ceiling: ResolvedCeiling::configured(magi_rs::magi::AGENT_TIMEOUT_SECS),
                 },
                 &mut notices,
             )
@@ -9978,6 +10364,7 @@ mod tests {
                     env_overrides: &MagiEnvModelOverrides::default(),
                     capability_cache: None,
                     probe: &ProbeOutcome::default(),
+                    ceiling: ResolvedCeiling::configured(magi_rs::magi::AGENT_TIMEOUT_SECS),
                 },
                 &mut notices,
             )
@@ -10303,6 +10690,7 @@ mod tests {
                     env_overrides: &MagiEnvModelOverrides::default(),
                     capability_cache: None,
                     probe: &ProbeOutcome::default(),
+                    ceiling: ResolvedCeiling::configured(magi_rs::magi::AGENT_TIMEOUT_SECS),
                 },
                 &mut notices,
             )
@@ -10312,7 +10700,7 @@ mod tests {
             let trace = seat_wiring_trace();
             assert_eq!(trace.len(), 3, "all three seats must end up wired");
             let seats: std::collections::HashSet<AgentName> =
-                trace.iter().map(|(s, _, _)| *s).collect();
+                trace.iter().map(|w| w.seat).collect();
             assert_eq!(
                 seats.len(),
                 3,
@@ -10322,8 +10710,59 @@ mod tests {
                 assert!(seats.contains(&expected), "missing seat {expected:?}");
             }
             assert!(
-                trace.iter().all(|(_, _, wrapped)| *wrapped),
+                trace.iter().all(|w| w.retry_wrapped),
                 "all three seats must end up wrapped in RetryProvider (REQ-A03): {trace:?}"
+            );
+        }
+
+        /// The derived ceiling must reach the constructed trio, not merely the telemetry.
+        /// Every test elsewhere in this task asserts on `BudgetTelemetry`, which is our OWN
+        /// description of the decision — nothing else proves the number reaches the mages. If
+        /// `ceiling` were dropped between `TrioBuild` and the seat's HTTP client, every test
+        /// above would still pass and E-B would do nothing, which is precisely the silent no-op
+        /// the whole feature exists to eliminate.
+        ///
+        /// Asserted against a value ABOVE `AGENT_TIMEOUT_MAX_SECS`, so the test cannot pass on a
+        /// path that silently fell back to the configured ceiling.
+        #[test]
+        fn the_derived_ceiling_reaches_the_seats() {
+            let cfg = MagiConfig::from_toml_str("provider = \"ollama\"\n").unwrap();
+            let mut notices = Vec::new();
+            let (ceiling, _) =
+                BudgetTelemetry::derive(Some(&TimeoutDecision::obeyed(1800)), 90, 2, false);
+            assert!(
+                ceiling.secs() > magi_rs::magi::AGENT_TIMEOUT_MAX_SECS,
+                "precondition"
+            );
+
+            let magi = build_magi_orchestrator(
+                &TrioBuild {
+                    cfg: &cfg,
+                    principal_kind: ProviderKind::Ollama,
+                    endpoints: &test_endpoints(),
+                    creds: None,
+                    warn_tokens: None,
+                    env_overrides: &MagiEnvModelOverrides::default(),
+                    capability_cache: None,
+                    probe: &ProbeOutcome::default(),
+                    ceiling,
+                },
+                &mut notices,
+            )
+            .expect("ollama is keyless");
+            drop(magi);
+
+            let wired = seat_wiring_trace();
+            assert!(
+                !wired.is_empty(),
+                "no seat was wired, so the assertion below is vacuous"
+            );
+            assert!(
+                wired
+                    .iter()
+                    .all(|s| s.client_timeout
+                        == magi_rs::magi::derive_client_timeout(ceiling.secs())),
+                "a ceiling that stops at the telemetry is a feature that does nothing: {wired:?}"
             );
         }
 
@@ -10362,6 +10801,7 @@ mod tests {
                     env_overrides: &MagiEnvModelOverrides::default(),
                     capability_cache: None,
                     probe: &ProbeOutcome::default(),
+                    ceiling: ResolvedCeiling::configured(magi_rs::magi::AGENT_TIMEOUT_SECS),
                 },
                 &mut notices,
             )
@@ -10408,6 +10848,7 @@ mod tests {
                     env_overrides: &MagiEnvModelOverrides::default(),
                     capability_cache: None,
                     probe: &ProbeOutcome::default(),
+                    ceiling: ResolvedCeiling::configured(magi_rs::magi::AGENT_TIMEOUT_SECS),
                 },
                 &mut notices,
             )
@@ -10512,6 +10953,7 @@ mod tests {
                             env_overrides: &MagiEnvModelOverrides::default(),
                             capability_cache: None,
                             probe: &ProbeOutcome::default(),
+                            ceiling: ResolvedCeiling::configured(magi_rs::magi::AGENT_TIMEOUT_SECS),
                         },
                         &mut notices,
                     ),
@@ -10533,6 +10975,7 @@ mod tests {
                         env_overrides: &MagiEnvModelOverrides::default(),
                         capability_cache: None,
                         probe: &ProbeOutcome::default(),
+                        ceiling: ResolvedCeiling::configured(magi_rs::magi::AGENT_TIMEOUT_SECS),
                     },
                     &mut notices,
                 )
@@ -10566,6 +11009,7 @@ mod tests {
                     env_overrides: &MagiEnvModelOverrides::default(),
                     capability_cache: None,
                     probe: &ProbeOutcome::default(),
+                    ceiling: ResolvedCeiling::configured(magi_rs::magi::AGENT_TIMEOUT_SECS),
                 },
                 &mut notices,
             ) {
@@ -10610,6 +11054,7 @@ mod tests {
                     env_overrides: &MagiEnvModelOverrides::default(),
                     capability_cache: None,
                     probe: &ProbeOutcome::default(),
+                    ceiling: ResolvedCeiling::configured(magi_rs::magi::AGENT_TIMEOUT_SECS),
                 },
                 &mut notices,
             ) {
@@ -10647,6 +11092,7 @@ mod tests {
                     env_overrides: &MagiEnvModelOverrides::default(),
                     capability_cache: None,
                     probe: &ProbeOutcome::default(),
+                    ceiling: ResolvedCeiling::configured(magi_rs::magi::AGENT_TIMEOUT_SECS),
                 },
                 &mut notices,
             ) {
@@ -11021,6 +11467,7 @@ mod tests {
                         env_overrides: &MagiEnvModelOverrides::default(),
                         capability_cache: None,
                         probe: &ProbeOutcome::default(),
+                        ceiling: ResolvedCeiling::configured(magi_rs::magi::AGENT_TIMEOUT_SECS),
                     },
                     &mut notices,
                 )
@@ -11042,6 +11489,7 @@ mod tests {
                         env_overrides: &MagiEnvModelOverrides::default(),
                         capability_cache: None,
                         probe: &ProbeOutcome::default(),
+                        ceiling: ResolvedCeiling::configured(magi_rs::magi::AGENT_TIMEOUT_SECS),
                     },
                     &mut notices,
                 )
@@ -11066,6 +11514,7 @@ mod tests {
                         env_overrides: &env_overrides,
                         capability_cache: None,
                         probe: &ProbeOutcome::default(),
+                        ceiling: ResolvedCeiling::configured(magi_rs::magi::AGENT_TIMEOUT_SECS),
                     },
                     &mut notices,
                 )
@@ -11123,6 +11572,7 @@ mod tests {
                     env_overrides: &env_overrides,
                     capability_cache: None,
                     probe: &ProbeOutcome::default(),
+                    ceiling: ResolvedCeiling::configured(magi_rs::magi::AGENT_TIMEOUT_SECS),
                 },
                 &mut notices,
             )
@@ -11132,8 +11582,8 @@ mod tests {
             let trace = seat_wiring_trace();
             let melchior_model = trace
                 .iter()
-                .find(|(seat, _, _)| *seat == AgentName::Melchior)
-                .map(|(_, model, _)| model.as_str());
+                .find(|w| w.seat == AgentName::Melchior)
+                .map(|w| w.model.as_str());
             assert_eq!(
                 melchior_model,
                 Some("toml-melchior-model"),
@@ -11559,6 +12009,17 @@ mod tests {
                              this notice matters most for)",
                         );
                         assert!(notice.text.contains("main provider"), "{}", notice.text);
+                        // Task 3 (E-B): this run had no `--timeout`, so `prepare_headless` must
+                        // have taken the configured path — `ctx.budget` is the ONLY place that
+                        // is observable from outside the function (REQ-EB02b). Same precedent as
+                        // `divergence_notice` above: no dispatcher reads it back yet, so this is
+                        // the real end-to-end proof that `prepare_headless` populates it.
+                        assert_eq!(
+                            ctx.budget.operation_budget_secs,
+                            derive_operation_budget(magi_rs::magi::AGENT_TIMEOUT_SECS).as_secs(),
+                            "the configured/absent-`--timeout` path must carry the formula's \
+                             byte-identical-to-v0.14.3 operation budget onto the context"
+                        );
                     });
                 });
             });
