@@ -8411,6 +8411,89 @@ mod tests {
         assert!(n.text.contains("900"));
     }
 
+    /// Loop 1 finding (IMPORTANT 3): `budget_notice` — spec §6b's sole deliverable — had NO
+    /// test at all. It decides which of the two tiers a run's per-mage-ceiling notice gets, and
+    /// the split is the entire reason two `Notice` constructors exist here: `Resolution` for the
+    /// derived path (an explicit `--timeout` IS the config resolving differently from what
+    /// `magi.toml` says, per this function's own rustdoc), `Info` for the configured one.
+    #[test]
+    fn budget_notice_uses_resolution_tier_for_the_derived_path_and_info_for_the_configured_one() {
+        let telemetry = magi_rs::magi::BudgetTelemetry {
+            operation_budget_secs: 149,
+            ceiling_floored: false,
+            floor_activation_threshold_secs: 114,
+            max_rotations_effective: 2,
+            ceiling_above_sanity: false,
+        };
+
+        let derived = budget_notice(249, Some(1800), &telemetry);
+        assert_eq!(
+            derived.tier,
+            NoticeTier::Resolution,
+            "the derived ceiling must survive NOTICE_MAX_INFO's cap — an Info tier here is \
+             the exact defect the Resolution/Info split exists to prevent"
+        );
+
+        let configured = budget_notice(90, None, &telemetry);
+        assert_eq!(
+            configured.tier,
+            NoticeTier::Info,
+            "the configured path resolved exactly as written, so it may be capped away \
+             without losing anything"
+        );
+    }
+
+    /// The derived notice must print the RAW `--timeout` the operator typed, not the derived
+    /// ceiling. This is a deliberate decision whose own rustdoc predicts a future editor will
+    /// "fix" it by passing `resolved.secs()` — pin it so that edit fails loudly instead of
+    /// silently dropping the one fact that makes the notice useful.
+    #[test]
+    fn budget_notice_prints_the_raw_asked_value_not_the_derived_ceiling() {
+        let telemetry = magi_rs::magi::BudgetTelemetry {
+            operation_budget_secs: 149,
+            ceiling_floored: false,
+            floor_activation_threshold_secs: 114,
+            max_rotations_effective: 2,
+            ceiling_above_sanity: false,
+        };
+        let n = budget_notice(249, Some(1800), &telemetry);
+        assert!(
+            n.text.contains("1800"),
+            "the notice's job is to connect the number the operator typed to the ceiling it \
+             bought, so the raw --timeout must appear verbatim: {}",
+            n.text
+        );
+        assert!(
+            n.text.contains("249"),
+            "and the derived ceiling itself must also appear: {}",
+            n.text
+        );
+    }
+
+    /// The budget must appear in the text on BOTH paths — REQ-EB04's whole point is making the
+    /// per-attempt number observable without reading source, and that requirement does not
+    /// depend on which path derived it.
+    #[test]
+    fn budget_notice_carries_the_operation_budget_on_both_paths() {
+        let telemetry = magi_rs::magi::BudgetTelemetry {
+            operation_budget_secs: 149,
+            ceiling_floored: false,
+            floor_activation_threshold_secs: 114,
+            max_rotations_effective: 2,
+            ceiling_above_sanity: false,
+        };
+        assert!(
+            budget_notice(249, Some(1800), &telemetry)
+                .text
+                .contains("149"),
+            "the derived path must publish the operation budget"
+        );
+        assert!(
+            budget_notice(90, None, &telemetry).text.contains("149"),
+            "the configured path must publish it too"
+        );
+    }
+
     /// Both paths resolve the rotation scale through ONE function. A second hand-written
     /// copy would compile, pass every other test, and diverge only when one of the three
     /// fields gains a rule the other copy never learns.
@@ -10768,6 +10851,84 @@ mod tests {
                         == magi_rs::magi::derive_client_timeout(ceiling.secs())),
                 "a ceiling that stops at the telemetry is a feature that does nothing: {wired:?}"
             );
+        }
+
+        /// Loop 1 finding (IMPORTANT 1): before this test, NOTHING drove `prepare_headless`
+        /// with `h.timeout = Some(..)` — the one branch that actually turns E-B on end to end
+        /// had zero coverage (`grep -rnE "timeout: Some\(|\.timeout = Some\(" src/main.rs`
+        /// matched nothing outside this file's own test bodies). Every other derived-path test
+        /// called `BudgetTelemetry::derive` or `build_magi_orchestrator` directly with a
+        /// hand-built argument, so the ONE line that switches the feature on
+        /// (`h.timeout.is_some().then_some(&timeout_decision)`) was unguarded.
+        ///
+        /// **Verified by mutation, both directions, before this test existed in its current
+        /// form:**
+        /// - Replacing that line with a bare `let run = None;` makes every headless run silently
+        ///   revert to the pre-E-B ceiling while `applied_caps` keeps reporting as if nothing
+        ///   changed. This test's first assertion (`operation_budget_secs == 149`) catches it:
+        ///   under the mutation the telemetry takes the configured path and reports `54`
+        ///   (`derive_operation_budget(90)`), not `149`.
+        /// - Replacing `ceiling: resolved_ceiling` with
+        ///   `ceiling: ResolvedCeiling::configured(configured_ceiling)` decouples the ceiling
+        ///   handed to `TrioBuild` from the one paired with the stamped telemetry — the trio
+        ///   would run at the 90s/54s configured scale while `applied_caps` still publishes
+        ///   249s/149s. This test's second assertion (the seats' `client_timeout`) catches it:
+        ///   under the mutation every seat is wired with `derive_client_timeout(90)`, not
+        ///   `derive_client_timeout(249)`.
+        ///
+        /// Drives the REAL function end to end — `init_default_workspace` scaffolds a default
+        /// `provider = "ollama"` `.magi/magi.toml` (keyless: building the trio needs no network
+        /// credential) — with `--timeout 1800`, the spec's own worked example
+        /// (`--timeout 1800` derives a 249s per-mage ceiling, and
+        /// `derive_operation_budget(249) == 149`). `build_magi_orchestrator` runs inside
+        /// `prepare_headless` on the SAME thread this test drives `block_on` from (no
+        /// `tokio::spawn` on that path), so one call observes both halves.
+        #[test]
+        fn prepare_headless_scales_the_seats_budget_with_an_explicit_timeout() {
+            with_var("MAGI_PROVIDER", None, || {
+                with_var("ANTHROPIC_MODEL", None, || {
+                    with_var("OPENAI_MODEL", None, || {
+                        let (_tmp, cwd) = init_default_workspace();
+                        let input = write_envelope(&cwd, "env.json", r#"{"prompt":"hi"}"#);
+
+                        let mut h = base_hargs();
+                        h.input = Some(input);
+                        h.workdir = Some(cwd.clone());
+                        h.no_memory = true;
+                        h.timeout = Some(1800);
+
+                        let rt = tokio::runtime::Runtime::new().unwrap();
+                        let ctx = rt
+                            .block_on(prepare_headless(&h, None, &cwd, None, None))
+                            .expect("prepare_headless must succeed");
+
+                        assert_eq!(
+                            ctx.budget.operation_budget_secs, 149,
+                            "--timeout 1800 derives a 249s per-mage ceiling (the spec's worked \
+                             example: derive_ceiling_from_timeout(1800, 2, false) == 249), and \
+                             derive_operation_budget(249) == 149 — the run must have taken the \
+                             DERIVED path, not the configured one (which would report 54)"
+                        );
+
+                        let trace = seat_wiring_trace();
+                        assert!(
+                            !trace.is_empty(),
+                            "no seat was wired, so the assertion below would be vacuous"
+                        );
+                        let expected_client_timeout = magi_rs::magi::derive_client_timeout(249);
+                        assert!(
+                            trace
+                                .iter()
+                                .all(|w| w.client_timeout == expected_client_timeout),
+                            "the derived ceiling must reach every seat's HTTP client, not only \
+                             the telemetry stamped into the envelope: {trace:?}, expected \
+                             {expected_client_timeout:?}"
+                        );
+
+                        drop(ctx.consult_magi);
+                    });
+                });
+            });
         }
 
         /// REQ-R01: each seat is registered with its DECLARED lineage. The registration migrates

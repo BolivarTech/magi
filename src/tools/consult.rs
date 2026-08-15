@@ -1600,6 +1600,21 @@ mod tests {
             !msg.contains("rejected due to authentication"),
             "no per-agent evidence here: must not claim auth was the cause: {msg}"
         );
+        // Loop 1 finding (cheap doc correction 5): the two substrings above survive ANY
+        // rewording, including the earlier one this hint was narrowed away from ("possible
+        // cause: <keyless>", which read as a diagnosis and sent a requester down the wrong
+        // path). Pin the narrowing itself — keyless auth presented as ONE hypothesis, not THE
+        // cause — so a future edit can't silently drift back to the confident framing.
+        assert!(
+            msg.contains("one possible cause (not the only one)"),
+            "the hint must present keyless auth as ONE hypothesis among several, never as the \
+             diagnosis: {msg}"
+        );
+        assert!(
+            msg.contains("A total failure can equally mean"),
+            "the hint must name the sibling hypotheses (unreachable endpoint, timeout, \
+             unavailable model) that a confident framing would crowd out: {msg}"
+        );
     }
 
     /// SC-A12f: under a kind that carries a credential, a total failure says nothing about
