@@ -460,7 +460,14 @@ Resolved in order, first hit wins (`env > vault`; there is no OS keyring or `key
 1. `ANTHROPIC_API_KEY` environment variable
 2. The vault entry `ANTHROPIC_API_KEY` (stored via `magi-rs vault set ANTHROPIC_API_KEY`, unlocked by the passphrase)
 
-The model is read from `ANTHROPIC_MODEL`, defaulting to `claude-sonnet-4-6`. With no key found, the agent falls back to `StaticProvider`. The OpenAI-compatible key (`OPENAI_API_KEY`) follows the same `env > vault` precedence.
+The model is read from `ANTHROPIC_MODEL`, defaulting to `claude-sonnet-4-6`. With no key found, the agent falls back to `StaticProvider`.
+
+The **OpenAI-compatible key** (`OPENAI_API_KEY`) — used by the OpenAI / Ollama / OpenRouter / Groq provider *and* by the embedder — resolves by the same two steps and is stored the same way:
+
+1. `OPENAI_API_KEY` environment variable
+2. The vault entry `OPENAI_API_KEY` (stored via `magi-rs vault set OPENAI_API_KEY`)
+
+For a local Ollama daemon neither is needed: magi-rs falls back to a dummy value. Any authenticated endpoint — real OpenAI, OpenRouter, Groq — needs one, and will fail with a clear `401` if it is absent from both places.
 
 **A standard API key is the recommended, supported path.** Create one at [console.anthropic.com](https://console.anthropic.com/) (with billing enabled) and set `ANTHROPIC_API_KEY` or store it with `magi-rs vault set ANTHROPIC_API_KEY`.
 
@@ -507,8 +514,29 @@ Secrets live in an encrypted `vault` table, managed by the CLI:
 ```bash
 magi-rs vault ls                       # list secret NAMES + timestamps (never values)
 magi-rs vault set ANTHROPIC_API_KEY    # value read from a hidden prompt or stdin, never argv
+magi-rs vault set OPENAI_API_KEY       # same, for any OpenAI-compatible backend
 magi-rs vault rm  OPENAI_API_KEY       # delete (Y-only confirmation; -f to skip)
 magi-rs vault passwd                   # rotate the passphrase (re-wraps the same data key, O(1))
+```
+
+`set` **never takes the value as an argument** — it reads it from a hidden prompt
+when a TTY is present, and from stdin when there is none. That makes it scriptable
+without the secret ever reaching the process table or the shell history:
+
+```bash
+echo "$MY_KEY" | magi-rs vault set OPENAI_API_KEY -p "$MAGI_PASSPHRASE"
+```
+
+Without a TTY the passphrase must come from `-p` or `MAGI_PASSPHRASE`: stdin is
+reserved for the *value*, so it is never read as the passphrase.
+
+**Overwriting an existing name behaves differently in the two modes.** Interactively it
+asks for a `Y`-only confirmation. Non-interactively it does not prompt — it **refuses**,
+exiting non-zero with `destructive operation requires -f in non-interactive mode`. A
+script that re-sets a name it may already hold must therefore pass `-f`:
+
+```bash
+echo "$MY_KEY" | magi-rs vault set OPENAI_API_KEY -f -p "$MAGI_PASSPHRASE"
 ```
 
 There is **no `get`/`cat`/`show` command**. A stored value is never printed, by design.
@@ -595,7 +623,7 @@ settings above. All built-in default literals live in one place:
 **API keys never live in `magi.toml`.** Keys come from env or the vault only. `magi.toml` is non-secret runtime config and is the wrong place for credentials. Specifically:
 
 - **Anthropic key.** `ANTHROPIC_API_KEY` env var, or the vault entry of the same name (see above).
-- **OpenAI-compatible key.** `OPENAI_API_KEY` env var, or the vault entry of the same name. For a local Ollama instance, magi-rs falls back to a dummy value (`"ollama"`) so you can run without setting anything.
+- **OpenAI-compatible key.** `OPENAI_API_KEY` env var, or the vault entry of the same name (`magi-rs vault set OPENAI_API_KEY`). For a local Ollama instance, magi-rs falls back to a dummy value (`"ollama"`) so you can run without setting anything.
 - Placing `api_key` / `OPENAI_API_KEY` (or any other unknown field) inside `magi.toml` is rejected at parse time under `deny_unknown_fields`, not silently dropped.
 - **An authenticated `base_url` never carries a literal credential.** Use the
   `[user]`/`[password]` placeholders in its `userinfo`, resolved from the vault at use
@@ -675,7 +703,7 @@ cp docs/magi.toml.example magi.toml
 cargo run
 ```
 
-To use OpenAI instead, edit `magi.toml` (`base_url = "https://api.openai.com/v1"`, pick a `model`) and set `OPENAI_API_KEY` in the environment.
+To use OpenAI instead, edit `magi.toml` (`base_url = "https://api.openai.com/v1"`, pick a `model`) and provide `OPENAI_API_KEY` — either in the environment or in the vault (`magi-rs vault set OPENAI_API_KEY`).
 
 For **OpenRouter**, a verified configuration and the four traps that backend sets are documented in [`docs/OPENROUTER-BACKEND.md`](docs/OPENROUTER-BACKEND.md), with a ready-to-copy [`docs/magi.toml.openrouter.example`](docs/magi.toml.openrouter.example).
 
