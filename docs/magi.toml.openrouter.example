@@ -1,0 +1,82 @@
+# magi-rs configuration — OpenRouter backend, economical tier.
+#
+# A ready-to-use companion to `magi.toml.example`, which documents every key
+# against the default Ollama backend. Copy this file to `.magi/magi.toml` and
+# edit. That path is gitignored; only this example is tracked.
+#
+# Every model below was verified against OpenRouter on 2026-08-22 (magi-rs
+# v0.15.0): reachable, tool-calling or MAGI marker-protocol compliant, and
+# priced by measurement rather than by the published table. The reasoning
+# behind each choice — and the four traps this backend sets — is in
+# `docs/OPENROUTER-BACKEND.md`.
+#
+# Credentials NEVER live here. Export the OpenRouter key as OPENAI_API_KEY, or
+# store it with `magi-rs vault set OPENAI_API_KEY`. Resolution is env > vault.
+
+provider = "openai-compat"
+base_url = "https://openrouter.ai/api/v1"
+
+[openai]
+# Main agent: drives the tool loop, so function-calling reliability outranks a
+# marginally lower price. 400k context, $0.050/Mtok in.
+model = "openai/gpt-5-nano"
+
+[anthropic]
+model = "claude-sonnet-4-6"
+
+# ===========================================================================
+# [magi] — the council of three
+# ===========================================================================
+# Seats are the three cheapest verified models that both honour the
+# <MAGI_VERDICT> marker protocol and answer in under ten seconds. Latency is a
+# selection criterion, not a nicety: all three mages run concurrently against
+# one derived per-mage budget, and a seat that overruns it rotates away.
+[magi]
+melchior_model    = "qwen/qwen3-30b-a3b-instruct-2507"  # 2.9s  $0.048
+melchior_lineage  = "alibaba"
+balthasar_model   = "mistralai/mistral-nemo"            # 8.0s  $0.019
+balthasar_lineage = "mistral"
+caspar_model      = "inclusionai/ling-3.0-flash"        # 5.8s  $0.021
+caspar_lineage    = "inclusionai"
+
+auto_approve       = false
+max_rotations      = 2
+agent_timeout_secs = 120
+
+[memory]
+mode = "selective"
+context_budget_tokens = 8000
+distill_enabled = true
+evicted_retention_days = -1
+max_records = 50000
+
+# ===========================================================================
+# [embedding] — OpenRouter DOES serve /embeddings, but its embedding models are
+# absent from the /models catalogue, so they cannot be discovered by listing.
+# bge-m3 measured $0.0002/Mtok, 75x cheaper than text-embedding-3-small, and
+# emits the smallest vector of the working set (1024), which is also the
+# smallest on-disk index. `dim = 0` autodetects it from the first response.
+# ===========================================================================
+[embedding]
+model = "baai/bge-m3"
+dim   = 0
+
+# ── Rotation pool: LAST IN THE FILE (TOML puts every loose key before the first
+# array of tables). Ordered strongest to weakest; one lineage per entry, none
+# shared with a seat, so any rotation preserves three-way diversity.
+# google/gemma-3-12b-it is deliberately absent: it fails the marker protocol.
+[[magi.fallback]]
+model   = "openai/gpt-oss-120b"
+lineage = "openai"
+
+[[magi.fallback]]
+model   = "deepseek/deepseek-v4-flash"
+lineage = "deepseek"
+
+[[magi.fallback]]
+model   = "z-ai/glm-4.7-flash"
+lineage = "zhipu"
+
+[[magi.fallback]]
+model   = "amazon/nova-lite-v1"
+lineage = "amazon"

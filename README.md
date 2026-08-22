@@ -677,6 +677,8 @@ cargo run
 
 To use OpenAI instead, edit `magi.toml` (`base_url = "https://api.openai.com/v1"`, pick a `model`) and set `OPENAI_API_KEY` in the environment.
 
+For **OpenRouter**, a verified configuration and the four traps that backend sets are documented in [`docs/OPENROUTER-BACKEND.md`](docs/OPENROUTER-BACKEND.md), with a ready-to-copy [`docs/magi.toml.openrouter.example`](docs/magi.toml.openrouter.example).
+
 ---
 
 ## Tiered Memory (RAG)
