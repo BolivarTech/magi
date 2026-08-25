@@ -124,15 +124,49 @@ class LoadTests(unittest.TestCase):
             SmokeConfig.load(path)
         self.assertNotIn("hunter2", str(caught.exception))
 
-    def test_a_declared_profile_is_read_when_it_is_asked_for(self) -> None:
-        path = self._write(
-            _MINIMAL + '\n[profile.cheap]\nmodel = "m"\ntrio = ["a", "b", "c"]\n'
-        )
-        self.assertEqual(["a", "b", "c"], ModelProfile.load(path).trio)
+    _CHEAP = (
+        '\n[profile.cheap]\nmodel = "m"\ntrio = [\n'
+        '  { model = "a", lineage = "alpha" },\n'
+        '  { model = "b", lineage = "beta" },\n'
+        '  { model = "c", lineage = "gamma" },\n]\n'
+    )
 
-    def test_a_trio_that_is_not_three_models_is_refused(self) -> None:
+    def test_a_declared_profile_carries_a_lineage_per_seat(self) -> None:
+        """A seat declares a model AND its lineage, or it declares neither.
+
+        The product made this breaking in v0.13.0 for a reason the harness
+        inherits: a lineage is a user-chosen failure domain, so replacing a
+        seat's model while leaving the lineage the product wrote produces a
+        file whose two halves contradict each other -- and the diversity check
+        would then pass on three labels that describe models no longer there.
+        """
+        profile = ModelProfile.load(self._write(_MINIMAL + self._CHEAP))
+        self.assertEqual(["a", "b", "c"], [seat.model for seat in profile.trio])
+        self.assertEqual(["alpha", "beta", "gamma"],
+                         [seat.lineage for seat in profile.trio])
+
+    def test_a_seat_without_a_lineage_is_refused(self) -> None:
+        """Never inferred, and never defaulted either.
+
+        Guessing a label here would be worse than refusing: it would look
+        exactly like a declaration, and the operator would never learn the
+        harness had chosen their failure domain for them.
+        """
         path = self._write(
-            _MINIMAL + '\n[profile.cheap]\nmodel = "m"\ntrio = ["a", "b"]\n'
+            _MINIMAL + '\n[profile.cheap]\nmodel = "m"\ntrio = [\n'
+            '  { model = "a", lineage = "alpha" },\n'
+            '  { model = "b" },\n'
+            '  { model = "c", lineage = "gamma" },\n]\n'
+        )
+        with self.assertRaises(PreflightError) as caught:
+            ModelProfile.load(path)
+        self.assertIn("lineage", str(caught.exception))
+
+    def test_a_trio_that_is_not_three_seats_is_refused(self) -> None:
+        path = self._write(
+            _MINIMAL + '\n[profile.cheap]\nmodel = "m"\ntrio = [\n'
+            '  { model = "a", lineage = "alpha" },\n'
+            '  { model = "b", lineage = "beta" },\n]\n'
         )
         with self.assertRaises(PreflightError):
             ModelProfile.load(path)
