@@ -47,6 +47,52 @@ class LifecycleTests(unittest.TestCase):
         self.assertFalse(marker.exists())
         self.assertTrue(env.runs_dir.is_dir())
 
+    def test_the_scratch_area_is_outside_the_product_workspace(self) -> None:
+        """It exists to hold trees that carry NO ``.magi/``, so it cannot live
+        under one.
+
+        The environment root holds the product's workspace, and ``magi init``
+        refuses to nest a second ``.magi/`` inside an existing one. A scratch
+        area under the root therefore fails the one thing it was created for:
+        every scenario that seeds a workspace there gets
+        ``refusing to nest a second .magi/ inside it`` and reports the
+        product's correct behaviour as its own inability to run.
+        """
+        env = Environment(self.root)
+        env.init()
+        self.assertFalse(
+            env.scratch_dir.resolve().is_relative_to(env.root.resolve()),
+            "magi init cannot scaffold inside the environment's own workspace",
+        )
+
+    def test_the_scratch_area_protects_itself_from_git(self) -> None:
+        """It sits beside the environment, so it needs its own ignore rule.
+
+        The environment's ``.gitignore`` covers the environment and nothing
+        else, and the scenario that asserts the harness left no trace reads
+        ``git status``.
+        """
+        env = Environment(self.root)
+        env.init()
+        text = (env.scratch_dir / ".gitignore").read_text(encoding="utf-8")
+        self.assertIn("*", text)
+        self.assertIn("!.gitignore", text)
+
+    def test_reset_empties_the_scratch_area_too(self) -> None:
+        """``--reset-env`` is the recovery for an environment that grew.
+
+        The workspaces scenarios seed there are throwaway and accumulate one
+        per run, so leaving them behind would make the reset a partial one.
+        """
+        env = Environment(self.root)
+        env.init()
+        stale = env.scratch_dir / "s11-old" / "marker"
+        stale.parent.mkdir(parents=True)
+        stale.write_text("old", encoding="utf-8")
+        env.reset()
+        self.assertFalse(stale.exists())
+        self.assertTrue(env.scratch_dir.is_dir())
+
     def test_exists_is_false_before_init_and_true_after(self) -> None:
         env = Environment(self.root)
         self.assertFalse(env.exists())
