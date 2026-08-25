@@ -165,5 +165,152 @@ class VaultScenarioBodyTests(unittest.TestCase):
         self.assertEqual(Outcome.FAIL, outcomes[vault.S3_ASSERTIONS[3]])
 
 
+class _FakeDatabase:
+    """A product double with an envelope, some history, and a passphrase.
+
+    Attributes:
+        counts: The per-table row counts ``vault diagnose`` reports.
+        envelope: Whether an envelope exists to fail an unwrap against.
+        wrong_passphrase_opens: Whether a wrong passphrase is accepted, which
+            is the regression assertion 1 exists to catch.
+        destroy_on_wrong: Whether a wrong passphrase wipes the history, which
+            is the one REQ-V35 forbids and whose cost is the user's data.
+    """
+
+    def __init__(self, counts: tuple[int, ...] = (2, 1, 8, 3, 5),
+                 envelope: bool = True,
+                 wrong_passphrase_opens: bool = False,
+                 destroy_on_wrong: bool = False) -> None:
+        """Create the double.
+
+        Args:
+            counts: vault, sessions, messages, knowledge, memories.
+            envelope: Whether the envelope is present.
+            wrong_passphrase_opens: Whether the wrong passphrase is accepted.
+            destroy_on_wrong: Whether a refused open empties the tables.
+        """
+        self.counts = list(counts)
+        self.envelope = envelope
+        self.wrong_passphrase_opens = wrong_passphrase_opens
+        self.destroy_on_wrong = destroy_on_wrong
+
+    def __call__(self, call: support.Call) -> ProductOutput | None:
+        """Answer one invocation.
+
+        Args:
+            call: What the fake binary was asked to run.
+
+        Returns:
+            ProductOutput: The canned answer, or None for the failed default.
+        """
+        args = list(call.args)
+        if args[:1] != ["vault"]:
+            return None
+        if "diagnose" in args:
+            return _capture(self._report().encode("utf-8"), b"", 0)
+        given = (call.env or {}).get("MAGI_PASSPHRASE")
+        if given == vault.WRONG_PASSPHRASE:
+            if self.destroy_on_wrong:
+                self.counts = [0] * len(self.counts)
+            if not self.wrong_passphrase_opens:
+                return _capture(b"", b"error: incorrect passphrase\n", 1)
+        return _capture(b"(vault empty)\n", b"", 0)
+
+    def _report(self) -> str:
+        """Render what ``vault diagnose`` prints.
+
+        Returns:
+            str: The envelope line, the verdict, and the five counts.
+        """
+        labels = ("vault", "sessions", "messages", "knowledge", "memories")
+        lines = ["envelope: %s" % ("present" if self.envelope else "absent"),
+                 "fec: ok", "verdict: healthy", "counts:"]
+        lines += ["  %s: %d" % pair for pair in zip(labels, self.counts)]
+        return "\n".join(lines) + "\n"
+
+
+def _capture(stdout: bytes, stderr: bytes, exit_code: int) -> ProductOutput:
+    """Build a canned capture.
+
+    Args:
+        stdout: What the product printed.
+        stderr: What it wrote to the error stream.
+        exit_code: The code it exited with.
+
+    Returns:
+        ProductOutput: The capture.
+    """
+    return ProductOutput(stdout=stdout, stderr=stderr, exit_code=exit_code,
+                         command=["magi-rs", "vault"])
+
+
+class WrongPassphraseScenarioTests(unittest.TestCase):
+    """S4 is registered standalone and declares its two assertions."""
+
+    def test_s4_is_registered_without_a_run(self) -> None:
+        entry = DEFAULT_REGISTRY.get("S4")
+        self.assertIsNone(entry.run)
+        self.assertFalse(entry.needs_backend)
+
+    def test_the_assertion_texts_are_the_spec_texts(self) -> None:
+        self.assertEqual(
+            [
+                "opening with a wrong passphrase fails with a typed "
+                "WrongPassphrase, exit 1",
+                "reopening with the correct passphrase still finds the "
+                "accumulated history",
+            ],
+            list(vault.S4_ASSERTIONS),
+        )
+
+
+class WrongPassphraseScenarioBodyTests(unittest.TestCase):
+    """The scenario whose failure is total loss of the user's data."""
+
+    def test_a_product_that_does_nothing_still_reports_both(self) -> None:
+        support.install_fake_runs(self)
+        findings = list(DEFAULT_REGISTRY.get("S4").func(None))
+        self.assertEqual(list(vault.S4_ASSERTIONS),
+                         [finding.assertion for finding in findings])
+        self.assertNotIn(Outcome.PASS,
+                         {finding.outcome for finding in findings})
+
+    def test_an_environment_with_history_passes_both(self) -> None:
+        support.install_fake_runs(self, responder=_FakeDatabase())
+        self.assertEqual({Outcome.PASS}, set(_outcomes("S4").values()))
+
+    def test_an_empty_environment_cannot_test_either_assertion(self) -> None:
+        """The trap this scenario is written around. Over a database with no
+        envelope and no rows, assertion 2 would pass while checking nothing --
+        there is no accumulated history to still be there -- and a guardian
+        whose precondition is empty is the failure this harness chases.
+        """
+        support.install_fake_runs(
+            self, responder=_FakeDatabase(counts=(0, 0, 0, 0, 0),
+                                          envelope=False))
+        self.assertEqual({Outcome.CANNOT_TEST}, set(_outcomes("S4").values()))
+
+    def test_a_wrong_passphrase_that_opens_the_vault_fails(self) -> None:
+        support.install_fake_runs(
+            self, responder=_FakeDatabase(wrong_passphrase_opens=True))
+        outcomes = _outcomes("S4")
+        self.assertEqual(Outcome.FAIL, outcomes[vault.S4_ASSERTIONS[0]])
+
+    def test_history_destroyed_by_the_refusal_fails(self) -> None:
+        """REQ-V35 itself: a wrong passphrase and a corrupt wrapped key fail
+        the same tag check, so wiping on failure turns a typo into total loss.
+        """
+        support.install_fake_runs(
+            self, responder=_FakeDatabase(destroy_on_wrong=True))
+        outcomes = _outcomes("S4")
+        self.assertEqual(Outcome.FAIL, outcomes[vault.S4_ASSERTIONS[1]])
+
+    def test_the_wrong_passphrase_is_not_the_configured_one(self) -> None:
+        """A "wrong" passphrase that happens to be the real one would make
+        assertion 1 red for the wrong reason, and assertion 2 vacuous.
+        """
+        self.assertNotEqual(support.FAKE_PASSPHRASE, vault.WRONG_PASSPHRASE)
+
+
 if __name__ == "__main__":
     unittest.main()
