@@ -7,7 +7,8 @@ import pathlib
 import tempfile
 import unittest
 
-from smoke.env import Environment
+from smoke.config import ModelProfile, Seat
+from smoke.env import Environment, _apply_profile
 from smoke.errors import PreflightError
 
 
@@ -66,3 +67,68 @@ class GrowthTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ProfileRewriteTests(unittest.TestCase):
+    """A profiled seat is rewritten whole, or the file it produces is broken."""
+
+    _GENERATED = (
+        '[openai]\nmodel = "kimi-k2.6:cloud"\n\n'
+        '[magi]\n'
+        'melchior_model  = "qwen3.5:397b-cloud"\n'
+        'balthasar_model = "gpt-oss:120b-cloud"\n'
+        'caspar_model    = "deepseek-v4-pro:cloud"\n'
+        'melchior_lineage  = "alibaba"\n'
+        'balthasar_lineage = "openai"\n'
+        'caspar_lineage    = "deepseek"\n'
+        '# melchior_model = "commented out"\n'
+        '[anthropic]\nmodel = "claude-sonnet-4-6"\n'
+    )
+
+    def _profile(self) -> ModelProfile:
+        """Build a three-seat profile whose lineages differ from the file's.
+
+        Returns:
+            ModelProfile: The profile under test.
+        """
+        return ModelProfile(
+            model="cheap-main",
+            trio=[
+                Seat(model="cheap-a", lineage="alpha"),
+                Seat(model="cheap-b", lineage="beta"),
+                Seat(model="cheap-c", lineage="gamma"),
+            ],
+        )
+
+    def test_each_seat_has_both_of_its_keys_rewritten(self) -> None:
+        """Model and lineage move together.
+
+        Rewriting the model alone leaves the file declaring a failure domain
+        the seat no longer belongs to -- and since v0.13.0 the product treats a
+        seat whose halves disagree as a load error, so a half-rewrite does not
+        degrade gracefully, it fails to start. Drop the lineage line from
+        ``_apply_profile`` and this goes red.
+        """
+        rewritten = _apply_profile(self._GENERATED, self._profile())
+        for model, lineage in (("cheap-a", "alpha"), ("cheap-b", "beta"),
+                               ("cheap-c", "gamma")):
+            self.assertIn('"%s"' % model, rewritten)
+            self.assertIn('"%s"' % lineage, rewritten)
+        for stale in ("qwen3.5:397b-cloud", "alibaba", "deepseek"):
+            self.assertNotIn('= "%s"' % stale, rewritten)
+
+    def test_a_key_of_the_same_name_in_another_table_is_untouched(self) -> None:
+        """``model`` exists under [openai] and under [anthropic]; only the
+        first is the main agent's. A line-wise rewrite that forgot which table
+        it was in would silently repoint the product's Anthropic backend.
+        """
+        rewritten = _apply_profile(self._GENERATED, self._profile())
+        self.assertIn('"claude-sonnet-4-6"', rewritten)
+        self.assertIn('"cheap-main"', rewritten)
+
+    def test_a_commented_line_is_left_alone(self) -> None:
+        """Commented configuration is documentation. Rewriting it would put a
+        cheap model into an example the operator reads as the product's.
+        """
+        rewritten = _apply_profile(self._GENERATED, self._profile())
+        self.assertIn('# melchior_model = "commented out"', rewritten)
