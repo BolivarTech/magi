@@ -1,0 +1,429 @@
+# Author: Julian Bolivar
+# Version: 1.0.0
+# Date: 2026-08-25
+"""The test environment's lifecycle.
+
+The environment is PERSISTENT on purpose (REQ-S30). The real user's case is a
+database that already holds data, and an environment rebuilt on every run only
+ever exercises first startup -- the one case that never fails. Keeping it is
+what stops S4's never-delete check and S9's memory checks from being vacuous.
+
+``scratch/`` is the single declared exception: ``magi init`` can only be
+exercised against a directory that does NOT yet carry ``.magi/``, which S2 and
+S14 need.
+
+Only the CONFIGURATION is ever normalised, never the data. That distinction is
+the whole of :meth:`Environment.normalize_magi_toml`.
+"""
+
+import os
+import pathlib
+import shutil
+import subprocess
+import tempfile
+import tomllib
+from dataclasses import dataclass
+
+from smoke.config import ModelProfile
+from smoke.errors import HarnessError, PreflightError
+
+#: The environment's own gitignore. ``*`` hides everything that lands here and
+#: ``!.gitignore`` exempts the file itself, so the rule is self-protecting: a
+#: ``.gitkeep`` would make the directory exist without stopping anybody from
+#: committing the database that grows inside it.
+ENV_GITIGNORE = "*\n!.gitignore\n"
+
+GITIGNORE_NAME = ".gitignore"
+MAGI_DIR_NAME = ".magi"
+MAGI_TOML_NAME = "magi.toml"
+DATABASE_NAME = ".magi-rs-memory.db"
+RUNS_DIR_NAME = "runs"
+PAYLOAD_DIR_NAME = "payload"
+SCRATCH_DIR_NAME = "scratch"
+
+#: The product subcommand that writes a starting ``magi.toml``.
+INIT_SUBCOMMAND = "init"
+
+#: How long the product is given to scaffold one temporary tree, in seconds.
+#: ``magi init`` writes a handful of small files and touches no network, so a
+#: run that has not finished by now is hung rather than slow.
+INIT_TIMEOUT_SECONDS = 60
+
+#: The product's own table inside the environment's ``magi.toml``. It is NOT
+#: ``[calibration]``, which is the harness's own table in ``smoke.toml``: two
+#: related sets of numbers in two files owned by two programs.
+MEMORY_SECTION = "memory"
+
+#: The keys the cheap profile overrides, by table. ``[openai].model`` is the
+#: main agent's model for both ``ollama`` and ``openai-compat`` -- they share
+#: the completions protocol -- and the three ``[magi]`` seats are the trio.
+PROFILE_MODEL_KEY = ("openai", "model")
+PROFILE_TRIO_KEYS = (
+    ("magi", "melchior_model"),
+    ("magi", "balthasar_model"),
+    ("magi", "caspar_model"),
+)
+
+
+@dataclass(frozen=True)
+class Growth:
+    """How large the persistent environment has become.
+
+    Nothing here enforces a limit. Growth is made VISIBLE rather than capped,
+    because the threshold at which it starts to hurt has not been measured, and
+    an invented limit is a number defended rather than known. ``--reset-env``
+    is the recovery.
+
+    Attributes:
+        db_bytes: Size of the product's encrypted database, or 0 if absent.
+        runs_bytes: Total bytes of every archived run artifact.
+        active_memories: The product's active-memory count when a run has
+            reported one, otherwise ``None``. It cannot be read off the
+            filesystem: the database is encrypted, so the only source is the
+            product's own diagnostics line. ``None`` means NOT MEASURED, never
+            zero -- the same distinction the harness draws between
+            ``CANNOT_TEST`` and ``FAIL``.
+    """
+
+    db_bytes: int
+    runs_bytes: int
+    active_memories: int | None
+
+
+class Environment:
+    """The persistent test environment under ``smoke/env/``.
+
+    Example:
+        >>> env = Environment(pathlib.Path("smoke/env"))
+        >>> if not env.exists():
+        ...     env.init()
+    """
+
+    def __init__(self, root: pathlib.Path | str) -> None:
+        """Bind to one environment root without touching the filesystem.
+
+        Args:
+            root: The environment directory, normally ``smoke/env``. It is not
+                created here: construction is cheap and total, so the CLI can
+                build one before deciding whether to init, reset or run.
+        """
+        self._root = pathlib.Path(root)
+
+    @property
+    def root(self) -> pathlib.Path:
+        """The environment directory itself.
+
+        Returns:
+            The root path, whether or not it exists.
+        """
+        return self._root
+
+    @property
+    def magi_dir(self) -> pathlib.Path:
+        """The product's workspace inside the environment.
+
+        Returns:
+            The ``.magi/`` directory holding ``magi.toml`` and the database.
+        """
+        return self._root / MAGI_DIR_NAME
+
+    @property
+    def runs_dir(self) -> pathlib.Path:
+        """Where each run's scrubbed command and output are archived.
+
+        Returns:
+            The ``runs/`` directory.
+        """
+        return self._root / RUNS_DIR_NAME
+
+    @property
+    def payload_dir(self) -> pathlib.Path:
+        """Where the generated large payload lives.
+
+        Returns:
+            The ``payload/`` directory.
+        """
+        return self._root / PAYLOAD_DIR_NAME
+
+    @property
+    def scratch_dir(self) -> pathlib.Path:
+        """The fixture area for the scenarios that need a virgin tree.
+
+        Returns:
+            The ``scratch/`` directory. S2 and S14 build temporary trees here
+            precisely because ``magi init`` refuses where ``.magi/`` exists.
+        """
+        return self._root / SCRATCH_DIR_NAME
+
+    def exists(self) -> bool:
+        """Report whether the environment has been created.
+
+        Returns:
+            ``True`` if the root is a directory.
+        """
+        return self._root.is_dir()
+
+    def init(self) -> None:
+        """Create the environment, all of it or none of it.
+
+        The tree is built in a temporary SIBLING and renamed into place, which
+        is the same discipline ``magi init`` uses: a failure half way through
+        leaves the staging directory behind and the environment simply absent,
+        rather than a directory that exists, looks initialised, and is missing
+        the one subdirectory a scenario needs.
+
+        Raises:
+            PreflightError: If the environment already exists. Destroying it
+                silently would throw away the accumulated history that makes S4
+                and S9 meaningful, so the message names ``--reset-env`` and the
+                choice stays with the operator.
+            HarnessError: If the tree cannot be built or moved into place.
+        """
+        if self.exists():
+            raise PreflightError(
+                "%s already exists; run --reset-env to destroy and rebuild it. "
+                "The accumulated history is not discarded by accident."
+                % self._root
+            )
+        self._root.parent.mkdir(parents=True, exist_ok=True)
+        staging = pathlib.Path(
+            tempfile.mkdtemp(prefix=".%s." % self._root.name, dir=self._root.parent)
+        )
+        try:
+            for name in (MAGI_DIR_NAME, RUNS_DIR_NAME, PAYLOAD_DIR_NAME,
+                         SCRATCH_DIR_NAME):
+                (staging / name).mkdir()
+            (staging / GITIGNORE_NAME).write_text(ENV_GITIGNORE, encoding="utf-8")
+            os.replace(staging, self._root)
+        except OSError as exc:
+            shutil.rmtree(staging, ignore_errors=True)
+            raise HarnessError(
+                "could not create the test environment at %s: %s" % (self._root, exc)
+            ) from exc
+
+    def reset(self) -> None:
+        """Destroy the environment and build it again.
+
+        Raises:
+            HarnessError: If the existing tree cannot be removed, or the
+                rebuild fails.
+        """
+        if self.exists():
+            try:
+                shutil.rmtree(self._root)
+            except OSError as exc:
+                raise HarnessError(
+                    "could not remove the test environment at %s: %s"
+                    % (self._root, exc)
+                ) from exc
+        self.init()
+
+    def growth(self) -> Growth:
+        """Measure how large the environment has become.
+
+        Complexity: ``O(number of archived files)`` -- one ``stat`` per file
+        under ``runs/``, walked once per run, never per finding.
+
+        Returns:
+            Growth: The database size, the archived bytes, and ``None`` for the
+            active-memory count, which no run reports yet.
+        """
+        database = self.magi_dir / DATABASE_NAME
+        try:
+            db_bytes = database.stat().st_size
+        except OSError:
+            db_bytes = 0
+        runs_bytes = 0
+        for path in self.runs_dir.rglob("*"):
+            try:
+                if path.is_file():
+                    runs_bytes += path.stat().st_size
+            except OSError:
+                # A file archived by a run that is still writing can vanish
+                # between the walk and the stat. Missing bytes understate the
+                # total; failing the measurement would lose all of it.
+                continue
+        return Growth(db_bytes=db_bytes, runs_bytes=runs_bytes,
+                      active_memories=None)
+
+    def memory_settings(self) -> dict[str, object]:
+        """Read the product's ``[memory]`` table out of the environment.
+
+        An unreadable or absent file yields an EMPTY mapping rather than an
+        error, and empty is not zero: S9 turns it into ``CANNOT_TEST``, because
+        asserting a derived ceiling against defaults that were never declared
+        would test a computation that did not happen.
+
+        Returns:
+            The ``[memory]`` table, or ``{}`` when the file is missing, does not
+            parse, or declares no such table.
+        """
+        path = self.magi_dir / MAGI_TOML_NAME
+        try:
+            with path.open("rb") as handle:
+                document = tomllib.load(handle)
+        except (OSError, tomllib.TOMLDecodeError):
+            return {}
+        section = document.get(MEMORY_SECTION)
+        return dict(section) if isinstance(section, dict) else {}
+
+    def normalize_magi_toml(self, profile: ModelProfile | None) -> None:
+        """Rewrite the environment's ``magi.toml``, and nothing else.
+
+        With a *profile* the file names that profile's model and trio. With
+        ``None`` it names the PRODUCT's own defaults, obtained by running the
+        product's ``magi init`` and taking what it wrote: the product is the
+        single source of truth for its own defaults, and a copy kept here would
+        be the copy that forgets to be updated. That is what keeps a certifying
+        run from claiming product defaults over an environment still pointing at
+        the cheap models left behind by the previous run.
+
+        The data is untouched. Only the configuration is normalised.
+
+        Args:
+            profile: The cheap profile, or ``None`` for the product's defaults.
+
+        Raises:
+            HarnessError: If ``magi init`` cannot be run, writes nothing, or the
+                transplanted text still carries the temporary directory's path.
+                All three are defects in the harness, reported as such and never
+                as a verdict on the product.
+        """
+        generated = self._product_default_toml()
+        text = generated if profile is None else _apply_profile(generated, profile)
+        self.magi_dir.mkdir(parents=True, exist_ok=True)
+        (self.magi_dir / MAGI_TOML_NAME).write_text(text, encoding="utf-8")
+
+    def _product_default_toml(self) -> str:
+        """Ask the product to write a default ``magi.toml`` and read it back.
+
+        ``magi init`` runs in a PRIVATE temporary directory, never in
+        ``env/scratch/``: it refuses on a tree that already carries ``.magi/``,
+        so it cannot be aimed at the environment itself, and ``scratch/`` is the
+        declared fixture area for S2 and S14, where an extra ``.magi/`` would
+        change what those two scenarios find.
+
+        Returns:
+            The generated file's text.
+
+        Raises:
+            HarnessError: If the binary cannot be run, exits non-zero, writes no
+                file, or the generated text embeds the temporary path. That last
+                check is not paranoia: a config carrying an absolute path into a
+                directory about to be deleted would leave the environment
+                pointing at nothing, and the failure would surface much later as
+                an opaque product error.
+        """
+        # Imported here rather than at module scope on purpose. This is the one
+        # method that needs the product binary; importing it at the top would
+        # make every consumer of Environment -- including the lifecycle commands
+        # that must work before anything is built -- depend on the locator.
+        from smoke.binary import ReleaseBinary
+
+        repo_root = pathlib.Path(__file__).resolve().parent.parent
+        binary = ReleaseBinary(repo_root)
+        scratch = pathlib.Path(tempfile.mkdtemp())
+        try:
+            try:
+                completed = subprocess.run(
+                    [str(binary.path), INIT_SUBCOMMAND],
+                    cwd=str(scratch),
+                    capture_output=True,
+                    timeout=INIT_TIMEOUT_SECONDS,
+                    check=False,
+                )
+            except (OSError, subprocess.SubprocessError) as exc:
+                raise HarnessError(
+                    "could not run the product's %s to obtain its defaults: %s"
+                    % (INIT_SUBCOMMAND, exc)
+                ) from exc
+            if completed.returncode != 0:
+                raise HarnessError(
+                    "the product's %s exited %d while obtaining its defaults"
+                    % (INIT_SUBCOMMAND, completed.returncode)
+                )
+            written = scratch / MAGI_DIR_NAME / MAGI_TOML_NAME
+            try:
+                text = written.read_text(encoding="utf-8")
+            except OSError as exc:
+                raise HarnessError(
+                    "the product's %s wrote no %s to read defaults from"
+                    % (INIT_SUBCOMMAND, MAGI_TOML_NAME)
+                ) from exc
+            _reject_transplanted_path(text, scratch)
+            return text
+        finally:
+            shutil.rmtree(scratch, ignore_errors=True)
+
+
+def _reject_transplanted_path(text: str, scratch: pathlib.Path) -> None:
+    """Refuse a generated config that names the temporary directory.
+
+    Both separator spellings are checked because a config may normalise a
+    Windows path to forward slashes on its way through a serialiser, and a
+    check that only knows one spelling passes on exactly the file it exists to
+    catch.
+
+    Args:
+        text: The generated configuration.
+        scratch: The temporary directory it was generated in.
+
+    Raises:
+        HarnessError: If any spelling of the temporary path appears in *text*.
+    """
+    spellings = set()
+    for candidate in (scratch, scratch.resolve()):
+        rendered = str(candidate)
+        spellings.add(rendered)
+        spellings.add(rendered.replace("\\", "/"))
+    for spelling in spellings:
+        if spelling in text:
+            raise HarnessError(
+                "the generated %s carries the temporary directory it was built "
+                "in, so the environment would point at a directory that no "
+                "longer exists" % MAGI_TOML_NAME
+            )
+
+
+def _apply_profile(text: str, profile: ModelProfile) -> str:
+    """Overwrite the model and trio keys of a generated configuration.
+
+    The rewrite is line-wise and table-aware rather than a parse-and-serialise
+    round trip, because the standard library reads TOML and does not write it,
+    and REQ-S02 rules out the package that would. Working on the product's own
+    generated file keeps every other key -- including each seat's lineage --
+    exactly as the product wrote it.
+
+    Note the limitation, declared rather than papered over: ``ModelProfile``
+    carries model names and no lineages, so a profiled trio keeps the lineage
+    labels of the models it replaced. A lineage is a user-chosen failure domain
+    and is never inferred, so the harness will not invent one.
+
+    Complexity: ``O(lines)``.
+
+    Args:
+        text: The generated configuration.
+        profile: The profile whose model and trio should win.
+
+    Returns:
+        The rewritten configuration.
+    """
+    replacements = {PROFILE_MODEL_KEY: profile.model}
+    for position, key in enumerate(PROFILE_TRIO_KEYS):
+        replacements[key] = profile.trio[position]
+
+    table = ""
+    lines = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            table = stripped[1:-1].strip()
+            lines.append(line)
+            continue
+        key = stripped.split("=", 1)[0].strip() if "=" in stripped else ""
+        replacement = replacements.get((table, key))
+        if replacement is None or stripped.startswith("#"):
+            lines.append(line)
+            continue
+        lines.append('%s = "%s"' % (key, replacement))
+    return "\n".join(lines) + "\n"
