@@ -1,11 +1,18 @@
 # Author: Julian Bolivar
 # Version: 1.0.0
 # Date: 2026-08-25
-"""S2 -- the workspace is created, not clobbered, and discovered.
+"""The two workspace scenarios: S2 -- created and discovered; S14 -- ``-w``.
 
-Protects ``system/workspace.rs``: ``magi init`` scaffolds a restricted
+S2 protects ``system/workspace.rs``: ``magi init`` scaffolds a restricted
 ``.magi/``, refuses to touch one that already exists, and the walk-up finds the
 nearest ancestor from a nested directory.
+
+S14 protects the DOUBLE declaration of ``-w`` (REQ-S32), and it does not
+duplicate ``tests/workdir_flag.rs``. Those tests run in debug, where collapsing
+the two declarations trips a ``debug_assert!`` while clap builds the command
+and the binary panics at startup -- a loud failure. In release that assertion
+is compiled out and the behaviour can degrade in silence, which is the case
+this scenario is the only guard against.
 
 Everything here runs under ``env/scratch/``, the declared exception to REQ-S30.
 ``init`` can only be exercised against a directory that does NOT yet carry
@@ -36,9 +43,37 @@ ASSERTIONS = (
     "query from a nested subdirectory finds the ancestor .magi/",
 )
 
+#: The verbatim assertion texts of the spec's section 8, for S14.
+S14_ASSERTIONS = (
+    "init -w <dir> scaffolds into <dir> and leaves the current directory "
+    "untouched",
+    "vault -w <dir> ls and vault ls -w <dir> both parse",
+    "given twice, the innermost wins",
+    "on init it is not global, so repeating it is a clap error",
+)
+
 #: The product's subcommands this scenario drives.
 INIT_SUBCOMMAND = "init"
 QUERY_SUBCOMMAND = "query"
+VAULT_SUBCOMMAND = "vault"
+LS_SUBCOMMAND = "ls"
+SET_SUBCOMMAND = "set"
+WORKDIR_FLAG = "-w"
+FORCE_FLAG = "--force"
+
+#: The entry S14 plants to tell two workspaces apart. Assertion 3 cannot be
+#: answered by "did it work" alone: both directories are real workspaces, so
+#: the only way to see WHICH one an invocation resolved is to make them hold
+#: different things.
+MARKER_NAME = "SMOKE_S14_MARKER"
+
+#: What clap prints when it refuses to parse. It is the discriminator between
+#: a PARSE error and a runtime failure that happens to share an exit code, and
+#: the difference is the whole of assertion 4.
+CLAP_USAGE_MARKER = b"usage:"
+
+#: The exit code clap uses for a parse error.
+CLAP_EXIT_CODE = 2
 
 #: What the product scaffolds, and the one file inside it whose permissions say
 #: whether the restriction reached the contents as well as the directory.
@@ -355,6 +390,281 @@ def _discovery_finding(root, magi_dir):
         "missing workspace, so where it resolved is unknown: %s"
         % (probe.output.exit_code, magi_dir, _excerpt(probe.output)),
     )
+
+
+@scenario("S14")
+def the_workdir_flag_still_resolves_in_the_release_binary(run):
+    """Exercise both ``-w`` declarations against the artifact users receive.
+
+    Every workspace here is seeded by running ``init`` with the target as the
+    process's CWD, never with ``-w``. A precondition built on the flag under
+    test cannot fail: with the flag ignored the seed lands in the current
+    directory, and the assertion then resolves that same directory, finds the
+    workspace it expected and passes. Strengthening the assertions does not
+    help, because setup and assertion move together.
+
+    Args:
+        run: Always ``None``; S14 declares no shared run.
+
+    Yields:
+        Finding: One per entry of :data:`S14_ASSERTIONS`, in that order.
+    """
+    current = _fresh_directory("s14-cwd-")
+    target = _fresh_directory("s14-target-")
+    yield _scaffolds_into_target_finding(current, target)
+
+    first = _seeded_workspace("s14-first-")
+    second = _seeded_workspace("s14-second-")
+    yield _both_orders_parse_finding(first)
+    yield _innermost_wins_finding(first, second)
+    yield _repeat_is_a_parse_error_finding(first)
+
+
+def _fresh_directory(prefix):
+    """Make an empty directory under the scratch area.
+
+    Args:
+        prefix: What to name it, before the random suffix.
+
+    Returns:
+        pathlib.Path: The new directory.
+    """
+    return pathlib.Path(
+        tempfile.mkdtemp(prefix=prefix, dir=str(runs.scratch_root()))
+    )
+
+
+def _seeded_workspace(prefix):
+    """Make a directory and scaffold a workspace in it BY CWD.
+
+    Args:
+        prefix: What to name it, before the random suffix.
+
+    Returns:
+        pathlib.Path | None: The directory, or None when the product did not
+        scaffold one -- in which case there is nothing to resolve against and
+        the caller reports CANNOT_TEST rather than a verdict.
+    """
+    root = _fresh_directory(prefix)
+    runs.attempt([INIT_SUBCOMMAND], stdin=b"", timeout_s=INIT_TIMEOUT_S,
+                 label="s14-seed", cwd=root,
+                 env={"MAGI_PASSPHRASE": runs.passphrase()})
+    return root if (root / MAGI_DIR_NAME).is_dir() else None
+
+
+def _vault_attempt(args, label, cwd=None, stdin=None):
+    """Run one ``vault`` invocation, without adding a ``-w`` of its own.
+
+    The caller composes the whole argument list, because WHERE the flag sits is
+    exactly what assertions 2 and 3 vary.
+
+    Args:
+        args: The full argument list after the program name.
+        label: What to call the invocation in the archive.
+        cwd: The directory to run in, or None.
+        stdin: Bytes for the child, or None.
+
+    Returns:
+        Attempt: The capture, or why there is none.
+    """
+    return runs.attempt(args, stdin=stdin, timeout_s=INIT_TIMEOUT_S,
+                        label=label, cwd=cwd,
+                        env={"MAGI_PASSPHRASE": runs.passphrase()})
+
+
+def _scaffolds_into_target_finding(current, target):
+    """Judge assertion 1: it scaffolds THERE and leaves HERE alone.
+
+    Both halves are checked. "It scaffolded into the target" alone would pass
+    against a product that scaffolded into both, and the second directory is
+    the user's own working directory.
+
+    Args:
+        current: The directory the product runs in.
+        target: The directory ``-w`` names.
+
+    Returns:
+        Finding: PASS when the target gained a workspace and the cwd did not.
+    """
+    before = _snapshot(current)
+    attempt = runs.attempt(
+        [INIT_SUBCOMMAND, WORKDIR_FLAG, str(target)], stdin=b"",
+        timeout_s=INIT_TIMEOUT_S, label="s14-init-flag", cwd=current,
+        env={"MAGI_PASSPHRASE": runs.passphrase()},
+    )
+    if not attempt.ok:
+        return _s14(0, Outcome.CANNOT_TEST, attempt.failure)
+    scaffolded = (target / MAGI_DIR_NAME).is_dir()
+    touched = _changed_paths(before, _snapshot(current))
+    if not scaffolded and (current / MAGI_DIR_NAME).is_dir():
+        return _s14(0, Outcome.FAIL,
+                    "init -w scaffolded into the current directory %s instead "
+                    "of %s, so the flag was not read" % (current, target))
+    if not scaffolded:
+        return _s14(0, Outcome.FAIL,
+                    "init -w exited %d and scaffolded nothing at %s: %s"
+                    % (attempt.output.exit_code, target,
+                       _excerpt(attempt.output)))
+    if touched:
+        return _s14(0, Outcome.FAIL,
+                    "init -w also changed the current directory: %s"
+                    % ", ".join(touched))
+    return _s14(0, Outcome.PASS, "")
+
+
+def _both_orders_parse_finding(workspace):
+    """Judge assertion 2: the flag parses before AND after the subcommand.
+
+    ``-w`` is global within the ``vault`` subtree, which is what makes both
+    spellings legal. A parse error in either one means the propagation was
+    lost.
+
+    Args:
+        workspace: A seeded workspace, or None.
+
+    Returns:
+        Finding: PASS when neither spelling is a parse error and both succeed.
+    """
+    if workspace is None:
+        return _s14(1, Outcome.CANNOT_TEST,
+                    "no workspace could be seeded to list")
+    spellings = {
+        "vault -w <dir> ls": [VAULT_SUBCOMMAND, WORKDIR_FLAG, str(workspace),
+                              LS_SUBCOMMAND],
+        "vault ls -w <dir>": [VAULT_SUBCOMMAND, LS_SUBCOMMAND, WORKDIR_FLAG,
+                              str(workspace)],
+    }
+    broken = []
+    for spelling, args in spellings.items():
+        attempt = _vault_attempt(args, "s14-order")
+        if not attempt.ok:
+            return _s14(1, Outcome.CANNOT_TEST, attempt.failure)
+        if _is_parse_error(attempt.output):
+            broken.append("%s is a parse error" % spelling)
+        elif attempt.output.exit_code != 0:
+            broken.append("%s parsed but exited %d: %s"
+                          % (spelling, attempt.output.exit_code,
+                             _excerpt(attempt.output)))
+    if broken:
+        return _s14(1, Outcome.FAIL, "; ".join(broken))
+    return _s14(1, Outcome.PASS, "")
+
+
+def _innermost_wins_finding(first, second):
+    """Judge assertion 3 by making the two candidates hold different things.
+
+    Asking only whether the invocation SUCCEEDED cannot answer this: both
+    directories are real workspaces, so either resolution succeeds. The marker
+    is planted in one of them -- by cwd, never by the flag -- and then the
+    listing says which one was read.
+
+    Args:
+        first: One seeded workspace, or None.
+        second: The other, or None.
+
+    Returns:
+        Finding: PASS when the last ``-w`` wins in both directions.
+    """
+    if first is None or second is None:
+        return _s14(2, Outcome.CANNOT_TEST,
+                    "two workspaces could not be seeded to tell apart")
+    planted = _vault_attempt(
+        [VAULT_SUBCOMMAND, SET_SUBCOMMAND, MARKER_NAME, FORCE_FLAG],
+        "s14-plant", cwd=second, stdin=b"marker\n",
+    )
+    if not planted.ok:
+        return _s14(2, Outcome.CANNOT_TEST, planted.failure)
+    if planted.output.exit_code != 0:
+        return _s14(2, Outcome.CANNOT_TEST,
+                    "the marker could not be planted in %s: exit %d: %s"
+                    % (second, planted.output.exit_code,
+                       _excerpt(planted.output)))
+    inner = _vault_attempt(
+        [VAULT_SUBCOMMAND, WORKDIR_FLAG, str(first), LS_SUBCOMMAND,
+         WORKDIR_FLAG, str(second)], "s14-innermost")
+    outer = _vault_attempt(
+        [VAULT_SUBCOMMAND, WORKDIR_FLAG, str(second), LS_SUBCOMMAND,
+         WORKDIR_FLAG, str(first)], "s14-outermost")
+    for attempt in (inner, outer):
+        if not attempt.ok:
+            return _s14(2, Outcome.CANNOT_TEST, attempt.failure)
+    marker = MARKER_NAME.encode("utf-8")
+    reads_second = marker in inner.output.stdout
+    reads_first = marker not in outer.output.stdout
+    if reads_second and reads_first:
+        return _s14(2, Outcome.PASS, "")
+    return _s14(2, Outcome.FAIL,
+                "the last -w did not win: '-w %s ls -w %s' %s the marker, and "
+                "'-w %s ls -w %s' %s it"
+                % (first, second, "listed" if reads_second else "did not list",
+                   second, first, "did not list" if reads_first else "listed"))
+
+
+def _repeat_is_a_parse_error_finding(workspace):
+    """Judge assertion 4: on ``init`` the flag is not global, so twice is out.
+
+    Checked as a PARSE error and not merely as a non-zero exit. ``init`` can
+    fail for its own reasons with the same code, and "it refused" would then
+    pass over a product that accepted the repetition and failed later for
+    something else entirely.
+
+    Args:
+        workspace: A directory to aim the repeated flag at, or None.
+
+    Returns:
+        Finding: PASS when clap refuses the repetition.
+    """
+    if workspace is None:
+        return _s14(3, Outcome.CANNOT_TEST,
+                    "no directory was available to aim the flag at")
+    attempt = runs.attempt(
+        [INIT_SUBCOMMAND, WORKDIR_FLAG, str(workspace), WORKDIR_FLAG,
+         str(workspace)],
+        stdin=b"", timeout_s=INIT_TIMEOUT_S, label="s14-repeat",
+        env={"MAGI_PASSPHRASE": runs.passphrase()},
+    )
+    if not attempt.ok:
+        return _s14(3, Outcome.CANNOT_TEST, attempt.failure)
+    if attempt.output.exit_code == 0:
+        return _s14(3, Outcome.FAIL,
+                    "init accepted -w twice, so the flag propagates where it "
+                    "was declared not to")
+    if not _is_parse_error(attempt.output):
+        return _s14(3, Outcome.FAIL,
+                    "init exited %d without a parse error, so the repetition "
+                    "was accepted and something else failed: %s"
+                    % (attempt.output.exit_code, _excerpt(attempt.output)))
+    return _s14(3, Outcome.PASS, "")
+
+
+def _is_parse_error(output):
+    """Whether a capture is the argument parser refusing, not the program.
+
+    Args:
+        output: The capture to classify.
+
+    Returns:
+        bool: True when the exit code is clap's and the output carries its
+        usage block. Both are required: the exit code alone is shared with a
+        runtime failure, and the usage block alone appears in ``--help``.
+    """
+    return (output.exit_code == CLAP_EXIT_CODE
+            and CLAP_USAGE_MARKER in output.raw().lower())
+
+
+def _s14(index, outcome, detail):
+    """Build the finding for one entry of :data:`S14_ASSERTIONS`.
+
+    Args:
+        index: Position in :data:`S14_ASSERTIONS`.
+        outcome: What became of it.
+        detail: The cause when the outcome is not PASS.
+
+    Returns:
+        Finding: The finding, with no run id -- S14 is standalone.
+    """
+    return Finding(assertion=S14_ASSERTIONS[index], outcome=outcome,
+                   detail=detail, run_id=None)
 
 
 def _snapshot(root):
