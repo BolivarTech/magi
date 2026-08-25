@@ -40,7 +40,9 @@ class ConfigureGuardTests(unittest.TestCase):
         binary.invoke.return_value = ProductOutput(
             stdout=b"out", stderr=b"", exit_code=0, command=["magi-rs", "--version"]
         )
-        runs.configure(binary, mock.Mock(spec=Environment), mock.Mock(spec=SmokeConfig))
+        env = mock.Mock(spec=Environment)
+        env.runs_dir = pathlib.Path(tempfile.mkdtemp())
+        runs.configure(binary, env, mock.Mock(spec=SmokeConfig))
         output = runs.invoke(["--version"], timeout_s=5, label="probe")
         self.assertEqual(0, output.exit_code)
         binary.invoke.assert_called_once()
