@@ -24,6 +24,13 @@ from smoke.lock import RunLock
 from smoke.preflight import Preflight
 from smoke.registry import DEFAULT_REGISTRY
 from smoke.runner import Ambient, Runner, StampedFinding
+# Imported for its side effect: the decorator registers at import time, so a
+# scenario nobody imported is a scenario nobody runs. Without this line the
+# harness reconciled an EMPTY registry against itself -- every set difference
+# empty, nothing invoked, nothing reported -- and exited 0 having evaluated
+# nothing. It sits last so the ordering says what it is: not a symbol this
+# module uses, but the moment the scenarios come into existence.
+from smoke import scenarios  # noqa: F401
 
 EXIT_OK = 0
 EXIT_NOT_PASSED = 1
