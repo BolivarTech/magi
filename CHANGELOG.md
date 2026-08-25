@@ -9,6 +9,12 @@ changes and the **patch** position signals backward-compatible fixes.
 
 ## [Unreleased]
 
+### Security
+
+- Update `h2` to 0.4.19, closing RUSTSEC-2026-0258: a peer could send unbounded
+  empty DATA frames and force the connection to keep allocating. The crate
+  reaches magi-rs transitively through `reqwest`; no magi-rs code changes.
+
 ## [0.15.0] - 2026-08-15
 
 Each MAGI mage's per-attempt operation budget used to cap out at 72 s regardless of the run's
