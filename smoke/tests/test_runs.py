@@ -179,10 +179,18 @@ class AccessorTests(unittest.TestCase):
     def test_the_scratch_area_is_created_on_demand(self) -> None:
         """``--init-env`` makes it, but a scenario asking for it after a manual
         cleanup should get a usable directory rather than a missing one.
+
+        The ENVIRONMENT is what creates it, so the directory arrives with the
+        ignore rule that keeps its throwaway workspaces out of ``git status``.
+        A bare ``mkdir`` here would have given the caller a usable directory
+        and made the harness leave a trace.
         """
+        self.env.prepare_scratch.side_effect = (
+            lambda: self.env.scratch_dir.mkdir(parents=True, exist_ok=True))
         runs.configure(self.binary, self.env, mock.Mock(spec=SmokeConfig))
-        self.assertFalse((self.root / "scratch").exists())
+        self.assertFalse(self.env.scratch_dir.exists())
         self.assertTrue(runs.scratch_root().is_dir())
+        self.env.prepare_scratch.assert_called_once_with()
 
 
 if __name__ == "__main__":

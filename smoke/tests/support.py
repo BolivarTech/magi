@@ -140,10 +140,21 @@ class FakeEnvironment:
         """
         self.root = pathlib.Path(root)
         self.runs_dir = self.root / "runs"
-        self.scratch_dir = self.root / "scratch"
+        # Beside the root, as the real Environment places it: the root carries
+        # the product's workspace and ``magi init`` refuses to nest inside one.
+        self.scratch_dir = self.root.parent / "scratch"
         if create:
             for directory in (self.root, self.runs_dir, self.scratch_dir):
                 directory.mkdir(parents=True, exist_ok=True)
+
+    def prepare_scratch(self) -> None:
+        """Create the scratch area, as ``Environment`` does.
+
+        The double carries it because :func:`smoke.runs.scratch_root` calls it,
+        and a double missing a method the code under test uses would fail here
+        for a reason no scenario has.
+        """
+        self.scratch_dir.mkdir(parents=True, exist_ok=True)
 
 
 class FakeConfig:

@@ -151,11 +151,17 @@ class Environment:
     def scratch_dir(self) -> pathlib.Path:
         """The fixture area for the scenarios that need a virgin tree.
 
+        It is a SIBLING of the environment root, never a child, and that is
+        forced by what it is for. The root carries the product's own
+        ``.magi/``, and ``magi init`` refuses to nest a second one inside an
+        existing one -- so a scratch area under the root fails at exactly the
+        thing it was created for, and every scenario seeding a workspace there
+        reads the product's correct refusal as its own inability to run.
+
         Returns:
-            The ``scratch/`` directory. S2 and S14 build temporary trees here
-            precisely because ``magi init`` refuses where ``.magi/`` exists.
+            The ``scratch/`` directory beside the environment.
         """
-        return self._root / SCRATCH_DIR_NAME
+        return self._root.parent / SCRATCH_DIR_NAME
 
     def exists(self) -> bool:
         """Report whether the environment has been INITIALISED.
@@ -199,8 +205,7 @@ class Environment:
             tempfile.mkdtemp(prefix=".%s." % self._root.name, dir=self._root.parent)
         )
         try:
-            for name in (MAGI_DIR_NAME, RUNS_DIR_NAME, PAYLOAD_DIR_NAME,
-                         SCRATCH_DIR_NAME):
+            for name in (MAGI_DIR_NAME, RUNS_DIR_NAME, PAYLOAD_DIR_NAME):
                 (staging / name).mkdir()
             (staging / GITIGNORE_NAME).write_text(ENV_GITIGNORE, encoding="utf-8")
             # The root may already be present and empty: its .gitignore is
@@ -222,21 +227,54 @@ class Environment:
             raise HarnessError(
                 "could not create the test environment at %s: %s" % (self._root, exc)
             ) from exc
+        self.prepare_scratch()
+
+    def prepare_scratch(self) -> None:
+        """Create the scratch area beside the environment and ignore it.
+
+        It is not built in the staging tree and renamed with the rest, because
+        it is not part of the rename's atomicity argument: the guarantee there
+        is that the ENVIRONMENT is never half-built, and the scratch area holds
+        only throwaway workspaces a scenario rebuilds anyway. It carries its
+        own self-protecting ``.gitignore`` because the environment's covers the
+        environment and nothing else.
+
+        Raises:
+            HarnessError: If the directory or its ignore rule cannot be
+                written.
+        """
+        try:
+            self.scratch_dir.mkdir(parents=True, exist_ok=True)
+            (self.scratch_dir / GITIGNORE_NAME).write_text(
+                ENV_GITIGNORE, encoding="utf-8")
+        except OSError as exc:
+            raise HarnessError(
+                "could not create the scratch area at %s: %s"
+                % (self.scratch_dir, exc)
+            ) from exc
 
     def reset(self) -> None:
         """Destroy the environment and build it again.
+
+        The scratch area goes with it. It is not part of the environment's
+        directory any more, but it is part of what a run leaves behind -- one
+        throwaway workspace per seeding scenario per run -- and a reset that
+        left it standing would be a partial one.
 
         Raises:
             HarnessError: If the existing tree cannot be removed, or the
                 rebuild fails.
         """
-        if self.exists():
+        for directory in (self._root if self.exists() else None,
+                          self.scratch_dir if self.scratch_dir.is_dir()
+                          else None):
+            if directory is None:
+                continue
             try:
-                shutil.rmtree(self._root)
+                shutil.rmtree(directory)
             except OSError as exc:
                 raise HarnessError(
-                    "could not remove the test environment at %s: %s"
-                    % (self._root, exc)
+                    "could not remove %s: %s" % (directory, exc)
                 ) from exc
         self.init()
 

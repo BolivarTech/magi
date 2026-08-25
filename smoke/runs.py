@@ -146,22 +146,24 @@ def scratch_root():
 
     Created on demand, because a scenario that finds it missing after somebody
     cleaned up by hand should still run rather than report the harness's own
-    tidiness as a product defect.
+    tidiness as a product defect. The environment does the creating, so the
+    directory comes back with its self-protecting ignore rule rather than as a
+    bare ``mkdir`` whose contents the next ``git status`` would report.
 
     Args:
         None.
 
     Returns:
-        pathlib.Path: ``env/scratch``, existing.
+        pathlib.Path: The scratch area beside the environment, existing.
 
     Raises:
-        HarnessError: If :func:`configure` has not run.
+        HarnessError: If :func:`configure` has not run, or the directory cannot
+            be created.
     """
     if _env is None:
         raise HarnessError(_UNCONFIGURED % "the scratch area")
-    directory = pathlib.Path(_env.scratch_dir)
-    directory.mkdir(parents=True, exist_ok=True)
-    return directory
+    _env.prepare_scratch()
+    return pathlib.Path(_env.scratch_dir)
 
 
 def passphrase():
