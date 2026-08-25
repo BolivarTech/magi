@@ -28,8 +28,37 @@ import pathlib
 import subprocess
 import sys
 
-from smoke.errors import PreflightError, ProductOutputError
+from smoke.errors import PreflightError, ProductOutputError, TimedOut
 from smoke.product import ProductOutput
+
+#: What a killed process is recorded as exiting with. It never exited, so no
+#: real code applies; the negative value keeps it from colliding with anything
+#: the product publishes, and nothing asserts on it.
+KILLED_EXIT_CODE = -1
+
+
+def _partial_capture(expired: subprocess.TimeoutExpired,
+                     command: list[str]) -> ProductOutput:
+    """Wrap whatever a timed-out child had already written.
+
+    ``subprocess.run`` attaches the buffered streams to the exception on
+    Windows and leaves them ``None`` on POSIX, so both shapes are handled here
+    and an absent stream becomes empty bytes -- "nothing was captured", which
+    is not the same claim as "the product emitted nothing".
+
+    Args:
+        expired: The expiry raised by ``subprocess.run``.
+        command: The argv as invoked.
+
+    Returns:
+        ProductOutput: The partial capture, with :data:`KILLED_EXIT_CODE`.
+    """
+    return ProductOutput(
+        stdout=expired.stdout or b"",
+        stderr=expired.stderr or b"",
+        exit_code=KILLED_EXIT_CODE,
+        command=command,
+    )
 
 #: The binary's name, without the platform suffix.
 BINARY_STEM = "magi-rs"
@@ -263,8 +292,14 @@ class ReleaseBinary:
                 check=False,
             )
         except subprocess.TimeoutExpired as exc:
-            raise ProductOutputError(
-                "the product did not finish within %s seconds" % timeout
+            # Whatever the child had already written is carried out with the
+            # failure rather than dropped. A hang is not silence: a consult
+            # that expires may already have emitted the block a scenario reads
+            # to tell a degraded ceiling from a slow provider, and re-running
+            # to recover it would be a second run of the thing that hung.
+            raise TimedOut(
+                "the product did not finish within %s seconds" % timeout,
+                output=_partial_capture(exc, command),
             ) from exc
         except OSError as exc:
             raise ProductOutputError(
