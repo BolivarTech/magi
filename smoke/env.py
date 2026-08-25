@@ -158,12 +158,19 @@ class Environment:
         return self._root / SCRATCH_DIR_NAME
 
     def exists(self) -> bool:
-        """Report whether the environment has been created.
+        """Report whether the environment has been INITIALISED.
+
+        Not whether the directory is present, and the difference is the whole
+        point. ``smoke/env/.gitignore`` is tracked, so the directory exists in
+        every clone before anything has been built -- reading existence off the
+        directory made ``--init-env`` refuse on a fresh checkout and left the
+        harness unusable out of the box. The marker is the product's workspace,
+        which is what ``init`` creates and what every later step needs.
 
         Returns:
-            ``True`` if the root is a directory.
+            bool: ``True`` when the environment carries the product workspace.
         """
-        return self._root.is_dir()
+        return self.magi_dir.is_dir()
 
     def init(self) -> None:
         """Create the environment, all of it or none of it.
@@ -196,6 +203,19 @@ class Environment:
                          SCRATCH_DIR_NAME):
                 (staging / name).mkdir()
             (staging / GITIGNORE_NAME).write_text(ENV_GITIGNORE, encoding="utf-8")
+            # The root may already be present and empty: its .gitignore is
+            # TRACKED, so a fresh clone carries the directory before anything is
+            # built. os.replace onto an existing directory is refused on Windows
+            # (WinError 5), so the empty root is removed first.
+            #
+            # That trades one guarantee for another rather than dropping it. The
+            # window is now "root gone, staging not yet renamed", and a crash
+            # there leaves the environment ABSENT -- which git restores and
+            # --init-env rebuilds. The guarantee kept is the one that matters:
+            # never a directory that exists, looks initialised, and is missing
+            # the subdirectory a scenario needs.
+            if self._root.is_dir():
+                shutil.rmtree(self._root)
             os.replace(staging, self._root)
         except OSError as exc:
             shutil.rmtree(staging, ignore_errors=True)
