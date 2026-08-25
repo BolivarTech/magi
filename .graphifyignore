@@ -18,3 +18,4 @@ __pycache__/
 .magi-rs-memory.db*
 key.txt*
 magi.toml
+smoke/

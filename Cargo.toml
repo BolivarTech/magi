@@ -10,7 +10,8 @@ repository = "https://github.com/BolivarTech/magi"
 readme = "README.md"
 keywords = ["terminal", "ai", "assistant", "tui", "llm"]
 categories = ["command-line-utilities"]
-exclude = ["docs/AUDIT_*.md", "key.txt*", ".claude/", ".remember/", "target/"]
+exclude = ["docs/AUDIT_*.md", "key.txt*", ".claude/", ".remember/", "target/",
+           "smoke/", "docs/test/", "scripts/", "run-tests.py"]
 
 [dependencies]
 # Async runtime
