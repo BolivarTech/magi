@@ -15,7 +15,6 @@ import sys
 import traceback
 
 from smoke.errors import HarnessError, PreflightError
-from smoke.outcome import Outcome
 from smoke.registry import DEFAULT_REGISTRY
 from smoke.runner import Ambient, Runner, StampedFinding
 
