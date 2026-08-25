@@ -5013,7 +5013,15 @@ async fn prepare_headless(
             Ok(v) => v,
             Err(e) => {
                 eprintln!("error: {e}");
-                return Err(1);
+                // 2, not 1: a broken `magi.toml` is invalid INPUT, which is what
+                // `exit::CLI_MISUSE` means and what README and REQ-H23 publish
+                // ("unknown field"). This path returned 1 -- the runtime-error
+                // code -- while the sibling arm thirty lines below already
+                // returned 2 for an unrecognised envelope `mode`, so the same
+                // function answered two codes for one class. A CI reading the
+                // exit code could not tell a malformed config from a corrupt
+                // database.
+                return Err(2);
             }
         },
         None => (MagiConfig::default(), Vec::new()),

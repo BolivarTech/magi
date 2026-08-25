@@ -9,6 +9,14 @@ changes and the **patch** position signals backward-compatible fixes.
 
 ## [Unreleased]
 
+### Fixed
+
+- A present-but-unparseable `magi.toml` now exits **2**, not 1. Exit 2 is the
+  published code for invalid input (README, REQ-H23) and the same function
+  already used it for an unrecognised envelope `mode`, so one class of failure
+  answered two codes and a CI could not tell a malformed config from a corrupt
+  database.
+
 ### Security
 
 - Update `h2` to 0.4.19, closing RUSTSEC-2026-0258: a peer could send unbounded
