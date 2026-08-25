@@ -198,7 +198,8 @@ class ReleaseBinary:
 
     def invoke(self, args: list[str], stdin: bytes | None = None,
                env: dict[str, str] | None = None,
-               timeout: float | None = None) -> ProductOutput:
+               timeout: float | None = None,
+               cwd: pathlib.Path | str | None = None) -> ProductOutput:
         """Run the binary once and capture everything it emitted.
 
         Three rules hold here and each one was a way to get it wrong.
@@ -224,6 +225,14 @@ class ReleaseBinary:
                 loses ``PATH`` -- and, on Windows, ``SystemRoot``, without
                 which sockets do not initialise.
             timeout: Seconds to wait, or ``None`` to wait indefinitely.
+            cwd: The directory to run the child in, or ``None`` for the
+                harness's own. It is a parameter and never a ``chdir`` because
+                the harness is one process running every scenario in turn: a
+                directory changed for one of them stays changed for the next,
+                and the failure that produces surfaces somewhere else entirely.
+                S2 and S14 need it because the only way to seed a workspace
+                without using the very flag S14 tests is to run ``init`` with
+                the target as the process's working directory.
 
         Returns:
             ProductOutput: The captured streams, exit code, and the argv
@@ -249,6 +258,7 @@ class ReleaseBinary:
                 input=stdin,
                 capture_output=True,
                 env=child_env,
+                cwd=None if cwd is None else str(cwd),
                 timeout=timeout,
                 check=False,
             )

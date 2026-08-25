@@ -13,3 +13,5 @@ Modules are added here as their phase lands. A module present on disk and
 missing from this list never registers, and the reconciliation cannot see it,
 so ``ScenarioModuleImportTests`` compares the two.
 """
+
+from smoke.scenarios import workspace  # noqa: F401
