@@ -54,6 +54,31 @@ class LifecycleTests(unittest.TestCase):
         self.assertTrue(env.exists())
 
 
+class InitialisedTests(unittest.TestCase):
+    """"The directory is there" and "the environment exists" are not the same."""
+
+    def test_a_directory_holding_only_its_gitignore_is_not_initialised(self) -> None:
+        """The tracked ``smoke/env/.gitignore`` makes the directory exist in
+        every clone, so reading existence off the directory means ``--init-env``
+        refuses before it has ever run. Found by running the harness, not by a
+        unit test: the other tests build environments in temporary directories,
+        where that tracked file is not present.
+        """
+        root = pathlib.Path(tempfile.mkdtemp()) / "env"
+        root.mkdir()
+        (root / ".gitignore").write_text("*\n!.gitignore\n", encoding="utf-8")
+        self.assertFalse(Environment(root).exists())
+
+    def test_init_succeeds_into_that_directory(self) -> None:
+        """The consequence, end to end: a fresh clone can build its environment."""
+        root = pathlib.Path(tempfile.mkdtemp()) / "env"
+        root.mkdir()
+        (root / ".gitignore").write_text("*\n!.gitignore\n", encoding="utf-8")
+        env = Environment(root)
+        env.init()
+        self.assertTrue(env.exists())
+
+
 class GrowthTests(unittest.TestCase):
     """Growth is unbounded on purpose, so it is made visible."""
 
