@@ -1,9 +1,9 @@
 # Author: Julian Bolivar
 # Version: 1.0.0
 # Date: 2026-08-25
-"""S11 -- a broken configuration cuts before anything runs.
+"""The two configuration scenarios: S11 -- a broken file; S15 -- a blank value.
 
-Protects ``config/migrate.rs`` and the rule that a present-but-unparseable
+S11 protects ``config/migrate.rs`` and the rule that a present-but-unparseable
 ``magi.toml`` is fatal rather than a warning that degrades to defaults. With
 ``base_url`` load-bearing for every endpoint, discarding a broken file silently
 would run the agent against endpoints the operator never named.
@@ -24,6 +24,24 @@ Assertion 2 points ``base_url`` at a port nothing is listening on and asserts
 the failure carries no connection error. It does NOT measure time: a timing
 assertion is a gate that goes red on a loaded machine, and this one has to
 answer a question about ordering, which timing only approximates.
+
+S15 protects ``non_blank``: a text-valued environment variable exported empty
+or whitespace-only is ABSENT, never invalid. An exported-but-unfilled variable
+in a CI script is an everyday accident, and breaking startup over it punishes
+the accident instead of falling through to the next precedence level.
+
+Its third assertion is what stops the rule from overshooting. A product that
+treated EVERY value as absent would satisfy the first two perfectly, so a
+scenario without the third would pass over the opposite defect and report the
+whole family as protected.
+
+One limit of S15 is declared here rather than left for a reader to discover.
+The second assertion's clause about an empty credential short-circuiting the
+vault lookup is checked only as far as the outside of the process allows: the
+harness sees the exit code and the output, never the lookup, so what it
+verifies is that no configuration or vocabulary failure stopped the run before
+it reached the backend. A short-circuit that silently produced a wrong
+credential and still reached the network would not be visible here.
 """
 
 import pathlib
@@ -41,6 +59,54 @@ S11_ASSERTIONS = (
     "it cuts before any backend request is issued",
     "a v0.11.0-era file names every incompatibility at once, not just the first",
     "a seat declaring a model without its lineage fails naming all three seats",
+)
+
+#: The verbatim assertion texts of the spec's section 8, for S15.
+S15_ASSERTIONS = (
+    "each text-valued variable, exported empty or blank, falls through to the "
+    "next precedence level",
+    "startup succeeds — no vocabulary error, no empty credential "
+    "short-circuiting the vault lookup",
+    "a value that is present and unrecognised is still an error",
+)
+
+#: The eight text-valued variables the spec names. ``MAGI_MODEL_*`` is a family
+#: and one member stands for it: the resolver is shared, so a second seat would
+#: exercise the same code path and cost another invocation.
+BLANKABLE_VARIABLES = (
+    "MAGI_PROVIDER",
+    "MAGI_PASSPHRASE",
+    "OPENAI_BASE_URL",
+    "OPENAI_MODEL",
+    "ANTHROPIC_MODEL",
+    "MAGI_MODEL_MELCHIOR",
+    "ANTHROPIC_API_KEY",
+    "OPENAI_API_KEY",
+)
+
+#: Blank means BOTH of these. An exported-but-unfilled variable arrives as the
+#: first; a value trimmed to nothing by a shell arrives as the second.
+BLANK_SPELLINGS = ("", "   ")
+
+#: The variable whose blank case is different, and why. Falling through leads
+#: to a TTY prompt that does not exist in this context, so the expected result
+#: is the typed refusal -- never a hang, which is why every invocation carries
+#: a timeout the harness controls.
+PASSPHRASE_VARIABLE = "MAGI_PASSPHRASE"
+PASSPHRASE_UNAVAILABLE_MARKER = b"no passphrase"
+PASSPHRASE_UNAVAILABLE_EXIT = 1
+
+#: A value nobody could mean. Assertion 3 requires the product to reject it,
+#: which is what distinguishes "blank falls through" from "anything goes".
+UNRECOGNISED_PROVIDER = "not-a-real-backend"
+
+#: What a vocabulary refusal looks like. Their ABSENCE is the evidence for
+#: assertions 1 and 2; the first one's PRESENCE is the evidence for 3.
+VOCABULARY_MARKERS = (
+    b"unknown provider",
+    b"unknown mode",
+    b"unknown field",
+    b"invalid value",
 )
 
 INIT_SUBCOMMAND = "init"
@@ -410,6 +476,202 @@ def _seat_lineage_finding(attempt):
                     % (len(SEATS) - len(missing), len(SEATS),
                        ", ".join(missing), _excerpt(attempt.output)))
     return _s11(3, Outcome.PASS, "")
+
+
+@scenario("S15")
+def a_blank_environment_variable_is_absent_never_invalid(run):
+    """Export each variable empty and blank, then export one filled and wrong.
+
+    Args:
+        run: Always ``None``; S15 declares no shared run.
+
+    Yields:
+        Finding: One per entry of :data:`S15_ASSERTIONS`, in that order.
+    """
+    root = _seed_workspace()
+    if root is None:
+        for index in range(len(S15_ASSERTIONS)):
+            yield _s15(index, Outcome.CANNOT_TEST,
+                       "the product's %s did not scaffold a workspace to run "
+                       "in" % INIT_SUBCOMMAND)
+        return
+
+    blanked = {}
+    for name in BLANKABLE_VARIABLES:
+        for spelling in BLANK_SPELLINGS:
+            blanked[(name, spelling)] = _probe(
+                root, {name: spelling},
+                "s15-blank-%s" % name.lower(),
+                keep_passphrase=name != PASSPHRASE_VARIABLE,
+            )
+    unrecognised = _probe(root, {"MAGI_PROVIDER": UNRECOGNISED_PROVIDER},
+                          "s15-unrecognised")
+
+    yield _falls_through_finding(blanked)
+    yield _startup_succeeds_finding(blanked)
+    yield _unrecognised_is_an_error_finding(unrecognised)
+
+
+def _probe(root, overlay, label, keep_passphrase=True):
+    """Run the product once with *overlay* on top of the environment.
+
+    Args:
+        root: The seeded workspace's parent directory.
+        overlay: The variables to export for this invocation.
+        label: What to call the invocation in the archive.
+        keep_passphrase: Whether to supply the real passphrase. It is False for
+            exactly one probe -- the one blanking the passphrase itself -- and
+            supplying it there would overwrite the value under test.
+
+    Returns:
+        Attempt: The capture, or why there is none.
+    """
+    env = dict(overlay)
+    if keep_passphrase:
+        env.setdefault("MAGI_PASSPHRASE", runs.passphrase())
+    return runs.attempt(
+        [QUERY_SUBCOMMAND, "--output-format", "json",
+         "--timeout", str(PRODUCT_TIMEOUT_S)],
+        stdin=PROBE_PROMPT, timeout_s=QUERY_TIMEOUT_S, label=label, cwd=root,
+        env=env,
+    )
+
+
+def _vocabulary_complaints(output):
+    """Report which vocabulary refusals a capture carries.
+
+    Complexity: ``O(len(capture) * len(VOCABULARY_MARKERS))``.
+
+    Args:
+        output: The capture to search.
+
+    Returns:
+        list[str]: The markers found, decoded, in declaration order.
+    """
+    lowered = output.raw().lower()
+    return [marker.decode("utf-8") for marker in VOCABULARY_MARKERS
+            if marker in lowered]
+
+
+def _falls_through_finding(blanked):
+    """Judge assertion 1 over every variable and both spellings of blank.
+
+    Args:
+        blanked: Each ``(variable, spelling)`` and what the product did.
+
+    Returns:
+        Finding: PASS when no blank value was read as a value, and the
+        passphrase's own blank produced its typed refusal rather than a hang.
+    """
+    unreachable = [key for key, attempt in blanked.items() if not attempt.ok]
+    if unreachable:
+        return _s15(0, Outcome.CANNOT_TEST,
+                    "%d probe(s) never completed, starting with %s: %s"
+                    % (len(unreachable), unreachable[0][0],
+                       blanked[unreachable[0]].failure))
+    rejected = []
+    for (name, spelling), attempt in sorted(blanked.items()):
+        if name == PASSPHRASE_VARIABLE:
+            rejected += _passphrase_complaints(spelling, attempt.output)
+            continue
+        complaints = _vocabulary_complaints(attempt.output)
+        if complaints:
+            rejected.append("%s=%r was read as a value (%s)"
+                            % (name, spelling, ", ".join(complaints)))
+    if rejected:
+        return _s15(0, Outcome.FAIL, "; ".join(rejected))
+    return _s15(0, Outcome.PASS, "")
+
+
+def _passphrase_complaints(spelling, output):
+    """Check the one variable whose fall-through has a different destination.
+
+    Args:
+        spelling: Which blank spelling was exported.
+        output: What the product did with it.
+
+    Returns:
+        list[str]: What was wrong, empty when the typed refusal arrived.
+    """
+    if PASSPHRASE_UNAVAILABLE_MARKER not in output.raw().lower():
+        return ["%s=%r did not produce the typed refusal: exit %d: %s"
+                % (PASSPHRASE_VARIABLE, spelling, output.exit_code,
+                   _excerpt(output))]
+    if output.exit_code != PASSPHRASE_UNAVAILABLE_EXIT:
+        return ["%s=%r refused with exit %d, expected %d"
+                % (PASSPHRASE_VARIABLE, spelling, output.exit_code,
+                   PASSPHRASE_UNAVAILABLE_EXIT)]
+    return []
+
+
+def _startup_succeeds_finding(blanked):
+    """Judge assertion 2: nothing blank stopped the run during configuration.
+
+    The passphrase probes are excluded from this one and named as excluded: a
+    blank passphrase is SUPPOSED to stop the run, and folding it in would make
+    the assertion contradict the previous one.
+
+    Args:
+        blanked: Each ``(variable, spelling)`` and what the product did.
+
+    Returns:
+        Finding: PASS when no probe died of a configuration complaint.
+    """
+    stopped = []
+    for (name, spelling), attempt in sorted(blanked.items()):
+        if name == PASSPHRASE_VARIABLE or not attempt.ok:
+            continue
+        complaints = _vocabulary_complaints(attempt.output)
+        if complaints:
+            stopped.append("%s=%r: %s" % (name, spelling,
+                                          ", ".join(complaints)))
+        elif attempt.output.exit_code == CONFIG_EXIT_CODE:
+            stopped.append("%s=%r exited %d, the configuration-error code"
+                           % (name, spelling, CONFIG_EXIT_CODE))
+    if not any(attempt.ok for attempt in blanked.values()):
+        return _s15(1, Outcome.CANNOT_TEST,
+                    "no probe completed, so startup was never observed")
+    if stopped:
+        return _s15(1, Outcome.FAIL, "; ".join(stopped))
+    return _s15(1, Outcome.PASS, "")
+
+
+def _unrecognised_is_an_error_finding(attempt):
+    """Judge assertion 3: a filled-in value nobody could mean still fails.
+
+    Args:
+        attempt: The capture of the probe carrying the bad value.
+
+    Returns:
+        Finding: PASS when the product refused it by name.
+    """
+    if not attempt.ok:
+        return _s15(2, Outcome.CANNOT_TEST, attempt.failure)
+    if attempt.output.exit_code == 0:
+        return _s15(2, Outcome.FAIL,
+                    "MAGI_PROVIDER=%r was accepted, so the blank rule reaches "
+                    "values that are present and wrong" % UNRECOGNISED_PROVIDER)
+    if not _vocabulary_complaints(attempt.output):
+        return _s15(2, Outcome.FAIL,
+                    "MAGI_PROVIDER=%r failed the run without a vocabulary "
+                    "error, so it was not the value that was rejected: %s"
+                    % (UNRECOGNISED_PROVIDER, _excerpt(attempt.output)))
+    return _s15(2, Outcome.PASS, "")
+
+
+def _s15(index, outcome, detail):
+    """Build the finding for one entry of :data:`S15_ASSERTIONS`.
+
+    Args:
+        index: Position in :data:`S15_ASSERTIONS`.
+        outcome: What became of it.
+        detail: The cause when the outcome is not PASS.
+
+    Returns:
+        Finding: The finding, with no run id -- S15 is standalone.
+    """
+    return Finding(assertion=S15_ASSERTIONS[index], outcome=outcome,
+                   detail=detail, run_id=None)
 
 
 def _excerpt(output, limit=600):
