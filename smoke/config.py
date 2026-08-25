@@ -12,6 +12,7 @@ this file is the passphrase.
 """
 
 import tomllib
+from dataclasses import dataclass
 from pathlib import Path
 
 from smoke.errors import PreflightError
@@ -202,12 +203,34 @@ class SmokeConfig:
         )
 
 
+@dataclass(frozen=True)
+class Seat:
+    """One MAGI seat: a model and the failure domain it belongs to.
+
+    The pair is inseparable, and that is the point. The product made it
+    breaking in v0.13.0 that a seat declaring a model must also declare its
+    lineage, because a lineage is a **user-chosen failure domain** that cannot
+    be read off a model name -- the same two models are legitimately one domain
+    for one operator and two for another. Carrying the model without the
+    lineage would let the harness rewrite a seat and leave behind a label
+    describing a model that is no longer there, and the product's diversity
+    check would then pass on three descriptions of the wrong thing.
+
+    Attributes:
+        model: The model tag the seat runs.
+        lineage: The failure domain the operator assigned to it.
+    """
+
+    model: str
+    lineage: str
+
+
 class ModelProfile:
     """The cheap model profile, read only when ``--profile`` asked for it.
 
     Attributes:
         model: The main agent's model.
-        trio: Exactly :data:`TRIO_SIZE` models, one per MAGI seat.
+        trio: Exactly :data:`TRIO_SIZE` seats, each a :class:`Seat`.
     """
 
     def __init__(self, model, trio):
@@ -215,7 +238,7 @@ class ModelProfile:
 
         Args:
             model: The main agent's model.
-            trio: The three seat models.
+            trio: The three seats.
         """
         self.model = model
         self.trio = trio
@@ -249,7 +272,22 @@ class ModelProfile:
         trio = section.get("trio")
         if not isinstance(trio, list) or len(trio) != TRIO_SIZE:
             raise PreflightError(
-                "[profile.cheap].trio in %s must name exactly %d models"
+                "[profile.cheap].trio in %s must name exactly %d seats"
                 % (path.name, TRIO_SIZE)
             )
-        return cls(model=section.get("model"), trio=trio)
+        seats = []
+        for position, entry in enumerate(trio):
+            if not isinstance(entry, dict) or "model" not in entry:
+                raise PreflightError(
+                    "[profile.cheap].trio[%d] in %s must declare a model"
+                    % (position, path.name)
+                )
+            if "lineage" not in entry:
+                raise PreflightError(
+                    "[profile.cheap].trio[%d] in %s declares a model without a "
+                    "lineage. A lineage is a failure domain you choose, so the "
+                    "harness will not infer one: guessing would look exactly "
+                    "like a declaration." % (position, path.name)
+                )
+            seats.append(Seat(model=entry["model"], lineage=entry["lineage"]))
+        return cls(model=section.get("model"), trio=seats)

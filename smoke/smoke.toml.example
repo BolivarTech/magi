@@ -44,9 +44,18 @@ ceiling_fraction = 0.0   # <measure>
 #   mistral-large-3:675b-cloud  Medium  invalid JSON, and never reasons
 # Cost signal: Ollama Cloud bills quota, not tokens - use the Usage label it
 # publishes per model, never an estimate of your own.
+# Each seat declares a model AND its lineage. The product has treated a seat
+# that declares one without the other as a load error since v0.13.0, and the
+# reason carries over here: a lineage is a failure domain YOU choose, not a
+# property readable off a model name. The harness rewrites both keys together
+# and will not infer a label - guessing would look exactly like a declaration.
 [profile.cheap]
 model = "<measure: main agent, needs tool-calling>"
-trio  = ["gemma4:cloud", "qwen3.5:cloud", "deepseek-v4-flash:cloud"]
+trio = [
+  { model = "gemma4:cloud",            lineage = "<declare>" },
+  { model = "qwen3.5:cloud",           lineage = "<declare>" },
+  { model = "deepseek-v4-flash:cloud", lineage = "<declare>" },
+]
 # Expected reds under this profile, each with its cause written:
 #   (filled in after the first measurement - a deterministic red with a
 #    written cause is auditable; an intermittent one gets rationalised)
