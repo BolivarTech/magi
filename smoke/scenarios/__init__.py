@@ -16,3 +16,4 @@ so ``ScenarioModuleImportTests`` compares the two.
 
 from smoke.scenarios import workspace  # noqa: F401
 from smoke.scenarios import vault  # noqa: F401
+from smoke.scenarios import config_fatal  # noqa: F401
