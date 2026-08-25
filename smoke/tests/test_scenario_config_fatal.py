@@ -232,5 +232,160 @@ class ConfigFatalScenarioBodyTests(unittest.TestCase):
             )
 
 
+class _FakeEnvReader:
+    """A product double that reads the environment the way the product does.
+
+    Attributes:
+        blank_is_invalid: Whether a blank value is treated as a present one and
+            rejected against the vocabulary. That is the defect assertions 1
+            and 2 exist to catch.
+        every_value_is_absent: Whether even a filled-in unrecognised value
+            falls through. That is the OPPOSITE defect -- the fix overshooting
+            into accepting anything -- and only assertion 3 can see it.
+    """
+
+    def __init__(self, blank_is_invalid: bool = False,
+                 every_value_is_absent: bool = False) -> None:
+        """Create the double.
+
+        Args:
+            blank_is_invalid: Reject blank values against the vocabulary.
+            every_value_is_absent: Never reject any value.
+        """
+        self.blank_is_invalid = blank_is_invalid
+        self.every_value_is_absent = every_value_is_absent
+
+    def __call__(self, call: support.Call) -> ProductOutput | None:
+        """Answer one invocation.
+
+        Args:
+            call: What the fake binary was asked to run.
+
+        Returns:
+            ProductOutput: The canned answer, or None for the failed default.
+        """
+        if call.args[:1] == ("init",):
+            return _FakeProduct._scaffold(
+                pathlib.Path(call.cwd) if call.cwd else None)
+        if call.args[:1] != ("query",):
+            return None
+        env = call.env or {}
+        passphrase = env.get("MAGI_PASSPHRASE", support.FAKE_PASSPHRASE)
+        if not passphrase.strip():
+            return _capture(
+                b"",
+                b"error: no passphrase: use -p or MAGI_PASSPHRASE in "
+                b"non-interactive environments\n", 1)
+        provider = env.get("MAGI_PROVIDER", "")
+        present = bool(provider.strip()) or (self.blank_is_invalid
+                                             and "MAGI_PROVIDER" in env)
+        known = provider.strip() in ("ollama", "openai-compat", "anthropic")
+        if present and not known and not self.every_value_is_absent:
+            return _capture(
+                b"", b'error: unknown provider: "%s" (valid: ollama, '
+                     b'openai-compat, anthropic)\n' % provider.encode("utf-8"),
+                2)
+        return _capture(b"", b"error sending request: connection refused\n", 1)
+
+
+class BlankEnvScenarioTests(unittest.TestCase):
+    """S15 is registered standalone and declares its three assertions."""
+
+    def test_s15_is_registered_without_a_run(self) -> None:
+        entry = DEFAULT_REGISTRY.get("S15")
+        self.assertIsNone(entry.run)
+        self.assertFalse(entry.needs_backend)
+
+    def test_the_assertion_texts_are_the_spec_texts(self) -> None:
+        self.assertEqual(
+            [
+                "each text-valued variable, exported empty or blank, falls "
+                "through to the next precedence level",
+                "startup succeeds — no vocabulary error, no empty credential "
+                "short-circuiting the vault lookup",
+                "a value that is present and unrecognised is still an error",
+            ],
+            list(config_fatal.S15_ASSERTIONS),
+        )
+
+    def test_every_variable_the_spec_names_is_covered(self) -> None:
+        """The spec covers eight variables in one pass, so the scenario has to
+        exercise eight. A shorter list is a smaller guarantee wearing the same
+        assertion text.
+        """
+        self.assertEqual(8, len(config_fatal.BLANKABLE_VARIABLES))
+        for name in ("MAGI_PROVIDER", "MAGI_PASSPHRASE", "OPENAI_BASE_URL",
+                     "OPENAI_MODEL", "ANTHROPIC_MODEL", "ANTHROPIC_API_KEY",
+                     "OPENAI_API_KEY"):
+            self.assertIn(name, config_fatal.BLANKABLE_VARIABLES)
+        self.assertTrue(
+            any(name.startswith("MAGI_MODEL_")
+                for name in config_fatal.BLANKABLE_VARIABLES),
+            "the MAGI_MODEL_* family is not represented",
+        )
+
+    def test_both_spellings_of_blank_are_exercised(self) -> None:
+        """An exported-but-unfilled variable in a CI script is the everyday
+        accident this protects, and it arrives in both spellings.
+        """
+        self.assertEqual(("", "   "), config_fatal.BLANK_SPELLINGS)
+
+
+class BlankEnvScenarioBodyTests(unittest.TestCase):
+    """What S15 concludes about a product that reads blanks well, and badly."""
+
+    def _outcomes(self) -> dict[str, Outcome]:
+        """Run S15 and index its outcomes by assertion.
+
+        Returns:
+            dict[str, Outcome]: What each assertion concluded.
+        """
+        findings = list(DEFAULT_REGISTRY.get("S15").func(None))
+        return {finding.assertion: finding.outcome for finding in findings}
+
+    def test_a_product_that_scaffolds_nothing_still_reports_all_three(self) -> None:
+        support.install_fake_runs(self)
+        findings = list(DEFAULT_REGISTRY.get("S15").func(None))
+        self.assertEqual(list(config_fatal.S15_ASSERTIONS),
+                         [finding.assertion for finding in findings])
+        self.assertEqual({Outcome.CANNOT_TEST},
+                         {finding.outcome for finding in findings})
+
+    def test_a_product_that_reads_blanks_as_absent_passes(self) -> None:
+        support.install_fake_runs(self, responder=_FakeEnvReader())
+        self.assertEqual({Outcome.PASS}, set(self._outcomes().values()))
+
+    def test_a_blank_rejected_against_the_vocabulary_fails(self) -> None:
+        support.install_fake_runs(
+            self, responder=_FakeEnvReader(blank_is_invalid=True))
+        outcomes = self._outcomes()
+        self.assertEqual(Outcome.FAIL, outcomes[config_fatal.S15_ASSERTIONS[0]])
+        self.assertEqual(Outcome.FAIL, outcomes[config_fatal.S15_ASSERTIONS[1]])
+
+    def test_accepting_an_unrecognised_value_fails(self) -> None:
+        """Without assertion 3 a product that treated EVERY value as absent
+        would pass the first two perfectly, which is the fix overshooting.
+        """
+        support.install_fake_runs(
+            self, responder=_FakeEnvReader(every_value_is_absent=True))
+        outcomes = self._outcomes()
+        self.assertEqual(Outcome.PASS, outcomes[config_fatal.S15_ASSERTIONS[0]])
+        self.assertEqual(Outcome.FAIL, outcomes[config_fatal.S15_ASSERTIONS[2]])
+
+    def test_the_passphrase_variable_is_bounded_not_awaited(self) -> None:
+        """A blank MAGI_PASSPHRASE falls through to a TTY prompt that does not
+        exist here, so the expected answer is the typed refusal. Every
+        invocation carries a timeout, so a regression that hangs fails the
+        scenario instead of the harness.
+        """
+        binary = support.install_fake_runs(self, responder=_FakeEnvReader())
+        list(DEFAULT_REGISTRY.get("S15").func(None))
+        blanked = [call for call in binary.calls
+                   if (call.env or {}).get("MAGI_PASSPHRASE", "x").strip() == ""]
+        self.assertTrue(blanked, "the passphrase was never blanked")
+        for call in blanked:
+            self.assertIsNotNone(call.timeout)
+
+
 if __name__ == "__main__":
     unittest.main()
