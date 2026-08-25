@@ -1,10 +1,15 @@
 # Author: Julian Bolivar
 # Version: 1.0.0
 # Date: 2026-08-25
-"""S3 -- the vault stores and never reveals.
+"""The two vault scenarios: S3 -- stores and never reveals; S4 -- never deletes.
 
-Protects REQ-V09: there is no ``get``/``cat``/``show``/``reveal``/``export``
+S3 protects REQ-V09: there is no ``get``/``cat``/``show``/``reveal``/``export``
 subcommand, and the stored value never reaches any output.
+
+S4 protects REQ-V35, the never-delete policy, and it is the scenario whose
+failure is total loss of the user's data. Under the envelope a wrong passphrase
+and a corrupt wrapped key fail the same GCM-SIV tag check, so a product that
+wiped on failure would turn a typo into an unrecoverable loss.
 
 Two things here are done the hard way on purpose.
 
@@ -32,6 +37,12 @@ S3_ASSERTIONS = (
     "the planted value appears nowhere in stdout, stderr or the run log",
     "no subcommand exists that prints a stored value",
     "vault rm removes it and ls no longer lists it",
+)
+
+#: The verbatim assertion texts of the spec's section 8, for S4.
+S4_ASSERTIONS = (
+    "opening with a wrong passphrase fails with a typed WrongPassphrase, exit 1",
+    "reopening with the correct passphrase still finds the accumulated history",
 )
 
 #: The entry this scenario plants. A FIXED name rather than a random one: a run
@@ -67,9 +78,37 @@ LOG_DIR_PARTS = (".magi", "logs")
 REVEALING_SUBCOMMANDS = ("get", "cat", "show", "reveal", "export", "print",
                          "read", "dump")
 
+#: What S4 opens the database with. It must differ from the configured
+#: passphrase -- a "wrong" one that happens to be right makes assertion 1 red
+#: for the wrong reason and assertion 2 vacuous -- and it is long enough that
+#: the product's own strength floor is never what rejects it.
+WRONG_PASSPHRASE = "this-is-not-the-passphrase-0000"
+
+#: The subcommand S4 measures the environment with. It is read-only and needs
+#: NO passphrase (REQ-H32), which is the only reason the precondition can be
+#: checked at all: every other way of counting the rows would first have to
+#: open the very envelope the scenario is about to attack.
+DIAGNOSE_SUBCOMMAND = "diagnose"
+
+#: How ``diagnose`` announces that there is a wrapped key to fail against, and
+#: the block its per-table counts follow.
+ENVELOPE_PRESENT_LINE = "envelope: present"
+COUNTS_HEADING = "counts:"
+
+#: The tables whose rows are the user's accumulated history. ``vault`` is
+#: excluded: S3 plants and removes an entry there in the same run, so counting
+#: it would make S4's precondition depend on when S3 happened to run.
+HISTORY_TABLES = ("sessions", "messages", "knowledge", "memories")
+
+#: What the product prints when the unwrap fails. The assertion is on the TYPED
+#: failure, not merely on a non-zero exit: a database that could not be opened
+#: for some other reason is a different event with the same exit code.
+WRONG_PASSPHRASE_MARKER = b"incorrect passphrase"
+
 _COMMANDS_HEADING = re.compile(r"^\s*(commands|subcommands):\s*$",
                                re.IGNORECASE)
 _DIGIT = re.compile(r"\d")
+_COUNT_LINE = re.compile(r"^\s+(\w+):\s+(\d+)\s*$")
 
 
 @scenario("S3")
@@ -103,7 +142,7 @@ def the_vault_stores_and_never_reveals(run):
     yield _removed_finding(removed, relisted)
 
 
-def _vault(args, stdin=None, label="s3", planted=()):
+def _vault(args, stdin=None, label="s3", planted=(), passphrase=None):
     """Run one ``vault`` subcommand against the persistent environment.
 
     Args:
@@ -113,14 +152,20 @@ def _vault(args, stdin=None, label="s3", planted=()):
         planted: The secrets this invocation puts in front of the product, so
             the archived copy is scrubbed. An invocation that omits a secret it
             planted writes it to ``env/runs/`` in clear.
+        passphrase: What to unlock with; the configured one when omitted. It
+            travels in ``MAGI_PASSPHRASE`` and never in ``-p``, which is a
+            global flag and would ride in a command line every process on the
+            machine can read while the child lives.
 
     Returns:
         Attempt: The capture, or why there is none.
     """
+    if passphrase is None:
+        passphrase = runs.passphrase()
     return runs.attempt(
         [VAULT_SUBCOMMAND, WORKDIR_FLAG, str(runs.workspace_root())] + list(args),
         stdin=stdin, timeout_s=VAULT_TIMEOUT_S, label=label, planted=planted,
-        env={"MAGI_PASSPHRASE": runs.passphrase()},
+        env={"MAGI_PASSPHRASE": passphrase},
     )
 
 
@@ -379,6 +424,202 @@ def _excerpt(output, limit=400):
         str: The first *limit* bytes of both streams, decoded leniently.
     """
     return output.raw()[:limit].decode("utf-8", errors="replace").strip()
+
+
+@scenario("S4")
+def a_wrong_passphrase_destroys_nothing(run):
+    """Fail an unwrap on purpose, then check nothing was lost doing it.
+
+    The precondition is verified, not assumed. Over a database with no envelope
+    there is nothing for a wrong passphrase to fail against -- the product
+    would bootstrap one and exit 0 -- and over a database with no rows,
+    "the accumulated history is still there" is true of a history that never
+    existed. Either way the scenario reports CANNOT_TEST naming what was
+    missing, and never PASS.
+
+    Args:
+        run: Always ``None``; S4 declares no shared run.
+
+    Yields:
+        Finding: One per entry of :data:`S4_ASSERTIONS`, in that order.
+    """
+    before = _diagnose("s4-diagnose-before")
+    refused = _vault(["ls"], label="s4-wrong",
+                     passphrase=WRONG_PASSPHRASE)
+    after = _diagnose("s4-diagnose-after")
+    reopened = _vault(["ls"], label="s4-reopen")
+    yield _refusal_is_typed_finding(before, refused)
+    yield _history_survived_finding(before, after, reopened)
+
+
+def _diagnose(label):
+    """Read the database's structure without unlocking it.
+
+    Args:
+        label: What to call the invocation in the archive.
+
+    Returns:
+        Attempt: The capture, or why there is none.
+    """
+    return runs.attempt(
+        [VAULT_SUBCOMMAND, WORKDIR_FLAG, str(runs.workspace_root()),
+         DIAGNOSE_SUBCOMMAND],
+        timeout_s=VAULT_TIMEOUT_S, label=label,
+    )
+
+
+def _envelope_present(attempt):
+    """Whether ``diagnose`` reported a wrapped key.
+
+    Args:
+        attempt: The ``vault diagnose`` attempt.
+
+    Returns:
+        bool: True when the report names a present envelope.
+    """
+    if not attempt.ok:
+        return False
+    text = attempt.output.stdout.decode("utf-8", errors="replace")
+    return any(line.strip() == ENVELOPE_PRESENT_LINE
+               for line in text.splitlines())
+
+
+def _history_counts(attempt):
+    """Extract the per-table row counts out of a ``diagnose`` report.
+
+    Only the lines inside the ``counts:`` block are read: the report also
+    carries an envelope line and a verdict, and a looser match would take
+    ``fec: ok`` for a table.
+
+    Complexity: ``O(lines)``.
+
+    Args:
+        attempt: The ``vault diagnose`` attempt.
+
+    Returns:
+        dict[str, int] | None: The counts of :data:`HISTORY_TABLES` that the
+        report gave a number for, or None when the report could not be read. A
+        table reported as ``missing`` is absent from the mapping rather than
+        recorded as zero -- unknown is not empty.
+    """
+    if not attempt.ok or attempt.output.exit_code != 0:
+        return None
+    counts = {}
+    inside = False
+    for line in attempt.output.stdout.decode("utf-8",
+                                             errors="replace").splitlines():
+        if line.strip() == COUNTS_HEADING:
+            inside = True
+            continue
+        if not inside:
+            continue
+        match = _COUNT_LINE.match(line)
+        if match is None:
+            break
+        if match.group(1) in HISTORY_TABLES:
+            counts[match.group(1)] = int(match.group(2))
+    return counts
+
+
+def _refusal_is_typed_finding(before, refused):
+    """Judge assertion 1: the refusal is typed, and it is exit 1.
+
+    Args:
+        before: The ``diagnose`` taken before the attempt.
+        refused: The open attempted with the wrong passphrase.
+
+    Returns:
+        Finding: PASS on exit 1 carrying the typed refusal.
+    """
+    if not _envelope_present(before):
+        return _s4(0, Outcome.CANNOT_TEST,
+                   "the environment carries no envelope, so a wrong "
+                   "passphrase has no wrapped key to fail against")
+    if not refused.ok:
+        return _s4(0, Outcome.CANNOT_TEST, refused.failure)
+    if refused.output.exit_code == 0:
+        return _s4(0, Outcome.FAIL,
+                   "the vault opened with a passphrase that is not its own")
+    if WRONG_PASSPHRASE_MARKER not in refused.output.raw():
+        return _s4(0, Outcome.FAIL,
+                   "the refusal is untyped: exit %d without naming an "
+                   "incorrect passphrase: %s"
+                   % (refused.output.exit_code, _excerpt(refused.output)))
+    if refused.output.exit_code != 1:
+        return _s4(0, Outcome.FAIL,
+                   "the typed refusal exited %d, expected 1"
+                   % refused.output.exit_code)
+    return _s4(0, Outcome.PASS, "")
+
+
+def _history_survived_finding(before, after, reopened):
+    """Judge assertion 2: nothing was deleted, and the vault still opens.
+
+    Args:
+        before: The ``diagnose`` taken before the wrong passphrase.
+        after: The one taken after it.
+        reopened: The open attempted with the correct passphrase.
+
+    Returns:
+        Finding: PASS when every table holds what it held and the correct
+        passphrase still works.
+    """
+    counts_before = _history_counts(before)
+    counts_after = _history_counts(after)
+    if counts_before is None or counts_after is None:
+        return _s4(1, Outcome.CANNOT_TEST,
+                   "the database's structure could not be read, so nothing "
+                   "can be said about what survived")
+    if not any(counts_before.values()):
+        return _s4(1, Outcome.CANNOT_TEST,
+                   "the environment holds no accumulated history yet (%s), so "
+                   "this assertion would pass over nothing"
+                   % _render_counts(counts_before))
+    lost = ["%s went from %d to %d"
+            % (table, counts_before[table], counts_after.get(table, 0))
+            for table in sorted(counts_before)
+            if counts_after.get(table, 0) < counts_before[table]]
+    if lost:
+        return _s4(1, Outcome.FAIL,
+                   "a refused open destroyed data: %s" % "; ".join(lost))
+    if not reopened.ok:
+        return _s4(1, Outcome.CANNOT_TEST, reopened.failure)
+    if reopened.output.exit_code != 0:
+        return _s4(1, Outcome.FAIL,
+                   "the correct passphrase no longer opens the vault: exit "
+                   "%d: %s" % (reopened.output.exit_code,
+                               _excerpt(reopened.output)))
+    return _s4(1, Outcome.PASS, "")
+
+
+def _render_counts(counts):
+    """Render a counts mapping for a finding's detail.
+
+    Args:
+        counts: Table name to row count.
+
+    Returns:
+        str: The pairs, sorted by table, or a note that none were reported.
+    """
+    if not counts:
+        return "no table reported a count"
+    return ", ".join("%s=%d" % (table, counts[table])
+                     for table in sorted(counts))
+
+
+def _s4(index, outcome, detail):
+    """Build the finding for one entry of :data:`S4_ASSERTIONS`.
+
+    Args:
+        index: Position in :data:`S4_ASSERTIONS`.
+        outcome: What became of it.
+        detail: The cause when the outcome is not PASS.
+
+    Returns:
+        Finding: The finding, with no run id -- S4 is standalone.
+    """
+    return Finding(assertion=S4_ASSERTIONS[index], outcome=outcome,
+                   detail=detail, run_id=None)
 
 
 def _s3(index, outcome, detail):
