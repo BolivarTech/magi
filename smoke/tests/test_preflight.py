@@ -17,6 +17,7 @@ from smoke.env import Environment
 from smoke.errors import PreflightError
 from smoke.lock import RunLock
 from smoke.preflight import BackendStatus, Preflight, check_config_permissions
+from smoke.product import ProductOutput
 
 
 @unittest.skipIf(sys.platform == "win32", "POSIX permission bits")
@@ -106,6 +107,80 @@ class OrderingTests(unittest.TestCase):
                               RunLock(directory / ".lock")).run(False, None)
         self.assertIn("--init-env", str(caught.exception))
         env.normalize_magi_toml.assert_not_called()
+
+
+class RotationRestoreTests(unittest.TestCase):
+    """Step 6 must RESTORE, not narrate.
+
+    The first version of this step printed "restoring the backend credential"
+    and then did nothing: it never re-set the value and never removed the
+    marker, so every subsequent run found the marker again and announced the
+    same restore. A message claiming work that did not happen is worse than
+    silence -- it reads as evidence forever.
+    """
+
+    def _preflight(self, listing, credential="the-real-credential"):
+        """Build a preflight whose vault answers *listing*.
+
+        Args:
+            listing: What ``vault ls`` prints.
+            credential: What the environment holds for the backend key.
+
+        Returns:
+            tuple: The preflight and the list its binary records calls into.
+        """
+        calls = []
+        binary = mock.create_autospec(ReleaseBinary, instance=True)
+
+        def answer(args, stdin=None, env=None, timeout=None, cwd=None):
+            calls.append(list(args))
+            text = listing if args[:2] == ["vault", "ls"] else ""
+            return ProductOutput(stdout=text.encode("utf-8"), stderr=b"",
+                                 exit_code=0, command=["magi-rs"] + list(args))
+
+        binary.invoke.side_effect = answer
+        config = mock.Mock(spec=SmokeConfig)
+        config.passphrase = "correct horse battery staple"
+        config.backend_key_env = "SMOKE_TEST_KEY"
+        env = mock.Mock(spec=Environment)
+        env.exists.return_value = True
+        os.environ["SMOKE_TEST_KEY"] = credential
+        self.addCleanup(os.environ.pop, "SMOKE_TEST_KEY", None)
+        return Preflight(config, env, binary, mock.Mock(spec=RunLock)), calls
+
+    def test_a_left_over_marker_is_restored_and_removed(self) -> None:
+        """Detection alone leaves the environment broken for the next run."""
+        preflight, calls = self._preflight("SMOKE_R7_ROTATION\nOPENAI_API_KEY\n")
+        preflight._restore_rotation_if_left_over()
+        subcommands = [c[:2] for c in calls]
+        self.assertIn(["vault", "set"], subcommands)
+        self.assertIn(["vault", "rm"], subcommands)
+        self.assertLess(subcommands.index(["vault", "set"]),
+                        subcommands.index(["vault", "rm"]),
+                        "the credential is restored before the marker is dropped")
+
+    def test_no_marker_means_no_vault_writes_at_all(self) -> None:
+        preflight, calls = self._preflight("OPENAI_API_KEY\n")
+        preflight._restore_rotation_if_left_over()
+        self.assertEqual([["vault", "ls"]], [c[:2] for c in calls])
+
+    def test_the_vault_listing_uses_the_binary_s_real_signature(self) -> None:
+        """The first version passed ``timeout_s=``; the binary takes ``timeout``.
+
+        The resulting TypeError was swallowed by a bare ``except Exception``,
+        so the listing silently answered "cannot tell" on every run and the
+        marker was never detected at all. An autospec double refuses the wrong
+        keyword, which is what makes this checkable.
+        """
+        preflight, _ = self._preflight("OPENAI_API_KEY\n")
+        self.assertIsNotNone(preflight._vault_names())
+
+    def test_a_restore_with_no_credential_to_restore_cuts(self) -> None:
+        """Cutting is the honest answer; printing a restore is not."""
+        preflight, _ = self._preflight("SMOKE_R7_ROTATION\n", credential="")
+        os.environ.pop("SMOKE_TEST_KEY", None)
+        with self.assertRaises(PreflightError):
+            preflight._restore_rotation_if_left_over()
 
 
 class BackendStatusTests(unittest.TestCase):
