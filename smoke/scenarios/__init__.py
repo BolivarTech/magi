@@ -20,3 +20,4 @@ from smoke.scenarios import config_fatal  # noqa: F401
 from smoke.scenarios import hygiene  # noqa: F401
 from smoke.scenarios import flags  # noqa: F401
 from smoke.scenarios import docs  # noqa: F401
+from smoke.scenarios import contract  # noqa: F401
