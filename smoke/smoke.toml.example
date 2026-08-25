@@ -1,0 +1,54 @@
+# Author: Julian Bolivar
+# Version: 1.0.0
+# Date: 2026-08-25
+#
+# Copy to smoke/smoke.toml (gitignored) and fill in. This file is tracked and
+# carries no real values.
+
+[env]
+# The vault passphrase for smoke/env/. At least 12 characters; the product
+# also requires zxcvbn >= 3, which the harness cannot check without a
+# dependency it is not allowed to have. It reaches the product through
+# MAGI_PASSPHRASE, never through -p: -p is a global flag, so the passphrase
+# would ride in the archived command line of every run.
+passphrase = "<choose one, at least 12 characters>"
+
+[backend]
+kind     = "ollama"
+base_url = "http://localhost:11434/v1"
+key_env  = "OPENAI_API_KEY"
+
+# The large payload: bytes are CHOSEN, tokens are ASSERTED (spec section 7.2).
+# 250000 is measured viable against a real backend and sits at 95% of
+# MAX_QUERY_BYTES (256 KiB). The harness never predicts the token count.
+[payload]
+target_bytes = 250000
+token_floor  = 50000
+
+# S9's empirical numbers. Both are MEASURED in phase 5, against this
+# environment; a number chosen in the spec would be a guess wearing a
+# contract's clothes.
+[calibration]
+margin_tokens    = 0     # <measure>
+ceiling_fraction = 0.0   # <measure>
+
+# CHEAP PROFILE - for iterating. It NEVER certifies (REQ-S35).
+# Starting point inherited from MAGI-Core, measured 2026-08-21. It is a
+# candidate list and an exclusion list, NOT an answer: those measurements
+# cover verdict-shaped properties, and the main agent's tool-calling axis
+# (which S5 needs) was never exercised there. RE-MEASURE against magi-rs's
+# own prompts before declaring any of them.
+#   gemma4:cloud                Low     never reasons
+#   gpt-oss:20b-cloud           Low     ignores think:false
+#   nemotron-3-nano:30b-cloud   Low     truncates its verdict JSON 1 run in 3
+#   mistral-large-3:675b-cloud  Medium  invalid JSON, and never reasons
+# Cost signal: Ollama Cloud bills quota, not tokens - use the Usage label it
+# publishes per model, never an estimate of your own.
+[profile.cheap]
+model = "<measure: main agent, needs tool-calling>"
+trio  = ["gemma4:cloud", "qwen3.5:cloud", "deepseek-v4-flash:cloud"]
+# Expected reds under this profile, each with its cause written:
+#   (filled in after the first measurement - a deterministic red with a
+#    written cause is auditable; an intermittent one gets rationalised)
+
+# To CERTIFY, pass no --profile at all: the product's own defaults are used.
