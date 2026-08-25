@@ -58,11 +58,13 @@ MEMORY_SECTION = "memory"
 #: main agent's model for both ``ollama`` and ``openai-compat`` -- they share
 #: the completions protocol -- and the three ``[magi]`` seats are the trio.
 PROFILE_MODEL_KEY = ("openai", "model")
-PROFILE_TRIO_KEYS = (
-    ("magi", "melchior_model"),
-    ("magi", "balthasar_model"),
-    ("magi", "caspar_model"),
-)
+
+#: The three seats, in the order a profile's trio declares them. Each one owns
+#: TWO keys in the product's file -- ``<seat>_model`` and ``<seat>_lineage`` --
+#: and the harness rewrites both or neither. Since v0.13.0 the product treats a
+#: seat that declares a model without its lineage as a load error, so writing
+#: one and leaving the other is not a smaller change: it is a broken file.
+PROFILE_SEATS = ("melchior", "balthasar", "caspar")
 
 
 @dataclass(frozen=True)
@@ -394,10 +396,13 @@ def _apply_profile(text: str, profile: ModelProfile) -> str:
     generated file keeps every other key -- including each seat's lineage --
     exactly as the product wrote it.
 
-    Note the limitation, declared rather than papered over: ``ModelProfile``
-    carries model names and no lineages, so a profiled trio keeps the lineage
-    labels of the models it replaced. A lineage is a user-chosen failure domain
-    and is never inferred, so the harness will not invent one.
+    Each seat's model and lineage are rewritten **together**. The profile
+    declares both because the operator declares both: a lineage is a
+    user-chosen failure domain, never inferred from a model name. Rewriting the
+    model alone would leave the file describing a failure domain the seat no
+    longer belongs to, and the product's diversity check would then pass on
+    three labels about models that are not there -- a diversity guarantee that
+    is true of the file and false of the run.
 
     Complexity: ``O(lines)``.
 
@@ -409,8 +414,9 @@ def _apply_profile(text: str, profile: ModelProfile) -> str:
         The rewritten configuration.
     """
     replacements = {PROFILE_MODEL_KEY: profile.model}
-    for position, key in enumerate(PROFILE_TRIO_KEYS):
-        replacements[key] = profile.trio[position]
+    for seat_name, seat in zip(PROFILE_SEATS, profile.trio):
+        replacements[("magi", "%s_model" % seat_name)] = seat.model
+        replacements[("magi", "%s_lineage" % seat_name)] = seat.lineage
 
     table = ""
     lines = []
