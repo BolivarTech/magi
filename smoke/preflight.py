@@ -28,12 +28,19 @@ import urllib.error
 import urllib.request
 
 from smoke.config import ROTATION_MARKER
-from smoke.errors import PreflightError
+from smoke.errors import PreflightError, ProductOutputError
 
 #: How long the backend probe waits before calling it unreachable. A backend
 #: that does not answer is not a failure (D-17): everything that does not need
 #: it still runs, and what does is reported CANNOT_TEST.
 BACKEND_PROBE_TIMEOUT_S = 10
+
+#: The variable the passphrase travels in. Never ``-p``: that is a global flag
+#: and would ride in the archived command line of every run.
+PASSPHRASE_VAR = "MAGI_PASSPHRASE"
+
+#: How long a vault command gets. Local work behind an Argon2 derivation.
+VAULT_TIMEOUT_S = 60
 
 #: How long ``icacls`` gets. It reads a local ACL; anything slower than this is
 #: a broken system, not a slow one.
@@ -243,9 +250,26 @@ class Preflight:
         listed = self._vault_names()
         if listed is None or ROTATION_MARKER not in listed:
             return
+        key = getattr(self.config, "backend_key_env", "")
+        credential = os.environ.get(key, "")
+        if not credential:
+            raise PreflightError(
+                "a previous run died mid-rotation: the vault still holds %s, "
+                "and %s carries no credential to restore from. Set it, or run "
+                "--reset-env to discard the environment."
+                % (ROTATION_MARKER, key or "the configured key variable")
+            )
+        # Restore FIRST, drop the marker second. A crash between the two leaves
+        # the marker with the credential already correct, so the next preflight
+        # restores a correct value over itself -- a no-op. The other order would
+        # leave the credential rotated with nothing left to say so.
+        self._vault_write(["vault", "set", key, "--force"], stdin=credential.encode("utf-8"))
+        self._vault_write(["vault", "rm", ROTATION_MARKER, "--force"])
         print(
-            "[preflight] a previous run died mid-rotation; restoring the "
-            "backend credential from smoke.toml"
+            "[preflight] a previous run died mid-rotation; %s has been "
+            "restored and %s removed. Something is killing R7 -- the recovery "
+            "working is not the same as nothing being wrong."
+            % (key, ROTATION_MARKER)
         )
 
     def _vault_names(self) -> list[str] | None:
@@ -257,12 +281,51 @@ class Preflight:
             expose one, and the sentinel is recognised by its name.
         """
         try:
-            completed = self.binary.invoke(["vault", "ls"], timeout_s=ICACLS_TIMEOUT_S)
-        except Exception:  # noqa: BLE001 - any failure means "cannot tell"
+            completed = self.binary.invoke(
+                ["vault", "ls"],
+                env={PASSPHRASE_VAR: getattr(self.config, "passphrase", "")},
+                timeout=VAULT_TIMEOUT_S,
+            )
+        except (OSError, ProductOutputError):
+            # Narrow on purpose. A bare `except Exception` here swallowed a
+            # TypeError from calling invoke with the wrong keyword, so this
+            # method answered "cannot tell" on every run and the marker was
+            # never detected at all -- the silence looked exactly like a clean
+            # vault.
             return None
         if completed.exit_code != 0:
             return None
         return completed.raw().decode("utf-8", errors="replace").split()
+
+    def _vault_write(self, argv, stdin=None) -> None:
+        """Run one vault mutation, refusing to continue if it fails.
+
+        Args:
+            argv: The product arguments, starting with ``vault``.
+            stdin: Bytes to feed the command, for a value that must never
+                appear in a command line.
+
+        Raises:
+            PreflightError: If the command cannot run or exits non-zero. A
+                half-restored environment produces authentication failures in
+                scenarios that have nothing to do with it, and those get
+                diagnosed for hours.
+        """
+        try:
+            completed = self.binary.invoke(
+                argv, stdin=stdin,
+                env={PASSPHRASE_VAR: getattr(self.config, "passphrase", "")},
+                timeout=VAULT_TIMEOUT_S,
+            )
+        except (OSError, ProductOutputError) as exc:
+            raise PreflightError(
+                "could not restore the rotated credential: %s" % exc
+            ) from exc
+        if completed.exit_code != 0:
+            raise PreflightError(
+                "restoring the rotated credential failed (%s exited %d)"
+                % (" ".join(argv[:2]), completed.exit_code)
+            )
 
     def _settle_binary(self, certifying: bool) -> None:
         """Step 7: the binary answers, and a certifying run always rebuilds.
