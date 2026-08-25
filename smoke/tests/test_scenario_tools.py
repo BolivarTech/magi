@@ -188,6 +188,26 @@ class ToolsScenarioBodyTests(unittest.TestCase):
         self.assertEqual(list(tools.ASSERTIONS), list(outcomes))
         self.assertEqual(Outcome.CANNOT_TEST, outcomes[tools.ASSERTIONS[0]])
 
+    def test_the_prompt_names_the_target_relatively_not_absolutely(self) -> None:
+        """Measured against the real backend: an ABSOLUTE path is refused in
+        prose and the tool is never called, so the guard is never asked and the
+        assertion can only ever report CANNOT_TEST.
+
+        A relative path that walks out of the workspace is the same escape, and
+        it is the one ``PathGuard`` has to normalise lexically before it can
+        reject. Naming it that way is what turns a permanently unevaluated
+        assertion into one that reaches the code it protects.
+        """
+        binary = support.install_fake_runs(self, responder=_FakeProbe(DENIED))
+        _outcomes(_run([_LS_RECORD]))
+        probes = [call for call in binary.calls if call.stdin is not None]
+        self.assertEqual(1, len(probes))
+        prompt = probes[0].stdin.decode("utf-8")
+        self.assertIn(tools.escape_target(), prompt)
+        self.assertNotIn(str(tools.outside_path()), prompt)
+        self.assertTrue(tools.escape_target().startswith("../"),
+                        tools.escape_target())
+
     def test_the_probe_aims_at_a_path_that_exists_outside_the_workspace(self) -> None:
         """A refusal for a MISSING file would be a false green.
 
