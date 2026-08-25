@@ -23,7 +23,8 @@ from smoke.errors import HarnessError, PreflightError
 from smoke.lock import RunLock
 from smoke.preflight import Preflight
 from smoke.registry import DEFAULT_REGISTRY
-from smoke.runner import Ambient, Runner, StampedFinding
+from smoke.runner import Ambient, Runner, StampedFinding, capture_tree
+from smoke.runs import DEFINITIONS, RunExecutor, RunResult, needed_runs
 # Imported for its side effect: the decorator registers at import time, so a
 # scenario nobody imported is a scenario nobody runs. Without this line the
 # harness reconciled an EMPTY registry against itself -- every set difference
@@ -126,15 +127,33 @@ def main(argv: list[str] | None = None) -> int:
             return EXIT_OK
         certifying = args.smoke_2 and profile is None
         binary = ReleaseBinary(REPO_ROOT)
+        runs.configure(binary, env, config)
+        # The snapshot is taken BEFORE the preflight, not after. The scenario
+        # that asserts the harness left no trace compares against it, and the
+        # preflight already writes -- it takes the lock and normalises the
+        # environment's magi.toml. A snapshot taken afterwards would declare
+        # the harness clean of exactly the changes it had just made.
+        ambient = Ambient(
+            tree_snapshot=capture_tree(REPO_ROOT),
+            margin_tokens=config.margin_tokens,
+            ceiling_fraction=config.ceiling_fraction,
+            memory_settings=env.memory_settings(),
+        )
         # The preflight normalises the environment itself, as its step 7b --
         # inside the lock it takes at step 2. main() must NOT do it here.
         backend = Preflight(config, env, binary,
                             RunLock(LOCK_PATH)).run(certifying, profile)
-        runs.configure(binary, env, config)
-        findings = Runner(DEFAULT_REGISTRY, {}, backend.reachable,
-                          Ambient(tree_snapshot=None, margin_tokens=config.margin_tokens,
-                                  ceiling_fraction=config.ceiling_fraction,
-                                  memory_settings=env.memory_settings())).run()
+        executor = RunExecutor(binary, env, config)
+        run_results: dict[str, RunResult] = {}
+        for run_id in needed_runs(DEFAULT_REGISTRY, backend.reachable):
+            result = executor.execute(DEFINITIONS[run_id])
+            # Archived per result and immediately, never in a batch at the end:
+            # a harness that dies mid-run should leave the outputs it already
+            # had, scrubbed, rather than nothing.
+            executor.archive(result)
+            run_results[run_id] = result
+        findings = Runner(DEFAULT_REGISTRY, run_results, backend.reachable,
+                          ambient).run()
     except PreflightError as exc:
         print(f"preflight: {exc}", file=sys.stderr)
         return EXIT_PREFLIGHT
