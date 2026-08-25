@@ -90,6 +90,28 @@ class LoadTests(unittest.TestCase):
             SmokeConfig.load(path)
         self.assertIn("smoke.toml", str(caught.exception))
 
+    def test_the_decoder_error_is_never_chained_onto_the_report(self) -> None:
+        """The suppression is the guard, and it guards THIS code.
+
+        Measured on 3.11: ``tomllib`` reports position only -- no case tried
+        (error on a later line, on the secret's own line, a duplicate key)
+        reproduced any content. So the leak REQ-A16c records is the PRODUCT's
+        Rust decoder, not this one, and asserting "the message does not contain
+        the secret" would pass no matter what this module did: a test that
+        cannot fail advertises a protection it is not providing.
+
+        What is worth guarding is the harness's own choice not to depend on
+        that measurement holding forever. ``raise ... from None`` suppresses
+        the context, so no traceback path can surface the decoder's text even
+        if a future version starts carrying it. Swap it for ``from exc`` and
+        this goes red.
+        """
+        path = self._write('this is not = = toml\n')
+        with self.assertRaises(PreflightError) as caught:
+            SmokeConfig.load(path)
+        self.assertIsNone(caught.exception.__cause__)
+        self.assertTrue(caught.exception.__suppress_context__)
+
     def test_a_weak_passphrase_is_refused(self) -> None:
         path = self._write(_MINIMAL.replace("correct horse battery staple", "short"))
         with self.assertRaises(PreflightError) as caught:
