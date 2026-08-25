@@ -40,6 +40,7 @@ def _seed_env_config() -> None:
     (config_dir / memory.MAGI_TOML_NAME).write_text(_ENV_CONFIG,
                                                     encoding="utf-8")
 
+
 #: A ``[memory]`` block declaring all three fields the ceiling is derived from.
 _COMPLETE_SETTINGS = {
     "context_budget_tokens": 8000,
@@ -85,7 +86,7 @@ def _run(run_id, input_tokens, stderr=b"") -> RunResult:
                      duration_s=1.0, timed_out=False, planted=())
 
 
-def _runs(r3_tokens=9000, r2_tokens=1000, r3_stderr=_HEALTHY_LINE):
+def _runs(r3_tokens=4000, r2_tokens=1000, r3_stderr=_HEALTHY_LINE):
     """The mapping a scenario declaring three runs receives.
 
     Args:
