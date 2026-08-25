@@ -111,6 +111,22 @@ FULL_SUITE_TRIGGERS = (
 # avoid everywhere else.
 DOC_PREFIXES = ("docs/", "dev-docs/", ".superpowers/", "planning/", "sbtdd/",
                 "graphify-out/")
+
+# The smoke harness. A THIRD category, and neither of the existing two would do.
+#
+# It cannot be "full": cargo does not compile Python, so no Rust test can be
+# affected by it. It cannot be DOC_PREFIXES either -- that routes to ``None``,
+# which widens to the full suite all the same, so the cost would survive the
+# classification. And it cannot reuse the empty-diff answer, whose message tells
+# the reader the file is gitignored and invisible to git: ``smoke/`` is TRACKED,
+# so that message would state the opposite of the truth about their own tree.
+#
+# This does not weaken the "when in doubt, widen" rule. ``smoke/`` stops being an
+# UNKNOWN path and becomes a CLASSIFIED one; what is removed is the doubt, not
+# the widening. Its corollary is mandatory and lives in the message below: if
+# this script runs nothing for the harness, something else must gate it, or the
+# saving is paid for by leaving the harness unverified.
+HARNESS_PREFIXES = ("smoke/",)
 DOC_SUFFIXES = (".md", ".toml", ".json", ".yml", ".yaml", ".txt")
 
 
@@ -184,6 +200,12 @@ def module_filter(path, pkgs=None, single_crate=True):
     if lowered in FULL_SUITE_TRIGGERS:
         return "full"
 
+    # Before the package lookup and before DOC_SUFFIXES: ``smoke/*.toml`` would
+    # otherwise be read as documentation and ``smoke/*.py`` as an unknown path,
+    # and both of those end in the full suite.
+    if path.startswith(HARNESS_PREFIXES):
+        return "harness"
+
     if pkgs:
         owned = owning_package(path, pkgs)
         if owned is None:
@@ -239,14 +261,22 @@ def build_filter(paths, pkgs):
 
     single_crate = not pkgs or len(pkgs) == 1
     fragments = []
+    harness_touched = False
     for path in paths:
         mapped = module_filter(path, pkgs, single_crate)
         if mapped == "full":
             return "full", "%s forces a full run" % path
+        if mapped == "harness":
+            # Contributes no filter, and must not erase one: a change that
+            # touches the harness AND Rust still runs the Rust selection.
+            harness_touched = True
+            continue
         if mapped and mapped not in fragments:
             fragments.append(mapped)
 
     if not fragments:
+        if harness_touched:
+            return "harness", "only the smoke harness changed"
         return None, "only documentation or config changed"
     if len(fragments) == 1:
         return fragments[0], "1 path group mapped"
@@ -275,6 +305,13 @@ def main():
         print("[scoped-tests] %s -- nothing to verify, so nothing is run." % reason)
         print("[scoped-tests] A git-ignored file (CLAUDE.md, .claude/, dev-docs/, planning/) "
               "is invisible to git and cannot affect the build.")
+        return 0
+
+    if expression == "harness":
+        print("[scoped-tests] %s -- cargo does not compile it, so no Rust test "
+              "can be affected." % reason)
+        print("[scoped-tests] The harness has its own gate and it is NOT optional: "
+              "python -m compileall -q smoke/ && python -m unittest discover smoke/tests -q")
         return 0
 
     if expression == "full":
