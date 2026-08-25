@@ -653,10 +653,18 @@ The three MAGI perspectives (Melchior / Balthasar / Caspar) used by `/consult` a
 
 ```toml
 [magi]
-melchior_model  = "qwen3:8b"       # Scientist  — theoretical analysis
-balthasar_model = "gpt-oss:20b"    # Pragmatist — practical trade-offs
-caspar_model    = "deepseek-r1:8b" # Critic     — adversarial review
+melchior_model    = "qwen3:8b"       # Scientist  — theoretical analysis
+melchior_lineage  = "alibaba"
+balthasar_model   = "gpt-oss:20b"    # Pragmatist — practical trade-offs
+balthasar_lineage = "openai"
+caspar_model      = "deepseek-r1:8b" # Critic     — adversarial review
+caspar_lineage    = "deepseek"
 ```
+
+A seat that names a model must also name its lineage — the failure domain you consider that
+model to belong to. It is never inferred, and since `enforce_diversity` defaults to `true` the
+three have to differ. A seat left on the built-in model inherits the built-in lineage and owes
+nothing.
 
 | Setting | Env var | `magi.toml` | Default |
 |---------|---------|-------------|---------|

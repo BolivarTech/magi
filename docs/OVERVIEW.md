@@ -14,7 +14,7 @@ That makes Magi a fit for environments where source cannot be shipped to a third
 Design principles:
 
 - **Local-first** — a single static binary; state lives in an encrypted SQLite file, not a vendor vault.
-- **Encrypted at rest** — Argon2id → AES-256-GCM-SIV → Reed-Solomon FEC; the database key lives in the OS keyring, kept separate from the LLM API key.
+- **Encrypted at rest** — Argon2id → AES-256-GCM-SIV → Reed-Solomon FEC; the database is unlocked by a passphrase you choose, which is never stored anywhere. Nothing on disk opens it without that passphrase — there is no keyring entry, no cached copy, no recovery path. The LLM API key is a separate secret, kept *inside* the store the passphrase opens.
 - **Sandboxed** — filesystem tools are confined to the workspace; the shell tool runs a strict command allowlist.
 - **Human-in-the-loop** — every tool call is approved before it runs.
 

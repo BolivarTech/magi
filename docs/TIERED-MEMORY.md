@@ -296,15 +296,20 @@ session), never a panic or data loss.
 The same `CryptoVault` that protects conversation messages also protects memory:
 
 ```
-master password (OS keyring)
-  └─ Argon2id (OWASP 2025: 64 MiB, t=3, p=4)
-       └─ 32-byte key (derived once per session, cached)
-            ├─ AES-256-GCM-SIV (nonce-misuse resistant, fresh OsRng nonce per record)
-            │    └─ Reed-Solomon FEC (bit-rot recovery)
-            │         └─ encrypted `text_blob` (memory text)
-            └─ same cipher/FEC
-                 └─ encrypted `embedding_blob` (float32 vector)
+passphrase (chosen by the user; never stored, on disk or anywhere else)
+  └─ Argon2id (OWASP 2025: 64 MiB, t=3, p=4) + per-database salt
+       └─ key-encryption key
+            └─ unwraps the 32-byte data key (derived once per process)
+                 ├─ AES-256-GCM-SIV (nonce-misuse resistant, fresh OsRng nonce per record)
+                 │    └─ Reed-Solomon FEC (bit-rot recovery)
+                 │         └─ encrypted `text_blob` (memory text)
+                 └─ same cipher/FEC
+                      └─ encrypted `embedding_blob` (float32 vector)
 ```
+
+The salt and the wrapped data key are the only things the file carries about the key, and
+neither opens it. Forgetting the passphrase means the data is gone; that is the point of the
+design, not a gap in it.
 
 The **ANN index lives only in RAM** — vectors are decrypted to memory at session
 start and the in-RAM index is rebuilt. Nothing in the SQLite file ever contains a
