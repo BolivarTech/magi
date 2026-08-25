@@ -3,6 +3,9 @@
 # Date: 2026-08-25
 """Tests for the CLI surface and the four exit codes."""
 
+import pathlib
+import subprocess
+import sys
 import unittest
 
 from smoke.__main__ import (
@@ -15,6 +18,11 @@ from smoke.__main__ import (
 )
 from smoke.outcome import Outcome
 from smoke.runner import StampedFinding
+
+#: How long the child interpreter is given to import the entry point, in
+#: seconds. It imports modules and touches no network, so anything past this is
+#: hung rather than slow.
+_IMPORT_TIMEOUT_S = 120
 
 
 def _finding(outcome: Outcome) -> StampedFinding:
@@ -61,6 +69,37 @@ class ArgumentTests(unittest.TestCase):
     def test_init_env_and_reset_env_are_mutually_exclusive(self) -> None:
         with self.assertRaises(SystemExit):
             parse_args(["--init-env", "--reset-env"])
+
+
+class RegistrationOnTheProductPathTests(unittest.TestCase):
+    """The scenarios have to be registered on the path the OPERATOR takes."""
+
+    def test_running_the_module_registers_the_scenarios(self) -> None:
+        """A SUBPROCESS, and that is the whole value of this test.
+
+        In this process every scenario module has already been imported by the
+        scenario tests, so ``DEFAULT_REGISTRY`` is populated no matter what
+        ``smoke.__main__`` does. Only a fresh interpreter that imports nothing
+        but the entry point can answer whether the operator's ``python -m
+        smoke`` sees any scenario at all.
+
+        Without this the harness ran to completion, evaluated NOTHING, and
+        exited 0 -- a green run over an empty registry, which is the exact
+        shape of guardian this harness exists to refuse. The reconciliation
+        cannot catch it: with nothing registered, registered, invoked and
+        reported are all empty and every set difference is empty too.
+        """
+        result = subprocess.run(
+            [sys.executable, "-c",
+             "import smoke.__main__;"
+             "from smoke.registry import DEFAULT_REGISTRY;"
+             "print(len(DEFAULT_REGISTRY.registered_ids()))"],
+            cwd=str(pathlib.Path(__file__).resolve().parent.parent.parent),
+            capture_output=True, text=True, timeout=_IMPORT_TIMEOUT_S,
+            check=True,
+        )
+        self.assertGreater(int(result.stdout.strip()), 0,
+                           "python -m smoke would evaluate nothing and exit 0")
 
 
 if __name__ == "__main__":
