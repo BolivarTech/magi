@@ -35,6 +35,17 @@ BACKEND_KINDS = ("ollama", "openai-compat", "anthropic")
 PAYLOAD_TARGET_BYTES = 250_000
 PAYLOAD_TOKEN_FLOOR = 50_000
 
+#: Where the certificate is written, relative to the repository root and spelled
+#: with forward slashes because that is how git reports a path, and S12
+#: subtracts it from what git reports. A FIXED name that replaces the previous
+#: one: git history is already the archive, and a versioned filename would force
+#: a reader to know what the old one was called.
+#:
+#: Declared here rather than in ``certificate.py`` for the same reason as
+#: ROTATION_MARKER below: both of its readers are later tasks, and a constant
+#: living in the later module would invert the dependency.
+CERTIFICATE_PATH = "docs/test/smoke-certificate.md"
+
 #: The vault entry R7 creates before rotating and removes after restoring. The
 #: preflight finds it by NAME through ``vault ls``, because the product never
 #: prints a stored value. Declared here because both readers are later tasks.

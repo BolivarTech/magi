@@ -129,17 +129,21 @@ class FakeBinary:
 class FakeEnvironment:
     """The three directories :mod:`smoke.runs` reads off an ``Environment``."""
 
-    def __init__(self, root: pathlib.Path) -> None:
-        """Create the directories under *root*.
+    def __init__(self, root: pathlib.Path, create: bool = True) -> None:
+        """Bind to *root*, optionally creating what a real environment holds.
 
         Args:
-            root: The environment root, created if absent.
+            root: The environment root.
+            create: Whether to create the directories. A test that hands in a
+                root of its own may be checking what happens when it does NOT
+                exist, and creating it here would answer a different question.
         """
         self.root = pathlib.Path(root)
         self.runs_dir = self.root / "runs"
         self.scratch_dir = self.root / "scratch"
-        for directory in (self.root, self.runs_dir, self.scratch_dir):
-            directory.mkdir(parents=True, exist_ok=True)
+        if create:
+            for directory in (self.root, self.runs_dir, self.scratch_dir):
+                directory.mkdir(parents=True, exist_ok=True)
 
 
 class FakeConfig:
@@ -161,7 +165,8 @@ FAKE_PASSPHRASE = "correct-horse-battery-staple"
 
 def install_fake_runs(case: unittest.TestCase,
                       responder: Responder | None = None,
-                      repo_root: pathlib.Path | None = None) -> FakeBinary:
+                      repo_root: pathlib.Path | None = None,
+                      env_root: pathlib.Path | None = None) -> FakeBinary:
     """Point :mod:`smoke.runs` at doubles for the duration of one test.
 
     Cleanup is registered rather than left to ``tearDown``: a test that fails
@@ -173,16 +178,25 @@ def install_fake_runs(case: unittest.TestCase,
         responder: How the fake binary should answer; see :class:`FakeBinary`.
         repo_root: The repository the fake claims; defaults to the real one, so
             a scenario that shells out to git finds a repository.
+        env_root: Where the fake environment lives; defaults to a temporary
+            directory that is removed afterwards. S12 asks git what it can see
+            of the environment, and git can only answer about a path inside a
+            repository, so that test passes one -- and keeps ownership of it,
+            which is why a caller-supplied root is never removed here.
 
     Returns:
         FakeBinary: The double, so the test can read ``calls``.
     """
-    root = pathlib.Path(tempfile.mkdtemp(prefix="smoke-fake-env-"))
-    case.addCleanup(shutil.rmtree, root, ignore_errors=True)
+    if env_root is None:
+        root = pathlib.Path(tempfile.mkdtemp(prefix="smoke-fake-env-"))
+        case.addCleanup(shutil.rmtree, root, ignore_errors=True)
+    else:
+        root = pathlib.Path(env_root)
     case.addCleanup(runs.reset_for_test)
     if repo_root is None:
         repo_root = pathlib.Path(__file__).resolve().parent.parent.parent
     binary = FakeBinary(repo_root, responder)
     runs.reset_for_test()
-    runs.configure(binary, FakeEnvironment(root), FakeConfig(FAKE_PASSPHRASE))
+    runs.configure(binary, FakeEnvironment(root, create=env_root is None),
+                   FakeConfig(FAKE_PASSPHRASE))
     return binary
