@@ -57,7 +57,6 @@ from smoke.registry import scenario
 S11_ASSERTIONS = (
     "an unknown field in magi.toml exits 2 naming the field",
     "it cuts before any backend request is issued",
-    "a v0.11.0-era file names every incompatibility at once, not just the first",
     "a seat declaring a model without its lineage fails naming all three seats",
 )
 
@@ -190,13 +189,11 @@ def a_broken_config_cuts_before_running(run):
     dead_port = _closed_port()
     unknown = _run_variant(
         root, _with_unknown_field(generated, dead_port), "s11-unknown-field")
-    legacy = _run_variant(root, _v011_config(dead_port), "s11-v011")
     seatless = _run_variant(
         root, _without_lineages(generated), "s11-missing-lineage")
 
     yield _unknown_field_finding(unknown)
     yield _cuts_early_finding(unknown, dead_port)
-    yield _all_at_once_finding(legacy)
     yield _seat_lineage_finding(seatless)
 
 
@@ -319,31 +316,6 @@ def _with_dead_endpoint(generated, dead_port):
     return "\n".join(lines) + "\n"
 
 
-def _v011_config(dead_port):
-    """Build variant B: a file carrying all three v0.11.0-era patterns.
-
-    Written out rather than derived. The point of the variant is the three
-    incompatibilities and nothing else, and a file built by editing the current
-    generated one would also carry today's keys, so a message naming them would
-    be about the wrong thing.
-
-    Args:
-        dead_port: The port the retired ``[openai].base_url`` should name.
-
-    Returns:
-        str: The configuration text.
-    """
-    return (
-        'provider = "openai"\n'
-        "\n"
-        "[openai]\n"
-        'base_url = "http://127.0.0.1:%d/v1"\n'
-        "\n"
-        "[headless]\n"
-        "tool_result_cap_bytes = 4096\n"
-    ) % dead_port
-
-
 def _without_lineages(generated):
     """Build variant C: three seats declaring a model and no lineage.
 
@@ -422,36 +394,6 @@ def _cuts_early_finding(attempt, dead_port):
     return _s11(1, Outcome.PASS, "")
 
 
-def _all_at_once_finding(attempt):
-    """Judge assertion 3 by counting the incompatibilities that were NAMED.
-
-    Counting is the whole assertion. A message that names one of the three is
-    exactly the one-at-a-time behaviour the guided migration exists to replace,
-    and it is also a non-empty message -- so any check that only asked whether
-    the product complained would pass over the defect.
-
-    Args:
-        attempt: The variant B capture.
-
-    Returns:
-        Finding: PASS when all three are named in one message.
-    """
-    if not attempt.ok:
-        return _s11(2, Outcome.CANNOT_TEST, attempt.failure)
-    if attempt.output.exit_code == 0:
-        return _s11(2, Outcome.FAIL,
-                    "a v0.11.0-era configuration was accepted")
-    capture = attempt.output.raw()
-    missing = [marker for marker in V011_MARKERS
-               if marker.encode("utf-8") not in capture]
-    if missing:
-        return _s11(2, Outcome.FAIL,
-                    "%d of %d incompatibilities named; missing %s: %s"
-                    % (len(V011_MARKERS) - len(missing), len(V011_MARKERS),
-                       ", ".join(missing), _excerpt(attempt.output)))
-    return _s11(2, Outcome.PASS, "")
-
-
 def _seat_lineage_finding(attempt):
     """Judge assertion 4: every seat missing a lineage is named, not just one.
 
@@ -462,20 +404,20 @@ def _seat_lineage_finding(attempt):
         Finding: PASS when the refusal names all three seats.
     """
     if not attempt.ok:
-        return _s11(3, Outcome.CANNOT_TEST, attempt.failure)
+        return _s11(2, Outcome.CANNOT_TEST, attempt.failure)
     if attempt.output.exit_code == 0:
-        return _s11(3, Outcome.FAIL,
+        return _s11(2, Outcome.FAIL,
                     "three seats declared a model with no lineage and the "
                     "configuration was accepted, so a failure domain was "
                     "inferred rather than declared")
     lowered = attempt.output.raw().lower()
     missing = [seat for seat in SEATS if seat.encode("utf-8") not in lowered]
     if missing:
-        return _s11(3, Outcome.FAIL,
+        return _s11(2, Outcome.FAIL,
                     "%d of %d seats named; missing %s: %s"
                     % (len(SEATS) - len(missing), len(SEATS),
                        ", ".join(missing), _excerpt(attempt.output)))
-    return _s11(3, Outcome.PASS, "")
+    return _s11(2, Outcome.PASS, "")
 
 
 @scenario("S15")

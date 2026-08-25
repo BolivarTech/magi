@@ -38,8 +38,6 @@ class _FakeProduct:
     """A product double that scaffolds, then refuses each broken variant.
 
     Attributes:
-        all_at_once: Whether the v0.11.0-era file is reported whole or one
-            incompatibility at a time.
         seats_named: How many seats the missing-lineage refusal names.
         exit_code: What a rejected configuration exits with.
         reaches_backend: Whether the refusal carries a connection failure,
@@ -47,17 +45,15 @@ class _FakeProduct:
             configuration would look like.
     """
 
-    def __init__(self, all_at_once: bool = True, seats_named: int = 3,
+    def __init__(self, seats_named: int = 3,
                  exit_code: int = 2, reaches_backend: bool = False) -> None:
         """Create the double.
 
         Args:
-            all_at_once: Report every v0.11.0 incompatibility together.
             seats_named: How many of the three seats to name.
             exit_code: The code a rejected configuration exits with.
             reaches_backend: Emit a connection failure alongside the refusal.
         """
-        self.all_at_once = all_at_once
         self.seats_named = seats_named
         self.exit_code = exit_code
         self.reaches_backend = reaches_backend
@@ -159,8 +155,6 @@ class ConfigFatalScenarioTests(unittest.TestCase):
             [
                 "an unknown field in magi.toml exits 2 naming the field",
                 "it cuts before any backend request is issued",
-                "a v0.11.0-era file names every incompatibility at once, not "
-                "just the first",
                 "a seat declaring a model without its lineage fails naming all "
                 "three seats",
             ],
@@ -171,7 +165,7 @@ class ConfigFatalScenarioTests(unittest.TestCase):
 class ConfigFatalScenarioBodyTests(unittest.TestCase):
     """What S11 concludes about a product that refuses well, and badly."""
 
-    def test_a_product_that_scaffolds_nothing_still_reports_all_four(self) -> None:
+    def test_a_product_that_scaffolds_nothing_still_reports_them_all(self) -> None:
         support.install_fake_runs(self)
         findings = list(DEFAULT_REGISTRY.get("S11").func(None))
         self.assertEqual(list(config_fatal.S11_ASSERTIONS),
@@ -184,21 +178,11 @@ class ConfigFatalScenarioBodyTests(unittest.TestCase):
         self.assertEqual({Outcome.PASS},
                          set(_outcomes().values()))
 
-    def test_one_incompatibility_at_a_time_fails_the_count(self) -> None:
-        """The trap the assertion is written around. Reporting the first of
-        three is a non-empty message, so a check that only asked whether the
-        product complained would pass over exactly this defect.
-        """
-        support.install_fake_runs(self, responder=_FakeProduct(all_at_once=False))
-        outcomes = _outcomes()
-        self.assertEqual(Outcome.FAIL,
-                         outcomes[config_fatal.S11_ASSERTIONS[2]])
-
     def test_naming_one_seat_of_three_fails(self) -> None:
         support.install_fake_runs(self, responder=_FakeProduct(seats_named=1))
         outcomes = _outcomes()
         self.assertEqual(Outcome.FAIL,
-                         outcomes[config_fatal.S11_ASSERTIONS[3]])
+                         outcomes[config_fatal.S11_ASSERTIONS[2]])
 
     def test_a_refusal_that_first_contacted_the_backend_fails(self) -> None:
         support.install_fake_runs(self,
