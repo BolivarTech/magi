@@ -51,10 +51,19 @@ def _read(path):
 
     Raises:
         PreflightError: If the file is missing or does not parse. The message
-            names the file and nothing else: the decoder's own text reproduces
-            the offending line, and in this file that line may be the
-            passphrase. The exception context is suppressed for the same
-            reason, so no traceback can surface it either.
+            names the file and nothing else, and the context is suppressed so
+            no traceback can surface the decoder's text either.
+
+            The reason is worth stating precisely, because the obvious one is
+            wrong. Measured on Python 3.11, ``tomllib`` reports position only
+            -- ``(at line N, column M)`` -- and echoes no content, including
+            when the syntax error sits on the passphrase's own line. The leak
+            REQ-A16c records belongs to the PRODUCT's Rust decoder, which does
+            reproduce the offending line. What this suppression buys is
+            independence from that measurement continuing to hold: the file
+            being parsed here opens with a passphrase, and the cost of not
+            depending on a third party's error format is one lost line of
+            diagnostic text.
     """
     try:
         with path.open("rb") as handle:
