@@ -1,0 +1,471 @@
+# Author: Julian Bolivar
+# Version: 1.0.0
+# Date: 2026-08-25
+"""S9 -- memory persists, embeds and injects.
+
+Protects ``src/memory/``, failure #5 and REQ-29.
+
+**It never asserts that the model answers the planted fact** (D-12). That is a
+property of the LLM, and as a gate assertion it would be intermittent. What the
+scenario measures is what the PRODUCT did: did it persist, did the embedder
+answer, did the assembler inject.
+
+**Injection is measured by DIFFERENCE, because no JSON field reports it.** R2
+runs with ``--no-memory`` and is the control; R3 runs with memory and asks about
+the fact R1 planted. The gap between their ``usage.input_tokens`` is what the
+assembler added, and R2 writes nothing, so it can run in any order.
+
+**Assertion 3b is what stops assertion 3 passing green while measuring
+something else.** Once the environment has accumulated enough that the assembler
+saturates its budget, the R3 minus R2 difference stops meaning "it injected what
+we planted" and starts meaning "the budget is full" -- and it still clears the
+margin, so assertion 3 passes exactly the same. A green that no longer means
+what it says is worse than a red, so the saturated case degrades BOTH to
+``CANNOT_TEST``.
+
+**The ceiling is DERIVED from the environment's own configuration, never
+declared.** A fixed number in ``smoke.toml`` would age in the worse direction:
+the environment grows and the number does not, so one day it stops firing and
+the false green comes back with a guardian that looks like it is in place.
+
+    usable_budget = (context_budget_tokens - response_headroom_tokens)
+                    * (1 - safety_margin_ratio)
+    saturated     = (input_tokens(R3) - input_tokens(R2))
+                    >= usable_budget * ceiling_fraction
+
+**If the environment declares any of those three fields missing, the ceiling is
+not derived and 3b degrades.** The harness does NOT fill in the product's own
+default: that is a second source of truth, and the copy is always the one that
+forgets to be updated. Absent is not zero -- asserting against zero would test a
+computation that never happened.
+
+**Assertions 1 and 2 read R3's startup line, not R1's.** The line reports the
+state as it was when the process opened, so R1's is the count from BEFORE it
+planted anything. R3 runs after both and is the run whose injection assertion 3
+measures, which makes its count the one that has to be non-zero for the rest of
+the scenario to mean anything.
+
+**Assertion 4 is a one-off invocation, not a ninth shared run.** Exactly one
+assertion wants that output, it touches neither the trio nor the large payload,
+and a table row read by a single scenario is ceremony. The workspace it builds
+lives outside the repository -- so it can never reach ``git status`` -- and is
+removed in ``finally``, because a harness that leaks a directory per run leaks a
+database with it.
+"""
+
+import pathlib
+import re
+import shutil
+import tempfile
+
+from smoke import runs
+from smoke.env import INIT_SUBCOMMAND, MAGI_DIR_NAME, MAGI_TOML_NAME
+from smoke.errors import HarnessError, ProductOutputError
+from smoke.outcome import Finding, Outcome
+from smoke.registry import scenario
+
+#: The verbatim assertion texts of the spec's section 8, for S9.
+ASSERTIONS = (
+    "the startup line reports N active with N > 0",
+    "pending re-embed is 0 — the embedder answered",
+    "usage.input_tokens of R3 exceeds R2's by more than the declared margin",
+    "the environment is below the saturation ceiling — otherwise 3 degrades "
+    "to CANNOT_TEST",
+    "with the embedder down, the run completes with a degradation notice",
+)
+
+#: The runs S9 reads. R1 plants, R2 is the ``--no-memory`` control, R3 recalls.
+PLANTING_RUN = "R1"
+CONTROL_RUN = "R2"
+RECALL_RUN = "R3"
+
+#: The three ``[memory]`` fields the saturation ceiling is derived from. Named
+#: as a group because the rule is about the group: all three or nothing.
+CEILING_FIELDS = ("context_budget_tokens", "response_headroom_tokens",
+                  "safety_margin_ratio")
+
+#: Where the token count lives in the output contract.
+INPUT_TOKENS_PATH = "usage.input_tokens"
+
+#: The product's startup diagnostics line. Anchored on the counts rather than
+#: on the whole sentence so a change to the index-size suffix does not silently
+#: stop the scenario from finding it -- a line it cannot find degrades, and a
+#: degradation nobody caused is a gate that blocks for no reason.
+STARTUP_LINE = re.compile(
+    rb"memory:\s*(\d+)\s+active,\s*(\d+)\s+archived,\s*(\d+)\s+pending re-embed"
+)
+
+#: An endpoint nothing listens on. Port 9 is the discard service, reserved and
+#: unused, so the embedder fails quickly and predictably rather than waiting out
+#: a routing black hole.
+DEAD_EMBEDDING_ENDPOINT = "http://127.0.0.1:9/v1"
+
+#: The table the override belongs in. Getting this wrong points the MAIN
+#: provider at the closed port, and the run then fails outright instead of
+#: degrading -- a red that looks exactly like the assertion working.
+EMBEDDING_SECTION_HEADER = "[embedding]"
+
+#: The key overridden inside that table.
+BASE_URL_KEY = "base_url"
+
+#: The product's own phrase for this degradation. Matched rather than any
+#: mention of the embedder, because REQ-29 is specifically about falling back to
+#: text-only persistence instead of failing the turn.
+DEGRADATION_MARKER = "text-only persistence"
+
+#: How long each half of the probe is given, in seconds. The scaffold touches
+#: no network; the query is one short turn against the real backend.
+SCAFFOLD_TIMEOUT_S = 60
+PROBE_TIMEOUT_S = 180
+
+#: What the two probe invocations are called in the archive.
+SCAFFOLD_LABEL = "s9-embedder-down-init"
+PROBE_LABEL = "s9-embedder-down-query"
+
+#: The prompt the probe sends. Short on purpose: the assertion is about what
+#: the product does when its embedder is unreachable, not about the answer.
+PROBE_PROMPT = b"Remember that my favourite colour is green, then say ok.\n"
+
+#: Prefix of the throwaway workspace, so a leaked one is identifiable.
+PROBE_PREFIX = "smoke-s9-embedder-"
+
+#: The exit code a run that degraded gracefully still reports.
+SUCCESS_EXIT_CODE = 0
+
+
+def usable_budget(settings):
+    """The assembler's usable token budget, derived from the environment.
+
+    Complexity: ``O(len(CEILING_FIELDS))``.
+
+    Args:
+        settings: The environment's ``[memory]`` table, as parsed.
+
+    Returns:
+        float | None: The budget, or ``None`` when any of the three fields is
+        absent or is not a number. ``None`` means *not derived*, which is a
+        different state from a budget of zero and is reported as such.
+    """
+    values = []
+    for field in CEILING_FIELDS:
+        value = settings.get(field)
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            return None
+        values.append(float(value))
+    budget, headroom, margin_ratio = values
+    return (budget - headroom) * (1.0 - margin_ratio)
+
+
+def point_embedding_at(text, endpoint=DEAD_EMBEDDING_ENDPOINT):
+    """Return *text* with the embedding endpoint overridden.
+
+    The edit is line-level because the standard library ships no TOML writer
+    (REQ-S02 forbids adding one). The override is inserted directly after the
+    section header, which is where TOML resolves it into that table and nowhere
+    else -- and where a later duplicate key inside the same table would lose to
+    it, so the commented default the product ships cannot resurrect itself.
+
+    Complexity: ``O(number of lines)``.
+
+    Args:
+        text: The configuration to rewrite.
+        endpoint: The URL the embedder should be pointed at.
+
+    Returns:
+        str: The rewritten configuration.
+
+    Raises:
+        HarnessError: If the text declares no ``[embedding]`` table. Appending
+            one would silently change which table every following key belongs
+            to, so the harness refuses rather than guesses.
+    """
+    lines = text.splitlines()
+    for index, line in enumerate(lines):
+        if line.strip() == EMBEDDING_SECTION_HEADER:
+            override = '%s = "%s"' % (BASE_URL_KEY, endpoint)
+            return "\n".join(lines[:index + 1] + [override]
+                             + lines[index + 1:]) + "\n"
+    raise HarnessError(
+        "the environment's %s declares no %s table, so there is nothing to "
+        "point at a closed port" % (MAGI_TOML_NAME, EMBEDDING_SECTION_HEADER)
+    )
+
+
+@scenario("S9", run=(PLANTING_RUN, CONTROL_RUN, RECALL_RUN),
+          needs_backend=True, needs_ambient=True)
+def memory_persists_embeds_and_injects(run, ambient):
+    """Compare the three runs, then take the embedder down once.
+
+    Args:
+        run: The three ``RunResult`` objects keyed by id, as the runner hands a
+            scenario that declares several.
+        ambient: State captured before any run started. S9 reads the margin,
+            the fraction and the environment's ``[memory]`` block off it.
+
+    Yields:
+        Finding: One per entry of :data:`ASSERTIONS`, in that order.
+    """
+    results = run or {}
+    counts, counts_failure = _startup_counts(results.get(RECALL_RUN))
+    yield _active_finding(counts, counts_failure)
+    yield _pending_finding(counts, counts_failure)
+
+    saturation = _saturation_finding(results, ambient)
+    yield _injection_finding(results, ambient, saturation.outcome)
+    yield saturation
+    yield _embedder_down_finding()
+
+
+def _startup_counts(result):
+    """The three counts of R3's startup line.
+
+    Args:
+        result: R3's result, or None.
+
+    Returns:
+        tuple: ``(counts, failure)`` where *counts* is the ``(active,
+        archived, pending)`` triple and *failure* explains its absence. Exactly
+        one of the two is set.
+    """
+    if result is None:
+        return None, "run %s produced no capture to inspect" % RECALL_RUN
+    match = STARTUP_LINE.search(result.output.raw())
+    if match is None:
+        return None, (
+            "run %s printed no memory diagnostics line, so neither count can "
+            "be read" % RECALL_RUN
+        )
+    return tuple(int(group) for group in match.groups()), ""
+
+
+def _active_finding(counts, failure):
+    """Judge assertion 1: something was persisted and survived.
+
+    Args:
+        counts: The startup triple, or None.
+        failure: Why there is none.
+
+    Returns:
+        Finding: PASS when the active count is above zero.
+    """
+    if counts is None:
+        return _s9(0, Outcome.CANNOT_TEST, RECALL_RUN, failure)
+    active = counts[0]
+    if active <= 0:
+        return _s9(0, Outcome.FAIL, RECALL_RUN,
+                   "the startup line reports %d active memories, so nothing "
+                   "%s planted survived to be recalled" % (active, PLANTING_RUN))
+    return _s9(0, Outcome.PASS, RECALL_RUN, "")
+
+
+def _pending_finding(counts, failure):
+    """Judge assertion 2: nothing is still waiting to be embedded.
+
+    Args:
+        counts: The startup triple, or None.
+        failure: Why there is none.
+
+    Returns:
+        Finding: PASS when the pending count is zero. A non-zero count is the
+        embedder having declined to answer, which is the failure the assertion
+        names.
+    """
+    if counts is None:
+        return _s9(1, Outcome.CANNOT_TEST, RECALL_RUN, failure)
+    pending = counts[2]
+    if pending != 0:
+        return _s9(1, Outcome.FAIL, RECALL_RUN,
+                   "%d memor%s are still waiting to be embedded, so the "
+                   "embedder did not answer for them"
+                   % (pending, "y" if pending == 1 else "ies"))
+    return _s9(1, Outcome.PASS, RECALL_RUN, "")
+
+
+def _injection_finding(results, ambient, saturation):
+    """Judge assertion 3: the assembler added more than the declared margin.
+
+    Args:
+        results: The three results, keyed by id.
+        ambient: The ambient state carrying the margin.
+        saturation: What assertion 3b concluded. Anything but PASS takes this
+            assertion down with it: above the ceiling the difference no longer
+            measures injection, and below a derived ceiling there is nothing
+            saying it does.
+
+    Returns:
+        Finding: PASS when the gap clears the margin.
+    """
+    if saturation is not Outcome.PASS:
+        return _s9(2, Outcome.CANNOT_TEST, RECALL_RUN,
+                   "the saturation check did not pass, so the difference "
+                   "between %s and %s cannot be read as injection"
+                   % (RECALL_RUN, CONTROL_RUN))
+    margin = ambient.margin_tokens
+    if not isinstance(margin, int) or margin <= 0:
+        return _s9(2, Outcome.CANNOT_TEST, RECALL_RUN,
+                   "no margin is calibrated in smoke.toml, and a margin of "
+                   "zero cannot tell an injection from two prompts of "
+                   "different length")
+    delta, failure = _token_delta(results)
+    if delta is None:
+        return _s9(2, Outcome.CANNOT_TEST, RECALL_RUN, failure)
+    if delta <= margin:
+        return _s9(2, Outcome.FAIL, RECALL_RUN,
+                   "%s sent %d more input tokens than %s, which does not "
+                   "clear the declared margin of %d"
+                   % (RECALL_RUN, delta, CONTROL_RUN, margin))
+    return _s9(2, Outcome.PASS, RECALL_RUN, "")
+
+
+def _saturation_finding(results, ambient):
+    """Judge assertion 3b: the environment has not filled the budget.
+
+    Args:
+        results: The three results, keyed by id.
+        ambient: The ambient state carrying the fraction and the ``[memory]``
+            block.
+
+    Returns:
+        Finding: PASS below the ceiling; CANNOT_TEST when the ceiling is not
+        derived, when the fraction is uncalibrated, or when the environment has
+        reached it -- the last of which blocks the gate and sends whoever reads
+        the report to recalibrate or reset, which is the decision that has to be
+        taken with the number in front of them.
+    """
+    budget = usable_budget(ambient.memory_settings)
+    if budget is None:
+        return _s9(3, Outcome.CANNOT_TEST, RECALL_RUN,
+                   "the environment's [memory] table does not declare all of "
+                   "%s, so the ceiling is not derived. The harness does not "
+                   "fill in the product's defaults: absent is not zero."
+                   % ", ".join(CEILING_FIELDS))
+    fraction = ambient.ceiling_fraction
+    if not isinstance(fraction, float) or fraction <= 0.0:
+        return _s9(3, Outcome.CANNOT_TEST, RECALL_RUN,
+                   "no ceiling fraction is calibrated in smoke.toml, so there "
+                   "is no ceiling to compare against")
+    delta, failure = _token_delta(results)
+    if delta is None:
+        return _s9(3, Outcome.CANNOT_TEST, RECALL_RUN, failure)
+    ceiling = budget * fraction
+    if delta >= ceiling:
+        return _s9(3, Outcome.CANNOT_TEST, RECALL_RUN,
+                   "the assembler added %d tokens against a ceiling of %.0f, "
+                   "so the difference now measures a full budget rather than "
+                   "the injection; recalibrate or reset the environment"
+                   % (delta, ceiling))
+    return _s9(3, Outcome.PASS, RECALL_RUN, "")
+
+
+def _token_delta(results):
+    """How many more input tokens R3 sent than R2.
+
+    Args:
+        results: The three results, keyed by id.
+
+    Returns:
+        tuple: ``(delta, failure)``; exactly one of the two is set.
+    """
+    counts = {}
+    for run_id in (CONTROL_RUN, RECALL_RUN):
+        result = results.get(run_id)
+        if result is None:
+            return None, "run %s produced no capture to inspect" % run_id
+        try:
+            value = result.output.key(INPUT_TOKENS_PATH)
+        except ProductOutputError as exc:
+            return None, "run %s: %s" % (run_id, exc)
+        if not isinstance(value, int) or isinstance(value, bool):
+            return None, ("run %s reported %s as %s, expected a number"
+                          % (run_id, INPUT_TOKENS_PATH, type(value).__name__))
+        counts[run_id] = value
+    return counts[RECALL_RUN] - counts[CONTROL_RUN], ""
+
+
+def _embedder_down_finding():
+    """Judge assertion 4 by running once against an unreachable embedder.
+
+    The workspace is scaffolded by the product's own ``init`` -- so it carries
+    whatever permissions the product expects -- and its configuration is then
+    replaced by the ENVIRONMENT's, patched. Reusing the environment's config is
+    what keeps the probe on the same models and the same endpoint the rest of
+    the run is using, instead of silently falling back to the product's
+    defaults under a cheap profile.
+
+    Returns:
+        Finding: PASS when the run completed and said it had degraded.
+    """
+    workspace = pathlib.Path(tempfile.mkdtemp(prefix=PROBE_PREFIX))
+    try:
+        scaffold = runs.attempt([INIT_SUBCOMMAND], timeout_s=SCAFFOLD_TIMEOUT_S,
+                                label=SCAFFOLD_LABEL, cwd=str(workspace))
+        if not scaffold.ok:
+            return _s9(4, Outcome.CANNOT_TEST, None, scaffold.failure)
+        if scaffold.output.exit_code != SUCCESS_EXIT_CODE:
+            return _s9(4, Outcome.CANNOT_TEST, None,
+                       "%s exited %d, so there is no workspace to run the "
+                       "probe in" % (INIT_SUBCOMMAND,
+                                     scaffold.output.exit_code))
+        try:
+            source = (runs.workspace_root() / MAGI_DIR_NAME
+                      / MAGI_TOML_NAME).read_text(encoding="utf-8")
+        except OSError as exc:
+            return _s9(4, Outcome.CANNOT_TEST, None,
+                       "the environment's %s could not be read, so the probe "
+                       "has no configuration to patch: %s"
+                       % (MAGI_TOML_NAME, exc))
+        (workspace / MAGI_DIR_NAME / MAGI_TOML_NAME).write_text(
+            point_embedding_at(source), encoding="utf-8")
+        probe = runs.attempt(
+            ["query", "--output-format", "json", "-w", str(workspace),
+             "--auto"],
+            stdin=PROBE_PROMPT, timeout_s=PROBE_TIMEOUT_S, label=PROBE_LABEL,
+            env={runs.PASSPHRASE_VARIABLE: runs.passphrase()},
+        )
+        return _judge_degraded(probe)
+    finally:
+        shutil.rmtree(workspace, ignore_errors=True)
+
+
+def _judge_degraded(probe):
+    """Decide assertion 4 from the probe's capture.
+
+    Args:
+        probe: The probe's :class:`~smoke.runs.Attempt`.
+
+    Returns:
+        Finding: PASS only when the run completed AND announced the
+        degradation. A silent completion is reported as the failure it is: an
+        operator whose embedder is down and who is told nothing watches
+        memories accumulate unembedded with no signal that anything changed.
+    """
+    if not probe.ok:
+        return _s9(4, Outcome.CANNOT_TEST, None, probe.failure)
+    output = probe.output
+    if output.exit_code != SUCCESS_EXIT_CODE:
+        return _s9(4, Outcome.FAIL, None,
+                   "an unreachable embedder took the run down: exit %d. "
+                   "REQ-29 requires degrading to text-only persistence, not "
+                   "failing the turn." % output.exit_code)
+    if DEGRADATION_MARKER.encode("utf-8") not in output.raw():
+        return _s9(4, Outcome.FAIL, None,
+                   "the run completed but never said %r, so an operator whose "
+                   "embedder is unreachable is told nothing"
+                   % DEGRADATION_MARKER)
+    return _s9(4, Outcome.PASS, None, "")
+
+
+def _s9(index, outcome, run_id, detail):
+    """Build the finding for one entry of :data:`ASSERTIONS`.
+
+    Args:
+        index: Position in :data:`ASSERTIONS`.
+        outcome: What became of it.
+        run_id: The shared run it came from, or None for the one-off probe.
+        detail: The cause when the outcome is not PASS.
+
+    Returns:
+        Finding: The finding.
+    """
+    return Finding(assertion=ASSERTIONS[index], outcome=outcome, detail=detail,
+                   run_id=run_id)
