@@ -33,6 +33,7 @@ import json
 import os
 import pathlib
 import re
+import sys
 import threading
 import time
 
@@ -957,11 +958,19 @@ class RunExecutor:
         that refuses to remove what is not there would then be reported as a
         leak that does not exist.
 
+        It WARNS rather than raises, and the distinction is the whole point.
+        This runs from a ``finally``, so raising replaces whatever exception
+        is already in flight -- R6's own ``TimedOut`` among them, which the
+        runner needs in order to substitute CANNOT_TEST for S10 -- and then
+        escapes ``execute``. Main types only ``PreflightError`` and
+        ``HarnessError``, so it would reach the last-resort catch and exit 3,
+        which says the HARNESS failed. The event is one ``vault rm`` the
+        product refused, and a leftover entry is inert besides: the preflight
+        regenerates the environment's ``magi.toml`` on every run, so no
+        ``base_url`` declares the placeholders that would read them back.
+
         Args:
             planted: The entries this run really wrote, in order.
-
-        Raises:
-            ProductOutputError: If any removal failed, naming them.
         """
         failed = []
         for name in planted:
@@ -970,11 +979,9 @@ class RunExecutor:
             except (OSError, ProductOutputError) as exc:
                 failed.append("%s (%s)" % (name, exc))
         if failed:
-            raise ProductOutputError(
-                "the run left placeholder entries in the vault: %s. Remove "
-                "them before the next run, or its endpoint is authenticated "
-                "by accident." % "; ".join(failed)
-            )
+            print("[runs] the run left placeholder entries in the vault: %s. "
+                  "The next preflight sweeps them." % "; ".join(failed),
+                  file=sys.stderr)
 
     def _invoke_with(self, definition: RunDefinition,
                      declared: dict, stdin: bytes) -> ProductOutput:
