@@ -431,6 +431,57 @@ class ShortTreeTests(unittest.TestCase):
         self.assertEqual(len(runs.DEFINITIONS["R4"].stdin), result.stdin_bytes)
 
 
+class BaselineCaptureTests(unittest.TestCase):
+    """The rotation's baseline is produced by the EXECUTOR, and nothing tested it.
+
+    S16's three interesting cases inject a hand-built ``baseline=`` dict, and
+    the one production test drove a responder that answered ``{}`` to
+    everything -- so ``_history_counts`` ran, parsed nothing, returned None,
+    and its result was never asserted. If it never produced a baseline in
+    production, S16 assertion 2 would be CANNOT_TEST forever, the gate would
+    block on every run, and the whole suite would stay green.
+    """
+
+    def _executor(self, report: bytes):
+        """An executor whose vault answers *report* to ``diagnose``.
+
+        Args:
+            report: What the product should print for the diagnose call.
+
+        Returns:
+            RunExecutor: Configured against the double.
+        """
+        def responder(call):
+            args = list(call.args)
+            if args[:1] != ["vault"]:
+                return None
+            body = report if "diagnose" in args else b""
+            return ProductOutput(stdout=body, stderr=b"", exit_code=0,
+                                 command=["magi-rs"] + args)
+
+        support.install_fake_runs(self, responder=responder)
+        return runs.RunExecutor(runs._binary, runs._env, runs._config,
+                                credential="the-real-credential")
+
+    def test_the_rotation_records_the_counts_it_read(self) -> None:
+        report = ("envelope: present" + chr(10) + "counts:" + chr(10) +
+                  "  vault: 1" + chr(10) + "  sessions: 2" + chr(10) +
+                  "  messages: 9" + chr(10)).encode("utf-8")
+        result = self._executor(report).execute(runs.DEFINITIONS["R7"])
+        self.assertEqual({"vault": 1, "sessions": 2, "messages": 9},
+                         result.baseline)
+
+    def test_a_report_it_cannot_read_records_no_baseline(self) -> None:
+        """None means NOT MEASURED, and S16 refuses rather than assuming."""
+        result = self._executor(b"envelope: absent").execute(
+            runs.DEFINITIONS["R7"])
+        self.assertIsNone(result.baseline)
+
+    def test_a_run_that_does_not_rotate_records_none(self) -> None:
+        result = self._executor(b"counts:").execute(runs.DEFINITIONS["R3"])
+        self.assertIsNone(result.baseline)
+
+
 class PlaceholderLifetimeTests(unittest.TestCase):
     """R6's four vault entries are planted and removed as a unit.
 

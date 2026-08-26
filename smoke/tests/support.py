@@ -167,7 +167,8 @@ class FakeConfig:
     """The fields :mod:`smoke.runs` reads off a ``SmokeConfig``."""
 
     def __init__(self, passphrase: str,
-                 payload_target_bytes: int = FAKE_PAYLOAD_TARGET_BYTES) -> None:
+                 payload_target_bytes: int = FAKE_PAYLOAD_TARGET_BYTES,
+                 backend_key_env: str = "SMOKE_FAKE_KEY") -> None:
         """Store what the module asks for.
 
         Args:
@@ -177,9 +178,13 @@ class FakeConfig:
                 measuring what it sends, at which point every large run through
                 a double raised ``AttributeError`` -- an under-specified double,
                 not a defect in what it stands for.
+            backend_key_env: The variable the rotating run puts back. Same
+                story: the double grew it when a test first drove R7 through
+                the executor.
         """
         self.passphrase = passphrase
         self.payload_target_bytes = payload_target_bytes
+        self.backend_key_env = backend_key_env
 
 
 #: The passphrase the doubles hand out. Long enough to clear the product's own
