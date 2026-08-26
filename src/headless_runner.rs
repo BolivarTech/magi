@@ -1831,6 +1831,13 @@ mod tests {
 
     /// One notice line, formatted and redacted the way the drain loop emits it.
     ///
+    /// This covers the FORMATTING half only, and says so because the name it
+    /// carried before did not: "a notice reaches the operator" is a claim about
+    /// the drain loop, and deleting the `StreamPiece::Notice` arm there leaves
+    /// this test green. The wiring's guardian is S9's fourth assertion in
+    /// `smoke/`, which runs the release binary against a failing embedder and
+    /// looks for the notice in what the process actually printed.
+    ///
     /// The drain loop consumed every `StreamPiece` and inspected only
     /// `Content`, for time-to-first-byte. `StreamPiece::Notice` was dropped on
     /// the floor, so REQ-29's second half held in the TUI and nowhere else: an
@@ -1843,7 +1850,7 @@ mod tests {
     /// the way out, exactly like every other foreign string this binary
     /// prints.
     #[test]
-    fn a_notice_reaches_the_operator_with_its_authority_redacted() {
+    fn a_notice_line_is_prefixed_and_its_authority_redacted() {
         let line =
             notice_line("memory: context assembly failed (POST https://u:pw@host/v1/embeddings)");
         assert!(line.starts_with(NOTICE_PREFIX), "got: {line}");
