@@ -16,6 +16,7 @@ from smoke.config import SmokeConfig
 from smoke.env import Environment
 from smoke.errors import PreflightError
 from smoke.lock import RunLock
+from smoke import preflight as preflight_module
 from smoke.preflight import BackendStatus, Preflight, check_config_permissions
 from smoke.product import ProductOutput
 
@@ -446,6 +447,43 @@ class RotationRestoreTests(unittest.TestCase):
         os.environ.pop("SMOKE_TEST_KEY", None)
         with self.assertRaises(PreflightError):
             preflight._restore_rotation_if_left_over()
+
+
+class ModelExistenceTests(unittest.TestCase):
+    """Step 8: a model the environment names has to exist on the backend.
+
+    This is failure #5 -- a run that reaches a healthy backend and asks it for
+    something it does not have. The spec makes it a hard cut, and it belongs
+    in the preflight rather than in a scenario: every trio run would otherwise
+    spend its whole ceiling discovering it.
+
+    It only applies where the backend can be asked. ``openai-compat`` and
+    ``anthropic`` publish no tag listing, so there the check degrades to not
+    performed rather than to a guess.
+    """
+
+    def test_a_missing_model_cuts_naming_it(self) -> None:
+        with self.assertRaises(PreflightError) as caught:
+            preflight_module.require_declared_models(
+                {"present:cloud", "absent:cloud"}, {"present:cloud"})
+        message = str(caught.exception)
+        self.assertIn("absent:cloud", message)
+        self.assertNotIn("present:cloud", message)
+
+    def test_every_model_present_passes(self) -> None:
+        preflight_module.require_declared_models(
+            {"a:cloud", "b:cloud"}, {"a:cloud", "b:cloud", "spare:cloud"})
+
+    def test_a_backend_that_lists_nothing_is_not_measurable(self) -> None:
+        """An empty listing is "could not be asked", not "nothing exists".
+
+        Cutting there would refuse every backend without a tag endpoint, which
+        is every backend but Ollama.
+        """
+        preflight_module.require_declared_models({"a:cloud"}, None)
+
+    def test_declaring_no_models_passes(self) -> None:
+        preflight_module.require_declared_models(set(), {"a:cloud"})
 
 
 class BackendStatusTests(unittest.TestCase):
