@@ -969,8 +969,6 @@ class RotationTests(unittest.TestCase):
         self.assertEqual([], self.calls)
 
 
-if __name__ == "__main__":
-    unittest.main()
 
 
 class LargePayloadWiringTests(unittest.TestCase):
@@ -1038,3 +1036,7 @@ class LargePayloadWiringTests(unittest.TestCase):
         runs.configure(binary, env, config)
         runs.RunExecutor(binary, env, config).execute(runs.DEFINITIONS["R1"])
         self.assertLess(len(sent["stdin"] or b""), 4096)
+
+
+if __name__ == "__main__":
+    unittest.main()

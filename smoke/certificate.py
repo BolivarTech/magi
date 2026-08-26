@@ -87,6 +87,11 @@ def may_certify(smoke_2: bool, profile, findings, evaluated: int) -> bool:
     """
     if not smoke_2 or profile is not None:
         return False
+    # Defence in depth, and unreachable in production on purpose:
+    # ``require_declared_count`` already exits 3 at startup on a short
+    # registry, and the runner's reconciliation guarantees every
+    # registered scenario reported. It is here so a future caller that
+    # skips either of those cannot emit a document reading "18 of 19".
     if evaluated != DECLARED_SCENARIO_COUNT:
         return False
     return not any(one.outcome.blocks_gate for one in findings)
