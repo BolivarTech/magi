@@ -5,9 +5,11 @@
 
 import os
 import pathlib
+import socket
 import stat
 import sys
 import tempfile
+import threading
 import unittest
 from unittest import mock
 
@@ -513,6 +515,82 @@ class BackendStatusTests(unittest.TestCase):
         status = BackendStatus(reachable=False, cause="connection refused")
         self.assertFalse(status.reachable)
         self.assertIn("refused", status.cause)
+
+
+class BackendSpeakingGarbageTests(unittest.TestCase):
+    """A daemon that answers something other than HTTP is not a harness bug.
+
+    ``http.client`` raises ``BadStatusLine`` and ``IncompleteRead`` out of
+    ``getresponse()``, and neither is an ``OSError`` -- ``urlopen``'s handler
+    does not wrap what the response raises. An except tuple that names only
+    ``URLError``/``OSError``/``ValueError`` therefore lets it escape the
+    preflight, escape main's two typed handlers, and land on the last-resort
+    catch, which exits 3. Exit 3 says the HARNESS failed; a misbehaving
+    backend is D-17's "could not be reached", which is exit 1 territory at
+    worst and a degraded status at best.
+    """
+
+    def _garbage_endpoint(self) -> str:
+        """Stand up a socket that answers with something that is not HTTP.
+
+        Returns:
+            str: The base URL of a server that will accept a connection and
+            reply with a status line no HTTP client can parse.
+        """
+        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(8)
+        self.addCleanup(listener.close)
+
+        def serve() -> None:
+            while True:
+                try:
+                    connection, _ = listener.accept()
+                except OSError:
+                    return
+                with connection:
+                    try:
+                        connection.recv(4096)
+                        connection.sendall(b"GARBAGE NOT HTTP\r\n\r\n")
+                    except OSError:
+                        pass
+
+        thread = threading.Thread(target=serve, daemon=True)
+        thread.start()
+        return "http://127.0.0.1:%d/v1" % listener.getsockname()[1]
+
+    def _preflight(self, url: str) -> Preflight:
+        """Build a preflight pointed at *url*.
+
+        Args:
+            url: The endpoint both the probe and the model listing will use.
+
+        Returns:
+            Preflight: Ready to have either step called on it.
+        """
+        config = mock.Mock(spec=SmokeConfig)
+        config.backend_base_url = url
+        config.backend_kind = "ollama"
+        return Preflight(config, mock.Mock(spec=Environment),
+                         mock.Mock(spec=ReleaseBinary),
+                         mock.Mock(spec=RunLock))
+
+    def test_the_reachability_probe_degrades_rather_than_raises(self) -> None:
+        """Step 8, which runs FIRST and so decides whether step 9 runs at all.
+
+        The guard on the model listing was added for this failure mode and
+        cannot fire for it: a daemon answering garbage dies here, several
+        statements earlier.
+        """
+        preflight = self._preflight(self._garbage_endpoint())
+        status = preflight._probe_backend()
+        self.assertFalse(status.reachable)
+        self.assertTrue(status.cause)
+
+    def test_the_model_listing_degrades_rather_than_raises(self) -> None:
+        preflight = self._preflight(self._garbage_endpoint())
+        self.assertIsNone(preflight._available_models())
 
 
 if __name__ == "__main__":
