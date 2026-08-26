@@ -51,6 +51,14 @@ and a table row read by a single scenario is ceremony. The workspace it builds
 lives outside the repository -- so it can never reach ``git status`` -- and is
 removed in ``finally``, because a harness that leaks a directory per run leaks a
 database with it.
+
+**What it points the embedder at ANSWERS, and that is the second attempt.** The
+module used to name ``127.0.0.1:9`` and call it "the discard service, reserved
+and unused". Where that service is actually running the connection is accepted
+and then never answered, so the probe waited out its entire ceiling and
+assertion 4 reported ``CANNOT_TEST`` rather than exercising REQ-29 at all. An
+endpoint that returns an error is a failing embedder too, and it is one on
+every machine.
 """
 
 import pathlib
@@ -95,16 +103,8 @@ STARTUP_LINE = re.compile(
     rb"memory:\s*(\d+)\s+active,\s*(\d+)\s+archived,\s*(\d+)\s+pending re-embed"
 )
 
-#: What the embedder is pointed at comes from :func:`smoke.runs.error_backend`
-#: and is never a literal here. This module used to name a port and call it
-#: "the discard service, reserved and unused"; where that service is actually
-#: running the connection is accepted and never answered, so the probe waited
-#: out its whole ceiling and assertion 4 reported CANNOT_TEST rather than
-#: exercising REQ-29 at all. An endpoint that ANSWERS with an error is a
-#: failing embedder too, and it is one on every machine.
-
 #: The table the override belongs in. Getting this wrong points the MAIN
-#: provider at the closed port, and the run then fails outright instead of
+#: provider at the failing endpoint, and the run then fails outright instead of
 #: degrading -- a red that looks exactly like the assertion working.
 EMBEDDING_SECTION_HEADER = "[embedding]"
 
@@ -190,7 +190,8 @@ def point_embedding_at(endpoint, text):
                              + lines[index + 1:]) + "\n"
     raise HarnessError(
         "the environment's %s declares no %s table, so there is nothing to "
-        "point at a closed port" % (MAGI_TOML_NAME, EMBEDDING_SECTION_HEADER)
+        "point at the failing endpoint"
+        % (MAGI_TOML_NAME, EMBEDDING_SECTION_HEADER)
     )
 
 
