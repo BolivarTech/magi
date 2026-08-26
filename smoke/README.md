@@ -206,7 +206,9 @@ A decorated generator and a registry entry. Nothing else, on purpose: if adding 
 touching the runner or the report, nobody would add one.
 
 ```python
-@scenario("S20", run="R1", needs_backend=True)
+ASSERTIONS = ("the thing that must hold",)
+
+@scenario("S20", assertions=ASSERTIONS, run="R1", needs_backend=True)
 def the_thing_that_must_hold(run):
     """..."""
     yield Finding(assertion=ASSERTIONS[0], outcome=Outcome.PASS, detail="",
@@ -224,6 +226,12 @@ Three rules every scenario obeys:
   with the cause. Silence is a harness failure.
 - **Reach the product only through `smoke.runs`**, never through `smoke.binary`. A test
   enforces it.
+- **Declare every assertion text to the decorator, as the module's own
+  constant.** The runner reconciles what arrived against what was promised, in
+  both directions: a missing one is coverage lost in silence, and one nobody
+  declared reaches the certificate verbatim. Passing a literal instead of the
+  constant makes a second copy the check cannot see drifting, and a test
+  refuses it.
 - **Never assert on what the model answered.** Assert on what the product did: did it
   persist, did it inject, did it redact, what shape is the JSON, how many tokens went in.
   Record the model's answer as an observation with no verdict.
