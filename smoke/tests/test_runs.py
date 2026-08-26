@@ -544,3 +544,62 @@ class RotationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LargePayloadWiringTests(unittest.TestCase):
+    """A run declaring the large payload must actually be SENT one."""
+
+    def setUp(self) -> None:
+        runs.reset_for_test()
+        self.addCleanup(runs.reset_for_test)
+
+    def test_a_large_payload_run_is_sent_more_than_its_literal_prompt(self) -> None:
+        """``payload_size`` was declared on every definition and read by
+        nothing, so R4 -- the whole reason the large payload exists -- went out
+        carrying a 53-byte literal. S8 would then have asserted a token floor
+        against a size the product was never sent, which is precisely what S8's
+        own trap text forbids: never accuse the product of a size it did not
+        receive.
+        """
+        sent = {}
+        binary = mock.Mock(spec=ReleaseBinary)
+
+        def answer(args, stdin=None, env=None, timeout=None, cwd=None):
+            sent["stdin"] = stdin
+            return ProductOutput(stdout=b"{}", stderr=b"", exit_code=0,
+                                 command=["magi-rs"] + list(args))
+
+        binary.invoke.side_effect = answer
+        env = mock.Mock(spec=Environment)
+        env.runs_dir = pathlib.Path(tempfile.mkdtemp())
+        config = mock.Mock(spec=SmokeConfig)
+        config.passphrase = "correct horse battery staple"
+        config.payload_target_bytes = 4096
+        config.payload_token_floor = 10
+        config.backend_key_env = "OPENAI_API_KEY"
+        runs.configure(binary, env, config)
+        runs.RunExecutor(binary, env, config).execute(runs.DEFINITIONS["R4"])
+        self.assertGreaterEqual(len(sent["stdin"] or b""),
+                                config.payload_target_bytes)
+
+    def test_a_small_payload_run_is_not_inflated(self) -> None:
+        """The large payload is expensive and exactly one run carries it."""
+        sent = {}
+        binary = mock.Mock(spec=ReleaseBinary)
+
+        def answer(args, stdin=None, env=None, timeout=None, cwd=None):
+            sent["stdin"] = stdin
+            return ProductOutput(stdout=b"{}", stderr=b"", exit_code=0,
+                                 command=["magi-rs"] + list(args))
+
+        binary.invoke.side_effect = answer
+        env = mock.Mock(spec=Environment)
+        env.runs_dir = pathlib.Path(tempfile.mkdtemp())
+        config = mock.Mock(spec=SmokeConfig)
+        config.passphrase = "correct horse battery staple"
+        config.payload_target_bytes = 4096
+        config.payload_token_floor = 10
+        config.backend_key_env = "OPENAI_API_KEY"
+        runs.configure(binary, env, config)
+        runs.RunExecutor(binary, env, config).execute(runs.DEFINITIONS["R1"])
+        self.assertLess(len(sent["stdin"] or b""), 4096)
