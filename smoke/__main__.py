@@ -59,6 +59,11 @@ try:
     # not a symbol this module uses, but the moment the scenarios come into
     # existence.
     from smoke import scenarios  # noqa: F401
+except (KeyboardInterrupt, SystemExit):
+    # An operator pressing Ctrl+C during startup is not a harness failure,
+    # and BaseException would have reported it as one. Re-raised so the
+    # interpreter gives its usual answer.
+    raise
 except BaseException:  # noqa: BLE001 - re-raised as the harness's own code
     traceback.print_exc()
     print("harness failure: the harness could not be loaded, so no scenario "

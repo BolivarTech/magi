@@ -368,7 +368,7 @@ class Environment:
         try:
             document = tomllib.loads(
                 (self.magi_dir / MAGI_TOML_NAME).read_text(encoding="utf-8"))
-        except (OSError, tomllib.TOMLDecodeError):
+        except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
             return set()
         names = set()
         for table in self.MODEL_TABLES:
@@ -398,7 +398,7 @@ class Environment:
         try:
             document = tomllib.loads(
                 (self.magi_dir / MAGI_TOML_NAME).read_text(encoding="utf-8"))
-        except (OSError, tomllib.TOMLDecodeError):
+        except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
             return None
         value = document.get("base_url")
         return value if isinstance(value, str) else None
@@ -429,7 +429,7 @@ class Environment:
             with path.open("rb") as handle:
                 document = tomllib.load(handle)
             text = path.read_text(encoding="utf-8")
-        except (OSError, tomllib.TOMLDecodeError):
+        except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
             return {}
         section = document.get(MEMORY_SECTION)
         settings = _commented_defaults(text, MEMORY_SECTION)
