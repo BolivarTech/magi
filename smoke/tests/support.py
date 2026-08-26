@@ -193,6 +193,30 @@ class FakeConfig:
 FAKE_PASSPHRASE = "correct-horse-battery-staple"
 
 
+def vault_succeeds(call: "Call") -> ProductOutput | None:
+    """A responder that accepts the executor's vault bookkeeping and nothing else.
+
+    The default response is a FAILED invocation, deliberately, so a scenario
+    tested against a bare double cannot reach PASS while asserting nothing.
+    That default is right for the scenario and wrong for the executor's own
+    plumbing: R6 plants placeholder entries and R7 rotates a credential, both
+    through ``vault set``, and a refusal there now stops the run before it
+    starts -- which is the point of that check, but it is not what a test
+    about resolved URLs is asking.
+
+    Args:
+        call: What the fake binary was asked to run.
+
+    Returns:
+        ProductOutput: Exit 0 for a vault subcommand; None for anything else,
+        which leaves the failed default in place for the run itself.
+    """
+    if list(call.args[:1]) != ["vault"]:
+        return None
+    return ProductOutput(stdout=b"", stderr=b"", exit_code=0,
+                         command=["magi-rs"] + list(call.args))
+
+
 def scratch_dir(case: unittest.TestCase) -> pathlib.Path:
     """A temporary directory that goes away when the test does.
 

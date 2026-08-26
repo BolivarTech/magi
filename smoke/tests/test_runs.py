@@ -741,7 +741,7 @@ class AuthenticatedBackendTests(unittest.TestCase):
                          declared["OPENAI_BASE_URL"])
 
     def test_the_resolved_url_carries_the_placeholders(self) -> None:
-        binary = support.install_fake_runs(self)
+        binary = support.install_fake_runs(self, responder=support.vault_succeeds)
         executor = runs.RunExecutor(runs._binary, runs._env, runs._config,
                                     credential="the-real-credential")
         executor.execute(runs.DEFINITIONS["R6"])
@@ -754,7 +754,7 @@ class AuthenticatedBackendTests(unittest.TestCase):
         outlive the run: a leftover entry would make the next run's endpoint
         authenticated by accident.
         """
-        binary = support.install_fake_runs(self)
+        binary = support.install_fake_runs(self, responder=support.vault_succeeds)
         executor = runs.RunExecutor(runs._binary, runs._env, runs._config,
                                     credential="the-real-credential")
         executor.execute(runs.DEFINITIONS["R6"])
@@ -821,7 +821,7 @@ class ErrorBackendTests(unittest.TestCase):
                          declared["OPENAI_BASE_URL"])
 
     def test_the_token_is_resolved_before_the_product_sees_it(self) -> None:
-        binary = support.install_fake_runs(self)
+        binary = support.install_fake_runs(self, responder=support.vault_succeeds)
         executor = runs.RunExecutor(runs._binary, runs._env, runs._config,
                                     credential="the-real-credential")
         executor.execute(runs.DEFINITIONS["R6"])

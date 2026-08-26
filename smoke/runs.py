@@ -1184,14 +1184,19 @@ class RunExecutor:
                 which any process on the machine could read.
 
         Raises:
-            ProductOutputError: If the product could not be run.
+            ProductOutputError: If the product could not be run, or ran and
+                refused. The second half is not pedantry: ``invoke`` treats a
+                non-zero exit as an answer rather than an error, so without
+                this check a ``vault set`` the product REFUSED returned
+                normally and the rotation reported a success that never
+                happened.
         """
-        self._binary.invoke(
+        self._require_zero(self._binary.invoke(
             [_VAULT_SUBCOMMAND, _SET_SUBCOMMAND, name, _FORCE_FLAG,
              "-w", str(self._env.root)],
             stdin=value,
             env={PASSPHRASE_VARIABLE: self._config.passphrase},
-            timeout=VAULT_TIMEOUT_S)
+            timeout=VAULT_TIMEOUT_S), _SET_SUBCOMMAND, name)
 
     def _vault_remove(self, name: str) -> None:
         """Delete one secret, skipping the confirmation.
@@ -1200,11 +1205,35 @@ class RunExecutor:
             name: The entry's name.
 
         Raises:
-            ProductOutputError: If the product could not be run.
+            ProductOutputError: If the product could not be run, or ran and
+                refused. Same reason as :meth:`_vault_set`.
         """
-        self._binary.invoke(
+        self._require_zero(self._binary.invoke(
             [_VAULT_SUBCOMMAND, _REMOVE_SUBCOMMAND, name, _FORCE_FLAG,
              "-w", str(self._env.root)],
             stdin=b"",
             env={PASSPHRASE_VARIABLE: self._config.passphrase},
-            timeout=VAULT_TIMEOUT_S)
+            timeout=VAULT_TIMEOUT_S), _REMOVE_SUBCOMMAND, name)
+
+    @staticmethod
+    def _require_zero(output, verb: str, name: str):
+        """Turn a refusal into the error the callers already handle.
+
+        Args:
+            output: What the invocation captured.
+            verb: The vault subcommand, for the message.
+            name: The entry it acted on.
+
+        Returns:
+            ProductOutput: The capture, when the product accepted.
+
+        Raises:
+            ProductOutputError: When it exited non-zero, carrying the
+                product's own stderr rather than a summary of it.
+        """
+        if output.exit_code != 0:
+            raise ProductOutputError(
+                "vault %s %s exited %d: %s"
+                % (verb, name, output.exit_code,
+                   output.stderr.decode("utf-8", errors="replace").strip()))
+        return output
