@@ -20,6 +20,24 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import scoped_tests  # noqa: E402 - the path insert above has to run first
 
 
+def _repo_with_a_commit() -> pathlib.Path:
+    """A git repository with one commit, so ``git diff HEAD`` has a HEAD.
+
+    Returns:
+        pathlib.Path: The repository root.
+    """
+    root = pathlib.Path(tempfile.mkdtemp())
+    run = lambda *args: subprocess.run(args, cwd=str(root), check=True,
+                                       capture_output=True)
+    run("git", "init", "-q")
+    run("git", "config", "user.email", "harness@example.invalid")
+    run("git", "config", "user.name", "harness")
+    (root / "seed").write_text("seed", encoding="utf-8")
+    run("git", "add", "seed")
+    run("git", "commit", "-q", "-m", "seed")
+    return root
+
+
 class HarnessCategoryTests(unittest.TestCase):
     """``smoke/`` is classified, not unknown, and not conflated with 'no diff'."""
 
@@ -68,8 +86,7 @@ class HarnessCategoryTests(unittest.TestCase):
         the script's single exception to widening, and it has to mean "there
         is no change", not "git was not looking".
         """
-        root = pathlib.Path(tempfile.mkdtemp())
-        subprocess.run(["git", "init", "-q", str(root)], check=True)
+        root = _repo_with_a_commit()
         (root / "src").mkdir()
         (root / "src" / "brand_new.rs").write_text("fn main() {}\n",
                                                    encoding="utf-8")
@@ -78,8 +95,7 @@ class HarnessCategoryTests(unittest.TestCase):
 
     def test_an_ignored_new_file_is_still_not_a_change(self) -> None:
         """Widening on an ignored path would run the whole suite for a log."""
-        root = pathlib.Path(tempfile.mkdtemp())
-        subprocess.run(["git", "init", "-q", str(root)], check=True)
+        root = _repo_with_a_commit()
         (root / ".gitignore").write_text("noise.log\n", encoding="utf-8")
         (root / "noise.log").write_text("x\n", encoding="utf-8")
         listed = scoped_tests.changed_files(None, cwd=str(root))

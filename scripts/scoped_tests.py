@@ -130,12 +130,35 @@ HARNESS_PREFIXES = ("smoke/",)
 DOC_SUFFIXES = (".md", ".toml", ".json", ".yml", ".yaml", ".txt")
 
 
-def changed_files(rev_range):
-    """Return the repository-relative paths the range (or worktree) touches."""
+def changed_files(rev_range, cwd=None):
+    """Return the repository-relative paths the range (or worktree) touches.
+
+    UNTRACKED files count. ``git diff`` lists only what git already knows
+    about, so a brand-new source file that has not been staged is invisible to
+    it -- and the script would then take its one shortcut, "git reports no
+    change", and run nothing at all on the commit that adds a file. The empty
+    answer has to mean there is no change, never that git was not looking.
+    Ignored paths stay out (``--exclude-standard``): widening the whole suite
+    for a log file is the other direction of the same mistake.
+
+    A rev range names two commits, and an untracked file belongs to neither,
+    so the second listing is taken only for the worktree.
+    """
     cmd = ["git", "diff", "--name-only"]
     cmd.append(rev_range if rev_range else "HEAD")
-    out = subprocess.run(cmd, capture_output=True, text=True, check=True).stdout
-    return [line.strip().replace("\\", "/") for line in out.splitlines() if line.strip()]
+    listed = subprocess.run(cmd, capture_output=True, text=True, check=True,
+                            cwd=cwd).stdout.splitlines()
+    if not rev_range:
+        listed += subprocess.run(
+            ["git", "ls-files", "--others", "--exclude-standard"],
+            capture_output=True, text=True, check=True, cwd=cwd).stdout.splitlines()
+    seen, paths = set(), []
+    for line in listed:
+        path = line.strip().replace("\\", "/")
+        if path and path not in seen:
+            seen.add(path)
+            paths.append(path)
+    return paths
 
 
 def repo_root():
