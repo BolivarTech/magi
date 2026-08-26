@@ -6,8 +6,10 @@
 import pathlib
 import subprocess
 import sys
+import pathlib
 import unittest
 
+from smoke import __main__ as main
 from smoke.__main__ import (
     EXIT_HARNESS,
     EXIT_NOT_PASSED,
@@ -70,6 +72,31 @@ class ArgumentTests(unittest.TestCase):
         with self.assertRaises(SystemExit):
             parse_args(["--init-env", "--reset-env"])
 
+
+class AmbientOrderingTests(unittest.TestCase):
+    """The environment's [memory] table is read AFTER the preflight writes it.
+
+    Step 7b is what normalises ``magi.toml``. Reading the table before it
+    means S9's saturation ceiling derives from the PREVIOUS run's file, or
+    from nothing at all on a first run where the file does not exist yet --
+    and then 3b is CANNOT_TEST, assertion 3 degrades with it, and no
+    certificate can be emitted on a fresh environment. The tree snapshot has
+    the opposite requirement and must still be taken before.
+
+    Checked against the source: the two reads have to sit on opposite sides of
+    the preflight call, and nothing else in this module can say which side.
+    """
+
+    def test_the_memory_table_is_read_after_the_preflight_runs(self) -> None:
+        text = pathlib.Path(main.__file__).read_text(encoding="utf-8")
+        preflight = text.index("Preflight(config, env, binary")
+        settings = text.index("env.memory_settings()")
+        snapshot = text.index("capture_tree(REPO_ROOT)")
+        self.assertLess(snapshot, preflight,
+                        "the tree snapshot must precede the preflight")
+        self.assertGreater(settings, preflight,
+                           "the memory table must be read after step 7b "
+                           "writes magi.toml")
 
 class RegistrationOnTheProductPathTests(unittest.TestCase):
     """The scenarios have to be registered on the path the OPERATOR takes."""
