@@ -47,6 +47,24 @@ def _http_post(url: str, credential: bytes) -> tuple[int, bytes]:
         return refused.code, refused.read()
 
 
+def _query_call(binary):
+    """The invocation that ran the product, not the vault bookkeeping.
+
+    The authenticated backend plants entries before the run and removes them
+    after, so the LAST recorded call is a ``vault rm``, not the run.
+
+    Args:
+        binary: The fake binary.
+
+    Returns:
+        support.Call: The recorded query invocation.
+    """
+    for call in reversed(binary.calls):
+        if list(call.args[:1]) != ["vault"]:
+            return call
+    raise AssertionError("no non-vault invocation was recorded")
+
+
 class ConfigureGuardTests(unittest.TestCase):
     """Module state is write-once at startup, and that is checkable."""
 
@@ -399,7 +417,7 @@ class AuthenticatedBackendTests(unittest.TestCase):
         executor = runs.RunExecutor(runs._binary, runs._env, runs._config,
                                     credential="the-real-credential")
         executor.execute(runs.DEFINITIONS["R6"])
-        resolved = (binary.calls[-1].env or {}).get("OPENAI_BASE_URL", "")
+        resolved = (_query_call(binary).env or {}).get("OPENAI_BASE_URL", "")
         self.assertIn(runs.USER_PLACEHOLDER, resolved)
         self.assertIn(runs.PASSWORD_PLACEHOLDER, resolved)
 
@@ -479,11 +497,10 @@ class ErrorBackendTests(unittest.TestCase):
         executor = runs.RunExecutor(runs._binary, runs._env, runs._config,
                                     credential="the-real-credential")
         executor.execute(runs.DEFINITIONS["R6"])
-        overlay = binary.calls[-1].env or {}
+        overlay = _query_call(binary).env or {}
         self.assertNotIn(runs.ERROR_BACKEND_TOKEN,
                          overlay.get("OPENAI_BASE_URL", ""))
-        self.assertTrue(
-            overlay.get("OPENAI_BASE_URL", "").startswith("http://127.0.0.1:"))
+        self.assertIn("@127.0.0.1:", overlay.get("OPENAI_BASE_URL", ""))
 
 
 class NeededRunsTests(unittest.TestCase):

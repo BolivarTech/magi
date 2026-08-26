@@ -517,6 +517,24 @@ RECALL_PROMPT = b"Which language do I prefer for systems programming?\n"
 #: nothing.
 ERROR_BACKEND_TOKEN = "<error-backend>"
 
+#: What the product substitutes from the vault into an authenticated URL.
+#: Literals, because they are the product's own spelling and it refuses a
+#: base_url that carries anything else.
+USER_PLACEHOLDER = "[user]"
+PASSWORD_PLACEHOLDER = "[password]"
+
+#: The vault entries the substitution reads. BOTH pairs, and that is measured
+#: rather than assumed: with only the root pair the product asked for
+#: ``MAGI_BASE_URL_USER``, and with only the prefixed pair it asked for
+#: ``BASE_URL_USER``. The trio section inherits the root endpoint, so both
+#: resolutions happen and both need their entry.
+PLACEHOLDER_ENTRIES = ("BASE_URL_USER", "BASE_URL_PASSWORD",
+                       "MAGI_BASE_URL_USER", "MAGI_BASE_URL_PASSWORD")
+
+#: The account name the placeholders resolve to. Only the PASSWORD is the
+#: planted secret; the user half is ordinary and carries no marker.
+BACKEND_USER = "smoke-probe"
+
 #: What the local endpoint answers. 401 is what a real provider returns for a
 #: credential it rejects, which is the path the redaction defect lived on.
 ERROR_BACKEND_STATUS = 401
@@ -853,10 +871,48 @@ class RunExecutor:
         declared = dict(definition.env)
         if ERROR_BACKEND_TOKEN not in declared.values():
             return self._invoke_with(definition, declared, stdin)
-        with error_backend() as url:
+        with self._authenticated_backend(definition) as url:
             resolved = {name: (url if value == ERROR_BACKEND_TOKEN else value)
                         for name, value in declared.items()}
             return self._invoke_with(definition, resolved, stdin)
+
+    @contextlib.contextmanager
+    def _authenticated_backend(self, definition: RunDefinition):
+        """Serve an error backend the product must AUTHENTICATE against.
+
+        The credential goes into the URL's authority, not only into a header,
+        and that is the whole point of the run. The defect it guards lives in
+        the vault percent-encoding a credential into the authority: a reserved
+        character there moves the last ``@`` that ``redact_url`` anchors on,
+        and the function used to return its input unchanged. A credential
+        carried in ``Authorization`` never travels that path.
+
+        The product refuses a literal credential in ``base_url`` -- measured,
+        with a message that names the placeholder mechanism and does not echo
+        the value -- so the credential travels through the vault and the URL
+        carries placeholders. The entries are removed afterwards: one left
+        behind makes the next run's endpoint authenticated by accident.
+
+        Args:
+            definition: The run, for the secret it declares planting.
+
+        Yields:
+            str: The authenticated URL to hand the product.
+        """
+        password = definition.planted[0].value if definition.planted else ""
+        with error_backend() as url:
+            for name in PLACEHOLDER_ENTRIES:
+                self._vault_set(
+                    name,
+                    (password if name.endswith("PASSWORD") else BACKEND_USER)
+                    .encode("utf-8"))
+            try:
+                yield url.replace(
+                    "http://",
+                    "http://%s:%s@" % (USER_PLACEHOLDER, PASSWORD_PLACEHOLDER))
+            finally:
+                for name in PLACEHOLDER_ENTRIES:
+                    self._vault_remove(name)
 
     def _invoke_with(self, definition: RunDefinition,
                      declared: dict, stdin: bytes) -> ProductOutput:
