@@ -258,11 +258,18 @@ def _windows_permission_finding(magi_dir):
     if broad:
         return _finding(1, Outcome.FAIL,
                         "the DACL still grants %s" % ", ".join(broad))
-    if len(principals) != 1:
+    # DISTINCT accounts, not entries. icacls prints a principal once per access
+    # entry, and the product's own restriction leaves the owner with two -- one
+    # inheritable for what the directory contains, one for the directory
+    # itself. Counting entries reported "2 accounts (X, X)", the same name
+    # twice, so the assertion could never pass on a correctly restricted
+    # workspace. Who can read it is the question; how many rows say so is not.
+    accounts = sorted(set(principals))
+    if len(accounts) != 1:
         return _finding(
             1, Outcome.FAIL,
             "the DACL names %d accounts (%s); the restriction leaves exactly one"
-            % (len(principals), ", ".join(principals)),
+            % (len(accounts), ", ".join(accounts)),
         )
     return _finding(1, Outcome.PASS, "")
 
