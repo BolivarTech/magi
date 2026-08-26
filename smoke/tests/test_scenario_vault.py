@@ -505,6 +505,24 @@ class CredentialRotationScenarioBodyTests(unittest.TestCase):
                     for f in DEFAULT_REGISTRY.get("S16").func(run)}
         self.assertEqual(Outcome.FAIL, outcomes[vault.S16_ASSERTIONS[1]])
 
+    def test_a_measured_wipe_outranks_an_unmeasured_table(self) -> None:
+        """S16's half of the rule S4 already guards, and it had no guardian.
+
+        The shared helper is covered and both call sites read it, but only
+        S4's ordering was tested: reverting S16's -- checking ``unmeasured``
+        before ``lost`` -- left this module green. S16 has a loss case and an
+        unmeasured case and had none where BOTH hold, which is the whole
+        subject of the fix, on the assertion that guards REQ-V35.
+        """
+        support.install_fake_runs(
+            self, responder=_RotatedDatabase(counts=(1, 0, 40, 0, 5),
+                                             missing=("messages",)))
+        run = _r7_result(baseline={"sessions": 2, "messages": 40,
+                                   "knowledge": 3, "memories": 5})
+        outcomes = {f.assertion: f.outcome
+                    for f in DEFAULT_REGISTRY.get("S16").func(run)}
+        self.assertEqual(Outcome.FAIL, outcomes[vault.S16_ASSERTIONS[1]])
+
     def test_a_table_nobody_measured_is_not_a_loss(self) -> None:
         """Unknown is not empty.
 

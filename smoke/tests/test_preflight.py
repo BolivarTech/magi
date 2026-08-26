@@ -524,6 +524,28 @@ class RotationRestoreTests(unittest.TestCase):
             preflight._restore_rotation_if_left_over()
         self.assertIn("no such binary", str(caught.exception))
 
+    def test_a_vault_that_refuses_to_be_listed_cuts(self) -> None:
+        """The other half of the cut, and the one the spec actually names.
+
+        Section 5.2's causes are "vault ilegible, passphrase equivocada" --
+        both of which are the product RUNNING and exiting non-zero, not
+        failing to start. The sibling test drives an OSError, so with only
+        that one the branch this exercises could be deleted and the whole
+        suite stayed green.
+        """
+        preflight, _ = self._preflight("")
+        # side_effect FIRST, and cleared rather than set beside a return_value:
+        # the helper installs one, and a side_effect takes precedence over a
+        # return_value, so assigning the capture alone leaves the helper's
+        # healthy exit 0 in place and the test passes for the wrong reason.
+        preflight.binary.invoke.side_effect = None
+        preflight.binary.invoke.return_value = ProductOutput(
+            stdout=b"", stderr=b"error: incorrect passphrase", exit_code=1,
+            command=["magi-rs", "vault", "ls"])
+        with self.assertRaises(PreflightError) as caught:
+            preflight._restore_rotation_if_left_over()
+        self.assertIn("incorrect passphrase", str(caught.exception))
+
     def test_left_over_placeholders_are_swept(self) -> None:
         """The crash path the placeholder removal never covered.
 
