@@ -34,9 +34,10 @@ def load_tests(loader, tests, ignore):  # noqa: ARG001 - unittest protocol
         ignore: Unused; the protocol supplies it.
 
     Returns:
-        unittest.TestSuite: The suite, with one case per module that has
-        examples. A module with none contributes nothing, which is why an
-        empty package does not fail here.
+        unittest.TestSuite: The suite, with one case per DOCSTRING that
+        carries examples -- a module with several contributes several. A
+        module with none contributes nothing, which is why an empty package
+        does not fail here.
     """
     for module in pkgutil.walk_packages(smoke.__path__, "smoke."):
         if module.name.startswith(_SKIPPED):
@@ -60,9 +61,11 @@ def _doctest_cases():
     stayed green while zero examples executed anywhere.
 
     Returns:
-        list[doctest.DocTestCase]: One per executable example the protocol
-        actually delivers, flattened out of the nested suites the loader
-        builds.
+        list[doctest.DocTestCase]: One per DOCSTRING that carries examples,
+        flattened out of the nested suites the loader builds. Not one per
+        example -- ``DocTestSuite`` groups a docstring's examples into a
+        single case, so this tree yields 11 cases over 24 examples, and a
+        later floor written against the wrong unit would be red on arrival.
     """
     module = importlib.import_module(__name__)
     suite = unittest.defaultTestLoader.loadTestsFromModule(module)

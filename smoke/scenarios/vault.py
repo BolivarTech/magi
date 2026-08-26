@@ -766,9 +766,9 @@ def rotating_a_credential_keeps_the_database(run):
 
     The rotation is over by the time this runs -- R7 puts the real credential
     back on both exits of its own rotation -- so the scenario reads the
-    aftermath rather than
-    driving the rotation itself. That is deliberate: one place performs the
-    dangerous half, and it is the place that also knows how to undo it.
+    aftermath rather than driving the rotation itself. That is deliberate:
+    one place performs the dangerous half, and it is the place that also
+    knows how to undo it.
 
     Both assertions are refused when R7 did not complete. A database that opens
     is not evidence about a rotation, and over a truncated run it is not even
