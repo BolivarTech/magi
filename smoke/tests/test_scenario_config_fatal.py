@@ -103,10 +103,6 @@ class _FakeProduct:
         text = (root / ".magi" / "magi.toml").read_text(encoding="utf-8")
         if config_fatal.UNKNOWN_FIELD in text:
             message = "error: unknown field `%s`" % config_fatal.UNKNOWN_FIELD
-        elif "tool_result_cap_bytes" in text:
-            named = (config_fatal.V011_MARKERS if self.all_at_once
-                     else config_fatal.V011_MARKERS[:1])
-            message = "error: migrate: " + ", ".join(named)
         elif "_lineage" not in text:
             named = config_fatal.SEATS[:self.seats_named]
             message = "error: seats without a lineage: " + ", ".join(named)
