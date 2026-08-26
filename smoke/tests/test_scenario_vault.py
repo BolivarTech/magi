@@ -8,6 +8,7 @@ import unittest
 from smoke.outcome import Outcome
 from smoke.product import ProductOutput
 from smoke.registry import DEFAULT_REGISTRY
+from smoke.runs import RunResult
 from smoke.scenarios import vault  # noqa: F401 - import registers it
 from smoke.tests import support
 
@@ -310,6 +311,138 @@ class WrongPassphraseScenarioBodyTests(unittest.TestCase):
         assertion 1 red for the wrong reason, and assertion 2 vacuous.
         """
         self.assertNotEqual(support.FAKE_PASSPHRASE, vault.WRONG_PASSPHRASE)
+
+
+class _RotatedDatabase(_FakeDatabase):
+    """The database as S16 finds it: after R7 rotated the stored API key.
+
+    Attributes:
+        opens: Whether the configured passphrase still opens the database. A
+            False here is the defect the durable invariant of section 0.2
+            forbids -- rotating a third-party credential re-keying the local
+            vault -- and it is what assertion 1 exists to catch.
+    """
+
+    def __init__(self, opens: bool = True, **kwargs) -> None:
+        """Create the double.
+
+        Args:
+            opens: Whether the configured passphrase is still accepted.
+            **kwargs: Passed through to :class:`_FakeDatabase`.
+        """
+        super().__init__(**kwargs)
+        self.opens = opens
+
+    def __call__(self, call: support.Call) -> ProductOutput | None:
+        """Answer one invocation.
+
+        Args:
+            call: What the fake binary was asked to run.
+
+        Returns:
+            ProductOutput: The canned answer, or None for the failed default.
+        """
+        args = list(call.args)
+        if args[:1] == ["vault"] and "diagnose" not in args and not self.opens:
+            return _capture(b"", b"error: incorrect passphrase\n", 1)
+        return super().__call__(call)
+
+
+def _r7_result(timed_out: bool = False) -> RunResult:
+    """Build the R7 capture S16 reads.
+
+    R7 exits non-zero on purpose: it queries while the backend credential holds
+    the rotation sentinel, so the call it makes cannot authenticate. What S16
+    asks about is the database the product kept using around that failure, not
+    the answer the backend refused to give.
+
+    Args:
+        timed_out: Whether the run exceeded its ceiling.
+
+    Returns:
+        RunResult: The capture, or the truncated one.
+    """
+    return RunResult(run_id="R7", output=_capture(b"", b"error: 401\n", 1),
+                     duration_s=1.0, timed_out=timed_out, planted=())
+
+
+def _s16_outcomes(run: RunResult | None) -> dict[str, Outcome]:
+    """Run S16 over one R7 capture and index its outcomes by assertion.
+
+    Args:
+        run: What R7 produced, or None when it never executed.
+
+    Returns:
+        dict[str, Outcome]: What each assertion concluded.
+    """
+    findings = list(DEFAULT_REGISTRY.get("S16").func(run))
+    return {finding.assertion: finding.outcome for finding in findings}
+
+
+class CredentialRotationScenarioTests(unittest.TestCase):
+    """S16 hangs off R7 and declares its two assertions."""
+
+    def test_s16_is_registered_with_its_declared_run(self) -> None:
+        entry = DEFAULT_REGISTRY.get("S16")
+        self.assertEqual("R7", entry.run)
+        self.assertTrue(entry.needs_backend)
+
+    def test_the_assertion_texts_are_the_spec_texts(self) -> None:
+        self.assertEqual(
+            [
+                "after rotating the stored API key, the DB still opens with "
+                "the same passphrase",
+                "the previous history is still there",
+            ],
+            list(vault.S16_ASSERTIONS),
+        )
+
+
+class CredentialRotationScenarioBodyTests(unittest.TestCase):
+    """Rotating a third-party credential must not cost the user their data."""
+
+    def test_a_rotation_that_never_ran_cannot_test_either_assertion(self) -> None:
+        """With R7 absent nothing was rotated, so a database that opens says
+        nothing about surviving a rotation that never happened.
+        """
+        support.install_fake_runs(self, responder=_RotatedDatabase())
+        self.assertEqual({Outcome.CANNOT_TEST},
+                         set(_s16_outcomes(None).values()))
+
+    def test_a_rotation_that_timed_out_cannot_test_either_assertion(self) -> None:
+        support.install_fake_runs(self, responder=_RotatedDatabase())
+        self.assertEqual({Outcome.CANNOT_TEST},
+                         set(_s16_outcomes(_r7_result(timed_out=True)).values()))
+
+    def test_a_database_that_survived_the_rotation_passes_both(self) -> None:
+        support.install_fake_runs(self, responder=_RotatedDatabase())
+        self.assertEqual({Outcome.PASS},
+                         set(_s16_outcomes(_r7_result()).values()))
+
+    def test_a_passphrase_the_rotation_invalidated_fails(self) -> None:
+        """The durable invariant of section 0.2: rotating a third-party
+        credential never invalidates the local encrypted database.
+        """
+        support.install_fake_runs(self, responder=_RotatedDatabase(opens=False))
+        self.assertEqual(Outcome.FAIL,
+                         _s16_outcomes(_r7_result())[vault.S16_ASSERTIONS[0]])
+
+    def test_an_empty_environment_cannot_test_the_history(self) -> None:
+        """Same trap as S4: over a database with no rows, "the previous
+        history is still there" is true of a history that never existed.
+        """
+        support.install_fake_runs(
+            self, responder=_RotatedDatabase(counts=(0, 0, 0, 0, 0)))
+        self.assertEqual(Outcome.CANNOT_TEST,
+                         _s16_outcomes(_r7_result())[vault.S16_ASSERTIONS[1]])
+
+    def test_a_product_that_does_nothing_still_reports_both(self) -> None:
+        support.install_fake_runs(self)
+        findings = list(DEFAULT_REGISTRY.get("S16").func(_r7_result()))
+        self.assertEqual(list(vault.S16_ASSERTIONS),
+                         [finding.assertion for finding in findings])
+        self.assertNotIn(Outcome.PASS,
+                         {finding.outcome for finding in findings})
 
 
 if __name__ == "__main__":
