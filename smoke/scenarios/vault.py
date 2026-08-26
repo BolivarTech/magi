@@ -518,7 +518,9 @@ def _history_counts(attempt):
     """
     if not attempt.ok or attempt.output.exit_code != 0:
         return None
-    return diagnose_counts(attempt.output.stdout)
+    return {table: count
+            for table, count in diagnose_counts(attempt.output.stdout).items()
+            if table in HISTORY_TABLES}
 
 
 def _refusal_is_typed_finding(before, refused):
