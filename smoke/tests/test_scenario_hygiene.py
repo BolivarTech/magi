@@ -129,18 +129,70 @@ class HygieneScenarioBodyTests(unittest.TestCase):
         self.assertEqual(Outcome.FAIL, outcomes[hygiene.ASSERTIONS[0]])
         self.assertTrue(appeared.exists())
 
+    def _borrow_certificate_path(self):
+        """Take the real certificate path, and guarantee it comes back.
+
+        This test writes to ``docs/test/smoke-certificate.md`` itself, because
+        S12's subject is what GIT sees and a temporary path elsewhere is not
+        the file git would report. Borrowing it is therefore necessary; not
+        putting it back was a defect, and one that could only appear once the
+        file existed.
+
+        The first version handled the absent case -- unlink on cleanup -- and
+        not the present one. Every certificate this harness had ever emitted
+        was written by a run that then exited, so the tree never carried one
+        while the suite ran, and the gap was invisible until a release put a
+        real certificate there. Running the unit suite then replaced a
+        released artifact with nine bytes, and the suite stayed green: the
+        test that asserts the harness leaves no trace was the thing leaving
+        one.
+
+        Returns:
+            pathlib.Path: The certificate path, restored to exactly its prior
+            content -- or to not existing -- when the test ends.
+        """
+        certificate = REPO_ROOT / CERTIFICATE_PATH
+        if certificate.exists():
+            saved = certificate.read_bytes()
+            self.addCleanup(certificate.write_bytes, saved)
+        else:
+            certificate.parent.mkdir(parents=True, exist_ok=True)
+            self.addCleanup(certificate.unlink, True)
+        return certificate
+
     def test_the_certificate_alone_is_allowed_to_appear(self) -> None:
         """It is the one file the run is supposed to leave behind."""
         support.install_fake_runs(self)
         before = capture_tree(REPO_ROOT)
-        certificate = REPO_ROOT / CERTIFICATE_PATH
-        existed = certificate.exists()
-        certificate.parent.mkdir(parents=True, exist_ok=True)
-        if not existed:
-            self.addCleanup(certificate.unlink, True)
+        certificate = self._borrow_certificate_path()
         certificate.write_text("# probe\n", encoding="utf-8")
         outcomes = _outcomes(_ambient(before))
         self.assertEqual(Outcome.PASS, outcomes[hygiene.ASSERTIONS[0]])
+
+    def test_an_existing_certificate_survives_this_module(self) -> None:
+        """The guardian for the borrow, and it drives the real cleanup.
+
+        Asserting inside the borrowing test cannot work: the restore runs in
+        a cleanup, after every assertion in that test has already passed. So
+        this one plants a sentinel, runs the borrowing test through unittest
+        so its cleanups actually fire, and then reads the file.
+        """
+        certificate = REPO_ROOT / CERTIFICATE_PATH
+        certificate.parent.mkdir(parents=True, exist_ok=True)
+        existed = certificate.exists()
+        saved = certificate.read_bytes() if existed else None
+        self.addCleanup(certificate.write_bytes, saved) if existed else \
+            self.addCleanup(certificate.unlink, True)
+
+        sentinel = b"# a released certificate nobody may overwrite\n"
+        certificate.write_bytes(sentinel)
+        case = HygieneScenarioBodyTests(
+            "test_the_certificate_alone_is_allowed_to_appear")
+        result = case.run()
+        self.assertTrue(result.wasSuccessful(),
+                        "the borrowing test itself failed: %s" % result.errors)
+        self.assertEqual(sentinel, certificate.read_bytes(),
+                         "the suite overwrote a certificate it only borrowed")
 
     def test_an_environment_git_cannot_see_passes(self) -> None:
         directory = self._probe_dir(_IGNORE_EVERYTHING)
