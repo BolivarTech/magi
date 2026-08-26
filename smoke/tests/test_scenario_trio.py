@@ -456,9 +456,13 @@ class S18Tests(unittest.TestCase):
         return {"R4": _result("R4", document=r4),
                 "R8": _result("R8", document=r8)}
 
-    def test_the_declared_shapes_pass_all_four(self) -> None:
-        self.assertEqual({Outcome.PASS},
-                         set(_outcomes("S18", self._pair()).values()))
+    def test_the_declared_shapes_pass_the_first_three(self) -> None:
+        """The fourth is covered separately: the default envelope carries no
+        finding, and an empty array is the positive certificate that nothing
+        was produced rather than a shape that is wrong."""
+        outcomes = _outcomes("S18", self._pair())
+        for text in trio.S18_ASSERTIONS[:3]:
+            self.assertEqual(Outcome.PASS, outcomes[text], text)
 
     def test_a_missing_key_under_the_flag_fails_the_first(self) -> None:
         envelope = copy.deepcopy(_ENVELOPE)
