@@ -78,6 +78,26 @@ class WindowsPermissionTests(unittest.TestCase):
         self.assertIn("could not be read", str(caught.exception))
 
 
+def _verb(argv: list[str]) -> str:
+    """The vault subcommand an invocation carries.
+
+    Read by NAME rather than by position: the workspace flag sits between the
+    subcommand group and its verb, so an index would have to move every time
+    the argv gains a flag.
+
+    Args:
+        argv: The invocation.
+
+    Returns:
+        str: The first argument that is not the group, a flag, or a flag's
+        value.
+    """
+    rest = list(argv[1:])
+    while rest and rest[0].startswith("-"):
+        rest = rest[2:]
+    return rest[0] if rest else ""
+
+
 def _quiet_permissions(case: unittest.TestCase) -> None:
     """Patch out step 4 for a test whose subject is a different step.
 
@@ -294,7 +314,7 @@ class RotationRestoreTests(unittest.TestCase):
 
         def answer(args, stdin=None, env=None, timeout=None, cwd=None):
             calls.append(list(args))
-            text = listing if args[:2] == ["vault", "ls"] else ""
+            text = listing if _verb(args) == "ls" else ""
             return ProductOutput(stdout=text.encode("utf-8"), stderr=b"",
                                  exit_code=0, command=["magi-rs"] + list(args))
 
@@ -331,17 +351,16 @@ class RotationRestoreTests(unittest.TestCase):
         """Detection alone leaves the environment broken for the next run."""
         preflight, calls = self._preflight("SMOKE_R7_ROTATION\nOPENAI_API_KEY\n")
         preflight._restore_rotation_if_left_over()
-        subcommands = [c[:2] for c in calls]
-        self.assertIn(["vault", "set"], subcommands)
-        self.assertIn(["vault", "rm"], subcommands)
-        self.assertLess(subcommands.index(["vault", "set"]),
-                        subcommands.index(["vault", "rm"]),
+        verbs = [_verb(c) for c in calls]
+        self.assertIn("set", verbs)
+        self.assertIn("rm", verbs)
+        self.assertLess(verbs.index("set"), verbs.index("rm"),
                         "the credential is restored before the marker is dropped")
 
     def test_no_marker_means_no_vault_writes_at_all(self) -> None:
         preflight, calls = self._preflight("OPENAI_API_KEY\n")
         preflight._restore_rotation_if_left_over()
-        self.assertEqual([["vault", "ls"]], [c[:2] for c in calls])
+        self.assertEqual(["ls"], [_verb(c) for c in calls])
 
     def test_the_vault_listing_uses_the_binary_s_real_signature(self) -> None:
         """The first version passed ``timeout_s=``; the binary takes ``timeout``.

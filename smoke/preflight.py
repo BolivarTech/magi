@@ -35,6 +35,16 @@ from smoke.errors import PreflightError, ProductOutputError
 #: it still runs, and what does is reported CANNOT_TEST.
 BACKEND_PROBE_TIMEOUT_S = 10
 
+#: The flag that tells the product WHICH workspace to open.
+#:
+#: Without it the product walks up from the harness's own working directory,
+#: which is the repository root and not ``smoke/env/``. Step 6 then listed a
+#: vault that does not exist, answered "cannot tell", and never detected the
+#: rotation marker -- and had any ancestor of the launch directory carried a
+#: ``.magi/``, the restore would have written the operator's real backend
+#: credential into that unrelated workspace.
+WORKDIR_FLAG = "-w"
+
 #: The variable the passphrase travels in. Never ``-p``: that is a global flag
 #: and would ride in the archived command line of every run.
 PASSPHRASE_VAR = "MAGI_PASSPHRASE"
@@ -297,8 +307,11 @@ class Preflight:
         # the marker with the credential already correct, so the next preflight
         # restores a correct value over itself -- a no-op. The other order would
         # leave the credential rotated with nothing left to say so.
-        self._vault_write(["vault", "set", key, "--force"], stdin=credential.encode("utf-8"))
-        self._vault_write(["vault", "rm", ROTATION_MARKER, "--force"])
+        self._vault_write(["vault", WORKDIR_FLAG, str(self.env.root),
+                           "set", key, "--force"],
+                          stdin=credential.encode("utf-8"))
+        self._vault_write(["vault", WORKDIR_FLAG, str(self.env.root),
+                           "rm", ROTATION_MARKER, "--force"])
         print(
             "[preflight] a previous run died mid-rotation; %s has been "
             "restored and %s removed. Something is killing R7 -- the recovery "
@@ -316,7 +329,7 @@ class Preflight:
         """
         try:
             completed = self.binary.invoke(
-                ["vault", "ls"],
+                ["vault", WORKDIR_FLAG, str(self.env.root), "ls"],
                 env={PASSPHRASE_VAR: getattr(self.config, "passphrase", "")},
                 timeout=VAULT_TIMEOUT_S,
             )
