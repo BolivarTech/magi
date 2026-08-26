@@ -3,6 +3,8 @@
 # Date: 2026-08-25
 """Tests for the one door between a scenario and the product."""
 
+import contextlib
+import io
 import pathlib
 import socket
 import tempfile
@@ -519,6 +521,35 @@ class PlaceholderLifetimeTests(unittest.TestCase):
         self.assertEqual(set(planted), set(removed),
                          "everything planted has to be taken back out")
 
+    def test_a_failed_removal_warns_instead_of_taking_the_harness_down(self):
+        """A leftover entry is a note, never a verdict on the product.
+
+        Raising out of the ``finally`` replaced whatever was already in
+        flight -- R6's own ``TimedOut`` among them, which the runner needs to
+        substitute CANNOT_TEST for S10 -- and then escaped ``execute``. Main
+        types only PreflightError and HarnessError, so it reached the
+        last-resort catch: a traceback, exit 3, no report, and every finding
+        from every completed run discarded. Exit 3 says the HARNESS failed;
+        the event is one ``vault rm`` the product refused.
+        """
+        def stubborn(call):
+            args = list(call.args)
+            if args[:1] != ["vault"]:
+                return None
+            if "rm" in args:
+                raise ProductOutputError("vault rm refused")
+            return ProductOutput(stdout=b"", stderr=b"", exit_code=0,
+                                 command=["magi-rs"] + args)
+
+        support.install_fake_runs(self, responder=stubborn)
+        executor = runs.RunExecutor(runs._binary, runs._env, runs._config,
+                                    credential="the-real-credential")
+        noise = io.StringIO()
+        with contextlib.redirect_stderr(noise):
+            result = executor.execute(runs.DEFINITIONS["R6"])
+        self.assertEqual("R6", result.run_id)
+        self.assertIn("placeholder", noise.getvalue())
+
     def test_one_failed_removal_does_not_skip_the_rest(self) -> None:
         removed = []
 
@@ -538,11 +569,12 @@ class PlaceholderLifetimeTests(unittest.TestCase):
         support.install_fake_runs(self, responder=stubborn)
         executor = runs.RunExecutor(runs._binary, runs._env, runs._config,
                                     credential="the-real-credential")
-        with self.assertRaises(ProductOutputError) as caught:
+        noise = io.StringIO()
+        with contextlib.redirect_stderr(noise):
             executor.execute(runs.DEFINITIONS["R6"])
         self.assertEqual(len(runs.PLACEHOLDER_ENTRIES), len(removed),
                          "every entry gets its own removal attempt")
-        self.assertIn("left placeholder entries", str(caught.exception))
+        self.assertIn("left placeholder entries", noise.getvalue())
 
 
 class ArchiveScrubbingTests(unittest.TestCase):
