@@ -557,7 +557,10 @@ class PlaceholderLifetimeTests(unittest.TestCase):
             args = list(call.args)
             if args[:1] != ["vault"]:
                 return None
-            if "set" in args and runs.ROTATION_MARKER not in args:
+            # The sentinel set and the restore carry the SAME argv; the value
+            # is the only thing that tells them apart, and only the restore
+            # runs from the finally this test is about.
+            if call.stdin == b"the-real-credential":
                 raise ProductOutputError("vault set refused")
             return ProductOutput(stdout=b"", stderr=b"", exit_code=0,
                                  command=["magi-rs"] + args)
@@ -568,6 +571,33 @@ class PlaceholderLifetimeTests(unittest.TestCase):
         with self.assertRaises(HarnessError) as caught:
             executor.execute(runs.DEFINITIONS["R7"])
         self.assertIn("credential", str(caught.exception))
+
+    def test_a_failed_restore_does_not_replace_the_run_s_own_timeout(self):
+        """R7 times out AND the restore fails: the timeout has to survive.
+
+        The runner substitutes CANNOT_TEST for the scenarios that read a run
+        which timed out. Replacing that timeout with the restore's own
+        failure loses the substitution, so S16 reports nothing it could have
+        reported. The restore still says what happened, on stderr.
+        """
+        def stubborn(call):
+            args = list(call.args)
+            if args[:1] != ["vault"]:
+                raise TimedOut("the run itself timed out", output=None)
+            if call.stdin == b"the-real-credential":
+                raise ProductOutputError("vault set refused")
+            return ProductOutput(stdout=b"", stderr=b"", exit_code=0,
+                                 command=["magi-rs"] + args)
+
+        support.install_fake_runs(self, responder=stubborn)
+        executor = runs.RunExecutor(runs._binary, runs._env, runs._config,
+                                    credential="the-real-credential")
+        noise = io.StringIO()
+        with contextlib.redirect_stderr(noise):
+            result = executor.execute(runs.DEFINITIONS["R7"])
+        self.assertTrue(result.timed_out,
+                        "the run's own timeout must reach the runner")
+        self.assertIn("could not be restored", noise.getvalue())
 
     def test_a_failed_removal_warns_instead_of_taking_the_harness_down(self):
         """A leftover entry is a note, never a verdict on the product.

@@ -1084,8 +1084,59 @@ class RunExecutor:
             self._vault_set(name, ROTATION_SENTINEL)
             yield baseline
         finally:
+            self._restore(name, credential)
+
+    def _restore(self, name: str, credential: str) -> None:
+        """Put the real credential back and drop the marker.
+
+        Runs from a ``finally``, and the three rules that follow from that
+        were learned the expensive way on the placeholder path.
+
+        **It raises a TYPED error.** A ``ProductOutputError`` escaping here
+        reaches main's last-resort catch, which is a traceback and exit 3 --
+        the code reserved for a defect in the HARNESS -- with no report and
+        every finding from every completed run discarded. The event is a
+        ``vault set`` the product refused.
+
+        **It stops the run, unlike a leftover placeholder.** A placeholder is
+        inert because step 7b rewrites ``magi.toml`` every run. A credential
+        left rotated is not: every backend invocation after it authenticates
+        with the sentinel and dies of an opaque auth error.
+
+        **It never replaces an exception already in flight.** R7's own
+        ``TimedOut`` is what the runner needs in order to substitute
+        CANNOT_TEST for the scenarios that read the run.
+
+        Args:
+            name: The variable the backend credential lives under.
+            credential: The real value to put back.
+
+        Raises:
+            HarnessError: If a vault write failed and nothing else was
+                already failing.
+        """
+        # Captured HERE, before the try. Inside an ``except ... as exc`` block
+        # ``sys.exc_info()`` IS exc, so the same check written there compares a
+        # value against itself and the branch can never be taken -- the shape
+        # of guard this project keeps finding by mutation and never by reading.
+        in_flight = sys.exc_info()[1]
+        try:
             self._vault_set(name, credential.encode("utf-8"))
             self._vault_remove(ROTATION_MARKER)
+        except (OSError, ProductOutputError) as exc:
+            if in_flight is not None:
+                print("[runs] the rotated backend credential could not be "
+                      "restored (%s), and the run was already failing. The "
+                      "next preflight restores it from %s."
+                      % (exc, name), file=sys.stderr)
+                return
+            raise HarnessError(
+                "the rotated backend credential could not be restored: %s. "
+                "The environment still holds the sentinel, so every backend "
+                "run would fail to authenticate. The next preflight restores "
+                "it from %s; if that also fails, run --reset-env."
+                % (exc, name)
+            ) from exc
 
     def _real_credential(self) -> str:
         """The credential the rotation has to be able to restore.
