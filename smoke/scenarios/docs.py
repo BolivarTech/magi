@@ -425,10 +425,23 @@ def _seed_workspace():
     root = pathlib.Path(
         tempfile.mkdtemp(prefix="s13-", dir=str(runs.scratch_root()))
     )
-    seeded = runs.attempt([INIT_SUBCOMMAND], stdin=b"",
-                          timeout_s=INIT_TIMEOUT_S, label="s13-init", cwd=root,
-                          env={"MAGI_PASSPHRASE": runs.passphrase()})
-    if not seeded.ok or not (root / MAGI_DIR_NAME).is_dir():
+    try:
+        seeded = runs.attempt([INIT_SUBCOMMAND], stdin=b"",
+                              timeout_s=INIT_TIMEOUT_S, label="s13-init",
+                              cwd=root,
+                              env={"MAGI_PASSPHRASE": runs.passphrase()})
+        scaffolded = seeded.ok and (root / MAGI_DIR_NAME).is_dir()
+    except BaseException:
+        # This function creates the directory, so this function removes it on
+        # every path that does not hand it to a caller. The first version of
+        # the cleanup lived only in the caller's `finally`, which covers the
+        # workspace that WAS returned and leaks the one that was not -- and
+        # the failure path is the likelier of the two to run, because it is
+        # the one a broken product takes.
+        shutil.rmtree(root, ignore_errors=True)
+        raise
+    if not scaffolded:
+        shutil.rmtree(root, ignore_errors=True)
         return None
     return root
 

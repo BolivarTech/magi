@@ -4,6 +4,7 @@
 """Unit tests for the S13 scenario's own shape."""
 
 import unittest
+from unittest import mock
 
 from smoke.outcome import Outcome
 from smoke.product import ProductOutput
@@ -172,6 +173,38 @@ def _help_responder(call: support.Call) -> ProductOutput | None:
         return None
     return ProductOutput(stdout=text.encode("utf-8"), stderr=b"", exit_code=0,
                          command=["magi-rs"] + args)
+
+
+
+class SeedWorkspaceCleanupTests(unittest.TestCase):
+    """The directory S13 creates is removed on the path that FAILS too.
+
+    The first cleanup lived in the caller's ``finally``, which covers the
+    workspace that was handed back and leaks the one that was not -- and the
+    failure path is the likelier of the two to run, because it is the one a
+    broken product takes. One directory per failed run, under a scratch area
+    an operator is not expected to sweep by hand.
+    """
+
+    def test_a_failed_init_leaves_no_directory_behind(self) -> None:
+        scratch = support.scratch_dir(self)
+        support.install_fake_runs(self)
+        with mock.patch.object(docs.runs, "scratch_root",
+                               return_value=scratch):
+            self.assertIsNone(docs._seed_workspace())
+        self.assertEqual([], sorted(scratch.iterdir()),
+                         "the workspace it could not scaffold was left behind")
+
+    def test_a_raise_part_way_through_leaves_no_directory_behind(self) -> None:
+        scratch = support.scratch_dir(self)
+        support.install_fake_runs(self)
+        with mock.patch.object(docs.runs, "scratch_root",
+                               return_value=scratch):
+            with mock.patch.object(docs.runs, "attempt",
+                                   side_effect=RuntimeError("boom")):
+                with self.assertRaises(RuntimeError):
+                    docs._seed_workspace()
+        self.assertEqual([], sorted(scratch.iterdir()))
 
 
 if __name__ == "__main__":
