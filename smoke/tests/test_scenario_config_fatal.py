@@ -394,11 +394,24 @@ class BlankPassphraseTests(unittest.TestCase):
                                exit_code=1, command=["magi-rs", "query"])
         self.assertEqual([], config_fatal._passphrase_complaints("   ", output))
 
-    def test_an_untyped_crash_is_still_a_complaint(self) -> None:
-        """The half that must survive: a panic or an unbounded wait is not a
-        refusal, and loosening the check must not swallow those.
+    def test_an_untyped_message_is_a_complaint_even_at_exit_1(self) -> None:
+        """Isolated to the WORDING check, deliberately.
+
+        A fixture that also carried a wrong exit code would be caught by the
+        exit check, and dropping the wording check would leave it green -- a
+        test guarded by the branch it is not testing. Exit 1 here, so only the
+        wording can catch it.
         """
         output = ProductOutput(stdout=b"", stderr=b"thread 'main' panicked",
+                               exit_code=1, command=["magi-rs", "query"])
+        self.assertNotEqual([], config_fatal._passphrase_complaints("   ", output))
+
+    def test_a_typed_refusal_at_the_wrong_exit_code_is_a_complaint(self) -> None:
+        """The mirror, isolated to the EXIT check: the wording is right, so
+        only the code can catch it. A refusal that exits 101 is a crash wearing
+        a refusal's message, and a CI reading the code cannot tell.
+        """
+        output = ProductOutput(stdout=b"", stderr=b"error: incorrect passphrase",
                                exit_code=101, command=["magi-rs", "query"])
         self.assertNotEqual([], config_fatal._passphrase_complaints("   ", output))
 
