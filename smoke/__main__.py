@@ -11,6 +11,7 @@ different thing and becomes ``FAIL`` (section 3.1).
 """
 
 import argparse
+import dataclasses
 import datetime
 import pathlib
 import subprocess
@@ -22,7 +23,7 @@ from smoke.binary import ReleaseBinary
 from smoke.certificate import (Certificate, ROUNDS_FILENAME, RoundCounter,
                                may_certify)
 from smoke.config import ModelProfile, SmokeConfig
-from smoke.env import Environment
+from smoke.env import Environment, active_memories
 from smoke.errors import HarnessError, PreflightError
 from smoke.lock import RunLock
 from smoke.preflight import Preflight
@@ -170,7 +171,14 @@ def main(argv: list[str] | None = None) -> int:
     except HarnessError as exc:
         print(f"harness failure: {exc}", file=sys.stderr)
         return EXIT_HARNESS
-    growth = env.growth()
+    # The active-memory count comes from a RUN, not from the filesystem: the
+    # database is encrypted, so the product's own startup line is the only
+    # source. Without this the field was None forever and every report read
+    # "active memories not measured" while the number sat in a capture.
+    growth = dataclasses.replace(
+        env.growth(),
+        active_memories=active_memories(
+            b"".join(result.output.raw() for result in run_results.values())))
     print(Report(findings, growth).render(), end="")
     try:
         certify(args, profile, findings, env, binary, run_results, growth)

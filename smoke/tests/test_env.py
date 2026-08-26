@@ -8,7 +8,7 @@ import tempfile
 import unittest
 
 from smoke.config import ModelProfile, Seat
-from smoke.env import Environment, _apply_profile
+from smoke.env import Environment, _apply_profile, active_memories
 from smoke.errors import PreflightError
 
 
@@ -148,17 +148,17 @@ class ActiveMemoryCountTests(unittest.TestCase):
     def test_it_reads_the_count_out_of_a_startup_line(self) -> None:
         line = (b"note: memory: 53 active, 2 archived, 0 pending re-embed "
                 b"(~159 KB index)")
-        self.assertEqual(53, env.active_memories(line))
+        self.assertEqual(53, active_memories(line))
 
     def test_a_capture_without_the_line_is_not_measured(self) -> None:
         """None means NOT MEASURED. Zero would be a number nobody took."""
-        self.assertIsNone(env.active_memories(b"note: something else"))
+        self.assertIsNone(active_memories(b"note: something else"))
 
     def test_the_last_line_wins(self) -> None:
         """Runs execute in order, so the newest count is the current one."""
         text = (b"memory: 4 active, 0 archived, 0 pending re-embed\n"
                 b"memory: 9 active, 0 archived, 0 pending re-embed\n")
-        self.assertEqual(9, env.active_memories(text))
+        self.assertEqual(9, active_memories(text))
 
 
 if __name__ == "__main__":

@@ -18,6 +18,7 @@ the whole of :meth:`Environment.normalize_magi_toml`.
 
 import os
 import pathlib
+import re
 import shutil
 import subprocess
 import tempfile
@@ -65,6 +66,33 @@ PROFILE_MODEL_KEY = ("openai", "model")
 #: seat that declares a model without its lineage as a load error, so writing
 #: one and leaving the other is not a smaller change: it is a broken file.
 PROFILE_SEATS = ("melchior", "balthasar", "caspar")
+
+
+#: The product's startup diagnostics line. The active-memory count cannot be
+#: read off the filesystem -- the database is encrypted -- so the product's own
+#: report is the only source, and that makes a RUN its producer. Anchored on
+#: the counts rather than on the whole sentence so a change to the index-size
+#: suffix does not silently stop it being found.
+STARTUP_LINE = re.compile(
+    rb"memory:\s*(\d+)\s+active,\s*(\d+)\s+archived,\s*(\d+)\s+pending re-embed"
+)
+
+
+def active_memories(capture):
+    """How many memories the product reported active, or None.
+
+    Complexity: ``O(len(capture))``.
+
+    Args:
+        capture: Bytes a run printed.
+
+    Returns:
+        int | None: The count from the LAST startup line -- runs execute in
+        order, so the newest is the current one -- or None when no line was
+        found. None means NOT MEASURED, never zero.
+    """
+    found = STARTUP_LINE.findall(capture)
+    return int(found[-1][0]) if found else None
 
 
 @dataclass(frozen=True)

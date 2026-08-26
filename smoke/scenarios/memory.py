@@ -73,12 +73,12 @@ returns an error is a failing embedder too, and it is one on every machine.
 """
 
 import pathlib
-import re
 import shutil
 import tempfile
 
 from smoke import runs
-from smoke.env import INIT_SUBCOMMAND, MAGI_DIR_NAME, MAGI_TOML_NAME
+from smoke.env import (INIT_SUBCOMMAND, MAGI_DIR_NAME, MAGI_TOML_NAME,
+                       STARTUP_LINE)
 from smoke.errors import HarnessError, ProductOutputError
 from smoke.outcome import Finding, Outcome
 from smoke.registry import scenario
@@ -121,14 +121,6 @@ INPUT_TOKENS_PATH = "usage.input_tokens"
 #: carries only its own. Against this repository's environment that is 79
 #: against 4.
 TRANSCRIPT_PATH = "transcript"
-
-#: The product's startup diagnostics line. Anchored on the counts rather than
-#: on the whole sentence so a change to the index-size suffix does not silently
-#: stop the scenario from finding it -- a line it cannot find degrades, and a
-#: degradation nobody caused is a gate that blocks for no reason.
-STARTUP_LINE = re.compile(
-    rb"memory:\s*(\d+)\s+active,\s*(\d+)\s+archived,\s*(\d+)\s+pending re-embed"
-)
 
 #: The table the override belongs in. Getting this wrong points the MAIN
 #: provider at the failing endpoint, and the run then fails outright instead of
