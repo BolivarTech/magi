@@ -492,6 +492,24 @@ COMMON_FLAGS = ("--output-format", "json", "-w", WORKSPACE_TOKEN)
 #: chance in a model's own prose.
 _R6_CREDENTIAL = mint_credential()
 
+#: What R4 gives the product as its wall clock, in seconds. MEASURED against
+#: this repository's own backend, never chosen: at 300 the product derives 40s
+#: per mage and 24s per attempt, and the 250 kB consult abandoned after 81.7s
+#: with a typed provider timeout -- eight red assertions across S6, S7, S8 and
+#: S18, every one of them from this single number. The same payload against the
+#: same backend at 1800 derives 249s per mage and 149s per attempt, and
+#: completed in 103s with three real verdicts.
+#:
+#: It looks enormous beside a healthy run of under two minutes, and that is the
+#: product's arithmetic rather than padding: the budget is spread over two
+#: attempts of each of three models per mage, so what a healthy run needs is a
+#: small fraction of what a fully rotating one is allowed.
+LARGE_CONSULT_TIMEOUT_S = 1800
+
+#: The harness's own ceiling for that run, 20 % above the product's. The
+#: comment in the table says why it can never be the smaller of the two.
+LARGE_CONSULT_CEILING_S = 2160
+
 #: The token standing for the endpoint R6 fails against. It is resolved when
 #: the run executes and never written into the table: a fixed URL is a promise
 #: about whichever machine the harness happens to run on, and two versions of
@@ -615,17 +633,24 @@ DEFINITIONS: dict[str, RunDefinition] = {
         needs_trio=False, payload_size=PAYLOAD_SMALL, timeout_s=180),
     "R4": RunDefinition(
         run_id="R4",
-        argv=("consult",) + COMMON_FLAGS + ("--timeout", "300",
+        argv=("consult",) + COMMON_FLAGS + ("--timeout",
+                                            str(LARGE_CONSULT_TIMEOUT_S),
                                             "--structured-verdicts"),
         stdin=b"Review the following source for correctness and risk.\n",
-        # 420 against the product's own 300 is not a second knob: the harness
+        # LARGE_CONSULT_CEILING_S against the product's own timeout is not a
+        # second knob: the harness
         # ceiling has to sit ABOVE the product's, or the harness would kill the
         # very abandonment this run exists to observe. The margin covers
         # process start and the JSON write.
-        needs_trio=True, payload_size=PAYLOAD_LARGE, timeout_s=420),
+        needs_trio=True, payload_size=PAYLOAD_LARGE,
+        timeout_s=LARGE_CONSULT_CEILING_S),
     "R5": RunDefinition(
         run_id="R5",
-        argv=("query",) + COMMON_FLAGS + ("--consult",),
+        # --auto is not a convenience: under the default tier the consult
+        # tool is DENIED, and the only thing in tool_calls[] is that denial.
+        # S19's subject is the SHAPE of the consult tool result, so a run
+        # that cannot produce one leaves it reporting CANNOT_TEST forever.
+        argv=("query",) + COMMON_FLAGS + ("--consult", "--auto"),
         stdin=b"Should this project adopt a logging framework? Consult first.\n",
         needs_trio=True, payload_size=PAYLOAD_SMALL, timeout_s=420),
     "R6": RunDefinition(
