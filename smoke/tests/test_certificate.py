@@ -52,34 +52,58 @@ class MayCertifyTests(unittest.TestCase):
 
     def test_smoke_1_never_certifies(self) -> None:
         self.assertFalse(may_certify(smoke_2=False, profile=None,
-                                     findings=_clean()))
+                                     findings=_clean(),
+                                     evaluated=DECLARED_SCENARIO_COUNT))
 
     def test_a_profile_never_certifies_however_green(self) -> None:
         """REQ-S35. A cheap-profile run certifying under a document that says
         "product defaults" is false at the one point its whole value rests on.
         """
         self.assertFalse(may_certify(smoke_2=True, profile=object(),
-                                     findings=_clean()))
+                                     findings=_clean(),
+                                     evaluated=DECLARED_SCENARIO_COUNT))
 
     def test_a_cannot_test_blocks_the_certificate(self) -> None:
         """D-17: what was promised and could not run is not a green."""
         findings = _clean() + [_finding("S3", "third", Outcome.CANNOT_TEST)]
         self.assertFalse(may_certify(smoke_2=True, profile=None,
-                                     findings=findings))
+                                     findings=findings,
+                                     evaluated=DECLARED_SCENARIO_COUNT))
 
     def test_a_fail_blocks_the_certificate(self) -> None:
         findings = _clean() + [_finding("S3", "third", Outcome.FAIL)]
         self.assertFalse(may_certify(smoke_2=True, profile=None,
-                                     findings=findings))
+                                     findings=findings,
+                                     evaluated=DECLARED_SCENARIO_COUNT))
 
     def test_out_of_scope_alone_does_not_block(self) -> None:
         findings = _clean() + [_finding("S3", "third", Outcome.OUT_OF_SCOPE)]
         self.assertTrue(may_certify(smoke_2=True, profile=None,
-                                    findings=findings))
+                                    findings=findings,
+                                    evaluated=DECLARED_SCENARIO_COUNT))
 
     def test_a_clean_smoke_2_with_no_profile_certifies(self) -> None:
         self.assertTrue(may_certify(smoke_2=True, profile=None,
-                                    findings=_clean()))
+                                    findings=_clean(),
+                                    evaluated=DECLARED_SCENARIO_COUNT))
+
+
+    def test_a_run_that_evaluated_fewer_scenarios_does_not_certify(self) -> None:
+        """The headline is "N of N", and nothing checked the first N.
+
+        Drop a module from ``scenarios/__init__.py`` and reconciliation still
+        passes -- it compares what was invoked against what reported, and both
+        shrink together. The certificate would then read "18 of 19" and be
+        emitted anyway, which is honest arithmetic over silently reduced
+        coverage.
+        """
+        self.assertFalse(may_certify(smoke_2=True, profile=None,
+                                     findings=_clean(), evaluated=18))
+
+    def test_a_full_run_certifies(self) -> None:
+        self.assertTrue(may_certify(smoke_2=True, profile=None,
+                                    findings=_clean(),
+                                    evaluated=DECLARED_SCENARIO_COUNT))
 
 
 class CertificateRenderingTests(unittest.TestCase):
