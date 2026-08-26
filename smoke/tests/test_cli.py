@@ -157,6 +157,53 @@ class ImportTimeFailureTests(unittest.TestCase):
     module successfully.
     """
 
+    def _broken_tree(self, relative: str) -> pathlib.Path:
+        """Copy the package and make one module raise on import.
+
+        Args:
+            relative: The module to break, relative to ``smoke/``.
+
+        Returns:
+            pathlib.Path: The root to run ``python -m smoke`` from.
+        """
+        root = support.scratch_dir(self)
+        shutil.copytree(pathlib.Path(main.__file__).parent, root / "smoke")
+        target = root / "smoke" / relative
+        target.write_text("raise RuntimeError('deliberately broken')\n",
+                          encoding="utf-8")
+        return root
+
+    def _exit_code(self, root: pathlib.Path):
+        """Run the harness from *root* and return its exit code and stderr.
+
+        Args:
+            root: The tree to run in.
+
+        Returns:
+            tuple[int, str]: The exit code and what reached standard error.
+        """
+        result = subprocess.run(
+            [sys.executable, "-m", "smoke", "--smoke-1"], cwd=str(root),
+            capture_output=True, text=True, timeout=_IMPORT_TIMEOUT_S)
+        return result.returncode, result.stderr
+
+    def test_a_harness_module_that_cannot_import_also_exits_three(self) -> None:
+        """The other half, and the half the first fix left open.
+
+        Wrapping only the scenario import covers the module that registers
+        scenarios and leaves every other ``from smoke...`` above it exiting 1
+        -- so a syntax error in the report, the runner or the registry was
+        still reported as the product having failed. There is nothing special
+        about the scenario package here: the whole harness-loading phase is
+        one operation, and either all of it names its own exit code or none
+        of it does.
+        """
+        code, stderr = self._exit_code(self._broken_tree("report.py"))
+        self.assertEqual(EXIT_HARNESS, code,
+                         "a harness module that cannot import must not report "
+                         "the product as having failed")
+        self.assertIn("deliberately broken", stderr)
+
     def test_a_scenario_that_cannot_import_exits_three(self) -> None:
         root = support.scratch_dir(self)
         shutil.copytree(pathlib.Path(main.__file__).parent, root / "smoke")
