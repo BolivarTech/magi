@@ -3,13 +3,9 @@
 # Date: 2026-08-25
 """The smoke harness: the product exercised as a consumer exercises it.
 
-``CERTIFICATE_PATH`` lives here rather than beside the code that writes it,
-because it has readers in two places and one of them comes first: the scenario
-that asserts nothing else was left behind needs the name, and so does the
-writer of the certificate.
-
-A ``VERSION`` sat here too and nothing ever read it. The version that matters
-is the PRODUCT's, and the certificate takes that from the binary itself.
+The package holds no constants. ``CERTIFICATE_PATH`` was declared here AND
+in ``config.py`` with the same value, which is one value too many for the
+one path S12 subtracts from what git reports: had the two drifted, S12
+would have reported the certificate as a trace the harness had no business
+leaving -- a false red on the scenario written to catch exactly that.
 """
-
-CERTIFICATE_PATH = "docs/test/smoke-certificate.md"

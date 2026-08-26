@@ -32,7 +32,6 @@ import http.server
 import json
 import os
 import pathlib
-import re
 import sys
 import threading
 import time

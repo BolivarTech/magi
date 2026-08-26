@@ -105,10 +105,11 @@ WRONG_PASSPHRASE = "this-is-not-the-passphrase-0000"
 #: open the very envelope the scenario is about to attack.
 DIAGNOSE_SUBCOMMAND = "diagnose"
 
-#: How ``diagnose`` announces that there is a wrapped key to fail against, and
-#: the block its per-table counts follow.
+#: How ``diagnose`` announces that there is a wrapped key to fail against. The
+#: counts heading that used to sit beside it is gone: ``product.py`` owns the
+#: one parser of that block and declares its own, and a second copy here was a
+#: name nothing read.
 ENVELOPE_PRESENT_LINE = "envelope: present"
-COUNTS_HEADING = "counts:"
 
 #: The tables whose rows are the user's accumulated history. ``vault`` is
 #: excluded: S3 plants and removes an entry there in the same run, so counting

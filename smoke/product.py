@@ -116,6 +116,7 @@ class ProductOutput:
         """
         return self.stdout + b"\n" + self.stderr
 
+
 #: Where ``vault diagnose`` starts listing per-table row counts.
 COUNTS_HEADING = "counts:"
 
@@ -168,4 +169,3 @@ def diagnose_counts(report: bytes) -> dict:
             continue
         break
     return counts
-

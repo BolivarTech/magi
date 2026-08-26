@@ -18,11 +18,11 @@ import subprocess
 import sys
 import traceback
 
-from smoke import CERTIFICATE_PATH, runs
+from smoke import runs
 from smoke.binary import ReleaseBinary
 from smoke.certificate import (Certificate, ROUNDS_FILENAME, RoundCounter,
                                may_certify)
-from smoke.config import ModelProfile, SmokeConfig
+from smoke.config import CERTIFICATE_PATH, ModelProfile, SmokeConfig
 from smoke.env import Environment, active_memories
 from smoke.errors import HarnessError, PreflightError
 from smoke.lock import RunLock
