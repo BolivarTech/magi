@@ -224,6 +224,68 @@ def passphrase():
     return _config.passphrase
 
 
+def payload_floor():
+    """The token floor S8 asserts the large run's input against.
+
+    Read off the CONFIGURATION rather than imported from
+    :mod:`smoke.config`'s defaults: ``[payload].token_floor`` is overridable in
+    ``smoke.toml``, and a scenario comparing against the built-in default would
+    silently ignore an operator who moved it -- the second source of truth that
+    disagrees the first time somebody changes a setting.
+
+    Args:
+        None.
+
+    Returns:
+        int: The configured floor, in tokens.
+
+    Raises:
+        HarnessError: If :func:`configure` has not run.
+    """
+    if _config is None:
+        raise HarnessError(_UNCONFIGURED % "the payload token floor")
+    return _config.payload_token_floor
+
+
+def payload_target():
+    """How many bytes the large payload is declared to be.
+
+    Args:
+        None.
+
+    Returns:
+        int: The configured size, in bytes.
+
+    Raises:
+        HarnessError: If :func:`configure` has not run.
+    """
+    if _config is None:
+        raise HarnessError(_UNCONFIGURED % "the payload size")
+    return _config.payload_target_bytes
+
+
+def payload_bytes(run_id):
+    """How many bytes one definition actually sends the product.
+
+    This is what the run CARRIES, not what it was meant to: S8 compares the two
+    so it can say "the payload never got sent" instead of accusing the product
+    of a size it never received.
+
+    Args:
+        run_id: The definition to measure.
+
+    Returns:
+        int: The length of that definition's standard input.
+
+    Raises:
+        HarnessError: If the id is not in :data:`DEFINITIONS`.
+    """
+    try:
+        return len(DEFINITIONS[run_id].stdin)
+    except KeyError as exc:
+        raise HarnessError("run %r is not in the table" % run_id) from exc
+
+
 def attempt(argv, stdin=None, *, timeout_s, label, planted=(), cwd=None,
             env=None):
     """Invoke the product, returning the capture or the reason there is none.
