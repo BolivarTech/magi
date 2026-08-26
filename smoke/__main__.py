@@ -147,6 +147,7 @@ def main(argv: list[str] | None = None) -> int:
         One of the four exit codes.
     """
     args = parse_args(sys.argv[1:] if argv is None else argv)
+    lock = None
     try:
         config = SmokeConfig.load(CONFIG_PATH)
         # REQ-S35: the profile exists only when it was asked for. There is no
@@ -170,10 +171,18 @@ def main(argv: list[str] | None = None) -> int:
         # environment's magi.toml. A snapshot taken afterwards would declare
         # the harness clean of exactly the changes it had just made.
         snapshot = capture_tree(REPO_ROOT)
+        # The lock is BOUND here, not passed as a temporary. The preflight
+        # takes it at step 2 and nothing releases it explicitly, which reads as
+        # "held for the process" -- and was not: a temporary is collected at
+        # the end of the statement, its file handle finalized, and both flock
+        # and msvcrt.locking release on close. The eight product runs, the only
+        # part that mutates the shared environment, then ran unlocked. That is
+        # the race smoke/lock.py says produces a FALSE VERDICT rather than an
+        # error, on the path that emits the certificate.
+        lock = RunLock(LOCK_PATH)
         # The preflight normalises the environment itself, as its step 7b --
         # inside the lock it takes at step 2. main() must NOT do it here.
-        backend = Preflight(config, env, binary,
-                            RunLock(LOCK_PATH)).run(certifying, profile)
+        backend = Preflight(config, env, binary, lock).run(certifying, profile)
         # And the [memory] table is read AFTER that, for the opposite reason:
         # step 7b is what writes the file it comes from. Read before, S9's
         # saturation ceiling derives from the previous run's configuration, or
@@ -201,6 +210,14 @@ def main(argv: list[str] | None = None) -> int:
     except HarnessError as exc:
         print(f"harness failure: {exc}", file=sys.stderr)
         return EXIT_HARNESS
+    finally:
+        # Released HERE, once the runs are done, and in a `finally` so every
+        # path frees it. Binding it above is what fixes the defect -- the
+        # temporary was collected mid-run and the OS released the lock with the
+        # handle -- but leaning on the process exiting to free it would make
+        # `main` unusable twice in one process, which the tests do.
+        if lock is not None:
+            lock.release()
     # The active-memory count comes from a RUN, not from the filesystem: the
     # database is encrypted, so the product's own startup line is the only
     # source. Without this the field was None forever and every report read
