@@ -10,7 +10,7 @@ import unittest
 from smoke.config import ModelProfile, Seat
 from smoke.env import (Environment, _apply_profile,
                        _reject_transplanted_path, active_memories)
-from smoke.errors import PreflightError
+from smoke.errors import HarnessError, PreflightError
 from smoke.tests import support
 
 
@@ -331,7 +331,7 @@ class TransplantedPathTests(unittest.TestCase):
     def test_either_separator_spelling_is_caught(self) -> None:
         scratch = pathlib.Path(tempfile.gettempdir()) / "smoke-generated-xyz"
         for spelling in (str(scratch), str(scratch).replace("\\", "/")):
-            with self.assertRaises(PreflightError):
+            with self.assertRaises(HarnessError):
                 _reject_transplanted_path('base_url = "%s"' % spelling,
                                           scratch)
 

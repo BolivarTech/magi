@@ -601,8 +601,55 @@ def _apply_profile(text: str, profile: ModelProfile) -> str:
         if replacement is None or stripped.startswith("#"):
             lines.append(line)
             continue
-        lines.append('%s = "%s"' % (key, replacement))
+        lines.append('%s = "%s"' % (key, _toml_value(key, replacement)))
     return "\n".join(lines) + "\n"
+
+
+#: Characters a TOML basic string cannot carry raw. A model tag or a lineage
+#: label never legitimately holds either.
+_UNQUOTABLE = ('"', "\\")
+
+
+def _toml_value(key: str, value: str) -> str:
+    """Return *value*, or refuse it when it cannot be interpolated verbatim.
+
+    The rewrite writes ``key = "value"`` by interpolation, so a value holding
+    a double quote or a backslash produces a file that is malformed at best
+    and carries keys nobody wrote at worst. What discovers that is the
+    PRODUCT, refusing to parse a configuration the HARNESS generated -- a
+    failure about as far from its cause as this design gets.
+
+    Refused rather than escaped, deliberately. An escaped tag would be
+    written faithfully and then not exist on the daemon, so the run would die
+    later and further away; a tag carrying either character is simply wrong,
+    and saying so at the profile line is the shortest path to the fix.
+
+    Args:
+        key: The configuration key being written, for the message.
+        value: The value the profile declared.
+
+    Returns:
+        str: The value unchanged, when it is safe to interpolate.
+
+    Raises:
+        PreflightError: If it carries a character a basic string cannot hold.
+
+    Example:
+        >>> _toml_value("melchior_model", "kimi-k2.6:cloud")
+        'kimi-k2.6:cloud'
+    """
+    for character in _UNQUOTABLE:
+        if character in value:
+            raise PreflightError(
+                "the profile's %s is %r, which carries a %s. A model tag or a "
+                "lineage never does, and interpolating it would generate a "
+                "magi.toml the product cannot parse -- so the failure would "
+                "surface as the product refusing a file the harness wrote. "
+                "Fix the value in the profile."
+                % (key, value,
+                   "double quote" if character == '"' else "backslash")
+            )
+    return value
 
 
 def _commented_defaults(text: str, section: str) -> dict:
