@@ -126,7 +126,18 @@ DOC_PREFIXES = ("docs/", "dev-docs/", ".superpowers/", "planning/", "sbtdd/",
 # the widening. Its corollary is mandatory and lives in the message below: if
 # this script runs nothing for the harness, something else must gate it, or the
 # saving is paid for by leaving the harness unverified.
-HARNESS_PREFIXES = ("smoke/",)
+#: ``scripts/`` joins ``smoke/`` here: neither is compiled by cargo, and both
+#: carry their own Python suite. Its own tests used to answer "full", so
+#: editing them ran the whole Rust suite and never the nine tests in the file,
+#: which nothing else referenced either. A test file no gate runs stops being
+#: true without anyone noticing. ``scoped_tests.py`` ITSELF is excluded below
+#: and still forces the full suite: it is the selector, and a selector that
+#: could narrow its own verification is the one thing that must not.
+HARNESS_PREFIXES = ("smoke/", "scripts/")
+#: This script. A change to it widens to the full suite even though it is a
+#: Python file under ``scripts/``.
+SELF_PATH = "scripts/scoped_tests.py"
+
 DOC_SUFFIXES = (".md", ".toml", ".json", ".yml", ".yaml", ".txt")
 
 
@@ -226,7 +237,7 @@ def module_filter(path, pkgs=None, single_crate=True):
     # Before the package lookup and before DOC_SUFFIXES: ``smoke/*.toml`` would
     # otherwise be read as documentation and ``smoke/*.py`` as an unknown path,
     # and both of those end in the full suite.
-    if path.startswith(HARNESS_PREFIXES):
+    if path.startswith(HARNESS_PREFIXES) and path != SELF_PATH:
         return "harness"
 
     if pkgs:
@@ -333,8 +344,10 @@ def main():
     if expression == "harness":
         print("[scoped-tests] %s -- cargo does not compile it, so no Rust test "
               "can be affected." % reason)
-        print("[scoped-tests] The harness has its own gate and it is NOT optional: "
-              "python -m compileall -q smoke/ && python -m unittest discover smoke/tests -q")
+        print("[scoped-tests] Their own gates are NOT optional: "
+              "python -m compileall -q smoke/ && "
+              "python -m unittest discover smoke/tests -q && "
+              'python -m unittest discover scripts -p "test_*.py" -q')
         return 0
 
     if expression == "full":
