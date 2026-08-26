@@ -3,6 +3,7 @@
 # Date: 2026-08-25
 """Tests for the preflight's ordering and its hard cuts."""
 
+import contextlib
 import os
 import pathlib
 import socket
@@ -21,6 +22,7 @@ from smoke.lock import RunLock
 from smoke import preflight as preflight_module
 from smoke.preflight import BackendStatus, Preflight, check_config_permissions
 from smoke.product import ProductOutput
+from smoke.tests import support
 
 
 #: A minimal, valid smoke.toml. The key variable is interpolated so a test
@@ -37,7 +39,7 @@ class PosixPermissionTests(unittest.TestCase):
     """smoke.toml holds the passphrase in the clear, so others cannot read it."""
 
     def setUp(self) -> None:
-        self.path = pathlib.Path(tempfile.mkdtemp()) / "smoke.toml"
+        self.path = support.scratch_dir(self) / "smoke.toml"
         self.path.write_text("[env]\n", encoding="utf-8")
 
     def test_owner_only_is_accepted(self) -> None:
@@ -73,7 +75,7 @@ class WindowsPermissionTests(unittest.TestCase):
         harness must say so: BackendStatus-style 'not measured', never a pass
         for having failed to look.
         """
-        path = pathlib.Path(tempfile.mkdtemp()) / "smoke.toml"
+        path = support.scratch_dir(self) / "smoke.toml"
         path.write_text("[env]\n", encoding="utf-8")
         with mock.patch("smoke.preflight._read_sddl", return_value=None):
             with self.assertRaises(PreflightError) as caught:
@@ -135,7 +137,7 @@ def _resolvable_config(case: unittest.TestCase):
     config = mock.Mock(spec=SmokeConfig)
     config.passphrase = "correct horse battery staple"
     config.backend_key_env = "SMOKE_ORDERING_KEY"
-    config.path = str(pathlib.Path(tempfile.mkdtemp()) / "smoke.toml")
+    config.path = str(support.scratch_dir(case) / "smoke.toml")
     config.backend_base_url = "http://127.0.0.1:1/v1"
     return config
 
@@ -150,7 +152,7 @@ class OrderingTests(unittest.TestCase):
         defaults. Swap steps 2 and 7b and this goes red.
         """
         order: list[str] = []
-        directory = pathlib.Path(tempfile.mkdtemp())
+        directory = support.scratch_dir(self)
         config = _resolvable_config(self)
         env = mock.Mock(spec=Environment)
         env.exists.return_value = True
@@ -169,7 +171,7 @@ class OrderingTests(unittest.TestCase):
         exist fails with a low-level error instead of the --init-env message
         step 5 already knows how to give.
         """
-        directory = pathlib.Path(tempfile.mkdtemp())
+        directory = support.scratch_dir(self)
         config = _resolvable_config(self)
         env = mock.Mock(spec=Environment)
         env.exists.return_value = False
@@ -195,7 +197,7 @@ class PermissionCheckWiringTests(unittest.TestCase):
     """
 
     def test_the_loaded_config_knows_where_it_came_from(self) -> None:
-        directory = pathlib.Path(tempfile.mkdtemp())
+        directory = support.scratch_dir(self)
         path = directory / "smoke.toml"
         path.write_text(_CONFIG_TEXT % "K", encoding="utf-8")
         self.assertEqual(path, pathlib.Path(SmokeConfig.load(path).path))
@@ -209,7 +211,7 @@ class PermissionCheckWiringTests(unittest.TestCase):
         """
         os.environ["SMOKE_WIRING_KEY"] = "the-real-credential"
         self.addCleanup(os.environ.pop, "SMOKE_WIRING_KEY", None)
-        directory = pathlib.Path(tempfile.mkdtemp())
+        directory = support.scratch_dir(self)
         path = directory / "smoke.toml"
         path.write_text(
             _CONFIG_TEXT % "SMOKE_WIRING_KEY", encoding="utf-8")
@@ -221,9 +223,14 @@ class PermissionCheckWiringTests(unittest.TestCase):
         # RUNS, and a unit suite that reaches a real daemon on localhost gives a
         # different answer depending on whose machine it is -- and hangs for the
         # probe's whole timeout on one that blackholes the port.
-        with mock.patch.object(RunLock, "acquire"),              mock.patch.object(RunLock, "release"),              mock.patch.object(Preflight, "_probe_backend",
-                               return_value=BackendStatus(reachable=False,
-                                                          cause="patched")),              mock.patch("smoke.preflight.check_config_permissions") as check:
+        patched = BackendStatus(reachable=False, cause="patched")
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch.object(RunLock, "acquire"))
+            stack.enter_context(mock.patch.object(RunLock, "release"))
+            stack.enter_context(mock.patch.object(Preflight, "_probe_backend",
+                                                  return_value=patched))
+            check = stack.enter_context(
+                mock.patch("smoke.preflight.check_config_permissions"))
             Preflight(SmokeConfig.load(path), env,
                       mock.Mock(spec=ReleaseBinary),
                       RunLock(directory / ".lock")).run(False, None)
@@ -253,13 +260,13 @@ class CredentialResolutionTests(unittest.TestCase):
         config = mock.Mock(spec=SmokeConfig)
         config.passphrase = "correct horse battery staple"
         config.backend_key_env = variable
-        config.path = str(pathlib.Path(tempfile.mkdtemp()) / "smoke.toml")
+        config.path = str(support.scratch_dir(self) / "smoke.toml")
         config.backend_base_url = "http://127.0.0.1:1/v1"
         return config
 
     def test_an_unresolvable_credential_cuts_naming_the_variable(self) -> None:
         os.environ.pop("SMOKE_ABSENT_KEY", None)
-        directory = pathlib.Path(tempfile.mkdtemp())
+        directory = support.scratch_dir(self)
         env = mock.Mock(spec=Environment)
         env.exists.return_value = True
         env.declared_base_url.return_value = None
@@ -277,7 +284,7 @@ class CredentialResolutionTests(unittest.TestCase):
         thing it exists to avoid paying for.
         """
         os.environ.pop("SMOKE_ABSENT_KEY", None)
-        directory = pathlib.Path(tempfile.mkdtemp())
+        directory = support.scratch_dir(self)
         env = mock.Mock(spec=Environment)
         env.exists.return_value = True
         env.declared_base_url.return_value = None
@@ -332,13 +339,13 @@ class EndpointAgreementTests(unittest.TestCase):
         config = mock.Mock(spec=SmokeConfig)
         config.passphrase = "correct horse battery staple"
         config.backend_key_env = "SMOKE_AGREE_KEY"
-        config.path = str(pathlib.Path(tempfile.mkdtemp()) / "smoke.toml")
+        config.path = str(support.scratch_dir(self) / "smoke.toml")
         config.backend_base_url = probed
         env = mock.Mock(spec=Environment)
         env.exists.return_value = True
         env.declared_base_url.return_value = declared
         return Preflight(config, env, mock.Mock(spec=ReleaseBinary),
-                         RunLock(pathlib.Path(tempfile.mkdtemp()) / ".lock"))
+                         RunLock(support.scratch_dir(self) / ".lock"))
 
     def test_two_different_endpoints_cut(self) -> None:
         preflight = self._preflight("http://localhost:11434/v1",

@@ -14,6 +14,7 @@ from smoke.config import (
     SmokeConfig,
 )
 from smoke.errors import PreflightError
+from smoke.tests import support
 
 _MINIMAL = """
 [env]
@@ -38,7 +39,7 @@ class LoadTests(unittest.TestCase):
         Returns:
             The path written.
         """
-        directory = pathlib.Path(tempfile.mkdtemp())
+        directory = support.scratch_dir(self)
         path = directory / "smoke.toml"
         path.write_text(text, encoding="utf-8")
         return path

@@ -29,6 +29,7 @@ from smoke.__main__ import (
 )
 from smoke.outcome import Outcome
 from smoke.runner import StampedFinding
+from smoke.tests import support
 
 #: How long the child interpreter is given to import the entry point, in
 #: seconds. It imports modules and touches no network, so anything past this is
@@ -71,7 +72,8 @@ class ArgumentTests(unittest.TestCase):
         self.assertIsNone(parse_args(["--smoke-2"]).profile)
 
     def test_profile_is_captured(self) -> None:
-        self.assertEqual("smoke/smoke.toml", parse_args(["--smoke-1", "--profile", "smoke/smoke.toml"]).profile)
+        parsed = parse_args(["--smoke-1", "--profile", "smoke/smoke.toml"])
+        self.assertEqual("smoke/smoke.toml", parsed.profile)
 
     def test_smoke_1_and_smoke_2_are_mutually_exclusive(self) -> None:
         with self.assertRaises(SystemExit):
@@ -177,7 +179,7 @@ class LockLifetimeTests(unittest.TestCase):
     """
 
     def test_a_second_run_cannot_start_while_the_runs_execute(self) -> None:
-        root = pathlib.Path(tempfile.mkdtemp())
+        root = support.scratch_dir(self)
         held: list[bool] = []
 
         def executing(self, definition):
@@ -239,7 +241,7 @@ class LockLifetimeTests(unittest.TestCase):
         directory the counter is about to write into, while the first run is
         still deciding what its certificate says.
         """
-        root = pathlib.Path(tempfile.mkdtemp())
+        root = support.scratch_dir(self)
         held: list[bool] = []
 
         def certifying(*args, **kwargs):

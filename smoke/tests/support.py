@@ -192,6 +192,26 @@ class FakeConfig:
 FAKE_PASSPHRASE = "correct-horse-battery-staple"
 
 
+def scratch_dir(case: unittest.TestCase) -> pathlib.Path:
+    """A temporary directory that goes away when the test does.
+
+    ``tempfile.mkdtemp()`` on its own does not. The suite had forty-three of
+    them and six cleanups, so every full run left thirty-seven directories
+    behind in the system temp area. One helper rather than thirty-seven
+    ``addCleanup`` lines, because the version that is easy to call is the one
+    that gets called.
+
+    Args:
+        case: The test to register the removal on.
+
+    Returns:
+        pathlib.Path: The directory, already created.
+    """
+    root = pathlib.Path(tempfile.mkdtemp(prefix="smoke-test-"))
+    case.addCleanup(shutil.rmtree, root, ignore_errors=True)
+    return root
+
+
 def install_fake_runs(case: unittest.TestCase,
                       responder: Responder | None = None,
                       repo_root: pathlib.Path | None = None,

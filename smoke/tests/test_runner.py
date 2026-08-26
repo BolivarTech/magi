@@ -14,6 +14,7 @@ from smoke.outcome import Finding, Outcome
 from smoke.registry import Registry, scenario
 from smoke import runner as runner_module
 from smoke.runner import Ambient, Runner, capture_tree
+from smoke.tests import support
 
 #: No scenario under test reads ambient state, so every case below passes the
 #: same empty one. S12 is the only scenario that declares needs_ambient, and it
@@ -68,7 +69,7 @@ class TreeSnapshotTests(unittest.TestCase):
         """A path->hash map, not one hash of everything: S12 has to name WHICH
         file appeared, and a diff nobody can read is a red nobody acts on.
         """
-        root = pathlib.Path(tempfile.mkdtemp())
+        root = support.scratch_dir(self)
         subprocess.run(["git", "init", "-q", str(root)], check=True)
         (root / "kept.txt").write_text("one", encoding="utf-8")
         snapshot = capture_tree(root)
@@ -79,7 +80,7 @@ class TreeSnapshotTests(unittest.TestCase):
         """Without this the snapshot could return constant hashes and S12 would
         pass over a modified tree.
         """
-        root = pathlib.Path(tempfile.mkdtemp())
+        root = support.scratch_dir(self)
         subprocess.run(["git", "init", "-q", str(root)], check=True)
         target = root / "kept.txt"
         target.write_text("one", encoding="utf-8")

@@ -19,6 +19,7 @@ from smoke.outcome import Outcome
 from smoke.registry import DECLARED_SCENARIO_COUNT, DEFAULT_REGISTRY
 from smoke.runner import StampedFinding
 from smoke import scenarios  # noqa: F401 - importing registers them
+from smoke.tests import support
 
 
 def _finding(scenario: str, assertion: str, outcome: Outcome = Outcome.PASS,
@@ -175,7 +176,7 @@ class CertificateRenderingTests(unittest.TestCase):
                          lines[:2])
 
     def test_writing_it_creates_the_directory_and_the_file(self) -> None:
-        target = (pathlib.Path(tempfile.mkdtemp()) / "docs" / "test"
+        target = (support.scratch_dir(self) / "docs" / "test"
                   / "smoke-certificate.md")
         certificate = self._certificate()
         certificate.write(target)
@@ -187,7 +188,7 @@ class CertificateRenderingTests(unittest.TestCase):
         archive, and a versioned filename would force a reader to know what
         the old one was called.
         """
-        target = pathlib.Path(tempfile.mkdtemp()) / "smoke-certificate.md"
+        target = support.scratch_dir(self) / "smoke-certificate.md"
         target.write_text("an older certificate", encoding="utf-8")
         self._certificate().write(target)
         self.assertNotIn("an older certificate",
@@ -211,7 +212,7 @@ class RoundCounterTests(unittest.TestCase):
     """How many attempts this release needed, counted where it survives."""
 
     def setUp(self) -> None:
-        self.path = pathlib.Path(tempfile.mkdtemp()) / "rounds"
+        self.path = support.scratch_dir(self) / "rounds"
 
     def test_the_first_round_is_one(self) -> None:
         self.assertEqual(1, RoundCounter(self.path).bump())

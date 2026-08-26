@@ -17,6 +17,7 @@ import unittest
 from smoke.config import PAYLOAD_TARGET_BYTES
 from smoke.errors import HarnessError
 from smoke.payload import PayloadBuilder
+from smoke.tests import support
 
 #: Where the product declares the cap it rejects a payload above, and the
 #: pattern that reads it. Parsed from the source rather than copied here: a
@@ -44,7 +45,7 @@ class BuildTests(unittest.TestCase):
     """What the builder promises about the bytes it returns."""
 
     def setUp(self) -> None:
-        self.root = pathlib.Path(tempfile.mkdtemp())
+        self.root = support.scratch_dir(self)
         self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
         _plant(self.root, "src/alpha.rs", b"a" * 500)
         _plant(self.root, "src/nested/beta.rs", b"b" * 500)
@@ -83,7 +84,7 @@ class BuildTests(unittest.TestCase):
             self.builder.build(-1)
 
     def test_a_tree_with_no_sources_reports_nothing_available(self) -> None:
-        empty = pathlib.Path(tempfile.mkdtemp())
+        empty = support.scratch_dir(self)
         self.addCleanup(shutil.rmtree, empty, ignore_errors=True)
         self.assertEqual(0, PayloadBuilder(empty).available_bytes())
 
@@ -92,7 +93,7 @@ class OrderingTests(unittest.TestCase):
     """The order is the byte order of the POSIX-normalised relative path."""
 
     def setUp(self) -> None:
-        self.root = pathlib.Path(tempfile.mkdtemp())
+        self.root = support.scratch_dir(self)
         self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
 
     def test_the_separator_is_normalised_before_the_comparison(self) -> None:
@@ -127,7 +128,7 @@ class BinaryReadTests(unittest.TestCase):
     def test_a_carriage_return_survives_into_the_payload(self) -> None:
         """On a CRLF checkout a text-mode read changes the content actually
         sent, so the payload would differ between two clones of one commit."""
-        root = pathlib.Path(tempfile.mkdtemp())
+        root = support.scratch_dir(self)
         self.addCleanup(shutil.rmtree, root, ignore_errors=True)
         _plant(root, "src/crlf.rs", b"one\r\ntwo\r\n")
         self.assertIn(b"\r\n", PayloadBuilder(root).build(10))

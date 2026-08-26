@@ -12,13 +12,14 @@ from unittest import mock
 
 from smoke.binary import ReleaseBinary
 from smoke.errors import PreflightError, ProductOutputError, TimedOut
+from smoke.tests import support
 
 
 class LocationTests(unittest.TestCase):
     """The harness uses target/release, never cargo run (REQ-S07)."""
 
     def setUp(self) -> None:
-        self.root = pathlib.Path(tempfile.mkdtemp())
+        self.root = support.scratch_dir(self)
         (self.root / "target" / "release").mkdir(parents=True)
 
     def _plant(self, content: bytes = b"binary") -> pathlib.Path:
@@ -58,7 +59,7 @@ class ExpiryTests(unittest.TestCase):
     """A run that did not finish still carries what it had already written."""
 
     def setUp(self) -> None:
-        self.binary = ReleaseBinary(pathlib.Path(tempfile.mkdtemp()))
+        self.binary = ReleaseBinary(support.scratch_dir(self))
 
     def test_a_timeout_carries_the_streams_the_child_had_written(self) -> None:
         """Discarding them would remove the ONE case the timeout rule grants.

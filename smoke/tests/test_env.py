@@ -10,13 +10,14 @@ import unittest
 from smoke.config import ModelProfile, Seat
 from smoke.env import Environment, _apply_profile, active_memories
 from smoke.errors import PreflightError
+from smoke.tests import support
 
 
 class LifecycleTests(unittest.TestCase):
     """init creates, reset rebuilds, and neither leaves a half-built tree."""
 
     def setUp(self) -> None:
-        self.root = pathlib.Path(tempfile.mkdtemp()) / "env"
+        self.root = support.scratch_dir(self) / "env"
 
     def test_init_creates_every_declared_subdirectory(self) -> None:
         env = Environment(self.root)
@@ -110,14 +111,14 @@ class InitialisedTests(unittest.TestCase):
         unit test: the other tests build environments in temporary directories,
         where that tracked file is not present.
         """
-        root = pathlib.Path(tempfile.mkdtemp()) / "env"
+        root = support.scratch_dir(self) / "env"
         root.mkdir()
         (root / ".gitignore").write_text("*\n!.gitignore\n", encoding="utf-8")
         self.assertFalse(Environment(root).exists())
 
     def test_init_succeeds_into_that_directory(self) -> None:
         """The consequence, end to end: a fresh clone can build its environment."""
-        root = pathlib.Path(tempfile.mkdtemp()) / "env"
+        root = support.scratch_dir(self) / "env"
         root.mkdir()
         (root / ".gitignore").write_text("*\n!.gitignore\n", encoding="utf-8")
         env = Environment(root)
@@ -129,7 +130,7 @@ class GrowthTests(unittest.TestCase):
     """Growth is unbounded on purpose, so it is made visible."""
 
     def test_growth_reports_sizes_for_an_empty_environment(self) -> None:
-        env = Environment(pathlib.Path(tempfile.mkdtemp()) / "env")
+        env = Environment(support.scratch_dir(self) / "env")
         env.init()
         growth = env.growth()
         self.assertEqual(0, growth.db_bytes)
@@ -147,7 +148,7 @@ class DeclaredModelsTests(unittest.TestCase):
     """
 
     def _env(self, text: str) -> Environment:
-        root = pathlib.Path(tempfile.mkdtemp())
+        root = support.scratch_dir(self)
         (root / ".magi").mkdir()
         (root / ".magi" / "magi.toml").write_text(text, encoding="utf-8")
         return Environment(root)
@@ -172,7 +173,7 @@ class DeclaredModelsTests(unittest.TestCase):
 
     def test_an_unreadable_config_declares_nothing(self) -> None:
         self.assertEqual(set(), Environment(
-            pathlib.Path(tempfile.mkdtemp())).declared_models())
+            support.scratch_dir(self)).declared_models())
 
 
 class ActiveMemoryCountTests(unittest.TestCase):
@@ -281,7 +282,7 @@ class MemorySettingsTests(unittest.TestCase):
         Returns:
             Environment: Ready to read.
         """
-        root = pathlib.Path(tempfile.mkdtemp()) / "env"
+        root = support.scratch_dir(self) / "env"
         env = Environment(root)
         env.init()
         (env.magi_dir / "magi.toml").write_text(body, encoding="utf-8")

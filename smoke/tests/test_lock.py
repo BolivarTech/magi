@@ -11,13 +11,14 @@ import textwrap
 import unittest
 
 from smoke.lock import RunLock
+from smoke.tests import support
 
 
 class LockTests(unittest.TestCase):
     """One run at a time, and the lock outlives what it protects."""
 
     def setUp(self) -> None:
-        self.directory = pathlib.Path(tempfile.mkdtemp())
+        self.directory = support.scratch_dir(self)
         self.path = self.directory / ".lock"
 
     def test_acquiring_creates_a_non_empty_file(self) -> None:

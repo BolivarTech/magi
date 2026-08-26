@@ -107,7 +107,7 @@ class ConfigureGuardTests(unittest.TestCase):
             stdout=b"out", stderr=b"", exit_code=0, command=["magi-rs", "--version"]
         )
         env = mock.Mock(spec=Environment)
-        env.runs_dir = pathlib.Path(tempfile.mkdtemp())
+        env.runs_dir = support.scratch_dir(self)
         runs.configure(binary, env, _config_double())
         output = runs.invoke(["--version"], timeout_s=5, label="probe")
         self.assertEqual(0, output.exit_code)
@@ -119,7 +119,7 @@ class ArchiveTests(unittest.TestCase):
 
     def setUp(self) -> None:
         runs.reset_for_test()
-        self.root = pathlib.Path(tempfile.mkdtemp())
+        self.root = support.scratch_dir(self)
         self.env = mock.Mock(spec=Environment)
         self.env.runs_dir = self.root
         self.secret = PlantedSecret("s3cr3t-value", "backend credential")
@@ -171,7 +171,7 @@ class InvocationOptionsTests(unittest.TestCase):
 
     def setUp(self) -> None:
         runs.reset_for_test()
-        self.root = pathlib.Path(tempfile.mkdtemp())
+        self.root = support.scratch_dir(self)
         self.env = mock.Mock(spec=Environment)
         self.env.runs_dir = self.root
         self.binary = mock.Mock(spec=ReleaseBinary)
@@ -221,7 +221,7 @@ class AccessorTests(unittest.TestCase):
 
     def setUp(self) -> None:
         runs.reset_for_test()
-        self.root = pathlib.Path(tempfile.mkdtemp())
+        self.root = support.scratch_dir(self)
         self.env = mock.Mock(spec=Environment)
         self.env.runs_dir = self.root / "runs"
         self.env.root = self.root
@@ -1050,7 +1050,7 @@ class LargePayloadWiringTests(unittest.TestCase):
         binary.invoke.side_effect = answer
         binary.repo_root = pathlib.Path(__file__).resolve().parent.parent.parent
         env = mock.Mock(spec=Environment)
-        env.runs_dir = pathlib.Path(tempfile.mkdtemp())
+        env.runs_dir = support.scratch_dir(self)
         config = mock.Mock(spec=SmokeConfig)
         config.passphrase = "correct horse battery staple"
         config.payload_target_bytes = 4096
@@ -1080,7 +1080,7 @@ class LargePayloadWiringTests(unittest.TestCase):
         binary.invoke.side_effect = answer
         binary.repo_root = pathlib.Path(__file__).resolve().parent.parent.parent
         env = mock.Mock(spec=Environment)
-        env.runs_dir = pathlib.Path(tempfile.mkdtemp())
+        env.runs_dir = support.scratch_dir(self)
         config = mock.Mock(spec=SmokeConfig)
         config.passphrase = "correct horse battery staple"
         config.payload_target_bytes = 4096

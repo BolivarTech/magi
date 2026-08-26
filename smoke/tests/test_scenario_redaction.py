@@ -13,6 +13,7 @@ from smoke.outcome import Outcome
 from smoke.registry import DEFAULT_REGISTRY
 from smoke.scenarios import redaction  # noqa: F401 - import registers it
 from smoke.secrets import PlantedSecret, mint_credential
+from smoke.tests import support
 
 #: RESERVED characters on purpose. Without them the percent-encoded form
 #: equals the raw one -- ``quote`` leaves letters, digits and ``-._~``
@@ -131,7 +132,7 @@ class RedactionBodyTests(unittest.TestCase):
 
     def test_a_clean_archive_passes_the_third(self) -> None:
         """The other half: with a log present and clean, assertion 3 evaluates."""
-        directory = pathlib.Path(tempfile.mkdtemp()) / "R6"
+        directory = support.scratch_dir(self) / "R6"
         directory.mkdir(parents=True)
         (directory / "stderr").write_bytes(
             b"$ magi-rs query\n<redacted: backend credential, 1 occurrence>")
@@ -144,7 +145,7 @@ class RedactionBodyTests(unittest.TestCase):
         """The archive is written SCRUBBED, so a secret found there is one the
         scrubber was never told about -- the case worth reporting.
         """
-        directory = pathlib.Path(tempfile.mkdtemp()) / "R6"
+        directory = support.scratch_dir(self) / "R6"
         directory.mkdir(parents=True)
         (directory / "stderr").write_bytes(
             ("$ magi-rs query\n%s" % _SECRET).encode("utf-8"))
@@ -160,7 +161,7 @@ class RedactionBodyTests(unittest.TestCase):
         ``https://[user]:[password]@host``, and S10 duly reported the
         harness's own fixture as an authority the product had leaked.
         """
-        root = pathlib.Path(tempfile.mkdtemp())
+        root = support.scratch_dir(self)
         other = root / "s13-config-readme-2-20260101T000000"
         other.mkdir(parents=True)
         other.joinpath("invocation.log").write_bytes(
