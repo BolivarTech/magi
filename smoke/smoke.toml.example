@@ -28,11 +28,21 @@ token_floor  = 50000
 # S9's empirical numbers. Both are MEASURED in phase 5, against this
 # environment; a number chosen in the spec would be a guess wearing a
 # contract's clothes.
-# MEASURE these against YOUR environment; the numbers below are the ones this
-# repository measured on 2026-08-25 (R3 1295 input tokens vs R2 888, delta 407)
-# and they are a starting point, not an answer. Declare the margin well below
-# the delta you measure: it is a floor the delta must clear, and a value near
-# the measurement fails on ordinary variance instead of on a regression.
+# MEASURE these against YOUR environment. The numbers below are what this
+# repository measured on 2026-08-26: the same prompt with memory on and with
+# --no-memory came out at 1668 against 392 input tokens, so the assembler
+# contributes 1276. They are a starting point, not an answer.
+#
+# An earlier note here reported a delta of 407 from R3 1295 against R2 888.
+# Both numbers were real and the subtraction was meaningless: R2 carried a
+# different, much longer prompt than R3, so the difference mixed prompt length
+# with what the assembler injected. On the next run the same arithmetic gave 8
+# and S9 went red over a product that was working. The control now carries the
+# prompt it is a control for.
+#
+# Declare the margin well below the delta you measure: it is a floor the delta
+# must clear, and a value near the measurement fails on ordinary variance
+# instead of on a regression.
 [calibration]
 margin_tokens    = 100
 ceiling_fraction = 0.8
