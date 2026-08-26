@@ -190,6 +190,45 @@ class OrderingTests(unittest.TestCase):
                           RunLock(directory / ".lock")).run(False, None)
         self.assertEqual(["lock", "normalize"], order)
 
+    def test_the_binary_is_settled_before_the_vault_is_listed(self) -> None:
+        """Step 6 asks the PRODUCT, so it cannot run before the product exists.
+
+        While an unlistable vault returned quietly this was invisible: step 6
+        shrugged and step 7 rebuilt, or gave its own accurate message. Now
+        that the vault cut is real, a tree with no build reaches it first and
+        exits 2 blaming the vault and the passphrase -- on a fresh clone, on
+        CI, after cargo clean, and after the clean tree a release prescribes.
+        The published quick-start never says to build, because the certifying
+        run is documented to rebuild. One of its two suggested remedies,
+        --reset-env, destroys the accumulated history the environment exists
+        to hold and cannot fix the cause.
+
+        The module docstring already carries this argument for the
+        normalisation: it comes after the binary because a certifying run
+        rebuilds first. Step 6 has the same dependency.
+        """
+        order: list[str] = []
+        directory = support.scratch_dir(self)
+        config = _resolvable_config(self)
+        env = mock.Mock(spec=Environment)
+        env.exists.return_value = True
+        env.declared_base_url.return_value = None
+        env.declared_models.return_value = set()
+        binary = _quiet_binary()
+        binary.invoke.side_effect = lambda *a, **k: (
+            order.append("vault ls"),
+            ProductOutput(stdout=b"(vault empty)", stderr=b"", exit_code=0,
+                          command=["magi-rs"]))[1]
+        binary.version.side_effect = lambda: order.append("settle")
+        binary.rebuild.side_effect = lambda: order.append("settle")
+        with mock.patch.object(RunLock, "acquire"):
+            with mock.patch.object(RunLock, "release"):
+                Preflight(config, env, binary,
+                          RunLock(directory / ".lock")).run(False, None)
+        self.assertLess(order.index("settle"), order.index("vault ls"),
+                        "step 6 invokes the product, so the binary has to be "
+                        "settled before it runs")
+
     def test_a_missing_environment_cuts_before_it_is_normalised(self) -> None:
         """Step 5 before step 7b: normalising an environment that does not
         exist fails with a low-level error instead of the --init-env message
