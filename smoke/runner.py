@@ -34,6 +34,14 @@ _TRANSLATED_FAILURE = "the product's output could not be interpreted"
 _BACKEND_UNREACHABLE = "the backend was not reachable"
 _RUN_TIMED_OUT = "the shared run did not finish inside its timeout"
 
+#: The three texts the RUNNER answers with when a scenario never ran: a
+#: timed-out run, an unreachable backend, a capture that could not be read.
+#: Named as a group because the completeness check has to recognise all three
+#: or none -- a scenario that did not run promised nothing on that path.
+SUBSTITUTED_ASSERTIONS = frozenset(
+    (_TRANSLATED_FAILURE, _BACKEND_UNREACHABLE, _RUN_TIMED_OUT)
+)
+
 
 @dataclasses.dataclass(frozen=True)
 class StampedFinding:
@@ -194,8 +202,10 @@ class Runner:
 
         for entry in self._registry.entries():
             invoked.add(entry.scenario_id)
+            answered: list[str] = []
             for finding in self._invoke(entry):
                 reported.add(entry.scenario_id)
+                answered.append(finding.assertion)
                 findings.append(
                     StampedFinding(
                         scenario=entry.scenario_id,
@@ -205,6 +215,7 @@ class Runner:
                         run_id=finding.run_id,
                     )
                 )
+            self.reconcile_completeness(entry, answered)
 
         self.reconcile(
             registered=set(self._registry.registered_ids()),
@@ -212,6 +223,57 @@ class Runner:
             reported=reported,
         )
         return findings
+
+    @staticmethod
+    def reconcile_completeness(entry: ScenarioEntry, answered: list[str]) -> None:
+        """Check that a scenario answered everything it promised.
+
+        The other reconciliation checks PRESENCE: a scenario was invoked and it
+        reported. That is satisfied by a scenario which returns after two of
+        its five findings, and the three it never reached leave no trace -- not
+        in the report, not in the exit code, and not in the certificate, which
+        counts scenarios rather than assertions.
+
+        Both directions are errors. A missing assertion is silent coverage
+        loss; an assertion nobody declared reaches the certificate verbatim,
+        so a text that drifted from its module constant is a wrong claim in
+        the one document meant to be trusted later.
+
+        Complexity: ``O(declared + answered)``.
+
+        Args:
+            entry: The scenario that just ran.
+            answered: The assertion texts it yielded, in order. When the runner
+                substituted its own single finding the scenario never ran, and
+                the check does not apply.
+
+        Raises:
+            HarnessError: If the two sets differ. This is a defect in the
+                HARNESS -- exit 3 -- never a verdict on the product.
+        """
+        if not entry.assertions:
+            return
+        if len(answered) == 1 and answered[0] in SUBSTITUTED_ASSERTIONS:
+            # The RUNNER answered, not the scenario. A timed-out run, an
+            # unreachable backend and an unreadable capture each collapse the
+            # whole scenario into one finding on purpose, and the scenario body
+            # never ran -- so it promised nothing on this path and owes nothing.
+            return
+        declared = set(entry.assertions)
+        arrived = set(answered)
+        silent = sorted(declared - arrived)
+        invented = sorted(arrived - declared)
+        if not silent and not invented:
+            return
+        parts = []
+        if silent:
+            parts.append("never answered %s" % "; ".join(repr(s) for s in silent))
+        if invented:
+            parts.append("answered %s, which it never declared"
+                         % "; ".join(repr(s) for s in invented))
+        raise HarnessError(
+            "scenario %s %s" % (entry.scenario_id, " and ".join(parts))
+        )
 
     def _invoke(self, entry: ScenarioEntry) -> list[Finding]:
         """Run one scenario, translating a product-output failure to FAIL.

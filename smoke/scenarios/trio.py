@@ -378,7 +378,7 @@ def _degradation_cause(body):
     return ""
 
 
-@scenario("S6", run=TRIO_RUN, needs_backend=True)
+@scenario("S6", assertions=S6_ASSERTIONS, run=TRIO_RUN, needs_backend=True)
 def the_real_trio_reaches_consensus(run):
     """Count the verdicts, check the consensus, and refuse a degraded run.
 
@@ -418,7 +418,8 @@ def the_real_trio_reaches_consensus(run):
                    Outcome.FAIL if cause else Outcome.PASS, TRIO_RUN, cause)
 
 
-@scenario("S7", run=TRIO_RUN, needs_backend=True, inspects_timeouts=True)
+@scenario("S7", assertions=S7_ASSERTIONS, run=TRIO_RUN, needs_backend=True,
+           inspects_timeouts=True)
 def the_derived_ceiling_does_not_degrade_the_trio(run):
     """Recompute the budget layers, then judge the run against them.
 
@@ -564,7 +565,7 @@ def _flags_finding(derived, caps, failure):
     return _finding(S7_ASSERTIONS, 2, Outcome.PASS, TRIO_RUN, "")
 
 
-@scenario("S8", run=TRIO_RUN, needs_backend=True)
+@scenario("S8", assertions=S8_ASSERTIONS, run=TRIO_RUN, needs_backend=True)
 def a_large_input_arrives_large(run):
     """Check the run completed whole, arrived large, and stayed under the cap.
 
@@ -675,7 +676,8 @@ def _under_cap_finding(run):
     return _finding(S8_ASSERTIONS, 2, Outcome.PASS, TRIO_RUN, "")
 
 
-@scenario("S18", run=(TRIO_RUN, BARE_RUN), needs_backend=True)
+@scenario("S18", assertions=S18_ASSERTIONS, run=(TRIO_RUN, BARE_RUN),
+           needs_backend=True)
 def the_shape_varies_by_flag_never_by_data(run):
     """Compare the flagged envelope against the flagless one, and count keys.
 

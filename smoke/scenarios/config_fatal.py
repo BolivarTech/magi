@@ -174,7 +174,7 @@ _LINEAGE_KEY = re.compile(r"^\s*(%s)_lineage\s*=" % "|".join(SEATS))
 _ROOT_BASE_URL = re.compile(r"^\s*base_url\s*=")
 
 
-@scenario("S11")
+@scenario("S11", assertions=S11_ASSERTIONS)
 def a_broken_config_cuts_before_running(run):
     """Feed the product three broken configurations and read how it refuses.
 
@@ -434,7 +434,7 @@ def _seat_lineage_finding(attempt):
     return _s11(2, Outcome.PASS, "")
 
 
-@scenario("S15")
+@scenario("S15", assertions=S15_ASSERTIONS)
 def a_blank_environment_variable_is_absent_never_invalid(run):
     """Export each variable empty and blank, then export one filled and wrong.
 

@@ -62,6 +62,9 @@ class ScenarioEntry:
     needs_backend: bool
     needs_ambient: bool
     inspects_timeouts: bool
+    #: The verbatim texts the scenario promises to answer, for the runner's
+    #: completeness check. Empty means it declares none.
+    assertions: tuple[str, ...] = ()
 
 
 def _sort_key(scenario_id: str) -> tuple[str, int]:
@@ -151,6 +154,7 @@ DEFAULT_REGISTRY = Registry()
 
 def scenario(
     scenario_id: str,
+    assertions: tuple[str, ...] = (),
     run: str | tuple[str, ...] | None = None,
     needs_backend: bool = False,
     needs_ambient: bool = False,
@@ -161,6 +165,13 @@ def scenario(
 
     Args:
         scenario_id: The id used in the report, e.g. ``"S7"``.
+        assertions: The verbatim texts this scenario promises to answer. The
+            runner reconciles what arrives against them: reconciliation alone
+            checks PRESENCE, and a scenario that returns after two of its five
+            findings is present, reported, and short three assertions that
+            leave no trace in the report, the exit code or the certificate.
+            Empty means the scenario declares nothing to check against, which
+            is how the tests that predate this register.
         run: One run id, a tuple of them, or None when the scenario is
             standalone. Standalone does not mean it leaves the product alone --
             it reaches it through ``runs.invoke()``.
@@ -190,7 +201,8 @@ def scenario(
     def decorate(func: ScenarioFunc) -> ScenarioFunc:
         target = DEFAULT_REGISTRY if registry is None else registry
         target.add(ScenarioEntry(scenario_id, func, run, needs_backend,
-                                 needs_ambient, inspects_timeouts))
+                                 needs_ambient, inspects_timeouts,
+                                 tuple(assertions)))
         return func
 
     return decorate

@@ -263,6 +263,25 @@ class CompletenessTests(unittest.TestCase):
         self.assertEqual(["first", "second"],
                          [f.assertion for f in findings])
 
+    def test_a_scenario_the_runner_answered_for_owes_nothing(self) -> None:
+        """The runner substitutes ONE finding when a scenario never ran: a
+        timed-out run, an unreachable backend, an unreadable capture. The
+        scenario body did not execute, so it promised nothing on that path --
+        and a completeness check that ignored this would turn every
+        backend-down run into exit 3, a harness failure over a healthy harness.
+        """
+        registry = Registry()
+
+        @scenario("S1", assertions=("first", "second"), needs_backend=True,
+                  registry=registry)
+        def never_runs(run):
+            yield Finding(assertion="first", outcome=Outcome.PASS, detail="",
+                          run_id=None)
+
+        findings = Runner(registry, {}, False, _NO_AMBIENT).run()
+        self.assertEqual(1, len(findings))
+        self.assertEqual(Outcome.CANNOT_TEST, findings[0].outcome)
+
     def test_a_finding_the_scenario_never_declared_is_a_harness_failure(self) -> None:
         """The other direction. A text that drifted from the declared tuple
         reaches the certificate verbatim, so it has to match what was promised.

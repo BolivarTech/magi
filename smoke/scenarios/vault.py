@@ -125,7 +125,7 @@ _DIGIT = re.compile(r"\d")
 _COUNT_LINE = re.compile(r"^\s+(\w+):\s+(\d+)\s*$")
 
 
-@scenario("S3")
+@scenario("S3", assertions=S3_ASSERTIONS)
 def the_vault_stores_and_never_reveals(run):
     """Plant a credential in the persistent vault, then take it back out.
 
@@ -440,7 +440,7 @@ def _excerpt(output, limit=400):
     return output.raw()[:limit].decode("utf-8", errors="replace").strip()
 
 
-@scenario("S4")
+@scenario("S4", assertions=S4_ASSERTIONS)
 def a_wrong_passphrase_destroys_nothing(run):
     """Fail an unwrap on purpose, then check nothing was lost doing it.
 
@@ -663,7 +663,8 @@ S16_ASSERTIONS = (
 S16_RUN_ID = "R7"
 
 
-@scenario("S16", run=S16_RUN_ID, needs_backend=True)
+@scenario("S16", assertions=S16_ASSERTIONS, run=S16_RUN_ID,
+           needs_backend=True)
 def rotating_a_credential_keeps_the_database(run):
     """Check what R7's rotation left behind: the same passphrase, the same rows.
 

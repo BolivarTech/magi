@@ -56,7 +56,7 @@ TOOL_CALLS_KEY = "tool_calls"
 FORBIDDEN_KEYS = ("agents", "consensus")
 
 
-@scenario("S19", run=RUN_ID, needs_backend=True)
+@scenario("S19", assertions=ASSERTIONS, run=RUN_ID, needs_backend=True)
 def the_agents_consult_cap_is_still_protected(run):
     """Read every consult tool result R5 recorded and check both keys.
 

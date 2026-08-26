@@ -136,7 +136,7 @@ def escape_target() -> str:
     return relative.replace(os.sep, "/")
 
 
-@scenario("S5", run=RUN_ID, needs_backend=True)
+@scenario("S5", assertions=ASSERTIONS, run=RUN_ID, needs_backend=True)
 def the_tools_run_and_the_sandbox_holds(run):
     """Read R1's tool record, then ask the product to read outside its box.
 

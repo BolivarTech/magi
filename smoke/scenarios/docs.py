@@ -105,7 +105,7 @@ _ENTRY = re.compile(r"^ {2,6}([^\s,]+)(?:,\s+(\S+))?")
 _STRIPS_VALUE = re.compile(r"[=<\[].*$")
 
 
-@scenario("S13")
+@scenario("S13", assertions=S13_ASSERTIONS)
 def the_published_documentation_is_still_true(run):
     """Check every published guide against the binary's own surface.
 

@@ -231,7 +231,8 @@ def point_embedding_at(endpoint, text):
     )
 
 
-@scenario("S9", run=(PLANTING_RUN, CONTROL_RUN, RECALL_RUN),
+@scenario("S9", assertions=ASSERTIONS,
+           run=(PLANTING_RUN, CONTROL_RUN, RECALL_RUN),
           needs_backend=True, needs_ambient=True)
 def memory_persists_embeds_and_injects(run, ambient):
     """Compare the three runs, then take the embedder down once.

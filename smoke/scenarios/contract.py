@@ -91,7 +91,7 @@ APPLIED_CAPS_KEYS = (
 )
 
 
-@scenario("S1", run=RUN_ID, needs_backend=True)
+@scenario("S1", assertions=ASSERTIONS, run=RUN_ID, needs_backend=True)
 def the_output_contract_still_holds(run):
     """Check the four contract properties over R1's capture.
 

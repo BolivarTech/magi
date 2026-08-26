@@ -60,7 +60,7 @@ IGNORED_PREFIX = "!!"
 STATUS_FIELD_WIDTH = 2
 
 
-@scenario("S12", needs_ambient=True)
+@scenario("S12", assertions=ASSERTIONS, needs_ambient=True)
 def the_harness_leaves_no_trace(run, ambient):
     """Subtract the pre-run snapshot from the tree, and ask git about the env.
 

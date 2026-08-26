@@ -127,7 +127,7 @@ DISCOVERY_PROMPT = b"say ok\n"
 WINDOWS_PLATFORM = "win32"
 
 
-@scenario("S2")
+@scenario("S2", assertions=ASSERTIONS)
 def the_workspace_is_created_not_clobbered_and_discovered(run):
     """Exercise ``magi init`` and the walk-up on a virgin tree.
 
@@ -402,7 +402,7 @@ def _discovery_finding(root, magi_dir):
     )
 
 
-@scenario("S14")
+@scenario("S14", assertions=S14_ASSERTIONS)
 def the_workdir_flag_still_resolves_in_the_release_binary(run):
     """Exercise both ``-w`` declarations against the artifact users receive.
 

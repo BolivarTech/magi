@@ -61,7 +61,7 @@ CLAP_USAGE_MARKER = b"usage:"
 PROBE_PROMPT = b"say ok\n"
 
 
-@scenario("S17")
+@scenario("S17", assertions=ASSERTIONS)
 def the_structured_flag_exists_only_where_it_should(run):
     """Offer the flag to the subcommand that lacks it, then misuse it properly.
 

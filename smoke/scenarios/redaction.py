@@ -43,7 +43,7 @@ ASSERTIONS = (
 )
 
 
-@scenario("S10", run="R6", needs_backend=True)
+@scenario("S10", assertions=ASSERTIONS, run="R6", needs_backend=True)
 def no_credential_leaks(run):
     """Search four channels for the planted credential, then for shape.
 

@@ -10,6 +10,8 @@ import pathlib
 import unittest
 
 from smoke import __main__ as main
+from smoke.errors import HarnessError
+from smoke.registry import DECLARED_SCENARIO_COUNT, DEFAULT_REGISTRY
 from smoke.__main__ import (
     EXIT_HARNESS,
     EXIT_NOT_PASSED,
@@ -127,6 +129,27 @@ class RegistrationOnTheProductPathTests(unittest.TestCase):
         )
         self.assertGreater(int(result.stdout.strip()), 0,
                            "python -m smoke would evaluate nothing and exit 0")
+
+
+class DeclaredCountAtRuntimeTests(unittest.TestCase):
+    """The registry is checked against the declared count BEFORE anything runs.
+
+    A unit test already guards the two against drifting apart, and a test is
+    the wrong place for the whole guarantee: it catches the change that is made
+    with the suite watching, not the deployment where a module quietly failed
+    to import. The count is what the certificate publishes as "N of N", so the
+    harness verifies it about ITSELF, at startup, and a mismatch is exit 3 --
+    a defect in the harness, never a verdict on the product.
+    """
+
+    def test_a_registry_short_of_the_declared_count_is_refused(self) -> None:
+        with self.assertRaises(HarnessError) as caught:
+            main.require_declared_count(18)
+        self.assertIn("18", str(caught.exception))
+        self.assertIn(str(DECLARED_SCENARIO_COUNT), str(caught.exception))
+
+    def test_the_real_registry_matches(self) -> None:
+        main.require_declared_count(len(DEFAULT_REGISTRY.registered_ids()))
 
 
 if __name__ == "__main__":
