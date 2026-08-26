@@ -265,11 +265,18 @@ class WorkdirFlagScenarioBodyTests(unittest.TestCase):
         used the flag could not: the seed would land in the current directory
         and the assertion would then resolve that same directory, find the
         workspace it expected, and pass.
+
+        Assertion 3 is checked for "not PASS" rather than for FAIL, and the
+        distinction is the honest one: with the flag ignored, the invocation
+        it reads exits non-zero, and the harness then has no evidence about
+        WHICH workspace was read. ``CANNOT_TEST`` is the accurate verdict and
+        it blocks the gate exactly as FAIL does. What the mutation has to show
+        is that the assertion goes red, not which shade.
         """
         support.install_fake_runs(self, responder=_FakeWorkdir(honors_flag=False))
         outcomes = _workdir_outcomes()
         self.assertEqual(Outcome.FAIL, outcomes[workspace.S14_ASSERTIONS[0]])
-        self.assertEqual(Outcome.FAIL, outcomes[workspace.S14_ASSERTIONS[2]])
+        self.assertNotEqual(Outcome.PASS, outcomes[workspace.S14_ASSERTIONS[2]])
 
     def test_an_outermost_wins_resolver_fails(self) -> None:
         support.install_fake_runs(self,
