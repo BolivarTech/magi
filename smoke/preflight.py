@@ -253,11 +253,18 @@ class Preflight:
     def _require_backend_credential(self) -> None:
         """Step 3: the variable naming the backend credential holds something.
 
+        Every read of the configuration in this module is a plain attribute,
+        never ``getattr`` with a default. The default is what turned a missing
+        ``path`` into a permission check that silently never ran, and the same
+        five reads sat one rename away from the same failure. A configuration
+        that does not declare what this module needs should raise here, at
+        startup, where it is loud.
+
         Raises:
             PreflightError: Naming the variable and how to set it. The value
                 itself never reaches the message.
         """
-        key = getattr(self.config, "backend_key_env", "")
+        key = self.config.backend_key_env
         if not isinstance(key, str) or not key:
             raise PreflightError(
                 "smoke.toml declares no backend credential variable; set "
@@ -298,7 +305,7 @@ class Preflight:
         listed = self._vault_names()
         if listed is None or ROTATION_MARKER not in listed:
             return
-        key = getattr(self.config, "backend_key_env", "")
+        key = self.config.backend_key_env
         credential = os.environ.get(key, "")
         if not credential:
             raise PreflightError(
@@ -334,7 +341,7 @@ class Preflight:
         try:
             completed = self.binary.invoke(
                 ["vault", WORKDIR_FLAG, str(self.env.root), "ls"],
-                env={PASSPHRASE_VAR: getattr(self.config, "passphrase", "")},
+                env={PASSPHRASE_VAR: self.config.passphrase},
                 timeout=VAULT_TIMEOUT_S,
             )
         except (OSError, ProductOutputError):
@@ -365,7 +372,7 @@ class Preflight:
         try:
             completed = self.binary.invoke(
                 argv, stdin=stdin,
-                env={PASSPHRASE_VAR: getattr(self.config, "passphrase", "")},
+                env={PASSPHRASE_VAR: self.config.passphrase},
                 timeout=VAULT_TIMEOUT_S,
             )
         except (OSError, ProductOutputError) as exc:
@@ -397,7 +404,7 @@ class Preflight:
         Returns:
             BackendStatus: Reachable, or not with the cause recorded.
         """
-        url = getattr(self.config, "backend_base_url", None)
+        url = self.config.backend_base_url
         if not url:
             return BackendStatus(reachable=False, cause="no backend base_url configured")
         try:

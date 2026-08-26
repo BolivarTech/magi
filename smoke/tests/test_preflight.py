@@ -133,6 +133,7 @@ def _resolvable_config(case: unittest.TestCase):
     config.passphrase = "correct horse battery staple"
     config.backend_key_env = "SMOKE_ORDERING_KEY"
     config.path = str(pathlib.Path(tempfile.mkdtemp()) / "smoke.toml")
+    config.backend_base_url = "http://127.0.0.1:1/v1"
     return config
 
 
@@ -243,6 +244,7 @@ class CredentialResolutionTests(unittest.TestCase):
         config.passphrase = "correct horse battery staple"
         config.backend_key_env = variable
         config.path = str(pathlib.Path(tempfile.mkdtemp()) / "smoke.toml")
+        config.backend_base_url = "http://127.0.0.1:1/v1"
         return config
 
     def test_an_unresolvable_credential_cuts_naming_the_variable(self) -> None:
