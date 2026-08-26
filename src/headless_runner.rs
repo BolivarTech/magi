@@ -75,9 +75,6 @@ const TIMEOUT_BELOW_FORMULA_LOG: &str =
     "the run deadline is below the minimum a consult with its schema retry needs \
      (REQ-A04); a forced or proactive consult may not complete";
 
-/// Buffered capacity of the internal chunk channel; mirrors the interactive TUI
-/// bridge so backpressure behaves identically. The channel is drained
-/// concurrently, so this is a small smoothing buffer, not a bound on output.
 /// What every operator-facing notice is prefixed with on stderr.
 ///
 /// stderr and not stdout: stdout carries the run's output, which a consumer
@@ -103,6 +100,9 @@ fn notice_line(text: &str) -> String {
     format!("{NOTICE_PREFIX}{}", redact_foreign_text(text).as_str())
 }
 
+/// Buffered capacity of the internal chunk channel; mirrors the interactive TUI
+/// bridge so backpressure behaves identically. The channel is drained
+/// concurrently, so this is a small smoothing buffer, not a bound on output.
 const CHUNK_CHANNEL_CAPACITY: usize = 100;
 
 /// Upper bound on how long [`run_query`] waits for the ttfb-measuring drain task after the
@@ -1829,10 +1829,7 @@ mod tests {
             .collect()
     }
 
-    /// The runner sums `RunObserver::on_usage` across every turn into
-    /// `RunOutcome.usage` — a non-terminal tool turn reporting (10, 2) plus a
-    /// terminal turn reporting (5, 3) must total (15, 5), not just the last turn.
-    /// A notice the agent emits must REACH the operator in headless mode.
+    /// One notice line, formatted and redacted the way the drain loop emits it.
     ///
     /// The drain loop consumed every `StreamPiece` and inspected only
     /// `Content`, for time-to-first-byte. `StreamPiece::Notice` was dropped on
@@ -1854,6 +1851,9 @@ mod tests {
         assert!(line.contains("context assembly failed"), "got: {line}");
     }
 
+    /// The runner sums `RunObserver::on_usage` across every turn into
+    /// `RunOutcome.usage` - a non-terminal tool turn reporting (10, 2) plus a
+    /// terminal turn reporting (5, 3) must total (15, 5), not just the last turn.
     #[tokio::test]
     async fn test_run_query_sums_usage_across_turns_into_run_outcome() {
         let provider = ScriptedProvider::new(vec![
