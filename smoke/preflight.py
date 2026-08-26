@@ -24,6 +24,11 @@ findings rather than from the spec's list, which is why they carry letters:
 inserting them as whole numbers would renumber everything after them, and
 the published documentation names these steps.
 
+**One step runs out of its numbered order, and the dependency forces it.**
+Step 7 settles the binary before step 6 lists the vault, because step 6 asks
+the PRODUCT and cannot run before there is a product to ask. The numbering
+keeps the spec's names; the execution follows the dependency.
+
 The order is the design, not a convenience. Two boundaries carry a defect each
 if moved, and both were found by review rather than by a test that failed:
 
@@ -296,8 +301,16 @@ class Preflight:
         self.lock.acquire()
         self._require_config()
         self._require_environment()
-        self._restore_rotation_if_left_over()
+        # The binary BEFORE step 6, which is a deviation from the spec's
+        # numbering and is forced by a dependency the numbering does not
+        # carry: step 6 asks the product to list the vault, so it cannot run
+        # before there is a product to ask. The spec's own defended ordering
+        # constraint -- 7b after 7, because a certifying run rebuilds -- is
+        # the same argument, and step 6 has the same dependency. Numbered the
+        # other way round, a tree with no build reaches step 6 first and its
+        # cut blames the vault and the passphrase for a missing binary.
         self._settle_binary(certifying)
+        self._restore_rotation_if_left_over()
         self.env.normalize_magi_toml(profile)
         self._require_one_endpoint()
         backend = self._probe_backend()
