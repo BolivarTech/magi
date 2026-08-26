@@ -20,6 +20,7 @@ assertion, and it must still report ALL of them.
 import dataclasses
 import pathlib
 import shutil
+import sys
 import tempfile
 import unittest
 from typing import Callable, Optional
@@ -208,8 +209,27 @@ def scratch_dir(case: unittest.TestCase) -> pathlib.Path:
         pathlib.Path: The directory, already created.
     """
     root = pathlib.Path(tempfile.mkdtemp(prefix="smoke-test-"))
-    case.addCleanup(shutil.rmtree, root, ignore_errors=True)
+    case.addCleanup(_remove_quietly, root)
     return root
+
+
+def _remove_quietly(root: pathlib.Path) -> None:
+    """Remove *root*, saying so on stderr if it could not be removed.
+
+    ``ignore_errors=True`` would leave the directory behind in silence, which
+    is the leak this helper exists to stop, made invisible. On Windows an open
+    handle is enough to hit it. The harness's own rule is that what could not
+    be done gets reported, so this reports rather than raising: a test that
+    passed did not fail because of a directory.
+
+    Args:
+        root: The directory to remove.
+    """
+    try:
+        shutil.rmtree(root)
+    except OSError as exc:
+        print("[tests] could not remove %s: %s" % (root, exc),
+              file=sys.stderr)
 
 
 def install_fake_runs(case: unittest.TestCase,

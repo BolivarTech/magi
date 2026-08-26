@@ -253,9 +253,14 @@ surplus. A checkable requirement with no scenario is a declared hole.
   runs going to localhost, and nothing noticed, because both daemons served the same tags.
   Step 8 would have cut on the first discrepancy that mattered: the embedding model exists
   on one and not on the other.
-- **A killed run leaves the lock behind.** `smoke/.lock` sits beside `env/` rather than
-  inside it, so `--reset-env` does not clear it. Delete it by hand after a run was
-  killed.
+- **A killed run leaves the lock FILE behind, and that is harmless.** `smoke/.lock` sits
+  beside `env/` rather than inside it, so `--reset-env` does not clear it. The lock
+  itself is an advisory one the operating system holds for the life of the process, so
+  a killed run releases it immediately; the file that stays is an empty artifact the
+  next run reuses. Do not delete it by hand. On Unix that unlinks the inode a live run
+  may still be holding, and the next run then creates a fresh file, locks that one, and
+  both proceed at once — which is the concurrent corruption the lock exists to prevent,
+  caused by trying to clean up after it.
 - **R7 cannot tell you it overwrote a changed `smoke.toml`.** If the file was edited
   between a crash and the restart, the restore writes the new value with no warning that
   it differs from what was there. Comparing the stored value against the file would
