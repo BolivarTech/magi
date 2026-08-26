@@ -309,10 +309,19 @@ class Environment:
     def memory_settings(self) -> dict[str, object]:
         """Read the product's ``[memory]`` table out of the environment.
 
+        A field the product wrote **commented out** counts, and that is the
+        point. ``magi init`` renders two of the three memory fields as comments
+        with their real default values interpolated, so the file carries the
+        product's own defaults as data. Reading only the live keys left S9's
+        ceiling underivable forever -- on the certifying run too -- and the
+        alternative, copying the defaults into the harness, is the second
+        source of truth this project rejects everywhere else.
+
         An unreadable or absent file yields an EMPTY mapping rather than an
         error, and empty is not zero: S9 turns it into ``CANNOT_TEST``, because
         asserting a derived ceiling against defaults that were never declared
-        would test a computation that did not happen.
+        would test a computation that did not happen. A key that appears
+        nowhere -- not even as a comment -- is still absent.
 
         Returns:
             The ``[memory]`` table, or ``{}`` when the file is missing, does not
@@ -322,10 +331,16 @@ class Environment:
         try:
             with path.open("rb") as handle:
                 document = tomllib.load(handle)
+            text = path.read_text(encoding="utf-8")
         except (OSError, tomllib.TOMLDecodeError):
             return {}
         section = document.get(MEMORY_SECTION)
-        return dict(section) if isinstance(section, dict) else {}
+        settings = _commented_defaults(text, MEMORY_SECTION)
+        if isinstance(section, dict):
+            # A live key always wins: an operator who uncommented a line and
+            # changed it meant it, and the commented one is now history.
+            settings.update(section)
+        return settings
 
     def normalize_magi_toml(self, profile: ModelProfile | None) -> None:
         """Rewrite the environment's ``magi.toml``, and nothing else.
@@ -491,3 +506,44 @@ def _apply_profile(text: str, profile: ModelProfile) -> str:
             continue
         lines.append('%s = "%s"' % (key, replacement))
     return "\n".join(lines) + "\n"
+
+
+def _commented_defaults(text: str, section: str) -> dict:
+    """Recover the values the product wrote as commented-out defaults.
+
+    Table-aware on purpose: a commented key under another table is not a
+    setting of this one just because it is commented.
+
+    Complexity: ``O(lines)``.
+
+    Args:
+        text: The configuration file's text.
+        section: The table whose commented keys to recover.
+
+    Returns:
+        dict: Key to value for every commented assignment inside *section*
+        whose right-hand side parses as TOML. A comment that is prose rather
+        than an assignment is skipped rather than guessed at.
+    """
+    recovered: dict = {}
+    table = ""
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            table = stripped[1:-1].strip()
+            continue
+        if table != section or not stripped.startswith("#"):
+            continue
+        body = stripped.lstrip("#").strip()
+        if "=" not in body:
+            continue
+        key = body.split("=", 1)[0].strip()
+        if not key.isidentifier():
+            continue
+        try:
+            parsed = tomllib.loads(body)
+        except tomllib.TOMLDecodeError:
+            continue
+        if key in parsed:
+            recovered[key] = parsed[key]
+    return recovered
