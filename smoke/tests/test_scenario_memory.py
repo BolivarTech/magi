@@ -333,6 +333,43 @@ class EmbedderDownTests(unittest.TestCase):
         _outcomes(_runs(), _ambient())
         self.assertEqual(runs.ERROR_BACKEND_STATUS, responder.status)
 
+    def test_the_marker_is_a_phrase_the_product_actually_emits(self) -> None:
+        """The guardian that could never pass.
+
+        ``text-only persistence`` is emitted on exactly one path: the embedder
+        CLIENT failing to construct, which happens for a malformed URL or an
+        unresolvable vault entry. It never happens for an endpoint that is
+        unreachable or that answers with an error, because the client is built
+        lazily and constructs fine either way. The probe creates the second
+        kind, so assertion 4 matched a string the run it performs cannot
+        produce, and hid behind CANNOT_TEST for as long as the probe also hung.
+
+        The path the probe does reach is the assembler's, which announces
+        itself differently. Checked against the product's source, because the
+        failure is a string that reads perfectly well on its own.
+        """
+        root = pathlib.Path(__file__).resolve().parent.parent.parent
+        source = (root / "src" / "agent" / "mod.rs").read_text(
+            encoding="utf-8", errors="replace")
+        self.assertTrue(
+            memory.DEGRADATION_MARKER in source,
+            "%r appears nowhere in src/agent/mod.rs, so no run can ever "
+            "produce it" % memory.DEGRADATION_MARKER)
+
+    def test_the_probe_plants_a_memory_before_it_breaks_the_embedder(self) -> None:
+        """The fixture could not trip the condition either.
+
+        The throwaway workspace starts with no memories at all, so the recall
+        path never asks the embedder for anything and the degradation never
+        happens. The probe has to put something in the store first, with the
+        embedder still working, and only then break it.
+        """
+        binary = support.install_fake_runs(self, responder=_FakeDegraded(notice=True))
+        _seed_env_config()
+        _outcomes(_runs(), _ambient())
+        queries = [call for call in binary.calls if call.args[:1] == ["query"]]
+        self.assertGreaterEqual(len(queries), 2)
+
     def test_a_run_that_completes_with_the_notice_passes(self) -> None:
         support.install_fake_runs(self, responder=_FakeDegraded(notice=True))
         _seed_env_config()
