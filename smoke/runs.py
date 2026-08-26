@@ -367,6 +367,12 @@ def _archive(output, label, planted) -> None:
     than nothing, so each invocation is archived as it lands instead of in a
     batch at the end.
 
+    The environment's PASSPHRASE is added to whatever the caller declared.
+    ``RunExecutor.archive`` has always done this; this path had not, and every
+    autonomous scenario goes through here with the same passphrase in the
+    child's environment. One guarded path and one unguarded, for the secret
+    that opens the whole vault.
+
     Args:
         output: The capture to persist.
         label: What to call it on disk.
@@ -379,7 +385,8 @@ def _archive(output, label, planted) -> None:
         " ".join(output.command).encode("utf-8", errors="replace"),
         output.raw(),
     )
-    (directory / "invocation.log").write_bytes(scrub(body, planted))
+    secrets = tuple(planted) + (PlantedSecret(passphrase(), "vault passphrase"),)
+    (directory / "invocation.log").write_bytes(scrub(body, secrets))
 
 
 @dataclasses.dataclass(frozen=True)

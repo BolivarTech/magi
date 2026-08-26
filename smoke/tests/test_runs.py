@@ -47,6 +47,22 @@ def _http_post(url: str, credential: bytes) -> tuple[int, bytes]:
         return refused.code, refused.read()
 
 
+def _config_double():
+    """A configuration double that declares what :mod:`smoke.runs` reads.
+
+    Archiving scrubs the passphrase, so a double without one is
+    under-specified rather than minimal -- and it fails as an
+    ``AttributeError`` from inside the archive, which is the loud version and
+    the one this project prefers to a swallowed default.
+
+    Returns:
+        mock.Mock: The double.
+    """
+    config = mock.Mock(spec=SmokeConfig)
+    config.passphrase = support.FAKE_PASSPHRASE
+    return config
+
+
 def _query_call(binary):
     """The invocation that ran the product, not the vault bookkeeping.
 
@@ -90,7 +106,7 @@ class ConfigureGuardTests(unittest.TestCase):
         )
         env = mock.Mock(spec=Environment)
         env.runs_dir = pathlib.Path(tempfile.mkdtemp())
-        runs.configure(binary, env, mock.Mock(spec=SmokeConfig))
+        runs.configure(binary, env, _config_double())
         output = runs.invoke(["--version"], timeout_s=5, label="probe")
         self.assertEqual(0, output.exit_code)
         binary.invoke.assert_called_once()
@@ -112,7 +128,12 @@ class ArchiveTests(unittest.TestCase):
             exit_code=0,
             command=["magi-rs", "query"],
         )
-        runs.configure(self.binary, self.env, mock.Mock(spec=SmokeConfig))
+        # A configuration double that does not declare a passphrase is an
+        # under-specified double: archiving scrubs it, and the real config
+        # always has one.
+        config = mock.Mock(spec=SmokeConfig)
+        config.passphrase = support.FAKE_PASSPHRASE
+        runs.configure(self.binary, self.env, config)
 
     def tearDown(self) -> None:
         runs.reset_for_test()
@@ -155,7 +176,7 @@ class InvocationOptionsTests(unittest.TestCase):
         self.binary.invoke.return_value = ProductOutput(
             stdout=b"", stderr=b"", exit_code=0, command=["magi-rs", "init"]
         )
-        runs.configure(self.binary, self.env, mock.Mock(spec=SmokeConfig))
+        runs.configure(self.binary, self.env, _config_double())
 
     def tearDown(self) -> None:
         runs.reset_for_test()
@@ -235,7 +256,7 @@ class AccessorTests(unittest.TestCase):
         """
         self.env.prepare_scratch.side_effect = (
             lambda: self.env.scratch_dir.mkdir(parents=True, exist_ok=True))
-        runs.configure(self.binary, self.env, mock.Mock(spec=SmokeConfig))
+        runs.configure(self.binary, self.env, _config_double())
         self.assertFalse(self.env.scratch_dir.exists())
         self.assertTrue(runs.scratch_root().is_dir())
         self.env.prepare_scratch.assert_called_once_with()
