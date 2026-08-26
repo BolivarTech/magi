@@ -381,11 +381,26 @@ class Preflight:
         invisible precisely because the recovery works.
         """
         listed = self._vault_names()
-        if listed is None:
-            return
+        # The ROTATION first, the placeholders second. A leftover placeholder
+        # is inert -- step 7b rewrites the environment's magi.toml every run,
+        # so no base_url declares the placeholders that would read the entries
+        # back. A rotated credential is not: it breaks every backend run that
+        # follows. Sweeping first put the recoverable failure ahead of the one
+        # that matters.
+        if ROTATION_MARKER in listed:
+            self._restore_rotation(listed)
         self._sweep_placeholders(listed)
-        if ROTATION_MARKER not in listed:
-            return
+
+    def _restore_rotation(self, listed: list[str]) -> None:
+        """Put the real backend credential back and drop the sentinel.
+
+        Args:
+            listed: The vault entry names, which carry the marker.
+
+        Raises:
+            PreflightError: If nothing holds a credential to restore from, or
+                a vault write fails.
+        """
         key = self.config.backend_key_env
         credential = os.environ.get(key, "")
         if not credential:
@@ -401,9 +416,11 @@ class Preflight:
         # leave the credential rotated with nothing left to say so.
         self._vault_write(["vault", WORKDIR_FLAG, str(self.env.root),
                            "set", key, "--force"],
+                          "could not restore the rotated backend credential",
                           stdin=credential.encode("utf-8"))
         self._vault_write(["vault", WORKDIR_FLAG, str(self.env.root),
-                           "rm", ROTATION_MARKER, "--force"])
+                           "rm", ROTATION_MARKER, "--force"],
+                          "could not drop the rotation marker")
         print(
             "[preflight] a previous run died mid-rotation; %s has been "
             "restored and %s removed. Something is killing R7 -- the recovery "
@@ -428,20 +445,36 @@ class Preflight:
         left = [name for name in PLACEHOLDER_ENTRIES if name in listed]
         for name in left:
             self._vault_write(["vault", WORKDIR_FLAG, str(self.env.root),
-                               "rm", name, "--force"])
+                               "rm", name, "--force"],
+                              "could not remove the placeholder entry %s that "
+                              "a killed run left behind" % name)
         if left:
             print(
                 "[preflight] a previous run was killed mid-R6; removed the "
                 "placeholder entries it left: %s." % ", ".join(left)
             )
 
-    def _vault_names(self) -> list[str] | None:
-        """List the vault entry names, or ``None`` when they cannot be read.
+    def _vault_names(self) -> list[str]:
+        """List the vault entry names, or cut naming why they cannot be read.
+
+        It used to answer ``None`` and let the caller return quietly, which
+        the spec forbids for a reason worth restating: a run killed
+        mid-rotation leaves a sentinel credential in the environment, and a
+        preflight that cannot read the vault cannot tell. Starting anyway
+        means every backend invocation authenticates with the sentinel and
+        dies of an opaque auth error, while S16 renders a verdict over a
+        half-rotated database -- and the report says nothing, because the
+        announcement covers only the branch where the restore succeeded.
 
         Returns:
-            list[str] | None: The names, or ``None`` if the vault could not be
-            listed. Nothing here reads a stored VALUE: the product does not
-            expose one, and the sentinel is recognised by its name.
+            list[str]: The entry names. Nothing here reads a stored VALUE:
+            the product does not expose one, and the sentinel is recognised
+            by its name. Only ``stdout`` is parsed -- ``raw()`` appends
+            stderr, and a diagnostic there naming an entry would invent one.
+
+        Raises:
+            PreflightError: If the vault could not be listed, naming the
+                cause. Not silence: this is one of the nine hard cuts.
         """
         try:
             completed = self.binary.invoke(
@@ -449,22 +482,39 @@ class Preflight:
                 env={PASSPHRASE_VAR: self.config.passphrase},
                 timeout=VAULT_TIMEOUT_S,
             )
-        except (OSError, ProductOutputError):
+        except (OSError, ProductOutputError) as exc:
             # Narrow on purpose. A bare `except Exception` here swallowed a
             # TypeError from calling invoke with the wrong keyword, so this
             # method answered "cannot tell" on every run and the marker was
             # never detected at all -- the silence looked exactly like a clean
             # vault.
-            return None
+            raise PreflightError(
+                "the environment's vault could not be listed, so the harness "
+                "cannot tell whether a previous run died mid-rotation: %s. "
+                "Build the binary and check the passphrase in smoke.toml, or "
+                "run --reset-env to discard the environment." % exc
+            ) from exc
         if completed.exit_code != 0:
-            return None
-        return completed.raw().decode("utf-8", errors="replace").split()
+            raise PreflightError(
+                "the environment's vault could not be listed (vault ls exited "
+                "%d), so the harness cannot tell whether a previous run died "
+                "mid-rotation: %s. Check the passphrase in smoke.toml, or run "
+                "--reset-env to discard the environment."
+                % (completed.exit_code,
+                   completed.stderr.decode("utf-8", errors="replace").strip())
+            )
+        return completed.stdout.decode("utf-8", errors="replace").split()
 
-    def _vault_write(self, argv, stdin=None) -> None:
+    def _vault_write(self, argv, subject, stdin=None) -> None:
         """Run one vault mutation, refusing to continue if it fails.
 
         Args:
             argv: The product arguments, starting with ``vault``.
+            subject: What this write is doing, for the failure message. It is
+                a REQUIRED argument rather than a default: the message used to
+                say "could not restore the rotated credential" for every
+                caller, so an operator whose placeholder removal failed was
+                sent to look at R7's rotation, which had not happened.
             stdin: Bytes to feed the command, for a value that must never
                 appear in a command line.
 
@@ -481,13 +531,11 @@ class Preflight:
                 timeout=VAULT_TIMEOUT_S,
             )
         except (OSError, ProductOutputError) as exc:
-            raise PreflightError(
-                "could not restore the rotated credential: %s" % exc
-            ) from exc
+            raise PreflightError("%s: %s" % (subject, exc)) from exc
         if completed.exit_code != 0:
             raise PreflightError(
-                "restoring the rotated credential failed (%s exited %d)"
-                % (" ".join(argv[:2]), completed.exit_code)
+                "%s (%s exited %d)"
+                % (subject, " ".join(argv[:2]), completed.exit_code)
             )
 
     def _settle_binary(self, certifying: bool) -> None:

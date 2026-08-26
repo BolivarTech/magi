@@ -102,6 +102,26 @@ def _verb(argv: list[str]) -> str:
     return rest[0] if rest else ""
 
 
+def _quiet_binary():
+    """A binary double whose ``vault ls`` answers an empty, healthy listing.
+
+    A bare ``mock.Mock(spec=ReleaseBinary)`` returns a Mock from ``invoke``,
+    so ``exit_code`` is a Mock too. That stayed invisible while step 6
+    answered "cannot tell" and returned. Now that an unlistable vault CUTS, a
+    double that does not say what the vault holds makes every test merely
+    passing through step 6 fail on the formatting of a Mock -- so it says,
+    which is what the real one always does.
+
+    Returns:
+        mock.Mock: The double.
+    """
+    binary = mock.Mock(spec=ReleaseBinary)
+    binary.invoke.return_value = ProductOutput(
+        stdout=b"(vault empty)", stderr=b"", exit_code=0,
+        command=["magi-rs", "vault", "ls"])
+    return binary
+
+
 def _quiet_permissions(case: unittest.TestCase) -> None:
     """Patch out step 4 for a test whose subject is a different step.
 
@@ -161,7 +181,7 @@ class OrderingTests(unittest.TestCase):
                                side_effect=lambda: order.append("lock")):
             with mock.patch.object(RunLock, "release"):
                 Preflight(config, env,
-                          mock.Mock(spec=ReleaseBinary),
+                          _quiet_binary(),
                           RunLock(directory / ".lock")).run(False, None)
         self.assertEqual(["lock", "normalize"], order)
 
@@ -178,7 +198,7 @@ class OrderingTests(unittest.TestCase):
             with mock.patch.object(RunLock, "release"):
                 with self.assertRaises(PreflightError) as caught:
                     Preflight(config, env,
-                              mock.Mock(spec=ReleaseBinary),
+                              _quiet_binary(),
                               RunLock(directory / ".lock")).run(False, None)
         self.assertIn("--init-env", str(caught.exception))
         env.normalize_magi_toml.assert_not_called()
@@ -231,7 +251,7 @@ class PermissionCheckWiringTests(unittest.TestCase):
             check = stack.enter_context(
                 mock.patch("smoke.preflight.check_config_permissions"))
             Preflight(SmokeConfig.load(path), env,
-                      mock.Mock(spec=ReleaseBinary),
+                      _quiet_binary(),
                       RunLock(directory / ".lock")).run(False, None)
         check.assert_called_once()
 
@@ -273,7 +293,7 @@ class CredentialResolutionTests(unittest.TestCase):
             with mock.patch.object(RunLock, "release"):
                 with self.assertRaises(PreflightError) as caught:
                     Preflight(self._config("SMOKE_ABSENT_KEY"), env,
-                              mock.Mock(spec=ReleaseBinary),
+                              _quiet_binary(),
                               RunLock(directory / ".lock")).run(False, None)
         self.assertIn("SMOKE_ABSENT_KEY", str(caught.exception))
 
@@ -287,7 +307,7 @@ class CredentialResolutionTests(unittest.TestCase):
         env = mock.Mock(spec=Environment)
         env.exists.return_value = True
         env.declared_base_url.return_value = None
-        binary = mock.Mock(spec=ReleaseBinary)
+        binary = _quiet_binary()
         with mock.patch.object(RunLock, "acquire"):
             with mock.patch.object(RunLock, "release"):
                 with self.assertRaises(PreflightError):
@@ -304,7 +324,7 @@ class CredentialResolutionTests(unittest.TestCase):
         self.addCleanup(os.environ.pop, "SMOKE_PRESENT_KEY", None)
         preflight = Preflight(self._config("SMOKE_PRESENT_KEY"),
                               mock.Mock(spec=Environment),
-                              mock.Mock(spec=ReleaseBinary),
+                              _quiet_binary(),
                               mock.Mock(spec=RunLock))
         preflight._require_config()
 
@@ -343,7 +363,7 @@ class EndpointAgreementTests(unittest.TestCase):
         env = mock.Mock(spec=Environment)
         env.exists.return_value = True
         env.declared_base_url.return_value = declared
-        return Preflight(config, env, mock.Mock(spec=ReleaseBinary),
+        return Preflight(config, env, _quiet_binary(),
                          RunLock(support.scratch_dir(self) / ".lock"))
 
     def test_two_different_endpoints_cut(self) -> None:
@@ -614,7 +634,7 @@ class BackendSpeakingGarbageTests(unittest.TestCase):
         config.backend_base_url = url
         config.backend_kind = "ollama"
         return Preflight(config, mock.Mock(spec=Environment),
-                         mock.Mock(spec=ReleaseBinary),
+                         _quiet_binary(),
                          mock.Mock(spec=RunLock))
 
     def test_the_reachability_probe_degrades_rather_than_raises(self) -> None:
