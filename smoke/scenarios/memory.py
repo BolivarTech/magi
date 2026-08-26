@@ -53,12 +53,11 @@ removed in ``finally``, because a harness that leaks a directory per run leaks a
 database with it.
 
 **What it points the embedder at ANSWERS, and that is the second attempt.** The
-module used to name ``127.0.0.1:9`` and call it "the discard service, reserved
-and unused". Where that service is actually running the connection is accepted
-and then never answered, so the probe waited out its entire ceiling and
-assertion 4 reported ``CANNOT_TEST`` rather than exercising REQ-29 at all. An
-endpoint that returns an error is a failing embedder too, and it is one on
-every machine.
+module used to name the loopback discard port and call it "reserved and
+unused". Where that service is actually running the connection is accepted and
+then never answered, so the probe waited out its entire ceiling and assertion 4
+reported ``CANNOT_TEST`` rather than exercising REQ-29 at all. An endpoint that
+returns an error is a failing embedder too, and it is one on every machine.
 """
 
 import pathlib
