@@ -570,6 +570,7 @@ class LargePayloadWiringTests(unittest.TestCase):
                                  command=["magi-rs"] + list(args))
 
         binary.invoke.side_effect = answer
+        binary.repo_root = pathlib.Path(__file__).resolve().parent.parent.parent
         env = mock.Mock(spec=Environment)
         env.runs_dir = pathlib.Path(tempfile.mkdtemp())
         config = mock.Mock(spec=SmokeConfig)
@@ -593,6 +594,7 @@ class LargePayloadWiringTests(unittest.TestCase):
                                  command=["magi-rs"] + list(args))
 
         binary.invoke.side_effect = answer
+        binary.repo_root = pathlib.Path(__file__).resolve().parent.parent.parent
         env = mock.Mock(spec=Environment)
         env.runs_dir = pathlib.Path(tempfile.mkdtemp())
         config = mock.Mock(spec=SmokeConfig)

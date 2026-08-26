@@ -34,6 +34,7 @@ import time
 
 from smoke.config import ROTATION_MARKER
 from smoke.errors import HarnessError, ProductOutputError, TimedOut
+from smoke.payload import PayloadBuilder
 from smoke.product import ProductOutput
 from smoke.secrets import PlantedSecret, mint_credential, scrub
 
@@ -721,8 +722,38 @@ class RunExecutor:
         overlay = {PASSPHRASE_VARIABLE: self._config.passphrase}
         overlay.update(dict(definition.env))
         return self._binary.invoke(
-            self._command(definition), stdin=definition.stdin, env=overlay,
-            timeout=definition.timeout_s)
+            self._command(definition), stdin=self._stdin_for(definition),
+            env=overlay, timeout=definition.timeout_s)
+
+    def _stdin_for(self, definition: RunDefinition) -> bytes:
+        """What actually goes on the run's standard input.
+
+        ``payload_size`` was a declaration nothing read, so the one run that
+        exists to carry a quarter of a megabyte went out with its 53-byte
+        prompt -- and S8 would have asserted a token floor against a size the
+        product never received, which S8's own trap text forbids. The
+        declaration is load-bearing now: a run marked :data:`PAYLOAD_LARGE` is
+        handed its prompt followed by the generated body.
+
+        The size comes from the CONFIG and not from the module constant, so an
+        operator who lowers ``[payload].target_bytes`` for a backend that
+        cannot take the default gets the size they asked for rather than a copy
+        that forgot to update.
+
+        Args:
+            definition: The run about to execute.
+
+        Returns:
+            bytes: The prompt, plus the generated payload for a large run.
+        """
+        if definition.payload_size != PAYLOAD_LARGE:
+            return definition.stdin
+        # The executor's OWN binary, not the module-level accessor: this
+        # class is handed everything it needs, and reaching for module
+        # state here would make it depend on configure() having run.
+        body = PayloadBuilder(self._binary.repo_root).build(
+            self._config.payload_target_bytes)
+        return definition.stdin + body
 
     def _passphrase_secret(self) -> PlantedSecret:
         """The environment's passphrase, as something the scrubber can remove.
