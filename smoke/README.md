@@ -241,6 +241,11 @@ surplus. A checkable requirement with no scenario is a declared hole.
 
 ## Known limitations
 
+- **`[backend].base_url` can hold exactly one value, and it is not free.** The preflight
+  regenerates the environment's `magi.toml` from `magi init` on every run, so what the
+  runs use is always the product's default. This setting has to match it or the preflight
+  cuts, and the comparison is literal after trimming a trailing slash: `127.0.0.1` and
+  `localhost` are different strings here.
 - **The probe and the runs must name the same endpoint, and the preflight now checks it.**
   `[backend].base_url` in `smoke.toml` is read by exactly one thing, the reachability
   probe; every run goes to whatever the environment's `magi.toml` declares at its root.

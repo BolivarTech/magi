@@ -215,12 +215,16 @@ class PermissionCheckWiringTests(unittest.TestCase):
         env.exists.return_value = True
         env.declared_base_url.return_value = None
         env.declared_models.return_value = set()
-        with mock.patch.object(RunLock, "acquire"):
-            with mock.patch.object(RunLock, "release"):
-                with mock.patch("smoke.preflight.check_config_permissions") as check:
-                    Preflight(SmokeConfig.load(path), env,
-                              mock.Mock(spec=ReleaseBinary),
-                              RunLock(directory / ".lock")).run(False, None)
+        # The backend probe is patched out: the subject here is whether step 4
+        # RUNS, and a unit suite that reaches a real daemon on localhost gives a
+        # different answer depending on whose machine it is -- and hangs for the
+        # probe's whole timeout on one that blackholes the port.
+        with mock.patch.object(RunLock, "acquire"),              mock.patch.object(RunLock, "release"),              mock.patch.object(Preflight, "_probe_backend",
+                               return_value=BackendStatus(reachable=False,
+                                                          cause="patched")),              mock.patch("smoke.preflight.check_config_permissions") as check:
+            Preflight(SmokeConfig.load(path), env,
+                      mock.Mock(spec=ReleaseBinary),
+                      RunLock(directory / ".lock")).run(False, None)
         check.assert_called_once()
 
 

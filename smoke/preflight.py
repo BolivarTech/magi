@@ -1,7 +1,7 @@
 # Author: Julian Bolivar
 # Version: 1.0.0
 # Date: 2026-08-25
-"""The nine hard cuts that run before any scenario.
+"""The eleven hard cuts that run before any scenario.
 
 The order is the design, not a convenience. Two boundaries carry a defect each
 if moved, and both were found by review rather than by a test that failed:
@@ -197,7 +197,7 @@ def _tagged(name: str) -> str:
 
 
 def require_declared_models(declared, available) -> None:
-    """Step 8: every model the environment names exists on the backend.
+    """Step 9: every model the environment names exists on the backend.
 
     This is failure #5 -- a run that reaches a healthy backend and asks it for
     something it does not have. It belongs here rather than in a scenario
@@ -229,7 +229,7 @@ def require_declared_models(declared, available) -> None:
 
 
 class Preflight:
-    """The nine cuts, in order, before a single scenario runs.
+    """The eleven cuts, in order, before a single scenario runs.
 
     Attributes:
         config: The harness configuration.
@@ -280,7 +280,7 @@ class Preflight:
         self.env.normalize_magi_toml(profile)
         self._require_one_endpoint()
         backend = self._probe_backend()
-        # Step 8 runs only when the backend answered: asking a host that is
+        # Step 9 runs only when the backend answered: asking a host that is
         # down which models it has produces silence, and silence here means
         # "could not be asked", never "nothing exists".
         if backend.reachable:
@@ -471,7 +471,7 @@ class Preflight:
         self.binary.version()
 
     def _require_one_endpoint(self) -> None:
-        """The endpoint this preflight probes is the one the runs will use.
+        """Step 7c: the endpoint this preflight probes is the one the runs use.
 
         Runs after step 7b, because 7b is what writes the file this reads.
 

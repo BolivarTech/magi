@@ -13,6 +13,14 @@
 # would ride in the archived command line of every run.
 passphrase = "<choose one, at least 12 characters>"
 
+# base_url here is ONLY what the reachability probe and the model check ask.
+# Every run goes to the root `base_url` of the environment's own magi.toml,
+# which the preflight regenerates from `magi init` on every run -- so in
+# practice this has to equal the product's default, and the preflight cuts if
+# it does not. The two silently disagreed once, probe on a LAN host and runs on
+# localhost, and nothing noticed because both daemons served the same tags.
+# Comparison is literal after trimming a trailing slash: 127.0.0.1 is NOT
+# localhost here.
 [backend]
 kind     = "ollama"
 base_url = "http://localhost:11434/v1"
