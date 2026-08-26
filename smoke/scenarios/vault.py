@@ -755,6 +755,14 @@ def _history_intact_finding(diagnosed, reopened, baseline):
         return _s16(1, Outcome.CANNOT_TEST,
                     "the database's structure could not be read, so nothing "
                     "can be said about what survived")
+    # HISTORY_TABLES, not everything the report listed. ``vault`` is the
+    # rotation's own workspace: R7 plants a marker before it rotates and
+    # removes it after, and R6's authenticated endpoint plants four
+    # placeholder entries and removes those. Counting that table reads the
+    # run's own bookkeeping as the user losing data, and a live run said so:
+    # "vault went from 1 to 0". S4 excludes it for the same reason.
+    baseline = {table: count for table, count in baseline.items()
+                if table in HISTORY_TABLES}
     if not any(baseline.values()):
         return _s16(1, Outcome.CANNOT_TEST,
                     "the environment held no accumulated history before the "
