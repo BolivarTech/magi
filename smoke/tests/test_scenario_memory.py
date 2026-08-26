@@ -275,6 +275,17 @@ class MemoryScenarioBodyTests(unittest.TestCase):
         self.assertEqual(Outcome.CANNOT_TEST, outcomes[memory.ASSERTIONS[3]])
         self.assertEqual(Outcome.CANNOT_TEST, outcomes[memory.ASSERTIONS[2]])
 
+    def test_a_whole_number_fraction_is_still_a_calibration(self) -> None:
+        """TOML ``ceiling_fraction = 1`` parses as an int.
+
+        The check asked for a float, so a calibrated 1 reported "no ceiling
+        fraction is calibrated" -- a message that is false about the file in
+        front of it, and 3b and 3 both degrade over a setting the operator did
+        write.
+        """
+        outcomes = _outcomes(_runs(), _ambient(fraction=1))
+        self.assertEqual(Outcome.PASS, outcomes[memory.ASSERTIONS[3]])
+
     def test_an_undeclared_ceiling_cannot_test_the_fourth(self) -> None:
         """An EMPTY block is not a block full of zeros."""
         outcomes = _outcomes(_runs(), _ambient(settings={}))
