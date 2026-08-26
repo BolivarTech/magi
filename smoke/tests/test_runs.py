@@ -547,8 +547,9 @@ class PlaceholderLifetimeTests(unittest.TestCase):
         used -- the key resolves env-first and step 3 requires the real one
         there -- but because the rotation writes a marker the next preflight
         recovers from, and the restore is what clears it. So unlike a
-        leftover placeholder it must stop the harness. What it must not do is stop it as an untyped
-        ProductOutputError escaping into main's last-resort catch: that is a
+        leftover placeholder it must stop the harness. What it must not do is
+        stop it as an untyped ProductOutputError escaping into main's
+        last-resort catch: that is a
         traceback and exit 3, the code reserved for a defect in the harness,
         with the report discarded and every finding from every completed run
         lost. A typed HarnessError says the same thing through the handler

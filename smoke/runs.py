@@ -1079,7 +1079,18 @@ class RunExecutor:
             )
         name = self._config.backend_key_env
         baseline = self._history_counts()
-        self._vault_set(ROTATION_MARKER, ROTATION_MARKER_VALUE)
+        try:
+            # Typed for the same reason the restore is: reading the exit code
+            # widened what these can raise from "could not start the product"
+            # to "the product ran and refused", and an untyped one here
+            # escapes execute into main's last-resort catch -- a traceback and
+            # exit 3, which says the HARNESS failed.
+            self._vault_set(ROTATION_MARKER, ROTATION_MARKER_VALUE)
+        except (OSError, ProductOutputError) as exc:
+            raise HarnessError(
+                "the rotation could not write its marker, so a death part "
+                "way through would leave no way to recover: %s" % exc
+            ) from exc
         try:
             self._vault_set(name, ROTATION_SENTINEL)
             yield baseline
@@ -1100,8 +1111,8 @@ class RunExecutor:
                  in_flight: bool) -> None:
         """Put the real credential back and drop the marker.
 
-        Runs from a ``finally``, and the three rules that follow from that
-        were learned the expensive way on the placeholder path.
+        Runs on both exits of the rotation, and the three rules that follow
+        from that were learned the expensive way on the placeholder path.
 
         **It raises a TYPED error.** A ``ProductOutputError`` escaping here
         reaches main's last-resort catch, which is a traceback and exit 3 --
@@ -1242,9 +1253,6 @@ class RunExecutor:
             verb: The vault subcommand, for the message.
             name: The entry it acted on.
 
-        Returns:
-            ProductOutput: The capture, when the product accepted.
-
         Raises:
             ProductOutputError: When it exited non-zero, carrying the
                 product's own stderr rather than a summary of it.
@@ -1254,4 +1262,3 @@ class RunExecutor:
                 "vault %s %s exited %d: %s"
                 % (verb, name, output.exit_code,
                    output.stderr.decode("utf-8", errors="replace").strip()))
-        return output

@@ -124,9 +124,18 @@ class Environment:
     """The persistent test environment under ``smoke/env/``.
 
     Example:
-        >>> env = Environment(pathlib.Path("smoke/env"))
-        >>> if not env.exists():
-        ...     env.init()
+        Under a temporary root, never ``smoke/env`` itself. The examples in
+        this package are executed by the suite, and ``init`` removes the root
+        before it rebuilds -- so an example naming the real environment would
+        make running the unit tests destroy the accumulated history the
+        environment exists to hold, taking the decision that :meth:`init`
+        raises a ``PreflightError`` precisely to leave with a human.
+
+        >>> import tempfile
+        >>> with tempfile.TemporaryDirectory() as scratch:
+        ...     env = Environment(pathlib.Path(scratch) / "env")
+        ...     env.exists()
+        False
     """
 
     def __init__(self, root: pathlib.Path | str) -> None:

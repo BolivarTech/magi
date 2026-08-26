@@ -47,8 +47,18 @@ class PayloadBuilder:
     """Builds a payload of a declared byte size from one checkout.
 
     Example:
-        >>> builder = PayloadBuilder(pathlib.Path("."))
-        >>> len(builder.build(1024))
+        Over a tree the example builds, not over the checkout. Two reasons,
+        and the suite executes these so both are live: ``"."`` makes the
+        result depend on the directory the runner was started from, and
+        reading the product's real sources couples a unit test to how much
+        Rust happens to be in the tree.
+
+        >>> import tempfile
+        >>> with tempfile.TemporaryDirectory() as scratch:
+        ...     root = pathlib.Path(scratch)
+        ...     (root / "src").mkdir()
+        ...     _ = (root / "src" / "main.rs").write_text("// " + "x" * 4096)
+        ...     len(PayloadBuilder(root).build(1024))
         1024
     """
 

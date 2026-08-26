@@ -48,19 +48,32 @@ def load_tests(loader, tests, ignore):  # noqa: ARG001 - unittest protocol
 
 
 class DoctestCoverageTests(unittest.TestCase):
-    """The loader has to actually find something.
+    """The LOADER has to find something, not a copy of the loader.
 
-    Without this, deleting every example -- or breaking the walk so it
-    imports nothing -- leaves a green suite that certifies no examples at
-    all, which is the shape of guardian this harness exists to refuse.
+    The first version of this walked the package itself and counted what it
+    found, which guards the wrong half. Rename ``load_tests`` and no example
+    executes anywhere, yet a test that re-implements the walk still passes:
+    it certified that examples EXIST, while the suite quietly went back to
+    running none of them. Mutation said so -- the rename left this file
+    green.
+
+    So it calls the real entry point. That goes red on a renamed, mistyped
+    or exception-swallowing loader, and still goes red if every example is
+    deleted.
     """
 
-    def test_the_walk_finds_examples_to_run(self) -> None:
-        found = 0
-        for module in pkgutil.walk_packages(smoke.__path__, "smoke."):
-            if module.name.startswith(_SKIPPED):
-                continue
-            imported = importlib.import_module(module.name)
-            found += sum(len(t.examples)
-                         for t in doctest.DocTestFinder().find(imported))
-        self.assertGreater(found, 0, "no Example: is being executed")
+    def test_the_loader_produces_cases_to_run(self) -> None:
+        suite = load_tests(unittest.TestLoader(), unittest.TestSuite(), None)
+        self.assertGreater(suite.countTestCases(), 0,
+                           "the loader produced no doctest cases, so no "
+                           "Example: in the package is being executed")
+
+    def test_the_loader_covers_more_than_one_module(self) -> None:
+        """One module's examples is not the package's examples.
+
+        A walk that broke after the first import would satisfy the count
+        above while covering almost nothing.
+        """
+        suite = load_tests(unittest.TestLoader(), unittest.TestSuite(), None)
+        modules = {case.id().rsplit(".", 1)[0] for case in suite}
+        self.assertGreater(len(modules), 1, "the walk stopped early")

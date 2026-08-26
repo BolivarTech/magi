@@ -102,11 +102,10 @@ class RoundCounter:
 
     Example:
         >>> import pathlib, tempfile
-        >>> path = pathlib.Path(tempfile.mkdtemp()) / "rounds"
-        >>> RoundCounter(path).bump()
-        1
-        >>> RoundCounter(path).bump()
-        2
+        >>> with tempfile.TemporaryDirectory() as scratch:
+        ...     path = pathlib.Path(scratch) / "rounds"
+        ...     (RoundCounter(path).bump(), RoundCounter(path).bump())
+        (1, 2)
     """
 
     def __init__(self, path) -> None:

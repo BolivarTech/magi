@@ -92,8 +92,8 @@ class ReleaseBinary:
     """The release artifact of one magi-rs checkout.
 
     Example:
-        >>> binary = ReleaseBinary(pathlib.Path("."))
-        >>> binary.path.name.startswith("magi-rs")
+        >>> root = pathlib.Path(__file__).resolve().parent.parent
+        >>> ReleaseBinary(root).path.name.startswith("magi-rs")
         True
     """
 

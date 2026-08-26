@@ -143,9 +143,23 @@ class SmokeConfig:
         payload_token_floor: The token floor S8 asserts against.
 
     Example:
-        >>> config = SmokeConfig.load(Path("smoke/smoke.toml"))
-        >>> config.backend_kind
-        'ollama'
+        Off a file the example writes, never ``smoke/smoke.toml``. That one
+        is gitignored, so on a fresh clone the load raises and the harness's
+        own suite is red before the operator has done anything wrong; and
+        asserting ``'ollama'`` would put a green suite at the mercy of which
+        of the three legal kinds this machine happens to be configured for,
+        which is the harness's own named antipattern.
+
+        >>> import tempfile
+        >>> with tempfile.TemporaryDirectory() as scratch:
+        ...     path = Path(scratch) / "smoke.toml"
+        ...     _ = path.write_text(
+        ...         '[env]\\npassphrase = "correct-horse-battery-staple"\\n'
+        ...         '[backend]\\nkind = "openai-compat"\\n'
+        ...         'base_url = "http://localhost:11434/v1"\\n'
+        ...         'key_env = "SMOKE_EXAMPLE_KEY"\\n', encoding="utf-8")
+        ...     SmokeConfig.load(path).backend_kind
+        'openai-compat'
     """
 
     def __init__(self, path, passphrase, backend_kind, backend_base_url,

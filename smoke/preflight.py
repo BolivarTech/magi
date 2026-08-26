@@ -16,8 +16,9 @@ keeping: the steps that cut mostly do not raise here. ``_settle_binary``
 raises nothing of its own and delegates to ``binary.py``, whose ``rebuild``
 and ``version`` raise ``PreflightError`` -- ``sha256`` does too, but the
 certificate calls that one, not the preflight; the lock raises from
-``lock.py`` and the configuration from ``config.py``. Counting the ``raise`` statements in THIS
-module answers a different question, and answers it confidently.
+``lock.py`` and the configuration from ``config.py``. Counting the ``raise``
+statements in THIS module answers a different question, and answers it
+confidently.
 
 Steps 1 to 8 are the spec's own numbering (section 4). ``7b`` (the
 normalisation) and ``7c`` (endpoint agreement) are additions that came from

@@ -421,10 +421,13 @@ class _RotatedDatabase(_FakeDatabase):
 def _r7_result(timed_out: bool = False, baseline=None) -> RunResult:
     """Build the R7 capture S16 reads.
 
-    R7 exits non-zero on purpose: it queries while the backend credential holds
-    the rotation sentinel, so the call it makes cannot authenticate. What S16
-    asks about is the database the product kept using around that failure, not
-    the answer the backend refused to give.
+    The capture carries a non-zero exit because S16 never reads one, not
+    because the rotation makes the query fail. It does not: the product
+    resolves the key env-first, preflight step 3 requires the real value in
+    the environment, and every child inherits it, so R7's own query
+    authenticates normally. What S16 asks about is the database the product
+    kept around the rotation, which is why the exit code is free to be
+    anything here.
 
     Args:
         timed_out: Whether the run exceeded its ceiling.
