@@ -2055,7 +2055,7 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Re
 
                         match key.code {
                             KeyCode::Enter => {
-                                let input = app.input.drain(..).collect::<String>();
+                                let input = std::mem::take(&mut app.input);
                                 app.cursor_position = 0;
                                 let trimmed = input.trim();
                                 if !trimmed.is_empty() {

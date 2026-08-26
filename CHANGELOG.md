@@ -11,6 +11,17 @@ changes and the **patch** position signals backward-compatible fixes.
 
 ## [0.16.0] - 2026-08-26
 
+### Fixed
+
+- `cargo clippy -D warnings` failed on Rust 1.98, which is what CI runs. The
+  TUI drained its input buffer into a new `String` where `std::mem::take` says
+  the same thing without the copy, and 1.98 lints that as `drain_collect`. The
+  line dates to the initial commit and had been red on `main` since the runners
+  moved to 1.98; it went unseen locally because the developer toolchain was
+  still 1.97, where the lint does not exist. **A verification gate is only as
+  strong as the toolchain it runs on**, so the fix is one line and the lesson
+  is to keep the two in step.
+
 ### Added
 
 - A smoke-test harness under `smoke/`, run as `python -m smoke`. It builds the
