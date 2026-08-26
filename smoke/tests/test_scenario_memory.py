@@ -77,43 +77,50 @@ def _capture(document, stderr=b"", exit_code=0) -> ProductOutput:
                          exit_code=exit_code, command=["magi-rs", "query"])
 
 
-def _run(run_id, input_tokens, stderr=b"") -> RunResult:
+def _run(run_id, input_tokens, stderr=b"", turns=1) -> RunResult:
     """Build one of S9's three results.
 
     Args:
         run_id: Which definition it stands for.
         input_tokens: What ``usage.input_tokens`` should report.
         stderr: The startup lines the product printed.
+        turns: How many messages the transcript carries. This is what
+            assertion 3 reads: a run with memory carries the turns the
+            assembler loaded on top of its own.
 
     Returns:
         RunResult: The real type, not a double.
     """
-    document = {"usage": {"input_tokens": input_tokens, "output_tokens": 5}}
+    document = {"usage": {"input_tokens": input_tokens, "output_tokens": 5},
+                "transcript": [{"role": "user", "content": "x"}] * turns}
     return RunResult(run_id=run_id, output=_capture(document, stderr=stderr),
                      duration_s=1.0, timed_out=False, planted=())
 
 
-def _runs(r3_tokens=4000, r2_tokens=1000, r3_stderr=_HEALTHY_LINE):
+def _runs(r3_tokens=4000, r2_tokens=1000, r3_stderr=_HEALTHY_LINE,
+          r3_turns=40, r2_turns=4):
     """The mapping a scenario declaring three runs receives.
 
     Args:
         r3_tokens: ``usage.input_tokens`` for R3.
         r2_tokens: The same for R2, the ``--no-memory`` control.
         r3_stderr: R3's startup lines.
+        r3_turns: Transcript length for R3, the run with memory.
+        r2_turns: Transcript length for R2, the control.
 
     Returns:
         dict[str, RunResult]: Keyed by run id, as the runner hands it over.
     """
-    return {"R1": _run("R1", 800), "R2": _run("R2", r2_tokens),
-            "R3": _run("R3", r3_tokens, stderr=r3_stderr)}
+    return {"R1": _run("R1", 800),
+            "R2": _run("R2", r2_tokens, turns=r2_turns),
+            "R3": _run("R3", r3_tokens, stderr=r3_stderr, turns=r3_turns)}
 
 
-def _ambient(settings=None, margin=100, fraction=0.8) -> Ambient:
+def _ambient(settings=None, fraction=0.8) -> Ambient:
     """Build the ambient state S9 reads.
 
     Args:
         settings: The environment's ``[memory]`` block.
-        margin: The configured margin in tokens.
         fraction: The configured saturation fraction.
 
     Returns:
@@ -121,7 +128,6 @@ def _ambient(settings=None, margin=100, fraction=0.8) -> Ambient:
     """
     return Ambient(
         tree_snapshot=None,
-        margin_tokens=margin,
         ceiling_fraction=fraction,
         memory_settings=dict(_COMPLETE_SETTINGS if settings is None
                              else settings),
@@ -156,8 +162,8 @@ class MemoryScenarioShapeTests(unittest.TestCase):
             [
                 "the startup line reports N active with N > 0",
                 "pending re-embed is 0 — the embedder answered",
-                "usage.input_tokens of R3 exceeds R2's by more than the "
-                "declared margin",
+                "R3's transcript carries turns R2's does not — the "
+                "assembler loaded them",
                 "the environment is below the saturation ceiling — otherwise "
                 "3 degrades to CANNOT_TEST",
                 "with the embedder down, the run completes with a degradation "
@@ -232,34 +238,40 @@ class MemoryScenarioBodyTests(unittest.TestCase):
         self.assertEqual(Outcome.CANNOT_TEST, outcomes[memory.ASSERTIONS[0]])
         self.assertEqual(Outcome.CANNOT_TEST, outcomes[memory.ASSERTIONS[1]])
 
-    def test_a_difference_below_the_margin_fails_the_third(self) -> None:
-        outcomes = _outcomes(_runs(r3_tokens=1050, r2_tokens=1000),
-                             _ambient(margin=100))
+    def test_a_transcript_no_longer_than_the_control_fails_the_third(self) -> None:
+        """Memory loaded nothing, and that is the regression to catch."""
+        outcomes = _outcomes(_runs(r3_turns=4, r2_turns=4), _ambient())
         self.assertEqual(Outcome.FAIL, outcomes[memory.ASSERTIONS[2]])
 
-    def test_an_uncalibrated_margin_cannot_test_the_third(self) -> None:
-        """A margin of zero cannot tell "it injected" from "it did not".
+    def test_a_longer_transcript_passes_the_third(self) -> None:
+        outcomes = _outcomes(_runs(r3_turns=40, r2_turns=4), _ambient())
+        self.assertEqual(Outcome.PASS, outcomes[memory.ASSERTIONS[2]])
 
-        Zero is what ``smoke.toml`` carries until phase 5 measures the real
-        number, and R2 and R3 carry different prompts, so almost any pair of
-        token counts clears it. Reporting PASS there is a green that means
-        nothing.
+    def test_a_missing_transcript_cannot_test_the_third(self) -> None:
+        """Absent is not empty. A capture with no transcript says nothing
+        about what the assembler did.
         """
-        outcomes = _outcomes(_runs(), _ambient(margin=0))
-        self.assertEqual(Outcome.CANNOT_TEST, outcomes[memory.ASSERTIONS[2]])
+        results = _runs()
+        broken = json.loads(results["R3"].output.stdout)
+        broken.pop("transcript")
+        results["R3"] = RunResult(
+            run_id="R3", output=_capture(broken, stderr=_HEALTHY_LINE),
+            duration_s=1.0, timed_out=False, planted=())
+        self.assertEqual(Outcome.CANNOT_TEST,
+                         _outcomes(results, _ambient())[memory.ASSERTIONS[2]])
 
     def test_a_saturated_environment_cannot_test_the_third(self) -> None:
         """The false green assertion 3b exists to stop.
 
-        Once the assembler saturates its budget, the R3 minus R2 difference
-        stops measuring "it injected what we planted" and starts measuring "the
-        budget is full" -- and it still clears the margin, so assertion 3 would
-        pass in exactly the same way while measuring something else.
+        Once the assembler saturates its budget it loads bulk history rather
+        than what the query asked for, so a longer transcript stops meaning
+        "it recalled what we planted" -- and it is longer in exactly the same
+        way, so assertion 3 would pass while measuring something else.
         """
         saturated = (8000 - 1024) * 0.9 * 0.8
         outcomes = _outcomes(
             _runs(r3_tokens=1000 + int(saturated) + 1, r2_tokens=1000),
-            _ambient(margin=100, fraction=0.8))
+            _ambient(fraction=0.8))
         self.assertEqual(Outcome.CANNOT_TEST, outcomes[memory.ASSERTIONS[3]])
         self.assertEqual(Outcome.CANNOT_TEST, outcomes[memory.ASSERTIONS[2]])
 
