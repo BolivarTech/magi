@@ -408,7 +408,13 @@ def _saturation_finding(results, ambient):
                    "fill in the product's defaults: absent is not zero."
                    % ", ".join(CEILING_FIELDS))
     fraction = ambient.ceiling_fraction
-    if not isinstance(fraction, float) or fraction <= 0.0:
+    # A TOML ``ceiling_fraction = 1`` parses as an int, and demanding a float
+    # made a calibrated whole number report "no ceiling fraction is
+    # calibrated" -- false about the file in front of it. ``bool`` is excluded
+    # for the same reason ``usable_budget`` excludes it: True is not a
+    # fraction.
+    if (not isinstance(fraction, (int, float)) or isinstance(fraction, bool)
+            or fraction <= 0.0):
         return _s9(3, Outcome.CANNOT_TEST, RECALL_RUN,
                    "no ceiling fraction is calibrated in smoke.toml, so there "
                    "is no ceiling to compare against")
