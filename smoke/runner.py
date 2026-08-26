@@ -34,14 +34,6 @@ _TRANSLATED_FAILURE = "the product's output could not be interpreted"
 _BACKEND_UNREACHABLE = "the backend was not reachable"
 _RUN_TIMED_OUT = "the shared run did not finish inside its timeout"
 
-#: The three texts the RUNNER answers with when a scenario never ran: a
-#: timed-out run, an unreachable backend, a capture that could not be read.
-#: Named as a group because the completeness check has to recognise all three
-#: or none -- a scenario that did not run promised nothing on that path.
-SUBSTITUTED_ASSERTIONS = frozenset(
-    (_TRANSLATED_FAILURE, _BACKEND_UNREACHABLE, _RUN_TIMED_OUT)
-)
-
 
 @dataclasses.dataclass(frozen=True)
 class StampedFinding:
@@ -203,7 +195,8 @@ class Runner:
         for entry in self._registry.entries():
             invoked.add(entry.scenario_id)
             answered: list[str] = []
-            for finding in self._invoke(entry):
+            produced, substituted = self._invoke(entry)
+            for finding in produced:
                 reported.add(entry.scenario_id)
                 answered.append(finding.assertion)
                 findings.append(
@@ -215,7 +208,8 @@ class Runner:
                         run_id=finding.run_id,
                     )
                 )
-            self.reconcile_completeness(entry, answered)
+            if not substituted:
+                self.reconcile_completeness(entry, answered)
 
         self.reconcile(
             registered=set(self._registry.registered_ids()),
@@ -243,21 +237,15 @@ class Runner:
 
         Args:
             entry: The scenario that just ran.
-            answered: The assertion texts it yielded, in order. When the runner
-                substituted its own single finding the scenario never ran, and
-                the check does not apply.
+            answered: The assertion texts it yielded, in order. The caller
+                does not call this at all when the runner substituted its own
+                finding: the scenario never ran, so it promised nothing.
 
         Raises:
             HarnessError: If the two sets differ. This is a defect in the
                 HARNESS -- exit 3 -- never a verdict on the product.
         """
         if not entry.assertions:
-            return
-        if len(answered) == 1 and answered[0] in SUBSTITUTED_ASSERTIONS:
-            # The RUNNER answered, not the scenario. A timed-out run, an
-            # unreachable backend and an unreadable capture each collapse the
-            # whole scenario into one finding on purpose, and the scenario body
-            # never ran -- so it promised nothing on this path and owes nothing.
             return
         declared = set(entry.assertions)
         arrived = set(answered)
@@ -275,15 +263,19 @@ class Runner:
             "scenario %s %s" % (entry.scenario_id, " and ".join(parts))
         )
 
-    def _invoke(self, entry: ScenarioEntry) -> list[Finding]:
+    def _invoke(self, entry: ScenarioEntry) -> tuple[list[Finding], bool]:
         """Run one scenario, translating a product-output failure to FAIL.
 
         Args:
             entry: The registered scenario to invoke.
 
         Returns:
-            The findings it yielded; a single FAIL when the product's output
-            could not be interpreted.
+            tuple[list[Finding], bool]: The findings, and whether the RUNNER
+            answered instead of the scenario. The flag is a fact the runner
+            holds, not something to infer from the text it wrote: a scenario is
+            free to declare any string as one of its assertions, including one
+            of these, and reading the answer off the text would then exempt a
+            scenario that really did go quiet.
 
         Raises:
             Exception: Anything the harness itself got wrong propagates
@@ -309,7 +301,7 @@ class Runner:
                         detail=f"run {run_id} exceeded its timeout",
                         run_id=run_id,
                     )
-                ]
+                ], True
         if entry.needs_backend and not self._backend_reachable:
             # D-17: a down backend is not a product defect, so this is never FAIL.
             # It still blocks the gate, and the certificate is still not written.
@@ -320,12 +312,12 @@ class Runner:
                     detail="the backend did not answer; this scenario needs it",
                     run_id=entry.run,
                 )
-            ]
+            ], True
         run = self._resolve_run(entry)
         try:
             findings = (entry.func(run, self._ambient) if entry.needs_ambient
                         else entry.func(run))
-            return list(findings)
+            return list(findings), False
         except ProductOutputError as exc:
             return [
                 Finding(
@@ -334,7 +326,7 @@ class Runner:
                     detail=str(exc),
                     run_id=entry.run,
                 )
-            ]
+            ], True
 
     def _runs_for(self, entry: ScenarioEntry) -> dict[str, _TimedOutRun | None]:
         """The shared runs this scenario hangs off, keyed by id.

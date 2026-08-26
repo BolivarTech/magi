@@ -275,7 +275,7 @@ class CompletenessTests(unittest.TestCase):
         """
         registry = Registry()
 
-        borrowed = sorted(runner_module.SUBSTITUTED_ASSERTIONS)[0]
+        borrowed = runner_module._BACKEND_UNREACHABLE
 
         @scenario("S1", assertions=(borrowed, "second"), registry=registry)
         def borrows_the_text(run):
