@@ -214,14 +214,45 @@ class Preflight:
             )
 
     def _require_config(self) -> None:
-        """Steps 3 and 4: the configuration exists and is not exposed.
+        """Steps 3 and 4: the configuration resolves and is not exposed.
+
+        The credential is resolved HERE rather than where it is spent. R7
+        rotates it and needs the real value to put back, and the executor that
+        performs the rotation runs after every cheaper run has already
+        completed -- so a variable that resolves to nothing surfaced as a
+        harness failure with the whole backend bill already paid. Nothing is
+        read out of the credential and nothing is printed: only whether it
+        resolves at all.
 
         Raises:
-            PreflightError: If the permissions are permissive or unreadable.
+            PreflightError: If the backend credential does not resolve, or the
+                permissions are permissive or unreadable.
         """
         path = getattr(self.config, "path", None)
         if path is not None:
             check_config_permissions(pathlib.Path(path))
+        self._require_backend_credential()
+
+    def _require_backend_credential(self) -> None:
+        """Step 3: the variable naming the backend credential holds something.
+
+        Raises:
+            PreflightError: Naming the variable and how to set it. The value
+                itself never reaches the message.
+        """
+        key = getattr(self.config, "backend_key_env", "")
+        if not isinstance(key, str) or not key:
+            raise PreflightError(
+                "smoke.toml declares no backend credential variable; set "
+                "[backend].key_env to the variable holding it"
+            )
+        if not os.environ.get(key, "").strip():
+            raise PreflightError(
+                "%s carries no backend credential. Export it before running: "
+                "R7 rotates that credential and has to put the real one back, "
+                "so a run started without it spends every other run first and "
+                "then fails." % key
+            )
 
     def _require_environment(self) -> None:
         """Step 5: the environment exists.
