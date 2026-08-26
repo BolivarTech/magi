@@ -236,6 +236,28 @@ class WorkdirFlagScenarioBodyTests(unittest.TestCase):
         support.install_fake_runs(self, responder=_FakeWorkdir())
         self.assertEqual({Outcome.PASS}, set(_workdir_outcomes().values()))
 
+    def test_a_failed_control_invocation_cannot_test_the_third(self) -> None:
+        """The control's exit code was never read.
+
+        Assertion 3 concludes from "the marker is absent from the outer
+        listing". An outer invocation that exited non-zero with empty stdout
+        satisfies that too, so the assertion passed on half a measurement.
+        """
+        class _OuterFails(_FakeWorkdir):
+            def __call__(self, call):
+                answer = super().__call__(call)
+                flags = [call.args[i + 1] for i, a in enumerate(call.args)
+                         if a == "-w"]
+                if answer is not None and len(flags) == 2:
+                    return ProductOutput(stdout=b"", stderr=b"boom",
+                                         exit_code=1,
+                                         command=["magi-rs"] + list(call.args))
+                return answer
+
+        support.install_fake_runs(self, responder=_OuterFails())
+        self.assertEqual(Outcome.CANNOT_TEST,
+                         _workdir_outcomes()[workspace.S14_ASSERTIONS[2]])
+
     def test_a_resolver_that_ignores_the_flag_fails(self) -> None:
         """The mutation, run rather than described -- at the level of the
         double. With ``-w`` ignored the product acts on the process's cwd, and
