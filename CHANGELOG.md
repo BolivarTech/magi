@@ -11,6 +11,16 @@ changes and the **patch** position signals backward-compatible fixes.
 
 ### Fixed
 
+- Notices the agent emits now reach the operator in headless runs. The drain loop
+  consumed every stream piece and looked only at content, for time-to-first-byte,
+  so `StreamPiece::Notice` was dropped: REQ-29's second half — degrade *and say
+  so* — held in the TUI and nowhere else, and somebody running `magi query` with
+  a failing embedder watched memories pile up unembedded with no signal at all.
+  They go to stderr, prefixed `notice: `, with any authority in them redacted;
+  stdout is left alone so a consumer parsing the JSON contract is unaffected.
+  **A CI job that asserts stderr is empty on a degraded run will now see a
+  line.**
+
 - A present-but-unparseable `magi.toml` now exits **2**, not 1. Exit 2 is the
   published code for invalid input (README, REQ-H23) and the same function
   already used it for an unrecognised envelope `mode`, so one class of failure
