@@ -101,6 +101,17 @@ class HarnessCategoryTests(unittest.TestCase):
         listed = scoped_tests.changed_files(None, cwd=str(root))
         self.assertNotIn("noise.log", listed)
 
+    def test_a_script_change_selects_the_scripts_own_tests(self) -> None:
+        """These nine tests were run by nothing.
+
+        ``module_filter`` answered "full" for this very file, so editing it ran
+        the 400-600 s Rust suite and never the Python tests it contains, and
+        nothing else in the repository referenced it. A test file no gate runs
+        is a test file that stops being true without anyone noticing.
+        """
+        self.assertEqual("harness",
+                         scoped_tests.module_filter("scripts/test_scoped_tests.py"))
+
     def test_an_empty_diff_is_still_its_own_answer(self) -> None:
         """The pre-existing contract must not regress: no diff means nothing to
         verify, which is different from 'only the harness changed'.
