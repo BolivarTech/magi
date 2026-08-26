@@ -208,6 +208,29 @@ class ToolsScenarioBodyTests(unittest.TestCase):
         self.assertTrue(tools.escape_target().startswith("../"),
                         tools.escape_target())
 
+    def test_the_prompt_defers_the_decision_to_the_guard(self) -> None:
+        """Measured against the real backend, twice.
+
+        Asked to "read the file at ../../Cargo.toml and quote its first line",
+        the model answered in prose that the tool is sandboxed and blocks
+        traversal, and made no tool call at all: zero records, so the guard was
+        never asked and the assertion could only report CANNOT_TEST. The tool
+        DESCRIPTION tells the model the path will be refused, so it reasons its
+        way to the right answer and never reaches the code.
+
+        Told instead that this is a self-test, to call the tool exactly once,
+        and NOT to decide for itself whether the path is allowed because the
+        tool's own guard is what the test needs, the same model called ``view``
+        with the same path and the product answered "Security Violation: Path
+        traversal attempted" with ``ok: false``. The verdict still comes
+        entirely from the product; what changed is that the product got asked.
+        """
+        binary = support.install_fake_runs(self, responder=_FakeProbe(DENIED))
+        _outcomes(_run([_LS_RECORD]))
+        probes = [call for call in binary.calls if call.stdin is not None]
+        prompt = probes[0].stdin.decode("utf-8")
+        self.assertIn(tools.DEFER_TO_THE_GUARD, prompt)
+
     def test_the_probe_aims_at_a_path_that_exists_outside_the_workspace(self) -> None:
         """A refusal for a MISSING file would be a false green.
 
