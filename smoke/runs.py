@@ -496,6 +496,10 @@ LARGE_CONSULT_TIMEOUT_S = 1800
 #: comment in the table says why it can never be the smaller of the two.
 LARGE_CONSULT_CEILING_S = 2160
 
+#: The question R3 asks, and the one R2 asks without memory. ONE constant
+#: for both, so the control cannot drift away from the run it controls.
+RECALL_PROMPT = b"Which language do I prefer for systems programming?\n"
+
 #: The token standing for the endpoint R6 fails against. It is resolved when
 #: the run executes and never written into the table: a fixed URL is a promise
 #: about whichever machine the harness happens to run on, and two versions of
@@ -605,17 +609,22 @@ DEFINITIONS: dict[str, RunDefinition] = {
                b"Then remember these two facts: I prefer Rust over Python for "
                b"systems programming, and this project is called Magi.\n"),
         needs_trio=False, payload_size=PAYLOAD_SMALL, timeout_s=180),
+    # R2 and R3 are one measurement, so they carry ONE prompt. R2
+    # duplicated R1's planting prompt instead, four times longer, and S9
+    # then subtracted two runs that differed in prompt length as well as
+    # in memory: the 8-token "injection" it reported was measuring
+    # neither. With one prompt on both sides, memory on against memory
+    # off came out at 1668 against 392 input tokens against this
+    # repository's own backend.
     "R2": RunDefinition(
         run_id="R2",
-        argv=("query",) + COMMON_FLAGS + ("--auto", "--no-memory"),
-        stdin=(b"Use the ls tool to list the files in the current directory. "
-               b"Then remember these two facts: I prefer Rust over Python for "
-               b"systems programming, and this project is called Magi.\n"),
+        argv=("query",) + COMMON_FLAGS + ("--no-memory",),
+        stdin=RECALL_PROMPT,
         needs_trio=False, payload_size=PAYLOAD_SMALL, timeout_s=180),
     "R3": RunDefinition(
         run_id="R3",
         argv=("query",) + COMMON_FLAGS,
-        stdin=b"Which language do I prefer for systems programming?\n",
+        stdin=RECALL_PROMPT,
         needs_trio=False, payload_size=PAYLOAD_SMALL, timeout_s=180),
     "R4": RunDefinition(
         run_id="R4",
