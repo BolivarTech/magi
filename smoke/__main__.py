@@ -27,7 +27,7 @@ from smoke.env import Environment, active_memories
 from smoke.errors import HarnessError, PreflightError
 from smoke.lock import RunLock
 from smoke.preflight import Preflight
-from smoke.registry import DEFAULT_REGISTRY
+from smoke.registry import DECLARED_SCENARIO_COUNT, DEFAULT_REGISTRY
 from smoke.report import Report
 from smoke.runner import Ambient, Runner, StampedFinding, capture_tree
 from smoke.runs import DEFINITIONS, RunExecutor, RunResult, needed_runs
@@ -91,6 +91,35 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def require_declared_count(registered: int) -> None:
+    """Check the registry against the count the certificate publishes.
+
+    A unit test already guards the two against drifting apart, and that is the
+    wrong place for the whole guarantee: it catches a change made with the
+    suite watching, not a deployment where a module quietly failed to import.
+    The number reaches the certificate as "N of N", so the harness verifies it
+    about ITSELF, at startup, before anything expensive runs.
+
+    Args:
+        registered: How many scenarios actually registered.
+
+    Raises:
+        HarnessError: If it differs from :data:`DECLARED_SCENARIO_COUNT`. That
+            is a defect in the HARNESS -- exit 3 -- never a verdict on the
+            product: either a module stopped importing or the constant was
+            moved without the scenarios that justify it.
+    """
+    if registered == DECLARED_SCENARIO_COUNT:
+        return
+    raise HarnessError(
+        "%d scenarios registered but %d are declared. Either a module is no "
+        "longer imported in smoke/scenarios/__init__.py, or "
+        "DECLARED_SCENARIO_COUNT was changed without the scenarios that "
+        "justify it -- and the certificate publishes that number."
+        % (registered, DECLARED_SCENARIO_COUNT)
+    )
+
+
 def exit_code_for(findings: list[StampedFinding]) -> int:
     """Map the findings to the process exit code.
 
@@ -131,6 +160,7 @@ def main(argv: list[str] | None = None) -> int:
             with RunLock(LOCK_PATH):
                 env.reset() if args.reset_env else env.init()
             return EXIT_OK
+        require_declared_count(len(DEFAULT_REGISTRY.registered_ids()))
         certifying = args.smoke_2 and profile is None
         binary = ReleaseBinary(REPO_ROOT)
         runs.configure(binary, env, config)
