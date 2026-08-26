@@ -767,6 +767,15 @@ def _history_intact_finding(diagnosed, reopened, baseline):
     way. Over a database with no rows the claim is true of a history that never
     existed, which is a green that checked nothing.
 
+    **What it does NOT see, recorded rather than papered over.** The baseline
+    is taken before R7 and the counts are read during evaluation, after R8's
+    consult has written more rows. So a rotation that lost fewer rows than R8
+    added is masked. The direction is right -- the assertion is "what was
+    there is still there", and a real wipe clears the tables outright -- but
+    the margin is R8's, not zero. Narrowing it would mean reading the counts
+    the instant the rotation ends, which puts a diagnose inside the run and
+    makes the run's own timing part of what the scenario measures.
+
     Args:
         diagnosed: The ``vault diagnose`` taken after the rotation.
         reopened: The open attempted with the configured passphrase.
