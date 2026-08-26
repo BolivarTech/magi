@@ -78,6 +78,22 @@ class WindowsPermissionTests(unittest.TestCase):
         self.assertIn("could not be read", str(caught.exception))
 
 
+def _quiet_permissions(case: unittest.TestCase) -> None:
+    """Patch out step 4 for a test whose subject is a different step.
+
+    The permission check reads a real file's ACL, which a temporary file in a
+    test does not reliably satisfy. Patching it keeps these tests about the
+    step they name; the check has its own tests, and its WIRING has
+    :class:`PermissionCheckWiringTests`.
+
+    Args:
+        case: The test to register the cleanup on.
+    """
+    patcher = mock.patch("smoke.preflight.check_config_permissions")
+    case.addCleanup(patcher.stop)
+    patcher.start()
+
+
 def _resolvable_config(case: unittest.TestCase):
     """Build a configuration double whose backend credential resolves.
 
@@ -92,9 +108,11 @@ def _resolvable_config(case: unittest.TestCase):
     """
     os.environ["SMOKE_ORDERING_KEY"] = "the-real-credential"
     case.addCleanup(os.environ.pop, "SMOKE_ORDERING_KEY", None)
+    _quiet_permissions(case)
     config = mock.Mock(spec=SmokeConfig)
     config.passphrase = "correct horse battery staple"
     config.backend_key_env = "SMOKE_ORDERING_KEY"
+    config.path = str(pathlib.Path(tempfile.mkdtemp()) / "smoke.toml")
     return config
 
 
@@ -200,9 +218,11 @@ class CredentialResolutionTests(unittest.TestCase):
         Returns:
             mock.Mock: The double.
         """
+        _quiet_permissions(self)
         config = mock.Mock(spec=SmokeConfig)
         config.passphrase = "correct horse battery staple"
         config.backend_key_env = variable
+        config.path = str(pathlib.Path(tempfile.mkdtemp()) / "smoke.toml")
         return config
 
     def test_an_unresolvable_credential_cuts_naming_the_variable(self) -> None:

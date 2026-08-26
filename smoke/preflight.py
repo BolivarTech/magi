@@ -228,9 +228,12 @@ class Preflight:
             PreflightError: If the backend credential does not resolve, or the
                 permissions are permissive or unreadable.
         """
-        path = getattr(self.config, "path", None)
-        if path is not None:
-            check_config_permissions(pathlib.Path(path))
+        # Read as an ATTRIBUTE, never through a getattr default. The default
+        # is what turned "the config does not declare where it came from" into
+        # a silently skipped check on every real run, on the one file that
+        # holds the vault passphrase in cleartext. A config without a path is
+        # now an AttributeError at startup, which is the loud version.
+        check_config_permissions(pathlib.Path(self.config.path))
         self._require_backend_credential()
 
     def _require_backend_credential(self) -> None:

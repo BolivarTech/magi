@@ -140,7 +140,7 @@ class SmokeConfig:
         'ollama'
     """
 
-    def __init__(self, passphrase, backend_kind, backend_base_url,
+    def __init__(self, path, passphrase, backend_kind, backend_base_url,
                  backend_key_env, ceiling_fraction,
                  payload_target_bytes, payload_token_floor):
         """Store the parsed configuration.
@@ -154,6 +154,7 @@ class SmokeConfig:
             payload_target_bytes: Bytes to generate.
             payload_token_floor: The floor S8 asserts.
         """
+        self.path = path
         self.passphrase = passphrase
         self.backend_kind = backend_kind
         self.backend_base_url = backend_base_url
@@ -200,6 +201,7 @@ class SmokeConfig:
         calibration = document.get("calibration", {})
         payload = document.get("payload", {})
         return cls(
+            path=path,
             passphrase=passphrase,
             backend_kind=kind,
             backend_base_url=_require(document, "backend", "base_url", path),
