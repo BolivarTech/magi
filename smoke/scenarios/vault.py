@@ -579,13 +579,17 @@ def _history_survived_finding(before, after, reopened):
                    "this assertion would pass over nothing"
                    % _render_counts(counts_before))
     unmeasured, lost = _compare_counts(counts_before, counts_after)
+    # The LOSS first. A measured destruction is evidence and an unmeasured
+    # table is the absence of it, so a report that carries both is a product
+    # defect with a gap beside it, not a gap.
+    if lost:
+        return _s4(1, Outcome.FAIL,
+                   "a refused open destroyed data: %s%s"
+                   % ("; ".join(lost), _and_unmeasured(unmeasured)))
     if unmeasured:
         return _s4(1, Outcome.CANNOT_TEST,
                    "the report gave no count for %s, so what survived there "
                    "is unknown rather than lost" % ", ".join(unmeasured))
-    if lost:
-        return _s4(1, Outcome.FAIL,
-                   "a refused open destroyed data: %s" % "; ".join(lost))
     if not reopened.ok:
         return _s4(1, Outcome.CANNOT_TEST, reopened.failure)
     if reopened.output.exit_code != 0:
@@ -594,6 +598,31 @@ def _history_survived_finding(before, after, reopened):
                    "%d: %s" % (reopened.output.exit_code,
                                _excerpt(reopened.output)))
     return _s4(1, Outcome.PASS, "")
+
+
+def _and_unmeasured(unmeasured):
+    """The clause a loss finding adds when some table also went uncounted.
+
+    A loss and a gap can coexist, and the finding says so rather than picking
+    one: the loss is what the reader acts on, the gap is what stops them
+    concluding the rest survived.
+
+    Args:
+        unmeasured: The tables the second report gave no count for.
+
+    Returns:
+        str: The clause, or the empty string when everything was counted.
+
+    Example:
+        >>> _and_unmeasured([])
+        ''
+        >>> _and_unmeasured(["memories"])
+        ' (and memories went uncounted, so its rows are unknown)'
+    """
+    if not unmeasured:
+        return ""
+    return (" (and %s went uncounted, so %s rows are unknown)"
+            % (", ".join(unmeasured), "its" if len(unmeasured) == 1 else "their"))
 
 
 def _compare_counts(before, after):
@@ -616,25 +645,35 @@ def _compare_counts(before, after):
         before: The counts taken first, keyed by table.
         after: The counts taken second, keyed by table.
 
+    **The rule is per table, not per report**, and the first version of this
+    helper got that wrong: any unmeasured table returned an empty loss list,
+    so one table rendering ``missing`` silenced every table that WAS counted.
+    A real wipe of three measured tables came back as "the report gave no
+    count for messages" -- the gate still blocked, because CANNOT_TEST blocks
+    it, but the harness's most consequential assertion called a product
+    destroying the user's data an environment problem and sent the reader to
+    the wrong table. A measured loss is evidence; an unmeasured table is the
+    absence of evidence, and the first outranks the second.
+
     Returns:
         tuple[list[str], list[str]]: The tables *after* gave no count for, and
-        a rendered description of each table that lost rows. When the first
-        list is non-empty the second says nothing about those tables, so the
-        caller reports the unknown rather than the loss.
+        a rendered description of each table that lost rows. Both are computed
+        independently and either may be non-empty: the caller reports the loss
+        when there is one, and the unknown only when there is not.
 
     Example:
         >>> _compare_counts({"sessions": 2}, {"sessions": 1})
         ([], ['sessions went from 2 to 1'])
         >>> _compare_counts({"sessions": 2}, {})
         (['sessions'], [])
+        >>> _compare_counts({"a": 1, "b": 2}, {"b": 0})
+        (['a'], ['b went from 2 to 0'])
     """
     unmeasured = sorted(table for table in before if table not in after)
-    if unmeasured:
-        return unmeasured, []
     lost = ["%s went from %d to %d" % (table, before[table], after[table])
             for table in sorted(before)
-            if after[table] < before[table]]
-    return [], lost
+            if table in after and after[table] < before[table]]
+    return unmeasured, lost
 
 
 def _render_counts(counts):
@@ -808,14 +847,15 @@ def _history_intact_finding(diagnosed, reopened, baseline):
                     "rotation (%s), so this assertion would pass over nothing"
                     % _render_counts(baseline))
     unmeasured, lost = _compare_counts(baseline, counts)
+    # The loss first, for the reason S4 records at its own call site.
+    if lost:
+        return _s16(1, Outcome.FAIL,
+                    "rotating the credential destroyed data: %s%s"
+                    % ("; ".join(lost), _and_unmeasured(unmeasured)))
     if unmeasured:
         return _s16(1, Outcome.CANNOT_TEST,
                     "the report gave no count for %s, so what survived there "
                     "is unknown rather than lost" % ", ".join(unmeasured))
-    if lost:
-        return _s16(1, Outcome.FAIL,
-                    "rotating the credential destroyed data: %s"
-                    % "; ".join(lost))
     if not reopened.ok:
         return _s16(1, Outcome.CANNOT_TEST, reopened.failure)
     if reopened.output.exit_code != 0:
