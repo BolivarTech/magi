@@ -334,6 +334,48 @@ class Environment:
         return Growth(db_bytes=db_bytes, runs_bytes=runs_bytes,
                       active_memories=None)
 
+    #: Where a model name can appear in the product's configuration: the
+    #: main agent under ``[openai]``, and the embedder under ``[embedding]``.
+    #: The three ``[magi]`` seats are read separately because their keys carry
+    #: the seat name.
+    MODEL_TABLES = ("openai", "embedding")
+
+    #: The seats, whose model keys are ``<seat>_model`` under ``[magi]``.
+    SEATS = ("melchior", "balthasar", "caspar")
+
+    def declared_models(self):
+        """Every model this environment asks the product to reach.
+
+        ``[[fallback]]`` entries are deliberately EXCLUDED. A missing fallback
+        degrades a rotation rather than stopping a run, and the product already
+        reports one as unmeasured instead of refusing; requiring them to exist
+        would cut a run over a spare nobody has reached for.
+
+        Read off the file the product wrote, never from a copy of its
+        defaults: the copy is the one that forgets to be updated.
+
+        Complexity: ``O(size of the configuration)``.
+
+        Returns:
+            set[str]: The declared names, empty when the file cannot be read.
+        """
+        try:
+            document = tomllib.loads(
+                (self.magi_dir / MAGI_TOML_NAME).read_text(encoding="utf-8"))
+        except (OSError, tomllib.TOMLDecodeError):
+            return set()
+        names = set()
+        for table in self.MODEL_TABLES:
+            value = (document.get(table) or {}).get("model")
+            if isinstance(value, str) and value:
+                names.add(value)
+        magi = document.get("magi") or {}
+        for seat in self.SEATS:
+            value = magi.get("%s_model" % seat)
+            if isinstance(value, str) and value:
+                names.add(value)
+        return names
+
     def declared_base_url(self):
         """The root ``base_url`` the environment's configuration declares.
 

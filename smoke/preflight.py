@@ -18,6 +18,7 @@ if moved, and both were found by review rather than by a test that failed:
 """
 
 import dataclasses
+import json
 import os
 import pathlib
 import re
@@ -164,6 +165,46 @@ def check_config_permissions(path: pathlib.Path) -> None:
         )
 
 
+#: Where an Ollama daemon lists what it has. The OpenAI-compatible surface
+#: publishes no equivalent, so a backend of any other kind cannot be asked and
+#: the check degrades to NOT PERFORMED rather than to a guess.
+TAGS_PATH = "/api/tags"
+
+#: The backend kind that can be asked at all.
+INTROSPECTABLE_KIND = "ollama"
+
+
+def require_declared_models(declared, available) -> None:
+    """Step 8: every model the environment names exists on the backend.
+
+    This is failure #5 -- a run that reaches a healthy backend and asks it for
+    something it does not have. It belongs here rather than in a scenario
+    because every trio run would otherwise spend its whole ceiling finding out.
+
+    Complexity: ``O(len(declared))``.
+
+    Args:
+        declared: The model names the environment's configuration asks for.
+        available: What the backend lists, or None when it could not be asked.
+            None is NOT "nothing exists": every backend but Ollama publishes no
+            tag listing, and cutting on silence would refuse all of them.
+
+    Raises:
+        PreflightError: Naming the models that are missing, and only those.
+    """
+    if available is None or not declared:
+        return
+    missing = sorted(name for name in declared if name not in available)
+    if not missing:
+        return
+    raise PreflightError(
+        "the environment asks for %s, which the backend does not have. Pull "
+        "%s, or point the configuration at a model that is installed."
+        % (", ".join(missing),
+           " and ".join("`ollama pull %s`" % name for name in missing))
+    )
+
+
 class Preflight:
     """The nine cuts, in order, before a single scenario runs.
 
@@ -215,7 +256,14 @@ class Preflight:
         self._settle_binary(certifying)
         self.env.normalize_magi_toml(profile)
         self._require_one_endpoint()
-        return self._probe_backend()
+        backend = self._probe_backend()
+        # Step 8 runs only when the backend answered: asking a host that is
+        # down which models it has produces silence, and silence here means
+        # "could not be asked", never "nothing exists".
+        if backend.reachable:
+            require_declared_models(self.env.declared_models(),
+                                    self._available_models())
+        return backend
 
     def _require_python(self) -> None:
         """Step 1: the interpreter is new enough.
@@ -422,6 +470,34 @@ class Preflight:
             "[backend].base_url match, or the probe certifies a host nothing "
             "talks to." % (declared, probed)
         )
+
+    def _available_models(self):
+        """What the backend says it has, or None when it cannot be asked.
+
+        Returns:
+            set[str] | None: The tags, or None for a backend kind that
+            publishes no listing, an unparseable answer, or a failed request.
+            Every one of those is "not measurable", and the caller treats it
+            as such rather than as an empty backend.
+        """
+        if getattr(self.config, "backend_kind", "") != INTROSPECTABLE_KIND:
+            return None
+        root = self.config.backend_base_url.rstrip("/")
+        # The tag endpoint sits beside the OpenAI-compatible surface, not
+        # inside it: /v1 is the completions root and /api/tags is the daemon's.
+        if root.endswith("/v1"):
+            root = root[: -len("/v1")]
+        try:
+            with urllib.request.urlopen(root + TAGS_PATH,
+                                        timeout=BACKEND_PROBE_TIMEOUT_S) as answer:
+                document = json.loads(answer.read().decode("utf-8"))
+        except (OSError, urllib.error.URLError, ValueError):
+            return None
+        models = document.get("models")
+        if not isinstance(models, list):
+            return None
+        return {entry.get("name") for entry in models
+                if isinstance(entry, dict) and isinstance(entry.get("name"), str)}
 
     def _probe_backend(self) -> BackendStatus:
         """Step 8: ask the backend whether it is there.

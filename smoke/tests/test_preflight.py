@@ -214,6 +214,7 @@ class PermissionCheckWiringTests(unittest.TestCase):
         env = mock.Mock(spec=Environment)
         env.exists.return_value = True
         env.declared_base_url.return_value = None
+        env.declared_models.return_value = set()
         with mock.patch.object(RunLock, "acquire"):
             with mock.patch.object(RunLock, "release"):
                 with mock.patch("smoke.preflight.check_config_permissions") as check:
