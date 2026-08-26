@@ -696,7 +696,8 @@ def rotating_a_credential_keeps_the_database(run):
     diagnosed = _diagnose("s16-diagnose")
     reopened = _vault(["ls"], label="s16-reopen")
     yield _still_opens_finding(diagnosed, reopened)
-    yield _history_intact_finding(diagnosed, reopened)
+    yield _history_intact_finding(diagnosed, reopened,
+                                  getattr(run, "baseline", None))
 
 
 def _still_opens_finding(diagnosed, reopened):
@@ -724,30 +725,49 @@ def _still_opens_finding(diagnosed, reopened):
     return _s16(0, Outcome.PASS, "")
 
 
-def _history_intact_finding(diagnosed, reopened):
+def _history_intact_finding(diagnosed, reopened, baseline):
     """Judge assertion 2: the rows that were there are still there.
 
-    The same precondition trap as S4, and refused the same way. Over a database
-    with no rows the claim is true of a history that never existed, which is a
-    green that checked nothing.
+    Against a BEFORE, because without one the assertion can only ask whether
+    SOME history is there -- and a rotation that destroyed most of it leaves
+    every table non-zero and passes. S4 has always compared before against
+    after; this did not, and the two sit in the same module.
+
+    The same precondition trap as S4 applies on top, and is refused the same
+    way. Over a database with no rows the claim is true of a history that never
+    existed, which is a green that checked nothing.
 
     Args:
         diagnosed: The ``vault diagnose`` taken after the rotation.
         reopened: The open attempted with the configured passphrase.
+        baseline: The counts the rotating run took before it started, or None
+            when it recorded none.
 
     Returns:
-        Finding: PASS when the history is non-empty and readable.
+        Finding: PASS when every table holds at least what it held.
     """
     counts = _history_counts(diagnosed)
+    if baseline is None:
+        return _s16(1, Outcome.CANNOT_TEST,
+                    "the rotation recorded no baseline, so there is nothing "
+                    "to compare what survived against")
     if counts is None:
         return _s16(1, Outcome.CANNOT_TEST,
                     "the database's structure could not be read, so nothing "
                     "can be said about what survived")
-    if not any(counts.values()):
+    if not any(baseline.values()):
         return _s16(1, Outcome.CANNOT_TEST,
-                    "the environment holds no accumulated history yet (%s), "
-                    "so this assertion would pass over nothing"
-                    % _render_counts(counts))
+                    "the environment held no accumulated history before the "
+                    "rotation (%s), so this assertion would pass over nothing"
+                    % _render_counts(baseline))
+    lost = ["%s went from %d to %d"
+            % (table, baseline[table], counts.get(table, 0))
+            for table in sorted(baseline)
+            if counts.get(table, 0) < baseline[table]]
+    if lost:
+        return _s16(1, Outcome.FAIL,
+                    "rotating the credential destroyed data: %s"
+                    % "; ".join(lost))
     if not reopened.ok:
         return _s16(1, Outcome.CANNOT_TEST, reopened.failure)
     if reopened.output.exit_code != 0:

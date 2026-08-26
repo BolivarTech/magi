@@ -32,6 +32,7 @@ import http.server
 import json
 import os
 import pathlib
+import re
 import threading
 import time
 
@@ -468,6 +469,12 @@ class RunResult:
     #: Defaulted so the doubles in the tests stay short. In production there is
     #: exactly one constructor -- the executor -- and it always sets it.
     stdin_bytes: int = 0
+    #: Per-table row counts taken BEFORE the run changed anything, for the one
+    #: run that rotates. ``None`` means no baseline was recorded, which is a
+    #: different state from "the tables were empty" and is reported as such:
+    #: without it, "the previous history is still there" can only ask whether
+    #: SOME history is there, and a rotation that destroyed most of it passes.
+    baseline: dict | None = None
 
 
 #: The token that stands for the environment's path inside a definition's argv.
@@ -484,6 +491,9 @@ COMMON_FLAGS = ("--output-format", "json", "-w", WORKSPACE_TOKEN)
 #: alphanumeric, so it survives any level of encoding and cannot occur by
 #: chance in a model's own prose.
 _R6_CREDENTIAL = mint_credential()
+
+#: One line of a ``vault diagnose`` counts block.
+_COUNT_LINE = re.compile(r"^\s+(\w+):\s+(\d+)\s*$")
 
 #: What R4 gives the product as its wall clock, in seconds. MEASURED against
 #: this repository's own backend, never chosen: at 300 the product derives 40s
@@ -790,9 +800,15 @@ class RunExecutor:
         """
         started = time.monotonic()
         stdin = self._stdin_for(definition)
+        baseline = None
         try:
             if definition.rotates:
-                with self._rotated_credential():
+                # The baseline is taken INSIDE, after the guard that refuses to
+                # rotate a credential there is nothing to put back. Reading the
+                # environment before that guard runs touches it on the one path
+                # that is supposed to have changed nothing.
+                with self._rotated_credential() as counts:
+                    baseline = counts
                     output = self._invoke(definition, stdin)
             else:
                 output = self._invoke(definition, stdin)
@@ -809,6 +825,7 @@ class RunExecutor:
             timed_out=timed_out,
             planted=definition.planted,
             stdin_bytes=len(stdin),
+            baseline=baseline,
         )
 
     def archive(self, result: RunResult) -> None:
@@ -999,7 +1016,9 @@ class RunExecutor:
         it never prints a stored value, so a preflight cannot read one back.
 
         Yields:
-            None: While the credential holds the sentinel.
+            dict | None: The per-table row counts taken before anything moved,
+            so the scenario can tell "the history survived" from "some history
+            is there". None when they could not be read.
 
         Raises:
             HarnessError: If there is no real credential to restore. Rotating a
@@ -1014,10 +1033,11 @@ class RunExecutor:
                 "holding it" % self._config.backend_key_env
             )
         name = self._config.backend_key_env
+        baseline = self._history_counts()
         self._vault_set(ROTATION_MARKER, ROTATION_MARKER_VALUE)
         try:
             self._vault_set(name, ROTATION_SENTINEL)
-            yield
+            yield baseline
         finally:
             self._vault_set(name, credential.encode("utf-8"))
             self._vault_remove(ROTATION_MARKER)
@@ -1036,6 +1056,39 @@ class RunExecutor:
         if self._credential is not None:
             return self._credential
         return os.environ.get(self._config.backend_key_env, "")
+
+    def _history_counts(self) -> dict | None:
+        """The environment's per-table row counts, before the run touches it.
+
+        Read through ``vault diagnose``, which needs NO passphrase (REQ-H32) --
+        the only reason a baseline can be taken at all without unlocking the
+        very envelope the run is about to rotate around.
+
+        Returns:
+            dict | None: Table name to row count, or None when the report
+            could not be read. None means NOT MEASURED, and the scenario that
+            reads it refuses rather than assuming zero.
+        """
+        try:
+            output = self._binary.invoke(
+                [_VAULT_SUBCOMMAND, "-w", str(self._env.root), "diagnose"],
+                stdin=b"", env={}, timeout=VAULT_TIMEOUT_S)
+        except (OSError, ProductOutputError, TimedOut):
+            return None
+        if output.exit_code != 0:
+            return None
+        counts, inside = {}, False
+        for line in output.stdout.decode("utf-8", errors="replace").splitlines():
+            if line.strip() == "counts:":
+                inside = True
+                continue
+            if not inside:
+                continue
+            match = _COUNT_LINE.match(line)
+            if match is None:
+                break
+            counts[match.group(1)] = int(match.group(2))
+        return counts or None
 
     def _vault_set(self, name: str, value: bytes) -> None:
         """Store one secret, overwriting without asking.

@@ -363,7 +363,8 @@ def _r7_result(timed_out: bool = False, baseline=None) -> RunResult:
         RunResult: The capture, or the truncated one.
     """
     return RunResult(run_id="R7", output=_capture(b"", b"error: 401\n", 1),
-                     duration_s=1.0, timed_out=timed_out, planted=())
+                     duration_s=1.0, timed_out=timed_out, planted=(),
+                     baseline=baseline)
 
 
 def _s16_outcomes(run: RunResult | None) -> dict[str, Outcome]:
@@ -416,8 +417,9 @@ class CredentialRotationScenarioBodyTests(unittest.TestCase):
 
     def test_a_database_that_survived_the_rotation_passes_both(self) -> None:
         support.install_fake_runs(self, responder=_RotatedDatabase())
-        self.assertEqual({Outcome.PASS},
-                         set(_s16_outcomes(_r7_result()).values()))
+        run = _r7_result(baseline={"sessions": 1, "messages": 8,
+                                   "knowledge": 3, "memories": 5})
+        self.assertEqual({Outcome.PASS}, set(_s16_outcomes(run).values()))
 
     def test_history_the_rotation_destroyed_fails(self) -> None:
         """"The previous history is still there" needs a BEFORE.
