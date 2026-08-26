@@ -174,6 +174,27 @@ TAGS_PATH = "/api/tags"
 INTROSPECTABLE_KIND = "ollama"
 
 
+def _tagged(name: str) -> str:
+    """Spell a model name the way the daemon lists it.
+
+    Ollama always answers ``/api/tags`` fully tagged, and an operator does not
+    type the tag: ``ollama run nomic-embed-text-v2-moe`` is ordinary usage and
+    the daemon reports it as ``nomic-embed-text-v2-moe:latest``. Comparing the
+    two spellings literally reported a model as missing and refused the whole
+    run, telling somebody to pull what they already had.
+
+    The tag is looked for after the last ``/`` so a registry-qualified name
+    like ``host/org/model`` is not mistaken for a tagged one.
+
+    Args:
+        name: A model name, tagged or not.
+
+    Returns:
+        str: The name with an explicit tag.
+    """
+    return name if ":" in name.rsplit("/", 1)[-1] else name + ":latest"
+
+
 def require_declared_models(declared, available) -> None:
     """Step 8: every model the environment names exists on the backend.
 
@@ -194,7 +215,8 @@ def require_declared_models(declared, available) -> None:
     """
     if available is None or not declared:
         return
-    missing = sorted(name for name in declared if name not in available)
+    listed = {_tagged(name) for name in available}
+    missing = sorted(name for name in declared if _tagged(name) not in listed)
     if not missing:
         return
     raise PreflightError(
@@ -480,7 +502,7 @@ class Preflight:
             Every one of those is "not measurable", and the caller treats it
             as such rather than as an empty backend.
         """
-        if getattr(self.config, "backend_kind", "") != INTROSPECTABLE_KIND:
+        if self.config.backend_kind != INTROSPECTABLE_KIND:
             return None
         root = self.config.backend_base_url.rstrip("/")
         # The tag endpoint sits beside the OpenAI-compatible surface, not

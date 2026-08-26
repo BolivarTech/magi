@@ -475,6 +475,21 @@ class ModelExistenceTests(unittest.TestCase):
         preflight_module.require_declared_models(
             {"a:cloud", "b:cloud"}, {"a:cloud", "b:cloud", "spare:cloud"})
 
+    def test_an_untagged_name_matches_the_backend_s_latest(self) -> None:
+        """Ollama always answers fully tagged, and an operator does not type it.
+
+        ``/api/tags`` returns ``nomic-embed-text-v2-moe:latest``; a config that
+        says ``nomic-embed-text-v2-moe`` -- which is what ``ollama run`` takes
+        and what somebody filling in the cheap profile writes -- would be
+        reported missing and the preflight would refuse to run, telling them to
+        pull a model they already have.
+        """
+        preflight_module.require_declared_models({"foo"}, {"foo:latest"})
+
+    def test_an_explicit_tag_still_has_to_match(self) -> None:
+        with self.assertRaises(PreflightError):
+            preflight_module.require_declared_models({"foo:v2"}, {"foo:latest"})
+
     def test_a_backend_that_lists_nothing_is_not_measurable(self) -> None:
         """An empty listing is "could not be asked", not "nothing exists".
 
