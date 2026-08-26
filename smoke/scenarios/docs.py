@@ -37,6 +37,7 @@ the assertion.
 
 import pathlib
 import re
+import shutil
 import tempfile
 
 from smoke import runs
@@ -370,11 +371,20 @@ def _config_finding(documents):
             2, Outcome.CANNOT_TEST,
             "the product's %s did not scaffold a workspace to install the "
             "documented configurations in" % INIT_SUBCOMMAND)
-    offenders = []
-    for relative, line, body in embedded:
-        verdict = _install_and_probe(root, body, relative, line)
-        if verdict:
-            offenders.append(verdict)
+    try:
+        offenders = []
+        for relative, line, body in embedded:
+            verdict = _install_and_probe(root, body, relative, line)
+            if verdict:
+                offenders.append(verdict)
+    finally:
+        # Removed here, and the scratch area's own reset is not an argument
+        # against it: --reset-env is a recovery an operator runs, not a
+        # cleanup this scenario is entitled to defer to. One workspace per
+        # run, forever, is the kind of growth nobody notices until a disk
+        # does -- and the harness already refuses that bargain for its own
+        # temporary directories.
+        shutil.rmtree(root, ignore_errors=True)
     if offenders:
         return _finding(2, Outcome.FAIL, "; ".join(offenders))
     return _finding(2, Outcome.PASS, "")
