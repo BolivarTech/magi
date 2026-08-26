@@ -206,7 +206,8 @@ def certify(args, profile, findings, env, binary, run_results, growth) -> None:
         return
     counter = RoundCounter(env.root / ROUNDS_FILENAME)
     rounds = counter.bump()
-    if not may_certify(True, profile, findings):
+    evaluated = len({finding.scenario for finding in findings})
+    if not may_certify(True, profile, findings, evaluated):
         return
     Certificate(
         version=product_version(binary),
@@ -216,7 +217,7 @@ def certify(args, profile, findings, env, binary, run_results, growth) -> None:
         run_count=len(run_results),
         duration_s=sum(result.duration_s for result in run_results.values()),
         rounds=rounds,
-        evaluated=len({finding.scenario for finding in findings}),
+        evaluated=evaluated,
         growth=growth,
         findings=findings,
     ).write(REPO_ROOT / CERTIFICATE_PATH)

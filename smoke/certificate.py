@@ -63,8 +63,15 @@ OUT_OF_SCOPE_DECLARATION = (
 ROUNDS_FILENAME = "rounds"
 
 
-def may_certify(smoke_2: bool, profile, findings) -> bool:
+def may_certify(smoke_2: bool, profile, findings, evaluated: int) -> bool:
     """Whether this run is allowed to emit a certificate.
+
+    FOUR conditions, and the fourth is the one the count itself demands. The
+    document's headline is "N of N", and nothing checked the first N: drop a
+    module from the scenario package and reconciliation still passes, because
+    it compares what was invoked against what reported and both shrink
+    together. The certificate would then read "18 of 19" and be emitted
+    anyway -- honest arithmetic over silently reduced coverage.
 
     Complexity: ``O(findings)``.
 
@@ -73,11 +80,14 @@ def may_certify(smoke_2: bool, profile, findings) -> bool:
         profile: The model profile in force, or None for the product's own
             defaults.
         findings: Every stamped finding of the run.
+        evaluated: How many distinct scenarios reported.
 
     Returns:
-        bool: True only when all three conditions hold at once.
+        bool: True only when all four conditions hold at once.
     """
     if not smoke_2 or profile is not None:
+        return False
+    if evaluated != DECLARED_SCENARIO_COUNT:
         return False
     return not any(one.outcome.blocks_gate for one in findings)
 
