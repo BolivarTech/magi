@@ -765,7 +765,8 @@ def rotating_a_credential_keeps_the_database(run):
     """Check what R7's rotation left behind: the same passphrase, the same rows.
 
     The rotation is over by the time this runs -- R7 puts the real credential
-    back in a ``finally`` -- so the scenario reads the aftermath rather than
+    back on both exits of its own rotation -- so the scenario reads the
+    aftermath rather than
     driving the rotation itself. That is deliberate: one place performs the
     dangerous half, and it is the place that also knows how to undo it.
 

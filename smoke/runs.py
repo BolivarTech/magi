@@ -1052,9 +1052,10 @@ class RunExecutor:
         Three pieces, each covering a different death. The marker is written
         BEFORE the credential moves, so a process killed in between leaves a
         vault the next preflight can recognise -- written afterwards it would
-        be absent in exactly the case it exists for. The restore lives in a
-        ``finally``, covering an exception and an orderly interruption. What
-        neither covers is a power cut, and that is what the marker is for.
+        be absent in exactly the case it exists for. The restore runs on
+        BOTH exits -- the caller has an ``except`` and an ``else`` -- covering
+        a failure and an orderly completion alike. What neither covers is a
+        power cut, and that is what the marker is for.
 
         The marker is a separate entry recognised by NAME rather than a
         sentinel recognised by its value, and that is forced by the product:

@@ -541,7 +541,7 @@ class PlaceholderLifetimeTests(unittest.TestCase):
                          "everything planted has to be taken back out")
 
     def test_a_failed_restore_is_typed_and_keeps_the_run_s_own_failure(self):
-        """The same defect the placeholder removal had, in R7's finally.
+        """The same defect the placeholder removal had, on R7's undo path.
 
         A restore that fails is NOT inert. Not because the sentinel would be
         used -- the key resolves env-first and step 3 requires the real one
@@ -549,11 +549,11 @@ class PlaceholderLifetimeTests(unittest.TestCase):
         recovers from, and the restore is what clears it. So unlike a
         leftover placeholder it must stop the harness. What it must not do is
         stop it as an untyped ProductOutputError escaping into main's
-        last-resort catch: that is a
-        traceback and exit 3, the code reserved for a defect in the harness,
-        with the report discarded and every finding from every completed run
-        lost. A typed HarnessError says the same thing through the handler
-        that prints a cause and returns a code.
+        last-resort catch: that is a traceback and exit 3, the code reserved
+        for a defect in the harness, with the report discarded and every
+        finding from every completed run lost. A typed HarnessError says the
+        same thing through the handler that prints a cause and returns a
+        code.
         """
         def stubborn(call):
             args = list(call.args)
@@ -561,7 +561,7 @@ class PlaceholderLifetimeTests(unittest.TestCase):
                 return None
             # The sentinel set and the restore carry the SAME argv; the value
             # is the only thing that tells them apart, and only the restore
-            # runs from the finally this test is about.
+            # is the one this test is about.
             if call.stdin == b"the-real-credential":
                 raise ProductOutputError("vault set refused")
             return ProductOutput(stdout=b"", stderr=b"", exit_code=0,
@@ -573,6 +573,34 @@ class PlaceholderLifetimeTests(unittest.TestCase):
         with self.assertRaises(HarnessError) as caught:
             executor.execute(runs.DEFINITIONS["R7"])
         self.assertIn("credential", str(caught.exception))
+
+    def test_a_marker_write_the_product_REFUSES_is_typed(self):
+        """The restore's sibling, and it shipped without a Red.
+
+        The marker is written before the credential moves, precisely so a
+        death in between is recoverable. A refusal there means the rotation
+        has no way to announce itself, and the vault helpers now read the
+        exit code -- so what used to be "could not start the product" is
+        also "the product ran and refused". Untyped, it escapes execute past
+        main's two handlers into the last-resort catch: traceback, exit 3,
+        report discarded.
+        """
+        def refusing(call):
+            args = list(call.args)
+            if args[:1] != ["vault"]:
+                return None
+            if runs.ROTATION_MARKER in args and "set" in args:
+                return ProductOutput(stdout=b"", stderr=b"error: refused",
+                                     exit_code=1, command=["magi-rs"] + args)
+            return ProductOutput(stdout=b"", stderr=b"", exit_code=0,
+                                 command=["magi-rs"] + args)
+
+        support.install_fake_runs(self, responder=refusing)
+        executor = runs.RunExecutor(runs._binary, runs._env, runs._config,
+                                    credential="the-real-credential")
+        with self.assertRaises(HarnessError) as caught:
+            executor.execute(runs.DEFINITIONS["R7"])
+        self.assertIn("marker", str(caught.exception))
 
     def test_a_restore_the_product_REFUSES_is_a_failed_restore(self):
         """The event the restore's own docstring names, and could not see.
@@ -1087,7 +1115,7 @@ class RotationTests(unittest.TestCase):
         self.assertEqual(2, len(written))
 
     def test_the_restore_runs_even_when_the_run_raises(self) -> None:
-        """The undo lives in a finally, not after the happy path."""
+        """The undo runs on both exits, not only after the happy path."""
         self.raise_on_query = True
         with self.assertRaises(ProductOutputError):
             self.executor.execute(self.definition)

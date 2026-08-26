@@ -47,33 +47,56 @@ def load_tests(loader, tests, ignore):  # noqa: ARG001 - unittest protocol
     return tests
 
 
+def _doctest_cases():
+    """The doctest cases UNITTEST would run for this module.
+
+    Loaded through ``defaultTestLoader``, never by calling :func:`load_tests`
+    by name, and that distinction is the whole guard. Two earlier versions of
+    this check failed the same way one layer apart: the first re-implemented
+    the walk, the second called the walk. Neither can observe the thing that
+    actually has to hold -- that a module attribute literally spelled
+    ``load_tests`` exists and is what unittest invokes. Rename it
+    consistently, the way an editor's rename-symbol does, and both of those
+    stayed green while zero examples executed anywhere.
+
+    Returns:
+        list[doctest.DocTestCase]: One per executable example the protocol
+        actually delivers, flattened out of the nested suites the loader
+        builds.
+    """
+    module = importlib.import_module(__name__)
+    suite = unittest.defaultTestLoader.loadTestsFromModule(module)
+
+    def flatten(item):
+        if isinstance(item, unittest.TestSuite):
+            for child in item:
+                yield from flatten(child)
+        else:
+            yield item
+
+    return [case for case in flatten(suite)
+            if isinstance(case, doctest.DocTestCase)]
+
+
 class DoctestCoverageTests(unittest.TestCase):
-    """The LOADER has to find something, not a copy of the loader.
+    """Unittest has to be delivering the examples, not merely able to.
 
-    The first version of this walked the package itself and counted what it
-    found, which guards the wrong half. Rename ``load_tests`` and no example
-    executes anywhere, yet a test that re-implements the walk still passes:
-    it certified that examples EXIST, while the suite quietly went back to
-    running none of them. Mutation said so -- the rename left this file
-    green.
-
-    So it calls the real entry point. That goes red on a renamed, mistyped
-    or exception-swallowing loader, and still goes red if every example is
-    deleted.
+    Goes red on all three ways the wiring dies: the loader renamed or moved
+    so the protocol stops calling it, a walk that yields nothing, and every
+    ``Example:`` deleted. The first is the one two previous versions of this
+    check could not see.
     """
 
-    def test_the_loader_produces_cases_to_run(self) -> None:
-        suite = load_tests(unittest.TestLoader(), unittest.TestSuite(), None)
-        self.assertGreater(suite.countTestCases(), 0,
-                           "the loader produced no doctest cases, so no "
-                           "Example: in the package is being executed")
+    def test_unittest_delivers_the_examples(self) -> None:
+        self.assertGreater(len(_doctest_cases()), 0,
+                           "unittest is running no doctest at all, so every "
+                           "Example: in the package is unexecuted prose")
 
-    def test_the_loader_covers_more_than_one_module(self) -> None:
+    def test_the_walk_covers_more_than_one_module(self) -> None:
         """One module's examples is not the package's examples.
 
         A walk that broke after the first import would satisfy the count
         above while covering almost nothing.
         """
-        suite = load_tests(unittest.TestLoader(), unittest.TestSuite(), None)
-        modules = {case.id().rsplit(".", 1)[0] for case in suite}
+        modules = {case.id().rsplit(".", 1)[0] for case in _doctest_cases()}
         self.assertGreater(len(modules), 1, "the walk stopped early")
