@@ -12,6 +12,7 @@ import unittest
 from smoke.errors import HarnessError, ProductOutputError
 from smoke.outcome import Finding, Outcome
 from smoke.registry import Registry, scenario
+from smoke import runner as runner_module
 from smoke.runner import Ambient, Runner, capture_tree
 
 #: No scenario under test reads ambient state, so every case below passes the
@@ -262,6 +263,28 @@ class CompletenessTests(unittest.TestCase):
         findings = Runner(registry, {}, True, _NO_AMBIENT).run()
         self.assertEqual(["first", "second"],
                          [f.assertion for f in findings])
+
+    def test_the_exemption_follows_the_runner_state_not_the_text(self) -> None:
+        """A scenario that DECLARES one of the substituted texts as its own
+        assertion must still be checked for completeness.
+
+        Inferring "the runner answered" from the text is inference about a
+        string, and a scenario is free to declare any string. The runner knows
+        the answer as a fact -- it either substituted or it did not -- so it
+        says so instead of leaving it to be guessed.
+        """
+        registry = Registry()
+
+        borrowed = sorted(runner_module.SUBSTITUTED_ASSERTIONS)[0]
+
+        @scenario("S1", assertions=(borrowed, "second"), registry=registry)
+        def borrows_the_text(run):
+            yield Finding(assertion=borrowed, outcome=Outcome.PASS, detail="",
+                          run_id=None)
+
+        with self.assertRaises(HarnessError) as caught:
+            Runner(registry, {}, True, _NO_AMBIENT).run()
+        self.assertIn("second", str(caught.exception))
 
     def test_a_scenario_the_runner_answered_for_owes_nothing(self) -> None:
         """The runner substitutes ONE finding when a scenario never ran: a

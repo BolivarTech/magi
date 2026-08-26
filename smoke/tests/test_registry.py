@@ -4,10 +4,12 @@
 """Tests for scenario registration and its silence-detection guard."""
 
 import pathlib
+import ast
+import re
 import unittest
 
 from smoke.errors import HarnessError
-from smoke.registry import Registry, scenario
+from smoke.registry import DECLARED_SCENARIO_COUNT, Registry, scenario
 
 
 class RegistryTests(unittest.TestCase):
@@ -56,6 +58,38 @@ class ScenarioModuleImportTests(unittest.TestCase):
             missing,
             f"scenario modules present but never imported: {sorted(missing)}",
         )
+
+
+class AssertionSourceTests(unittest.TestCase):
+    """The decorator is handed the module's own constant, never a copy.
+
+    The texts are declared once, as a module constant, and reach the
+    certificate verbatim from there. A decorator given a literal instead would
+    create a second copy that the completeness check cannot see drifting: it
+    compares findings against the decorator's tuple, so both sides of a
+    divergence would agree with each other and disagree with the constant the
+    scenario actually builds its findings from.
+    """
+
+    def test_every_registration_names_a_constant(self) -> None:
+        pattern = re.compile(r"@scenario\(\s*\"S\d+\"\s*,\s*assertions=([^,)]+)")
+        checked = 0
+        for path in sorted(pathlib.Path("smoke/scenarios").glob("*.py")):
+            if path.name == "__init__.py":
+                continue
+            source = path.read_text(encoding="utf-8")
+            names = {node.targets[0].id for node in ast.parse(source).body
+                     if isinstance(node, ast.Assign)
+                     and getattr(node.targets[0], "id", "").endswith("ASSERTIONS")}
+            for match in pattern.finditer(source):
+                used = match.group(1).strip()
+                checked += 1
+                self.assertIn(used, names,
+                              "%s passes %r, which is not a constant it "
+                              "declares" % (path.name, used))
+        self.assertEqual(DECLARED_SCENARIO_COUNT, checked,
+                         "every registered scenario must declare its "
+                         "assertions to the decorator")
 
 
 if __name__ == "__main__":
