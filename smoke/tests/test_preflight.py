@@ -607,7 +607,6 @@ class BackendSpeakingGarbageTests(unittest.TestCase):
         listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         listener.bind(("127.0.0.1", 0))
         listener.listen(8)
-        self.addCleanup(listener.close)
 
         def serve() -> None:
             while True:
@@ -624,10 +623,21 @@ class BackendSpeakingGarbageTests(unittest.TestCase):
 
         thread = threading.Thread(target=serve, daemon=True)
         thread.start()
-        # Closed FIRST, joined second: the thread is blocked in accept() and
-        # only the close wakes it. Daemon so it can never hang the suite, and
-        # joined anyway so two of these do not accumulate.
-        self.addCleanup(thread.join, THREAD_JOIN_TIMEOUT_S)
+
+        def shut_down() -> None:
+            """Close the socket, THEN wait for the thread to notice.
+
+            One cleanup rather than two, because ``addCleanup`` runs its
+            callbacks in reverse registration order: registering the close and
+            the join separately ran the join first, against a socket still
+            open, and each test then waited out the whole join timeout. The
+            suite went from eighteen seconds to seventy-nine, which is the
+            only reason the ordering was noticed at all.
+            """
+            listener.close()
+            thread.join(THREAD_JOIN_TIMEOUT_S)
+
+        self.addCleanup(shut_down)
         return "http://127.0.0.1:%d/v1" % listener.getsockname()[1]
 
     def _preflight(self, url: str) -> Preflight:
