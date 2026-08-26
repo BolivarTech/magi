@@ -371,5 +371,37 @@ class BlankEnvScenarioBodyTests(unittest.TestCase):
             self.assertIsNotNone(call.timeout)
 
 
+class BlankPassphraseTests(unittest.TestCase):
+    """What the product actually contracts for a blank MAGI_PASSPHRASE."""
+
+    def test_a_typed_refusal_at_exit_1_is_accepted_whichever_it_is(self) -> None:
+        """The rule this scenario rests on ENUMERATES its variables, and the
+        passphrase is not among them.
+
+        ``CLAUDE.md``'s blank-is-absent rule names provider, kind,
+        default_mode, base_url, the model resolvers, ``MAGI_MODEL_*`` and the
+        two API keys. ``MAGI_PASSPHRASE`` has its own precedence -- flag, then
+        environment, then a TTY prompt -- and nothing promises a blank one is
+        read as absent. Requiring the "no passphrase" wording asserted a
+        contract the product never published, and the product answers
+        "incorrect passphrase": it tried the blank value, which is a defensible
+        reading of "present".
+
+        What IS promised, and what this checks, is that the refusal is typed
+        and bounded: exit 1, a diagnosable message, never a hang.
+        """
+        output = ProductOutput(stdout=b"", stderr=b"error: incorrect passphrase",
+                               exit_code=1, command=["magi-rs", "query"])
+        self.assertEqual([], config_fatal._passphrase_complaints("   ", output))
+
+    def test_an_untyped_crash_is_still_a_complaint(self) -> None:
+        """The half that must survive: a panic or an unbounded wait is not a
+        refusal, and loosening the check must not swallow those.
+        """
+        output = ProductOutput(stdout=b"", stderr=b"thread 'main' panicked",
+                               exit_code=101, command=["magi-rs", "query"])
+        self.assertNotEqual([], config_fatal._passphrase_complaints("   ", output))
+
+
 if __name__ == "__main__":
     unittest.main()
