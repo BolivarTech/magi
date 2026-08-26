@@ -3,14 +3,21 @@
 # Date: 2026-08-25
 """Tests for the CLI surface and the four exit codes."""
 
+import contextlib
 import pathlib
 import subprocess
 import sys
-import pathlib
+import tempfile
 import unittest
+from unittest import mock
 
 from smoke import __main__ as main
-from smoke.errors import HarnessError
+from smoke.lock import RunLock
+from smoke.preflight import BackendStatus
+from smoke.product import ProductOutput
+from smoke.runs import RunResult
+from smoke.env import Growth
+from smoke.errors import HarnessError, PreflightError
 from smoke.registry import DECLARED_SCENARIO_COUNT, DEFAULT_REGISTRY
 from smoke.__main__ import (
     EXIT_HARNESS,
@@ -150,6 +157,75 @@ class DeclaredCountAtRuntimeTests(unittest.TestCase):
 
     def test_the_real_registry_matches(self) -> None:
         main.require_declared_count(len(DEFAULT_REGISTRY.registered_ids()))
+
+
+#: What the patched preflight answers: a reachable backend, so the run
+#: proceeds to the executor where the lock is actually checked.
+_REACHABLE = BackendStatus(reachable=True, cause="")
+
+
+class LockLifetimeTests(unittest.TestCase):
+    """The lock is held while the RUNS execute, not only while the preflight does.
+
+    ``Preflight.run`` acquires it and nothing released it, which read as "held
+    for the process". It was not: ``main`` passed ``RunLock(LOCK_PATH)`` as a
+    temporary, so the object was collected at the end of that statement, its
+    file handle finalized, and both ``flock`` and ``msvcrt.locking`` release on
+    close. The eight product runs -- the only part that mutates the shared
+    persistent environment -- then ran unlocked, which is the exact race
+    ``smoke/lock.py`` says produces a false verdict rather than an error.
+    """
+
+    def test_a_second_run_cannot_start_while_the_runs_execute(self) -> None:
+        root = pathlib.Path(tempfile.mkdtemp())
+        held: list[bool] = []
+
+        def executing(self, definition):
+            """Stand in for one product run, and try to take the lock."""
+            try:
+                RunLock(root / ".lock").acquire()
+                held.append(False)
+            except PreflightError:
+                held.append(True)
+            return RunResult(
+                run_id=definition.run_id,
+                output=ProductOutput(stdout=b"{}", stderr=b"", exit_code=0,
+                                     command=["magi-rs"]),
+                duration_s=0.0, timed_out=False, planted=())
+
+        def preflight(self, certifying, profile):
+            """Stand in for the preflight: take the lock, as step 2 does."""
+            self.lock.acquire()
+            return BackendStatus(reachable=True, cause="")
+
+        environment = mock.Mock()
+        environment.return_value.growth.return_value = Growth(
+            db_bytes=0, runs_bytes=0, active_memories=None)
+
+        patches = [
+            mock.patch.object(main, "LOCK_PATH", root / ".lock"),
+            mock.patch.object(main, "ENV_ROOT", root / "env"),
+            mock.patch.object(main, "CONFIG_PATH", root / "smoke.toml"),
+            mock.patch.object(main.SmokeConfig, "load"),
+            mock.patch.object(main, "Environment", environment),
+            mock.patch.object(main, "ReleaseBinary"),
+            mock.patch.object(main, "capture_tree"),
+            mock.patch.object(main.runs, "configure"),
+            mock.patch.object(main, "require_declared_count"),
+            mock.patch.object(main, "needed_runs", return_value=["R1"]),
+            mock.patch.object(main, "DEFINITIONS", {"R1": mock.Mock()}),
+            mock.patch.object(main.RunExecutor, "execute", executing),
+            mock.patch.object(main.RunExecutor, "archive"),
+            mock.patch.object(main.Preflight, "run", preflight),
+            mock.patch.object(main.Runner, "run", return_value=[]),
+        ]
+        with contextlib.ExitStack() as stack:
+            for patch in patches:
+                stack.enter_context(patch)
+            main.main(["--smoke-1"])
+
+        self.assertEqual([True], held,
+                         "the lock must still be held while a run executes")
 
 
 if __name__ == "__main__":
