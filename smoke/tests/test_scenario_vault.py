@@ -338,6 +338,27 @@ class WrongPassphraseScenarioBodyTests(unittest.TestCase):
         self.assertEqual(Outcome.CANNOT_TEST,
                          _outcomes("S4")[vault.S4_ASSERTIONS[1]])
 
+    def test_a_measured_wipe_outranks_an_unmeasured_table(self) -> None:
+        """One unmeasured table must not silence three measured wipes.
+
+        The rule is per-table, and the first version of the shared helper
+        made it whole-report: any table the second diagnose did not count
+        short-circuited the comparison, so a genuine REQ-V35 violation --
+        sessions, knowledge and memories all counted in both reports and all
+        gone to zero -- was reported CANNOT_TEST, naming only the one table
+        that happened to render ``missing``.
+
+        The gate blocks either way, so this is not a false green. It is
+        worse in a subtler direction: the harness's most consequential
+        assertion calls a product destroying the user's data an environment
+        problem, and sends the operator to look at the wrong thing.
+        """
+        support.install_fake_runs(
+            self, responder=_FakeDatabase(destroy_on_wrong=True,
+                                          unmeasured_after=("messages",)))
+        self.assertEqual(Outcome.FAIL,
+                         _outcomes("S4")[vault.S4_ASSERTIONS[1]])
+
     def test_a_wrong_passphrase_that_opens_the_vault_fails(self) -> None:
         support.install_fake_runs(
             self, responder=_FakeDatabase(wrong_passphrase_opens=True))
