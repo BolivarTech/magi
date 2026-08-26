@@ -1,7 +1,8 @@
 # Author: Julian Bolivar
 # Version: 1.0.0
 # Date: 2026-08-25
-"""The two vault scenarios: S3 -- stores and never reveals; S4 -- never deletes.
+"""The three vault scenarios: S3 -- stores and never reveals; S4 -- never
+deletes; S16 -- rotating a third-party credential costs no local data.
 
 S3 protects REQ-V09: there is no ``get``/``cat``/``show``/``reveal``/``export``
 subcommand, and the stored value never reaches any output.
@@ -21,6 +22,19 @@ travels percent-encoded shares no substring with the value that was planted.
 
 Assertion 4 is verified against ``--help``, the parser's own output. "I am not
 aware of a subcommand that prints a value" is not evidence; a Commands list is.
+
+S16 protects the durable invariant of the project's coding standards: rotating
+a third-party credential never invalidates the local encrypted database. The
+internal test of that invariant injects doubles; here the rotation is real, over
+a database holding real data, performed by the binary an operator runs.
+
+Its blind spot is recorded rather than closed, because the product's own design
+makes closing it impossible: if somebody edited ``smoke.toml`` between a crash
+and the restart, the restore writes the new value with no warning that it
+differs from what was there. Comparing the vault's value against the file would
+settle it, and REQ-V09 says a stored value is never printed and offers no
+subcommand that would print one. What is missing is the warning, not the
+correction: the file is the configuration's source of truth.
 """
 
 import re
@@ -635,3 +649,124 @@ def _s3(index, outcome, detail):
     """
     return Finding(assertion=S3_ASSERTIONS[index], outcome=outcome,
                    detail=detail, run_id=None)
+
+
+#: The verbatim assertion texts of the spec's section 8, for S16.
+S16_ASSERTIONS = (
+    "after rotating the stored API key, the DB still opens with the same "
+    "passphrase",
+    "the previous history is still there",
+)
+
+#: The run S16 reads, named once so the decorator and every finding's run id
+#: cannot drift apart.
+S16_RUN_ID = "R7"
+
+
+@scenario("S16", run=S16_RUN_ID, needs_backend=True)
+def rotating_a_credential_keeps_the_database(run):
+    """Check what R7's rotation left behind: the same passphrase, the same rows.
+
+    The rotation is over by the time this runs -- R7 puts the real credential
+    back in a ``finally`` -- so the scenario reads the aftermath rather than
+    driving the rotation itself. That is deliberate: one place performs the
+    dangerous half, and it is the place that also knows how to undo it.
+
+    Both assertions are refused when R7 did not complete. A database that opens
+    is not evidence about a rotation, and over a truncated run it is not even
+    evidence that one was attempted.
+
+    Args:
+        run: R7's ``RunResult``, or ``None`` when the run never produced one.
+
+    Yields:
+        Finding: One per entry of :data:`S16_ASSERTIONS`, in that order.
+    """
+    if run is None or getattr(run, "timed_out", False):
+        cause = ("run %s never executed, so no credential was rotated"
+                 % S16_RUN_ID if run is None else
+                 "run %s exceeded its ceiling, so the rotation it performs may "
+                 "not have completed" % S16_RUN_ID)
+        for index in range(len(S16_ASSERTIONS)):
+            yield _s16(index, Outcome.CANNOT_TEST,
+                       "%s; a database that still opens says nothing about "
+                       "surviving a rotation that did not happen" % cause)
+        return
+
+    diagnosed = _diagnose("s16-diagnose")
+    reopened = _vault(["ls"], label="s16-reopen")
+    yield _still_opens_finding(diagnosed, reopened)
+    yield _history_intact_finding(diagnosed, reopened)
+
+
+def _still_opens_finding(diagnosed, reopened):
+    """Judge assertion 1: the passphrase that worked before still works.
+
+    Args:
+        diagnosed: The ``vault diagnose`` taken after the rotation.
+        reopened: The open attempted with the configured passphrase.
+
+    Returns:
+        Finding: PASS when the database opens and there was an envelope for the
+        rotation to have damaged.
+    """
+    if not _envelope_present(diagnosed):
+        return _s16(0, Outcome.CANNOT_TEST,
+                    "the environment carries no envelope, so opening it says "
+                    "nothing about a wrapped key surviving the rotation")
+    if not reopened.ok:
+        return _s16(0, Outcome.CANNOT_TEST, reopened.failure)
+    if reopened.output.exit_code != 0:
+        return _s16(0, Outcome.FAIL,
+                    "the configured passphrase no longer opens the database "
+                    "after the backend credential was rotated: exit %d: %s"
+                    % (reopened.output.exit_code, _excerpt(reopened.output)))
+    return _s16(0, Outcome.PASS, "")
+
+
+def _history_intact_finding(diagnosed, reopened):
+    """Judge assertion 2: the rows that were there are still there.
+
+    The same precondition trap as S4, and refused the same way. Over a database
+    with no rows the claim is true of a history that never existed, which is a
+    green that checked nothing.
+
+    Args:
+        diagnosed: The ``vault diagnose`` taken after the rotation.
+        reopened: The open attempted with the configured passphrase.
+
+    Returns:
+        Finding: PASS when the history is non-empty and readable.
+    """
+    counts = _history_counts(diagnosed)
+    if counts is None:
+        return _s16(1, Outcome.CANNOT_TEST,
+                    "the database's structure could not be read, so nothing "
+                    "can be said about what survived")
+    if not any(counts.values()):
+        return _s16(1, Outcome.CANNOT_TEST,
+                    "the environment holds no accumulated history yet (%s), "
+                    "so this assertion would pass over nothing"
+                    % _render_counts(counts))
+    if not reopened.ok:
+        return _s16(1, Outcome.CANNOT_TEST, reopened.failure)
+    if reopened.output.exit_code != 0:
+        return _s16(1, Outcome.CANNOT_TEST,
+                    "the database no longer opens, so what it holds could not "
+                    "be confirmed")
+    return _s16(1, Outcome.PASS, "")
+
+
+def _s16(index, outcome, detail):
+    """Build the finding for one entry of :data:`S16_ASSERTIONS`.
+
+    Args:
+        index: Position in :data:`S16_ASSERTIONS`.
+        outcome: What became of it.
+        detail: The cause when the outcome is not PASS.
+
+    Returns:
+        Finding: The finding, attributed to the run whose rotation it reads.
+    """
+    return Finding(assertion=S16_ASSERTIONS[index], outcome=outcome,
+                   detail=detail, run_id=S16_RUN_ID)
