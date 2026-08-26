@@ -984,11 +984,20 @@ class RunExecutor:
         """
         if definition.payload_size != PAYLOAD_LARGE:
             return definition.stdin
+        # A tree too small to build the payload is a fact about the CHECKOUT,
+        # not a bug in the harness, and exit 3 is reserved for the latter. The
+        # run goes out carrying its prompt alone, and S8 -- which compares what
+        # the run CARRIED against what was declared -- reports CANNOT_TEST
+        # naming the shortfall. That branch already existed and nothing could
+        # reach it.
         # The executor's OWN binary, not the module-level accessor: this
         # class is handed everything it needs, and reaching for module
         # state here would make it depend on configure() having run.
-        body = PayloadBuilder(self._binary.repo_root).build(
-            self._config.payload_target_bytes)
+        try:
+            body = PayloadBuilder(self._binary.repo_root).build(
+                self._config.payload_target_bytes)
+        except HarnessError:
+            return definition.stdin
         return definition.stdin + body
 
     def _passphrase_secret(self) -> PlantedSecret:
