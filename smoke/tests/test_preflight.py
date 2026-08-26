@@ -291,6 +291,67 @@ class CredentialResolutionTests(unittest.TestCase):
         preflight._require_config()
 
 
+class EndpointAgreementTests(unittest.TestCase):
+    """The endpoint the preflight PROBES is the one the runs USE.
+
+    ``[backend].base_url`` is read by exactly one place, the reachability
+    probe, while every run reaches whatever the environment's ``magi.toml``
+    declares at its root. The two are separate settings and nothing compared
+    them: this repository ran for a whole session with the probe pointed at a
+    machine on the LAN and the runs going to localhost, and it stayed
+    invisible because both daemons served the same tags. A preflight that
+    certifies "the backend answers" about a host nothing talks to is a
+    guardian aimed the wrong way.
+    """
+
+    def _preflight(self, declared, probed):
+        """Build a preflight whose two endpoints are *declared* and *probed*.
+
+        Args:
+            declared: What the environment's magi.toml says at its root.
+            probed: What smoke.toml names for the probe.
+
+        Returns:
+            Preflight: Ready to run.
+        """
+        os.environ["SMOKE_AGREE_KEY"] = "the-real-credential"
+        self.addCleanup(os.environ.pop, "SMOKE_AGREE_KEY", None)
+        _quiet_permissions(self)
+        config = mock.Mock(spec=SmokeConfig)
+        config.passphrase = "correct horse battery staple"
+        config.backend_key_env = "SMOKE_AGREE_KEY"
+        config.path = str(pathlib.Path(tempfile.mkdtemp()) / "smoke.toml")
+        config.backend_base_url = probed
+        env = mock.Mock(spec=Environment)
+        env.exists.return_value = True
+        env.declared_base_url.return_value = declared
+        return Preflight(config, env, mock.Mock(spec=ReleaseBinary),
+                         RunLock(pathlib.Path(tempfile.mkdtemp()) / ".lock"))
+
+    def test_two_different_endpoints_cut(self) -> None:
+        preflight = self._preflight("http://localhost:11434/v1",
+                                    "http://192.168.0.30:11434/v1")
+        with self.assertRaises(PreflightError) as caught:
+            preflight._require_one_endpoint()
+        message = str(caught.exception)
+        self.assertIn("localhost", message)
+        self.assertIn("192.168.0.30", message)
+
+    def test_the_same_endpoint_passes(self) -> None:
+        preflight = self._preflight("http://localhost:11434/v1",
+                                    "http://localhost:11434/v1")
+        preflight._require_one_endpoint()
+
+    def test_an_unreadable_environment_config_does_not_cut(self) -> None:
+        """Not measurable is not a disagreement.
+
+        Step 5 already refuses an environment that is not there, and a config
+        the harness cannot parse is step 7b's problem, not this check's.
+        """
+        preflight = self._preflight(None, "http://localhost:11434/v1")
+        preflight._require_one_endpoint()
+
+
 class RotationRestoreTests(unittest.TestCase):
     """Step 6 must RESTORE, not narrate.
 
