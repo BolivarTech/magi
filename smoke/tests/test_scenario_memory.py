@@ -281,16 +281,12 @@ class MemoryScenarioBodyTests(unittest.TestCase):
 class EmbedderDownTests(unittest.TestCase):
     """Assertion 4 is a one-off invocation, not a ninth shared run."""
 
-    def test_the_endpoint_it_points_at_is_a_closed_local_port(self) -> None:
-        self.assertTrue(memory.DEAD_EMBEDDING_ENDPOINT.startswith(
-            "http://127.0.0.1:"))
-
     def test_the_override_lands_inside_the_embedding_table(self) -> None:
         """A line-level edit, checked rather than trusted.
 
         The standard library has no TOML writer, so the override is inserted
         after the section header. Landing it in the wrong table would point the
-        MAIN provider at the closed port, and the run would fail outright
+        MAIN provider at the failing endpoint, and the run would fail outright
         instead of degrading -- a red that looks like the assertion working.
         """
         patched = memory.point_embedding_at(

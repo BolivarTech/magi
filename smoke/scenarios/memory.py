@@ -95,10 +95,13 @@ STARTUP_LINE = re.compile(
     rb"memory:\s*(\d+)\s+active,\s*(\d+)\s+archived,\s*(\d+)\s+pending re-embed"
 )
 
-#: An endpoint nothing listens on. Port 9 is the discard service, reserved and
-#: unused, so the embedder fails quickly and predictably rather than waiting out
-#: a routing black hole.
-DEAD_EMBEDDING_ENDPOINT = "http://127.0.0.1:9/v1"
+#: What the embedder is pointed at comes from :func:`smoke.runs.error_backend`
+#: and is never a literal here. This module used to name a port and call it
+#: "the discard service, reserved and unused"; where that service is actually
+#: running the connection is accepted and never answered, so the probe waited
+#: out its whole ceiling and assertion 4 reported CANNOT_TEST rather than
+#: exercising REQ-29 at all. An endpoint that ANSWERS with an error is a
+#: failing embedder too, and it is one on every machine.
 
 #: The table the override belongs in. Getting this wrong points the MAIN
 #: provider at the closed port, and the run then fails outright instead of
@@ -156,7 +159,7 @@ def usable_budget(settings):
     return (budget - headroom) * (1.0 - margin_ratio)
 
 
-def point_embedding_at(text, endpoint=DEAD_EMBEDDING_ENDPOINT):
+def point_embedding_at(endpoint, text):
     """Return *text* with the embedding endpoint overridden.
 
     The edit is line-level because the standard library ships no TOML writer
@@ -168,8 +171,8 @@ def point_embedding_at(text, endpoint=DEAD_EMBEDDING_ENDPOINT):
     Complexity: ``O(number of lines)``.
 
     Args:
-        text: The configuration to rewrite.
         endpoint: The URL the embedder should be pointed at.
+        text: The configuration to rewrite.
 
     Returns:
         str: The rewritten configuration.
@@ -414,14 +417,16 @@ def _embedder_down_finding():
                        "the environment's %s could not be read, so the probe "
                        "has no configuration to patch: %s"
                        % (MAGI_TOML_NAME, exc))
-        (workspace / MAGI_DIR_NAME / MAGI_TOML_NAME).write_text(
-            point_embedding_at(source), encoding="utf-8")
-        probe = runs.attempt(
-            ["query", "--output-format", "json", "-w", str(workspace),
-             "--auto"],
-            stdin=PROBE_PROMPT, timeout_s=PROBE_TIMEOUT_S, label=PROBE_LABEL,
-            env={runs.PASSPHRASE_VARIABLE: runs.passphrase()},
-        )
+        with runs.error_backend() as endpoint:
+            (workspace / MAGI_DIR_NAME / MAGI_TOML_NAME).write_text(
+                point_embedding_at(endpoint, source), encoding="utf-8")
+            probe = runs.attempt(
+                ["query", "--output-format", "json", "-w", str(workspace),
+                 "--auto"],
+                stdin=PROBE_PROMPT, timeout_s=PROBE_TIMEOUT_S,
+                label=PROBE_LABEL,
+                env={runs.PASSPHRASE_VARIABLE: runs.passphrase()},
+            )
         return _judge_degraded(probe)
     finally:
         shutil.rmtree(workspace, ignore_errors=True)
