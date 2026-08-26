@@ -69,6 +69,26 @@ class WindowsPermissionTests(unittest.TestCase):
         self.assertIn("could not be read", str(caught.exception))
 
 
+def _resolvable_config(case: unittest.TestCase):
+    """Build a configuration double whose backend credential resolves.
+
+    A configuration that names no resolvable credential is cut at step 3, so a
+    double meant to reach a later step has to carry one.
+
+    Args:
+        case: The test to register the environment cleanup on.
+
+    Returns:
+        mock.Mock: The double.
+    """
+    os.environ["SMOKE_ORDERING_KEY"] = "the-real-credential"
+    case.addCleanup(os.environ.pop, "SMOKE_ORDERING_KEY", None)
+    config = mock.Mock(spec=SmokeConfig)
+    config.passphrase = "correct horse battery staple"
+    config.backend_key_env = "SMOKE_ORDERING_KEY"
+    return config
+
+
 class OrderingTests(unittest.TestCase):
     """The lock precedes every mutation of the environment."""
 
@@ -80,13 +100,14 @@ class OrderingTests(unittest.TestCase):
         """
         order: list[str] = []
         directory = pathlib.Path(tempfile.mkdtemp())
+        config = _resolvable_config(self)
         env = mock.Mock(spec=Environment)
         env.exists.return_value = True
         env.normalize_magi_toml.side_effect = lambda profile: order.append("normalize")
         with mock.patch.object(RunLock, "acquire",
                                side_effect=lambda: order.append("lock")):
             with mock.patch.object(RunLock, "release"):
-                Preflight(mock.Mock(spec=SmokeConfig), env,
+                Preflight(config, env,
                           mock.Mock(spec=ReleaseBinary),
                           RunLock(directory / ".lock")).run(False, None)
         self.assertEqual(["lock", "normalize"], order)
@@ -97,16 +118,85 @@ class OrderingTests(unittest.TestCase):
         step 5 already knows how to give.
         """
         directory = pathlib.Path(tempfile.mkdtemp())
+        config = _resolvable_config(self)
         env = mock.Mock(spec=Environment)
         env.exists.return_value = False
         with mock.patch.object(RunLock, "acquire"):
             with mock.patch.object(RunLock, "release"):
                 with self.assertRaises(PreflightError) as caught:
-                    Preflight(mock.Mock(spec=SmokeConfig), env,
+                    Preflight(config, env,
                               mock.Mock(spec=ReleaseBinary),
                               RunLock(directory / ".lock")).run(False, None)
         self.assertIn("--init-env", str(caught.exception))
         env.normalize_magi_toml.assert_not_called()
+
+
+class CredentialResolutionTests(unittest.TestCase):
+    """Step 3 resolves the backend credential, and it does so BEFORE spending.
+
+    R7 rotates that credential and has to put the real one back, so a variable
+    that resolves to nothing is fatal to the run. Discovering it inside R7
+    costs every earlier backend run first, which is exactly what happened: four
+    completed runs, then ``exit 3`` over a precondition step 3 already owns.
+    Failing before spending is the whole reason this cut sits where it does.
+    """
+
+    def _config(self, variable: str):
+        """Build a configuration double naming *variable* as the key holder.
+
+        Args:
+            variable: The environment variable the backend credential lives in.
+
+        Returns:
+            mock.Mock: The double.
+        """
+        config = mock.Mock(spec=SmokeConfig)
+        config.passphrase = "correct horse battery staple"
+        config.backend_key_env = variable
+        return config
+
+    def test_an_unresolvable_credential_cuts_naming_the_variable(self) -> None:
+        os.environ.pop("SMOKE_ABSENT_KEY", None)
+        directory = pathlib.Path(tempfile.mkdtemp())
+        env = mock.Mock(spec=Environment)
+        env.exists.return_value = True
+        with mock.patch.object(RunLock, "acquire"):
+            with mock.patch.object(RunLock, "release"):
+                with self.assertRaises(PreflightError) as caught:
+                    Preflight(self._config("SMOKE_ABSENT_KEY"), env,
+                              mock.Mock(spec=ReleaseBinary),
+                              RunLock(directory / ".lock")).run(False, None)
+        self.assertIn("SMOKE_ABSENT_KEY", str(caught.exception))
+
+    def test_it_cuts_before_the_environment_is_touched_at_all(self) -> None:
+        """Step 3 precedes steps 5, 6 and 7b. A cut that happens after the
+        environment has been listed or normalised has already paid for the
+        thing it exists to avoid paying for.
+        """
+        os.environ.pop("SMOKE_ABSENT_KEY", None)
+        directory = pathlib.Path(tempfile.mkdtemp())
+        env = mock.Mock(spec=Environment)
+        env.exists.return_value = True
+        binary = mock.Mock(spec=ReleaseBinary)
+        with mock.patch.object(RunLock, "acquire"):
+            with mock.patch.object(RunLock, "release"):
+                with self.assertRaises(PreflightError):
+                    Preflight(self._config("SMOKE_ABSENT_KEY"), env, binary,
+                              RunLock(directory / ".lock")).run(False, None)
+        env.normalize_magi_toml.assert_not_called()
+        binary.invoke.assert_not_called()
+
+    def test_a_resolvable_credential_passes_the_cut(self) -> None:
+        """A permanent red would look like a working guard, so the double has
+        to be able to get through.
+        """
+        os.environ["SMOKE_PRESENT_KEY"] = "the-real-credential"
+        self.addCleanup(os.environ.pop, "SMOKE_PRESENT_KEY", None)
+        preflight = Preflight(self._config("SMOKE_PRESENT_KEY"),
+                              mock.Mock(spec=Environment),
+                              mock.Mock(spec=ReleaseBinary),
+                              mock.Mock(spec=RunLock))
+        preflight._require_config()
 
 
 class RotationRestoreTests(unittest.TestCase):
