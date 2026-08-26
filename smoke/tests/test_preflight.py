@@ -24,6 +24,11 @@ from smoke.product import ProductOutput
 from smoke.tests import support
 
 
+#: How long a test waits for its listener thread to notice the socket closed
+#: under it. Generous on purpose: the deadline is a failure bound, not a
+#: measurement, and the thread is a daemon so overrunning it costs nothing.
+THREAD_JOIN_TIMEOUT_S = 30
+
 #: A minimal, valid smoke.toml. The key variable is interpolated so a test
 #: can name the one it exported.
 _CONFIG_TEXT = (
@@ -619,6 +624,10 @@ class BackendSpeakingGarbageTests(unittest.TestCase):
 
         thread = threading.Thread(target=serve, daemon=True)
         thread.start()
+        # Closed FIRST, joined second: the thread is blocked in accept() and
+        # only the close wakes it. Daemon so it can never hang the suite, and
+        # joined anyway so two of these do not accumulate.
+        self.addCleanup(thread.join, THREAD_JOIN_TIMEOUT_S)
         return "http://127.0.0.1:%d/v1" % listener.getsockname()[1]
 
     def _preflight(self, url: str) -> Preflight:

@@ -10,7 +10,6 @@ reports it counted -- that is a different file's job, and deliberately so.
 
 import pathlib
 import re
-import shutil
 import unittest
 
 from smoke.config import PAYLOAD_TARGET_BYTES
@@ -45,7 +44,6 @@ class BuildTests(unittest.TestCase):
 
     def setUp(self) -> None:
         self.root = support.scratch_dir(self)
-        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
         _plant(self.root, "src/alpha.rs", b"a" * 500)
         _plant(self.root, "src/nested/beta.rs", b"b" * 500)
         self.builder = PayloadBuilder(self.root)
@@ -84,7 +82,6 @@ class BuildTests(unittest.TestCase):
 
     def test_a_tree_with_no_sources_reports_nothing_available(self) -> None:
         empty = support.scratch_dir(self)
-        self.addCleanup(shutil.rmtree, empty, ignore_errors=True)
         self.assertEqual(0, PayloadBuilder(empty).available_bytes())
 
 
@@ -93,7 +90,6 @@ class OrderingTests(unittest.TestCase):
 
     def setUp(self) -> None:
         self.root = support.scratch_dir(self)
-        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
 
     def test_the_separator_is_normalised_before_the_comparison(self) -> None:
         """``/`` is 0x2F and ``\\`` is 0x5C, with ``A`` at 0x41 between them.
@@ -128,7 +124,6 @@ class BinaryReadTests(unittest.TestCase):
         """On a CRLF checkout a text-mode read changes the content actually
         sent, so the payload would differ between two clones of one commit."""
         root = support.scratch_dir(self)
-        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
         _plant(root, "src/crlf.rs", b"one\r\ntwo\r\n")
         self.assertIn(b"\r\n", PayloadBuilder(root).build(10))
 

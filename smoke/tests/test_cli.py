@@ -4,6 +4,7 @@
 """Tests for the CLI surface and the four exit codes."""
 
 import contextlib
+import io
 import pathlib
 import subprocess
 import sys
@@ -279,6 +280,10 @@ class LockLifetimeTests(unittest.TestCase):
         with contextlib.ExitStack() as stack:
             for patch in patches:
                 stack.enter_context(patch)
+            # The real Report renders here, and a unit suite that prints a
+            # run report into its own log makes the log unreadable for the
+            # failures it exists to show.
+            stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
             main.main(["--smoke-2"])
 
         self.assertEqual([True], held,

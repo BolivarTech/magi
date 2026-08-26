@@ -519,9 +519,7 @@ def _history_counts(attempt):
     """
     if not attempt.ok or attempt.output.exit_code != 0:
         return None
-    return {table: count
-            for table, count in diagnose_counts(attempt.output.stdout).items()
-            if table in HISTORY_TABLES}
+    return _history_only(diagnose_counts(attempt.output.stdout))
 
 
 def _refusal_is_typed_finding(before, refused):
@@ -623,6 +621,34 @@ def _and_unmeasured(unmeasured):
         return ""
     return (" (and %s went uncounted, so %s rows are unknown)"
             % (", ".join(unmeasured), "its" if len(unmeasured) == 1 else "their"))
+
+
+def _history_only(counts):
+    """Keep the tables whose rows are the user's accumulated history.
+
+    ``vault`` is the one this drops, and dropping it is not tidiness. R7
+    plants a rotation marker there and removes it, R6's authenticated
+    endpoint plants four placeholder entries and removes those, and S3 plants
+    a probe and removes it -- so counting that table reads the harness's own
+    bookkeeping as the user losing data. A live run said exactly that:
+    "vault went from 1 to 0".
+
+    Complexity: ``O(len(counts))``.
+
+    Args:
+        counts: Table name to row count, as the product reported it.
+
+    Returns:
+        dict[str, int]: The history tables the mapping carried. A table the
+        report rendered ``missing`` is absent here too -- unknown is not
+        empty, and :func:`_compare_counts` depends on that distinction.
+
+    Example:
+        >>> _history_only({"vault": 1, "sessions": 2})
+        {'sessions': 2}
+    """
+    return {table: count for table, count in counts.items()
+            if table in HISTORY_TABLES}
 
 
 def _compare_counts(before, after):
@@ -833,14 +859,10 @@ def _history_intact_finding(diagnosed, reopened, baseline):
         return _s16(1, Outcome.CANNOT_TEST,
                     "the database's structure could not be read, so nothing "
                     "can be said about what survived")
-    # HISTORY_TABLES, not everything the report listed. ``vault`` is the
-    # rotation's own workspace: R7 plants a marker before it rotates and
-    # removes it after, and R6's authenticated endpoint plants four
-    # placeholder entries and removes those. Counting that table reads the
-    # run's own bookkeeping as the user losing data, and a live run said so:
-    # "vault went from 1 to 0". S4 excludes it for the same reason.
-    baseline = {table: count for table, count in baseline.items()
-                if table in HISTORY_TABLES}
+    # The baseline comes from runs.py, which does not know about history
+    # tables and should not: it is infrastructure. S4's side is filtered where
+    # its report is parsed, so both arrive here on the same footing.
+    baseline = _history_only(baseline)
     if not any(baseline.values()):
         return _s16(1, Outcome.CANNOT_TEST,
                     "the environment held no accumulated history before the "
