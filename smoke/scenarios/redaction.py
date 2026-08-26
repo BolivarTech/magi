@@ -38,7 +38,8 @@ ASSERTIONS = (
     "the credential appears in neither stdout nor stderr",
     "nor in the JSON output",
     "nor in the run log",
-    "every authority emitted anywhere is redacted",
+    "every authority emitted anywhere — JSON, stdout, stderr, run log — is "
+    "redacted; asserted on shape, not on the secret",
 )
 
 
