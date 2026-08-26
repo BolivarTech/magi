@@ -11,6 +11,8 @@ that must NOT widen are asserted individually.
 
 import pathlib
 import sys
+import subprocess
+import tempfile
 import unittest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
@@ -55,6 +57,33 @@ class HarnessCategoryTests(unittest.TestCase):
             ["smoke/runner.py", "src/agent/mod.rs"], None)
         self.assertIn("agent", expression)
         self.assertNotEqual("harness", expression)
+
+    def test_a_new_untracked_file_is_a_change(self) -> None:
+        """``git diff`` does not list what git has never been told about.
+
+        A brand-new source file that has not been staged is invisible to
+        ``git diff --name-only HEAD``, so the script answered "git reports no
+        change -- nothing to verify, so nothing is run" and ran no tests at
+        all, on the one commit that adds a file. The empty-diff shortcut is
+        the script's single exception to widening, and it has to mean "there
+        is no change", not "git was not looking".
+        """
+        root = pathlib.Path(tempfile.mkdtemp())
+        subprocess.run(["git", "init", "-q", str(root)], check=True)
+        (root / "src").mkdir()
+        (root / "src" / "brand_new.rs").write_text("fn main() {}\n",
+                                                   encoding="utf-8")
+        listed = scoped_tests.changed_files(None, cwd=str(root))
+        self.assertIn("src/brand_new.rs", listed)
+
+    def test_an_ignored_new_file_is_still_not_a_change(self) -> None:
+        """Widening on an ignored path would run the whole suite for a log."""
+        root = pathlib.Path(tempfile.mkdtemp())
+        subprocess.run(["git", "init", "-q", str(root)], check=True)
+        (root / ".gitignore").write_text("noise.log\n", encoding="utf-8")
+        (root / "noise.log").write_text("x\n", encoding="utf-8")
+        listed = scoped_tests.changed_files(None, cwd=str(root))
+        self.assertNotIn("noise.log", listed)
 
     def test_an_empty_diff_is_still_its_own_answer(self) -> None:
         """The pre-existing contract must not regress: no diff means nothing to
