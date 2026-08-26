@@ -1,7 +1,14 @@
 # Author: Julian Bolivar
 # Version: 1.0.0
 # Date: 2026-08-25
-"""The eleven hard cuts that run before any scenario.
+"""The eight hard cuts that run before any scenario.
+
+Eight because a cut is a step that can RAISE ``PreflightError``:
+the interpreter, the lock, the credential, the permissions, the
+environment, the leftover rotation, the endpoint agreement and the
+declared models. Settling the binary raises ``HarnessError`` -- exit 3,
+a defect of the harness, not a refusal to start -- and neither the
+normalisation nor the reachability probe can cut at all.
 
 The order is the design, not a convenience. Two boundaries carry a defect each
 if moved, and both were found by review rather than by a test that failed:
@@ -197,7 +204,7 @@ def _tagged(name: str) -> str:
 
 
 def require_declared_models(declared, available) -> None:
-    """Step 9: every model the environment names exists on the backend.
+    """Step 8: every model the environment names exists on the backend.
 
     This is failure #5 -- a run that reaches a healthy backend and asks it for
     something it does not have. It belongs here rather than in a scenario
@@ -229,7 +236,7 @@ def require_declared_models(declared, available) -> None:
 
 
 class Preflight:
-    """The eleven cuts, in order, before a single scenario runs.
+    """The eight cuts, in order, before a single scenario runs.
 
     Attributes:
         config: The harness configuration.
@@ -280,9 +287,8 @@ class Preflight:
         self.env.normalize_magi_toml(profile)
         self._require_one_endpoint()
         backend = self._probe_backend()
-        # Step 9 runs only when the backend answered: asking a host that is
-        # down which models it has produces silence, and silence here means
-        # "could not be asked", never "nothing exists".
+        # Step 8 runs only when the backend answered, which is why the probe
+        # above carries no number of its own.
         if backend.reachable:
             require_declared_models(self.env.declared_models(),
                                     self._available_models())
@@ -554,7 +560,14 @@ class Preflight:
                 if isinstance(entry, dict) and isinstance(entry.get("name"), str)}
 
     def _probe_backend(self) -> BackendStatus:
-        """Step 8: ask the backend whether it is there.
+        """Ask the backend whether it is there.
+
+        NOT a numbered cut, and the spec is right not to give it one: by D-17
+        a backend that does not answer never cuts. It is the CONDITION step 8
+        hangs on -- asking a host that is down which models it has produces
+        silence, and silence there means "could not be asked", never "nothing
+        exists". Numbering it pushed the model check to 9 and left the
+        published README pointing at a step that had moved.
 
         Returns:
             BackendStatus: Reachable, or not with the cause recorded.

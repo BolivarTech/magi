@@ -602,7 +602,7 @@ class BackendSpeakingGarbageTests(unittest.TestCase):
                          mock.Mock(spec=RunLock))
 
     def test_the_reachability_probe_degrades_rather_than_raises(self) -> None:
-        """Step 8, which runs FIRST and so decides whether step 9 runs at all.
+        """The probe, which runs FIRST and decides whether step 8 runs.
 
         The guard on the model listing was added for this failure mode and
         cannot fire for it: a daemon answering garbage dies here, several
