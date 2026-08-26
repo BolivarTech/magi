@@ -130,9 +130,9 @@ class RedactionBodyTests(unittest.TestCase):
 
     def test_a_clean_archive_passes_the_third(self) -> None:
         """The other half: with a log present and clean, assertion 3 evaluates."""
-        directory = pathlib.Path(tempfile.mkdtemp()) / "r6-1"
+        directory = pathlib.Path(tempfile.mkdtemp()) / "R6"
         directory.mkdir(parents=True)
-        (directory / "invocation.log").write_bytes(
+        (directory / "stderr").write_bytes(
             b"$ magi-rs query\n<redacted: backend credential, 1 occurrence>")
         with mock.patch.object(redaction.runs, "archive_root",
                                return_value=directory.parent):
@@ -143,14 +143,34 @@ class RedactionBodyTests(unittest.TestCase):
         """The archive is written SCRUBBED, so a secret found there is one the
         scrubber was never told about -- the case worth reporting.
         """
-        directory = pathlib.Path(tempfile.mkdtemp()) / "r6-1"
+        directory = pathlib.Path(tempfile.mkdtemp()) / "R6"
         directory.mkdir(parents=True)
-        (directory / "invocation.log").write_bytes(
+        (directory / "stderr").write_bytes(
             ("$ magi-rs query\n%s" % _SECRET).encode("utf-8"))
         with mock.patch.object(redaction.runs, "archive_root",
                                return_value=directory.parent):
             outcomes = _outcomes(_FakeRun(stdout=b'{"ok": true}'))
         self.assertEqual(Outcome.FAIL, outcomes[redaction.ASSERTIONS[2]])
+
+    def test_another_scenario_s_archive_is_not_this_run_s(self) -> None:
+        """S10 concatenated EVERY invocation.log under the archive root, so it
+        read fixtures other scenarios had planted there. One of them is the
+        placeholder the product documents and requires,
+        ``https://[user]:[password]@host``, and S10 duly reported the
+        harness's own fixture as an authority the product had leaked.
+        """
+        root = pathlib.Path(tempfile.mkdtemp())
+        other = root / "s13-config-readme-2-20260101T000000"
+        other.mkdir(parents=True)
+        other.joinpath("invocation.log").write_bytes(
+            b'base_url = "https://[user]:[password]@example.invalid/v1"')
+        mine = root / "R6"
+        mine.mkdir(parents=True)
+        mine.joinpath("stdout").write_bytes(b'{"ok": true}')
+        with mock.patch.object(redaction.runs, "archive_root",
+                               return_value=root):
+            outcomes = _outcomes(_FakeRun(stdout=b'{"ok": true}'))
+        self.assertEqual(Outcome.PASS, outcomes[redaction.ASSERTIONS[3]])
 
     def test_the_raw_credential_in_stderr_fails_the_first(self) -> None:
         run = _FakeRun(stderr=("error: %s rejected" % _SECRET).encode("utf-8"))
