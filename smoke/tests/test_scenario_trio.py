@@ -411,6 +411,36 @@ class S8Tests(unittest.TestCase):
             self.assertEqual({Outcome.PASS},
                              set(_outcomes("S8", result).values()))
 
+    def test_the_token_count_comes_from_the_envelope_not_from_usage(self) -> None:
+        """``usage`` is documented as ``{0, 0}`` on this path.
+
+        ``run_consult`` says so in its own "Gaps (documented, never
+        fabricated)" section: magi-core does not surface token counts there.
+        So assertion 2 read a field the product promises will be zero, and
+        against a 250 kB payload it reported "250054 bytes became 0 input
+        tokens" -- a guardian that cannot pass, on a product that is behaving
+        exactly as documented.
+
+        The envelope does carry the number, under
+        ``consult.input_size.estimated_tokens``, and against this repository's
+        backend the same payload came out at 62513 against a floor of 50000.
+        """
+        document = _document()
+        document["usage"] = {"input_tokens": 0, "output_tokens": 0}
+        document["consult"]["input_size"] = {"estimated_tokens": 62513,
+                                             "exceeded": False,
+                                             "warn_threshold": 98304}
+        with _payload(target=250000, floor=50000):
+            outcomes = _outcomes("S8", _result(document=document))
+        self.assertEqual(Outcome.PASS, outcomes[trio.S8_ASSERTIONS[1]])
+
+    def test_an_envelope_without_the_size_cannot_test_the_second(self) -> None:
+        document = _document()
+        document["consult"].pop("input_size", None)
+        with _payload(target=250000, floor=50000):
+            outcomes = _outcomes("S8", _result(document=document))
+        self.assertEqual(Outcome.CANNOT_TEST, outcomes[trio.S8_ASSERTIONS[1]])
+
     def test_a_truncated_report_fails_the_first(self) -> None:
         envelope = dict(copy.deepcopy(_ENVELOPE), report_truncated="bytes")
         with _payload(target=250000, floor=50000):
