@@ -59,5 +59,20 @@ class LockTests(unittest.TestCase):
             pass
 
 
+
+    def test_a_lock_file_that_is_not_utf8_still_names_a_holder(self) -> None:
+        """The owner is read for a MESSAGE, so it must not become the failure.
+
+        ``read_text`` caught only OSError, and a lock file holding bytes that
+        are not UTF-8 -- a foreign writer, a truncated write, a filesystem
+        that handed back garbage -- raises UnicodeDecodeError instead. That
+        is a ValueError, so it escaped the read and reached the last-resort
+        catch: a second run got a traceback where it should have been told
+        another run is in progress.
+        """
+        path = support.scratch_dir(self) / ".lock"
+        path.write_bytes(bytes([0xFF, 0xFE]) + b" not utf-8 at all")
+        self.assertEqual("unknown", RunLock(path)._recorded_owner())
+
 if __name__ == "__main__":
     unittest.main()
