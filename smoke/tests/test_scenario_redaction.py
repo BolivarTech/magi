@@ -3,8 +3,6 @@
 # Date: 2026-08-25
 """Unit tests for the S10 scenario's own shape."""
 
-import pathlib
-import tempfile
 import unittest
 import urllib.parse
 from unittest import mock

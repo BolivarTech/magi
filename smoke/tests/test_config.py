@@ -4,7 +4,6 @@
 """Tests for smoke.toml parsing."""
 
 import pathlib
-import tempfile
 import unittest
 
 from smoke.config import (

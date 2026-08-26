@@ -6,7 +6,6 @@
 import hashlib
 import pathlib
 import subprocess
-import tempfile
 import unittest
 from unittest import mock
 

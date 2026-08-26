@@ -8,8 +8,6 @@ because it is the artifact somebody trusts a year later without re-running
 anything.
 """
 
-import pathlib
-import tempfile
 import unittest
 
 from smoke.certificate import (Certificate, OUT_OF_SCOPE_DECLARATION,

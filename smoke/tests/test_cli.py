@@ -7,7 +7,6 @@ import contextlib
 import pathlib
 import subprocess
 import sys
-import tempfile
 import unittest
 from unittest import mock
 

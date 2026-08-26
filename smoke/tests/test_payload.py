@@ -11,7 +11,6 @@ reports it counted -- that is a different file's job, and deliberately so.
 import pathlib
 import re
 import shutil
-import tempfile
 import unittest
 
 from smoke.config import PAYLOAD_TARGET_BYTES

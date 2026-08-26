@@ -6,8 +6,6 @@
 import contextlib
 import io
 import pathlib
-import socket
-import tempfile
 import unittest
 import urllib.error
 import urllib.parse

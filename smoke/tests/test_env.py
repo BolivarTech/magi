@@ -3,8 +3,6 @@
 # Date: 2026-08-25
 """Tests for the test environment's lifecycle."""
 
-import pathlib
-import tempfile
 import unittest
 
 from smoke.config import ModelProfile, Seat

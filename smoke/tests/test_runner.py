@@ -4,9 +4,7 @@
 """Tests for scenario invocation, id stamping and reconciliation."""
 
 import dataclasses
-import pathlib
 import subprocess
-import tempfile
 import unittest
 
 from smoke.errors import HarnessError, ProductOutputError
