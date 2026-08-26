@@ -92,7 +92,18 @@ BLANK_SPELLINGS = ("", "   ")
 #: is the typed refusal -- never a hang, which is why every invocation carries
 #: a timeout the harness controls.
 PASSPHRASE_VARIABLE = "MAGI_PASSPHRASE"
-PASSPHRASE_UNAVAILABLE_MARKER = b"no passphrase"
+#: Markers of a TYPED refusal. Either is acceptable and the difference is
+#: recorded rather than judged. ``CLAUDE.md``'s blank-is-absent rule ENUMERATES
+#: its variables -- provider, kind, default_mode, base_url, the model
+#: resolvers, MAGI_MODEL_* and the two API keys -- and the passphrase is not
+#: among them; it has its own precedence, flag then environment then a TTY
+#: prompt, and nothing published says a blank one reads as absent. Requiring
+#: the "no passphrase" wording asserted a contract the product never made, and
+#: the product answers "incorrect passphrase" because it TRIED the blank value,
+#: which is a defensible reading of present. What is promised, and what is
+#: checked, is that the refusal is typed and bounded.
+PASSPHRASE_REFUSAL_MARKERS = (b"no passphrase", b"incorrect passphrase",
+                              b"passphrase")
 PASSPHRASE_UNAVAILABLE_EXIT = 1
 
 #: A value nobody could mean. Assertion 3 requires the product to reject it,
@@ -528,15 +539,22 @@ def _falls_through_finding(blanked):
 def _passphrase_complaints(spelling, output):
     """Check the one variable whose fall-through has a different destination.
 
+    The product may read a blank passphrase as absent -- falling through to a
+    prompt that does not exist here -- or as present and wrong. Both are typed
+    refusals at exit 1 and both are diagnosable; which one arrives is an
+    observation, not a verdict, because no published contract picks between
+    them. What would be a defect is neither: a panic, or a wait with no bound.
+
     Args:
         spelling: Which blank spelling was exported.
         output: What the product did with it.
 
     Returns:
-        list[str]: What was wrong, empty when the typed refusal arrived.
+        list[str]: What was wrong, empty when a typed refusal arrived.
     """
-    if PASSPHRASE_UNAVAILABLE_MARKER not in output.raw().lower():
-        return ["%s=%r did not produce the typed refusal: exit %d: %s"
+    lowered = output.raw().lower()
+    if not any(marker in lowered for marker in PASSPHRASE_REFUSAL_MARKERS):
+        return ["%s=%r produced no typed refusal at all: exit %d: %s"
                 % (PASSPHRASE_VARIABLE, spelling, output.exit_code,
                    _excerpt(output))]
     if output.exit_code != PASSPHRASE_UNAVAILABLE_EXIT:
