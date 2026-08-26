@@ -5,7 +5,6 @@
 
 import pathlib
 import ast
-import re
 import unittest
 
 from smoke.errors import HarnessError
@@ -72,21 +71,39 @@ class AssertionSourceTests(unittest.TestCase):
     """
 
     def test_every_registration_names_a_constant(self) -> None:
-        pattern = re.compile(r"@scenario\(\s*\"S\d+\"\s*,\s*assertions=([^,)]+)")
+        """Parsed, not pattern-matched.
+
+        A regex over the decorator line reads argument ORDER, so
+        ``@scenario("S20", run="R1", assertions=ASSERTIONS)`` -- which is
+        legal and which somebody will write -- would not match and the guard
+        would go red over a correct registration. Reading the call from the
+        syntax tree asks what was actually passed.
+        """
         checked = 0
         for path in sorted(pathlib.Path("smoke/scenarios").glob("*.py")):
             if path.name == "__init__.py":
                 continue
-            source = path.read_text(encoding="utf-8")
-            names = {node.targets[0].id for node in ast.parse(source).body
-                     if isinstance(node, ast.Assign)
-                     and getattr(node.targets[0], "id", "").endswith("ASSERTIONS")}
-            for match in pattern.finditer(source):
-                used = match.group(1).strip()
-                checked += 1
-                self.assertIn(used, names,
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            declared = {node.targets[0].id for node in tree.body
+                        if isinstance(node, ast.Assign)
+                        and getattr(node.targets[0], "id", "").endswith("ASSERTIONS")}
+            for node in ast.walk(tree):
+                if not (isinstance(node, ast.Call)
+                        and getattr(node.func, "id", "") == "scenario"):
+                    continue
+                passed = {kw.arg: kw.value for kw in node.keywords}
+                self.assertIn("assertions", passed,
+                              "%s registers a scenario without declaring its "
+                              "assertions" % path.name)
+                value = passed["assertions"]
+                self.assertIsInstance(
+                    value, ast.Name,
+                    "%s passes a literal rather than the module's own "
+                    "constant" % path.name)
+                self.assertIn(value.id, declared,
                               "%s passes %r, which is not a constant it "
-                              "declares" % (path.name, used))
+                              "declares" % (path.name, value.id))
+                checked += 1
         self.assertEqual(DECLARED_SCENARIO_COUNT, checked,
                          "every registered scenario must declare its "
                          "assertions to the decorator")
