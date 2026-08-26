@@ -540,6 +540,35 @@ class PlaceholderLifetimeTests(unittest.TestCase):
         self.assertEqual(set(planted), set(removed),
                          "everything planted has to be taken back out")
 
+    def test_a_failed_restore_is_typed_and_keeps_the_run_s_own_failure(self):
+        """The same defect the placeholder removal had, in R7's finally.
+
+        A restore that fails is NOT inert -- the environment is left holding
+        a sentinel credential and every backend run after it dies of an
+        opaque auth error -- so unlike a leftover placeholder it must stop
+        the harness. What it must not do is stop it as an untyped
+        ProductOutputError escaping into main's last-resort catch: that is a
+        traceback and exit 3, the code reserved for a defect in the harness,
+        with the report discarded and every finding from every completed run
+        lost. A typed HarnessError says the same thing through the handler
+        that prints a cause and returns a code.
+        """
+        def stubborn(call):
+            args = list(call.args)
+            if args[:1] != ["vault"]:
+                return None
+            if "set" in args and runs.ROTATION_MARKER not in args:
+                raise ProductOutputError("vault set refused")
+            return ProductOutput(stdout=b"", stderr=b"", exit_code=0,
+                                 command=["magi-rs"] + args)
+
+        support.install_fake_runs(self, responder=stubborn)
+        executor = runs.RunExecutor(runs._binary, runs._env, runs._config,
+                                    credential="the-real-credential")
+        with self.assertRaises(HarnessError) as caught:
+            executor.execute(runs.DEFINITIONS["R7"])
+        self.assertIn("credential", str(caught.exception))
+
     def test_a_failed_removal_warns_instead_of_taking_the_harness_down(self):
         """A leftover entry is a note, never a verdict on the product.
 
