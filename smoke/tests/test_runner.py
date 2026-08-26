@@ -223,5 +223,60 @@ class ProductOutputBoundaryTests(unittest.TestCase):
                        ambient=_NO_AMBIENT).run()
 
 
+class CompletenessTests(unittest.TestCase):
+    """Reconciliation checks PRESENCE; this checks COMPLETENESS.
+
+    A scenario that returns after two of its five findings reconciles
+    perfectly: it was invoked and it reported. The three assertions it never
+    reached leave no trace anywhere -- not in the report, not in the exit code,
+    and not in the certificate, which counts scenarios rather than assertions.
+    Every scenario already declares its assertion texts as a module constant,
+    so the runner can compare what arrived against what was promised.
+    """
+
+    def test_a_scenario_that_stops_early_is_a_harness_failure(self) -> None:
+        registry = Registry()
+
+        @scenario("S1", assertions=("first", "second", "third"),
+                  registry=registry)
+        def stops_early(run):
+            yield Finding(assertion="first", outcome=Outcome.PASS, detail="",
+                          run_id=None)
+
+        with self.assertRaises(HarnessError) as caught:
+            Runner(registry, {}, True, _NO_AMBIENT).run()
+        message = str(caught.exception)
+        self.assertIn("S1", message)
+        self.assertIn("second", message)
+        self.assertIn("third", message)
+
+    def test_a_complete_scenario_reconciles(self) -> None:
+        registry = Registry()
+
+        @scenario("S1", assertions=("first", "second"), registry=registry)
+        def complete(run):
+            for text in ("first", "second"):
+                yield Finding(assertion=text, outcome=Outcome.PASS, detail="",
+                              run_id=None)
+
+        findings = Runner(registry, {}, True, _NO_AMBIENT).run()
+        self.assertEqual(["first", "second"],
+                         [f.assertion for f in findings])
+
+    def test_a_finding_the_scenario_never_declared_is_a_harness_failure(self) -> None:
+        """The other direction. A text that drifted from the declared tuple
+        reaches the certificate verbatim, so it has to match what was promised.
+        """
+        registry = Registry()
+
+        @scenario("S1", assertions=("first",), registry=registry)
+        def drifted(run):
+            yield Finding(assertion="frist", outcome=Outcome.PASS, detail="",
+                          run_id=None)
+
+        with self.assertRaises(HarnessError):
+            Runner(registry, {}, True, _NO_AMBIENT).run()
+
+
 if __name__ == "__main__":
     unittest.main()
