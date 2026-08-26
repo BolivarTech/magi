@@ -542,5 +542,11 @@ class Preflight:
             # An HTTP error is an ANSWER: something is listening and speaking
             # HTTP, which is all this step establishes.
             return BackendStatus(reachable=True, cause="")
-        except (urllib.error.URLError, OSError, ValueError) as exc:
+        except (urllib.error.URLError, OSError, ValueError,
+                http.client.HTTPException) as exc:
+            # HTTPException for the same reason the model listing names it,
+            # and this is the call that MATTERS: this step runs first and
+            # decides whether the listing runs at all, so a guard only there
+            # can never fire -- the daemon dies here, several statements
+            # earlier.
             return BackendStatus(reachable=False, cause=str(exc))
