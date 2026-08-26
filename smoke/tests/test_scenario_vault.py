@@ -436,6 +436,23 @@ class CredentialRotationScenarioBodyTests(unittest.TestCase):
                     for f in DEFAULT_REGISTRY.get("S16").func(run)}
         self.assertEqual(Outcome.FAIL, outcomes[vault.S16_ASSERTIONS[1]])
 
+    def test_the_vault_table_is_not_part_of_the_history(self) -> None:
+        """The rotation writes and removes its own vault entries.
+
+        R7 plants a marker before it rotates and removes it after, and R6's
+        authenticated endpoint plants four placeholder entries and removes
+        those too. Counting the ``vault`` table therefore reads the rotation's
+        own bookkeeping as the user losing data -- which is exactly what a live
+        run reported: "vault went from 1 to 0". S4 excludes the table for the
+        same reason and says so; the baseline had not.
+        """
+        support.install_fake_runs(self, responder=_RotatedDatabase())
+        run = _r7_result(baseline={"vault": 1, "sessions": 1, "messages": 8,
+                                   "knowledge": 3, "memories": 5})
+        outcomes = {f.assertion: f.outcome
+                    for f in DEFAULT_REGISTRY.get("S16").func(run)}
+        self.assertEqual(Outcome.PASS, outcomes[vault.S16_ASSERTIONS[1]])
+
     def test_history_that_survived_intact_passes(self) -> None:
         support.install_fake_runs(self, responder=_RotatedDatabase())
         run = _r7_result(baseline={"sessions": 1, "messages": 8,
