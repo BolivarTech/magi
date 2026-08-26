@@ -371,6 +371,62 @@ class ControlRunTests(unittest.TestCase):
         self.assertNotIn("--no-memory", runs.DEFINITIONS["R3"].argv)
 
 
+class AuthenticatedBackendTests(unittest.TestCase):
+    """R6 has to put the credential in the URL, not only in a header.
+
+    The spec picks R6 as "an authenticated ``base_url`` that fails" for one
+    reason: the defect it guards lives in the vault percent-encoding a
+    credential INTO the authority, where a reserved character moves the last
+    ``@`` that ``redact_url`` anchors on. A credential carried in
+    ``Authorization`` never travels that path, so the percent-encoded forms in
+    ``PlantedSecret.forms()`` were unreachable and the shape detector had no
+    authority to look at anywhere in 33 kB of output.
+
+    Measured against the product: a literal credential in ``base_url`` is
+    refused at load, naming the placeholder mechanism; the placeholders then
+    need BOTH the root pair and the ``MAGI_``-prefixed pair, because the trio
+    section inherits the root endpoint. With all four planted the run reaches
+    the backend, and the product's error reads ``"Basic [REDACTED]"``.
+    """
+
+    def test_the_run_declares_the_authenticated_token(self) -> None:
+        declared = dict(runs.DEFINITIONS["R6"].env)
+        self.assertEqual(runs.ERROR_BACKEND_TOKEN,
+                         declared["OPENAI_BASE_URL"])
+
+    def test_the_resolved_url_carries_the_placeholders(self) -> None:
+        binary = support.install_fake_runs(self)
+        executor = runs.RunExecutor(runs._binary, runs._env, runs._config,
+                                    credential="the-real-credential")
+        executor.execute(runs.DEFINITIONS["R6"])
+        resolved = (binary.calls[-1].env or {}).get("OPENAI_BASE_URL", "")
+        self.assertIn(runs.USER_PLACEHOLDER, resolved)
+        self.assertIn(runs.PASSWORD_PLACEHOLDER, resolved)
+
+    def test_the_credential_is_planted_in_the_vault_and_removed(self) -> None:
+        """It travels through the vault, never as an argument, and it does not
+        outlive the run: a leftover entry would make the next run's endpoint
+        authenticated by accident.
+        """
+        binary = support.install_fake_runs(self)
+        executor = runs.RunExecutor(runs._binary, runs._env, runs._config,
+                                    credential="the-real-credential")
+        executor.execute(runs.DEFINITIONS["R6"])
+        planted, removed = [], []
+        for call in binary.calls:
+            args = list(call.args)
+            if args[:1] != ["vault"]:
+                continue
+            if "set" in args:
+                planted.append(args[args.index("set") + 1])
+            if "rm" in args:
+                removed.append(args[args.index("rm") + 1])
+        self.assertEqual(set(runs.PLACEHOLDER_ENTRIES), set(planted))
+        self.assertEqual(set(runs.PLACEHOLDER_ENTRIES), set(removed))
+        for call in binary.calls:
+            self.assertNotIn(runs._R6_CREDENTIAL.value, " ".join(call.args))
+
+
 class ErrorBackendTests(unittest.TestCase):
     """R6 has to reach an endpoint that ANSWERS with an error, fast.
 
