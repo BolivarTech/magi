@@ -38,12 +38,26 @@ from smoke.runs import DEFINITIONS, RunExecutor, RunResult, needed_runs
 # empty, nothing invoked, nothing reported -- and exited 0 having evaluated
 # nothing. It sits last so the ordering says what it is: not a symbol this
 # module uses, but the moment the scenarios come into existence.
-from smoke import scenarios  # noqa: F401
-
 EXIT_OK = 0
 EXIT_NOT_PASSED = 1
 EXIT_PREFLIGHT = 2
 EXIT_HARNESS = 3
+
+
+try:
+    # The side-effect import that registers every scenario, and the one place
+    # an exit code can escape this module's control: it runs before `main`
+    # exists to catch anything, so an uncaught raise here is Python's exit 1
+    # -- which in this harness means "a scenario did not pass", a verdict on
+    # the PRODUCT. A syntax error in the harness would have been reported as
+    # the product failing.
+    from smoke import scenarios  # noqa: F401
+except BaseException:  # noqa: BLE001 - re-raised as the harness's own code
+    traceback.print_exc()
+    print("harness failure: a scenario module could not be imported, so no "
+          "scenario was registered and nothing could be evaluated",
+          file=sys.stderr)
+    raise SystemExit(EXIT_HARNESS)
 
 #: Module-level, not literals inside main: the tests patch around them, and a
 #: literal buried in a function is not patchable.
