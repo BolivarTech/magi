@@ -73,6 +73,9 @@ MARKER_NAME = "SMOKE_S14_MARKER"
 CLAP_USAGE_MARKER = b"usage:"
 
 #: The exit code clap uses for a parse error.
+#: What a run that resolved its workspace exits with.
+SUCCESS_EXIT_CODE = 0
+
 CLAP_EXIT_CODE = 2
 
 #: What the product scaffolds, and the one file inside it whose permissions say
@@ -595,6 +598,16 @@ def _innermost_wins_finding(first, second):
     for attempt in (inner, outer):
         if not attempt.ok:
             return _s14(2, Outcome.CANNOT_TEST, attempt.failure)
+        # The EXIT CODE too, not only "the harness got a capture". This
+        # assertion concludes from the marker being ABSENT from the outer
+        # listing, and an invocation that failed with empty stdout satisfies
+        # that without having resolved anything.
+        if attempt.output.exit_code != SUCCESS_EXIT_CODE:
+            return _s14(2, Outcome.CANNOT_TEST,
+                        "an invocation exited %d, so its listing says nothing "
+                        "about which workspace was read: %s"
+                        % (attempt.output.exit_code,
+                           _excerpt(attempt.output)))
     marker = MARKER_NAME.encode("utf-8")
     reads_second = marker in inner.output.stdout
     reads_first = marker not in outer.output.stdout
