@@ -572,6 +572,39 @@ class PlaceholderLifetimeTests(unittest.TestCase):
             executor.execute(runs.DEFINITIONS["R7"])
         self.assertIn("credential", str(caught.exception))
 
+    def test_a_restore_the_product_REFUSES_is_a_failed_restore(self):
+        """The event the restore's own docstring names, and could not see.
+
+        ``_vault_set`` and ``_vault_remove`` called invoke and never read the
+        exit code, and ``invoke`` documents that a non-zero exit is not an
+        error -- so a ``vault set`` the product RAN and REFUSED returned
+        normally. The restore then reported success, and the marker removal
+        that follows it succeeded too, which is the worse half: the next
+        preflight sees no marker, never restores, and the environment is left
+        rotated with nothing left to say so. That is exactly the state the
+        marker's write-before-rotate ordering exists to prevent, reached
+        through a different door.
+
+        The preflight's twin, ``_vault_write``, has always checked the exit
+        code. The runs-side pair did not.
+        """
+        def refusing(call):
+            args = list(call.args)
+            if args[:1] != ["vault"]:
+                return None
+            if call.stdin == b"the-real-credential":
+                return ProductOutput(stdout=b"", stderr=b"error: refused",
+                                     exit_code=1, command=["magi-rs"] + args)
+            return ProductOutput(stdout=b"", stderr=b"", exit_code=0,
+                                 command=["magi-rs"] + args)
+
+        support.install_fake_runs(self, responder=refusing)
+        executor = runs.RunExecutor(runs._binary, runs._env, runs._config,
+                                    credential="the-real-credential")
+        with self.assertRaises(HarnessError) as caught:
+            executor.execute(runs.DEFINITIONS["R7"])
+        self.assertIn("credential", str(caught.exception))
+
     def test_a_failed_restore_does_not_replace_the_run_s_own_timeout(self):
         """R7 times out AND the restore fails: the timeout has to survive.
 
