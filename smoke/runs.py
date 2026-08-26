@@ -37,7 +37,8 @@ import threading
 import time
 
 from smoke.config import ROTATION_MARKER
-from smoke.errors import HarnessError, ProductOutputError, TimedOut
+from smoke.errors import (HarnessError, PayloadTooSmall,
+                          ProductOutputError, TimedOut)
 from smoke.payload import PayloadBuilder
 from smoke.product import ProductOutput, diagnose_counts
 from smoke.secrets import PlantedSecret, mint_credential, scrub
@@ -1033,7 +1034,7 @@ class RunExecutor:
         try:
             body = PayloadBuilder(self._binary.repo_root).build(
                 self._config.payload_target_bytes)
-        except HarnessError:
+        except PayloadTooSmall:
             return definition.stdin
         return definition.stdin + body
 

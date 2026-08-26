@@ -56,5 +56,17 @@ class TimedOut(ProductOutputError):
         self.output = output
 
 
+class PayloadTooSmall(HarnessError):
+    """The checkout does not hold enough source to build the large payload.
+
+    A subclass because the executor DEGRADES on this one and on nothing else
+    it shares a type with. ``PayloadBuilder.build`` also raises for a negative
+    target and for a source file it cannot read, and those are defects in the
+    configuration or the harness -- swallowing them into "the run carried its
+    prompt alone" reports S8 as CANNOT_TEST with a cause that names the wrong
+    thing.
+    """
+
+
 class PreflightError(SmokeError):
     """A precondition failed before any scenario could run. Exit code 2."""

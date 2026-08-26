@@ -30,7 +30,7 @@ changes the content actually sent.
 
 import pathlib
 
-from smoke.errors import HarnessError
+from smoke.errors import HarnessError, PayloadTooSmall
 
 #: Where the material comes from. The product's own Rust sources: they are
 #: large enough, they are in every clone, and they are the kind of text a
@@ -139,7 +139,7 @@ class PayloadBuilder:
                 break
             self._append(path, collected, target_bytes)
         if len(collected) < target_bytes:
-            raise HarnessError(
+            raise PayloadTooSmall(
                 "the tree holds %d bytes under %s and the payload asked for "
                 "%d; the scenario cannot be evaluated on a short payload"
                 % (len(collected), SOURCE_GLOB, target_bytes)
