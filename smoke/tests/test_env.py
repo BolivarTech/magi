@@ -3,10 +3,13 @@
 # Date: 2026-08-25
 """Tests for the test environment's lifecycle."""
 
+import pathlib
+import tempfile
 import unittest
 
 from smoke.config import ModelProfile, Seat
-from smoke.env import Environment, _apply_profile, active_memories
+from smoke.env import (Environment, _apply_profile,
+                       _reject_transplanted_path, active_memories)
 from smoke.errors import PreflightError
 from smoke.tests import support
 
@@ -266,6 +269,76 @@ class ProfileRewriteTests(unittest.TestCase):
         """
         rewritten = _apply_profile(self._GENERATED, self._profile())
         self.assertIn('# melchior_model = "commented out"', rewritten)
+
+
+class ProfileValueRejectionTests(unittest.TestCase):
+    """A profile value is interpolated into TOML, so it has to BE a TOML value.
+
+    The rewrite writes ``key = "value"`` by string interpolation. A model tag
+    carrying a double quote or a backslash therefore produces a file that is
+    malformed at best and carries keys nobody wrote at worst -- and the
+    failure lands on the PRODUCT, refusing to parse a config the harness
+    generated, rather than on the profile line that caused it.
+
+    Refused rather than escaped, deliberately. An escaped tag would be
+    written faithfully and then not exist on the daemon, so the run dies
+    later and further from the cause; a model tag never legitimately contains
+    either character, so the value is simply wrong and saying so at the
+    profile is the shortest path to the fix.
+    """
+
+    @staticmethod
+    def _profile(model: str, lineage: str = "alpha") -> ModelProfile:
+        """A three-seat profile carrying *model* and *lineage* in every seat.
+
+        Args:
+            model: The tag to put in each seat and at the root.
+            lineage: The failure domain to declare for each seat.
+
+        Returns:
+            ModelProfile: The profile under test.
+        """
+        seat = Seat(model=model, lineage=lineage)
+        return ModelProfile(model=model, trio=[seat, seat, seat])
+
+    def test_a_quote_in_a_model_is_refused_naming_the_key(self) -> None:
+        with self.assertRaises(PreflightError) as caught:
+            _apply_profile(ProfileRewriteTests._GENERATED,
+                           self._profile('kimi"k2'))
+        self.assertIn("model", str(caught.exception))
+
+    def test_a_backslash_in_a_lineage_is_refused(self) -> None:
+        with self.assertRaises(PreflightError):
+            _apply_profile(ProfileRewriteTests._GENERATED,
+                           self._profile("kimi-k2.6:cloud", "moon\\shot"))
+
+    def test_an_ordinary_tag_still_goes_through(self) -> None:
+        rewritten = _apply_profile(ProfileRewriteTests._GENERATED,
+                                   self._profile("kimi-k2.6:cloud"))
+        self.assertIn('"kimi-k2.6:cloud"', rewritten)
+
+
+class TransplantedPathTests(unittest.TestCase):
+    """The guard that stops a generated config naming its own scratch dir.
+
+    It had no test at all. The defaults are obtained by running the product's
+    own ``init`` inside a temporary directory; if the product ever wrote that
+    path into the file, the environment would carry a reference to a
+    directory deleted moments later -- and the harness would have put it
+    there.
+    """
+
+    def test_either_separator_spelling_is_caught(self) -> None:
+        scratch = pathlib.Path(tempfile.gettempdir()) / "smoke-generated-xyz"
+        for spelling in (str(scratch), str(scratch).replace("\\", "/")):
+            with self.assertRaises(PreflightError):
+                _reject_transplanted_path('base_url = "%s"' % spelling,
+                                          scratch)
+
+    def test_a_config_that_names_no_scratch_path_passes(self) -> None:
+        _reject_transplanted_path(
+            'base_url = "http://localhost:11434/v1"',
+            pathlib.Path(tempfile.gettempdir()) / "smoke-generated-xyz")
 
 
 class MemorySettingsTests(unittest.TestCase):
