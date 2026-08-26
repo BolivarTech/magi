@@ -9,6 +9,34 @@ changes and the **patch** position signals backward-compatible fixes.
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-08-26
+
+### Added
+
+- A smoke-test harness under `smoke/`, run as `python -m smoke`. It builds the
+  release binary and drives it against a real backend and a real encrypted
+  database, the way somebody who installed it would, and checks 60 assertions
+  across 19 scenarios: the JSON contract, the sandbox, the vault's refusal to
+  reveal or delete, credential redaction over four channels, workspace
+  discovery, the MAGI trio and its derived timeout, tiered memory, and every
+  `magi-rs` invocation printed in the published documentation.
+
+  It exists because four releases were broken by defects the unit suite could
+  not have caught: a missing shared library, a glibc floor, a stale lockfile,
+  and seven documentation defects that shipped to crates.io. None of them could
+  have failed `cargo nextest run`, because a test that passes against a mock
+  says nothing about the binary a user runs, in release, against a daemon that
+  answers slowly or refuses.
+
+  Four outcomes rather than two: `PASS`, `FAIL`, `CANNOT_TEST` for something it
+  tried and the environment would not allow, and `OUT_OF_SCOPE` for what this
+  invocation never undertook. Without the third, everything unprovable
+  disguises itself as green. Exit code 3 is reserved for a failure of the
+  harness itself, so its own bugs are never read as a verdict on the product.
+
+  Development tool only: `cargo package` excludes it, along with the
+  certificate it emits.
+
 ### Fixed
 
 - Notices the agent emits now reach the operator in headless runs. The drain loop
@@ -100,7 +128,7 @@ high, and had to read the source to find out why: the budget derived from
   (`magi query --structured-verdicts` is a parse error, not an accepted no-op) and requires
   `--output-format json`; with text output it exits **2** rather than being ignored.
 
-  Requested by `magi-claude` (ref E-A) to delete ~11 Python modules that reimplement what this
+  Requested (ref E-A) to delete ~11 Python modules that reimplement what this
   crate already does.
 
 ## [0.14.2] - 2026-08-13
@@ -896,8 +924,8 @@ plain bytes.
   the DEK in O(1) but leaves every record encrypted under the *same* DEK.
   This protects against a compromised passphrase, not against a DEK already
   extracted from a running process's RAM. Documented, not surfaced as a
-  runtime warning (would be noise for routine rotation) — see `CLAUDE.md`
-  and the `vault passwd` docs.
+  runtime warning (would be noise for routine rotation) — see the
+  `vault passwd` docs.
 - **`mlock`/core-dump suppression are best-effort and platform-uneven.**
   Windows cannot prevent a user-initiated process dump from inside the
   program in any language; containers/CI without `CAP_IPC_LOCK` degrade with
@@ -906,7 +934,7 @@ plain bytes.
   rustdoc says so explicitly.
 - **Unlock ergonomics** (avoiding a passphrase prompt on every launch) and
   **hardware-backed key protection** (TPM/Secure Enclave) remain deferred —
-  see `dev-docs/PENDING_IMPLEMENTATION.md` §13.3/§13.4.
+  tracked internally as §13.3/§13.4.
 
 ## [0.8.0] - 2026-07-15
 
@@ -1225,7 +1253,8 @@ Initial pre-release, published primarily to reserve the `magi-rs` crate name.
 - `ratatui` TUI with Normal / Selection / Visual modes and Unicode-safe input.
 - OAuth (PKCE) login and OS keyring integration, with `magi-rust` legacy migration.
 
-[Unreleased]: https://github.com/BolivarTech/magi/compare/v0.15.0...HEAD
+[Unreleased]: https://github.com/BolivarTech/magi/compare/v0.16.0...HEAD
+[0.16.0]: https://github.com/BolivarTech/magi/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/BolivarTech/magi/compare/v0.14.3...v0.15.0
 [0.14.3]: https://github.com/BolivarTech/magi/compare/v0.14.2...v0.14.3
 [0.14.2]: https://github.com/BolivarTech/magi/compare/v0.14.1...v0.14.2
