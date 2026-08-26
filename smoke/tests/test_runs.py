@@ -389,6 +389,35 @@ class ControlRunTests(unittest.TestCase):
         self.assertNotIn("--no-memory", runs.DEFINITIONS["R3"].argv)
 
 
+class ArchiveScrubbingTests(unittest.TestCase):
+    """The passphrase is scrubbed on BOTH archive paths, not just one.
+
+    ``RunExecutor.archive`` adds it deliberately and explains why. The
+    ``invoke()`` path -- every autonomous scenario: S2, S3, S4, S5, S9, S14,
+    S15, S17 -- passes only the secrets the caller declared, while the child
+    carries the same passphrase in its environment. One path guarded, one not,
+    for the secret that opens the whole vault.
+    """
+
+    def test_the_passphrase_never_reaches_an_archived_invocation(self) -> None:
+        """Driven by a product that DOES echo it, because one that does not
+        cannot tell a guarded path from an unguarded one.
+        """
+        def leaks(call):
+            return ProductOutput(
+                stdout=b"error: could not open with " +
+                       support.FAKE_PASSPHRASE.encode("utf-8"),
+                stderr=b"", exit_code=1, command=["magi-rs"] + list(call.args))
+
+        support.install_fake_runs(self, responder=leaks)
+        runs.invoke(["vault", "ls"], timeout_s=5, label="probe")
+        archived = b"".join(path.read_bytes() for path in
+                            pathlib.Path(runs.archive_root()).rglob("*")
+                            if path.is_file())
+        self.assertTrue(archived, "nothing was archived")
+        self.assertNotIn(support.FAKE_PASSPHRASE.encode("utf-8"), archived)
+
+
 class AuthenticatedBackendTests(unittest.TestCase):
     """R6 has to put the credential in the URL, not only in a header.
 
