@@ -18,7 +18,8 @@ from smoke.product import ProductOutput
 from smoke.runs import RunResult
 from smoke.env import Growth
 from smoke.errors import HarnessError, PreflightError
-from smoke.registry import DECLARED_SCENARIO_COUNT, DEFAULT_REGISTRY
+from smoke.registry import (DECLARED_ASSERTION_COUNT,
+                            DECLARED_SCENARIO_COUNT, DEFAULT_REGISTRY)
 from smoke.__main__ import (
     EXIT_HARNESS,
     EXIT_NOT_PASSED,
@@ -159,6 +160,28 @@ class DeclaredCountAtRuntimeTests(unittest.TestCase):
 
     def test_the_real_registry_matches(self) -> None:
         main.require_declared_count(len(DEFAULT_REGISTRY.registered_ids()))
+
+    def test_a_registry_short_of_the_declared_assertions_is_refused(self) -> None:
+        """The coverage loss the reconciliation cannot see, by construction.
+
+        Reconciliation asks whether a scenario ANSWERED what it declared, so
+        deleting an assertion from the module constant and its yield together
+        satisfies it: both sides shrank. Nineteen scenarios still register,
+        nineteen still report, the certificate still says "19 of 19", and the
+        harness quietly promises less than the spec's sixty assertions.
+
+        Scenario count and assertion count are different questions, and only
+        the second sees this one.
+        """
+        with self.assertRaises(HarnessError) as caught:
+            main.require_declared_assertions(59)
+        self.assertIn("59", str(caught.exception))
+        self.assertIn(str(DECLARED_ASSERTION_COUNT), str(caught.exception))
+
+    def test_the_real_registry_declares_every_assertion(self) -> None:
+        main.require_declared_assertions(
+            sum(len(DEFAULT_REGISTRY.get(one).assertions)
+                for one in DEFAULT_REGISTRY.registered_ids()))
 
 
 #: What the patched preflight answers: a reachable backend, so the run
