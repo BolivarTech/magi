@@ -203,3 +203,67 @@ class ProfileRewriteTests(unittest.TestCase):
         """
         rewritten = _apply_profile(self._GENERATED, self._profile())
         self.assertIn('# melchior_model = "commented out"', rewritten)
+
+
+class MemorySettingsTests(unittest.TestCase):
+    """A default the product COMMENTED OUT is still a value it declared."""
+
+    def _write_env(self, body: str) -> Environment:
+        """Build an environment whose magi.toml holds *body*.
+
+        Args:
+            body: The file's contents.
+
+        Returns:
+            Environment: Ready to read.
+        """
+        root = pathlib.Path(tempfile.mkdtemp()) / "env"
+        env = Environment(root)
+        env.init()
+        (env.magi_dir / "magi.toml").write_text(body, encoding="utf-8")
+        return env
+
+    def test_a_live_key_is_read(self) -> None:
+        env = self._write_env("[memory]\ncontext_budget_tokens = 8000\n")
+        self.assertEqual(8000, env.memory_settings()["context_budget_tokens"])
+
+    def test_a_commented_default_is_read_as_a_default(self) -> None:
+        """``magi init`` writes two of the three fields commented, WITH their
+        real values interpolated -- so the file carries the product's own
+        defaults as data. Reading only the live keys made S9's ceiling
+        permanently underivable, including on the certifying run, and the
+        alternative (copying the defaults into the harness) is the second
+        source of truth this project rejects everywhere else. The value comes
+        from the line the product wrote.
+        """
+        env = self._write_env(
+            "[memory]\ncontext_budget_tokens = 8000\n"
+            "# response_headroom_tokens = 1024    # reserved for the reply\n"
+            "# safety_margin_ratio = 0.1           # heuristic guard\n"
+        )
+        settings = env.memory_settings()
+        self.assertEqual(1024, settings["response_headroom_tokens"])
+        self.assertEqual(0.1, settings["safety_margin_ratio"])
+
+    def test_a_live_key_wins_over_a_commented_one(self) -> None:
+        """An operator who uncommented and changed a value means it."""
+        env = self._write_env(
+            "[memory]\n# response_headroom_tokens = 1024\n"
+            "response_headroom_tokens = 4096\n"
+        )
+        self.assertEqual(4096, env.memory_settings()["response_headroom_tokens"])
+
+    def test_a_key_that_appears_nowhere_is_still_absent(self) -> None:
+        """Absent is not zero, and this is the half that keeps it so."""
+        env = self._write_env("[memory]\ncontext_budget_tokens = 8000\n")
+        self.assertNotIn("safety_margin_ratio", env.memory_settings())
+
+    def test_a_commented_key_of_another_table_is_not_borrowed(self) -> None:
+        """The scan is table-aware; a commented key under [openai] is not a
+        memory setting just because it is commented.
+        """
+        env = self._write_env(
+            "[openai]\n# safety_margin_ratio = 9.9\n"
+            "[memory]\ncontext_budget_tokens = 8000\n"
+        )
+        self.assertNotIn("safety_margin_ratio", env.memory_settings())
