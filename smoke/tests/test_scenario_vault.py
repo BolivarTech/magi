@@ -293,6 +293,23 @@ class WrongPassphraseScenarioBodyTests(unittest.TestCase):
                                           envelope=False))
         self.assertEqual({Outcome.CANNOT_TEST}, set(_outcomes("S4").values()))
 
+    def test_a_vault_row_is_not_accumulated_history(self) -> None:
+        """The same trap, defeated by the one table that is never empty.
+
+        R7 restores the backend credential into the ``vault`` table and leaves
+        it there, so ``vault: 1`` is the steady state of a persistent
+        environment after its first rotation. S4 declares no run and no
+        backend, so it also evaluates when the backend was down and nothing
+        wrote a single row of history. If the precondition counts that row,
+        the guardian goes green over a database with no history at all --
+        which is exactly what the empty-environment test above forbids, only
+        reached by a table that is not history.
+        """
+        support.install_fake_runs(
+            self, responder=_FakeDatabase(counts=(1, 0, 0, 0, 0)))
+        self.assertEqual(Outcome.CANNOT_TEST,
+                         _outcomes("S4")[vault.S4_ASSERTIONS[1]])
+
     def test_a_wrong_passphrase_that_opens_the_vault_fails(self) -> None:
         support.install_fake_runs(
             self, responder=_FakeDatabase(wrong_passphrase_opens=True))
