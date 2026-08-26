@@ -227,6 +227,63 @@ class LockLifetimeTests(unittest.TestCase):
         self.assertEqual([True], held,
                          "the lock must still be held while a run executes")
 
+    def test_a_second_run_cannot_start_while_the_certificate_is_written(self):
+        """The same race, moved later rather than closed.
+
+        Freeing the lock in a ``finally`` around the runs leaves everything
+        after it unlocked, and what comes after is not bookkeeping: the growth
+        figures the certificate publishes, ``RoundCounter``'s bump and reset --
+        which WRITE inside the environment -- the binary's digest, and the
+        document itself. A second run may take the lock the instant the
+        ``finally`` executes, and ``--reset-env`` would then rmtree the
+        directory the counter is about to write into, while the first run is
+        still deciding what its certificate says.
+        """
+        root = pathlib.Path(tempfile.mkdtemp())
+        held: list[bool] = []
+
+        def certifying(*args, **kwargs):
+            """Stand in for the certificate, and try to take the lock."""
+            try:
+                RunLock(root / ".lock").acquire()
+                held.append(False)
+            except PreflightError:
+                held.append(True)
+
+        def preflight(self, certifying_run, profile):
+            """Stand in for the preflight: take the lock, as step 2 does."""
+            self.lock.acquire()
+            return _REACHABLE
+
+        environment = mock.Mock()
+        environment.return_value.growth.return_value = Growth(
+            db_bytes=0, runs_bytes=0, active_memories=None)
+
+        patches = [
+            mock.patch.object(main, "LOCK_PATH", root / ".lock"),
+            mock.patch.object(main, "ENV_ROOT", root / "env"),
+            mock.patch.object(main, "CONFIG_PATH", root / "smoke.toml"),
+            mock.patch.object(main.SmokeConfig, "load"),
+            mock.patch.object(main, "Environment", environment),
+            mock.patch.object(main, "ReleaseBinary"),
+            mock.patch.object(main, "capture_tree"),
+            mock.patch.object(main.runs, "configure"),
+            mock.patch.object(main, "require_declared_count"),
+            mock.patch.object(main, "needed_runs", return_value=[]),
+            mock.patch.object(main, "DEFINITIONS", {}),
+            mock.patch.object(main.Preflight, "run", preflight),
+            mock.patch.object(main.Runner, "run", return_value=[]),
+            mock.patch.object(main, "certify", certifying),
+        ]
+        with contextlib.ExitStack() as stack:
+            for patch in patches:
+                stack.enter_context(patch)
+            main.main(["--smoke-2"])
+
+        self.assertEqual([True], held,
+                         "the lock must still be held while the certificate "
+                         "is decided and written")
+
 
 if __name__ == "__main__":
     unittest.main()
