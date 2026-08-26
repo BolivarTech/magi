@@ -28,9 +28,14 @@ token_floor  = 50000
 # S9's empirical numbers. Both are MEASURED in phase 5, against this
 # environment; a number chosen in the spec would be a guess wearing a
 # contract's clothes.
+# MEASURE these against YOUR environment; the numbers below are the ones this
+# repository measured on 2026-08-25 (R3 1295 input tokens vs R2 888, delta 407)
+# and they are a starting point, not an answer. Declare the margin well below
+# the delta you measure: it is a floor the delta must clear, and a value near
+# the measurement fails on ordinary variance instead of on a regression.
 [calibration]
-margin_tokens    = 0     # <measure>
-ceiling_fraction = 0.0   # <measure>
+margin_tokens    = 100
+ceiling_fraction = 0.8
 
 # CHEAP PROFILE - for iterating. It NEVER certifies (REQ-S35).
 # Starting point inherited from MAGI-Core, measured 2026-08-21. It is a
