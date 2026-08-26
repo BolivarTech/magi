@@ -151,6 +151,7 @@ class OrderingTests(unittest.TestCase):
         config = _resolvable_config(self)
         env = mock.Mock(spec=Environment)
         env.exists.return_value = True
+        env.declared_base_url.return_value = None
         env.normalize_magi_toml.side_effect = lambda profile: order.append("normalize")
         with mock.patch.object(RunLock, "acquire",
                                side_effect=lambda: order.append("lock")):
@@ -211,6 +212,7 @@ class PermissionCheckWiringTests(unittest.TestCase):
             _CONFIG_TEXT % "SMOKE_WIRING_KEY", encoding="utf-8")
         env = mock.Mock(spec=Environment)
         env.exists.return_value = True
+        env.declared_base_url.return_value = None
         with mock.patch.object(RunLock, "acquire"):
             with mock.patch.object(RunLock, "release"):
                 with mock.patch("smoke.preflight.check_config_permissions") as check:
@@ -252,6 +254,7 @@ class CredentialResolutionTests(unittest.TestCase):
         directory = pathlib.Path(tempfile.mkdtemp())
         env = mock.Mock(spec=Environment)
         env.exists.return_value = True
+        env.declared_base_url.return_value = None
         with mock.patch.object(RunLock, "acquire"):
             with mock.patch.object(RunLock, "release"):
                 with self.assertRaises(PreflightError) as caught:
@@ -269,6 +272,7 @@ class CredentialResolutionTests(unittest.TestCase):
         directory = pathlib.Path(tempfile.mkdtemp())
         env = mock.Mock(spec=Environment)
         env.exists.return_value = True
+        env.declared_base_url.return_value = None
         binary = mock.Mock(spec=ReleaseBinary)
         with mock.patch.object(RunLock, "acquire"):
             with mock.patch.object(RunLock, "release"):

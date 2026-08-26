@@ -214,6 +214,7 @@ class Preflight:
         self._restore_rotation_if_left_over()
         self._settle_binary(certifying)
         self.env.normalize_magi_toml(profile)
+        self._require_one_endpoint()
         return self._probe_backend()
 
     def _require_python(self) -> None:
@@ -397,6 +398,30 @@ class Preflight:
         if certifying:
             self.binary.rebuild()
         self.binary.version()
+
+    def _require_one_endpoint(self) -> None:
+        """The endpoint this preflight probes is the one the runs will use.
+
+        Runs after step 7b, because 7b is what writes the file this reads.
+
+        Raises:
+            PreflightError: If the two disagree, naming both. A probe aimed at
+                a different host certifies a backend nothing talks to, and it
+                stays invisible for as long as both hosts happen to serve the
+                same models.
+        """
+        declared = self.env.declared_base_url()
+        if declared is None:
+            return
+        probed = self.config.backend_base_url
+        if declared.rstrip("/") == probed.rstrip("/"):
+            return
+        raise PreflightError(
+            "the runs go to %s, which is what the environment's configuration "
+            "declares, but smoke.toml points the backend probe at %s. Make "
+            "[backend].base_url match, or the probe certifies a host nothing "
+            "talks to." % (declared, probed)
+        )
 
     def _probe_backend(self) -> BackendStatus:
         """Step 8: ask the backend whether it is there.

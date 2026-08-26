@@ -334,6 +334,27 @@ class Environment:
         return Growth(db_bytes=db_bytes, runs_bytes=runs_bytes,
                       active_memories=None)
 
+    def declared_base_url(self):
+        """The root ``base_url`` the environment's configuration declares.
+
+        This is where the RUNS go. ``[backend].base_url`` in ``smoke.toml`` is
+        a separate setting read only by the reachability probe, and the two
+        drifting apart is invisible: the probe reports a healthy backend about
+        a host nothing talks to.
+
+        Returns:
+            str | None: The declared endpoint, or None when the file is absent
+            or unreadable. None means NOT MEASURABLE, and the caller treats it
+            as such rather than as a disagreement.
+        """
+        try:
+            document = tomllib.loads(
+                (self.magi_dir / MAGI_TOML_NAME).read_text(encoding="utf-8"))
+        except (OSError, tomllib.TOMLDecodeError):
+            return None
+        value = document.get("base_url")
+        return value if isinstance(value, str) else None
+
     def memory_settings(self) -> dict[str, object]:
         """Read the product's ``[memory]`` table out of the environment.
 
