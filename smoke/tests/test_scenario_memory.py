@@ -367,7 +367,8 @@ class EmbedderDownTests(unittest.TestCase):
         binary = support.install_fake_runs(self, responder=_FakeDegraded(notice=True))
         _seed_env_config()
         _outcomes(_runs(), _ambient())
-        queries = [call for call in binary.calls if call.args[:1] == ["query"]]
+        queries = [call for call in binary.calls
+                   if list(call.args[:1]) == ["query"]]
         self.assertGreaterEqual(len(queries), 2)
 
     def test_a_run_that_completes_with_the_notice_passes(self) -> None:
@@ -458,6 +459,12 @@ class _FakeDegraded:
             return ProductOutput(stdout=b"", stderr=b"", exit_code=0,
                                  command=["magi-rs", memory.INIT_SUBCOMMAND])
         if args[:1] == ["query"]:
+            # The planting half must succeed whatever this double stands in
+            # for: exit_code describes the run under test, which is the
+            # RECALL, and failing the plant instead only ever yields
+            # CANNOT_TEST over a store that was never filled.
+            if call.stdin == memory.PLANT_PROMPT:
+                return _capture({"response": "ok"}, stderr=b"", exit_code=0)
             stderr = (b"note: " + memory.DEGRADATION_MARKER.encode() + b"\n"
                       if self.notice else b"note: nothing to report\n")
             return _capture({"response": "ok"}, stderr=stderr,

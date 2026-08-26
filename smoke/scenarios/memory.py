@@ -110,10 +110,31 @@ EMBEDDING_SECTION_HEADER = "[embedding]"
 #: The key overridden inside that table.
 BASE_URL_KEY = "base_url"
 
-#: The product's own phrase for this degradation. Matched rather than any
-#: mention of the embedder, because REQ-29 is specifically about falling back to
-#: text-only persistence instead of failing the turn.
-DEGRADATION_MARKER = "text-only persistence"
+#: The product's own phrase for this degradation, taken from the path the
+#: probe actually reaches: the assembler failing and falling back to the full
+#: history (``src/agent/mod.rs``, ``summarize_assembly_error``).
+#:
+#: It used to be "text-only persistence", which the product emits on exactly
+#: one path -- the embedder CLIENT failing to CONSTRUCT, which happens for a
+#: malformed URL or an unresolvable vault entry and never for an endpoint that
+#: is merely unreachable or that answers with an error, because the client is
+#: built lazily and constructs fine either way. The probe creates the second
+#: kind, so the assertion matched a string its own run could not produce, and
+#: it hid behind CANNOT_TEST for as long as the probe also hung.
+DEGRADATION_MARKER = "context assembly failed"
+
+#: What the probe stores before it breaks the embedder. A workspace with no
+#: memories never asks the embedder to do anything, so the degradation never
+#: happens and the assertion evaluates a run in which nothing went wrong.
+PLANT_PROMPT = b"Remember that my favourite colour is green, then say ok.\n"
+
+#: What the probe asks once the embedder is failing. It has to be a RECALL,
+#: because that is the path that embeds a query and therefore the path that
+#: degrades.
+RECALL_PROMPT = b"What is my favourite colour?\n"
+
+#: What the planting half is called in the archive.
+PLANT_LABEL = "s9-embedder-down-plant"
 
 #: How long each half of the probe is given, in seconds. The scaffold touches
 #: no network; the query is one short turn against the real backend.
@@ -123,10 +144,6 @@ PROBE_TIMEOUT_S = 180
 #: What the two probe invocations are called in the archive.
 SCAFFOLD_LABEL = "s9-embedder-down-init"
 PROBE_LABEL = "s9-embedder-down-query"
-
-#: The prompt the probe sends. Short on purpose: the assertion is about what
-#: the product does when its embedder is unreachable, not about the answer.
-PROBE_PROMPT = b"Remember that my favourite colour is green, then say ok.\n"
 
 #: Prefix of the throwaway workspace, so a leaked one is identifiable.
 PROBE_PREFIX = "smoke-s9-embedder-"
@@ -417,19 +434,44 @@ def _embedder_down_finding():
                        "the environment's %s could not be read, so the probe "
                        "has no configuration to patch: %s"
                        % (MAGI_TOML_NAME, exc))
+        # Plant FIRST, with the environment's own embedder still working, so
+        # the store has something for the recall to look for. Only then break
+        # it: a workspace with no memories never asks the embedder anything.
+        (workspace / MAGI_DIR_NAME / MAGI_TOML_NAME).write_text(
+            source, encoding="utf-8")
+        planted = _query(workspace, PLANT_PROMPT, PLANT_LABEL)
+        if not planted.ok:
+            return _s9(4, Outcome.CANNOT_TEST, None, planted.failure)
+        if planted.output.exit_code != SUCCESS_EXIT_CODE:
+            return _s9(4, Outcome.CANNOT_TEST, None,
+                       "the planting run exited %d, so there is nothing in "
+                       "the store for the recall to embed"
+                       % planted.output.exit_code)
         with runs.error_backend() as endpoint:
             (workspace / MAGI_DIR_NAME / MAGI_TOML_NAME).write_text(
                 point_embedding_at(endpoint, source), encoding="utf-8")
-            probe = runs.attempt(
-                ["query", "--output-format", "json", "-w", str(workspace),
-                 "--auto"],
-                stdin=PROBE_PROMPT, timeout_s=PROBE_TIMEOUT_S,
-                label=PROBE_LABEL,
-                env={runs.PASSPHRASE_VARIABLE: runs.passphrase()},
-            )
+            probe = _query(workspace, RECALL_PROMPT, PROBE_LABEL)
         return _judge_degraded(probe)
     finally:
         shutil.rmtree(workspace, ignore_errors=True)
+
+
+def _query(workspace, prompt, label):
+    """Run one query inside the throwaway workspace.
+
+    Args:
+        workspace: Where the product should look for its ``.magi/``.
+        prompt: What to send on standard input.
+        label: What to call the invocation in the archive.
+
+    Returns:
+        Attempt: The capture, or why there is none.
+    """
+    return runs.attempt(
+        ["query", "--output-format", "json", "-w", str(workspace), "--auto"],
+        stdin=prompt, timeout_s=PROBE_TIMEOUT_S, label=label,
+        env={runs.PASSPHRASE_VARIABLE: runs.passphrase()},
+    )
 
 
 def _judge_degraded(probe):
