@@ -128,7 +128,7 @@ gets rationalised until somebody deletes the assertion.
 
 ## What it costs
 
-Measured on 2026-08-26 against an Ollama daemon on the LAN, product defaults, on a green
+Measured on 2026-08-26 against a local Ollama daemon, product defaults, on a green
 run: **558 seconds end to end** for the preflight, eight product runs and nineteen
 scenarios. Two individual numbers were taken directly, because they are the ones that
 decide the total:
@@ -140,6 +140,14 @@ decide the total:
 
 The other six are short queries and consults; nothing measures them individually, and a
 table of invented per-run numbers would be worse than none.
+
+**R4 no longer reproduces failure #4, and that is a deliberate trade.** The spec picks
+S7 as the direct reproduction of a `--timeout`-driven ceiling collapse, and 300 was the
+value that collapsed it. At 1800 the arithmetic assertions still check the derived
+relation, but `ceiling_floored` is false and the collapse itself is out of reach outside
+a hang. What was bought is a run that can complete at all; what was sold is the
+reproduction. A cheap standalone assertion on a low-`--timeout` run would buy it back
+without a trio invocation, and it is not written yet.
 
 R4 dominates, and its budget is the number worth understanding before you touch it. The
 product divides `--timeout` across two attempts of each of three models per mage, so a
@@ -225,6 +233,13 @@ surplus. A checkable requirement with no scenario is a declared hole.
 
 ## Known limitations
 
+- **The probe and the runs must name the same endpoint, and the preflight now checks it.**
+  `[backend].base_url` in `smoke.toml` is read by exactly one thing, the reachability
+  probe; every run goes to whatever the environment's `magi.toml` declares at its root.
+  This repository ran a whole session with the probe aimed at a machine on the LAN and the
+  runs going to localhost, and nothing noticed, because both daemons served the same tags.
+  Step 8 would have cut on the first discrepancy that mattered: the embedding model exists
+  on one and not on the other.
 - **A killed run leaves the lock behind.** `smoke/.lock` sits beside `env/` rather than
   inside it, so `--reset-env` does not clear it. Delete it by hand after a run was
   killed.
@@ -243,11 +258,19 @@ surplus. A checkable requirement with no scenario is a declared hole.
 - **`env/` is not portable.** It carries absolute paths and a database with
   filesystem-specific state. Copying it to another machine does not work. Run
   `--init-env` there instead.
-- **S14's guardians were mutation-verified once.** With `-w` resolution disabled, seven
-  of the eight integration tests go red. The record and the reasoning live in
-  `tests/workdir_flag.rs`, above `seed_workspace`. Re-run that mutation if you change how
-  the flag resolves, because reading the tests cannot see this one: in the earlier
-  version the setup and the assertion moved together.
+- **S14's mutation record is borrowed, not its own.** `tests/workdir_flag.rs` documents a
+  mutation of the product's `-w` resolution: seven of its eight integration tests go red
+  with the flag disabled, and the reasoning sits above `seed_workspace`. That is a
+  different artifact guarding a different build profile, and S14 exists precisely because
+  those run in debug. S14's own four assertions were mutation-verified at the level of the
+  double (`test_a_resolver_that_ignores_the_flag_fails`), not against the release binary.
+  Doing it against the binary is open work.
+- **Two scenarios can be talked out of their own subject.** S18's key counts and S19's cap
+  both read a structure the model has to produce first; if it produces none they report
+  `CANNOT_TEST`, which blocks the gate. S5 hit this and was fixed by measuring a prompt
+  that makes the product act instead of explain, recorded as `DEFER_TO_THE_GUARD`. The
+  other two have no equivalent yet, so the gate's colour still depends on model behaviour
+  in two places.
 
 ## What the first four rounds found
 
