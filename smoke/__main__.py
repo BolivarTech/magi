@@ -204,6 +204,18 @@ def main(argv: list[str] | None = None) -> int:
             run_results[run_id] = result
         findings = Runner(DEFAULT_REGISTRY, run_results, backend.reachable,
                           ambient).run()
+        # The active-memory count comes from a RUN, not from the filesystem:
+        # the database is encrypted, so the product's own startup line is the
+        # only source. Without this the field was None forever and every
+        # report read "active memories not measured" while the number sat in
+        # a capture.
+        growth = dataclasses.replace(
+            env.growth(),
+            active_memories=active_memories(
+                b"".join(result.output.raw()
+                         for result in run_results.values())))
+        print(Report(findings, growth).render(), end="")
+        certify(args, profile, findings, env, binary, run_results, growth)
     except PreflightError as exc:
         print(f"preflight: {exc}", file=sys.stderr)
         return EXIT_PREFLIGHT
@@ -211,27 +223,14 @@ def main(argv: list[str] | None = None) -> int:
         print(f"harness failure: {exc}", file=sys.stderr)
         return EXIT_HARNESS
     finally:
-        # Released HERE, once the runs are done, and in a `finally` so every
-        # path frees it. Binding it above is what fixes the defect -- the
-        # temporary was collected mid-run and the OS released the lock with the
-        # handle -- but leaning on the process exiting to free it would make
-        # `main` unusable twice in one process, which the tests do.
+        # Released once EVERYTHING that touches the shared environment is
+        # done, the certificate included: RoundCounter writes inside the
+        # environment, growth reads it, and the digest is taken off a binary
+        # a concurrent preflight would rebuild. Binding the lock above is what
+        # keeps it alive -- the temporary was collected mid-run and the OS
+        # released the lock with the handle.
         if lock is not None:
             lock.release()
-    # The active-memory count comes from a RUN, not from the filesystem: the
-    # database is encrypted, so the product's own startup line is the only
-    # source. Without this the field was None forever and every report read
-    # "active memories not measured" while the number sat in a capture.
-    growth = dataclasses.replace(
-        env.growth(),
-        active_memories=active_memories(
-            b"".join(result.output.raw() for result in run_results.values())))
-    print(Report(findings, growth).render(), end="")
-    try:
-        certify(args, profile, findings, env, binary, run_results, growth)
-    except HarnessError as exc:
-        print(f"harness failure: {exc}", file=sys.stderr)
-        return EXIT_HARNESS
     return exit_code_for(findings)
 
 
