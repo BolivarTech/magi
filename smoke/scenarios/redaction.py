@@ -63,7 +63,7 @@ def no_credential_leaks(run):
 
     planted = tuple(run.planted)
     streams = run.output.raw()
-    log = _archived_log()
+    log = _archived_log(run.run_id)
 
     yield _leak_finding(0, streams, planted,
                         "stdout and stderr")
@@ -124,30 +124,48 @@ def _authority_finding(streams, log):
     return _finding(3, Outcome.PASS, "")
 
 
-def _archived_log():
-    """Read back what the executor wrote to disk for the most recent run.
+def _archived_log(run_id):
+    """Read back what the executor archived for THIS run.
 
     The archive is the third channel, and it is the one a reader keeps. The
     capture the assertions walk is NOT what is persisted: the archive is
     scrubbed (section 2.5), so a leak found here is a leak the scrubber did not
-    know about -- which is precisely the case worth reporting.
+    know about, which is precisely the case worth reporting.
+
+    It is scoped to the run's own directory, and that scoping is the fix to a
+    real false positive. The first version globbed every ``invocation.log``
+    under the archive root and concatenated them, so it read fixtures other
+    scenarios had written. One of those is the placeholder the product
+    documents and requires, ``https://[user]:[password]@host``, and assertion 4
+    reported the harness's own fixture as an authority the product had leaked.
+
+    Complexity: ``O(archived bytes for this run)``.
+
+    Args:
+        run_id: The run whose archive to read.
 
     Returns:
-        bytes | None: The archived bytes, or None when no log was found.
+        bytes | None: The archived bytes, or None when nothing was archived.
     """
     try:
         directory = runs.archive_root()
     except Exception:  # noqa: BLE001 - an unconfigured module means "cannot tell"
         return None
-    if directory is None or not directory.is_dir():
+    if directory is None:
         return None
-    logs = sorted(directory.rglob("invocation.log"))
-    if not logs:
+    mine = directory / run_id
+    if not mine.is_dir():
         return None
-    try:
-        return b"\n".join(path.read_bytes() for path in logs)
-    except OSError:
+    chunks = []
+    for path in sorted(mine.rglob("*")):
+        try:
+            if path.is_file():
+                chunks.append(path.read_bytes())
+        except OSError:
+            continue
+    if not chunks:
         return None
+    return b"\n".join(chunks)
 
 
 def _finding(index, outcome, detail):
