@@ -432,6 +432,27 @@ class ShortTreeTests(unittest.TestCase):
         result = executor.execute(runs.DEFINITIONS["R4"])
         self.assertEqual(len(runs.DEFINITIONS["R4"].stdin), result.stdin_bytes)
 
+    def test_any_other_harness_error_still_stops_the_run(self) -> None:
+        """The degrade is for a tree too small and for nothing else.
+
+        Catching every ``HarnessError`` here reads the same as catching the
+        one that matters, and it is not: a source file that cannot be read, a
+        target that makes no sense, a builder that fails for any reason at all
+        would silently become "the large run carried its prompt alone" -- and
+        S8, whose whole subject is what the product does with a large input,
+        would report on a payload that was never assembled. Widen the except
+        and this goes green while S8 quietly measures nothing.
+        """
+        support.install_fake_runs(self)
+        executor = runs.RunExecutor(
+            runs._binary, runs._env,
+            support.FakeConfig(support.FAKE_PASSPHRASE,
+                               payload_target_bytes=4096))
+        with mock.patch.object(runs.PayloadBuilder, "build",
+                               side_effect=HarnessError("unreadable source")):
+            with self.assertRaises(HarnessError):
+                executor.execute(runs.DEFINITIONS["R4"])
+
 
 class BaselineCaptureTests(unittest.TestCase):
     """The rotation's baseline is produced by the EXECUTOR, and nothing tested it.
