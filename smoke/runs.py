@@ -287,6 +287,22 @@ def payload_bytes(run_id):
         raise HarnessError("run %r is not in the table" % run_id) from exc
 
 
+def archive_root():
+    """Where this run's invocations were archived, or ``None`` if unconfigured.
+
+    The archive is the third channel S10 searches, and it is the one a reader
+    keeps. What is written there is SCRUBBED, so a secret found in it is one
+    the scrubber was never told about -- exactly the case worth reporting
+    rather than the case worth hiding.
+
+    Returns:
+        pathlib.Path | None: The directory, or None before :func:`configure`.
+    """
+    if _env is None:
+        return None
+    return pathlib.Path(_env.runs_dir)
+
+
 def attempt(argv, stdin=None, *, timeout_s, label, planted=(), cwd=None,
             env=None):
     """Invoke the product, returning the capture or the reason there is none.

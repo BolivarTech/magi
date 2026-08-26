@@ -3,15 +3,23 @@
 # Date: 2026-08-25
 """Unit tests for the S10 scenario's own shape."""
 
+import pathlib
+import tempfile
 import unittest
 import urllib.parse
+from unittest import mock
 
 from smoke.outcome import Outcome
 from smoke.registry import DEFAULT_REGISTRY
 from smoke.scenarios import redaction  # noqa: F401 - import registers it
 from smoke.secrets import PlantedSecret, mint_credential
 
-_SECRET = "sup3rs3cr3t-value"
+#: RESERVED characters on purpose. Without them the percent-encoded form
+#: equals the raw one -- ``quote`` leaves letters, digits and ``-._~``
+#: alone -- so the encoding test would exercise no encoding at all and a
+#: raw-only search would pass it. The mutation said so before this line
+#: did.
+_SECRET = "sup3r@s3cr3t/value#1"
 _LABEL = "backend credential"
 
 
@@ -105,10 +113,44 @@ class RedactionScenarioTests(unittest.TestCase):
 class RedactionBodyTests(unittest.TestCase):
     """What S10 concludes about output that leaks, and output that does not."""
 
-    def test_a_clean_capture_passes_every_assertion(self) -> None:
+    def test_a_clean_capture_passes_the_three_it_can_evaluate(self) -> None:
+        """With no archive configured, assertion 3 has nothing to search.
+
+        It reports CANNOT_TEST rather than PASS, which is the discipline this
+        harness runs on: finding no leak in a channel you never opened is not
+        evidence of anything.
+        """
         run = _FakeRun(stdout=b'{"ok": true}',
                        stderr=b"error: request to https://***@host/v1 failed")
-        self.assertEqual({Outcome.PASS}, set(_outcomes(run).values()))
+        outcomes = _outcomes(run)
+        for index in (0, 1, 3):
+            self.assertEqual(Outcome.PASS, outcomes[redaction.ASSERTIONS[index]])
+        self.assertEqual(Outcome.CANNOT_TEST,
+                         outcomes[redaction.ASSERTIONS[2]])
+
+    def test_a_clean_archive_passes_the_third(self) -> None:
+        """The other half: with a log present and clean, assertion 3 evaluates."""
+        directory = pathlib.Path(tempfile.mkdtemp()) / "r6-1"
+        directory.mkdir(parents=True)
+        (directory / "invocation.log").write_bytes(
+            b"$ magi-rs query\n<redacted: backend credential, 1 occurrence>")
+        with mock.patch.object(redaction.runs, "archive_root",
+                               return_value=directory.parent):
+            outcomes = _outcomes(_FakeRun(stdout=b'{"ok": true}'))
+        self.assertEqual(Outcome.PASS, outcomes[redaction.ASSERTIONS[2]])
+
+    def test_a_leak_in_the_archive_fails_the_third(self) -> None:
+        """The archive is written SCRUBBED, so a secret found there is one the
+        scrubber was never told about -- the case worth reporting.
+        """
+        directory = pathlib.Path(tempfile.mkdtemp()) / "r6-1"
+        directory.mkdir(parents=True)
+        (directory / "invocation.log").write_bytes(
+            ("$ magi-rs query\n%s" % _SECRET).encode("utf-8"))
+        with mock.patch.object(redaction.runs, "archive_root",
+                               return_value=directory.parent):
+            outcomes = _outcomes(_FakeRun(stdout=b'{"ok": true}'))
+        self.assertEqual(Outcome.FAIL, outcomes[redaction.ASSERTIONS[2]])
 
     def test_the_raw_credential_in_stderr_fails_the_first(self) -> None:
         run = _FakeRun(stderr=("error: %s rejected" % _SECRET).encode("utf-8"))

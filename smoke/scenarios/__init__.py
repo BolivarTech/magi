@@ -25,3 +25,4 @@ from smoke.scenarios import tools  # noqa: F401
 from smoke.scenarios import memory  # noqa: F401
 from smoke.scenarios import trio  # noqa: F401
 from smoke.scenarios import agent_path  # noqa: F401
+from smoke.scenarios import redaction  # noqa: F401
