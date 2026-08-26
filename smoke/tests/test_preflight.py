@@ -308,6 +308,25 @@ class RotationRestoreTests(unittest.TestCase):
         self.addCleanup(os.environ.pop, "SMOKE_TEST_KEY", None)
         return Preflight(config, env, binary, mock.Mock(spec=RunLock)), calls
 
+    def test_every_vault_call_names_the_environment(self) -> None:
+        """Without ``-w`` the product walks UP from the harness's own working
+        directory, which is the repository root, not ``smoke/env/``.
+
+        Two consequences, and the second is the one that matters. ``vault ls``
+        exits non-zero where there is no ``.magi/``, so ``_vault_names``
+        answers None and the marker is never detected: step 6, the layer that
+        covers a power cut, does not exist. And if any ancestor of the launch
+        directory does carry a ``.magi/``, the restore writes the operator's
+        real backend credential into that unrelated workspace's vault.
+
+        ``RunExecutor._vault_set`` has always passed ``-w``; this path did not.
+        """
+        preflight, calls = self._preflight("SMOKE_R7_ROTATION\n")
+        preflight._restore_rotation_if_left_over()
+        self.assertTrue(calls, "no vault call was made at all")
+        for call in calls:
+            self.assertIn("-w", call, "vault call without -w: %r" % (call,))
+
     def test_a_left_over_marker_is_restored_and_removed(self) -> None:
         """Detection alone leaves the environment broken for the next run."""
         preflight, calls = self._preflight("SMOKE_R7_ROTATION\nOPENAI_API_KEY\n")
