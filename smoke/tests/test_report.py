@@ -106,15 +106,17 @@ class ReportRenderingTests(unittest.TestCase):
 class ReportCountingTests(unittest.TestCase):
     """The summary is the line most people read, so it counts exactly."""
 
-    def test_blocking_is_fail_and_cannot_test_only(self) -> None:
-        report = Report([
-            _finding("S1", "a"),
-            _finding("S2", "b", Outcome.FAIL, "broke"),
-            _finding("S3", "c", Outcome.CANNOT_TEST, "no backend"),
-            _finding("S4", "d", Outcome.OUT_OF_SCOPE, "never promised"),
-        ])
-        self.assertEqual(["S2", "S3"],
-                         [finding.scenario for finding in report.blocking()])
+    def test_fail_and_cannot_test_are_what_block_a_green_run(self) -> None:
+        """Asserted on the outcome itself, which is what production reads.
+
+        This used to go through ``Report.blocking()``, an accessor whose only
+        caller was this test: ``exit_code_for`` reads ``outcome.blocks_gate``
+        directly. A test is not a consumer, so the accessor went and the
+        guarantee stayed -- pointed at the path that actually decides the
+        exit code.
+        """
+        blocking = {outcome for outcome in Outcome if outcome.blocks_gate}
+        self.assertEqual({Outcome.FAIL, Outcome.CANNOT_TEST}, blocking)
 
     def test_out_of_scope_counts_as_neither_passed_nor_not_passed(self) -> None:
         """It was never promised, so counting it either way misstates the run:
@@ -128,20 +130,6 @@ class ReportCountingTests(unittest.TestCase):
         ])
         self.assertIn("result: 1 passed, 1 not passed, 3 total",
                       report.render())
-
-    def test_grouped_by_run_indexes_every_finding_by_its_run(self) -> None:
-        report = Report([_finding("S1", "a", run_id="R1"),
-                         _finding("S2", "b", run_id="R1"),
-                         _finding("S3", "c")])
-        grouped = report.grouped_by_run()
-        self.assertEqual(["S1", "S2"],
-                         [finding.scenario for finding in grouped["R1"]])
-        self.assertEqual(["S3"],
-                         [finding.scenario for finding in grouped[None]])
-
-
-class ReportGrowthTests(unittest.TestCase):
-    """Growth is made visible, and an unmeasured count says so."""
 
     def test_an_unmeasured_memory_count_is_not_rendered_as_zero(self) -> None:
         """None means NOT MEASURED. Printing it as 0 is the same lie the

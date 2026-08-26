@@ -318,6 +318,13 @@ class Runner:
             findings = (entry.func(run, self._ambient) if entry.needs_ambient
                         else entry.func(run))
             return list(findings), False
+        # ProductOutputError and NOTHING wider, deliberately. A scenario is
+        # harness code: if it raises a KeyError over a capture it misread,
+        # that is a defect in the HARNESS and exit 3 is the honest answer.
+        # Converting it into a FAIL finding -- which reads as a verdict on
+        # the product -- would blame the product for the harness's bug, and
+        # that is the one direction this whole design refuses to be wrong in.
+        # A failure of the PRODUCT arrives typed, because runs.py wraps it.
         except ProductOutputError as exc:
             return [
                 Finding(

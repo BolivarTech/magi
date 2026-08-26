@@ -132,32 +132,16 @@ class Report:
         """
         return self._findings
 
-    def blocking(self) -> list:
-        """The findings that forbid a green run.
-
-        Complexity: ``O(findings)``.
-
-        Returns:
-            list: Every ``FAIL`` and ``CANNOT_TEST``, in report order.
-        """
-        return [one for one in self._findings if one.outcome.blocks_gate]
-
-    def grouped_by_run(self) -> dict:
-        """Every finding, indexed by the run that produced it.
-
-        Complexity: ``O(findings)``.
-
-        Returns:
-            dict: Run id (or None for the standalone scenarios) to the
-            findings it produced, each list in report order.
-        """
-        grouped: dict = {}
-        for one in self._findings:
-            grouped.setdefault(one.run_id, []).append(one)
-        return grouped
-
     def causes(self) -> list:
         """The distinct causes, each with the assertions it accounts for.
+
+        **This groups the CAUSE LINES, and hides nothing.** ``render`` emits
+        one line per finding first and only then this block, and each entry
+        lists its own members -- so two failures sharing a ``(run_id,
+        detail)`` key are both printed individually and both named under the
+        cause. What the key collapses is the repeated cause TEXT, which is
+        what a run of eight scenarios blocked by one dead backend produces
+        and what a reader does not need eight times.
 
         Complexity: ``O(findings)``.
 

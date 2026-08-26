@@ -19,6 +19,15 @@ from smoke.outcome import Finding
 #: with two readers is what keeps the headline and the registry from drifting.
 DECLARED_SCENARIO_COUNT = 19
 
+#: How many ASSERTIONS those scenarios promise between them, per section 8 of
+#: the spec. A separate constant because it answers a separate question, and
+#: the reconciliation cannot answer this one: it checks that a scenario
+#: ANSWERED what it declared, so deleting an assertion from a module constant
+#: and its yield together satisfies it -- both sides shrank. The scenario
+#: count stays 19, the certificate still reads "19 of 19", and the coverage is
+#: quietly smaller.
+DECLARED_ASSERTION_COUNT = 60
+
 #: A scenario takes the run it declared, and -- only when it declares
 #: needs_ambient -- the ambient state as a second argument. The union is
 #: honest about a real two-shape call rather than hiding it behind ``...``,

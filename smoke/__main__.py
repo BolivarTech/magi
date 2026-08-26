@@ -27,7 +27,8 @@ from smoke.env import Environment, active_memories
 from smoke.errors import HarnessError, PreflightError
 from smoke.lock import RunLock
 from smoke.preflight import Preflight
-from smoke.registry import DECLARED_SCENARIO_COUNT, DEFAULT_REGISTRY
+from smoke.registry import (DECLARED_ASSERTION_COUNT,
+                            DECLARED_SCENARIO_COUNT, DEFAULT_REGISTRY)
 from smoke.report import Report
 from smoke.runner import Ambient, Runner, StampedFinding, capture_tree
 from smoke.runs import DEFINITIONS, RunExecutor, RunResult, needed_runs
@@ -120,6 +121,34 @@ def require_declared_count(registered: int) -> None:
     )
 
 
+def require_declared_assertions(declared: int) -> None:
+    """Check the registry's assertion total against what the spec promises.
+
+    The scenario count and the assertion count are different questions, and
+    only this one sees a scenario that quietly answers less than it used to:
+    the runner's reconciliation compares a scenario's declared assertions
+    against the ones it answered, so shrinking both together passes.
+
+    Args:
+        declared: How many assertions the registry's scenarios declare between
+            them.
+
+    Raises:
+        HarnessError: If it differs from :data:`DECLARED_ASSERTION_COUNT`. A
+            defect in the HARNESS -- exit 3 -- never a verdict on the product.
+    """
+    if declared == DECLARED_ASSERTION_COUNT:
+        return
+    raise HarnessError(
+        "the registry declares %d assertions and the harness promises %d. "
+        "Either a scenario stopped declaring one -- which the per-scenario "
+        "reconciliation cannot see, because it only asks whether a scenario "
+        "answered what it declared -- or the constant moved without the "
+        "assertions that justify it."
+        % (declared, DECLARED_ASSERTION_COUNT)
+    )
+
+
 def exit_code_for(findings: list[StampedFinding]) -> int:
     """Map the findings to the process exit code.
 
@@ -162,6 +191,9 @@ def main(argv: list[str] | None = None) -> int:
                 env.reset() if args.reset_env else env.init()
             return EXIT_OK
         require_declared_count(len(DEFAULT_REGISTRY.registered_ids()))
+        require_declared_assertions(
+            sum(len(DEFAULT_REGISTRY.get(one).assertions)
+                for one in DEFAULT_REGISTRY.registered_ids()))
         certifying = args.smoke_2 and profile is None
         binary = ReleaseBinary(REPO_ROOT)
         runs.configure(binary, env, config)
