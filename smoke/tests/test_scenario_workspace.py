@@ -286,10 +286,10 @@ class WindowsPrincipalCountTests(unittest.TestCase):
         "C:\\ws\\.magi THOTH\\jbolivarg:(OI)(CI)(F)\n"
         "                THOTH\\someone-else:(R)\n"
     )
-    _BROAD = (
-        "C:\\ws\\.magi THOTH\\jbolivarg:(OI)(CI)(F)\n"
-        "                Everyone:(R)\n"
-    )
+    #: ONE account, and it is the broad one. Pairing Everyone with the owner
+    #: would make the count check fire too, so dropping the broad check
+    #: would still FAIL and the test would guard nothing.
+    _BROAD = "C:\\ws\\.magi Everyone:(F)\n"
 
     def _verdict(self, listing):
         """Run the permission finding against a canned icacls listing.
