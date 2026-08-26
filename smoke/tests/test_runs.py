@@ -4,8 +4,10 @@
 """Tests for the one door between a scenario and the product."""
 
 import pathlib
+import socket
 import tempfile
 import unittest
+import urllib.parse
 from unittest import mock
 
 from smoke import runs
@@ -259,6 +261,51 @@ class DefinitionTableTests(unittest.TestCase):
         self.assertEqual(
             {"R7"},
             {run_id for run_id, item in runs.DEFINITIONS.items() if item.rotates})
+
+
+class DeadEndpointTests(unittest.TestCase):
+    """R6 needs a connection that is REFUSED, never one that is swallowed.
+
+    The definition named ``127.0.0.1:9`` and called it the discard service,
+    "reserved and unused". Where that service is actually RUNNING the
+    connection is accepted and then never answered, which is a black hole
+    rather than a fast failure. The run hung past its ceiling, was killed with
+    no output at all, and S10 reported CANNOT_TEST over three assertions it
+    never got to search. A port written into the table is a promise about
+    whichever machine the harness happens to run on, and that is the promise
+    that broke.
+    """
+
+    def test_a_listening_port_is_not_refused(self) -> None:
+        """The discriminator itself. A check that answered "refused" for
+        everything would make the next test vacuous.
+        """
+        listener = socket.socket()
+        self.addCleanup(listener.close)
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        self.assertFalse(runs.port_refuses(listener.getsockname()[1]))
+
+    def test_the_endpoint_it_hands_out_actually_refuses(self) -> None:
+        port = urllib.parse.urlsplit(runs.dead_endpoint()).port
+        self.assertIsNotNone(port)
+        self.assertTrue(runs.port_refuses(port))
+
+    def test_the_run_declares_the_token_rather_than_a_fixed_port(self) -> None:
+        declared = dict(runs.DEFINITIONS["R6"].env)
+        self.assertEqual(runs.DEAD_ENDPOINT_TOKEN,
+                         declared["OPENAI_BASE_URL"])
+
+    def test_the_token_is_resolved_before_the_product_sees_it(self) -> None:
+        binary = support.install_fake_runs(self)
+        executor = runs.RunExecutor(runs._binary, runs._env, runs._config,
+                                    credential="the-real-credential")
+        executor.execute(runs.DEFINITIONS["R6"])
+        overlay = binary.calls[-1].env or {}
+        self.assertNotIn(runs.DEAD_ENDPOINT_TOKEN,
+                         overlay.get("OPENAI_BASE_URL", ""))
+        self.assertTrue(
+            overlay.get("OPENAI_BASE_URL", "").startswith("http://127.0.0.1:"))
 
 
 class NeededRunsTests(unittest.TestCase):
