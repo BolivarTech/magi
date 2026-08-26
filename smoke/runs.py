@@ -28,8 +28,11 @@ unconfigured is what makes the write-once half checkable rather than assumed.
 import contextlib
 import dataclasses
 import datetime
+import http.server
+import json
 import os
 import pathlib
+import threading
 import time
 
 from smoke.config import ROTATION_MARKER
@@ -489,10 +492,98 @@ COMMON_FLAGS = ("--output-format", "json", "-w", WORKSPACE_TOKEN)
 #: chance in a model's own prose.
 _R6_CREDENTIAL = mint_credential()
 
-#: An endpoint nothing listens on. Port 9 is the discard service, reserved and
-#: unused, so the run fails quickly and predictably rather than waiting out a
-#: routing black hole.
-_DEAD_ENDPOINT = "http://127.0.0.1:9/v1"
+#: The token standing for the endpoint R6 fails against. It is resolved when
+#: the run executes and never written into the table: a fixed URL is a promise
+#: about whichever machine the harness happens to run on, and two versions of
+#: that promise have already been measured false here.
+#:
+#: It replaced ``http://127.0.0.1:9/v1``, chosen as "the discard service,
+#: reserved and unused". Where that service is actually RUNNING -- Windows
+#: ships it and this repository measured it live -- the connection is accepted
+#: and never answered, so R6 hung past its ceiling, was killed with no output,
+#: and S10 reported CANNOT_TEST over three assertions it never got to search.
+#: An ephemeral port bound and released fails the same way here: the machine
+#: drops the packet rather than refusing it. And bounding the run with the
+#: product's own ``--timeout`` finishes but carries neither the credential nor
+#: the endpoint into the output, so all three assertions would pass over
+#: nothing.
+ERROR_BACKEND_TOKEN = "<error-backend>"
+
+#: What the local endpoint answers. 401 is what a real provider returns for a
+#: credential it rejects, which is the path the redaction defect lived on.
+ERROR_BACKEND_STATUS = 401
+
+#: How long the handler waits on a request before giving up on reading it.
+ERROR_BACKEND_TIMEOUT_S = 5.0
+
+
+class _EchoingHandler(http.server.BaseHTTPRequestHandler):
+    """Answers every request with an error that repeats what it was sent.
+
+    Echoing the Authorization header is the whole point rather than a
+    convenience: it PLANTS the credential on the product's error path, which
+    is where the redaction defect this repository already fixed once actually
+    lived. A backend that answered 401 with an empty body would only show that
+    the product invents no leak; this one shows it does not repeat one it was
+    handed.
+    """
+
+    #: Bounds a request that stops mid-headers, so a stuck client cannot hold
+    #: the run open past its ceiling.
+    timeout = ERROR_BACKEND_TIMEOUT_S
+
+    def do_POST(self) -> None:  # noqa: N802 - the base class names it
+        """Answer one POST with :data:`ERROR_BACKEND_STATUS`."""
+        length = int(self.headers.get("Content-Length") or 0)
+        if length:
+            self.rfile.read(length)
+        body = json.dumps({
+            "error": {
+                "message": "unauthorized",
+                "authorization": self.headers.get("Authorization", ""),
+                "url": self.path,
+            }
+        }).encode("utf-8")
+        self.send_response(ERROR_BACKEND_STATUS)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self) -> None:  # noqa: N802 - the base class names it
+        """Answer one GET the same way, so a probe gets an answer too."""
+        self.do_POST()
+
+    def log_message(self, fmt: str, *args) -> None:
+        """Swallow the access log.
+
+        The default writes every request to stderr, and the request line
+        carries whatever the product put in the URL. That is the harness
+        printing a credential the scenario is about to search for.
+
+        Args:
+            fmt: The format string the base class passes.
+            *args: Its arguments.
+        """
+
+
+@contextlib.contextmanager
+def error_backend():
+    """Serve an error-answering endpoint on loopback for the block's duration.
+
+    Yields:
+        str: The base URL to point the product at, already ending in ``/v1``.
+    """
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _EchoingHandler)
+    server.daemon_threads = True
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield "http://127.0.0.1:%d/v1" % server.server_address[1]
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=ERROR_BACKEND_TIMEOUT_S)
 
 _BACKEND_URL_VARIABLE = "OPENAI_BASE_URL"
 _BACKEND_KEY_VARIABLE = "OPENAI_API_KEY"
@@ -546,7 +637,7 @@ DEFINITIONS: dict[str, RunDefinition] = {
         # minutes before saying so.
         needs_trio=False, payload_size=PAYLOAD_SMALL, timeout_s=60,
         planted=(_R6_CREDENTIAL,),
-        env=((_BACKEND_URL_VARIABLE, _DEAD_ENDPOINT),
+        env=((_BACKEND_URL_VARIABLE, ERROR_BACKEND_TOKEN),
              (_BACKEND_KEY_VARIABLE, _R6_CREDENTIAL.value))),
     "R7": RunDefinition(
         run_id="R7",
@@ -735,8 +826,32 @@ class RunExecutor:
             ProductOutputError: If the product could not be started, or
                 :class:`~smoke.errors.TimedOut` if it did not finish in time.
         """
+        declared = dict(definition.env)
+        if ERROR_BACKEND_TOKEN not in declared.values():
+            return self._invoke_with(definition, declared)
+        with error_backend() as url:
+            resolved = {name: (url if value == ERROR_BACKEND_TOKEN else value)
+                        for name, value in declared.items()}
+            return self._invoke_with(definition, resolved)
+
+    def _invoke_with(self, definition: RunDefinition,
+                     declared: dict) -> ProductOutput:
+        """Run the product once with *declared* overlaid on its environment.
+
+        Args:
+            definition: The run.
+            declared: The environment the definition asks for, already
+                resolved.
+
+        Returns:
+            ProductOutput: The capture, unscrubbed.
+
+        Raises:
+            ProductOutputError: If the product could not be started, or
+                :class:`~smoke.errors.TimedOut` if it did not finish in time.
+        """
         overlay = {PASSPHRASE_VARIABLE: self._config.passphrase}
-        overlay.update(dict(definition.env))
+        overlay.update(declared)
         return self._binary.invoke(
             self._command(definition), stdin=self._stdin_for(definition),
             env=overlay, timeout=definition.timeout_s)
