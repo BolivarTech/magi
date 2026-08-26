@@ -11,17 +11,29 @@ scenario measures is what the PRODUCT did: did it persist, did the embedder
 answer, did the assembler inject.
 
 **Injection is measured by DIFFERENCE, because no JSON field reports it.** R2
-runs with ``--no-memory`` and is the control; R3 runs with memory and asks about
-the fact R1 planted. The gap between their ``usage.input_tokens`` is what the
-assembler added, and R2 writes nothing, so it can run in any order.
+runs with ``--no-memory`` and is the control; R3 runs with memory. They carry
+the SAME prompt, which took two attempts to get right, and R2 writes nothing,
+so it can run in any order.
+
+**The difference that carries the signal is the TRANSCRIPT, not the token
+count**, and that too is measured rather than argued. The first version
+subtracted ``usage.input_tokens`` and required a calibrated margin. Its control
+carried R1's planting prompt, four times longer than R3's question, so the
+subtraction mixed prompt length with injection; with that fixed, the honest
+number came out at 33 tokens -- while the run with memory answered the planted
+question correctly and the control replied that it had no stored memory.
+Selective mode recalls what was asked for instead of replaying history, so the
+injection is real and cheap, the delta sits inside ordinary variance, and no
+threshold belongs there. What the two runs do not share is their transcript:
+the control carries only the turns it produced.
 
 **Assertion 3b is what stops assertion 3 passing green while measuring
 something else.** Once the environment has accumulated enough that the assembler
-saturates its budget, the R3 minus R2 difference stops meaning "it injected what
-we planted" and starts meaning "the budget is full" -- and it still clears the
-margin, so assertion 3 passes exactly the same. A green that no longer means
-what it says is worse than a red, so the saturated case degrades BOTH to
-``CANNOT_TEST``.
+saturates its budget, it loads bulk history rather than what the query asked
+for, so a longer transcript stops meaning "it recalled what we planted" -- and
+it is longer in exactly the same way, so assertion 3 would pass while measuring
+something else. A green that no longer means what it says is worse than a red,
+so the saturated case degrades BOTH to ``CANNOT_TEST``.
 
 **The ceiling is DERIVED from the environment's own configuration, never
 declared.** A fixed number in ``smoke.toml`` would age in the worse direction:
