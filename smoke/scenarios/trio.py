@@ -92,7 +92,14 @@ TRIO_SIZE = 3
 CONSULT_KEY = "consult"
 APPLIED_CAPS_KEY = "applied_caps"
 ERROR_KEY = "error"
-INPUT_TOKENS_PATH = "usage.input_tokens"
+#: Where the consult path reports how large its input was, in tokens.
+#:
+#: NOT ``usage.input_tokens``, which ``run_consult`` documents as ``{0, 0}`` in
+#: its own "Gaps (documented, never fabricated)" section: magi-core does not
+#: surface token counts there. Reading it made assertion 2 report "250054 bytes
+#: became 0 input tokens" against a product behaving exactly as documented --
+#: a guardian that could not pass. The envelope carries the real number.
+ESTIMATED_TOKENS_PATH = "consult.input_size.estimated_tokens"
 
 #: Keys of the consult envelope.
 AGENTS_KEY = "agents"
@@ -624,14 +631,14 @@ def _token_floor_finding(run):
                         % (TRIO_RUN, sent, target))
     floor = runs.payload_floor()
     try:
-        observed = run.output.key(INPUT_TOKENS_PATH)
+        observed = run.output.key(ESTIMATED_TOKENS_PATH)
     except ProductOutputError as exc:
         return _finding(S8_ASSERTIONS, 1, Outcome.CANNOT_TEST, TRIO_RUN,
                         str(exc))
     if not _is_count(observed):
         return _finding(S8_ASSERTIONS, 1, Outcome.CANNOT_TEST, TRIO_RUN,
                         "%s is %r, which is not a token count"
-                        % (INPUT_TOKENS_PATH, observed))
+                        % (ESTIMATED_TOKENS_PATH, observed))
     if observed < floor:
         return _finding(S8_ASSERTIONS, 1, Outcome.FAIL, TRIO_RUN,
                         "%d bytes became %d input tokens, below the declared "

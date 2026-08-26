@@ -84,15 +84,23 @@ def _document(envelope=None, caps=None, input_tokens=60000, error=None):
     Args:
         envelope: What to put under ``consult``.
         caps: What to put under ``applied_caps``.
-        input_tokens: What ``usage.input_tokens`` reports.
+        input_tokens: How large the input was. It fills BOTH
+            ``usage.input_tokens`` and ``consult.input_size.estimated_tokens``:
+            the product reports the first as zero on this path by documented
+            design, and the second is where the real number lives.
         error: The error payload, or None.
 
     Returns:
         dict: The document.
     """
+    consult = copy.deepcopy(_ENVELOPE if envelope is None else envelope)
+    if isinstance(consult, dict):
+        size = consult.setdefault("input_size", {"exceeded": False,
+                                                 "warn_threshold": 98304})
+        size["estimated_tokens"] = input_tokens
     return {
         "schema_version": 1,
-        "consult": copy.deepcopy(_ENVELOPE if envelope is None else envelope),
+        "consult": consult,
         "applied_caps": copy.deepcopy(_R4_CAPS if caps is None else caps),
         "usage": {"input_tokens": input_tokens, "output_tokens": 100},
         "error": error,
