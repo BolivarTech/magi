@@ -7,7 +7,9 @@ import pathlib
 import socket
 import tempfile
 import unittest
+import urllib.error
 import urllib.parse
+import urllib.request
 from unittest import mock
 
 from smoke import runs
@@ -19,6 +21,30 @@ from smoke.product import ProductOutput
 from smoke.registry import Registry, ScenarioEntry
 from smoke.secrets import PlantedSecret
 from smoke.tests import support
+
+
+def _http_post(url: str, credential: bytes) -> tuple[int, bytes]:
+    """Post to *url* carrying *credential* as a bearer token.
+
+    Args:
+        url: Where to post.
+        credential: What to put in the Authorization header.
+
+    Returns:
+        tuple[int, bytes]: The status code and the body.
+
+    Raises:
+        OSError: If nothing is listening.
+    """
+    request = urllib.request.Request(
+        url.rstrip("/") + "/chat/completions", data=b"{}",
+        headers={"Authorization": b"Bearer " + credential,
+                 "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(request, timeout=5) as answer:
+            return answer.status, answer.read()
+    except urllib.error.HTTPError as refused:
+        return refused.code, refused.read()
 
 
 class ConfigureGuardTests(unittest.TestCase):
@@ -263,37 +289,51 @@ class DefinitionTableTests(unittest.TestCase):
             {run_id for run_id, item in runs.DEFINITIONS.items() if item.rotates})
 
 
-class DeadEndpointTests(unittest.TestCase):
-    """R6 needs a connection that is REFUSED, never one that is swallowed.
+class ErrorBackendTests(unittest.TestCase):
+    """R6 has to reach an endpoint that ANSWERS with an error, fast.
 
-    The definition named ``127.0.0.1:9`` and called it the discard service,
-    "reserved and unused". Where that service is actually RUNNING the
-    connection is accepted and then never answered, which is a black hole
-    rather than a fast failure. The run hung past its ceiling, was killed with
-    no output at all, and S10 reported CANNOT_TEST over three assertions it
-    never got to search. A port written into the table is a promise about
-    whichever machine the harness happens to run on, and that is the promise
-    that broke.
+    Two mechanisms were tried and measured before this one. ``127.0.0.1:9``
+    was declared "the discard service, reserved and unused"; where that
+    service is running the connection is accepted and never answered, and R6
+    hung past its ceiling, was killed with no output, and S10 reported
+    CANNOT_TEST over three assertions it never got to search. An ephemeral
+    port bound and released does not help either: this machine drops the
+    packet instead of refusing it, so the wait is the same. Bounding the run
+    with the product's own ``--timeout`` does finish, and it is worse than
+    both -- the measured output carried neither the credential nor the
+    endpoint, so all three assertions would have passed over nothing.
+
+    What is left is the mechanism that was always the strongest: answer. A
+    local endpoint that returns 401 and ECHOES the Authorization header into
+    its body puts the credential onto the product's error path deliberately,
+    which is where the redaction defect this repository already fixed once
+    actually lived. Without it S10 can only show the product invented no leak;
+    with it, S10 shows the product does not repeat one it was handed.
     """
 
-    def test_a_listening_port_is_not_refused(self) -> None:
-        """The discriminator itself. A check that answered "refused" for
-        everything would make the next test vacuous.
+    def test_it_answers_every_request_with_an_error(self) -> None:
+        with runs.error_backend() as url:
+            status, _ = _http_post(url, b"the-planted-credential")
+        self.assertEqual(runs.ERROR_BACKEND_STATUS, status)
+
+    def test_the_body_echoes_the_credential_it_was_sent(self) -> None:
+        """This is the plant. A body that does not carry the credential
+        cannot show whether the product would repeat one.
         """
-        listener = socket.socket()
-        self.addCleanup(listener.close)
-        listener.bind(("127.0.0.1", 0))
-        listener.listen(1)
-        self.assertFalse(runs.port_refuses(listener.getsockname()[1]))
+        with runs.error_backend() as url:
+            _, body = _http_post(url, b"the-planted-credential")
+        self.assertIn(b"the-planted-credential", body)
 
-    def test_the_endpoint_it_hands_out_actually_refuses(self) -> None:
-        port = urllib.parse.urlsplit(runs.dead_endpoint()).port
-        self.assertIsNotNone(port)
-        self.assertTrue(runs.port_refuses(port))
+    def test_it_stops_listening_once_the_run_is_over(self) -> None:
+        """One leaked listener per run is a leaked thread and a leaked port."""
+        with runs.error_backend() as url:
+            port = urllib.parse.urlsplit(url).port
+        with self.assertRaises(OSError):
+            _http_post("http://127.0.0.1:%d/v1" % port, b"x")
 
-    def test_the_run_declares_the_token_rather_than_a_fixed_port(self) -> None:
+    def test_the_run_declares_the_token_rather_than_a_fixed_url(self) -> None:
         declared = dict(runs.DEFINITIONS["R6"].env)
-        self.assertEqual(runs.DEAD_ENDPOINT_TOKEN,
+        self.assertEqual(runs.ERROR_BACKEND_TOKEN,
                          declared["OPENAI_BASE_URL"])
 
     def test_the_token_is_resolved_before_the_product_sees_it(self) -> None:
@@ -302,7 +342,7 @@ class DeadEndpointTests(unittest.TestCase):
                                     credential="the-real-credential")
         executor.execute(runs.DEFINITIONS["R6"])
         overlay = binary.calls[-1].env or {}
-        self.assertNotIn(runs.DEAD_ENDPOINT_TOKEN,
+        self.assertNotIn(runs.ERROR_BACKEND_TOKEN,
                          overlay.get("OPENAI_BASE_URL", ""))
         self.assertTrue(
             overlay.get("OPENAI_BASE_URL", "").startswith("http://127.0.0.1:"))
