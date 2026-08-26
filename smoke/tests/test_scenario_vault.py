@@ -181,7 +181,9 @@ class _FakeDatabase:
     def __init__(self, counts: tuple[int, ...] = (2, 1, 8, 3, 5),
                  envelope: bool = True,
                  wrong_passphrase_opens: bool = False,
-                 destroy_on_wrong: bool = False) -> None:
+                 destroy_on_wrong: bool = False,
+                 missing: tuple[str, ...] = (),
+                 unmeasured_after: tuple[str, ...] = ()) -> None:
         """Create the double.
 
         Args:
@@ -189,11 +191,21 @@ class _FakeDatabase:
             envelope: Whether the envelope is present.
             wrong_passphrase_opens: Whether the wrong passphrase is accepted.
             destroy_on_wrong: Whether a refused open empties the tables.
+            missing: Tables EVERY report renders ``missing``. S16 compares
+                one report against an injected baseline, so one report is all
+                it has.
+            unmeasured_after: Tables only the reports AFTER the first render
+                ``missing``. S4 compares two reports it takes itself, and a
+                table absent from both never enters the comparison -- so it
+                could not tell "unknown" from "lost" with one knob.
         """
         self.counts = list(counts)
         self.envelope = envelope
         self.wrong_passphrase_opens = wrong_passphrase_opens
         self.destroy_on_wrong = destroy_on_wrong
+        self.missing = missing
+        self.unmeasured_after = unmeasured_after
+        self.reports = 0
 
     def __call__(self, call: support.Call) -> ProductOutput | None:
         """Answer one invocation.
@@ -226,7 +238,9 @@ class _FakeDatabase:
         labels = ("vault", "sessions", "messages", "knowledge", "memories")
         lines = ["envelope: %s" % ("present" if self.envelope else "absent"),
                  "fec: ok", "verdict: healthy", "counts:"]
-        absent = getattr(self, "missing", ())
+        self.reports += 1
+        absent = self.missing + (self.unmeasured_after
+                                 if self.reports > 1 else ())
         lines += ["  %s: %s" % (label, "missing" if label in absent else count)
                   for label, count in zip(labels, self.counts)]
         return "\n".join(lines) + "\n"
@@ -310,6 +324,20 @@ class WrongPassphraseScenarioBodyTests(unittest.TestCase):
         self.assertEqual(Outcome.CANNOT_TEST,
                          _outcomes("S4")[vault.S4_ASSERTIONS[1]])
 
+    def test_a_table_nobody_measured_is_not_a_loss(self) -> None:
+        """The rule S16 already follows, four lines away in the same file.
+
+        A table the product rendered ``missing`` is left out of the mapping
+        deliberately: absent and zero are different answers. Reading it back
+        with a zero default contradicts that and reports the user's data
+        destroyed on a table nobody counted -- which, on the scenario whose
+        subject is REQ-V35, is the worst direction to be wrong in.
+        """
+        support.install_fake_runs(
+            self, responder=_FakeDatabase(unmeasured_after=("messages",)))
+        self.assertEqual(Outcome.CANNOT_TEST,
+                         _outcomes("S4")[vault.S4_ASSERTIONS[1]])
+
     def test_a_wrong_passphrase_that_opens_the_vault_fails(self) -> None:
         support.install_fake_runs(
             self, responder=_FakeDatabase(wrong_passphrase_opens=True))
@@ -342,18 +370,17 @@ class _RotatedDatabase(_FakeDatabase):
             vault -- and it is what assertion 1 exists to catch.
     """
 
-    def __init__(self, opens: bool = True, missing: tuple = (), **kwargs) -> None:
+    def __init__(self, opens: bool = True, **kwargs) -> None:
         """Create the double.
 
         Args:
             opens: Whether the configured passphrase is still accepted.
-            missing: Tables the report renders as ``missing`` rather than a
-                number -- what the product does for one it creates lazily.
-            **kwargs: Passed through to :class:`_FakeDatabase`.
+            **kwargs: Passed through to :class:`_FakeDatabase`, ``missing``
+                included -- the base declares it, so redeclaring it here only
+                creates a second name for one field.
         """
         super().__init__(**kwargs)
         self.opens = opens
-        self.missing = missing
 
     def __call__(self, call: support.Call) -> ProductOutput | None:
         """Answer one invocation.
