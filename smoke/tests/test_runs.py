@@ -431,6 +431,67 @@ class ShortTreeTests(unittest.TestCase):
         self.assertEqual(len(runs.DEFINITIONS["R4"].stdin), result.stdin_bytes)
 
 
+class PlaceholderLifetimeTests(unittest.TestCase):
+    """R6's four vault entries are planted and removed as a unit.
+
+    They were planted OUTSIDE the try, so a `vault set` that failed part-way --
+    a 180 s Argon2 open under load is documented in this repository, not
+    hypothetical -- left the earlier entries behind with no cleanup path at
+    all. And the removal loop had no per-entry guard, so the first failure
+    skipped the rest. Nothing recovers them either: the preflight's rotation
+    recovery knows only about the marker.
+    """
+
+    def test_a_failure_part_way_through_still_removes_what_was_planted(self) -> None:
+        planted, removed = [], []
+
+        def flaky(call):
+            args = list(call.args)
+            if args[:1] != ["vault"]:
+                return None
+            verb = "set" if "set" in args else ("rm" if "rm" in args else "")
+            name = args[args.index(verb) + 1] if verb else ""
+            if verb == "set":
+                if len(planted) == 2:
+                    raise ProductOutputError("vault set timed out")
+                planted.append(name)
+            if verb == "rm":
+                removed.append(name)
+            return ProductOutput(stdout=b"", stderr=b"", exit_code=0,
+                                 command=["magi-rs"] + args)
+
+        support.install_fake_runs(self, responder=flaky)
+        executor = runs.RunExecutor(runs._binary, runs._env, runs._config,
+                                    credential="the-real-credential")
+        with self.assertRaises(ProductOutputError):
+            executor.execute(runs.DEFINITIONS["R6"])
+        self.assertEqual(set(planted), set(removed),
+                         "everything planted has to be taken back out")
+
+    def test_one_failed_removal_does_not_skip_the_rest(self) -> None:
+        removed = []
+
+        def stubborn(call):
+            args = list(call.args)
+            if args[:1] != ["vault"]:
+                return None
+            if "rm" in args:
+                name = args[args.index("rm") + 1]
+                if not removed:
+                    removed.append(name)
+                    raise ProductOutputError("vault rm timed out")
+                removed.append(name)
+            return ProductOutput(stdout=b"", stderr=b"", exit_code=0,
+                                 command=["magi-rs"] + args)
+
+        support.install_fake_runs(self, responder=stubborn)
+        executor = runs.RunExecutor(runs._binary, runs._env, runs._config,
+                                    credential="the-real-credential")
+        executor.execute(runs.DEFINITIONS["R6"])
+        self.assertEqual(len(runs.PLACEHOLDER_ENTRIES), len(removed),
+                         "every entry gets its own removal attempt")
+
+
 class ArchiveScrubbingTests(unittest.TestCase):
     """The passphrase is scrubbed on BOTH archive paths, not just one.
 
