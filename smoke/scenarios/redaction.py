@@ -64,6 +64,23 @@ def no_credential_leaks(run):
                            "that does not exist proves nothing")
         return
 
+    # The run has to have FAILED, and that is a precondition rather than a
+    # detail. The credential only travels on the error path -- R6 points the
+    # product at a backend answering 401 to everything, and the value reaches
+    # the URL's authority on its way to being refused. A run that succeeded
+    # carries no credential to find, so every channel comes back clean and
+    # all four assertions pass having searched output that never held the
+    # thing they look for. Measured against a real archived R6: exit 1,
+    # stop_reason "error", response null.
+    if not _walked_the_error_path(run):
+        for index in range(len(ASSERTIONS)):
+            yield _finding(index, Outcome.CANNOT_TEST,
+                           "R6 exited %d, so the error path the credential "
+                           "travels on was never walked; finding no leak in "
+                           "output that never carried one proves nothing"
+                           % run.output.exit_code)
+        return
+
     planted = tuple(run.planted)
     streams = run.output.raw()
     log = _archived_log(run.run_id)
@@ -184,3 +201,20 @@ def _finding(index, outcome, detail):
     """
     return Finding(assertion=ASSERTIONS[index], outcome=outcome,
                    detail=detail, run_id="R6")
+
+
+def _walked_the_error_path(run) -> bool:
+    """Whether R6 reached the refusal its assertions depend on.
+
+    Args:
+        run: R6's result.
+
+    Returns:
+        bool: True when the product exited non-zero. That is what a real R6
+        does -- the archived capture of one records exit 1 with
+        ``stop_reason`` ``"error"`` and a null response -- and it is checked
+        on the EXIT CODE rather than on the JSON because a run that failed
+        before it could emit JSON is still a run that failed, and reading the
+        body would report the harder-to-parse case as a success.
+    """
+    return run.output.exit_code != 0
