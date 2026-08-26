@@ -102,8 +102,11 @@ PASSPHRASE_VARIABLE = "MAGI_PASSPHRASE"
 #: the product answers "incorrect passphrase" because it TRIED the blank value,
 #: which is a defensible reading of present. What is promised, and what is
 #: checked, is that the refusal is typed and bounded.
-PASSPHRASE_REFUSAL_MARKERS = (b"no passphrase", b"incorrect passphrase",
-                              b"passphrase")
+#: A bare ``b"passphrase"`` was here too, and it made the other two
+#: redundant: it accepts any refusal that happens to use the word, which is
+#: not "the refusal is typed". Both wordings the product actually produces are
+#: named above, which is what the measured decision was.
+PASSPHRASE_REFUSAL_MARKERS = (b"no passphrase", b"incorrect passphrase")
 PASSPHRASE_UNAVAILABLE_EXIT = 1
 
 #: A value nobody could mean. Assertion 3 requires the product to reject it,
