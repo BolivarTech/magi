@@ -350,6 +350,27 @@ class CarriedPayloadTests(unittest.TestCase):
                          result.stdin_bytes)
 
 
+class ControlRunTests(unittest.TestCase):
+    """The control has to carry the SAME prompt as the run it controls.
+
+    R2 duplicated R1's planting prompt while S9 compared it against R3, whose
+    prompt is a quarter of the length. The difference between their token
+    counts therefore mixed prompt length with what the assembler injected, and
+    the run that measured 8 tokens of "injection" was measuring neither. With
+    the same prompt on both sides, memory on against memory off came out at
+    1668 against 392 input tokens: the assembler contributes 1276, and the
+    declared margin of 100 is nowhere near it.
+    """
+
+    def test_the_control_carries_the_recall_prompt(self) -> None:
+        self.assertEqual(runs.DEFINITIONS["R3"].stdin,
+                         runs.DEFINITIONS["R2"].stdin)
+
+    def test_the_control_is_the_one_that_disables_memory(self) -> None:
+        self.assertIn("--no-memory", runs.DEFINITIONS["R2"].argv)
+        self.assertNotIn("--no-memory", runs.DEFINITIONS["R3"].argv)
+
+
 class ErrorBackendTests(unittest.TestCase):
     """R6 has to reach an endpoint that ANSWERS with an error, fast.
 
