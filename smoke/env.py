@@ -456,6 +456,9 @@ class Environment:
             profile: The cheap profile, or ``None`` for the product's defaults.
 
         Raises:
+            PreflightError: If a profiled value cannot be interpolated into
+                TOML verbatim -- see :func:`_toml_value`. A configuration
+                defect, so it cuts rather than reporting a harness failure.
             HarnessError: If ``magi init`` cannot be run, writes nothing, or the
                 transplanted text still carries the temporary directory's path.
                 All three are defects in the harness, reported as such and never

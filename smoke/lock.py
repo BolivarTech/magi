@@ -138,7 +138,12 @@ class RunLock:
         """
         try:
             return self._path.read_text(encoding="utf-8").strip() or "unknown"
-        except OSError:
+        except (OSError, UnicodeDecodeError):
+            # UnicodeDecodeError is a ValueError, not an OSError. The file may
+            # have been written by something else entirely, or truncated
+            # mid-write, and this read exists only to name a holder in a
+            # message -- so a file it cannot decode makes the holder unknown,
+            # never the failure the caller reports.
             return "unknown"
 
     def release(self) -> None:
