@@ -226,7 +226,9 @@ class _FakeDatabase:
         labels = ("vault", "sessions", "messages", "knowledge", "memories")
         lines = ["envelope: %s" % ("present" if self.envelope else "absent"),
                  "fec: ok", "verdict: healthy", "counts:"]
-        lines += ["  %s: %d" % pair for pair in zip(labels, self.counts)]
+        absent = getattr(self, "missing", ())
+        lines += ["  %s: %s" % (label, "missing" if label in absent else count)
+                  for label, count in zip(labels, self.counts)]
         return "\n".join(lines) + "\n"
 
 
@@ -323,15 +325,18 @@ class _RotatedDatabase(_FakeDatabase):
             vault -- and it is what assertion 1 exists to catch.
     """
 
-    def __init__(self, opens: bool = True, **kwargs) -> None:
+    def __init__(self, opens: bool = True, missing: tuple = (), **kwargs) -> None:
         """Create the double.
 
         Args:
             opens: Whether the configured passphrase is still accepted.
+            missing: Tables the report renders as ``missing`` rather than a
+                number -- what the product does for one it creates lazily.
             **kwargs: Passed through to :class:`_FakeDatabase`.
         """
         super().__init__(**kwargs)
         self.opens = opens
+        self.missing = missing
 
     def __call__(self, call: support.Call) -> ProductOutput | None:
         """Answer one invocation.
@@ -435,6 +440,22 @@ class CredentialRotationScenarioBodyTests(unittest.TestCase):
         outcomes = {f.assertion: f.outcome
                     for f in DEFAULT_REGISTRY.get("S16").func(run)}
         self.assertEqual(Outcome.FAIL, outcomes[vault.S16_ASSERTIONS[1]])
+
+    def test_a_table_nobody_measured_is_not_a_loss(self) -> None:
+        """Unknown is not empty.
+
+        ``diagnose_counts`` leaves a table reported ``missing`` out of the
+        mapping and says so, and then reading it back with ``.get(table, 0)``
+        flattened absent to zero and reported FAIL -- a blocking red -- over a
+        table nobody measured. The two halves have to agree.
+        """
+        support.install_fake_runs(self, responder=_RotatedDatabase(
+            counts=(1, 1, 8, 3, 5), missing=("memories",)))
+        run = _r7_result(baseline={"sessions": 1, "messages": 8,
+                                   "knowledge": 3, "memories": 5})
+        outcomes = {f.assertion: f.outcome
+                    for f in DEFAULT_REGISTRY.get("S16").func(run)}
+        self.assertEqual(Outcome.CANNOT_TEST, outcomes[vault.S16_ASSERTIONS[1]])
 
     def test_the_vault_table_is_not_part_of_the_history(self) -> None:
         """The rotation writes and removes its own vault entries.

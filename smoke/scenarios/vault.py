@@ -41,6 +41,7 @@ import re
 
 from smoke import runs
 from smoke.outcome import Finding, Outcome
+from smoke.product import diagnose_counts
 from smoke.registry import scenario
 from smoke.secrets import find_secret, mint_credential
 
@@ -122,7 +123,6 @@ WRONG_PASSPHRASE_MARKER = b"incorrect passphrase"
 _COMMANDS_HEADING = re.compile(r"^\s*(commands|subcommands):\s*$",
                                re.IGNORECASE)
 _DIGIT = re.compile(r"\d")
-_COUNT_LINE = re.compile(r"^\s+(\w+):\s+(\d+)\s*$")
 
 
 @scenario("S3", assertions=S3_ASSERTIONS)
@@ -518,21 +518,7 @@ def _history_counts(attempt):
     """
     if not attempt.ok or attempt.output.exit_code != 0:
         return None
-    counts = {}
-    inside = False
-    for line in attempt.output.stdout.decode("utf-8",
-                                             errors="replace").splitlines():
-        if line.strip() == COUNTS_HEADING:
-            inside = True
-            continue
-        if not inside:
-            continue
-        match = _COUNT_LINE.match(line)
-        if match is None:
-            break
-        if match.group(1) in HISTORY_TABLES:
-            counts[match.group(1)] = int(match.group(2))
-    return counts
+    return diagnose_counts(attempt.output.stdout)
 
 
 def _refusal_is_typed_finding(before, refused):

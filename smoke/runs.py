@@ -39,7 +39,7 @@ import time
 from smoke.config import ROTATION_MARKER
 from smoke.errors import HarnessError, ProductOutputError, TimedOut
 from smoke.payload import PayloadBuilder
-from smoke.product import ProductOutput
+from smoke.product import ProductOutput, diagnose_counts
 from smoke.secrets import PlantedSecret, mint_credential, scrub
 
 #: How the passphrase reaches the product. Never ``-p``: that is a global flag,
@@ -492,8 +492,6 @@ COMMON_FLAGS = ("--output-format", "json", "-w", WORKSPACE_TOKEN)
 #: chance in a model's own prose.
 _R6_CREDENTIAL = mint_credential()
 
-#: One line of a ``vault diagnose`` counts block.
-_COUNT_LINE = re.compile(r"^\s+(\w+):\s+(\d+)\s*$")
 
 #: What R4 gives the product as its wall clock, in seconds. MEASURED against
 #: this repository's own backend, never chosen: at 300 the product derives 40s
@@ -1086,18 +1084,7 @@ class RunExecutor:
             return None
         if output.exit_code != 0:
             return None
-        counts, inside = {}, False
-        for line in output.stdout.decode("utf-8", errors="replace").splitlines():
-            if line.strip() == "counts:":
-                inside = True
-                continue
-            if not inside:
-                continue
-            match = _COUNT_LINE.match(line)
-            if match is None:
-                break
-            counts[match.group(1)] = int(match.group(2))
-        return counts or None
+        return diagnose_counts(output.stdout) or None
 
     def _vault_set(self, name: str, value: bytes) -> None:
         """Store one secret, overwriting without asking.

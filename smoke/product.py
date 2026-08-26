@@ -11,6 +11,7 @@ is the product's defect even though it reaches the harness as an exception.
 
 import dataclasses
 import json
+import re
 
 from smoke.errors import ProductOutputError
 
@@ -114,3 +115,57 @@ class ProductOutput:
             no decoding, no parsing, no redaction, and no other change.
         """
         return self.stdout + b"\n" + self.stderr
+
+#: Where ``vault diagnose`` starts listing per-table row counts.
+COUNTS_HEADING = "counts:"
+
+#: One line of that block. A table the product has not created yet renders as
+#: ``missing`` rather than a number, and ``vault`` -- created lazily -- is the
+#: FIRST label printed, so a parser that stopped at the first non-numeric line
+#: dropped every history table behind it and reported an empty database.
+_COUNT_LINE = re.compile(r"^\s+(\w+):\s+(\d+)\s*$")
+_BLOCK_LINE = re.compile(r"^\s+\w+:\s+\S+\s*$")
+
+
+def diagnose_counts(report: bytes) -> dict:
+    """Per-table row counts out of a ``vault diagnose`` report.
+
+    One parser, in one place. There were two -- the baseline's and the
+    scenario's -- sharing a regex and disagreeing about everything else: only
+    one filtered to the history tables, and they answered differently for an
+    unreadable report. Filtering is the CALLER's business; this returns what
+    the product said.
+
+    A table reported ``missing`` is absent from the mapping rather than
+    recorded as zero: unknown is not empty, and a caller that flattens the two
+    reports data loss on a table nobody measured.
+
+    Complexity: ``O(lines)``.
+
+    Args:
+        report: What ``vault diagnose`` printed.
+
+    Returns:
+        dict: Table name to row count, for every table that gave a number.
+        Empty when the report carries no counts block.
+    """
+    counts = {}
+    inside = False
+    for line in report.decode("utf-8", errors="replace").splitlines():
+        if line.strip() == COUNTS_HEADING:
+            inside = True
+            continue
+        if not inside:
+            continue
+        match = _COUNT_LINE.match(line)
+        if match is not None:
+            counts[match.group(1)] = int(match.group(2))
+            continue
+        if _BLOCK_LINE.match(line):
+            # A label with a non-numeric value -- ``missing``. Still inside the
+            # block, so keep going; stopping here is what lost the tables that
+            # follow ``vault``.
+            continue
+        break
+    return counts
+
