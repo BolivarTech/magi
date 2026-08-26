@@ -20,6 +20,15 @@ from smoke.preflight import BackendStatus, Preflight, check_config_permissions
 from smoke.product import ProductOutput
 
 
+#: A minimal, valid smoke.toml. The key variable is interpolated so a test
+#: can name the one it exported.
+_CONFIG_TEXT = (
+    '[env]\npassphrase = "correct-horse-battery-staple"\n'
+    '[backend]\nkind = "ollama"\n'
+    'base_url = "http://localhost:11434/v1"\nkey_env = "%s"\n'
+)
+
+
 @unittest.skipIf(sys.platform == "win32", "POSIX permission bits")
 class PosixPermissionTests(unittest.TestCase):
     """smoke.toml holds the passphrase in the clear, so others cannot read it."""
@@ -129,6 +138,47 @@ class OrderingTests(unittest.TestCase):
                               RunLock(directory / ".lock")).run(False, None)
         self.assertIn("--init-env", str(caught.exception))
         env.normalize_magi_toml.assert_not_called()
+
+
+class PermissionCheckWiringTests(unittest.TestCase):
+    """Step 4 has to RUN, and only a Preflight-level test can say that it does.
+
+    ``_require_config`` read ``getattr(self.config, "path", None)`` and
+    ``SmokeConfig`` has no ``path`` attribute, so the default swallowed it and
+    the check was skipped on every real run. The existing tests call
+    ``check_config_permissions`` directly, so they passed over dead wiring --
+    and the doubles are ``mock.Mock(spec=SmokeConfig)``, which cannot grow the
+    attribute either. The file holds the vault passphrase in cleartext.
+    """
+
+    def test_the_loaded_config_knows_where_it_came_from(self) -> None:
+        directory = pathlib.Path(tempfile.mkdtemp())
+        path = directory / "smoke.toml"
+        path.write_text(_CONFIG_TEXT % "K", encoding="utf-8")
+        self.assertEqual(path, pathlib.Path(SmokeConfig.load(path).path))
+
+    def test_the_preflight_checks_the_permissions_of_a_real_config(self) -> None:
+        """Driven through a real ``SmokeConfig``, not a double.
+
+        A double can be given a ``path`` by hand, and then the call site fires
+        and the test passes whether or not the production object carries one.
+        Only the real type discriminates.
+        """
+        os.environ["SMOKE_WIRING_KEY"] = "the-real-credential"
+        self.addCleanup(os.environ.pop, "SMOKE_WIRING_KEY", None)
+        directory = pathlib.Path(tempfile.mkdtemp())
+        path = directory / "smoke.toml"
+        path.write_text(
+            _CONFIG_TEXT % "SMOKE_WIRING_KEY", encoding="utf-8")
+        env = mock.Mock(spec=Environment)
+        env.exists.return_value = True
+        with mock.patch.object(RunLock, "acquire"):
+            with mock.patch.object(RunLock, "release"):
+                with mock.patch("smoke.preflight.check_config_permissions") as check:
+                    Preflight(SmokeConfig.load(path), env,
+                              mock.Mock(spec=ReleaseBinary),
+                              RunLock(directory / ".lock")).run(False, None)
+        check.assert_called_once()
 
 
 class CredentialResolutionTests(unittest.TestCase):
