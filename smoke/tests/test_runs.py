@@ -580,8 +580,14 @@ class LargePayloadWiringTests(unittest.TestCase):
         config.backend_key_env = "OPENAI_API_KEY"
         runs.configure(binary, env, config)
         runs.RunExecutor(binary, env, config).execute(runs.DEFINITIONS["R4"])
-        self.assertGreaterEqual(len(sent["stdin"] or b""),
-                                config.payload_target_bytes)
+        sent_bytes = len(sent["stdin"] or b"")
+        self.assertGreaterEqual(sent_bytes, config.payload_target_bytes)
+        # Upper bound too, and it is the half that guards the CONFIG. Asserting
+        # only "at least the target" passes just as well when the size is taken
+        # from the module constant, which is exactly the copy-that-forgets-to-
+        # update this reads from the config to avoid.
+        self.assertLess(sent_bytes, config.payload_target_bytes * 2,
+                        "the size must come from the config, not the default")
 
     def test_a_small_payload_run_is_not_inflated(self) -> None:
         """The large payload is expensive and exactly one run carries it."""
