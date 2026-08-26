@@ -1,14 +1,28 @@
 # Author: Julian Bolivar
 # Version: 1.0.0
 # Date: 2026-08-25
-"""The eight hard cuts that run before any scenario.
+"""The nine hard cuts that run before any scenario.
 
-Eight because a cut is a step that can RAISE ``PreflightError``:
-the interpreter, the lock, the credential, the permissions, the
-environment, the leftover rotation, the endpoint agreement and the
-declared models. Settling the binary raises ``HarnessError`` -- exit 3,
-a defect of the harness, not a refusal to start -- and neither the
-normalisation nor the reachability probe can cut at all.
+A cut is a step that can raise ``PreflightError``, which is exit 2. Counted
+by following each step into what it delegates to, there are nine: the
+interpreter, the lock, the credential, the permissions, the environment, the
+leftover rotation, the binary, the endpoint agreement and the declared
+models. Two steps are NOT cuts -- normalising ``magi.toml`` raises
+``HarnessError`` (exit 3, a defect of the harness rather than a refusal to
+start), and the reachability probe cannot fail at all, by D-17.
+
+The count was wrong twice, in both directions, and the reason is worth
+keeping: the steps that cut mostly do not raise here. ``_settle_binary``
+raises nothing of its own and delegates to ``binary.py``, which raises
+``PreflightError`` in three methods; the lock raises from ``lock.py`` and the
+configuration from ``config.py``. Counting the ``raise`` statements in THIS
+module answers a different question, and answers it confidently.
+
+Steps 1 to 8 are the spec's own numbering (section 4). ``7b`` (the
+normalisation) and ``7c`` (endpoint agreement) are additions that came from
+findings rather than from the spec's list, which is why they carry letters:
+inserting them as whole numbers would renumber everything after them, and
+the published documentation names these steps.
 
 The order is the design, not a convenience. Two boundaries carry a defect each
 if moved, and both were found by review rather than by a test that failed:
@@ -236,7 +250,7 @@ def require_declared_models(declared, available) -> None:
 
 
 class Preflight:
-    """The eight cuts, in order, before a single scenario runs.
+    """The nine cuts, in order, before a single scenario runs.
 
     Attributes:
         config: The harness configuration.
