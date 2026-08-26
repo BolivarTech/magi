@@ -6,6 +6,7 @@
 import contextlib
 import io
 import pathlib
+import shutil
 import subprocess
 import sys
 import unittest
@@ -139,6 +140,41 @@ class RegistrationOnTheProductPathTests(unittest.TestCase):
         )
         self.assertGreater(int(result.stdout.strip()), 0,
                            "python -m smoke would evaluate nothing and exit 0")
+
+
+class ImportTimeFailureTests(unittest.TestCase):
+    """A scenario module that cannot import is a HARNESS failure, exit 3.
+
+    The scenarios are registered by a side-effect import at module level, so
+    a module that raises while importing does so before ``main`` exists to
+    catch anything. Python's own answer to an uncaught exception is exit 1 --
+    and in this harness exit 1 means "a scenario did not pass", which is a
+    verdict on the PRODUCT. A syntax error in the harness would have been
+    reported as the product failing.
+
+    Driven in a SUBPROCESS over a copied tree, because the failure happens at
+    import and cannot be reached from a process that has already imported the
+    module successfully.
+    """
+
+    def test_a_scenario_that_cannot_import_exits_three(self) -> None:
+        root = support.scratch_dir(self)
+        shutil.copytree(pathlib.Path(main.__file__).parent, root / "smoke")
+        broken = root / "smoke" / "scenarios" / "broken.py"
+        broken.write_text("raise RuntimeError('deliberately broken')\n",
+                          encoding="utf-8")
+        package = root / "smoke" / "scenarios" / "__init__.py"
+        package.write_text(
+            package.read_text(encoding="utf-8")
+            + "\nfrom smoke.scenarios import broken  # noqa: F401\n",
+            encoding="utf-8")
+        result = subprocess.run(
+            [sys.executable, "-m", "smoke", "--smoke-1"], cwd=str(root),
+            capture_output=True, text=True, timeout=_IMPORT_TIMEOUT_S)
+        self.assertEqual(EXIT_HARNESS, result.returncode,
+                         "a harness that cannot import must not report the "
+                         "product as having failed")
+        self.assertIn("deliberately broken", result.stderr)
 
 
 class DeclaredCountAtRuntimeTests(unittest.TestCase):
