@@ -47,6 +47,7 @@ use magi_rs::headless::types::{
 use magi_rs::magi::kind::ProviderKind;
 use magi_rs::magi::mode::{resolve_mode_guarded, ModeClassifier, ModeError, ModeSources};
 use magi_rs::magi::{BudgetTelemetry, TimeoutDecision};
+use magi_rs::redact::redact_foreign_text;
 
 use crate::agent::messages::{Content, Message, Role};
 use crate::agent::mode_classifier::NoticeSink;
@@ -77,6 +78,31 @@ const TIMEOUT_BELOW_FORMULA_LOG: &str =
 /// Buffered capacity of the internal chunk channel; mirrors the interactive TUI
 /// bridge so backpressure behaves identically. The channel is drained
 /// concurrently, so this is a small smoothing buffer, not a bound on output.
+/// What every operator-facing notice is prefixed with on stderr.
+///
+/// stderr and not stdout: stdout carries the run's output, which a consumer
+/// parses as JSON, and a notice written there would corrupt the very contract
+/// S1 exists to protect. There is no alternate screen to overwrite here, which
+/// is the reason the TUI needs a channel and this does not.
+const NOTICE_PREFIX: &str = "notice: ";
+
+/// Renders one agent notice for stderr, with any authority in it redacted.
+///
+/// The text is FOREIGN: it carries whatever the failing subsystem said, and
+/// `summarize_assembly_error` truncates a raw error that can embed the
+/// endpoint it was talking to, credentials and all. Every other foreign string
+/// this binary prints goes through the same helper, and a notice is not an
+/// exception just because it is short.
+///
+/// # Parameters
+/// - `text` — the notice as the agent emitted it.
+///
+/// # Returns
+/// The line to print, prefixed and redacted.
+fn notice_line(text: &str) -> String {
+    format!("{NOTICE_PREFIX}{}", redact_foreign_text(text).as_str())
+}
+
 const CHUNK_CHANNEL_CAPACITY: usize = 100;
 
 /// Upper bound on how long [`run_query`] waits for the ttfb-measuring drain task after the
@@ -1065,10 +1091,16 @@ pub async fn run_query(
     let drain = tokio::spawn(async move {
         let mut ttfb_ms: Option<u64> = None;
         while let Some(piece) = chunk_rx.recv().await {
-            if ttfb_ms.is_none() {
-                if let StreamPiece::Content(_) = piece {
+            match &piece {
+                StreamPiece::Content(_) if ttfb_ms.is_none() => {
                     ttfb_ms = Some(elapsed_ms(run_start));
                 }
+                // REQ-29's second half. The TUI renders these; here they used
+                // to be consumed and dropped, so an operator whose embedder
+                // was failing was told nothing at all and watched memories
+                // pile up unembedded.
+                StreamPiece::Notice(text) => eprintln!("{}", notice_line(text)),
+                _ => {}
             }
         }
         ttfb_ms
@@ -1815,9 +1847,8 @@ mod tests {
     /// prints.
     #[test]
     fn a_notice_reaches_the_operator_with_its_authority_redacted() {
-        let line = notice_line(
-            "memory: context assembly failed (POST https://u:pw@host/v1/embeddings)",
-        );
+        let line =
+            notice_line("memory: context assembly failed (POST https://u:pw@host/v1/embeddings)");
         assert!(line.starts_with(NOTICE_PREFIX), "got: {line}");
         assert!(!line.contains("pw"), "the credential survived: {line}");
         assert!(line.contains("context assembly failed"), "got: {line}");
