@@ -268,28 +268,6 @@ def payload_target():
     return _config.payload_target_bytes
 
 
-def payload_bytes(run_id):
-    """How many bytes one definition actually sends the product.
-
-    This is what the run CARRIES, not what it was meant to: S8 compares the two
-    so it can say "the payload never got sent" instead of accusing the product
-    of a size it never received.
-
-    Args:
-        run_id: The definition to measure.
-
-    Returns:
-        int: The length of that definition's standard input.
-
-    Raises:
-        HarnessError: If the id is not in :data:`DEFINITIONS`.
-    """
-    try:
-        return len(DEFINITIONS[run_id].stdin)
-    except KeyError as exc:
-        raise HarnessError("run %r is not in the table" % run_id) from exc
-
-
 def archive_root():
     """Where this run's invocations were archived, or ``None`` if unconfigured.
 
@@ -468,6 +446,11 @@ class RunResult:
             the run, so no scenario author has to remember to check -- which is
             the difference between a rule and a guarantee.
         planted: What the run put in front of the product.
+        stdin_bytes: How many bytes went to the child's standard input. What
+            the run CARRIED, not what its definition declared: a large run's
+            prompt is 54 bytes and its payload is a quarter of a megabyte, and
+            reading the declaration told S8 the payload had never been sent
+            while the product was busy answering it.
     """
 
     run_id: str
@@ -475,6 +458,9 @@ class RunResult:
     duration_s: float
     timed_out: bool
     planted: tuple[PlantedSecret, ...]
+    #: Defaulted so the doubles in the tests stay short. In production there is
+    #: exactly one constructor -- the executor -- and it always sets it.
+    stdin_bytes: int = 0
 
 
 #: The token that stands for the environment's path inside a definition's argv.
@@ -769,12 +755,13 @@ class RunExecutor:
                 result.
         """
         started = time.monotonic()
+        stdin = self._stdin_for(definition)
         try:
             if definition.rotates:
                 with self._rotated_credential():
-                    output = self._invoke(definition)
+                    output = self._invoke(definition, stdin)
             else:
-                output = self._invoke(definition)
+                output = self._invoke(definition, stdin)
             timed_out = False
         except TimedOut as expired:
             output = expired.output or ProductOutput(
@@ -787,6 +774,7 @@ class RunExecutor:
             duration_s=time.monotonic() - started,
             timed_out=timed_out,
             planted=definition.planted,
+            stdin_bytes=len(stdin),
         )
 
     def archive(self, result: RunResult) -> None:
@@ -838,11 +826,13 @@ class RunExecutor:
         return [root if word == WORKSPACE_TOKEN else word
                 for word in definition.argv]
 
-    def _invoke(self, definition: RunDefinition) -> ProductOutput:
+    def _invoke(self, definition: RunDefinition,
+                stdin: bytes) -> ProductOutput:
         """Run the product once for *definition*.
 
         Args:
             definition: The run.
+            stdin: What to hand the child, already built.
 
         Returns:
             ProductOutput: The capture, unscrubbed.
@@ -853,20 +843,21 @@ class RunExecutor:
         """
         declared = dict(definition.env)
         if ERROR_BACKEND_TOKEN not in declared.values():
-            return self._invoke_with(definition, declared)
+            return self._invoke_with(definition, declared, stdin)
         with error_backend() as url:
             resolved = {name: (url if value == ERROR_BACKEND_TOKEN else value)
                         for name, value in declared.items()}
-            return self._invoke_with(definition, resolved)
+            return self._invoke_with(definition, resolved, stdin)
 
     def _invoke_with(self, definition: RunDefinition,
-                     declared: dict) -> ProductOutput:
+                     declared: dict, stdin: bytes) -> ProductOutput:
         """Run the product once with *declared* overlaid on its environment.
 
         Args:
             definition: The run.
             declared: The environment the definition asks for, already
                 resolved.
+            stdin: What to hand the child.
 
         Returns:
             ProductOutput: The capture, unscrubbed.
@@ -878,7 +869,7 @@ class RunExecutor:
         overlay = {PASSPHRASE_VARIABLE: self._config.passphrase}
         overlay.update(declared)
         return self._binary.invoke(
-            self._command(definition), stdin=self._stdin_for(definition),
+            self._command(definition), stdin=stdin,
             env=overlay, timeout=definition.timeout_s)
 
     def _stdin_for(self, definition: RunDefinition) -> bytes:

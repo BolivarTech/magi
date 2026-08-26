@@ -100,7 +100,7 @@ def _document(envelope=None, caps=None, input_tokens=60000, error=None):
 
 
 def _result(run_id="R4", document=None, exit_code=0, timed_out=False,
-            stdout=None) -> RunResult:
+            stdout=None, stdin_bytes=250000) -> RunResult:
     """Build one shared run's result.
 
     Args:
@@ -109,6 +109,10 @@ def _result(run_id="R4", document=None, exit_code=0, timed_out=False,
         exit_code: What the product exited with.
         timed_out: Whether the harness's ceiling expired.
         stdout: Raw bytes to send instead of serialising *document*.
+        stdin_bytes: How many bytes the run carried. Read off the RESULT now,
+            the way the scenario reads it, rather than stubbed on a module
+            accessor: the accessor answered the DECLARED prompt length, which
+            is how S8 came to assert a 250 kB payload over 54 bytes.
 
     Returns:
         RunResult: The real type, not a double.
@@ -117,6 +121,7 @@ def _result(run_id="R4", document=None, exit_code=0, timed_out=False,
             else json.dumps(_document() if document is None
                             else document).encode())
     return RunResult(
+        stdin_bytes=stdin_bytes,
         run_id=run_id,
         output=ProductOutput(stdout=body, stderr=b"", exit_code=exit_code,
                              command=["magi-rs", "consult"]),
@@ -402,18 +407,18 @@ class S8Tests(unittest.TestCase):
 
     def test_a_complete_large_run_passes_all_three(self) -> None:
         result = _result(document=_document(input_tokens=60000))
-        with _payload(sent=250000, target=250000, floor=50000):
+        with _payload(target=250000, floor=50000):
             self.assertEqual({Outcome.PASS},
                              set(_outcomes("S8", result).values()))
 
     def test_a_truncated_report_fails_the_first(self) -> None:
         envelope = dict(copy.deepcopy(_ENVELOPE), report_truncated="bytes")
-        with _payload(sent=250000, target=250000, floor=50000):
+        with _payload(target=250000, floor=50000):
             outcomes = _outcomes("S8", _result(document=_document(envelope)))
         self.assertEqual(Outcome.FAIL, outcomes[trio.S8_ASSERTIONS[0]])
 
     def test_too_few_tokens_fail_the_second(self) -> None:
-        with _payload(sent=250000, target=250000, floor=50000):
+        with _payload(target=250000, floor=50000):
             outcomes = _outcomes(
                 "S8", _result(document=_document(input_tokens=100)))
         self.assertEqual(Outcome.FAIL, outcomes[trio.S8_ASSERTIONS[1]])
@@ -424,15 +429,16 @@ class S8Tests(unittest.TestCase):
         The spec states this rule for a tree too small to build the payload;
         it applies identically when the run simply does not carry it.
         """
-        with _payload(sent=53, target=250000, floor=50000):
+        with _payload(target=250000, floor=50000):
             outcomes = _outcomes(
-                "S8", _result(document=_document(input_tokens=100)))
+                "S8", _result(document=_document(input_tokens=100),
+                              stdin_bytes=53))
         self.assertEqual(Outcome.CANNOT_TEST, outcomes[trio.S8_ASSERTIONS[1]])
 
     def test_a_payload_over_the_input_cap_fails_the_third(self) -> None:
-        with _payload(sent=trio.MAX_QUERY_BYTES + 1, target=250000,
-                      floor=50000):
-            outcomes = _outcomes("S8", _result())
+        with _payload(target=250000, floor=50000):
+            outcomes = _outcomes(
+                "S8", _result(stdin_bytes=trio.MAX_QUERY_BYTES + 1))
         self.assertEqual(Outcome.FAIL, outcomes[trio.S8_ASSERTIONS[2]])
 
 
@@ -533,25 +539,22 @@ class _payload:
     otherwise every test after it inherits this one's numbers.
 
     Attributes:
-        sent: How many bytes R4's definition actually carries.
         target: The configured payload size.
         floor: The configured token floor.
     """
 
     #: The accessors this stands in for, named once so adding a fourth cannot
     #: be half-done: saved, replaced and restored all iterate this tuple.
-    NAMES = ("payload_bytes", "payload_target", "payload_floor")
+    NAMES = ("payload_target", "payload_floor")
 
-    def __init__(self, sent: int, target: int, floor: int) -> None:
+    def __init__(self, target: int, floor: int) -> None:
         """Record what to answer.
 
         Args:
-            sent: Bytes R4 carries.
             target: The configured size.
             floor: The configured floor.
         """
         self._answers = {
-            "payload_bytes": lambda run_id: sent,
             "payload_target": lambda: target,
             "payload_floor": lambda: floor,
         }

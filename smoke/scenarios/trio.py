@@ -570,7 +570,7 @@ def a_large_input_arrives_large(run):
     envelope = _envelope_of(run, TRIO_RUN)
     yield _untruncated_finding(run, envelope)
     yield _token_floor_finding(run)
-    yield _under_cap_finding()
+    yield _under_cap_finding(run)
 
 
 def _untruncated_finding(run, envelope):
@@ -611,7 +611,10 @@ def _token_floor_finding(run):
         Finding: CANNOT_TEST when the run never carried the payload -- the
         harness must not accuse the product of a size it was never sent.
     """
-    sent = runs.payload_bytes(TRIO_RUN)
+    if run is None:
+        return _finding(S8_ASSERTIONS, 1, Outcome.CANNOT_TEST, TRIO_RUN,
+                        "run %s produced no capture to inspect" % TRIO_RUN)
+    sent = run.stdin_bytes
     target = runs.payload_target()
     if sent < target * PAYLOAD_SENT_FRACTION:
         return _finding(S8_ASSERTIONS, 1, Outcome.CANNOT_TEST, TRIO_RUN,
@@ -619,9 +622,6 @@ def _token_floor_finding(run):
                         "%d, so the large input was never sent and the token "
                         "count says nothing about it"
                         % (TRIO_RUN, sent, target))
-    if run is None:
-        return _finding(S8_ASSERTIONS, 1, Outcome.CANNOT_TEST, TRIO_RUN,
-                        "run %s produced no capture to inspect" % TRIO_RUN)
     floor = runs.payload_floor()
     try:
         observed = run.output.key(INPUT_TOKENS_PATH)
@@ -639,7 +639,7 @@ def _token_floor_finding(run):
     return _finding(S8_ASSERTIONS, 1, Outcome.PASS, TRIO_RUN, "")
 
 
-def _under_cap_finding():
+def _under_cap_finding(run):
     """Judge assertion 3: the payload fits inside the product's input cap.
 
     The product REJECTS an oversized query rather than truncating it, so a
@@ -647,10 +647,19 @@ def _under_cap_finding():
     at all. Checking the bytes the harness chose is what keeps that from being
     discovered as an opaque product error.
 
+    Args:
+        run: The run's result, or None.
+
     Returns:
-        Finding: PASS when the declared payload is under the cap.
+        Finding: PASS when what the run CARRIED is under the cap. Reading the
+        declaration instead is what let this pass over a 54-byte prompt while
+        claiming to have checked a quarter of a megabyte.
     """
-    sent = runs.payload_bytes(TRIO_RUN)
+    if run is None:
+        return _finding(S8_ASSERTIONS, 2, Outcome.CANNOT_TEST, TRIO_RUN,
+                        "run %s produced no capture, so what it carried is "
+                        "unknown" % TRIO_RUN)
+    sent = run.stdin_bytes
     if sent >= MAX_QUERY_BYTES:
         return _finding(S8_ASSERTIONS, 2, Outcome.FAIL, TRIO_RUN,
                         "run %s carries %d bytes, at or above the product's "

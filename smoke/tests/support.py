@@ -157,16 +157,29 @@ class FakeEnvironment:
         self.scratch_dir.mkdir(parents=True, exist_ok=True)
 
 
-class FakeConfig:
-    """The one field :mod:`smoke.runs` reads off a ``SmokeConfig``."""
+#: What the double declares as the large payload's size. Small on purpose: the
+#: builder reads the repository's own sources, and a test that measures whether
+#: the payload was attached does not need a quarter of a megabyte to see it.
+FAKE_PAYLOAD_TARGET_BYTES = 2000
 
-    def __init__(self, passphrase: str) -> None:
-        """Store the passphrase.
+
+class FakeConfig:
+    """The fields :mod:`smoke.runs` reads off a ``SmokeConfig``."""
+
+    def __init__(self, passphrase: str,
+                 payload_target_bytes: int = FAKE_PAYLOAD_TARGET_BYTES) -> None:
+        """Store what the module asks for.
 
         Args:
             passphrase: What ``runs.passphrase()`` should answer.
+            payload_target_bytes: How large a run marked large should be. The
+                double carried only the passphrase until the executor started
+                measuring what it sends, at which point every large run through
+                a double raised ``AttributeError`` -- an under-specified double,
+                not a defect in what it stands for.
         """
         self.passphrase = passphrase
+        self.payload_target_bytes = payload_target_bytes
 
 
 #: The passphrase the doubles hand out. Long enough to clear the product's own
