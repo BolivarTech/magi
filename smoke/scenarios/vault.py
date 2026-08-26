@@ -755,10 +755,19 @@ def _history_intact_finding(diagnosed, reopened, baseline):
                     "the environment held no accumulated history before the "
                     "rotation (%s), so this assertion would pass over nothing"
                     % _render_counts(baseline))
+    # Absent and zero are different answers, and flattening them reports data
+    # loss on a table nobody measured. ``diagnose_counts`` leaves a table the
+    # product rendered ``missing`` out of the mapping and says so; reading it
+    # back with a zero default contradicted that in the next three lines.
+    unmeasured = sorted(table for table in baseline if table not in counts)
+    if unmeasured:
+        return _s16(1, Outcome.CANNOT_TEST,
+                    "the report gave no count for %s, so what survived there "
+                    "is unknown rather than lost" % ", ".join(unmeasured))
     lost = ["%s went from %d to %d"
-            % (table, baseline[table], counts.get(table, 0))
+            % (table, baseline[table], counts[table])
             for table in sorted(baseline)
-            if counts.get(table, 0) < baseline[table]]
+            if counts[table] < baseline[table]]
     if lost:
         return _s16(1, Outcome.FAIL,
                     "rotating the credential destroyed data: %s"
