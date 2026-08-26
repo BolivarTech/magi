@@ -142,12 +142,6 @@ CONFIG_EXIT_CODE = 2
 #: at a glance that the harness put it there and the operator did not.
 UNKNOWN_FIELD = "smoke_unknown_field"
 
-#: The three v0.11.0-era incompatibilities, and the token that says each one was
-#: named. The guided migration exists because ``deny_unknown_fields`` aborts on
-#: the FIRST unknown key, so the assertion counts that ALL THREE are named --
-#: not that the output is non-empty, which any one of them alone would satisfy.
-V011_MARKERS = ("provider", "base_url", "tool_result_cap_bytes")
-
 #: The three seats. A seat that declares a model without its lineage is a load
 #: error since v0.13.0, because a lineage is a failure domain the operator
 #: chooses and the product will not infer one -- guessing would look exactly

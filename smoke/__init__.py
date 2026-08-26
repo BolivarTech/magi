@@ -3,12 +3,13 @@
 # Date: 2026-08-25
 """The smoke harness: the product exercised as a consumer exercises it.
 
-Two constants live here rather than beside the code that uses them, because
-both have readers in more than one place and one of those readers comes first.
-``CERTIFICATE_PATH`` names the only file the harness may leave in the tree: the
-scenario that asserts nothing else was left behind needs it, and so does the
-writer of the certificate itself.
+``CERTIFICATE_PATH`` lives here rather than beside the code that writes it,
+because it has readers in two places and one of them comes first: the scenario
+that asserts nothing else was left behind needs the name, and so does the
+writer of the certificate.
+
+A ``VERSION`` sat here too and nothing ever read it. The version that matters
+is the PRODUCT's, and the certificate takes that from the binary itself.
 """
 
-VERSION = "1.0.0"
 CERTIFICATE_PATH = "docs/test/smoke-certificate.md"
