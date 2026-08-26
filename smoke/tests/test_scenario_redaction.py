@@ -31,7 +31,8 @@ class _FakeRun:
         planted: The secrets the executor put in front of it.
     """
 
-    def __init__(self, stdout=b"", stderr=b"", planted=None, timed_out=False):
+    def __init__(self, stdout=b"", stderr=b"", planted=None, timed_out=False,
+                 exit_code=1):
         """Build the double.
 
         Args:
@@ -39,8 +40,9 @@ class _FakeRun:
             stderr: Standard error bytes.
             planted: Secrets the run was given, or None for the default one.
             timed_out: Whether the run exceeded its ceiling.
+            exit_code: What the product exited with; see :class:`_FakeOutput`.
         """
-        self.output = _FakeOutput(stdout, stderr)
+        self.output = _FakeOutput(stdout, stderr, exit_code)
         self.planted = planted if planted is not None else (
             PlantedSecret(_SECRET, _LABEL),)
         self.timed_out = timed_out
@@ -55,16 +57,21 @@ class _FakeOutput:
         stderr: Standard error bytes.
     """
 
-    def __init__(self, stdout, stderr):
+    def __init__(self, stdout, stderr, exit_code=1):
         """Build the capture.
 
         Args:
             stdout: Standard output bytes.
             stderr: Standard error bytes.
+            exit_code: What the product exited with. ONE by default, because
+                that is what R6 does: it points the product at a backend that
+                answers 401 to everything, and a real archived run records
+                exit 1 with stop_reason "error". A zero here models the
+                fixture having failed to fail.
         """
         self.stdout = stdout
         self.stderr = stderr
-        self.exit_code = 1
+        self.exit_code = exit_code
         self.command = ["magi-rs", "query"]
 
     def raw(self):
@@ -127,6 +134,27 @@ class RedactionBodyTests(unittest.TestCase):
             self.assertEqual(Outcome.PASS, outcomes[redaction.ASSERTIONS[index]])
         self.assertEqual(Outcome.CANNOT_TEST,
                          outcomes[redaction.ASSERTIONS[2]])
+
+    def test_a_run_that_did_not_fail_cannot_test_anything(self) -> None:
+        """The vacuous pass this scenario is one fixture away from.
+
+        S10 searches R6's output for a credential that only travels on the
+        ERROR path: R6 points the product at a local backend answering 401 to
+        everything, and the credential reaches the URL's authority on the way
+        to being refused. If R6 ever SUCCEEDS -- the fixture server not
+        starting, the product reaching a different endpoint, the refusal
+        changing shape -- there is no credential in the output to find, and
+        all four assertions report PASS having searched output that never
+        carried the thing they look for.
+
+        That is a green over an unwalked path, on the scenario that guards a
+        credential leak. Measured against a real archived R6: exit 1,
+        stop_reason "error", response null. A zero exit means the fixture
+        failed to fail, and the honest answer is CANNOT_TEST.
+        """
+        run = _FakeRun(stdout=b'{"stop_reason": "end_turn"}', exit_code=0)
+        outcomes = _outcomes(run)
+        self.assertEqual({Outcome.CANNOT_TEST}, set(outcomes.values()))
 
     def test_a_clean_archive_passes_the_third(self) -> None:
         """The other half: with a log present and clean, assertion 3 evaluates."""
