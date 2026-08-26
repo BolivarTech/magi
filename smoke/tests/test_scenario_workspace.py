@@ -4,7 +4,9 @@
 """Unit tests for the S2 scenario's own shape."""
 
 import pathlib
+import subprocess
 import unittest
+from unittest import mock
 
 from smoke.outcome import Outcome
 from smoke.product import ProductOutput
@@ -270,6 +272,60 @@ class WorkdirFlagScenarioBodyTests(unittest.TestCase):
         self.assertTrue(seeds, "S14 seeded no workspace by cwd")
         for call in seeds:
             self.assertIsNotNone(call.cwd)
+
+
+class WindowsPrincipalCountTests(unittest.TestCase):
+    """The question is HOW MANY ACCOUNTS, not how many entries."""
+
+    _TARGET = "C:\\ws\\.magi"
+    _OWNER_TWICE = (
+        "C:\\ws\\.magi THOTH\\jbolivarg:(OI)(CI)(F)\n"
+        "                THOTH\\jbolivarg:(F)\n"
+    )
+    _TWO_ACCOUNTS = (
+        "C:\\ws\\.magi THOTH\\jbolivarg:(OI)(CI)(F)\n"
+        "                THOTH\\someone-else:(R)\n"
+    )
+    _BROAD = (
+        "C:\\ws\\.magi THOTH\\jbolivarg:(OI)(CI)(F)\n"
+        "                Everyone:(R)\n"
+    )
+
+    def _verdict(self, listing):
+        """Run the permission finding against a canned icacls listing.
+
+        Args:
+            listing: What icacls prints.
+
+        Returns:
+            Finding: What the scenario concluded.
+        """
+        completed = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout=listing.encode("utf-8"), stderr=b"")
+        with mock.patch.object(workspace.subprocess, "run",
+                               return_value=completed):
+            return workspace._windows_permission_finding(
+                pathlib.Path(self._TARGET))
+
+    def test_two_entries_for_the_same_account_pass(self) -> None:
+        """icacls lists a principal once per access entry, and the product's
+        own restriction leaves the owner with two -- one inheritable for what
+        the directory contains, one for the directory itself. Counting entries
+        reported "2 accounts (THOTH\\jbolivarg, THOTH\\jbolivarg)": the
+        same name twice, widening access to nobody, and the assertion could
+        never pass on a correctly restricted workspace.
+        """
+        self.assertEqual(Outcome.PASS, self._verdict(self._OWNER_TWICE).outcome)
+
+    def test_a_second_real_account_still_fails(self) -> None:
+        """The half that must not be lost. Another individual account carries
+        no well-known name to match, so counting distinct principals is the
+        only thing that sees it.
+        """
+        self.assertEqual(Outcome.FAIL, self._verdict(self._TWO_ACCOUNTS).outcome)
+
+    def test_a_broad_principal_still_fails(self) -> None:
+        self.assertEqual(Outcome.FAIL, self._verdict(self._BROAD).outcome)
 
 
 if __name__ == "__main__":
