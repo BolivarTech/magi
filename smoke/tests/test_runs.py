@@ -318,6 +318,38 @@ class DefinitionTableTests(unittest.TestCase):
             {run_id for run_id, item in runs.DEFINITIONS.items() if item.rotates})
 
 
+class CarriedPayloadTests(unittest.TestCase):
+    """What a run CARRIES is measured, never what it was declared to carry.
+
+    ``payload_bytes`` read the length of the definition's declared prompt,
+    which for R4 is 54 bytes, while the executor really did append the 250 kB
+    body. S8 turned that into one CANNOT_TEST -- "the large input was never
+    sent" -- and, worse, one PASS: "the generated payload stayed under the
+    product's input cap", asserted over 54 bytes. A green measuring nothing.
+    """
+
+    def test_the_result_reports_the_bytes_that_were_sent(self) -> None:
+        binary = support.install_fake_runs(self)
+        executor = runs.RunExecutor(runs._binary, runs._env, runs._config)
+        result = executor.execute(runs.DEFINITIONS["R4"])
+        self.assertEqual(len(binary.calls[-1].stdin or b""),
+                         result.stdin_bytes)
+
+    def test_a_large_run_carries_more_than_its_declared_prompt(self) -> None:
+        support.install_fake_runs(self)
+        executor = runs.RunExecutor(runs._binary, runs._env, runs._config)
+        result = executor.execute(runs.DEFINITIONS["R4"])
+        self.assertGreater(result.stdin_bytes,
+                           len(runs.DEFINITIONS["R4"].stdin))
+
+    def test_a_small_run_carries_exactly_its_prompt(self) -> None:
+        support.install_fake_runs(self)
+        executor = runs.RunExecutor(runs._binary, runs._env, runs._config)
+        result = executor.execute(runs.DEFINITIONS["R3"])
+        self.assertEqual(len(runs.DEFINITIONS["R3"].stdin),
+                         result.stdin_bytes)
+
+
 class ErrorBackendTests(unittest.TestCase):
     """R6 has to reach an endpoint that ANSWERS with an error, fast.
 
