@@ -437,6 +437,24 @@ class RotationRestoreTests(unittest.TestCase):
         preflight._restore_rotation_if_left_over()
         self.assertEqual(["ls"], [_verb(c) for c in calls])
 
+    def test_left_over_placeholders_are_swept(self) -> None:
+        """The crash path the placeholder removal never covered.
+
+        R6 takes its four entries back out in a ``finally``, which handles a
+        run that fails and one that times out. It does not handle the run that
+        is KILLED: there is no finally to reach, and unlike the rotation
+        marker nothing looked for them afterwards. The removal now warns
+        rather than raising and says the next preflight sweeps them, so the
+        sweep has to exist.
+        """
+        preflight, calls = self._preflight(
+            "OPENAI_API_KEY\nBASE_URL_USER\nMAGI_BASE_URL_PASSWORD\n")
+        preflight._restore_rotation_if_left_over()
+        removed = [call[call.index("rm") + 1]
+                   for call in calls if _verb(call) == "rm"]
+        self.assertEqual(["BASE_URL_USER", "MAGI_BASE_URL_PASSWORD"],
+                         sorted(removed))
+
     def test_the_vault_listing_uses_the_binary_s_real_signature(self) -> None:
         """The first version passed ``timeout_s=``; the binary takes ``timeout``.
 
