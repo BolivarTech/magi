@@ -410,6 +410,27 @@ class ControlRunTests(unittest.TestCase):
         self.assertNotIn("--no-memory", runs.DEFINITIONS["R3"].argv)
 
 
+class ShortTreeTests(unittest.TestCase):
+    """A tree too small for the payload degrades the run, never the harness.
+
+    ``PayloadBuilder.build`` raises, and the raise reached ``main``'s
+    ``except HarnessError`` -- exit 3, which is the code reserved for a bug in
+    the HARNESS. Section 7.2 and S8's own trap text both say the answer is
+    ``CANNOT_TEST``: the harness must not accuse the product of a size it was
+    never sent, and it must not accuse itself of a bug either. S8 already had
+    the branch for it, and nothing could reach it.
+    """
+
+    def test_a_tree_too_small_leaves_the_run_carrying_its_prompt(self) -> None:
+        support.install_fake_runs(self)
+        executor = runs.RunExecutor(
+            runs._binary, runs._env,
+            support.FakeConfig(support.FAKE_PASSPHRASE,
+                               payload_target_bytes=10 ** 12))
+        result = executor.execute(runs.DEFINITIONS["R4"])
+        self.assertEqual(len(runs.DEFINITIONS["R4"].stdin), result.stdin_bytes)
+
+
 class ArchiveScrubbingTests(unittest.TestCase):
     """The passphrase is scrubbed on BOTH archive paths, not just one.
 
