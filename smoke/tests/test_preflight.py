@@ -443,6 +443,23 @@ class RotationRestoreTests(unittest.TestCase):
         preflight._restore_rotation_if_left_over()
         self.assertEqual(["ls"], [_verb(c) for c in calls])
 
+    def test_a_vault_that_cannot_be_listed_cuts(self) -> None:
+        """Spec section 5.2: it cuts with exit 2, naming the cause.
+
+        "No se arranca sin saber si hay una rotacion pendiente." Returning
+        quietly is the worst of the three options: a run killed mid-rotation
+        leaves a sentinel credential in the environment, the next run cannot
+        tell, every backend invocation then authenticates with the sentinel
+        and dies of an opaque auth error, and S16 renders a verdict over a
+        half-rotated database. Nothing in the report says the recovery was
+        skipped -- the announcement only covers the branch that succeeded.
+        """
+        preflight, _ = self._preflight("")
+        preflight.binary.invoke.side_effect = OSError("no such binary")
+        with self.assertRaises(PreflightError) as caught:
+            preflight._restore_rotation_if_left_over()
+        self.assertIn("no such binary", str(caught.exception))
+
     def test_left_over_placeholders_are_swept(self) -> None:
         """The crash path the placeholder removal never covered.
 
