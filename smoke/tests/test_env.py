@@ -271,6 +271,40 @@ class ProfileRewriteTests(unittest.TestCase):
         self.assertIn('# melchior_model = "commented out"', rewritten)
 
 
+class CorruptConfigTests(unittest.TestCase):
+    """A magi.toml it cannot decode is NOT MEASURED, never a harness failure.
+
+    The readers caught OSError and TOMLDecodeError. UnicodeDecodeError is a
+    ValueError and is neither, so a file holding bytes that are not UTF-8 --
+    a truncated write, a foreign writer, a filesystem that handed back
+    garbage -- escaped and reached the last-resort catch: exit 3, which says
+    the HARNESS failed, over a file the harness only reads.
+
+    Each of these readers already has a documented "could not be read"
+    answer. This is the same answer for one more way of not being readable.
+    """
+
+    def _env(self, raw: bytes) -> Environment:
+        root = support.scratch_dir(self)
+        (root / ".magi").mkdir()
+        (root / ".magi" / "magi.toml").write_bytes(raw)
+        return Environment(root)
+
+    def test_an_undecodable_config_declares_no_endpoint(self) -> None:
+        env = self._env(bytes([0xFF, 0xFE]) + b'base_url = "x"')
+        self.assertIsNone(env.declared_base_url())
+
+    def test_an_undecodable_config_declares_no_models(self) -> None:
+        env = self._env(bytes([0xFF, 0xFE])
+                        + b'[openai]\nmodel = "x"')
+        self.assertEqual(set(), env.declared_models())
+
+    def test_an_undecodable_config_yields_no_memory_settings(self) -> None:
+        env = self._env(bytes([0xFF, 0xFE])
+                        + b"[memory]\nmode = 'x'")
+        self.assertEqual({}, env.memory_settings())
+
+
 class ProfileValueRejectionTests(unittest.TestCase):
     """A profile value is interpolated into TOML, so it has to BE a TOML value.
 
