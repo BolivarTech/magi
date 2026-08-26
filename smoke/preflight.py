@@ -13,9 +13,10 @@ start), and the reachability probe cannot fail at all, by D-17.
 
 The count was wrong twice, in both directions, and the reason is worth
 keeping: the steps that cut mostly do not raise here. ``_settle_binary``
-raises nothing of its own and delegates to ``binary.py``, which raises
-``PreflightError`` in three methods; the lock raises from ``lock.py`` and the
-configuration from ``config.py``. Counting the ``raise`` statements in THIS
+raises nothing of its own and delegates to ``binary.py``, whose ``rebuild``
+and ``version`` raise ``PreflightError`` -- ``sha256`` does too, but the
+certificate calls that one, not the preflight; the lock raises from
+``lock.py`` and the configuration from ``config.py``. Counting the ``raise`` statements in THIS
 module answers a different question, and answers it confidently.
 
 Steps 1 to 8 are the spec's own numbering (section 4). ``7b`` (the
@@ -408,21 +409,26 @@ class Preflight:
         invisible precisely because the recovery works.
         """
         listed = self._vault_names()
-        # The ROTATION first, the placeholders second. A leftover placeholder
-        # is inert -- step 7b rewrites the environment's magi.toml every run,
-        # so no base_url declares the placeholders that would read the entries
-        # back. A rotated credential is not: it breaks every backend run that
-        # follows. Sweeping first put the recoverable failure ahead of the one
-        # that matters.
+        # The ROTATION first, the placeholders second, and the reason is NOT
+        # the one first written here. That said a rotated credential breaks
+        # every backend run afterwards; it does not. The product resolves the
+        # key env-first (`resolve_openai_key`, src/main.rs), step 3 requires
+        # it in the environment, and every child inherits it -- so a vault
+        # entry holding the sentinel is shadowed and just as inert as a
+        # placeholder. What separates them is RECOVERY: the rotation has a
+        # marker the next preflight finds, and the restore is what clears it,
+        # so the restore is the step whose failure must not be pre-empted by
+        # a sweep cutting first.
         if ROTATION_MARKER in listed:
-            self._restore_rotation(listed)
+            self._restore_rotation()
         self._sweep_placeholders(listed)
 
-    def _restore_rotation(self, listed: list[str]) -> None:
+    def _restore_rotation(self) -> None:
         """Put the real backend credential back and drop the sentinel.
 
-        Args:
-            listed: The vault entry names, which carry the marker.
+        Takes no listing: the caller has already found the marker in it, and
+        a parameter documented as load-bearing that nothing reads tells the
+        next reader this consults the vault entries. It does not.
 
         Raises:
             PreflightError: If nothing holds a credential to restore from, or
@@ -486,12 +492,15 @@ class Preflight:
 
         It used to answer ``None`` and let the caller return quietly, which
         the spec forbids for a reason worth restating: a run killed
-        mid-rotation leaves a sentinel credential in the environment, and a
-        preflight that cannot read the vault cannot tell. Starting anyway
-        means every backend invocation authenticates with the sentinel and
-        dies of an opaque auth error, while S16 renders a verdict over a
-        half-rotated database -- and the report says nothing, because the
-        announcement covers only the branch where the restore succeeded.
+        mid-rotation leaves the environment holding a sentinel where the real
+        credential belongs, and a preflight that cannot read the vault cannot
+        tell. Starting anyway means S16 renders a verdict over a half-rotated
+        database, and the report says nothing about it, because the
+        announcement covers only the branch where the restore succeeded. The
+        sentinel is not what the product would AUTHENTICATE with -- the key
+        resolves env-first and step 3 requires the real one there -- so the
+        cost is a verdict issued over an environment nobody checked, not a
+        run that fails loudly.
 
         Returns:
             list[str]: The entry names. Nothing here reads a stored VALUE:

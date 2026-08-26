@@ -513,9 +513,8 @@ class RotationRestoreTests(unittest.TestCase):
         "No se arranca sin saber si hay una rotacion pendiente." Returning
         quietly is the worst of the three options: a run killed mid-rotation
         leaves a sentinel credential in the environment, the next run cannot
-        tell, every backend invocation then authenticates with the sentinel
-        and dies of an opaque auth error, and S16 renders a verdict over a
-        half-rotated database. Nothing in the report says the recovery was
+        tell, and S16 then renders a verdict over a half-rotated database
+        with nothing in the report saying the recovery was skipped. Nothing in the report says the recovery was
         skipped -- the announcement only covers the branch that succeeded.
         """
         preflight, _ = self._preflight("")

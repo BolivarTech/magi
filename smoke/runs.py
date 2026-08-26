@@ -1098,10 +1098,17 @@ class RunExecutor:
         every finding from every completed run discarded. The event is a
         ``vault set`` the product refused.
 
-        **It stops the run, unlike a leftover placeholder.** A placeholder is
-        inert because step 7b rewrites ``magi.toml`` every run. A credential
-        left rotated is not: every backend invocation after it authenticates
-        with the sentinel and dies of an opaque auth error.
+        **It stops the run, unlike a leftover placeholder.** Not because the
+        sentinel would be used -- it would not. The product resolves the key
+        env-first (``resolve_openai_key``), step 3 of the preflight requires
+        the real value in the environment, and every child inherits it, so a
+        vault entry holding the sentinel is shadowed. What makes this
+        different is the MARKER: the rotation writes one before it moves the
+        credential, precisely so a death in the middle is recoverable, and
+        the restore is what clears it. A restore that quietly failed while
+        the removal succeeded leaves the environment rotated with nothing
+        left to say so -- the one state the marker's ordering exists to
+        prevent.
 
         **It never replaces an exception already in flight.** R7's own
         ``TimedOut`` is what the runner needs in order to substitute

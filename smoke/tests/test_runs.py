@@ -543,10 +543,11 @@ class PlaceholderLifetimeTests(unittest.TestCase):
     def test_a_failed_restore_is_typed_and_keeps_the_run_s_own_failure(self):
         """The same defect the placeholder removal had, in R7's finally.
 
-        A restore that fails is NOT inert -- the environment is left holding
-        a sentinel credential and every backend run after it dies of an
-        opaque auth error -- so unlike a leftover placeholder it must stop
-        the harness. What it must not do is stop it as an untyped
+        A restore that fails is NOT inert. Not because the sentinel would be
+        used -- the key resolves env-first and step 3 requires the real one
+        there -- but because the rotation writes a marker the next preflight
+        recovers from, and the restore is what clears it. So unlike a
+        leftover placeholder it must stop the harness. What it must not do is stop it as an untyped
         ProductOutputError escaping into main's last-resort catch: that is a
         traceback and exit 3, the code reserved for a defect in the harness,
         with the report discarded and every finding from every completed run
