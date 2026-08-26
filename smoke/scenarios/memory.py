@@ -75,7 +75,8 @@ from smoke.registry import scenario
 ASSERTIONS = (
     "the startup line reports N active with N > 0",
     "pending re-embed is 0 — the embedder answered",
-    "usage.input_tokens of R3 exceeds R2's by more than the declared margin",
+    "R3's transcript carries turns R2's does not — the assembler loaded "
+    "them",
     "the environment is below the saturation ceiling — otherwise 3 degrades "
     "to CANNOT_TEST",
     "with the embedder down, the run completes with a degradation notice",
@@ -91,8 +92,23 @@ RECALL_RUN = "R3"
 CEILING_FIELDS = ("context_budget_tokens", "response_headroom_tokens",
                   "safety_margin_ratio")
 
-#: Where the token count lives in the output contract.
+#: Where the token count lives in the output contract. Assertion 3b reads it;
+#: assertion 3 does NOT, and the reason is measured rather than argued. With
+#: the control finally carrying the same prompt, memory on against memory off
+#: came out at 1436 against 1403 input tokens -- 33 apart -- while the run with
+#: memory answered the planted question correctly and the control said it had
+#: no stored memory. The injection is real and it is CHEAP: selective mode
+#: recalls what the query asked for instead of replaying history, so the token
+#: delta is inside ordinary variance and cannot carry a threshold. A margin
+#: tuned to fit 33 would fire on noise; one above it would fail on a working
+#: product. The observable that does discriminate is the transcript.
 INPUT_TOKENS_PATH = "usage.input_tokens"
+
+#: Where the run's own messages live. A run with memory carries the turns the
+#: assembler loaded on top of the ones it produced; the ``--no-memory`` control
+#: carries only its own. Against this repository's environment that is 79
+#: against 4.
+TRANSCRIPT_PATH = "transcript"
 
 #: The product's startup diagnostics line. Anchored on the counts rather than
 #: on the whole sentence so a change to the index-size suffix does not silently
@@ -302,38 +318,58 @@ def _pending_finding(counts, failure):
 
 
 def _injection_finding(results, ambient, saturation):
-    """Judge assertion 3: the assembler added more than the declared margin.
+    """Judge assertion 3: memory loaded turns the run did not produce.
+
+    Measured on the transcript rather than on a token delta, and the change is
+    evidence-led. See :data:`INPUT_TOKENS_PATH` for the numbers: with the
+    control finally carrying the same prompt, the two runs came out 33 tokens
+    apart while the one with memory answered the planted question and the
+    control said it had no stored memory. Selective mode recalls what was
+    asked for instead of replaying history, so what it costs in tokens is
+    inside ordinary variance and no threshold can sit there honestly. What the
+    two runs do NOT share is their transcript: the control carries only its own
+    turns.
 
     Args:
         results: The three results, keyed by id.
-        ambient: The ambient state carrying the margin.
+        ambient: The ambient state. Unused here now, kept because assertion 3b
+            hands it the same signature.
         saturation: What assertion 3b concluded. Anything but PASS takes this
-            assertion down with it: above the ceiling the difference no longer
-            measures injection, and below a derived ceiling there is nothing
-            saying it does.
+            assertion down with it: a saturated assembler loads bulk history
+            rather than what the query asked for, so a longer transcript stops
+            meaning it recalled what was planted.
 
     Returns:
-        Finding: PASS when the gap clears the margin.
+        Finding: PASS when the run with memory carries more turns than the
+        control.
     """
+    del ambient
     if saturation is not Outcome.PASS:
         return _s9(2, Outcome.CANNOT_TEST, RECALL_RUN,
                    "the saturation check did not pass, so the difference "
                    "between %s and %s cannot be read as injection"
                    % (RECALL_RUN, CONTROL_RUN))
-    margin = ambient.margin_tokens
-    if not isinstance(margin, int) or margin <= 0:
-        return _s9(2, Outcome.CANNOT_TEST, RECALL_RUN,
-                   "no margin is calibrated in smoke.toml, and a margin of "
-                   "zero cannot tell an injection from two prompts of "
-                   "different length")
-    delta, failure = _token_delta(results)
-    if delta is None:
-        return _s9(2, Outcome.CANNOT_TEST, RECALL_RUN, failure)
-    if delta <= margin:
+    counts = {}
+    for run_id in (CONTROL_RUN, RECALL_RUN):
+        result = results.get(run_id)
+        if result is None:
+            return _s9(2, Outcome.CANNOT_TEST, RECALL_RUN,
+                       "run %s produced no capture" % run_id)
+        try:
+            turns = result.output.key(TRANSCRIPT_PATH)
+        except ProductOutputError as exc:
+            return _s9(2, Outcome.CANNOT_TEST, RECALL_RUN, str(exc))
+        if not isinstance(turns, list):
+            return _s9(2, Outcome.CANNOT_TEST, RECALL_RUN,
+                       "%s of run %s is %s, expected a list"
+                       % (TRANSCRIPT_PATH, run_id, type(turns).__name__))
+        counts[run_id] = len(turns)
+    if counts[RECALL_RUN] <= counts[CONTROL_RUN]:
         return _s9(2, Outcome.FAIL, RECALL_RUN,
-                   "%s sent %d more input tokens than %s, which does not "
-                   "clear the declared margin of %d"
-                   % (RECALL_RUN, delta, CONTROL_RUN, margin))
+                   "%s carries %d turns against %s's %d, so the assembler "
+                   "loaded nothing the run did not produce itself"
+                   % (RECALL_RUN, counts[RECALL_RUN], CONTROL_RUN,
+                      counts[CONTROL_RUN]))
     return _s9(2, Outcome.PASS, RECALL_RUN, "")
 
 

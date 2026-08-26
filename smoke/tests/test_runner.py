@@ -17,7 +17,7 @@ from smoke.runner import Ambient, Runner, capture_tree
 #: No scenario under test reads ambient state, so every case below passes the
 #: same empty one. S12 is the only scenario that declares needs_ambient, and it
 #: is tested in its own module against a real snapshot.
-_NO_AMBIENT = Ambient(tree_snapshot=None, margin_tokens=None,
+_NO_AMBIENT = Ambient(tree_snapshot=None,
                       ceiling_fraction=None, memory_settings={})
 
 

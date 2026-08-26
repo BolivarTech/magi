@@ -84,8 +84,6 @@ class Ambient:
         tree_snapshot: The pre-run snapshot, or None when nothing captured one
             (the CLI before Task 21 wires it, and every unit test that does not
             exercise S12).
-        margin_tokens: The configured margin S9 assertion 3 checks the derived
-            ceiling against, or None when unconfigured.
         ceiling_fraction: The configured fraction for the same assertion, or
             None when unconfigured.
         memory_settings: The environment's ``magi.toml`` ``[memory]`` block as
@@ -96,7 +94,6 @@ class Ambient:
     """
 
     tree_snapshot: TreeSnapshot | None
-    margin_tokens: int | None
     ceiling_fraction: float | None
     memory_settings: dict[str, object]
 

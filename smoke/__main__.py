@@ -140,7 +140,6 @@ def main(argv: list[str] | None = None) -> int:
         # the harness clean of exactly the changes it had just made.
         ambient = Ambient(
             tree_snapshot=capture_tree(REPO_ROOT),
-            margin_tokens=config.margin_tokens,
             ceiling_fraction=config.ceiling_fraction,
             memory_settings=env.memory_settings(),
         )

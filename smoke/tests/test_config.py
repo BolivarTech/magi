@@ -49,18 +49,22 @@ class LoadTests(unittest.TestCase):
         self.assertEqual("OPENAI_API_KEY", config.backend_key_env)
 
     def test_the_calibration_and_payload_fields_parse(self) -> None:
-        """Four numbers reach real assertions -- S9's derived ceiling and S8's
-        token floor -- and none of them had a parsing test. A field that is
-        read but never parsed under test is a field that silently arrives as
-        its default.
+        """Three numbers reach real assertions -- S9's derived ceiling and
+        S8's token floor -- and none of them had a parsing test. A field that
+        is read but never parsed under test is a field that silently arrives
+        as its default.
+
+        There were four. ``margin_tokens`` went with the token-delta
+        measurement it was the threshold for: selective recall costs tens of
+        tokens rather than hundreds, so no threshold could sit there honestly,
+        and a setting nothing reads is worse than no setting at all.
         """
         path = self._write(
-            _MINIMAL + '\n[calibration]\nmargin_tokens = 2048\n'
+            _MINIMAL + '\n[calibration]\n'
             'ceiling_fraction = 0.8\n[payload]\ntarget_bytes = 1000\n'
             'token_floor = 200\n'
         )
         config = SmokeConfig.load(path)
-        self.assertEqual(2048, config.margin_tokens)
         self.assertEqual(0.8, config.ceiling_fraction)
         self.assertEqual(1000, config.payload_target_bytes)
         self.assertEqual(200, config.payload_token_floor)

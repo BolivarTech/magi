@@ -130,7 +130,6 @@ class SmokeConfig:
         backend_kind: One of :data:`BACKEND_KINDS`.
         backend_base_url: Where the product should reach the backend.
         backend_key_env: The environment variable holding the backend key.
-        margin_tokens: S9's margin; 0 until phase 5 measures it.
         ceiling_fraction: S9's fraction; 0.0 until phase 5 measures it.
         payload_target_bytes: Bytes the payload builder generates.
         payload_token_floor: The token floor S8 asserts against.
@@ -142,7 +141,7 @@ class SmokeConfig:
     """
 
     def __init__(self, passphrase, backend_kind, backend_base_url,
-                 backend_key_env, margin_tokens, ceiling_fraction,
+                 backend_key_env, ceiling_fraction,
                  payload_target_bytes, payload_token_floor):
         """Store the parsed configuration.
 
@@ -151,7 +150,6 @@ class SmokeConfig:
             backend_kind: One of :data:`BACKEND_KINDS`.
             backend_base_url: Where the product should reach the backend.
             backend_key_env: The variable holding the backend key.
-            margin_tokens: S9's margin.
             ceiling_fraction: S9's fraction.
             payload_target_bytes: Bytes to generate.
             payload_token_floor: The floor S8 asserts.
@@ -160,7 +158,6 @@ class SmokeConfig:
         self.backend_kind = backend_kind
         self.backend_base_url = backend_base_url
         self.backend_key_env = backend_key_env
-        self.margin_tokens = margin_tokens
         self.ceiling_fraction = ceiling_fraction
         self.payload_target_bytes = payload_target_bytes
         self.payload_token_floor = payload_token_floor
@@ -207,7 +204,6 @@ class SmokeConfig:
             backend_kind=kind,
             backend_base_url=_require(document, "backend", "base_url", path),
             backend_key_env=_require(document, "backend", "key_env", path),
-            margin_tokens=calibration.get("margin_tokens", 0),
             ceiling_fraction=calibration.get("ceiling_fraction", 0.0),
             payload_target_bytes=payload.get("target_bytes", PAYLOAD_TARGET_BYTES),
             payload_token_floor=payload.get("token_floor", PAYLOAD_TOKEN_FLOOR),

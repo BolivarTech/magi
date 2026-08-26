@@ -31,7 +31,7 @@ def _ambient(snapshot) -> Ambient:
     Returns:
         Ambient: The state, with the fields S12 does not read left empty.
     """
-    return Ambient(tree_snapshot=snapshot, margin_tokens=None,
+    return Ambient(tree_snapshot=snapshot,
                    ceiling_fraction=None, memory_settings={})
 
 
