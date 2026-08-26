@@ -348,7 +348,7 @@ class _RotatedDatabase(_FakeDatabase):
         return super().__call__(call)
 
 
-def _r7_result(timed_out: bool = False) -> RunResult:
+def _r7_result(timed_out: bool = False, baseline=None) -> RunResult:
     """Build the R7 capture S16 reads.
 
     R7 exits non-zero on purpose: it queries while the backend credential holds
@@ -418,6 +418,35 @@ class CredentialRotationScenarioBodyTests(unittest.TestCase):
         support.install_fake_runs(self, responder=_RotatedDatabase())
         self.assertEqual({Outcome.PASS},
                          set(_s16_outcomes(_r7_result()).values()))
+
+    def test_history_the_rotation_destroyed_fails(self) -> None:
+        """"The previous history is still there" needs a BEFORE.
+
+        Read once, after the rotation, the assertion passed whenever any table
+        was non-zero -- so a rotation that destroyed most of the history was
+        green. S4 does the same job correctly with a before/after comparison,
+        120 lines away in this same module.
+        """
+        support.install_fake_runs(self, responder=_RotatedDatabase())
+        run = _r7_result(baseline={"sessions": 2, "messages": 40,
+                                   "knowledge": 3, "memories": 5})
+        outcomes = {f.assertion: f.outcome
+                    for f in DEFAULT_REGISTRY.get("S16").func(run)}
+        self.assertEqual(Outcome.FAIL, outcomes[vault.S16_ASSERTIONS[1]])
+
+    def test_history_that_survived_intact_passes(self) -> None:
+        support.install_fake_runs(self, responder=_RotatedDatabase())
+        run = _r7_result(baseline={"sessions": 1, "messages": 8,
+                                   "knowledge": 3, "memories": 5})
+        outcomes = {f.assertion: f.outcome
+                    for f in DEFAULT_REGISTRY.get("S16").func(run)}
+        self.assertEqual(Outcome.PASS, outcomes[vault.S16_ASSERTIONS[1]])
+
+    def test_a_run_with_no_baseline_cannot_test_the_history(self) -> None:
+        """A rotation that recorded no baseline leaves nothing to compare."""
+        support.install_fake_runs(self, responder=_RotatedDatabase())
+        outcomes = _s16_outcomes(_r7_result())
+        self.assertEqual(Outcome.CANNOT_TEST, outcomes[vault.S16_ASSERTIONS[1]])
 
     def test_a_passphrase_the_rotation_invalidated_fails(self) -> None:
         """The durable invariant of section 0.2: rotating a third-party
