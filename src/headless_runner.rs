@@ -1800,6 +1800,29 @@ mod tests {
     /// The runner sums `RunObserver::on_usage` across every turn into
     /// `RunOutcome.usage` — a non-terminal tool turn reporting (10, 2) plus a
     /// terminal turn reporting (5, 3) must total (15, 5), not just the last turn.
+    /// A notice the agent emits must REACH the operator in headless mode.
+    ///
+    /// The drain loop consumed every `StreamPiece` and inspected only
+    /// `Content`, for time-to-first-byte. `StreamPiece::Notice` was dropped on
+    /// the floor, so REQ-29's second half held in the TUI and nowhere else: an
+    /// operator running `magi query` with a failing embedder watched memories
+    /// pile up unembedded and was told nothing at all. The smoke harness found
+    /// it by asking for the notice and never seeing one.
+    ///
+    /// The text is foreign -- it carries whatever the failing subsystem said,
+    /// which can embed a URL with credentials in it -- so it is redacted on
+    /// the way out, exactly like every other foreign string this binary
+    /// prints.
+    #[test]
+    fn a_notice_reaches_the_operator_with_its_authority_redacted() {
+        let line = notice_line(
+            "memory: context assembly failed (POST https://u:pw@host/v1/embeddings)",
+        );
+        assert!(line.starts_with(NOTICE_PREFIX), "got: {line}");
+        assert!(!line.contains("pw"), "the credential survived: {line}");
+        assert!(line.contains("context assembly failed"), "got: {line}");
+    }
+
     #[tokio::test]
     async fn test_run_query_sums_usage_across_turns_into_run_outcome() {
         let provider = ScriptedProvider::new(vec![
