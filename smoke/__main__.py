@@ -18,45 +18,51 @@ import subprocess
 import sys
 import traceback
 
-from smoke import runs
-from smoke.binary import ReleaseBinary
-from smoke.certificate import (Certificate, ROUNDS_FILENAME, RoundCounter,
-                               may_certify)
-from smoke.config import CERTIFICATE_PATH, ModelProfile, SmokeConfig
-from smoke.env import Environment, active_memories
-from smoke.errors import HarnessError, PreflightError
-from smoke.lock import RunLock
-from smoke.preflight import Preflight
-from smoke.registry import (DECLARED_ASSERTION_COUNT,
-                            DECLARED_SCENARIO_COUNT, DEFAULT_REGISTRY)
-from smoke.report import Report
-from smoke.runner import Ambient, Runner, StampedFinding, capture_tree
-from smoke.runs import DEFINITIONS, RunExecutor, RunResult, needed_runs
-# Imported for its side effect: the decorator registers at import time, so a
-# scenario nobody imported is a scenario nobody runs. Without this line the
-# harness reconciled an EMPTY registry against itself -- every set difference
-# empty, nothing invoked, nothing reported -- and exited 0 having evaluated
-# nothing. It sits last so the ordering says what it is: not a symbol this
-# module uses, but the moment the scenarios come into existence.
+#: The four codes, declared BEFORE anything from this package is imported --
+#: because loading the package is itself an operation that can fail, and it
+#: has to be able to name its own exit code when it does.
 EXIT_OK = 0
 EXIT_NOT_PASSED = 1
 EXIT_PREFLIGHT = 2
 EXIT_HARNESS = 3
 
-
 try:
-    # The side-effect import that registers every scenario, and the one place
-    # an exit code can escape this module's control: it runs before `main`
-    # exists to catch anything, so an uncaught raise here is Python's exit 1
-    # -- which in this harness means "a scenario did not pass", a verdict on
-    # the PRODUCT. A syntax error in the harness would have been reported as
-    # the product failing.
+    # THE WHOLE HARNESS-LOADING PHASE, in one guard, and that scope is the
+    # point. These run before `main` exists to catch anything, so an uncaught
+    # raise here is Python's own exit 1 -- which this harness defines as "a
+    # scenario did not pass", a verdict on the PRODUCT. A syntax error in the
+    # report or the runner was reported as the product failing.
+    #
+    # Guarding only the scenario import below covered the module that
+    # registers scenarios and left every other import here exiting 1. There
+    # is nothing special about the scenario package: loading the harness is
+    # one operation, and either all of it names its own code or none does.
+    from smoke import runs
+    from smoke.binary import ReleaseBinary
+    from smoke.certificate import (Certificate, ROUNDS_FILENAME, RoundCounter,
+                                   may_certify)
+    from smoke.config import CERTIFICATE_PATH, ModelProfile, SmokeConfig
+    from smoke.env import Environment, active_memories
+    from smoke.errors import HarnessError, PreflightError
+    from smoke.lock import RunLock
+    from smoke.preflight import Preflight
+    from smoke.registry import (DECLARED_ASSERTION_COUNT,
+                                DECLARED_SCENARIO_COUNT, DEFAULT_REGISTRY)
+    from smoke.report import Report
+    from smoke.runner import Ambient, Runner, StampedFinding, capture_tree
+    from smoke.runs import DEFINITIONS, RunExecutor, RunResult, needed_runs
+    # Imported for its side effect: the decorator registers at import time, so
+    # a scenario nobody imported is a scenario nobody runs. Without this line
+    # the harness reconciled an EMPTY registry against itself -- every set
+    # difference empty, nothing invoked, nothing reported -- and exited 0
+    # having evaluated nothing. It sits last so the ordering says what it is:
+    # not a symbol this module uses, but the moment the scenarios come into
+    # existence.
     from smoke import scenarios  # noqa: F401
 except BaseException:  # noqa: BLE001 - re-raised as the harness's own code
     traceback.print_exc()
-    print("harness failure: a scenario module could not be imported, so no "
-          "scenario was registered and nothing could be evaluated",
-          file=sys.stderr)
+    print("harness failure: the harness could not be loaded, so no scenario "
+          "was registered and nothing could be evaluated", file=sys.stderr)
     raise SystemExit(EXIT_HARNESS)
 
 #: Module-level, not literals inside main: the tests patch around them, and a
