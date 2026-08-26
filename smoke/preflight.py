@@ -18,6 +18,7 @@ if moved, and both were found by review rather than by a test that failed:
 """
 
 import dataclasses
+import http.client
 import json
 import os
 import pathlib
@@ -513,7 +514,11 @@ class Preflight:
             with urllib.request.urlopen(root + TAGS_PATH,
                                         timeout=BACKEND_PROBE_TIMEOUT_S) as answer:
                 document = json.loads(answer.read().decode("utf-8"))
-        except (OSError, urllib.error.URLError, ValueError):
+        except (OSError, urllib.error.URLError, ValueError,
+                http.client.HTTPException):
+            # HTTPException is not an OSError: a daemon that truncates
+            # its response would otherwise take the whole harness to
+            # exit 3 rather than to "could not be asked".
             return None
         models = document.get("models")
         if not isinstance(models, list):

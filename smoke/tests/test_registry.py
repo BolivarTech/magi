@@ -8,6 +8,7 @@ import ast
 import unittest
 
 from smoke.errors import HarnessError
+from smoke import scenarios
 from smoke.registry import DECLARED_SCENARIO_COUNT, Registry, scenario
 
 
@@ -80,7 +81,8 @@ class AssertionSourceTests(unittest.TestCase):
         syntax tree asks what was actually passed.
         """
         checked = 0
-        for path in sorted(pathlib.Path("smoke/scenarios").glob("*.py")):
+        package = pathlib.Path(scenarios.__file__).parent
+        for path in sorted(package.glob("*.py")):
             if path.name == "__init__.py":
                 continue
             tree = ast.parse(path.read_text(encoding="utf-8"))

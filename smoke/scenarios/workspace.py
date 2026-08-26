@@ -72,10 +72,10 @@ MARKER_NAME = "SMOKE_S14_MARKER"
 #: the difference is the whole of assertion 4.
 CLAP_USAGE_MARKER = b"usage:"
 
-#: The exit code clap uses for a parse error.
 #: What a run that resolved its workspace exits with.
 SUCCESS_EXIT_CODE = 0
 
+#: The exit code clap uses for a parse error.
 CLAP_EXIT_CODE = 2
 
 #: What the product scaffolds, and the one file inside it whose permissions say

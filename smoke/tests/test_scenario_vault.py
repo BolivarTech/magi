@@ -415,10 +415,9 @@ class CredentialRotationScenarioBodyTests(unittest.TestCase):
         self.assertEqual({Outcome.CANNOT_TEST},
                          set(_s16_outcomes(None).values()))
 
-    def test_a_rotation_that_timed_out_cannot_test_either_assertion(self) -> None:
-        support.install_fake_runs(self, responder=_RotatedDatabase())
-        self.assertEqual({Outcome.CANNOT_TEST},
-                         set(_s16_outcomes(_r7_result(timed_out=True)).values()))
+    def test_a_timed_out_rotation_is_the_runner_s_to_answer(self) -> None:
+        """Same as S10: the branch was unreachable, the declaration is not."""
+        self.assertFalse(DEFAULT_REGISTRY.get("S16").inspects_timeouts)
 
     def test_a_database_that_survived_the_rotation_passes_both(self) -> None:
         support.install_fake_runs(self, responder=_RotatedDatabase())

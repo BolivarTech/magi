@@ -669,22 +669,20 @@ def rotating_a_credential_keeps_the_database(run):
     Yields:
         Finding: One per entry of :data:`S16_ASSERTIONS`, in that order.
     """
-    if run is None or getattr(run, "timed_out", False):
-        cause = ("run %s never executed, so no credential was rotated"
-                 % S16_RUN_ID if run is None else
-                 "run %s exceeded its ceiling, so the rotation it performs may "
-                 "not have completed" % S16_RUN_ID)
+    # A timed-out run never reaches here either: S16 does not declare
+    # ``inspects_timeouts``, so the runner substitutes for the whole scenario.
+    if run is None:
         for index in range(len(S16_ASSERTIONS)):
             yield _s16(index, Outcome.CANNOT_TEST,
-                       "%s; a database that still opens says nothing about "
-                       "surviving a rotation that did not happen" % cause)
+                       "run %s never executed, so no credential was rotated; "
+                       "a database that still opens says nothing about "
+                       "surviving a rotation that did not happen" % S16_RUN_ID)
         return
 
     diagnosed = _diagnose("s16-diagnose")
     reopened = _vault(["ls"], label="s16-reopen")
     yield _still_opens_finding(diagnosed, reopened)
-    yield _history_intact_finding(diagnosed, reopened,
-                                  getattr(run, "baseline", None))
+    yield _history_intact_finding(diagnosed, reopened, run.baseline)
 
 
 def _still_opens_finding(diagnosed, reopened):

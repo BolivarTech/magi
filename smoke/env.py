@@ -340,9 +340,6 @@ class Environment:
     #: the seat name.
     MODEL_TABLES = ("openai", "embedding")
 
-    #: The seats, whose model keys are ``<seat>_model`` under ``[magi]``.
-    SEATS = ("melchior", "balthasar", "caspar")
-
     def declared_models(self):
         """Every model this environment asks the product to reach.
 
@@ -370,7 +367,7 @@ class Environment:
             if isinstance(value, str) and value:
                 names.add(value)
         magi = document.get("magi") or {}
-        for seat in self.SEATS:
+        for seat in PROFILE_SEATS:
             value = magi.get("%s_model" % seat)
             if isinstance(value, str) and value:
                 names.add(value)

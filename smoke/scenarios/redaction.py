@@ -53,13 +53,15 @@ def no_credential_leaks(run):
     Yields:
         Finding: One per entry of :data:`ASSERTIONS`, in that order.
     """
-    if run is None or getattr(run, "timed_out", False):
-        cause = ("R6 did not execute" if run is None
-                 else "R6 exceeded its ceiling, so its output is truncated")
+    # A timed-out run never reaches here: S10 does not declare
+    # ``inspects_timeouts``, so the runner has already substituted
+    # CANNOT_TEST for the whole scenario. What remains is the run that
+    # produced no capture at all.
+    if run is None:
         for index in range(len(ASSERTIONS)):
             yield _finding(index, Outcome.CANNOT_TEST,
-                           "%s; finding no leak in output that was cut short "
-                           "proves nothing" % cause)
+                           "R6 did not execute; finding no leak in output "
+                           "that does not exist proves nothing")
         return
 
     planted = tuple(run.planted)

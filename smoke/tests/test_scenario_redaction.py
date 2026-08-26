@@ -222,10 +222,17 @@ class RedactionBodyTests(unittest.TestCase):
         self.assertEqual(Outcome.FAIL,
                          _outcomes(run)[redaction.ASSERTIONS[0]])
 
-    def test_a_timed_out_run_cannot_test_rather_than_pass(self) -> None:
-        """Finding no leak in output that was cut short proves nothing."""
-        run = _FakeRun(stdout=b"", stderr=b"", timed_out=True)
-        self.assertEqual({Outcome.CANNOT_TEST}, set(_outcomes(run).values()))
+    def test_a_timed_out_run_is_the_runner_s_to_answer(self) -> None:
+        """S10 does not classify a timeout, and that is the invariant.
+
+        It used to carry its own ``timed_out`` branch, which production could
+        never reach: a scenario that does not declare ``inspects_timeouts``
+        has already been answered by the runner before its body runs. The
+        branch was dead code shaped like a guard, and the test that exercised
+        it asserted on a path nothing takes. What has to hold is the
+        declaration.
+        """
+        self.assertFalse(DEFAULT_REGISTRY.get("S10").inspects_timeouts)
 
     def test_a_run_that_never_happened_cannot_test(self) -> None:
         self.assertEqual({Outcome.CANNOT_TEST}, set(_outcomes(None).values()))
