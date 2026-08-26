@@ -136,6 +136,45 @@ class GrowthTests(unittest.TestCase):
         self.assertEqual(0, growth.runs_bytes)
 
 
+class DeclaredModelsTests(unittest.TestCase):
+    """Every model the environment names, so the preflight can check they exist.
+
+    Step 8 of the spec: a model that is not installed CUTS, because that is
+    failure #5 -- a run that reaches a healthy backend and asks it for
+    something it does not have. The names live in four places and the harness
+    must not keep a copy of the product's defaults, so they are read off the
+    file the product itself wrote.
+    """
+
+    def _env(self, text: str) -> Environment:
+        root = pathlib.Path(tempfile.mkdtemp())
+        (root / ".magi").mkdir()
+        (root / ".magi" / "magi.toml").write_text(text, encoding="utf-8")
+        return Environment(root)
+
+    def test_it_collects_the_agent_the_seats_and_the_embedder(self) -> None:
+        env = self._env(
+            '[openai]\nmodel = "main:cloud"\n\n'
+            '[magi]\nmelchior_model = "a:cloud"\nbalthasar_model = "b:cloud"\n'
+            'caspar_model = "c:cloud"\n\n'
+            '[embedding]\nmodel = "embed:latest"\n')
+        self.assertEqual({"main:cloud", "a:cloud", "b:cloud", "c:cloud",
+                          "embed:latest"}, env.declared_models())
+
+    def test_a_rotation_fallback_is_not_required_to_exist(self) -> None:
+        """A missing fallback degrades a rotation; it does not stop a run, and
+        the product already reports one as unmeasured rather than refusing.
+        """
+        env = self._env('[openai]\nmodel = "main:cloud"\n\n'
+                        '[[fallback]]\nmodel = "spare:cloud"\n'
+                        'lineage = "other"\n')
+        self.assertEqual({"main:cloud"}, env.declared_models())
+
+    def test_an_unreadable_config_declares_nothing(self) -> None:
+        self.assertEqual(set(), Environment(
+            pathlib.Path(tempfile.mkdtemp())).declared_models())
+
+
 class ActiveMemoryCountTests(unittest.TestCase):
     """The count comes from a RUN, because the database is encrypted.
 
