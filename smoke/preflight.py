@@ -21,9 +21,11 @@ import dataclasses
 import os
 import pathlib
 import re
+import shutil
 import stat
 import subprocess
 import sys
+import tempfile
 import urllib.error
 import urllib.request
 
@@ -99,7 +101,12 @@ def _read_sddl(path: pathlib.Path) -> str | None:
         easier and calling it green is the failure this whole module is written
         against.
     """
-    saved = path.parent / (path.name + ".sddl")
+    # A TEMP directory, never beside the file. The config lives in the tracked
+    # smoke/ tree and .gitignore covers smoke.toml and .lock and nothing else,
+    # so a failed unlink here left a file S12 correctly reports as a trace the
+    # harness had no business creating.
+    holder = pathlib.Path(tempfile.mkdtemp())
+    saved = holder / (path.name + ".sddl")
     try:
         completed = subprocess.run(
             ["icacls", str(path), "/save", str(saved)],
@@ -113,10 +120,7 @@ def _read_sddl(path: pathlib.Path) -> str | None:
     except (OSError, subprocess.SubprocessError):
         return None
     finally:
-        try:
-            saved.unlink(missing_ok=True)
-        except OSError:
-            pass
+        shutil.rmtree(holder, ignore_errors=True)
     return text if path.name in text else None
 
 
