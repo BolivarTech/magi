@@ -283,6 +283,35 @@ class DefinitionTableTests(unittest.TestCase):
             {"R6"},
             {run_id for run_id, item in runs.DEFINITIONS.items() if item.planted})
 
+    def test_the_consult_run_authorises_the_tool_it_exists_to_observe(self) -> None:
+        """S19 reads the consult tool's RESULT inside tool_calls[]. Under the
+        default tier the tool is DENIED, so the only result is a denial
+        message and S19 can report nothing but CANNOT_TEST -- which is what it
+        did, measured rather than predicted. A run whose subject is the shape
+        of a tool result has to be allowed to produce one.
+        """
+        self.assertIn("--auto", runs.DEFINITIONS["R5"].argv)
+
+    def test_the_large_payload_run_carries_the_measured_ceiling(self) -> None:
+        """MEASURED, not chosen. At --timeout 300 the product derives 40s per
+        mage and 24s per attempt, and the 250 kB consult abandoned after 81.7s
+        with a typed provider timeout: three FAILs in S6, one in S7, one in S8
+        and three in S18, all from one under-dimensioned number. The same
+        payload against the same backend at --timeout 1800 -- 249s per mage,
+        149s per attempt -- completed in 103s with three real verdicts.
+        """
+        argv = list(runs.DEFINITIONS["R4"].argv)
+        self.assertIn("--timeout", argv)
+        self.assertEqual(str(runs.LARGE_CONSULT_TIMEOUT_S),
+                         argv[argv.index("--timeout") + 1])
+
+    def test_the_harness_ceiling_sits_above_the_products_own(self) -> None:
+        """Not a second knob: below it, the harness would kill the very
+        abandonment the run exists to observe.
+        """
+        self.assertGreater(runs.DEFINITIONS["R4"].timeout_s,
+                           runs.LARGE_CONSULT_TIMEOUT_S)
+
     def test_only_one_run_rotates_a_credential(self) -> None:
         self.assertEqual(
             {"R7"},
