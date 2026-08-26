@@ -37,7 +37,7 @@ import sys
 import threading
 import time
 
-from smoke.config import ROTATION_MARKER
+from smoke.config import PLACEHOLDER_ENTRIES, ROTATION_MARKER
 from smoke.errors import (HarnessError, PayloadTooSmall,
                           ProductOutputError, TimedOut)
 from smoke.payload import PayloadBuilder
@@ -539,14 +539,6 @@ ERROR_BACKEND_TOKEN = "<error-backend>"
 #: base_url that carries anything else.
 USER_PLACEHOLDER = "[user]"
 PASSWORD_PLACEHOLDER = "[password]"
-
-#: The vault entries the substitution reads. BOTH pairs, and that is measured
-#: rather than assumed: with only the root pair the product asked for
-#: ``MAGI_BASE_URL_USER``, and with only the prefixed pair it asked for
-#: ``BASE_URL_USER``. The trio section inherits the root endpoint, so both
-#: resolutions happen and both need their entry.
-PLACEHOLDER_ENTRIES = ("BASE_URL_USER", "BASE_URL_PASSWORD",
-                       "MAGI_BASE_URL_USER", "MAGI_BASE_URL_PASSWORD")
 
 #: The account name the placeholders resolve to. Only the PASSWORD is the
 #: planted secret; the user half is ordinary and carries no marker.

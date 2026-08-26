@@ -31,7 +31,7 @@ import tempfile
 import urllib.error
 import urllib.request
 
-from smoke.config import ROTATION_MARKER
+from smoke.config import PLACEHOLDER_ENTRIES, ROTATION_MARKER
 from smoke.errors import PreflightError, ProductOutputError
 
 #: How long the backend probe waits before calling it unreachable. A backend
@@ -375,7 +375,10 @@ class Preflight:
         invisible precisely because the recovery works.
         """
         listed = self._vault_names()
-        if listed is None or ROTATION_MARKER not in listed:
+        if listed is None:
+            return
+        self._sweep_placeholders(listed)
+        if ROTATION_MARKER not in listed:
             return
         key = self.config.backend_key_env
         credential = os.environ.get(key, "")
@@ -401,6 +404,30 @@ class Preflight:
             "working is not the same as nothing being wrong."
             % (key, ROTATION_MARKER)
         )
+
+    def _sweep_placeholders(self, listed: list[str]) -> None:
+        """Remove any placeholder entry a killed R6 left in the vault.
+
+        R6 removes its own in a ``finally``, which covers the run that fails
+        and the run that times out but not the one that is killed -- there is
+        no ``finally`` to reach. The removal warns rather than raising, on the
+        grounds that the next preflight sweeps them; this is that sweep.
+
+        Complexity: ``O(len(PLACEHOLDER_ENTRIES))`` vault calls, and only for
+        entries that are actually there.
+
+        Args:
+            listed: The vault entry names, as ``vault ls`` gave them.
+        """
+        left = [name for name in PLACEHOLDER_ENTRIES if name in listed]
+        for name in left:
+            self._vault_write(["vault", WORKDIR_FLAG, str(self.env.root),
+                               "rm", name, "--force"])
+        if left:
+            print(
+                "[preflight] a previous run was killed mid-R6; removed the "
+                "placeholder entries it left: %s." % ", ".join(left)
+            )
 
     def _vault_names(self) -> list[str] | None:
         """List the vault entry names, or ``None`` when they cannot be read.

@@ -51,6 +51,14 @@ CERTIFICATE_PATH = "docs/test/smoke-certificate.md"
 #: prints a stored value. Declared here because both readers are later tasks.
 ROTATION_MARKER = "SMOKE_R7_ROTATION"
 
+#: The vault entries the substitution reads. BOTH pairs, and that is measured
+#: rather than assumed: with only the root pair the product asked for
+#: ``MAGI_BASE_URL_USER``, and with only the prefixed pair it asked for
+#: ``BASE_URL_USER``. The trio section inherits the root endpoint, so both
+#: resolutions happen and both need their entry.
+PLACEHOLDER_ENTRIES = ("BASE_URL_USER", "BASE_URL_PASSWORD",
+                       "MAGI_BASE_URL_USER", "MAGI_BASE_URL_PASSWORD")
+
 
 def _read(path):
     """Parse a TOML file without ever echoing its contents.
