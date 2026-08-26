@@ -26,7 +26,9 @@ from smoke.tests import support
 
 #: How long a test waits for its listener thread to notice the socket closed
 #: under it. Generous on purpose: the deadline is a failure bound, not a
-#: measurement, and the thread is a daemon so overrunning it costs nothing.
+#: measurement. Overrunning it is NOT free -- the cleanup asserts the thread
+#: actually ended, because a join that merely returns is what let a
+#: sixty-second regression pass for a green suite.
 THREAD_JOIN_TIMEOUT_S = 30
 
 #: A minimal, valid smoke.toml. The key variable is interpolated so a test
@@ -682,22 +684,32 @@ class BackendSpeakingGarbageTests(unittest.TestCase):
                         pass
 
         thread = threading.Thread(target=serve, daemon=True)
-        thread.start()
 
         def shut_down() -> None:
-            """Close the socket, THEN wait for the thread to notice.
+            """Close the socket, wait for the thread, and SAY if it outlived it.
 
             One cleanup rather than two, because ``addCleanup`` runs its
             callbacks in reverse registration order: registering the close and
             the join separately ran the join first, against a socket still
             open, and each test then waited out the whole join timeout. The
-            suite went from eighteen seconds to seventy-nine, which is the
-            only reason the ordering was noticed at all.
+            suite went from eighteen to seventy-nine seconds, and the only
+            reason that was noticed is that somebody read the number.
+
+            So the overrun is asserted rather than tolerated. A join that
+            returns tells you nothing about whether the thread ended, which is
+            precisely how the regression hid, and this module's own helper for
+            directories already follows the rule that what could not be done
+            gets reported.
             """
             listener.close()
             thread.join(THREAD_JOIN_TIMEOUT_S)
+            self.assertFalse(thread.is_alive(),
+                             "the listener thread outlived its socket")
 
+        # Registered BEFORE start(): a Thread.start() that raises would
+        # otherwise leak the listening socket for the life of the process.
         self.addCleanup(shut_down)
+        thread.start()
         return "http://127.0.0.1:%d/v1" % listener.getsockname()[1]
 
     def _preflight(self, url: str) -> Preflight:

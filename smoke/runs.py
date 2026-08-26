@@ -1083,10 +1083,21 @@ class RunExecutor:
         try:
             self._vault_set(name, ROTATION_SENTINEL)
             yield baseline
-        finally:
-            self._restore(name, credential)
+        except BaseException:
+            # The LANGUAGE answers "was something already failing?", rather
+            # than sys.exc_info(), which reports the innermost exception being
+            # handled anywhere on the stack -- so a caller that happened to be
+            # inside an unrelated except block would have made the restore
+            # suppress a genuine failure and blame an exception that had
+            # already finished. No production caller does that today, which is
+            # exactly why it would have gone unnoticed.
+            self._restore(name, credential, in_flight=True)
+            raise
+        else:
+            self._restore(name, credential, in_flight=False)
 
-    def _restore(self, name: str, credential: str) -> None:
+    def _restore(self, name: str, credential: str,
+                 in_flight: bool) -> None:
         """Put the real credential back and drop the marker.
 
         Runs from a ``finally``, and the three rules that follow from that
@@ -1117,21 +1128,21 @@ class RunExecutor:
         Args:
             name: The variable the backend credential lives under.
             credential: The real value to put back.
+            in_flight: Whether the run was already failing when this ran. The
+                caller knows, because it has an ``except`` and an ``else``;
+                asking ``sys.exc_info()`` here would answer a broader
+                question -- the innermost exception being handled anywhere on
+                the stack, unrelated ones included.
 
         Raises:
             HarnessError: If a vault write failed and nothing else was
                 already failing.
         """
-        # Captured HERE, before the try. Inside an ``except ... as exc`` block
-        # ``sys.exc_info()`` IS exc, so the same check written there compares a
-        # value against itself and the branch can never be taken -- the shape
-        # of guard this project keeps finding by mutation and never by reading.
-        in_flight = sys.exc_info()[1]
         try:
             self._vault_set(name, credential.encode("utf-8"))
             self._vault_remove(ROTATION_MARKER)
         except (OSError, ProductOutputError) as exc:
-            if in_flight is not None:
+            if in_flight:
                 print("[runs] the rotated backend credential could not be "
                       "restored (%s), and the run was already failing. The "
                       "next preflight restores it from %s."

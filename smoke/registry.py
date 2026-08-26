@@ -193,9 +193,18 @@ def scenario(
             before any scenario runs.
 
     Example:
-        >>> @scenario("S7", run="R4", needs_backend=True)
+        Into a registry of its own, never the default one: the decorator
+        records at import time and the default already holds every real
+        scenario, so an example that omitted ``registry=`` registered ``S7``
+        a second time and raised. It went unnoticed until the doctests were
+        wired into the suite, which is the argument for wiring them.
+
+        >>> own = Registry()
+        >>> @scenario("S7", run="R4", needs_backend=True, registry=own)
         ... def ceiling_does_not_degrade_the_trio(run):
         ...     yield Finding("the trio is not degraded", Outcome.PASS, "", "R4")
+        >>> own.get("S7").run
+        'R4'
     """
 
     def decorate(func: ScenarioFunc) -> ScenarioFunc:
