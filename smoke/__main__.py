@@ -138,15 +138,21 @@ def main(argv: list[str] | None = None) -> int:
         # preflight already writes -- it takes the lock and normalises the
         # environment's magi.toml. A snapshot taken afterwards would declare
         # the harness clean of exactly the changes it had just made.
-        ambient = Ambient(
-            tree_snapshot=capture_tree(REPO_ROOT),
-            ceiling_fraction=config.ceiling_fraction,
-            memory_settings=env.memory_settings(),
-        )
+        snapshot = capture_tree(REPO_ROOT)
         # The preflight normalises the environment itself, as its step 7b --
         # inside the lock it takes at step 2. main() must NOT do it here.
         backend = Preflight(config, env, binary,
                             RunLock(LOCK_PATH)).run(certifying, profile)
+        # And the [memory] table is read AFTER that, for the opposite reason:
+        # step 7b is what writes the file it comes from. Read before, S9's
+        # saturation ceiling derives from the previous run's configuration, or
+        # from nothing at all on a first run where there is no file yet -- and
+        # a fresh environment could then never certify.
+        ambient = Ambient(
+            tree_snapshot=snapshot,
+            ceiling_fraction=config.ceiling_fraction,
+            memory_settings=env.memory_settings(),
+        )
         executor = RunExecutor(binary, env, config)
         run_results: dict[str, RunResult] = {}
         for run_id in needed_runs(DEFAULT_REGISTRY, backend.reachable):
