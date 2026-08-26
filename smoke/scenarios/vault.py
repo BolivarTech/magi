@@ -577,10 +577,11 @@ def _history_survived_finding(before, after, reopened):
                    "the environment holds no accumulated history yet (%s), so "
                    "this assertion would pass over nothing"
                    % _render_counts(counts_before))
-    lost = ["%s went from %d to %d"
-            % (table, counts_before[table], counts_after.get(table, 0))
-            for table in sorted(counts_before)
-            if counts_after.get(table, 0) < counts_before[table]]
+    unmeasured, lost = _compare_counts(counts_before, counts_after)
+    if unmeasured:
+        return _s4(1, Outcome.CANNOT_TEST,
+                   "the report gave no count for %s, so what survived there "
+                   "is unknown rather than lost" % ", ".join(unmeasured))
     if lost:
         return _s4(1, Outcome.FAIL,
                    "a refused open destroyed data: %s" % "; ".join(lost))
@@ -592,6 +593,47 @@ def _history_survived_finding(before, after, reopened):
                    "%d: %s" % (reopened.output.exit_code,
                                _excerpt(reopened.output)))
     return _s4(1, Outcome.PASS, "")
+
+
+def _compare_counts(before, after):
+    """Say which tables went uncounted, and which lost rows.
+
+    One function because S4 and S16 ask the same question of two count
+    mappings and answered it differently: S16 refused to judge a table the
+    second report never counted, S4 read it back with a zero default and
+    called it destroyed. Two copies of one comparison is how they diverged,
+    so there is one.
+
+    **Absent is not zero.** ``diagnose_counts`` leaves a table the product
+    rendered ``missing`` out of the mapping deliberately, and flattening it
+    accuses the product of losing data nobody measured -- the false direction
+    on a pair of scenarios whose subject is the user's history surviving.
+
+    Complexity: ``O(len(before) log len(before))`` for the ordering.
+
+    Args:
+        before: The counts taken first, keyed by table.
+        after: The counts taken second, keyed by table.
+
+    Returns:
+        tuple[list[str], list[str]]: The tables *after* gave no count for, and
+        a rendered description of each table that lost rows. When the first
+        list is non-empty the second says nothing about those tables, so the
+        caller reports the unknown rather than the loss.
+
+    Example:
+        >>> _compare_counts({"sessions": 2}, {"sessions": 1})
+        ([], ['sessions went from 2 to 1'])
+        >>> _compare_counts({"sessions": 2}, {})
+        (['sessions'], [])
+    """
+    unmeasured = sorted(table for table in before if table not in after)
+    if unmeasured:
+        return unmeasured, []
+    lost = ["%s went from %d to %d" % (table, before[table], after[table])
+            for table in sorted(before)
+            if after[table] < before[table]]
+    return [], lost
 
 
 def _render_counts(counts):
@@ -755,19 +797,11 @@ def _history_intact_finding(diagnosed, reopened, baseline):
                     "the environment held no accumulated history before the "
                     "rotation (%s), so this assertion would pass over nothing"
                     % _render_counts(baseline))
-    # Absent and zero are different answers, and flattening them reports data
-    # loss on a table nobody measured. ``diagnose_counts`` leaves a table the
-    # product rendered ``missing`` out of the mapping and says so; reading it
-    # back with a zero default contradicted that in the next three lines.
-    unmeasured = sorted(table for table in baseline if table not in counts)
+    unmeasured, lost = _compare_counts(baseline, counts)
     if unmeasured:
         return _s16(1, Outcome.CANNOT_TEST,
                     "the report gave no count for %s, so what survived there "
                     "is unknown rather than lost" % ", ".join(unmeasured))
-    lost = ["%s went from %d to %d"
-            % (table, baseline[table], counts[table])
-            for table in sorted(baseline)
-            if counts[table] < baseline[table]]
     if lost:
         return _s16(1, Outcome.FAIL,
                     "rotating the credential destroyed data: %s"
