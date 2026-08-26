@@ -5,7 +5,10 @@
 
 import json
 import pathlib
+import tomllib
 import unittest
+import urllib.error
+import urllib.request
 
 from smoke import runs
 from smoke.errors import HarnessError
@@ -40,6 +43,10 @@ def _seed_env_config() -> None:
     (config_dir / memory.MAGI_TOML_NAME).write_text(_ENV_CONFIG,
                                                     encoding="utf-8")
 
+
+#: A stand-in endpoint for the tests that only check WHERE the override lands.
+#: The ones that check it is reachable open a real one instead.
+_PROBE_ENDPOINT = "http://127.0.0.1:65000/v1"
 
 #: A ``[memory]`` block declaring all three fields the ceiling is derived from.
 _COMPLETE_SETTINGS = {
@@ -287,6 +294,7 @@ class EmbedderDownTests(unittest.TestCase):
         instead of degrading -- a red that looks like the assertion working.
         """
         patched = memory.point_embedding_at(
+            _PROBE_ENDPOINT,
             "provider = \"ollama\"\n"
             "base_url = \"http://localhost:11434/v1\"\n"
             "\n"
@@ -296,13 +304,38 @@ class EmbedderDownTests(unittest.TestCase):
         )
         lines = patched.splitlines()
         header = lines.index("[embedding]")
-        self.assertEqual("base_url = \"%s\"" % memory.DEAD_EMBEDDING_ENDPOINT,
+        self.assertEqual("base_url = \"%s\"" % _PROBE_ENDPOINT,
                          lines[header + 1])
         self.assertEqual("base_url = \"http://localhost:11434/v1\"", lines[1])
 
     def test_a_config_without_the_table_is_refused(self) -> None:
         with self.assertRaises(HarnessError):
-            memory.point_embedding_at("provider = \"ollama\"\n")
+            memory.point_embedding_at(_PROBE_ENDPOINT,
+                                      "provider = \"ollama\"\n")
+
+    def test_the_probe_declares_no_fixed_port(self) -> None:
+        """The same defect as R6's, in a second copy of the same comment.
+
+        The module declared ``127.0.0.1:9`` as "the discard service, reserved
+        and unused". Where that service is RUNNING it accepts the connection
+        and never answers, so the probe waited out its entire ceiling and
+        assertion 4 reported CANNOT_TEST instead of exercising REQ-29 at all.
+        A literal port reads perfectly well, which is why this is checked
+        against the source rather than left to a reviewer's eye.
+        """
+        text = pathlib.Path(memory.__file__).read_text(encoding="utf-8")
+        self.assertNotIn("127.0.0.1:9", text)
+
+    def test_the_probe_points_the_embedder_at_something_that_answers(self) -> None:
+        """End to end through the double: the URL the scenario wrote into the
+        probe's own configuration is read back and connected to. Answering is
+        the whole difference between exercising REQ-29 and waiting.
+        """
+        responder = _AnsweringEmbedder()
+        support.install_fake_runs(self, responder=responder)
+        _seed_env_config()
+        _outcomes(_runs(), _ambient())
+        self.assertEqual(runs.ERROR_BACKEND_STATUS, responder.status)
 
     def test_a_run_that_completes_with_the_notice_passes(self) -> None:
         support.install_fake_runs(self, responder=_FakeDegraded(notice=True))
@@ -396,6 +429,60 @@ class _FakeDegraded:
                       if self.notice else b"note: nothing to report\n")
             return _capture({"response": "ok"}, stderr=stderr,
                             exit_code=self.exit_code)
+        return None
+
+
+class _AnsweringEmbedder(_FakeDegraded):
+    """Connects to whatever endpoint the scenario pointed the embedder at.
+
+    Attributes:
+        status: What that endpoint answered, or None if nothing was reached.
+    """
+
+    def __init__(self) -> None:
+        """Create the double with nothing measured yet."""
+        super().__init__(notice=True)
+        self.status = None
+
+    def __call__(self, call: support.Call) -> ProductOutput | None:
+        """Answer one invocation, probing the configured embedder first.
+
+        Args:
+            call: What the fake binary was asked to run.
+
+        Returns:
+            ProductOutput: Whatever :class:`_FakeDegraded` would answer.
+        """
+        args = list(call.args)
+        if args[:1] == ["query"] and "-w" in args:
+            root = pathlib.Path(args[args.index("-w") + 1])
+            config = root / memory.MAGI_DIR_NAME / memory.MAGI_TOML_NAME
+            if config.is_file():
+                declared = tomllib.loads(config.read_text(encoding="utf-8"))
+                url = declared.get("embedding", {}).get("base_url", "")
+                if url:
+                    self.status = _status_of(url)
+        return super().__call__(call)
+
+
+def _status_of(url: str) -> int | None:
+    """Post to *url* and report the status it answered with.
+
+    Args:
+        url: The endpoint to reach.
+
+    Returns:
+        int | None: The status code, or None when nothing answered.
+    """
+    request = urllib.request.Request(
+        url.rstrip("/") + "/embeddings", data=b"{}",
+        headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(request, timeout=5) as answer:
+            return answer.status
+    except urllib.error.HTTPError as refused:
+        return refused.code
+    except OSError:
         return None
 
 
