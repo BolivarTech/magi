@@ -923,18 +923,57 @@ class RunExecutor:
         """
         password = definition.planted[0].value if definition.planted else ""
         with error_backend() as url:
-            for name in PLACEHOLDER_ENTRIES:
-                self._vault_set(
-                    name,
-                    (password if name.endswith("PASSWORD") else BACKEND_USER)
-                    .encode("utf-8"))
+            # The plant sits INSIDE the try, so a `vault set` that fails
+            # part-way still reaches the removal for the entries that did land.
+            # Outside it, a failure on the third of four left the first two in
+            # the persistent vault with no cleanup path -- and unlike the
+            # rotation marker, nothing recovers these.
+            planted: list[str] = []
             try:
+                for name in PLACEHOLDER_ENTRIES:
+                    self._vault_set(
+                        name,
+                        (password if name.endswith("PASSWORD")
+                         else BACKEND_USER).encode("utf-8"))
+                    planted.append(name)
                 yield url.replace(
                     "http://",
                     "http://%s:%s@" % (USER_PLACEHOLDER, PASSWORD_PLACEHOLDER))
             finally:
-                for name in PLACEHOLDER_ENTRIES:
-                    self._vault_remove(name)
+                self._remove_placeholders(planted)
+
+    def _remove_placeholders(self, planted: list[str]) -> None:
+        """Take every placeholder back out, whatever happened to the others.
+
+        Each removal gets its own attempt: one raising used to skip the rest,
+        so a single slow `vault rm` left three entries behind. A failure here
+        is reported once, after all four have been tried, because an entry left
+        in the vault makes the NEXT run's endpoint authenticated by accident
+        and that is worth surfacing rather than swallowing.
+
+        Only what was actually planted is removed. Sweeping all four blindly
+        would call ``vault rm`` on names this run never wrote, and a product
+        that refuses to remove what is not there would then be reported as a
+        leak that does not exist.
+
+        Args:
+            planted: The entries this run really wrote, in order.
+
+        Raises:
+            ProductOutputError: If any removal failed, naming them.
+        """
+        failed = []
+        for name in planted:
+            try:
+                self._vault_remove(name)
+            except (OSError, ProductOutputError) as exc:
+                failed.append("%s (%s)" % (name, exc))
+        if failed:
+            raise ProductOutputError(
+                "the run left placeholder entries in the vault: %s. Remove "
+                "them before the next run, or its endpoint is authenticated "
+                "by accident." % "; ".join(failed)
+            )
 
     def _invoke_with(self, definition: RunDefinition,
                      declared: dict, stdin: bytes) -> ProductOutput:

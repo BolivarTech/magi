@@ -487,9 +487,11 @@ class PlaceholderLifetimeTests(unittest.TestCase):
         support.install_fake_runs(self, responder=stubborn)
         executor = runs.RunExecutor(runs._binary, runs._env, runs._config,
                                     credential="the-real-credential")
-        executor.execute(runs.DEFINITIONS["R6"])
+        with self.assertRaises(ProductOutputError) as caught:
+            executor.execute(runs.DEFINITIONS["R6"])
         self.assertEqual(len(runs.PLACEHOLDER_ENTRIES), len(removed),
                          "every entry gets its own removal attempt")
+        self.assertIn("left placeholder entries", str(caught.exception))
 
 
 class ArchiveScrubbingTests(unittest.TestCase):
