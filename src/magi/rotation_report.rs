@@ -114,6 +114,11 @@ pub fn render_rotations(rotations: &BTreeMap<AgentName, AgentRotation>) -> Value
                         "to_lineage": hop.to().as_str(),
                         "model_resolved": hop.model_resolved(),
                         "cause": cause_label(hop.kind()),
+                        // REQ-V4-09. `is_mage_local` rather than a hand-rolled match: the crate
+                        // exposes it precisely so a `#[non_exhaustive]` catch-all cannot silently
+                        // miscount a future cause as run-wide -- the same failure mode the
+                        // wildcard in `cause_label` produced while it was scaffolded.
+                        "mage_local": hop.kind().is_mage_local(),
                         "detail": detail.as_str(),
                     })
                 }).collect::<Vec<_>>(),
