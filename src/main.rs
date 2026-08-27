@@ -45,7 +45,9 @@ use clap::Parser;
 use cryptovault::CryptoVault;
 use magi_core::error::ProviderError;
 use magi_core::orchestrator::{Magi, MagiBuilder};
-use magi_core::provider::{LlmProvider, RetryConfig, RetryProvider};
+use magi_core::provider::{
+    CompletionConfig, LlmProvider, ReasoningControl, RetryConfig, RetryProvider,
+};
 use magi_core::providers::claude::ClaudeProvider;
 use magi_core::providers::ollama::OllamaProvider;
 use magi_core::providers::openai_compat::OpenAiCompatibleProvider;
@@ -3026,6 +3028,18 @@ thread_local! {
         const { std::cell::RefCell::new(Vec::new()) };
 }
 
+/// Test-only (Task 3): what `build_magi_orchestrator` handed to `with_completion_config`.
+///
+/// A trace rather than an assertion on a value, and the distinction is the whole guardian: the cap
+/// magi-rs declares equals magi-core's own default, so an equality test passes just as well when
+/// the call site is deleted and the builder falls back. Only PRESENCE separates a configured
+/// builder from a defaulted one.
+#[cfg(test)]
+thread_local! {
+    static COMPLETION_WIRING_TRACE: std::cell::RefCell<Option<CompletionConfig>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 /// Test-only: the trace left by the LAST call to `build_magi_orchestrator` in this thread. See
 /// [`SEAT_WIRING_TRACE`].
 #[cfg(test)]
@@ -3428,6 +3442,35 @@ fn above_sanity_notice(ceiling_secs: u64, b: &BudgetTelemetry) -> Option<Notice>
 /// # Errors
 /// - [`TrioError::UnknownKind`] if `[magi].kind` brings an unrecognized value. It is validated HERE with its own `ProviderKind::parse`, not via `cfg.effective_magi_kind()`: that accessor assumes `validate_vocabulary` already ran and swallows an unrecognized value falling back to inheritance — a correct precondition for its other callers, but exactly the one this point must NOT assume in order to report the error.
 /// - [`TrioError::SeatUnbuildable`] with **all** the seats that could not be built and their cause.
+/// The completion cap magi-rs DECLARES (REQ-V4-13).
+///
+/// Numerically magi-core 4.0.0's own default, and declared anyway: the value decides whether a
+/// reasoning model can finish, 3.2.0 shipped 4096 while 4.0.0 ships this, and inheriting it means a
+/// future default moves magi-rs with no diff and no failing test.
+const DECLARED_COMPLETION_CAP: u32 = 16_384;
+
+/// The completion configuration for the trio (REQ-V4-12, REQ-V4-13).
+///
+/// # Why `ReasoningControl::Default` and not `Disabled`
+///
+/// The failure that motivated disabling was measured under a 4096-token cap; it is now four times
+/// that, and REQ-V4-14 makes exhaustion name itself through `FinishReason::Length`. Reasoning on
+/// with an exhausted budget yields NO verdict — a blocked gate nobody misses. Reasoning off with
+/// degraded judgment yields a verdict that missed a defect and reads exactly like a good one, and
+/// the trio is a judge. `Disabled` stays available and unmeasured; taking it would trade a loud
+/// failure for a silent one.
+///
+/// # Returns
+///
+/// A `CompletionConfig` built from the crate's `Default` — the type is `#[non_exhaustive]`, so a
+/// struct literal does not compile here — with both load-bearing fields set explicitly.
+fn magi_completion_config() -> CompletionConfig {
+    let mut cfg = CompletionConfig::default();
+    cfg.max_tokens = DECLARED_COMPLETION_CAP;
+    cfg.reasoning = ReasoningControl::Default;
+    cfg
+}
+
 fn build_magi_orchestrator(
     b: &TrioBuild<'_>,
     notices: &mut Vec<Notice>,
@@ -3588,7 +3631,11 @@ fn build_magi_orchestrator(
         fallback_provider,
         retry.clone(),
     )))
-    .with_timeout(ceiling);
+    .with_timeout(ceiling)
+    .with_completion_config(magi_completion_config());
+
+    #[cfg(test)]
+    COMPLETION_WIRING_TRACE.with(|t| *t.borrow_mut() = Some(magi_completion_config()));
 
     // REQ-A15: the OTHER TWO exposed keys are also wired. Declaring them in TOML without
     // connecting them would make them decorative.
@@ -9078,6 +9125,17 @@ mod tests {
         /// Built with `serde_json` rather than by string interpolation: the verdict itself is
         /// JSON **inside** a JSON string field, and hand-escaping that is how a mock ends up
         /// serving something the parser rejects for a reason unrelated to the test.
+
+        /// REQ-V4-13 and REQ-V4-12: both values are DECLARED, not inherited. The point is not that
+        /// they differ from the crate's defaults — today they do not — but that a change to those
+        /// defaults cannot move magi-rs silently.
+        #[test]
+        fn the_completion_config_declares_the_cap_and_the_reasoning_control() {
+            let cfg = magi_completion_config();
+            assert_eq!(cfg.max_tokens, DECLARED_COMPLETION_CAP);
+            assert_eq!(cfg.reasoning, ReasoningControl::Default);
+        }
+
         fn verdict_body(agent: &str) -> String {
             use magi_core::verdict_markers::{VERDICT_CLOSE, VERDICT_OPEN};
             let verdict = format!(
@@ -11010,6 +11068,51 @@ mod tests {
         ///
         /// Asserted against a value ABOVE `AGENT_TIMEOUT_MAX_SECS`, so the test cannot pass on a
         /// path that silently fell back to the configured ceiling.
+        #[test]
+        /// The guardian for the WIRING, and it asserts STRUCTURAL PRESENCE rather than a value.
+        ///
+        /// The obvious version — `assert_eq!(trace.max_tokens, DECLARED_COMPLETION_CAP)` — CANNOT
+        /// FAIL, because that constant is numerically the crate's own default: delete the call
+        /// site, the builder falls back to `CompletionConfig::default()`, and the assertion still
+        /// passes. Only the `Option` being `Some` separates a configured builder from a defaulted
+        /// one.
+        ///
+        /// MUTATION (required): delete `.with_completion_config(magi_completion_config())` from
+        /// `build_magi_orchestrator` and this goes red because the trace is `None` — not because a
+        /// number changed.
+        fn the_builder_is_given_a_config_we_constructed_not_the_crates_default() {
+            let cfg = MagiConfig::from_toml_str(
+                "provider = \"ollama\"
+",
+            )
+            .unwrap();
+            let mut notices = Vec::new();
+            COMPLETION_WIRING_TRACE.with(|t| *t.borrow_mut() = None);
+
+            let magi = build_magi_orchestrator(
+                &TrioBuild {
+                    cfg: &cfg,
+                    principal_kind: ProviderKind::Ollama,
+                    endpoints: &test_endpoints(),
+                    creds: None,
+                    warn_tokens: None,
+                    env_overrides: &MagiEnvModelOverrides::default(),
+                    capability_cache: None,
+                    probe: &ProbeOutcome::default(),
+                    ceiling: ResolvedCeiling::configured(magi_rs::magi::AGENT_TIMEOUT_SECS),
+                },
+                &mut notices,
+            )
+            .expect("ollama is keyless");
+            drop(magi);
+
+            let seen = COMPLETION_WIRING_TRACE
+                .with(|t| t.borrow().clone())
+                .expect("with_completion_config was never called on the builder");
+            assert_eq!(seen.max_tokens, DECLARED_COMPLETION_CAP);
+            assert_eq!(seen.reasoning, ReasoningControl::Default);
+        }
+
         #[test]
         fn the_derived_ceiling_reaches_the_seats() {
             let cfg = MagiConfig::from_toml_str("provider = \"ollama\"\n").unwrap();
