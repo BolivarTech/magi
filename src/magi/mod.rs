@@ -369,6 +369,40 @@ pub fn attempt_factor(max_rotations: u32, retry_disabled: bool) -> u64 {
         .saturating_mul(100 + HEADLESS_TIMEOUT_SLACK_PCT)
 }
 
+/// The smallest cap that still lets magi-core honour a `Retry-After` at all.
+///
+/// The header is parsed in whole seconds, so anything below 1 s rounds to 0, which magi-core reads
+/// as the explicit "ignore the header entirely" opt-out. This is a backstop against a future change
+/// to the client-timeout floor or the jitter, not the operating floor.
+const MIN_RETRY_AFTER_CAP: Duration = Duration::from_secs(1);
+
+/// The largest `Retry-After` magi-rs will honour, DERIVED from the ceiling (REQ-V4-04).
+///
+/// # Why this value and not `client_timeout` itself
+///
+/// The mixed-chain bound magi-core documents is
+/// `operation_budget + max(client_timeout, retry_after_cap + jitter)`. Subtracting the jitter makes
+/// `cap + jitter == client_timeout` exactly, so the `max` becomes an equality and the bound
+/// collapses to `operation_budget + client_timeout` — REQ-A04's existing relation, with no jitter
+/// term left to reason about. Using `client_timeout` outright leaves a `+1 s` that survives the
+/// admissible range and then overruns the derived path's floor, where the relation already holds
+/// with equality and zero headroom.
+///
+/// `RETRY_AFTER_JITTER` is **referenced, never hand-copied**: a copied constant is drift this
+/// project has already paid for.
+///
+/// # Arguments
+/// * `ceiling_secs` - the resolved per-mage ceiling.
+///
+/// # Returns
+///
+/// The cap. **In practice never below 4 s**, because [`derive_client_timeout`] floors at
+/// `MIN_CLIENT_TIMEOUT` = 5 s and the jitter is a fixed 1 s.
+#[must_use]
+pub fn derive_retry_after_cap(_ceiling_secs: u64) -> Duration {
+    Duration::ZERO // Red stub: no logic. Step 4 replaces this.
+}
+
 /// The derived ceiling BEFORE the floor is applied, from an already-computed factor.
 ///
 /// Private, and factor-level rather than rotation-level, for two reasons: the floor is not
@@ -1796,5 +1830,65 @@ mod tests {
             derive_ceiling_from_timeout(18_000, 2, false),
             "flagged, NOT clamped: an upper bound is exactly what E-B removes"
         );
+    }
+
+    /// REQ-V4-04: the cap is `client_timeout - RETRY_AFTER_JITTER`, which makes
+    /// `cap + jitter == client_timeout` EXACTLY, so the mixed-chain bound
+    /// `operation_budget + max(client_timeout, cap + jitter)` collapses to
+    /// `operation_budget + client_timeout` -- REQ-A04's relation verbatim, with no jitter term.
+    #[test]
+    fn the_retry_after_cap_plus_jitter_equals_the_client_timeout_at_every_admissible_ceiling() {
+        for ceiling in AGENT_TIMEOUT_MIN_SECS..=AGENT_TIMEOUT_MAX_SECS {
+            assert_eq!(
+                derive_retry_after_cap(ceiling) + magi_core::backoff::RETRY_AFTER_JITTER,
+                derive_client_timeout(ceiling),
+                "ceiling {ceiling}: cap + jitter must equal the client timeout exactly"
+            );
+        }
+    }
+
+    /// The single-point version of this test would pass while proving nothing: the pre-existing
+    /// defect held at 30, 90 and 120 alike, so the fix must be checked across the whole range.
+    #[test]
+    fn the_mixed_chain_bound_never_exceeds_the_ceiling_across_the_admissible_range() {
+        for ceiling in AGENT_TIMEOUT_MIN_SECS..=AGENT_TIMEOUT_MAX_SECS {
+            let bound = derive_operation_budget(ceiling)
+                + std::cmp::max(
+                    derive_client_timeout(ceiling),
+                    derive_retry_after_cap(ceiling) + magi_core::backoff::RETRY_AFTER_JITTER,
+                );
+            assert!(
+                bound <= Duration::from_secs(ceiling),
+                "ceiling {ceiling}: mixed-chain bound {bound:?} exceeds it"
+            );
+        }
+    }
+
+    /// The derived path bypasses config validation, so both inner layers can reach their minimums.
+    /// There the relation holds with EQUALITY and zero headroom, which is why an additive jitter
+    /// term breaks it by construction: 10 + 5 + 1 = 16 > 15.
+    #[test]
+    fn the_relation_still_holds_where_every_floor_is_active() {
+        let floor = AGENT_TIMEOUT_ABSOLUTE_FLOOR_SECS;
+        assert_eq!(
+            derive_retry_after_cap(floor) + magi_core::backoff::RETRY_AFTER_JITTER,
+            derive_client_timeout(floor)
+        );
+        assert_eq!(
+            derive_operation_budget(floor) + derive_client_timeout(floor),
+            Duration::from_secs(floor),
+            "the absolute floor IS the sum of the two minimums"
+        );
+    }
+
+    /// A sub-second cap rounds down to 0, which magi-core reads as "ignore the header entirely".
+    #[test]
+    fn the_derived_cap_never_rounds_down_to_the_ignore_the_header_sentinel() {
+        for ceiling in 1..=200u64 {
+            assert!(
+                derive_retry_after_cap(ceiling) >= Duration::from_secs(1),
+                "ceiling {ceiling}: a sub-second cap disables Retry-After handling silently"
+            );
+        }
     }
 }
