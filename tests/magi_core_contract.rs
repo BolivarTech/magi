@@ -699,3 +699,41 @@ async fn magi_core_rejects_an_endless_probe_body_instead_of_accumulating_it() {
         served / (1024 * 1024),
     );
 }
+
+/// The `magi-core 4.0.0` surface this milestone depends on (Task 1, v0.17.0).
+///
+/// Every item here is one a later task consumes, so a pin that does not supply them fails HERE
+/// rather than three tasks later — which is the same reason the rest of this file exists, and the
+/// same failure the previous migration recorded: four compile-level defects that came from reading
+/// the crate rather than compiling against it.
+#[test]
+fn magi_core_4_0_0_supplies_the_surface_this_milestone_needs() {
+    use magi_core::backoff::RETRY_AFTER_JITTER;
+    use magi_core::provider::{CompletionConfig, FinishReason, ReasoningControl};
+    use magi_core::rotation::RotationKind;
+
+    // REQ-V4-04: referenced, never hand-copied as a literal `1`. The derived cap subtracts it so
+    // that `cap + jitter == client_timeout` exactly.
+    assert_eq!(RETRY_AFTER_JITTER, Duration::from_secs(1));
+
+    // REQ-V4-13: the default moved 4096 -> 16384 underneath us. We declare it either way.
+    assert_eq!(CompletionConfig::default().max_tokens, 16_384);
+
+    // REQ-V4-12: exactly two variants, and `Default` is the default.
+    assert_eq!(
+        ReasoningControl::default(),
+        ReasoningControl::Default,
+        "the crate's default must stay Default, or REQ-V4-12 declares a value it does not hold",
+    );
+    let _ = ReasoningControl::Disabled;
+
+    // REQ-V4-14: the distinction the empty-content request was filed for.
+    let _ = (FinishReason::Stop, FinishReason::Length, FinishReason::Load);
+
+    // REQ-V4-09: locality, with the two run-wide causes named explicitly. `Transport` is the one
+    // an abandoned `Retry-After` chain arrives as, which is why the cap REQ-V4-04 derives makes
+    // this distinction reachable in ordinary operation rather than theoretical.
+    assert!(!RotationKind::Transport.is_mage_local());
+    assert!(!RotationKind::Timeout.is_mage_local());
+    assert!(RotationKind::EmptyCompletion.is_mage_local());
+}
