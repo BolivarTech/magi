@@ -60,6 +60,7 @@ use magi_core::reporting::CompletionRecord;
 use magi_core::schema::AgentName;
 use serde_json::{json, Map, Value};
 
+use crate::magi::seat_label;
 use crate::redact::redact_foreign_text;
 
 /// Renders the per-attempt completion telemetry as JSON.
@@ -90,8 +91,10 @@ use crate::redact::redact_foreign_text;
 ///
 /// # Returns
 ///
-/// A JSON object keyed by lowercase seat label. A seat with no records contributes no key, and an
-/// empty input renders an empty object — the array under a seat is never synthesized.
+/// A JSON object keyed by lowercase seat label, one key per seat magi-core recorded. The two
+/// empty cases are different inputs and render differently: a seat ABSENT from the map contributes
+/// no key, while a seat PRESENT with no attempts renders an empty array. Neither is synthesized —
+/// the object mirrors what the report carries.
 ///
 /// # Complexity
 ///
@@ -136,11 +139,6 @@ pub fn render_completions(completions: &BTreeMap<AgentName, Vec<CompletionRecord
         .collect();
 
     Value::Object(seats)
-}
-
-/// Lowercase seat label, matching the identity magi-core serializes.
-fn seat_label(agent: AgentName) -> String {
-    agent.display_name().to_lowercase()
 }
 
 /// Stable JSON value for a finish reason, DERIVED from the crate.
@@ -492,5 +490,28 @@ mod tests {
 
         let json = render_completions(&map).to_string();
         assert!(!json.contains(CANARY), "the finish reason leaked: {json}");
+    }
+
+    /// `FinishReason::Other(String)` must reach the JSON as the wire label the backend sent, not
+    /// as a `Debug` rendering that would wrap it in the variant's name. The gate asked for this
+    /// explicitly: the redaction test proves nothing leaks, but it does not prove the value that
+    /// survives is the right SHAPE.
+    #[test]
+    fn an_unrecognised_finish_reason_renders_its_wire_string_not_the_debug_form() {
+        let map = seat(
+            AgentName::Melchior,
+            vec![attempt("m", json!("interrupted_by_operator"), json!(3))],
+        );
+        let rendered = render_completions(&map);
+        let finish = &rendered["melchior"][0]["finish"];
+        assert_eq!(
+            finish,
+            &json!("interrupted_by_operator"),
+            "the wire string must survive; a Debug form would read like Other(\"...\")"
+        );
+        assert!(
+            !finish.as_str().expect("a string").starts_with("Other"),
+            "the variant name leaked into a value consumers parse: {finish}"
+        );
     }
 }

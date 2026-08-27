@@ -48,6 +48,7 @@ use magi_core::rotation::{AgentRotation, RotationKind};
 use magi_core::schema::AgentName;
 use serde_json::{json, Value};
 
+use crate::magi::seat_label;
 use crate::redact::redact_foreign_text;
 
 /// Renders the rotation telemetry as JSON (REQ-R07/R08).
@@ -189,11 +190,6 @@ pub fn rotation_lines(rotations: &BTreeMap<AgentName, AgentRotation>) -> Vec<Str
             )
         })
         .collect()
-}
-
-/// Lowercase seat label, matching the identity magi-core serializes.
-fn seat_label(agent: AgentName) -> String {
-    agent.display_name().to_lowercase()
 }
 
 /// Stable label for a rotation cause.

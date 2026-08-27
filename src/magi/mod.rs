@@ -21,6 +21,22 @@
     )
 )]
 
+/// Lowercase seat label, matching the identity magi-core serializes.
+///
+/// Shared by the three report renderers. It lived in each of them until the section 6 gate named
+/// the duplication: three copies of one line is three places for the label a consumer keys on to
+/// drift apart, and the JSON they build is a contract.
+///
+/// # Arguments
+/// * `agent` - the seat.
+///
+/// # Returns
+/// The lowercase display name.
+#[must_use]
+pub fn seat_label(agent: magi_core::schema::AgentName) -> String {
+    agent.display_name().to_lowercase()
+}
+
 pub mod completion_report;
 pub mod eligibility_report;
 pub mod endpoint;

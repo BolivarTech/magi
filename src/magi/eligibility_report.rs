@@ -45,6 +45,7 @@ use magi_core::rotation::{CandidateEligibility, IneligibilityCause};
 use magi_core::schema::AgentName;
 use serde_json::{json, Value};
 
+use crate::magi::seat_label;
 use crate::redact::redact_foreign_text;
 
 /// Renders the pre-dispatch pool eligibility as JSON.
@@ -125,11 +126,6 @@ pub fn render_pool_eligibility(
         out.insert(seat_label(*agent), Value::Array(rendered));
     }
     Value::Object(out)
-}
-
-/// Lowercase seat label, matching the identity magi-core serializes.
-fn seat_label(agent: AgentName) -> String {
-    agent.display_name().to_lowercase()
 }
 
 /// Stable label for an ineligibility cause, DERIVED from the crate.
