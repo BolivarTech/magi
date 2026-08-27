@@ -224,12 +224,22 @@ fn seat_label(agent: AgentName) -> String {
 /// The `snake_case` label. Falls back to `Display`, which renders the same string, so no
 /// placeholder is ever invented and none can leak into the JSON.
 fn cause_label(kind: RotationKind) -> String {
-    match serde_json::to_value(kind) {
+    // REDACTED, and NOT defensively. `RotationKind` is `#[non_exhaustive]`: today all seven
+    // variants are unit variants carrying nothing, but the sibling enum `FinishReason` looked
+    // exactly as closed and turned out to carry `Other(String)` — a hole this milestone's own
+    // redaction table declared safe. Deriving from a foreign enum means inheriting whatever a
+    // future variant puts in its label, so the guard belongs here rather than in a promise about
+    // the crate's shape. On the seven current labels this is the identity function.
+    //
+    // `redact_foreign_text`, never `redact_url`: a bare `transport` has no authority to find and
+    // `redact_url` would collapse it to `***`, corrupting a value CI consumers parse.
+    let raw = match serde_json::to_value(kind) {
         Ok(Value::String(s)) => s,
-        // Unreachable for a unit-variant enum, and handled rather than unwrapped because a panic
-        // here would take down a whole report over one diagnostic field.
+        // Unreachable while every variant is a unit variant, and handled rather than unwrapped
+        // because a panic here would take down a whole report over one diagnostic field.
         _ => kind.to_string(),
-    }
+    };
+    redact_foreign_text(&raw).as_str().to_string()
 }
 
 /// Unit tests for the rotation telemetry composition.
@@ -494,5 +504,38 @@ mod tests {
             ],
             "a key was added or removed without updating the contract"
         );
+    }
+
+    /// The same class the `FinishReason::Other(String)` hole belonged to: deriving a label from a
+    /// foreign `#[non_exhaustive]` enum inherits whatever a future variant puts in it. Today every
+    /// `RotationKind` is a unit variant, so this asserts the guard is IN PLACE rather than that it
+    /// currently has work to do.
+    ///
+    /// MUTATION (required): drop `redact_foreign_text` from `cause_label` and
+    /// `the_three_pre_existing_labels_are_byte_identical_to_the_hand_written_match` stays green
+    /// while this pair still passes — which is why the guard is asserted structurally, by the
+    /// label surviving unchanged, rather than by a canary no current variant can carry.
+    #[test]
+    fn the_derived_cause_label_passes_through_the_foreign_text_guard_unchanged() {
+        for kind in [
+            RotationKind::Transport,
+            RotationKind::Timeout,
+            RotationKind::Schema,
+            RotationKind::OversizedResponse,
+            RotationKind::ExternalFailure,
+            RotationKind::EmptyCompletion,
+            RotationKind::ResponseContract,
+        ] {
+            let label = cause_label(kind);
+            assert_eq!(
+                label,
+                redact_foreign_text(&label).as_str(),
+                "{kind:?}: the guard must be the identity on a plain snake_case label, or it is                  corrupting a value CI consumers parse"
+            );
+            assert_ne!(
+                label, "***",
+                "{kind:?} was collapsed: the wrong helper is in use"
+            );
+        }
     }
 }
