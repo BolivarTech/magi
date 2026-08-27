@@ -1,16 +1,16 @@
 # Smoke Certificate
 
-- version: 0.16.0
-- commit: 56393db
-- date: 2026-08-26 (UTC)
+- version: 0.17.0
+- commit: d89c1ee
+- date: 2026-08-27 (UTC)
 - profile: product defaults (no --profile)
-- binary: sha256 2aa9b9a3f126c3881ea29729b5efe5f1a2e155ae78d55c12a92f4febfbf8bee1 (rebuilt from the commit above)
-- real cost: 8 backend run(s) in 468s
-- rounds needed: 1
-- scope: 19 of 19 scenarios evaluated
+- binary: sha256 3dac3b1638c933fd3744573727a4fce79a37691a0836a54922ce514fe395320d (rebuilt from the commit above)
+- real cost: 8 backend run(s) in 171s
+- rounds needed: 2
+- scope: 22 of 22 scenarios evaluated
 - contract coverage: StructuredVerdicts v0.14.3 (6/6 REQ-EA); Vault v0.9.0, Headless v0.10.0, MagiCore MS1-MS3, OperationBudget -- partial
-- environment: 156 active memories, 6246 KB database, 2852 KB archived
-- result: 60 passed, 0 not passed, 60 total
+- environment: 18 active memories, 872 KB database, 377 KB archived
+- result: 69 passed, 0 not passed, 69 total
 
 [PASS] S1 run=R1 - exit 0 and stdout parses as JSON
 [PASS] S1 run=R1 - schema_version is 1
@@ -72,4 +72,13 @@
 [PASS] S18 run=R4 - findings[] exposes exactly 6 keys
 [PASS] S19 run=R5 - the consult tool result inside tool_calls[] contains no agents key
 [PASS] S19 run=R5 - it contains no consensus key
+[PASS] S20 run=R4 - the trio completed against the native wire
+[PASS] S20 run=R4 - every transmitted attempt carries the declared completion cap
+[PASS] S20 run=R4 - completions are recorded per attempt
+[PASS] S20 run=R4 - the published per-mage threshold agrees with the attempt-factor formula
+[PASS] S21 run=R4 - every recorded attempt reports a finish this build knows, or an explicit null
+[PASS] S21 run=R4 - the rotations report is published and every hop names a known cause and its locality
+[PASS] S22 run=R4 - pool_eligibility is present even when empty
+[PASS] S22 run=R4 - all three notions of degradation are derivable from published keys
+[PASS] S22 run=R4 - degraded is false for a three-verdict run
 [OUT_OF_SCOPE] - cross-OS linkage and the published crate (REQ-S26, REQ-S27)
