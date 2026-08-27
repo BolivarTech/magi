@@ -199,6 +199,9 @@ assumes is the exact failure this harness exists to avoid.
 | S17 | REQ-EA01 and REQ-EA06, the structured flag exists only where it should |
 | S18 | REQ-EA03, the structured verdict envelope's exact shape |
 | S19 | REQ-EA02, the agent's consult cap |
+| S20 | the trio still completes after magi-core 4.0.0 moved it to `POST {base}/api/chat`, carrying the cap magi-rs declared |
+| S21 | an empty completion names itself: `empty_completion` rather than `transport`, mage-local, and told apart from an exhausted budget |
+| S22 | the rotation report is complete: `pool_eligibility` present even when empty, and all three notions of degradation derivable |
 
 ## Adding a scenario
 

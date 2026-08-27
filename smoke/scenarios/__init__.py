@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
-# Version: 1.0.0
-# Date: 2026-08-25
+# Version: 0.17.0
+# Date: 2026-08-27
 """Imports every scenario module so the decorator registers them.
 
 The imports are EXPLICIT and ORDERED. Never ``pkgutil``, never ``glob``:
@@ -26,3 +26,4 @@ from smoke.scenarios import memory  # noqa: F401
 from smoke.scenarios import trio  # noqa: F401
 from smoke.scenarios import agent_path  # noqa: F401
 from smoke.scenarios import redaction  # noqa: F401
+from smoke.scenarios import migration  # noqa: F401

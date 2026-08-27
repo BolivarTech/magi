@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
-# Version: 1.0.0
-# Date: 2026-08-25
+# Version: 0.17.0
+# Date: 2026-08-27
 """Scenario registration.
 
 Adding a scenario is a decorator and a function (REQ-S33). If adding one ever
@@ -17,16 +17,16 @@ from smoke.outcome import Finding
 #: certificate renderer, which publishes "N of N scenarios evaluated", and by
 #: the test that asserts the registry actually holds that many. One constant
 #: with two readers is what keeps the headline and the registry from drifting.
-DECLARED_SCENARIO_COUNT = 19
+DECLARED_SCENARIO_COUNT = 22
 
 #: How many ASSERTIONS those scenarios promise between them, per section 8 of
 #: the spec. A separate constant because it answers a separate question, and
 #: the reconciliation cannot answer this one: it checks that a scenario
 #: ANSWERED what it declared, so deleting an assertion from a module constant
 #: and its yield together satisfies it -- both sides shrank. The scenario
-#: count stays 19, the certificate still reads "19 of 19", and the coverage is
+#: count stays 22, the certificate still reads "22 of 22", and the coverage is
 #: quietly smaller.
-DECLARED_ASSERTION_COUNT = 60
+DECLARED_ASSERTION_COUNT = 70
 
 #: A scenario takes the run it declared, and -- only when it declares
 #: needs_ambient -- the ambient state as a second argument. The union is
