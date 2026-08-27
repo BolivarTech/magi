@@ -72,8 +72,8 @@ use magi_rs::magi::probe::{
 };
 use magi_rs::magi::rotation_config::corroborate_by_digest;
 use magi_rs::magi::{
-    bytes_to_tokens_est, derive_client_timeout, derive_operation_budget, BudgetTelemetry,
-    ResolvedCeiling, TimeoutDecision, CHARS_PER_TOKEN_EST, STALE_NOTICE_RATIO,
+    bytes_to_tokens_est, derive_client_timeout, derive_operation_budget, derive_retry_after_cap,
+    BudgetTelemetry, ResolvedCeiling, TimeoutDecision, CHARS_PER_TOKEN_EST, STALE_NOTICE_RATIO,
 };
 use magi_rs::notices::{render_notices, Notice};
 use magi_rs::redact::{redact_foreign_error, redact_foreign_text, redact_url, SafeErrorText};
@@ -3480,6 +3480,10 @@ fn build_magi_orchestrator(
     // `..default()` — it is built with `default()` and adjusted field by field.
     let mut retry = RetryConfig::default();
     retry.operation_budget = derive_operation_budget(ceiling.as_secs());
+    // REQ-V4-04: inherited, this is 300 s against a budget of 54 s at the default ceiling, and no
+    // admissible ceiling satisfies REQ-A04's relation. Derived, the mixed chain collapses back
+    // into it because `cap + jitter == client_timeout` exactly.
+    retry.retry_after_cap = derive_retry_after_cap(ceiling.as_secs());
     let client_timeout = derive_client_timeout(ceiling.as_secs());
 
     // The THREE seats are built first, so that ALL that fail can be reported.

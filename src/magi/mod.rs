@@ -399,8 +399,10 @@ const MIN_RETRY_AFTER_CAP: Duration = Duration::from_secs(1);
 /// The cap. **In practice never below 4 s**, because [`derive_client_timeout`] floors at
 /// `MIN_CLIENT_TIMEOUT` = 5 s and the jitter is a fixed 1 s.
 #[must_use]
-pub fn derive_retry_after_cap(_ceiling_secs: u64) -> Duration {
-    Duration::ZERO // Red stub: no logic. Step 4 replaces this.
+pub fn derive_retry_after_cap(ceiling_secs: u64) -> Duration {
+    derive_client_timeout(ceiling_secs)
+        .saturating_sub(magi_core::backoff::RETRY_AFTER_JITTER)
+        .max(MIN_RETRY_AFTER_CAP)
 }
 
 /// The derived ceiling BEFORE the floor is applied, from an already-computed factor.
