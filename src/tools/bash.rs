@@ -1,3 +1,7 @@
+// Author: Julian Bolivar
+// Version: 0.17.0
+// Date: 2026-08-27
+
 //! This module implements the BashTool, allowing the agent to execute shell commands.
 //! Hardened with strict timeouts and execution sandboxed to the workspace.
 //! Now uses a strict whitelist approach for maximum security.

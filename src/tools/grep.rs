@@ -1,3 +1,7 @@
+// Author: Julian Bolivar
+// Version: 0.17.0
+// Date: 2026-08-27
+
 //! This module implements the GrepTool, which allows the agent to search for patterns.
 
 use crate::system::grep::Grep;

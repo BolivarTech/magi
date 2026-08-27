@@ -1,3 +1,7 @@
+// Author: Julian Bolivar
+// Version: 0.17.0
+// Date: 2026-08-27
+
 //! This module provides a persistent memory system based on SQLite with encryption.
 
 use crate::agent::messages::Message;

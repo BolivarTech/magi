@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Author: Julian Bolivar
+# Version: 0.17.0
+# Date: 2026-08-27
+
 """Run the full Rust test suite: cargo nextest (via tdd-guard-rust) + doctests.
 
 Drop this at the root of any Rust project using cargo-nextest + TDD-Guard.

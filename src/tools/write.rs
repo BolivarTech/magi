@@ -1,3 +1,7 @@
+// Author: Julian Bolivar
+// Version: 0.17.0
+// Date: 2026-08-27
+
 //! This module implements the FileWriteTool, which allows the agent to create and modify files.
 //! It includes security sandboxing via PathGuard.
 

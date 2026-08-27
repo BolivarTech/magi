@@ -1,4 +1,6 @@
-// Author: Julian Bolivar Version: 1.0.0 Date: 2026-07-18 **Generic** test helpers for the
+// Author: Julian Bolivar
+// Version: 0.17.0
+// Date: 2026-08-27
 // headless subsystem.
 //!
 //! Only helpers with no dependency on feature types live here (MAGI CP2 run 2 Melchior — not

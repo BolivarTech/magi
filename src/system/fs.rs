@@ -1,3 +1,7 @@
+// Author: Julian Bolivar
+// Version: 0.17.0
+// Date: 2026-08-27
+
 //! This module provides an abstraction for the file system.
 //! It is designed for efficiency and security, supporting buffered I/O,
 //! UTF-8 boundary handling, path sandboxing, and recursive listing.

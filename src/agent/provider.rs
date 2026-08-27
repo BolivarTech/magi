@@ -1,3 +1,7 @@
+// Author: Julian Bolivar
+// Version: 0.17.0
+// Date: 2026-08-27
+
 //! This module defines the Provider trait for AI backend interactions.
 
 use crate::agent::messages::{Content, Message, Role};

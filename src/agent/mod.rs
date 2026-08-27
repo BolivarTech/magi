@@ -1,3 +1,7 @@
+// Author: Julian Bolivar
+// Version: 0.17.0
+// Date: 2026-08-27
+
 //! The Agent orchestrator coordinates between the Provider and the Tools.
 
 pub mod messages;

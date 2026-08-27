@@ -1,4 +1,6 @@
-// Author: Julian Bolivar Version: 1.0.0 Date: 2026-07-18
+// Author: Julian Bolivar
+// Version: 0.17.0
+// Date: 2026-08-27
 #![deny(missing_docs)]
 #![deny(clippy::missing_docs_in_private_items)]
 #![deny(clippy::missing_errors_doc, clippy::missing_panics_doc)]

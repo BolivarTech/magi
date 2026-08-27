@@ -1,3 +1,7 @@
+// Author: Julian Bolivar
+// Version: 0.17.0
+// Date: 2026-08-27
+
 //! This module defines the base traits and types for the tool system.
 //! It follows the OOP paradigm using traits for polymorphism and structs for implementation.
 

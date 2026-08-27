@@ -1,3 +1,7 @@
+// Author: Julian Bolivar
+// Version: 0.17.0
+// Date: 2026-08-27
+
 //! This module implements the ListTool (ls), which allows the agent to list files in a directory.
 //! Hardened following MAGI review to prevent sandbox escapes and infinite loops.
 

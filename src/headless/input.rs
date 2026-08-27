@@ -1,4 +1,6 @@
-// Author: Julian Bolivar Version: 1.1.0 Date: 2026-07-18
+// Author: Julian Bolivar
+// Version: 0.17.0
+// Date: 2026-08-27
 
 //! Reading and parsing of headless input (`-i <file>` / stdin, REQ-H03/H10/H11/H29).
 //!

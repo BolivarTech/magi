@@ -1,4 +1,6 @@
-// Author: Julian Bolivar Version: 1.0.0 Date: 2026-07-14 Vault subsystem domain errors.
+// Author: Julian Bolivar
+// Version: 0.17.0
+// Date: 2026-08-27
 //!
 //! Follows the pattern of [`crate::memory::error::MemoryError`]: foreign types (`cryptovault`,
 //! `rusqlite`) are **stringified** instead of wrapped, to keep external types out of the

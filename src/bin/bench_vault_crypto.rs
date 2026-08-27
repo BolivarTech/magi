@@ -1,4 +1,6 @@
-// Author: Julian Bolivar Version: 1.0.0 Date: 2026-07-15 Performance baseline of
+// Author: Julian Bolivar
+// Version: 0.17.0
+// Date: 2026-08-27
 // `ConcatenatedFec` (REQ-V36).
 //!
 //! Measures the **decrypt cost** and **disk expansion** of the `AES-256-GCM-SIV +

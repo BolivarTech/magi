@@ -1,4 +1,6 @@
-// Author: Julian Bolivar Version: 1.0.0 Date: 2026-08-03
+// Author: Julian Bolivar
+// Version: 0.17.0
+// Date: 2026-08-27
 
 //! Complexity gate: pure predicate that decides whether an agent-**self-routed** consult merits
 //! dispatching the three-perspective consensus (REQ-A20).

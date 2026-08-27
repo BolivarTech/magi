@@ -1,3 +1,7 @@
+// Author: Julian Bolivar
+// Version: 0.17.0
+// Date: 2026-08-27
+
 //! This module defines the conversation history structures.
 
 use serde::{Deserialize, Serialize};

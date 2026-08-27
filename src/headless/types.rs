@@ -1,4 +1,6 @@
-// Author: Julian Bolivar Version: 1.0.0 Date: 2026-07-18 Shared types of the headless output
+// Author: Julian Bolivar
+// Version: 0.17.0
+// Date: 2026-08-27
 // contract (MS1 ↔ MS2).
 //!
 //! DEFINED here, not referenced without definition — avoids the TDD-ordering build break (T6
