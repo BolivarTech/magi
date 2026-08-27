@@ -3028,12 +3028,12 @@ thread_local! {
         const { std::cell::RefCell::new(Vec::new()) };
 }
 
-/// Test-only (Task 3): what `build_magi_orchestrator` handed to `with_completion_config`.
-///
-/// A trace rather than an assertion on a value, and the distinction is the whole guardian: the cap
-/// magi-rs declares equals magi-core's own default, so an equality test passes just as well when
-/// the call site is deleted and the builder falls back. Only PRESENCE separates a configured
-/// builder from a defaulted one.
+// Test-only (Task 3): what `build_magi_orchestrator` handed to `with_completion_config`.
+//
+// A trace rather than an assertion on a value, and the distinction is the whole guardian: the cap
+// magi-rs declares equals magi-core's own default, so an equality test passes just as well when
+// the call site is deleted and the builder falls back. Only PRESENCE separates a configured
+// builder from a defaulted one.
 #[cfg(test)]
 thread_local! {
     static COMPLETION_WIRING_TRACE: std::cell::RefCell<Option<CompletionConfig>> =
@@ -9125,7 +9125,6 @@ mod tests {
         /// Built with `serde_json` rather than by string interpolation: the verdict itself is
         /// JSON **inside** a JSON string field, and hand-escaping that is how a mock ends up
         /// serving something the parser rejects for a reason unrelated to the test.
-
         /// REQ-V4-13 and REQ-V4-12: both values are DECLARED, not inherited. The point is not that
         /// they differ from the crate's defaults — today they do not — but that a change to those
         /// defaults cannot move magi-rs silently.

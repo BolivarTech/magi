@@ -21,6 +21,8 @@
     )
 )]
 
+pub mod completion_report;
+pub mod eligibility_report;
 pub mod endpoint;
 pub mod gate;
 pub mod kind;
