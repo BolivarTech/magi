@@ -1434,14 +1434,14 @@ mod tests {
                 _system_prompt: &str,
                 _user_prompt: &str,
                 _config: &CompletionConfig,
-            ) -> Result<String, ProviderError> {
+            ) -> Result<magi_core::provider::Completion, ProviderError> {
                 tokio::time::sleep(self.delay).await;
-                Ok(format!(
+                Ok(magi_core::provider::Completion::new(format!(
                     "{VERDICT_OPEN}
 {}
 {VERDICT_CLOSE}",
                     r#"{"agent":"melchior","verdict":"approve","confidence":0.9,"summary":"s","reasoning":"r","findings":[],"recommendation":"rec"}"#
-                ))
+                )))
             }
             fn name(&self) -> &str {
                 "slow"
@@ -1506,18 +1506,18 @@ mod tests {
                 _system_prompt: &str,
                 _user_prompt: &str,
                 _config: &CompletionConfig,
-            ) -> Result<String, ProviderError> {
+            ) -> Result<magi_core::provider::Completion, ProviderError> {
                 let _spy = DropFlag(self.dropped.clone());
                 // AFTER the guard exists, so observing `entered` guarantees a
                 // `DropFlag` is live and an abort is therefore observable.
                 self.entered.store(true, Ordering::SeqCst);
                 tokio::time::sleep(self.delay).await;
-                Ok(format!(
+                Ok(magi_core::provider::Completion::new(format!(
                     "{VERDICT_OPEN}
 {}
 {VERDICT_CLOSE}",
                     r#"{"agent":"melchior","verdict":"approve","confidence":0.9,"summary":"s","reasoning":"r","findings":[],"recommendation":"rec"}"#
-                ))
+                )))
             }
             fn name(&self) -> &str {
                 "slow-droppy"

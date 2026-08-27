@@ -50,7 +50,7 @@ use async_trait::async_trait;
 use magi_core::error::{ExternalErrorKind, ProviderError};
 // `CompletionConfig` lives in `provider`, NOT in `orchestrator`: there it's only imported and
 // is private. The plan had pasted the `orchestrator` path into all three doubles.
-use magi_core::provider::{CompletionConfig, LlmProvider};
+use magi_core::provider::{Completion, CompletionConfig, LlmProvider};
 use magi_core::verdict_markers::{VERDICT_CLOSE, VERDICT_OPEN};
 
 /// Name the doubles report via `LlmProvider::name`.
@@ -155,12 +155,12 @@ impl LlmProvider for AdheringTrioProvider {
         system_prompt: &str,
         _user_prompt: &str,
         _config: &CompletionConfig,
-    ) -> Result<String, ProviderError> {
+    ) -> Result<Completion, ProviderError> {
         let seat = seat_from_prompt(system_prompt);
-        Ok(format!(
+        Ok(Completion::new(format!(
             "{VERDICT_OPEN}\n{}\n{VERDICT_CLOSE}",
             verdict_json_with_findings(seat)
-        ))
+        )))
     }
 
     fn name(&self) -> &str {
@@ -219,7 +219,7 @@ impl LlmProvider for SchemaFailsOnceProvider {
         system_prompt: &str,
         _user_prompt: &str,
         _config: &CompletionConfig,
-    ) -> Result<String, ProviderError> {
+    ) -> Result<Completion, ProviderError> {
         tokio::time::sleep(self.per_call).await;
         let previous = {
             let mut map = self.calls_by_seat.lock().expect("not poisoned");
@@ -228,9 +228,9 @@ impl LlmProvider for SchemaFailsOnceProvider {
             *counter - 1
         };
         if previous == 0 {
-            Ok("not a verdict".to_string())
+            Ok(Completion::new("not a verdict".to_string()))
         } else {
-            Ok(marked_verdict())
+            Ok(Completion::new(marked_verdict()))
         }
     }
 
@@ -272,7 +272,7 @@ impl LlmProvider for HangingProvider {
         _system_prompt: &str,
         _user_prompt: &str,
         _config: &CompletionConfig,
-    ) -> Result<String, ProviderError> {
+    ) -> Result<Completion, ProviderError> {
         self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         std::future::pending::<()>().await;
         Err(ProviderError::external(
@@ -353,7 +353,7 @@ impl LlmProvider for OverlapCountingProvider {
         system_prompt: &str,
         _user_prompt: &str,
         _config: &CompletionConfig,
-    ) -> Result<String, ProviderError> {
+    ) -> Result<Completion, ProviderError> {
         let now = self.live.fetch_add(1, Ordering::SeqCst) + 1;
         self.peak.fetch_max(now, Ordering::SeqCst);
         // Blocks until every expected call has arrived — see the struct doc for why this
@@ -367,10 +367,10 @@ impl LlmProvider for OverlapCountingProvider {
         // two mismatched seats, and their retry calls arrive after the barrier has already
         // moved past this generation.
         let seat = seat_from_prompt(system_prompt);
-        Ok(format!(
+        Ok(Completion::new(format!(
             "{VERDICT_OPEN}\n{}\n{VERDICT_CLOSE}",
             verdict_json_with_findings(seat)
-        ))
+        )))
     }
 
     fn name(&self) -> &str {

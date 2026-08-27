@@ -70,7 +70,7 @@ uuid = { version = "1.8", features = ["v4"] }
 # before bumping, not taken on trust: `backoff.rs`'s constants and `impl Default for
 # RetryConfig` are byte-identical between 3.1.0 and 3.2.0. So the guard still points at the
 # next release, not this one.
-magi-core = { version = "=3.2.0", features = ["ollama", "openai-compat", "claude-api"] }
+magi-core = { version = "=4.0.0", features = ["ollama", "openai-compat", "claude-api"] }
 instant-distance = { version = "0.6", optional = true }
 
 # Vault MS2 — REQ-V42 layer 1: mlock/VirtualLock via a safe crate (no own unsafe).
@@ -110,7 +110,7 @@ tokio = { version = "1.36", features = ["test-util"] }
 # defaults, now tracked for 3.3.0). Keep this line's version in lockstep with the
 # [dependencies] one: two different pins would build the tests against a different crate
 # than production.
-magi-core = { version = "=3.2.0", features = ["ollama", "openai-compat", "claude-api", "test-utils"] }
+magi-core = { version = "=4.0.0", features = ["ollama", "openai-compat", "claude-api", "test-utils"] }
 # Mocking for tests
 mockall = "0.12"
 mockito = "1.4"

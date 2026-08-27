@@ -2678,7 +2678,7 @@ mod tests {
             _system_prompt: &str,
             _user_prompt: &str,
             _config: &magi_core::provider::CompletionConfig,
-        ) -> Result<String, magi_core::error::ProviderError> {
+        ) -> Result<magi_core::provider::Completion, magi_core::error::ProviderError> {
             Err(magi_core::error::ProviderError::external(
                 "unused in this test",
                 magi_core::error::ExternalErrorKind::Network,

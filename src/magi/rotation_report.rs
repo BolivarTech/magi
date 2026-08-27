@@ -201,6 +201,11 @@ fn cause_label(kind: RotationKind) -> &'static str {
         RotationKind::Transport => "transport",
         RotationKind::Schema => "schema",
         RotationKind::Timeout => "timeout",
+        // TASK 1 SCAFFOLD, REMOVED BY TASK 4. `RotationKind` became `#[non_exhaustive]` in 4.0.0,
+        // which forces this arm and destroys the closed-enum guarantee the docstring above claims.
+        // Task 4 derives the label from the crate's serde rendering, which relocates that guard to
+        // magi-core rather than losing it. Do not treat this arm as a design.
+        _ => "transport",
     }
 }
 

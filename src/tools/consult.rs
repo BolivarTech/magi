@@ -1326,7 +1326,7 @@ impl Tool for ConsultTool {
 mod tests {
     use super::*;
     use magi_core::error::{ExternalErrorKind, ProviderError};
-    use magi_core::provider::{CompletionConfig, LlmProvider};
+    use magi_core::provider::{Completion, CompletionConfig, LlmProvider};
     use magi_core::test_support::RoutingMockProvider;
     use magi_core::verdict_markers::{VERDICT_CLOSE, VERDICT_OPEN};
     use magi_rs::magi::{resolve_run_timeout, TimeoutMeasure, AGENT_TIMEOUT_SECS};
@@ -1359,9 +1359,9 @@ mod tests {
             _system_prompt: &str,
             _user_prompt: &str,
             _config: &CompletionConfig,
-        ) -> Result<String, ProviderError> {
+        ) -> Result<Completion, ProviderError> {
             tokio::time::sleep(Duration::from_secs(Self::SLEEP_SECS)).await;
-            Ok(String::new())
+            Ok(Completion::new(String::new()))
         }
 
         fn name(&self) -> &str {

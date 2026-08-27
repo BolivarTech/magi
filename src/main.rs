@@ -8991,8 +8991,14 @@ mod tests {
             );
         }
 
-        /// SC-R49: both `base_url` spellings reach the same completions endpoint. Under
-        /// `kind = "ollama"` a URL without `/v1` used to end in 404.
+        /// SC-R49: both `base_url` spellings reach the same completions endpoint.
+        ///
+        /// The endpoint itself moved in magi-core 4.0.0 (REQ-V4-08): `OllamaProvider` now posts to
+        /// the NATIVE `{base}/api/chat` rather than delegating to an inner OpenAI-compatible
+        /// provider on `/v1/chat/completions`. A `/v1` spelling is still accepted and is
+        /// **normalised away** by the crate, which is why both spellings still converge — but on
+        /// the other path. This assertion is the unit-level proof of that move; only the smoke
+        /// harness proves a real daemon answers there.
         #[tokio::test]
         async fn both_base_url_spellings_reach_the_same_completions_endpoint() {
             for suffix in ["", "/v1"] {
@@ -9013,7 +9019,7 @@ mod tests {
                     .await;
                 let line = recorded.await.expect("the listener task must finish");
                 assert!(
-                    line.starts_with("POST /v1/chat/completions"),
+                    line.starts_with("POST /api/chat"),
                     "base_url ending in {suffix:?} put {line:?} on the wire"
                 );
             }
@@ -9075,7 +9081,18 @@ mod tests {
                  \"confidence\":0.9,\"summary\":\"ok\",\"reasoning\":\"r\",\
                  \"recommendation\":\"go\",\"findings\":[]}}\n{VERDICT_CLOSE}"
             );
-            serde_json::json!({ "choices": [ { "message": { "content": verdict } } ] }).to_string()
+            // The NATIVE response shape (`POST {base}/api/chat`), not the OpenAI-compatible one.
+            // magi-core 4.0.0's `OllamaProvider` speaks `/api/chat` for every `kind = "ollama"`
+            // seat, and a `/v1`-shaped body deserializes to empty content — which surfaces as a
+            // failed seat rather than as a parse error, so the old shape fails LOUDLY here but
+            // would have failed obscurely in a run.
+            serde_json::json!({
+                "message": { "content": verdict },
+                "done_reason": "stop",
+                "eval_count": 128,
+                "prompt_eval_count": 64,
+            })
+            .to_string()
         }
 
         /// A `magi.toml` declaring the three seats, their lineages and one pool candidate.
@@ -10022,7 +10039,7 @@ mod tests {
             use mockito::Matcher;
             let mut server = mockito::Server::new_async().await;
             let _down = server
-                .mock("POST", "/v1/chat/completions")
+                .mock("POST", "/api/chat")
                 .match_body(Matcher::AllOf(vec![
                     Matcher::Regex("(?i)caspar".into()),
                     Matcher::Regex("down-model".into()),
@@ -10037,7 +10054,7 @@ mod tests {
                 ("(?i)balthasar", "ok-model", "balthasar"),
             ] {
                 server
-                    .mock("POST", "/v1/chat/completions")
+                    .mock("POST", "/api/chat")
                     .match_body(Matcher::AllOf(vec![
                         Matcher::Regex(seat.into()),
                         Matcher::Regex(model.into()),
@@ -10093,7 +10110,7 @@ mod tests {
             let mut server = mockito::Server::new_async().await;
             // EVERY model Caspar can reach fails, primary and candidate alike.
             let _all_down = server
-                .mock("POST", "/v1/chat/completions")
+                .mock("POST", "/api/chat")
                 .match_body(Matcher::Regex("(?i)caspar".into()))
                 .with_status(400)
                 .with_body("{\"error\":\"unavailable\"}")
@@ -10101,7 +10118,7 @@ mod tests {
                 .await;
             for (seat, agent) in [("(?i)melchior", "melchior"), ("(?i)balthasar", "balthasar")] {
                 server
-                    .mock("POST", "/v1/chat/completions")
+                    .mock("POST", "/api/chat")
                     .match_body(Matcher::Regex(seat.into()))
                     .with_status(200)
                     .with_body(verdict_body(agent))
@@ -10252,7 +10269,7 @@ mod tests {
             use mockito::Matcher;
             let mut server = mockito::Server::new_async().await;
             let _down = server
-                .mock("POST", "/v1/chat/completions")
+                .mock("POST", "/api/chat")
                 .match_body(Matcher::AllOf(vec![
                     Matcher::Regex("(?i)caspar".into()),
                     Matcher::Regex("down-model".into()),
@@ -10267,7 +10284,7 @@ mod tests {
                 ("(?i)balthasar", "ok-model", "balthasar"),
             ] {
                 server
-                    .mock("POST", "/v1/chat/completions")
+                    .mock("POST", "/api/chat")
                     .match_body(Matcher::AllOf(vec![
                         Matcher::Regex(seat.into()),
                         Matcher::Regex(model.into()),
@@ -10445,7 +10462,7 @@ mod tests {
             let mut server = mockito::Server::new_async().await;
 
             let _down = server
-                .mock("POST", "/v1/chat/completions")
+                .mock("POST", "/api/chat")
                 .match_body(Matcher::AllOf(vec![
                     Matcher::Regex("(?i)caspar".into()),
                     Matcher::Regex("down-model".into()),
@@ -10456,7 +10473,7 @@ mod tests {
                 .create_async()
                 .await;
             let _rescue = server
-                .mock("POST", "/v1/chat/completions")
+                .mock("POST", "/api/chat")
                 .match_body(Matcher::AllOf(vec![
                     Matcher::Regex("(?i)caspar".into()),
                     Matcher::Regex("rescue-model".into()),
@@ -10467,14 +10484,14 @@ mod tests {
                 .create_async()
                 .await;
             let _melchior = server
-                .mock("POST", "/v1/chat/completions")
+                .mock("POST", "/api/chat")
                 .match_body(Matcher::Regex("(?i)melchior".into()))
                 .with_status(200)
                 .with_body(verdict_body("melchior"))
                 .create_async()
                 .await;
             let _balthasar = server
-                .mock("POST", "/v1/chat/completions")
+                .mock("POST", "/api/chat")
                 .match_body(Matcher::Regex("(?i)balthasar".into()))
                 .with_status(200)
                 .with_body(verdict_body("balthasar"))
@@ -10565,7 +10582,7 @@ mod tests {
             let mut server = mockito::Server::new_async().await;
 
             let _down = server
-                .mock("POST", "/v1/chat/completions")
+                .mock("POST", "/api/chat")
                 .match_body(Matcher::AllOf(vec![
                     Matcher::Regex("(?i)caspar".into()),
                     Matcher::Regex("down-model".into()),
@@ -10585,7 +10602,7 @@ mod tests {
                     model
                 };
                 server
-                    .mock("POST", "/v1/chat/completions")
+                    .mock("POST", "/api/chat")
                     .match_body(Matcher::AllOf(vec![
                         Matcher::Regex(seat.into()),
                         Matcher::Regex(
@@ -10802,10 +10819,12 @@ mod tests {
                 system_prompt: &str,
                 user_prompt: &str,
                 _config: &CompletionConfig,
-            ) -> Result<String, ProviderError> {
+            ) -> Result<magi_core::provider::Completion, ProviderError> {
                 *self.captured.lock().unwrap() =
                     Some((system_prompt.to_string(), user_prompt.to_string()));
-                Ok(valid_verdict_for_current_agent())
+                Ok(magi_core::provider::Completion::new(
+                    valid_verdict_for_current_agent(),
+                ))
             }
             fn name(&self) -> &str {
                 "capturing"
@@ -11529,7 +11548,7 @@ mod tests {
                 _s: &str,
                 _u: &str,
                 _c: &CompletionConfig,
-            ) -> Result<String, ProviderError> {
+            ) -> Result<magi_core::provider::Completion, ProviderError> {
                 self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 tokio::time::sleep(Duration::from_millis(20)).await;
                 Err(ProviderError::external("hangs", ExternalErrorKind::Timeout))
