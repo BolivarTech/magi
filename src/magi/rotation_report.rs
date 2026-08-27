@@ -193,19 +193,37 @@ fn seat_label(agent: AgentName) -> String {
 
 /// Stable label for a rotation cause.
 ///
-/// Written out rather than `format!("{kind:?}")`: a `Debug` rendering is not a contract, and this
-/// string reaches the run JSON. `RotationKind` is a closed enum, so a new variant breaks this
-/// match instead of silently rendering as something else.
-fn cause_label(kind: RotationKind) -> &'static str {
-    match kind {
-        RotationKind::Transport => "transport",
-        RotationKind::Schema => "schema",
-        RotationKind::Timeout => "timeout",
-        // TASK 1 SCAFFOLD, REMOVED BY TASK 4. `RotationKind` became `#[non_exhaustive]` in 4.0.0,
-        // which forces this arm and destroys the closed-enum guarantee the docstring above claims.
-        // Task 4 derives the label from the crate's serde rendering, which relocates that guard to
-        // magi-core rather than losing it. Do not treat this arm as a design.
-        _ => "transport",
+/// The rotation cause as it reaches the run JSON, DERIVED from the crate (REQ-V4-01).
+///
+/// # Why the serde form and not `Display`
+///
+/// Both render the identical string and 4.0.0 pins both with tests, but those tests promise
+/// different things: the serde one exists so a `rename_all` change cannot silently alter an
+/// existing variant's serialized form, while the `Display` one only asserts current behaviour and
+/// a reworded `Display` is conventionally not a breaking change. This string reaches the run JSON,
+/// which CI consumers parse, so the wire contract is the right anchor.
+///
+/// # Why deriving PRESERVES the compile-time guard (REQ-V4-02)
+///
+/// `#[non_exhaustive]` binds CONSUMERS, not the defining crate. Inside magi-core the enum is still
+/// closed and its serde derive enumerates every variant, so a new cause cannot ship without
+/// magi-core rendering it. magi-rs inherits that instead of maintaining a second copy that drifts
+/// — and a hand-written match here would need a wildcard, which is what rendered
+/// `OversizedResponse` as `"transport"` while this was scaffolded.
+///
+/// # Arguments
+/// * `kind` - the cause magi-core reported.
+///
+/// # Returns
+///
+/// The `snake_case` label. Falls back to `Display`, which renders the same string, so no
+/// placeholder is ever invented and none can leak into the JSON.
+fn cause_label(kind: RotationKind) -> String {
+    match serde_json::to_value(kind) {
+        Ok(Value::String(s)) => s,
+        // Unreachable for a unit-variant enum, and handled rather than unwrapped because a panic
+        // here would take down a whole report over one diagnostic field.
+        _ => kind.to_string(),
     }
 }
 
