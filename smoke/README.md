@@ -200,7 +200,7 @@ assumes is the exact failure this harness exists to avoid.
 | S18 | REQ-EA03, the structured verdict envelope's exact shape |
 | S19 | REQ-EA02, the agent's consult cap |
 | S20 | the trio still completes after magi-core 4.0.0 moved it to `POST {base}/api/chat`, carrying the cap magi-rs declared |
-| S21 | an empty completion names itself: `empty_completion` rather than `transport`, mage-local, and told apart from an exhausted budget |
+| S21 | REQ-V4-14, the shape every run emits: a `finish` this build knows on every attempt, and a rotation report whose hops name a known cause and its locality |
 | S22 | the rotation report is complete: `pool_eligibility` present even when empty, and all three notions of degradation derivable |
 
 ## Adding a scenario
@@ -286,6 +286,17 @@ surplus. A checkable requirement with no scenario is a declared hole.
   those run in debug. S14's own four assertions were mutation-verified at the level of the
   double (`test_a_resolver_that_ignores_the_flag_fails`), not against the release binary.
   Doing it against the binary is open work.
+- **S21 no longer demonstrates an overrunning model end to end, and that is a trade rather than
+  an oversight.** It used to force the state — a reasoning model spending its whole output budget
+  on thought — and assert the product named it correctly. Six probes on 2026-08-27 killed the
+  recipe: identical prompt, identical payload, identical 16 384-token cap, `length` with empty
+  content on one run and `stop` with 10 312 tokens on the next. Cloud inference is not reproducible
+  at `temperature: 0`. That made the scenario's colour a property of the model rather than of the
+  product, and its three `CANNOT_TEST` outcomes block certification, so identical code was
+  certified on some runs and refused on others. It now asserts the shape the product emits on every
+  run instead. What is lost is the end-to-end demonstration; the mapping keeps its unit proof,
+  where it is a pure function over a constructed record, and a run that happens to overrun still
+  exercises it unasserted.
 - **Two scenarios can be talked out of their own subject.** S18's key counts and S19's cap
   both read a structure the model has to produce first; if it produces none they report
   `CANNOT_TEST`, which blocks the gate. S5 hit this and was fixed by measuring a prompt

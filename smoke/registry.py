@@ -26,7 +26,12 @@ DECLARED_SCENARIO_COUNT = 22
 #: and its yield together satisfies it -- both sides shrank. The scenario
 #: count stays 22, the certificate still reads "22 of 22", and the coverage is
 #: quietly smaller.
-DECLARED_ASSERTION_COUNT = 70
+#:
+#: It went 70 -> 69 on 2026-08-27 when S21 was redesigned. Its third assertion
+#: was not lost, it was retired with the forcing recipe it belonged to: an
+#: assertion invented to hold the total at 70 would have been padding, which is
+#: the defect that redesign exists to remove.
+DECLARED_ASSERTION_COUNT = 69
 
 #: A scenario takes the run it declared, and -- only when it declares
 #: needs_ambient -- the ambient state as a second argument. The union is

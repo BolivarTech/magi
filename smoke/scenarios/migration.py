@@ -37,26 +37,42 @@ record carrying no cap is reported as nothing having been transmitted rather
 than as a value that failed to match -- the two send the next reader to
 different places.
 
-**S21 forces a state and is allowed not to reach it.** A reasoning model
-returns empty content when the prompt is large enough that it spends its whole
-output budget thinking; the recorded failure used roughly 250 kB of Rust
-against a 4096-token cap. Only the TOKEN COUNT is load-bearing -- the text does
-not matter -- and R4's payload is exactly that, built from the tree by
-:mod:`smoke.payload` and bounded by the product's own ``MAX_QUERY_BYTES``. The
-cap is now four times what it was, so the model may simply finish. **That is
-``CANNOT_TEST``, never ``FAIL``**: the product did nothing wrong, the
-environment would not produce the state. Which condition was missing is
-reported by name, because a bare ``CANNOT_TEST`` with a generic reason is the
-vacuous outcome wearing an honest label.
+**S21 asserts a SHAPE and forces nothing, and that is a redesign made on
+measurement rather than on taste.** It used to try to CAUSE an empty completion
+-- a reasoning model spending its whole output budget on thought against a
+250 kB payload -- and then assert the product named the state correctly. Six
+probes of ``deepseek-v4-pro:cloud`` on 2026-08-27 killed the recipe: the same
+prompt, the same payload and the same 16 384-token cap gave ``length`` with
+16 384 tokens and empty content on one run and ``stop`` with 10 312 on the
+next. Cloud inference is not reproducible at ``temperature: 0`` and that model
+sits exactly on the boundary; ``minimax-m3:cloud`` is the same coin flip, only
+slower.
 
-**The one thing S21 cannot observe, stated rather than papered over.**
-``CompletionRecord::reasoning`` is deliberately not rendered into the run JSON
--- no consumer reads it -- so the harness cannot ask *"did a model reason?"*
-directly. What it can read is the finish reason and the token counts, and those
-separate the reports that matter: an attempt that exhausted the cap and still
-answered is a different fact from one that stopped normally well inside it, and
-both differ from a backend that reported neither. Where two readings genuinely
-collapse into one observable, the message names both rather than picking one.
+**That made S21 an assertion about the MODEL rather than about the product**,
+which this harness's own doctrine forbids: a gate cannot go red over something
+the product does not control. It was worse than red, in fact -- the three
+outcomes it reported were ``CANNOT_TEST``, which BLOCKS certification, so
+identical code would have been certified on some runs and refused on others.
+
+So S21 now asserts what the product emits on **every** run, whether or not any
+model overruns: that each recorded attempt carries a ``finish`` this build
+knows -- one of :data:`KNOWN_FINISH_LABELS`, or an explicit JSON null meaning
+*"the backend did not say"* -- and that the rotation report is published with
+every hop naming a cause :data:`KNOWN_ROTATION_CAUSES` holds and saying whether
+that cause was local to one mage.
+
+**What was given up is real and is not hidden.** There is no longer an
+end-to-end demonstration that a genuinely overrunning model is reported
+correctly. That claim keeps its unit proof -- the mapping is a pure function
+over a constructed ``CompletionRecord`` and is provable there and only there --
+and a real run that happens to overrun still exercises it, opportunistically
+and unasserted. What S21 buys back is a scenario whose colour is decided by
+this build's code.
+
+**Two assertions, not three, and the count moved with it.** The spec names
+exactly two properties for S21, and a third invented to keep the number would
+be padding -- which is the defect this redesign exists to remove, not a shape
+to preserve. ``DECLARED_ASSERTION_COUNT`` drops by one accordingly.
 
 **S22 asks whether the report is COMPLETE, not whether the run was healthy.**
 Its subject is published keys: ``pool_eligibility`` present even when empty,
@@ -70,7 +86,6 @@ in the ``degraded`` bit, whose meaning this milestone does not touch.
 
 import dataclasses
 
-from smoke import runs
 from smoke.errors import ProductOutputError
 from smoke.outcome import Finding, Outcome
 from smoke.registry import scenario
@@ -83,8 +98,7 @@ from smoke.registry import scenario
 # module loads.
 from smoke.scenarios.trio import (AGENTS_KEY, APPLIED_CAPS_KEY, CONSULT_KEY,
                                   DEGRADED_KEY, ENVIRONMENTAL_ERROR_KINDS,
-                                  ERROR_KEY, PAYLOAD_SENT_FRACTION,
-                                  SUCCESS_EXIT_CODE, TRIO_SIZE,
+                                  ERROR_KEY, SUCCESS_EXIT_CODE, TRIO_SIZE,
                                   attempt_factor, derive,
                                   floor_activation_threshold)
 
@@ -98,9 +112,10 @@ S20_ASSERTIONS = (
     "the published per-mage threshold agrees with the attempt-factor formula",
 )
 S21_ASSERTIONS = (
-    "the rotation cause reads empty_completion and not transport",
-    "the empty completion is reported as mage-local",
-    "finish tells budget exhaustion from a genuinely empty answer",
+    "every recorded attempt reports a finish this build knows, or an explicit "
+    "null",
+    "the rotations report is published and every hop names a known cause and "
+    "its locality",
 )
 S22_ASSERTIONS = (
     "pool_eligibility is present even when empty",
@@ -143,17 +158,33 @@ MAGE_LOCAL_KEY = "mage_local"
 ATTEMPT_KEYS = ("model", "cap", "finish", "completion_tokens", "prompt_tokens")
 CAP_KEY = "cap"
 FINISH_KEY = "finish"
-COMPLETION_TOKENS_KEY = "completion_tokens"
 
-#: The cause a seat's rotation must name when its completion came back empty,
-#: and the one it must NOT name. ``transport`` is the label a wildcard produces
-#: when a hand-written match meets a cause it does not know, so reading it here
-#: says the run blamed the network for something local to one mage.
-EMPTY_COMPLETION_CAUSE = "empty_completion"
-TRANSPORT_CAUSE = "transport"
+#: Every finish label this build can produce for a reason it RECOGNISES,
+#: mirrored from ``FinishReason``'s hand-written ``Serialize`` in the pinned
+#: magi-core. Three, and no more: the crate's own capture campaign observed
+#: exactly ``stop``, ``length`` and ``load``, and its ``from_wire`` folds every
+#: word any vendor publishes -- ``tool_calls``, ``end_turn``, ``refusal``,
+#: ``max_tokens``, ``model_context_window_exceeded`` and the rest -- into one
+#: of these three before a record is ever built.
+#:
+#: A fourth string therefore is not a vendor word magi-rs failed to anticipate;
+#: it is ``FinishReason::Other``, which the crate documents as *"a value no
+#: vendor publishes"*. Reporting that is signal about the wire, and it is
+#: DETERMINISTIC for a given backend -- which is the whole difference between
+#: this check and the forcing recipe it replaced.
+KNOWN_FINISH_LABELS = ("stop", "length", "load")
 
-#: The finish reason that means the output budget ran out.
-LENGTH_FINISH = "length"
+#: Every rotation cause this build can name, mirrored from ``cause_label`` in
+#: ``src/magi/rotation_report.rs``. Seven, matching ``RotationKind``'s variants
+#: one for one at the pin. The mirroring is deliberate and carries the same
+#: maintenance contract as :data:`DECLARED_COMPLETION_CAP`: a cause magi-core
+#: adds turns S21 red until this tuple moves, which is the point. A check that
+#: accepted whatever string arrived would accept the wildcard label a
+#: hand-written match invents, and that wildcard is exactly what REQ-V4-02
+#: forbids.
+KNOWN_ROTATION_CAUSES = ("transport", "timeout", "schema", "oversized_response",
+                         "external_failure", "empty_completion",
+                         "response_contract")
 
 #: Where the per-mage threshold S20 cross-checks is published.
 THRESHOLD_KEY = "floor_activation_threshold_secs"
@@ -506,176 +537,210 @@ def _threshold_finding(run):
     return _finding(S20_ASSERTIONS, 3, Outcome.PASS, "")
 
 
-#: Why S21 could not observe the state it forces. Each is a WRITTEN cause: a
-#: bare CANNOT_TEST with a generic reason is the vacuous outcome wearing an
-#: honest label, and these are the conditions that actually differ.
-REASON_PAYLOAD_NOT_SENT = (
-    "the recipe was not applied: run %s carried %d bytes against a declared "
-    "payload of %d, so the prompt was never large enough to make a model "
-    "spend its output budget"
-)
+#: The written cause when the run recorded no completion attempt at all. It is
+#: the ONE condition that can empty assertion 1's collection, and it is named
+#: rather than left to a generic message: an "every attempt reports X" loop
+#: over nothing is a green that asserted nothing, which is the vacuity this
+#: harness's doctrine treats as the worst available outcome.
 REASON_NO_ATTEMPTS = (
-    "the recipe cannot be observed: the run recorded no completion attempt, "
-    "so nothing says how any model stopped"
-)
-REASON_NO_TOKEN_COUNTS = (
-    "the recipe cannot be observed: no attempt reported a completion token "
-    "count, so an empty answer cannot be told from an unreported one"
-)
-REASON_EXHAUSTED_AND_ANSWERED = (
-    "an attempt exhausted the declared cap of %d and still returned %d "
-    "completion tokens, so budget exhaustion did not produce an empty "
-    "completion here"
-)
-REASON_COMPLETED_WITHIN_CAP = (
-    "the model completed within the declared cap of %d, spending at most %d "
-    "completion tokens and never reporting %r: either no configured model "
-    "reasons at length, or the cap is now large enough for the ones that do"
-)
-REASON_NO_ROTATION = (
-    "attempt %s returned zero completion tokens and its seat recorded no "
-    "rotation, so no cause was published to read"
+    "the run recorded no completion attempt, so \"every attempt reports a "
+    "finish this build knows\" would hold over an empty collection"
 )
 
 
-@dataclasses.dataclass(frozen=True)
-class _EmptyCompletion:
-    """The forced state, or the named reason it was not reached.
+def _finish_vocabulary_finding(capture, attempts, failure):
+    """Judge assertion 1: every attempt names a finish this build can produce.
 
-    Attributes:
-        attempt: The attempt that came back with zero completion tokens, or
-            None.
-        hop: The rotation hop the attempt's seat recorded, or None.
-        outcome: What every assertion reports when *attempt* is None, or when
-            *attempt* is set and *hop* is not.
-        detail: The written cause.
-    """
+    Unconditional by construction. It reads the shape of what the product
+    emitted rather than trying to provoke a state, so it holds on a run where
+    nothing overran, on a run where something did, and on a run where the
+    backend reported no reason at all.
 
-    attempt: object
-    hop: object
-    outcome: object
-    detail: str
+    **Null is a value, absence is a defect, and they are separated here.**
+    ``finish`` renders as JSON null when the backend did not say why the model
+    stopped, and substituting a word there would assert a measurement nobody
+    took -- the exact confusion that once made a completion scraping its cap
+    look healthy. So null PASSES. A ``finish`` key that is missing altogether
+    is a broken output contract and fails.
 
-
-def _empty_completion_state(run, capture, attempts, failure):
-    """Find the empty completion, or say precisely which condition was missing.
-
-    Complexity: ``O(attempts + hops)`` -- one pass over each.
+    **The vacuity guard is a CANNOT_TEST, and which one it is matters.** With
+    no attempts recorded the loop below iterates nothing and would report a
+    green that checked nothing, so the empty collection is reported by name
+    instead. It is not a FAIL because *"a completed consult leaves records"* is
+    already S20's third assertion over this very run, and duplicating that
+    verdict here would report one defect as two. It also cannot become S21's
+    resting state: a healthy R4 records attempts for all three seats, and a run
+    that records none has already blocked the gate through S20.
 
     Args:
-        run: R4's ``RunResult``, or None.
         capture: R4's reduction.
-        attempts: Every recorded attempt, or None.
+        attempts: Every recorded attempt, or None when ``completions`` could
+            not be read as a per-seat map.
         failure: Why there are none.
 
     Returns:
-        _EmptyCompletion: The state, or the reason.
+        Finding: PASS when every attempt's ``finish`` is one of
+        :data:`KNOWN_FINISH_LABELS` or null.
     """
     if capture.envelope is None:
-        return _EmptyCompletion(None, None, capture.outcome, capture.detail)
-    target = runs.payload_target()
-    if run.stdin_bytes < target * PAYLOAD_SENT_FRACTION:
-        return _EmptyCompletion(
-            None, None, Outcome.CANNOT_TEST,
-            REASON_PAYLOAD_NOT_SENT % (MIGRATION_RUN, run.stdin_bytes, target))
+        return _finding(S21_ASSERTIONS, 0, capture.outcome, capture.detail)
     if attempts is None:
-        return _EmptyCompletion(None, None, Outcome.FAIL, failure)
+        return _finding(S21_ASSERTIONS, 0, Outcome.FAIL, failure)
     if not attempts:
-        return _EmptyCompletion(None, None, Outcome.CANNOT_TEST,
-                                REASON_NO_ATTEMPTS)
-    empty = _first_empty_attempt(attempts)
-    if empty is None:
-        return _EmptyCompletion(None, None, Outcome.CANNOT_TEST,
-                                _why_not_empty(attempts))
-    hop = _empty_completion_hop(capture.envelope, empty.seat)
-    if hop is None:
-        return _EmptyCompletion(empty, None, Outcome.CANNOT_TEST,
-                                REASON_NO_ROTATION % empty.label)
-    return _EmptyCompletion(empty, hop, None, "")
+        return _finding(S21_ASSERTIONS, 0, Outcome.CANNOT_TEST,
+                        REASON_NO_ATTEMPTS)
+    problems = [problem
+                for problem in (_finish_problem(item) for item in attempts)
+                if problem]
+    if problems:
+        return _finding(S21_ASSERTIONS, 0, Outcome.FAIL, "; ".join(problems))
+    return _finding(S21_ASSERTIONS, 0, Outcome.PASS, "")
 
 
-def _first_empty_attempt(attempts):
-    """The first attempt that returned nothing at all.
+def _finish_problem(item):
+    """How one attempt fails the finish vocabulary, if it does.
 
     Args:
-        attempts: Every recorded attempt.
+        item: The attempt to judge.
 
     Returns:
-        _Attempt | None: The attempt reporting exactly zero completion tokens.
+        str: The problem, or the empty string when the attempt is fine.
     """
-    for item in attempts:
-        if not isinstance(item.record, dict):
-            continue
-        tokens = item.record.get(COMPLETION_TOKENS_KEY)
-        if _is_count(tokens) and tokens == 0:
-            return item
-    return None
+    if not isinstance(item.record, dict):
+        return "%s is not an object, so it reports no %s at all" % (
+            item.label, FINISH_KEY)
+    if FINISH_KEY not in item.record:
+        return ("%s omits %s, so nothing says whether the backend reported a "
+                "reason or reported none" % (item.label, FINISH_KEY))
+    finish = item.record[FINISH_KEY]
+    if finish is None or finish in KNOWN_FINISH_LABELS:
+        return ""
+    return ("%s reports %s as %r, which is outside the vocabulary this build "
+            "renders (%s, or null for not reported)"
+            % (item.label, FINISH_KEY, finish,
+               ", ".join(KNOWN_FINISH_LABELS)))
 
 
-def _why_not_empty(attempts):
-    """The written cause when every attempt came back with content.
+def _rotation_consistency_finding(capture):
+    """Judge assertion 2: the rotation report is published and well formed.
 
-    The three branches are the three genuinely different observations, and
-    they are separated by what the report carries rather than by a threshold
-    somebody invented. What the harness CANNOT separate -- a model that does
-    not reason from one that reasons inside the cap -- is named in one message
-    rather than guessed at, because ``reasoning`` is deliberately not rendered.
+    Two halves, and the first is what keeps the second from being vacuous.
+
+    **The report is published even when nobody rotated.** ``rotations`` is an
+    array magi-rs emits on every consult, empty when no seat hopped, and that
+    presence is the same fact ``pool_eligibility`` carries in S22: absent says
+    *"not computed"*, empty says *"computed, nothing to report"*. So this half
+    has content on every run, the healthy no-rotation one included, and there
+    is no input for which this assertion checks nothing.
+
+    **Each hop names a cause this build knows, and its locality.** ``cause`` is
+    derived from the crate's own serde rather than a hand-written match
+    precisely so a new ``RotationKind`` cannot ship as an invented wildcard
+    label, and ``mage_local`` comes from magi-core's ``is_mage_local`` because
+    it decides whether the other two seats keep going. Every hop is checked for
+    both, and the cause against :data:`KNOWN_ROTATION_CAUSES`.
+
+    A seat with no hops is not a failure and asserts nothing further, which is
+    exactly why the first half has to carry the unconditional weight.
+
+    Complexity: ``O(entries x hops)`` -- one pass over each.
 
     Args:
-        attempts: Every recorded attempt, all of them non-empty.
+        capture: R4's reduction.
 
     Returns:
-        str: The cause.
+        Finding: PASS when the array is published and every hop it carries is
+        well formed.
     """
-    counts = [item.record.get(COMPLETION_TOKENS_KEY) for item in attempts
-              if isinstance(item.record, dict)]
-    measured = [count for count in counts if _is_count(count)]
-    if not measured:
-        return REASON_NO_TOKEN_COUNTS
-    exhausted = [item for item in attempts
-                 if isinstance(item.record, dict)
-                 and item.record.get(FINISH_KEY) == LENGTH_FINISH]
-    if exhausted:
-        spent = exhausted[0].record.get(COMPLETION_TOKENS_KEY)
-        return REASON_EXHAUSTED_AND_ANSWERED % (DECLARED_COMPLETION_CAP, spent)
-    return REASON_COMPLETED_WITHIN_CAP % (DECLARED_COMPLETION_CAP,
-                                          max(measured), LENGTH_FINISH)
-
-
-def _empty_completion_hop(envelope, seat):
-    """The rotation hop one seat recorded, preferring the empty-completion one.
-
-    Complexity: ``O(hops)``.
-
-    Args:
-        envelope: The consult envelope.
-        seat: The seat label to look up.
-
-    Returns:
-        dict | None: The seat's ``empty_completion`` hop when it has one, its
-        first hop otherwise -- because a hop naming another cause is what
-        assertion 1 exists to fail on -- and None when the seat did not rotate.
-    """
-    entries = envelope.get(ROTATIONS_KEY)
+    if capture.envelope is None:
+        return _finding(S21_ASSERTIONS, 1, capture.outcome, capture.detail)
+    if ROTATIONS_KEY not in capture.envelope:
+        return _finding(S21_ASSERTIONS, 1, Outcome.FAIL,
+                        "the envelope carries no %s; absent says the rotation "
+                        "report was not computed, which is a different fact "
+                        "from an empty one saying nobody hopped"
+                        % ROTATIONS_KEY)
+    entries = capture.envelope[ROTATIONS_KEY]
     if not isinstance(entries, list):
-        return None
-    chain = []
-    for entry in entries:
-        if isinstance(entry, dict) and entry.get(AGENT_KEY) == seat:
-            found = entry.get(CHAIN_KEY)
-            chain = found if isinstance(found, list) else []
-            break
-    hops = [hop for hop in chain if isinstance(hop, dict)]
-    for hop in hops:
-        if hop.get(CAUSE_KEY) == EMPTY_COMPLETION_CAUSE:
-            return hop
-    return hops[0] if hops else None
+        return _finding(S21_ASSERTIONS, 1, Outcome.FAIL,
+                        "%s is %s, expected an array of rotating seats"
+                        % (ROTATIONS_KEY, type(entries).__name__))
+    problems = []
+    for position, entry in enumerate(entries):
+        problems.extend(_entry_problems(position, entry))
+    if problems:
+        return _finding(S21_ASSERTIONS, 1, Outcome.FAIL, "; ".join(problems))
+    return _finding(S21_ASSERTIONS, 1, Outcome.PASS, "")
+
+
+def _entry_problems(position, entry):
+    """Every way one rotation entry fails to publish a readable chain.
+
+    Args:
+        position: The entry's index, so a message names it without the reader
+            counting.
+        entry: The entry as published.
+
+    Returns:
+        list[str]: One message per problem; empty when the entry and every hop
+        under it are well formed.
+    """
+    where = "%s[%d]" % (ROTATIONS_KEY, position)
+    if not isinstance(entry, dict):
+        return ["%s is not an object" % where]
+    if CHAIN_KEY not in entry:
+        return ["%s publishes no %s, so its hops cannot be read"
+                % (where, CHAIN_KEY)]
+    chain = entry[CHAIN_KEY]
+    if not isinstance(chain, list):
+        return ["%s.%s is %s, expected an array of hops"
+                % (where, CHAIN_KEY, type(chain).__name__)]
+    problems = []
+    for index, hop in enumerate(chain):
+        problems.extend(_hop_problems("%s.%s[%d]" % (where, CHAIN_KEY, index),
+                                      hop))
+    return problems
+
+
+def _hop_problems(where, hop):
+    """Every way one hop fails to name a known cause and its locality.
+
+    Args:
+        where: How to name this hop in a message.
+        hop: The hop as published.
+
+    Returns:
+        list[str]: One message per problem; empty when the hop is well formed.
+    """
+    if not isinstance(hop, dict):
+        return ["%s is not an object" % where]
+    problems = []
+    if CAUSE_KEY not in hop:
+        problems.append("%s publishes no %s" % (where, CAUSE_KEY))
+    elif hop[CAUSE_KEY] not in KNOWN_ROTATION_CAUSES:
+        problems.append(
+            "%s names %s %r, which is not one of the causes this build renders"
+            " (%s)" % (where, CAUSE_KEY, hop[CAUSE_KEY],
+                       ", ".join(KNOWN_ROTATION_CAUSES)))
+    if MAGE_LOCAL_KEY not in hop:
+        problems.append("%s publishes no %s, so nothing says whether the cause "
+                        "condemned one mage or the run"
+                        % (where, MAGE_LOCAL_KEY))
+    elif not isinstance(hop[MAGE_LOCAL_KEY], bool):
+        problems.append("%s reports %s as %r, which is not a locality"
+                        % (where, MAGE_LOCAL_KEY, hop[MAGE_LOCAL_KEY]))
+    return problems
 
 
 @scenario("S21", assertions=S21_ASSERTIONS, run=MIGRATION_RUN,
           needs_backend=True)
-def an_empty_completion_names_itself(run):
-    """Assert the empty completion is named, local, and told from exhaustion.
+def every_attempt_reports_a_finish_this_build_knows(run):
+    """Assert the finish vocabulary and the rotation report's own shape.
+
+    Both assertions are unconditional: they read what the product emitted on
+    whatever run happened, rather than depending on a state a model has to be
+    talked into producing. See the module docstring for the measurement that
+    retired the forcing recipe.
 
     Args:
         run: R4's ``RunResult``, or None.
@@ -685,107 +750,8 @@ def an_empty_completion_names_itself(run):
     """
     capture = _capture_of(run, MIGRATION_RUN)
     attempts, failure = _attempts_of(capture.envelope)
-    state = _empty_completion_state(run, capture, attempts, failure)
-    yield _cause_finding(state)
-    yield _locality_finding(state)
-    yield _finish_finding(state)
-
-
-def _cause_finding(state):
-    """Judge assertion 1: the cause names the empty completion, not transport.
-
-    ``transport`` is the label a wildcard produces for a cause it does not
-    know, and it says the run blamed the network for something that happened
-    inside one mage. That is why the two are named against each other rather
-    than the cause merely being checked for presence.
-
-    Args:
-        state: What the run turned out to hold.
-
-    Returns:
-        Finding: PASS when the hop's cause is ``empty_completion``.
-    """
-    if state.hop is None:
-        return _finding(S21_ASSERTIONS, 0, state.outcome, state.detail)
-    cause = state.hop.get(CAUSE_KEY)
-    if cause == EMPTY_COMPLETION_CAUSE:
-        return _finding(S21_ASSERTIONS, 0, Outcome.PASS, "")
-    blamed = (", which blames the network for a condition local to one mage"
-              if cause == TRANSPORT_CAUSE else "")
-    return _finding(S21_ASSERTIONS, 0, Outcome.FAIL,
-                    "attempt %s returned zero completion tokens and its seat "
-                    "rotated with cause %r rather than %r%s"
-                    % (state.attempt.label, cause, EMPTY_COMPLETION_CAUSE,
-                       blamed))
-
-
-def _locality_finding(state):
-    """Judge assertion 2: the hop reports the cause as mage-local.
-
-    ``mage_local`` false says a cause condemned the whole run, which is what
-    decides whether the other two seats keep going. Reading it off the hop is
-    the only way to see it: the flag comes from magi-core's own
-    ``is_mage_local``, not from a match magi-rs maintains.
-
-    Args:
-        state: What the run turned out to hold.
-
-    Returns:
-        Finding: PASS when ``mage_local`` is exactly True.
-    """
-    if state.hop is None:
-        return _finding(S21_ASSERTIONS, 1, state.outcome, state.detail)
-    local = state.hop.get(MAGE_LOCAL_KEY)
-    if local is True:
-        return _finding(S21_ASSERTIONS, 1, Outcome.PASS, "")
-    if MAGE_LOCAL_KEY not in state.hop:
-        return _finding(S21_ASSERTIONS, 1, Outcome.FAIL,
-                        "the hop for %s publishes no %s, so nothing says "
-                        "whether the cause condemned one mage or the run"
-                        % (state.attempt.label, MAGE_LOCAL_KEY))
-    return _finding(S21_ASSERTIONS, 1, Outcome.FAIL,
-                    "the hop for %s reports %s as %r, so an empty completion "
-                    "is being treated as a run-wide condition"
-                    % (state.attempt.label, MAGE_LOCAL_KEY, local))
-
-
-def _finish_finding(state):
-    """Judge assertion 3: exhaustion and an empty answer stay distinguishable.
-
-    ``finish`` is null when the backend did not say why the model stopped, and
-    that distinction is the assertion's subject: substituting a default would
-    assert a measurement nobody took, which is exactly what made a completion
-    scraping its cap look healthy. So a null is ``CANNOT_TEST`` -- the run
-    cannot answer -- while an absent key is a broken contract and a value that
-    is not a string is a shape the vocabulary does not have.
-
-    Args:
-        state: What the run turned out to hold.
-
-    Returns:
-        Finding: PASS when the empty attempt carries a finish reason that
-        tells ``length`` from anything else.
-    """
-    if state.attempt is None:
-        return _finding(S21_ASSERTIONS, 2, state.outcome, state.detail)
-    record = state.attempt.record
-    if FINISH_KEY not in record:
-        return _finding(S21_ASSERTIONS, 2, Outcome.FAIL,
-                        "attempt %s omits %s, so budget exhaustion cannot be "
-                        "told from a genuinely empty answer"
-                        % (state.attempt.label, FINISH_KEY))
-    finish = record[FINISH_KEY]
-    if finish is None:
-        return _finding(S21_ASSERTIONS, 2, Outcome.CANNOT_TEST,
-                        "the backend reported no finish reason for attempt "
-                        "%s, so this run cannot tell budget exhaustion from a "
-                        "genuinely empty answer" % state.attempt.label)
-    if not isinstance(finish, str) or not finish:
-        return _finding(S21_ASSERTIONS, 2, Outcome.FAIL,
-                        "attempt %s reports %s as %r, which is not a finish "
-                        "reason the wire vocabulary has"
-                        % (state.attempt.label, FINISH_KEY, finish))
-    return _finding(S21_ASSERTIONS, 2, Outcome.PASS, "")
+    yield _finish_vocabulary_finding(capture, attempts, failure)
+    yield _rotation_consistency_finding(capture)
 
 
 @scenario("S22", assertions=S22_ASSERTIONS, run=MIGRATION_RUN,

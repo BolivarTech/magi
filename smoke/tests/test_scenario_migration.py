@@ -4,10 +4,15 @@
 """Unit tests for the three scenarios the magi-core 4.0.0 move needs.
 
 These test the HARNESS. Every product answer here is a double, so what is
-under test is the mapping from a published document to an outcome -- and in
-particular that S21 reaches ``CANNOT_TEST`` by a NAMED condition rather than a
-generic one, which is the only thing separating an honest not-run from a
-vacuous green.
+under test is the mapping from a published document to an outcome.
+
+**S21's tests carry the redesign of 2026-08-27.** The scenario used to force an
+empty completion and report which condition it could not reach; six probes
+proved the forcing non-reproducible, so it now asserts the SHAPE the product
+emits on every run. The tests that covered the recipe and its ``CANNOT_TEST``
+reasons are gone with it, and what replaces them is a vacuity guard: the one
+input that can empty assertion 1's collection must report ``CANNOT_TEST`` by
+name rather than a green that iterated nothing.
 """
 
 import copy
@@ -17,14 +22,12 @@ import unittest
 from smoke.outcome import Outcome
 from smoke.product import ProductOutput
 from smoke.registry import DEFAULT_REGISTRY
-from smoke import runs as runs_module
 from smoke.runs import RunResult
 from smoke.scenarios import migration  # noqa: F401 - import registers it
 
-#: How large R4's payload is declared to be, and how many bytes the doubles say
-#: it carried. Both are the harness's own numbers, so S21's "was the recipe
-#: applied?" branch is exercised against a value it can actually reach.
-PAYLOAD_TARGET = 250000
+#: How many bytes the doubles say R4 carried. R4's own payload is a large one,
+#: and the number is the harness's rather than a model's, so nothing here
+#: depends on what a backend chose to do with it.
 PAYLOAD_SENT = 250054
 
 #: One completion attempt, with the exact five keys the product maps by hand
@@ -37,12 +40,15 @@ _ATTEMPT = {
     "prompt_tokens": 62513,
 }
 
-#: One rotation hop that names an empty completion, mage-local.
+#: One rotation hop that names an empty completion, mage-local. The cause is a
+#: literal rather than an index into ``KNOWN_ROTATION_CAUSES``: a fixture that
+#: reads its value out of the tuple under test agrees with it however wrong
+#: that tuple becomes, and the vocabulary is checked by its own test.
 _HOP = {
     "from_lineage": "glm",
     "to_lineage": "qwen",
     "model_resolved": "qwen3.5:397b-cloud",
-    "cause": migration.EMPTY_COMPLETION_CAUSE,
+    "cause": "empty_completion",
     "mage_local": True,
     "detail": "mage-local: the completion was empty",
 }
@@ -195,52 +201,6 @@ def _seat_attempts(*records):
     return {"melchior": [copy.deepcopy(record) for record in records]}
 
 
-class _payload:
-    """Stand in for the payload size S21 reads, for one block.
-
-    Restoration happens in ``__exit__`` rather than on the happy path, so a
-    test failing inside the block still leaves the module as it found it --
-    otherwise every test after it inherits this one's number.
-    """
-
-    #: The accessors this stands in for, named once so adding a second cannot
-    #: be half-done: saved, replaced and restored all iterate this tuple.
-    NAMES = ("payload_target",)
-
-    def __init__(self, target: int = PAYLOAD_TARGET) -> None:
-        """Record what to answer.
-
-        Args:
-            target: The configured payload size, in bytes.
-        """
-        self._answers = {"payload_target": lambda: target}
-        self._saved: dict = {}
-
-    def __enter__(self) -> "_payload":
-        """Install the stand-ins.
-
-        Returns:
-            _payload: Self.
-        """
-        self._saved = {name: getattr(runs_module, name) for name in self.NAMES}
-        for name in self.NAMES:
-            setattr(runs_module, name, self._answers[name])
-        return self
-
-    def __exit__(self, *exc) -> bool:
-        """Put every accessor back, whatever happened.
-
-        Args:
-            *exc: The exception triple, ignored.
-
-        Returns:
-            bool: False, so nothing is suppressed.
-        """
-        for name, original in self._saved.items():
-            setattr(runs_module, name, original)
-        return False
-
-
 class MigrationScenarioShapeTests(unittest.TestCase):
     """All three declare R4, need a backend, and cannot read a timed-out run."""
 
@@ -276,9 +236,10 @@ class MigrationScenarioShapeTests(unittest.TestCase):
         )
         self.assertEqual(
             [
-                "the rotation cause reads empty_completion and not transport",
-                "the empty completion is reported as mage-local",
-                "finish tells budget exhaustion from a genuinely empty answer",
+                "every recorded attempt reports a finish this build knows, or "
+                "an explicit null",
+                "the rotations report is published and every hop names a known "
+                "cause and its locality",
             ],
             list(migration.S21_ASSERTIONS),
         )
@@ -470,228 +431,281 @@ class S20Tests(unittest.TestCase):
 
 
 class S21Tests(unittest.TestCase):
-    """The empty completion names itself, or the scenario names what was missing."""
+    """The finish vocabulary and the rotation report's shape, on every run."""
 
-    def _forced(self, attempt=None, hop=None, seat="melchior"):
-        """A run in which one seat came back empty and rotated.
+    @staticmethod
+    def _rotating(hop=None, entry=None, seat="melchior"):
+        """A run in which one seat rotated once.
 
         Args:
-            attempt: The empty attempt; None uses zero tokens and ``length``.
-            hop: The rotation hop; None uses the healthy one.
-            seat: Which seat the attempt and the hop belong to.
+            hop: The hop to publish; None uses the healthy one.
+            entry: The whole rotation entry, replacing the default; None builds
+                one around *hop*.
+            seat: Which seat rotated.
 
         Returns:
             RunResult: The double.
         """
-        empty = (dict(_ATTEMPT, completion_tokens=0, finish="length")
-                 if attempt is None else attempt)
-        envelope = _envelope_with(
-            completions={seat: [copy.deepcopy(empty)]},
-            rotations=[{"agent": seat,
-                        "model_configured": "glm-5.2:cloud",
-                        "model_used": "qwen3.5:397b-cloud",
-                        "ran_unmeasured": False,
-                        "chain": [copy.deepcopy(_HOP if hop is None
-                                                else hop)]}])
-        return _result(document=_document(envelope))
+        built = {"agent": seat,
+                 "model_configured": "glm-5.2:cloud",
+                 "model_used": "qwen3.5:397b-cloud",
+                 "ran_unmeasured": False,
+                 "chain": [copy.deepcopy(_HOP if hop is None else hop)]}
+        rotations = [built if entry is None else entry]
+        return _result(document=_document(_envelope_with(
+            rotations=copy.deepcopy(rotations))))
 
-    def test_a_forced_empty_completion_passes_all_three(self) -> None:
-        with _payload():
-            self.assertEqual({Outcome.PASS},
-                             set(_outcomes("S21", self._forced()).values()))
+    def test_a_healthy_run_passes_both(self) -> None:
+        """Three seats, one attempt each, nobody rotated: the shape holds."""
+        self.assertEqual({Outcome.PASS},
+                         set(_outcomes("S21", _result()).values()))
 
-    def test_a_transport_cause_fails_the_first(self) -> None:
-        """``transport`` is the label a wildcard produces for a cause it does
-        not know, and reading it here says the run blamed the network for
-        something local to one mage."""
-        with _payload():
-            outcomes = _outcomes(
-                "S21",
-                self._forced(hop=dict(_HOP,
-                                      cause=migration.TRANSPORT_CAUSE)))
+    def test_every_known_finish_label_passes_the_first(self) -> None:
+        """Guards the vocabulary tuple against being narrowed.
+
+        ``stop``, ``length`` and ``load`` are the three the crate's own
+        ``Serialize`` writes, so dropping one from
+        ``KNOWN_FINISH_LABELS`` would turn a legitimate run red.
+        """
+        for label in migration.KNOWN_FINISH_LABELS:
+            with self.subTest(finish=label):
+                document = _document(_envelope_with(
+                    completions=_seat_attempts(dict(_ATTEMPT, finish=label))))
+                outcomes = _outcomes("S21", _result(document=document))
+                self.assertEqual(Outcome.PASS,
+                                 outcomes[migration.S21_ASSERTIONS[0]])
+
+    def test_a_null_finish_passes_the_first(self) -> None:
+        """Null is a VALUE: the backend did not say why the model stopped.
+
+        Substituting a word there would assert a measurement nobody took, so
+        the product renders null on purpose and the assertion accepts it.
+        """
+        document = _document(_envelope_with(
+            completions=_seat_attempts(dict(_ATTEMPT, finish=None))))
+        outcomes = _outcomes("S21", _result(document=document))
+        self.assertEqual(Outcome.PASS, outcomes[migration.S21_ASSERTIONS[0]])
+
+    def test_an_absent_finish_key_fails_the_first(self) -> None:
+        """Absent is not null, and conflating them is the defect guarded here.
+
+        A missing key says nothing at all was rendered; null says the backend
+        reported no reason. One is a broken output contract, the other is an
+        ordinary run.
+        """
+        bare = {key: value for key, value in _ATTEMPT.items()
+                if key != "finish"}
+        document = _document(_envelope_with(completions=_seat_attempts(bare)))
+        outcomes = _outcomes("S21", _result(document=document))
         self.assertEqual(Outcome.FAIL, outcomes[migration.S21_ASSERTIONS[0]])
 
-    def test_the_transport_failure_says_what_transport_would_mean(self) -> None:
-        with _payload():
-            detail = _details(
-                "S21",
-                self._forced(hop=dict(_HOP,
-                                      cause=migration.TRANSPORT_CAUSE)))
-        self.assertIn("blames the network",
-                      detail[migration.S21_ASSERTIONS[0]])
+    def test_the_absent_finish_message_separates_it_from_a_null(self) -> None:
+        """A message reading as "no reason reported" would send the next reader
+        to the backend rather than to the renderer that dropped the key."""
+        bare = {key: value for key, value in _ATTEMPT.items()
+                if key != "finish"}
+        document = _document(_envelope_with(completions=_seat_attempts(bare)))
+        detail = _details("S21", _result(document=document))
+        self.assertIn("omits finish", detail[migration.S21_ASSERTIONS[0]])
 
-    def test_a_run_wide_locality_fails_the_second(self) -> None:
-        """``mage_local`` false says a cause condemned the whole run, which is
-        what decides whether the other two seats keep going."""
-        with _payload():
-            outcomes = _outcomes("S21",
-                                 self._forced(hop=dict(_HOP,
-                                                       mage_local=False)))
-        self.assertEqual(Outcome.FAIL, outcomes[migration.S21_ASSERTIONS[1]])
+    def test_the_crates_debug_form_fails_the_first(self) -> None:
+        """The mutation this assertion exists for.
 
-    def test_an_absent_locality_flag_fails_the_second(self) -> None:
-        hop = {key: value for key, value in _HOP.items() if key != "mage_local"}
-        with _payload():
-            outcomes = _outcomes("S21", self._forced(hop=hop))
-        self.assertEqual(Outcome.FAIL, outcomes[migration.S21_ASSERTIONS[1]])
-
-    def test_a_genuinely_empty_answer_passes_the_third(self) -> None:
-        """``stop`` on a zero-token attempt is the backend saying the model
-        finished and produced nothing, which is the other side of the
-        distinction the assertion is about."""
-        with _payload():
-            outcomes = _outcomes(
-                "S21",
-                self._forced(attempt=dict(_ATTEMPT, completion_tokens=0,
-                                          finish="stop")))
-        self.assertEqual(Outcome.PASS, outcomes[migration.S21_ASSERTIONS[2]])
-
-    def test_an_unreported_finish_cannot_test_the_third(self) -> None:
-        """``null`` means the backend did not say why the model stopped.
-
-        Substituting a default there would assert a measurement nobody took --
-        the confusion that made a completion scraping its cap look healthy --
-        so the run simply cannot answer.
+        ``finish_label`` derives the label from ``FinishReason``'s own serde so
+        magi-rs never maintains a second copy of the wire vocabulary. Deriving
+        it from the debug form instead compiles, runs, and publishes ``Length``
+        where the wire says ``length`` -- invisible to every unit test that
+        only asks whether a string arrived.
         """
-        with _payload():
-            outcomes = _outcomes(
-                "S21",
-                self._forced(attempt=dict(_ATTEMPT, completion_tokens=0,
-                                          finish=None)))
-        self.assertEqual(Outcome.CANNOT_TEST,
-                         outcomes[migration.S21_ASSERTIONS[2]])
+        document = _document(_envelope_with(
+            completions=_seat_attempts(dict(_ATTEMPT, finish="Length"))))
+        outcomes = _outcomes("S21", _result(document=document))
+        self.assertEqual(Outcome.FAIL, outcomes[migration.S21_ASSERTIONS[0]])
 
-    def test_an_absent_finish_key_fails_the_third(self) -> None:
-        attempt = {key: value for key, value in _ATTEMPT.items()
-                   if key != "finish"}
-        attempt["completion_tokens"] = 0
-        with _payload():
-            outcomes = _outcomes("S21", self._forced(attempt=attempt))
-        self.assertEqual(Outcome.FAIL, outcomes[migration.S21_ASSERTIONS[2]])
+    def test_a_finish_outside_the_wire_vocabulary_fails_the_first(self) -> None:
+        """``FinishReason::Other`` territory, which the crate documents as a
+        value no vendor publishes: every published word any wire uses is folded
+        into one of the three known variants before a record is built."""
+        document = _document(_envelope_with(
+            completions=_seat_attempts(dict(_ATTEMPT, finish="brand_new"))))
+        outcomes = _outcomes("S21", _result(document=document))
+        self.assertEqual(Outcome.FAIL, outcomes[migration.S21_ASSERTIONS[0]])
 
-    def test_a_finish_outside_the_vocabulary_fails_the_third(self) -> None:
-        with _payload():
-            outcomes = _outcomes(
-                "S21",
-                self._forced(attempt=dict(_ATTEMPT, completion_tokens=0,
-                                          finish=17)))
-        self.assertEqual(Outcome.FAIL, outcomes[migration.S21_ASSERTIONS[2]])
+    def test_a_non_string_finish_fails_the_first(self) -> None:
+        """A number is not a shape the finish vocabulary has, and it is not the
+        null that means "not reported" either."""
+        document = _document(_envelope_with(
+            completions=_seat_attempts(dict(_ATTEMPT, finish=17))))
+        outcomes = _outcomes("S21", _result(document=document))
+        self.assertEqual(Outcome.FAIL, outcomes[migration.S21_ASSERTIONS[0]])
 
-    def test_an_empty_completion_with_no_rotation_cannot_test_the_cause(self):
-        """No cause was published, so there is nothing to read -- which is a
-        different report from a cause that read wrong."""
-        envelope = _envelope_with(
-            completions=_seat_attempts(dict(_ATTEMPT, completion_tokens=0)))
-        with _payload():
-            outcomes = _outcomes("S21", _result(document=_document(envelope)))
+    def test_one_bad_attempt_among_good_ones_fails_the_first(self) -> None:
+        """The assertion is over EVERY attempt, so a single offender in a seat
+        that answered three times has to be found rather than averaged away."""
+        document = _document(_envelope_with(completions=_seat_attempts(
+            _ATTEMPT, dict(_ATTEMPT, finish="Length"), _ATTEMPT)))
+        outcomes = _outcomes("S21", _result(document=document))
+        self.assertEqual(Outcome.FAIL, outcomes[migration.S21_ASSERTIONS[0]])
+
+    def test_no_attempt_at_all_cannot_test_the_first(self) -> None:
+        """THE vacuity guard.
+
+        With no attempts the "every attempt" loop iterates nothing, and a PASS
+        there would be a green that checked nothing -- the outcome this
+        harness's doctrine treats as the worst available. It is CANNOT_TEST
+        rather than FAIL because "a completed consult leaves records" is
+        already S20's third assertion over this same run.
+        """
+        document = _document(_envelope_with(completions={}))
+        outcomes = _outcomes("S21", _result(document=document))
         self.assertEqual(Outcome.CANNOT_TEST,
                          outcomes[migration.S21_ASSERTIONS[0]])
 
-    def test_a_model_that_finished_cannot_test_and_says_so(self) -> None:
-        """The recipe's most likely legitimate failure at a 16384 cap.
-
-        The product did nothing wrong and the environment would not produce
-        the state, so this is CANNOT_TEST -- and the report names the
-        condition, because a generic reason is the vacuous outcome wearing an
-        honest label.
-        """
-        with _payload():
-            outcomes = _outcomes("S21", _result())
-            detail = _details("S21", _result())
-        self.assertEqual({Outcome.CANNOT_TEST}, set(outcomes.values()))
-        self.assertIn("completed within the declared cap",
-                      detail[migration.S21_ASSERTIONS[0]])
-
-    def test_an_exhausted_budget_that_still_answered_reports_itself(self) -> None:
-        """Distinct from the previous one: the cap DID run out and the model
-        answered anyway, which is evidence about the cap rather than about the
-        models configured."""
-        document = _document(
-            _envelope_with(completions=_seat_attempts(
-                dict(_ATTEMPT, finish="length", completion_tokens=16384))))
-        with _payload():
-            outcomes = _outcomes("S21", _result(document=document))
-            detail = _details("S21", _result(document=document))
-        self.assertEqual({Outcome.CANNOT_TEST}, set(outcomes.values()))
-        self.assertIn("exhausted the declared cap",
-                      detail[migration.S21_ASSERTIONS[0]])
-
-    def test_unreported_token_counts_report_the_recipe_unobservable(self) -> None:
-        document = _document(
-            _envelope_with(completions=_seat_attempts(
-                dict(_ATTEMPT, completion_tokens=None))))
-        with _payload():
-            detail = _details("S21", _result(document=document))
-        self.assertIn("no attempt reported a completion token count",
-                      detail[migration.S21_ASSERTIONS[0]])
-
-    def test_no_attempt_at_all_reports_the_recipe_unobservable(self) -> None:
-        document = _document(_envelope_with(completions={}))
-        with _payload():
-            outcomes = _outcomes("S21", _result(document=document))
-            detail = _details("S21", _result(document=document))
-        self.assertEqual({Outcome.CANNOT_TEST}, set(outcomes.values()))
-        self.assertIn("recorded no completion attempt",
-                      detail[migration.S21_ASSERTIONS[0]])
-
-    def test_a_payload_that_was_never_sent_reports_the_recipe_not_applied(self):
-        """The recipe's ONE load-bearing property is the token count.
-
-        A run that carried its bare prompt never made any model reason at
-        length, so nothing about it says whether an empty completion names
-        itself -- and blaming the product for a size it was never sent is what
-        the harness's own trap text forbids.
-        """
-        with _payload():
-            outcomes = _outcomes("S21", self._forced_short())
-            detail = _details("S21", self._forced_short())
-        self.assertEqual({Outcome.CANNOT_TEST}, set(outcomes.values()))
-        self.assertIn("the recipe was not applied",
-                      detail[migration.S21_ASSERTIONS[0]])
-
-    def _forced_short(self):
-        """A run that forced the state but never carried the payload.
-
-        Returns:
-            RunResult: The double, with a bare prompt's worth of stdin.
-        """
-        forced = self._forced()
-        return _result(document=json.loads(forced.output.stdout),
-                       stdin_bytes=54)
-
-    def test_the_four_cannot_test_reasons_are_all_different(self) -> None:
+    def test_the_vacuity_guard_names_the_empty_collection(self) -> None:
         """A bare CANNOT_TEST with a generic reason is the vacuous outcome
-        wearing an honest label, so the conditions that differ must read
-        differently."""
-        documents = {
-            "completed": _document(),
-            "exhausted": _document(_envelope_with(
-                completions=_seat_attempts(dict(_ATTEMPT, finish="length",
-                                                completion_tokens=16384)))),
-            "unmeasured": _document(_envelope_with(
-                completions=_seat_attempts(dict(_ATTEMPT,
-                                                completion_tokens=None)))),
-            "no attempt": _document(_envelope_with(completions={})),
-        }
-        seen = set()
-        with _payload():
-            for label, document in documents.items():
-                with self.subTest(condition=label):
-                    detail = _details("S21", _result(document=document))
-                    seen.add(detail[migration.S21_ASSERTIONS[0]])
-        self.assertEqual(len(documents), len(seen))
+        wearing an honest label, so the one condition that can empty the
+        collection has to read as itself."""
+        document = _document(_envelope_with(completions={}))
+        detail = _details("S21", _result(document=document))
+        self.assertIn("empty collection", detail[migration.S21_ASSERTIONS[0]])
+
+    def test_an_unreadable_completions_map_fails_the_first(self) -> None:
+        """A map that is not keyed by seat is a broken contract, not an absent
+        measurement, so it fails instead of degrading."""
+        document = _document(_envelope_with(completions=[]))
+        outcomes = _outcomes("S21", _result(document=document))
+        self.assertEqual(Outcome.FAIL, outcomes[migration.S21_ASSERTIONS[0]])
+
+    def test_a_run_with_no_rotation_passes_the_second(self) -> None:
+        """An empty array is the report saying nobody hopped, which is the
+        ordinary healthy run and must not be a failure."""
+        outcomes = _outcomes("S21", _result())
+        self.assertEqual(Outcome.PASS, outcomes[migration.S21_ASSERTIONS[1]])
+
+    def test_an_absent_rotations_key_fails_the_second(self) -> None:
+        """The half that makes this assertion non-vacuous.
+
+        With no hops there is nothing to check hop by hop, so the assertion
+        would assert nothing at all were it not for the array's PRESENCE:
+        absent says the rotation report was not computed, empty says it was and
+        nobody hopped. Rendering the key only when it has entries turns this
+        red on every run.
+        """
+        envelope = copy.deepcopy(_ENVELOPE)
+        del envelope["rotations"]
+        outcomes = _outcomes("S21", _result(document=_document(envelope)))
+        self.assertEqual(Outcome.FAIL, outcomes[migration.S21_ASSERTIONS[1]])
+
+    def test_a_non_array_rotations_fails_the_second(self) -> None:
+        document = _document(_envelope_with(rotations={}))
+        outcomes = _outcomes("S21", _result(document=document))
+        self.assertEqual(Outcome.FAIL, outcomes[migration.S21_ASSERTIONS[1]])
+
+    def test_every_known_cause_passes_the_second(self) -> None:
+        """Guards the cause vocabulary against being narrowed.
+
+        The seven mirror ``RotationKind``'s variants one for one at the pin, so
+        dropping one would turn a legitimate rotation red.
+        """
+        for cause in migration.KNOWN_ROTATION_CAUSES:
+            with self.subTest(cause=cause):
+                outcomes = _outcomes(
+                    "S21", self._rotating(hop=dict(_HOP, cause=cause)))
+                self.assertEqual(Outcome.PASS,
+                                 outcomes[migration.S21_ASSERTIONS[1]])
+
+    def test_a_wildcard_cause_label_fails_the_second(self) -> None:
+        """The mutation this half exists for.
+
+        ``cause_label`` derives from the crate's serde precisely so a new
+        ``RotationKind`` cannot ship as a label magi-rs invented. Replacing it
+        with a hand-written match plus a catch-all publishes a word the build
+        made up, and REQ-V4-02 names that as the failure mode that would be
+        invisible.
+        """
+        outcomes = _outcomes("S21",
+                             self._rotating(hop=dict(_HOP, cause="unknown")))
+        self.assertEqual(Outcome.FAIL, outcomes[migration.S21_ASSERTIONS[1]])
+
+    def test_an_absent_cause_fails_the_second(self) -> None:
+        hop = {key: value for key, value in _HOP.items() if key != "cause"}
+        outcomes = _outcomes("S21", self._rotating(hop=hop))
+        self.assertEqual(Outcome.FAIL, outcomes[migration.S21_ASSERTIONS[1]])
+
+    def test_an_absent_locality_fails_the_second(self) -> None:
+        """``mage_local`` decides whether the other two seats keep going, so a
+        hop that does not publish it leaves that unanswerable."""
+        hop = {key: value for key, value in _HOP.items() if key != "mage_local"}
+        outcomes = _outcomes("S21", self._rotating(hop=hop))
+        self.assertEqual(Outcome.FAIL, outcomes[migration.S21_ASSERTIONS[1]])
+
+    def test_a_run_wide_locality_still_passes_the_second(self) -> None:
+        """The assertion is that locality is PUBLISHED, not that it is true.
+
+        A run-wide cause is a legitimate thing for magi-core to report, and
+        demanding ``true`` here would put the gate's colour back where the
+        redesign took it from: on what a backend happened to do.
+        """
+        outcomes = _outcomes("S21",
+                             self._rotating(hop=dict(_HOP, mage_local=False)))
+        self.assertEqual(Outcome.PASS, outcomes[migration.S21_ASSERTIONS[1]])
+
+    def test_a_non_boolean_locality_fails_the_second(self) -> None:
+        outcomes = _outcomes("S21",
+                             self._rotating(hop=dict(_HOP, mage_local="yes")))
+        self.assertEqual(Outcome.FAIL, outcomes[migration.S21_ASSERTIONS[1]])
+
+    def test_a_rotation_entry_without_a_chain_fails_the_second(self) -> None:
+        """An entry that publishes no chain says a seat rotated and refuses to
+        say how, which no hop-level check can reach."""
+        outcomes = _outcomes("S21", self._rotating(entry={
+            "agent": "melchior", "model_configured": "glm-5.2:cloud",
+            "model_used": "qwen3.5:397b-cloud", "ran_unmeasured": False}))
+        self.assertEqual(Outcome.FAIL, outcomes[migration.S21_ASSERTIONS[1]])
+
+    def test_a_chain_that_is_not_an_array_fails_the_second(self) -> None:
+        outcomes = _outcomes("S21", self._rotating(entry={
+            "agent": "melchior", "model_configured": "glm-5.2:cloud",
+            "model_used": "qwen3.5:397b-cloud", "ran_unmeasured": False,
+            "chain": copy.deepcopy(_HOP)}))
+        self.assertEqual(Outcome.FAIL, outcomes[migration.S21_ASSERTIONS[1]])
+
+    def test_a_second_bad_hop_in_one_chain_is_reported(self) -> None:
+        """A seat that hopped twice is checked hop by hop, so an offender in
+        second position is not shadowed by a healthy first one."""
+        entry = {"agent": "melchior", "model_configured": "glm-5.2:cloud",
+                 "model_used": "qwen3.5:397b-cloud", "ran_unmeasured": False,
+                 "chain": [copy.deepcopy(_HOP),
+                           dict(_HOP, cause="unknown")]}
+        outcomes = _outcomes("S21", self._rotating(entry=entry))
+        self.assertEqual(Outcome.FAIL, outcomes[migration.S21_ASSERTIONS[1]])
+
+    def test_the_two_assertions_are_independent(self) -> None:
+        """A broken finish leaves the rotation half green and the other way
+        round, so a reader is sent to one subject rather than two."""
+        document = _document(_envelope_with(
+            completions=_seat_attempts(dict(_ATTEMPT, finish="Length"))))
+        outcomes = _outcomes("S21", _result(document=document))
+        self.assertEqual(Outcome.FAIL, outcomes[migration.S21_ASSERTIONS[0]])
+        self.assertEqual(Outcome.PASS, outcomes[migration.S21_ASSERTIONS[1]])
 
     def test_a_provider_error_cannot_test_every_assertion(self) -> None:
+        """The provider's failure, not the product's, so both degrade."""
         broken = _document(error={"kind": "provider", "message": "502"})
         broken["consult"] = None
-        with _payload():
-            outcomes = _outcomes("S21", _result(document=broken, exit_code=1))
+        outcomes = _outcomes("S21", _result(document=broken, exit_code=1))
         self.assertEqual(list(migration.S21_ASSERTIONS), list(outcomes))
         self.assertEqual({Outcome.CANNOT_TEST}, set(outcomes.values()))
 
-    def test_a_missing_run_reports_all_three(self) -> None:
-        with _payload():
-            outcomes = _outcomes("S21", None)
+    def test_a_runtime_error_fails_both(self) -> None:
+        """The product spoke and said no, which is a verdict about it."""
+        broken = _document(error={"kind": "runtime", "message": "boom"})
+        broken["consult"] = None
+        outcomes = _outcomes("S21", _result(document=broken, exit_code=1))
+        self.assertEqual({Outcome.FAIL}, set(outcomes.values()))
+
+    def test_a_missing_run_reports_both(self) -> None:
+        outcomes = _outcomes("S21", None)
         self.assertEqual(list(migration.S21_ASSERTIONS), list(outcomes))
         self.assertEqual({Outcome.CANNOT_TEST}, set(outcomes.values()))
 
