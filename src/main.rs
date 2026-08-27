@@ -3636,10 +3636,18 @@ fn build_magi_orchestrator(
         retry.clone(),
     )))
     .with_timeout(ceiling)
-    .with_completion_config(magi_completion_config());
-
-    #[cfg(test)]
-    COMPLETION_WIRING_TRACE.with(|t| *t.borrow_mut() = Some(magi_completion_config()));
+    .with_completion_config({
+        // The trace is set INSIDE the argument expression, so deleting the
+        // `.with_completion_config(...)` call deletes the trace with it. An earlier draft set it
+        // on the following line from a SECOND call to `magi_completion_config()`, which is a pure
+        // argument-free function: the mutation that removes the wiring left the trace populated,
+        // and the guardian could not fail. Its "mutation verified" claim was false because the
+        // mutation had removed the guardian too.
+        let completion = magi_completion_config();
+        #[cfg(test)]
+        COMPLETION_WIRING_TRACE.with(|t| *t.borrow_mut() = Some(completion.clone()));
+        completion
+    });
 
     // REQ-A15: the OTHER TWO exposed keys are also wired. Declaring them in TOML without
     // connecting them would make them decorative.

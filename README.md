@@ -336,8 +336,10 @@ it is an object with these keys, **all always present**:
 | `endpoint_divergence` | bool | whether this run's content passed through the principal provider (mode classification) before reaching a trio on a different endpoint |
 | `timeout_below_formula` | bool | whether an explicit `--timeout` was below what the derived escalation formula requires |
 | `failed_agents` | object | per-seat failure cause, redacted, for a mage that produced no verdict |
-| `rotations` | array | one entry per seat **that actually rotated** — from/to lineage, cause, and the model it ended on. Empty certifies that nobody did; it is a positive statement, not silence. (`magi-core`'s own report carries a row for every seat, rotated or not; this field is the filtered view.) |
+| `rotations` | array | one entry per seat **that actually rotated** — from/to lineage, cause, whether that cause was local to the mage or condemned the run (`mage_local`), and the model it ended on. Empty certifies that nobody did; it is a positive statement, not silence. (`magi-core`'s own report carries a row for every seat, rotated or not; this field is the filtered view.) |
 | `ran_unmeasured` | array | seats that ran without a measured context window, so their verdict carries that caveat |
+| `completions` | object | per seat, one record per completion **attempt**: the model, the cap in force, the token counts, and how it finished. `length` means the model ran out of output budget; a genuinely empty answer looks different, and the two want opposite fixes |
+| `pool_eligibility` | object | per seat, the fallback candidates it could **not** have rotated into and why. Present even when nothing was rejected — an absent map means the snapshot was never computed, which is a different fact from an empty one |
 
 New fields are added to `consult` without a `schema_version` bump — the same
 consumer contract above applies to it.

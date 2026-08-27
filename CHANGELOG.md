@@ -9,6 +9,51 @@ changes and the **patch** position signals backward-compatible fixes.
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-08-27
+
+### Changed
+
+- **`magi-core` moves from `=3.2.0` to `=4.0.0`, and the MAGI trio changes wire
+  protocol with it.** Under `provider = "ollama"` the three mages now reach the daemon
+  over the native `POST {base}/api/chat` instead of the OpenAI-compatible
+  `POST /v1/chat/completions`. Nothing in `magi.toml` changes and no configuration is
+  migrated: a `base_url` ending in `/v1` is still accepted and normalised away, so both
+  spellings converge on the same endpoint. The move arrives with the dependency, not with
+  a switch, which is why it is stated here rather than left to be noticed — it produced no
+  compile error and no warning. `kind = "openai-compat"` keeps `/v1` and is untouched.
+- **The `Retry-After` cap is now derived from `agent_timeout_secs`** rather than inherited
+  from the crate. Inherited, it was 300 s against an operation budget of 54 s at the
+  default ceiling, so a single honoured `Retry-After` overran the per-mage budget and the
+  run ended on an opaque cutoff instead of a typed abandonment. Derived, it is
+  `client_timeout − 1 s`, which makes the worst case of a mixed retry chain land exactly on
+  `operation_budget + client_timeout` — the relation the timeout scale was built around.
+  There is still one knob: raising the ceiling raises the cap with it.
+- **The completion cap and the reasoning control are declared explicitly.** Both happen to
+  equal `magi-core` 4.0.0's own defaults today (16 384 tokens, backend-chosen reasoning);
+  declaring them means a future change to those defaults cannot move this product without a
+  diff.
+
+### Added
+
+- **`completions` in the consult JSON** — one record per completion **attempt**, carrying
+  the model, the cap in force, the token counts, and the finish reason. That last field is
+  the point: it separates *the model ran out of output budget* from *the model genuinely had
+  nothing to say*. The two look identical from outside and want opposite fixes.
+- **`pool_eligibility` in the consult JSON** — which fallback candidates each mage could not
+  have rotated into, and why. Emitted even when nothing was rejected, because an absent map
+  and an empty one say different things: *not computed* versus *computed, nothing to reject*.
+- **`mage_local` on every rotation hop** — whether the cause condemned that one mage or the
+  whole run. The distinction matters more now: a `Retry-After` the run declines to wait for
+  condemns the lineage run-wide, and that is reachable in ordinary operation.
+
+### Fixed
+
+- Two shipped documentation claims that the dependency made false. One quoted the crate's
+  retry defaults as `600 + 300`; the budget default is now 450. The other explained the move
+  to `OllamaProvider` by saying it was *not* a protocol change, which was true when it was
+  written and is the opposite of true now.
+
+
 ## [0.16.0] - 2026-08-26
 
 ### Fixed

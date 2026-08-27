@@ -1,6 +1,6 @@
 // Author: Julian Bolivar
-// Version: 1.0.0
-// Date: 2026-08-11
+// Version: 0.17.0
+// Date: 2026-08-27
 
 //! Rotation telemetry, composed for output (REQ-R06/R07/R08/R09/R16).
 //!
