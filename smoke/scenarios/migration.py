@@ -141,7 +141,6 @@ ROTATIONS_KEY = "rotations"
 CHAIN_KEY = "chain"
 MODEL_CONFIGURED_KEY = "model_configured"
 MODEL_USED_KEY = "model_used"
-AGENT_KEY = "agent"
 
 #: Keys of one rotation hop.
 CAUSE_KEY = "cause"

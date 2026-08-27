@@ -826,3 +826,40 @@ class S22Tests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class VocabularyTests(unittest.TestCase):
+    """The two mirrored tuples are pinned to literals, not to themselves.
+
+    Every other test in this file ITERATES ``KNOWN_FINISH_LABELS`` and
+    ``KNOWN_ROTATION_CAUSES``, so narrowing either one leaves them all green: a
+    tuple validated only by iteration over itself is a guardian that cannot
+    fail. These two compare against hard-coded sets, which is the only way a
+    deletion shows up as red.
+    """
+
+    def test_the_finish_vocabulary_is_exactly_the_crates_three(self):
+        """MUTATION: drop "load" from KNOWN_FINISH_LABELS and this goes red.
+
+        Mirrored from ``FinishReason``'s hand-written ``Serialize`` in magi-core
+        4.0.0. A fourth variant reaching the wire is a pin-bump decision, not a
+        silent widening, so the literal here is the thing that forces the
+        conversation.
+        """
+        self.assertEqual(set(migration.KNOWN_FINISH_LABELS),
+                         {"stop", "length", "load"})
+        self.assertEqual(len(migration.KNOWN_FINISH_LABELS), 3,
+                         "a duplicate would pass the set comparison above")
+
+    def test_the_rotation_vocabulary_is_exactly_the_crates_seven(self):
+        """MUTATION: drop any cause from KNOWN_ROTATION_CAUSES and this goes red.
+
+        Mirrored from ``cause_label`` in ``src/magi/rotation_report.rs``, which
+        derives from ``RotationKind``'s serde form. Seven at the pin.
+        """
+        self.assertEqual(
+            set(migration.KNOWN_ROTATION_CAUSES),
+            {"transport", "timeout", "schema", "oversized_response",
+             "external_failure", "empty_completion", "response_contract"})
+        self.assertEqual(len(migration.KNOWN_ROTATION_CAUSES), 7,
+                         "a duplicate would pass the set comparison above")
