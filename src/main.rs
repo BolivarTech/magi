@@ -3424,24 +3424,6 @@ fn above_sanity_notice(ceiling_secs: u64, b: &BudgetTelemetry) -> Option<Notice>
     })
 }
 
-/// Builds the MAGI trio with the NATIVE providers of magi-core (REQ-A01).
-///
-/// The adapter disappears and with it the system-prompt doubling: each mage receives its prompt
-/// through the provider's own channel.
-///
-/// `notices` receives the non-fatal construction notices (e.g. the normalization of an Ollama
-/// `base_url` without `/v1`). It is passed by parameter and not returned separately so that a
-/// notice emitted on the error path **also** reaches the user: a seat failure and a strange URL
-/// are usually the same problem seen from two sides.
-///
-/// `warn_tokens` enters by PARAMETER and is not resolved inside: it is produced by the probe
-/// (`orchestrate_probes`/`derive_warn_tokens`, Task 5.2), called by the call site BEFORE this
-/// function. With `None` it falls back to magi-core's default — the v0.11.0 behavior, which
-/// remains the result when the probe measured nothing measurable.
-///
-/// # Errors
-/// - [`TrioError::UnknownKind`] if `[magi].kind` brings an unrecognized value. It is validated HERE with its own `ProviderKind::parse`, not via `cfg.effective_magi_kind()`: that accessor assumes `validate_vocabulary` already ran and swallows an unrecognized value falling back to inheritance — a correct precondition for its other callers, but exactly the one this point must NOT assume in order to report the error.
-/// - [`TrioError::SeatUnbuildable`] with **all** the seats that could not be built and their cause.
 /// The completion cap magi-rs DECLARES (REQ-V4-13).
 ///
 /// Numerically magi-core 4.0.0's own default, and declared anyway: the value decides whether a
@@ -3471,6 +3453,24 @@ fn magi_completion_config() -> CompletionConfig {
     cfg
 }
 
+/// Builds the MAGI trio with the NATIVE providers of magi-core (REQ-A01).
+///
+/// The adapter disappears and with it the system-prompt doubling: each mage receives its prompt
+/// through the provider's own channel.
+///
+/// `notices` receives the non-fatal construction notices (e.g. the normalization of an Ollama
+/// `base_url` without `/v1`). It is passed by parameter and not returned separately so that a
+/// notice emitted on the error path **also** reaches the user: a seat failure and a strange URL
+/// are usually the same problem seen from two sides.
+///
+/// `warn_tokens` enters by PARAMETER and is not resolved inside: it is produced by the probe
+/// (`orchestrate_probes`/`derive_warn_tokens`, Task 5.2), called by the call site BEFORE this
+/// function. With `None` it falls back to magi-core's default — the v0.11.0 behavior, which
+/// remains the result when the probe measured nothing measurable.
+///
+/// # Errors
+/// - [`TrioError::UnknownKind`] if `[magi].kind` brings an unrecognized value. It is validated HERE with its own `ProviderKind::parse`, not via `cfg.effective_magi_kind()`: that accessor assumes `validate_vocabulary` already ran and swallows an unrecognized value falling back to inheritance — a correct precondition for its other callers, but exactly the one this point must NOT assume in order to report the error.
+/// - [`TrioError::SeatUnbuildable`] with **all** the seats that could not be built and their cause.
 fn build_magi_orchestrator(
     b: &TrioBuild<'_>,
     notices: &mut Vec<Notice>,
