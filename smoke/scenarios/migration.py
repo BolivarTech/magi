@@ -864,10 +864,16 @@ def _derivability_finding(capture, attempts, failure):
     if attempts is None:
         problems.append(failure)
     elif not attempts:
-        return _finding(S22_ASSERTIONS, 1, Outcome.CANNOT_TEST,
-                        "the run recorded no completion attempt, so the "
-                        "truncation notion has no published key to be derived "
-                        "from")
+        # The truncation notion is genuinely underivable here, but whatever was already
+        # collected is a REAL defect and outranks it: returning CANNOT_TEST and dropping
+        # `problems` would file a rotation defect under "nothing to test", which is the one
+        # way this harness can hide a failure behind an honest-looking label.
+        untestable = ("the run recorded no completion attempt, so the truncation notion "
+                      "has no published key to be derived from")
+        if problems:
+            return _finding(S22_ASSERTIONS, 1, Outcome.FAIL,
+                            "; ".join([*problems, untestable]))
+        return _finding(S22_ASSERTIONS, 1, Outcome.CANNOT_TEST, untestable)
     else:
         problems.extend(
             "%s omits %s, so truncation cannot be derived for it"
