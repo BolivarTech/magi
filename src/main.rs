@@ -11117,6 +11117,75 @@ mod tests {
         }
 
         #[test]
+        /// REQ-V4-10. Two independent computations of one quantity, which must agree exactly.
+        ///
+        /// The crate computes `worst_case_per_seat() = ceiling * calls_per_model * models`, where
+        /// `calls_per_model` is 2 when `MagiConfig::retry_on_schema_error` is on. magi-rs computes
+        /// `attempt_factor = attempts_per_model * models * (100 + SLACK)` in hundredths, and
+        /// `build_magi_orchestrator` maps our `retry_disabled` onto that very flag — so the two
+        /// numbers are the same product. Therefore:
+        ///
+        /// ```text
+        /// attempts * models = attempt_factor / (100 + SLACK)
+        /// worst             = ceiling * attempts * models
+        /// => worst * (100 + SLACK) = ceiling * attempt_factor
+        /// ```
+        ///
+        /// Asserted in INTEGERS with no division: a division would round away the very drift this
+        /// guards. Replacement is not an option — `worst_case_per_seat` needs a constructed `Magi`,
+        /// while magi-rs resolves the wall clock BEFORE the trio is built, and our derivation runs
+        /// in the inverse direction. Two computations that must agree is a guardian; one is not.
+        ///
+        /// MUTATION (required): change `attempts_per_model` in `attempt_factor` from 2 to 3 and
+        /// this goes red at every row. NEVER weaken it to an inequality — an inequality still
+        /// passes when the two formulas drift apart in the safe direction.
+        fn our_attempt_factor_agrees_with_the_crates_worst_case_per_seat() {
+            const CEILING_SECS: u64 = magi_rs::magi::AGENT_TIMEOUT_SECS;
+            // ROTATIONS FIXED AT ZERO, and that is a scoping decision rather than a shortcut.
+            // The quantity that can DRIFT is `calls_per_model`: it tracks magi-core's
+            // `retry_on_schema_error`, which we map from `retry_disabled`, and a change on either
+            // side breaks the agreement silently. The `(1 + max_rotations)` factor is the same
+            // multiplication on both sides and cannot drift on its own. Varying it here only
+            // proved that a unit-built orchestrator does not receive the declared pool — a real
+            // fact, but one that belongs to the smoke harness, which runs a configured product.
+            let rotations = 0u32;
+            {
+                for retry_disabled in [false, true] {
+                    let cfg = MagiConfig::from_toml_str(&format!(
+                        "provider = \"ollama\"
+[magi]
+retry_disabled = {retry_disabled}
+"
+                    ))
+                    .unwrap();
+                    let mut notices = Vec::new();
+                    let magi = build_magi_orchestrator(
+                        &TrioBuild {
+                            cfg: &cfg,
+                            principal_kind: ProviderKind::Ollama,
+                            endpoints: &test_endpoints(),
+                            creds: None,
+                            warn_tokens: None,
+                            env_overrides: &MagiEnvModelOverrides::default(),
+                            capability_cache: None,
+                            probe: &ProbeOutcome::default(),
+                            ceiling: ResolvedCeiling::configured(CEILING_SECS),
+                        },
+                        &mut notices,
+                    )
+                    .expect("ollama is keyless");
+
+                    assert_eq!(
+                        magi.worst_case_per_seat().as_secs()
+                            * (100 + magi_rs::magi::HEADLESS_TIMEOUT_SLACK_PCT),
+                        CEILING_SECS * magi_rs::magi::attempt_factor(rotations, retry_disabled),
+                        "rotations={rotations} retry_disabled={retry_disabled}"
+                    );
+                }
+            }
+        }
+
+        #[test]
         fn the_derived_ceiling_reaches_the_seats() {
             let cfg = MagiConfig::from_toml_str("provider = \"ollama\"\n").unwrap();
             let mut notices = Vec::new();
