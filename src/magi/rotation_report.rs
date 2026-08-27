@@ -256,6 +256,27 @@ mod tests {
         }))
     }
 
+    /// A one-hop rotation whose cause is `kind`, for the locality assertions.
+    fn one_hop_with(kind: &str) -> BTreeMap<AgentName, AgentRotation> {
+        let mut m = BTreeMap::new();
+        m.insert(
+            AgentName::Melchior,
+            rotation(json!({
+                "model_configured": "primary-model",
+                "model_used": "fallback-model",
+                "ran_unmeasured": false,
+                "chain": [{
+                    "from": "alibaba",
+                    "to": "moonshot",
+                    "model_resolved": "fallback-model",
+                    "kind": kind,
+                    "detail": "d",
+                }],
+            })),
+        );
+        m
+    }
+
     /// A mage that never rotated: magi-core still records an entry, with an empty chain.
     fn never_rotated() -> AgentRotation {
         rotation(json!({
@@ -425,5 +446,48 @@ mod tests {
                 "a quoted JSON string leaked into the label: {label}"
             );
         }
+    }
+
+    /// REQ-V4-09: the distinction the empty-content request was filed about -- did the cause
+    /// condemn ONE seat or the whole run. Load-bearing now rather than merely useful, because the
+    /// derived `retry_after_cap` makes `RetryAbandoned`'s run-wide condemnation reachable in
+    /// ordinary operation, and it arrives as `Transport`.
+    #[test]
+    fn every_hop_reports_whether_its_cause_was_mage_local() {
+        let v = render_rotations(&one_hop_with("empty_completion"));
+        assert_eq!(v["rotations"][0]["chain"][0]["mage_local"], json!(true));
+
+        let v = render_rotations(&one_hop_with("transport"));
+        assert_eq!(
+            v["rotations"][0]["chain"][0]["mage_local"],
+            json!(false),
+            "Transport condemns the lineage run-wide, and a Retry-After abandonment arrives as one"
+        );
+    }
+
+    /// The consult JSON's key set is a CONTRACT. This test breaking is the versioned decision, not
+    /// an accident -- but it must break deliberately, naming the added key.
+    #[test]
+    fn the_hop_object_carries_exactly_the_declared_keys() {
+        let v = render_rotations(&one_hop_with("schema"));
+        let mut keys: Vec<String> = v["rotations"][0]["chain"][0]
+            .as_object()
+            .expect("hop is an object")
+            .keys()
+            .cloned()
+            .collect();
+        keys.sort();
+        assert_eq!(
+            keys,
+            vec![
+                "cause",
+                "detail",
+                "from_lineage",
+                "mage_local",
+                "model_resolved",
+                "to_lineage"
+            ],
+            "a key was added or removed without updating the contract"
+        );
     }
 }
