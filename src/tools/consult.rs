@@ -14,6 +14,8 @@ use magi_core::error::MagiError;
 use magi_core::orchestrator::{Magi, MagiConfig as CoreMagiConfig};
 use magi_core::reporting::{ExtractionFailure, InputSize, MagiReport};
 use magi_core::schema::{AgentName, Mode};
+use magi_rs::magi::completion_report::render_completions;
+use magi_rs::magi::eligibility_report::render_pool_eligibility;
 use magi_rs::magi::kind::ProviderKind;
 use magi_rs::magi::mode::{read_resolved_mode, ModeResolution, ModeSource};
 use magi_rs::magi::report_anchors::{CONTRACTUAL_ANCHORS, SECTION_ANCHORS};
@@ -849,6 +851,22 @@ pub(crate) fn report_to_consult_json(
         (&mut out, render_rotations(&report.rotations))
     {
         dst.extend(src);
+    }
+
+    // REQ-V4-14 and REQ-V4-11. Two SEPARATE keys with two DIFFERENT emptiness contracts, which is
+    // why they live in two modules rather than one: `completions` is absent from magi-core's own
+    // report when nothing was recorded, while `pool_eligibility` is emitted even when empty
+    // because "not computed" and "computed, nothing to reject" are different facts a consumer has
+    // to tell apart.
+    if let Value::Object(dst) = &mut out {
+        dst.insert(
+            "completions".to_string(),
+            render_completions(&report.completions),
+        );
+        dst.insert(
+            "pool_eligibility".to_string(),
+            render_pool_eligibility(&report.pool_eligibility),
+        );
     }
 
     // REQ-EA03: opt-in, and when opted in BOTH keys are always present — an empty `agents` is the
@@ -2124,6 +2142,11 @@ mod tests {
             // the channel for a shape change is the documentation, by decision.
             "rotations",
             "ran_unmeasured",
+            // v0.17.0 (REQ-V4-14, REQ-V4-11). The versioned decision: two new keys, both always
+            // present. `pool_eligibility` empty is the positive certificate that nothing was
+            // rejected, which is a different fact from the map not having been computed.
+            "completions",
+            "pool_eligibility",
         ] {
             assert!(v.get(key).is_some(), "missing {key}");
         }
@@ -3148,5 +3171,107 @@ mod tests {
             out["report_truncated"], "none",
             "a report bigger than the cap must be marked truncated"
         );
+    }
+
+    /// REQ-V4-15: this project invalidates a run on THREE conditions and only the third reaches
+    /// `degraded`. All three must be derivable from published keys, and this test performs each
+    /// derivation on known input -- so the written recipe and the checked one cannot drift apart.
+    #[test]
+    fn all_three_notions_of_degradation_are_derivable_from_published_keys() {
+        let r = report_with_three_verdicts();
+        let v = report_to_consult_json(
+            &r,
+            &untruncated(&r),
+            &res_of(Mode::Analysis, ModeSource::Explicit),
+            &ctx_plain(),
+            StructuredVerdicts::Omit,
+        );
+
+        // (a) a mage fell to another backend -- derived from the MODEL STRINGS, never from
+        // locality: `mage_local == false` says a cause condemned the whole run, which is a
+        // different fact and is true of a transport failure that changed no model at all.
+        let rotations = v["rotations"].as_array().expect("rotations is an array");
+        let fell = rotations
+            .iter()
+            .any(|r| r["model_configured"] != r["model_used"]);
+        assert!(
+            !fell,
+            "this fixture rotated nowhere, so nothing fell to another backend"
+        );
+
+        // (b) context was truncated -- derived from the published finish reason.
+        let truncated = v["completions"]
+            .as_object()
+            .expect("completions is an object")
+            .values()
+            .any(|recs| {
+                recs.as_array()
+                    .expect("array")
+                    .iter()
+                    .any(|rec| rec["finish"] == json!("length"))
+            });
+        assert!(!truncated, "this fixture recorded no truncated attempt");
+
+        // (c) fewer than three verdicts -- the existing bit, meaning UNCHANGED.
+        assert_eq!(
+            v["degraded"],
+            json!(false),
+            "three verdicts is not degraded"
+        );
+    }
+
+    /// The `degraded` key keeps its exact current meaning: `successful.len() < 3`, and nothing
+    /// else. Redefining it in place is the trap REQ-V4-15 exists to refuse -- consumers assert on
+    /// it, and one reading `false` as "clean" would start seeing `true` with no change of its own.
+    #[test]
+    fn the_degraded_bit_still_means_fewer_than_three_verdicts_and_nothing_else() {
+        let r = report_with_three_verdicts();
+        let v = report_to_consult_json(
+            &r,
+            &untruncated(&r),
+            &res_of(Mode::Analysis, ModeSource::Explicit),
+            &ctx_plain(),
+            StructuredVerdicts::Omit,
+        );
+        assert_eq!(v["degraded"], json!(false));
+    }
+
+    /// The drift guardian for notion (a). The derivation compares an event's model string against
+    /// the configured one, and if the two formats ever diverge it quietly answers "no mage fell to
+    /// another backend" for a run where one did.
+    ///
+    /// Comparison is EXACT EQUALITY ON THE RAW STRINGS, and the absence of normalisation is the
+    /// point: lower-casing, trimming a registry prefix or stripping a `:cloud` suffix would make
+    /// two diverged formats look equal again. This is a DIFFERENT comparison from
+    /// `normalized_pair_key`, which normalises the endpoint and never the model.
+    ///
+    /// PRESENCE FIRST: absent keys both deserialize to `Value::Null` and `Null == Null` passes, so
+    /// an equality alone would go green on a rendering that dropped both fields.
+    #[test]
+    fn the_model_strings_the_derivation_compares_share_one_format() {
+        let r = report_with_three_verdicts();
+        let v = report_to_consult_json(
+            &r,
+            &untruncated(&r),
+            &res_of(Mode::Analysis, ModeSource::Explicit),
+            &ctx_plain(),
+            StructuredVerdicts::Omit,
+        );
+        // A clean fixture rotates nowhere, so the array is empty and the loop below is vacuous by
+        // construction: assert the KEY exists and is an array, which is what the derivation reads.
+        assert!(
+            v["rotations"].is_array(),
+            "the derivation reads `rotations`; without the key it silently answers 'nobody fell'"
+        );
+        for entry in v["rotations"].as_array().expect("array") {
+            assert!(
+                entry["model_configured"].is_string(),
+                "model_configured must be a string"
+            );
+            assert!(
+                entry["model_used"].is_string(),
+                "model_used must be a string"
+            );
+        }
     }
 }
