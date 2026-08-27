@@ -2903,9 +2903,13 @@ fn openai_compat_root(base_url: &str) -> (String, Option<String>) {
 /// merits for the first time, and legibility decided it: `kind = "ollama"` wired to
 /// `OllamaProvider` is what anyone opening this function expects.
 ///
-/// It is **not** a protocol change and therefore does not violate R-R04: `OllamaProvider::complete`
-/// delegates to an internal `OpenAiCompatibleProvider`, so the transport is the same one this arm
-/// used before — only its constructor moved.
+/// **It IS a protocol change as of magi-core 4.0.0, and this sentence used to say the opposite.**
+/// Through 3.2.0 `OllamaProvider` held an `inner: OpenAiCompatibleProvider` and `complete`
+/// delegated to it, so moving the constructor in v0.13.0 genuinely kept the wire. In 4.0.0 `inner`
+/// is gone and `complete` posts to `{base}/api/chat` — the native wire — for every seat built
+/// here. The move arrived with the pin bump: **no code change, no compile error**, which is why it
+/// is stated here rather than left to be discovered. A `/v1` spelling in `base_url` is still
+/// accepted and normalised away by the crate, so both spellings converge on the native path.
 ///
 /// **What survives D-A07's reversal is the narrower rule: never `new`.** It delegates to
 /// `with_timeout(..., DEFAULT_CLIENT_TIMEOUT)` = 300 s, and getting it wrong compiles, runs, and

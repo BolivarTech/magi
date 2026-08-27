@@ -295,13 +295,15 @@ pub const HEADLESS_TIMEOUT_SLACK_PCT: u64 = 20;
 /// formula has already counted. A factor for `max_retries` would over-dimension the timeout by an
 /// order of magnitude.
 ///
-/// **And it survives BECAUSE the scale is derived, not by luck.** `RetryConfig`'s own rustdoc
-/// warns that its shipped defaults (`operation_budget + client_timeout = 600 + 300 = 900` against
-/// a 300 s ceiling) leave every retry **inert** on a hang: the first attempt consumes the whole
-/// budget and none of the retries run. magi-rs does not land there because it sets
-/// `retry.operation_budget = derive_operation_budget(ceiling)`. Passing a `RetryConfig::default()`
-/// without deriving would switch this layer off in silence — no failure, no warning, just no
-/// retries.
+/// **And it survives BECAUSE the scale is derived, not by luck.** With magi-core's shipped
+/// defaults — `operation_budget` is **450 s** as of 4.0.0, not the 600 s this rustdoc claimed
+/// through 3.2.0, against a 300 s client timeout — the budget is a **backstop rather than the
+/// operating limit**: the crate's own `limited_max_retries` cuts a hang at two attempts before the
+/// budget's first check lands. magi-rs does not inherit either arrangement, because it sets
+/// `retry.operation_budget = derive_operation_budget(ceiling)` and, since v0.17.0,
+/// `retry.retry_after_cap = derive_retry_after_cap(ceiling)`. Passing a bare
+/// `RetryConfig::default()` would put this layer on the crate's scale rather than ours — no
+/// failure, no warning, just a chain sized for a ceiling we never use.
 ///
 /// # Why a hung model costs ONE ceiling and a schema failure costs TWO
 ///
@@ -353,6 +355,27 @@ pub fn headless_consult_timeout_secs(
 /// The `100 + HEADLESS_TIMEOUT_SLACK_PCT` is **derived, never a literal `120`**: writing the
 /// number by hand means raising the slack updates the forward direction and leaves the inverse
 /// silently behind — the exact drift this extraction exists to prevent, reproduced one level down.
+///
+/// # Why the number is 2, and why `limited_max_retries` must NOT move it (REQ-V4-05)
+///
+/// The 2 is `calls_per_model`: one call, plus the schema-revalidation call. It tracks
+/// magi-core's `retry_on_schema_error`, which `build_magi_orchestrator` maps from our
+/// `retry_disabled` via `with_retry_disabled()` — so this factor and the crate's own
+/// `worst_case_per_seat()` compute the same product, independently, and must agree.
+///
+/// magi-core 4.0.0 added `limited_max_retries` (default **1**, giving two attempts for the classes
+/// that can each burn a whole client timeout). It looks like it should move this number and it must
+/// not: those retries happen **inside** one ceiling-wrapped call, and counting them again would
+/// count them twice — the crate says so in its own rustdoc, and D-R16 reached the same conclusion
+/// here. It is inherited by omission, deliberately.
+///
+/// *The coherence figure, so nobody has to re-derive it.* With `limited_max_retries = 1` a hang
+/// costs `2 x client_timeout + base_delay`, where `base_delay` is magi-core's `DEFAULT_BASE_DELAY`
+/// of 1 s. At the default 90 s ceiling that is `2 x 27 + 1 = 55 s` against an `operation_budget` of
+/// 54 s whose check fires **before** each attempt: the second attempt starts at ~28 s, is admitted
+/// because 28 < 54, and runs to completion at 55 s — **past** the budget, which is not re-checked
+/// mid-attempt. So "it fits" means *both attempts are admitted and the chain ends inside the
+/// ceiling*, NOT that it stays under the budget.
 ///
 /// # Arguments
 /// * `max_rotations` - `[magi].max_rotations`, **resolved** (effective, not the raw `Option`).
