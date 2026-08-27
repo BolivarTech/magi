@@ -365,4 +365,47 @@ mod tests {
         // produced, and precisely the shape B16 exists to reject. Requiring the surviving
         // diagnostic is what separates "redacted" from "gone".
     }
+
+    /// REQ-V4-01: all seven labels, AND the three that already existed unchanged. The second half
+    /// is the regression that matters -- those strings reach the run JSON, which CI consumers parse.
+    #[test]
+    fn every_rotation_cause_renders_its_own_snake_case_label() {
+        let cases = [
+            (RotationKind::Transport, "transport"),
+            (RotationKind::Timeout, "timeout"),
+            (RotationKind::Schema, "schema"),
+            (RotationKind::OversizedResponse, "oversized_response"),
+            (RotationKind::ExternalFailure, "external_failure"),
+            (RotationKind::EmptyCompletion, "empty_completion"),
+            (RotationKind::ResponseContract, "response_contract"),
+        ];
+        for (kind, expected) in cases {
+            assert_eq!(cause_label(kind), expected, "{kind:?} renders wrong");
+        }
+    }
+
+    /// S3: the three labels magi-rs emitted before this milestone are byte-identical afterwards.
+    /// Separate from the test above on purpose: that one would still pass if all seven changed
+    /// together, and these three are the ones with consumers today.
+    #[test]
+    fn the_three_pre_existing_labels_are_byte_identical_to_the_hand_written_match() {
+        assert_eq!(cause_label(RotationKind::Transport), "transport");
+        assert_eq!(cause_label(RotationKind::Timeout), "timeout");
+        assert_eq!(cause_label(RotationKind::Schema), "schema");
+    }
+
+    /// The serde error path falls back to `Display`, which renders the identical string -- so no
+    /// placeholder can be invented and none can leak into the run JSON.
+    #[test]
+    fn the_label_never_renders_a_placeholder() {
+        for kind in [RotationKind::Transport, RotationKind::EmptyCompletion] {
+            let label = cause_label(kind);
+            assert!(!label.is_empty());
+            assert_ne!(label, "unknown");
+            assert!(
+                !label.contains('"'),
+                "a quoted JSON string leaked into the label: {label}"
+            );
+        }
+    }
 }
