@@ -538,4 +538,31 @@ mod tests {
             );
         }
     }
+
+    /// The FALSIFIABLE half of the guard above, and it exists because the gate was right that the
+    /// other half is not: with every current `RotationKind` a unit variant, `redact_foreign_text`
+    /// is the identity, so deleting it changes nothing observable and that test stays green.
+    ///
+    /// This one drives the SAME helper the renderer relies on, over the payload a future variant
+    /// would carry. A guardian has to be able to notice the wrong helper BEFORE the variant that
+    /// needs it exists, not after.
+    ///
+    /// MUTATION (required): swap `redact_foreign_text` for `redact_url` in `cause_label` and the
+    /// sibling assertion above goes red on every label, because a bare `transport` has no
+    /// authority to find and collapses to `***`.
+    #[test]
+    fn the_helper_that_guards_the_label_redacts_a_string_bearing_cause() {
+        const CANARY: &str = "c4n4ry-s3cr3t";
+        let bearing = format!("external failure at http://alice:{CANARY}@host:11434/v1");
+        let guarded = redact_foreign_text(&bearing);
+        assert!(
+            !guarded.as_str().contains(CANARY),
+            "the helper cause_label relies on let a credential through: {}",
+            guarded.as_str()
+        );
+        assert!(
+            guarded.as_str().contains("external failure"),
+            "it must redact the authority and keep the diagnostic, not collapse the whole value"
+        );
+    }
 }

@@ -1,6 +1,6 @@
 // Author: Julian Bolivar
-// Version: 1.0.0
-// Date: 2026-08-02
+// Version: 0.17.0
+// Date: 2026-08-27
 
 //! Shared doubles for MS2's integration tests (Task 0.7).
 //!
