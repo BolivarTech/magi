@@ -2,6 +2,10 @@
 name = "magi-rs"
 version = "0.17.0"
 edition = "2021"
+# Minimum supported Rust version. This is the same decision as the toolchain
+# pinned in .github/workflows/*.yml, written in a second place because Cargo
+# and Actions read different files; CI asserts the two agree.
+rust-version = "1.98.0"
 default-run = "magi-rs"
 authors = ["Julian Bolivar <jbolivarg@gmail.com>"]
 description = "Magi Agent: a terminal AI assistant in Rust with sandboxed tool execution, OAuth login, and encrypted local memory (authenticated encryption with error-correcting FEC via the cryptovault crate)."

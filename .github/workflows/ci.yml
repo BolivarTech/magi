@@ -18,7 +18,23 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.98.0
+      # The pinned toolchain above and Cargo.toml's `rust-version` are one
+      # decision recorded in two files, and only one direction of a mismatch
+      # fails on its own: a toolchain OLDER than the MSRV makes cargo refuse to
+      # build. A toolchain NEWER than it breaks nothing and quietly stops
+      # verifying the floor we publish to crates.io, so assert equality here.
+      - name: Assert the pinned toolchain matches Cargo.toml's rust-version
+        shell: bash
+        run: |
+          set -euo pipefail
+          MSRV=$(grep -m1 '^rust-version' Cargo.toml | cut -d'"' -f2)
+          RUSTC=$(rustc --version | cut -d' ' -f2)
+          if [ "$MSRV" != "$RUSTC" ]; then
+            echo "::error::MSRV drift: Cargo.toml says rust-version = '$MSRV' but the pinned toolchain is $RUSTC. Update BOTH the 'rust-version' in Cargo.toml and every 'dtolnay/rust-toolchain@<version>' in .github/workflows/, or the published MSRV stops being the one CI verifies."
+            exit 1
+          fi
+          echo "OK: MSRV $MSRV == pinned toolchain $RUSTC."
       - uses: Swatinem/rust-cache@v2
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
@@ -35,7 +51,7 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.98.0
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
@@ -46,7 +62,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.98.0
         with:
           components: rustfmt
       - run: cargo fmt --check
