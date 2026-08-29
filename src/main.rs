@@ -5410,6 +5410,9 @@ async fn prepare_headless(
                 log_dir.display()
             );
         }
+        // REQ-L63: on stderr as well as in the envelope, so a CI job can capture
+        // it without parsing either the log or the JSON.
+        eprintln!("run: {}", magi_rs::logging::run_id());
     }
 
     Ok(HeadlessContext {

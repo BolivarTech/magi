@@ -148,6 +148,27 @@ impl LoggingHandle {
     }
 }
 
+/// This process's run identifier, minted once.
+///
+/// **Discoverable, not merely existent** (REQ-L63). Telling an operator to
+/// "filter by run" is useless if the job cannot say which run is its own, and
+/// the per-run file that used to be the implicit answer is exactly what the
+/// JSONL retirement removed. The value is emitted in the output envelope AND on
+/// stderr, so a CI job can capture it without parsing the log.
+///
+/// Same shape and the same reasons as an event id: `<pid>-<16 hex>`, 64 bits,
+/// because a counter or 32 bits collide across concurrent CI runs — which is
+/// precisely when isolating one matters.
+///
+/// # Complexity
+///
+/// `O(1)` after the first call.
+#[must_use]
+pub fn run_id() -> &'static str {
+    static ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    ID.get_or_init(|| chunk::EventId::new().render())
+}
+
 /// The single global handle.
 ///
 /// **A `OnceLock`, never a `Once`, and the difference is not style.**

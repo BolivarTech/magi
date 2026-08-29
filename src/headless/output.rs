@@ -93,6 +93,14 @@ const CONNECTION_REFUSED_MARKER: &str = "connection refused";
 struct WireOutcome<'a> {
     /// Output contract version; always the first serialized key.
     schema_version: u32,
+    /// This process's run identifier (REQ-L63).
+    ///
+    /// **Emitted so the run is DISCOVERABLE, not merely identified.** Telling a
+    /// CI job to "filter the log by run" is useless if the job cannot learn
+    /// which run was its own, and the per-run file that used to answer that is
+    /// what the JSONL retirement removed. It appears here AND on stderr, so a
+    /// job can capture it without parsing the log.
+    run_id: &'a str,
     /// Agent response text, or `None` on error.
     response: &'a Option<String>,
     /// Effective model used in the run.
@@ -188,6 +196,7 @@ pub fn write_json(
 ) -> Result<(), HeadlessError> {
     let wire = WireOutcome {
         schema_version: SCHEMA_VERSION,
+        run_id: crate::logging::run_id(),
         response: &o.response,
         model: &o.model,
         provider: &o.provider,
@@ -715,13 +724,39 @@ mod tests {
         let o = RunOutcome::sample();
         let mut buf = Vec::new();
         write_json(&mut buf, &o, TOOL_RESULT_CAP).unwrap();
-        let produced: serde_json::Value = serde_json::from_slice(&buf).unwrap();
+        let mut produced: serde_json::Value = serde_json::from_slice(&buf).unwrap();
+
+        // `run_id` is per-process by construction (pid plus 64 random bits), so
+        // it cannot sit in a golden file. It is lifted out and checked for
+        // SHAPE, and the rest of the object still compares whole — the key
+        // count included, because a key too many is as much a contract change
+        // as a key too few.
+        let run_id = produced
+            .as_object_mut()
+            .expect("an object")
+            .remove("run_id")
+            .expect("run_id must be emitted (REQ-L63)");
+        let run_id = run_id.as_str().expect("a string");
+        let (pid, hex) = run_id.split_once('-').expect("<pid>-<hex16>");
+        assert!(pid.parse::<u32>().is_ok(), "the pid half: {run_id}");
+        assert_eq!(hex.len(), 16, "64 bits, not 32: {run_id}");
 
         let golden: serde_json::Value =
             serde_json::from_str(include_str!("../../tests/golden/headless_output_v1.json"))
                 .unwrap();
 
         assert_eq!(produced, golden);
+    }
+
+    /// Adding `run_id` is ADDITIVE, so the contract version does not move.
+    ///
+    /// The policy is on [`SCHEMA_VERSION`]: only renaming, removing, retyping or
+    /// re-meaning a field bumps it. A consumer reading the keys it knows is
+    /// unaffected by a new one — and pinning that here means the next person to
+    /// add a field has to decide deliberately rather than by omission.
+    #[test]
+    fn adding_the_run_id_did_not_move_the_schema_version() {
+        assert_eq!(SCHEMA_VERSION, 1);
     }
 
     /// Text mode without clamp: `response` goes to `out`, `err_out` stays empty.

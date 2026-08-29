@@ -68,3 +68,19 @@ fn a_second_call_returns_the_same_handle_and_names_what_it_discarded() {
         "and nothing was written to the directory that was ignored"
     );
 }
+
+#[test]
+fn the_run_id_is_stable_within_a_process_and_has_the_documented_shape() {
+    let a = magi_rs::logging::run_id();
+    let b = magi_rs::logging::run_id();
+    assert_eq!(a, b, "one run, one id");
+
+    let (pid, hex) = a.split_once('-').expect("<pid>-<hex16>");
+    assert!(pid.parse::<u32>().is_ok(), "the pid half: {a}");
+    assert_eq!(hex.len(), 16, "64 bits, not 32: {a}");
+    assert!(
+        hex.chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+        "lowercase hex: {a}"
+    );
+}

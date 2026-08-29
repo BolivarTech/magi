@@ -142,8 +142,96 @@ pub fn render_notices(notices: Vec<Notice>) -> Vec<String> {
     out
 }
 
+/// How much of an error message survives for display.
+pub const ERROR_DISPLAY_CAP: usize = 240;
+
+/// Marker shown where an error's scaffolding was dropped.
+const HEAD_DROPPED: &str = "…";
+
+/// Formats an error for a user-facing notice.
+///
+/// # Parameters
+///
+/// * `prefix` — the notice's own lead-in, e.g. `"could not open the database"`.
+/// * `err` — the error's own text.
+/// * `cap` — how many bytes of `err` may survive.
+///
+/// # The two fixes this exists for
+///
+/// **P-L01 — the prefix is not repeated.** An error whose own `Display` already
+/// opens with the caller's lead-in used to be rendered as that lead-in twice,
+/// so the first line of the notice said nothing.
+///
+/// **P-L02 — truncation drops the HEAD, not the tail.** An error chain puts the
+/// scaffolding first and the root cause LAST: `could not open the encrypted
+/// database (opening …/.magi/state.db failed: llama-server binary not found)`.
+/// Cutting from the tail — which is right for a tool RESULT and is what
+/// `truncate_result` does — throws away the only part anyone needed. Eighty
+/// characters of scaffolding and no diagnosis is the failure that motivated this
+/// whole feature.
+///
+/// # Complexity
+///
+/// `O(n)` over the message.
+#[must_use]
+pub fn error_for_display(prefix: &str, err: &str, cap: usize) -> String {
+    let body = err.strip_prefix(prefix).map_or(err, str::trim_start);
+    let body = body.strip_prefix(": ").unwrap_or(body);
+    if body.len() <= cap {
+        return format!("{prefix}: {body}");
+    }
+    // Keep the TAIL: step FORWARD to a character boundary from the cut point.
+    let mut start = body.len() - cap;
+    while start < body.len() && !body.is_char_boundary(start) {
+        start += 1;
+    }
+    let tail = body.get(start..).unwrap_or(body);
+    format!("{prefix}: {HEAD_DROPPED}{tail}")
+}
+
 #[cfg(test)]
 mod tests {
+
+    /// P-L01: an error that already opens with the caller's lead-in is not
+    /// prefixed with it twice.
+    #[test]
+    fn the_prefix_is_not_repeated_when_the_error_already_carries_it() {
+        let shown = error_for_display(
+            "could not open the database",
+            "could not open the database: file is locked",
+            ERROR_DISPLAY_CAP,
+        );
+        assert_eq!(shown, "could not open the database: file is locked");
+        assert_eq!(
+            shown.matches("could not open the database").count(),
+            1,
+            "saying it twice makes the first line of the notice say nothing"
+        );
+    }
+
+    /// P-L02: the ROOT CAUSE is at the tail of an error chain, so truncation
+    /// drops the head.
+    #[test]
+    fn a_long_error_is_truncated_at_the_head_so_the_cause_survives() {
+        let scaffolding = "opening the encrypted store failed: ".repeat(10);
+        let cause = "llama-server binary not found";
+        let shown = error_for_display("memory", &format!("{scaffolding}{cause}"), 60);
+
+        assert!(
+            shown.contains(cause),
+            "the diagnosis must survive; that is the whole point: {shown}"
+        );
+        assert!(
+            !shown.contains(&scaffolding),
+            "and the scaffolding is what goes: {shown}"
+        );
+    }
+
+    #[test]
+    fn a_short_error_is_shown_whole_without_a_marker() {
+        let shown = error_for_display("memory", "disk full", ERROR_DISPLAY_CAP);
+        assert_eq!(shown, "memory: disk full");
+    }
     use super::*;
 
     /// The actionable items first, regardless of the order in which they were discovered.
