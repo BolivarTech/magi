@@ -58,6 +58,11 @@ pub const LOG_CHANNEL_LOW_SLOTS: usize = 6144;
 pub const LOG_CHANNEL_HIGH_BYTES: usize = 48 * 1024 * 1024;
 /// Byte budget of the ordinary channel.
 pub const LOG_CHANNEL_LOW_BYTES: usize = 16 * 1024 * 1024;
+/// How long the parked writer waits before re-checking, as a backstop.
+///
+/// The condvar is what actually wakes it; this bounds the damage if a signal is
+/// ever missed, rather than being the mechanism.
+const PARK_POLL: std::time::Duration = std::time::Duration::from_millis(50);
 /// Events the writer drains per batch before yielding.
 pub const HIGH_BATCH: usize = 64;
 /// How stale the writer's heartbeat may get before an emitter calls it hung.
@@ -177,6 +182,15 @@ pub struct DailyAppender {
     heartbeat: Arc<std::sync::Mutex<std::time::Instant>>,
     /// Set once a hang has been declared. The file branch never comes back.
     hung: Arc<AtomicU64>,
+    /// Wakes the writer when either channel gains work.
+    ///
+    /// **Without this the writer blocked on the PRIORITY channel and never woke
+    /// for an ordinary one.** A session that emits only `INFO` — which is most
+    /// of them — was never written at all until some `WARN` happened to arrive
+    /// and drain the backlog behind it. It looked like a test artefact and was
+    /// not: the canary found it because it emitted a single `INFO` and read an
+    /// empty directory.
+    wake: Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
 }
 
 impl DailyAppender {
@@ -191,6 +205,7 @@ impl DailyAppender {
             source: e,
         })?;
         let heartbeat = Arc::new(std::sync::Mutex::new(std::time::Instant::now()));
+        let wake = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
         let (high_tx, high_rx) = sync_channel(LOG_CHANNEL_HIGH_SLOTS);
         let (low_tx, low_rx) = sync_channel(LOG_CHANNEL_LOW_SLOTS);
         Ok(Self {
@@ -212,8 +227,10 @@ impl DailyAppender {
                 high_rx,
                 low_rx,
                 Arc::clone(&heartbeat),
+                Arc::clone(&wake),
             )),
             heartbeat,
+            wake,
             hung: Arc::new(AtomicU64::new(0)),
         })
     }
@@ -224,7 +241,7 @@ impl DailyAppender {
     ///
     /// * `item` — the whole audited event, never one of its chunks.
     /// * `priority` — which channel it travels on.
-    /// * `len` — the length reserved for it, which is [`Audited::reserved_len`]
+    /// * `len` — the length reserved for it, which is [`Audited::reserved_len`](crate::logging::auditor::Audited::reserved_len)
     ///   and therefore the PRE-audit length.
     ///
     /// # Returns
@@ -275,6 +292,7 @@ impl DailyAppender {
         match channel.tx.try_send(item) {
             Ok(()) => {
                 reservation.commit();
+                self.signal();
                 Submitted::Queued
             }
             Err(TrySendError::Full(_)) => {
@@ -285,6 +303,19 @@ impl DailyAppender {
                 self.writer_gone.store(1, Ordering::Release);
                 Submitted::WriterGone
             }
+        }
+    }
+
+    /// Wakes the writer, whichever channel the work landed on.
+    ///
+    /// # Complexity
+    ///
+    /// `O(1)`.
+    fn signal(&self) {
+        let (lock, cv) = &*self.wake;
+        if let Ok(mut ready) = lock.lock() {
+            *ready = true;
+            cv.notify_one();
         }
     }
 
@@ -367,6 +398,7 @@ fn spawn_writer(
     high: Receiver<Queued>,
     low: Receiver<Queued>,
     heartbeat: Arc<std::sync::Mutex<std::time::Instant>>,
+    wake: Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
 ) -> std::thread::JoinHandle<()> {
     /// Refreshes the mark an emitter reads to decide the writer is alive.
     fn stamp(hb: &std::sync::Mutex<std::time::Instant>) {
@@ -376,6 +408,8 @@ fn spawn_writer(
     }
     std::thread::spawn(move || {
         let mut sink = FileSink::new(dir);
+        let mut high_closed = false;
+        let mut low_closed = false;
         loop {
             let mut did_work = false;
             for _ in 0..HIGH_BATCH {
@@ -384,7 +418,11 @@ fn spawn_writer(
                         sink.write(&item);
                         did_work = true;
                     }
-                    Err(_) => break,
+                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        high_closed = true;
+                        break;
+                    }
                 }
             }
             match low.try_recv() {
@@ -393,33 +431,30 @@ fn spawn_writer(
                     did_work = true;
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => {}
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                    if high.try_recv().is_err() {
-                        break;
-                    }
-                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => low_closed = true,
             }
             if did_work {
                 stamp(&heartbeat);
             } else {
-                // Nothing on either channel: block on the priority one rather
-                // than spin. **Stamp BEFORE parking**: an idle writer otherwise
-                // accumulates an unboundedly stale mark, and the first event to
-                // arrive lets another emitter — microseconds later, with the
-                // queue momentarily non-empty — read a three-hour-old mark and
-                // declare a hang that does not exist.
+                // Nothing on either channel. **Stamp BEFORE parking**: an idle
+                // writer otherwise accumulates an unboundedly stale mark, and
+                // the first event to arrive lets another emitter — microseconds
+                // later, with the queue momentarily non-empty — read a
+                // three-hour-old mark and declare a hang that does not exist.
                 stamp(&heartbeat);
-                match high.recv() {
-                    Ok(item) => {
-                        sink.write(&item);
-                        stamp(&heartbeat);
-                    }
-                    Err(_) => {
-                        while let Ok(item) = low.try_recv() {
-                            sink.write(&item);
-                        }
-                        break;
-                    }
+                if high_closed && low_closed {
+                    break;
+                }
+                // Wait on the SIGNAL, not on one channel. Blocking on the
+                // priority receiver left an ordinary event unwritten until some
+                // priority event happened to arrive — and most sessions emit
+                // only ordinary ones.
+                let (lock, cv) = &*wake;
+                if let Ok(ready) = lock.lock() {
+                    let (mut ready, _) = cv
+                        .wait_timeout(ready, PARK_POLL)
+                        .unwrap_or_else(|p| p.into_inner());
+                    *ready = false;
                 }
             }
         }
@@ -573,6 +608,36 @@ mod tests {
             written.lines().count() > seen.len(),
             "and they must actually be CHUNKED, or contiguity is trivially true"
         );
+    }
+
+    #[test]
+    fn an_ordinary_event_is_written_even_when_the_writer_parked_first() {
+        // **The defect this guards was real and shipped-shaped.** The writer
+        // blocked on the PRIORITY channel, so an ordinary event that arrived
+        // after it parked was never written — and most sessions emit nothing but
+        // ordinary events. It looked like a test artefact when the canary found
+        // it: an empty log directory after a single `info!`.
+        //
+        // The ordering is the fixture: the writer must be PARKED before the
+        // event is offered. Offer first and the writer picks it up on its last
+        // lap, and the bug is invisible.
+        let dir = tempdir().unwrap();
+        let appender = DailyAppender::new(dir.path()).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(150));
+
+        let (item, len) = line("an ordinary line, no alarm, no priority");
+        assert_eq!(appender.submit(item, Priority::Low, len), Submitted::Queued);
+        std::thread::sleep(std::time::Duration::from_millis(300));
+
+        let path = dir.path().join(crate::logging::rotation::file_name(
+            time::OffsetDateTime::now_utc().date(),
+        ));
+        let written = std::fs::read_to_string(&path).unwrap_or_default();
+        assert!(
+            written.contains("an ordinary line"),
+            "a low-priority event after the park was never written: {written:?}"
+        );
+        appender.shutdown();
     }
 
     #[test]

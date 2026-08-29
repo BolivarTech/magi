@@ -179,7 +179,26 @@ pub fn register_process_secrets(
 ) -> Vec<auditor::SecretName> {
     let mut short = Vec::new();
     for (name, value) in secrets {
-        if !process_auditor().register_secret(*name, &[value]) {
+        // **Three variants, and the third is the MAIN case, not an extra.**
+        //
+        // *Raw* — the value as it appears in free text.
+        //
+        // *Escaped* — still needed with the JSON mode deferred, and it is easy
+        // to believe otherwise: in text mode a `{:?}` on a `String` escapes too,
+        // so the raw literal can be absent from a line with no JSON in sight.
+        //
+        // *Percent-encoded* — a password with reserved characters **never**
+        // appears raw inside a `base_url`, which is exactly where credentials
+        // live. Registering only the raw form is blindness in the one place
+        // that matters.
+        //
+        // The variants are composed HERE and the auditor keeps only
+        // `(length, hash)` of each, so the plaintext copies live exactly as long
+        // as this call.
+        let escaped = format!("{value:?}");
+        let escaped = escaped.trim_matches('"');
+        let encoded = crate::encoding::percent_encode(value);
+        if !process_auditor().register_secret(*name, &[value, escaped, encoded.as_str()]) {
             short.push(*name);
         }
     }

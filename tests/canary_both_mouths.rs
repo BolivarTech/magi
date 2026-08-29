@@ -213,3 +213,55 @@ fn a_foreign_string_gets_the_same_treatment_as_one_of_our_own() {
         "a foreign event's credential survived: {written}"
     );
 }
+
+#[test]
+fn a_password_that_only_ever_appears_percent_encoded_is_still_masked() {
+    // **REQ-L49's main case.** A password with reserved characters never shows
+    // up raw inside a `base_url` — it is encoded on the way in — so an auditor
+    // registered with only the raw form is blind in the one place credentials
+    // actually live. Registering the encoded variant is what closes it.
+    let dir = tempfile::tempdir().unwrap();
+    let sink = Arc::new(CapturingSink::default());
+    let cfg = LoggingConfig {
+        log_dir: dir.path().to_path_buf(),
+        file_level: tracing::Level::TRACE,
+    };
+    let handle = init_logging(
+        &cfg,
+        sink.clone(),
+        Some((TuiSink::new(sink.clone()), tracing::Level::TRACE)),
+    )
+    .expect("init");
+
+    // **Genuinely reserved characters**, or the encoded form equals the raw one
+    // and the raw variant catches it anyway — which is what happened first, and
+    // the mutation stayed green.
+    // **The writer is given time to PARK before anything is emitted**, and that
+    // ordering is the fixture. The original defect — the writer blocking on the
+    // priority channel and never waking for an ordinary one — only shows up when
+    // the park happens first. Emitting immediately hides it: the event is
+    // already queued when the writer takes its last lap.
+    std::thread::sleep(std::time::Duration::from_millis(150));
+
+    let raw = "p4ss@word/with?reserved#chars";
+    magi_rs::logging::register_process_secrets(&[(SecretName::new("BASE_URL_PASSWORD"), raw)]);
+
+    // Emitted ONLY in its encoded form, and **outside a URL authority** — inside
+    // one, pass 1 would mask it by position and the encoded variant would never
+    // be the thing that saved us. That masked the mutation too.
+    let encoded = magi_rs::encoding::percent_encode(raw);
+    tracing::info!(target: "magi_rs::agent", credential = %encoded, "endpoint configured");
+
+    drop(handle);
+    std::thread::sleep(std::time::Duration::from_millis(300));
+
+    let written = everything_written(dir.path());
+    assert!(
+        written.contains("endpoint configured"),
+        "the fixture must have written: {written}"
+    );
+    assert!(
+        !written.contains(encoded.as_str()),
+        "the encoded password survived: {written}"
+    );
+}

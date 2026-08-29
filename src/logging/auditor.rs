@@ -648,6 +648,22 @@ mod tests {
     const SOURCE: &str = include_str!("auditor.rs");
 
     #[test]
+    fn a_percent_encoded_variant_is_found_when_only_it_appears() {
+        let auditor = Auditor::new();
+        let raw = "p4ss@word/with?reserved#chars";
+        let encoded = crate::encoding::percent_encode(raw);
+        assert!(auditor.register_secret(SecretName::new("K"), &[raw, encoded.as_str()]));
+        let line = format!("credential={encoded}");
+        let (audited, alarm) = auditor.audit(&line, "magi_rs::tests", None, 0);
+        assert!(
+            !audited.as_str().contains(encoded.as_str()),
+            "the encoded form survived: {}",
+            audited.as_str()
+        );
+        assert!(alarm.is_some());
+    }
+
+    #[test]
     fn a_secret_renders_as_stars_in_both_debug_and_display() {
         let s = Secret::new("hunter2-and-then-some");
         assert_eq!(format!("{s}"), REDACTED);
