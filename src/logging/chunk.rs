@@ -211,8 +211,12 @@ fn cut_payloads(event: &str, first_budget: usize, cont_budget: usize) -> Vec<&st
 /// Builds the indented header the continuation chunks carry.
 #[must_use]
 pub fn cont_header_for(id: &EventId, run: &str) -> String {
-    let _ = run;
-    format!("  id={} ", id.render())
+    format!(
+        "  {}{} id={} ",
+        crate::logging::render::RUN_FIELD,
+        run,
+        id.render()
+    )
 }
 
 /// Splits an already-escaped event into lines that fit the threshold.

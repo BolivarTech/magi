@@ -105,6 +105,13 @@ const ESCAPE_UNICODE_OPEN: &str = "\\u{";
 /// Separator between the target and the message in a header.
 const TARGET_SEPARATOR: &str = ": ";
 
+/// Key naming the run on every line, including continuation chunks.
+///
+/// It is one constant read by both header builders on purpose: the two spell
+/// the same field, and a filter written against one that missed the other
+/// would silently return half a run.
+pub(crate) const RUN_FIELD: &str = "run=";
+
 /// Renders an event to text. Stage 1: nothing is escaped here.
 ///
 /// # Parameters
@@ -205,10 +212,9 @@ pub fn escape_for_line(rendered: &str) -> String {
 /// `O(1)`.
 #[must_use]
 pub fn header_of(level: Level, target: &str, ts: OffsetDateTime, run: &str) -> String {
-    let _ = run;
     let ts = ts.to_offset(time::UtcOffset::UTC);
     format!(
-        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z {} {}{}",
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z {} {}{} {}{}",
         ts.year(),
         u8::from(ts.month()),
         ts.day(),
@@ -216,6 +222,8 @@ pub fn header_of(level: Level, target: &str, ts: OffsetDateTime, run: &str) -> S
         ts.minute(),
         ts.second(),
         level,
+        RUN_FIELD,
+        run,
         target,
         TARGET_SEPARATOR
     )
