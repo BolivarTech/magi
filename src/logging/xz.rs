@@ -14,10 +14,16 @@
 //! write into permanent data loss on the one file that was supposed to be the
 //! record.
 
+use std::fs;
+use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
+
+use lzma_rust2::{XzOptions, XzReader, XzWriter};
 
 use crate::logging::LoggingError;
 
+/// Compression preset. 6 is the xz default: the knee of the ratio/time curve.
+const XZ_PRESET: u32 = 6;
 /// Extension appended to the source name for the compressed file.
 const XZ_EXTENSION: &str = "xz";
 /// Restrictive mode for every file this module creates (REQ-L65).
@@ -47,8 +53,109 @@ const OWNER_ONLY_MODE: u32 = 0o600;
 /// # Complexity
 ///
 /// `O(n)` over the file, with two passes: one to compress, one to verify.
-pub fn compress_verified(_src: &Path, _dst_tmp: &Path) -> Result<(), LoggingError> {
-    Ok(()) // Red-phase stub: succeeds without doing anything
+pub fn compress_verified(src: &Path, dst_tmp: &Path) -> Result<(), LoggingError> {
+    let original = fs::read(src).map_err(|e| LoggingError::Compress {
+        path: src.to_path_buf(),
+        source: e,
+    })?;
+
+    compress_to(&original, dst_tmp)?;
+    verify_round_trip(dst_tmp, &original)?;
+
+    let final_path = compressed_path(src);
+    fs::rename(dst_tmp, &final_path).map_err(|e| LoggingError::Write {
+        path: final_path,
+        source: e,
+    })?;
+    Ok(())
+}
+
+/// Writes `bytes` compressed into `dst`, with owner-only permissions.
+///
+/// # Errors
+///
+/// [`LoggingError::Compress`] on any I/O or encoder failure.
+///
+/// # Complexity
+///
+/// `O(n)`.
+fn compress_to(bytes: &[u8], dst: &Path) -> Result<(), LoggingError> {
+    let fail = |e: std::io::Error| LoggingError::Compress {
+        path: dst.to_path_buf(),
+        source: e,
+    };
+
+    let file = fs::File::create(dst).map_err(fail)?;
+    restrict(dst)?;
+    let mut writer = XzWriter::new(file, XzOptions::with_preset(XZ_PRESET)).map_err(fail)?;
+    writer.write_all(bytes).map_err(fail)?;
+    let mut finished = writer.finish().map_err(fail)?;
+    finished.flush().map_err(fail)?;
+    Ok(())
+}
+
+/// Reads `staged` back, decompresses it and compares against `expected`.
+///
+/// # Errors
+///
+/// [`LoggingError::Compress`] when the read-back fails or the bytes differ.
+///
+/// # Complexity
+///
+/// `O(n)`.
+fn verify_round_trip(staged: &Path, expected: &[u8]) -> Result<(), LoggingError> {
+    let fail = |e: std::io::Error| LoggingError::Compress {
+        path: staged.to_path_buf(),
+        source: e,
+    };
+
+    let file = fs::File::open(staged).map_err(fail)?;
+    let mut reader = XzReader::new(file, false);
+    let mut back = Vec::with_capacity(expected.len());
+    reader.read_to_end(&mut back).map_err(fail)?;
+
+    if back == expected {
+        return Ok(());
+    }
+    Err(LoggingError::Compress {
+        path: staged.to_path_buf(),
+        source: std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "the compressed file does not decompress to the original bytes",
+        ),
+    })
+}
+
+/// Applies owner-only permissions to a file this module created (REQ-L65).
+///
+/// # Errors
+///
+/// [`LoggingError::Write`] if the mode cannot be set.
+///
+/// # Platform
+///
+/// On Windows this is a no-op: the file inherits the ACL of the `.magi/`
+/// directory, which `magi init` already creates restricted. Stated rather than
+/// silently skipped, because "0600 everywhere" would be a claim this function
+/// does not keep on that platform.
+///
+/// # Complexity
+///
+/// `O(1)`.
+fn restrict(path: &Path) -> Result<(), LoggingError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(OWNER_ONLY_MODE)).map_err(|e| {
+            LoggingError::Write {
+                path: path.to_path_buf(),
+                source: e,
+            }
+        })?;
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
 }
 
 /// The `.xz` name a source file compresses into.
@@ -67,9 +174,7 @@ pub fn compressed_path(src: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::io::Read as _;
 
-    use lzma_rust2::XzReader;
     use tempfile::tempdir;
 
     use super::*;
@@ -145,6 +250,58 @@ mod tests {
             &dir.path().join("staging.tmp"),
         );
         assert!(outcome.is_err());
+    }
+
+    #[test]
+    fn verification_rejects_a_staged_file_that_is_not_valid_xz_at_all() {
+        let dir = tempdir().unwrap();
+        let staged = dir.path().join("garbage.tmp");
+        fs::write(&staged, b"this is not an xz stream").unwrap();
+        assert!(verify_round_trip(&staged, b"payload").is_err());
+    }
+
+    #[test]
+    fn verification_rejects_a_staged_file_that_decompresses_to_different_bytes() {
+        let dir = tempdir().unwrap();
+        let staged = dir.path().join("wrong.tmp");
+        compress_to(b"what was actually compressed", &staged).unwrap();
+        assert!(
+            verify_round_trip(&staged, b"what the caller expected").is_err(),
+            "a mismatch must be reported, not accepted"
+        );
+        // And the same staged file verifies against its real contents, so the
+        // rejection above is about the comparison and not about the reader.
+        assert!(verify_round_trip(&staged, b"what was actually compressed").is_ok());
+    }
+
+    #[test]
+    fn compress_verified_actually_calls_the_verification_before_renaming() {
+        // **No behavioural test can catch this, and that is why it is a source
+        // check.** With a working compressor the round trip always succeeds, so
+        // deleting the verification changes nothing any assertion can observe —
+        // it was run as a mutation and every test stayed green. The guarantee
+        // REQ-L14 buys only shows up when compression is corrupt, which this
+        // process cannot produce on demand.
+        let src = include_str!("xz.rs");
+        let body = src
+            .split("pub fn compress_verified")
+            .nth(1)
+            .expect("the function is in this file");
+        let body = body
+            .split(
+                "
+}",
+            )
+            .next()
+            .expect("its body ends somewhere");
+        let verify_at = body
+            .find("verify_round_trip(")
+            .expect("verification is called");
+        let rename_at = body.find("fs::rename(").expect("the rename is there");
+        assert!(
+            verify_at < rename_at,
+            "the round trip must be verified BEFORE the rename, or a corrupt              archive replaces a good original"
+        );
     }
 
     #[cfg(unix)]
