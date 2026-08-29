@@ -53,6 +53,36 @@ pub struct RetentionConfig {
 }
 
 /// Decides an [`Action`] for every entry, in the order given.
+///
+/// # Parameters
+///
+/// * `files` — the directory listing. The result has one entry per input, at
+///   the same index, so the caller matches by position.
+/// * `today` — the current UTC date; the file bearing it is never touched.
+/// * `now` — the current instant, used only for the `mtime` skew guard.
+/// * `cfg` — the operator's retention settings.
+///
+/// # Returns
+///
+/// One [`Action`] per file, in input order.
+///
+/// # The order of the two rules, which is not interchangeable
+///
+/// Age decides first; the byte cap is then applied to whatever still survives.
+/// The cap can only turn a `Keep` or a `Compress` into a `Delete` — it never
+/// rescues something age already condemned.
+///
+/// # What the cap will not do
+///
+/// Today's file and any file within the skew grace are never deletable, so a
+/// cap smaller than today's file alone simply is not met: `plan` reports `Keep`
+/// rather than satisfying a number by deleting the file the process is writing
+/// to. REQ-L15 outranks REQ-L18, and this is where that shows.
+///
+/// # Complexity
+///
+/// `O(n log n)` over the file count — linear to decide by age, and a sort only
+/// when the byte cap is actually exceeded.
 #[must_use]
 pub fn plan(
     files: &[FileEntry],
@@ -98,9 +128,11 @@ pub fn plan(
     actions
 }
 
-/// Decides the action for a file based on age and protection rules, before the byte cap.
+/// Decides one file's action from age and the protection rules, before the cap.
 ///
-/// O(1).
+/// # Complexity
+///
+/// `O(1)`.
 fn initial_action(file: &FileEntry, today: Date, now: SystemTime, cfg: &RetentionConfig) -> Action {
     if is_protected(file, today, now) {
         return Action::Keep;
@@ -123,14 +155,18 @@ fn initial_action(file: &FileEntry, today: Date, now: SystemTime, cfg: &Retentio
 ///
 /// Today's log and any file whose `mtime` is within the skew grace are always kept.
 ///
-/// O(1).
+/// # Complexity
+///
+/// `O(1)`.
 fn is_protected(file: &FileEntry, today: Date, now: SystemTime) -> bool {
     file.date == Some(today) || is_within_skew(file.mtime, now)
 }
 
 /// Returns whether `mtime` is close enough to `now` that the file is still being written.
 ///
-/// O(1).
+/// # Complexity
+///
+/// `O(1)`.
 fn is_within_skew(mtime: SystemTime, now: SystemTime) -> bool {
     now.duration_since(mtime)
         .map(|elapsed| elapsed <= std::time::Duration::from_secs(MTIME_SKEW_GRACE_SECS))
@@ -142,7 +178,9 @@ fn is_within_skew(mtime: SystemTime, now: SystemTime) -> bool {
 /// `None` and future dates are treated as infinitely old so they are purged
 /// instead of becoming immortal.
 ///
-/// O(1).
+/// # Complexity
+///
+/// `O(1)`.
 fn retention_age(date: Option<Date>, today: Date) -> i64 {
     match date {
         Some(d) if d <= today => (today - d).whole_days(),
@@ -155,7 +193,9 @@ fn retention_age(date: Option<Date>, today: Date) -> i64 {
 /// `None` sorts before any real date; future dates sort before any past date.
 /// Among past dates, older files sort before newer ones.
 ///
-/// O(1) to construct and compare.
+/// # Complexity
+///
+/// `O(1)` to construct and compare.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct PriorityKey {
     age: i64,
