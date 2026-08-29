@@ -1658,24 +1658,39 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
                 // Retention runs at startup, over what the previous runs left.
                 // Best effort throughout: a directory that cannot be read, or a
                 // delete that fails, is not worth failing a session over.
-                let swept = magi_rs::logging::sweep::sweep_orphan_temps(
-                    &log_dir,
-                    std::time::SystemTime::now(),
-                );
-                let files = magi_rs::logging::sweep::scan(&log_dir);
-                let names: Vec<String> = files.iter().map(|f| f.name.clone()).collect();
-                let plan = magi_rs::logging::retention::plan(
-                    &files,
-                    time::OffsetDateTime::now_utc().date(),
-                    std::time::SystemTime::now(),
-                    &magi_config.retention(),
-                );
-                let compressed =
-                    magi_rs::logging::sweep::execute_plan(&log_dir, &names, &plan).unwrap_or(0);
-                if swept > 0 || compressed > 0 {
-                    startup_notices.push(Notice::resolution(format!(
-                        "logs: {compressed} compressed, {swept} abandoned temporaries removed"
-                    )));
+                //
+                // **On the BLOCKING pool** (REQ-L16), and the caller is who
+                // decides that — the compressor itself knows nothing about the
+                // runtime. LZMA2 is CPU-bound and the cap allows five of them:
+                // on a worker thread that is several seconds during which every
+                // other task on that worker waits, which the user reads as the
+                // agent hanging on startup.
+                let dir = log_dir.clone();
+                let retention = magi_config.retention();
+                let outcome = tokio::task::spawn_blocking(move || {
+                    let swept = magi_rs::logging::sweep::sweep_orphan_temps(
+                        &dir,
+                        std::time::SystemTime::now(),
+                    );
+                    let files = magi_rs::logging::sweep::scan(&dir);
+                    let names: Vec<String> = files.iter().map(|f| f.name.clone()).collect();
+                    let plan = magi_rs::logging::retention::plan(
+                        &files,
+                        time::OffsetDateTime::now_utc().date(),
+                        std::time::SystemTime::now(),
+                        &retention,
+                    );
+                    let compressed =
+                        magi_rs::logging::sweep::execute_plan(&dir, &names, &plan).unwrap_or(0);
+                    (compressed, swept)
+                })
+                .await;
+                if let Ok((compressed, swept)) = outcome {
+                    if swept > 0 || compressed > 0 {
+                        startup_notices.push(Notice::resolution(format!(
+                            "logs: {compressed} compressed, {swept} abandoned temporaries removed"
+                        )));
+                    }
                 }
             }
             Err(e) => startup_notices.push(Notice::resolution(format!(

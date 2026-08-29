@@ -47,6 +47,15 @@ pub const LOG_CHANNEL_CAPACITY: usize = 8192;
 pub const LOG_CHANNEL_HIGH_SLOTS: usize = 2048;
 /// Slots for the ordinary channel.
 pub const LOG_CHANNEL_LOW_SLOTS: usize = 6144;
+
+/// **The total is a CHECKED relation, not a comment.**
+///
+/// `LOG_CHANNEL_CAPACITY` had no consumer: the code opens the two channels from
+/// their own halves and never reads the sum, so the constant was a claim that
+/// could drift from the numbers below it with nothing to notice. Asserting it at
+/// compile time gives it the consumer G2 requires and turns the claim into a
+/// guarantee, in the same move.
+const _: () = assert!(LOG_CHANNEL_HIGH_SLOTS + LOG_CHANNEL_LOW_SLOTS == LOG_CHANNEL_CAPACITY);
 /// Byte budget of the priority channel.
 ///
 /// **The priority channel gets the LARGER budget while holding FEWER slots, and
@@ -58,6 +67,9 @@ pub const LOG_CHANNEL_LOW_SLOTS: usize = 6144;
 pub const LOG_CHANNEL_HIGH_BYTES: usize = 48 * 1024 * 1024;
 /// Byte budget of the ordinary channel.
 pub const LOG_CHANNEL_LOW_BYTES: usize = 16 * 1024 * 1024;
+/// The line terminator, named so the two write sites cannot drift.
+const NEWLINE: &[u8] = b"
+";
 /// How long the parked writer waits before re-checking, as a backstop.
 ///
 /// The condvar is what actually wakes it; this bounds the damage if a signal is
@@ -406,6 +418,55 @@ fn spawn_writer(
             *m = std::time::Instant::now();
         }
     }
+
+    /// Writes one item, taking the ONE retry a write failure is allowed.
+    ///
+    /// # The retry hangs off the `io::Error`, not off the thread dying
+    ///
+    /// `clippy::panic` is denied in this module, so a write failure
+    /// **structurally cannot** panic the writer: hanging the retry off thread
+    /// termination would have fired only on a bug — whose cause persists — while
+    /// the transient cases got permanent shutdown. And because the writer does
+    /// not die, the receiver does not drop and there is no sender to swap.
+    ///
+    /// # Why the mark is stamped on the way INTO the cooldown
+    ///
+    /// The writer sits here for thirty seconds consuming nothing. Events arriving
+    /// meanwhile leave the queue non-empty, so the first emitter to look would
+    /// read a stale mark against a full queue and declare a hang that does not
+    /// exist — which is PERMANENT. A transient disk error, the very case the
+    /// retry exists for, would end in permanent shutdown before the retry ever
+    /// happened. The mark has to refresh in **every** state where the writer is
+    /// alive and deliberately not consuming.
+    ///
+    /// # Returns
+    ///
+    /// `false` once the file branch must be shut down for good.
+    fn write_with_one_retry(
+        sink: &mut FileSink,
+        item: &Queued,
+        hb: &std::sync::Mutex<std::time::Instant>,
+    ) -> bool {
+        if sink.write(item).is_ok() {
+            return true;
+        }
+        eprintln!(
+            "warning: the log file could not be written; retrying once in {}s",
+            WRITER_RETRY_COOLDOWN.as_secs()
+        );
+        // Stamp, sleep, stamp: an emitter looking at any moment of this window
+        // sees a live writer.
+        stamp(hb);
+        std::thread::sleep(WRITER_RETRY_COOLDOWN);
+        stamp(hb);
+        if sink.write(item).is_ok() {
+            return true;
+        }
+        eprintln!(
+            "warning: the log file still cannot be written; this session continues              WITHOUT a log file"
+        );
+        false
+    }
     std::thread::spawn(move || {
         let mut sink = FileSink::new(dir);
         let mut high_closed = false;
@@ -415,7 +476,9 @@ fn spawn_writer(
             for _ in 0..HIGH_BATCH {
                 match high.try_recv() {
                     Ok(item) => {
-                        sink.write(&item);
+                        if !write_with_one_retry(&mut sink, &item, &heartbeat) {
+                            return;
+                        }
                         did_work = true;
                     }
                     Err(std::sync::mpsc::TryRecvError::Empty) => break,
@@ -427,7 +490,9 @@ fn spawn_writer(
             }
             match low.try_recv() {
                 Ok(item) => {
-                    sink.write(&item);
+                    if !write_with_one_retry(&mut sink, &item, &heartbeat) {
+                        return;
+                    }
                     did_work = true;
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => {}
@@ -481,7 +546,7 @@ impl FileSink {
     /// # Complexity
     ///
     /// `O(n)` over the event.
-    fn write(&mut self, item: &Queued) {
+    fn write(&mut self, item: &Queued) -> std::io::Result<()> {
         use std::io::Write as _;
 
         let text = match item {
@@ -489,11 +554,9 @@ impl FileSink {
             Queued::Alarm(x) => crate::logging::auditor::render_alarm(x),
         };
         let now = time::OffsetDateTime::now_utc().date();
-        if self.rotate_to(now).is_err() {
-            return;
-        }
+        self.rotate_to(now)?;
         let Some((_, file)) = self.open.as_mut() else {
-            return;
+            return Ok(());
         };
         let id = crate::logging::chunk::EventId::new();
         let header = "";
@@ -503,10 +566,10 @@ impl FileSink {
             &crate::logging::chunk::cont_header_for(&id),
             id,
         ) {
-            let _ = file.write_all(line.as_bytes());
-            let _ = file.write_all(b"\n");
+            file.write_all(line.as_bytes())?;
+            file.write_all(NEWLINE)?;
         }
-        let _ = file.flush();
+        file.flush()
     }
 
     /// Opens the file for `today` if the open one belongs to another day.
@@ -638,6 +701,26 @@ mod tests {
             "a low-priority event after the park was never written: {written:?}"
         );
         appender.shutdown();
+    }
+
+    #[test]
+    fn a_write_failure_takes_the_retry_and_the_mark_stays_fresh_through_it() {
+        // REQ-L37. Two things at once, and the second is the one that bites:
+        // during the cooldown the writer consumes NOTHING for thirty seconds,
+        // so events pile up and the queue is non-empty. An emitter reading a
+        // stale mark against a full queue declares a hang — which is PERMANENT.
+        // A transient disk error, the very case the retry exists for, would end
+        // in permanent shutdown before the retry ever happened.
+        //
+        // The test asserts the ARITHMETIC of that, not a thirty-second wait: the
+        // cooldown must be shorter than the stall window, or the writer's own
+        // retry looks like a hang to every emitter.
+        assert!(
+            WRITER_RETRY_COOLDOWN.as_secs() < WRITER_STALL_SECS,
+            "a cooldown at or past the stall window makes the retry              indistinguishable from a hang: {}s vs {}s",
+            WRITER_RETRY_COOLDOWN.as_secs(),
+            WRITER_STALL_SECS
+        );
     }
 
     #[test]
