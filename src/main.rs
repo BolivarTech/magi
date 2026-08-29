@@ -682,6 +682,45 @@ fn discover_config(
 /// live env var is gone. Both sources are trimmed for the same reason
 /// `discover_config` trims: a key with stray whitespace or a trailing newline (a
 /// common `export KEY=$(cat f)` artifact) would otherwise produce a malformed
+/// The credentials this run resolved, as the auditor's registration expects them.
+///
+/// # Parameters
+///
+/// * `anthropic` — the resolved `ANTHROPIC_API_KEY`, if any.
+/// * `openai` — the resolved `OPENAI_API_KEY`, if any.
+///
+/// # Returns
+///
+/// One pair per credential actually present. Blank is absent, the same rule the
+/// resolvers themselves apply.
+///
+/// # Why this is a separate, pure function
+///
+/// The registry it feeds is deliberately unobservable — the auditor keeps only
+/// `(length, hash)` per variant and exposes no count, which is REQ-L51 and not
+/// an oversight. So the call site cannot be asserted on from outside, and a
+/// hook added to make it observable would weaken the property the module exists
+/// to protect. Splitting the SELECTION out gives the part that can be wrong a
+/// guardian, and leaves only the one-line call to review.
+///
+/// # Complexity
+///
+/// `O(1)`.
+fn secrets_to_arm<'a>(
+    anthropic: Option<&'a str>,
+    openai: Option<&'a str>,
+) -> Vec<(magi_rs::logging::auditor::SecretName, &'a str)> {
+    use magi_rs::logging::auditor::SecretName;
+    let mut out = Vec::new();
+    if let Some(k) = non_blank(anthropic) {
+        out.push((SecretName::new("ANTHROPIC_API_KEY"), k));
+    }
+    if let Some(k) = non_blank(openai) {
+        out.push((SecretName::new("OPENAI_API_KEY"), k));
+    }
+    out
+}
+
 /// `Authorization` header (401).
 fn resolve_openai_key(
     env_key: Option<&str>,
@@ -1707,6 +1746,25 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
         anthropic_key.as_deref(),
         secret_store.as_ref(),
     );
+    // REQ-L49: arm the auditor's EXACT pass with what this run actually
+    // resolved. Until this call existed the registry was empty in the shipped
+    // binary, so the pass that catches a secret no pattern recognises never ran
+    // — only the pattern pass protected the log. It goes here because this is
+    // the first point where both credentials are known, and after `init_logging`
+    // so the layer already holds the same process auditor.
+    for short in magi_rs::logging::register_process_secrets(&secrets_to_arm(
+        config.as_ref().map(|c| c.api_key.as_str()),
+        resolve_openai_key(openai_key.as_deref(), secret_store.as_ref()).as_deref(),
+    )) {
+        // The return value's first consumer. A credential too short for the
+        // rolling hash is still registered and still covered by the pattern
+        // pass, but the operator deserves to know which one got the weaker of
+        // the two.
+        startup_notices.push(Notice::resolution(format!(
+            "WARNING: {} is too short to be matched exactly in the log; it is             still masked by shape, which is weaker.",
+            short.as_str()
+        )));
+    }
     // Task 4.1: replaces `resolve_provider`/`legacy_backend_label` — the vocabulary is
     // unified now, so there is nothing left to normalize a raw `ProviderKind` onto.
     let provider_kind =
@@ -1898,6 +1956,24 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
             // headless `query` path, DRY). The embedding key is resolved here
             // (env > vault) so the helper stays free of the secret-store plumbing.
             let embed_key = resolve_openai_key(openai_key.as_deref(), secret_store.as_ref());
+            // REQ-L49, headless half. Same reasoning as the TUI call site: the exact
+            // pass only covers what was registered, and a surface that forgets to arm
+            // ships a log protected by the pattern pass alone.
+            for short in magi_rs::logging::register_process_secrets(&secrets_to_arm(
+                discover_config(
+                    &magi_config,
+                    anthropic_key.as_deref(),
+                    secret_store.as_ref(),
+                )
+                .as_ref()
+                .map(|c| c.api_key.as_str()),
+                embed_key.as_deref(),
+            )) {
+                eprintln!(
+            "warning: {} is too short to be matched exactly in the log; it is still             masked by shape, which is weaker.",
+            short.as_str()
+        );
+            }
             let mut attach_notices: Vec<String> = Vec::new();
             attach_persistent_memory(
                 &mut agent,
@@ -5870,6 +5946,36 @@ async fn run_consult_subcommand(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_auditor_is_armed_with_every_credential_the_run_resolved() {
+        // REQ-L49's exact pass is what catches a secret NO pattern recognises.
+        // It only runs over what was registered, so an empty registry makes the
+        // whole pass inert — and the shipped binary registered nothing at all
+        // until this wiring landed. The canary in tests/ registers its own
+        // secrets, so it guards the mechanism and never the arming.
+        let armed = secrets_to_arm(Some("sk-ant-api03-real"), Some("sk-openai-real"));
+        assert_eq!(armed.len(), 2, "both credentials must be registered");
+        assert_eq!(armed[0].0.as_str(), "ANTHROPIC_API_KEY");
+        assert_eq!(armed[0].1, "sk-ant-api03-real");
+        assert_eq!(armed[1].0.as_str(), "OPENAI_API_KEY");
+        assert_eq!(armed[1].1, "sk-openai-real");
+    }
+
+    #[test]
+    fn a_credential_the_run_did_not_resolve_is_not_registered() {
+        // Without this, a selector that returned two fixed pairs regardless of
+        // its input would satisfy the test above.
+        assert!(secrets_to_arm(None, None).is_empty());
+        assert_eq!(secrets_to_arm(Some("only-anthropic"), None).len(), 1);
+        assert_eq!(secrets_to_arm(None, Some("only-openai")).len(), 1);
+    }
+
+    #[test]
+    fn a_blank_credential_is_absent_not_a_secret_worth_registering() {
+        // The same rule the resolvers apply. Registering "" or "   " would give
+        // the exact pass a variant that matches everywhere.
+        assert!(secrets_to_arm(Some(""), Some("   ")).is_empty());
+    }
     use super::*;
     use crate::agent::messages::Message;
     use magi_rs::notices::NoticeTier;
