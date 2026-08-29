@@ -35,3 +35,6 @@
 
 pub mod chunk;
 pub mod rotation;
+
+#[cfg(test)]
+pub(crate) mod testutil;

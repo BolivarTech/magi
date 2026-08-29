@@ -25,16 +25,23 @@ pub const MAX_LINE_BYTES: usize = 4096;
 /// quiet, in that order of importance.
 pub const NEWLINE_BYTES: usize = 1;
 
+/// Byte length of the literal `id=` that precedes the identifier on chunk one.
 const ID_PREFIX_BYTES: usize = 3;
+/// The single space between the identifier and the `n/N` marker.
 const SPACE_AFTER_ID_BYTES: usize = 1;
+/// The `/` separating numerator from denominator in the marker.
 const SLASH_BYTES: usize = 1;
+/// The space between the marker and the payload.
 const SPACE_BYTES: usize = 1;
-const MIN_CHUNK_COUNT: usize = 1;
-const ONE_BASED_OFFSET: usize = 1;
+/// Rounds allowed for the budget/marker-width fixed point.
+///
+/// Four is generous: the width only grows with the digit count of `N`, so the
+/// loop settles in one or two rounds for any event a process can hold in
+/// memory. The bound exists so a pathological header cannot spin forever.
 const MAX_SIZING_ITERATIONS: usize = 4;
-const COUNTER_INITIAL: u64 = 0;
 
-static FALLBACK_COUNTER: AtomicU64 = AtomicU64::new(COUNTER_INITIAL);
+/// Counter behind the identifier's degraded path when the OS RNG refuses.
+static FALLBACK_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Identifier correlating the chunks of one event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,8 +88,11 @@ impl Default for EventId {
 ///
 /// Time complexity: O(log n), space complexity: O(1).
 fn decimal_digits(mut n: usize) -> usize {
+    // Zero is written with one digit. The first version returned a constant
+    // named for a chunk count here, which happened to hold the right number
+    // and said the wrong thing.
     if n == 0 {
-        return MIN_CHUNK_COUNT;
+        return 1;
     }
     let mut digits = 0;
     while n > 0 {
@@ -108,12 +118,19 @@ fn line_budget(overhead: usize) -> usize {
         .saturating_sub(overhead)
 }
 
-/// Ceiling division without floating point.
+/// Ceiling division without floating point, total in `b`.
+///
+/// A zero divisor answers `a` rather than dividing: the caller's guard already
+/// makes that unreachable today, but a helper that panics on an input its own
+/// signature accepts is a landmine in a module whose whole point is that it
+/// must not panic while everything else is failing.
 ///
 /// Time complexity: O(1), space complexity: O(1).
 fn ceil_div(a: usize, b: usize) -> usize {
-    let decrement = b.saturating_sub(1);
-    a.saturating_add(decrement) / b
+    if b == 0 {
+        return a;
+    }
+    a.saturating_add(b - 1) / b
 }
 
 /// Estimates the chunk count from the event length and the two budgets.
@@ -121,13 +138,35 @@ fn ceil_div(a: usize, b: usize) -> usize {
 /// Time complexity: O(1), space complexity: O(1).
 fn estimate_chunk_count(event_len: usize, first_budget: usize, cont_budget: usize) -> usize {
     if event_len <= first_budget {
-        return MIN_CHUNK_COUNT;
+        return 1;
     }
     let tail = event_len - first_budget;
     if cont_budget == 0 {
-        return MIN_CHUNK_COUNT + tail;
+        // One line per byte is the worst the caller can force with a header
+        // that leaves no room; it is an estimate, and the real cut decides.
+        return 1 + tail;
     }
-    MIN_CHUNK_COUNT + ceil_div(tail, cont_budget)
+    1 + ceil_div(tail, cont_budget)
+}
+
+/// The two payload budgets for a marker of `digit_count` digits.
+///
+/// Extracted because the expression appeared **three times** in `split` — in
+/// the sizing loop, after it, and again in the re-cut — and three copies of an
+/// arithmetic definition is three chances for one of them to drift.
+///
+/// Returns `(first_budget, cont_budget)`.
+///
+/// Time complexity: O(1), space complexity: O(1).
+fn budgets(
+    first_header: &str,
+    cont_header: &str,
+    rendered_id_len: usize,
+    digit_count: usize,
+) -> (usize, usize) {
+    let mw = marker_width(digit_count);
+    let first = first_header.len() + ID_PREFIX_BYTES + rendered_id_len + SPACE_AFTER_ID_BYTES + mw;
+    (line_budget(first), line_budget(cont_header.len() + mw))
 }
 
 /// Cuts `event` into payloads that respect UTF-8 boundaries and the per-line budgets.
@@ -179,71 +218,63 @@ pub fn cont_header_for(id: &EventId) -> String {
 #[must_use]
 pub fn split(event: &str, first_header: &str, cont_header: &str, id: EventId) -> Vec<String> {
     let rendered_id = id.render();
-    let rendered_id_len = rendered_id.len();
+    let id_len = rendered_id.len();
 
-    let mut digit_count = MIN_CHUNK_COUNT;
+    // The marker widens with the digit count of `N`, and `N` depends on the
+    // budget the marker leaves — so the two are solved by iterating to a fixed
+    // point rather than in one pass.
+    let mut digits = 1;
     for _ in 0..MAX_SIZING_ITERATIONS {
-        let mw = marker_width(digit_count);
-        let overhead_first =
-            first_header.len() + ID_PREFIX_BYTES + rendered_id_len + SPACE_AFTER_ID_BYTES + mw;
-        let overhead_cont = cont_header.len() + mw;
-        let first_budget = line_budget(overhead_first);
-        let cont_budget = line_budget(overhead_cont);
-        let estimated_n = estimate_chunk_count(event.len(), first_budget, cont_budget);
-        let new_digit_count = decimal_digits(estimated_n);
-        if new_digit_count == digit_count {
+        let (first, cont) = budgets(first_header, cont_header, id_len, digits);
+        let next = decimal_digits(estimate_chunk_count(event.len(), first, cont));
+        if next == digits {
             break;
         }
-        digit_count = new_digit_count;
+        digits = next;
     }
 
-    let mut mw = marker_width(digit_count);
-    let mut overhead_first =
-        first_header.len() + ID_PREFIX_BYTES + rendered_id_len + SPACE_AFTER_ID_BYTES + mw;
-    let mut overhead_cont = cont_header.len() + mw;
-    let mut first_budget = line_budget(overhead_first);
-    let mut cont_budget = line_budget(overhead_cont);
-    let mut payloads = cut_payloads(event, first_budget, cont_budget);
-    let mut n = payloads.len();
+    // `N` comes from the REAL cut, never from the estimate: retracting each cut
+    // to a character boundary gives back up to three bytes per chunk, the
+    // deficit accumulates, and the tail lands past the predicted last line.
+    let (mut first, mut cont) = budgets(first_header, cont_header, id_len, digits);
+    let mut payloads = cut_payloads(event, first, cont);
 
-    let real_digit_count = decimal_digits(n);
-    if real_digit_count > digit_count {
-        digit_count = real_digit_count;
-        mw = marker_width(digit_count);
-        overhead_first =
-            first_header.len() + ID_PREFIX_BYTES + rendered_id_len + SPACE_AFTER_ID_BYTES + mw;
-        overhead_cont = cont_header.len() + mw;
-        first_budget = line_budget(overhead_first);
-        cont_budget = line_budget(overhead_cont);
-        payloads = cut_payloads(event, first_budget, cont_budget);
-        n = payloads.len();
+    // If the real count needs a wider marker than the budgets allowed for, cut
+    // once more with the corrected width. Emitting a marker wider than its own
+    // budget is exactly the overflow this task exists to prevent.
+    if decimal_digits(payloads.len()) > digits {
+        digits = decimal_digits(payloads.len());
+        (first, cont) = budgets(first_header, cont_header, id_len, digits);
+        payloads = cut_payloads(event, first, cont);
     }
 
-    let mut lines = Vec::with_capacity(n);
-    if n == MIN_CHUNK_COUNT {
-        let payload = payloads.first().copied().unwrap_or("");
-        lines.push(format!("{}{}", first_header, payload));
-        return lines;
+    let n = payloads.len();
+    if n == 1 {
+        // A line with no marker IS a complete line (REQ-L11).
+        return vec![format!(
+            "{}{}",
+            first_header,
+            payloads.first().copied().unwrap_or("")
+        )];
     }
 
-    for (i, payload) in payloads.iter().enumerate() {
-        let line_no = i.saturating_add(ONE_BASED_OFFSET);
-        if i == 0 {
-            lines.push(format!(
-                "{}id={} {}/{} {}",
-                first_header, rendered_id, line_no, n, payload
-            ));
-        } else {
-            lines.push(format!("{}{}/{} {}", cont_header, line_no, n, payload));
-        }
-    }
-
-    lines
+    payloads
+        .iter()
+        .enumerate()
+        .map(|(i, payload)| {
+            if i == 0 {
+                format!("{first_header}id={rendered_id} 1/{n} {payload}")
+            } else {
+                format!("{cont_header}{}/{n} {payload}", i + 1)
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::logging::testutil::payload_of;
 
     /// REQ-L06's threshold, pinned here as a LITERAL rather than read from
     /// [`MAX_LINE_BYTES`].
@@ -263,19 +294,6 @@ mod tests {
         // If someone changes MAX_LINE_BYTES deliberately, this is the test that
         // says so — instead of every other assertion quietly following it.
         assert_eq!(MAX_LINE_BYTES, REQUIRED_MAX_LINE_BYTES);
-    }
-
-    /// The payload of a produced line, with its header and marker stripped.
-    ///
-    /// A chunked line is `<header>id=<pid>-<hex16> n/N <payload>`, so the
-    /// payload is what follows the marker's two tokens. An unchunked line
-    /// carries no marker at all (REQ-L11), and there the header ends at the
-    /// first space.
-    fn payload_of(line: &str) -> &str {
-        match line.find("id=") {
-            Some(i) => line[i..].splitn(3, ' ').nth(2).unwrap_or(""),
-            None => line.split_once(' ').map(|(_, p)| p).unwrap_or(line),
-        }
     }
 
     #[test]
