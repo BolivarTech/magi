@@ -6,8 +6,31 @@
 //! compression with retention, and an auditor that redacts secrets before they
 //! reach any output.
 //!
-//! Everything decidable lives in pure modules that return decisions; a thin
-//! shim executes them. That split is what makes "on day 8 it compresses and on
-//! day 31 it is deleted" testable without fabricating 31 days of real files.
+//! # The shape, and why it is this shape
+//!
+//! Everything decidable is a **pure function that returns a decision**;
+//! a thin shim executes it. Rotation, retention, chunking and rendering never
+//! touch the filesystem or read a clock. That is what makes "on day 8 it is
+//! compressed and on day 31 it is deleted" testable with two dates instead of
+//! thirty-one days of real files.
+//!
+//! # Lint policy, which is stricter here than in most of the crate
+//!
+//! This module is held to the same bar as `vault`: panicking constructs are
+//! **denied**, not discouraged. The reason is specific rather than general —
+//! this is the subsystem you read when everything else has already failed, so
+//! a panic inside it takes the diagnostic channel down at the exact moment it
+//! is needed. Fallible operations return `Result` and degrade to a documented
+//! best effort; they never abort the process that was trying to log.
+//!
+//! The denials are lifted under `cfg(test)`, where `unwrap` on a literal date
+//! is clarity rather than risk.
+
+#![cfg_attr(not(test), deny(clippy::unwrap_used))]
+#![cfg_attr(not(test), deny(clippy::expect_used))]
+#![cfg_attr(not(test), deny(clippy::panic))]
+#![cfg_attr(not(test), deny(clippy::todo))]
+#![cfg_attr(not(test), deny(clippy::unimplemented))]
+#![deny(missing_docs)]
 
 pub mod rotation;
