@@ -184,11 +184,11 @@ fn a_backslash_is_escaped_once_and_not_twice() {
     );
     // One escape doubles each backslash, so this is what lands on the wire.
     assert!(
-        written.contains(r"C:\Users\jb"),
+        written.contains(r"C:\\Users\\jb"),
         "the path is not singly escaped: {written}"
     );
     assert!(
-        !written.contains(r"C:\\Users"),
+        !written.contains(r"C:\\\\Users"),
         "the path was escaped twice: {written}"
     );
 }

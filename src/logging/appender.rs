@@ -549,9 +549,18 @@ impl FileSink {
     fn write(&mut self, item: &Queued) -> std::io::Result<()> {
         use std::io::Write as _;
 
+        // **Escaped exactly once, and the two arms differ because their inputs
+        // do.** A `Line` arrives already escaped: the layer runs stage 3 of
+        // REQ-L64 before submitting, because the same escaped text also goes to
+        // the screen branch. Escaping it again here doubled every backslash a
+        // second time, so a workspace path reached the file as `C:\\Users`.
+        // An `Alarm` is rendered right here and has had no other chance, so it
+        // is escaped here — which is its only escape, not a second one.
         let text = match item {
             Queued::Line(a) => a.as_str().to_string(),
-            Queued::Alarm(x) => crate::logging::auditor::render_alarm(x),
+            Queued::Alarm(x) => {
+                crate::logging::render::escape_for_line(&crate::logging::auditor::render_alarm(x))
+            }
         };
         let now = time::OffsetDateTime::now_utc().date();
         self.rotate_to(now)?;
@@ -561,7 +570,7 @@ impl FileSink {
         let id = crate::logging::chunk::EventId::new();
         let header = "";
         for line in crate::logging::chunk::split(
-            &crate::logging::render::escape_for_line(&text),
+            &text,
             header,
             &crate::logging::chunk::cont_header_for(&id, crate::logging::run_id()),
             id,
@@ -605,6 +614,58 @@ mod tests {
     fn line(text: &str) -> (Queued, usize) {
         let (a, _) = Auditor::new().audit(text, "magi_rs::tests", None, text.len());
         (Queued::Line(a), text.len())
+    }
+
+    #[test]
+    fn an_alarm_cannot_forge_a_second_line() {
+        // REQ-L64 names this case in its own rustdoc: a foreign string that
+        // survives unescaped produces what LOOKS like an independent log line,
+        // "including one imitating an auditor alarm, with nothing to tell the
+        // false from the real".
+        //
+        // The alarm's text is built from the SECRET NAME, which is ours, and the
+        // TARGET, which is not: a target is a literal in whichever crate emitted
+        // the event, and this tree logs foreign events from magi-core. Passing a
+        // hostile one is exercising the declared contract, not inventing a
+        // caller for it.
+        //
+        // This exists because the mutation found it missing. Dropping the
+        // escaping from the sink's alarm arm left every logging test green.
+        let dir = tempdir().unwrap();
+        let appender = DailyAppender::new(dir.path()).unwrap();
+
+        let auditor = Auditor::new();
+        let name = SecretName::new("BASE_URL_PASSWORD");
+        auditor.register_secret(name, &["hunter2-longer"]);
+        let (_, alarm) = auditor.audit(
+            "GET https://bob:hunter2-longer@example.com/v1",
+            "magi_core::http\nSECURITY: a line that was never emitted",
+            None,
+            0,
+        );
+        let alarm = alarm.expect("a live secret must alarm");
+        assert_eq!(
+            appender.submit(Queued::Alarm(alarm), Priority::High, 0),
+            Submitted::Queued
+        );
+        std::thread::sleep(std::time::Duration::from_millis(300));
+
+        let path = dir.path().join(crate::logging::rotation::file_name(
+            time::OffsetDateTime::now_utc().date(),
+        ));
+        let written = std::fs::read_to_string(&path).unwrap_or_default();
+
+        // The fixture must have written, or counting lines proves nothing.
+        assert!(
+            written.contains("SECURITY"),
+            "no alarm reached the file: {written:?}"
+        );
+        assert_eq!(
+            written.lines().filter(|l| !l.trim().is_empty()).count(),
+            1,
+            "the target's newline forged a second line: {written:?}"
+        );
+        appender.shutdown();
     }
 
     #[test]
