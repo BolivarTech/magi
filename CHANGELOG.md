@@ -20,12 +20,25 @@ changes and the **patch** position signals backward-compatible fixes.
   `retain_days`, `max_total_bytes`. `--log-dir` and `MAGI_LOG_DIR` override the
   directory, in that order.
 
+- **Every line carries `run=<id>`, and that id is how you find your own run.** The
+  daily file is shared by everything writing at the time, so isolating one
+  invocation means filtering by its id rather than opening its own file. The id is
+  published three ways: in the JSON envelope of `query` and `consult`, on a
+  `run: <id>` line on stderr for a job that only reads stderr, and as the run's
+  first log event, which names the subcommand and the workspace. Continuation
+  lines of a split event carry it too, so filtering a long event returns all of it
+  rather than its first line.
+
 ### Removed
 
 - **The JSONL run log (`run-*.jsonl`) is gone**, and with it `[headless]`'s
   `log_retention`, `log_max_bytes` and `log_level` keys. A `magi.toml` that still
   declares one of them now fails to parse with serde's `unknown field`, which is
   fatal — there is no guided migration, deliberately.
+
+  **What replaces it for an automated consumer:** read `run_id` from the output
+  envelope, then filter the daily file by `run=<that value>`. The capability the
+  per-run file gave you is the same; the way you reach it is not.
 
   **Read this before copying your old numbers across: retention changed units.**
   `log_retention` counted **runs**; `retain_days` counts **days**. There is no

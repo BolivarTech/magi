@@ -5010,6 +5010,12 @@ fn resolve_headless_limits(cfg: &HeadlessConfig, tool_result_cap: usize) -> Head
 /// return it directly.
 async fn prepare_headless(
     h: &HeadlessArgs,
+    // REQ-L63's first event names what was invoked. It arrives as a parameter
+    // because this function serves both `query` and `consult` and cannot tell
+    // them apart: `HeadlessArgs` is shared, and reading `argv` would either
+    // guess (a workspace directory named `query`) or risk echoing a `-p`
+    // passphrase into the log.
+    command: &str,
     mut passphrase_flag: Option<Zeroizing<String>>,
     cwd: &Path,
     anthropic_key: Option<String>,
@@ -5428,6 +5434,9 @@ async fn prepare_headless(
         // REQ-L63: on stderr as well as in the envelope, so a CI job can capture
         // it without parsing either the log or the JSON.
         eprintln!("run: {}", magi_rs::logging::run_id());
+        // The third piece of REQ-L63: the run's first event. It cannot come
+        // earlier — the layer it goes to is installed just above.
+        magi_rs::logging::announce_run(command, &ws.root);
     }
 
     Ok(HeadlessContext {
@@ -5486,7 +5495,9 @@ async fn run_query_subcommand(
     anthropic_key: Option<String>,
     openai_key: Option<String>,
 ) -> i32 {
-    let ctx = match prepare_headless(&h, passphrase_flag, cwd, anthropic_key, openai_key).await {
+    let ctx = match prepare_headless(&h, "query", passphrase_flag, cwd, anthropic_key, openai_key)
+        .await
+    {
         Ok(c) => c,
         Err(code) => return code,
     };
@@ -5751,7 +5762,16 @@ async fn run_consult_subcommand(
         );
         return 2;
     }
-    let ctx = match prepare_headless(&h, passphrase_flag, cwd, anthropic_key, openai_key).await {
+    let ctx = match prepare_headless(
+        &h,
+        "consult",
+        passphrase_flag,
+        cwd,
+        anthropic_key,
+        openai_key,
+    )
+    .await
+    {
         Ok(c) => c,
         Err(code) => return code,
     };
@@ -7851,7 +7871,7 @@ mod tests {
 
                     let rt = tokio::runtime::Runtime::new().unwrap();
                     let ctx = rt
-                        .block_on(prepare_headless(&h, None, &cwd, None, None))
+                        .block_on(prepare_headless(&h, "query", None, &cwd, None, None))
                         .expect("prepare_headless must succeed");
 
                     assert_eq!(ctx.resolved.provider, "anthropic");
@@ -7890,7 +7910,7 @@ mod tests {
 
                     let rt = tokio::runtime::Runtime::new().unwrap();
                     let ctx = rt
-                        .block_on(prepare_headless(&h, None, &cwd, None, None))
+                        .block_on(prepare_headless(&h, "query", None, &cwd, None, None))
                         .expect("prepare_headless must succeed");
 
                     assert_eq!(ctx.resolved.provider, "anthropic");
@@ -7931,7 +7951,7 @@ mod tests {
 
                     let rt = tokio::runtime::Runtime::new().unwrap();
                     let ctx = rt
-                        .block_on(prepare_headless(&h, None, &cwd, None, None))
+                        .block_on(prepare_headless(&h, "query", None, &cwd, None, None))
                         .expect("prepare_headless must succeed");
 
                     assert_eq!(ctx.resolved.provider, "ollama");
@@ -7964,7 +7984,7 @@ mod tests {
 
                     let rt = tokio::runtime::Runtime::new().unwrap();
                     let ctx = rt
-                        .block_on(prepare_headless(&h, None, &cwd, None, None))
+                        .block_on(prepare_headless(&h, "query", None, &cwd, None, None))
                         .expect("prepare_headless must succeed");
 
                     assert_eq!(ctx.resolved.provider, "ollama");
@@ -7992,7 +8012,7 @@ mod tests {
 
                     let rt = tokio::runtime::Runtime::new().unwrap();
                     let ctx = rt
-                        .block_on(prepare_headless(&h, None, &cwd, None, None))
+                        .block_on(prepare_headless(&h, "query", None, &cwd, None, None))
                         .expect("prepare_headless must succeed");
 
                     assert_eq!(ctx.resolved.provider, "ollama");
@@ -11262,7 +11282,7 @@ retry_disabled = {retry_disabled}
 
                         let rt = tokio::runtime::Runtime::new().unwrap();
                         let ctx = rt
-                            .block_on(prepare_headless(&h, None, &cwd, None, None))
+                            .block_on(prepare_headless(&h, "query", None, &cwd, None, None))
                             .expect("prepare_headless must succeed");
 
                         assert_eq!(
@@ -12527,7 +12547,7 @@ retry_disabled = {retry_disabled}
 
                         let rt = tokio::runtime::Runtime::new().unwrap();
                         let ctx = rt
-                            .block_on(prepare_headless(&h, None, &cwd, None, None))
+                            .block_on(prepare_headless(&h, "query", None, &cwd, None, None))
                             .expect("prepare_headless must succeed");
 
                         let notice = ctx.divergence_notice.expect(

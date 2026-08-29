@@ -226,6 +226,33 @@ pub fn run_id() -> &'static str {
     ID.get_or_init(|| chunk::EventId::new().render())
 }
 
+/// Emits the run's first event: what was invoked, and where.
+///
+/// # Parameters
+///
+/// * `command` — the subcommand the user ran, e.g. `"query"`.
+/// * `workspace` — the resolved workspace root.
+///
+/// # Why this is not enough on its own, said where a reader will look
+///
+/// REQ-L63 is explicit that this event **helps a reader orient and does not
+/// make the file self-sufficient**. With several runs writing concurrently the
+/// daily file holds many "first events" interleaved, and none of them says
+/// which one is *yours*. That answer comes from the envelope and from the
+/// stderr line; this is the third piece, not a replacement for either.
+///
+/// # Complexity
+///
+/// `O(1)`.
+pub fn announce_run(command: &str, workspace: &std::path::Path) {
+    tracing::info!(
+        target: "magi_rs::headless",
+        command = command,
+        workspace = %workspace.display(),
+        "run start"
+    );
+}
+
 /// The single global handle.
 ///
 /// **A `OnceLock`, never a `Once`, and the difference is not style.**
@@ -329,4 +356,39 @@ pub fn init_logging(
     let _ = tracing::subscriber::set_global_default(subscriber);
 
     Ok(handle)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_first_event_names_the_command_and_the_workspace() {
+        // REQ-L63's third piece. A reader who opens the file cold has to be
+        // able to tell what produced these lines.
+        let line = testutil::capture(|| {
+            announce_run("consult", std::path::Path::new("/srv/project"));
+        });
+        assert!(
+            line.contains("consult"),
+            "the event does not name the command: {line}"
+        );
+        assert!(
+            line.contains("/srv/project"),
+            "the event does not name the workspace: {line}"
+        );
+    }
+
+    #[test]
+    fn a_different_invocation_produces_a_different_first_event() {
+        // Without this, an event that hardcodes one command satisfies the test
+        // above and stops describing the run it announces.
+        let one = testutil::capture(|| {
+            announce_run("query", std::path::Path::new("/a"));
+        });
+        let two = testutil::capture(|| {
+            announce_run("consult", std::path::Path::new("/b"));
+        });
+        assert_ne!(one, two, "the first event ignores what it was told");
+    }
 }
