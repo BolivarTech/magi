@@ -27,3 +27,33 @@ pub(crate) fn payload_of(line: &str) -> &str {
         None => line.split_once(' ').map(|(_, p)| p).unwrap_or(line),
     }
 }
+
+/// Builds one [`FileEntry`](crate::logging::retention::FileEntry) per age, in
+/// the order given.
+///
+/// A **positive** age is that many days *before* `today`; a **negative** age is
+/// a file dated in the future, which is the case R-L13e exists for. `mtime` is
+/// set to the epoch so the skew guard never fires by accident — a test that
+/// wants the guard sets `mtime` itself.
+///
+/// # Complexity
+///
+/// `O(n)` over the ages.
+pub(crate) fn build_entries(
+    ages_in_days: &[i64],
+    today: time::Date,
+) -> Vec<crate::logging::retention::FileEntry> {
+    use crate::logging::retention::FileEntry;
+    ages_in_days
+        .iter()
+        .map(|age| {
+            let date = today - time::Duration::days(*age);
+            FileEntry {
+                name: crate::logging::rotation::file_name(date),
+                date: Some(date),
+                mtime: std::time::SystemTime::UNIX_EPOCH,
+                size: 0,
+            }
+        })
+        .collect()
+}

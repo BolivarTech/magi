@@ -34,6 +34,7 @@
 #![deny(missing_docs)]
 
 pub mod chunk;
+pub mod retention;
 pub mod rotation;
 
 #[cfg(test)]
