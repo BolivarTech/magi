@@ -33,10 +33,56 @@
 #![cfg_attr(not(test), deny(clippy::unimplemented))]
 #![deny(missing_docs)]
 
+use std::path::PathBuf;
+
+/// Everything this subsystem can fail at.
+///
+/// **Defined here because no task owned it.** Three tasks of the plan return
+/// `Result<_, LoggingError>` — the compressor, the retention executor and
+/// `init_logging` — and none declared the type. `mod.rs` is the subsystem's API
+/// surface and is already one of the milestone's files, so putting it here
+/// keeps the file count honest.
+#[derive(Debug, thiserror::Error)]
+pub enum LoggingError {
+    /// The log directory could not be created.
+    #[error("cannot create the log directory {path}: {source}")]
+    DirCreate {
+        /// Directory that could not be created.
+        path: PathBuf,
+        /// Underlying failure.
+        source: std::io::Error,
+    },
+    /// A write, create or rename failed.
+    #[error("cannot write {path}: {source}")]
+    Write {
+        /// File the operation targeted.
+        path: PathBuf,
+        /// Underlying failure.
+        source: std::io::Error,
+    },
+    /// Compression, its read-back, or the comparison failed.
+    #[error("cannot compress {path}: {source}")]
+    Compress {
+        /// File being compressed, or the staged temporary.
+        path: PathBuf,
+        /// Underlying failure.
+        source: std::io::Error,
+    },
+    /// An operator-supplied filter directive could not be parsed.
+    #[error("invalid filter directive {directive:?}: {reason}")]
+    FilterInvalid {
+        /// The directive as written.
+        directive: String,
+        /// Why it was rejected.
+        reason: String,
+    },
+}
+
 pub mod chunk;
 pub mod render;
 pub mod retention;
 pub mod rotation;
+pub mod xz;
 
 #[cfg(test)]
 pub(crate) mod testutil;

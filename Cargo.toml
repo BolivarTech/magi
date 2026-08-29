@@ -114,6 +114,7 @@ tokio-util = { version = "0.7", default-features = false }
 # dev-dependency for test fixtures); promoted here for production use, no new
 # transitive dependency introduced.
 dunce = "1.0.5"
+lzma-rust2 = "=0.20.0"
 
 [dev-dependencies]
 # `test-util` unlocks `tokio::time::{pause, advance}` for a virtual/paused clock.
