@@ -16,6 +16,19 @@
 //! `render_event`. Reading the module name and chaining the two inside would
 //! break REQ-L64's ordering without anything failing to compile.
 //!
+//! # This module is NOT fully pure, and the plan says it is
+//!
+//! [`escape_for_line`] and [`header_of`] are pure. [`render_event`] is not: its
+//! signature carries no timestamp, so it reads the clock itself. The split is
+//! deliberate rather than an oversight — `header_of` takes the instant as a
+//! parameter precisely so the part a test needs to pin is pinnable, and
+//! `render_event` is exercised through a real dispatcher where the clock is the
+//! honest source anyway.
+//!
+//! Stated because the plan calls this module pure. A reader who takes that
+//! literally will look for a `Clock` parameter that does not exist and conclude
+//! something is missing.
+//!
 //! # Escaping is a security property, not formatting
 //!
 //! Without it, a message carrying a newline produces what *looks* like an
