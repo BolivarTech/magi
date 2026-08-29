@@ -334,6 +334,7 @@ pub fn init_logging(
         magi_layer::FileSink::new(std::sync::Arc::clone(&appender)),
         cfg.file_level,
         std::sync::Arc::clone(&audit),
+        std::sync::Arc::clone(&sink),
     );
     if let Some((tui_sink, tui_level)) = tui {
         // Called HERE, inside, before the subscriber is installed: installation

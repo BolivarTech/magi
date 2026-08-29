@@ -31,7 +31,7 @@ use tracing::{Event, Subscriber};
 use tracing_subscriber::layer::Context;
 use tracing_subscriber::Layer;
 
-use crate::logging::appender::{DailyAppender, Priority};
+use crate::logging::appender::{DailyAppender, Priority, Submitted};
 use crate::logging::auditor::{Auditor, Queued};
 use crate::logging::render::{escape_for_line, render_event};
 
@@ -67,23 +67,92 @@ impl TuiSink {
     }
 }
 
+/// A credential-free announcement the layer makes about ITSELF.
+///
+/// Separate from the screen branch on purpose: the screen branch is a filter
+/// over ordinary events and MS2 decides what passes it, while this is the
+/// subsystem reporting that it has stopped working. Routing the second through
+/// the first would let a filter silence the one message that must never be
+/// silenced.
+struct Reporter {
+    sink: Arc<dyn crate::logging::NoticeDelivery>,
+    /// Latched so the notice is emitted ONCE, not per discarded event.
+    ///
+    /// The failure modes here are all high-frequency by nature — a full channel
+    /// is full for every event that follows — so an unlatched notice would turn
+    /// one problem into a flood that hides it.
+    announced: std::sync::atomic::AtomicBool,
+}
+
+impl Reporter {
+    /// Announces `text` unless something has already been announced.
+    fn announce_once(&self, text: &str) {
+        use std::sync::atomic::Ordering;
+        if self
+            .announced
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return;
+        }
+        // Through the auditor like everything else that reaches a mouth. The
+        // text is ours and carries no credential, but exempting one path is how
+        // the next author adds a second one that does.
+        let (line, _) = Auditor::new().audit(text, "magi_rs::logging", None, 0);
+        self.sink.deliver(&line);
+    }
+
+    /// Turns a submission outcome into the notice it deserves, if any.
+    fn report(&self, outcome: Submitted) {
+        match outcome {
+            Submitted::Queued => {}
+            Submitted::DroppedFull => self.announce_once(
+                "warning: the log queue is full and events are being discarded; \
+                 the session continues and the log is now incomplete",
+            ),
+            Submitted::DroppedOversized => self.announce_once(
+                "warning: an event was too large for the log queue and was \
+                 discarded; the session continues and the log is now incomplete",
+            ),
+            Submitted::WriterGone => self.announce_once(
+                "warning: the log writer has stopped; this session continues \
+                 WITHOUT a log file",
+            ),
+            Submitted::WriterHung => self.announce_once(
+                "warning: the log writer stopped responding; this session \
+                 continues WITHOUT a log file",
+            ),
+        }
+    }
+}
+
 /// The only layer.
 pub struct MagiLayer {
     file: FileSink,
     file_level: tracing::Level,
     tui: Option<(TuiSink, tracing::Level)>,
     auditor: Arc<Auditor>,
+    reporter: Reporter,
 }
 
 impl MagiLayer {
     /// Builds the layer with its file branch.
     #[must_use]
-    pub fn new(file: FileSink, file_level: tracing::Level, auditor: Arc<Auditor>) -> Self {
+    pub fn new(
+        file: FileSink,
+        file_level: tracing::Level,
+        auditor: Arc<Auditor>,
+        notices: Arc<dyn crate::logging::NoticeDelivery>,
+    ) -> Self {
         Self {
             file,
             file_level,
             tui: None,
             auditor,
+            reporter: Reporter {
+                sink: notices,
+                announced: std::sync::atomic::AtomicBool::new(false),
+            },
         }
     }
 
@@ -156,9 +225,15 @@ impl<S: Subscriber> Layer<S> for MagiLayer {
             } else {
                 Priority::Low
             };
-            self.file
-                .appender
-                .submit(Queued::Line(escaped.clone()), priority, reserved);
+            // **The outcome is read, not discarded.** Every variant other than
+            // `Queued` means the log is losing events or has stopped, and a
+            // subsystem whose whole purpose is diagnosis must not be the one
+            // thing that fails without saying so.
+            self.reporter.report(self.file.appender.submit(
+                Queued::Line(escaped.clone()),
+                priority,
+                reserved,
+            ));
         }
         if let Some((tui, tui_level)) = self.tui.as_ref() {
             if level <= *tui_level {
@@ -169,9 +244,11 @@ impl<S: Subscriber> Layer<S> for MagiLayer {
         if let Some(alarm) = alarm {
             // The alarm consults NO filter: exemption is from the filters, not
             // from congestion.
-            self.file
-                .appender
-                .submit(Queued::Alarm(alarm), Priority::High, 0);
+            self.reporter.report(self.file.appender.submit(
+                Queued::Alarm(alarm),
+                Priority::High,
+                0,
+            ));
         }
     }
 }
@@ -217,6 +294,7 @@ mod tests {
             FileSink::new(Arc::clone(&appender)),
             tracing::Level::INFO,
             Arc::new(Auditor::new()),
+            Arc::new(crate::logging::DiscardDelivery),
         );
         assert_eq!(layer.max_level(), tracing::Level::INFO);
 

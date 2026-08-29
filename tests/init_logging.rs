@@ -192,3 +192,48 @@ fn a_backslash_is_escaped_once_and_not_twice() {
         "the path was escaped twice: {written}"
     );
 }
+
+/// The file branch announces that it stopped writing — once, not per event.
+///
+/// REQ-L37 and D-L21 ask for one notice when the file branch shuts down. The
+/// appender returns `Submitted::{DroppedFull, DroppedOversized, WriterGone,
+/// WriterHung}` and the layer used to throw the value away, so a log that had
+/// stopped looked exactly like a log with nothing to say — in the one subsystem
+/// whose purpose is telling you what happened.
+///
+/// **Once** is half the requirement and the harder half: every one of these
+/// conditions is high-frequency by nature (a full queue is full for every event
+/// that follows), so an unlatched notice turns one problem into a flood that
+/// buries it.
+#[test]
+fn the_layer_announces_a_dropped_event_once_and_not_per_event() {
+    let dir = tempfile::tempdir().unwrap();
+    let sink = Arc::new(Recording::default());
+    let cfg = LoggingConfig {
+        log_dir: dir.path().to_path_buf(),
+        file_level: tracing::Level::INFO,
+    };
+    let handle = init_logging(&cfg, sink.clone(), None).expect("init");
+
+    // Past the low channel's byte budget, so the appender discards it as
+    // oversized rather than queueing it. Prose, not padding: a long run of one
+    // character is what the auditor's shape pass calls a secret, and `***` is
+    // small enough to queue.
+    let huge = "the quick brown fox jumps over the lazy dog ".repeat(500_000);
+    tracing::info!(target: "magi_rs::agent", "{huge}");
+    tracing::info!(target: "magi_rs::agent", "{huge}");
+
+    drop(handle);
+    std::thread::sleep(std::time::Duration::from_millis(300));
+
+    let lines = sink.lines.lock().unwrap().clone();
+    let announcements: Vec<&String> = lines
+        .iter()
+        .filter(|l| l.contains("discarded") || l.contains("WITHOUT a log file"))
+        .collect();
+    assert_eq!(
+        announcements.len(),
+        1,
+        "the file branch must say once that it is losing events, and only once: {lines:?}"
+    );
+}
