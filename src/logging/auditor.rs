@@ -20,7 +20,13 @@
 //! type rather than another `Audited`, so "exempt from the audit" shows up in a
 //! diff instead of being an untyped convention.
 
+use std::collections::BTreeSet;
 use std::fmt;
+use std::ops::Range;
+use std::sync::Mutex;
+
+use crate::headless::output::secret_pattern_ranges;
+use crate::redact::{locate_userinfo, UserinfoLocation};
 
 /// A secret value that refuses to print itself.
 ///
@@ -216,9 +222,88 @@ pub enum Queued {
     Alarm(AuditExempt),
 }
 
+/// Base of the rolling hash. A prime above 256, so every byte gets its own
+/// digit; a composite base collapses whole classes of window to one value.
+const ROLLING_BASE: u64 = 1_000_003;
+
+/// Shortest value the exact pass will scan for.
+///
+/// Below this, ordinary text collides constantly and the log would come back
+/// half redacted. A shorter secret is still registered — pass 1 covers it — and
+/// the caller is told, which beats rejecting it and leaving it uncovered AND
+/// unannounced.
+pub const MIN_SECRET_BYTES: usize = 8;
+
+/// The scheme separator that opens a URL authority.
+const SCHEME_SEP: &str = "://";
+
+/// What the auditor keeps for one registered variant: never the value.
+///
+/// `(len, hash, pow)` and nothing else. `pow` is `base^(len-1)`, precomputed
+/// once so the roll is O(1) per byte.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Digest {
+    len: usize,
+    hash: u64,
+    pow: u64,
+}
+
+impl Digest {
+    /// Digests a variant, or `None` when it is too short to scan for.
+    ///
+    /// # Complexity
+    ///
+    /// `O(k)` over the variant.
+    fn of(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() < MIN_SECRET_BYTES {
+            return None;
+        }
+        let mut pow = 1u64;
+        for _ in 1..bytes.len() {
+            pow = pow.wrapping_mul(ROLLING_BASE);
+        }
+        Some(Self {
+            len: bytes.len(),
+            hash: window_hash(bytes),
+            pow,
+        })
+    }
+}
+
+/// The hash of a whole window: `sum bytes[i] * base^(len-1-i)`, wrapping at 2^64.
+///
+/// # Complexity
+///
+/// `O(k)`.
+fn window_hash(bytes: &[u8]) -> u64 {
+    let mut hash = 0u64;
+    for &b in bytes {
+        hash = hash.wrapping_mul(ROLLING_BASE).wrapping_add(u64::from(b));
+    }
+    hash
+}
+
+/// One registered secret: its name, and the digests of its variants.
+#[derive(Debug, Clone)]
+struct Registered {
+    name: SecretName,
+    digests: Vec<Digest>,
+}
+
 /// Redacts every line that leaves the process.
+///
+/// # What it never holds
+///
+/// Registered secrets are kept as `(length, hash, pow)`. The value is hashed on
+/// the way in and dropped; there is no masked copy to unmask, because there is
+/// no copy. That is the whole reason the comparison is a rolling hash and not a
+/// literal search: a `memmem` over the plaintext would need the plaintext.
 #[derive(Default)]
-pub struct Auditor {}
+pub struct Auditor {
+    registered: Mutex<Vec<Registered>>,
+    /// Alarms already raised, keyed by `(secret, target)`.
+    alarmed: Mutex<BTreeSet<(SecretName, &'static str)>>,
+}
 
 impl Auditor {
     /// Builds an auditor with nothing registered yet.
@@ -228,11 +313,66 @@ impl Auditor {
     }
 
     /// Registers a secret by name, from variants the caller already derived.
-    pub fn register_secret(&self, _name: SecretName, _variants: &[&str]) {
-        // Red-phase stub
+    ///
+    /// # Parameters
+    ///
+    /// * `name` — a program constant. Never the value.
+    /// * `variants` — the forms the value can take on a line: raw, escaped,
+    ///   percent-encoded. **The composer derives them**, not the auditor: the
+    ///   encoder that produced the value inside a URL is the one that has to
+    ///   produce the variant, and it lives on the resolving side.
+    ///
+    /// # Returns
+    ///
+    /// `false` when at least one variant was shorter than [`MIN_SECRET_BYTES`],
+    /// so the caller can warn. The name is registered either way.
+    ///
+    /// # Complexity
+    ///
+    /// `O(total variant bytes)`.
+    pub fn register_secret(&self, name: SecretName, variants: &[&str]) -> bool {
+        let mut all_long = true;
+        let mut digests = Vec::with_capacity(variants.len());
+        for v in variants {
+            match Digest::of(v.as_bytes()) {
+                Some(d) => digests.push(d),
+                None => all_long = false,
+            }
+        }
+        if let Ok(mut reg) = self.registered.lock() {
+            reg.push(Registered { name, digests });
+        }
+        all_long
     }
 
     /// Audits one line. **The only constructor of [`Audited`].**
+    ///
+    /// # Parameters
+    ///
+    /// * `line` — the rendered, not-yet-escaped text.
+    /// * `target` — where it was emitted; the alarm carries it so an operator
+    ///   knows where to go look.
+    /// * `cause` — the emitter's declared cause, if any.
+    /// * `reserved_len` — bytes reserved for this line **before** auditing.
+    ///
+    /// # Returns
+    ///
+    /// The redacted line, and an alarm when a registered secret was found.
+    ///
+    /// # The two passes do not chain, and that is the requirement
+    ///
+    /// Both run over the ORIGINAL text and contribute ranges; the ranges are
+    /// unioned and the substitution happens once. Chained, pass 1 could mutilate
+    /// part of a live secret inside a URL authority — the `user:pass@` where
+    /// `pass` is also a registered value — leaving a residue that no longer
+    /// equals the registered value. Pass 2 would then look for a literal pass 1
+    /// had just broken, fail to find it, and **the residue would ship**: a leak
+    /// created by the ORDER of two defences that each work alone.
+    ///
+    /// # Complexity
+    ///
+    /// `O(k*n)` with `k` registered variants and `n` the line length, plus
+    /// `O(m log m)` to order the ranges.
     #[must_use]
     pub fn audit(
         &self,
@@ -241,17 +381,203 @@ impl Auditor {
         cause: Option<CauseKey>,
         reserved_len: usize,
     ) -> (Audited, Option<AuditExempt>) {
-        // Red-phase stub: passes the line through untouched.
-        let _ = target;
+        let mut ranges = pattern_pass(line);
+        let (exact, found) = self.exact_pass(line);
+        ranges.extend(exact);
+
+        let alarm = found.and_then(|secret| self.alarm(secret, target));
+
         (
             Audited {
-                line: line.to_string(),
+                line: redact_ranges(line, ranges),
                 cause,
                 reserved_len,
             },
-            None,
+            alarm,
         )
     }
+
+    /// Pass 2: the ranges where a registered variant appears, and which secret.
+    ///
+    /// # Complexity
+    ///
+    /// `O(k*n)`, one rolling sweep per registered variant.
+    fn exact_pass(&self, line: &str) -> (Vec<Range<usize>>, Option<SecretName>) {
+        let Ok(reg) = self.registered.lock() else {
+            return (Vec::new(), None);
+        };
+        let bytes = line.as_bytes();
+        let mut out = Vec::new();
+        let mut found = None;
+        for entry in reg.iter() {
+            for d in &entry.digests {
+                if bytes.len() < d.len {
+                    continue;
+                }
+                let Some(first) = bytes.get(..d.len) else {
+                    continue;
+                };
+                let mut hash = window_hash(first);
+                if hash == d.hash {
+                    out.push(0..d.len);
+                    found.get_or_insert(entry.name);
+                }
+                for start in 1..=(bytes.len() - d.len) {
+                    let outgoing = bytes.get(start - 1).copied().unwrap_or(0);
+                    let incoming = bytes.get(start + d.len - 1).copied().unwrap_or(0);
+                    hash = hash
+                        .wrapping_sub(u64::from(outgoing).wrapping_mul(d.pow))
+                        .wrapping_mul(ROLLING_BASE)
+                        .wrapping_add(u64::from(incoming));
+                    if hash == d.hash {
+                        out.push(start..start + d.len);
+                        found.get_or_insert(entry.name);
+                    }
+                }
+            }
+        }
+        (out, found)
+    }
+
+    /// Raises an alarm the first time a secret is seen at a target.
+    ///
+    /// Deduplicated by `(secret, target)` inside the auditor, which is why the
+    /// sink needs a non-deduplicating delivery for it: a `&'static str` key
+    /// cannot express the pair.
+    ///
+    /// # Complexity
+    ///
+    /// `O(log n)` over the alarms already raised.
+    fn alarm(&self, secret: SecretName, target: &'static str) -> Option<AuditExempt> {
+        let mut seen = self.alarmed.lock().ok()?;
+        if !seen.insert((secret, target)) {
+            return None;
+        }
+        Some(AuditExempt { secret, target })
+    }
+
+    /// Whether a name has been registered at all.
+    #[cfg(test)]
+    pub(crate) fn is_registered(&self, name: SecretName) -> bool {
+        self.registered
+            .lock()
+            .map(|r| r.iter().any(|e| e.name == name))
+            .unwrap_or(false)
+    }
+
+    /// Whether a name participates in the exact (second) pass.
+    #[cfg(test)]
+    pub(crate) fn in_exact_pass(&self, name: SecretName) -> bool {
+        self.registered
+            .lock()
+            .map(|r| r.iter().any(|e| e.name == name && !e.digests.is_empty()))
+            .unwrap_or(false)
+    }
+
+    /// Renders the auditor's retained state, for the no-plaintext guard.
+    ///
+    /// `cfg(test)` only: in production this would be surface that PRINTS the
+    /// auditor's state, which is the last thing anyone should be able to reach.
+    #[cfg(test)]
+    pub(crate) fn debug_dump_state(&self) -> String {
+        self.registered
+            .lock()
+            .map(|r| format!("{r:?}"))
+            .unwrap_or_default()
+    }
+}
+
+/// Pass 1: the ranges the pattern matchers and the URL authority rule claim.
+///
+/// Both halves already exist in this crate and are reused rather than rewritten:
+/// [`secret_pattern_ranges`] carries the key shapes, [`locate_userinfo`] carries
+/// the RFC 3986 authority rule. Writing either traversal a second time is how
+/// two copies drift apart, and here drifting means one of them stops seeing a
+/// credential.
+///
+/// # Complexity
+///
+/// `O(n)`.
+fn pattern_pass(line: &str) -> Vec<Range<usize>> {
+    let mut out = secret_pattern_ranges(line);
+    out.extend(userinfo_ranges(line));
+    out
+}
+
+/// The byte ranges of every URL `userinfo` on the line.
+///
+/// **By position, never by content** (REQ-L46): the authority's last `@` closes
+/// the userinfo and everything before it goes. Locating it by what it looks like
+/// loses to double percent-encoding.
+///
+/// # Complexity
+///
+/// `O(n)`.
+fn userinfo_ranges(line: &str) -> Vec<Range<usize>> {
+    let mut out = Vec::new();
+    let bytes = line.as_bytes();
+    let mut from = 0usize;
+    while let Some(rel) = line.get(from..).and_then(|s| s.find(SCHEME_SEP)) {
+        let start = from + rel;
+        let mut end = start;
+        while end < bytes.len() && !is_url_terminator(bytes.get(end).copied().unwrap_or(0)) {
+            end += 1;
+        }
+        if let Some(url) = line.get(start..end) {
+            if let UserinfoLocation::Found { start: a, end: b } = locate_userinfo(url) {
+                out.push(start + a..start + b);
+            }
+        }
+        from = end.max(start + SCHEME_SEP.len());
+        if from >= line.len() {
+            break;
+        }
+    }
+    out
+}
+
+/// Whether a byte ends a URL when a log line embeds one in prose.
+///
+/// # Complexity
+///
+/// `O(1)`.
+fn is_url_terminator(b: u8) -> bool {
+    b == b' ' || b == b'\t' || b == b'"' || b == QUOTE || b == b'<' || b == b'>'
+}
+
+/// The single-quote byte, named so the match above reads without an escape.
+const QUOTE: u8 = 39;
+
+/// Applies every range once, merged, replacing each with [`REDACTED`].
+///
+/// # Complexity
+///
+/// `O(m log m)` to order, then `O(n)` to rebuild.
+fn redact_ranges(line: &str, mut ranges: Vec<Range<usize>>) -> String {
+    if ranges.is_empty() {
+        return line.to_string();
+    }
+    ranges.sort_by(|a, b| a.start.cmp(&b.start).then_with(|| a.end.cmp(&b.end)));
+    let mut merged: Vec<Range<usize>> = Vec::with_capacity(ranges.len());
+    for r in ranges {
+        match merged.last_mut() {
+            Some(last) if r.start <= last.end => last.end = last.end.max(r.end),
+            _ => merged.push(r),
+        }
+    }
+    let mut out = String::with_capacity(line.len());
+    let mut cursor = 0usize;
+    for r in merged {
+        if let Some(seg) = line.get(cursor..r.start) {
+            out.push_str(seg);
+        }
+        out.push_str(REDACTED);
+        cursor = r.end;
+    }
+    if let Some(tail) = line.get(cursor..) {
+        out.push_str(tail);
+    }
+    out
 }
 
 #[cfg(test)]
@@ -310,6 +636,102 @@ mod tests {
         let auditor = Auditor::new();
         let (none, _) = auditor.audit("x", "t", None, 0);
         assert!(none.cause().is_none(), "no cause means no cause");
+    }
+
+    #[test]
+    fn the_two_passes_do_not_chain_so_an_overlapping_secret_still_matches() {
+        let auditor = Auditor::new();
+        auditor.register_secret(SecretName::new("BASE_URL_PASSWORD"), &["hunter2-longer"]);
+        // Pass 1 (URL redaction) would mutilate the password inside the
+        // authority; pass 2 must still see the ORIGINAL line.
+        let (audited, alarm) = auditor.audit(
+            "GET https://bob:hunter2-longer@example.com/v1",
+            "magi_rs::logging",
+            None,
+            0,
+        );
+        assert!(
+            !audited.as_str().contains("hunter2-longer"),
+            "residue leaked: {}",
+            audited.as_str()
+        );
+        assert!(alarm.is_some(), "an exact live-secret match must alarm");
+    }
+
+    #[test]
+    fn the_auditor_never_materialises_a_secret_in_the_clear() {
+        let auditor = Auditor::new();
+        auditor.register_secret(SecretName::new("K"), &["s3cret-value-long-enough"]);
+        let dump = auditor.debug_dump_state();
+        // Without this the assertion below is vacuously true on an empty dump:
+        // a state that shows NOTHING trivially fails to show the secret.
+        assert!(
+            dump.contains("K"),
+            "the dump must actually show the registered state: {dump}"
+        );
+        assert!(
+            !dump.contains("s3cret-value-long-enough"),
+            "and it must not show the value: {dump}"
+        );
+    }
+
+    #[test]
+    fn a_short_secret_is_registered_excluded_from_pass_two_and_warned() {
+        let auditor = Auditor::new();
+        let all_long = auditor.register_secret(SecretName::new("SHORT"), &["abc"]);
+        assert!(!all_long, "a secret under 8 bytes must warn");
+        assert!(
+            auditor.is_registered(SecretName::new("SHORT")),
+            "it is still registered for pass 1"
+        );
+        assert!(
+            !auditor.in_exact_pass(SecretName::new("SHORT")),
+            "and excluded from pass 2"
+        );
+    }
+
+    #[test]
+    fn redaction_happens_before_chunking_over_the_whole_line() {
+        let auditor = Auditor::new();
+        auditor.register_secret(SecretName::new("K"), &["a-secret-that-straddles"]);
+        let line = format!(
+            "{}{}{}",
+            "x".repeat(4090),
+            "a-secret-that-straddles",
+            "y".repeat(10)
+        );
+        let (audited, _) = auditor.audit(&line, "magi_rs::logging", None, 0);
+        assert!(
+            !audited.as_str().contains("a-secret-that-straddles"),
+            "a secret past the chunk boundary would not match"
+        );
+    }
+
+    #[test]
+    fn a_foreign_string_is_redacted_like_a_native_one() {
+        let auditor = Auditor::new();
+        let (audited, _) = auditor.audit(
+            "magi-core: POST https://u:p@host/v1 failed",
+            "magi_core::http",
+            None,
+            0,
+        );
+        assert!(
+            !audited.as_str().contains("u:p@"),
+            "foreign events get the same treatment"
+        );
+    }
+
+    #[test]
+    fn a_line_with_nothing_to_hide_comes_back_unchanged_and_without_an_alarm() {
+        // Without this the tests above pass just as well against an auditor
+        // that redacts everything.
+        let auditor = Auditor::new();
+        auditor.register_secret(SecretName::new("K"), &["never-appears-here"]);
+        let clean = "2026-08-14T00:00:00Z INFO magi_rs::agent: ordinary line";
+        let (audited, alarm) = auditor.audit(clean, "magi_rs::agent", None, 0);
+        assert_eq!(audited.as_str(), clean);
+        assert!(alarm.is_none());
     }
 
     #[test]
