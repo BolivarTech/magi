@@ -32,9 +32,17 @@ pub(crate) fn payload_of(line: &str) -> &str {
 /// the order given.
 ///
 /// A **positive** age is that many days *before* `today`; a **negative** age is
-/// a file dated in the future, which is the case R-L13e exists for. `mtime` is
-/// set to the epoch so the skew guard never fires by accident — a test that
-/// wants the guard sets `mtime` itself.
+/// a file dated in the future, which is the case R-L13e exists for.
+///
+/// # Why `mtime` is set *before* the epoch
+///
+/// The tests hand `plan` a `now` of `SystemTime::UNIX_EPOCH`. An `mtime` of the
+/// epoch would then read as "written zero seconds ago", the skew guard would
+/// protect **every** fixture file, and every scenario would come back all
+/// `Keep` — which is what happened, and it looked exactly like an
+/// implementation bug rather than a fixture one. Placing `mtime` two grace
+/// periods before the epoch makes the fixture unambiguously old; a test that
+/// wants the guard to fire sets `mtime` itself.
 ///
 /// # Complexity
 ///
@@ -51,7 +59,10 @@ pub(crate) fn build_entries(
             FileEntry {
                 name: crate::logging::rotation::file_name(date),
                 date: Some(date),
-                mtime: std::time::SystemTime::UNIX_EPOCH,
+                mtime: std::time::SystemTime::UNIX_EPOCH
+                    - std::time::Duration::from_secs(
+                        crate::logging::retention::MTIME_SKEW_GRACE_SECS * 2,
+                    ),
                 size: 0,
             }
         })
