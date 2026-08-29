@@ -109,3 +109,146 @@ pub mod xz;
 
 #[cfg(test)]
 pub(crate) mod testutil;
+
+/// Configuration of the logging subsystem.
+#[derive(Debug, Clone)]
+pub struct LoggingConfig {
+    /// Where the daily files live.
+    pub log_dir: std::path::PathBuf,
+    /// Level written to the file.
+    pub file_level: tracing::Level,
+}
+
+/// What a caller keeps after initialising.
+///
+/// Cheap to clone: the second `init_logging` call returns the same handle rather
+/// than a second subsystem.
+#[derive(Clone)]
+pub struct LoggingHandle {
+    appender: std::sync::Arc<appender::DailyAppender>,
+}
+
+impl LoggingHandle {
+    /// Advances the health window. **A no-op in MS1.**
+    ///
+    /// The method exists from MS1 because MS2 puts it to use without changing a
+    /// signature the three startup surfaces already return. Nothing feeds the
+    /// tracker here: `cause` is always `None` in MS1, so there is nothing to
+    /// advance. Same argument as `Audited`'s `cause` field — what is reserved is
+    /// the mechanism, never invented content.
+    pub fn health_tick(&self, _now: std::time::Instant) {}
+
+    /// Drains any pending health transitions. **A no-op in MS1.**
+    pub fn health_flush(&self) {}
+
+    /// How many events the appender has dropped.
+    #[must_use]
+    pub fn dropped(&self) -> u64 {
+        self.appender.dropped()
+    }
+}
+
+/// The single global handle.
+///
+/// **A `OnceLock`, never a `Once`, and the difference is not style.**
+/// `std::sync::Once` **poisons** if its closure panics: every later
+/// `call_once` panics too, forever. On a path where creating the directory can
+/// fail, that turns a recoverable failure into a dead process on the second
+/// attempt — REQ-L35 violated by the very mechanism chosen to protect it. A
+/// `OnceLock` does not poison: a failed attempt leaves the cell empty and the
+/// next call tries again.
+static HANDLE: std::sync::OnceLock<LoggingHandle> = std::sync::OnceLock::new();
+
+/// Brings the subsystem up. **Idempotent by construction.**
+///
+/// # Parameters
+///
+/// * `cfg` — where and at what level to write.
+/// * `sink` — **built by the caller**, never here: a failure before it existed
+///   would have nowhere to report and would end in an `eprintln!` that writes
+///   over the TUI's alternate screen.
+/// * `tui` — the screen branch. `None` in MS1; the parameter exists from MS1 so
+///   MS2 does not reopen this signature.
+///
+/// # Returns
+///
+/// The handle. A second call returns the **same** handle and `Ok`.
+///
+/// # A second call with a DIFFERENT configuration is ignored, and says so
+///
+/// The new `log_dir` or level is not applied and the caller gets no error. That
+/// is deliberate — reconfiguring a global subscriber hot is a mechanism MS1 does
+/// not have and nobody asked for — but the warning **names that the
+/// configuration was discarded**, not merely that a second call happened.
+/// Without that, an operator changes `log_dir`, sees a generic notice, and hunts
+/// for a file that was never moved.
+///
+/// Returning `Err` would force every caller to decide whether that is fatal, and
+/// the answer is always no: logging is already running, which is what they
+/// wanted.
+///
+/// # Errors
+///
+/// [`LoggingError::DirCreate`] if the log directory cannot be created.
+///
+/// # Complexity
+///
+/// `O(1)` after the first call.
+pub fn init_logging(
+    cfg: &LoggingConfig,
+    sink: std::sync::Arc<dyn NoticeDelivery>,
+    tui: Option<(magi_layer::TuiSink, tracing::Level)>,
+) -> Result<LoggingHandle, LoggingError> {
+    if let Some(existing) = HANDLE.get() {
+        // `set_global_default` PANICS if a subscriber is already installed, so a
+        // second call — a test that starts twice, a `main` that retries, a new
+        // surface that does not know another already initialised — would abort
+        // the process. REQ-L35 says logging never aborts.
+        let (line, _) = auditor::Auditor::new().audit(
+            "notice: logging was already initialised; this call's configuration \
+             (log directory and level) was DISCARDED and the running one kept",
+            "magi_rs::logging",
+            None,
+            0,
+        );
+        sink.deliver(&line);
+        return Ok(existing.clone());
+    }
+
+    // Step 2: resolve and create the directory, open the file.
+    let appender = std::sync::Arc::new(appender::DailyAppender::new(&cfg.log_dir)?);
+
+    // Step 3: resolve the zone offset. Constant in MS1 (UTC) and cannot fail.
+    // The step keeps its number because THE ORDER IS THE CONTRACT.
+
+    // Step 4: build the auditor and register the environment's secrets.
+    let audit = std::sync::Arc::new(auditor::Auditor::new());
+
+    // Step 5: mount the layer and install the subscriber.
+    let mut layer = magi_layer::MagiLayer::new(
+        magi_layer::FileSink::new(std::sync::Arc::clone(&appender)),
+        cfg.file_level,
+        std::sync::Arc::clone(&audit),
+    );
+    if let Some((tui_sink, tui_level)) = tui {
+        // Called HERE, inside, before the subscriber is installed: installation
+        // consumes the layer, so afterwards a `self -> Self` builder has nothing
+        // left to apply to.
+        layer = layer.with_tui(tui_sink, tui_level);
+    }
+
+    let handle = LoggingHandle {
+        appender: std::sync::Arc::clone(&appender),
+    };
+    let _ = HANDLE.set(handle.clone());
+
+    use tracing_subscriber::layer::SubscriberExt as _;
+    let subscriber = tracing_subscriber::registry().with(layer);
+    // Deliberately not `set_global_default`, which panics on a second install:
+    // this path is already guarded by the `OnceLock` above, and the result is
+    // discarded so a race between two first-callers degrades to one of them
+    // winning rather than to a panic.
+    let _ = tracing::subscriber::set_global_default(subscriber);
+
+    Ok(handle)
+}

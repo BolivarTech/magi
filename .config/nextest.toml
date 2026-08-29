@@ -177,7 +177,7 @@
 # Every pattern above is `test(/…::/)`, and **not one of them can match it**: an integration
 # test's name has no `::` path — it is the bare function name, `init_scaffolds_…`. Reaching it
 # by name would mean `test(/init_scaffolds/)`, which is a leaf pattern of the exact kind this
-# file has now watched rot three times. `binary(workdir_flag) | binary(auditor_isolation)` is the subsystem-level
+# file has now watched rot three times. `binary(workdir_flag) | binary(auditor_isolation) | binary(init_logging)` is the subsystem-level
 # equivalent for an integration target: renaming or adding a test inside the file cannot drop
 # it out of the group, and only deleting the file itself changes what it matches.
 #
@@ -195,5 +195,5 @@
 heavy = { max-threads = 3 }
 
 [[profile.default.overrides]]
-filter = 'test(/vault::/) | test(/system::/) | test(/agent::/) | test(/memory::/) | test(/tools::/) | test(/headless_runner::/) | binary(workdir_flag) | binary(auditor_isolation)'
+filter = 'test(/vault::/) | test(/system::/) | test(/agent::/) | test(/memory::/) | test(/tools::/) | test(/headless_runner::/) | binary(workdir_flag) | binary(auditor_isolation) | binary(init_logging)'
 test-group = "heavy"
