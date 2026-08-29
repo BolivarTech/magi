@@ -48,6 +48,12 @@ sha2 = "0.10"
 base64 = "0.22"
 rand = "0.8"
 urlencoding = "2.1"
+# Pinned exactly, and the pin is load-bearing rather than housekeeping: 0.3.54
+# is unresolvable on the index today because it requires `time-macros =0.2.32`,
+# which is not published. `macros` is deliberately not enabled — `date!()` and
+# `format_description!()` are conveniences the rotation module does not need,
+# and enabling them is what drags that broken requirement back in.
+time = { version = "=0.3.53", default-features = false, features = ["std", "formatting"] }
 cryptovault = "0.3.0"  # fundación criptográfica auditada (R-V01); reemplaza src/utils/crypto.rs (MS1)
 zeroize = "1.8"
 rusqlite = { version = "0.31", features = ["bundled"] }

@@ -5,6 +5,7 @@
 //! magi-rs library: exposes the `magi`, `vault`, and `headless` subsystems for fuzzing,
 //! coverage, and tests, as well as the `main.rs` binary.
 pub mod headless;
+pub mod logging;
 pub mod magi;
 pub mod notices;
 pub mod redact;
