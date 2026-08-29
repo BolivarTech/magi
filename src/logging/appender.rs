@@ -119,7 +119,11 @@ pub enum Submitted {
 struct Channel {
     tx: SyncSender<Queued>,
     budget: usize,
-    reserved: AtomicUsize,
+    /// **Shared with the writer**, which is the half that gives bytes back.
+    /// A reservation is a measure of what is IN the queue, so it has to fall as
+    /// the queue drains; owned solely by the emitter side it only ever rises,
+    /// and the budget silently becomes a lifetime quota.
+    reserved: Arc<AtomicUsize>,
 }
 
 impl Channel {
@@ -220,16 +224,18 @@ impl DailyAppender {
         let wake = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
         let (high_tx, high_rx) = sync_channel(LOG_CHANNEL_HIGH_SLOTS);
         let (low_tx, low_rx) = sync_channel(LOG_CHANNEL_LOW_SLOTS);
+        let high_reserved = Arc::new(AtomicUsize::new(0));
+        let low_reserved = Arc::new(AtomicUsize::new(0));
         Ok(Self {
             high: Channel {
                 tx: high_tx,
                 budget: LOG_CHANNEL_HIGH_BYTES,
-                reserved: AtomicUsize::new(0),
+                reserved: Arc::clone(&high_reserved),
             },
             low: Channel {
                 tx: low_tx,
                 budget: LOG_CHANNEL_LOW_BYTES,
-                reserved: AtomicUsize::new(0),
+                reserved: Arc::clone(&low_reserved),
             },
             dropped: Arc::new(AtomicU64::new(0)),
             writer_gone: Arc::new(AtomicU64::new(0)),
@@ -238,6 +244,8 @@ impl DailyAppender {
                 dir.to_path_buf(),
                 high_rx,
                 low_rx,
+                high_reserved,
+                low_reserved,
                 Arc::clone(&heartbeat),
                 Arc::clone(&wake),
             )),
@@ -409,9 +417,28 @@ fn spawn_writer(
     dir: PathBuf,
     high: Receiver<Queued>,
     low: Receiver<Queued>,
+    high_reserved: Arc<AtomicUsize>,
+    low_reserved: Arc<AtomicUsize>,
     heartbeat: Arc<std::sync::Mutex<std::time::Instant>>,
     wake: Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
 ) -> std::thread::JoinHandle<()> {
+    /// What an item reserved, read off the item itself.
+    ///
+    /// **One source of truth.** The emitter reserves `Audited::reserved_len`
+    /// and the writer releases the same field, so the two halves cannot drift
+    /// into subtracting a different number than was added. An alarm reserves
+    /// nothing (`submit` is called with `0`) and therefore releases nothing.
+    ///
+    /// # Complexity
+    ///
+    /// `O(1)`.
+    fn reserved_of(item: &Queued) -> usize {
+        match item {
+            Queued::Line(a) => a.reserved_len(),
+            Queued::Alarm(_) => 0,
+        }
+    }
+
     /// Refreshes the mark an emitter reads to decide the writer is alive.
     fn stamp(hb: &std::sync::Mutex<std::time::Instant>) {
         if let Ok(mut m) = hb.lock() {
@@ -476,7 +503,14 @@ fn spawn_writer(
             for _ in 0..HIGH_BATCH {
                 match high.try_recv() {
                     Ok(item) => {
-                        if !write_with_one_retry(&mut sink, &item, &heartbeat) {
+                        let held = reserved_of(&item);
+                        let written = write_with_one_retry(&mut sink, &item, &heartbeat);
+                        // Released whether or not the write landed: the bytes
+                        // have left the queue either way, and holding them for a
+                        // line that will never be written charges the budget for
+                        // an event nobody can read.
+                        high_reserved.fetch_sub(held, Ordering::AcqRel);
+                        if !written {
                             return;
                         }
                         did_work = true;
@@ -490,7 +524,10 @@ fn spawn_writer(
             }
             match low.try_recv() {
                 Ok(item) => {
-                    if !write_with_one_retry(&mut sink, &item, &heartbeat) {
+                    let held = reserved_of(&item);
+                    let written = write_with_one_retry(&mut sink, &item, &heartbeat);
+                    low_reserved.fetch_sub(held, Ordering::AcqRel);
+                    if !written {
                         return;
                     }
                     did_work = true;
@@ -906,6 +943,55 @@ mod tests {
     }
 
     #[test]
+    fn the_writer_gives_the_bytes_back_so_the_budget_is_not_a_lifetime_quota() {
+        // **The defect this guards makes the log die silently.** `commit()` marks
+        // the reservation so `Drop` does not subtract, on the promise that the
+        // writer releases it once written. If the writer never does, `reserved`
+        // only ever grows: past the channel's budget every later event takes the
+        // `DroppedFull` path forever, and nothing is written again for the life
+        // of the process. At a typical ~120-byte INFO line that is a few hundred
+        // thousand events -- a long session, not a hypothetical.
+        //
+        // The unit test below (`a_reservation_dropped_without_committing_...`)
+        // is correct about the Channel in isolation: there, committing IS handing
+        // the bytes on. What was missing is the other half of that hand-off, and
+        // no test at that level could see it.
+        let dir = tempdir().unwrap();
+        let appender = DailyAppender::new(dir.path()).unwrap();
+
+        // Far under the budget, so a refusal here can only mean a leak.
+        let mut submitted = 0usize;
+        for i in 0..200 {
+            let (item, len) = line(&format!("event number {i}"));
+            assert_eq!(
+                appender.submit(item, Priority::Low, len),
+                Submitted::Queued,
+                "event {i} was refused with the budget nowhere near spent"
+            );
+            submitted += len;
+        }
+        // The fixture must have reserved something, or asserting it returns to
+        // zero is asserting that nothing happened.
+        assert!(submitted > 0, "the fixture reserved no bytes at all");
+
+        // **Wait on the CONDITION with a generous failure deadline**, never on a
+        // duration: under the `heavy` nextest group a fixed sleep is a guess.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while appender.reserved(Priority::Low) != 0 && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+
+        assert_eq!(
+            appender.reserved(Priority::Low),
+            0,
+            "the writer wrote {submitted} bytes and returned none of them, so the \
+             channel's byte budget is a lifetime quota rather than a depth"
+        );
+        assert_eq!(appender.dropped(), 0, "nothing should have been refused");
+        appender.shutdown();
+    }
+
+    #[test]
     fn a_reservation_dropped_without_committing_returns_its_bytes() {
         // The guard, not the manual release: between `fetch_add` and `try_send`
         // there is code that can unwind, and a hand-written release is lost on
@@ -913,7 +999,7 @@ mod tests {
         let channel = Channel {
             tx: sync_channel(1).0,
             budget: 100,
-            reserved: AtomicUsize::new(0),
+            reserved: Arc::new(AtomicUsize::new(0)),
         };
         {
             let _r = channel.reserve(40).expect("fits");
