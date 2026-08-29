@@ -84,6 +84,7 @@ pub mod chunk;
 pub mod render;
 pub mod retention;
 pub mod rotation;
+pub mod sweep;
 pub mod xz;
 
 #[cfg(test)]
