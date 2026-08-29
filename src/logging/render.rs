@@ -23,25 +23,181 @@
 //! endpoint controls, could then **forge log entries** — including one
 //! imitating an auditor alarm — with nothing to tell the false from the real.
 
+use std::fmt::Write as _;
+
 use time::OffsetDateTime;
+use tracing::field::{Field, Visit};
 use tracing::{Event, Level};
 
+/// Collects an event's fields, keeping the message apart from the rest.
+#[derive(Default)]
+struct FieldWriter {
+    message: String,
+    fields: String,
+}
+
+impl FieldWriter {
+    /// Appends ` name=value`, the shape the tests and the operator read.
+    fn push_field(&mut self, name: &str, value: &str) {
+        let _ = write!(self.fields, " {name}={value}");
+    }
+}
+
+impl Visit for FieldWriter {
+    fn record_str(&mut self, field: &Field, value: &str) {
+        if field.name() == MESSAGE_FIELD {
+            self.message.push_str(value);
+        } else {
+            self.push_field(field.name(), value);
+        }
+    }
+
+    fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+        // `{:?}` is the fallback for every type that is not a plain string.
+        // A string reaches `record_str` above and keeps its quotes off, which
+        // is what makes `attempt=2` read as `attempt=2` and not `attempt="2"`.
+        if field.name() == MESSAGE_FIELD {
+            let _ = write!(self.message, "{value:?}");
+        } else {
+            let _ = write!(self.fields, " {}={:?}", field.name(), value);
+        }
+    }
+}
+
+/// The field `tracing` uses for an event's message.
+const MESSAGE_FIELD: &str = "message";
+/// The characters escaping rewrites, and their replacements.
+///
+/// Named because the literals are unreadable inline: a match arm on a raw
+/// backslash beside a match arm on an escaped one is the kind of line a reader
+/// has to count characters to parse.
+const BACKSLASH: char = '\\';
+/// The line terminator an unescaped foreign string would use to forge a line.
+const NEWLINE: char = '\n';
+/// Carriage return, which some terminals also treat as a line break.
+const CARRIAGE_RETURN: char = '\r';
+/// Horizontal tab.
+const TAB: char = '\t';
+/// Replacement for [`BACKSLASH`].
+const ESCAPED_BACKSLASH: &str = "\\\\";
+/// Replacement for [`NEWLINE`].
+const ESCAPED_NEWLINE: &str = "\\n";
+/// Replacement for [`CARRIAGE_RETURN`].
+const ESCAPED_CARRIAGE_RETURN: &str = "\\r";
+/// Replacement for [`TAB`].
+const ESCAPED_TAB: &str = "\\t";
+/// Opening of the escaped-unicode form used for every other control character.
+const ESCAPE_UNICODE_OPEN: &str = "\\u{";
+
+/// Separator between the target and the message in a header.
+const TARGET_SEPARATOR: &str = ": ";
+
 /// Renders an event to text. Stage 1: nothing is escaped here.
+///
+/// # Parameters
+///
+/// * `event` — the event as the dispatcher hands it over.
+///
+/// # Returns
+///
+/// `<header><message><space-separated fields>`, with every byte exactly as the
+/// emitter wrote it. **Nothing is escaped**: escaping is stage 3, and the
+/// auditor runs between the two.
+///
+/// # Complexity
+///
+/// `O(n)` over the event's rendered length.
 #[must_use]
-pub fn render_event(_event: &Event<'_>) -> String {
-    String::new() // Red-phase stub
+pub fn render_event(event: &Event<'_>) -> String {
+    let meta = event.metadata();
+    let mut writer = FieldWriter::default();
+    event.record(&mut writer);
+    let mut line = header_of(*meta.level(), meta.target(), OffsetDateTime::now_utc());
+    line.push_str(&writer.message);
+    line.push_str(&writer.fields);
+    line
 }
 
 /// Escapes a rendered line so it can never span more than one physical line.
+///
+/// # Parameters
+///
+/// * `rendered` — the audited text of stage 1.
+///
+/// # Returns
+///
+/// The same text with the backslash doubled, the three common control
+/// characters written as `\n`, `\r`, `\t`, and every other control
+/// character as `\u{h}` in lowercase hex.
+///
+/// # Why this is a security property and not formatting
+///
+/// A newline that survives produces what LOOKS like an independent log line, so
+/// a foreign string — a magi-core error, a body an endpoint controls — could
+/// forge entries, including one imitating an auditor alarm, with nothing to
+/// tell the false from the real.
+///
+/// # Complexity
+///
+/// `O(n)` over the input.
 #[must_use]
-pub fn escape_for_line(_rendered: &str) -> String {
-    String::new() // Red-phase stub
+pub fn escape_for_line(rendered: &str) -> String {
+    let mut out = String::with_capacity(rendered.len());
+    for c in rendered.chars() {
+        match c {
+            // The backslash goes first: escaping it after the others would
+            // double the backslashes they just introduced.
+            BACKSLASH => out.push_str(ESCAPED_BACKSLASH),
+            NEWLINE => out.push_str(ESCAPED_NEWLINE),
+            CARRIAGE_RETURN => out.push_str(ESCAPED_CARRIAGE_RETURN),
+            TAB => out.push_str(ESCAPED_TAB),
+            c if c.is_control() => {
+                let _ = write!(out, "{ESCAPE_UNICODE_OPEN}{:x}}}", c as u32);
+            }
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 /// Builds the header the chunker budgets against.
+///
+/// # Parameters
+///
+/// * `level` — the event's level.
+/// * `target` — the emitting module path.
+/// * `ts` — the instant, converted to UTC before rendering.
+///
+/// # Returns
+///
+/// `YYYY-MM-DDTHH:MM:SSZ LEVEL target: `, **ending in the separating space**.
+/// The trailing space is part of the contract: `chunk::split` budgets against
+/// `4096 - header.len()`, so a header that stopped one byte short would leave
+/// every payload one byte too long.
+///
+/// # Why this lives here and not in the chunker
+///
+/// Two modules cannot each hold half the header format. This one produces it,
+/// the chunker measures it, and the budget is computed over the same string.
+///
+/// # Complexity
+///
+/// `O(1)`.
 #[must_use]
-pub fn header_of(_level: Level, _target: &str, _ts: OffsetDateTime) -> String {
-    String::new() // Red-phase stub
+pub fn header_of(level: Level, target: &str, ts: OffsetDateTime) -> String {
+    let ts = ts.to_offset(time::UtcOffset::UTC);
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z {} {}{}",
+        ts.year(),
+        u8::from(ts.month()),
+        ts.day(),
+        ts.hour(),
+        ts.minute(),
+        ts.second(),
+        level,
+        target,
+        TARGET_SEPARATOR
+    )
 }
 
 #[cfg(test)]
