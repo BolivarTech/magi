@@ -160,11 +160,15 @@ fn restrict(path: &Path) -> Result<(), LoggingError> {
 
 /// The `.xz` name a source file compresses into.
 ///
+/// `pub(crate)` rather than `pub`: its consumer is the retention executor in
+/// this same subsystem, and a test is not a consumer. Nothing outside the crate
+/// has any reason to derive this name.
+///
 /// # Complexity
 ///
 /// `O(1)`.
 #[must_use]
-pub fn compressed_path(src: &Path) -> PathBuf {
+pub(crate) fn compressed_path(src: &Path) -> PathBuf {
     let mut name = src.as_os_str().to_os_string();
     name.push(".");
     name.push(XZ_EXTENSION);
