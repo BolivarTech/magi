@@ -165,6 +165,47 @@ impl Audited {
         self.cause
     }
 
+    /// Rewrites the text, keeping everything else.
+    ///
+    /// **A transformation, never a second constructor.** It takes `self` by
+    /// value, so it can only be applied to something that already went through
+    /// [`Auditor::audit`] — which remains the only path from an unaudited
+    /// `&str`. Stage 3's escaping uses this, and if it produced a `String` the
+    /// escaped text would live outside the type that proves it was audited.
+    ///
+    /// # Complexity
+    ///
+    /// `O(n)` plus whatever `f` costs.
+    #[must_use]
+    pub fn map_line(mut self, f: impl FnOnce(&str) -> String) -> Self {
+        self.line = f(&self.line);
+        self
+    }
+
+    /// Cuts the text to `max` bytes for display, on a character boundary.
+    ///
+    /// The marker names the original length, so a reader can tell a truncated
+    /// line from a short one.
+    ///
+    /// # Complexity
+    ///
+    /// `O(max)`.
+    #[must_use]
+    pub fn truncate_for_display(self, max: usize) -> Self {
+        if self.line.len() <= max {
+            return self;
+        }
+        let original = self.line.len();
+        self.map_line(|line| {
+            let mut cut = max;
+            while cut > 0 && !line.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            let head = line.get(..cut).unwrap_or("");
+            format!("{head}… [truncated, {original} bytes]")
+        })
+    }
+
     /// The byte count reserved for this line **before** it was audited.
     ///
     /// The writer releases exactly this, never the length it is holding.

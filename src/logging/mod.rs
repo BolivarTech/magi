@@ -78,9 +78,29 @@ pub enum LoggingError {
     },
 }
 
+/// Delivers an audited line to a screen.
+///
+/// **Declared here, in the library, and not as `NoticeSink`.** The sink trait
+/// lives in the binary crate, which this module cannot see; inverting the
+/// dependency would make `logging` depend on the agent. The binary's sink is
+/// adapted to this in MS2, which is also where the screen branch is wired.
+pub trait NoticeDelivery: Send + Sync {
+    /// Shows one audited line. **Consults no filter**: exemption from the
+    /// filters is what the alarm path buys.
+    fn deliver(&self, line: &auditor::Audited);
+}
+
+/// A delivery that shows nothing, for the tests and for MS1's absent screen.
+pub struct DiscardDelivery;
+
+impl NoticeDelivery for DiscardDelivery {
+    fn deliver(&self, _line: &auditor::Audited) {}
+}
+
 pub mod appender;
 pub mod auditor;
 pub mod chunk;
+pub mod magi_layer;
 pub mod render;
 pub mod retention;
 pub mod rotation;
