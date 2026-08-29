@@ -1348,6 +1348,10 @@ mod tests {
                 self.record(msg);
             }
         }
+
+        fn emit(&self, msg: &Audited) {
+            self.record(msg);
+        }
     }
 
     impl RecordingNoticeSink {

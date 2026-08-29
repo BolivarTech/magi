@@ -2,6 +2,15 @@
 // Version: 0.17.0
 // Date: 2026-08-27
 
+// The strict lint set of `src/logging/`, applied HERE because this file
+// implements `NoticeSink` and its contract says an implementation must not
+// panic. `Cargo.toml` sets `panic = "abort"` in release, so a panicking sink
+// kills the process — and a contract stated in a rustdoc that no lint enforces
+// in the file where it is violated is a convention, not a guarantee.
+#![cfg_attr(not(test), deny(clippy::unwrap_used))]
+#![cfg_attr(not(test), deny(clippy::expect_used))]
+#![cfg_attr(not(test), deny(clippy::panic))]
+
 //! This module implements the Terminal User Interface using Ratatui.
 
 use crate::agent::{Agent, AgentRunConfig, ApprovalRequest, StreamPiece};
@@ -245,6 +254,12 @@ impl crate::agent::mode_classifier::NoticeSink for TuiNoticeSink {
                 return;
             }
         }
+        self.route(msg.as_str());
+    }
+
+    /// Delivers without deduplicating; the auditor already did it, by
+    /// `(secret, target)`, which a `'static` key cannot express.
+    fn emit(&self, msg: &magi_rs::logging::auditor::Audited) {
         self.route(msg.as_str());
     }
 }

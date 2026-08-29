@@ -60,7 +60,7 @@ const NOTICE_TARGET: &str = "magi_rs::agent::mode_classifier";
 /// Notices do not travel the appender's channel, so they reserve nothing.
 const NO_RESERVATION: usize = 0;
 
-use magi_rs::logging::auditor::{Audited, Auditor};
+use magi_rs::logging::auditor::{render_alarm, AuditExempt, Audited, Auditor};
 
 /// Emitter of one-time notices, **injectable**.
 ///
@@ -82,16 +82,28 @@ pub trait NoticeSink: Send + Sync {
     /// handing this a raw `String` does not compile (REQ-L48).
     fn once(&self, key: &'static str, msg: &Audited);
 
-    // `emit` — deliver WITHOUT deduplicating — belongs to this trait and is
-    // deliberately NOT here yet. Its consumer is the auditor's alarm, which is
-    // task 3.3; declaring it now would be API surface with nothing calling it,
-    // which G2 forbids and which no `#[allow]` may paper over.
-    //
-    // Splitting it out is safe in a way the `once` signature change is not:
-    // changing `once` is BREAKING and has to land in one sweep or half the
-    // implementations keep compiling against a contract the production path no
-    // longer honours. Adding a required method later is additive and fails
-    // LOUDLY — every implementation stops compiling until it is updated.
+    /// Delivers WITHOUT deduplicating, because the caller already did it.
+    ///
+    /// The auditor's alarm dedupes by `(secret, target)` inside itself, and a
+    /// `&'static str` key cannot express that pair: concatenating two statics
+    /// yields a `String`, which is not `'static`. Routing an alarm through
+    /// [`once`](Self::once) would therefore either collapse every secret into
+    /// one alarm or leak a `String` per pair to fake the lifetime.
+    ///
+    /// # Implementations must not panic
+    ///
+    /// This is part of the signature, not advice. `Cargo.toml` sets
+    /// `panic = "abort"` in `[profile.release]`, so in the shipped binary there
+    /// is no unwind to catch: a panicking sink kills the process, and REQ-L35
+    /// says logging never aborts. An earlier design wrapped delivery in
+    /// `catch_unwind`, which would have worked in tests and vanished in
+    /// release — worse than nothing, because it would have been trusted.
+    ///
+    /// The lint attributes that make this enforceable live in **every file that
+    /// implements this trait**, not only in `src/logging/`: a contract stated in
+    /// a rustdoc that no lint enforces where it is violated is a convention, not
+    /// a guarantee.
+    fn emit(&self, msg: &Audited);
 }
 
 /// Emits `msg` the first time it is called with `key`; subsequent calls are no-ops for that
@@ -108,6 +120,10 @@ impl NoticeSink for ProcessNoticeSink {
         if seen.insert(key) {
             eprintln!("{}", msg.as_str());
         }
+    }
+
+    fn emit(&self, msg: &Audited) {
+        eprintln!("{}", msg.as_str());
     }
 }
 
@@ -142,12 +158,43 @@ impl ProviderClassifier {
             auditor,
         }
     }
+
+    /// Delivers an auditor alarm, if there was one.
+    ///
+    /// **Masking and alarming are both required, never one** (REQ-L50): masking
+    /// alone leaves the leak in place forever and turns the net into a carpet;
+    /// alarming alone would emit the secret anyway. The alarm goes out through
+    /// `emit`, not `once`, because the auditor already deduplicated it by
+    /// `(secret, target)`.
+    ///
+    /// # The alarm text goes through the auditor, and the plan says it does not
+    ///
+    /// `emit` takes an [`Audited`], and [`Auditor::audit`] is its only
+    /// constructor (REQ-L48) — so producing one for the alarm means auditing it.
+    /// A second constructor is exactly what that requirement forbids, so this is
+    /// the cheaper contradiction to accept.
+    ///
+    /// It is safe and it is not what the plan was guarding against. The text is
+    /// built by [`render_alarm`] from a [`SecretName`] and a target, both program
+    /// constants, so there is nothing in it for the passes to find. What the
+    /// plan forbids is the alarm re-entering as an ORDINARY line — being
+    /// filtered away, or citing the offending text — and neither happens: it
+    /// goes out through `emit`, which consults no filter, and it never carries
+    /// the line.
+    fn raise(&self, alarm: Option<AuditExempt>) {
+        if let Some(a) = alarm {
+            let (line, _) =
+                self.auditor
+                    .audit(&render_alarm(&a), NOTICE_TARGET, None, NO_RESERVATION);
+            self.notices.emit(&line);
+        }
+    }
 }
 
 #[async_trait]
 impl ModeClassifier for ProviderClassifier {
     async fn classify(&self, content: &str) -> Option<Mode> {
-        let (cost, _) = self.auditor.audit(
+        let (cost, cost_alarm) = self.auditor.audit(
             "notice: without `--mode` or `[magi].default_mode`, magi-rs adds a call to the \
              model to infer the lens. Declaring the mode avoids it.",
             NOTICE_TARGET,
@@ -155,6 +202,7 @@ impl ModeClassifier for ProviderClassifier {
             NO_RESERVATION,
         );
         self.notices.once(NOTICE_CLASSIFY_COST, &cost);
+        self.raise(cost_alarm);
 
         let prompt = format!(
             "Classify the delimited content into exactly one of these labels: \
@@ -167,7 +215,7 @@ impl ModeClassifier for ProviderClassifier {
         match tokio::time::timeout(deadline, self.provider.send_messages(&msgs, &[], None)).await {
             Ok(Ok(reply)) => normalize_label(&reply.concat_text()),
             Ok(Err(_)) | Err(_) => {
-                let (expired, _) = self.auditor.audit(
+                let (expired, expired_alarm) = self.auditor.audit(
                     &format!(
                         "notice: mode inference expired ({CLASSIFY_TIMEOUT_SECS}s) or failed; \
                          using `analysis`. On slow providers, declare \
@@ -178,6 +226,7 @@ impl ModeClassifier for ProviderClassifier {
                     NO_RESERVATION,
                 );
                 self.notices.once(NOTICE_CLASSIFY_TIMEOUT, &expired);
+                self.raise(expired_alarm);
                 None
             }
         }
@@ -255,6 +304,10 @@ mod tests {
             if seen.insert(key) {
                 self.record(msg);
             }
+        }
+
+        fn emit(&self, msg: &Audited) {
+            self.record(msg);
         }
     }
 

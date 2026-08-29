@@ -487,6 +487,25 @@ impl Auditor {
     }
 }
 
+/// The operator-facing text of an alarm.
+///
+/// **It never quotes the secret or the offending line** (REQ-L50). Naming the
+/// value inside the leak detector would be a new leak channel built inside the
+/// thing that exists to find them. The name and the target are all anyone needs
+/// to go to the site.
+///
+/// # Complexity
+///
+/// `O(1)`.
+#[must_use]
+pub fn render_alarm(alarm: &AuditExempt) -> String {
+    format!(
+        "SECURITY: the value registered as {} reached a log line emitted by {}.          It was masked, and this is the alarm that says masking happened — both,          never one. Go look at that target.",
+        alarm.secret(),
+        alarm.target()
+    )
+}
+
 /// Pass 1: the ranges the pattern matchers and the URL authority rule claim.
 ///
 /// Both halves already exist in this crate and are reused rather than rewritten:
@@ -732,6 +751,68 @@ mod tests {
         let (audited, alarm) = auditor.audit(clean, "magi_rs::agent", None, 0);
         assert_eq!(audited.as_str(), clean);
         assert!(alarm.is_none());
+    }
+
+    #[test]
+    fn the_alarm_names_the_secret_and_the_target_and_quotes_neither_line_nor_value() {
+        let auditor = Auditor::new();
+        let name = SecretName::new("BASE_URL_PASSWORD");
+        auditor.register_secret(name, &["hunter2-longer"]);
+        let (audited, alarm) = auditor.audit(
+            "GET https://bob:hunter2-longer@example.com/v1",
+            "magi_rs::agent",
+            None,
+            0,
+        );
+        let alarm = alarm.expect("a live secret must alarm");
+        let text = render_alarm(&alarm);
+
+        assert!(
+            text.contains("BASE_URL_PASSWORD"),
+            "it names the secret: {text}"
+        );
+        assert!(text.contains("magi_rs::agent"), "and the site: {text}");
+        assert!(
+            !text.contains("hunter2-longer"),
+            "it must NEVER quote the value: {text}"
+        );
+        assert!(
+            !text.contains(audited.as_str()),
+            "nor the offending line: {text}"
+        );
+    }
+
+    #[test]
+    fn the_same_secret_at_the_same_target_alarms_once_but_masks_every_time() {
+        // Both, never one (REQ-L50): masking alone leaves the leak in place
+        // forever; alarming alone would emit the secret anyway. The DEDUP is on
+        // the alarm, not on the masking.
+        let auditor = Auditor::new();
+        auditor.register_secret(SecretName::new("K"), &["repeated-secret-value"]);
+        let line = "url=https://x/repeated-secret-value";
+
+        let (first, alarm_one) = auditor.audit(line, "magi_rs::agent", None, 0);
+        let (second, alarm_two) = auditor.audit(line, "magi_rs::agent", None, 0);
+
+        assert!(alarm_one.is_some(), "the first sighting alarms");
+        assert!(alarm_two.is_none(), "the second does not repeat the alarm");
+        assert!(!first.as_str().contains("repeated-secret-value"));
+        assert!(
+            !second.as_str().contains("repeated-secret-value"),
+            "masking never stops, even once the alarm has been raised"
+        );
+    }
+
+    #[test]
+    fn the_same_secret_at_another_target_alarms_again() {
+        let auditor = Auditor::new();
+        auditor.register_secret(SecretName::new("K"), &["repeated-secret-value"]);
+        let line = "url=https://x/repeated-secret-value";
+        assert!(auditor.audit(line, "magi_rs::agent", None, 0).1.is_some());
+        assert!(
+            auditor.audit(line, "magi_core::http", None, 0).1.is_some(),
+            "a second site is a second thing to go fix"
+        );
     }
 
     #[test]
