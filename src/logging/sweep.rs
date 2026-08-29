@@ -166,6 +166,62 @@ pub fn sweep_orphan_temps(dir: &Path, now: SystemTime) -> usize {
     removed
 }
 
+/// Reads the log directory into the entries `retention::plan` decides over.
+///
+/// The date comes from the file NAME, which is the contract `rotation::file_name`
+/// writes. A name that does not carry one yields `None`, and retention treats
+/// that as older than every real date — the same direction it takes a future
+/// date, and for the same reason: an unrecognised file must not become immortal.
+///
+/// # Returns
+///
+/// One entry per `.log` or `.xz` file, in directory order.
+///
+/// # Complexity
+///
+/// `O(n)` over the directory.
+#[must_use]
+pub fn scan(dir: &Path) -> Vec<crate::logging::retention::FileEntry> {
+    use crate::logging::retention::FileEntry;
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        let is_log = name.ends_with(".log") || name.ends_with(".log.xz");
+        if !is_log {
+            continue;
+        }
+        let Ok(meta) = entry.metadata() else { continue };
+        out.push(FileEntry {
+            date: date_in(&name),
+            mtime: meta.modified().unwrap_or(SystemTime::UNIX_EPOCH),
+            size: meta.len(),
+            name,
+        });
+    }
+    out
+}
+
+/// Parses the `YYYY-MM-DD` a log file's name carries.
+///
+/// # Complexity
+///
+/// `O(1)`.
+fn date_in(name: &str) -> Option<time::Date> {
+    let rest = name.strip_prefix("magi-")?;
+    let (y, rest) = rest.split_once('-')?;
+    let (m, rest) = rest.split_once('-')?;
+    let d = rest.get(..2)?;
+    time::Date::from_calendar_date(
+        y.parse().ok()?,
+        time::Month::try_from(m.parse::<u8>().ok()?).ok()?,
+        d.parse().ok()?,
+    )
+    .ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1610,6 +1610,73 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
         Some(ws) => MagiConfig::load(&ws.config_path())?,
         None => (MagiConfig::default(), Vec::new()),
     };
+    // Task 6.1/6.4: bring the logging subsystem up, once the config is loaded and
+    // the workspace is known.
+    //
+    // **A failure here is a NOTICE, never fatal** (REQ-L35). The one exception —
+    // D-L20 — is a log directory that was actually DECLARED and cannot be
+    // created; an absent or blank setting falls through to the default and never
+    // reaches that path, which is what keeps a CI script that exports
+    // `MAGI_LOG_DIR` without filling it from taking the process down.
+    if let Some(ws) = workspace.as_ref() {
+        let log_dir = magi_config.resolve_log_dir(
+            None,
+            std::env::var(crate::config::ENV_LOG_DIR).ok().as_deref(),
+            &ws.logs_dir(),
+        );
+        let filter = magi_config.resolve_file_filter(
+            None,
+            std::env::var(crate::config::ENV_FILE_FILTER)
+                .ok()
+                .as_deref(),
+        );
+        let level = match filter.as_str() {
+            "trace" => tracing::Level::TRACE,
+            "debug" => tracing::Level::DEBUG,
+            "warn" => tracing::Level::WARN,
+            "error" => tracing::Level::ERROR,
+            _ => tracing::Level::INFO,
+        };
+        let cfg = magi_rs::logging::LoggingConfig {
+            log_dir: log_dir.clone(),
+            file_level: level,
+        };
+        match magi_rs::logging::init_logging(
+            &cfg,
+            std::sync::Arc::new(magi_rs::logging::DiscardDelivery),
+            None,
+        ) {
+            Ok(_handle) => {
+                // Retention runs at startup, over what the previous runs left.
+                // Best effort throughout: a directory that cannot be read, or a
+                // delete that fails, is not worth failing a session over.
+                let swept = magi_rs::logging::sweep::sweep_orphan_temps(
+                    &log_dir,
+                    std::time::SystemTime::now(),
+                );
+                let files = magi_rs::logging::sweep::scan(&log_dir);
+                let names: Vec<String> = files.iter().map(|f| f.name.clone()).collect();
+                let plan = magi_rs::logging::retention::plan(
+                    &files,
+                    time::OffsetDateTime::now_utc().date(),
+                    std::time::SystemTime::now(),
+                    &magi_config.retention(),
+                );
+                let compressed =
+                    magi_rs::logging::sweep::execute_plan(&log_dir, &names, &plan).unwrap_or(0);
+                if swept > 0 || compressed > 0 {
+                    startup_notices.push(Notice::resolution(format!(
+                        "logs: {compressed} compressed, {swept} abandoned temporaries removed"
+                    )));
+                }
+            }
+            Err(e) => startup_notices.push(Notice::resolution(format!(
+                "WARNING: logging is not writing to {}: {e}. The session continues                  without a log file.",
+                log_dir.display()
+            ))),
+        }
+    }
+
     // REQ-V12/H12: API key discovery happens AFTER the vault is (possibly) open,
     // env tier sourced from the consumed (scrubbed) value.
     let config = discover_config(

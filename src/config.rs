@@ -262,6 +262,109 @@ pub struct MagiConfig {
     /// `[headless]` section — see [`HeadlessConfig`].
     #[serde(default)]
     headless: HeadlessConfig,
+    /// `[logging]` section — see [`LoggingSection`].
+    #[serde(default)]
+    logging: LoggingSection,
+}
+
+/// The `[logging]` section of `magi.toml`.
+///
+/// # What is deliberately NOT here
+///
+/// `format` and `rotation_tz`. Their absence is not an oversight: they arrive
+/// with their functionality, because shipping an inert key promises something
+/// the binary does not do.
+#[derive(Debug, Clone, Default, PartialEq, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LoggingSection {
+    /// Where the daily files live. Absent ⇒ `.magi/logs`.
+    log_dir: Option<String>,
+    /// Level or per-target directive for the file branch.
+    file_filter: Option<String>,
+    /// Level or per-target directive for the screen branch. **MS2.**
+    tui_filter: Option<String>,
+    /// Whether rotated files are compressed.
+    compress: Option<bool>,
+    /// Age in days past which a file is compressed.
+    compress_after_days: Option<i64>,
+    /// Age in days past which a file is deleted.
+    retain_days: Option<i64>,
+    /// Ceiling on the total bytes retention may leave on disk.
+    max_total_bytes: Option<u64>,
+}
+
+// There is no `DEFAULT_LOG_DIR` here on purpose: `Workspace::logs_dir()` already
+// owns that path, and a second constant naming the same directory is two places
+// to change it and one chance to change only one.
+/// Environment variable that overrides the log directory.
+pub const ENV_LOG_DIR: &str = "MAGI_LOG_DIR";
+/// Environment variable that overrides the file filter.
+pub const ENV_FILE_FILTER: &str = "MAGI_LOG_FILTER";
+
+impl MagiConfig {
+    /// Resolves the log directory by precedence.
+    ///
+    /// `--log-dir` > `MAGI_LOG_DIR` > `[logging].log_dir` > `.magi/logs`.
+    ///
+    /// # Parameters
+    ///
+    /// * `flag` — the `--log-dir` value, if given.
+    /// * `env` — the environment variable's value, if set.
+    /// * `default` — where logs go when nothing was declared, which the
+    ///   workspace already knows (`Workspace::logs_dir()`).
+    ///
+    /// # A blank environment variable is ABSENT, never invalid
+    ///
+    /// An exported-but-unfilled variable is an everyday accident in a CI script.
+    /// Treating it as invalid turns that accident into a hard failure — and,
+    /// worse, into D-L20's fatal path, which applies only to a log directory
+    /// that was actually **declared** and cannot be created.
+    ///
+    /// # Complexity
+    ///
+    /// `O(1)`.
+    #[must_use]
+    pub fn resolve_log_dir(
+        &self,
+        flag: Option<&str>,
+        env: Option<&str>,
+        default: &std::path::Path,
+    ) -> std::path::PathBuf {
+        non_blank(flag)
+            .or_else(|| non_blank(env))
+            .or_else(|| non_blank(self.logging.log_dir.as_deref()))
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| default.to_path_buf())
+    }
+
+    /// Resolves the file branch's filter by the same precedence.
+    ///
+    /// # Complexity
+    ///
+    /// `O(1)`.
+    #[must_use]
+    pub fn resolve_file_filter(&self, flag: Option<&str>, env: Option<&str>) -> String {
+        non_blank(flag)
+            .or_else(|| non_blank(env))
+            .or_else(|| non_blank(self.logging.file_filter.as_deref()))
+            .unwrap_or("info")
+            .to_string()
+    }
+
+    /// The retention settings, with the built-in defaults filled in.
+    ///
+    /// # Complexity
+    ///
+    /// `O(1)`.
+    #[must_use]
+    pub fn retention(&self) -> magi_rs::logging::retention::RetentionConfig {
+        magi_rs::logging::retention::RetentionConfig {
+            compress: self.logging.compress.unwrap_or(true),
+            compress_after_days: self.logging.compress_after_days.unwrap_or(7),
+            retain_days: self.logging.retain_days.unwrap_or(30),
+            max_total_bytes: self.logging.max_total_bytes.unwrap_or(u64::MAX),
+        }
+    }
 }
 
 /// Crate-internal builder: the ONLY way to obtain a [`MagiConfig`] other than `Deserialize`
@@ -1586,6 +1689,82 @@ pub fn gate_thresholds_from(config: &MagiConfig) -> GateThresholds {
 
 #[cfg(test)]
 mod tests {
+
+    /// SC-L122: a blank env var is ABSENT, and absence never reaches D-L20.
+    #[test]
+    fn a_blank_log_dir_env_var_does_not_break_startup() {
+        let cfg = MagiConfig::default();
+        let fallback = std::path::Path::new("/w/.magi/logs");
+
+        // Exported and left unfilled is an everyday CI accident. Treating it as
+        // invalid turns the accident into a hard failure — and into the fatal
+        // path of D-L20, which applies only to a directory actually DECLARED
+        // and impossible to create.
+        for blank in [
+            "", "   ", "	", "
+  ",
+        ] {
+            assert_eq!(
+                cfg.resolve_log_dir(None, Some(blank), fallback),
+                fallback,
+                "a blank env ({blank:?}) must fall through to the default"
+            );
+        }
+    }
+
+    #[test]
+    fn the_log_dir_precedence_is_flag_then_env_then_file_then_default() {
+        let cfg = MagiConfig::default();
+        let fallback = std::path::Path::new("/w/.magi/logs");
+
+        assert_eq!(
+            cfg.resolve_log_dir(Some("/from/flag"), Some("/from/env"), fallback),
+            std::path::PathBuf::from("/from/flag"),
+            "the flag wins over the env"
+        );
+        assert_eq!(
+            cfg.resolve_log_dir(None, Some("/from/env"), fallback),
+            std::path::PathBuf::from("/from/env"),
+            "the env wins over the file and the default"
+        );
+        assert_eq!(cfg.resolve_log_dir(None, None, fallback), fallback);
+    }
+
+    #[test]
+    fn an_unknown_key_in_the_logging_section_is_a_parse_error() {
+        // `deny_unknown_fields`: a typo is rejected, never silently accepted.
+        let toml = "[logging]
+log_dirr = \"/typo\"
+";
+        assert!(
+            toml::from_str::<MagiConfig>(toml).is_err(),
+            "a misspelled key must not be swallowed"
+        );
+        // And the correctly spelled one parses, so the assertion above is not
+        // passing because the whole section is rejected.
+        let ok = "[logging]
+log_dir = \"/right\"
+";
+        assert!(toml::from_str::<MagiConfig>(ok).is_ok());
+    }
+
+    #[test]
+    fn format_and_rotation_tz_are_rejected_because_they_do_nothing_yet() {
+        // Their absence is not an oversight: an inert key promises what the
+        // binary does not do. `deny_unknown_fields` is what makes the promise
+        // impossible to make by accident.
+        for key in ["format", "rotation_tz"] {
+            let toml = format!(
+                "[logging]
+{key} = \"whatever\"
+"
+            );
+            assert!(
+                toml::from_str::<MagiConfig>(&toml).is_err(),
+                "{key} must not parse until it works"
+            );
+        }
+    }
     use super::*;
 
     /// A commented-out `[embedding].base_url` INHERITS the root endpoint.
