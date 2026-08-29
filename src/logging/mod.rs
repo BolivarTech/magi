@@ -78,6 +78,7 @@ pub enum LoggingError {
     },
 }
 
+pub mod auditor;
 pub mod chunk;
 pub mod render;
 pub mod retention;
