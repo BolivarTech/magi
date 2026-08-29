@@ -245,6 +245,26 @@ pub fn split(event: &str, first_header: &str, cont_header: &str, id: EventId) ->
 mod tests {
     use super::*;
 
+    /// REQ-L06's threshold, pinned here as a LITERAL rather than read from
+    /// [`MAX_LINE_BYTES`].
+    ///
+    /// Asserting against the constant **cannot fail**: it is the same value the
+    /// implementation sizes its budgets with, so raising it moves the produced
+    /// lines and the allowed ceiling together and the guarantee evaporates in
+    /// silence. The plan's own mutation for this task — "raise the budget above
+    /// 4096, the threshold test must go red" — was run and stayed green for
+    /// exactly that reason.
+    ///
+    /// The requirement is 4096 bytes. A test that guards it has to say 4096.
+    const REQUIRED_MAX_LINE_BYTES: usize = 4096;
+
+    #[test]
+    fn the_constant_still_matches_the_requirement_it_is_supposed_to_encode() {
+        // If someone changes MAX_LINE_BYTES deliberately, this is the test that
+        // says so — instead of every other assertion quietly following it.
+        assert_eq!(MAX_LINE_BYTES, REQUIRED_MAX_LINE_BYTES);
+    }
+
     /// The payload of a produced line, with its header and marker stripped.
     ///
     /// A chunked line is `<header>id=<pid>-<hex16> n/N <payload>`, so the
@@ -277,7 +297,7 @@ mod tests {
         );
         for line in &lines {
             assert!(
-                line.len() + NEWLINE_BYTES <= MAX_LINE_BYTES,
+                line.len() + NEWLINE_BYTES <= REQUIRED_MAX_LINE_BYTES,
                 "line of {} bytes",
                 line.len()
             );
@@ -333,7 +353,7 @@ mod tests {
             lines.len()
         );
         for line in &lines {
-            assert!(line.len() + NEWLINE_BYTES <= MAX_LINE_BYTES);
+            assert!(line.len() + NEWLINE_BYTES <= REQUIRED_MAX_LINE_BYTES);
         }
     }
 
@@ -354,7 +374,7 @@ mod tests {
              {cont_payload} vs {first_payload}"
         );
         for line in &lines {
-            assert!(line.len() + NEWLINE_BYTES <= MAX_LINE_BYTES);
+            assert!(line.len() + NEWLINE_BYTES <= REQUIRED_MAX_LINE_BYTES);
         }
     }
 
