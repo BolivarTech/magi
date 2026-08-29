@@ -32,7 +32,6 @@ mod error;
 pub mod exit;
 pub mod input;
 pub mod limits;
-pub mod log;
 pub mod output;
 pub mod policy;
 pub mod resolution;

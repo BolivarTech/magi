@@ -504,10 +504,16 @@ pub struct HeadlessConfig {
     /// Elevated tool-call cap under `--full-auto` (REQ-H08). Overrides
     /// `FULL_AUTO_MAX_TOOL_CALLS`.
     pub full_auto_max_tool_calls: Option<u32>,
-    /// Keep at most the last N run logs (REQ-H34). Overrides `LOG_RETENTION_RUNS`.
-    pub log_retention: Option<usize>,
-    /// Total log-dir byte ceiling (REQ-H24). Overrides `LOG_MAX_BYTES`.
-    pub log_max_bytes: Option<u64>,
+    // `log_retention`, `log_max_bytes` and `log_level` are GONE (REQ-L32), with
+    // no guided migration and none coming: a file that still declares one gets
+    // serde's bare `unknown field`, which is fatal. `src/config/migrate.rs` is
+    // deliberately not extended for them.
+    //
+    // What the bare error cannot say is in the CHANGELOG (REQ-L33): retention
+    // moved from RUNS to DAYS and there is no conversion. Without that, the
+    // natural path — read the name in the error, find the replacement, copy the
+    // number over — produces a config that starts fine and retains something
+    // else entirely.
     // `tool_result_cap_bytes` NO LONGER LIVES HERE (Task 1.3, third migration pattern of
     // REQ-A21b): it moved up to the root level because under `[headless]` it only covered batch
     // mode and left interactive mode loose, which is exactly where the report is re-sent on
@@ -515,8 +521,6 @@ pub struct HeadlessConfig {
     // one protects the wrong case. A file that still declares it here received the guided
     // migration error until v0.13.0 retired that pattern set (REQ-R22); it now gets serde's bare
     // `unknown field` — see `detect_migrations`. Default log level
-    // (REQ-H24): `error`|`warn`|`info`|`debug`. Overrides `"info"`.
-    pub log_level: Option<String>,
     /// Default wall-clock timeout secs for tool-executing tiers (REQ-H36). Overrides
     /// `FULL_AUTO_TIMEOUT_SECS`.
     pub timeout_secs: Option<u64>,
@@ -2378,9 +2382,6 @@ base_url = "http://embedder-host:11434/v1"
             "[headless]\n\
              max_input_bytes = 2048\n\
              full_auto_max_tool_calls = 30\n\
-             log_retention = 7\n\
-             log_max_bytes = 1048576\n\
-             log_level = \"debug\"\n\
              timeout_secs = 120\n\
              allow_system_override = true\n",
         )
@@ -2388,11 +2389,42 @@ base_url = "http://embedder-host:11434/v1"
 
         assert_eq!(c.headless.max_input_bytes, Some(2048));
         assert_eq!(c.headless.full_auto_max_tool_calls, Some(30));
-        assert_eq!(c.headless.log_retention, Some(7));
-        assert_eq!(c.headless.log_max_bytes, Some(1_048_576));
-        assert_eq!(c.headless.log_level.as_deref(), Some("debug"));
         assert_eq!(c.headless.timeout_secs, Some(120));
         assert_eq!(c.headless.allow_system_override, Some(true));
+    }
+
+    /// REQ-L32: the three retired keys are a PARSE ERROR, with no guided
+    /// migration and none coming.
+    ///
+    /// What the bare `unknown field` cannot say is in the CHANGELOG (REQ-L33):
+    /// retention moved from RUNS to DAYS with no conversion. The natural path —
+    /// read the name in the error, find the replacement, copy the number over —
+    /// otherwise produces a config that starts fine and retains something else.
+    #[test]
+    fn the_retired_headless_log_keys_are_rejected_outright() {
+        for key in [
+            "log_retention = 7",
+            "log_max_bytes = 1048576",
+            "log_level = \"debug\"",
+        ] {
+            let toml = format!(
+                "[headless]
+{key}
+"
+            );
+            assert!(
+                MagiConfig::from_toml_str(&toml).is_err(),
+                "{key} must be fatal, not silently ignored"
+            );
+        }
+        // And a section without them still parses, so the assertions above are
+        // not passing because `[headless]` itself broke.
+        assert!(MagiConfig::from_toml_str(
+            "[headless]
+max_input_bytes = 2048
+"
+        )
+        .is_ok());
     }
 
     /// -------------------------------------------------------------------------

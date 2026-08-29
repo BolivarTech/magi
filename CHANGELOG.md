@@ -9,6 +9,35 @@ changes and the **patch** position signals backward-compatible fixes.
 
 ## [Unreleased]
 
+### Added
+
+- **A real log file.** Magi now writes a daily file under `.magi/logs/`, rotated at
+  UTC midnight, compressed to `.xz` once it ages past `compress_after_days`, and
+  deleted past `retain_days`. Every line goes through an auditor first, so a
+  credential that reaches a log line is masked before it is written — and the
+  masking is announced, never silent. Configure it under `[logging]` in
+  `magi.toml`: `log_dir`, `file_filter`, `compress`, `compress_after_days`,
+  `retain_days`, `max_total_bytes`. `--log-dir` and `MAGI_LOG_DIR` override the
+  directory, in that order.
+
+### Removed
+
+- **The JSONL run log (`run-*.jsonl`) is gone**, and with it `[headless]`'s
+  `log_retention`, `log_max_bytes` and `log_level` keys. A `magi.toml` that still
+  declares one of them now fails to parse with serde's `unknown field`, which is
+  fatal — there is no guided migration, deliberately.
+
+  **Read this before copying your old numbers across: retention changed units.**
+  `log_retention` counted **runs**; `retain_days` counts **days**. There is no
+  conversion between them, and nothing will tell you if you carry the number
+  over — the file parses, the agent starts, and it keeps a completely different
+  amount of history than you meant. `log_max_bytes` maps to `max_total_bytes`,
+  which still counts bytes but now bounds the whole log directory rather than a
+  set of run files.
+
+  `--log-level` survives and means what it always meant; it now steers the file
+  branch of the new layer instead of the retired run log.
+
 ## [0.17.0] - 2026-08-27
 
 ### Changed

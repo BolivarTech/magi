@@ -56,7 +56,6 @@ use magi_core::schema::{AgentName, Mode};
 use magi_rs::headless::exit::exit_code as headless_exit_code;
 use magi_rs::headless::input::{parse_input, read_input_bounded, InputFormat};
 use magi_rs::headless::limits::{HeadlessLimits, NORMAL_MAX_TOOL_CALLS};
-use magi_rs::headless::log::{LogLevel, RunLog};
 use magi_rs::headless::output::{write_json, write_text};
 use magi_rs::headless::policy::{Policy, Tier};
 use magi_rs::headless::resolution::{
@@ -221,13 +220,18 @@ enum CliLogLevel {
 }
 
 impl CliLogLevel {
-    /// Maps this CLI selector to the library [`LogLevel`].
-    fn into_lib(self) -> LogLevel {
+    /// Maps this CLI selector to the level the logging layer filters on.
+    ///
+    /// It used to map to the JSONL run log's own `LogLevel`. That log is retired
+    /// (REQ-L40) and the flag now steers the file branch of the single layer, so
+    /// the same `--log-level debug` an operator already types keeps meaning what
+    /// it meant.
+    fn into_level(self) -> tracing::Level {
         match self {
-            CliLogLevel::Error => LogLevel::Error,
-            CliLogLevel::Warn => LogLevel::Warn,
-            CliLogLevel::Info => LogLevel::Info,
-            CliLogLevel::Debug => LogLevel::Debug,
+            CliLogLevel::Error => tracing::Level::ERROR,
+            CliLogLevel::Warn => tracing::Level::WARN,
+            CliLogLevel::Info => tracing::Level::INFO,
+            CliLogLevel::Debug => tracing::Level::DEBUG,
         }
     }
 }
@@ -321,7 +325,11 @@ struct HeadlessArgs {
     /// Wall-clock ceiling in seconds for the whole run (REQ-H36).
     #[arg(long)]
     timeout: Option<u64>,
-    /// Run-log verbosity; omitted ⇒ info (REQ-H24).
+    /// File-log verbosity; omitted ⇒ info.
+    ///
+    /// It used to steer the JSONL run log (REQ-H24), which is retired: it now
+    /// steers the file branch of the single layer, so the flag an operator
+    /// already types keeps meaning what it meant.
     #[arg(long, value_enum)]
     log_level: Option<CliLogLevel>,
     /// Override the run-log directory (default `.magi/logs`, REQ-H24).
@@ -4830,71 +4838,6 @@ fn finish_headless(h: &HeadlessArgs, outcome: &RunOutcome, tool_result_cap: usiz
     exit_code_for_outcome(outcome)
 }
 
-/// Resolves the effective run-log verbosity (REQ-H24, spec §11). Precedence:
-/// the `--log-level` CLI flag wins; else the `[headless] log_level` config
-/// string is parsed; else the default (`info`).
-///
-/// # Errors
-/// [`HeadlessError::InputInvalid`] if `cfg` is set but is not one of
-/// `error`/`warn`/`info`/`debug` — an unrecognized value is a clear typed
-/// error, never a silent fallback to the default.
-fn resolve_log_level(
-    cli: Option<CliLogLevel>,
-    cfg: Option<&str>,
-) -> Result<LogLevel, HeadlessError> {
-    if let Some(l) = cli {
-        return Ok(l.into_lib());
-    }
-    match cfg {
-        Some(s) => s.parse(),
-        None => Ok(LogLevel::Info),
-    }
-}
-
-/// Starts the JSONL run log for a headless run, or returns `None` when logging
-/// is disabled (`--no-memory` without an explicit `--log-dir`, REQ-H24). A
-/// start failure degrades to no logging with a stderr warning (best-effort).
-///
-/// `limits` supplies the EFFECTIVE `log_retention`/`log_max_bytes` caps (spec
-/// §11) so an operator-lowered `[headless]` override actually governs pruning.
-///
-/// # Errors
-/// [`HeadlessError::InputInvalid`] if `--log-level`/`[headless] log_level`
-/// resolve to an invalid verbosity string (see [`resolve_log_level`]) — this
-/// is a config/usage error, distinct from the best-effort log-file-open
-/// degradation below.
-fn build_run_log(
-    h: &HeadlessArgs,
-    workspace: Option<&Workspace>,
-    limits: &HeadlessLimits,
-    log_level_cfg: Option<&str>,
-) -> Result<Option<RunLog>, HeadlessError> {
-    let level = resolve_log_level(h.log_level, log_level_cfg)?;
-    let logs_dir = if let Some(d) = &h.log_dir {
-        Some(d.clone())
-    } else if h.no_memory {
-        None
-    } else {
-        workspace.map(Workspace::logs_dir)
-    };
-    let Some(dir) = logs_dir else {
-        return Ok(None);
-    };
-    match RunLog::start(
-        &dir,
-        level,
-        limits.log_retention_runs,
-        limits.log_max_bytes,
-        limits.tool_result_cap,
-    ) {
-        Ok(log) => Ok(Some(log)),
-        Err(e) => {
-            eprintln!("warning: could not start the run log ({e}); continuing without it");
-            Ok(None)
-        }
-    }
-}
-
 /// Maps the `--auto`/`--full-auto` flags to an authorization [`Tier`]:
 /// `--full-auto` wins when both are set; neither ⇒ the read-only `Default`
 /// (REQ-H07/H08).
@@ -4952,8 +4895,6 @@ struct HeadlessContext {
     /// resolved key, to substitute `[user]:[password]` credentials into the
     /// embedding `base_url` itself.
     secret_store: Option<SharedSecretStore>,
-    /// The started run log, if logging is enabled.
-    run_log: Option<RunLog>,
     /// Effective headless numeric caps for this run (spec §11), resolved once in
     /// `prepare_headless` and reused by both dispatchers.
     limits: HeadlessLimits,
@@ -5036,8 +4977,6 @@ fn resolve_headless_limits(cfg: &HeadlessConfig, tool_result_cap: usize) -> Head
         full_auto_max_tool_calls: cfg
             .full_auto_max_tool_calls
             .unwrap_or(d.full_auto_max_tool_calls),
-        log_retention_runs: cfg.log_retention.unwrap_or(d.log_retention_runs),
-        log_max_bytes: cfg.log_max_bytes.unwrap_or(d.log_max_bytes),
         // Passed as a parameter rather than read from `cfg`: the key moved up from `[headless]`
         // to the root level (Task 1.3, third pattern of REQ-A21b), so `MagiConfig` resolves it
         // and this function can no longer read it from its own section.
@@ -5443,18 +5382,35 @@ async fn prepare_headless(
     }
 
     let embed_key = resolve_openai_key(openai_key.as_deref(), secret_store.as_ref());
-    let run_log = match build_run_log(
-        h,
-        workspace.as_ref(),
-        &limits,
-        magi_config.headless().log_level.as_deref(),
-    ) {
-        Ok(log) => log,
-        Err(e) => {
-            eprintln!("error: {e}");
-            return Err(headless_error_exit_code(&e));
+    // The JSONL run log is retired (REQ-L40). The headless surfaces bring up the
+    // SAME single layer the TUI does: one log for the whole product, rather than
+    // one shape per surface.
+    //
+    // **A failure here is a warning, never fatal** (REQ-L35): a headless run that
+    // cannot write a log file is still a run that can answer.
+    if let Some(ws) = workspace.as_ref() {
+        let log_dir = h
+            .log_dir
+            .clone()
+            .unwrap_or_else(|| magi_config.resolve_log_dir(None, None, &ws.logs_dir()));
+        let level = h
+            .log_level
+            .map_or(tracing::Level::INFO, CliLogLevel::into_level);
+        let cfg = magi_rs::logging::LoggingConfig {
+            log_dir: log_dir.clone(),
+            file_level: level,
+        };
+        if let Err(e) = magi_rs::logging::init_logging(
+            &cfg,
+            std::sync::Arc::new(magi_rs::logging::DiscardDelivery),
+            None,
+        ) {
+            eprintln!(
+                "warning: logging is not writing to {}: {e}; the run continues",
+                log_dir.display()
+            );
         }
-    };
+    }
 
     Ok(HeadlessContext {
         workdir,
@@ -5468,7 +5424,6 @@ async fn prepare_headless(
         tier,
         embed_key,
         secret_store,
-        run_log,
         limits,
         env_mode,
         env_untrusted_content,
@@ -5529,7 +5484,6 @@ async fn run_query_subcommand(
         embed_key,
         secret_store,
         memory,
-        mut run_log,
         limits,
         budget,
         ..
@@ -5620,25 +5574,13 @@ async fn run_query_subcommand(
         timeout_below_formula: timeout_decision.is_some_and(|d| d.below_formula),
         budget,
     };
-    let outcome = run_query(
-        resolved,
-        policy,
-        &mut agent,
-        &prompt,
-        &wiring,
-        run_log.as_mut(),
-    )
-    .await;
-    // SC-A20h: the run's gate evaluations reach the structured run log. Drained here rather
-    // than inside `run_query` because the log is borrowed mutably by the run itself while the
+    let outcome = run_query(resolved, policy, &mut agent, &prompt, &wiring).await;
+    // SC-A20h: the run's gate evaluations still reach the log — the SINGLE layer
+    // now, rather than the retired JSONL run log. Drained here rather than inside
+    // `run_query` because the telemetry is produced by the run itself while the
     // agent future is in flight.
-    if let Some(log) = run_log.as_mut() {
-        for line in wiring.autonomous.drain_telemetry() {
-            let _ = log.event(&magi_rs::headless::log::LogEvent::Message {
-                level: LogLevel::Info,
-                text: &line,
-            });
-        }
+    for line in wiring.autonomous.drain_telemetry() {
+        tracing::info!(target: "magi_rs::magi::gate", "{line}");
     }
     finish_headless(&h, &outcome, limits.tool_result_cap)
 }
@@ -5802,7 +5744,6 @@ async fn run_consult_subcommand(
         consult_magi,
         resolved,
         prompt,
-        mut run_log,
         limits,
         env_mode,
         env_untrusted_content,
@@ -5885,16 +5826,7 @@ async fn run_consult_subcommand(
         },
         budget,
     };
-    let outcome = run_consult(
-        resolved,
-        magi,
-        &prompt,
-        timeout,
-        explicit_mode,
-        &runtime,
-        run_log.as_mut(),
-    )
-    .await;
+    let outcome = run_consult(resolved, magi, &prompt, timeout, explicit_mode, &runtime).await;
     finish_headless(&h, &outcome, limits.tool_result_cap)
 }
 
@@ -6510,16 +6442,12 @@ mod tests {
         let cfg = HeadlessConfig {
             max_input_bytes: Some(2048),
             full_auto_max_tool_calls: Some(30),
-            log_retention: Some(7),
-            log_max_bytes: Some(1024),
             timeout_secs: Some(120),
             ..Default::default()
         };
         let limits = resolve_headless_limits(&cfg, 4096);
         assert_eq!(limits.max_input_bytes, 2048);
         assert_eq!(limits.full_auto_max_tool_calls, 30);
-        assert_eq!(limits.log_retention_runs, 7);
-        assert_eq!(limits.log_max_bytes, 1024);
         assert_eq!(limits.tool_result_cap, 4096);
         assert_eq!(limits.full_auto_timeout_secs, 120);
     }
@@ -6585,47 +6513,6 @@ mod tests {
         std::fs::write(&path_ok, vec![b'x'; small_cap]).expect("write fixture");
         let bytes = read_headless_input(Some(&path_ok), small_cap).expect("must fit exactly");
         assert_eq!(bytes.len(), small_cap);
-    }
-
-    /// REQ-H24, spec §11: with no `--log-level` CLI flag, the
-    /// `[headless] log_level` config string must resolve the run-log
-    /// verbosity, not silently fall back to the `info` default.
-    #[test]
-    fn test_resolve_log_level_config_wins_over_default_without_cli_flag() {
-        let level = resolve_log_level(None, Some("debug"))
-            .expect("a valid config string must resolve, not error");
-        assert_eq!(
-            level,
-            LogLevel::Debug,
-            "the [headless] log_level config value must take effect, not the info default"
-        );
-    }
-
-    /// The `--log-level` CLI flag wins over a conflicting config value.
-    #[test]
-    fn test_resolve_log_level_cli_flag_wins_over_config() {
-        let level = resolve_log_level(Some(CliLogLevel::Error), Some("debug"))
-            .expect("must resolve with both sources present");
-        assert_eq!(level, LogLevel::Error);
-    }
-
-    /// No CLI flag and no config ⇒ the `info` default.
-    #[test]
-    fn test_resolve_log_level_defaults_to_info_when_unset() {
-        assert_eq!(
-            resolve_log_level(None, None).expect("must resolve"),
-            LogLevel::Info
-        );
-    }
-
-    /// An invalid `[headless] log_level` string is a clear typed error, never
-    /// a silent fallback.
-    #[test]
-    fn test_resolve_log_level_rejects_invalid_config_string() {
-        assert!(matches!(
-            resolve_log_level(None, Some("verbose")),
-            Err(HeadlessError::InputInvalid(_))
-        ));
     }
 
     /// REQ-H12b, spec §11: SECURITY gate — `[headless] allow_system_override`

@@ -55,10 +55,6 @@ pub struct HeadlessLimits {
     pub max_input_bytes: usize,
     /// Effective `--full-auto` tool-call cap (default [`FULL_AUTO_MAX_TOOL_CALLS`]).
     pub full_auto_max_tool_calls: u32,
-    /// Effective run-log retention count (default [`LOG_RETENTION_RUNS`]).
-    pub log_retention_runs: usize,
-    /// Effective log-dir byte ceiling (default [`LOG_MAX_BYTES`]).
-    pub log_max_bytes: u64,
     /// Effective per-tool-result byte cap (default [`TOOL_RESULT_CAP`]).
     pub tool_result_cap: usize,
     /// Effective default wall-clock timeout secs for tool-executing tiers
@@ -71,8 +67,6 @@ impl Default for HeadlessLimits {
         Self {
             max_input_bytes: MAX_INPUT_BYTES,
             full_auto_max_tool_calls: FULL_AUTO_MAX_TOOL_CALLS,
-            log_retention_runs: LOG_RETENTION_RUNS,
-            log_max_bytes: LOG_MAX_BYTES,
             tool_result_cap: TOOL_RESULT_CAP,
             full_auto_timeout_secs: FULL_AUTO_TIMEOUT_SECS,
         }
