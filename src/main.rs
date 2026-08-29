@@ -4215,6 +4215,7 @@ fn tui_mode_classifier_wiring(
         Arc::new(crate::agent::mode_classifier::ProviderClassifier::new(
             provider,
             Arc::clone(&notices) as Arc<dyn crate::agent::mode_classifier::NoticeSink>,
+            Arc::new(magi_rs::logging::auditor::Auditor::new()),
         ));
     (classifier, notices)
 }
@@ -5761,8 +5762,15 @@ async fn run_consult_subcommand(
     // suppress one notice because the other already fired.
     let notice_sink: Arc<dyn crate::agent::mode_classifier::NoticeSink> =
         Arc::new(crate::agent::mode_classifier::ProcessNoticeSink::default());
-    let classifier =
-        crate::agent::mode_classifier::ProviderClassifier::new(provider, Arc::clone(&notice_sink));
+    // One auditor per process, shared by the classifier and the runtime: it is
+    // where the registered secrets live, so two of them would mean two different
+    // ideas of what must be redacted.
+    let auditor = Arc::new(magi_rs::logging::auditor::Auditor::new());
+    let classifier = crate::agent::mode_classifier::ProviderClassifier::new(
+        provider,
+        Arc::clone(&notice_sink),
+        Arc::clone(&auditor),
+    );
     // Task 4.1: the trio is built ONCE, in `prepare_headless` (the shared prelude); a
     // forced `magi consult` needs a LIVE trio unconditionally, so an unbuildable one
     // fails this run closed exactly as it did before (REQ-A06's polished per-surface
@@ -5802,6 +5810,7 @@ async fn run_consult_subcommand(
         magi_config: &magi_config,
         timeout_decision,
         notice_sink: notice_sink.as_ref(),
+        auditor: auditor.as_ref(),
         structured_verdicts: if structured_verdicts {
             crate::tools::consult::StructuredVerdicts::Include
         } else {
@@ -13171,24 +13180,40 @@ agent_timeout_secs = {CEILING}
             );
         }
 
+        /// Wraps a literal as an [`Audited`] for these sink tests.
+        ///
+        /// The sink no longer takes a `&str`, and that IS the migration: the type
+        /// is what proves a line went through the auditor. These tests are about
+        /// the sink's routing and deduplication, not about redaction, so they
+        /// audit with a fresh auditor and nothing registered.
+        fn audited(text: &str) -> magi_rs::logging::auditor::Audited {
+            let (a, _) = magi_rs::logging::auditor::Auditor::new().audit(
+                text,
+                "magi_rs::tui::tests",
+                None,
+                0,
+            );
+            a
+        }
+
         /// Before the channel exists the sink falls back to stderr — correct, because raw mode
         /// has not been entered yet — and it never drops a notice silently (B9).
         #[test]
         fn an_unattached_sink_still_deduplicates_by_key() {
             let sink = crate::tui::TuiNoticeSink::new();
-            sink.once("k", "first");
-            sink.once("k", "second");
+            sink.once("k", &audited("first"));
+            sink.once("k", &audited("second"));
 
             let (tx, mut rx) = tokio::sync::mpsc::channel::<AgentResponse>(8);
             sink.attach(tx);
-            sink.once("k", "third");
+            sink.once("k", &audited("third"));
             assert!(
                 rx.try_recv().is_err(),
                 "a key already emitted before attachment must stay emitted: \"once\" is per \
                  key and per process, not per destination"
             );
 
-            sink.once("other", "fresh key");
+            sink.once("other", &audited("fresh key"));
             assert!(
                 matches!(rx.try_recv(), Ok(AgentResponse::Notice(t)) if t == "fresh key"),
                 "a key not yet seen must reach the channel once attached"
@@ -13212,7 +13237,7 @@ agent_timeout_secs = {CEILING}
                 .expect("the fresh channel has room for the filler");
 
             // `once` now hits `TrySendError::Full` and must queue rather than print.
-            sink.once("full-channel-key", "queued while full");
+            sink.once("full-channel-key", &audited("queued while full"));
 
             // Poll for the condition instead of sleeping a fixed duration
             // (CLAUDE.local.md: "wait on conditions, never on durations"): drain the
@@ -13254,7 +13279,7 @@ agent_timeout_secs = {CEILING}
             // STARTED but `LeaveAlternateScreen` has not run yet.
             drop(rx);
 
-            sink.once("closed-key", "deferred message");
+            sink.once("closed-key", &audited("deferred message"));
             assert_eq!(
                 sink.pending_len(),
                 1,
@@ -13282,10 +13307,10 @@ agent_timeout_secs = {CEILING}
             sink.attach(tx);
             drop(rx);
 
-            sink.once("k1", "first");
+            sink.once("k1", &audited("first"));
             assert_eq!(sink.flush(), vec!["first".to_string()]);
 
-            sink.once("k2", "second");
+            sink.once("k2", &audited("second"));
             assert_eq!(
                 sink.pending_len(),
                 0,
@@ -13314,7 +13339,7 @@ agent_timeout_secs = {CEILING}
                 .expect("the fresh channel has room for the filler");
 
             // Hits `TrySendError::Full` and spawns a background task waiting for room.
-            sink.once("full-then-closed", "should defer, not print");
+            sink.once("full-then-closed", &audited("should defer, not print"));
 
             // Drop the receiver while that background task is still waiting — simulates
             // `run_app` returning (and dropping `response_rx`) before room ever freed.

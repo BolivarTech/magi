@@ -66,6 +66,11 @@ use crate::tools::consult::{
 /// the other already fired.
 const NOTICE_TIMEOUT_BELOW_FORMULA: &str = "timeout.below_formula";
 
+/// Target recorded on the notices this module emits.
+const NOTICE_TARGET: &str = "magi_rs::headless_runner";
+/// Notices do not travel the appender's channel, so they reserve nothing.
+const NO_RESERVATION: usize = 0;
+
 /// Run-log line for the same condition on the `magi query` route (SC-A04d).
 ///
 /// The exact seconds live in the stderr notice and in `applied_caps`; the log line only has to
@@ -242,6 +247,8 @@ pub(crate) struct MagiRuntimeParams<'a> {
     pub(crate) timeout_decision: TimeoutDecision,
     /// Where `timeout_decision.warning` is emitted, if present (SC-A04d).
     pub(crate) notice_sink: &'a dyn NoticeSink,
+    /// Builds the [`Audited`](magi_rs::logging::auditor::Audited) a notice has to be.
+    pub(crate) auditor: &'a magi_rs::logging::auditor::Auditor,
     /// REQ-EA01/EA03: `consult --structured-verdicts`. It rides HERE rather than as one more
     /// positional argument down the chain, for the same reason `OpenAiSettings` and `ModeSources`
     /// are named structs: several same-typed arguments in a row are a silent transposition hazard.
@@ -299,7 +306,12 @@ async fn analyze_direct(
     // timeout_below_formula` already reports in the JSON (REQ-A11d covers the
     // pipeline consumer; this covers whoever runs the command by hand).
     if let Some(w) = &runtime.timeout_decision.warning {
-        runtime.notice_sink.once(NOTICE_TIMEOUT_BELOW_FORMULA, w);
+        let (audited, _) = runtime
+            .auditor
+            .audit(w, NOTICE_TARGET, None, NO_RESERVATION);
+        runtime
+            .notice_sink
+            .once(NOTICE_TIMEOUT_BELOW_FORMULA, &audited);
     }
 
     // SC-A11c: the SAME `check_query_size` the tool path and the TUI's explicit
@@ -1315,15 +1327,42 @@ mod tests {
         messages: Mutex<Vec<String>>,
     }
 
+    use magi_rs::logging::auditor::{Audited, Auditor};
+
+    /// The auditor the test runtimes borrow.
+    ///
+    /// A `OnceLock` because `MagiRuntimeParams` borrows it for `'a` and a local
+    /// would not outlive the literal. Sharing one across tests is safe here and
+    /// only here: in MS1 the auditor holds no registered state, so there is
+    /// nothing for one test to leak into another. **If a test ever registers a
+    /// secret, it needs its own.**
+    fn test_auditor() -> &'static Auditor {
+        static A: std::sync::OnceLock<Auditor> = std::sync::OnceLock::new();
+        A.get_or_init(Auditor::new)
+    }
+
     impl NoticeSink for RecordingNoticeSink {
-        fn once(&self, key: &'static str, msg: &str) {
+        fn once(&self, key: &'static str, msg: &Audited) {
             let mut seen = self.seen.lock().unwrap_or_else(PoisonError::into_inner);
             if seen.insert(key) {
-                self.messages
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .push(msg.to_string());
+                self.record(msg);
             }
+        }
+    }
+
+    impl RecordingNoticeSink {
+        /// Stores what the sink was handed.
+        ///
+        /// **Records `as_str()` of an [`Audited`], never a `&str` it was given.**
+        /// The migration's whole point is that the type is what proves the line
+        /// went through the auditor; a double that still took a `&str` would
+        /// keep compiling against the old contract and the tests would go on
+        /// asserting about a guarantee the production path no longer has.
+        fn record(&self, msg: &Audited) {
+            self.messages
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(msg.as_str().to_string());
         }
     }
 
@@ -1390,6 +1429,7 @@ mod tests {
             magi_config: &cfg,
             timeout_decision: neutral_timeout_decision(),
             notice_sink: &sink,
+            auditor: test_auditor(),
             structured_verdicts: StructuredVerdicts::Omit,
             budget: BudgetTelemetry::default(),
         };
@@ -2976,6 +3016,7 @@ mod tests {
                 magi_config: &cfg,
                 timeout_decision: neutral_timeout_decision(),
                 notice_sink: &sink,
+                auditor: test_auditor(),
                 structured_verdicts: StructuredVerdicts::Include,
                 budget: BudgetTelemetry::default(),
             },
@@ -3015,6 +3056,7 @@ mod tests {
                 magi_config: &cfg,
                 timeout_decision: neutral_timeout_decision(),
                 notice_sink: &sink,
+                auditor: test_auditor(),
                 structured_verdicts: StructuredVerdicts::Omit,
                 budget: BudgetTelemetry::default(),
             },
@@ -3067,6 +3109,7 @@ mod tests {
                 magi_config: &diverged,
                 timeout_decision: neutral_timeout_decision(),
                 notice_sink: &sink,
+                auditor: test_auditor(),
                 structured_verdicts: StructuredVerdicts::Omit,
                 budget: BudgetTelemetry::default(),
             },
@@ -3106,6 +3149,7 @@ mod tests {
                 magi_config: &diverged,
                 timeout_decision: neutral_timeout_decision(),
                 notice_sink: &sink,
+                auditor: test_auditor(),
                 structured_verdicts: StructuredVerdicts::Omit,
                 budget: BudgetTelemetry::default(),
             },
@@ -3156,6 +3200,7 @@ mod tests {
                 magi_config: &cfg,
                 timeout_decision: decision,
                 notice_sink: &sink,
+                auditor: test_auditor(),
                 structured_verdicts: StructuredVerdicts::Omit,
                 budget: BudgetTelemetry::default(),
             },
@@ -3216,6 +3261,7 @@ mod tests {
                 magi_config: &cfg,
                 timeout_decision: decision,
                 notice_sink: &sink,
+                auditor: test_auditor(),
                 structured_verdicts: StructuredVerdicts::Omit,
                 budget: BudgetTelemetry::default(),
             },
@@ -3265,6 +3311,7 @@ mod tests {
                 magi_config: &cfg,
                 timeout_decision: generous,
                 notice_sink: &sink_generous,
+                auditor: test_auditor(),
                 structured_verdicts: StructuredVerdicts::Omit,
                 budget: BudgetTelemetry::default(),
             },
@@ -3303,6 +3350,7 @@ mod tests {
                 magi_config: &cfg,
                 timeout_decision: absent,
                 notice_sink: &sink_absent,
+                auditor: test_auditor(),
                 structured_verdicts: StructuredVerdicts::Omit,
                 budget: BudgetTelemetry::default(),
             },
@@ -3339,6 +3387,7 @@ mod tests {
                 magi_config: &cfg,
                 timeout_decision: neutral_timeout_decision(),
                 notice_sink: &sink,
+                auditor: test_auditor(),
                 structured_verdicts: StructuredVerdicts::Omit,
                 budget: BudgetTelemetry::default(),
             },
@@ -3386,6 +3435,7 @@ mod tests {
                 magi_config: &cfg,
                 timeout_decision: neutral_timeout_decision(),
                 notice_sink: &sink,
+                auditor: test_auditor(),
                 structured_verdicts: StructuredVerdicts::Omit,
                 budget: BudgetTelemetry::default(),
             },
@@ -3430,6 +3480,7 @@ mod tests {
                 magi_config: &cfg,
                 timeout_decision: neutral_timeout_decision(),
                 notice_sink: &sink,
+                auditor: test_auditor(),
                 structured_verdicts: StructuredVerdicts::Omit,
                 budget: BudgetTelemetry::default(),
             },
@@ -3473,6 +3524,7 @@ mod tests {
                 magi_config: &cfg,
                 timeout_decision: neutral_timeout_decision(),
                 notice_sink: &sink,
+                auditor: test_auditor(),
                 structured_verdicts: StructuredVerdicts::Omit,
                 budget: expected,
             },
@@ -3524,6 +3576,7 @@ mod tests {
             magi_config: &cfg,
             timeout_decision: neutral_timeout_decision(),
             notice_sink: &sink,
+            auditor: test_auditor(),
             structured_verdicts: StructuredVerdicts::Omit,
             budget: BudgetTelemetry::default(),
         };

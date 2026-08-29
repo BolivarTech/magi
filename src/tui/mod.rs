@@ -238,13 +238,24 @@ impl crate::agent::mode_classifier::NoticeSink for TuiNoticeSink {
     ///   before room frees up (the run ended), defers through the same
     ///   [`Self::defer_or_print`] path rather than printing directly from the spawned task —
     ///   see [`PendingNotices`] for why that indirection is what actually closes the race.
-    fn once(&self, key: &'static str, msg: &str) {
+    fn once(&self, key: &'static str, msg: &magi_rs::logging::auditor::Audited) {
         {
             let mut seen = self.seen.lock().unwrap_or_else(|p| p.into_inner());
             if !seen.insert(key) {
                 return;
             }
         }
+        self.route(msg.as_str());
+    }
+}
+
+impl TuiNoticeSink {
+    /// The routing every notice shares, whatever deduplicated it.
+    ///
+    /// Extracted when `emit` arrived: two copies of the three-way fallback below
+    /// is two chances for one of them to lose the distinction between a closed
+    /// channel and a full one, which is the bug this whole comment records.
+    fn route(&self, msg: &str) {
         let tx = self
             .tx
             .lock()

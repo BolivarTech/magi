@@ -55,6 +55,13 @@ const NOTICE_CLASSIFY_COST: &str = "classify.cost";
 /// previous one — this one warns that something FAILED, not that something IS GOING TO HAPPEN.
 const NOTICE_CLASSIFY_TIMEOUT: &str = "classify.timeout";
 
+/// Target recorded on the notices this module emits.
+const NOTICE_TARGET: &str = "magi_rs::agent::mode_classifier";
+/// Notices do not travel the appender's channel, so they reserve nothing.
+const NO_RESERVATION: usize = 0;
+
+use magi_rs::logging::auditor::{Audited, Auditor};
+
 /// Emitter of one-time notices, **injectable**.
 ///
 /// **Resolves a real tension between two rules, and therefore is neither a field nor
@@ -69,7 +76,22 @@ pub trait NoticeSink: Send + Sync {
     /// headless `magi consult`, one process IS one run, so building a [`ProcessNoticeSink`] per
     /// invocation already satisfies "once per process"), **one fresh instance per test** in the
     /// suite. The semantics of "once" live in the sink, not in whoever uses it.
-    fn once(&self, key: &'static str, msg: &str);
+    ///
+    /// **Takes an [`Audited`], not a `&str`, and that is the whole point.** Nothing reaches an
+    /// output without having gone through the auditor, and the compiler is what enforces it:
+    /// handing this a raw `String` does not compile (REQ-L48).
+    fn once(&self, key: &'static str, msg: &Audited);
+
+    // `emit` — deliver WITHOUT deduplicating — belongs to this trait and is
+    // deliberately NOT here yet. Its consumer is the auditor's alarm, which is
+    // task 3.3; declaring it now would be API surface with nothing calling it,
+    // which G2 forbids and which no `#[allow]` may paper over.
+    //
+    // Splitting it out is safe in a way the `once` signature change is not:
+    // changing `once` is BREAKING and has to land in one sweep or half the
+    // implementations keep compiling against a contract the production path no
+    // longer honours. Adding a required method later is additive and fails
+    // LOUDLY — every implementation stops compiling until it is updated.
 }
 
 /// Emits `msg` the first time it is called with `key`; subsequent calls are no-ops for that
@@ -81,10 +103,10 @@ pub struct ProcessNoticeSink {
 }
 
 impl NoticeSink for ProcessNoticeSink {
-    fn once(&self, key: &'static str, msg: &str) {
+    fn once(&self, key: &'static str, msg: &Audited) {
         let mut seen = self.seen.lock().unwrap_or_else(PoisonError::into_inner);
         if seen.insert(key) {
-            eprintln!("{msg}");
+            eprintln!("{}", msg.as_str());
         }
     }
 }
@@ -98,24 +120,41 @@ pub struct ProviderClassifier {
     provider: Arc<dyn Provider>,
     /// The primary provider already resolved (same one that serves the tool loop).
     notices: Arc<dyn NoticeSink>,
+    /// Builds the [`Audited`] every notice now has to be.
+    ///
+    /// Threaded in rather than reached through a global: a process-wide auditor would satisfy
+    /// the semantics and break the same test-isolation rule the sink itself was designed
+    /// around, which is the tension documented on [`NoticeSink`].
+    auditor: Arc<Auditor>,
 }
 
 impl ProviderClassifier {
     /// Emitter of the two one-time notices of this module.
     #[must_use]
-    pub fn new(provider: Arc<dyn Provider>, notices: Arc<dyn NoticeSink>) -> Self {
-        Self { provider, notices }
+    pub fn new(
+        provider: Arc<dyn Provider>,
+        notices: Arc<dyn NoticeSink>,
+        auditor: Arc<Auditor>,
+    ) -> Self {
+        Self {
+            provider,
+            notices,
+            auditor,
+        }
     }
 }
 
 #[async_trait]
 impl ModeClassifier for ProviderClassifier {
     async fn classify(&self, content: &str) -> Option<Mode> {
-        self.notices.once(
-            NOTICE_CLASSIFY_COST,
+        let (cost, _) = self.auditor.audit(
             "notice: without `--mode` or `[magi].default_mode`, magi-rs adds a call to the \
              model to infer the lens. Declaring the mode avoids it.",
+            NOTICE_TARGET,
+            None,
+            NO_RESERVATION,
         );
+        self.notices.once(NOTICE_CLASSIFY_COST, &cost);
 
         let prompt = format!(
             "Classify the delimited content into exactly one of these labels: \
@@ -128,14 +167,17 @@ impl ModeClassifier for ProviderClassifier {
         match tokio::time::timeout(deadline, self.provider.send_messages(&msgs, &[], None)).await {
             Ok(Ok(reply)) => normalize_label(&reply.concat_text()),
             Ok(Err(_)) | Err(_) => {
-                self.notices.once(
-                    NOTICE_CLASSIFY_TIMEOUT,
+                let (expired, _) = self.auditor.audit(
                     &format!(
                         "notice: mode inference expired ({CLASSIFY_TIMEOUT_SECS}s) or failed; \
                          using `analysis`. On slow providers, declare \
                          `[magi].default_mode`."
                     ),
+                    NOTICE_TARGET,
+                    None,
+                    NO_RESERVATION,
                 );
+                self.notices.once(NOTICE_CLASSIFY_TIMEOUT, &expired);
                 None
             }
         }
@@ -208,15 +250,37 @@ mod tests {
     }
 
     impl NoticeSink for RecordingNoticeSink {
-        fn once(&self, key: &'static str, msg: &str) {
+        fn once(&self, key: &'static str, msg: &Audited) {
             let mut seen = self.seen.lock().unwrap_or_else(PoisonError::into_inner);
             if seen.insert(key) {
-                self.messages
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .push(msg.to_string());
+                self.record(msg);
             }
         }
+    }
+
+    impl RecordingNoticeSink {
+        /// Stores what the sink was handed.
+        ///
+        /// **Records `as_str()` of an [`Audited`], never a `&str` it was given.**
+        /// The migration's whole point is that the type is what proves the line
+        /// went through the auditor; a double that still took a `&str` would
+        /// keep compiling against the old contract and the tests would go on
+        /// asserting about a guarantee the production path no longer has.
+        fn record(&self, msg: &Audited) {
+            self.messages
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(msg.as_str().to_string());
+        }
+    }
+
+    /// A fresh auditor for a test's classifier.
+    ///
+    /// One per construction, never shared: the sink's own doc explains why a
+    /// process-wide instance would let test order decide what a test sees, and
+    /// the auditor holds registered state for exactly the same reason.
+    fn test_auditor() -> Arc<Auditor> {
+        Arc::new(Auditor::new())
     }
 
     impl RecordingNoticeSink {
@@ -253,6 +317,7 @@ mod tests {
         let classifier = ProviderClassifier::new(
             slow_provider(Duration::from_secs(CLASSIFY_TIMEOUT_SECS + 2)),
             Arc::new(ProcessNoticeSink::default()),
+            test_auditor(),
         );
 
         let handle = tokio::spawn(async move { classifier.classify("x").await });
@@ -275,6 +340,7 @@ mod tests {
         let classifier = Arc::new(ProviderClassifier::new(
             slow_provider(Duration::from_secs(30)),
             sink.clone(),
+            test_auditor(),
         ));
 
         for _ in 0..3 {
@@ -306,7 +372,11 @@ mod tests {
     #[tokio::test]
     async fn the_cost_notice_fires_even_when_classification_succeeds() {
         let sink = Arc::new(RecordingNoticeSink::default());
-        let classifier = ProviderClassifier::new(provider_returning("code-review"), sink.clone());
+        let classifier = ProviderClassifier::new(
+            provider_returning("code-review"),
+            sink.clone(),
+            test_auditor(),
+        );
 
         assert_eq!(
             classifier.classify("x").await,
@@ -331,6 +401,7 @@ mod tests {
         let classifier = ProviderClassifier::new(
             provider_returning("el modo apropiado seria code-review"),
             sink.clone(),
+            test_auditor(),
         );
 
         assert_eq!(classifier.classify("x").await, None, "prose is not a label");
@@ -354,15 +425,23 @@ mod tests {
         let b = Arc::new(RecordingNoticeSink::default());
 
         let handle_a = tokio::spawn(async move {
-            ProviderClassifier::new(slow_provider(Duration::from_secs(30)), a.clone())
-                .classify("x")
-                .await;
+            ProviderClassifier::new(
+                slow_provider(Duration::from_secs(30)),
+                a.clone(),
+                test_auditor(),
+            )
+            .classify("x")
+            .await;
             a
         });
         let handle_b = tokio::spawn(async move {
-            ProviderClassifier::new(slow_provider(Duration::from_secs(30)), b.clone())
-                .classify("x")
-                .await;
+            ProviderClassifier::new(
+                slow_provider(Duration::from_secs(30)),
+                b.clone(),
+                test_auditor(),
+            )
+            .classify("x")
+            .await;
             b
         });
         tokio::time::advance(Duration::from_secs(CLASSIFY_TIMEOUT_SECS + 1)).await;
