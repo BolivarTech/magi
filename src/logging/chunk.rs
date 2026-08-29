@@ -210,7 +210,8 @@ fn cut_payloads(event: &str, first_budget: usize, cont_budget: usize) -> Vec<&st
 
 /// Builds the indented header the continuation chunks carry.
 #[must_use]
-pub fn cont_header_for(id: &EventId) -> String {
+pub fn cont_header_for(id: &EventId, run: &str) -> String {
+    let _ = run;
     format!("  id={} ", id.render())
 }
 
@@ -297,6 +298,24 @@ mod tests {
     }
 
     #[test]
+    fn a_continuation_header_carries_the_run() {
+        // Chunks 2..N are lines too, and SC-L79 says filtering by a run
+        // returns ONLY its lines -- which means ALL of them. A continuation
+        // line without the run is a line that filter drops.
+        let id = EventId::new();
+        let cont = cont_header_for(&id, "4242-deadbeefcafe0001");
+        assert!(
+            cont.contains("run=4242-deadbeefcafe0001"),
+            "no run field in the continuation header: {cont}"
+        );
+        assert_ne!(
+            cont_header_for(&id, "1-a"),
+            cont_header_for(&id, "2-b"),
+            "the continuation header ignores the run it was handed"
+        );
+    }
+
+    #[test]
     fn every_written_line_stays_within_the_threshold_including_the_newline() {
         let event = "x".repeat(50 * 1024);
         let id = EventId::new();
@@ -304,7 +323,7 @@ mod tests {
         // not exist yet, and this test is about the threshold, not about where
         // the header comes from.
         let header = "2026-08-14T00:00:00Z INFO magi_rs::agent: ";
-        let lines = split(&event, header, &cont_header_for(&id), id);
+        let lines = split(&event, header, &cont_header_for(&id, "0-0"), id);
         // Without this the assertion below is vacuously true on an empty
         // result: a 50 KiB event MUST chunk, so an unchunked answer is the
         // failure, not a pass.
@@ -325,7 +344,7 @@ mod tests {
     #[test]
     fn a_short_event_carries_no_chunk_marker() {
         let id = EventId::new();
-        let lines = split("short", "H ", &cont_header_for(&id), id);
+        let lines = split("short", "H ", &cont_header_for(&id, "0-0"), id);
         assert_eq!(lines.len(), 1);
         assert!(!lines[0].contains("id="));
         assert!(!lines[0].contains("1/1"));
@@ -335,7 +354,7 @@ mod tests {
     fn cuts_land_on_character_boundaries_and_every_chunk_is_valid_utf8() {
         let event = "日".repeat(4000); // 3 bytes each
         let id = EventId::new();
-        let lines = split(&event, "H ", &cont_header_for(&id), id);
+        let lines = split(&event, "H ", &cont_header_for(&id, "0-0"), id);
         let joined: String = lines.iter().map(|l| payload_of(l)).collect();
         assert_eq!(joined, event);
     }
@@ -344,7 +363,7 @@ mod tests {
     fn the_marker_count_matches_the_number_of_lines_actually_produced() {
         let event = "日".repeat(20_000);
         let id = EventId::new();
-        let lines = split(&event, "H ", &cont_header_for(&id), id);
+        let lines = split(&event, "H ", &cont_header_for(&id, "0-0"), id);
         let n = lines.len();
         assert!(n > 1, "a 60 KB event must produce several chunks, got {n}");
         for (i, line) in lines.iter().enumerate() {
@@ -361,7 +380,7 @@ mod tests {
         // 512 chunks: the marker grows from "1/512" to "512/512".
         let event = "x".repeat(512 * 4000);
         let id = EventId::new();
-        let lines = split(&event, "H ", &cont_header_for(&id), id);
+        let lines = split(&event, "H ", &cont_header_for(&id, "0-0"), id);
         // The point of this test is a marker that WIDENS from `1/N` to a
         // three-digit numerator; over an empty or short result there is no
         // widening to observe and every assertion below holds for free.
@@ -383,7 +402,7 @@ mod tests {
         let long_header = "2026-08-14T00:00:00Z INFO magi_rs::agent::very::long::target: ";
         let id = EventId::new();
         let event = "x".repeat(40_000);
-        let lines = split(&event, long_header, &cont_header_for(&id), id);
+        let lines = split(&event, long_header, &cont_header_for(&id, "0-0"), id);
         let first_payload = payload_of(&lines[0]).len();
         let cont_payload = payload_of(&lines[1]).len();
         assert!(

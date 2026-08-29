@@ -84,3 +84,61 @@ fn the_run_id_is_stable_within_a_process_and_has_the_documented_shape() {
         "lowercase hex: {a}"
     );
 }
+
+/// SC-L79: filtering the daily file by a run returns **only** that run's lines.
+///
+/// The file is shared by every concurrent invocation -- nine runs landed in one
+/// file during this milestone's own smoke pass -- so the run id on the line is
+/// the whole of what replaces the per-run file REQ-H24 retired. Retiring that
+/// contract without this leaves a CI consumer a log it cannot filter.
+///
+/// **Every line, including continuations.** A payload past the 4096-byte
+/// threshold is split, and a continuation line missing the id is a line the
+/// filter drops -- which is the same defect, only harder to see.
+#[test]
+fn every_line_of_the_daily_file_carries_the_run_id() {
+    let dir = tempfile::tempdir().unwrap();
+    let sink = Arc::new(Recording::default());
+    let cfg = LoggingConfig {
+        log_dir: dir.path().to_path_buf(),
+        file_level: tracing::Level::INFO,
+    };
+    let handle = init_logging(&cfg, sink, None).expect("init");
+
+    tracing::info!(target: "magi_rs::agent", "a short one");
+    // Comfortably past MAX_LINE_BYTES, so this event becomes several lines.
+    //
+    // **Prose, not padding.** A long run of one repeated character is exactly
+    // what the auditor's shape pass calls a secret, so `"x".repeat(12_000)`
+    // arrives as `***` -- one short line, and the split this test exists to
+    // exercise never happens. That masking already produced one ineffective
+    // guardian in this milestone; the fixture has to survive the redactor.
+    let long = "the quick brown fox jumps over the lazy dog ".repeat(300);
+    tracing::info!(target: "magi_rs::agent", "{long}");
+
+    drop(handle);
+    std::thread::sleep(std::time::Duration::from_millis(300));
+
+    let mut written = String::new();
+    for entry in std::fs::read_dir(dir.path()).expect("read_dir").flatten() {
+        written.push_str(&std::fs::read_to_string(entry.path()).unwrap_or_default());
+    }
+
+    let lines: Vec<&str> = written.lines().filter(|l| !l.trim().is_empty()).collect();
+    // Without this the loop below is vacuously true over an empty file, which
+    // is this repository's most frequent way of shipping a guardian that
+    // guards nothing. Two events, one of them split, is more than three lines.
+    assert!(
+        lines.len() > 3,
+        "the fixture produced {} lines, so the assertion below proves nothing: {written}",
+        lines.len()
+    );
+
+    let needle = format!("run={}", magi_rs::logging::run_id());
+    for line in &lines {
+        assert!(
+            line.contains(&needle),
+            "a line the run filter would drop: {line}"
+        );
+    }
+}

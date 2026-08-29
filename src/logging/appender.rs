@@ -563,7 +563,7 @@ impl FileSink {
         for line in crate::logging::chunk::split(
             &crate::logging::render::escape_for_line(&text),
             header,
-            &crate::logging::chunk::cont_header_for(&id),
+            &crate::logging::chunk::cont_header_for(&id, crate::logging::run_id()),
             id,
         ) {
             file.write_all(line.as_bytes())?;

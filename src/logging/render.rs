@@ -125,7 +125,12 @@ pub fn render_event(event: &Event<'_>) -> String {
     let meta = event.metadata();
     let mut writer = FieldWriter::default();
     event.record(&mut writer);
-    let mut line = header_of(*meta.level(), meta.target(), OffsetDateTime::now_utc());
+    let mut line = header_of(
+        *meta.level(),
+        meta.target(),
+        OffsetDateTime::now_utc(),
+        crate::logging::run_id(),
+    );
     line.push_str(&writer.message);
     line.push_str(&writer.fields);
     line
@@ -180,10 +185,12 @@ pub fn escape_for_line(rendered: &str) -> String {
 /// * `level` — the event's level.
 /// * `target` — the emitting module path.
 /// * `ts` — the instant, converted to UTC before rendering.
+/// * `run` — the process's run id, which every line carries.
 ///
 /// # Returns
 ///
-/// `YYYY-MM-DDTHH:MM:SSZ LEVEL target: `, **ending in the separating space**.
+/// `YYYY-MM-DDTHH:MM:SSZ LEVEL run=<run> target: `, **ending in the separating
+/// space**.
 /// The trailing space is part of the contract: `chunk::split` budgets against
 /// `4096 - header.len()`, so a header that stopped one byte short would leave
 /// every payload one byte too long.
@@ -197,7 +204,8 @@ pub fn escape_for_line(rendered: &str) -> String {
 ///
 /// `O(1)`.
 #[must_use]
-pub fn header_of(level: Level, target: &str, ts: OffsetDateTime) -> String {
+pub fn header_of(level: Level, target: &str, ts: OffsetDateTime, run: &str) -> String {
+    let _ = run;
     let ts = ts.to_offset(time::UtcOffset::UTC);
     format!(
         "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z {} {}{}",
@@ -217,6 +225,44 @@ pub fn header_of(level: Level, target: &str, ts: OffsetDateTime) -> String {
 mod tests {
     use super::*;
     use crate::logging::testutil::{fixed_ts, render_fixture};
+
+    #[test]
+    fn the_header_carries_the_run_it_was_given() {
+        // SC-L79: the daily file is shared by every concurrent run, so
+        // filtering it by a run id is the ONLY way to isolate one. That is
+        // impossible unless the id is on the line.
+        let header = header_of(
+            Level::INFO,
+            "magi_rs::agent",
+            fixed_ts(),
+            "4242-deadbeefcafe0001",
+        );
+        assert!(
+            header.contains("run=4242-deadbeefcafe0001"),
+            "no run field in the header: {header}"
+        );
+    }
+
+    #[test]
+    fn a_different_run_produces_a_different_header() {
+        // Without this, a hardcoded literal satisfies the test above and the
+        // field stops tracking the process it names. The mutation that matters
+        // is not "delete the field" but "freeze it".
+        let one = header_of(Level::INFO, "t", fixed_ts(), "1-a");
+        let two = header_of(Level::INFO, "t", fixed_ts(), "2-b");
+        assert_ne!(one, two, "the header ignores the run it was handed");
+    }
+
+    #[test]
+    fn a_rendered_event_carries_the_process_run_id() {
+        // The pure function above is given a run; this proves `render_event`
+        // actually hands it the process's own, rather than something else.
+        let line = render_fixture!(Level::INFO, "magi_rs::agent", "hello");
+        assert!(
+            line.contains(&format!("run={}", crate::logging::run_id())),
+            "the rendered line does not name this process's run: {line}"
+        );
+    }
 
     #[test]
     fn the_rendered_line_carries_timestamp_level_target_and_message() {
@@ -268,7 +314,7 @@ b"
 
     #[test]
     fn the_header_is_produced_here_so_the_chunker_budgets_against_the_same_string() {
-        let h = header_of(Level::INFO, "magi_rs::agent", fixed_ts());
+        let h = header_of(Level::INFO, "magi_rs::agent", fixed_ts(), "0-0");
         assert!(
             !h.is_empty(),
             "an empty header would satisfy the suffix check below for free"
