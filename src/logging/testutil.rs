@@ -68,3 +68,75 @@ pub(crate) fn build_entries(
         })
         .collect()
 }
+
+/// A deterministic timestamp, so a test never depends on the wall clock.
+///
+/// # Complexity
+///
+/// `O(1)`.
+pub(crate) fn fixed_ts() -> time::OffsetDateTime {
+    time::Date::from_calendar_date(2026, time::Month::August, 14)
+        .expect("a literal calendar date")
+        .midnight()
+        .assume_utc()
+}
+
+/// Runs `emit` with a subscriber that renders every event through
+/// [`render_event`](crate::logging::render::render_event), and returns the last
+/// rendered line.
+///
+/// # Why a subscriber and not a constructed event
+///
+/// `tracing::Event` has no usable public constructor: it exists only inside a
+/// dispatcher while a macro emits it. Driving `render_event` therefore means
+/// installing a subscriber and emitting for real — which is the better test
+/// anyway, because it walks the production path instead of a fabricated one.
+///
+/// # Complexity
+///
+/// `O(1)` plus whatever `emit` does.
+pub(crate) fn capture(emit: impl FnOnce()) -> String {
+    use std::sync::{Arc, Mutex};
+    use tracing_subscriber::layer::SubscriberExt;
+
+    let buf: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+
+    struct CaptureLayer(Arc<Mutex<Vec<String>>>);
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for CaptureLayer {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            if let Ok(mut g) = self.0.lock() {
+                g.push(crate::logging::render::render_event(event));
+            }
+        }
+    }
+
+    let subscriber = tracing_subscriber::registry().with(CaptureLayer(Arc::clone(&buf)));
+    tracing::subscriber::with_default(subscriber, emit);
+
+    let guard = buf
+        .lock()
+        .expect("the capture buffer is never poisoned here");
+    guard.last().cloned().unwrap_or_default()
+}
+
+/// Renders one event through the real dispatcher and returns the line.
+///
+/// **A macro, not a function, and that is forced rather than chosen.** `tracing`
+/// builds each callsite's `Metadata` as a `static`, so the target and the level
+/// must be **constant at the emit site**: a function taking them as parameters
+/// fails to compile with `E0435, attempt to use a non-constant value in a
+/// constant`. The plan declared
+/// `render_fixture(level, target, msg, fields) -> String`, which cannot exist.
+/// Fields are named at the callsite for the same reason.
+macro_rules! render_fixture {
+    ($lvl:expr, $target:literal, $msg:expr $(, $k:ident = $v:expr)* $(,)?) => {{
+        $crate::logging::testutil::capture(|| {
+            tracing::event!(target: $target, $lvl, message = $msg $(, $k = $v)*);
+        })
+    }};
+}
+pub(crate) use render_fixture;

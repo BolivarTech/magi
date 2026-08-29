@@ -53,6 +53,16 @@ urlencoding = "2.1"
 # which is not published. `macros` is deliberately not enabled — `date!()` and
 # `format_description!()` are conveniences the rotation module does not need,
 # and enabling them is what drags that broken requirement back in.
+# The event pipeline. Pinned like the rest for reproducibility.
+#
+# `tracing-subscriber` lands here rather than with the layer that consumes it in
+# production, because its first consumer is the TEST FIXTURE: `tracing::Event`
+# has no public constructor — it exists only inside a dispatcher while a macro
+# emits it — so exercising `render_event` at all means installing a subscriber.
+# Hand-rolling one is forty lines of no-op trait methods for a crate the layer
+# needs anyway.
+tracing = "=0.1.44"
+tracing-subscriber = { version = "=0.3.23", default-features = false, features = ["std", "registry"] }
 time = { version = "=0.3.53", default-features = false, features = ["std", "formatting"] }
 cryptovault = "0.3.0"  # fundación criptográfica auditada (R-V01); reemplaza src/utils/crypto.rs (MS1)
 zeroize = "1.8"
