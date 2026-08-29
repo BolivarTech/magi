@@ -10,18 +10,27 @@
 use time::Date;
 
 /// Whether the open file should be rolled.
-pub fn should_roll(_open_date: Date, _now_utc: Date) -> bool {
-    unimplemented!("Green phase")
+pub fn should_roll(open_date: Date, now_utc: Date) -> bool {
+    now_utc > open_date
 }
 
 /// The date of the file to roll into.
-pub fn roll_target(_open_date: Date, _now_utc: Date) -> Date {
-    unimplemented!("Green phase")
+pub fn roll_target(open_date: Date, now_utc: Date) -> Date {
+    if now_utc > open_date {
+        now_utc
+    } else {
+        open_date
+    }
 }
 
 /// The log file name for a date.
-pub fn file_name(_date: Date) -> String {
-    unimplemented!("Green phase")
+pub fn file_name(date: Date) -> String {
+    format!(
+        "magi-{:04}-{:02}-{:02}.log",
+        date.year(),
+        u8::from(date.month()),
+        date.day()
+    )
 }
 
 #[cfg(test)]
