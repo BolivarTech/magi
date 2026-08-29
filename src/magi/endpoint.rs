@@ -262,14 +262,45 @@ impl EndpointTemplate {
         // structural character, regardless of what the operator's secret contains. `%` itself
         // is escaped too, so a literal `%2F` typed into a password cannot smuggle a decoded
         // `/` past a consumer that decodes once.
-        let user_encoded = urlencoding::encode(user.as_str());
-        let password_encoded = urlencoding::encode(password.as_str());
+        // **Through the shared encoder, not a second call to the same crate.**
+        // `crate::encoding`'s whole reason to exist is that this side and the
+        // auditor's registration must produce the SAME bytes: the auditor scans
+        // for the encoded form, and if the two ever diverge it scans for a form
+        // that never appears. Two independent `urlencoding::encode` calls are
+        // not a shared function -- either one can move to a different `AsciiSet`
+        // and nothing stops compiling, while the failure is a credential encoded
+        // one way in the URL and hashed another way in the auditor.
+        let user_encoded = crate::encoding::percent_encode(user.as_str());
+        let password_encoded = crate::encoding::percent_encode(password.as_str());
+
+        // REQ-L49's MAIN case, registered where the value is resolved. A
+        // password with reserved characters NEVER appears raw inside a
+        // `base_url` -- it is encoded on the way in -- so an auditor that only
+        // knew the raw form would be blind in the one place credentials live.
+        // `register_process_secrets` composes the encoded variant from the raw
+        // value using this same encoder, which is what the paragraph above is
+        // guarding.
+        for short in crate::logging::register_process_secrets(&[
+            (
+                crate::logging::auditor::SecretName::new("BASE_URL_USER"),
+                user.as_str(),
+            ),
+            (
+                crate::logging::auditor::SecretName::new("BASE_URL_PASSWORD"),
+                password.as_str(),
+            ),
+        ]) {
+            eprintln!(
+                "warning: {} is too short to be matched exactly in the log; it is still                 masked by shape, which is weaker.",
+                short.as_str()
+            );
+        }
 
         let mut out = String::with_capacity(self.0.len());
         out.push_str(prefix);
-        out.push_str(&user_encoded);
+        out.push_str(user_encoded.as_str());
         out.push(':');
-        out.push_str(&password_encoded);
+        out.push_str(password_encoded.as_str());
         out.push_str(tail);
         Ok(ResolvedEndpoint(out))
     }
@@ -357,6 +388,46 @@ mod tests {
         fn contains(&mut self, name: &str) -> Result<bool, VaultError> {
             Ok(self.entries.contains_key(name))
         }
+    }
+
+    /// The URL and the auditor must encode a credential to the SAME bytes.
+    ///
+    /// `src/encoding.rs`'s module doc states this as the reason it exists, and
+    /// until this test it was a claim rather than a property: `endpoint.rs`
+    /// called `urlencoding::encode` directly, so the two were independent calls
+    /// that happened to agree. Either could have moved to a different
+    /// `AsciiSet` with nothing failing to compile, and the failure would be a
+    /// credential encoded one way in the URL and hashed another way in the
+    /// auditor -- which reads, from the outside, as an auditor that simply does
+    /// not catch it.
+    ///
+    /// Every character in the fixture is one that changes a URL authority's
+    /// parse if it survives unencoded, which is what makes them worth pinning.
+    #[test]
+    fn the_url_and_the_auditor_encode_a_hostile_password_identically() {
+        let hostile = "p4ss@word/with?reserved#chars%and:more";
+        let mut vault = StubVault::with(&[
+            ("BASE_URL_USER", "operator"),
+            ("BASE_URL_PASSWORD", hostile),
+        ]);
+        let template =
+            EndpointTemplate::parse("https://[user]:[password]@api.example.com/v1", Scope::Root)
+                .expect("parse");
+        let resolved = template.resolve(&mut vault, Scope::Root).expect("resolve");
+
+        let shared = crate::encoding::percent_encode(hostile);
+        assert!(
+            resolved.as_str().contains(shared.as_str()),
+            "the URL does not carry the bytes the auditor scans for.\n  url: {}\n  auditor: {shared}",
+            resolved.as_str()
+        );
+        // Without this the assertion above would also hold for an encoder that
+        // did nothing at all on both sides.
+        assert!(
+            !resolved.as_str().contains(hostile),
+            "the hostile password survived unencoded: {}",
+            resolved.as_str()
+        );
     }
 
     /// SC-A16d: LITERAL credential is an error, and the message does not repeat it.
