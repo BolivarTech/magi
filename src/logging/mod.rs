@@ -33,4 +33,5 @@
 #![cfg_attr(not(test), deny(clippy::unimplemented))]
 #![deny(missing_docs)]
 
+pub mod chunk;
 pub mod rotation;
