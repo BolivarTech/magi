@@ -148,6 +148,44 @@ impl LoggingHandle {
     }
 }
 
+/// The auditor the installed layer uses.
+///
+/// One per process, because the registered secrets have to be the SAME set for
+/// every mouth: two auditors would mean two different ideas of what must be
+/// redacted, and the mouth with the emptier one is the leak.
+fn process_auditor() -> &'static std::sync::Arc<auditor::Auditor> {
+    static A: std::sync::OnceLock<std::sync::Arc<auditor::Auditor>> = std::sync::OnceLock::new();
+    A.get_or_init(|| std::sync::Arc::new(auditor::Auditor::new()))
+}
+
+/// Registers the secrets this process resolved, so both mouths mask them.
+///
+/// # Parameters
+///
+/// * `secrets` — name and value pairs. **The caller composes the variants** it
+///   wants covered; this does not derive them, because the encoder that produced
+///   a value inside a URL lives on the resolving side, not here.
+///
+/// # Returns
+///
+/// The names whose value was too short for the exact pass, so the caller can
+/// warn. They are registered regardless — pass 1 still covers them.
+///
+/// # Complexity
+///
+/// `O(total bytes)`.
+pub fn register_process_secrets(
+    secrets: &[(auditor::SecretName, &str)],
+) -> Vec<auditor::SecretName> {
+    let mut short = Vec::new();
+    for (name, value) in secrets {
+        if !process_auditor().register_secret(*name, &[value]) {
+            short.push(*name);
+        }
+    }
+    short
+}
+
 /// This process's run identifier, minted once.
 ///
 /// **Discoverable, not merely existent** (REQ-L63). Telling an operator to
@@ -243,7 +281,7 @@ pub fn init_logging(
     // The step keeps its number because THE ORDER IS THE CONTRACT.
 
     // Step 4: build the auditor and register the environment's secrets.
-    let audit = std::sync::Arc::new(auditor::Auditor::new());
+    let audit = std::sync::Arc::clone(process_auditor());
 
     // Step 5: mount the layer and install the subscriber.
     let mut layer = magi_layer::MagiLayer::new(
