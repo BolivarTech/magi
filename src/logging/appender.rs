@@ -60,6 +60,17 @@ pub const LOG_CHANNEL_HIGH_BYTES: usize = 48 * 1024 * 1024;
 pub const LOG_CHANNEL_LOW_BYTES: usize = 16 * 1024 * 1024;
 /// Events the writer drains per batch before yielding.
 pub const HIGH_BATCH: usize = 64;
+/// How stale the writer's heartbeat may get before an emitter calls it hung.
+pub const WRITER_STALL_SECS: u64 = 60;
+/// Wait before the writer's ONE retry after a write failure.
+///
+/// **Chosen, not measured**, and the trade-off is not obvious: everything
+/// emitted during the wait is lost. Shorter retries before a transient cause
+/// clears — a disk that filled does not empty in five seconds — and spends the
+/// single retry for nothing; longer widens the window in which every event goes
+/// missing. Thirty seconds is a compromise between a retry that is worth making
+/// and a gap an operator can still explain.
+pub const WRITER_RETRY_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Which channel an event travels on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,6 +94,8 @@ pub enum Submitted {
     /// The writer is gone. The file branch is off; nothing more is counted and
     /// nothing more is announced.
     WriterGone,
+    /// The writer's heartbeat went stale with work pending. Permanent.
+    WriterHung,
 }
 
 /// One channel: its sender, its byte budget and its reservation counter.
@@ -153,6 +166,17 @@ pub struct DailyAppender {
     writer_gone: Arc<AtomicU64>,
     dir: PathBuf,
     writer: Option<std::thread::JoinHandle<()>>,
+    /// Last moment the writer was known to be alive and working.
+    ///
+    /// Stamped when it finishes a consume cycle, **when it parks on an empty
+    /// queue**, and **when it enters the retry cooldown**. All three, because
+    /// the mark has to refresh in every state where the writer is alive and
+    /// deliberately not consuming — miss one and an emitter reads a stale mark
+    /// with a non-empty queue and declares a hang that does not exist, which is
+    /// a permanent shutdown of the file layer.
+    heartbeat: Arc<std::sync::Mutex<std::time::Instant>>,
+    /// Set once a hang has been declared. The file branch never comes back.
+    hung: Arc<AtomicU64>,
 }
 
 impl DailyAppender {
@@ -166,6 +190,7 @@ impl DailyAppender {
             path: dir.to_path_buf(),
             source: e,
         })?;
+        let heartbeat = Arc::new(std::sync::Mutex::new(std::time::Instant::now()));
         let (high_tx, high_rx) = sync_channel(LOG_CHANNEL_HIGH_SLOTS);
         let (low_tx, low_rx) = sync_channel(LOG_CHANNEL_LOW_SLOTS);
         Ok(Self {
@@ -182,7 +207,14 @@ impl DailyAppender {
             dropped: Arc::new(AtomicU64::new(0)),
             writer_gone: Arc::new(AtomicU64::new(0)),
             dir: dir.to_path_buf(),
-            writer: Some(spawn_writer(dir.to_path_buf(), high_rx, low_rx)),
+            writer: Some(spawn_writer(
+                dir.to_path_buf(),
+                high_rx,
+                low_rx,
+                Arc::clone(&heartbeat),
+            )),
+            heartbeat,
+            hung: Arc::new(AtomicU64::new(0)),
         })
     }
 
@@ -203,6 +235,26 @@ impl DailyAppender {
     ///
     /// `O(1)` plus the channel's own send.
     pub fn submit(&self, item: Queued, priority: Priority, len: usize) -> Submitted {
+        self.submit_at(item, priority, len, std::time::Instant::now())
+    }
+
+    /// [`submit`](Self::submit) with the clock supplied, so the stall check is
+    /// testable without waiting a minute.
+    pub fn submit_at(
+        &self,
+        item: Queued,
+        priority: Priority,
+        len: usize,
+        now: std::time::Instant,
+    ) -> Submitted {
+        // **The stall check runs BEFORE the send, and the order is observable.**
+        // After it, a full channel sends the emitter down the discard path and
+        // it never looks at the mark — so exactly when the writer is hung, which
+        // is when the queue fills, the detector stops running. The hang would be
+        // undetectable in its own symptom.
+        if self.check_stalled(now) {
+            return Submitted::WriterHung;
+        }
         if self.writer_gone.load(Ordering::Acquire) != 0 {
             // Closed is the writer's death, not congestion. Counting these would
             // produce the per-turn echo this feature exists to remove.
@@ -234,6 +286,36 @@ impl DailyAppender {
                 Submitted::WriterGone
             }
         }
+    }
+
+    /// Declares a hang if the writer's mark has gone stale with work pending.
+    ///
+    /// **A hang does NOT inherit the retry.** A finished thread no longer
+    /// exists; a hung one is still inside a `write` with its file open, and safe
+    /// Rust can neither kill nor join it. Recreating it would leave two threads
+    /// writing the same file.
+    ///
+    /// # Complexity
+    ///
+    /// `O(1)`.
+    fn check_stalled(&self, now: std::time::Instant) -> bool {
+        if self.hung.load(Ordering::Acquire) != 0 {
+            return true;
+        }
+        let Ok(mark) = self.heartbeat.lock() else {
+            return false;
+        };
+        if now.duration_since(*mark) > std::time::Duration::from_secs(WRITER_STALL_SECS) {
+            self.hung.store(1, Ordering::Release);
+            return true;
+        }
+        false
+    }
+
+    /// The writer's current heartbeat, for the tests that assert it refreshes.
+    #[cfg(test)]
+    fn heartbeat_at(&self) -> Option<std::time::Instant> {
+        self.heartbeat.lock().ok().map(|m| *m)
     }
 
     /// How many events have been dropped so far.
@@ -284,7 +366,14 @@ fn spawn_writer(
     dir: PathBuf,
     high: Receiver<Queued>,
     low: Receiver<Queued>,
+    heartbeat: Arc<std::sync::Mutex<std::time::Instant>>,
 ) -> std::thread::JoinHandle<()> {
+    /// Refreshes the mark an emitter reads to decide the writer is alive.
+    fn stamp(hb: &std::sync::Mutex<std::time::Instant>) {
+        if let Ok(mut m) = hb.lock() {
+            *m = std::time::Instant::now();
+        }
+    }
     std::thread::spawn(move || {
         let mut sink = FileSink::new(dir);
         loop {
@@ -310,12 +399,21 @@ fn spawn_writer(
                     }
                 }
             }
-            if !did_work {
+            if did_work {
+                stamp(&heartbeat);
+            } else {
                 // Nothing on either channel: block on the priority one rather
-                // than spin. A closed priority channel with a live ordinary one
-                // still needs the loop, hence the second check.
+                // than spin. **Stamp BEFORE parking**: an idle writer otherwise
+                // accumulates an unboundedly stale mark, and the first event to
+                // arrive lets another emitter — microseconds later, with the
+                // queue momentarily non-empty — read a three-hour-old mark and
+                // declare a hang that does not exist.
+                stamp(&heartbeat);
                 match high.recv() {
-                    Ok(item) => sink.write(&item),
+                    Ok(item) => {
+                        sink.write(&item);
+                        stamp(&heartbeat);
+                    }
                     Err(_) => {
                         while let Ok(item) = low.try_recv() {
                             sink.write(&item);
@@ -517,6 +615,84 @@ mod tests {
             "it is refused on size, not on content"
         );
         assert_eq!(appender.reserved(Priority::High), 0);
+        appender.shutdown();
+    }
+
+    #[test]
+    fn the_stall_check_runs_even_when_the_send_would_have_failed() {
+        // **The order is observable and it is the point.** Run after the send, a
+        // full channel takes the emitter down the discard path and it never
+        // looks at the mark — so exactly when the writer is hung, which is when
+        // the queue fills, the detector stops running. The hang becomes
+        // undetectable in its own symptom.
+        let dir = tempdir().unwrap();
+        let appender = DailyAppender::new(dir.path()).unwrap();
+
+        // A reservation larger than the budget: the send WOULD have been
+        // refused. The stall check must still have run and won.
+        let stale =
+            std::time::Instant::now() + std::time::Duration::from_secs(WRITER_STALL_SECS + 1);
+        let (item, _) = line("x");
+        assert_eq!(
+            appender.submit_at(item, Priority::Low, LOG_CHANNEL_LOW_BYTES + 1, stale),
+            Submitted::WriterHung,
+            "the hang must be reported, not the oversize: the check runs first"
+        );
+        appender.shutdown();
+    }
+
+    #[test]
+    fn a_declared_hang_is_permanent_and_does_not_retry() {
+        // A finished thread no longer exists; a hung one is still inside a
+        // `write` with its file open, and safe Rust can neither kill nor join
+        // it. Recreating it would leave two threads on the same file.
+        let dir = tempdir().unwrap();
+        let appender = DailyAppender::new(dir.path()).unwrap();
+        let stale =
+            std::time::Instant::now() + std::time::Duration::from_secs(WRITER_STALL_SECS + 1);
+        let (a, len) = line("first");
+        assert_eq!(
+            appender.submit_at(a, Priority::Low, len, stale),
+            Submitted::WriterHung
+        );
+        // Now with a perfectly fresh clock: still hung.
+        let (b, len) = line("second");
+        assert_eq!(
+            appender.submit_at(b, Priority::Low, len, std::time::Instant::now()),
+            Submitted::WriterHung,
+            "the file layer never comes back"
+        );
+        appender.shutdown();
+    }
+
+    #[test]
+    fn an_idle_writer_refreshes_its_mark_instead_of_letting_it_go_stale() {
+        // **Asserts the mark ADVANCES, not that no hang was declared.** The
+        // second is vacuously true: the mark is stamped at construction and the
+        // stall window is a minute, so a test that only submits and checks
+        // passes just as well with the park stamp deleted — which was run as a
+        // mutation and stayed green. What the stamp buys is that an idle writer
+        // does not accumulate staleness without bound, and only a mark that
+        // moves shows that.
+        let dir = tempdir().unwrap();
+        let appender = DailyAppender::new(dir.path()).unwrap();
+        let at_construction = appender.heartbeat_at().expect("a mark exists");
+
+        // The writer reaches its park and stamps there. Poll for the condition
+        // rather than sleeping a guessed interval.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let mut parked = at_construction;
+        while std::time::Instant::now() < deadline {
+            parked = appender.heartbeat_at().expect("a mark exists");
+            if parked > at_construction {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(
+            parked > at_construction,
+            "the writer must stamp when it parks on an empty queue, or an idle              process accumulates staleness and the next event kills the layer"
+        );
         appender.shutdown();
     }
 
