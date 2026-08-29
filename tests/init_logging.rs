@@ -142,3 +142,53 @@ fn every_line_of_the_daily_file_carries_the_run_id() {
         );
     }
 }
+
+/// A backslash survives as ONE escape, not two.
+///
+/// Escaping is stage 3 of REQ-L64 and runs in the layer. The file sink then
+/// escaped the layer's result a second time on its way into the chunker.
+/// Nothing a test could see broke -- the line is still one line, the auditor
+/// still ran first -- but the CONTENT is wrong: every Windows path in the log
+/// read `C:\\Users` where it should read `C:\Users`, and a message already
+/// escaped to `\n` arrived as `\\n`.
+///
+/// The two arms of the sink disagreed, which is why it went unnoticed. An alarm
+/// is rendered inside the sink and escaped there exactly once, correctly; only
+/// the line arm, which arrives pre-escaped, was escaped twice. A guardian over
+/// the alarm path would have stayed green forever.
+#[test]
+fn a_backslash_is_escaped_once_and_not_twice() {
+    let dir = tempfile::tempdir().unwrap();
+    let sink = Arc::new(Recording::default());
+    let cfg = LoggingConfig {
+        log_dir: dir.path().to_path_buf(),
+        file_level: tracing::Level::INFO,
+    };
+    let handle = init_logging(&cfg, sink, None).expect("init");
+
+    // A real Windows path, which is where this shows up in practice.
+    tracing::info!(target: "magi_rs::agent", "path {} here", r"C:\Users\jb");
+
+    drop(handle);
+    std::thread::sleep(std::time::Duration::from_millis(300));
+
+    let mut written = String::new();
+    for entry in std::fs::read_dir(dir.path()).expect("read_dir").flatten() {
+        written.push_str(&std::fs::read_to_string(entry.path()).unwrap_or_default());
+    }
+
+    // Without this the two assertions below hold over an empty file.
+    assert!(
+        written.contains("here"),
+        "the fixture produced nothing: {written}"
+    );
+    // One escape doubles each backslash, so this is what lands on the wire.
+    assert!(
+        written.contains(r"C:\Users\jb"),
+        "the path is not singly escaped: {written}"
+    );
+    assert!(
+        !written.contains(r"C:\\Users"),
+        "the path was escaped twice: {written}"
+    );
+}
