@@ -52,24 +52,8 @@ fn no_call_site_in_the_product_logs_a_prompt_or_a_user_message() {
 
     let mut offenders = Vec::new();
     let mut scanned = 0usize;
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    let mut stack = vec![root];
-    while let Some(dir) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                stack.push(path);
-                continue;
-            }
-            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
-                continue;
-            }
-            let Ok(text) = std::fs::read_to_string(&path) else {
-                continue;
-            };
+    {
+        for (path, text) in source_files() {
             scanned += 1;
             // **The whole invocation, not one line.** `tracing::info!(` sits on
             // its own line and the fields follow it, so a line-based scan looks
@@ -107,25 +91,15 @@ fn no_call_site_in_the_product_logs_a_prompt_or_a_user_message() {
                 let Some(from_open) = rest.get(open..) else {
                     continue;
                 };
-                let mut depth = 0usize;
-                let mut end = open;
-                for (i, c) in from_open.char_indices() {
-                    match c {
-                        '(' => depth += 1,
-                        ')' => {
-                            depth = depth.saturating_sub(1);
-                            if depth == 0 {
-                                end = open + i;
-                                break;
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                let Some(call) = rest.get(open..=end) else {
+                let Some(call) =
+                    argument_list(from_open).and_then(|len| rest.get(open..open + len))
+                else {
                     continue;
                 };
-                if FORBIDDEN.iter().any(|f| is_field_use(call, f)) {
+                if FORBIDDEN
+                    .iter()
+                    .any(|f| is_field_use(call, f) || is_value_use(call, f))
+                {
                     let line = text.get(..start).map_or(0, |p| p.lines().count());
                     offenders.push(format!("{}:{}", path.display(), line + 1));
                 }
@@ -255,33 +229,13 @@ fn no_layer_in_the_tree_reads_span_fields_which_is_why_spans_are_exempt() {
         "fn on_close",
     ];
 
-    let mut layers = Vec::new();
-    // `CARGO_MANIFEST_DIR`, not a relative `"src"`: a relative path resolves
-    // against the process's working directory, which the test runner owns. The
-    // prompt scanner above already roots itself this way; this one claimed to
-    // and did not.
-    let mut stack = vec![std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src")];
-    while let Some(dir) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                stack.push(path);
-                continue;
-            }
-            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
-                continue;
-            }
-            let Ok(text) = std::fs::read_to_string(&path) else {
-                continue;
-            };
-            if declares_a_layer_impl(&text) {
-                layers.push((path, text));
-            }
-        }
-    }
+    // Rooted at `CARGO_MANIFEST_DIR` by `source_files`, not at a relative
+    // "src": a relative path resolves against the process's working directory,
+    // which the test runner owns.
+    let layers: Vec<_> = source_files()
+        .into_iter()
+        .filter(|(_, text)| declares_a_layer_impl(text))
+        .collect();
 
     // Two guards against a vacuous pass, which is the shape of defect this
     // milestone has now produced eight times. The first catches a walk that
@@ -476,78 +430,63 @@ fn impl_precedes(text: &str, at: usize) -> bool {
     // reviewers asked for the second: `/* impl<S> Layer<S> for X */` would
     // otherwise be read as an impl header, which is the same false positive the
     // line-comment filter already prevents, arriving through the other syntax.
-    let without_blocks: String = header
-        .split("/*")
-        .enumerate()
-        .map(|(i, piece)| {
-            if i == 0 {
-                piece
-            } else {
-                piece.split_once("*/").map_or("", |(_, tail)| tail)
-            }
-        })
-        .collect();
+    let without_blocks = strip_block_comments(header);
     without_blocks
         .lines()
         .filter(|l| !l.trim_start().starts_with("//"))
         .any(|l| l.contains("impl"))
 }
 
-/// No file imports an emit macro, which is what makes the scanner's anchor sound.
+/// Nothing brings an emit macro into scope, which is what makes the anchor sound.
 ///
 /// The scanner above finds call sites by looking for `tracing::` followed by an
 /// emit macro. A reviewer put the hole plainly: `use tracing::info;` and then a
 /// bare `info!(prompt)` carries the value and matches nothing. No file does that
-/// today, and the scanner would go silent the moment one did — the failure mode
-/// this repository keeps rediscovering, where the guard stops speaking and
-/// nothing says so.
+/// today, so the scanner would simply go quiet the first time one did — the
+/// failure this repository keeps rediscovering, where the guard stops speaking
+/// and nothing says so.
 ///
-/// Widening the scanner to bare `info!(` was the other option and it is worse:
-/// a bare `info!` may belong to any crate, so the scan would report call sites
-/// it cannot judge, and a guardian that cries wolf gets relaxed until it stops
-/// speaking. Forbidding the import instead makes the anchor TRUE rather than
-/// assumed, in one assertion that can fail.
+/// Widening the scan to a bare `info!(` was the other option and it is worse: a
+/// bare `info!` may belong to any crate, so it would report call sites it cannot
+/// judge, and a guardian that cries wolf gets relaxed until it stops speaking.
+///
+/// **It reads `use` ITEMS, not lines, because the first version read lines.** A
+/// reviewer listed what that missed and every entry was real: a braced group
+/// wrapped across lines, `pub use`, `#[macro_use] extern crate tracing`, and a
+/// path spaced as `tracing :: info`. The commit that introduced it claimed the
+/// anchor was now true, which was stronger than what the assertion enforced —
+/// its own kind of defect. An item runs to its `;`, however many lines that is.
 ///
 /// Complexity: `O(bytes under src/)`.
 #[test]
-fn no_file_imports_an_emit_macro_so_the_scanner_sees_every_call_site() {
+fn nothing_brings_an_emit_macro_into_scope_so_the_scanner_sees_every_call_site() {
     const EMIT: [&str; 6] = ["info", "warn", "error", "debug", "trace", "event"];
 
     let mut offenders = Vec::new();
     let mut scanned = 0usize;
-    let mut stack = vec![std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src")];
-    while let Some(dir) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                stack.push(path);
-                continue;
-            }
-            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
-                continue;
-            }
-            let Ok(text) = std::fs::read_to_string(&path) else {
+    for (path, text) in source_files() {
+        scanned += 1;
+        // The 2015-edition route, which imports every macro at once without
+        // naming any of them.
+        if text.contains("macro_use") && text.contains("extern crate tracing") {
+            offenders.push(format!(
+                "{}: #[macro_use] extern crate tracing",
+                path.display()
+            ));
+        }
+        for (at, _) in text.match_indices("use ") {
+            let Some(rest) = text.get(at..) else { continue };
+            let Some((item, _)) = rest.split_once(';') else {
                 continue;
             };
-            scanned += 1;
-            for line in text.lines() {
-                let line = line.trim();
-                if !line.starts_with("use tracing::") {
-                    continue;
-                }
-                // `Level`, `Event`, `Subscriber` and `field::` are types, not
-                // macros, and importing them changes nothing about how a call
-                // site is spelled.
-                if EMIT.iter().any(|m| is_field_use(line, m))
-                    || EMIT.iter().any(|m| {
-                        line.contains(&format!("::{m};")) || line.contains(&format!("::{m} "))
-                    })
-                {
-                    offenders.push(format!("{}: {line}", path.display()));
-                }
+            // A `use` written inside a comment has no `;` of its own, so without
+            // a bound the split runs to the next semicolon anywhere in the file.
+            if item.len() > MAX_USE_ITEM_BYTES || !item.contains("tracing") {
+                continue;
+            }
+            let flat = item.split_whitespace().collect::<Vec<_>>().join(" ");
+            if EMIT.iter().any(|m| names_item(&flat, m)) {
+                offenders.push(format!("{}: {flat}", path.display()));
             }
         }
     }
@@ -560,6 +499,216 @@ fn no_file_imports_an_emit_macro_so_the_scanner_sees_every_call_site() {
     );
     assert!(
         offenders.is_empty(),
-        "an emit macro is imported, so a bare call to it carries a field the prompt scanner cannot see. Call it as `tracing::info!(…)` instead: {offenders:?}"
+        "an emit macro is in scope, so a bare call to it carries a field the prompt scanner cannot see. Call it as `tracing::info!(...)` instead: {offenders:?}"
     );
+}
+
+/// How long a `use` item may be before it is taken for something else.
+const MAX_USE_ITEM_BYTES: usize = 400;
+
+/// Whether the whitespace-flattened `use` item *flat* names macro *name*.
+///
+/// The name must sit where an item sits, so `tracing::info` and
+/// `tracing::{info, warn}` match while `tracing::info_span` and a module called
+/// `information` do not.
+///
+/// # Parameters
+///
+/// * `flat` — the item with runs of whitespace collapsed to one space.
+/// * `name` — the macro name.
+///
+/// # Returns
+///
+/// `true` if the item brings that macro into scope.
+///
+/// # Complexity
+///
+/// `O(n)` in the item's length.
+fn names_item(flat: &str, name: &str) -> bool {
+    for (at, _) in flat.match_indices(name) {
+        let before = flat.get(..at).unwrap_or_default().trim_end();
+        let opens = before.ends_with("::") || before.ends_with('{') || before.ends_with(',');
+        let after = flat.get(at + name.len()..).unwrap_or_default().trim_start();
+        let closes = after.is_empty()
+            || after.starts_with(',')
+            || after.starts_with('}')
+            || after.starts_with("as ");
+        if opens && closes {
+            return true;
+        }
+    }
+    false
+}
+
+/// Every `.rs` file under `src/`, read once.
+///
+/// Three copies of this walk had accumulated, which a reviewer counted before I
+/// did. A read that fails is skipped rather than reported, and that is safe only
+/// because every caller pairs it with a count assertion — a walk that silently
+/// found nothing would otherwise pass every check built on it.
+///
+/// # Returns
+///
+/// Each file's path and contents.
+///
+/// # Complexity
+///
+/// `O(bytes under src/)`.
+fn source_files() -> Vec<(std::path::PathBuf, String)> {
+    let mut out = Vec::new();
+    let mut stack = vec![std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src")];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+                if let Ok(text) = std::fs::read_to_string(&path) {
+                    out.push((path, text));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The byte length of the parenthesised argument list starting at *from_open*.
+///
+/// **String literals are skipped, because a `)` inside one is not a delimiter.**
+/// A reviewer found the truncation: an invocation whose message contains a
+/// quoted `)` closed the walk there, so everything after it — including the
+/// field this scanner exists to catch — fell outside the extracted call. A
+/// silent miss, which is the direction that matters.
+///
+/// # Parameters
+///
+/// * `from_open` — text beginning at the opening `(`.
+///
+/// # Returns
+///
+/// The length through the matching `)`, or `None` when it is unbalanced.
+///
+/// # Complexity
+///
+/// `O(n)` in the argument list's length.
+fn argument_list(from_open: &str) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    for (i, c) in from_open.char_indices() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if c == ESCAPE {
+                escaped = true;
+            } else if c == QUOTE {
+                in_string = false;
+            }
+            continue;
+        }
+        match c {
+            QUOTE => in_string = true,
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i + 1);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Opens and closes a string literal.
+const QUOTE: char = '"';
+/// Escapes the next character inside a string literal.
+const ESCAPE: char = '\\';
+
+/// Whether *args* passes *name* as a field's VALUE.
+///
+/// `info!(target: "t", key = prompt)` writes the prompt under a field named
+/// something else, so the name-position test above sees nothing at all. This
+/// covers the exact pass-through and only that — `= name`, `= %name`, `= ?name`,
+/// ending at an argument boundary. `prompt.len()` is not a match, deliberately:
+/// a derived quantity is not the prompt, and a guardian that cries wolf gets
+/// relaxed until it stops speaking.
+///
+/// # Parameters
+///
+/// * `args` — the macro invocation's argument list.
+/// * `name` — the local whose value must not be logged.
+///
+/// # Returns
+///
+/// `true` if the invocation passes that local as a value.
+///
+/// # Complexity
+///
+/// `O(n)` in the argument list's length.
+fn is_value_use(args: &str, name: &str) -> bool {
+    for (at, _) in args.match_indices(name) {
+        let ends = args
+            .get(at + name.len()..)
+            .map(str::trim_start)
+            .is_none_or(|s| s.is_empty() || s.starts_with(',') || s.starts_with(')'));
+        if !ends {
+            continue;
+        }
+        let mut before = args.get(..at).unwrap_or_default().trim_end();
+        if let Some(head) = before.strip_suffix(['%', '?']) {
+            before = head.trim_end();
+        }
+        if before.ends_with('=') && !before.ends_with("==") {
+            return true;
+        }
+    }
+    false
+}
+
+/// *text* with `/* ... */` comments removed, nesting included.
+///
+/// Rust's block comments nest, so a naive split on the first `*/` reopens the
+/// code at a point that is still inside a comment. A reviewer raised it as a
+/// remark rather than a defect and it is one line of state either way, so it is
+/// modelled rather than noted.
+///
+/// # Parameters
+///
+/// * `text` — the window to clean.
+///
+/// # Returns
+///
+/// The text outside every block comment.
+///
+/// # Complexity
+///
+/// `O(n)` in the text's length.
+fn strip_block_comments(text: &str) -> String {
+    let bytes: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    let mut depth = 0usize;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let two = (bytes.get(i), bytes.get(i + 1));
+        if two == (Some(&'/'), Some(&'*')) {
+            depth += 1;
+            i += 2;
+        } else if two == (Some(&'*'), Some(&'/')) && depth > 0 {
+            depth -= 1;
+            i += 2;
+        } else {
+            if depth == 0 {
+                if let Some(c) = bytes.get(i) {
+                    out.push(*c);
+                }
+            }
+            i += 1;
+        }
+    }
+    out
 }
