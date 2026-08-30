@@ -140,6 +140,16 @@ fn no_call_site_in_the_product_logs_a_prompt_or_a_user_message() {
     );
 }
 
+/// Pins the SHAPE of what the layer writes — not the prompt guarantee.
+///
+/// **Known and accepted: this one cannot fail for the property its name
+/// suggests.** It emits events that never contained the prompt and then finds
+/// the prompt absent, which holds whether or not anything guards it; deleting
+/// the auditor leaves it green. The prompt guarantee is carried by
+/// `no_call_site_in_the_product_logs_a_prompt_or_a_user_message` above, which
+/// checks the emitters, where the property actually lives. This is kept for
+/// what it does prove: that the fixture writes, and what it writes has the
+/// shape the rest of these tests read.
 #[test]
 fn nothing_the_layer_writes_carries_the_raw_prompt() {
     let dir = tempfile::tempdir().unwrap();
@@ -206,40 +216,85 @@ fn the_auditor_both_masks_a_registered_value_and_alarms_on_it() {
     assert!(alarm.is_some(), "and it alarmed, both never one");
 }
 
-/// The span exemption above is a fact about `magi_layer.rs`, so it is checked.
+/// The span exemption above is a fact about every `Layer` in the tree.
 ///
 /// The scanner deliberately ignores `tracing::span!` because a span's fields are
-/// never read: the layer implements `on_event` and nothing else. That is true
-/// today and nothing makes it stay true. Adding `on_new_span` or `on_record`
-/// would start recording span fields and silently open the exact hole the
-/// scanner exists to close, with no test anywhere going red.
+/// never read: no layer magi-rs installs implements a span callback. That is
+/// true today and nothing makes it stay true. Adding `on_new_span` or
+/// `on_record` would start recording span fields and silently open the exact
+/// hole the scanner exists to close, with no test anywhere going red.
 ///
 /// So this one does. It is a source check rather than a behavioural one because
 /// the absence of a trait method is not observable at runtime — the default
 /// implementation does nothing, which is indistinguishable from not reading the
 /// fields.
 ///
-/// Complexity: `O(bytes of magi_layer.rs)`.
+/// **It scans every `impl Layer` in the tree, not one named file.** The first
+/// version read `src/logging/magi_layer.rs` and nothing else, which a reviewer
+/// caught: a second `impl Layer` in any other file would have carried span
+/// callbacks straight past it, and moving the existing one would have left the
+/// check reading a file that no longer implements anything. Finding the impls
+/// rather than naming their file removes both.
+///
+/// Complexity: `O(bytes under src/)`.
 #[test]
-fn the_layer_reads_no_span_fields_which_is_why_spans_are_exempt() {
-    let source = std::fs::read_to_string("src/logging/magi_layer.rs")
-        .expect("the layer's source is part of the tree this test runs in");
-    for callback in [
+fn no_layer_in_the_tree_reads_span_fields_which_is_why_spans_are_exempt() {
+    const CALLBACKS: [&str; 4] = [
         "fn on_new_span",
         "fn on_record",
         "fn on_enter",
         "fn on_close",
-    ] {
-        assert!(
-            !source.contains(callback),
-            "magi_layer.rs now implements `{callback}`, so span fields reach the log and the prompt scanner above must stop exempting `span!`. Add the span macros to its list, then delete this assertion's entry."
-        );
+    ];
+
+    let mut layers = Vec::new();
+    let mut stack = vec![std::path::PathBuf::from("src")];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            // The impl header, whatever the trait is spelled as at that call
+            // site -- `Layer<S> for` catches both `Layer<S>` and the fully
+            // qualified `tracing_subscriber::Layer<S>`.
+            if text.contains("Layer<S> for") {
+                layers.push((path, text));
+            }
+        }
     }
-    // Without this the loop is vacuously true over an unreadable or moved file,
-    // which is the shape of guardian this milestone has now produced eight
-    // times.
+
+    // Two guards against a vacuous pass, which is the shape of defect this
+    // milestone has now produced eight times. The first catches a walk that
+    // found nothing; the second catches a walk that found only doubles, after
+    // the production layer was renamed or moved out from under it.
     assert!(
-        source.contains("fn on_event"),
-        "magi_layer.rs no longer implements `on_event`, so this test is reading the wrong file and proves nothing"
+        !layers.is_empty(),
+        "the walk found no `impl Layer` at all, so the loop below proves nothing"
     );
+    assert!(
+        layers.iter().any(|(p, _)| p.ends_with("magi_layer.rs")),
+        "the product's own layer is not among the {} found, so this test is no longer reading it: {:?}",
+        layers.len(),
+        layers.iter().map(|(p, _)| p).collect::<Vec<_>>()
+    );
+
+    for (path, text) in &layers {
+        for callback in CALLBACKS {
+            assert!(
+                !text.contains(callback),
+                "{} now implements `{callback}`, so span fields reach the log and the prompt scanner above must stop exempting `span!`. Add the span macros to its list, then delete this assertion's entry.",
+                path.display()
+            );
+        }
+    }
 }
