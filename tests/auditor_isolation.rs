@@ -117,6 +117,6 @@ fn a_fresh_auditor_alarms_again_for_a_pair_another_already_raised() {
     let (_, second_alarm) = second.audit(&line, "magi_rs::tests", None, 0);
     assert!(
         second_alarm.is_some(),
-        "a second auditor stayed silent for a pair the first had raised, so the          dedup set is shared and one caller's finding can suppress another's"
+        "a second auditor stayed silent for a pair the first had raised, so the dedup set is shared and one caller's finding can suppress another's"
     );
 }

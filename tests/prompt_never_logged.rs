@@ -81,6 +81,17 @@ fn no_call_site_in_the_product_logs_a_prompt_or_a_user_message() {
                 // `event!` is the general form the five level macros expand to,
                 // and a call site can use it directly -- `render_fixture!` does.
                 // Listing only the five leaves the one that covers them all.
+                //
+                // **`span!` is deliberately absent, and the test below is why.**
+                // A span field would leak only if something READ it, and the
+                // layer implements `on_event` alone -- no `on_new_span`, no
+                // `on_record`, no `on_enter` -- so a span's fields are never
+                // visited, formatted or written. Scanning for `span!` would fail
+                // a call site that cannot leak. That exemption is an assumption
+                // about another file, which is how a documented exemption
+                // quietly becomes a hole, so
+                // `the_layer_reads_no_span_fields_which_is_why_spans_are_exempt`
+                // pins it: add a span callback and it goes red.
                 let is_emit = ["info!", "debug!", "warn!", "error!", "trace!", "event!"]
                     .iter()
                     .any(|m| rest.starts_with(&format!("tracing::{m}")));
@@ -125,7 +136,7 @@ fn no_call_site_in_the_product_logs_a_prompt_or_a_user_message() {
     assert!(scanned > 50, "the source walk found only {scanned} files");
     assert!(
         offenders.is_empty(),
-        "a call site passes a prompt to the log, where nothing downstream will          mask it: {offenders:?}"
+        "a call site passes a prompt to the log, where nothing downstream will mask it: {offenders:?}"
     );
 }
 
@@ -163,8 +174,22 @@ fn nothing_the_layer_writes_carries_the_raw_prompt() {
     );
 }
 
+/// The auditor masks a registered value AND alarms — both, never one.
+///
+/// **Renamed, because the old name promised a file.** It read
+/// `a_registered_secret_never_reaches_the_file_even_at_trace_level` and touched
+/// no file: no directory, no subscriber, no emission, no trace level. It called
+/// `Auditor::audit` and read the returned string. Two reviewers reached the same
+/// conclusion independently, and they were right — the name described coverage
+/// nobody had here.
+///
+/// The property the old name claimed IS guarded, in
+/// `tests/canary_both_mouths.rs`: four tests there install the layer with
+/// `Filter::parse("trace")`, emit through the real dispatcher and read the file
+/// back. Writing a second fixture for it would duplicate that for nothing. What
+/// was wrong was the name, so the name is what changed.
 #[test]
-fn a_registered_secret_never_reaches_the_file_even_at_trace_level() {
+fn the_auditor_both_masks_a_registered_value_and_alarms_on_it() {
     let auditor = Auditor::new();
     auditor.register_secret(SecretName::new("K"), &["sk-ant-a-live-key-value"]);
     let (audited, alarm) = auditor.audit(
@@ -179,4 +204,42 @@ fn a_registered_secret_never_reaches_the_file_even_at_trace_level() {
         audited.as_str()
     );
     assert!(alarm.is_some(), "and it alarmed, both never one");
+}
+
+/// The span exemption above is a fact about `magi_layer.rs`, so it is checked.
+///
+/// The scanner deliberately ignores `tracing::span!` because a span's fields are
+/// never read: the layer implements `on_event` and nothing else. That is true
+/// today and nothing makes it stay true. Adding `on_new_span` or `on_record`
+/// would start recording span fields and silently open the exact hole the
+/// scanner exists to close, with no test anywhere going red.
+///
+/// So this one does. It is a source check rather than a behavioural one because
+/// the absence of a trait method is not observable at runtime — the default
+/// implementation does nothing, which is indistinguishable from not reading the
+/// fields.
+///
+/// Complexity: `O(bytes of magi_layer.rs)`.
+#[test]
+fn the_layer_reads_no_span_fields_which_is_why_spans_are_exempt() {
+    let source = std::fs::read_to_string("src/logging/magi_layer.rs")
+        .expect("the layer's source is part of the tree this test runs in");
+    for callback in [
+        "fn on_new_span",
+        "fn on_record",
+        "fn on_enter",
+        "fn on_close",
+    ] {
+        assert!(
+            !source.contains(callback),
+            "magi_layer.rs now implements `{callback}`, so span fields reach the log and the prompt scanner above must stop exempting `span!`. Add the span macros to its list, then delete this assertion's entry."
+        );
+    }
+    // Without this the loop is vacuously true over an unreadable or moved file,
+    // which is the shape of guardian this milestone has now produced eight
+    // times.
+    assert!(
+        source.contains("fn on_event"),
+        "magi_layer.rs no longer implements `on_event`, so this test is reading the wrong file and proves nothing"
+    );
 }

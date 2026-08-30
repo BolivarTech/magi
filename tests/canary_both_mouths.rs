@@ -154,7 +154,7 @@ fn a_credential_emitted_through_the_real_dispatcher_reaches_neither_mouth() {
     );
     assert!(
         notice_mouth.contains("connecting to"),
-        "the notice mouth received nothing, so grepping it proves nothing:          {notice_mouth}"
+        "the notice mouth received nothing, so grepping it proves nothing: {notice_mouth}"
     );
 
     for (mouth, text) in [("file", &file_mouth), ("notice", &notice_mouth)] {
@@ -168,7 +168,7 @@ fn a_credential_emitted_through_the_real_dispatcher_reaches_neither_mouth() {
         );
         assert!(
             !text.contains(OPAQUE),
-            "the shapeless secret reached the {mouth} mouth — only the exact pass              can catch this one, so this is the assertion that proves the auditor              ran on this branch at all: {text}"
+            "the shapeless secret reached the {mouth} mouth — only the exact pass can catch this one, so this is the assertion that proves the auditor ran on this branch at all: {text}"
         );
     }
 }
@@ -332,6 +332,6 @@ fn a_secret_ending_in_a_quote_is_masked_in_its_escaped_form() {
     // registration that stopped one character short leaves behind.
     assert!(
         !written.contains("***\""),
-        "the mask stops one character short, leaving the secret's own quote          beside it: {written}"
+        "the mask stops one character short, leaving the secret's own quote beside it: {written}"
     );
 }
