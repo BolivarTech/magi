@@ -60,6 +60,13 @@ fn no_call_site_in_the_product_logs_a_prompt_or_a_user_message() {
     // so their NAMES join the anchor set instead, and their call sites are
     // scanned with the same two predicates.
     let wrappers = emit_wrapping_macros();
+    // The same pin the layer walk carries: a collection that silently comes
+    // back empty makes every anchor built from it vacuous, and nothing else
+    // would say so. `render_fixture!` is in the tree and wraps `event!`.
+    assert!(
+        wrappers.iter().any(|w| w == "render_fixture!"),
+        "the wrapper walk did not find `render_fixture!`, so the anchor set it builds is not to be trusted: {wrappers:?}"
+    );
     {
         for (path, text) in source_files() {
             scanned += 1;
@@ -90,14 +97,6 @@ fn no_call_site_in_the_product_logs_a_prompt_or_a_user_message() {
                     let Some(rest) = text.get(start..) else {
                         continue;
                     };
-                    // A wrapper's own DEFINITION is not a call site: its body holds
-                    // the macro's parameters, not a caller's expression.
-                    if text
-                        .get(..start)
-                        .is_some_and(|head| head.trim_end().ends_with("macro_rules!"))
-                    {
-                        continue;
-                    }
                     // `event!` is the general form the five level macros expand to,
                     // and a call site can use it directly -- `render_fixture!` does.
                     // Listing only the five leaves the one that covers them all.
@@ -112,10 +111,6 @@ fn no_call_site_in_the_product_logs_a_prompt_or_a_user_message() {
                     // quietly becomes a hole, so
                     // `the_layer_reads_no_span_fields_which_is_why_spans_are_exempt`
                     // pins it: add a span callback and it goes red.
-                    let is_emit = anchors.iter().any(|a| rest.starts_with(a.as_str()));
-                    if !is_emit {
-                        continue;
-                    }
                     // `info![...]` and `info!{...}` are the same invocation under
                     // the other two delimiters rustc accepts, and anchoring on `(`
                     // alone let both through untouched.
@@ -501,7 +496,7 @@ fn tighten_paths(text: &str) -> String {
 /// The emit macros a call site may name.
 const EMIT_MACROS: [&str; 6] = ["info!", "debug!", "warn!", "error!", "trace!", "event!"];
 
-/// The names of locally defined macros whose bodies invoke an emit macro.
+/// The names of locally defined macros that reach an emit macro.
 ///
 /// Such a macro forwards its caller's expression into a field, so the call site
 /// carries the value while naming no `tracing::` anything. `render_fixture!` is
@@ -510,44 +505,95 @@ const EMIT_MACROS: [&str; 6] = ["info!", "debug!", "warn!", "error!", "trace!", 
 /// cannot provide. So the names are collected and joined to the anchor set
 /// rather than forbidden.
 ///
+/// **Transitively**, because a macro that wraps a wrapper is the same channel
+/// one level deeper. The first version collected only direct wrappers and a
+/// two-step chain went green -- the hole this file's own payload had asked
+/// about, which three reviewers then confirmed. The walk repeats until a pass
+/// adds nothing.
+///
+/// The text is normalised the same way the call-site scan normalises it:
+/// comments out, path spacing closed. Otherwise a wrapper written
+/// `tracing :: info!` is not recognised as one, and a `macro_rules!` quoted in
+/// a doc comment is collected as a phantom.
+///
 /// # Returns
 ///
 /// Each wrapper's name with its bang, e.g. `render_fixture!`.
 ///
 /// # Complexity
 ///
-/// `O(bytes under src/)`.
+/// `O(n * bytes under src/)` with `n` the depth of the deepest chain, which is
+/// bounded by the number of macros in the tree.
 fn emit_wrapping_macros() -> Vec<String> {
-    /// How far past `macro_rules!` a body is read looking for an emit macro.
-    const BODY_SCAN_BYTES: usize = 4096;
+    let bodies: Vec<(String, String)> = source_files()
+        .into_iter()
+        .flat_map(|(_, text)| macro_definitions(&tighten_paths(&without_comments(&text))))
+        .collect();
 
-    let mut names = Vec::new();
-    for (_, text) in source_files() {
-        for (at, _) in text.match_indices("macro_rules!") {
-            let Some(rest) = text.get(at + "macro_rules!".len()..) else {
-                continue;
-            };
-            let name: String = rest
-                .trim_start()
-                .chars()
-                .take_while(|c| c.is_alphanumeric() || *c == '_')
-                .collect();
-            if name.is_empty() {
+    let mut names: Vec<String> = Vec::new();
+    loop {
+        let before = names.len();
+        for (name, body) in &bodies {
+            let anchor = format!("{name}!");
+            if names.contains(&anchor) {
                 continue;
             }
-            let body = rest.get(..BODY_SCAN_BYTES.min(rest.len())).unwrap_or(rest);
-            if EMIT_MACROS
+            let reaches_emit = EMIT_MACROS
                 .iter()
                 .any(|m| body.contains(&format!("tracing::{m}")))
-            {
-                let anchor = format!("{name}!");
-                if !names.contains(&anchor) {
-                    names.push(anchor);
-                }
+                || names.iter().any(|w| body.contains(w.as_str()));
+            if reaches_emit {
+                names.push(anchor);
             }
         }
+        if names.len() == before {
+            return names;
+        }
     }
-    names
+}
+
+/// Every `macro_rules!` definition in *text*, as name and body.
+///
+/// The body is delimited by its own braces rather than a byte window. A window
+/// both spills into whatever follows a short macro and truncates a long one,
+/// and a reviewer pointed out that both directions are wrong for a collection
+/// the anchor set depends on.
+///
+/// # Parameters
+///
+/// * `text` — one source file, already normalised.
+///
+/// # Returns
+///
+/// One entry per definition.
+///
+/// # Complexity
+///
+/// `O(n)` in the text's length.
+fn macro_definitions(text: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for (at, _) in text.match_indices("macro_rules!") {
+        let Some(rest) = text.get(at + "macro_rules!".len()..) else {
+            continue;
+        };
+        let name: String = rest
+            .trim_start()
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .collect();
+        if name.is_empty() {
+            continue;
+        }
+        let Some(open) = rest.find('{') else { continue };
+        let Some(from_open) = rest.get(open..) else {
+            continue;
+        };
+        let body = argument_list(from_open)
+            .and_then(|len| from_open.get(..len))
+            .unwrap_or(from_open);
+        out.push((name, body.to_string()));
+    }
+    out
 }
 
 /// Whether *args* uses *name* in the position a `tracing` field occupies.
@@ -715,6 +761,12 @@ fn impl_precedes(text: &str, at: usize) -> bool {
 /// `tracing::info` — names nothing this guard recognises. Widening the filter
 /// to every crate would report items it cannot judge; the boundary is recorded
 /// instead.
+///
+/// **Declared limit: a renamed import of a wrapper defeats this.** A local
+/// wrapper macro reached under another name — `use crate::shout as yell;` —
+/// is invoked as `yell!`, which no collected anchor matches. Resolving macro
+/// imports is a different analysis from scanning for their definitions, so the
+/// boundary is recorded rather than half-implemented.
 ///
 /// **Declared limit: a Cargo.toml dependency rename defeats this.**
 /// `tracing = { package = "tracing", ... }` under another key makes the crate
