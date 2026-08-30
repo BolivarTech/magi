@@ -790,12 +790,11 @@ fn source_files() -> Vec<(std::path::PathBuf, String)> {
 /// scanner exists to catch simply falls outside the call -- so the walk now
 /// models all three rather than the common one.
 ///
-/// **Declared limit: the caller finds the opening delimiter by search**, so a
-/// `(`, `[` or `{` written in a comment between the macro name and its real
-/// argument list is what the walk starts from. The extraction is then wrong
-/// from its first character. No call site in the tree is written that way and
-/// the fix costs a second comment pass over the prefix; it is stated here
-/// rather than left implicit.
+/// The limit that used to be declared here -- an opening delimiter written in a
+/// comment ahead of the real argument list -- is closed rather than declared as
+/// of the commit that strips comments from the whole file before the anchor
+/// search. A reviewer caught the stale text; a declared limit that no longer
+/// applies is as misleading as an undeclared one.
 ///
 /// # Parameters
 ///
@@ -1047,11 +1046,18 @@ fn is_value_use(args: &str, name: &str) -> bool {
         // safe because what follows the method only has to be a delimiter.
         let tail = args.get(at + name.len()..).unwrap_or_default();
         let squeezed: String = tail.chars().filter(|c| !c.is_whitespace()).collect();
-        let rest = IDENTITY
-            .iter()
-            .find_map(|m| squeezed.strip_prefix(m))
-            .unwrap_or(&squeezed);
-        if !(rest.is_empty() || rest.starts_with(',') || rest.starts_with(')')) {
+        // Stripped in a LOOP, because they chain: `prompt.clone().to_owned()`
+        // hands on the same bytes twice and one strip left the second in place,
+        // where it read as an unrelated expression. `prompt.len()` still stays
+        // green -- `.len()` is not in the list, so the loop stops at it.
+        let mut rest: &str = &squeezed;
+        while let Some(shorter) = IDENTITY.iter().find_map(|m| rest.strip_prefix(m)) {
+            rest = shorter;
+        }
+        // `]` and `}` close an argument list as much as `)` does. The outer
+        // delimiters are normalised before this runs, so these cover a nested
+        // one.
+        if !(rest.is_empty() || rest.starts_with([',', ')', ']', '}'])) {
             continue;
         }
         // Walk back past any number of prefixes, whitespace between them
