@@ -27,8 +27,12 @@ const XZ_PRESET: u32 = 6;
 /// Extension appended to the source name for the compressed file.
 const XZ_EXTENSION: &str = "xz";
 /// Restrictive mode for every file this module creates (REQ-L65).
-#[cfg(unix)]
-const OWNER_ONLY_MODE: u32 = 0o600;
+///
+/// Aliased from the subsystem's own constant rather than declared again: the
+/// active `.log`, the staging temporary and the finished `.xz` are the same
+/// secret at three moments of its life, and two constants is two places to
+/// change one rule.
+use crate::logging::OWNER_ONLY_FILE_MODE as OWNER_ONLY_MODE;
 
 /// Compresses `src` to `<src>.xz`, verifying the round trip before renaming.
 ///
@@ -86,7 +90,7 @@ fn compress_to(bytes: &[u8], dst: &Path) -> Result<(), LoggingError> {
     };
 
     let file = fs::File::create(dst).map_err(fail)?;
-    restrict(dst)?;
+    crate::logging::restrict(dst, OWNER_ONLY_MODE)?;
     let mut writer = XzWriter::new(file, XzOptions::with_preset(XZ_PRESET)).map_err(fail)?;
     writer.write_all(bytes).map_err(fail)?;
     let mut finished = writer.finish().map_err(fail)?;
@@ -124,38 +128,6 @@ fn verify_round_trip(staged: &Path, expected: &[u8]) -> Result<(), LoggingError>
             "the compressed file does not decompress to the original bytes",
         ),
     })
-}
-
-/// Applies owner-only permissions to a file this module created (REQ-L65).
-///
-/// # Errors
-///
-/// [`LoggingError::Write`] if the mode cannot be set.
-///
-/// # Platform
-///
-/// On Windows this is a no-op: the file inherits the ACL of the `.magi/`
-/// directory, which `magi init` already creates restricted. Stated rather than
-/// silently skipped, because "0600 everywhere" would be a claim this function
-/// does not keep on that platform.
-///
-/// # Complexity
-///
-/// `O(1)`.
-fn restrict(path: &Path) -> Result<(), LoggingError> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(OWNER_ONLY_MODE)).map_err(|e| {
-            LoggingError::Write {
-                path: path.to_path_buf(),
-                source: e,
-            }
-        })?;
-    }
-    #[cfg(not(unix))]
-    let _ = path;
-    Ok(())
 }
 
 /// The `.xz` name a source file compresses into.

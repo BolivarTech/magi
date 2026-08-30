@@ -220,6 +220,10 @@ impl DailyAppender {
             path: dir.to_path_buf(),
             source: e,
         })?;
+        // REQ-L65. `create_dir_all` leaves the process umask's bits, commonly
+        // 0755, so the directory holding a transcript of everything the agent
+        // did would be world-readable on a shared machine.
+        crate::logging::restrict(dir, crate::logging::OWNER_ONLY_DIR_MODE)?;
         let heartbeat = Arc::new(std::sync::Mutex::new(std::time::Instant::now()));
         let wake = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
         let (high_tx, high_rx) = sync_channel(LOG_CHANNEL_HIGH_SLOTS);
@@ -632,10 +636,27 @@ impl FileSink {
             return Ok(());
         }
         let path = self.dir.join(crate::logging::rotation::file_name(target));
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)?;
+        let mut options = std::fs::OpenOptions::new();
+        options.create(true).append(true);
+        // **The mode at CREATION, not a chmod afterwards.** A chmod leaves the
+        // file world-readable for the instant between the two calls, and that
+        // instant is when a reader on a shared machine wins.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(crate::logging::OWNER_ONLY_FILE_MODE);
+        }
+        let file = options.open(&path)?;
+        // And again for the file that ALREADY existed: `mode()` applies only to
+        // a file this call creates, so a day's file first opened by a run with a
+        // laxer umask would keep those bits for the rest of the day. Best effort
+        // -- REQ-L35 says logging never aborts a session -- but not silent.
+        if let Err(e) = crate::logging::restrict(&path, crate::logging::OWNER_ONLY_FILE_MODE) {
+            eprintln!(
+                "warning: could not restrict permissions on {}: {e}",
+                path.display()
+            );
+        }
         self.open = Some((target, std::io::BufWriter::new(file)));
         Ok(())
     }
@@ -938,6 +959,54 @@ mod tests {
         assert!(
             parked > at_construction,
             "the writer must stamp when it parks on an empty queue, or an idle              process accumulates staleness and the next event kills the layer"
+        );
+        appender.shutdown();
+    }
+
+    /// REQ-L65: the directory and the active file are the owner's alone.
+    ///
+    /// The spec calls this non-negotiable for MS1 and the reason is plain: the
+    /// log is a transcript of everything the agent did, and `create_dir_all`
+    /// plus a default `OpenOptions` leave whatever the process umask says --
+    /// commonly `0755` and `0644`. On a shared machine that is world-readable.
+    ///
+    /// **Unix only, and it is not run on the box this was written on.** There is
+    /// no umask on Windows for it to correct; the file lives under `.magi/`,
+    /// which `magi init` already restricts by ACL to the current user (REQ-H38)
+    /// and a file created underneath inherits. Stated rather than left implied,
+    /// because a reader on Windows will see this test never execute.
+    #[cfg(unix)]
+    #[test]
+    fn the_directory_and_the_active_file_are_not_left_at_the_umask() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("logs");
+        let appender = DailyAppender::new(&root).unwrap();
+
+        let (item, len) = line("a line that forces the day's file open");
+        assert_eq!(appender.submit(item, Priority::Low, len), Submitted::Queued);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let path = root.join(crate::logging::rotation::file_name(
+            time::OffsetDateTime::now_utc().date(),
+        ));
+        while !path.exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        // The fixture must have produced the file, or the mode of a path that
+        // does not exist is not what this asserts.
+        assert!(path.exists(), "the day's file was never opened: {path:?}");
+
+        let dir_mode = std::fs::metadata(&root).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            dir_mode,
+            crate::logging::OWNER_ONLY_DIR_MODE,
+            "the log directory is readable by more than its owner"
+        );
+        let file_mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            file_mode,
+            crate::logging::OWNER_ONLY_FILE_MODE,
+            "the active log file is readable by more than its owner"
         );
         appender.shutdown();
     }

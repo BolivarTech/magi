@@ -148,6 +148,53 @@ impl LoggingHandle {
     }
 }
 
+/// Permission bits the log's own files carry on Unix (REQ-L65).
+///
+/// `0600` on a file, `0700` on the directory: a log is a transcript of what the
+/// agent did, and on a shared machine the process umask commonly leaves it
+/// `0644` — world-readable — which is the state this constant exists to prevent.
+pub(crate) const OWNER_ONLY_FILE_MODE: u32 = 0o600;
+/// The directory half of [`OWNER_ONLY_FILE_MODE`].
+pub(crate) const OWNER_ONLY_DIR_MODE: u32 = 0o700;
+
+/// Restricts `path` to its owner.
+///
+/// # Parameters
+///
+/// * `path` — an existing file or directory.
+/// * `mode` — [`OWNER_ONLY_FILE_MODE`] or [`OWNER_ONLY_DIR_MODE`].
+///
+/// # Errors
+///
+/// [`LoggingError::Write`] if the permissions cannot be set.
+///
+/// # Windows
+///
+/// A no-op, and that is a decision rather than a gap. The log lives inside
+/// `.magi/logs/`, and `magi init` already restricts `.magi/` by ACL to the
+/// current user (REQ-H38), which a file created underneath inherits. The
+/// Unix-side umask has no equivalent there, so there is no window this would
+/// close that the directory's ACL leaves open.
+///
+/// # Complexity
+///
+/// `O(1)`.
+pub(crate) fn restrict(path: &std::path::Path, mode: u32) -> Result<(), LoggingError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).map_err(|e| {
+            LoggingError::Write {
+                path: path.to_path_buf(),
+                source: e,
+            }
+        })?;
+    }
+    #[cfg(not(unix))]
+    let _ = (path, mode);
+    Ok(())
+}
+
 /// The auditor the installed layer uses.
 ///
 /// One per process, because the registered secrets have to be the SAME set for
