@@ -17,7 +17,9 @@ changes and the **patch** position signals backward-compatible fixes.
   credential that reaches a log line is masked before it is written — and the
   masking is announced, never silent. Configure it under `[logging]` in
   `magi.toml`: `log_dir`, `file_filter`, `compress`, `compress_after_days`,
-  `retain_days`, `max_total_bytes`. `--log-dir` and `MAGI_LOG_DIR` override the
+  `retain_days`, `max_total_bytes`. Those six and no others — a key that the
+  binary does not read yet is not shipped, so setting one is a load error that
+  names it rather than a setting that quietly does nothing. `--log-dir` and `MAGI_LOG_DIR` override the
   directory, in that order.
 
 - **Every line carries `run=<id>`, and that id is how you find your own run.** The

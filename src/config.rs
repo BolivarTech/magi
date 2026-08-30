@@ -281,8 +281,6 @@ pub struct LoggingSection {
     log_dir: Option<String>,
     /// Level or per-target directive for the file branch.
     file_filter: Option<String>,
-    /// Level or per-target directive for the screen branch. **MS2.**
-    tui_filter: Option<String>,
     /// Whether rotated files are compressed.
     compress: Option<bool>,
     /// Age in days past which a file is compressed.
@@ -550,7 +548,7 @@ pub struct HeadlessConfig {
     // every turn of a long session. A cap that protects the cheap case and not the expensive
     // one protects the wrong case. A file that still declares it here received the guided
     // migration error until v0.13.0 retired that pattern set (REQ-R22); it now gets serde's bare
-    // `unknown field` — see `detect_migrations`. Default log level
+    // `unknown field` — see `detect_migrations`.
     /// Default wall-clock timeout secs for tool-executing tiers (REQ-H36). Overrides
     /// `FULL_AUTO_TIMEOUT_SECS`.
     pub timeout_secs: Option<u64>,
@@ -1725,6 +1723,31 @@ pub fn gate_thresholds_from(config: &MagiConfig) -> GateThresholds {
 mod tests {
 
     /// SC-L122: a blank env var is ABSENT, and absence never reaches D-L20.
+    #[test]
+    fn an_inert_logging_key_is_rejected_rather_than_accepted_and_ignored() {
+        // The struct's own doc says a shipped key promises something the binary
+        // does, and `format` and `rotation_tz` were deferred for exactly that
+        // reason. `tui_filter` shipped anyway, accepted by serde and read by
+        // nothing -- an operator could set it, see no error, and get no effect.
+        //
+        // `deny_unknown_fields` is what makes removal the strong choice: the
+        // key is now a load error naming itself, which is a better answer than
+        // silence in either direction.
+        let err = MagiConfig::from_toml_str("[logging]\ntui_filter = \"debug\"\n")
+            .expect_err("an inert key must not be accepted");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("tui_filter"),
+            "the error must name the key so the operator can find it: {msg}"
+        );
+        // And a key that IS wired still parses, or the assertion above would
+        // hold for a section that rejects everything.
+        assert!(
+            MagiConfig::from_toml_str("[logging]\nfile_filter = \"debug\"\n").is_ok(),
+            "a real key must still be accepted"
+        );
+    }
+
     #[test]
     fn a_declared_log_dir_is_marked_declared_and_a_defaulted_one_is_not() {
         // D-L20 turns on exactly this bit: declared fails the startup, defaulted

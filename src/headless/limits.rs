@@ -23,12 +23,6 @@ pub const MAX_JSON_DEPTH: u32 = 64;
 /// (REQ-H14). 64 KiB.
 pub const TOOL_RESULT_CAP: usize = 64 * 1024;
 
-/// Retention: keep at most the last N run logs, pruned at start (REQ-H34). 50.
-pub const LOG_RETENTION_RUNS: usize = 50;
-
-/// Retention: total log-dir byte ceiling, pruned oldest-first (REQ-H24). 512 MiB.
-pub const LOG_MAX_BYTES: u64 = 512 * 1024 * 1024;
-
 /// Hard wall-clock ceiling (seconds) applied by default under `--full-auto`
 /// (and any tool-executing tier) when no `--timeout` is given (REQ-H36). 900 s.
 pub const FULL_AUTO_TIMEOUT_SECS: u64 = 900;
@@ -83,8 +77,6 @@ mod tests {
         assert_eq!(MAX_INPUT_BYTES, 10 * 1024 * 1024);
         assert_eq!(MAX_JSON_DEPTH, 64);
         assert_eq!(TOOL_RESULT_CAP, 64 * 1024);
-        assert_eq!(LOG_RETENTION_RUNS, 50);
-        assert_eq!(LOG_MAX_BYTES, 512 * 1024 * 1024);
         assert_eq!(FULL_AUTO_TIMEOUT_SECS, 900);
         assert_eq!(NORMAL_MAX_TOOL_CALLS, 15);
         assert_eq!(FULL_AUTO_MAX_TOOL_CALLS, 50);
