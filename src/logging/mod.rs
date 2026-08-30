@@ -244,7 +244,13 @@ pub(crate) fn restrict(path: &std::path::Path, mode: u32) -> Result<(), LoggingE
 /// One per process, because the registered secrets have to be the SAME set for
 /// every mouth: two auditors would mean two different ideas of what must be
 /// redacted, and the mouth with the emptier one is the leak.
-fn process_auditor() -> &'static std::sync::Arc<auditor::Auditor> {
+///
+/// **Public because the layer is not the only consumer.** The mode classifier
+/// and the headless runtime redact with an auditor too, and each used to build
+/// its own -- next to a comment saying there is one per process. A registry
+/// filled by `register_process_secrets` was invisible to both, so the exact
+/// pass covered the log and nothing else.
+pub fn process_auditor() -> &'static std::sync::Arc<auditor::Auditor> {
     static A: std::sync::OnceLock<std::sync::Arc<auditor::Auditor>> = std::sync::OnceLock::new();
     A.get_or_init(|| std::sync::Arc::new(auditor::Auditor::new()))
 }

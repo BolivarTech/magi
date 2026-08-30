@@ -4446,7 +4446,9 @@ fn tui_mode_classifier_wiring(
         Arc::new(crate::agent::mode_classifier::ProviderClassifier::new(
             provider,
             Arc::clone(&notices) as Arc<dyn crate::agent::mode_classifier::NoticeSink>,
-            Arc::new(magi_rs::logging::auditor::Auditor::new()),
+            // THE process auditor, not one of its own: the classifier redacts
+            // with the registered secrets or it redacts with nothing.
+            std::sync::Arc::clone(magi_rs::logging::process_auditor()),
         ));
     (classifier, notices)
 }
@@ -5602,34 +5604,46 @@ async fn prepare_headless(
             log_dir: log_dir.clone(),
             file_filter: parsed,
         };
-        if let Err(e) = magi_rs::logging::init_logging(
+        let logging_up = match magi_rs::logging::init_logging(
             &cfg,
             std::sync::Arc::new(magi_rs::logging::DiscardDelivery),
             None,
         ) {
-            // **D-L20, the one exception REQ-L35 carves out.** An operator who
-            // wrote a path asked for that path; degrading silently hands them an
-            // empty directory and no clue, which is the complaint this feature
-            // exists to answer. A DEFAULTED directory that cannot be created
-            // degrades, because nobody asked for it.
-            if resolved_dir.declared {
+            Ok(_) => true,
+            Err(e) => {
+                // **D-L20, the one exception REQ-L35 carves out.** An operator who
+                // wrote a path asked for that path; degrading silently hands them an
+                // empty directory and no clue, which is the complaint this feature
+                // exists to answer. A DEFAULTED directory that cannot be created
+                // degrades, because nobody asked for it.
+                if resolved_dir.declared {
+                    eprintln!(
+                        "error: the log directory {} could not be used: {e}",
+                        log_dir.display()
+                    );
+                    return Err(2);
+                }
                 eprintln!(
-                    "error: the log directory {} could not be used: {e}",
+                    "warning: logging is not writing to {}: {e}; the run continues",
                     log_dir.display()
                 );
-                return Err(2);
+                false
             }
-            eprintln!(
-                "warning: logging is not writing to {}: {e}; the run continues",
-                log_dir.display()
-            );
+        };
+        // **Only when there is a log to filter.** `run_id()` mints its id from
+        // its own OnceLock and `announce_run` emits into a subscriber that was
+        // never installed, so neither panics with the layer down -- but printing
+        // `run: <id>` promises a CI job a value it can filter the daily file by,
+        // and there is no daily file. An id that identifies nothing sends the
+        // reader looking for one.
+        if logging_up {
+            // REQ-L63: on stderr as well as in the envelope, so a CI job can
+            // capture it without parsing either the log or the JSON.
+            eprintln!("run: {}", magi_rs::logging::run_id());
+            // The third piece of REQ-L63: the run's first event. It cannot come
+            // earlier — the layer it goes to is installed just above.
+            magi_rs::logging::announce_run(command, &ws.root);
         }
-        // REQ-L63: on stderr as well as in the envelope, so a CI job can capture
-        // it without parsing either the log or the JSON.
-        eprintln!("run: {}", magi_rs::logging::run_id());
-        // The third piece of REQ-L63: the run's first event. It cannot come
-        // earlier — the layer it goes to is installed just above.
-        magi_rs::logging::announce_run(command, &ws.root);
     }
 
     Ok(HeadlessContext {
@@ -6003,8 +6017,10 @@ async fn run_consult_subcommand(
         Arc::new(crate::agent::mode_classifier::ProcessNoticeSink::default());
     // One auditor per process, shared by the classifier and the runtime: it is
     // where the registered secrets live, so two of them would mean two different
-    // ideas of what must be redacted.
-    let auditor = Arc::new(magi_rs::logging::auditor::Auditor::new());
+    // ideas of what must be redacted. This line used to construct a SECOND one
+    // directly beneath that sentence, which is how the rule ended up describing
+    // something the code did not do.
+    let auditor = std::sync::Arc::clone(magi_rs::logging::process_auditor());
     let classifier = crate::agent::mode_classifier::ProviderClassifier::new(
         provider,
         Arc::clone(&notice_sink),
@@ -6063,6 +6079,37 @@ async fn run_consult_subcommand(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn no_surface_builds_an_auditor_of_its_own() {
+        // The invariant was written down and then broken directly beneath its
+        // own sentence: a comment saying "one auditor per process, shared by the
+        // classifier and the runtime" sat immediately above a line constructing
+        // a second one. Two more were elsewhere.
+        //
+        // The consequence is not cosmetic. `register_process_secrets` fills the
+        // process auditor; an auditor built anywhere else starts empty, so the
+        // exact pass covers the log and nothing that surface redacts. A comment
+        // cannot hold this -- it demonstrably did not -- so a check does.
+        let source = include_str!("main.rs");
+        let (production, _) = source
+            .split_once("\n#[cfg(test)]\nmod tests {")
+            .expect("this file has a test module");
+        let offenders: Vec<usize> = production
+            .match_indices("Auditor::new()")
+            .map(|(i, _)| production.get(..i).map_or(0, |p| p.lines().count()) + 1)
+            .collect();
+        assert!(
+            offenders.is_empty(),
+            "a surface builds its own auditor, which starts with no registered \
+             secrets, at line(s): {offenders:?}"
+        );
+        // And the fixture must have read something, or an empty haystack passes.
+        assert!(
+            production.contains("process_auditor()"),
+            "the source check read a file that does not reach the auditor"
+        );
+    }
+
     #[test]
     fn every_surface_arms_the_auditor() {
         // **A source check, and it earned its place.** The registry is
