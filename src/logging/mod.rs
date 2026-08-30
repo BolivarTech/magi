@@ -286,8 +286,19 @@ pub fn register_process_secrets(
         // The variants are composed HERE and the auditor keeps only
         // `(length, hash)` of each, so the plaintext copies live exactly as long
         // as this call.
-        let escaped = format!("{value:?}");
-        let escaped = escaped.trim_matches('"');
+        // **One quote off each end, not every quote.** `{:?}` wraps the value
+        // in exactly one pair, so `trim_matches` -- which strips as many as it
+        // finds -- ate the value's own trailing quote too: a credential ending
+        // in `"` registered its escaped form as `abc\` instead of `abc\"`, and
+        // the exact pass then scanned for a string that never appears. Three
+        // reviewers named this independently, and while the raw and encoded
+        // variants still cover the value, a wrong variant in the auditor is not
+        // something to carry forward.
+        let quoted = format!("{value:?}");
+        let escaped = quoted
+            .strip_prefix('"')
+            .and_then(|s| s.strip_suffix('"'))
+            .unwrap_or(quoted.as_str());
         let encoded = crate::encoding::percent_encode(value);
         if !process_auditor().register_secret(*name, &[value, escaped, encoded.as_str()]) {
             short.push(*name);
@@ -410,7 +421,7 @@ pub fn init_logging(
     tui: Option<(magi_layer::TuiSink, tracing::Level)>,
 ) -> Result<LoggingHandle, LoggingError> {
     if let Some(existing) = HANDLE.get() {
-        // `set_global_default` PANICS if a subscriber is already installed, so a
+        // A second call would otherwise reach `set_global_default`, which
         // second call — a test that starts twice, a `main` that retries, a new
         // surface that does not know another already initialised — would abort
         // the process. REQ-L35 says logging never aborts.

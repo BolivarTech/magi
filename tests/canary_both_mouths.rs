@@ -265,3 +265,73 @@ fn a_password_that_only_ever_appears_percent_encoded_is_still_masked() {
         "the encoded password survived: {written}"
     );
 }
+
+/// A credential ending in a quote is registered with the RIGHT escaped form.
+///
+/// `{:?}` wraps a value in exactly one pair of quotes, so trimming every
+/// trailing quote ate the value's own: `abc"` registered its escaped variant as
+/// `abc\` rather than `abc\"`, and the exact pass then scanned for a string
+/// that never appears on any line.
+///
+/// **The damage is smaller than it first looks, and saying so is the point.**
+/// The mangled variant is a PREFIX of the correct one, so the exact pass still
+/// matches and still redacts -- it just stops one character short, leaving the
+/// value's own closing quote dangling beside the mask. Nothing leaks. That is
+/// why three reviewers all rated it INFO.
+///
+/// It is fixed anyway, because a variant the auditor holds should be the one
+/// that appears, and a quote is an ordinary character in a generated password.
+/// And the assertion below is the one that can tell the two apart: asserting
+/// the secret is absent passes either way, since the shorter variant covers it.
+/// The mutation proved that before this comment existed.
+#[test]
+fn a_secret_ending_in_a_quote_is_masked_in_its_escaped_form() {
+    let dir = tempfile::tempdir().unwrap();
+    let sink = Arc::new(CapturingSink::default());
+    let cfg = LoggingConfig {
+        log_dir: dir.path().to_path_buf(),
+        file_filter: magi_rs::logging::filter::Filter::parse("trace").expect("valid"),
+    };
+    let handle = init_logging(
+        &cfg,
+        sink,
+        Some((
+            TuiSink::new(Arc::new(CapturingSink::default())),
+            tracing::Level::TRACE,
+        )),
+    )
+    .expect("init");
+
+    // Long enough for the exact pass, and ending in the character at issue.
+    let raw = "correct horse battery staple\"";
+    magi_rs::logging::register_process_secrets(&[(SecretName::new("BASE_URL_PASSWORD"), raw)]);
+
+    // Emitted ONLY in its escaped form -- which is how it appears when a
+    // `{:?}` renders it -- and with no shape a pattern could catch, so only
+    // the registered escaped variant can save it.
+    let escaped = format!("{raw:?}");
+    let escaped = escaped
+        .strip_prefix('"')
+        .and_then(|s| s.strip_suffix('"'))
+        .unwrap_or(escaped.as_str());
+    tracing::info!(target: "magi_rs::agent", "value {} configured", escaped);
+
+    drop(handle);
+    std::thread::sleep(std::time::Duration::from_millis(300));
+
+    let written = everything_written(dir.path());
+    assert!(
+        written.contains("configured"),
+        "the fixture must have written: {written}"
+    );
+    assert!(
+        !written.contains(escaped),
+        "the escaped form of a secret ending in a quote survived: {written}"
+    );
+    // The discriminating one: a mask followed by the orphaned quote is what a
+    // registration that stopped one character short leaves behind.
+    assert!(
+        !written.contains("***\""),
+        "the mask stops one character short, leaving the secret's own quote          beside it: {written}"
+    );
+}
