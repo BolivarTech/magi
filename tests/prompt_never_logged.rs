@@ -549,8 +549,17 @@ fn is_field_use(args: &str, name: &str) -> bool {
                 _ => break,
             }
         }
-        if matches!(chars.next(), Some('(' | ',' | '{')) {
-            return true;
+        // A macro's `[` is a field boundary; an index's `[` is not, and the
+        // only thing separating them in text is the bang. `?vec![prompt]`
+        // builds a value holding the prompt and writes it; `v[prompt]` writes
+        // whatever `v` holds AT the prompt, which is not the prompt. Accepting
+        // `[` outright would turn the second into a false positive, and
+        // rejecting it outright leaves the first a silent miss -- found by
+        // sweeping the family before asking a reviewer for it.
+        match chars.next() {
+            Some('(' | ',' | '{') => return true,
+            Some('[') if chars.peek() == Some(&'!') => return true,
+            _ => {}
         }
     }
     false
