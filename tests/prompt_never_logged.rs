@@ -1021,6 +1021,14 @@ const HASH: char = '#';
 /// `prompt.len()` stays excluded on purpose: a derived quantity is not the
 /// prompt, and a guardian that cries wolf gets relaxed until it stops speaking.
 ///
+/// **Declared, not closed: concatenation.** `key = prompt.to_owned() + x`
+/// compiles and writes the prompt inside a longer string, and this predicate
+/// does not see it. Closing it means treating `+` as a terminator, which then
+/// has to handle the operand on either side and starts matching the shape `a +
+/// b` generally — a guardian that cries wolf, for the one spelling of an
+/// expression that could be written a dozen other ways. It is recorded beside
+/// the `prompt.len()` precedent rather than chased.
+///
 /// # Parameters
 ///
 /// * `args` - the macro invocation's argument list.
@@ -1054,10 +1062,13 @@ fn is_value_use(args: &str, name: &str) -> bool {
         while let Some(shorter) = IDENTITY.iter().find_map(|m| rest.strip_prefix(m)) {
             rest = shorter;
         }
-        // `]` and `}` close an argument list as much as `)` does. The outer
-        // delimiters are normalised before this runs, so these cover a nested
-        // one.
-        if !(rest.is_empty() || rest.starts_with([',', ')', ']', '}'])) {
+        // The mirror of the walk-back's wrapper set, and it had the same gap.
+        // `]` and `}` close an argument list as much as `)` does; `;` ends the
+        // element of a repeat array, `?[prompt; 3]`; and `[` opens a slice,
+        // `&prompt[..]` and `?prompt[0..]`. All three of those compile and all
+        // three passed green. `prompt[0..]` unsigilled does NOT compile, which
+        // is why each spelling was built before it was covered.
+        if !(rest.is_empty() || rest.starts_with([',', ')', ']', '}', ';', '['])) {
             continue;
         }
         // Walk back past any number of prefixes, whitespace between them
