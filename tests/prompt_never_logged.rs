@@ -479,8 +479,8 @@ fn tighten_paths(text: &str) -> String {
 /// therefore misses three of the four, which is the gap this closes.
 ///
 /// The position test is what keeps it narrow. The name must begin a field, so
-/// what precedes it (past an optional `%` or `?` sigil and any spaces) is the
-/// opening paren, a comma or a brace — never a letter, which excludes
+/// what precedes it — past any sigils, with whitespace anywhere between them —
+/// is the opening paren, a comma or a brace — never a letter, which excludes
 /// `system_prompt`, and never a quote, which excludes the word inside a string
 /// literal. What follows must not continue the identifier, which excludes
 /// `prompt_tokens`.
@@ -515,22 +515,33 @@ fn is_field_use(args: &str, name: &str) -> bool {
         }
         let before = args.get(..at).unwrap_or_default();
         let mut chars = before.chars().rev().peekable();
+        // Walk back past any number of sigils with whitespace anywhere between
+        // them. The first version peeked for the sigil BEFORE skipping
+        // whitespace, so `%prompt` matched and `% prompt` did not -- a reviewer
+        // found it, and the compiler makes no such distinction. Both are one
+        // field carrying the same value.
+        //
         // A raw identifier is the same field under a spelling the parser
         // tolerates: `r#prompt = p` compiles and writes the value. Checked
         // rather than assumed -- a dotted name in this position does NOT
         // compile (`local ambiguity when calling macro`), so that one is not a
         // form to cover.
-        if matches!(chars.peek(), Some('#')) {
-            chars.next();
-            if matches!(chars.peek(), Some('r')) {
+        loop {
+            while matches!(chars.peek(), Some(c) if c.is_whitespace()) {
                 chars.next();
             }
-        }
-        if matches!(chars.peek(), Some('%' | '?')) {
-            chars.next();
-        }
-        while matches!(chars.peek(), Some(c) if c.is_whitespace()) {
-            chars.next();
+            match chars.peek() {
+                Some('#') => {
+                    chars.next();
+                    if matches!(chars.peek(), Some('r')) {
+                        chars.next();
+                    }
+                }
+                Some('%' | '?') => {
+                    chars.next();
+                }
+                _ => break,
+            }
         }
         if matches!(chars.next(), Some('(' | ',' | '{')) {
             return true;
@@ -1022,7 +1033,10 @@ fn is_value_use(args: &str, name: &str) -> bool {
     const IDENTITY: [&str; 4] = [".clone()", ".to_owned()", ".as_str()", ".to_string()"];
 
     for (at, _) in args.match_indices(name) {
-        let tail = args.get(at + name.len()..).unwrap_or_default();
+        // Trim BEFORE stripping the method, not after: `prompt .clone()` is the
+        // same expression as `prompt.clone()` and the first version saw only
+        // the second.
+        let tail = args.get(at + name.len()..).unwrap_or_default().trim_start();
         let rest = IDENTITY
             .iter()
             .find_map(|m| tail.strip_prefix(m))
@@ -1031,13 +1045,20 @@ fn is_value_use(args: &str, name: &str) -> bool {
         if !(rest.is_empty() || rest.starts_with(',') || rest.starts_with(')')) {
             continue;
         }
+        // Walk back past any number of prefixes, whitespace between them
+        // included. `r#prompt` is the same local under a spelling the parser
+        // tolerates, and `(&prompt)` is the same value behind one more layer.
+        // A `(` here cannot make a false positive on `f(prompt)`, because what
+        // precedes that paren is a function name rather than an `=`.
         let mut before = args.get(..at).unwrap_or_default().trim_end();
-        // `r#prompt` is the same local under a spelling the parser tolerates.
-        if let Some(head) = before.strip_suffix("r#") {
-            before = head.trim_end();
-        }
-        if let Some(head) = before.strip_suffix(['%', '?', '&']) {
-            before = head.trim_end();
+        loop {
+            let stripped = before
+                .strip_suffix("r#")
+                .or_else(|| before.strip_suffix(['%', '?', '&', '(']));
+            match stripped {
+                Some(head) => before = head.trim_end(),
+                None => break,
+            }
         }
         if before.ends_with('=') && !before.ends_with("==") {
             return true;
