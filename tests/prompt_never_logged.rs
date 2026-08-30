@@ -66,10 +66,7 @@ fn no_call_site_in_the_product_logs_a_prompt_or_a_user_message() {
             // reviewer named it. Offsets below index the FLATTENED text, and
             // only the reported line number is derived from it, so the shift
             // costs an approximate line rather than a wrong verdict.
-            let text = text
-                .replace(" :: ", "::")
-                .replace(":: ", "::")
-                .replace(" ::", "::");
+            let text = tighten_paths(&text);
             for (start, _) in text.match_indices("tracing::") {
                 let Some(rest) = text.get(start..) else {
                     continue;
@@ -108,7 +105,8 @@ fn no_call_site_in_the_product_logs_a_prompt_or_a_user_message() {
                 };
                 let Some(call) = argument_list(from_open)
                     .and_then(|len| rest.get(open..open + len))
-                    .map(as_parenthesised)
+                    .map(without_comments)
+                    .map(|c| as_parenthesised(&c))
                 else {
                     continue;
                 };
@@ -378,6 +376,101 @@ fn as_parenthesised(call: &str) -> String {
     chars.into_iter().collect()
 }
 
+/// *call* with every comment span replaced by a single space.
+///
+/// **The walk skipped comments; the predicates still read them.** A reviewer
+/// worked out the consequence and it was the opposite of what the previous
+/// docstring claimed: `info!(target: "t", /* x */ prompt)` leaves `*/` in front
+/// of the name, no boundary set contains it, and the field goes unseen. That is
+/// a silent miss, not the false positive I declared — verified by running both
+/// spellings in isolation, after a first attempt put two invocations in one
+/// file and let the detected one hide the undetected one.
+///
+/// A space rather than nothing, so `a/*x*/b` cannot fuse into one identifier.
+///
+/// # Parameters
+///
+/// * `call` — the extracted invocation.
+///
+/// # Returns
+///
+/// The same text with comments blanked.
+///
+/// # Complexity
+///
+/// `O(n)` in the call's length.
+fn without_comments(call: &str) -> String {
+    let chars: Vec<char> = call.chars().collect();
+    let mut out = String::with_capacity(call.len());
+    let mut i = 0usize;
+    while i < chars.len() {
+        if let Some((skipped, _)) = literal_at(&chars, i) {
+            out.extend(chars.get(i..i + skipped).unwrap_or_default());
+            i += skipped;
+            continue;
+        }
+        if let Some((skipped, _)) = comment_at(&chars, i) {
+            out.push(' ');
+            i += skipped;
+            continue;
+        }
+        if let Some(c) = chars.get(i) {
+            out.push(*c);
+        }
+        i += 1;
+    }
+    out
+}
+
+/// *text* with whitespace removed around `::` and before a macro's `!`.
+///
+/// The anchor is the literal `tracing::info!`, so any whitespace the compiler
+/// tolerates inside that path is an evasion. The first version replaced three
+/// spellings built from U+0020; a reviewer pointed out that a tab or a newline
+/// does the same job, and so does a space before the bang. This removes the
+/// whitespace itself rather than enumerating where it can sit.
+///
+/// # Parameters
+///
+/// * `text` — a source file.
+///
+/// # Returns
+///
+/// The text with those runs closed up.
+///
+/// # Complexity
+///
+/// `O(n)` in the text's length.
+fn tighten_paths(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0usize;
+    while i < chars.len() {
+        let c = chars[i];
+        if c.is_whitespace() {
+            // Look past this run of whitespace: if a `::` or a `!` follows, or
+            // a `::` precedes, the run is inside a path and comes out.
+            let mut j = i;
+            while j < chars.len() && chars[j].is_whitespace() {
+                j += 1;
+            }
+            let follows_sep = out.ends_with("::");
+            let precedes_sep = chars.get(j) == Some(&':') && chars.get(j + 1) == Some(&':');
+            let precedes_bang = chars.get(j) == Some(&'!');
+            if follows_sep || precedes_sep || precedes_bang {
+                i = j;
+                continue;
+            }
+            out.push(c);
+            i += 1;
+            continue;
+        }
+        out.push(c);
+        i += 1;
+    }
+    out
+}
+
 /// Whether *args* uses *name* in the position a `tracing` field occupies.
 ///
 /// `tracing` accepts five spellings for the same leak — `name = value`,
@@ -504,6 +597,13 @@ fn impl_precedes(text: &str, at: usize) -> bool {
 /// bare `info!` may belong to any crate, so it would report call sites it cannot
 /// judge, and a guardian that cries wolf gets relaxed until it stops speaking.
 ///
+/// **Declared limit: a re-export defeats this too.** The filter looks for the
+/// literal `tracing` in the item, so an emit macro re-exported under another
+/// crate's path — `use some_wrapper::info;` where `some_wrapper` re-exports
+/// `tracing::info` — names nothing this guard recognises. Widening the filter
+/// to every crate would report items it cannot judge; the boundary is recorded
+/// instead.
+///
 /// **Declared limit: a Cargo.toml dependency rename defeats this.**
 /// `tracing = { package = "tracing", ... }` under another key makes the crate
 /// reachable by a name no source file mentions, and there is no textual trace in
@@ -562,10 +662,15 @@ fn nothing_brings_an_emit_macro_into_scope_so_the_scanner_sees_every_call_site()
             // `tracing :: info` flattens to one space between tokens, not to
             // none, so the shape checks below run on a form with the path
             // separator's spacing removed as well.
+            // The separator's spacing AND the group's: `use tracing::{ * }` and
+            // `use tracing::{ self as t }` are the same items with a space inside
+            // the braces, which a reviewer found still slipping through.
             let tight = flat
                 .replace(" :: ", "::")
                 .replace(":: ", "::")
-                .replace(" ::", "::");
+                .replace(" ::", "::")
+                .replace("{ ", "{")
+                .replace(" }", "}");
             let renamed = tight.contains("tracing as ") || tight.contains("tracing::{self as ");
             let globbed = tight.contains("tracing::*") || tight.contains("tracing::{*");
             let wholesale = renamed || globbed;
@@ -667,12 +772,6 @@ fn source_files() -> Vec<(std::path::PathBuf, String)> {
 /// character literals. A truncated extraction is a SILENT miss -- the field this
 /// scanner exists to catch simply falls outside the call -- so the walk now
 /// models all three rather than the common one.
-///
-/// **Declared limit: a comment INSIDE the extracted call is skipped by this
-/// walk but not removed from what it returns**, so the position predicates
-/// still see its text. A field name written in a comment inside the arguments
-/// therefore reads as a field use -- a false positive, which fails the build
-/// and gets looked at, rather than a silent miss.
 ///
 /// **Declared limit: the caller finds the opening delimiter by search**, so a
 /// `(`, `[` or `{` written in a comment between the macro name and its real
