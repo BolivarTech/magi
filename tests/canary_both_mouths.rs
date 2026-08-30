@@ -109,7 +109,7 @@ fn a_credential_emitted_through_the_real_dispatcher_reaches_neither_mouth() {
 
     let cfg = LoggingConfig {
         log_dir: dir.path().to_path_buf(),
-        file_level: tracing::Level::TRACE,
+        file_filter: magi_rs::logging::filter::Filter::parse("trace").expect("valid"),
     };
     // **The screen branch is CONNECTED here**, and it has to be. MS1 never wires
     // it in production, so passing `None` would leave the second mouth
@@ -184,7 +184,7 @@ fn a_foreign_string_gets_the_same_treatment_as_one_of_our_own() {
     let sink = Arc::new(CapturingSink::default());
     let cfg = LoggingConfig {
         log_dir: dir.path().to_path_buf(),
-        file_level: tracing::Level::TRACE,
+        file_filter: magi_rs::logging::filter::Filter::parse("trace").expect("valid"),
     };
     let handle = init_logging(
         &cfg,
@@ -224,7 +224,7 @@ fn a_password_that_only_ever_appears_percent_encoded_is_still_masked() {
     let sink = Arc::new(CapturingSink::default());
     let cfg = LoggingConfig {
         log_dir: dir.path().to_path_buf(),
-        file_level: tracing::Level::TRACE,
+        file_filter: magi_rs::logging::filter::Filter::parse("trace").expect("valid"),
     };
     let handle = init_logging(
         &cfg,

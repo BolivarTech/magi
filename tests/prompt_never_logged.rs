@@ -26,7 +26,7 @@ fn nothing_the_layer_writes_carries_the_raw_prompt() {
     let dir = tempfile::tempdir().unwrap();
     let cfg = LoggingConfig {
         log_dir: dir.path().to_path_buf(),
-        file_level: tracing::Level::TRACE,
+        file_filter: magi_rs::logging::filter::Filter::parse("trace").expect("valid"),
     };
     let handle = init_logging(&cfg, Arc::new(DiscardDelivery), None).expect("init");
 

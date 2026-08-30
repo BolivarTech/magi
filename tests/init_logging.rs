@@ -35,7 +35,7 @@ fn a_second_call_returns_the_same_handle_and_names_what_it_discarded() {
 
     let cfg = LoggingConfig {
         log_dir: first_dir.path().to_path_buf(),
-        file_level: tracing::Level::INFO,
+        file_filter: magi_rs::logging::filter::Filter::parse("info").expect("valid"),
     };
     let first = init_logging(&cfg, sink.clone(), None).expect("first init");
 
@@ -44,7 +44,7 @@ fn a_second_call_returns_the_same_handle_and_names_what_it_discarded() {
     // violated by the mechanism meant to protect it.
     let other = LoggingConfig {
         log_dir: second_dir.path().to_path_buf(),
-        file_level: tracing::Level::DEBUG,
+        file_filter: magi_rs::logging::filter::Filter::parse("debug").expect("valid"),
     };
     let second = init_logging(&other, sink.clone(), None).expect("second init is Ok, not Err");
 
@@ -101,7 +101,7 @@ fn every_line_of_the_daily_file_carries_the_run_id() {
     let sink = Arc::new(Recording::default());
     let cfg = LoggingConfig {
         log_dir: dir.path().to_path_buf(),
-        file_level: tracing::Level::INFO,
+        file_filter: magi_rs::logging::filter::Filter::parse("info").expect("valid"),
     };
     let handle = init_logging(&cfg, sink, None).expect("init");
 
@@ -162,7 +162,7 @@ fn a_backslash_is_escaped_once_and_not_twice() {
     let sink = Arc::new(Recording::default());
     let cfg = LoggingConfig {
         log_dir: dir.path().to_path_buf(),
-        file_level: tracing::Level::INFO,
+        file_filter: magi_rs::logging::filter::Filter::parse("info").expect("valid"),
     };
     let handle = init_logging(&cfg, sink, None).expect("init");
 
@@ -211,7 +211,7 @@ fn the_layer_announces_a_dropped_event_once_and_not_per_event() {
     let sink = Arc::new(Recording::default());
     let cfg = LoggingConfig {
         log_dir: dir.path().to_path_buf(),
-        file_level: tracing::Level::INFO,
+        file_filter: magi_rs::logging::filter::Filter::parse("info").expect("valid"),
     };
     let handle = init_logging(&cfg, sink.clone(), None).expect("init");
 

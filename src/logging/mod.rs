@@ -100,6 +100,7 @@ impl NoticeDelivery for DiscardDelivery {
 pub mod appender;
 pub mod auditor;
 pub mod chunk;
+pub mod filter;
 pub mod magi_layer;
 pub mod render;
 pub mod retention;
@@ -115,8 +116,10 @@ pub(crate) mod testutil;
 pub struct LoggingConfig {
     /// Where the daily files live.
     pub log_dir: std::path::PathBuf,
-    /// Level written to the file.
-    pub file_level: tracing::Level,
+    /// Which events reach the file (REQ-L30): a level, or per-target
+    /// directives. Parsed by the caller so an invalid one is a LOAD error
+    /// (REQ-L31) rather than something this function discovers too late.
+    pub file_filter: filter::Filter,
 }
 
 /// What a caller keeps after initialising.
@@ -379,7 +382,7 @@ pub fn init_logging(
     // Step 5: mount the layer and install the subscriber.
     let mut layer = magi_layer::MagiLayer::new(
         magi_layer::FileSink::new(std::sync::Arc::clone(&appender)),
-        cfg.file_level,
+        cfg.file_filter.clone(),
         std::sync::Arc::clone(&audit),
         std::sync::Arc::clone(&sink),
     );

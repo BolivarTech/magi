@@ -226,12 +226,17 @@ impl CliLogLevel {
     /// (REQ-L40) and the flag now steers the file branch of the single layer, so
     /// the same `--log-level debug` an operator already types keeps meaning what
     /// it meant.
-    fn into_level(self) -> tracing::Level {
+    /// The word this selector spells in a filter specification.
+    ///
+    /// `--log-level` predates per-target directives and stays a plain level, so
+    /// it enters the same precedence chain as the string it would have been
+    /// written as. One parser, one grammar, one place a level is understood.
+    fn as_filter_word(self) -> &'static str {
         match self {
-            CliLogLevel::Error => tracing::Level::ERROR,
-            CliLogLevel::Warn => tracing::Level::WARN,
-            CliLogLevel::Info => tracing::Level::INFO,
-            CliLogLevel::Debug => tracing::Level::DEBUG,
+            CliLogLevel::Error => "error",
+            CliLogLevel::Warn => "warn",
+            CliLogLevel::Info => "info",
+            CliLogLevel::Debug => "debug",
         }
     }
 }
@@ -1666,27 +1671,32 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
     // reaches that path, which is what keeps a CI script that exports
     // `MAGI_LOG_DIR` without filling it from taking the process down.
     if let Some(ws) = workspace.as_ref() {
-        let log_dir = magi_config.resolve_log_dir(
+        let resolved_dir = magi_config.resolve_log_dir(
             None,
             std::env::var(crate::config::ENV_LOG_DIR).ok().as_deref(),
             &ws.logs_dir(),
         );
+        let log_dir = resolved_dir.path.clone();
         let filter = magi_config.resolve_file_filter(
             None,
             std::env::var(crate::config::ENV_FILE_FILTER)
                 .ok()
                 .as_deref(),
         );
-        let level = match filter.as_str() {
-            "trace" => tracing::Level::TRACE,
-            "debug" => tracing::Level::DEBUG,
-            "warn" => tracing::Level::WARN,
-            "error" => tracing::Level::ERROR,
-            _ => tracing::Level::INFO,
+        // REQ-L30/L31: per-target directives, and an invalid one is a LOAD
+        // error rather than a silent fallback to INFO. The five-literal match
+        // this replaces accepted `magi_rs=debug` by quietly ignoring it, so an
+        // operator got a filter they believed was in effect and was not.
+        let parsed = match magi_rs::logging::filter::Filter::parse(&filter) {
+            Ok(f) => f,
+            Err(e) => {
+                eprintln!("error: {e}");
+                return Err(anyhow::anyhow!("invalid log filter"));
+            }
         };
         let cfg = magi_rs::logging::LoggingConfig {
             log_dir: log_dir.clone(),
-            file_level: level,
+            file_filter: parsed,
         };
         match magi_rs::logging::init_logging(
             &cfg,
@@ -1731,6 +1741,14 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
                         )));
                     }
                 }
+            }
+            // Same D-L20 split as the headless surface: declared fails hard,
+            // defaulted degrades.
+            Err(e) if resolved_dir.declared => {
+                anyhow::bail!(
+                    "the log directory {} could not be used: {e}",
+                    log_dir.display()
+                );
             }
             Err(e) => startup_notices.push(Notice::resolution(format!(
                 "WARNING: logging is not writing to {}: {e}. The session continues                  without a log file.",
@@ -5486,22 +5504,52 @@ async fn prepare_headless(
     // **A failure here is a warning, never fatal** (REQ-L35): a headless run that
     // cannot write a log file is still a run that can answer.
     if let Some(ws) = workspace.as_ref() {
-        let log_dir = h
-            .log_dir
-            .clone()
-            .unwrap_or_else(|| magi_config.resolve_log_dir(None, None, &ws.logs_dir()));
-        let level = h
-            .log_level
-            .map_or(tracing::Level::INFO, CliLogLevel::into_level);
+        let resolved_dir = magi_config.resolve_log_dir(
+            h.log_dir.as_deref().and_then(|p| p.to_str()),
+            std::env::var(crate::config::ENV_LOG_DIR).ok().as_deref(),
+            &ws.logs_dir(),
+        );
+        let log_dir = resolved_dir.path.clone();
+        // **The same precedence the TUI applies** (REQ-L29). This surface used
+        // to drop the env tier on the directory and bypass `resolve_file_filter`
+        // altogether, so one `magi.toml` produced different levels depending on
+        // which surface read it — a difference nothing announced.
+        let filter = magi_config.resolve_file_filter(
+            h.log_level.map(CliLogLevel::as_filter_word),
+            std::env::var(crate::config::ENV_FILE_FILTER)
+                .ok()
+                .as_deref(),
+        );
+        let parsed = match magi_rs::logging::filter::Filter::parse(&filter) {
+            Ok(f) => f,
+            Err(e) => {
+                // 2 like every other invalid-input path here: a filter the
+                // operator wrote and mistyped is bad INPUT, not a runtime fault.
+                eprintln!("error: {e}");
+                return Err(2);
+            }
+        };
         let cfg = magi_rs::logging::LoggingConfig {
             log_dir: log_dir.clone(),
-            file_level: level,
+            file_filter: parsed,
         };
         if let Err(e) = magi_rs::logging::init_logging(
             &cfg,
             std::sync::Arc::new(magi_rs::logging::DiscardDelivery),
             None,
         ) {
+            // **D-L20, the one exception REQ-L35 carves out.** An operator who
+            // wrote a path asked for that path; degrading silently hands them an
+            // empty directory and no clue, which is the complaint this feature
+            // exists to answer. A DEFAULTED directory that cannot be created
+            // degrades, because nobody asked for it.
+            if resolved_dir.declared {
+                eprintln!(
+                    "error: the log directory {} could not be used: {e}",
+                    log_dir.display()
+                );
+                return Err(2);
+            }
             eprintln!(
                 "warning: logging is not writing to {}: {e}; the run continues",
                 log_dir.display()

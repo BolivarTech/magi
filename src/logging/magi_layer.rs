@@ -129,7 +129,7 @@ impl Reporter {
 /// The only layer.
 pub struct MagiLayer {
     file: FileSink,
-    file_level: tracing::Level,
+    file_filter: crate::logging::filter::Filter,
     tui: Option<(TuiSink, tracing::Level)>,
     auditor: Arc<Auditor>,
     reporter: Reporter,
@@ -140,13 +140,13 @@ impl MagiLayer {
     #[must_use]
     pub fn new(
         file: FileSink,
-        file_level: tracing::Level,
+        file_filter: crate::logging::filter::Filter,
         auditor: Arc<Auditor>,
         notices: Arc<dyn crate::logging::NoticeDelivery>,
     ) -> Self {
         Self {
             file,
-            file_level,
+            file_filter,
             tui: None,
             auditor,
             reporter: Reporter {
@@ -178,9 +178,10 @@ impl MagiLayer {
     /// callsite in the dependency tree is enabled** — the cost of the static
     /// level hint is the whole reason it exists.
     fn max_level(&self) -> tracing::Level {
+        let file = self.file_filter.max_level();
         match self.tui.as_ref() {
-            Some((_, tui)) => self.file_level.max(*tui),
-            None => self.file_level,
+            Some((_, tui)) => file.max(*tui),
+            None => file,
         }
     }
 }
@@ -219,7 +220,7 @@ impl<S: Subscriber> Layer<S> for MagiLayer {
         let escaped = audited.map_line(escape_for_line);
         let level = *event.metadata().level();
 
-        if level <= self.file_level {
+        if level <= self.file_filter.level_for(target) {
             let priority = if level <= tracing::Level::WARN {
                 Priority::High
             } else {
@@ -292,7 +293,7 @@ mod tests {
         let appender = Arc::new(DailyAppender::new(dir.path()).unwrap());
         let layer = MagiLayer::new(
             FileSink::new(Arc::clone(&appender)),
-            tracing::Level::INFO,
+            crate::logging::filter::Filter::parse("info").expect("valid"),
             Arc::new(Auditor::new()),
             Arc::new(crate::logging::DiscardDelivery),
         );

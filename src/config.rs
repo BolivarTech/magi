@@ -296,6 +296,20 @@ pub struct LoggingSection {
 // There is no `DEFAULT_LOG_DIR` here on purpose: `Workspace::logs_dir()` already
 // owns that path, and a second constant naming the same directory is two places
 // to change it and one chance to change only one.
+/// Where the log goes, and whether anyone asked for it.
+///
+/// The provenance travels WITH the path rather than being re-derived, because
+/// D-L20 turns on it: a declared directory that cannot be created is a startup
+/// error, a defaulted one degrades to a notice. Two functions reading the same
+/// precedence chain to answer "which was it?" is how the two answers drift.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedLogDir {
+    /// The directory to use.
+    pub path: std::path::PathBuf,
+    /// True when a flag, an environment variable or the file named it.
+    pub declared: bool,
+}
+
 /// Environment variable that overrides the log directory.
 pub const ENV_LOG_DIR: &str = "MAGI_LOG_DIR";
 /// Environment variable that overrides the file filter.
@@ -329,12 +343,18 @@ impl MagiConfig {
         flag: Option<&str>,
         env: Option<&str>,
         default: &std::path::Path,
-    ) -> std::path::PathBuf {
-        non_blank(flag)
+    ) -> ResolvedLogDir {
+        let declared = non_blank(flag)
             .or_else(|| non_blank(env))
-            .or_else(|| non_blank(self.logging.log_dir.as_deref()))
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| default.to_path_buf())
+            .or_else(|| non_blank(self.logging.log_dir.as_deref()));
+        ResolvedLogDir {
+            // A BLANK value is absent, never declared. An exported-but-unfilled
+            // MAGI_LOG_DIR is an everyday CI accident, and reading it as
+            // "declared" turns that accident into the hard startup failure
+            // D-L20 reserves for a path the operator actually asked for.
+            declared: declared.is_some(),
+            path: declared.map_or_else(|| default.to_path_buf(), std::path::PathBuf::from),
+        }
     }
 
     /// Resolves the file branch's filter by the same precedence.
@@ -1696,6 +1716,45 @@ mod tests {
 
     /// SC-L122: a blank env var is ABSENT, and absence never reaches D-L20.
     #[test]
+    fn a_declared_log_dir_is_marked_declared_and_a_defaulted_one_is_not() {
+        // D-L20 turns on exactly this bit: declared fails the startup, defaulted
+        // degrades to a notice. Getting it backwards either takes CI down over a
+        // directory nobody asked for, or hands an operator who DID ask an empty
+        // directory and no clue -- the complaint the feature exists to answer.
+        let cfg = MagiConfig::default();
+        let fallback = std::path::Path::new("/default/logs");
+
+        assert!(
+            cfg.resolve_log_dir(Some("/from/flag"), None, fallback)
+                .declared,
+            "a flag is a declaration"
+        );
+        assert!(
+            cfg.resolve_log_dir(None, Some("/from/env"), fallback)
+                .declared,
+            "so is an environment variable"
+        );
+        assert!(
+            !cfg.resolve_log_dir(None, None, fallback).declared,
+            "and the fallback is not"
+        );
+    }
+
+    #[test]
+    fn a_blank_log_dir_is_absent_rather_than_declared() {
+        // An exported-but-unfilled MAGI_LOG_DIR is an everyday CI accident.
+        // Reading it as declared converts that accident into D-L20's hard
+        // failure, which is the opposite of what the rule is for.
+        let cfg = MagiConfig::default();
+        let fallback = std::path::Path::new("/default/logs");
+        for blank in ["", "   ", "\t"] {
+            let r = cfg.resolve_log_dir(None, Some(blank), fallback);
+            assert!(!r.declared, "{blank:?} must not count as declared");
+            assert_eq!(r.path, fallback);
+        }
+    }
+
+    #[test]
     fn a_blank_log_dir_env_var_does_not_break_startup() {
         let cfg = MagiConfig::default();
         let fallback = std::path::Path::new("/w/.magi/logs");
@@ -1709,7 +1768,7 @@ mod tests {
   ",
         ] {
             assert_eq!(
-                cfg.resolve_log_dir(None, Some(blank), fallback),
+                cfg.resolve_log_dir(None, Some(blank), fallback).path,
                 fallback,
                 "a blank env ({blank:?}) must fall through to the default"
             );
@@ -1722,16 +1781,17 @@ mod tests {
         let fallback = std::path::Path::new("/w/.magi/logs");
 
         assert_eq!(
-            cfg.resolve_log_dir(Some("/from/flag"), Some("/from/env"), fallback),
+            cfg.resolve_log_dir(Some("/from/flag"), Some("/from/env"), fallback)
+                .path,
             std::path::PathBuf::from("/from/flag"),
             "the flag wins over the env"
         );
         assert_eq!(
-            cfg.resolve_log_dir(None, Some("/from/env"), fallback),
+            cfg.resolve_log_dir(None, Some("/from/env"), fallback).path,
             std::path::PathBuf::from("/from/env"),
             "the env wins over the file and the default"
         );
-        assert_eq!(cfg.resolve_log_dir(None, None, fallback), fallback);
+        assert_eq!(cfg.resolve_log_dir(None, None, fallback).path, fallback);
     }
 
     #[test]
