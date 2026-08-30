@@ -36,17 +36,19 @@ const PROMPT: &str = "PROMPT-BODY-do-not-write-this-to-any-file-ever";
 /// this one.
 #[test]
 fn no_call_site_in_the_product_logs_a_prompt_or_a_user_message() {
-    // The fields a prompt would arrive under. Narrow on purpose: a broad match
-    // on "prompt" hits doc comments and constant names, and a guardian that
-    // cries wolf gets relaxed until it stops speaking.
-    const FORBIDDEN: &[&str] = &[
-        "prompt = ",
-        "prompt =%",
-        "prompt = %",
-        "prompt = ?",
-        "user_message = ",
-        "envelope = ",
-    ];
+    // The field NAMES a prompt would arrive under. Names, not spellings: the
+    // first version listed `"prompt = "` and its sigil variants, which missed
+    // `tracing`'s shorthand entirely. `info!(target: "t", prompt)` passes a
+    // field called `prompt` carrying the local of that name, and `%prompt` and
+    // `?prompt` do the same through Display and Debug. All three write the
+    // value; none contains an `=`. A reviewer found this, and it is the one
+    // finding in this round that could actually leak.
+    //
+    // Narrow is still the goal — a guardian that cries wolf gets relaxed until
+    // it stops speaking — so `is_field_use` requires the name to sit where a
+    // field sits, which keeps `system_prompt`, `prompt_tokens` and the word
+    // inside a string literal out.
+    const FORBIDDEN: &[&str] = &["prompt", "user_message", "envelope"];
 
     let mut offenders = Vec::new();
     let mut scanned = 0usize;
@@ -123,7 +125,7 @@ fn no_call_site_in_the_product_logs_a_prompt_or_a_user_message() {
                 let Some(call) = rest.get(open..=end) else {
                     continue;
                 };
-                if FORBIDDEN.iter().any(|f| call.contains(f)) {
+                if FORBIDDEN.iter().any(|f| is_field_use(call, f)) {
                     let line = text.get(..start).map_or(0, |p| p.lines().count());
                     offenders.push(format!("{}:{}", path.display(), line + 1));
                 }
@@ -333,12 +335,20 @@ fn declares_a_layer_impl(text: &str) -> bool {
         let Some(rest) = text.get(at + TRAIT_OPEN.len()..) else {
             continue;
         };
+        if !impl_precedes(text, at) {
+            continue;
+        }
         let mut depth = 1usize;
         let mut close = None;
+        let mut previous = ' ';
         for (i, c) in rest.char_indices() {
             match c {
                 '<' => depth += 1,
-                '>' => {
+                // `->` inside a generic argument is a return arrow, not a
+                // closing bracket. `Layer<fn() -> T>` would otherwise close at
+                // the arrow and the header would go unrecognised — a false
+                // NEGATIVE, which is the direction that matters here.
+                '>' if previous != '-' => {
                     depth -= 1;
                     if depth == 0 {
                         close = Some(i);
@@ -347,6 +357,7 @@ fn declares_a_layer_impl(text: &str) -> bool {
                 }
                 _ => {}
             }
+            previous = c;
         }
         let Some(close) = close else { continue };
         let Some(after) = rest.get(close + 1..) else {
@@ -357,4 +368,94 @@ fn declares_a_layer_impl(text: &str) -> bool {
         }
     }
     false
+}
+
+/// Whether *args* uses *name* in the position a `tracing` field occupies.
+///
+/// `tracing` accepts four spellings for the same leak — `name = value`,
+/// `name` (shorthand for the local of that name), `%name` and `?name` — and
+/// only the first contains an `=`. A scanner that looks for `"name = "`
+/// therefore misses three of the four, which is the gap this closes.
+///
+/// The position test is what keeps it narrow. The name must begin a field, so
+/// what precedes it (past an optional `%` or `?` sigil and any spaces) is the
+/// opening paren, a comma or a brace — never a letter, which excludes
+/// `system_prompt`, and never a quote, which excludes the word inside a string
+/// literal. What follows must not continue the identifier, which excludes
+/// `prompt_tokens`.
+///
+/// # Parameters
+///
+/// * `args` — the macro invocation's argument list, parens included.
+/// * `name` — the field name to look for.
+///
+/// # Returns
+///
+/// `true` if the invocation passes a field by that name.
+///
+/// # Complexity
+///
+/// `O(n)` in the argument list's length.
+fn is_field_use(args: &str, name: &str) -> bool {
+    for (at, _) in args.match_indices(name) {
+        let after_ok = args
+            .get(at + name.len()..)
+            .and_then(|s| s.chars().next())
+            .is_none_or(|c| !c.is_alphanumeric() && c != '_');
+        if !after_ok {
+            continue;
+        }
+        let before = args.get(..at).unwrap_or_default();
+        let mut chars = before.chars().rev().peekable();
+        if matches!(chars.peek(), Some('%' | '?')) {
+            chars.next();
+        }
+        while matches!(chars.peek(), Some(c) if c.is_whitespace()) {
+            chars.next();
+        }
+        if matches!(chars.next(), Some('(' | ',' | '{')) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Whether an `impl` opens the header that reaches *at*.
+///
+/// Without this the walk matched any `Layer<…> for` — including one quoted in a
+/// doc comment, which is a false positive, and this very file's own prose,
+/// which is worse because it is guaranteed. It looks back over the header,
+/// which may wrap across lines, and ignores comment lines so that describing an
+/// impl is not the same as declaring one.
+///
+/// # Parameters
+///
+/// * `text` — the whole file.
+/// * `at` — the byte offset of the trait name.
+///
+/// # Returns
+///
+/// `true` if the enclosing statement is an `impl`.
+///
+/// # Complexity
+///
+/// `O(1)` — the look-back is bounded by [`HEADER_LOOKBACK_BYTES`].
+fn impl_precedes(text: &str, at: usize) -> bool {
+    /// How far back an `impl` header may start. Three wrapped lines is more
+    /// than rustfmt produces for one.
+    const HEADER_LOOKBACK_BYTES: usize = 240;
+
+    let from = at.saturating_sub(HEADER_LOOKBACK_BYTES);
+    let Some(window) = text.get(from..at) else {
+        return false;
+    };
+    // A `;` or `}` ends the previous item, so anything before it belongs to
+    // something else.
+    let header = window
+        .rsplit_once([';', '}'])
+        .map_or(window, |(_, tail)| tail);
+    header
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("//"))
+        .any(|l| l.contains("impl"))
 }
