@@ -84,7 +84,12 @@ fn no_call_site_in_the_product_logs_a_prompt_or_a_user_message() {
                 if !is_emit {
                     continue;
                 }
-                let Some(open) = rest.find('(') else { continue };
+                // `info![...]` and `info!{...}` are the same invocation under
+                // the other two delimiters rustc accepts, and anchoring on `(`
+                // alone let both through untouched.
+                let Some(open) = rest.find(['(', '[', '{']) else {
+                    continue;
+                };
                 // `skip(open)` would be wrong here and was: `char_indices`
                 // counts CHARACTERS while `open` is a BYTE offset, so the walk
                 // started somewhere else entirely and met a `)` before any `(`.
@@ -468,11 +473,14 @@ fn nothing_brings_an_emit_macro_into_scope_so_the_scanner_sees_every_call_site()
         scanned += 1;
         // The 2015-edition route, which imports every macro at once without
         // naming any of them.
-        if text.contains("macro_use") && text.contains("extern crate tracing") {
-            offenders.push(format!(
-                "{}: #[macro_use] extern crate tracing",
-                path.display()
-            ));
+        // `#[macro_use] extern crate tracing` is the 2015-edition route and
+        // imports every macro at once. `extern crate tracing as t` is the other
+        // half of the same evasion: it names no macro, but it makes `t::info!`
+        // spellable and the anchor looks for `tracing::`.
+        if text.contains("extern crate tracing")
+            && (text.contains("macro_use") || text.contains("extern crate tracing as "))
+        {
+            offenders.push(format!("{}: extern crate tracing", path.display()));
         }
         for (at, _) in text.match_indices("use ") {
             let Some(rest) = text.get(at..) else { continue };
@@ -489,10 +497,14 @@ fn nothing_brings_an_emit_macro_into_scope_so_the_scanner_sees_every_call_site()
             // crate, so neither names a macro that `names_item` could find. A
             // reviewer listed both after the item rewrite, which is the second
             // time the enforced set was narrower than the claim.
-            let wholesale = flat.contains("tracing::*")
-                || flat.contains("tracing::{*")
-                || flat.contains("use tracing as ")
-                || flat.contains("pub use tracing as ");
+            // Every spelling that brings the crate in wholesale or under
+            // another name. A reviewer listed three more after the first pass
+            // closed two, which is the third time the enforced set has come up
+            // narrower than the claim -- so this matches the SHAPE (the crate
+            // renamed, or a glob over it) rather than a list of literals.
+            let renamed = flat.contains("tracing as ") || flat.contains("tracing::{self as ");
+            let globbed = flat.contains("tracing::*") || flat.contains("tracing::{*");
+            let wholesale = renamed || globbed;
             if wholesale || EMIT.iter().any(|m| names_item(&flat, m)) {
                 offenders.push(format!("{}: {flat}", path.display()));
             }
@@ -583,7 +595,7 @@ fn source_files() -> Vec<(std::path::PathBuf, String)> {
     out
 }
 
-/// The byte length of the parenthesised argument list starting at *from_open*.
+/// The byte length of the delimited argument list starting at *from_open*.
 ///
 /// **Every literal is skipped, because a `)` inside one is not a delimiter.**
 /// Three reviewers found this in two rounds and each time the missing form was
@@ -605,6 +617,11 @@ fn source_files() -> Vec<(std::path::PathBuf, String)> {
 /// `O(n)` in the argument list's length.
 fn argument_list(from_open: &str) -> Option<usize> {
     let chars: Vec<char> = from_open.chars().collect();
+    let (open, close) = match chars.first() {
+        Some('[') => ('[', ']'),
+        Some('{') => ('{', '}'),
+        _ => ('(', ')'),
+    };
     let mut depth = 0usize;
     let mut i = 0usize;
     // Byte offset kept alongside the character index, because the caller slices
@@ -617,15 +634,23 @@ fn argument_list(from_open: &str) -> Option<usize> {
             at += bytes;
             continue;
         }
-        match c {
-            '(' => depth += 1,
-            ')' => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(at + c.len_utf8());
-                }
+        // A comment inside the arguments is the fourth member of the same
+        // family as the three literals: a `)` written in one is not a
+        // delimiter, and reading it as one truncates the call. It was found
+        // after the literals were closed, which is why it is closed rather
+        // than declared -- the family is the defect, not any one spelling.
+        if let Some((skipped, bytes)) = comment_at(&chars, i) {
+            i += skipped;
+            at += bytes;
+            continue;
+        }
+        if c == open {
+            depth += 1;
+        } else if c == close {
+            depth -= 1;
+            if depth == 0 {
+                return Some(at + c.len_utf8());
             }
-            _ => {}
         }
         i += 1;
         at += c.len_utf8();
@@ -710,6 +735,69 @@ fn literal_at(chars: &[char], i: usize) -> Option<(usize, usize)> {
 
     None
 }
+
+/// How many characters and bytes the comment starting at *i* occupies.
+///
+/// A line comment runs to the newline; a block comment nests, so the depth is
+/// tracked rather than stopping at the first `*/`.
+///
+/// # Parameters
+///
+/// * `chars` - the text as characters.
+/// * `i` - where to look.
+///
+/// # Returns
+///
+/// `Some((characters, bytes))` if a comment starts there, else `None`.
+///
+/// # Complexity
+///
+/// `O(n)` in the comment's length.
+fn comment_at(chars: &[char], i: usize) -> Option<(usize, usize)> {
+    let measure = |from: usize, to: usize| -> (usize, usize) {
+        let bytes = chars
+            .get(from..to)
+            .map_or(0, |s| s.iter().map(|c| c.len_utf8()).sum());
+        (to - from, bytes)
+    };
+
+    if chars.get(i) == Some(&SLASH) && chars.get(i + 1) == Some(&SLASH) {
+        let mut j = i + 2;
+        while j < chars.len() && chars[j] != NEWLINE {
+            j += 1;
+        }
+        return Some(measure(i, j));
+    }
+
+    if chars.get(i) == Some(&SLASH) && chars.get(i + 1) == Some(&STAR) {
+        let mut depth = 1usize;
+        let mut j = i + 2;
+        while j < chars.len() {
+            if chars.get(j) == Some(&SLASH) && chars.get(j + 1) == Some(&STAR) {
+                depth += 1;
+                j += 2;
+            } else if chars.get(j) == Some(&STAR) && chars.get(j + 1) == Some(&SLASH) {
+                depth -= 1;
+                j += 2;
+                if depth == 0 {
+                    return Some(measure(i, j));
+                }
+            } else {
+                j += 1;
+            }
+        }
+        return Some(measure(i, chars.len()));
+    }
+
+    None
+}
+
+/// Opens a comment, and closes a block one.
+const SLASH: char = '/';
+/// Pairs with a slash to delimit a block comment.
+const STAR: char = '*';
+/// Ends a line comment.
+const NEWLINE: char = '\n';
 
 /// Opens and closes a string literal.
 const QUOTE: char = '"';
