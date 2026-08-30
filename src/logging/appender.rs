@@ -1202,7 +1202,7 @@ mod tests {
         }
         assert!(
             parked > at_construction,
-            "the writer must stamp when it parks on an empty queue, or an idle              process accumulates staleness and the next event kills the layer"
+            "the writer must stamp when it parks on an empty queue, or an idle process accumulates staleness and the next event kills the layer"
         );
         appender.shutdown();
     }

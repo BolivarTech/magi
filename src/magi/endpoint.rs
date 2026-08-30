@@ -296,7 +296,7 @@ impl EndpointTemplate {
             ),
         ]) {
             eprintln!(
-                "warning: {} is too short to be matched exactly in the log; it is still                 masked by shape, which is weaker.",
+                "warning: {} is too short to be matched exactly in the log; it is still masked by shape, which is weaker.",
                 short.as_str()
             );
         }

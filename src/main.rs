@@ -1460,7 +1460,7 @@ where
         let left = handle.drain(EXIT_DRAIN_BUDGET);
         if left > 0 {
             eprintln!(
-                "warning: {left} bytes of log were still queued after waiting {}s and were                  not written",
+                "warning: {left} bytes of log were still queued after waiting {}s and were not written",
                 EXIT_DRAIN_BUDGET.as_secs()
             );
         }
@@ -1791,12 +1791,12 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
                         startup_notices.push(Notice::resolution(match failure {
                             magi_rs::logging::sweep::Failure::Compression(name, cause) => {
                                 format!(
-                                    "WARNING: {name} could not be compressed ({cause}); it is                                      still on disk and still counts towards the ceiling."
+                                    "WARNING: {name} could not be compressed ({cause}); it is still on disk and still counts towards the ceiling."
                                 )
                             }
                             magi_rs::logging::sweep::Failure::SourceMoved(name) => {
                                 format!(
-                                    "WARNING: {name} changed while it was being compressed, so                                      it was kept rather than replaced by an archive that does                                      not contain all of it."
+                                    "WARNING: {name} changed while it was being compressed, so it was kept rather than replaced by an archive that does not contain all of it."
                                 )
                             }
                         }));
@@ -1812,7 +1812,7 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
                 );
             }
             Err(e) => startup_notices.push(Notice::resolution(format!(
-                "WARNING: logging is not writing to {}: {e}. The session continues                  without a log file.",
+                "WARNING: logging is not writing to {}: {e}. The session continues without a log file.",
                 log_dir.display()
             ))),
         }
@@ -1840,7 +1840,7 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
         // pass, but the operator deserves to know which one got the weaker of
         // the two.
         startup_notices.push(Notice::resolution(format!(
-            "WARNING: {} is too short to be matched exactly in the log; it is             still masked by shape, which is weaker.",
+            "WARNING: {} is too short to be matched exactly in the log; it is still masked by shape, which is weaker.",
             short.as_str()
         )));
     }
@@ -9503,10 +9503,10 @@ mod tests {
             MagiConfig::from_toml_str(&format!(
                 "provider = \"ollama\"\n\
                  [magi]\n\
-                 melchior_model    = \"ok-model\"\nmelchior_lineage  = \"lin-melchior\"\n\
+                 melchior_model = \"ok-model\"\nmelchior_lineage  = \"lin-melchior\"\n\
                  balthasar_model   = \"ok-model\"\nbalthasar_lineage = \"lin-balthasar\"\n\
                  caspar_model \
-                  = \"down-model\"\ncaspar_lineage    = \"lin-caspar\"\n\
+                  = \"down-model\"\ncaspar_lineage = \"lin-caspar\"\n\
                  agent_timeout_secs = 30\n\
                  max_rotations = {max_rotations}\n\
                  [[magi.fallback]]\n\
@@ -9537,9 +9537,9 @@ mod tests {
             let cfg = MagiConfig::from_toml_str(
                 "provider = \"ollama\"\n\
                  [magi]\n\
-                 melchior_model    = \"ok-model\"\nmelchior_lineage  = \"lin-melchior\"\n\
+                 melchior_model = \"ok-model\"\nmelchior_lineage  = \"lin-melchior\"\n\
                  balthasar_model   = \"ok-model\"\nbalthasar_lineage = \"lin-balthasar\"\n\
-                 caspar_model      = \"down-model\"\ncaspar_lineage    = \"lin-caspar\"\n\
+                 caspar_model = \"down-model\"\ncaspar_lineage = \"lin-caspar\"\n\
                  agent_timeout_secs = 30\n\
                  max_rotations = 2\n\
                  strict_context_guard = true\n\
@@ -9596,9 +9596,9 @@ mod tests {
                  [openai]\n\
                  model = \"principal-model\"\n\
                  [magi]\n\
-                 melchior_model    = \"mel\"\nmelchior_lineage  = \"lin-m\"\n\
+                 melchior_model = \"mel\"\nmelchior_lineage  = \"lin-m\"\n\
                  balthasar_model   = \"bal\"\nbalthasar_lineage = \"lin-b\"\n\
-                 caspar_model      = \"cas\"\ncaspar_lineage    = \"lin-c\"\n\
+                 caspar_model = \"cas\"\ncaspar_lineage = \"lin-c\"\n\
                  agent_timeout_secs = 30\n\
                  max_rotations = 2\n\
                  {extra}\
@@ -10048,9 +10048,9 @@ mod tests {
                  [magi]\n\
                  kind = \"anthropic\"\n\
                  base_url = \"https://api.anthropic.com/v1/\"\n\
-                 melchior_model    = \"mel\"\nmelchior_lineage  = \"lin-m\"\n\
+                 melchior_model = \"mel\"\nmelchior_lineage  = \"lin-m\"\n\
                  balthasar_model   = \"bal\"\nbalthasar_lineage = \"lin-b\"\n\
-                 caspar_model      = \"cas\"\ncaspar_lineage    = \"lin-c\"\n\
+                 caspar_model = \"cas\"\ncaspar_lineage = \"lin-c\"\n\
                  [[magi.fallback]]\n\
                  model   = \"principal-model\"\nlineage = \"lin-rescue\"\n",
             )
@@ -10192,10 +10192,10 @@ mod tests {
             let cfg = MagiConfig::from_toml_str(
                 "provider = \"ollama\"\n\
                  [magi]\n\
-                 melchior_model    = \"shared\"\nmelchior_lineage  = \"lin-a\"\n\
+                 melchior_model = \"shared\"\nmelchior_lineage  = \"lin-a\"\n\
                  balthasar_model   = \"shared\"\nbalthasar_lineage = \"lin-b\"\n\
                  caspar_model \
-                  = \"other\"\ncaspar_lineage    = \"lin-c\"\n\
+                  = \"other\"\ncaspar_lineage = \"lin-c\"\n\
                  [[magi.fallback]]\n\
                  model   = \"shared\"\nlineage = \"lin-rescue\"\n",
             )
@@ -10261,9 +10261,9 @@ mod tests {
             let declared_distinct = MagiConfig::from_toml_str(
                 "provider = \"ollama\"\n\
                  [magi]\n\
-                 melchior_model    = \"m-a\"\nmelchior_lineage  = \"la\"\n\
+                 melchior_model = \"m-a\"\nmelchior_lineage  = \"la\"\n\
                  balthasar_model   = \"m-b\"\nbalthasar_lineage = \"lb\"\n\
-                 caspar_model      = \"m-c\"\ncaspar_lineage    = \"lc\"\n",
+                 caspar_model = \"m-c\"\ncaspar_lineage = \"lc\"\n",
             )
             .expect("a declared, distinct trio loads");
 
@@ -10343,9 +10343,9 @@ mod tests {
             let cfg = MagiConfig::from_toml_str(
                 "provider = \"ollama\"\n\
                  [magi]\n\
-                 melchior_model    = \"m-a\"\nmelchior_lineage  = \"opus\"\n\
+                 melchior_model = \"m-a\"\nmelchior_lineage  = \"opus\"\n\
                  balthasar_model   = \"m-b\"\nbalthasar_lineage = \"sonnet\"\n\
-                 caspar_model      = \"m-c\"\ncaspar_lineage    = \"haiku\"\n\
+                 caspar_model = \"m-c\"\ncaspar_lineage = \"haiku\"\n\
                  enforce_diversity = false\n\
                  [[magi.fallback]]\n\
                  model   = \"rescue\"\nlineage = \"opus\"\n",
@@ -11661,10 +11661,10 @@ retry_disabled = {retry_disabled}
             let cfg = MagiConfig::from_toml_str(
                 "provider = \"ollama\"\n\
                  [magi]\n\
-                 melchior_model    = \"m-model\"\nmelchior_lineage  = \"declared-melchior\"\n\
+                 melchior_model = \"m-model\"\nmelchior_lineage  = \"declared-melchior\"\n\
                  balthasar_model   = \"b-model\"\nbalthasar_lineage = \"declared-balthasar\"\n\
                  caspar_model \
-                  = \"c-model\"\ncaspar_lineage    = \"declared-caspar\"\n",
+                  = \"c-model\"\ncaspar_lineage = \"declared-caspar\"\n",
             )
             .expect("a fully declared trio must parse");
             let mut notices = Vec::new();
