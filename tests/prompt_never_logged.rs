@@ -78,7 +78,10 @@ fn no_call_site_in_the_product_logs_a_prompt_or_a_user_message() {
                 let Some(rest) = text.get(start..) else {
                     continue;
                 };
-                let is_emit = ["info!", "debug!", "warn!", "error!", "trace!"]
+                // `event!` is the general form the five level macros expand to,
+                // and a call site can use it directly -- `render_fixture!` does.
+                // Listing only the five leaves the one that covers them all.
+                let is_emit = ["info!", "debug!", "warn!", "error!", "trace!", "event!"]
                     .iter()
                     .any(|m| rest.starts_with(&format!("tracing::{m}")));
                 if !is_emit {

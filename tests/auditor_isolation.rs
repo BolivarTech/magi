@@ -89,17 +89,34 @@ fn redaction_works_over_a_hand_built_line_with_both_shapes_on_it() {
 }
 
 #[test]
-fn an_alarm_in_one_test_does_not_follow_into_the_next() {
-    // The dedup set lives in the auditor instance, so a fresh one alarms again
-    // for the same pair. If the set were global, this test would see the alarm
-    // already raised by the test above and come back empty — which is the
-    // failure mode this file exists to rule out.
-    let auditor = Auditor::new();
-    assert!(auditor.register_secret(SECRET_NAME, &[LIVE_SECRET]));
+fn a_fresh_auditor_alarms_again_for_a_pair_another_already_raised() {
+    // The dedup set lives in the auditor INSTANCE. A global one would mean the
+    // second auditor here stays silent because the first already spoke, and
+    // then one test's finding could suppress another's.
+    //
+    // **Both auditors live in THIS test, and that is the fix rather than a
+    // tidy-up.** It used to rely on the test above having raised the alarm
+    // first -- which `cargo nextest` makes impossible, because every test gets
+    // its own process and there is no test above. The guardian asserted a
+    // property of cross-test state in a runner that has none: it could not fail
+    // for the reason it gave, whatever the auditor did. Two reviewers found it
+    // independently.
     let line = format!("token={LIVE_SECRET}");
-    let (_, alarm) = auditor.audit(&line, "magi_rs::tests", None, 0);
+
+    let first = Auditor::new();
+    assert!(first.register_secret(SECRET_NAME, &[LIVE_SECRET]));
+    let (_, first_alarm) = first.audit(&line, "magi_rs::tests", None, 0);
     assert!(
-        alarm.is_some(),
-        "a fresh auditor has raised nothing yet, whatever other tests did"
+        first_alarm.is_some(),
+        "the first must alarm, or the second proves nothing"
+    );
+
+    // Same name, same value, same line -- everything a global set would key on.
+    let second = Auditor::new();
+    assert!(second.register_secret(SECRET_NAME, &[LIVE_SECRET]));
+    let (_, second_alarm) = second.audit(&line, "magi_rs::tests", None, 0);
+    assert!(
+        second_alarm.is_some(),
+        "a second auditor stayed silent for a pair the first had raised, so the          dedup set is shared and one caller's finding can suppress another's"
     );
 }
