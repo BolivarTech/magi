@@ -451,7 +451,19 @@ pub fn init_logging(
     let handle = LoggingHandle {
         appender: std::sync::Arc::clone(&appender),
     };
-    let _ = HANDLE.set(handle.clone());
+    // **The race is resolved, not discarded.** Two callers can both pass the
+    // `get` above, and both then build an appender — each with its own writer
+    // thread on the same file. Throwing the `set` result away left the loser
+    // holding a handle that is not the installed one: `installed()` would find
+    // the winner's, the exit drain would wait on that, and the loser's thread
+    // would keep writing with nobody accounting for it. The loser takes the
+    // winner's handle and lets its own drop, which closes its channels and ends
+    // its writer.
+    if HANDLE.set(handle.clone()).is_err() {
+        if let Some(winner) = HANDLE.get() {
+            return Ok(winner.clone());
+        }
+    }
 
     use tracing_subscriber::layer::SubscriberExt as _;
     let subscriber = tracing_subscriber::registry().with(layer);

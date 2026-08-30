@@ -83,15 +83,28 @@ struct Reporter {
     /// The failure modes here are all high-frequency by nature — a full channel
     /// is full for every event that follows — so an unlatched notice would turn
     /// one problem into a flood that hides it.
-    announced: std::sync::atomic::AtomicBool,
+    /// Latched for the DEGRADED tier: events are being lost, the branch lives.
+    degraded: std::sync::atomic::AtomicBool,
+    /// Latched for the STOPPED tier: the branch is gone for the rest of the run.
+    ///
+    /// **Two latches and not one.** With a single one, a moment of congestion
+    /// fires the notice and the writer's death is then silent forever: the
+    /// operator is told events are being discarded and never told the log
+    /// stopped. Those are different things to know and different things to do
+    /// about, so the worse of the two must always be able to speak.
+    stopped: std::sync::atomic::AtomicBool,
 }
 
 impl Reporter {
-    /// Announces `text` unless something has already been announced.
-    fn announce_once(&self, text: &str) {
+    /// Announces `text` once for its tier.
+    ///
+    /// # Parameters
+    ///
+    /// * `latch` — the tier's latch; a tier speaks once and no more.
+    /// * `text` — what to say.
+    fn announce_once(&self, latch: &std::sync::atomic::AtomicBool, text: &str) {
         use std::sync::atomic::Ordering;
-        if self
-            .announced
+        if latch
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .is_err()
         {
@@ -114,18 +127,22 @@ impl Reporter {
         match outcome {
             Submitted::Queued => {}
             Submitted::DroppedFull => self.announce_once(
+                &self.degraded,
                 "warning: the log queue is full and events are being discarded; \
                  the session continues and the log is now incomplete",
             ),
             Submitted::DroppedOversized => self.announce_once(
+                &self.degraded,
                 "warning: an event was too large for the log queue and was \
                  discarded; the session continues and the log is now incomplete",
             ),
             Submitted::WriterGone => self.announce_once(
+                &self.stopped,
                 "warning: the log writer has stopped; this session continues \
                  WITHOUT a log file",
             ),
             Submitted::WriterHung => self.announce_once(
+                &self.stopped,
                 "warning: the log writer stopped responding; this session \
                  continues WITHOUT a log file",
             ),
@@ -158,7 +175,8 @@ impl MagiLayer {
             reporter: Reporter {
                 sink: notices,
                 auditor: Arc::clone(&auditor),
-                announced: std::sync::atomic::AtomicBool::new(false),
+                degraded: std::sync::atomic::AtomicBool::new(false),
+                stopped: std::sync::atomic::AtomicBool::new(false),
             },
             auditor,
         }
@@ -301,6 +319,58 @@ mod tests {
     use super::*;
     use crate::logging::auditor::SecretName;
     use tempfile::tempdir;
+
+    /// Records what the reporter delivered.
+    #[derive(Default)]
+    struct RecordingSink {
+        lines: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl crate::logging::NoticeDelivery for RecordingSink {
+        fn deliver(&self, line: &crate::logging::auditor::Audited) {
+            if let Ok(mut l) = self.lines.lock() {
+                l.push(line.as_str().to_string());
+            }
+        }
+    }
+
+    #[test]
+    fn a_transient_notice_does_not_silence_the_permanent_one() {
+        // With one latch for every outcome, a moment of congestion spoke first
+        // and the writer's death was then silent for the rest of the run: the
+        // operator was told events were being discarded and never told the log
+        // had stopped. Those are different things to know -- one says the file
+        // is incomplete, the other says there is no file -- and different
+        // things to do about.
+        let sink = Arc::new(RecordingSink::default());
+        let reporter = Reporter {
+            sink: sink.clone(),
+            auditor: Arc::new(Auditor::new()),
+            degraded: std::sync::atomic::AtomicBool::new(false),
+            stopped: std::sync::atomic::AtomicBool::new(false),
+        };
+
+        // The transient one first, twice, so its own latch is proven to hold.
+        reporter.report(Submitted::DroppedFull);
+        reporter.report(Submitted::DroppedFull);
+        // Then the permanent one.
+        reporter.report(Submitted::WriterGone);
+        reporter.report(Submitted::WriterHung);
+
+        let said = sink.lines.lock().unwrap().clone();
+        assert_eq!(
+            said.iter().filter(|l| l.contains("discarded")).count(),
+            1,
+            "the transient tier must speak once: {said:?}"
+        );
+        assert_eq!(
+            said.iter()
+                .filter(|l| l.contains("WITHOUT a log file"))
+                .count(),
+            1,
+            "and the permanent one must still be able to speak at all: {said:?}"
+        );
+    }
 
     #[test]
     fn the_level_hint_is_the_maximum_of_both_branches() {

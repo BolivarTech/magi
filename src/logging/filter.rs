@@ -27,6 +27,17 @@ const DASH: char = '-';
 /// What a dash normalises to (REQ-L31).
 const UNDERSCORE: char = '_';
 
+/// One `target=level` directive, with the prefix its children must match.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Override {
+    /// The target as written, normalised.
+    name: String,
+    /// `name::`, so a child match is a `starts_with` and not a `format!`.
+    prefix: String,
+    /// The level it grants.
+    level: Level,
+}
+
 /// A parsed filter: one default level plus any per-target overrides.
 ///
 /// # Examples
@@ -42,7 +53,12 @@ pub struct Filter {
     /// Applied to any target no override matches.
     default: Level,
     /// Overrides, in declaration order.
-    targets: Vec<(String, Level)>,
+    ///
+    /// Each carries its name AND the `name::` prefix a child target must start
+    /// with. **Precomputed**, because `level_for` runs on every event and
+    /// building that prefix there allocated once per override per event, on the
+    /// hot path, to produce the same string every time.
+    targets: Vec<Override>,
 }
 
 impl Filter {
@@ -85,10 +101,12 @@ impl Filter {
                     if first.is_empty() {
                         return Err(invalid(spec, "a directive has no target before its '='"));
                     }
-                    targets.push((
-                        first.replace(DASH, &UNDERSCORE.to_string()),
-                        parse_level(level.trim(), spec)?,
-                    ));
+                    let name = first.replace(DASH, &UNDERSCORE.to_string());
+                    targets.push(Override {
+                        prefix: format!("{name}::"),
+                        name,
+                        level: parse_level(level.trim(), spec)?,
+                    });
                 }
             }
         }
@@ -110,10 +128,10 @@ impl Filter {
     #[must_use]
     pub fn level_for(&self, target: &str) -> Level {
         let mut best: Option<(usize, Level)> = None;
-        for (name, level) in &self.targets {
-            let matches = target == name || target.starts_with(&format!("{name}::"));
-            if matches && best.is_none_or(|(len, _)| name.len() > len) {
-                best = Some((name.len(), *level));
+        for o in &self.targets {
+            let matches = target == o.name || target.starts_with(&o.prefix);
+            if matches && best.is_none_or(|(len, _)| o.name.len() > len) {
+                best = Some((o.name.len(), o.level));
             }
         }
         best.map_or(self.default, |(_, level)| level)
@@ -131,7 +149,7 @@ impl Filter {
     pub fn max_level(&self) -> Level {
         self.targets
             .iter()
-            .fold(self.default, |acc, (_, l)| acc.max(*l))
+            .fold(self.default, |acc, o| acc.max(o.level))
     }
 }
 
