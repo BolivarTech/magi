@@ -177,6 +177,27 @@ impl Drop for Reservation<'_> {
     }
 }
 
+/// What the retry writes through.
+///
+/// A trait for one reason: REQ-L37's retry is a **timing** behaviour over a
+/// failing target, and a real `FileSink` cannot be made to fail on demand -- it
+/// holds an open handle to a file the test would have to break underneath it.
+/// The same argument `submit_at` already makes for injecting the clock.
+pub(crate) trait ItemWriter {
+    /// Writes one queued item.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the underlying target reports.
+    fn write_item(&mut self, item: &Queued) -> std::io::Result<()>;
+}
+
+impl ItemWriter for FileSink {
+    fn write_item(&mut self, item: &Queued) -> std::io::Result<()> {
+        self.write(item)
+    }
+}
+
 /// Writes each day's events to its own file, from one thread.
 pub struct DailyAppender {
     high: Channel,
@@ -417,6 +438,69 @@ impl DailyAppender {
 /// # Complexity
 ///
 /// `O(events)` over the run.
+/// Refreshes the mark an emitter reads to decide the writer is alive.
+///
+/// Lifted out of `spawn_writer` with the retry it serves: the retry is REQ-L37
+/// and needed a test, and a helper nested inside a thread closure cannot be
+/// reached from one.
+fn stamp(hb: &std::sync::Mutex<std::time::Instant>) {
+    if let Ok(mut m) = hb.lock() {
+        *m = std::time::Instant::now();
+    }
+}
+
+/// Writes one item, taking the ONE retry a write failure is allowed.
+///
+/// # The retry hangs off the `io::Error`, not off the thread dying
+///
+/// `clippy::panic` is denied in this module, so a write failure
+/// **structurally cannot** panic the writer: hanging the retry off thread
+/// termination would have fired only on a bug — whose cause persists — while
+/// the transient cases got permanent shutdown. And because the writer does
+/// not die, the receiver does not drop and there is no sender to swap.
+///
+/// # Why the mark is stamped on the way INTO the cooldown
+///
+/// The writer sits here for thirty seconds consuming nothing. Events arriving
+/// meanwhile leave the queue non-empty, so the first emitter to look would
+/// read a stale mark against a full queue and declare a hang that does not
+/// exist — which is PERMANENT. A transient disk error, the very case the
+/// retry exists for, would end in permanent shutdown before the retry ever
+/// happened. The mark has to refresh in **every** state where the writer is
+/// alive and deliberately not consuming.
+///
+/// # Returns
+///
+/// `false` once the file branch must be shut down for good.
+fn write_with_one_retry(
+    sink: &mut impl ItemWriter,
+    item: &Queued,
+    hb: &std::sync::Mutex<std::time::Instant>,
+    cooldown: std::time::Duration,
+) -> bool {
+    if sink.write_item(item).is_ok() {
+        return true;
+    }
+    // **Nothing to stderr from here** (REQ-L39). This runs on a detached
+    // thread for the whole session, so a write here lands on top of the
+    // ratatui frame whenever the TUI holds the alternate screen — the exact
+    // corruption `TuiNoticeSink` exists to prevent.
+    //
+    // Nor is anything lost by saying nothing: REQ-L37 asks for ONE notice
+    // when the file branch shuts down, and the layer already emits it
+    // through the notice sink when the writer's death turns the next submit
+    // into `WriterGone`. A second announcement from a thread that cannot
+    // reach the sink would be a duplicate on the surface where it is safe
+    // and damage on the surface where it is not.
+    //
+    // Stamp, sleep, stamp: an emitter looking at any moment of this window
+    // sees a live writer.
+    stamp(hb);
+    std::thread::sleep(cooldown);
+    stamp(hb);
+    sink.write_item(item).is_ok()
+}
+
 fn spawn_writer(
     dir: PathBuf,
     high: Receiver<Queued>,
@@ -443,63 +527,6 @@ fn spawn_writer(
         }
     }
 
-    /// Refreshes the mark an emitter reads to decide the writer is alive.
-    fn stamp(hb: &std::sync::Mutex<std::time::Instant>) {
-        if let Ok(mut m) = hb.lock() {
-            *m = std::time::Instant::now();
-        }
-    }
-
-    /// Writes one item, taking the ONE retry a write failure is allowed.
-    ///
-    /// # The retry hangs off the `io::Error`, not off the thread dying
-    ///
-    /// `clippy::panic` is denied in this module, so a write failure
-    /// **structurally cannot** panic the writer: hanging the retry off thread
-    /// termination would have fired only on a bug — whose cause persists — while
-    /// the transient cases got permanent shutdown. And because the writer does
-    /// not die, the receiver does not drop and there is no sender to swap.
-    ///
-    /// # Why the mark is stamped on the way INTO the cooldown
-    ///
-    /// The writer sits here for thirty seconds consuming nothing. Events arriving
-    /// meanwhile leave the queue non-empty, so the first emitter to look would
-    /// read a stale mark against a full queue and declare a hang that does not
-    /// exist — which is PERMANENT. A transient disk error, the very case the
-    /// retry exists for, would end in permanent shutdown before the retry ever
-    /// happened. The mark has to refresh in **every** state where the writer is
-    /// alive and deliberately not consuming.
-    ///
-    /// # Returns
-    ///
-    /// `false` once the file branch must be shut down for good.
-    fn write_with_one_retry(
-        sink: &mut FileSink,
-        item: &Queued,
-        hb: &std::sync::Mutex<std::time::Instant>,
-    ) -> bool {
-        if sink.write(item).is_ok() {
-            return true;
-        }
-        // **Nothing to stderr from here** (REQ-L39). This runs on a detached
-        // thread for the whole session, so a write here lands on top of the
-        // ratatui frame whenever the TUI holds the alternate screen — the exact
-        // corruption `TuiNoticeSink` exists to prevent.
-        //
-        // Nor is anything lost by saying nothing: REQ-L37 asks for ONE notice
-        // when the file branch shuts down, and the layer already emits it
-        // through the notice sink when the writer's death turns the next submit
-        // into `WriterGone`. A second announcement from a thread that cannot
-        // reach the sink would be a duplicate on the surface where it is safe
-        // and damage on the surface where it is not.
-        //
-        // Stamp, sleep, stamp: an emitter looking at any moment of this window
-        // sees a live writer.
-        stamp(hb);
-        std::thread::sleep(WRITER_RETRY_COOLDOWN);
-        stamp(hb);
-        sink.write(item).is_ok()
-    }
     std::thread::spawn(move || {
         let mut sink = FileSink::new(dir);
         let mut high_closed = false;
@@ -510,7 +537,12 @@ fn spawn_writer(
                 match high.try_recv() {
                     Ok(item) => {
                         let held = reserved_of(&item);
-                        let written = write_with_one_retry(&mut sink, &item, &heartbeat);
+                        let written = write_with_one_retry(
+                            &mut sink,
+                            &item,
+                            &heartbeat,
+                            WRITER_RETRY_COOLDOWN,
+                        );
                         // Released whether or not the write landed: the bytes
                         // have left the queue either way, and holding them for a
                         // line that will never be written charges the budget for
@@ -531,7 +563,8 @@ fn spawn_writer(
             match low.try_recv() {
                 Ok(item) => {
                     let held = reserved_of(&item);
-                    let written = write_with_one_retry(&mut sink, &item, &heartbeat);
+                    let written =
+                        write_with_one_retry(&mut sink, &item, &heartbeat, WRITER_RETRY_COOLDOWN);
                     low_reserved.fetch_sub(held, Ordering::AcqRel);
                     if !written {
                         return;
@@ -824,23 +857,92 @@ mod tests {
         appender.shutdown();
     }
 
+    /// A target that fails its first `n` writes and then succeeds.
+    struct FlakyWriter {
+        remaining_failures: usize,
+        writes: usize,
+    }
+
+    impl ItemWriter for FlakyWriter {
+        fn write_item(&mut self, _: &Queued) -> std::io::Result<()> {
+            self.writes += 1;
+            if self.remaining_failures > 0 {
+                self.remaining_failures -= 1;
+                return Err(std::io::Error::other("the disk said no"));
+            }
+            Ok(())
+        }
+    }
+
     #[test]
-    fn a_write_failure_takes_the_retry_and_the_mark_stays_fresh_through_it() {
-        // REQ-L37. Two things at once, and the second is the one that bites:
-        // during the cooldown the writer consumes NOTHING for thirty seconds,
-        // so events pile up and the queue is non-empty. An emitter reading a
-        // stale mark against a full queue declares a hang — which is PERMANENT.
-        // A transient disk error, the very case the retry exists for, would end
-        // in permanent shutdown before the retry ever happened.
+    fn one_transient_write_failure_is_retried_and_the_event_survives() {
+        // REQ-L37's actual behaviour, which had no test: the retry, the second
+        // attempt, and the event reaching the target. What stood here asserted
+        // only that WRITER_RETRY_COOLDOWN < WRITER_STALL_SECS -- a comparison of
+        // two constants that can fail only if somebody edits a constant, under a
+        // name promising the behaviour it never touched.
         //
-        // The test asserts the ARITHMETIC of that, not a thirty-second wait: the
-        // cooldown must be shorter than the stall window, or the writer's own
-        // retry looks like a hang to every emitter.
+        // The cooldown is injected so this costs milliseconds rather than the
+        // thirty seconds production waits, the same argument `submit_at` already
+        // makes for the clock. Thirty seconds is why this went untested.
+        let hb = std::sync::Mutex::new(std::time::Instant::now());
+        let mut sink = FlakyWriter {
+            remaining_failures: 1,
+            writes: 0,
+        };
+        let (item, _) = line("an event that must survive one bad write");
+
+        let kept =
+            write_with_one_retry(&mut sink, &item, &hb, std::time::Duration::from_millis(10));
+
+        assert!(kept, "one transient failure must not shut the branch down");
+        assert_eq!(
+            sink.writes, 2,
+            "the retry is ONE retry, not zero and not two"
+        );
+    }
+
+    #[test]
+    fn a_second_failure_shuts_the_file_branch_down_for_good() {
+        // The other half of REQ-L37: the retry is ONE. A target that is still
+        // broken after the cooldown is not transient, and continuing to try it
+        // per event turns a dead disk into a busy loop.
+        let hb = std::sync::Mutex::new(std::time::Instant::now());
+        let mut sink = FlakyWriter {
+            remaining_failures: 99,
+            writes: 0,
+        };
+        let (item, _) = line("an event nobody will read");
+
+        let kept =
+            write_with_one_retry(&mut sink, &item, &hb, std::time::Duration::from_millis(10));
+
+        assert!(!kept, "a persistent failure must shut the branch down");
+        assert_eq!(sink.writes, 2, "and it must stop after the one retry");
+    }
+
+    #[test]
+    fn the_mark_stays_fresh_across_the_cooldown() {
+        // The subtle half. During the cooldown the writer consumes nothing, so
+        // events pile up and the queue is non-empty; an emitter reading a stale
+        // mark against a full queue declares a hang, which is PERMANENT. The
+        // transient disk error the retry exists for would end in permanent
+        // shutdown before the retry ever happened.
+        let hb = std::sync::Mutex::new(
+            std::time::Instant::now() - std::time::Duration::from_secs(WRITER_STALL_SECS * 2),
+        );
+        let stale = *hb.lock().unwrap();
+        let mut sink = FlakyWriter {
+            remaining_failures: 1,
+            writes: 0,
+        };
+        let (item, _) = line("an event during the cooldown");
+
+        write_with_one_retry(&mut sink, &item, &hb, std::time::Duration::from_millis(10));
+
         assert!(
-            WRITER_RETRY_COOLDOWN.as_secs() < WRITER_STALL_SECS,
-            "a cooldown at or past the stall window makes the retry              indistinguishable from a hang: {}s vs {}s",
-            WRITER_RETRY_COOLDOWN.as_secs(),
-            WRITER_STALL_SECS
+            *hb.lock().unwrap() > stale,
+            "the mark went into the cooldown stale and came out stale"
         );
     }
 

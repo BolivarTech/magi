@@ -974,9 +974,19 @@ fn open_tui_memory(
             Ok(store) => return MemoryAttachment::Encrypted(store),
             Err(e) => {
                 if !is_wrong_passphrase(&e) {
+                    // P-L01/P-L02. A store error can be long and can already
+                    // open with this very lead-in, so pasting it in whole gives
+                    // the reader the sentence twice and then buries the cause
+                    // past the notice cap. `error_for_display` drops the HEAD,
+                    // because in a chain of wrapped errors the cause is at the
+                    // end.
                     notices.push(format!(
-                        "WARNING: could not open the encrypted database ({e}); \
-                         running WITHOUT persistence for this session."
+                        "WARNING: {}; running WITHOUT persistence for this session.",
+                        magi_rs::notices::error_for_display(
+                            "could not open the encrypted database",
+                            &e.to_string(),
+                            magi_rs::notices::ERROR_DISPLAY_CAP,
+                        )
                     ));
                     return MemoryAttachment::Ephemeral;
                 }
@@ -1621,9 +1631,13 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
                         ),
                         Err(e) => {
                             startup_notices.push(Notice::resolution(format!(
-                                "WARNING: could not open the secret vault ({e}); \
-                                 ANTHROPIC_API_KEY/OPENAI_API_KEY must come from the \
-                                 environment this session."
+                                "WARNING: {}; ANTHROPIC_API_KEY/OPENAI_API_KEY must \
+                                 come from the environment this session.",
+                                magi_rs::notices::error_for_display(
+                                    "could not open the secret vault",
+                                    &e.to_string(),
+                                    magi_rs::notices::ERROR_DISPLAY_CAP,
+                                )
                             )));
                             (Some(store), None)
                         }
