@@ -2034,25 +2034,11 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
             // Wire persistence + the tiered-memory subsystem (shared with the
             // headless `query` path, DRY). The embedding key is resolved here
             // (env > vault) so the helper stays free of the secret-store plumbing.
+            //
+            // **Not registered with the auditor again here.** The same value was
+            // armed thirty lines above, and a second registration only earns a
+            // second "too short" warning for one credential.
             let embed_key = resolve_openai_key(openai_key.as_deref(), secret_store.as_ref());
-            // REQ-L49, headless half. Same reasoning as the TUI call site: the exact
-            // pass only covers what was registered, and a surface that forgets to arm
-            // ships a log protected by the pattern pass alone.
-            for short in magi_rs::logging::register_process_secrets(&secrets_to_arm(
-                discover_config(
-                    &magi_config,
-                    anthropic_key.as_deref(),
-                    secret_store.as_ref(),
-                )
-                .as_ref()
-                .map(|c| c.api_key.as_str()),
-                embed_key.as_deref(),
-            )) {
-                eprintln!(
-            "warning: {} is too short to be matched exactly in the log; it is still             masked by shape, which is weaker.",
-            short.as_str()
-        );
-            }
             let mut attach_notices: Vec<String> = Vec::new();
             attach_persistent_memory(
                 &mut agent,
@@ -5558,6 +5544,28 @@ async fn prepare_headless(
     }
 
     let embed_key = resolve_openai_key(openai_key.as_deref(), secret_store.as_ref());
+    // REQ-L49, the headless half. Without this the surface a CI job uses ships
+    // a log protected by the pattern pass alone: the exact pass only covers
+    // what was registered, and nothing here registered anything.
+    //
+    // It sits on THIS `embed_key` and not the one in `run()`. An earlier edit
+    // matched the first line of that shape in the file, which belongs to the
+    // TUI, and left this surface unarmed while looking done.
+    for short in magi_rs::logging::register_process_secrets(&secrets_to_arm(
+        discover_config(
+            &magi_config,
+            anthropic_key.as_deref(),
+            secret_store.as_ref(),
+        )
+        .as_ref()
+        .map(|c| c.api_key.as_str()),
+        embed_key.as_deref(),
+    )) {
+        eprintln!(
+            "warning: {} is too short to be matched exactly in the log; it is still masked by shape, which is weaker.",
+            short.as_str()
+        );
+    }
     // The JSONL run log is retired (REQ-L40). The headless surfaces bring up the
     // SAME single layer the TUI does: one log for the whole product, rather than
     // one shape per surface.
@@ -6055,6 +6063,59 @@ async fn run_consult_subcommand(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn every_surface_arms_the_auditor() {
+        // **A source check, and it earned its place.** The registry is
+        // deliberately unobservable -- the auditor keeps a length and a hash and
+        // exposes no count (REQ-L51) -- so no assertion can ask "is it armed?"
+        // from outside. What CAN be checked is that each surface that resolves
+        // credentials also registers them.
+        //
+        // The gap this closes was live: an edit meant for `prepare_headless`
+        // matched the first line of that shape in the file, which belongs to
+        // the TUI. The headless surface -- the one a CI job uses -- shipped
+        // unarmed, and every test stayed green because the canary registers its
+        // own secrets and the selector's unit tests never touch a call site.
+        let source = include_str!("main.rs");
+        let (production, _) = source
+            .split_once("\n#[cfg(test)]\nmod tests {")
+            .expect("this file has a test module");
+
+        // `run` is the TUI surface; `prepare_headless` is query and consult.
+        for surface in ["async fn run(", "async fn prepare_headless("] {
+            let start = production
+                .find(surface)
+                .unwrap_or_else(|| panic!("{surface} is gone; this check needs updating"));
+            let body = production.get(start..).unwrap_or("");
+            // To the next top-level fn, so one surface's call cannot be counted
+            // for another's.
+            let end = body[1..].find("\nasync fn ").map_or(body.len(), |i| i + 1);
+            let body = body.get(..end).unwrap_or(body);
+            assert!(
+                body.contains("register_process_secrets"),
+                "{surface} resolves credentials and never arms the auditor, so \
+                 its log is protected by the pattern pass alone"
+            );
+        }
+    }
+
+    #[test]
+    fn no_surface_arms_the_auditor_twice() {
+        // A second registration of the same value is not a leak, but it earns a
+        // second "too short" warning for one credential, and it is the shape a
+        // half-finished move leaves behind -- which is how the duplicate this
+        // removes came to exist.
+        let source = include_str!("main.rs");
+        let (production, _) = source
+            .split_once("\n#[cfg(test)]\nmod tests {")
+            .expect("this file has a test module");
+        assert_eq!(
+            production.matches("register_process_secrets").count(),
+            2,
+            "expected exactly one arming per surface"
+        );
+    }
+
     #[test]
     fn the_auditor_is_armed_with_every_credential_the_run_resolved() {
         // REQ-L49's exact pass is what catches a secret NO pattern recognises.

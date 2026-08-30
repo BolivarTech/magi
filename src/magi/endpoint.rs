@@ -280,13 +280,18 @@ impl EndpointTemplate {
         // `register_process_secrets` composes the encoded variant from the raw
         // value using this same encoder, which is what the paragraph above is
         // guarding.
+        // **Named by SCOPE, not by the root's name.** `Scope` already spells the
+        // three pairs the vault uses, and the lookup above went through them.
+        // Registering a `MAGI_BASE_URL_PASSWORD` under `BASE_URL_PASSWORD`
+        // masks the value correctly and then names the wrong config key in the
+        // alarm -- sending the reader to an entry that is not the one at fault.
         for short in crate::logging::register_process_secrets(&[
             (
-                crate::logging::auditor::SecretName::new("BASE_URL_USER"),
+                crate::logging::auditor::SecretName::new(scope.user_entry()),
                 user.as_str(),
             ),
             (
-                crate::logging::auditor::SecretName::new("BASE_URL_PASSWORD"),
+                crate::logging::auditor::SecretName::new(scope.password_entry()),
                 password.as_str(),
             ),
         ]) {
