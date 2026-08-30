@@ -216,7 +216,7 @@ fn the_auditor_both_masks_a_registered_value_and_alarms_on_it() {
     assert!(alarm.is_some(), "and it alarmed, both never one");
 }
 
-/// The span exemption above is a fact about every `Layer` in the tree.
+/// The span exemption above is a fact about every `Layer` under `src/`.
 ///
 /// The scanner deliberately ignores `tracing::span!` because a span's fields are
 /// never read: no layer magi-rs installs implements a span callback. That is
@@ -229,12 +229,19 @@ fn the_auditor_both_masks_a_registered_value_and_alarms_on_it() {
 /// implementation does nothing, which is indistinguishable from not reading the
 /// fields.
 ///
-/// **It scans every `impl Layer` in the tree, not one named file.** The first
+/// **It scans every `impl Layer` under `src/`, not one named file.** The first
 /// version read `src/logging/magi_layer.rs` and nothing else, which a reviewer
 /// caught: a second `impl Layer` in any other file would have carried span
 /// callbacks straight past it, and moving the existing one would have left the
 /// check reading a file that no longer implements anything. Finding the impls
 /// rather than naming their file removes both.
+///
+/// **The impl is found by shape, not by the generic's spelling.** A first
+/// version matched the literal `Layer<S> for`, which three reviewers flagged
+/// together: `impl<Sub> Layer<Sub> for` is the same impl and the same risk, and
+/// the search would have walked straight past it. The walk now reads `Layer<`,
+/// tracks angle-bracket depth to the matching `>` so a nested argument does not
+/// end it early, and accepts what follows only if it is `for`.
 ///
 /// Complexity: `O(bytes under src/)`.
 #[test]
@@ -247,7 +254,11 @@ fn no_layer_in_the_tree_reads_span_fields_which_is_why_spans_are_exempt() {
     ];
 
     let mut layers = Vec::new();
-    let mut stack = vec![std::path::PathBuf::from("src")];
+    // `CARGO_MANIFEST_DIR`, not a relative `"src"`: a relative path resolves
+    // against the process's working directory, which the test runner owns. The
+    // prompt scanner above already roots itself this way; this one claimed to
+    // and did not.
+    let mut stack = vec![std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src")];
     while let Some(dir) = stack.pop() {
         let Ok(entries) = std::fs::read_dir(&dir) else {
             continue;
@@ -264,10 +275,7 @@ fn no_layer_in_the_tree_reads_span_fields_which_is_why_spans_are_exempt() {
             let Ok(text) = std::fs::read_to_string(&path) else {
                 continue;
             };
-            // The impl header, whatever the trait is spelled as at that call
-            // site -- `Layer<S> for` catches both `Layer<S>` and the fully
-            // qualified `tracing_subscriber::Layer<S>`.
-            if text.contains("Layer<S> for") {
+            if declares_a_layer_impl(&text) {
                 layers.push((path, text));
             }
         }
@@ -297,4 +305,56 @@ fn no_layer_in_the_tree_reads_span_fields_which_is_why_spans_are_exempt() {
             );
         }
     }
+}
+
+/// Whether *text* contains an `impl … Layer<…> for …` header.
+///
+/// Matching the literal `Layer<S> for` would have missed `impl<Sub> Layer<Sub>
+/// for`, which is the same impl written with a different generic name. This
+/// reads the trait name, walks its generic arguments by bracket depth — so a
+/// nested `Layer<Foo<Bar>>` does not end at the inner `>` — and accepts the
+/// match only when `for` follows.
+///
+/// # Parameters
+///
+/// * `text` — the whole contents of one source file.
+///
+/// # Returns
+///
+/// `true` if any such header is present.
+///
+/// # Complexity
+///
+/// `O(n)` in the file's length: each `Layer<` scans forward only to its own
+/// matching `>`, and those spans do not overlap.
+fn declares_a_layer_impl(text: &str) -> bool {
+    const TRAIT_OPEN: &str = "Layer<";
+    for (at, _) in text.match_indices(TRAIT_OPEN) {
+        let Some(rest) = text.get(at + TRAIT_OPEN.len()..) else {
+            continue;
+        };
+        let mut depth = 1usize;
+        let mut close = None;
+        for (i, c) in rest.char_indices() {
+            match c {
+                '<' => depth += 1,
+                '>' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        close = Some(i);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let Some(close) = close else { continue };
+        let Some(after) = rest.get(close + 1..) else {
+            continue;
+        };
+        if after.trim_start().starts_with("for ") {
+            return true;
+        }
+    }
+    false
 }
