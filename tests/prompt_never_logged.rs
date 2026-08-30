@@ -66,7 +66,12 @@ fn no_call_site_in_the_product_logs_a_prompt_or_a_user_message() {
             // reviewer named it. Offsets below index the FLATTENED text, and
             // only the reported line number is derived from it, so the shift
             // costs an approximate line rather than a wrong verdict.
-            let text = tighten_paths(&text);
+            // Comments come out of the WHOLE file, not just the extracted
+            // call. `tracing::/*c*/info!` is a call site the anchor could not
+            // see at all -- the same trivia family, one level further out. The
+            // reported line number was already approximate, so nothing else
+            // changes.
+            let text = tighten_paths(&without_comments(&text));
             for (start, _) in text.match_indices("tracing::") {
                 let Some(rest) = text.get(start..) else {
                     continue;
@@ -103,10 +108,11 @@ fn no_call_site_in_the_product_logs_a_prompt_or_a_user_message() {
                 let Some(from_open) = rest.get(open..) else {
                     continue;
                 };
+                // No second comment pass: the text this slices was stripped
+                // above, so a comment cannot reach the predicates from here.
                 let Some(call) = argument_list(from_open)
                     .and_then(|len| rest.get(open..open + len))
-                    .map(without_comments)
-                    .map(|c| as_parenthesised(&c))
+                    .map(as_parenthesised)
                 else {
                     continue;
                 };
@@ -1033,15 +1039,18 @@ fn is_value_use(args: &str, name: &str) -> bool {
     const IDENTITY: [&str; 4] = [".clone()", ".to_owned()", ".as_str()", ".to_string()"];
 
     for (at, _) in args.match_indices(name) {
-        // Trim BEFORE stripping the method, not after: `prompt .clone()` is the
-        // same expression as `prompt.clone()` and the first version saw only
-        // the second.
-        let tail = args.get(at + name.len()..).unwrap_or_default().trim_start();
+        // The method is compared against a tail with ALL its whitespace
+        // squeezed out, not merely trimmed at the front. Trimming closed
+        // `prompt .clone()` and left `prompt. clone()` and `prompt.clone ()`
+        // open -- the family closed one boundary deep, as a reviewer put it.
+        // Squeezing closes every spelling of the same call at once, and it is
+        // safe because what follows the method only has to be a delimiter.
+        let tail = args.get(at + name.len()..).unwrap_or_default();
+        let squeezed: String = tail.chars().filter(|c| !c.is_whitespace()).collect();
         let rest = IDENTITY
             .iter()
-            .find_map(|m| tail.strip_prefix(m))
-            .unwrap_or(tail)
-            .trim_start();
+            .find_map(|m| squeezed.strip_prefix(m))
+            .unwrap_or(&squeezed);
         if !(rest.is_empty() || rest.starts_with(',') || rest.starts_with(')')) {
             continue;
         }
