@@ -96,14 +96,15 @@ fn no_call_site_in_the_product_logs_a_prompt_or_a_user_message() {
                 let Some(from_open) = rest.get(open..) else {
                     continue;
                 };
-                let Some(call) =
-                    argument_list(from_open).and_then(|len| rest.get(open..open + len))
+                let Some(call) = argument_list(from_open)
+                    .and_then(|len| rest.get(open..open + len))
+                    .map(as_parenthesised)
                 else {
                     continue;
                 };
                 if FORBIDDEN
                     .iter()
-                    .any(|f| is_field_use(call, f) || is_value_use(call, f))
+                    .any(|f| is_field_use(&call, f) || is_value_use(&call, f))
                 {
                     let line = text.get(..start).map_or(0, |p| p.lines().count());
                     offenders.push(format!("{}:{}", path.display(), line + 1));
@@ -329,6 +330,44 @@ fn declares_a_layer_impl(text: &str) -> bool {
     false
 }
 
+/// *call* with its outer delimiters rewritten to parentheses.
+///
+/// **The extraction learned `[` and `{`; the position predicates did not.** A
+/// reviewer raised it as critical and was right: `info![prompt]` extracted
+/// correctly and then matched nothing, because the name sat against a `[` that
+/// no boundary set contained. Worse, the two mutation rows that were supposed to
+/// cover this put the name after a comma, so they proved the extraction and
+/// stayed silent about the matching — the guardian's own harness hiding the
+/// hole, which is the defect this milestone exists to keep finding.
+///
+/// Normalising here rather than widening both predicates keeps every position
+/// rule written once, the braced field block `{ prompt = p }` included: that
+/// brace is INTERNAL and is left alone.
+///
+/// # Parameters
+///
+/// * `call` — the extracted invocation, delimiters included.
+///
+/// # Returns
+///
+/// The same text with the first and last characters as `(` and `)`.
+///
+/// # Complexity
+///
+/// `O(n)` in the call's length.
+fn as_parenthesised(call: &str) -> String {
+    let mut chars: Vec<char> = call.chars().collect();
+    if matches!(chars.first(), Some('[' | '{')) {
+        chars[0] = '(';
+    }
+    if let Some(last) = chars.last_mut() {
+        if matches!(last, ']' | '}') {
+            *last = ')';
+        }
+    }
+    chars.into_iter().collect()
+}
+
 /// Whether *args* uses *name* in the position a `tracing` field occupies.
 ///
 /// `tracing` accepts five spellings for the same leak — `name = value`,
@@ -455,6 +494,13 @@ fn impl_precedes(text: &str, at: usize) -> bool {
 /// bare `info!` may belong to any crate, so it would report call sites it cannot
 /// judge, and a guardian that cries wolf gets relaxed until it stops speaking.
 ///
+/// **Declared limit: a Cargo.toml dependency rename defeats this.**
+/// `tracing = { package = "tracing", ... }` under another key makes the crate
+/// reachable by a name no source file mentions, and there is no textual trace in
+/// `src/` for either guard to find. Detecting it means reading the manifest,
+/// which is a different check with a different failure mode; it is recorded here
+/// as a limit rather than left to be discovered.
+///
 /// **It reads `use` ITEMS, not lines, because the first version read lines.** A
 /// reviewer listed what that missed and every entry was real: a braced group
 /// wrapped across lines, `pub use`, `#[macro_use] extern crate tracing`, and a
@@ -477,8 +523,9 @@ fn nothing_brings_an_emit_macro_into_scope_so_the_scanner_sees_every_call_site()
         // imports every macro at once. `extern crate tracing as t` is the other
         // half of the same evasion: it names no macro, but it makes `t::info!`
         // spellable and the anchor looks for `tracing::`.
-        if text.contains("extern crate tracing")
-            && (text.contains("macro_use") || text.contains("extern crate tracing as "))
+        let flat_file = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        if flat_file.contains("extern crate tracing")
+            && (text.contains("macro_use") || flat_file.contains("extern crate tracing as "))
         {
             offenders.push(format!("{}: extern crate tracing", path.display()));
         }
@@ -502,8 +549,15 @@ fn nothing_brings_an_emit_macro_into_scope_so_the_scanner_sees_every_call_site()
             // closed two, which is the third time the enforced set has come up
             // narrower than the claim -- so this matches the SHAPE (the crate
             // renamed, or a glob over it) rather than a list of literals.
-            let renamed = flat.contains("tracing as ") || flat.contains("tracing::{self as ");
-            let globbed = flat.contains("tracing::*") || flat.contains("tracing::{*");
+            // `tracing :: info` flattens to one space between tokens, not to
+            // none, so the shape checks below run on a form with the path
+            // separator's spacing removed as well.
+            let tight = flat
+                .replace(" :: ", "::")
+                .replace(":: ", "::")
+                .replace(" ::", "::");
+            let renamed = tight.contains("tracing as ") || tight.contains("tracing::{self as ");
+            let globbed = tight.contains("tracing::*") || tight.contains("tracing::{*");
             let wholesale = renamed || globbed;
             if wholesale || EMIT.iter().any(|m| names_item(&flat, m)) {
                 offenders.push(format!("{}: {flat}", path.display()));
@@ -604,9 +658,16 @@ fn source_files() -> Vec<(std::path::PathBuf, String)> {
 /// scanner exists to catch simply falls outside the call -- so the walk now
 /// models all three rather than the common one.
 ///
+/// **Declared limit: the caller finds the opening delimiter by search**, so a
+/// `(`, `[` or `{` written in a comment between the macro name and its real
+/// argument list is what the walk starts from. The extraction is then wrong
+/// from its first character. No call site in the tree is written that way and
+/// the fix costs a second comment pass over the prefix; it is stated here
+/// rather than left implicit.
+///
 /// # Parameters
 ///
-/// * `from_open` - text beginning at the opening `(`.
+/// * `from_open` - text beginning at the opening delimiter.
 ///
 /// # Returns
 ///
