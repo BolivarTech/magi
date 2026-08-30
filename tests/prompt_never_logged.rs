@@ -1063,13 +1063,19 @@ fn is_value_use(args: &str, name: &str) -> bool {
         // Walk back past any number of prefixes, whitespace between them
         // included. `r#prompt` is the same local under a spelling the parser
         // tolerates, and `(&prompt)` is the same value behind one more layer.
-        // A `(` here cannot make a false positive on `f(prompt)`, because what
-        // precedes that paren is a function name rather than an `=`.
+        //
+        // `[` and `{` are wrappers for the same reason `(` is. The one that
+        // matters is `key = ?[prompt]`: the sigil supplies Debug, which an
+        // array does implement, so it compiles and it writes the prompt. The
+        // unsigilled `key = [prompt]` does NOT compile -- `[&str; 1]` is not a
+        // `tracing::Value` -- which is why the pair had to be checked and not
+        // assumed. None of the three makes a false positive on `f(prompt)` or
+        // `v[prompt]`, because what precedes that bracket is a name, not an `=`.
         let mut before = args.get(..at).unwrap_or_default().trim_end();
         loop {
             let stripped = before
                 .strip_suffix("r#")
-                .or_else(|| before.strip_suffix(['%', '?', '&', '(']));
+                .or_else(|| before.strip_suffix(['%', '?', '&', '(', '[', '{']));
             match stripped {
                 Some(head) => before = head.trim_end(),
                 None => break,
