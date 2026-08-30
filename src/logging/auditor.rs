@@ -547,7 +547,7 @@ impl Auditor {
 #[must_use]
 pub fn render_alarm(alarm: &AuditExempt) -> String {
     format!(
-        "SECURITY: the value registered as {} reached a log line emitted by {}.          It was masked, and this is the alarm that says masking happened — both,          never one. Go look at that target.",
+        "SECURITY: the value registered as {} reached a log line emitted by {}.          It was masked, and this is the alarm that says masking happened - both,          never one. Go look at that target.",
         alarm.secret(),
         alarm.target()
     )

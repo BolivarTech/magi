@@ -76,6 +76,8 @@ impl TuiSink {
 /// silenced.
 struct Reporter {
     sink: Arc<dyn crate::logging::NoticeDelivery>,
+    /// The process auditor, shared with the layer that owns this reporter.
+    auditor: Arc<Auditor>,
     /// Latched so the notice is emitted ONCE, not per discarded event.
     ///
     /// The failure modes here are all high-frequency by nature — a full channel
@@ -95,11 +97,16 @@ impl Reporter {
         {
             return;
         }
-        // Through the auditor like everything else that reaches a mouth. The
-        // text is ours and carries no credential, but exempting one path is how
-        // the next author adds a second one that does.
-        let (line, _) = Auditor::new().audit(text, "magi_rs::logging", None, 0);
-        self.sink.deliver(&line);
+        // Through the PROCESS auditor, not a fresh one, and escaped like every
+        // other line that reaches a mouth. The text is ours and carries no
+        // credential today, so neither step changes what is delivered -- which
+        // is exactly why it would be easy to skip, and why the next author who
+        // interpolates a path or an error into this message would find the one
+        // path that had been left exempt.
+        let (line, _) = self
+            .auditor
+            .audit(text, "magi_rs::logging", None, text.len());
+        self.sink.deliver(&line.map_line(escape_for_line));
     }
 
     /// Turns a submission outcome into the notice it deserves, if any.
@@ -148,11 +155,12 @@ impl MagiLayer {
             file,
             file_filter,
             tui: None,
-            auditor,
             reporter: Reporter {
                 sink: notices,
+                auditor: Arc::clone(&auditor),
                 announced: std::sync::atomic::AtomicBool::new(false),
             },
+            auditor,
         }
     }
 

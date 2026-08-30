@@ -185,6 +185,41 @@ pub fn escape_for_line(rendered: &str) -> String {
     out
 }
 
+/// Where a rendered line's header ends, and its message begins.
+///
+/// # Parameters
+///
+/// * `line` — a line [`header_of`] produced the front of.
+///
+/// # Returns
+///
+/// The index just past the target separator, or `0` when there is no header —
+/// an alarm, or any text that did not come through [`render_event`].
+///
+/// # Why the FIRST separator is the right one
+///
+/// The header is `TIMESTAMP LEVEL run=<id> target: `, and none of those four
+/// can contain the separator: the timestamp's colons are followed by digits,
+/// the level and the run id have none, and a module path spells `::` without a
+/// space. So the first occurrence closes the header, and a message that happens
+/// to contain one of its own cannot be mistaken for it.
+///
+/// # Why this lives here
+///
+/// The same argument [`header_of`] makes: one module produces the header, and
+/// whoever needs to find its end asks that module rather than re-deriving the
+/// format. Two places knowing where a header stops is one place to get it
+/// wrong.
+///
+/// # Complexity
+///
+/// `O(n)` in the header's length.
+#[must_use]
+pub fn header_end(line: &str) -> usize {
+    line.find(TARGET_SEPARATOR)
+        .map_or(0, |i| i + TARGET_SEPARATOR.len())
+}
+
 /// Builds the header the chunker budgets against.
 ///
 /// # Parameters

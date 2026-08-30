@@ -287,7 +287,8 @@ impl DailyAppender {
     /// * `item` — the whole audited event, never one of its chunks.
     /// * `priority` — which channel it travels on.
     /// * `len` — the length reserved for it, which is [`Audited::reserved_len`](crate::logging::auditor::Audited::reserved_len)
-    ///   and therefore the PRE-audit length.
+    ///   and therefore the length of the text as it will be QUEUED -- after
+    ///   the audit and after the escape, which is what the writer releases.
     ///
     /// # Returns
     ///
@@ -649,7 +650,23 @@ impl FileSink {
         let text = match item {
             Queued::Line(a) => a.as_str().to_string(),
             Queued::Alarm(x) => {
-                crate::logging::render::escape_for_line(&crate::logging::auditor::render_alarm(x))
+                // **An alarm gets a header like any other line**, and it has to:
+                // without one it carries no timestamp, no level and no `run=`,
+                // so filtering the daily file by a run silently drops exactly
+                // the lines that say a credential was masked. It is rendered at
+                // ERROR because that is what it is.
+                format!(
+                    "{}{}",
+                    crate::logging::render::header_of(
+                        tracing::Level::ERROR,
+                        "magi_rs::logging",
+                        time::OffsetDateTime::now_utc(),
+                        crate::logging::run_id(),
+                    ),
+                    crate::logging::render::escape_for_line(
+                        &crate::logging::auditor::render_alarm(x)
+                    )
+                )
             }
         };
         let now = time::OffsetDateTime::now_utc().date();
@@ -658,9 +675,15 @@ impl FileSink {
             return Ok(());
         };
         let id = crate::logging::chunk::EventId::new();
-        let header = "";
+        // **The header is handed to the chunker AS the header**, not buried in
+        // the payload. With an empty one, chunk 1 came out as
+        // `id=<id> 1/N <timestamp> ...` -- the marker ahead of the header, the
+        // reverse of what REQ-L08 declares -- and the budget was measured
+        // against a header the chunker could not see.
+        let cut = crate::logging::render::header_end(&text);
+        let (header, body) = text.split_at(cut.min(text.len()));
         for line in crate::logging::chunk::split(
-            &text,
+            body,
             header,
             &crate::logging::chunk::cont_header_for(&id, crate::logging::run_id()),
             id,
@@ -721,6 +744,109 @@ mod tests {
     fn line(text: &str) -> (Queued, usize) {
         let (a, _) = Auditor::new().audit(text, "magi_rs::tests", None, text.len());
         (Queued::Line(a), text.len())
+    }
+
+    #[test]
+    fn a_split_event_carries_its_header_before_the_chunk_marker() {
+        // REQ-L08: chunk 1 is the FULL HEADER followed by `id=... 1/N`. The sink
+        // used to hand the chunker an empty header and the whole rendered line
+        // as payload, so chunk 1 came out `id=... 1/N <timestamp> ...` -- the
+        // marker ahead of the header it is supposed to follow, and a budget
+        // measured against a header the chunker could not see.
+        let dir = tempdir().unwrap();
+        let appender = DailyAppender::new(dir.path()).unwrap();
+
+        // Prose, not padding: a long run of one character is what the auditor
+        // calls a secret, and `***` never reaches the chunker at all.
+        let long = "the quick brown fox jumps over the lazy dog ".repeat(200);
+        let rendered = format!(
+            "{}{long}",
+            crate::logging::render::header_of(
+                tracing::Level::INFO,
+                "magi_rs::agent",
+                time::OffsetDateTime::now_utc(),
+                crate::logging::run_id(),
+            )
+        );
+        let (audited, _) = Auditor::new().audit(&rendered, "magi_rs::tests", None, rendered.len());
+        assert_eq!(
+            appender.submit(Queued::Line(audited), Priority::Low, rendered.len()),
+            Submitted::Queued
+        );
+        std::thread::sleep(std::time::Duration::from_millis(300));
+
+        let path = dir.path().join(crate::logging::rotation::file_name(
+            time::OffsetDateTime::now_utc().date(),
+        ));
+        let written = std::fs::read_to_string(&path).unwrap_or_default();
+        let lines: Vec<&str> = written.lines().filter(|l| !l.trim().is_empty()).collect();
+        // The fixture must have SPLIT, or the ordering under test never arises.
+        assert!(lines.len() > 1, "the fixture produced one line: {written}");
+
+        let first = lines.first().copied().unwrap_or("");
+        assert!(
+            first.starts_with("20"),
+            "chunk 1 does not begin with its timestamp: {first}"
+        );
+        let marker = first.find("id=").unwrap_or(usize::MAX);
+        let separator = first.find(": ").unwrap_or(0);
+        assert!(
+            marker > separator,
+            "the chunk marker precedes the header instead of following it: {first}"
+        );
+        appender.shutdown();
+    }
+
+    #[test]
+    fn an_alarm_carries_a_header_so_the_run_filter_finds_it() {
+        // Without one an alarm has no timestamp, no level and no `run=`, so
+        // filtering the daily file by a run drops exactly the lines that say a
+        // credential was masked -- the ones a reader is looking for.
+        let dir = tempdir().unwrap();
+        let appender = DailyAppender::new(dir.path()).unwrap();
+
+        let auditor = Auditor::new();
+        auditor.register_secret(SecretName::new("BASE_URL_PASSWORD"), &["hunter2-longer"]);
+        let (_, alarm) = auditor.audit(
+            "GET https://bob:hunter2-longer@example.com/v1",
+            "magi_rs::agent",
+            None,
+            0,
+        );
+        let alarm = alarm.expect("a live secret must alarm");
+        assert_eq!(
+            appender.submit(Queued::Alarm(alarm), Priority::High, 0),
+            Submitted::Queued
+        );
+        std::thread::sleep(std::time::Duration::from_millis(300));
+
+        let path = dir.path().join(crate::logging::rotation::file_name(
+            time::OffsetDateTime::now_utc().date(),
+        ));
+        let written = std::fs::read_to_string(&path).unwrap_or_default();
+        assert!(
+            written.contains("SECURITY"),
+            "the fixture wrote no alarm: {written:?}"
+        );
+        assert!(
+            written.contains(&format!("run={}", crate::logging::run_id())),
+            "the alarm is invisible to the run filter: {written:?}"
+        );
+        assert!(
+            written.contains("ERROR"),
+            "and it must carry the level it is: {written:?}"
+        );
+        // **At the FRONT, not merely present.** Order is not cosmetic here:
+        // `header_end` finds the first target separator to tell the header from
+        // the body, so a header appended after the text makes that cut land
+        // inside the message and hands the chunker the wrong prefix. Swapping
+        // the two left every assertion above green, which is what sent this
+        // one back for another line.
+        assert!(
+            written.starts_with("20"),
+            "the alarm's header is not at the front: {written:?}"
+        );
+        appender.shutdown();
     }
 
     #[test]
@@ -1158,7 +1284,14 @@ mod tests {
 mod tests {",
             )
             .expect("this module has a test section");
-        let offenders: Vec<&str> = source.lines().filter(|l| l.contains("println!")).collect();
+        // `println!` also matches `eprintln!`, which is the one that mattered
+        // here, but `dbg!` writes to stderr and shares neither spelling. A
+        // guardian that names some of the ways to reach a terminal is a
+        // guardian for the ways somebody happened to think of.
+        let offenders: Vec<&str> = source
+            .lines()
+            .filter(|l| l.contains("println!") || l.contains("dbg!"))
+            .collect();
         assert!(
             offenders.is_empty(),
             "this module writes to a terminal the TUI may own: {offenders:?}"
