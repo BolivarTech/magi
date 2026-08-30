@@ -179,6 +179,12 @@ impl Audited {
     #[must_use]
     pub fn map_line(mut self, f: impl FnOnce(&str) -> String) -> Self {
         self.line = f(&self.line);
+        // **The measure follows the line.** `reserved_len` is what the queue
+        // holds and what the writer gives back, so a transformation that
+        // changes the text and leaves the number behind makes the emitter
+        // reserve one amount and the writer release another. Escaping is
+        // exactly such a transformation: it can grow a line severalfold.
+        self.reserved_len = self.line.len();
         self
     }
 
@@ -646,6 +652,31 @@ mod tests {
 
     /// This module's own source, for the structural guards below.
     const SOURCE: &str = include_str!("auditor.rs");
+
+    #[test]
+    fn transforming_the_line_moves_the_measure_with_it() {
+        // `reserved_len` is what the emitter reserves and what the writer gives
+        // back. A transformation that changes the text and leaves the number
+        // behind makes those two different amounts, and the counter drifts
+        // until the channel refuses everything -- the shape of the defect that
+        // made the byte budget a lifetime quota.
+        //
+        // Escaping is exactly such a transformation, and this was nearly
+        // reintroduced while fixing the measure: the layer was about to reserve
+        // the escaped length against a field still holding the rendered one.
+        let auditor = Auditor::new();
+        let (audited, _) = auditor.audit("abc", "magi_rs::tests", None, 3);
+        assert_eq!(audited.reserved_len(), 3);
+
+        let grown = audited.map_line(|l| format!("{l}{l}{l}"));
+        assert_eq!(grown.as_str().len(), 9, "the fixture must have grown it");
+        assert_eq!(
+            grown.reserved_len(),
+            9,
+            "the measure stayed on the old line, so the writer would release \
+             less than the emitter reserved"
+        );
+    }
 
     #[test]
     fn a_percent_encoded_variant_is_found_when_only_it_appears() {

@@ -400,6 +400,20 @@ impl DailyAppender {
         self.dropped.load(Ordering::Relaxed)
     }
 
+    /// Bytes queued on both channels together.
+    ///
+    /// Meaningful only because the writer now RELEASES what it wrote: before
+    /// that, this number only ever rose and a drain built on it would never
+    /// finish.
+    ///
+    /// # Complexity
+    ///
+    /// `O(1)`.
+    #[must_use]
+    pub fn queued_bytes(&self) -> usize {
+        self.reserved(Priority::High) + self.reserved(Priority::Low)
+    }
+
     /// Bytes currently reserved on a channel.
     #[must_use]
     pub fn reserved(&self, priority: Priority) -> usize {

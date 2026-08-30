@@ -218,6 +218,13 @@ impl<S: Subscriber> Layer<S> for MagiLayer {
 
         // Stage 3: escape, then fan out.
         let escaped = audited.map_line(escape_for_line);
+        // **What is reserved is what the writer will release.** `map_line`
+        // above recomputed the measure from the escaped text -- which is what
+        // the queue actually holds, and can be severalfold the rendered length
+        // once control characters take their escaped form. Passing anything
+        // else here would reserve one number and release another, which is the
+        // leak that made the byte budget a lifetime quota.
+        let reserved = escaped.reserved_len();
         let level = *event.metadata().level();
 
         if level <= self.file_filter.level_for(target) {

@@ -132,6 +132,47 @@ pub struct LoggingHandle {
 }
 
 impl LoggingHandle {
+    /// Waits for the queue to empty, up to `budget` (REQ-L54).
+    ///
+    /// # Parameters
+    ///
+    /// * `budget` — the longest this is allowed to hold up the exit.
+    ///
+    /// # Returns
+    ///
+    /// Bytes still queued when it gave up; `0` when everything reached the
+    /// file.
+    ///
+    /// # Why the process needs this
+    ///
+    /// The writer is a detached thread. Without a wait, the process exits and
+    /// takes it down with whatever it had not written yet, and the events lost
+    /// are the LAST ones -- which on a run that ended badly are the only ones
+    /// worth having.
+    ///
+    /// # Why it is bounded
+    ///
+    /// A writer that is stuck must not hold the exit open. The budget makes the
+    /// wait a best effort with a stated cost, and the return value lets the
+    /// caller say how much did not make it rather than pretend it did.
+    ///
+    /// # Complexity
+    ///
+    /// `O(budget / poll interval)`.
+    #[must_use]
+    pub fn drain(&self, budget: std::time::Duration) -> usize {
+        /// How often the queue is re-checked while draining.
+        const POLL: std::time::Duration = std::time::Duration::from_millis(20);
+        let deadline = std::time::Instant::now() + budget;
+        loop {
+            let left = self.appender.queued_bytes();
+            if left == 0 || std::time::Instant::now() >= deadline {
+                return left;
+            }
+            std::thread::sleep(POLL);
+        }
+    }
+
     /// Advances the health window. **A no-op in MS1.**
     ///
     /// The method exists from MS1 because MS2 puts it to use without changing a
@@ -313,6 +354,20 @@ pub fn announce_run(command: &str, workspace: &std::path::Path) {
 /// `OnceLock` does not poison: a failed attempt leaves the cell empty and the
 /// next call tries again.
 static HANDLE: std::sync::OnceLock<LoggingHandle> = std::sync::OnceLock::new();
+
+/// The handle this process installed, if logging came up at all.
+///
+/// The exit path needs it and does not own it: `init_logging` hands its handle
+/// to a caller that may drop it long before the process ends, and the writer
+/// lives in the static either way.
+///
+/// # Complexity
+///
+/// `O(1)`.
+#[must_use]
+pub fn installed() -> Option<&'static LoggingHandle> {
+    HANDLE.get()
+}
 
 /// Brings the subsystem up. **Idempotent by construction.**
 ///

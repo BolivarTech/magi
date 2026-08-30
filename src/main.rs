@@ -1440,14 +1440,40 @@ where
             return ExitCode::FAILURE;
         }
     };
-    match runtime.block_on(body(secrets)) {
+    let code = match runtime.block_on(body(secrets)) {
         Ok(code) => code,
         Err(e) => {
             eprintln!("error: {e}");
             ExitCode::FAILURE
         }
+    };
+    // REQ-L54. The writer is a detached thread, so without this the process
+    // exits and takes it down holding whatever it had not written -- and the
+    // events lost are the LAST ones, which on a run that ended badly are the
+    // only ones worth having.
+    //
+    // Bounded, because a stuck writer must not hold the exit open, and honest
+    // about the shortfall rather than pretending everything landed. It is safe
+    // to reach stderr here: the alternate screen is long gone by the time the
+    // runtime has stopped.
+    if let Some(handle) = magi_rs::logging::installed() {
+        let left = handle.drain(EXIT_DRAIN_BUDGET);
+        if left > 0 {
+            eprintln!(
+                "warning: {left} bytes of log were still queued after waiting {}s and were                  not written",
+                EXIT_DRAIN_BUDGET.as_secs()
+            );
+        }
     }
+    code
 }
+
+/// How long the exit waits for the log queue to empty (REQ-L54).
+///
+/// Two seconds: long enough for a queue holding an ordinary session's tail,
+/// short enough that a stuck writer is a pause a user reads as the program
+/// closing rather than as a hang.
+const EXIT_DRAIN_BUDGET: std::time::Duration = std::time::Duration::from_secs(2);
 
 fn main() -> ExitCode {
     bootstrap_headless(run)
