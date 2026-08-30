@@ -481,22 +481,24 @@ fn spawn_writer(
         if sink.write(item).is_ok() {
             return true;
         }
-        eprintln!(
-            "warning: the log file could not be written; retrying once in {}s",
-            WRITER_RETRY_COOLDOWN.as_secs()
-        );
+        // **Nothing to stderr from here** (REQ-L39). This runs on a detached
+        // thread for the whole session, so a write here lands on top of the
+        // ratatui frame whenever the TUI holds the alternate screen — the exact
+        // corruption `TuiNoticeSink` exists to prevent.
+        //
+        // Nor is anything lost by saying nothing: REQ-L37 asks for ONE notice
+        // when the file branch shuts down, and the layer already emits it
+        // through the notice sink when the writer's death turns the next submit
+        // into `WriterGone`. A second announcement from a thread that cannot
+        // reach the sink would be a duplicate on the surface where it is safe
+        // and damage on the surface where it is not.
+        //
         // Stamp, sleep, stamp: an emitter looking at any moment of this window
         // sees a live writer.
         stamp(hb);
         std::thread::sleep(WRITER_RETRY_COOLDOWN);
         stamp(hb);
-        if sink.write(item).is_ok() {
-            return true;
-        }
-        eprintln!(
-            "warning: the log file still cannot be written; this session continues              WITHOUT a log file"
-        );
-        false
+        sink.write(item).is_ok()
     }
     std::thread::spawn(move || {
         let mut sink = FileSink::new(dir);
@@ -649,14 +651,14 @@ impl FileSink {
         let file = options.open(&path)?;
         // And again for the file that ALREADY existed: `mode()` applies only to
         // a file this call creates, so a day's file first opened by a run with a
-        // laxer umask would keep those bits for the rest of the day. Best effort
-        // -- REQ-L35 says logging never aborts a session -- but not silent.
-        if let Err(e) = crate::logging::restrict(&path, crate::logging::OWNER_ONLY_FILE_MODE) {
-            eprintln!(
-                "warning: could not restrict permissions on {}: {e}",
-                path.display()
-            );
-        }
+        // laxer umask would keep those bits for the rest of the day.
+        //
+        // Best effort and SILENT, deliberately: REQ-L35 says logging never
+        // aborts a session, and REQ-L39 forbids this thread reaching stderr at
+        // all. On the platform where the mode matters the call fails only if the
+        // file is not ours, which the surrounding open would already have
+        // failed on.
+        let _ = crate::logging::restrict(&path, crate::logging::OWNER_ONLY_FILE_MODE);
         self.open = Some((target, std::io::BufWriter::new(file)));
         Ok(())
     }
@@ -1009,6 +1011,48 @@ mod tests {
             "the active log file is readable by more than its owner"
         );
         appender.shutdown();
+    }
+
+    #[test]
+    fn the_writer_thread_never_reaches_stderr() {
+        // REQ-L39, and a SOURCE check because no behavioural test can see it.
+        // The writer is a detached thread that lives for the whole session, so a
+        // stderr write from it lands on top of the ratatui frame whenever the
+        // TUI holds the alternate screen. A test would have to install a real
+        // terminal, take the alternate screen and observe corruption -- and the
+        // failure is intermittent even then, because it depends on the writer
+        // choosing that moment.
+        //
+        // `CLAUDE.md` records this as a durable invariant precisely because it
+        // looks harmless in review: three of these shipped in this module, one
+        // of them added while fixing something else.
+        // **Only the production half**, split at the test module. This very
+        // test names the macros it forbids, so scanning the whole file makes it
+        // its own first offender -- which it did, on the first run.
+        let whole = include_str!("appender.rs");
+        // Split on the MODULE marker at column zero, not on the attribute: an
+        // attribute of the same name sits on a method above `spawn_writer`, so
+        // splitting on it truncated the production half to nothing and the
+        // scan came back empty — a guardian that passes by having nothing to
+        // look at.
+        let (source, _) = whole
+            .split_once(
+                "
+#[cfg(test)]
+mod tests {",
+            )
+            .expect("this module has a test section");
+        let offenders: Vec<&str> = source.lines().filter(|l| l.contains("println!")).collect();
+        assert!(
+            offenders.is_empty(),
+            "this module writes to a terminal the TUI may own: {offenders:?}"
+        );
+        // The fixture must have read the file, or an empty haystack proves
+        // nothing about what is in it.
+        assert!(
+            source.contains("fn spawn_writer"),
+            "the source check read the wrong half of the wrong file"
+        );
     }
 
     #[test]
