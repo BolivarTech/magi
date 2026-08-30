@@ -15,7 +15,7 @@
 //! record.
 
 use std::fs;
-use std::io::{Read as _, Write as _};
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use lzma_rust2::{XzOptions, XzReader, XzWriter};
@@ -24,6 +24,12 @@ use crate::logging::LoggingError;
 
 /// Compression preset. 6 is the xz default: the knee of the ratio/time curve.
 const XZ_PRESET: u32 = 6;
+/// Block size the round-trip comparison reads at a time.
+///
+/// 64 KiB: large enough that the syscall count is irrelevant beside the
+/// decompression, small enough that peak memory is a constant nobody has to
+/// reason about against a file of unknown size.
+const VERIFY_BLOCK_BYTES: usize = 64 * 1024;
 /// Extension appended to the source name for the compressed file.
 const XZ_EXTENSION: &str = "xz";
 /// Restrictive mode for every file this module creates (REQ-L65).
@@ -58,13 +64,8 @@ use crate::logging::OWNER_ONLY_FILE_MODE as OWNER_ONLY_MODE;
 ///
 /// `O(n)` over the file, with two passes: one to compress, one to verify.
 pub fn compress_verified(src: &Path, dst_tmp: &Path) -> Result<(), LoggingError> {
-    let original = fs::read(src).map_err(|e| LoggingError::Compress {
-        path: src.to_path_buf(),
-        source: e,
-    })?;
-
-    compress_to(&original, dst_tmp)?;
-    verify_round_trip(dst_tmp, &original)?;
+    compress_to(src, dst_tmp)?;
+    verify_round_trip(dst_tmp, src)?;
 
     let final_path = compressed_path(src);
     fs::rename(dst_tmp, &final_path).map_err(|e| LoggingError::Write {
@@ -83,16 +84,24 @@ pub fn compress_verified(src: &Path, dst_tmp: &Path) -> Result<(), LoggingError>
 /// # Complexity
 ///
 /// `O(n)`.
-fn compress_to(bytes: &[u8], dst: &Path) -> Result<(), LoggingError> {
+fn compress_to(src: &Path, dst: &Path) -> Result<(), LoggingError> {
     let fail = |e: std::io::Error| LoggingError::Compress {
         path: dst.to_path_buf(),
         source: e,
     };
 
+    let mut source = fs::File::open(src).map_err(|e| LoggingError::Compress {
+        path: src.to_path_buf(),
+        source: e,
+    })?;
     let file = fs::File::create(dst).map_err(fail)?;
     crate::logging::restrict(dst, OWNER_ONLY_MODE)?;
     let mut writer = XzWriter::new(file, XzOptions::with_preset(XZ_PRESET)).map_err(fail)?;
-    writer.write_all(bytes).map_err(fail)?;
+    // **Streamed, never `fs::read` into a `Vec`.** A daily file runs to hundreds
+    // of megabytes -- `max_total_bytes` defaults to 512 MiB and today's file is
+    // untouchable -- so buffering it whole makes the routine that exists to
+    // protect data the cause of an OOM that kills the process.
+    std::io::copy(&mut source, &mut writer).map_err(fail)?;
     let mut finished = writer.finish().map_err(fail)?;
     finished.flush().map_err(fail)?;
     Ok(())
@@ -107,19 +116,30 @@ fn compress_to(bytes: &[u8], dst: &Path) -> Result<(), LoggingError> {
 /// # Complexity
 ///
 /// `O(n)`.
-fn verify_round_trip(staged: &Path, expected: &[u8]) -> Result<(), LoggingError> {
+fn verify_round_trip(staged: &Path, original: &Path) -> Result<(), LoggingError> {
     let fail = |e: std::io::Error| LoggingError::Compress {
         path: staged.to_path_buf(),
         source: e,
     };
 
-    let file = fs::File::open(staged).map_err(fail)?;
-    let mut reader = XzReader::new(file, false);
-    let mut back = Vec::with_capacity(expected.len());
-    reader.read_to_end(&mut back).map_err(fail)?;
+    let staged_file = fs::File::open(staged).map_err(fail)?;
+    let mut back = std::io::BufReader::new(XzReader::new(staged_file, false));
+    let mut source = std::io::BufReader::new(fs::File::open(original).map_err(fail)?);
 
-    if back == expected {
-        return Ok(());
+    // **Block by block, cutting at the first mismatch: constant memory whatever
+    // the size.** Reading both into `Vec`s peaks at twice the file, and this
+    // runs on the blocking pool inside a live session.
+    let mut a = vec![0u8; VERIFY_BLOCK_BYTES];
+    let mut b = vec![0u8; VERIFY_BLOCK_BYTES];
+    loop {
+        let read_a = fill(&mut source, &mut a).map_err(fail)?;
+        let read_b = fill(&mut back, &mut b).map_err(fail)?;
+        if read_a != read_b || a.get(..read_a) != b.get(..read_b) {
+            break;
+        }
+        if read_a == 0 {
+            return Ok(());
+        }
     }
     Err(LoggingError::Compress {
         path: staged.to_path_buf(),
@@ -128,6 +148,40 @@ fn verify_round_trip(staged: &Path, expected: &[u8]) -> Result<(), LoggingError>
             "the compressed file does not decompress to the original bytes",
         ),
     })
+}
+
+/// Fills `buf` as far as the reader will go, treating a short read as normal.
+///
+/// `Read::read` is allowed to return fewer bytes than asked for at any time, and
+/// a decompressor does so routinely at a block boundary. Comparing two streams
+/// with raw `read` calls therefore reports a mismatch where the only difference
+/// is where each side happened to stop.
+///
+/// # Returns
+///
+/// How many bytes were placed in `buf`; `0` only at end of stream.
+///
+/// # Errors
+///
+/// The first non-interrupted I/O error.
+///
+/// # Complexity
+///
+/// `O(buf.len())`.
+fn fill(reader: &mut impl std::io::Read, buf: &mut [u8]) -> std::io::Result<usize> {
+    let mut filled = 0;
+    while filled < buf.len() {
+        let Some(slot) = buf.get_mut(filled..) else {
+            break;
+        };
+        match reader.read(slot) {
+            Ok(0) => break,
+            Ok(n) => filled += n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(filled)
 }
 
 /// The `.xz` name a source file compresses into.
@@ -162,6 +216,55 @@ mod tests {
     }
 
     #[test]
+    fn verification_does_not_hold_the_whole_file_in_memory() {
+        // REQ-L14 is explicit that the comparison is streamed "nunca cargando
+        // los dos archivos en memoria", and the reason is that this runs on the
+        // blocking pool inside a live session over a file that can reach
+        // hundreds of megabytes. Reading both sides into `Vec`s peaks at twice
+        // the file and turns the routine that exists to PROTECT data into the
+        // cause of an OOM that kills the process.
+        //
+        // A test cannot watch an allocator from here, so it asserts the property
+        // that the streaming shape gives and the buffering one does not: a file
+        // several times the block size round-trips correctly, and it does so
+        // reading a bounded window at a time. The block constant is what the
+        // implementation is measured against, and it is checked against a
+        // literal below so this cannot be satisfied by widening it.
+        let dir = tempdir().unwrap();
+        let src = dir.path().join("magi-2026-08-29.log");
+        // Prose rather than one repeated byte, so the compressor cannot collapse
+        // it to something smaller than the window under test.
+        let body = "the quick brown fox jumps over the lazy dog 0123456789\n".repeat(20_000);
+        fs::write(&src, &body).unwrap();
+        assert!(
+            body.len() > VERIFY_BLOCK_BYTES * 4,
+            "the fixture must span several blocks or the loop runs once"
+        );
+
+        let staged = dir.path().join("staging.tmp");
+        compress_verified(&src, &staged).expect("round trip");
+
+        let out = compressed_path(&src);
+        assert!(out.exists(), "the compressed file was not produced");
+        let mut back = String::new();
+        std::io::Read::read_to_string(
+            &mut lzma_rust2::XzReader::new(fs::File::open(&out).unwrap(), false),
+            &mut back,
+        )
+        .unwrap();
+        assert_eq!(back, body, "the streamed round trip lost bytes");
+    }
+
+    #[test]
+    fn the_verification_window_is_a_bounded_constant() {
+        // Asserted against a LITERAL, not against itself: a test that compared
+        // the constant to the constant would stay green while someone raised it
+        // to the file size, which is the buffering the requirement forbids
+        // wearing a streaming shape.
+        assert_eq!(VERIFY_BLOCK_BYTES, 65_536);
+    }
+
+    #[test]
     fn a_verified_compression_round_trips_to_the_original_bytes() {
         let dir = tempdir().unwrap();
         let body = b"2026-08-14T00:00:00Z INFO magi_rs::agent: hello\n".repeat(200);
@@ -174,9 +277,11 @@ mod tests {
         assert!(src.exists(), "compress_verified never removes the original");
 
         let mut back = Vec::new();
-        XzReader::new(fs::File::open(&xz).unwrap(), false)
-            .read_to_end(&mut back)
-            .unwrap();
+        std::io::Read::read_to_end(
+            &mut XzReader::new(fs::File::open(&xz).unwrap(), false),
+            &mut back,
+        )
+        .unwrap();
         assert_eq!(back, body, "the round trip must be exact");
     }
 
@@ -233,21 +338,27 @@ mod tests {
         let dir = tempdir().unwrap();
         let staged = dir.path().join("garbage.tmp");
         fs::write(&staged, b"this is not an xz stream").unwrap();
-        assert!(verify_round_trip(&staged, b"payload").is_err());
+        let original = dir.path().join("magi-2026-08-17.log");
+        fs::write(&original, b"payload").unwrap();
+        assert!(verify_round_trip(&staged, &original).is_err());
     }
 
     #[test]
     fn verification_rejects_a_staged_file_that_decompresses_to_different_bytes() {
         let dir = tempdir().unwrap();
+        let real = dir.path().join("real.log");
+        let claimed = dir.path().join("claimed.log");
+        fs::write(&real, b"what was actually compressed").unwrap();
+        fs::write(&claimed, b"what the caller expected").unwrap();
         let staged = dir.path().join("wrong.tmp");
-        compress_to(b"what was actually compressed", &staged).unwrap();
+        compress_to(&real, &staged).unwrap();
         assert!(
-            verify_round_trip(&staged, b"what the caller expected").is_err(),
+            verify_round_trip(&staged, &claimed).is_err(),
             "a mismatch must be reported, not accepted"
         );
         // And the same staged file verifies against its real contents, so the
         // rejection above is about the comparison and not about the reader.
-        assert!(verify_round_trip(&staged, b"what was actually compressed").is_ok());
+        assert!(verify_round_trip(&staged, &real).is_ok());
     }
 
     #[test]

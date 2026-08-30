@@ -310,6 +310,13 @@ pub struct ResolvedLogDir {
     pub declared: bool,
 }
 
+/// Ceiling the log directory is kept under when nothing declares one.
+///
+/// 512 MiB, the value the spec ships. `u64::MAX` was not a bigger default but
+/// an absent one: it switches REQ-L18 off entirely, so the disk ceiling the
+/// feature advertises did not exist unless an operator wrote it down.
+pub const DEFAULT_MAX_TOTAL_LOG_BYTES: u64 = 536_870_912;
+
 /// Environment variable that overrides the log directory.
 pub const ENV_LOG_DIR: &str = "MAGI_LOG_DIR";
 /// Environment variable that overrides the file filter.
@@ -382,7 +389,10 @@ impl MagiConfig {
             compress: self.logging.compress.unwrap_or(true),
             compress_after_days: self.logging.compress_after_days.unwrap_or(7),
             retain_days: self.logging.retain_days.unwrap_or(30),
-            max_total_bytes: self.logging.max_total_bytes.unwrap_or(u64::MAX),
+            max_total_bytes: self
+                .logging
+                .max_total_bytes
+                .unwrap_or(DEFAULT_MAX_TOTAL_LOG_BYTES),
         }
     }
 }
