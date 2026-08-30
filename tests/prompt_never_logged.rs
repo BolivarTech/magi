@@ -558,7 +558,20 @@ fn is_field_use(args: &str, name: &str) -> bool {
         // sweeping the family before asking a reviewer for it.
         match chars.next() {
             Some('(' | ',' | '{') => return true,
-            Some('[') if chars.peek() == Some(&'!') => return true,
+            Some('[') => {
+                // Whitespace may sit between the bang and the bracket, the
+                // same way it may sit around a sigil. `?vec! [prompt]`
+                // compiles and writes the prompt, and demanding adjacency here
+                // repeated the mistake the sigil loop already corrected two
+                // commits ago. A spaced INDEX -- `v [prompt]` -- still reads
+                // green, because what precedes its bracket is a name.
+                while matches!(chars.peek(), Some(c) if c.is_whitespace()) {
+                    chars.next();
+                }
+                if chars.peek() == Some(&'!') {
+                    return true;
+                }
+            }
             _ => {}
         }
     }
