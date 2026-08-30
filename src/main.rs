@@ -1743,16 +1743,37 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
                         std::time::SystemTime::now(),
                         &retention,
                     );
-                    let compressed =
-                        magi_rs::logging::sweep::execute_plan(&dir, &names, &plan).unwrap_or(0);
-                    (compressed, swept)
+                    let done = magi_rs::logging::sweep::execute_plan(&dir, &names, &plan)
+                        .unwrap_or_default();
+                    (done, swept)
                 })
                 .await;
-                if let Ok((compressed, swept)) = outcome {
-                    if swept > 0 || compressed > 0 {
+                if let Ok((done, swept)) = outcome {
+                    if swept > 0 || done.compressed > 0 {
                         startup_notices.push(Notice::resolution(format!(
-                            "logs: {compressed} compressed, {swept} abandoned temporaries removed"
+                            "logs: {} compressed, {swept} abandoned temporaries removed",
+                            done.compressed
                         )));
+                    }
+                    // REQ-L61: apart from the size warning, and with the two
+                    // causes kept distinct. A nearly full disk makes compression
+                    // fail, retention then cannot shrink the directory, and the
+                    // size warning alone describes the symptom while hiding what
+                    // produced it -- the operator deletes the wrong things for
+                    // as many runs as it takes to guess.
+                    for failure in &done.failures {
+                        startup_notices.push(Notice::resolution(match failure {
+                            magi_rs::logging::sweep::Failure::Compression(name, cause) => {
+                                format!(
+                                    "WARNING: {name} could not be compressed ({cause}); it is                                      still on disk and still counts towards the ceiling."
+                                )
+                            }
+                            magi_rs::logging::sweep::Failure::SourceMoved(name) => {
+                                format!(
+                                    "WARNING: {name} changed while it was being compressed, so                                      it was kept rather than replaced by an archive that does                                      not contain all of it."
+                                )
+                            }
+                        }));
                     }
                 }
             }

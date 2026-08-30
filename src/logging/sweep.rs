@@ -47,6 +47,67 @@ pub const MAX_COMPRESSIONS_PER_START: usize = 5;
 /// Extension of a staged compression.
 const TMP_EXTENSION: &str = "tmp";
 
+/// A source file's identity for the purpose of REQ-L14's delete guard.
+///
+/// Size and modification time together: either alone misses a case. A rewrite
+/// that keeps the length changes only the time; a filesystem with coarse time
+/// granularity can leave the time equal across an append that changes only the
+/// length.
+type SourceStamp = Option<(u64, std::time::SystemTime)>;
+
+/// Whether the original may be deleted now that its archive verified.
+///
+/// # Parameters
+///
+/// * `before` — the source's stamp taken before the compression read it.
+/// * `after` — its stamp taken after the archive verified.
+///
+/// # Returns
+///
+/// `true` only when the file is still the one that was archived.
+///
+/// # Why an absent stamp is a refusal
+///
+/// `None` means the metadata could not be read, which is not evidence that
+/// nothing changed. REQ-L14 guards an action that cannot be undone, so the
+/// unknown case keeps the file: a redundant copy costs disk, and a wrong delete
+/// costs the data.
+///
+/// # Complexity
+///
+/// `O(1)`.
+#[must_use]
+fn may_delete_source(before: SourceStamp, after: SourceStamp) -> bool {
+    match (before, after) {
+        (Some(b), Some(a)) => b == a,
+        _ => false,
+    }
+}
+
+/// Why one file did not get compressed.
+///
+/// Two variants and not one message, because REQ-L61 turns on telling them
+/// apart: a failure to compress is a resource problem, and a source that moved
+/// underneath is a data problem. One string for both sends the operator to the
+/// wrong place.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Failure {
+    /// Compression or its verification failed; carries the file and the cause.
+    Compression(String, String),
+    /// The archive verified, but the original changed while it was being read,
+    /// so deleting it would lose bytes the archive never covered.
+    SourceMoved(String),
+}
+
+/// What one retention pass did.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Swept {
+    /// Files compressed and whose originals were removed.
+    pub compressed: usize,
+    /// Files that were not, with the reason for each.
+    pub failures: Vec<Failure>,
+}
+
 /// Applies `actions` to `files`, in order, best effort.
 ///
 /// # Parameters
@@ -57,13 +118,16 @@ const TMP_EXTENSION: &str = "tmp";
 ///
 /// # Returns
 ///
-/// How many files were compressed. Deletions are not counted because nothing
-/// downstream bounds them.
+/// What was compressed and what refused to be. Deletions are not counted
+/// because nothing downstream bounds them.
 ///
 /// # Errors
 ///
-/// Never. Individual failures are absorbed; the signature returns `Result` so a
-/// caller that wants to react to a systemic failure can, and today none does.
+/// Never. Per-file failures travel in the return value instead, because they
+/// are what the CALLER has to announce: REQ-L61 requires a compression failure
+/// to be reported apart from the total-size warning, and swallowing it here
+/// leaves the operator reading "the directory is over its ceiling" run after
+/// run with no hint that the cause is no room to compress.
 ///
 /// # Complexity
 ///
@@ -72,8 +136,9 @@ pub fn execute_plan(
     dir: &Path,
     names: &[String],
     actions: &[Action],
-) -> Result<usize, LoggingError> {
+) -> Result<Swept, LoggingError> {
     let mut compressed = 0usize;
+    let mut failures = Vec::new();
     for (name, action) in names.iter().zip(actions.iter()) {
         let path = dir.join(name);
         match action {
@@ -82,13 +147,40 @@ pub fn execute_plan(
                 if compressed >= MAX_COMPRESSIONS_PER_START {
                     continue;
                 }
+                // REQ-L14: what the source looked like BEFORE, so the delete
+                // below can tell "the file I compressed" from "a file that
+                // moved under me". `Delete` is not undoable, so the check has
+                // to be about the bytes that were actually read.
+                let before = fs::metadata(&path)
+                    .ok()
+                    .and_then(|m| m.modified().ok().map(|t| (m.len(), t)));
                 let staged = staging_path(dir, name);
-                if compress_verified(&path, &staged).is_ok() {
-                    compressed += 1;
-                    // The original goes only once the .xz is proven good.
-                    let _ = fs::remove_file(&path);
-                } else {
-                    let _ = fs::remove_file(&staged);
+                match compress_verified(&path, &staged) {
+                    Ok(()) => {
+                        compressed += 1;
+                        let after = fs::metadata(&path)
+                            .ok()
+                            .and_then(|m| m.modified().ok().map(|t| (m.len(), t)));
+                        // The original goes only once the .xz is proven good AND
+                        // the original is still what was proven. A file that grew
+                        // or was rewritten during the compression is NOT in the
+                        // archive, and deleting it loses data the verification
+                        // never covered.
+                        if may_delete_source(before, after) {
+                            let _ = fs::remove_file(&path);
+                        } else {
+                            failures.push(Failure::SourceMoved(name.clone()));
+                        }
+                    }
+                    Err(e) => {
+                        let _ = fs::remove_file(&staged);
+                        // REQ-L61: announced APART from the total-size warning,
+                        // and the two causes stay distinguishable. A nearly full
+                        // disk makes compression fail, retention cannot shrink
+                        // the directory, and the size warning then describes the
+                        // symptom while hiding the cause.
+                        failures.push(Failure::Compression(name.clone(), e.to_string()));
+                    }
                 }
             }
             Action::Delete => {
@@ -98,19 +190,34 @@ pub fn execute_plan(
             }
         }
     }
-    Ok(compressed)
+    Ok(Swept {
+        compressed,
+        failures,
+    })
 }
 
 /// Where a compression stages its output.
 ///
 /// Same directory as the source, so the final rename is atomic.
 ///
+/// # Why the name carries the process
+///
+/// `<name>.tmp` is one path, and two processes compressing the same day collide
+/// on it: each writes over the other, and the error branch of either removes a
+/// temporary the other is still filling. A network `log_dir` makes this ordinary
+/// rather than exotic, which is why D-L08 lists the suffix among what is
+/// explicitly NOT deferred.
+///
+/// The PID is a disambiguator and never a liveness signal -- REQ-L55 decides
+/// abandonment by `mtime` alone, so a recycled PID or one belonging to another
+/// host confuses nothing.
+///
 /// # Complexity
 ///
 /// `O(1)`.
 #[must_use]
 pub fn staging_path(dir: &Path, name: &str) -> PathBuf {
-    dir.join(format!("{name}.{TMP_EXTENSION}"))
+    dir.join(format!("{name}.{}.{TMP_EXTENSION}", std::process::id()))
 }
 
 /// Removes staged files a crash left behind.
@@ -250,6 +357,84 @@ mod tests {
     // `const` instead, which is where the guarantee is.
 
     #[test]
+    fn a_source_that_changed_during_compression_is_kept_not_deleted() {
+        // REQ-L14. The verification proves the ARCHIVE matches what was read;
+        // it says nothing about a file that grew afterwards, and deleting on
+        // the strength of it loses the bytes it never covered. A delete is the
+        // one action in this module that cannot be undone.
+        //
+        // The DECISION is tested rather than the race, because the race cannot
+        // be produced from outside: it needs a writer appending between the
+        // read and the delete, inside a call this test makes. Extracting the
+        // decision is what makes the part that can be wrong assertable, and
+        // leaves one line at the call site to review.
+        let t0 = std::time::SystemTime::UNIX_EPOCH;
+        let t1 = t0 + std::time::Duration::from_secs(1);
+
+        assert!(
+            may_delete_source(Some((10, t0)), Some((10, t0))),
+            "an unchanged file is the one that was archived"
+        );
+        assert!(
+            !may_delete_source(Some((10, t0)), Some((20, t0))),
+            "an append that leaves the mtime alone must still be caught"
+        );
+        assert!(
+            !may_delete_source(Some((10, t0)), Some((10, t1))),
+            "and a rewrite that keeps the length must be caught by the time"
+        );
+        assert!(
+            !may_delete_source(Some((10, t0)), None),
+            "metadata that cannot be read is not evidence that nothing changed"
+        );
+        assert!(
+            !may_delete_source(None, Some((10, t0))),
+            "and neither is a missing baseline"
+        );
+    }
+
+    #[test]
+    fn a_compression_failure_is_reported_rather_than_swallowed() {
+        // REQ-L61. Announced APART from the total-size warning: on a nearly
+        // full disk compression fails, retention cannot shrink the directory,
+        // and the size warning alone describes the symptom while hiding the
+        // cause. Returning the failure is what lets the caller say both.
+        let dir = tempdir().unwrap();
+        let name = "magi-2026-08-03.log";
+        // A name the plan will try to compress, with nothing behind it: the
+        // source cannot be opened, which is the shape a disk error takes here.
+        let done = execute_plan(dir.path(), &[name.to_string()], &[Action::Compress]).unwrap();
+
+        assert_eq!(done.compressed, 0);
+        assert_eq!(done.failures.len(), 1, "the failure must reach the caller");
+        assert!(
+            matches!(done.failures[0], Failure::Compression(ref n, _) if n == name),
+            "and name the file and its cause: {:?}",
+            done.failures[0]
+        );
+    }
+
+    #[test]
+    fn two_processes_do_not_stage_into_the_same_temporary() {
+        // D-L08 lists the unique suffix among what is explicitly NOT deferred.
+        // With one `<name>.tmp` for everyone, two processes compressing the
+        // same day write over each other, and the error branch of either
+        // removes a temporary the other is still filling. A network log_dir
+        // makes that ordinary rather than exotic.
+        let dir = std::path::Path::new("/logs");
+        let mine = staging_path(dir, "magi-2026-08-04.log");
+        assert!(
+            mine.to_string_lossy()
+                .contains(&std::process::id().to_string()),
+            "the staging path does not distinguish this process: {mine:?}"
+        );
+        assert!(
+            mine.to_string_lossy().ends_with(TMP_EXTENSION),
+            "and it must still be recognisable to the orphan sweep: {mine:?}"
+        );
+    }
+
+    #[test]
     fn an_orphan_temp_is_swept_but_a_live_one_is_not() {
         let dir = tempdir().unwrap();
         let orphan = write(dir.path(), "old.tmp", b"abandoned");
@@ -293,7 +478,7 @@ mod tests {
         let done = execute_plan(dir.path(), &names, &actions).unwrap();
 
         assert_eq!(
-            done,
+            done.compressed,
             MAX_COMPRESSIONS_PER_START,
             "{} pending must not fire {} LZMA2 runs at startup",
             names.len(),
@@ -339,7 +524,7 @@ mod tests {
         let done =
             execute_plan(dir.path(), std::slice::from_ref(&name), &[Action::Compress]).unwrap();
 
-        assert_eq!(done, 1);
+        assert_eq!(done.compressed, 1);
         assert!(
             !dir.path().join(&name).exists(),
             "the original goes once the archive is proven"
