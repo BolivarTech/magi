@@ -485,7 +485,15 @@ fn nothing_brings_an_emit_macro_into_scope_so_the_scanner_sees_every_call_site()
                 continue;
             }
             let flat = item.split_whitespace().collect::<Vec<_>>().join(" ");
-            if EMIT.iter().any(|m| names_item(&flat, m)) {
+            // A glob brings every macro in at once and an alias renames the
+            // crate, so neither names a macro that `names_item` could find. A
+            // reviewer listed both after the item rewrite, which is the second
+            // time the enforced set was narrower than the claim.
+            let wholesale = flat.contains("tracing::*")
+                || flat.contains("tracing::{*")
+                || flat.contains("use tracing as ")
+                || flat.contains("pub use tracing as ");
+            if wholesale || EMIT.iter().any(|m| names_item(&flat, m)) {
                 offenders.push(format!("{}: {flat}", path.display()));
             }
         }
@@ -577,15 +585,16 @@ fn source_files() -> Vec<(std::path::PathBuf, String)> {
 
 /// The byte length of the parenthesised argument list starting at *from_open*.
 ///
-/// **String literals are skipped, because a `)` inside one is not a delimiter.**
-/// A reviewer found the truncation: an invocation whose message contains a
-/// quoted `)` closed the walk there, so everything after it — including the
-/// field this scanner exists to catch — fell outside the extracted call. A
-/// silent miss, which is the direction that matters.
+/// **Every literal is skipped, because a `)` inside one is not a delimiter.**
+/// Three reviewers found this in two rounds and each time the missing form was
+/// narrower than the last: an ordinary string first, then raw strings and
+/// character literals. A truncated extraction is a SILENT miss -- the field this
+/// scanner exists to catch simply falls outside the call -- so the walk now
+/// models all three rather than the common one.
 ///
 /// # Parameters
 ///
-/// * `from_open` — text beginning at the opening `(`.
+/// * `from_open` - text beginning at the opening `(`.
 ///
 /// # Returns
 ///
@@ -595,32 +604,110 @@ fn source_files() -> Vec<(std::path::PathBuf, String)> {
 ///
 /// `O(n)` in the argument list's length.
 fn argument_list(from_open: &str) -> Option<usize> {
+    let chars: Vec<char> = from_open.chars().collect();
     let mut depth = 0usize;
-    let mut in_string = false;
-    let mut escaped = false;
-    for (i, c) in from_open.char_indices() {
-        if in_string {
-            if escaped {
-                escaped = false;
-            } else if c == ESCAPE {
-                escaped = true;
-            } else if c == QUOTE {
-                in_string = false;
-            }
+    let mut i = 0usize;
+    // Byte offset kept alongside the character index, because the caller slices
+    // by bytes. Conflating the two is a mistake this file has already made once.
+    let mut at = 0usize;
+    while i < chars.len() {
+        let c = chars[i];
+        if let Some((skipped, bytes)) = literal_at(&chars, i) {
+            i += skipped;
+            at += bytes;
             continue;
         }
         match c {
-            QUOTE => in_string = true,
             '(' => depth += 1,
             ')' => {
                 depth -= 1;
                 if depth == 0 {
-                    return Some(i + 1);
+                    return Some(at + c.len_utf8());
                 }
             }
             _ => {}
         }
+        i += 1;
+        at += c.len_utf8();
     }
+    None
+}
+
+/// How many characters and bytes the literal starting at *i* occupies.
+///
+/// Handles the three forms whose contents must not be read as code: `"..."`
+/// with escapes, `r"..."` / `r#"..."#` with a matching hash count, and `'c'`.
+///
+/// # Parameters
+///
+/// * `chars` - the text as characters.
+/// * `i` - where to look.
+///
+/// # Returns
+///
+/// `Some((characters, bytes))` if a literal starts there, else `None`.
+///
+/// # Complexity
+///
+/// `O(n)` in the literal's length.
+fn literal_at(chars: &[char], i: usize) -> Option<(usize, usize)> {
+    let measure = |from: usize, to: usize| -> (usize, usize) {
+        let bytes = chars
+            .get(from..to)
+            .map_or(0, |s| s.iter().map(|c| c.len_utf8()).sum());
+        (to - from, bytes)
+    };
+
+    // Raw string: `r`, any number of `#`, then the quote. The same count of `#`
+    // closes it, which is the whole point of the form -- a quote inside does not
+    // end it.
+    if chars.get(i) == Some(&'r') {
+        let mut hashes = 0usize;
+        while chars.get(i + 1 + hashes) == Some(&HASH) {
+            hashes += 1;
+        }
+        if chars.get(i + 1 + hashes) == Some(&QUOTE) {
+            let mut j = i + 2 + hashes;
+            while j < chars.len() {
+                if chars[j] == QUOTE {
+                    let closed = (0..hashes).all(|k| chars.get(j + 1 + k) == Some(&HASH));
+                    if closed {
+                        return Some(measure(i, j + 1 + hashes));
+                    }
+                }
+                j += 1;
+            }
+            return Some(measure(i, chars.len()));
+        }
+    }
+
+    // Ordinary string.
+    if chars.get(i) == Some(&QUOTE) {
+        let mut j = i + 1;
+        while j < chars.len() {
+            if chars[j] == ESCAPE {
+                j += 2;
+                continue;
+            }
+            if chars[j] == QUOTE {
+                return Some(measure(i, j + 1));
+            }
+            j += 1;
+        }
+        return Some(measure(i, chars.len()));
+    }
+
+    // Character literal. A lifetime is written the same way up to the quote --
+    // `'a` -- so this accepts only a form that actually closes, which a lifetime
+    // never does within the two characters that follow.
+    if chars.get(i) == Some(&TICK) {
+        let escaped = chars.get(i + 1) == Some(&ESCAPE);
+        let close = if escaped { i + 3 } else { i + 2 };
+        if chars.get(close) == Some(&TICK) {
+            return Some(measure(i, close + 1));
+        }
+    }
+
     None
 }
 
@@ -628,20 +715,36 @@ fn argument_list(from_open: &str) -> Option<usize> {
 const QUOTE: char = '"';
 /// Escapes the next character inside a string literal.
 const ESCAPE: char = '\\';
+/// Delimits a character literal.
+const TICK: char = '\'';
+/// Pads a raw string's delimiter.
+const HASH: char = '#';
 
 /// Whether *args* passes *name* as a field's VALUE.
 ///
 /// `info!(target: "t", key = prompt)` writes the prompt under a field named
 /// something else, so the name-position test above sees nothing at all. This
-/// covers the exact pass-through and only that — `= name`, `= %name`, `= ?name`,
-/// ending at an argument boundary. `prompt.len()` is not a match, deliberately:
-/// a derived quantity is not the prompt, and a guardian that cries wolf gets
-/// relaxed until it stops speaking.
+/// covers the pass-through forms: `= name`, `= &name`, the sigils `%` and `?`,
+/// the raw identifier `r#name`, and the identity methods that hand the same
+/// bytes on under another expression -- `clone`, `to_owned`, `as_str`,
+/// `to_string`.
+///
+/// **What it does NOT cover, stated rather than implied.** This is text
+/// matching, not Rust, so a prompt reaching a field through a local rename, a
+/// struct field, a function's return value or a format argument is invisible to
+/// it. That is an accepted residual and the reason the scanner is one of two
+/// guards rather than the guarantee: the auditor masks at the layer, and this
+/// catches the emitter forms a person actually writes. A previous docstring
+/// justified the exclusions by `prompt.len()` alone, which did not describe what
+/// the predicate really left out -- a reviewer said so twice.
+///
+/// `prompt.len()` stays excluded on purpose: a derived quantity is not the
+/// prompt, and a guardian that cries wolf gets relaxed until it stops speaking.
 ///
 /// # Parameters
 ///
-/// * `args` — the macro invocation's argument list.
-/// * `name` — the local whose value must not be logged.
+/// * `args` - the macro invocation's argument list.
+/// * `name` - the local whose value must not be logged.
 ///
 /// # Returns
 ///
@@ -651,16 +754,25 @@ const ESCAPE: char = '\\';
 ///
 /// `O(n)` in the argument list's length.
 fn is_value_use(args: &str, name: &str) -> bool {
+    /// Expressions that hand the same bytes on under another spelling.
+    const IDENTITY: [&str; 4] = [".clone()", ".to_owned()", ".as_str()", ".to_string()"];
+
     for (at, _) in args.match_indices(name) {
-        let ends = args
-            .get(at + name.len()..)
-            .map(str::trim_start)
-            .is_none_or(|s| s.is_empty() || s.starts_with(',') || s.starts_with(')'));
-        if !ends {
+        let tail = args.get(at + name.len()..).unwrap_or_default();
+        let rest = IDENTITY
+            .iter()
+            .find_map(|m| tail.strip_prefix(m))
+            .unwrap_or(tail)
+            .trim_start();
+        if !(rest.is_empty() || rest.starts_with(',') || rest.starts_with(')')) {
             continue;
         }
         let mut before = args.get(..at).unwrap_or_default().trim_end();
-        if let Some(head) = before.strip_suffix(['%', '?']) {
+        // `r#prompt` is the same local under a spelling the parser tolerates.
+        if let Some(head) = before.strip_suffix("r#") {
+            before = head.trim_end();
+        }
+        if let Some(head) = before.strip_suffix(['%', '?', '&']) {
             before = head.trim_end();
         }
         if before.ends_with('=') && !before.ends_with("==") {
