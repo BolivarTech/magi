@@ -372,9 +372,9 @@ fn declares_a_layer_impl(text: &str) -> bool {
 
 /// Whether *args* uses *name* in the position a `tracing` field occupies.
 ///
-/// `tracing` accepts four spellings for the same leak — `name = value`,
-/// `name` (shorthand for the local of that name), `%name` and `?name` — and
-/// only the first contains an `=`. A scanner that looks for `"name = "`
+/// `tracing` accepts five spellings for the same leak — `name = value`,
+/// `name` (shorthand for the local of that name), `%name`, `?name` and the raw
+/// identifier `r#name` — and only two of them contain an `=`. A scanner that looks for `"name = "`
 /// therefore misses three of the four, which is the gap this closes.
 ///
 /// The position test is what keeps it narrow. The name must begin a field, so
@@ -383,6 +383,13 @@ fn declares_a_layer_impl(text: &str) -> bool {
 /// `system_prompt`, and never a quote, which excludes the word inside a string
 /// literal. What follows must not continue the identifier, which excludes
 /// `prompt_tokens`.
+///
+/// **The brace earns its place**: `info!(target: "t", { prompt = p }, "msg")`
+/// is a braced field block and it compiles, which was checked rather than
+/// assumed when a reviewer asked whether any syntax needs it. It costs a false
+/// positive on a struct literal written inside macro arguments — `Foo { prompt:
+/// p }` — and that is the right trade: a false positive fails the build and
+/// someone looks, a false negative writes a prompt to disk and nobody does.
 ///
 /// # Parameters
 ///
@@ -407,6 +414,17 @@ fn is_field_use(args: &str, name: &str) -> bool {
         }
         let before = args.get(..at).unwrap_or_default();
         let mut chars = before.chars().rev().peekable();
+        // A raw identifier is the same field under a spelling the parser
+        // tolerates: `r#prompt = p` compiles and writes the value. Checked
+        // rather than assumed -- a dotted name in this position does NOT
+        // compile (`local ambiguity when calling macro`), so that one is not a
+        // form to cover.
+        if matches!(chars.peek(), Some('#')) {
+            chars.next();
+            if matches!(chars.peek(), Some('r')) {
+                chars.next();
+            }
+        }
         if matches!(chars.peek(), Some('%' | '?')) {
             chars.next();
         }
@@ -454,8 +472,94 @@ fn impl_precedes(text: &str, at: usize) -> bool {
     let header = window
         .rsplit_once([';', '}'])
         .map_or(window, |(_, tail)| tail);
-    header
+    // Line comments and block comments both describe rather than declare. Two
+    // reviewers asked for the second: `/* impl<S> Layer<S> for X */` would
+    // otherwise be read as an impl header, which is the same false positive the
+    // line-comment filter already prevents, arriving through the other syntax.
+    let without_blocks: String = header
+        .split("/*")
+        .enumerate()
+        .map(|(i, piece)| {
+            if i == 0 {
+                piece
+            } else {
+                piece.split_once("*/").map_or("", |(_, tail)| tail)
+            }
+        })
+        .collect();
+    without_blocks
         .lines()
         .filter(|l| !l.trim_start().starts_with("//"))
         .any(|l| l.contains("impl"))
+}
+
+/// No file imports an emit macro, which is what makes the scanner's anchor sound.
+///
+/// The scanner above finds call sites by looking for `tracing::` followed by an
+/// emit macro. A reviewer put the hole plainly: `use tracing::info;` and then a
+/// bare `info!(prompt)` carries the value and matches nothing. No file does that
+/// today, and the scanner would go silent the moment one did — the failure mode
+/// this repository keeps rediscovering, where the guard stops speaking and
+/// nothing says so.
+///
+/// Widening the scanner to bare `info!(` was the other option and it is worse:
+/// a bare `info!` may belong to any crate, so the scan would report call sites
+/// it cannot judge, and a guardian that cries wolf gets relaxed until it stops
+/// speaking. Forbidding the import instead makes the anchor TRUE rather than
+/// assumed, in one assertion that can fail.
+///
+/// Complexity: `O(bytes under src/)`.
+#[test]
+fn no_file_imports_an_emit_macro_so_the_scanner_sees_every_call_site() {
+    const EMIT: [&str; 6] = ["info", "warn", "error", "debug", "trace", "event"];
+
+    let mut offenders = Vec::new();
+    let mut scanned = 0usize;
+    let mut stack = vec![std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src")];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            scanned += 1;
+            for line in text.lines() {
+                let line = line.trim();
+                if !line.starts_with("use tracing::") {
+                    continue;
+                }
+                // `Level`, `Event`, `Subscriber` and `field::` are types, not
+                // macros, and importing them changes nothing about how a call
+                // site is spelled.
+                if EMIT.iter().any(|m| is_field_use(line, m))
+                    || EMIT.iter().any(|m| {
+                        line.contains(&format!("::{m};")) || line.contains(&format!("::{m} "))
+                    })
+                {
+                    offenders.push(format!("{}: {line}", path.display()));
+                }
+            }
+        }
+    }
+
+    // The same vacuity guard the scanner above carries: without it an empty or
+    // unreadable walk passes silently.
+    assert!(
+        scanned > 50,
+        "the source walk found only {scanned} files, so the assertion below proves nothing"
+    );
+    assert!(
+        offenders.is_empty(),
+        "an emit macro is imported, so a bare call to it carries a field the prompt scanner cannot see. Call it as `tracing::info!(…)` instead: {offenders:?}"
+    );
 }
