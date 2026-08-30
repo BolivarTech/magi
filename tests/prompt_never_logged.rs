@@ -52,6 +52,14 @@ fn no_call_site_in_the_product_logs_a_prompt_or_a_user_message() {
 
     let mut offenders = Vec::new();
     let mut scanned = 0usize;
+    // A locally defined macro that wraps an emit macro moves the field out of
+    // reach: `shout!(prompt)` names no `tracing::` anything, so the anchor sees
+    // nothing at all. A reviewer named the channel and it was green. Banning
+    // such macros is not available -- `render_fixture!` is one, and it exists
+    // because `tracing` needs its target and level constant at the emit site --
+    // so their NAMES join the anchor set instead, and their call sites are
+    // scanned with the same two predicates.
+    let wrappers = emit_wrapping_macros();
     {
         for (path, text) in source_files() {
             scanned += 1;
@@ -72,56 +80,69 @@ fn no_call_site_in_the_product_logs_a_prompt_or_a_user_message() {
             // reported line number was already approximate, so nothing else
             // changes.
             let text = tighten_paths(&without_comments(&text));
-            for (start, _) in text.match_indices("tracing::") {
-                let Some(rest) = text.get(start..) else {
-                    continue;
-                };
-                // `event!` is the general form the five level macros expand to,
-                // and a call site can use it directly -- `render_fixture!` does.
-                // Listing only the five leaves the one that covers them all.
-                //
-                // **`span!` is deliberately absent, and the test below is why.**
-                // A span field would leak only if something READ it, and the
-                // layer implements `on_event` alone -- no `on_new_span`, no
-                // `on_record`, no `on_enter` -- so a span's fields are never
-                // visited, formatted or written. Scanning for `span!` would fail
-                // a call site that cannot leak. That exemption is an assumption
-                // about another file, which is how a documented exemption
-                // quietly becomes a hole, so
-                // `the_layer_reads_no_span_fields_which_is_why_spans_are_exempt`
-                // pins it: add a span callback and it goes red.
-                let is_emit = ["info!", "debug!", "warn!", "error!", "trace!", "event!"]
-                    .iter()
-                    .any(|m| rest.starts_with(&format!("tracing::{m}")));
-                if !is_emit {
-                    continue;
-                }
-                // `info![...]` and `info!{...}` are the same invocation under
-                // the other two delimiters rustc accepts, and anchoring on `(`
-                // alone let both through untouched.
-                let Some(open) = rest.find(['(', '[', '{']) else {
-                    continue;
-                };
-                // `skip(open)` would be wrong here and was: `char_indices`
-                // counts CHARACTERS while `open` is a BYTE offset, so the walk
-                // started somewhere else entirely and met a `)` before any `(`.
-                let Some(from_open) = rest.get(open..) else {
-                    continue;
-                };
-                // No second comment pass: the text this slices was stripped
-                // above, so a comment cannot reach the predicates from here.
-                let Some(call) = argument_list(from_open)
-                    .and_then(|len| rest.get(open..open + len))
-                    .map(as_parenthesised)
-                else {
-                    continue;
-                };
-                if FORBIDDEN
-                    .iter()
-                    .any(|f| is_field_use(&call, f) || is_value_use(&call, f))
-                {
-                    let line = text.get(..start).map_or(0, |p| p.lines().count());
-                    offenders.push(format!("{}:{}", path.display(), line + 1));
+            let mut anchors: Vec<String> = EMIT_MACROS
+                .iter()
+                .map(|m| format!("tracing::{m}"))
+                .collect();
+            anchors.extend(wrappers.iter().cloned());
+            for anchor in &anchors {
+                for (start, _) in text.match_indices(anchor.as_str()) {
+                    let Some(rest) = text.get(start..) else {
+                        continue;
+                    };
+                    // A wrapper's own DEFINITION is not a call site: its body holds
+                    // the macro's parameters, not a caller's expression.
+                    if text
+                        .get(..start)
+                        .is_some_and(|head| head.trim_end().ends_with("macro_rules!"))
+                    {
+                        continue;
+                    }
+                    // `event!` is the general form the five level macros expand to,
+                    // and a call site can use it directly -- `render_fixture!` does.
+                    // Listing only the five leaves the one that covers them all.
+                    //
+                    // **`span!` is deliberately absent, and the test below is why.**
+                    // A span field would leak only if something READ it, and the
+                    // layer implements `on_event` alone -- no `on_new_span`, no
+                    // `on_record`, no `on_enter` -- so a span's fields are never
+                    // visited, formatted or written. Scanning for `span!` would fail
+                    // a call site that cannot leak. That exemption is an assumption
+                    // about another file, which is how a documented exemption
+                    // quietly becomes a hole, so
+                    // `the_layer_reads_no_span_fields_which_is_why_spans_are_exempt`
+                    // pins it: add a span callback and it goes red.
+                    let is_emit = anchors.iter().any(|a| rest.starts_with(a.as_str()));
+                    if !is_emit {
+                        continue;
+                    }
+                    // `info![...]` and `info!{...}` are the same invocation under
+                    // the other two delimiters rustc accepts, and anchoring on `(`
+                    // alone let both through untouched.
+                    let Some(open) = rest.find(['(', '[', '{']) else {
+                        continue;
+                    };
+                    // `skip(open)` would be wrong here and was: `char_indices`
+                    // counts CHARACTERS while `open` is a BYTE offset, so the walk
+                    // started somewhere else entirely and met a `)` before any `(`.
+                    let Some(from_open) = rest.get(open..) else {
+                        continue;
+                    };
+                    // No second comment pass: the text this slices was stripped
+                    // above, so a comment cannot reach the predicates from here.
+                    let Some(call) = argument_list(from_open)
+                        .and_then(|len| rest.get(open..open + len))
+                        .map(as_parenthesised)
+                    else {
+                        continue;
+                    };
+                    if FORBIDDEN
+                        .iter()
+                        .any(|f| is_field_use(&call, f) || is_value_use(&call, f))
+                    {
+                        let line = text.get(..start).map_or(0, |p| p.lines().count());
+                        offenders.push(format!("{}:{}", path.display(), line + 1));
+                    }
                 }
             }
         }
@@ -475,6 +496,58 @@ fn tighten_paths(text: &str) -> String {
         i += 1;
     }
     out
+}
+
+/// The emit macros a call site may name.
+const EMIT_MACROS: [&str; 6] = ["info!", "debug!", "warn!", "error!", "trace!", "event!"];
+
+/// The names of locally defined macros whose bodies invoke an emit macro.
+///
+/// Such a macro forwards its caller's expression into a field, so the call site
+/// carries the value while naming no `tracing::` anything. `render_fixture!` is
+/// one and has to be -- `tracing` builds each callsite's metadata as a static,
+/// so target and level must be constant at the emit site, which a function
+/// cannot provide. So the names are collected and joined to the anchor set
+/// rather than forbidden.
+///
+/// # Returns
+///
+/// Each wrapper's name with its bang, e.g. `render_fixture!`.
+///
+/// # Complexity
+///
+/// `O(bytes under src/)`.
+fn emit_wrapping_macros() -> Vec<String> {
+    /// How far past `macro_rules!` a body is read looking for an emit macro.
+    const BODY_SCAN_BYTES: usize = 4096;
+
+    let mut names = Vec::new();
+    for (_, text) in source_files() {
+        for (at, _) in text.match_indices("macro_rules!") {
+            let Some(rest) = text.get(at + "macro_rules!".len()..) else {
+                continue;
+            };
+            let name: String = rest
+                .trim_start()
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+            if name.is_empty() {
+                continue;
+            }
+            let body = rest.get(..BODY_SCAN_BYTES.min(rest.len())).unwrap_or(rest);
+            if EMIT_MACROS
+                .iter()
+                .any(|m| body.contains(&format!("tracing::{m}")))
+            {
+                let anchor = format!("{name}!");
+                if !names.contains(&anchor) {
+                    names.push(anchor);
+                }
+            }
+        }
+    }
+    names
 }
 
 /// Whether *args* uses *name* in the position a `tracing` field occupies.
@@ -1043,6 +1116,13 @@ const HASH: char = '#';
 /// `prompt.len()` stays excluded on purpose: a derived quantity is not the
 /// prompt, and a guardian that cries wolf gets relaxed until it stops speaking.
 ///
+/// **And a correction, because I wrote the opposite several times.** This
+/// scanner is NOT backed by the auditor for prompts. The auditor masks
+/// registered secrets and things shaped like credentials; a user's prompt is
+/// neither, which the module docstring says plainly and my own summaries kept
+/// contradicting. For a prompt this scanner is the only guard, so every limit
+/// below is a real exposure and not a second line of defence.
+///
 /// **Declared, not closed: concatenation.** `key = prompt.to_owned() + x`
 /// compiles and writes the prompt inside a longer string, and this predicate
 /// does not see it. Closing it means treating `+` as a terminator, which then
@@ -1065,7 +1145,13 @@ const HASH: char = '#';
 /// `O(n)` in the argument list's length.
 fn is_value_use(args: &str, name: &str) -> bool {
     /// Expressions that hand the same bytes on under another spelling.
-    const IDENTITY: [&str; 4] = [".clone()", ".to_owned()", ".as_str()", ".to_string()"];
+    const IDENTITY: [&str; 5] = [
+        ".clone()",
+        ".to_owned()",
+        ".as_str()",
+        ".to_string()",
+        ".deref()",
+    ];
 
     for (at, _) in args.match_indices(name) {
         // The method is compared against a tail with ALL its whitespace
@@ -1108,7 +1194,7 @@ fn is_value_use(args: &str, name: &str) -> bool {
         loop {
             let stripped = before
                 .strip_suffix("r#")
-                .or_else(|| before.strip_suffix(['%', '?', '&', '(', '[', '{']));
+                .or_else(|| before.strip_suffix(['%', '?', '&', '*', '(', '[', '{']));
             match stripped {
                 Some(head) => before = head.trim_end(),
                 None => break,
