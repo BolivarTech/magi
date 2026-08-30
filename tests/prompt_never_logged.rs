@@ -60,6 +60,16 @@ fn no_call_site_in_the_product_logs_a_prompt_or_a_user_message() {
             // at the macro name and the field separately and matches neither.
             // The first version of this test did exactly that, and its mutation
             // -- a real call site given a `prompt` field -- stayed green.
+            // The path's own spacing is removed first. `tracing :: info!` is
+            // the same call site and the anchor is a literal, so without this
+            // it matched nothing at all -- found by running it, after a
+            // reviewer named it. Offsets below index the FLATTENED text, and
+            // only the reported line number is derived from it, so the shift
+            // costs an approximate line rather than a wrong verdict.
+            let text = text
+                .replace(" :: ", "::")
+                .replace(":: ", "::")
+                .replace(" ::", "::");
             for (start, _) in text.match_indices("tracing::") {
                 let Some(rest) = text.get(start..) else {
                     continue;
@@ -657,6 +667,12 @@ fn source_files() -> Vec<(std::path::PathBuf, String)> {
 /// character literals. A truncated extraction is a SILENT miss -- the field this
 /// scanner exists to catch simply falls outside the call -- so the walk now
 /// models all three rather than the common one.
+///
+/// **Declared limit: a comment INSIDE the extracted call is skipped by this
+/// walk but not removed from what it returns**, so the position predicates
+/// still see its text. A field name written in a comment inside the arguments
+/// therefore reads as a field use -- a false positive, which fails the build
+/// and gets looked at, rather than a silent miss.
 ///
 /// **Declared limit: the caller finds the opening delimiter by search**, so a
 /// `(`, `[` or `{` written in a comment between the macro name and its real
