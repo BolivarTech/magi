@@ -229,15 +229,46 @@ impl HealthReporter {
         // ERROR and WARN are a failure; INFO and below carrying a key are the
         // success event recovery is detected from (task 3.3).
         let ok = level > tracing::Level::WARN;
-        let decided = {
-            let Ok(mut tracker) = self.tracker.lock() else {
-                return;
-            };
-            tracker.observe(Some(cause), ok, Instant::now())
-        };
+        let decided = self.tracker().observe(Some(cause), ok, Instant::now());
         if let Some(transition) = decided {
             self.show(&transition);
         }
+    }
+
+    /// The tracker, **recovered rather than abandoned** if the lock is
+    /// poisoned.
+    ///
+    /// # Why recovery and not a silent skip
+    ///
+    /// Returning early on a `PoisonError` — which is what all three call sites
+    /// used to do — turns one panic anywhere in the process into health
+    /// tracking that is dead for the rest of the run and never says so. That
+    /// is a silent failure (G4) in the subsystem whose entire job is
+    /// announcing failure, and it is the one failure this subsystem could
+    /// never report, because the reporting is what would be broken.
+    ///
+    /// Recovery is safe here for a specific reason rather than a general one:
+    /// [`HealthTracker`] is a plain state machine with **no panicking
+    /// operation** — no indexing, no unwrap, no allocation-dependent
+    /// invariant that a partial write could leave half-applied. A poisoned
+    /// lock therefore means some *other* code panicked while holding this
+    /// guard, and the state behind it is still structurally whole.
+    ///
+    /// # The consequence, stated
+    ///
+    /// If a future change gives the tracker an operation that CAN panic
+    /// mid-update, this starts handing out a half-updated state machine
+    /// instead of no state machine. The worst it can produce is a wrong
+    /// screen notice — never a crash, and never a lost log line, because the
+    /// file branch does not pass through here.
+    ///
+    /// # Complexity
+    ///
+    /// `O(1)`.
+    fn tracker(&self) -> std::sync::MutexGuard<'_, HealthTracker> {
+        self.tracker
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// Expires the stability window without a new event, showing everything
@@ -258,7 +289,7 @@ impl HealthReporter {
     /// `O(s²)` worst case in the number of subsystems observed so far, which
     /// is a handful: `O(s)` per pass over at most `s` pendings.
     pub(crate) fn tick(&self, now: Instant) {
-        while let Some(transition) = self.tracker.lock().ok().and_then(|mut t| t.tick(now)) {
+        while let Some(transition) = self.tracker().tick(now) {
             self.show(&transition);
         }
     }
@@ -269,12 +300,7 @@ impl HealthReporter {
     ///
     /// `O(s)` in the number of subsystems observed so far.
     pub(crate) fn flush(&self) {
-        let decided = {
-            let Ok(mut tracker) = self.tracker.lock() else {
-                return;
-            };
-            tracker.flush()
-        };
+        let decided = self.tracker().flush();
         for transition in &decided {
             self.show(transition);
         }
