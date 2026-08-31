@@ -533,15 +533,30 @@ fn five_consecutive_failures_show_one_notice_and_leave_five_records() {
     // file half comes from the day's file, not from a count of what was
     // emitted, because "five were emitted" is not "five were written".
     //
-    // # The third count, and why it is asserted rather than left implicit
+    // # What "un aviso" counts, and why six lines is the correct total
     //
-    // The five WARN records reach the SCREEN as well, because REQ-L19 puts
-    // every `WARN` there. So five failures put SIX lines on screen: one notice
-    // plus the five records. SC-L15 is met under the reading "one health
-    // notice" and NOT under the reading "one screen line", and the two spec
-    // clauses disagree on which it is. The count is pinned here so that
-    // disagreement is visible to whoever settles it, instead of living in a
-    // comment that a later change can silently falsify.
+    // SC-L15's subject is the DEGRADATION NOTICE -- the scenario's own title
+    // says so -- and there is exactly one of those. The five WARN records reach
+    // the screen too, so the total is six lines, and that is REQ-L19 working
+    // rather than a leak. Both facts that make it so are named here, because a
+    // reader who re-derives this from the scenario text alone will see a
+    // contradiction and reach for a "fix" that breaks the tracker:
+    //
+    //   * REQ-L19 (spec:2099): `ERROR` and `WARN` reach the screen; `INFO` and
+    //     below go ONLY to the file. A failure record is `WARN`, so it is on
+    //     the screen by requirement.
+    //   * `ok` is derived from the LEVEL -- `ok_from_level` is
+    //     `level > tracing::Level::WARN` (`src/memory/embedding.rs:1325`,
+    //     mirroring the layer's own derivation). So a failure emitted below
+    //     `WARN` to keep it off the screen would be read by the tracker as a
+    //     SUCCESS and drive it to `Restored`: the exact opposite of what it
+    //     reports.
+    //
+    // Together those make "five failures, one line on screen" unreachable by
+    // construction, not merely unimplemented. The count of records on screen is
+    // asserted below rather than left to this comment, because it is true and
+    // worth pinning -- and if it ever moves, that is a decision about REQ-L19,
+    // not a refactor.
     let dir = tempfile::tempdir().expect("a temp dir");
     let (handle, screen) = start(dir.path(), "info");
 
@@ -579,9 +594,9 @@ fn five_consecutive_failures_show_one_notice_and_leave_five_records() {
         .count();
     assert_eq!(
         records_on_screen, CONSECUTIVE_FAILING_TURNS,
-        "REQ-L19 puts every WARN on the screen, so the records land there too. \
-         If this number moves, SC-L15's \"one notice\" was reinterpreted as \
-         \"one line\" and that is a decision, not a refactor: {shown:?}"
+        "REQ-L19 puts every WARN on the screen, so the records belong there \
+         alongside the one notice. Moving this number is a decision about \
+         REQ-L19 and about what `ok` is derived from, not a refactor: {shown:?}"
     );
 
     drop(handle);
