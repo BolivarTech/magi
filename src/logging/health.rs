@@ -11,6 +11,7 @@
 //! else is silence by design, because "everything else" is exactly the noise
 //! this feature exists to remove.
 
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use crate::logging::auditor::CauseKey;
@@ -233,10 +234,33 @@ impl HealthTracker {
     }
 }
 
+/// Turns a transition into the line the user reads.
+///
+/// # Parameters
+///
+/// * `t` — the transition the tracker produced.
+/// * `log_path` — the day's log file. **Received, never looked up**: this
+///   module is pure, and REQ-L23's third part is a path only the caller knows.
+///
+/// # Returns
+///
+/// One screen line.
+///
+/// # Complexity
+///
+/// `O(1)`.
+#[must_use]
+pub fn render_transition(_t: &Transition, _log_path: &Path) -> String {
+    String::new()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::time::Duration;
+    use tracing::Level;
+
+    use crate::logging::filter::Filter;
 
     #[test]
     fn the_first_degradation_is_immediate_and_does_not_wait_for_the_window() {
@@ -493,6 +517,149 @@ mod tests {
             h.flush().len(),
             2,
             "one pending transition per subsystem, not just one"
+        );
+    }
+
+    /// The day's log file, as REQ-L23's third part reaches `render_transition`.
+    const A_LOG_PATH: &str = ".magi/logs/magi-2026-08-14.log";
+    /// The file name inside [`A_LOG_PATH`], which is what a message must name.
+    const A_LOG_FILE: &str = "magi-2026-08-14.log";
+
+    /// Every cause the message table declares, with the two texts it owes.
+    ///
+    /// Kept as one table so a row added to `render_transition` without its
+    /// counterpart here is visible as an omission rather than as absence.
+    fn declared_messages() -> Vec<(CauseKey, &'static str, &'static str)> {
+        vec![
+            (
+                CauseKey::new("embedder", "unreachable"),
+                "memory: retrieval unavailable — answers will not use past context",
+                "✓ memory: retrieval restored",
+            ),
+            (
+                CauseKey::new("embedder", "http_error"),
+                "memory: retrieval failing — answers will not use past context",
+                "✓ memory: retrieval restored",
+            ),
+            (
+                CauseKey::new("provider", "unreachable"),
+                "provider: unreachable — the turn cannot complete",
+                "✓ provider: reachable again",
+            ),
+            (
+                CauseKey::new("vault", "locked"),
+                "vault: locked — stored credentials are unavailable",
+                "✓ vault: unlocked",
+            ),
+        ]
+    }
+
+    #[test]
+    fn each_declared_cause_names_what_broke_what_it_means_and_where_to_read_more() {
+        // REQ-L23's three parts. The first two come from the table; the third
+        // is always the day's log file, which is why this function takes a path
+        // instead of composing one.
+        let path = Path::new(A_LOG_PATH);
+        for (key, degraded, restored) in declared_messages() {
+            let d = render_transition(&Transition::Degraded(key), path);
+            let r = render_transition(&Transition::Restored(key), path);
+            assert!(
+                d.starts_with(degraded),
+                "the degradation text for {key:?} is not the declared one: {d}"
+            );
+            assert!(
+                r.starts_with(restored),
+                "the recovery text for {key:?} is not the declared one: {r}"
+            );
+            assert!(
+                d.contains(A_LOG_FILE),
+                "REQ-L23's third part -- where to read more -- is missing: {d}"
+            );
+            assert!(
+                r.contains(A_LOG_FILE),
+                "REQ-L23's third part -- where to read more -- is missing: {r}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_cause_with_no_declared_message_is_reported_as_a_programming_error() {
+        // A `CauseKey` with no row is a bug in the task that introduced it, not
+        // a runtime case to paper over with generic text: generic text is
+        // exactly what REQ-L23 exists to forbid, and it would hide the omission
+        // until the cause fires in production, which is when the message is
+        // needed.
+        let path = Path::new(A_LOG_PATH);
+        let out = render_transition(
+            &Transition::Degraded(CauseKey::new("nonesuch", "no_such_cause")),
+            path,
+        );
+        assert!(
+            out.contains("internal error"),
+            "an undeclared cause must say it is a defect: {out}"
+        );
+        assert!(
+            out.contains("nonesuch") && out.contains("no_such_cause"),
+            "and it must name the cause, or nobody can find the missing row: {out}"
+        );
+    }
+
+    /// Every line a closure emitted, through the real dispatcher.
+    ///
+    /// `testutil::capture` returns only the last line, which cannot tell "one
+    /// notice" from "two" -- and "exactly one" is half of what the test below
+    /// asserts.
+    fn capture_all(emit: impl FnOnce()) -> Vec<String> {
+        use std::sync::{Arc, Mutex};
+        use tracing_subscriber::layer::SubscriberExt as _;
+
+        let buf: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        struct CaptureLayer(Arc<Mutex<Vec<String>>>);
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for CaptureLayer {
+            fn on_event(
+                &self,
+                event: &tracing::Event<'_>,
+                _: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                if let Ok(mut g) = self.0.lock() {
+                    g.push(crate::logging::render::render_event(event));
+                }
+            }
+        }
+        let subscriber = tracing_subscriber::registry().with(CaptureLayer(Arc::clone(&buf)));
+        tracing::subscriber::with_default(subscriber, emit);
+        let lines = buf.lock().expect("never poisoned").clone();
+        lines
+    }
+
+    #[test]
+    fn test_a_warn_is_emitted_when_both_filters_exclude_info() {
+        // The failure this announces is silent by construction: the operator
+        // sees degradations and never sees one recover, months after setting
+        // the filters. "Declared in the plan" does not reach that person.
+        let warn_only = Filter::parse("warn").expect("a valid directive");
+        let said = capture_all(|| {
+            crate::logging::warn_if_recovery_detection_is_off(&warn_only, Some(Level::WARN))
+        });
+        assert_eq!(
+            said.len(),
+            1,
+            "exactly one notice, naming the consequence: {said:?}"
+        );
+        assert!(
+            said[0].contains("health recovery detection is off"),
+            "the notice must name the consequence, not merely the setting: {said:?}"
+        );
+
+        // The other half, without which this passes against a notice that
+        // always fires -- which is a notice nobody reads.
+        let defaults = Filter::parse("info").expect("a valid directive");
+        let quiet = capture_all(|| {
+            crate::logging::warn_if_recovery_detection_is_off(&defaults, Some(Level::WARN))
+        });
+        assert!(
+            quiet.is_empty(),
+            "with the defaults the union admits info, so there is nothing to warn about: {quiet:?}"
         );
     }
 

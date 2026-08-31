@@ -90,6 +90,47 @@ pub trait NoticeDelivery: Send + Sync {
     fn deliver(&self, line: &auditor::Audited);
 }
 
+/// The level the screen branch is wired at (REQ-L19).
+///
+/// `ERROR` and `WARN` reach the screen; `INFO` and below go only to the file.
+/// **Not operator-configurable, and that is decided rather than pending**: the
+/// `[logging].tui_filter` key was removed once it was found to be accepted by
+/// serde and read by nothing, so the policy lives here as one constant rather
+/// than as a setting whose effect nobody could observe.
+pub const SCREEN_LEVEL: tracing::Level = tracing::Level::WARN;
+
+/// Warns, once at startup, when recovery detection cannot work.
+///
+/// # Parameters
+///
+/// * `file_filter` — the file branch's filter.
+/// * `screen_level` — the screen branch's level, when one is wired.
+///
+/// # Why this is a notice and not an exemption in `enabled`
+///
+/// The success events that health recovery is detected from are `INFO`-level.
+/// When the union of both filters excludes `INFO` they never reach the layer,
+/// so a degradation is still shown and is never seen to recover. Carving an
+/// exception into `enabled` for cause-bearing events would be a filter that
+/// lies about what it filters — an operator who raised the threshold asked for
+/// fewer events. So the behaviour stands and the consequence is named instead.
+///
+/// # Why it is emitted HERE and not inside [`init_logging`]
+///
+/// `init_logging` mounts the layer; it knows nothing about recovery detection,
+/// and teaching it would put a screen policy inside the plumbing. The caller
+/// invokes this right after it holds the handle, where both filters are
+/// already resolved and the sink already exists.
+///
+/// # Complexity
+///
+/// `O(k)` over the filter's per-target overrides.
+pub fn warn_if_recovery_detection_is_off(
+    _file_filter: &filter::Filter,
+    _screen_level: Option<tracing::Level>,
+) {
+}
+
 /// A delivery that shows nothing, for the tests and for MS1's absent screen.
 pub struct DiscardDelivery;
 
