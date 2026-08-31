@@ -5,11 +5,24 @@
 //! Transition-only health tracking (D-L13, SC-L14...SC-L119).
 //!
 //! This module decides *when* a subsystem's health is worth putting on
-//! screen. It is pure: no `tracing`, no filesystem, no TUI. `observe` takes
-//! whatever the caller already knows about one event and returns a
-//! [`Transition`] only when that transition is worth showing; everything
-//! else is silence by design, because "everything else" is exactly the noise
-//! this feature exists to remove.
+//! screen, and *what* that says. It is pure: it emits nothing, touches no
+//! filesystem and knows no TUI. `observe` takes whatever the caller already
+//! knows about one event and returns a [`Transition`] only when that
+//! transition is worth showing; everything else is silence by design, because
+//! "everything else" is exactly the noise this feature exists to remove.
+//!
+//! # What lives here and what does not
+//!
+//! [`HealthTracker`] holds the state machine; [`render_transition`] holds the
+//! message table, because a `CauseKey` and what it means to a user are two
+//! halves of one piece of knowledge and splitting them across a module
+//! boundary is how they drift apart. Both are functions of their arguments:
+//! the day's log path is **received**, not looked up, and `Instant` is
+//! **passed in**, not read.
+//!
+//! Delivery is somebody else's job. The layer is what feeds this and what
+//! puts the result on screen, so nothing here decides which mouth a
+//! transition reaches or when the window is expired.
 
 use std::path::Path;
 use std::time::{Duration, Instant};
