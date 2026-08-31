@@ -1744,12 +1744,30 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
             log_dir: log_dir.clone(),
             file_filter: parsed,
         };
+        // **The screen branch is wired here** (MS2): one layer, both mouths,
+        // and the level is REQ-L19's constant rather than a setting — `ERROR`
+        // and `WARN` reach the screen, `INFO` and below only the file. The
+        // delivery is whatever this surface built; today that is the
+        // discarding one, and the sink the TUI attaches replaces it in place
+        // without reopening this call.
+        let notices: std::sync::Arc<dyn magi_rs::logging::NoticeDelivery> =
+            std::sync::Arc::new(magi_rs::logging::DiscardDelivery);
         match magi_rs::logging::init_logging(
             &cfg,
-            std::sync::Arc::new(magi_rs::logging::DiscardDelivery),
-            None,
+            std::sync::Arc::clone(&notices),
+            Some((
+                magi_rs::logging::magi_layer::TuiSink::new(std::sync::Arc::clone(&notices)),
+                magi_rs::logging::SCREEN_LEVEL,
+            )),
         ) {
             Ok(_handle) => {
+                // Right after the handle comes back and before it is used, as
+                // task 3.3 requires: both filters are resolved by now and the
+                // sink exists, which are the two things this notice needs.
+                magi_rs::logging::warn_if_recovery_detection_is_off(
+                    &cfg.file_filter,
+                    Some(magi_rs::logging::SCREEN_LEVEL),
+                );
                 // Retention runs at startup, over what the previous runs left.
                 // Best effort throughout: a directory that cannot be read, or a
                 // delete that fails, is not worth failing a session over.
@@ -5610,10 +5628,18 @@ async fn prepare_headless(
             log_dir: log_dir.clone(),
             file_filter: parsed,
         };
+        // The same wiring the TUI surface applies just above, and for the same
+        // reason: one layer with both mouths, the screen level fixed by
+        // REQ-L19 rather than configured.
+        let notices: std::sync::Arc<dyn magi_rs::logging::NoticeDelivery> =
+            std::sync::Arc::new(magi_rs::logging::DiscardDelivery);
         let logging_up = match magi_rs::logging::init_logging(
             &cfg,
-            std::sync::Arc::new(magi_rs::logging::DiscardDelivery),
-            None,
+            std::sync::Arc::clone(&notices),
+            Some((
+                magi_rs::logging::magi_layer::TuiSink::new(std::sync::Arc::clone(&notices)),
+                magi_rs::logging::SCREEN_LEVEL,
+            )),
         ) {
             Ok(_) => true,
             Err(e) => {
@@ -5643,6 +5669,11 @@ async fn prepare_headless(
         // and there is no daily file. An id that identifies nothing sends the
         // reader looking for one.
         if logging_up {
+            // Before anything else uses the subsystem, as task 3.3 requires.
+            magi_rs::logging::warn_if_recovery_detection_is_off(
+                &cfg.file_filter,
+                Some(magi_rs::logging::SCREEN_LEVEL),
+            );
             // REQ-L63: on stderr as well as in the envelope, so a CI job can
             // capture it without parsing either the log or the JSON.
             eprintln!("run: {}", magi_rs::logging::run_id());

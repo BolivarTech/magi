@@ -126,9 +126,15 @@ pub const SCREEN_LEVEL: tracing::Level = tracing::Level::WARN;
 ///
 /// `O(k)` over the filter's per-target overrides.
 pub fn warn_if_recovery_detection_is_off(
-    _file_filter: &filter::Filter,
-    _screen_level: Option<tracing::Level>,
+    file_filter: &filter::Filter,
+    screen_level: Option<tracing::Level>,
 ) {
+    if health::recovery_detection_is_off(file_filter, screen_level) {
+        tracing::warn!(
+            target: health::HEALTH_TARGET,
+            "health recovery detection is off: both filters exclude info-level events"
+        );
+    }
 }
 
 /// A delivery that shows nothing, for the tests and for MS1's absent screen.
@@ -171,6 +177,11 @@ pub struct LoggingConfig {
 #[derive(Clone)]
 pub struct LoggingHandle {
     appender: std::sync::Arc<appender::DailyAppender>,
+    /// The layer's health reporter, shared rather than owned.
+    ///
+    /// Exposed only through [`LoggingHandle::health_tick`] and
+    /// [`LoggingHandle::health_flush`], so no caller decides when to lock.
+    health: std::sync::Arc<magi_layer::HealthReporter>,
 }
 
 impl LoggingHandle {
@@ -215,17 +226,43 @@ impl LoggingHandle {
         }
     }
 
-    /// Advances the health window. **A no-op in MS1.**
+    /// Advances the health window, showing any transition it expires.
     ///
-    /// The method exists from MS1 because MS2 puts it to use without changing a
-    /// signature the three startup surfaces already return. Nothing feeds the
-    /// tracker here: `cause` is always `None` in MS1, so there is nothing to
-    /// advance. Same argument as `Audited`'s `cause` field — what is reserved is
-    /// the mechanism, never invented content.
-    pub fn health_tick(&self, _now: std::time::Instant) {}
+    /// # Parameters
+    ///
+    /// * `now` — a monotonic instant. Passed in rather than read here so the
+    ///   tracker stays deterministic under test.
+    ///
+    /// # Who calls it
+    ///
+    /// The TUI's event loop, which already wakes on its own `poll` timeout;
+    /// and headless once per agent turn, which is the only natural cadence a
+    /// mode without an event loop has. The consequence is declared rather than
+    /// hidden: in headless the window is really "until the next turn", and a
+    /// run shorter than that relies on [`Self::health_flush`] instead.
+    ///
+    /// # Complexity
+    ///
+    /// `O(s)` in the number of subsystems observed so far.
+    pub fn health_tick(&self, now: std::time::Instant) {
+        self.health.tick(now);
+    }
 
-    /// Drains any pending health transitions. **A no-op in MS1.**
-    pub fn health_flush(&self) {}
+    /// Shows every pending health transition, window or no window (SC-L90).
+    ///
+    /// Called at close, where there is no "later" left for a state to settle
+    /// in: the choice is between showing a pending transition now and losing
+    /// it. Neither `SIGKILL` nor an unhandled `SIGTERM` reaches this, and MS2
+    /// installs no handler — a container stopped that way loses the pending
+    /// transition, with the same consolation as the appender's own drain, that
+    /// what already reached the file is complete.
+    ///
+    /// # Complexity
+    ///
+    /// `O(s)` in the number of subsystems observed so far.
+    pub fn health_flush(&self) {
+        self.health.flush();
+    }
 
     /// How many events the appender has dropped.
     #[must_use]
@@ -500,6 +537,10 @@ pub fn init_logging(
         std::sync::Arc::clone(&audit),
         std::sync::Arc::clone(&sink),
     );
+    // Taken before installation, for the same reason `with_tui` is called
+    // before it: installation consumes the layer, and the exit path still has
+    // to be able to flush what the tracker is holding.
+    let health = layer.health();
     if let Some((tui_sink, tui_level)) = tui {
         // Called HERE, inside, before the subscriber is installed: installation
         // consumes the layer, so afterwards a `self -> Self` builder has nothing
@@ -509,6 +550,7 @@ pub fn init_logging(
 
     let handle = LoggingHandle {
         appender: std::sync::Arc::clone(&appender),
+        health,
     };
     // **The race is resolved, not discarded.** Two callers can both pass the
     // `get` above, and both then build an appender — each with its own writer

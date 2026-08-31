@@ -26,7 +26,9 @@
 //! an event that size is rare, and the alternative is a leak.
 
 use std::collections::BTreeSet;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use tracing::field::{Field, Visit};
 use tracing::{Event, Subscriber};
@@ -34,7 +36,8 @@ use tracing_subscriber::layer::Context;
 use tracing_subscriber::Layer;
 
 use crate::logging::appender::{DailyAppender, Priority, Submitted};
-use crate::logging::auditor::{Auditor, CauseKey, Queued};
+use crate::logging::auditor::{Audited, Auditor, CauseKey, Queued};
+use crate::logging::health::{render_transition, HealthTracker, Transition, HEALTH_TARGET};
 use crate::logging::render::{escape_for_line, render_event};
 
 /// Field name an emitter uses to declare the subsystem half of a [`CauseKey`]
@@ -158,6 +161,161 @@ impl Reporter {
     }
 }
 
+/// Feeds the health tracker, and shows what it decides is worth showing.
+///
+/// **Held behind an `Arc` by two owners with different jobs.** The layer
+/// observes, on whichever thread emitted; the [`LoggingHandle`] ticks the
+/// window and flushes at close, on the thread that is ending the run. Neither
+/// owns the other, and the handle deliberately exposes only `health_tick` and
+/// `health_flush` rather than the tracker itself: handing out an
+/// `Arc<Mutex<HealthTracker>>` would leave every caller deciding when to lock,
+/// which is exactly the decision this repository already centralised for the
+/// DEK.
+///
+/// [`LoggingHandle`]: crate::logging::LoggingHandle
+pub(crate) struct HealthReporter {
+    /// The tracker itself, which is `!Sync` by design — see its own rustdoc.
+    tracker: Mutex<HealthTracker>,
+    /// Where a transition is shown. **Not the screen BRANCH**: a transition is
+    /// not an event and must not be filtered again, the same exemption the
+    /// auditor's alarm has and for the same reason. This is the sink the
+    /// caller built, which is the TUI's message channel in the terminal and
+    /// stderr headless.
+    sink: Arc<dyn crate::logging::NoticeDelivery>,
+    /// The process auditor, shared with the layer that owns this reporter.
+    auditor: Arc<Auditor>,
+    /// Consulted only for its directory, to name the day's file.
+    appender: Arc<DailyAppender>,
+}
+
+impl HealthReporter {
+    /// Builds a reporter over an empty tracker.
+    fn new(
+        sink: Arc<dyn crate::logging::NoticeDelivery>,
+        auditor: Arc<Auditor>,
+        appender: Arc<DailyAppender>,
+    ) -> Self {
+        Self {
+            tracker: Mutex::new(HealthTracker::new()),
+            sink,
+            auditor,
+            appender,
+        }
+    }
+
+    /// Feeds one audited event to the tracker, and shows what comes back.
+    ///
+    /// # Parameters
+    ///
+    /// * `line` — the audited event, which carries the emitter's cause key.
+    /// * `level` — the event's level, which is the ONLY thing `ok` is derived
+    ///   from. Deriving it from the text would be what R-L13 forbids for the
+    ///   key itself: every HTTP 500 with a fresh request id would read as new.
+    ///
+    /// # Why the lock is taken only when there is a cause
+    ///
+    /// magi-core's 46 uninstrumented call sites carry no key and are most of
+    /// the volume. Testing `cause` first trades one comparison for a mutex
+    /// acquisition per foreign event on the hot path.
+    ///
+    /// # Complexity
+    ///
+    /// `O(1)` for an event with no cause; otherwise one lock plus the
+    /// tracker's own amortised `O(1)`.
+    fn observe(&self, line: &Audited, level: tracing::Level) {
+        let Some(cause) = line.cause() else {
+            return;
+        };
+        // ERROR and WARN are a failure; INFO and below carrying a key are the
+        // success event recovery is detected from (task 3.3).
+        let ok = level > tracing::Level::WARN;
+        let decided = {
+            let Ok(mut tracker) = self.tracker.lock() else {
+                return;
+            };
+            tracker.observe(Some(cause), ok, Instant::now())
+        };
+        if let Some(transition) = decided {
+            self.show(&transition);
+        }
+    }
+
+    /// Expires the stability window without a new event.
+    ///
+    /// # Complexity
+    ///
+    /// `O(s)` in the number of subsystems observed so far.
+    pub(crate) fn tick(&self, now: Instant) {
+        let decided = {
+            let Ok(mut tracker) = self.tracker.lock() else {
+                return;
+            };
+            tracker.tick(now)
+        };
+        if let Some(transition) = decided {
+            self.show(&transition);
+        }
+    }
+
+    /// Shows every still-pending transition, window or no window (SC-L90).
+    ///
+    /// # Complexity
+    ///
+    /// `O(s)` in the number of subsystems observed so far.
+    pub(crate) fn flush(&self) {
+        let decided = {
+            let Ok(mut tracker) = self.tracker.lock() else {
+                return;
+            };
+            tracker.flush()
+        };
+        for transition in &decided {
+            self.show(transition);
+        }
+    }
+
+    /// Puts one transition on the screen.
+    ///
+    /// # Why an audited line and not a plain `String`
+    ///
+    /// The text carries RUNTIME data: REQ-L23's third part is the day's log
+    /// path, composed from whatever the operator put in `log_dir` — which can
+    /// hold a credential if somebody puts one there. The fixed words and the
+    /// cause key have nothing to audit; the path does. The cause is passed as
+    /// `None` on purpose: what leaves here is the SCREEN MESSAGE, not the
+    /// event that caused it, and handing the key back would re-inject it into
+    /// the tracker.
+    ///
+    /// # Complexity
+    ///
+    /// `O(k*n)` — the auditor's, over a short line.
+    fn show(&self, transition: &Transition) {
+        let text = render_transition(transition, &self.todays_log_path());
+        // The alarm is discarded exactly as `Reporter::announce_once` discards
+        // its own: this is the layer talking about itself, and the redaction
+        // that matters has already happened inside `audit`.
+        let (line, _alarm) = self.auditor.audit(&text, HEALTH_TARGET, None, text.len());
+        self.sink.deliver(&line.map_line(escape_for_line));
+    }
+
+    /// The file today's events are being written to.
+    ///
+    /// Composed per delivery rather than cached, because a session that
+    /// crosses midnight UTC rolls onto a new file and a cached path would send
+    /// the reader to yesterday's.
+    ///
+    /// # Complexity
+    ///
+    /// `O(1)`.
+    fn todays_log_path(&self) -> PathBuf {
+        self.appender
+            .dir()
+            .join(crate::logging::rotation::file_name(
+                time::OffsetDateTime::now_utc().date(),
+            ))
+    }
+}
+
 /// The only layer.
 pub struct MagiLayer {
     file: FileSink,
@@ -165,6 +323,7 @@ pub struct MagiLayer {
     tui: Option<(TuiSink, tracing::Level)>,
     auditor: Arc<Auditor>,
     reporter: Reporter,
+    health: Arc<HealthReporter>,
 }
 
 impl MagiLayer {
@@ -176,6 +335,11 @@ impl MagiLayer {
         auditor: Arc<Auditor>,
         notices: Arc<dyn crate::logging::NoticeDelivery>,
     ) -> Self {
+        let health = Arc::new(HealthReporter::new(
+            Arc::clone(&notices),
+            Arc::clone(&auditor),
+            Arc::clone(&file.appender),
+        ));
         Self {
             file,
             file_filter,
@@ -187,7 +351,17 @@ impl MagiLayer {
                 stopped: std::sync::atomic::AtomicBool::new(false),
             },
             auditor,
+            health,
         }
+    }
+
+    /// The health reporter this layer feeds.
+    ///
+    /// `init_logging` takes a handle on it BEFORE installing the subscriber,
+    /// because installation consumes the layer and the exit path still has to
+    /// be able to flush.
+    pub(crate) fn health(&self) -> Arc<HealthReporter> {
+        Arc::clone(&self.health)
     }
 
     /// Attaches the screen branch and its level.
@@ -260,6 +434,13 @@ impl<S: Subscriber> Layer<S> for MagiLayer {
         // leak that made the byte budget a lifetime quota.
         let reserved = escaped.reserved_len();
         let level = *event.metadata().level();
+
+        // **Health is observed here: after the audit, before the fan-out.**
+        // This is the only point that sees EVERY event, including the ones the
+        // screen filter is about to discard -- and whether a subsystem is
+        // healthy must not depend on what happens to be displayed. It is also
+        // where the `Audited` carrying the cause key already exists.
+        self.health.observe(&escaped, level);
 
         if level <= self.file_filter.level_for(target) {
             let priority = if level <= tracing::Level::WARN {

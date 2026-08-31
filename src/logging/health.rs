@@ -14,7 +14,10 @@
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+use tracing::Level;
+
 use crate::logging::auditor::CauseKey;
+use crate::logging::filter::Filter;
 
 /// How long a state has to hold before its transition reaches the screen
 /// (R-L13d). **Chosen: 30 s, not measured.**
@@ -234,6 +237,63 @@ impl HealthTracker {
     }
 }
 
+/// Target every line this module puts on screen is attributed to.
+///
+/// Fixed rather than inherited from the event that caused it: the alarm path
+/// carries a target so an operator knows where to go look, and a transition's
+/// origin is this module, not the subsystem it is reporting on.
+pub const HEALTH_TARGET: &str = "magi_rs::logging::health";
+
+/// The subsystem half of the causes the message table below declares.
+const SUBSYSTEM_EMBEDDER: &str = "embedder";
+/// The subsystem half of the provider's causes.
+const SUBSYSTEM_PROVIDER: &str = "provider";
+/// The subsystem half of the vault's causes.
+const SUBSYSTEM_VAULT: &str = "vault";
+/// A subsystem that could not be reached at all.
+const CAUSE_UNREACHABLE: &str = "unreachable";
+/// A subsystem that answered, badly.
+const CAUSE_HTTP_ERROR: &str = "http_error";
+/// A vault that is closed.
+const CAUSE_LOCKED: &str = "locked";
+
+/// The screen texts one cause owes: degradation first, recovery second.
+///
+/// **The table is the contract, not a suggestion.** What a user reads must not
+/// be left to whoever implements the call site, so each pair is written once,
+/// here, and every message carries REQ-L23's first two parts — what broke, and
+/// what it means for this session. [`render_transition`] adds the third.
+///
+/// # Returns
+///
+/// `None` for a cause with no declared row, which is a defect rather than a
+/// runtime case — see [`render_transition`].
+///
+/// # Complexity
+///
+/// `O(1)`: a match over a fixed set of literals.
+fn screen_messages(key: CauseKey) -> Option<(&'static str, &'static str)> {
+    match (key.subsystem(), key.cause()) {
+        (SUBSYSTEM_EMBEDDER, CAUSE_UNREACHABLE) => Some((
+            "memory: retrieval unavailable — answers will not use past context",
+            "✓ memory: retrieval restored",
+        )),
+        (SUBSYSTEM_EMBEDDER, CAUSE_HTTP_ERROR) => Some((
+            "memory: retrieval failing — answers will not use past context",
+            "✓ memory: retrieval restored",
+        )),
+        (SUBSYSTEM_PROVIDER, CAUSE_UNREACHABLE) => Some((
+            "provider: unreachable — the turn cannot complete",
+            "✓ provider: reachable again",
+        )),
+        (SUBSYSTEM_VAULT, CAUSE_LOCKED) => Some((
+            "vault: locked — stored credentials are unavailable",
+            "✓ vault: unlocked",
+        )),
+        _ => None,
+    }
+}
+
 /// Turns a transition into the line the user reads.
 ///
 /// # Parameters
@@ -244,23 +304,83 @@ impl HealthTracker {
 ///
 /// # Returns
 ///
-/// One screen line.
+/// One screen line carrying REQ-L23's three parts: what broke, what it means
+/// for this session, and where to read more.
+///
+/// # A cause with no declared row is a DEFECT, and the line says so
+///
+/// Substituting generic runtime text would satisfy the type and defeat the
+/// requirement: the message exists to be specific, and the omission would stay
+/// invisible until the cause fires in production, which is precisely when
+/// somebody needs the message. Naming it instead makes the missing row
+/// findable. It does not panic — this module is the one a reader reaches for
+/// when everything else has already failed.
+///
+/// # Examples
+///
+/// ```
+/// use std::path::Path;
+/// use magi_rs::logging::auditor::CauseKey;
+/// use magi_rs::logging::health::{render_transition, Transition};
+///
+/// let key = CauseKey::new("provider", "unreachable");
+/// let line = render_transition(
+///     &Transition::Degraded(key),
+///     Path::new(".magi/logs/magi-2026-08-14.log"),
+/// );
+/// assert!(line.starts_with("provider: unreachable"));
+/// assert!(line.contains("magi-2026-08-14.log"));
+/// ```
 ///
 /// # Complexity
 ///
-/// `O(1)`.
+/// `O(n)` over the rendered line.
 #[must_use]
-pub fn render_transition(_t: &Transition, _log_path: &Path) -> String {
-    String::new()
+pub fn render_transition(t: &Transition, log_path: &Path) -> String {
+    let (key, text) = match t {
+        Transition::Degraded(key) => (key, screen_messages(*key).map(|(d, _)| d)),
+        Transition::Restored(key) => (key, screen_messages(*key).map(|(_, r)| r)),
+    };
+    match text {
+        Some(text) => format!("{text} (see {})", log_path.display()),
+        None => format!(
+            "internal error: no screen message is declared for cause {}/{}; \
+             the task that introduced the cause owes one (see {})",
+            key.subsystem(),
+            key.cause(),
+            log_path.display()
+        ),
+    }
+}
+
+/// Whether the union of both filters excludes `INFO`.
+///
+/// # Parameters
+///
+/// * `file_filter` — the file branch's filter.
+/// * `screen_level` — the screen branch's level, when one is wired.
+///
+/// # Returns
+///
+/// `true` when no `INFO` event can reach the layer, which is the condition
+/// under which recovery detection silently stops working: the success events a
+/// recovery is derived from are `INFO`-level.
+///
+/// # Complexity
+///
+/// `O(k)` over the filter's per-target overrides.
+pub(crate) fn recovery_detection_is_off(file_filter: &Filter, screen_level: Option<Level>) -> bool {
+    let union = match screen_level {
+        Some(screen) => file_filter.max_level().max(screen),
+        None => file_filter.max_level(),
+    };
+    union < Level::INFO
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::time::Duration;
-    use tracing::Level;
-
-    use crate::logging::filter::Filter;
 
     #[test]
     fn the_first_degradation_is_immediate_and_does_not_wait_for_the_window() {
