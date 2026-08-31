@@ -4756,13 +4756,15 @@ async fn attach_persistent_memory(
                 if let Ok(embedding_url) = magi_config.effective_embedding_base_url() {
                     if magi_config.memory().distill_enabled && !is_localhost(embedding_url.as_str())
                     {
-                        // `info`. It reads like a privacy warning, and it is one — but
-                        // both halves of the condition are settings the operator wrote
-                        // and both are being honoured, which is the table's `info` row.
-                        // Compare the divergence notice, which fires on the ABSENCE of
-                        // `[magi].default_mode`: there the extra hop is a side effect of
-                        // something nobody chose, and it warns.
-                        notices.push(Notice::info(format!(
+                        // `warn`, and the first reading of this site had it wrong.
+                        // `effective_embedding_base_url` may be INHERITED from the root
+                        // `base_url` — the comment above says so — so the endpoint the
+                        // batches leave for is not necessarily one anybody chose for the
+                        // embedder. Cloud egress arrived at by inheritance is a side
+                        // effect of something nobody decided, which is the same reason
+                        // the divergence notice warns, and it is worth knowing before
+                        // the batches go rather than after.
+                        notices.push(Notice::warn(format!(
                             "Memory distiller will send bounded memory batches \
                              (≤ {} tokens) to {} — set distill_enabled = false \
                              in [memory] for zero cloud memory egress.",
@@ -5094,8 +5096,8 @@ struct HeadlessContext {
     /// `false` when absent. Same extraction-order note as [`Self::env_mode`].
     env_untrusted_content: bool,
     /// The REQ-A07p/SC-A07p endpoint-divergence notice for THIS run, if it applies —
-    /// fix round 4. Already `eprintln!`'d to stderr by `prepare_headless` (same
-    /// immediate-print convention as `cfg_notices`/`trio_notices` just above it), and
+    /// fix round 4. Already announced by `prepare_headless` through `emit_notices`, which
+    /// routes it by level like every other notice, and
     /// ALSO kept here because `prepare_headless` cannot be driven from a unit test in any way
     /// that captures its stderr (this is a real process resource, global and not
     /// parallel-test-safe to redirect), so a test asserts on this field directly
@@ -5292,9 +5294,11 @@ async fn prepare_headless(
         },
         None => (MagiConfig::default(), Vec::new()),
     };
-    for n in &cfg_notices {
-        eprintln!("{n}");
-    }
+    // NOT printed here. These are the same `config::resolution_notices` the TUI classifies
+    // as `info` — an honoured setting explaining what it does and does not cover — and five
+    // raw prints at startup are five lines the screen policy says belong in the file. They
+    // ride to the emission point below with the rest.
+    let cfg_notices: Vec<Notice> = cfg_notices.into_iter().map(Notice::info).collect();
 
     // Resolved BEFORE reading input so the effective `max_input_bytes` (an
     // operator-lowered `[headless]` cap, spec §11) governs the read itself
@@ -5498,7 +5502,7 @@ async fn prepare_headless(
 
     // REQ-A24/A24b/A24c (Task 5.2): same polling as the TUI, see `run()`'s comment — never
     // blocks or fails headless startup.
-    let mut trio_notices: Vec<Notice> = Vec::new();
+    let mut trio_notices: Vec<Notice> = cfg_notices;
     // Same wiring as the TUI, through the same opener (B3).
     let capability_cache = open_capability_cache(memory.as_ref(), &mut trio_notices);
     let (warn_tokens, probe) = probe_and_report(
@@ -5600,96 +5604,26 @@ async fn prepare_headless(
     //
     // **A failure here is a warning, never fatal** (REQ-L35): a headless run that
     // cannot write a log file is still a run that can answer.
-    if let Some(ws) = workspace.as_ref() {
-        let resolved_dir = magi_config.resolve_log_dir(
-            h.log_dir.as_deref().and_then(|p| p.to_str()),
-            std::env::var(crate::config::ENV_LOG_DIR).ok().as_deref(),
-            &ws.logs_dir(),
-        );
-        let log_dir = resolved_dir.path.clone();
-        // **The same precedence the TUI applies** (REQ-L29). This surface used
-        // to drop the env tier on the directory and bypass `resolve_file_filter`
-        // altogether, so one `magi.toml` produced different levels depending on
-        // which surface read it — a difference nothing announced.
-        let filter = magi_config.resolve_file_filter(
-            h.log_level.map(CliLogLevel::as_filter_word),
-            std::env::var(crate::config::ENV_FILE_FILTER)
-                .ok()
-                .as_deref(),
-        );
-        let parsed = match magi_rs::logging::filter::Filter::parse(&filter) {
-            Ok(f) => f,
-            Err(e) => {
-                // 2 like every other invalid-input path here: a filter the
-                // operator wrote and mistyped is bad INPUT, not a runtime fault.
-                eprintln!("error: {e}");
-                return Err(2);
-            }
-        };
-        let cfg = magi_rs::logging::LoggingConfig {
-            log_dir: log_dir.clone(),
-            file_filter: parsed,
-        };
-        // The same wiring the TUI surface applies just above, and for the same
-        // reason: one layer with both mouths, the screen level fixed by
-        // REQ-L19 rather than configured.
-        let notices: std::sync::Arc<dyn magi_rs::logging::NoticeDelivery> =
-            std::sync::Arc::new(magi_rs::logging::DiscardDelivery);
-        let logging_up = match magi_rs::logging::init_logging(
-            &cfg,
-            std::sync::Arc::clone(&notices),
-            Some((
-                magi_rs::logging::magi_layer::TuiSink::new(std::sync::Arc::clone(&notices)),
-                magi_rs::logging::SCREEN_LEVEL,
-            )),
-        ) {
-            Ok(_) => true,
-            Err(e) => {
-                // **D-L20, the one exception REQ-L35 carves out.** An operator who
-                // wrote a path asked for that path; degrading silently hands them an
-                // empty directory and no clue, which is the complaint this feature
-                // exists to answer. A DEFAULTED directory that cannot be created
-                // degrades, because nobody asked for it.
-                if resolved_dir.declared {
-                    eprintln!(
-                        "error: the log directory {} could not be used: {e}",
-                        log_dir.display()
-                    );
-                    return Err(2);
-                }
-                eprintln!(
-                    "warning: logging is not writing to {}: {e}; the run continues",
-                    log_dir.display()
-                );
-                false
-            }
-        };
-        // **Only when there is a log to filter.** `run_id()` mints its id from
-        // its own OnceLock and `announce_run` emits into a subscriber that was
-        // never installed, so neither panics with the layer down -- but printing
-        // `run: <id>` promises a CI job a value it can filter the daily file by,
-        // and there is no daily file. An id that identifies nothing sends the
-        // reader looking for one.
-        if logging_up {
-            // Before anything else uses the subsystem, as task 3.3 requires.
-            magi_rs::logging::warn_if_recovery_detection_is_off(
-                &cfg.file_filter,
-                Some(magi_rs::logging::SCREEN_LEVEL),
-            );
-            // REQ-L63: on stderr as well as in the envelope, so a CI job can
-            // capture it without parsing either the log or the JSON.
-            eprintln!("run: {}", magi_rs::logging::run_id());
-            // The third piece of REQ-L63: the run's first event. It cannot come
-            // earlier — the layer it goes to is installed just above.
-            magi_rs::logging::announce_run(command, &ws.root);
-        }
-    }
+    // **Every path emits, including the two that fail.** `bring_up_headless_logging`
+    // returns from the middle on bad input, and inline that skipped the emission below and
+    // destroyed the trio and budget context collected before it. Holding the result until
+    // after the emission is what makes that unreachable rather than remembered.
+    let logging = match workspace.as_ref() {
+        Some(ws) => bring_up_headless_logging(h, &magi_config, ws, command),
+        // No workspace, no log directory, and therefore no layer at all. The notices below
+        // still reach the user: `emit_notices` falls back to stderr for what the screen
+        // policy shows when nothing is listening.
+        None => Ok(()),
+    };
 
     // **After the layer is up, not where they were collected.** The notices are announced
     // through `tracing` now, so emitting them before `init_logging` would put every one of
     // them into a subscriber that does not exist yet. The trio is built long before the log
     // directory is resolved, so the list waits here instead.
     emit_notices(trio_notices);
+    // Only now: the bring-up's own error already printed its reason, and this keeps the
+    // context that led up to it from being thrown away with the run.
+    logging?;
 
     Ok(HeadlessContext {
         workdir,
@@ -5711,6 +5645,123 @@ async fn prepare_headless(
         #[cfg(test)]
         divergence_notice: headless_divergence_notice,
     })
+}
+
+/// Brings the logging layer up for a headless run.
+///
+/// # Parameters
+///
+/// * `h` — the subcommand's arguments, for the `--log-dir`/`--log-level` tiers.
+/// * `magi_config` — the loaded configuration, for the file tier of the same two.
+/// * `ws` — the discovered workspace, which is what makes a log directory nameable.
+/// * `command` — the subcommand name, for the run's first event (REQ-L63).
+///
+/// # Errors
+///
+/// `2` for input the operator wrote and got wrong: an unparseable `file_filter`, or a log
+/// directory that was DECLARED and cannot be used (D-L20). A DEFAULTED directory that
+/// cannot be used warns and the run continues (REQ-L35).
+///
+/// # Why it is a function rather than the block it used to be
+///
+/// Both error paths return from the middle of the bring-up, and the caller emits the
+/// startup notices AFTER it. Inline, those two returns skipped the emission and the trio
+/// and budget context collected before them was destroyed. Extracted, the caller emits on
+/// every path by construction, and there is no third early return for a later author to
+/// forget — which is the same reason the emission is not simply repeated at each `return`.
+///
+/// # Complexity
+///
+/// `O(1)` plus the filesystem work of creating the log directory.
+fn bring_up_headless_logging(
+    h: &HeadlessArgs,
+    magi_config: &MagiConfig,
+    ws: &crate::system::workspace::Workspace,
+    command: &str,
+) -> Result<(), i32> {
+    let resolved_dir = magi_config.resolve_log_dir(
+        h.log_dir.as_deref().and_then(|p| p.to_str()),
+        std::env::var(crate::config::ENV_LOG_DIR).ok().as_deref(),
+        &ws.logs_dir(),
+    );
+    let log_dir = resolved_dir.path.clone();
+    // **The same precedence the TUI applies** (REQ-L29). This surface used
+    // to drop the env tier on the directory and bypass `resolve_file_filter`
+    // altogether, so one `magi.toml` produced different levels depending on
+    // which surface read it — a difference nothing announced.
+    let filter = magi_config.resolve_file_filter(
+        h.log_level.map(CliLogLevel::as_filter_word),
+        std::env::var(crate::config::ENV_FILE_FILTER)
+            .ok()
+            .as_deref(),
+    );
+    let parsed = match magi_rs::logging::filter::Filter::parse(&filter) {
+        Ok(f) => f,
+        Err(e) => {
+            // 2 like every other invalid-input path here: a filter the
+            // operator wrote and mistyped is bad INPUT, not a runtime fault.
+            eprintln!("error: {e}");
+            return Err(2);
+        }
+    };
+    let cfg = magi_rs::logging::LoggingConfig {
+        log_dir: log_dir.clone(),
+        file_filter: parsed,
+    };
+    // The same wiring the TUI surface applies just above, and for the same
+    // reason: one layer with both mouths, the screen level fixed by
+    // REQ-L19 rather than configured.
+    let notices: std::sync::Arc<dyn magi_rs::logging::NoticeDelivery> =
+        std::sync::Arc::new(magi_rs::logging::DiscardDelivery);
+    let logging_up = match magi_rs::logging::init_logging(
+        &cfg,
+        std::sync::Arc::clone(&notices),
+        Some((
+            magi_rs::logging::magi_layer::TuiSink::new(std::sync::Arc::clone(&notices)),
+            magi_rs::logging::SCREEN_LEVEL,
+        )),
+    ) {
+        Ok(_) => true,
+        Err(e) => {
+            // **D-L20, the one exception REQ-L35 carves out.** An operator who
+            // wrote a path asked for that path; degrading silently hands them an
+            // empty directory and no clue, which is the complaint this feature
+            // exists to answer. A DEFAULTED directory that cannot be created
+            // degrades, because nobody asked for it.
+            if resolved_dir.declared {
+                eprintln!(
+                    "error: the log directory {} could not be used: {e}",
+                    log_dir.display()
+                );
+                return Err(2);
+            }
+            eprintln!(
+                "warning: logging is not writing to {}: {e}; the run continues",
+                log_dir.display()
+            );
+            false
+        }
+    };
+    // **Only when there is a log to filter.** `run_id()` mints its id from
+    // its own OnceLock and `announce_run` emits into a subscriber that was
+    // never installed, so neither panics with the layer down -- but printing
+    // `run: <id>` promises a CI job a value it can filter the daily file by,
+    // and there is no daily file. An id that identifies nothing sends the
+    // reader looking for one.
+    if logging_up {
+        // Before anything else uses the subsystem, as task 3.3 requires.
+        magi_rs::logging::warn_if_recovery_detection_is_off(
+            &cfg.file_filter,
+            Some(magi_rs::logging::SCREEN_LEVEL),
+        );
+        // REQ-L63: on stderr as well as in the envelope, so a CI job can
+        // capture it without parsing either the log or the JSON.
+        eprintln!("run: {}", magi_rs::logging::run_id());
+        // The third piece of REQ-L63: the run's first event. It cannot come
+        // earlier — the layer it goes to is installed just above.
+        magi_rs::logging::announce_run(command, &ws.root);
+    }
+    Ok(())
 }
 
 /// Registers the sandboxed file tools on `agent` with `workdir` as the

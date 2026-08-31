@@ -40,7 +40,12 @@ use std::collections::HashSet;
 ///
 /// Fixed rather than per-source so an operator can raise or lower the whole startup
 /// announcement with one `[logging].file_filter` directive.
-pub const NOTICE_TARGET: &str = "magi_rs::startup";
+///
+/// **The cost of one target, stated because someone will need it:** collecting the emission
+/// in one place flattens the module target for all of it, so a REQ-L30/L31 per-target
+/// directive can address the startup as a unit and not a subsystem within it. What it does
+/// not cost is provenance — each event still carries its own file, line and span.
+const NOTICE_TARGET: &str = "magi_rs::startup";
 
 /// A startup notice, with the level that decides which mouth it reaches.
 ///
@@ -118,11 +123,41 @@ pub fn emit_notices(notices: Vec<Notice>) {
 ///
 /// [`emit_notices`]'s, plus `O(n)` writes on the fallback path.
 pub(crate) fn emit_notices_into(notices: Vec<Notice>, fallback: &mut dyn std::io::Write) {
-    for notice in ordered_for_emission(notices) {
-        announce(&notice);
+    let ordered = ordered_for_emission(notices);
+
+    // **`OFF` is the no-subscriber state, and it is the right question to ask.** The global
+    // maximum starts at `OFF` and is only raised when a subscriber is installed, so this
+    // answers "would `announce` reach anything at all?" rather than the narrower "was a
+    // dispatcher ever set". Our own layer hints `max(file_filter, SCREEN_LEVEL)`, which is
+    // never `OFF`, so an installed layer never takes the fallback.
+    if tracing::level_filters::LevelFilter::current() != tracing::level_filters::LevelFilter::OFF {
+        for notice in &ordered {
+            announce(notice);
+        }
+        return;
     }
-    let _ = fallback;
+
+    // No layer, so no file either: `init_logging` is guarded on a discovered `.magi/`
+    // workspace and this function is not. The screen policy still decides who speaks —
+    // writing every line here would put the whole diagnostic list in front of the user in
+    // exactly the case SC-L14 exists to keep quiet — and what is left with nowhere to go is
+    // the `INFO` half, whose declared destination is a file that does not exist. The first
+    // `WARN` in this situation says why there is no workspace, which is also why there is no
+    // log.
+    for notice in ordered.iter().filter(|n| n.level <= SCREEN_LEVEL) {
+        // A failed write to stderr has nowhere to be reported, so it is dropped rather than
+        // escalated: this is already the last resort.
+        let _ = writeln!(fallback, "{}", notice.text);
+    }
 }
+
+/// The level at and above which a notice reaches a human.
+///
+/// The same constant the layer's screen branch is wired at (REQ-L19), referenced rather than
+/// repeated: two copies would let the fallback and the layer disagree about what a user sees,
+/// and the disagreement would only show up in the case where there is no layer to compare
+/// against.
+const SCREEN_LEVEL: tracing::Level = crate::logging::SCREEN_LEVEL;
 
 /// Puts the notices in the order they are announced in, with the duplicates gone.
 ///
