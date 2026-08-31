@@ -1271,18 +1271,21 @@ mod tests {
         // **Only the production half**, split at the test module. This very
         // test names the macros it forbids, so scanning the whole file makes it
         // its own first offender -- which it did, on the first run.
-        let whole = include_str!("appender.rs");
+        // Line endings come out before anything is matched, and the needle is
+        // an escape rather than a multi-line literal. The two ends used to
+        // disagree: rustc's lexer normalises CRLF to LF inside a source
+        // literal, while `include_str!` hands back the file's bytes untouched.
+        // On a CRLF checkout the needle was LF and the haystack was CRLF, so
+        // the split found nothing and the guard panicked. Green on the machine
+        // it was written on, red in CI, which is the whole shape of it.
+        let whole = include_str!("appender.rs").replace('\r', "");
         // Split on the MODULE marker at column zero, not on the attribute: an
         // attribute of the same name sits on a method above `spawn_writer`, so
         // splitting on it truncated the production half to nothing and the
         // scan came back empty — a guardian that passes by having nothing to
         // look at.
         let (source, _) = whole
-            .split_once(
-                "
-#[cfg(test)]
-mod tests {",
-            )
+            .split_once("\n#[cfg(test)]\nmod tests {")
             .expect("this module has a test section");
         // `println!` also matches `eprintln!`, which is the one that mattered
         // here, but `dbg!` writes to stderr and shares neither spelling. A

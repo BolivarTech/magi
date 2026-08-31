@@ -6090,7 +6090,12 @@ mod tests {
         // process auditor; an auditor built anywhere else starts empty, so the
         // exact pass covers the log and nothing that surface redacts. A comment
         // cannot hold this -- it demonstrably did not -- so a check does.
-        let source = include_str!("main.rs");
+        // The `\r` comes out because `include_str!` returns the file's bytes
+        // untouched while every needle below is an escaped `\n`. On a CRLF
+        // working tree they never meet, and rustfmt writes CRLF on Windows, so
+        // this guard passed on a Linux checkout and failed in CI on a Windows
+        // one. Three sibling guards in this file had the same bug.
+        let source = include_str!("main.rs").replace('\r', "");
         let (production, _) = source
             .split_once("\n#[cfg(test)]\nmod tests {")
             .expect("this file has a test module");
@@ -6123,7 +6128,12 @@ mod tests {
         // the TUI. The headless surface -- the one a CI job uses -- shipped
         // unarmed, and every test stayed green because the canary registers its
         // own secrets and the selector's unit tests never touch a call site.
-        let source = include_str!("main.rs");
+        // The `\r` comes out because `include_str!` returns the file's bytes
+        // untouched while every needle below is an escaped `\n`. On a CRLF
+        // working tree they never meet, and rustfmt writes CRLF on Windows, so
+        // this guard passed on a Linux checkout and failed in CI on a Windows
+        // one. Three sibling guards in this file had the same bug.
+        let source = include_str!("main.rs").replace('\r', "");
         let (production, _) = source
             .split_once("\n#[cfg(test)]\nmod tests {")
             .expect("this file has a test module");
@@ -6152,7 +6162,12 @@ mod tests {
         // second "too short" warning for one credential, and it is the shape a
         // half-finished move leaves behind -- which is how the duplicate this
         // removes came to exist.
-        let source = include_str!("main.rs");
+        // The `\r` comes out because `include_str!` returns the file's bytes
+        // untouched while every needle below is an escaped `\n`. On a CRLF
+        // working tree they never meet, and rustfmt writes CRLF on Windows, so
+        // this guard passed on a Linux checkout and failed in CI on a Windows
+        // one. Three sibling guards in this file had the same bug.
+        let source = include_str!("main.rs").replace('\r', "");
         let (production, _) = source
             .split_once("\n#[cfg(test)]\nmod tests {")
             .expect("this file has a test module");
@@ -9107,7 +9122,12 @@ mod tests {
         // number as `ctx.timeout_decision`, the value the context already carries from
         // `prepare_headless`, so no assertion on the *result* can tell a correct read from a
         // regressed re-resolution apart. Only the source text distinguishes them.
-        let src = include_str!("main.rs");
+        // The `\r` comes out because `include_str!` returns the file's bytes
+        // untouched while every needle below is an escaped `\n`. On a CRLF
+        // working tree they never meet, and rustfmt writes CRLF on Windows, so
+        // this guard passed on a Linux checkout and failed in CI on a Windows
+        // one. Three sibling guards in this file had the same bug.
+        let src = include_str!("main.rs").replace('\r', "");
         let start = src
             .find("fn run_consult_subcommand")
             .expect("run_consult_subcommand not found — fix this test's anchor, do not delete it");

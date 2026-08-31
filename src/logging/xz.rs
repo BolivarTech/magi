@@ -369,18 +369,19 @@ mod tests {
         // it was run as a mutation and every test stayed green. The guarantee
         // REQ-L14 buys only shows up when compression is corrupt, which this
         // process cannot produce on demand.
-        let src = include_str!("xz.rs");
+        // Line endings come out before anything is matched, and the needle is
+        // an escape rather than a multi-line literal. The two ends used to
+        // disagree: rustc's lexer normalises CRLF to LF inside a source
+        // literal, while `include_str!` hands back the file's bytes untouched.
+        // On a CRLF checkout the needle was LF and the haystack was CRLF, so
+        // the split found nothing and the guard panicked. Green on the machine
+        // it was written on, red in CI, which is the whole shape of it.
+        let src = include_str!("xz.rs").replace('\r', "");
         let body = src
             .split("pub fn compress_verified")
             .nth(1)
             .expect("the function is in this file");
-        let body = body
-            .split(
-                "
-}",
-            )
-            .next()
-            .expect("its body ends somewhere");
+        let body = body.split("\n}").next().expect("its body ends somewhere");
         let verify_at = body
             .find("verify_round_trip(")
             .expect("verification is called");

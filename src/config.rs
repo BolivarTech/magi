@@ -3677,7 +3677,12 @@ max_input_bytes = 2048
     /// moment a field becomes public again, which is the mutation B16 asks about.
     #[test]
     fn no_magi_config_field_is_public_so_no_literal_can_skip_validation() {
-        let source = include_str!("config.rs");
+        // The `\r` comes out because `include_str!` returns the file's bytes
+        // untouched while every needle below is an escaped `\n`. On a CRLF
+        // working tree they never meet, and rustfmt writes CRLF on Windows, so
+        // this guard passed on a Linux checkout and failed in CI on a Windows
+        // one. Three sibling guards in this file had the same bug.
+        let source = include_str!("config.rs").replace('\r', "");
         let mut after_header = source
             .lines()
             .skip_while(|line| line.trim() != MAGI_CONFIG_STRUCT_HEADER)
