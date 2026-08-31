@@ -116,15 +116,24 @@ pub struct CauseKey {
 /// The embedder's subsystem half, as [`CauseKey::ALL`] declares it.
 const EMBEDDER: &str = "embedder";
 
-/// The embedder's cause half.
-///
-/// One cause per subsystem, deliberately: the health state is kept per
-/// subsystem, and a success event has no error variant to derive a cause from,
-/// so a per-variant key could not be matched by the success event without
-/// consulting what failed last — which is state the emitting site must not
-/// keep. The key names the health topic (retrieval is unavailable for this
-/// turn); the event's own message says which failure produced it.
+/// The cause an endpoint that could not be reached at all is keyed by.
 const UNREACHABLE: &str = "unreachable";
+
+/// The cause an endpoint that answered — badly — is keyed by.
+///
+/// **A separate cause from [`UNREACHABLE`], because R-L13b keys on the error
+/// VARIANT.** Collapsing a subsystem to one cause makes SC-L16 — the screen
+/// shows a second notice when the embedder goes from an HTTP error to a
+/// refused connection — unreachable in production, and the health tracker's
+/// entire cause-change branch dead with it.
+///
+/// The message table says the same thing in its own shape: the two embedder
+/// rows carry **different** degradation strings and an **identical** recovery
+/// string, because degradation is per variant while recovery is per subsystem.
+/// That asymmetry is also why one success event can answer both causes — the
+/// tracker keys its state on the subsystem, so a success sets it healthy
+/// whichever of its causes it names.
+const HTTP_ERROR: &str = "http_error";
 
 impl CauseKey {
     /// Every declared cause.
@@ -140,7 +149,10 @@ impl CauseKey {
     /// emitting site keeps its own constants (`tracing` fields take literals,
     /// not values); a site whose spelling drifts from this list stops
     /// resolving here, and its own tests say so.
-    pub const ALL: &'static [CauseKey] = &[CauseKey::new(EMBEDDER, UNREACHABLE)];
+    pub const ALL: &'static [CauseKey] = &[
+        CauseKey::new(EMBEDDER, UNREACHABLE),
+        CauseKey::new(EMBEDDER, HTTP_ERROR),
+    ];
 
     /// Builds a cause key from its two program-constant halves.
     ///

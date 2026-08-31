@@ -402,14 +402,53 @@ const EMBEDDER_TARGET: &str = "magi_rs::memory";
 /// resolve the emitted key through that list instead of rebuilding it.
 const EMBEDDER_SUBSYSTEM: &str = "embedder";
 
-/// The cause half of the embedder's cause key.
-///
-/// The same key rides on the failure and on the success, which is what lets
-/// the health tracker pair them; see [`CauseKey::ALL`][ck] for why there is one
-/// cause per subsystem rather than one per error variant.
+/// The cause a failure names when the endpoint could not be reached at all.
 ///
 /// [ck]: magi_rs::logging::auditor::CauseKey::ALL
-const EMBEDDER_CAUSE: &str = "unreachable";
+const EMBEDDER_UNREACHABLE: &str = "unreachable";
+
+/// The cause a failure names when the endpoint answered, badly.
+///
+/// One cause per error VARIANT (R-L13b) and not one per subsystem: with a
+/// single cause the screen could never show the change SC-L16 asks for, and
+/// the health tracker's cause-change branch would be dead code. See
+/// [`CauseKey::ALL`][ck].
+const EMBEDDER_HTTP_ERROR: &str = "http_error";
+
+/// The cause the success event names.
+///
+/// **Recovery is per SUBSYSTEM**, so this only has to name a declared cause of
+/// this one: the tracker keys its state on `cause.subsystem` and a success sets
+/// that state healthy whichever cause it carries, while both embedder rows in
+/// the message table render the identical recovery line. That is what lets one
+/// success event answer either failing variant without the call site having to
+/// remember which of them failed last — state a call site must not keep, since
+/// the tracker is what knows it.
+const EMBEDDER_RECOVERY_CAUSE: &str = EMBEDDER_UNREACHABLE;
+
+/// The cause key half a failure names, taken from the error VARIANT (R-L13b)
+/// and never from its text.
+///
+/// # Parameters
+///
+/// * `error` — the typed failure the call produced.
+///
+/// # Returns
+///
+/// The cause half of the key. The split is "did an answer arrive at all": a
+/// timeout and a refused connection are a reachability failure, while a 500, a
+/// rejected key, a throttle and an undecodable body are all an endpoint that
+/// answered badly.
+fn failure_cause(error: &EmbeddingError) -> &'static str {
+    match error {
+        EmbeddingError::Timeout | EmbeddingError::Network => EMBEDDER_UNREACHABLE,
+        EmbeddingError::Http(_)
+        | EmbeddingError::Auth
+        | EmbeddingError::RateLimited
+        | EmbeddingError::Malformed(_)
+        | EmbeddingError::Dim { .. } => EMBEDDER_HTTP_ERROR,
+    }
+}
 
 /// Reports one embedder operation's outcome as a health event.
 ///
@@ -422,9 +461,10 @@ const EMBEDDER_CAUSE: &str = "unreachable";
 /// # Why both outcomes, and why unconditionally
 ///
 /// The failure alone can only ever degrade a subsystem. Recovery is detected
-/// from a low-level event **carrying the same cause key**, so without the
-/// success half the tracker never leaves the degraded state and the `✓` line
-/// never appears. It is emitted on the success path itself rather than inside
+/// from a low-level event **carrying a cause key of the same subsystem**, so
+/// without the success half the tracker never leaves the degraded state and the
+/// `✓` line never appears. It is emitted on the success path itself rather than
+/// inside
 /// a condition that consults whether something failed earlier: the tracker is
 /// what knows that, and a call site that duplicates the judgement is where the
 /// two copies drift apart.
@@ -447,14 +487,14 @@ fn report_health(outcome: &Result<Vec<Vec<f32>>, EmbeddingError>) {
             target: EMBEDDER_TARGET,
             tracing::Level::INFO,
             cause.subsystem = EMBEDDER_SUBSYSTEM,
-            cause.name = EMBEDDER_CAUSE,
+            cause.name = EMBEDDER_RECOVERY_CAUSE,
             "embedding request ok"
         ),
         Err(e) => tracing::event!(
             target: EMBEDDER_TARGET,
             tracing::Level::WARN,
             cause.subsystem = EMBEDDER_SUBSYSTEM,
-            cause.name = EMBEDDER_CAUSE,
+            cause.name = failure_cause(e),
             "embedding request failed: {e}"
         ),
     }
