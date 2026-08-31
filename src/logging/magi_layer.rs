@@ -295,31 +295,64 @@ impl<S: Subscriber> Layer<S> for MagiLayer {
     }
 }
 
+/// One interning cache: the leaked values [`intern`] has produced so far,
+/// and whether its once-only capacity warning has already fired.
+///
+/// The warning is latched **per cache**, not globally — [`leak_target`]'s
+/// cache and [`cause_from_event`]'s cache never share one flag, so one
+/// reaching its cap cannot suppress the other's warning.
+#[derive(Default)]
+struct InternCache {
+    /// Every distinct value interned into this cache so far.
+    seen: BTreeSet<&'static str>,
+    /// Whether the capacity warning already fired for this cache.
+    warned: bool,
+}
+
 /// Interns `value` into a process-lifetime slice, deduplicated against
 /// `cache`: a repeated value returns the same `'static` pointer instead of a
-/// fresh leak. Shared by [`leak_target`] and [`cause_from_event`] — same
-/// problem (a `tracing` field hands back a borrowed lifetime even when the
-/// text behind it is `'static` in practice), same bound (the set is limited
-/// by the number of distinct values a running process can produce, never by
-/// external input).
+/// fresh leak. Past `max_entries` DISTINCT values, a new one is never
+/// leaked — `fallback` is returned instead, and a warning fires once for
+/// that cache (mirroring `MAX_TOOL_CALL_SLOTS` in `agent::provider`: cap and
+/// warn, never an unbounded grow; latched rather than per-call because the
+/// failure mode is high-frequency by nature, the same argument [`Reporter`]
+/// makes for its own two latches above).
+///
+/// **`max_entries` is not one-size-fits-all — see the callers.**
+/// [`leak_target`] passes `usize::MAX` (its input is compile-time bounded, so
+/// there is nothing to cap); [`cause_from_event`] passes a real ceiling
+/// (its input is runtime text an emitter chooses, which is not compile-time
+/// bounded at all).
 ///
 /// # Complexity
 ///
 /// `O(log n)` over the distinct values already interned into `cache`.
 fn intern(
-    cache: &Mutex<Option<BTreeSet<&'static str>>>,
+    cache: &Mutex<Option<InternCache>>,
     value: &str,
     fallback: &'static str,
+    max_entries: usize,
 ) -> &'static str {
     let Ok(mut guard) = cache.lock() else {
         return fallback;
     };
-    let set = guard.get_or_insert_with(BTreeSet::new);
-    if let Some(found) = set.get(value) {
+    let entry = guard.get_or_insert_with(InternCache::default);
+    if let Some(found) = entry.seen.get(value) {
         return found;
     }
+    if entry.seen.len() >= max_entries {
+        if !entry.warned {
+            entry.warned = true;
+            eprintln!(
+                "WARNING: an interning cache reached its cap of {max_entries} \
+                 distinct values; further values collapse to {fallback:?} \
+                 instead of leaking indefinitely"
+            );
+        }
+        return fallback;
+    }
     let leaked: &'static str = Box::leak(value.to_string().into_boxed_str());
-    set.insert(leaked);
+    entry.seen.insert(leaked);
     leaked
 }
 
@@ -327,15 +360,38 @@ fn intern(
 ///
 /// `tracing` builds each callsite's metadata as a `static`, so every target
 /// **is** `'static` — but the borrow checker cannot see that through
-/// `Metadata::target()`, which hands back a shorter lifetime.
+/// `Metadata::target()`, which hands back a shorter lifetime. Uncapped: a
+/// target is a module path fixed at COMPILE TIME by this program's own
+/// `tracing::warn!`/`info!`/... call sites, so the set of distinct values is
+/// bounded by the binary itself — nothing an attacker or a bug can grow at
+/// runtime. Compare [`cause_from_event`], whose input is NOT compile-time
+/// bounded and therefore does need a real cap.
 ///
 /// # Complexity
 ///
 /// `O(log n)` over the distinct targets seen.
 fn leak_target(target: &str) -> &'static str {
-    static SEEN: Mutex<Option<BTreeSet<&'static str>>> = Mutex::new(None);
-    intern(&SEEN, target, "magi_rs::unknown")
+    static SEEN: Mutex<Option<InternCache>> = Mutex::new(None);
+    intern(&SEEN, target, "magi_rs::unknown", usize::MAX)
 }
+
+/// Upper bound on distinct `cause.subsystem`/`cause.name` values this
+/// process will intern.
+///
+/// Unlike [`leak_target`]'s targets, a cause field is text the EMITTER
+/// chooses at runtime (`cause.subsystem = "embedder"`), so nothing bounds
+/// how many distinct values a buggy or hostile emitter could mint — restating
+/// "the process bounds it" here would describe a hope, not enforce one. Past
+/// this many distinct values, a new one degrades to
+/// [`CAUSE_INTERN_CAP_REACHED`] instead of growing the cache further. Task
+/// 3.3's own message table lists four causes total, so 256 is headroom for
+/// legitimate growth, not a tuned measurement — the number only has to be
+/// far enough past realistic use that it never fires in ordinary operation.
+const MAX_INTERNED_CAUSE_VALUES: usize = 256;
+
+/// Substituted for a cause-field value once [`MAX_INTERNED_CAUSE_VALUES`]
+/// distinct values are already interned.
+const CAUSE_INTERN_CAP_REACHED: &str = "cause-intern-cap-reached";
 
 /// Reads the `cause.subsystem`/`cause.name` field pair off an event, when the
 /// emitter declared both.
@@ -354,8 +410,21 @@ fn leak_target(target: &str) -> &'static str {
 /// every field an emitter writes as `cause.subsystem = "embedder"` is a
 /// `'static` string literal in practice — the trait's signature cannot see
 /// that. [`CauseKey::new`] requires `&'static str`, so the value is interned
-/// exactly like [`leak_target`]: once per distinct string this process
-/// actually produces.
+/// — capped at [`MAX_INTERNED_CAUSE_VALUES`], unlike [`leak_target`]'s
+/// uncapped cache, because this input is runtime text an emitter chooses,
+/// not a compile-time-bounded set of module paths.
+///
+/// # Only `&str`-valued fields are recognised
+///
+/// The `Visit` trait requires a `record_debug` method with no default body,
+/// so this type still implements it — but its body does nothing for the two
+/// cause field names. Task 3.3's only declared convention is a string
+/// literal on both halves; special-casing a `Debug`-formatted value that
+/// nothing today produces would be speculative surface with no consumer
+/// (G2), and it would feed a wider, less predictable set of strings into the
+/// capped cache above than the convention actually allows. If a future task
+/// needs a non-string cause field, that task adds the handling with its
+/// consumer.
 ///
 /// # Complexity
 ///
@@ -378,23 +447,30 @@ fn cause_from_event(event: &Event<'_>) -> Option<CauseKey> {
             }
         }
 
-        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
-            match field.name() {
-                CAUSE_SUBSYSTEM_FIELD => self.subsystem = Some(format!("{value:?}")),
-                CAUSE_NAME_FIELD => self.cause = Some(format!("{value:?}")),
-                _ => {}
-            }
+        fn record_debug(&mut self, _field: &Field, _value: &dyn std::fmt::Debug) {
+            // Deliberately empty — see this function's rustdoc: only
+            // `&str`-valued cause fields are recognised.
         }
     }
 
-    static SEEN: Mutex<Option<BTreeSet<&'static str>>> = Mutex::new(None);
+    static SEEN: Mutex<Option<InternCache>> = Mutex::new(None);
 
     let mut fields = CauseFields::default();
     event.record(&mut fields);
     match (fields.subsystem, fields.cause) {
         (Some(subsystem), Some(cause)) => Some(CauseKey::new(
-            intern(&SEEN, &subsystem, "unknown"),
-            intern(&SEEN, &cause, "unknown"),
+            intern(
+                &SEEN,
+                &subsystem,
+                CAUSE_INTERN_CAP_REACHED,
+                MAX_INTERNED_CAUSE_VALUES,
+            ),
+            intern(
+                &SEEN,
+                &cause,
+                CAUSE_INTERN_CAP_REACHED,
+                MAX_INTERNED_CAUSE_VALUES,
+            ),
         )),
         _ => None,
     }
@@ -405,6 +481,7 @@ mod tests {
     use super::*;
     use crate::logging::auditor::SecretName;
     use tempfile::tempdir;
+    use tracing_subscriber::layer::SubscriberExt as _;
 
     /// Records what the reporter delivered.
     #[derive(Default)]
@@ -492,6 +569,79 @@ mod tests {
             "a per-event leak would grow without bound on a long run"
         );
         assert_ne!(leak_target("magi_rs::other"), a);
+    }
+
+    /// Task 0.1 fix-round Finding 2: distinct cause-field values past
+    /// [`MAX_INTERNED_CAUSE_VALUES`] must never keep growing the cache — they
+    /// collapse to [`CAUSE_INTERN_CAP_REACHED`] instead of leaking
+    /// indefinitely.
+    ///
+    /// Drives real events through the real dispatcher (`cause_from_event`
+    /// takes an `Event`, which has no public constructor outside one) with
+    /// EVERY subsystem and cause value distinct, so each of the first
+    /// `MAX_INTERNED_CAUSE_VALUES / 2` events consumes exactly two new cache
+    /// slots. That makes the crossover exact rather than approximate: the
+    /// cache fills to precisely the cap after that many events, and every
+    /// event after it — however many more are sent — must keep coming back
+    /// as the SAME fallback pair, which is the only way this test could
+    /// observe "does not keep growing" without a private accessor into the
+    /// cache's size.
+    ///
+    /// Isolated by relying on `cargo nextest`'s one-process-per-test model
+    /// (documented elsewhere in this file's tests and in
+    /// `tests/canary_both_mouths.rs`): the cache is a function-local
+    /// `static`, so a second test sharing this process would share it too.
+    #[test]
+    fn interning_past_the_cap_falls_back_instead_of_growing_forever() {
+        struct CaptureCause(Arc<Mutex<Vec<Option<CauseKey>>>>);
+        impl<S: Subscriber> Layer<S> for CaptureCause {
+            fn on_event(&self, event: &Event<'_>, _: Context<'_, S>) {
+                let key = cause_from_event(event);
+                if let Ok(mut captured) = self.0.lock() {
+                    captured.push(key);
+                }
+            }
+        }
+
+        let captured: Arc<Mutex<Vec<Option<CauseKey>>>> = Arc::new(Mutex::new(Vec::new()));
+        let fills_the_cap = MAX_INTERNED_CAUSE_VALUES / 2;
+        let past_the_cap = 40;
+
+        let subscriber = tracing_subscriber::registry().with(CaptureCause(Arc::clone(&captured)));
+        tracing::subscriber::with_default(subscriber, || {
+            for i in 0..(fills_the_cap + past_the_cap) {
+                let subsystem = format!("cause-cap-subsystem-{i}");
+                let cause = format!("cause-cap-cause-{i}");
+                tracing::warn!(
+                    cause.subsystem = subsystem.as_str(),
+                    cause.name = cause.as_str(),
+                    "distinct cause value for the cap test"
+                );
+            }
+        });
+
+        let captured = captured.lock().expect("not poisoned");
+        assert_eq!(captured.len(), fills_the_cap + past_the_cap);
+
+        for (i, key) in captured[..fills_the_cap].iter().enumerate() {
+            let key = key.expect("both fields were declared");
+            assert_ne!(
+                key.subsystem(),
+                CAUSE_INTERN_CAP_REACHED,
+                "event {i} is within the cap and must intern normally"
+            );
+        }
+
+        let fallback = CauseKey::new(CAUSE_INTERN_CAP_REACHED, CAUSE_INTERN_CAP_REACHED);
+        for (i, key) in captured[fills_the_cap..].iter().enumerate() {
+            assert_eq!(
+                *key,
+                Some(fallback),
+                "event {} is past the cap; a growing cache would keep minting \
+                 distinct values instead of always returning the same fallback",
+                fills_the_cap + i
+            );
+        }
     }
 
     #[test]
