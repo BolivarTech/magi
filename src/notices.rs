@@ -79,15 +79,6 @@ impl Notice {
             text: text.into(),
         }
     }
-
-    /// Transitional alias for [`Notice::warn`], removed by this task's sweep.
-    ///
-    /// It exists only so the call sites still compile while each one is being classified
-    /// individually. Mapping the whole family to `WARN` is deliberately the WRONG answer —
-    /// it is the bulk translation D-L11 forbids, and the classification tests fail against it.
-    pub fn resolution(text: impl Into<String>) -> Self {
-        Self::warn(text)
-    }
 }
 
 /// Announces every notice through `tracing`, at its own level.

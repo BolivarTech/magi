@@ -911,28 +911,6 @@ fn low_level_warning_notices(warnings: &[String]) -> Vec<Notice> {
         .collect()
 }
 
-/// Wraps the raw `String`s [`open_tui_memory`] and `attach_persistent_memory` push
-/// into their `&mut Vec<String>` buffer as `Resolution` [`Notice`]s.
-///
-/// Both helpers keep the `Vec<String>` signature on purpose: they are shared with the
-/// headless `query` path (REQ-H), which has no startup list to render a tier into —
-/// see the `notices` module doc for why that is the correct scope boundary. `run()`
-/// bridges the gap HERE, at the one place that does render a startup list.
-///
-/// The tier is always `Resolution`, never `Info` — deliberately conservative in ONE
-/// direction. These are messages `run()` did not author (it cannot read the intent
-/// behind an arbitrary string produced by a helper it calls), so a per-message
-/// classification would be a guess, and the two ways to guess wrong are not
-/// symmetric: defaulting to `Info` risks `NOTICE_MAX_INFO`'s cap silently dropping a
-/// real warning (e.g. "running WITHOUT persistence") — exactly what the cap must
-/// never do to a signal. Defaulting to `Resolution` risks a merely-diagnostic message
-/// (e.g. the memory diagnostics summary) surviving the cap when it didn't need to —
-/// noise, not a lost signal. Between the two failure directions, this picks the one
-/// that costs nothing important.
-fn wrap_helper_notices(texts: Vec<String>) -> Vec<Notice> {
-    texts.into_iter().map(Notice::resolution).collect()
-}
-
 /// The "no persistence at all" warning shown when the TUI reaches the end of the
 /// memory-attach sequence with no store to attach.
 ///
@@ -952,7 +930,7 @@ fn open_tui_memory(
     db_path: &std::path::Path,
     passphrase_flag: Option<Zeroizing<String>>,
     prompt: &mut dyn PassphrasePrompt,
-    notices: &mut Vec<String>,
+    notices: &mut Vec<Notice>,
 ) -> MemoryAttachment {
     let db_absent = !db_path.exists();
     let mut passphrase = match resolve_master_passphrase(db_absent, passphrase_flag, prompt) {
@@ -961,10 +939,10 @@ fn open_tui_memory(
             // Surface the SPECIFIC reason (e.g. a rejected weak passphrase vs. no
             // passphrase available) so the user knows why the session degraded.
             // VaultError's Display never contains the passphrase (verified).
-            notices.push(format!(
+            notices.push(Notice::warn(format!(
                 "WARNING: {e}; running WITHOUT persistence for this session (any \
                  existing on-disk database is left untouched)."
-            ));
+            )));
             return MemoryAttachment::Ephemeral;
         }
     };
@@ -977,25 +955,24 @@ fn open_tui_memory(
                     // P-L01/P-L02. A store error can be long and can already
                     // open with this very lead-in, so pasting it in whole gives
                     // the reader the sentence twice and then buries the cause
-                    // past the notice cap. `error_for_display` drops the HEAD,
-                    // because in a chain of wrapped errors the cause is at the
-                    // end.
-                    notices.push(format!(
+                    // past the screen's own payload cap. `error_for_display`
+                    // drops the HEAD, because in a chain of wrapped errors the
+                    // cause is at the end.
+                    notices.push(Notice::warn(format!(
                         "WARNING: {}; running WITHOUT persistence for this session.",
                         magi_rs::notices::error_for_display(
                             "could not open the encrypted database",
                             &e.to_string(),
                             magi_rs::notices::ERROR_DISPLAY_CAP,
                         )
-                    ));
+                    )));
                     return MemoryAttachment::Ephemeral;
                 }
                 if !prompt.is_interactive() {
-                    notices.push(
+                    notices.push(Notice::warn(
                         "WARNING: incorrect passphrase and no interactive terminal to \
-                         retry; running WITHOUT persistence for this session."
-                            .to_string(),
-                    );
+                         retry; running WITHOUT persistence for this session.",
+                    ));
                     return MemoryAttachment::Ephemeral;
                 }
                 let retry_msg = "Incorrect passphrase (if this DB predates v0.9.0's \
@@ -1004,11 +981,10 @@ fn open_tui_memory(
                 match prompt.read_passphrase(retry_msg, false) {
                     Ok(p) if !p.is_empty() => passphrase = p,
                     _ => {
-                        notices.push(
+                        notices.push(Notice::warn(
                             "WARNING: passphrase entry cancelled; running WITHOUT \
-                             persistence for this session."
-                                .to_string(),
-                        );
+                             persistence for this session.",
+                        ));
                         return MemoryAttachment::Ephemeral;
                     }
                 }
@@ -1605,14 +1581,12 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
     }
 
     // ── TUI path ─────────────────────────────────────────────────────────
-    // Task 1.5: every source below pushes a `Notice`, never a bare `String` — the
-    // tier decides both print ORDER (`Blocking` first) and whether `NOTICE_MAX_INFO`
-    // can ever trim it. `open_tui_memory` and `attach_persistent_memory` keep their
-    // `&mut Vec<String>` signature: they are shared with the headless `query` path
-    // (REQ-H), which has no startup list to render a tier into (see `notices`
-    // module doc for why that boundary is deliberate, not unfinished). `run()`
-    // bridges the gap at the one place that DOES render a startup list, via
-    // `wrap_helper_notices`.
+    // Every source below pushes a `Notice`, never a bare `String`, and the level it
+    // chooses is what decides whether a human sees the line at all (REQ-L19).
+    // `open_tui_memory` and `attach_persistent_memory` push `Notice` too, and they no
+    // longer keep a `Vec<String>` shared with the headless path: a bare string forced
+    // whoever collected it to guess one level for the whole family, and that family
+    // holds both "retrieval is gone" and a count of memories.
     let mut startup_notices: Vec<Notice> = low_level_warning_notices(&hardening_warnings);
 
     // Discover the unified `.magi/` state directory (walk-up, nearest ancestor,
@@ -1631,7 +1605,7 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
     };
 
     let mut prompt = TtyPrompt;
-    let mut open_memory_notices: Vec<String> = Vec::new();
+    let mut open_memory_notices: Vec<Notice> = Vec::new();
     let attachment = match workspace.as_ref() {
         Some(ws) => open_tui_memory(
             &ws.db_path(),
@@ -1649,7 +1623,7 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
             MemoryAttachment::Ephemeral
         }
     };
-    startup_notices.extend(wrap_helper_notices(open_memory_notices));
+    startup_notices.extend(open_memory_notices);
 
     let (memory_store, secret_store): (Option<EncryptedSqliteMemory>, Option<SharedSecretStore>) =
         match attachment {
@@ -2069,7 +2043,7 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
             // armed thirty lines above, and a second registration only earns a
             // second "too short" warning for one credential.
             let embed_key = resolve_openai_key(openai_key.as_deref(), secret_store.as_ref());
-            let mut attach_notices: Vec<String> = Vec::new();
+            let mut attach_notices: Vec<Notice> = Vec::new();
             attach_persistent_memory(
                 &mut agent,
                 concrete_store,
@@ -2079,7 +2053,7 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
                 &mut attach_notices,
             )
             .await?;
-            startup_notices.extend(wrap_helper_notices(attach_notices));
+            startup_notices.extend(attach_notices);
         }
         None => {
             // #7: surface the no-persistence state in the TUI, not just pre-TUI stderr.
@@ -4690,7 +4664,7 @@ async fn attach_persistent_memory(
     magi_config: &MagiConfig,
     embed_key: Option<String>,
     secret_store: Option<&SharedSecretStore>,
-    notices: &mut Vec<String>,
+    notices: &mut Vec<Notice>,
 ) -> anyhow::Result<()> {
     // Build the vector store from the shared connection + masked DEK. Errors
     // here are non-fatal: fall through without the tiered-memory subsystem
@@ -4736,10 +4710,12 @@ async fn attach_persistent_memory(
             });
         match embedder_result {
             Err(err) => {
-                notices.push(format!(
+                // `warn`: retrieval is gone for the session, so answers stop
+                // using past context — and nothing later in the run says so.
+                notices.push(Notice::warn(format!(
                     "embedding client init failed ({err}); \
                      memory subsystem disabled (text-only persistence)"
-                ));
+                )));
             }
             Ok(embedder_inner) => {
                 let embedder = Arc::new(embedder_inner);
@@ -4750,14 +4726,20 @@ async fn attach_persistent_memory(
                 agent.on_session_open().await.ok();
 
                 // CP2-AN/S: one-line diagnostics summary — never fail startup on error.
+                //
+                // `info`, and this is the site that made a single level for the whole
+                // family untenable: counting memories is the classification table's own
+                // example of a normal startup state, sitting in the same buffer as the
+                // "retrieval is gone" line above. One guess covering both puts either a
+                // count on the screen or a lost capability only in the file.
                 if let Ok(d) = vstore_diag.diagnostics("root").await {
-                    notices.push(format!(
+                    notices.push(Notice::info(format!(
                         "memory: {} active, {} archived, {} pending re-embed (~{} KB index)",
                         d.active_count,
                         d.archived_count,
                         d.pending_reembed_count,
                         d.ram_estimate_bytes / 1024,
-                    ));
+                    )));
                 }
 
                 // CP2-AG/AJ: warn when the distiller will send memory batches to a
@@ -4774,13 +4756,19 @@ async fn attach_persistent_memory(
                 if let Ok(embedding_url) = magi_config.effective_embedding_base_url() {
                     if magi_config.memory().distill_enabled && !is_localhost(embedding_url.as_str())
                     {
-                        notices.push(format!(
+                        // `info`. It reads like a privacy warning, and it is one — but
+                        // both halves of the condition are settings the operator wrote
+                        // and both are being honoured, which is the table's `info` row.
+                        // Compare the divergence notice, which fires on the ABSENCE of
+                        // `[magi].default_mode`: there the extra hop is a side effect of
+                        // something nobody chose, and it warns.
+                        notices.push(Notice::info(format!(
                             "Memory distiller will send bounded memory batches \
                              (≤ {} tokens) to {} — set distill_enabled = false \
                              in [memory] for zero cloud memory egress.",
                             magi_config.memory().distill_max_batch_tokens,
                             embedding_url.as_str(),
-                        ));
+                        )));
                     }
                 }
             }
@@ -5814,9 +5802,10 @@ async fn run_query_subcommand(
                 eprintln!("error: {e}");
                 return 1;
             }
-            for n in notices {
-                eprintln!("note: {n}");
-            }
+            // Through the layer, like every other notice: the memory subsystem being
+            // disabled belongs on stderr, and a count of memories belongs in the file.
+            // An `eprintln!` here could not tell them apart.
+            emit_notices(notices);
         }
     }
 
@@ -7476,7 +7465,7 @@ mod tests {
             let attachment = open_tui_memory(&db_path, None, &mut prompt, &mut notices);
             assert!(matches!(attachment, MemoryAttachment::Ephemeral));
             assert!(!db_path.exists(), "must never create a DB it cannot open");
-            assert!(notices.iter().any(|n| n.contains("WARNING")));
+            assert!(notices.iter().any(|n| n.text.contains("WARNING")));
         });
     }
 
@@ -7572,8 +7561,8 @@ mod tests {
     /// Same guarantee for the family of messages [`open_tui_memory`] produces — the
     /// concrete scenario mirrors
     /// `test_open_tui_memory_degrades_to_ephemeral_when_no_tty_and_no_passphrase_on_first_run`
-    /// (no TTY, no passphrase, first run), fed through the SAME wrapper `run()`
-    /// uses so the two can never disagree.
+    /// (no TTY, no passphrase, first run), and reads the notices the helper itself
+    /// built rather than a level some collector applied to them afterwards.
     #[test]
     #[serial_test::serial]
     fn open_tui_memory_notices_never_degrade_to_info() {
@@ -7581,11 +7570,10 @@ mod tests {
             let tmp = tempfile::tempdir().unwrap();
             let db_path = tmp.path().join("absent.db");
             let mut prompt = FakePrompt::non_interactive();
-            let mut texts = Vec::new();
-            let attachment = open_tui_memory(&db_path, None, &mut prompt, &mut texts);
+            let mut notices = Vec::new();
+            let attachment = open_tui_memory(&db_path, None, &mut prompt, &mut notices);
             assert!(matches!(attachment, MemoryAttachment::Ephemeral));
 
-            let notices = wrap_helper_notices(texts);
             assert!(!notices.is_empty());
             for n in &notices {
                 assert_eq!(
