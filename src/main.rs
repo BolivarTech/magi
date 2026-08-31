@@ -1464,6 +1464,12 @@ where
                 EXIT_DRAIN_BUDGET.as_secs()
             );
         }
+        // SC-L90: a short headless run has no event loop to expire the
+        // health window on, so close is the only remaining chance to show a
+        // transition still waiting on it. A no-op until task 2.1 feeds the
+        // tracker; reserved here now so that task does not have to reopen
+        // this call site.
+        handle.health_flush();
     }
     code
 }

@@ -1105,6 +1105,15 @@ pub async fn run_query(
     };
     let ttfb_ms = bounded_drain_result(drain).await;
 
+    // Headless has no event loop to expire the health window on, so the
+    // turn boundary is the only natural cadence: once per agent turn
+    // (`run_query` is exactly one). A no-op until task 2.1 feeds the
+    // tracker; reserved here now so that task does not have to reopen this
+    // call site.
+    if let Some(handle) = magi_rs::logging::installed() {
+        handle.health_tick(Instant::now());
+    }
+
     let total_ms = elapsed_ms(run_start);
 
     // Snapshot the observer state once (the run is over; no more callbacks).
