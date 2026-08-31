@@ -202,6 +202,8 @@ assumes is the exact failure this harness exists to avoid.
 | S20 | the trio still completes after magi-core 4.0.0 moved it to `POST {base}/api/chat`, carrying the cap magi-rs declared |
 | S21 | REQ-V4-14, the shape every run emits: a `finish` this build knows on every attempt, and a rotation report whose hops name a known cause and its locality |
 | S22 | the rotation report is complete: `pool_eligibility` present even when empty, and all three notions of degradation derivable |
+| S23 | REQ-L63, one run id published on stderr and inside the day's log |
+| S24 | SC-L14 and REQ-L19, a clean run's diagnostics reach the day's log and never the screen |
 
 ## Adding a scenario
 
