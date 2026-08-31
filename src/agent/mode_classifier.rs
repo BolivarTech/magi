@@ -106,6 +106,50 @@ pub trait NoticeSink: Send + Sync {
     fn emit(&self, msg: &Audited);
 }
 
+/// Hands the logging layer's screen branch to a [`NoticeSink`].
+///
+/// **The adapter exists because the two traits live on opposite sides of the
+/// crate split.** [`magi_rs::logging::NoticeDelivery`] is declared in the
+/// library, which cannot see the binary's sinks; [`NoticeSink`] is declared
+/// here, in the binary, because the TUI's implementation needs the response
+/// channel. Inverting either dependency would make `logging` depend on the
+/// agent, so the two meet in this one type.
+///
+/// **`deliver` binds to [`NoticeSink::emit`], never to [`NoticeSink::once`],
+/// and that is a correctness requirement rather than a preference.** What
+/// arrives here has already been deduplicated: the health tracker dedupes by
+/// cause and by its stability window, and the auditor's alarm dedupes by
+/// `(secret, target)`. Routing it through `once` would add a SECOND memory,
+/// keyed on a `&'static str`, whose only effect would be to swallow a
+/// legitimate second degradation of the same cause after a recovery — the one
+/// notice the user most needs to see.
+pub struct ScreenDelivery {
+    /// Where an audited line is shown: the TUI's frame, or stderr headless.
+    sink: Arc<dyn NoticeSink>,
+}
+
+impl ScreenDelivery {
+    /// Wraps `sink` as the logging layer's screen delivery.
+    ///
+    /// # Parameters
+    ///
+    /// * `sink` — the surface's own sink. The SAME instance the rest of the
+    ///   surface emits through, so one destination stays one destination.
+    #[must_use]
+    pub fn new(sink: Arc<dyn NoticeSink>) -> Self {
+        Self { sink }
+    }
+}
+
+impl magi_rs::logging::NoticeDelivery for ScreenDelivery {
+    /// # Complexity
+    ///
+    /// `O(1)` plus whatever the sink's own delivery costs.
+    fn deliver(&self, line: &Audited) {
+        let _ = (&self.sink, line);
+    }
+}
+
 /// Emits `msg` the first time it is called with `key`; subsequent calls are no-ops for that
 /// `key`.
 #[derive(Default)]

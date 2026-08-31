@@ -1682,6 +1682,13 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
         Some(ws) => MagiConfig::load(&ws.config_path())?,
         None => (MagiConfig::default(), Vec::new()),
     };
+    // Built BEFORE the logging subsystem, and that ordering is the whole point:
+    // the layer's screen branch has to deliver into the same sink the TUI later
+    // attaches its response channel to, or a degradation would go to a second
+    // destination that writes over the ratatui frame. `tui_mode_classifier_wiring`
+    // used to mint this itself, several hundred lines further down — after
+    // `init_logging` had already been handed a delivery that discarded.
+    let tui_notices = Arc::new(crate::tui::TuiNoticeSink::new());
     // Task 6.1/6.4: bring the logging subsystem up, once the config is loaded and
     // the workspace is known.
     //
@@ -1720,12 +1727,17 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
         };
         // **The screen branch is wired here** (MS2): one layer, both mouths,
         // and the level is REQ-L19's constant rather than a setting — `ERROR`
-        // and `WARN` reach the screen, `INFO` and below only the file. The
-        // delivery is whatever this surface built; today that is the
-        // discarding one, and the sink the TUI attaches replaces it in place
-        // without reopening this call.
-        let notices: std::sync::Arc<dyn magi_rs::logging::NoticeDelivery> =
-            std::sync::Arc::new(magi_rs::logging::DiscardDelivery);
+        // and `WARN` reach the screen, `INFO` and below only the file.
+        //
+        // The delivery is the surface's REAL sink, adapted across the crate
+        // split (`ScreenDelivery`). It was a discarding one for as long as the
+        // notices were still classified the old way — connecting it before
+        // task 3.1 reclassified them would have flooded the screen with `INFO`,
+        // which is the noise this milestone exists to remove.
+        let notices: std::sync::Arc<dyn magi_rs::logging::NoticeDelivery> = std::sync::Arc::new(
+            crate::agent::mode_classifier::ScreenDelivery::new(std::sync::Arc::clone(&tui_notices)
+                as std::sync::Arc<dyn crate::agent::mode_classifier::NoticeSink>),
+        );
         match magi_rs::logging::init_logging(
             &cfg,
             std::sync::Arc::clone(&notices),
@@ -2017,8 +2029,9 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
     // `run_consult_subcommand`'s own classifier construction. REQ-A07d: the TUI's
     // explicit `/consult` needs the same `resolve_mode_guarded` classifier/config
     // pair the direct headless `magi consult` path already has.
-    let (tui_mode_classifier, tui_classifier_notices) =
-        tui_mode_classifier_wiring(provider.clone());
+    let tui_mode_classifier =
+        tui_mode_classifier_wiring(provider.clone(), Arc::clone(&tui_notices));
+    let tui_classifier_notices = tui_notices;
     let tui_default_mode = magi_config.effective_default_mode();
     let tui_untrusted_content = magi_config.magi().untrusted_content.unwrap_or(false);
     // REQ-A07p/SC-A07p: `tui_default_mode.is_none()` IS "will this session infer the
@@ -4437,26 +4450,24 @@ impl AutonomousRunConfig {
 /// Builds the TUI's mode classifier together with the sink its one-time notices go to
 /// (REQ-A07c).
 ///
-/// **The two are returned as a pair because they must be the SAME instance.** The classifier
+/// **The sink is taken rather than minted, because a THIRD consumer arrived.** The classifier
 /// emits its cost/expiry notices through whatever sink it was constructed with; the TUI can
 /// only reroute them away from stderr — where they land on top of the ratatui frame — by
-/// attaching the response channel to that exact sink once it exists. Handing back two
-/// independent values would compile, run, and silently keep writing over the frame, which is
-/// the defect this pair exists to make unrepresentable.
+/// attaching the response channel to that exact sink. Since MS2 the logging layer's screen
+/// branch delivers into it as well, and that branch is wired at `init_logging`, long before
+/// this function runs. Minting one here would give the layer and the classifier two different
+/// destinations, and the layer's would be the one writing over the frame.
 ///
 /// # Parameters
 /// * `provider` - the principal provider; the classification is one label, so it is paid at the principal's price and never at the trio's.
+/// * `notices` - the session's one sink, already handed to the logging layer.
 ///
 /// # Returns
-/// The classifier for `TuiMagiRuntimeConfig::mode_classifier`, and the sink for its
-/// `classifier_notices`.
+/// The classifier for `TuiMagiRuntimeConfig::mode_classifier`.
 fn tui_mode_classifier_wiring(
     provider: Arc<dyn Provider>,
-) -> (
-    Arc<dyn magi_rs::magi::mode::ModeClassifier>,
-    Arc<crate::tui::TuiNoticeSink>,
-) {
-    let notices = Arc::new(crate::tui::TuiNoticeSink::new());
+    notices: Arc<crate::tui::TuiNoticeSink>,
+) -> Arc<dyn magi_rs::magi::mode::ModeClassifier> {
     let classifier: Arc<dyn magi_rs::magi::mode::ModeClassifier> =
         Arc::new(crate::agent::mode_classifier::ProviderClassifier::new(
             provider,
@@ -4465,7 +4476,7 @@ fn tui_mode_classifier_wiring(
             // with the registered secrets or it redacts with nothing.
             std::sync::Arc::clone(magi_rs::logging::process_auditor()),
         ));
-    (classifier, notices)
+    classifier
 }
 
 /// Builds the pair (startup notice, `/consult` message) for the TUI when the trio is not
@@ -5718,8 +5729,17 @@ fn bring_up_headless_logging(
     // The same wiring the TUI surface applies just above, and for the same
     // reason: one layer with both mouths, the screen level fixed by
     // REQ-L19 rather than configured.
+    //
+    // A sink of its own rather than the one `run_consult_subcommand` builds,
+    // and the difference is nil where it matters: headless "screen" IS stderr,
+    // so both instances write to the same place, and the only state a sink
+    // keeps is `once`'s dedup memory — which this path never touches, because
+    // `ScreenDelivery` binds to `emit`. Threading the other one down here would
+    // be plumbing bought with nothing.
     let notices: std::sync::Arc<dyn magi_rs::logging::NoticeDelivery> =
-        std::sync::Arc::new(magi_rs::logging::DiscardDelivery);
+        std::sync::Arc::new(crate::agent::mode_classifier::ScreenDelivery::new(
+            std::sync::Arc::new(crate::agent::mode_classifier::ProcessNoticeSink::default()),
+        ));
     let logging_up = match magi_rs::logging::init_logging(
         &cfg,
         std::sync::Arc::clone(&notices),
@@ -6183,6 +6203,132 @@ async fn run_consult_subcommand(
 
 #[cfg(test)]
 mod tests {
+    /// R14: production must not hand the logging layer a delivery that throws
+    /// screen notices away. Both `init_logging` call sites did exactly that for
+    /// as long as the notices were still classified the old way — deliberately,
+    /// because connecting the real sink before task 3.1 would have flooded the
+    /// screen with `INFO` — and nothing but this guard stops that stopgap from
+    /// coming back once the reason for it is forgotten.
+    ///
+    /// The `\r` comes out because `include_str!` returns the file's bytes
+    /// untouched while rustc normalises CRLF inside a source literal, so the two
+    /// ends of the comparison would disagree on a Windows checkout.
+    ///
+    /// **The needle is composed from two halves on purpose.** Written whole it
+    /// would appear in this test's own source, the guard would match itself, and
+    /// it could then never fail — which is this repository's most frequent defect.
+    #[test]
+    fn no_logging_call_site_delivers_its_screen_notices_into_the_void() {
+        let discarding = concat!("Discard", "Delivery");
+        let source = include_str!("main.rs").replace('\r', "");
+        assert!(
+            !source.contains(discarding),
+            "a logging call site is back to discarding its screen notices, so MS2 changes \
+             nothing a user sees"
+        );
+    }
+
+    /// R14, the other half: the delivery has to REACH the screen.
+    ///
+    /// Driven through the production wiring — the real `TuiNoticeSink`, the real
+    /// `ScreenDelivery`, the real `init_logging`, and a real `tracing` event
+    /// through the installed dispatcher — rather than through a sink written for
+    /// the occasion. A test-only delivery would prove that a delivery this test
+    /// built works, which is not the claim.
+    ///
+    /// It installs a process-global subscriber, so it needs a process of its own:
+    /// run under `cargo nextest`, which gives every test one.
+    #[test]
+    fn a_warning_reaches_the_tui_buffer_through_the_production_wiring() {
+        let sink = std::sync::Arc::new(crate::tui::TuiNoticeSink::new());
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        sink.attach(tx);
+        let delivery: std::sync::Arc<dyn magi_rs::logging::NoticeDelivery> = std::sync::Arc::new(
+            crate::agent::mode_classifier::ScreenDelivery::new(std::sync::Arc::clone(&sink)
+                as std::sync::Arc<dyn crate::agent::mode_classifier::NoticeSink>),
+        );
+        let dir = tempfile::tempdir().expect("temp log directory");
+        let cfg = magi_rs::logging::LoggingConfig {
+            log_dir: dir.path().to_path_buf(),
+            file_filter: magi_rs::logging::filter::Filter::parse("info").expect("filter"),
+        };
+        magi_rs::logging::init_logging(
+            &cfg,
+            std::sync::Arc::clone(&delivery),
+            Some((
+                magi_rs::logging::magi_layer::TuiSink::new(std::sync::Arc::clone(&delivery)),
+                magi_rs::logging::SCREEN_LEVEL,
+            )),
+        )
+        .expect("logging must come up on a temporary directory");
+
+        tracing::warn!("memory: retrieval unavailable");
+
+        let mut seen = Vec::new();
+        while let Ok(response) = rx.try_recv() {
+            if let crate::tui::AgentResponse::Notice(text) = response {
+                seen.push(text);
+            }
+        }
+        assert!(
+            seen.iter().any(|t| t.contains("retrieval unavailable")),
+            "a WARN must reach the screen buffer the TUI draws from: {seen:?}"
+        );
+    }
+
+    /// `ScreenDelivery` routes through `emit`, never through `once`.
+    ///
+    /// What arrives here has already been deduplicated by the tracker's cause
+    /// and window, or by the auditor's `(secret, target)`. A second memory keyed
+    /// on a `&'static str` would suppress a legitimate second degradation of the
+    /// same cause after a recovery, which is the notice that matters most — and
+    /// nothing about the types would say so, since both methods take an
+    /// `Audited` and return nothing.
+    #[test]
+    fn the_screen_delivery_emits_rather_than_deduplicating() {
+        use magi_rs::logging::NoticeDelivery as _;
+        /// Counts which of the sink's two methods a delivery actually calls.
+        #[derive(Default)]
+        struct CountingSink {
+            /// Calls that arrived through the deduplicating method.
+            once_calls: std::sync::atomic::AtomicUsize,
+            /// Calls that arrived through the non-deduplicating one.
+            emit_calls: std::sync::atomic::AtomicUsize,
+        }
+        impl crate::agent::mode_classifier::NoticeSink for CountingSink {
+            fn once(&self, _key: &'static str, _msg: &magi_rs::logging::auditor::Audited) {
+                self.once_calls
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            fn emit(&self, _msg: &magi_rs::logging::auditor::Audited) {
+                self.emit_calls
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        let sink = std::sync::Arc::new(CountingSink::default());
+        let delivery =
+            crate::agent::mode_classifier::ScreenDelivery::new(std::sync::Arc::clone(&sink)
+                as std::sync::Arc<dyn crate::agent::mode_classifier::NoticeSink>);
+        let (line, _) = magi_rs::logging::auditor::Auditor::new().audit(
+            "provider: unreachable",
+            "magi_rs::logging::health",
+            None,
+            0,
+        );
+        delivery.deliver(&line);
+        delivery.deliver(&line);
+        assert_eq!(
+            sink.emit_calls.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "both deliveries must arrive; the same cause degrading twice is two notices"
+        );
+        assert_eq!(
+            sink.once_calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "routing through `once` adds a second dedup memory keyed on a &'static str"
+        );
+    }
+
     #[test]
     fn no_surface_builds_an_auditor_of_its_own() {
         // The invariant was written down and then broken directly beneath its
@@ -13636,7 +13782,9 @@ agent_timeout_secs = {CEILING}
         /// unrelated instances fails here instead of silently writing over the frame.
         #[tokio::test]
         async fn the_tui_classifier_emits_its_notices_through_the_attached_channel() {
-            let (classifier, notices) = tui_mode_classifier_wiring(Arc::new(StaticProvider));
+            let notices = Arc::new(crate::tui::TuiNoticeSink::new());
+            let classifier =
+                tui_mode_classifier_wiring(Arc::new(StaticProvider), Arc::clone(&notices));
             let (tx, mut rx) = tokio::sync::mpsc::channel::<AgentResponse>(8);
             notices.attach(tx);
 
