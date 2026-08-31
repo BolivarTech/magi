@@ -273,8 +273,21 @@ mod tests {
         let t0 = Instant::now();
         let w = Duration::from_secs(HEALTH_MIN_STABLE_SECS);
         let t1 = t0 + Duration::from_secs(60 * 60 * 24 * 60); // sixty days later
-        h.observe(Some(c), false, t0);
-        assert!(matches!(h.tick(t0 + w), Some(Transition::Degraded(_))));
+
+        // SC-L71: the subsystem's first degradation is IMMEDIATE, so `observe`
+        // returns it and the subsequent `tick` has nothing pending. (These two
+        // lines used to assert the pre-SC-L71 behaviour, where the window also
+        // governed the first degradation -- the same call sequence as
+        // `alternating_between_two_failing_causes_is_not_a_recovery` with the
+        // opposite result, which no deterministic implementation could satisfy.)
+        assert!(matches!(
+            h.observe(Some(c), false, t0),
+            Some(Transition::Degraded(_))
+        ));
+        assert!(
+            h.tick(t0 + w).is_none(),
+            "nothing pending right after an immediate emission"
+        );
         assert!(
             h.observe(Some(c), false, t1).is_none(),
             "elapsed monotonic time is not a transition"
