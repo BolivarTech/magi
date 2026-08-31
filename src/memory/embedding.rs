@@ -1162,4 +1162,276 @@ mod tests {
         assert_eq!(out[0], vec![1.0, 1.0, 1.0]);
         assert_eq!(out[1], vec![2.0, 2.0, 2.0]);
     }
+
+    // ─── Health instrumentation (MS2 task 3.3) ───────────────────────────────
+
+    use std::path::Path;
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
+
+    use magi_rs::logging::auditor::CauseKey;
+    use magi_rs::logging::health::{render_transition, HealthTracker, Transition};
+    use tracing::field::{Field, Visit};
+    use tracing_subscriber::layer::SubscriberExt as _;
+
+    /// The subsystem field name an emitter declares a cause key with.
+    ///
+    /// Mirrored here rather than imported: the layer keeps its own copy
+    /// private, and a test that reached for it could not also prove the two
+    /// spellings agree.
+    const CAUSE_SUBSYSTEM_FIELD: &str = "cause.subsystem";
+    /// The cause field name, the other half of the same convention.
+    const CAUSE_NAME_FIELD: &str = "cause.name";
+
+    /// A day's log file, as REQ-L23's third part reaches `render_transition`.
+    const A_LOG_PATH: &str = ".magi/logs/magi-2026-08-14.log";
+
+    /// The recovery line SC-L17 asks the screen for.
+    const RESTORED_LINE: &str = "✓ memory: retrieval restored";
+
+    /// One event a capturing subscriber saw: its level, and the two halves of
+    /// the cause key its emitter declared.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct CapturedEvent {
+        /// The level the event was emitted at, which is the only thing the
+        /// layer derives `ok` from.
+        level: tracing::Level,
+        /// The `cause.subsystem` value, when one was recorded as a string.
+        subsystem: Option<String>,
+        /// The `cause.name` value, when one was recorded as a string.
+        cause: Option<String>,
+    }
+
+    impl CapturedEvent {
+        /// The declared cause key this event names, if any.
+        ///
+        /// Resolved **through** [`CauseKey::ALL`] rather than rebuilt from the
+        /// captured text: `CauseKey::new` takes `&'static str`, and going
+        /// through the declared list also ties an emitting site to the table
+        /// `render_transition` reads. A site that emits an undeclared cause
+        /// comes back `None` here.
+        fn declared_key(&self) -> Option<CauseKey> {
+            let subsystem = self.subsystem.as_deref()?;
+            let cause = self.cause.as_deref()?;
+            CauseKey::ALL
+                .iter()
+                .find(|k| k.subsystem() == subsystem && k.cause() == cause)
+                .copied()
+        }
+
+        /// Whether this event declared either half of a cause key.
+        fn is_keyed(&self) -> bool {
+            self.subsystem.is_some() || self.cause.is_some()
+        }
+    }
+
+    /// Records every event's level and cause fields, through the real
+    /// dispatcher.
+    struct CauseCapture(Arc<Mutex<Vec<CapturedEvent>>>);
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for CauseCapture {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            /// Collects the two cause fields off one event.
+            ///
+            /// `record_str` only, mirroring the layer's own visitor: a value
+            /// written with the `?` Debug-capture sigil is dropped here
+            /// exactly as production drops it, so a site that used one would
+            /// fail these tests instead of shipping a keyless event.
+            #[derive(Default)]
+            struct Fields {
+                /// The subsystem half, once seen.
+                subsystem: Option<String>,
+                /// The cause half, once seen.
+                cause: Option<String>,
+            }
+            impl Visit for Fields {
+                fn record_str(&mut self, field: &Field, value: &str) {
+                    match field.name() {
+                        CAUSE_SUBSYSTEM_FIELD => self.subsystem = Some(value.to_string()),
+                        CAUSE_NAME_FIELD => self.cause = Some(value.to_string()),
+                        _ => {}
+                    }
+                }
+
+                fn record_debug(&mut self, _: &Field, _: &dyn std::fmt::Debug) {}
+            }
+
+            let mut fields = Fields::default();
+            event.record(&mut fields);
+            if let Ok(mut seen) = self.0.lock() {
+                seen.push(CapturedEvent {
+                    level: *event.metadata().level(),
+                    subsystem: fields.subsystem,
+                    cause: fields.cause,
+                });
+            }
+        }
+    }
+
+    /// Installs the capturing subscriber for as long as the returned guard
+    /// lives, and hands back what it collects.
+    fn capture_causes() -> (
+        Arc<Mutex<Vec<CapturedEvent>>>,
+        tracing::subscriber::DefaultGuard,
+    ) {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry().with(CauseCapture(Arc::clone(&seen)));
+        let guard = tracing::subscriber::set_default(subscriber);
+        (seen, guard)
+    }
+
+    /// Only the events that declared a cause key, in emission order.
+    ///
+    /// The dependency tree emits plenty of its own events under a subscriber
+    /// with no filter; none of them carry these two fields.
+    fn keyed_events(seen: &Mutex<Vec<CapturedEvent>>) -> Vec<CapturedEvent> {
+        seen.lock()
+            .map(|s| s.iter().filter(|e| e.is_keyed()).cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// An embeddings endpoint that answers correctly.
+    async fn healthy_endpoint() -> mockito::ServerGuard {
+        let mut server = mockito::Server::new_async().await;
+        server
+            .mock("POST", "/embeddings")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"data":[{"embedding":[0.1,0.2,0.3]}]}"#)
+            .create_async()
+            .await;
+        server
+    }
+
+    #[tokio::test]
+    async fn test_a_successful_embedder_call_emits_its_cause_key_at_info_level() {
+        // The level is `info` and not `debug`, and that is what decides
+        // whether recovery detection works at all: `MagiLayer::enabled` is the
+        // UNION of the file and screen filters, so with the shipped defaults
+        // (`info` and `warn`) a `debug` event is rejected before `on_event`,
+        // the tracker never receives its `ok = true`, and SC-L17's `✓` never
+        // appears.
+        let server = healthy_endpoint().await;
+        let embedder =
+            OpenAiCompatibleEmbedder::new(&cfg(&server.url()), Some("ollama".into())).unwrap();
+
+        let (seen, _guard) = capture_causes();
+        embedder
+            .embed(&["a document".to_string()])
+            .await
+            .expect("the endpoint answers correctly");
+        let keyed = keyed_events(&seen);
+
+        assert_eq!(
+            keyed.len(),
+            1,
+            "one event per subsystem operation, no more and no less: {keyed:?}"
+        );
+        let event = &keyed[0];
+        assert_eq!(
+            event.level,
+            tracing::Level::INFO,
+            "a `debug` success event never reaches the layer under the shipped \
+             filters, so the recovery it feeds is undetectable: {event:?}"
+        );
+        assert!(
+            event.declared_key().is_some(),
+            "both halves must be present, recorded as strings, and declared in \
+             `CauseKey::ALL`: {event:?}"
+        );
+
+        // And the level is checked against the product's own default rather
+        // than against a literal, so raising the shipped default is what would
+        // have to move this, not an edit to the test.
+        let shipped = crate::config::MagiConfig::default().resolve_file_filter(None, None);
+        let file = magi_rs::logging::filter::Filter::parse(&shipped).expect("the default parses");
+        let union = file.max_level().max(magi_rs::logging::SCREEN_LEVEL);
+        assert!(
+            event.level <= union,
+            "the shipped filters would drop this event before the layer sees it"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_the_success_event_uses_the_same_cause_key_as_its_failure() {
+        // Two servers rather than two mocks on one: which of two mocks on the
+        // same route answers first is mockito's business, and the property
+        // under test is the EMITTER's -- that both events name one cause.
+        let mut broken = mockito::Server::new_async().await;
+        broken
+            .mock("POST", "/embeddings")
+            .with_status(500)
+            .with_body("the upstream is down")
+            .create_async()
+            .await;
+        let working = healthy_endpoint().await;
+
+        let (seen, _guard) = capture_causes();
+        OpenAiCompatibleEmbedder::new(&cfg(&broken.url()), Some("ollama".into()))
+            .unwrap()
+            .embed(&["a document".to_string()])
+            .await
+            .expect_err("a 500 is a failure");
+        OpenAiCompatibleEmbedder::new(&cfg(&working.url()), Some("ollama".into()))
+            .unwrap()
+            .embed(&["a document".to_string()])
+            .await
+            .expect("and this one answers correctly");
+
+        let keyed = keyed_events(&seen);
+        assert_eq!(keyed.len(), 2, "one event per call: {keyed:?}");
+        let (failure, success) = (&keyed[0], &keyed[1]);
+        assert_eq!(
+            failure.level,
+            tracing::Level::WARN,
+            "a failure is what puts the subsystem in the degraded state"
+        );
+        assert_eq!(success.level, tracing::Level::INFO);
+
+        let degraded = failure
+            .declared_key()
+            .expect("the failure names a declared cause");
+        let restored = success
+            .declared_key()
+            .expect("the success names a declared cause");
+        assert_eq!(
+            degraded, restored,
+            "the success names a different cause than its failure, so the \
+             recovery would be reported against a topic that was never degraded"
+        );
+
+        // And the consequence the equality buys, which is the whole reason the
+        // task exists: the tracker reaches `Restored` and the screen says so.
+        // `ok` is derived from the LEVEL here exactly as the layer derives it.
+        let mut tracker = HealthTracker::new();
+        let t0 = Instant::now();
+        assert!(
+            matches!(
+                tracker.observe(Some(degraded), failure.level > tracing::Level::WARN, t0),
+                Some(Transition::Degraded(_))
+            ),
+            "the failure event must degrade the subsystem"
+        );
+        assert!(
+            tracker
+                .observe(
+                    Some(restored),
+                    success.level > tracing::Level::WARN,
+                    t0 + Duration::from_secs(1)
+                )
+                .is_none(),
+            "the recovery serves its window"
+        );
+        let flushed = tracker.flush();
+        assert_eq!(flushed.len(), 1, "one pending recovery: {flushed:?}");
+        let line = render_transition(&flushed[0], Path::new(A_LOG_PATH));
+        assert!(
+            line.contains(RESTORED_LINE),
+            "SC-L17's line never comes out of this pair of events: {line}"
+        );
+    }
 }

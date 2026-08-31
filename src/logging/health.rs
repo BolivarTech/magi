@@ -719,6 +719,41 @@ mod tests {
         }
     }
 
+    /// What [`render_transition`] opens with when a cause has no declared row.
+    ///
+    /// Named here so the guard below can assert the *absence* of that branch:
+    /// the fallback is a non-empty string, so a test that only checked for
+    /// emptiness would pass for every undeclared cause in the list.
+    const NO_ROW_MARKER: &str = "internal error";
+
+    #[test]
+    fn every_declared_cause_key_has_a_screen_message() {
+        // The guard belongs to task 3.3 and not to the task that wrote the
+        // table: above it, `CauseKey::ALL` is empty, the loop runs zero times
+        // and the whole thing is a green tick over nothing.
+        assert!(
+            !CauseKey::ALL.is_empty(),
+            "task 3.3 declares every cause it instruments here; with an empty \
+             list the loop below guards nothing"
+        );
+        let path = Path::new(A_LOG_PATH);
+        for key in CauseKey::ALL {
+            let d = render_transition(&Transition::Degraded(*key), path);
+            let r = render_transition(&Transition::Restored(*key), path);
+            assert!(!d.is_empty(), "no degradation message for {key:?}");
+            assert!(!r.is_empty(), "no recovery message for {key:?}");
+            assert!(
+                !d.contains(NO_ROW_MARKER) && !r.contains(NO_ROW_MARKER),
+                "{key:?} is declared but has no row in the message table, so \
+                 the user would read a defect report instead of a message: {d}"
+            );
+            assert!(
+                d.contains(A_LOG_FILE),
+                "REQ-L23's third part -- where to read more -- is missing: {d}"
+            );
+        }
+    }
+
     #[test]
     fn a_cause_with_no_declared_message_is_reported_as_a_programming_error() {
         // A `CauseKey` with no row is a bug in the task that introduced it, not
