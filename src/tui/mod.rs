@@ -1995,6 +1995,21 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Re
     loop {
         terminal.draw(|f| ui(f, &mut app))?;
 
+        // The health window expires by TIME, not by event, so something has to
+        // wake up and say so: a degradation that stops producing events — which
+        // is precisely what a service going down looks like — would otherwise
+        // hold its pending transition forever. This loop is that something. It
+        // already wakes on the `poll` timeout below even when nobody is typing,
+        // which is exactly the condition the window needs, so no timer is added.
+        //
+        // `health_flush` is NOT called here. It belongs after
+        // `LeaveAlternateScreen`, where `bootstrap_headless` already calls it:
+        // writing to the terminal while the alternate screen is held is what
+        // REQ-L39 forbids.
+        if let Some(handle) = magi_rs::logging::installed() {
+            handle.health_tick(std::time::Instant::now());
+        }
+
         while let Ok(response) = app.response_rx.try_recv() {
             match response {
                 AgentResponse::StreamDelta(delta) => app.append_stream_delta(delta),
