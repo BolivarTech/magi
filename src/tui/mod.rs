@@ -665,6 +665,18 @@ impl StatusRow {
 /// branches are not enumerable: a failure, a cancellation and a panic all have
 /// to give the line back, and the one that gets forgotten is whichever branch
 /// is added last. Precedent in this repository: `AbortOnDrop` in `src/task.rs`.
+///
+/// **On a RELEASE panic this never runs, and the requirement is still met by
+/// something else.** `Cargo.toml` sets `panic = "abort"` for the release
+/// profile, so a panic in the shipped binary tears the process down without
+/// unwinding and no `Drop` is called. What clears the row there is the process
+/// exiting — there is no session left to leave a stale line in, so the cost is
+/// nil. It is written down because the gap between REQ-L27's wording and what a
+/// build profile does is exactly the kind of thing someone later "fixes" by
+/// scattering explicit clears through the exit branches, which is the design
+/// this guard replaced. The unwinding path is real under the test profile,
+/// which is where `test_the_status_row_is_cleared_even_when_the_operation_panics`
+/// observes it.
 pub struct StatusGuard<'a> {
     /// The row this guard is holding open.
     row: &'a StatusRow,
