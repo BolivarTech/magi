@@ -189,9 +189,10 @@ pub fn warn_if_recovery_detection_is_off(
 ///
 /// # The cost, stated
 ///
-/// A collected notice is announced under `magi_rs::startup` rather than
-/// [`health::HEALTH_TARGET`], so a per-target directive naming health does not
-/// address the terminal's copy of this one line. That is the flattening every
+/// A collected notice is announced under `magi_rs::startup` rather than under
+/// the health target [`warn_if_recovery_detection_is_off`] uses, so a
+/// per-target directive naming health does not address the terminal's copy of
+/// this one line. That is the flattening every
 /// other startup notice already accepts (D-L11's execution is centralised), and
 /// the alternative is a line an operator can filter but never read.
 ///
