@@ -11,14 +11,7 @@
 //! else is silence by design, because "everything else" is exactly the noise
 //! this feature exists to remove.
 //!
-//! # Status
-//!
-//! Red phase stub: signatures are final, bodies are not. Every method below
-//! returns an obviously-wrong value on purpose (G8) so the test suite fails
-//! by assertion rather than by `unimplemented!()`, which this module's lint
-//! policy denies outside `cfg(test)`.
-
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::logging::auditor::CauseKey;
 
@@ -36,35 +29,185 @@ pub enum Transition {
     Restored(CauseKey),
 }
 
-/// Decides when a degradation or recovery is worth showing on screen.
+/// Health state of a single subsystem. `None` means healthy; `Some(cause)`
+/// means degraded, with the cause currently in force.
+type HealthState = Option<CauseKey>;
+
+/// A candidate transition that has been observed but has not yet held for
+/// [`HEALTH_MIN_STABLE_SECS`].
+#[derive(Debug, Clone)]
+struct PendingTransition {
+    /// The transition to emit once the window elapses.
+    transition: Transition,
+    /// The health state this transition moves the subsystem to.
+    target: HealthState,
+    /// When the candidate state was first observed.
+    since: Instant,
+}
+
+/// Per-subsystem bookkeeping: the state last shown on screen, and any
+/// candidate transition still serving its window.
 #[derive(Debug, Clone, Default)]
-pub struct HealthTracker;
+struct SubsystemState {
+    /// The health state last actually reported to the caller.
+    shown: HealthState,
+    /// A transition holding for the stability window, if any.
+    pending: Option<PendingTransition>,
+}
+
+/// Decides when a degradation or recovery is worth showing on screen.
+///
+/// State is kept **per subsystem** ([`CauseKey::subsystem`]), never per
+/// cause: two causes of one subsystem share a single health state, with the
+/// cause riding along to say why. This is what lets a subsystem's first
+/// failure show immediately (SC-L71) while a later cause change inside the
+/// same subsystem still serves the window (SC-L76).
+///
+/// Not thread-safe by itself, deliberately: `observe`, `tick` and `flush`
+/// all take `&mut self`; whoever shares one instance across threads supplies
+/// its own `Mutex`, the same trade-off `SqliteVectorStore` already makes in
+/// this repository.
+#[derive(Debug, Clone, Default)]
+pub struct HealthTracker {
+    /// One entry per subsystem observed so far, kept in first-observed
+    /// order so [`Self::flush`] can report the earliest degradation first.
+    states: Vec<(&'static str, SubsystemState)>,
+}
 
 impl HealthTracker {
-    /// Builds an empty tracker.
+    /// Builds an empty tracker: every subsystem starts healthy and unseen.
     #[must_use]
     pub fn new() -> Self {
-        Self
+        Self::default()
     }
 
-    /// Observes one event. Stub: always returns `None`.
+    /// Finds a subsystem's bookkeeping, creating it (healthy, unseen) the
+    /// first time it is referenced.
+    ///
+    /// # Complexity
+    ///
+    /// `O(n)` in the number of distinct subsystems seen so far, which in
+    /// practice is a handful (embedder, provider, vault, ...) -- amortised
+    /// `O(1)` per observation against that fixed small `n`.
+    fn state_mut(&mut self, subsystem: &'static str) -> &mut SubsystemState {
+        match self.states.iter().position(|(name, _)| *name == subsystem) {
+            Some(idx) => &mut self.states[idx].1,
+            None => {
+                self.states.push((subsystem, SubsystemState::default()));
+                let last = self.states.len() - 1;
+                &mut self.states[last].1
+            }
+        }
+    }
+
+    /// Observes one event. Returns a transition only when the new state has
+    /// already held for [`HEALTH_MIN_STABLE_SECS`] (R-L13d) -- **except** a
+    /// subsystem's very first degradation, which is immediate (SC-L71).
+    ///
+    /// `cause` is `None` for the call sites that carry no cause key; such an
+    /// event is ignored rather than keyed off its text (R-L13). `ok` is the
+    /// caller's own classification of the event's level -- this function
+    /// never inspects text to derive either value.
+    ///
+    /// # Complexity
+    ///
+    /// `O(1)` amortised: one lookup via [`Self::state_mut`] plus
+    /// constant-time state comparison.
     pub fn observe(
         &mut self,
-        _cause: Option<CauseKey>,
-        _ok: bool,
-        _now: Instant,
+        cause: Option<CauseKey>,
+        ok: bool,
+        now: Instant,
     ) -> Option<Transition> {
+        let cause = cause?;
+        let candidate: HealthState = if ok { None } else { Some(cause) };
+        let state = self.state_mut(cause.subsystem());
+
+        // Rule: same state as what is shown -- nothing new to report, and
+        // any transition that had been waiting on a DIFFERENT candidate is
+        // no longer relevant.
+        if candidate == state.shown {
+            state.pending = None;
+            return None;
+        }
+
+        // Rule (SC-L71): a subsystem's first-ever degradation is immediate.
+        if state.shown.is_none() && candidate.is_some() {
+            let transition = Transition::Degraded(cause);
+            state.shown = candidate;
+            // Already shown, not pending: nothing left to wait on.
+            state.pending = None;
+            return Some(transition);
+        }
+
+        // Everything else -- a recovery, or a cause change inside an
+        // already-degraded subsystem -- serves the window.
+        let transition = match candidate {
+            None => Transition::Restored(cause),
+            Some(_) => Transition::Degraded(cause),
+        };
+
+        match &state.pending {
+            // Already pending toward this exact candidate: keep its
+            // original `since` rather than restarting the window.
+            Some(pending) if pending.target == candidate => {}
+            _ => {
+                state.pending = Some(PendingTransition {
+                    transition,
+                    target: candidate,
+                    since: now,
+                });
+            }
+        }
+
         None
     }
 
-    /// Expires the window. Stub: always returns `None`.
-    pub fn tick(&mut self, _now: Instant) -> Option<Transition> {
+    /// Expires the window without a new event. The caller invokes this
+    /// periodically (the TUI event loop's own `poll` timeout) and once more
+    /// at shutdown; without it, a pending transition whose subsystem stops
+    /// producing events -- exactly what happens when something goes fully
+    /// dark -- would never be emitted.
+    ///
+    /// # Complexity
+    ///
+    /// `O(s)` in the number of distinct subsystems observed so far.
+    pub fn tick(&mut self, now: Instant) -> Option<Transition> {
+        let window = Duration::from_secs(HEALTH_MIN_STABLE_SECS);
+        for (_, state) in &mut self.states {
+            if let Some(pending) = state.pending.take() {
+                if now.saturating_duration_since(pending.since) >= window {
+                    state.shown = pending.target;
+                    return Some(pending.transition);
+                }
+                state.pending = Some(pending);
+            }
+        }
         None
     }
 
-    /// Emits pending transitions. Stub: always empty.
+    /// Emits every pending transition, ignoring whether its window has
+    /// elapsed. Used at shutdown (SC-L90): a short headless run would
+    /// otherwise end without ever showing its only pending signal.
+    ///
+    /// Returns a `Vec`, not an `Option`, because state is per subsystem: a
+    /// cascading failure can leave one pending transition per subsystem,
+    /// and an `Option` would show one and silently drop the rest. The order
+    /// matches first-observed order, so the earliest subsystem to degrade
+    /// is reported first.
+    ///
+    /// # Complexity
+    ///
+    /// `O(s)` in the number of distinct subsystems observed so far.
     pub fn flush(&mut self) -> Vec<Transition> {
-        Vec::new()
+        let mut out = Vec::new();
+        for (_, state) in &mut self.states {
+            if let Some(pending) = state.pending.take() {
+                state.shown = pending.target;
+                out.push(pending.transition);
+            }
+        }
+        out
     }
 }
 
