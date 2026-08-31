@@ -3728,6 +3728,13 @@ mod tests {
     /// never calling it, which is the shape of guardian this repository keeps
     /// finding.
     ///
+    /// **Bounded by the loop body, not by the function.** Spanning all of
+    /// `run_app` would leave the guard green with the call hoisted above `loop`
+    /// or dropped below it — a single tick per session instead of one per pass,
+    /// which is precisely the failure that leaves the stability window never
+    /// expiring. `loop {` opens the body and `if event::poll(` is unambiguously
+    /// inside it, so a call outside the loop lands outside that pair either way.
+    ///
     /// The `\r` comes out because `include_str!` returns the file's bytes
     /// untouched while rustc normalises CRLF inside a source literal, so a
     /// needle spanning lines would compare two different things on a Windows
@@ -3738,15 +3745,19 @@ mod tests {
         let start = source
             .find("\nasync fn run_app<B: Backend>")
             .expect("run_app must still be the event loop");
-        let end = source[start..]
-            .find("\nfn char_display_width")
+        let opens = source[start..]
+            .find("\n    loop {")
             .map(|offset| start + offset)
-            .expect("the item after run_app must still bound its body");
-        let body = &source[start..end];
+            .expect("run_app must still be a loop");
+        let polls = source[opens..]
+            .find("\n        if event::poll(")
+            .map(|offset| opens + offset)
+            .expect("the loop must still block on the poll timeout");
+        let loop_body = &source[opens..polls];
         assert!(
-            body.contains("health_tick("),
-            "the ratatui loop must expire the health window, or a recovery is only ever \
-             shown after the session it belongs to has ended"
+            loop_body.contains("health_tick("),
+            "the health window must be expired on every pass of the ratatui loop, or a \
+             recovery is only ever shown after the session it belongs to has ended"
         );
     }
 
