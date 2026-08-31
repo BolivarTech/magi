@@ -7726,37 +7726,54 @@ mod tests {
         });
     }
 
-    /// The no-layer fallback writes to stderr, so it must run BEFORE the terminal is taken
-    /// over — nothing may reach stderr while ratatui holds the alternate screen (REQ-L39).
+    /// C1: `run()` HANDS the startup notices to `run_tui_ext` and does not announce them
+    /// itself — the announcement belongs in the one window where the sink is already attached
+    /// and the alternate screen is not yet up.
     ///
-    /// `TuiNoticeSink` separates three cases rather than two, and this is the third one made
-    /// unreachable instead of handled: with a subscriber installed the layer routes and never
-    /// touches stderr; with none and no TUI, stderr is correct; with none and the TUI already
-    /// on the alternate screen, printing would corrupt the frame. Only the call ORDER in
-    /// `run()` rules that case out, and an ordering is exactly the kind of fact that stops
-    /// being true without anything saying so.
+    /// `TuiNoticeSink` separates three cases rather than two, and both of the bad ones are
+    /// ordering accidents. With a subscriber installed the layer routes and never touches
+    /// stderr; with none and no TUI, stderr is correct; with none and the TUI already on the
+    /// alternate screen, printing corrupts the frame (REQ-L39). What this milestone added is a
+    /// FOURTH consideration that used to be nobody's: an ATTACHED sink puts the line in the
+    /// transcript, and `run()` announcing one statement before the handoff meant the sink was
+    /// always still unattached, so every startup `WARN`/`ERROR` went to the primary buffer and
+    /// was covered by `EnterAlternateScreen` for the rest of the session.
+    ///
+    /// So the announcement moved into `run_tui_ext`, and this guard holds the half of the
+    /// property that lives here: `run()` must not do it too. Its companion,
+    /// `tui::tests::test_the_startup_notices_are_emitted_inside_the_attached_window`, holds the
+    /// other half — that the announcement sits between the `attach` and the alternate screen.
     ///
     /// Asserted on byte offsets rather than on a regex, because the property IS the order.
     ///
     /// The `\r` comes out for the same reason as every other source-reading guard here:
     /// `include_str!` returns the file's bytes untouched while rustc normalises CRLF inside
     /// a source literal, and rustfmt writes CRLF on Windows and LF elsewhere, so a needle
-    /// carrying a newline would match on one machine and not the next. Both needles below
-    /// are single-line, so today the strip changes nothing — it is here so that adding a
-    /// multi-line needle later cannot quietly reintroduce the trap.
+    /// carrying a newline would match on one machine and not the next. Every needle below is
+    /// single-line, so today the strip changes nothing — it is here so that adding a
+    /// multi-line needle later cannot quietly reintroduce the trap. The forbidden call is
+    /// composed with `concat!` so this guard cannot match its own source and pass for free.
     #[test]
-    fn the_startup_notices_are_emitted_before_the_terminal_is_taken_over() {
+    fn the_startup_notices_are_handed_to_the_tui_rather_than_announced_early() {
         let source = include_str!("main.rs").replace('\r', "");
-        let emitted = source
-            .find("emit_notices(startup_notices);")
-            .expect("run() must emit the startup notices");
-        let tui = source
+        let announced_here = concat!("emit_notices(startup_", "notices);");
+        assert!(
+            !source.contains(announced_here),
+            "run() announces the startup notices itself, which happens before run_tui_ext \
+             attaches the sink: every WARN and ERROR is printed to the primary screen and \
+             then hidden by EnterAlternateScreen for the whole session"
+        );
+        let call = source
             .find("crate::tui::run_tui_ext(")
             .expect("run() must hand off to the TUI");
+        let end = source[call..]
+            .find("\n    .await?;")
+            .map(|offset| call + offset)
+            .expect("the handoff must still end in an awaited result");
         assert!(
-            emitted < tui,
-            "the notices are emitted after the TUI takes the terminal, so the no-layer \
-             fallback would write over the alternate screen"
+            source[call..end].contains("startup_notices"),
+            "run_tui_ext no longer receives the startup notices, so nothing announces them \
+             at all and the whole startup goes silent"
         );
     }
 

@@ -3747,6 +3747,62 @@ mod tests {
         );
     }
 
+    /// C1: the startup notices are announced INSIDE the attached window — after
+    /// `attach`, before `EnterAlternateScreen` — and nowhere else.
+    ///
+    /// Announcing them earlier (which is what `run()` used to do, one statement
+    /// before the handoff) reaches a sink whose `tx` is still `None`, so
+    /// [`TuiNoticeSink::route`] takes its stderr branch and writes to the
+    /// PRIMARY buffer. `EnterAlternateScreen` swaps that buffer out about a
+    /// millisecond later, so a wrong passphrase's "running WITHOUT persistence
+    /// for this session" is written, instantly covered, and stays invisible for
+    /// the whole conversation — reappearing only after the user quits.
+    /// Announcing them LATER, once the frame exists, is the other failure: then
+    /// the same stderr branch writes ON TOP of the frame.
+    ///
+    /// Both bounds therefore have to hold at once, which is why the two
+    /// assertions live in one guard: satisfying either alone reopens the other
+    /// defect. The companion guard in `main.rs`
+    /// (`the_startup_notices_are_handed_to_the_tui_rather_than_announced_early`)
+    /// closes the third way out — announcing them in `run()` as well as here.
+    ///
+    /// Asserted on byte offsets for the same reason as the guard above: the
+    /// property IS an order, and driving `run_tui_ext` far enough to observe it
+    /// needs a real terminal. Every needle is single-line and the `\r` is
+    /// stripped, so this reads the same on a CRLF checkout as on an LF one.
+    #[test]
+    fn test_the_startup_notices_are_emitted_inside_the_attached_window() {
+        let source = include_str!("mod.rs").replace('\r', "");
+        let start = source
+            .find("\npub async fn run_tui_ext(")
+            .expect("run_tui_ext must still bring the terminal up");
+        let end = source[start..]
+            .find("\nfn report_gate_telemetry")
+            .map(|offset| start + offset)
+            .expect("the item after run_tui_ext must still bound its body");
+        let body = &source[start..end];
+        let attached = body
+            .find("classifier_notices.attach(")
+            .expect("the sink must still be attached");
+        let emitted = body
+            .find("emit_notices(startup_notices);")
+            .expect("run_tui_ext must announce the startup notices it was handed");
+        let alternate = body
+            .find("EnterAlternateScreen)")
+            .expect("the alternate screen must still be entered");
+        assert!(
+            attached < emitted,
+            "the startup notices are announced while the sink is still \
+             unattached, so every WARN and ERROR goes to the primary screen \
+             and is hidden by EnterAlternateScreen for the whole session"
+        );
+        assert!(
+            emitted < alternate,
+            "the startup notices are announced after the alternate screen is \
+             up, so the no-layer fallback writes over the frame"
+        );
+    }
+
     /// R15: the event loop is what expires the health window while the user is
     /// looking at the screen.
     ///
