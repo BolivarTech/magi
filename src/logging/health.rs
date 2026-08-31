@@ -737,6 +737,37 @@ mod tests {
     }
 
     #[test]
+    fn test_an_actionable_error_names_what_broke_what_it_means_and_where_to_read_more() {
+        // REQ-L23: an actionable screen error has three parts, and this
+        // asserts each on its own, specific content -- not on non-emptiness
+        // and not on a `.log` substring, both of which a no-row branch or an
+        // unrelated path would also satisfy.
+        let path = Path::new(A_LOG_PATH);
+        let line = render_transition(
+            &Transition::Degraded(CauseKey::new("provider", "unreachable")),
+            path,
+        );
+
+        // Part 1 -- what broke: the subsystem is named.
+        assert!(
+            line.contains("provider"),
+            "REQ-L23 part 1 (what broke) is missing the subsystem name: {line}"
+        );
+        // Part 2 -- what it means for this session: the consequence is stated.
+        assert!(
+            line.contains("the turn cannot complete"),
+            "REQ-L23 part 2 (what it means for this session) is missing: {line}"
+        );
+        // Part 3 -- where to read more: the exact path passed in, not merely
+        // something ending in ".log".
+        assert!(
+            line.contains(A_LOG_PATH),
+            "REQ-L23 part 3 (where to read more) does not carry the log path \
+             actually passed in: {line}"
+        );
+    }
+
+    #[test]
     fn every_declared_cause_key_has_a_screen_message() {
         // The guard belongs to task 3.3 and not to the task that wrote the
         // table: above it, `CauseKey::ALL` is empty, the loop runs zero times
