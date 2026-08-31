@@ -109,18 +109,27 @@ pub const SCREEN_LEVEL: tracing::Level = tracing::Level::WARN;
 /// # Why this is a notice and not an exemption in `enabled`
 ///
 /// The success events that health recovery is detected from are `INFO`-level.
-/// When the union of both filters excludes `INFO` they never reach the layer,
-/// so a degradation is still shown and is never seen to recover. Carving an
+/// When the layer's `enabled` admits no `INFO` they never reach it, so a
+/// degradation is still shown and is never seen to recover. Carving an
 /// exception into `enabled` for cause-bearing events would be a filter that
 /// lies about what it filters — an operator who raised the threshold asked for
 /// fewer events. So the behaviour stands and the consequence is named instead.
+///
+/// # Only ONE of the two inputs is operator-settable
+///
+/// `enabled` is the union of the file branch's filter and the screen branch's
+/// level, but the screen branch is the fixed [`SCREEN_LEVEL`] constant, which
+/// never admits `INFO` — the `[logging].tui_filter` key was removed once it was
+/// found to be read by nothing. So the union collapses to a question about
+/// `file_filter` alone, and the notice below names that key rather than "both
+/// filters": there is no second one for an operator to go looking for.
 ///
 /// # Why it is emitted HERE and not inside [`init_logging`]
 ///
 /// `init_logging` mounts the layer; it knows nothing about recovery detection,
 /// and teaching it would put a screen policy inside the plumbing. The caller
-/// invokes this right after it holds the handle, where both filters are
-/// already resolved and the sink already exists.
+/// invokes this right after it holds the handle, where the filter and the
+/// screen level are already resolved and the sink already exists.
 ///
 /// # Complexity
 ///
@@ -132,7 +141,8 @@ pub fn warn_if_recovery_detection_is_off(
     if health::recovery_detection_is_off(file_filter, screen_level) {
         tracing::warn!(
             target: health::HEALTH_TARGET,
-            "health recovery detection is off: both filters exclude info-level events"
+            "health recovery detection is off: file_filter excludes info-level events, \
+             so a degradation is never seen to recover"
         );
     }
 }

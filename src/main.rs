@@ -1748,8 +1748,9 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
         ) {
             Ok(_handle) => {
                 // Right after the handle comes back and before it is used, as
-                // task 3.3 requires: both filters are resolved by now and the
-                // sink exists, which are the two things this notice needs.
+                // task 3.3 requires: the file filter and the screen level are
+                // resolved by now and the sink exists, which are the two things
+                // this notice needs.
                 magi_rs::logging::warn_if_recovery_detection_is_off(
                     &cfg.file_filter,
                     Some(magi_rs::logging::SCREEN_LEVEL),

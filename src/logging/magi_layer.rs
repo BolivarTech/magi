@@ -2,7 +2,11 @@
 // Version: 0.18.0
 // Date: 2026-08-31
 
-//! One `tracing` layer, carrying both filters and both sinks.
+//! One `tracing` layer, carrying both sinks with the level each is gated at.
+//!
+//! The two gates are **not** two filters: the file branch takes a configurable
+//! [`crate::logging::filter::Filter`], the screen branch a fixed
+//! [`crate::logging::SCREEN_LEVEL`]. Only the first is operator-settable.
 //!
 //! # Why one layer and not two
 //!

@@ -471,8 +471,9 @@ fn failure_cause(error: &EmbeddingError) -> &'static str {
 /// two copies drift apart.
 ///
 /// The level is `info` and not `debug` deliberately — the layer's `enabled` is
-/// the union of the file and screen filters, and under the shipped defaults a
-/// `debug` event is rejected before the layer ever sees it.
+/// the union of the file branch's filter and the screen branch's fixed level,
+/// and under the shipped defaults a `debug` event is rejected before the layer
+/// ever sees it.
 ///
 /// # What this costs the log file
 ///

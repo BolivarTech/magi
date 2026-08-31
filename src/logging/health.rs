@@ -387,12 +387,21 @@ pub fn render_transition(t: &Transition, log_path: &Path) -> String {
     }
 }
 
-/// Whether the union of both filters excludes `INFO`.
+/// Whether the layer admits no `INFO` event.
+///
+/// The union is taken over the file branch's **filter** and the screen
+/// branch's **level** — two different things, and only the first is
+/// operator-settable. The screen branch is `SCREEN_LEVEL`, a constant that
+/// never admits `INFO`, so in production this is a question about
+/// `file_filter` alone. `screen_level` stays a parameter because MS1's screen
+/// branch can be absent, which is what `None` means; it is not a second
+/// configurable filter.
 ///
 /// # Parameters
 ///
-/// * `file_filter` — the file branch's filter.
-/// * `screen_level` — the screen branch's level, when one is wired.
+/// * `file_filter` — the file branch's filter, the only settable half.
+/// * `screen_level` — the screen branch's fixed level, or `None` when no
+///   screen branch is wired.
 ///
 /// # Returns
 ///
