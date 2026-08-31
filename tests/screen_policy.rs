@@ -66,6 +66,36 @@ fn todays_log_file_name() -> String {
     magi_rs::logging::rotation::file_name(time::OffsetDateTime::now_utc().date())
 }
 
+/// Everything the file mouth wrote, once `needle` appears or the deadline
+/// passes.
+///
+/// **A poll on the condition, never a fixed delay.** The writer is a detached
+/// thread, so how long it takes to flush is a property of the machine, not of
+/// the product: a flat sleep is a guess that is too long on an idle box and too
+/// short on a loaded one, which is this repository's documented flake recipe.
+/// The discriminating property is that the line *arrives*, never that it
+/// arrives inside some number of milliseconds, so the deadline is a FAILURE
+/// bound set far past any legitimate flush.
+///
+/// # Returns
+///
+/// The file contents — the needle's presence is left to the caller to assert,
+/// so a timeout reports what was actually written instead of a bare "false".
+fn wait_for_file(dir: &std::path::Path, needle: &str) -> String {
+    /// Far past any legitimate flush; only a real defect reaches it.
+    const DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
+    /// How often the file is re-read while waiting.
+    const POLL: std::time::Duration = std::time::Duration::from_millis(20);
+    let start = std::time::Instant::now();
+    loop {
+        let written = everything_written(dir);
+        if written.contains(needle) || start.elapsed() >= DEADLINE {
+            return written;
+        }
+        std::thread::sleep(POLL);
+    }
+}
+
 /// Everything the file mouth wrote.
 fn everything_written(dir: &std::path::Path) -> String {
     let mut all = String::new();
@@ -208,8 +238,10 @@ fn test_info_never_reaches_the_screen_but_reaches_the_file() {
     tracing::warn!(target: "magi_rs::agent", "the embedder answered 500");
 
     drop(handle);
-    std::thread::sleep(std::time::Duration::from_millis(300));
 
+    // The screen is asserted with no wait at all: delivery to the sink happens
+    // inside `on_event`, on the emitting thread. Only the FILE goes through the
+    // writer thread, so only the file is waited on.
     let shown = screen.joined();
     assert!(
         shown.contains("the embedder answered 500"),
@@ -221,7 +253,7 @@ fn test_info_never_reaches_the_screen_but_reaches_the_file() {
         "an INFO event reached the screen: {shown}"
     );
 
-    let written = everything_written(dir.path());
+    let written = wait_for_file(dir.path(), "context assembled");
     assert!(
         written.contains("context assembled"),
         "and the file is where it must have gone instead: {written}"
