@@ -531,6 +531,134 @@ pub enum AppMode {
     Visual, // Mode for selecting text within a message
 }
 
+/// Rows the status line takes while an operation is running.
+const STATUS_ROW_HEIGHT_SHOWN: u16 = 1;
+/// Rows the status line takes while there is nothing to show (REQ-L26).
+const STATUS_ROW_HEIGHT_COLLAPSED: u16 = 0;
+
+/// What the row says while a `/consult` is being deliberated.
+///
+/// A program constant, never a composed `String` — see [`StatusRow`] for why
+/// the type of the text is the guarantee rather than the convention.
+const STATUS_CONSULTING_THE_TRIO: &str = "consulting the trio…";
+
+/// The ephemeral status row: one line while a long operation runs, and nothing
+/// at all the rest of the time.
+///
+/// **It lives OUTSIDE [`App::messages`]** (REQ-L25). The transcript is
+/// append-only and both Selection and Visual index into it, so a line that
+/// appears and disappears would need mutability there and would change two
+/// modes that have no business knowing an operation is in flight.
+///
+/// **The text is `&'static str`, and that is the guarantee rather than a
+/// convention.** The row is ephemeral, so it never passes through the auditor —
+/// which means nothing composed at runtime may reach it. A program constant
+/// cannot carry a credential, a path or a provider's error body, and the type
+/// is what enforces it, the same argument
+/// [`SecretName`](magi_rs::logging::auditor::SecretName) makes for a secret's
+/// name. If a counter is ever wanted ("seat 2 of 3") it is added as its OWN
+/// field with its own bounded format, never concatenated into this text.
+///
+/// **Cloning shares one row, and that is the point.** The task that starts the
+/// operation and the task that draws the frame are different tasks: the event
+/// loop holds one handle and [`App`] holds another, both naming the same line.
+/// `set` still takes `&mut self` because ONE handle must not open two
+/// overlapping guards — that is what the exclusive borrow expresses — while the
+/// shared cell is only how the renderer gets to see the result.
+///
+/// # Example
+///
+/// ```ignore
+/// let mut row = StatusRow::new();
+/// {
+///     let _showing = row.set("consulting the trio…");
+///     // …the long operation runs here; the row is one line tall…
+/// }
+/// // The guard is gone, so the row is collapsed again.
+/// assert_eq!(row.height(), 0);
+/// ```
+#[derive(Clone, Default)]
+pub struct StatusRow {
+    /// The line currently shown, or `None` while the row is collapsed.
+    shown: Arc<Mutex<Option<&'static str>>>,
+}
+
+impl StatusRow {
+    /// A collapsed row.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Shows `text` until the returned guard is dropped.
+    ///
+    /// # Parameters
+    ///
+    /// * `text` — a program constant naming the operation, supplied by whoever
+    ///   STARTS it. Only operations known to be long qualify (R-L15).
+    ///
+    /// # Returns
+    ///
+    /// The guard whose `Drop` clears the row — on success, on failure, on
+    /// cancellation and on a panic alike (REQ-L27).
+    ///
+    /// # Complexity
+    ///
+    /// `O(1)`.
+    pub fn set(&mut self, text: &'static str) -> StatusGuard<'_> {
+        let _ = text;
+        StatusGuard { row: self }
+    }
+
+    /// The rows this line occupies: one while something is shown, zero
+    /// otherwise (REQ-L26).
+    ///
+    /// # Complexity
+    ///
+    /// `O(1)`.
+    #[must_use]
+    pub fn height(&self) -> u16 {
+        if self.current().is_some() {
+            STATUS_ROW_HEIGHT_SHOWN
+        } else {
+            STATUS_ROW_HEIGHT_COLLAPSED
+        }
+    }
+
+    /// What the row says, or `None` while it is collapsed.
+    ///
+    /// # Complexity
+    ///
+    /// `O(1)`.
+    #[must_use]
+    pub fn current(&self) -> Option<&'static str> {
+        *self.cell()
+    }
+
+    /// The shared cell, with a poisoned lock recovered rather than unwrapped —
+    /// a panic in one task must not take the row down for the other.
+    fn cell(&self) -> std::sync::MutexGuard<'_, Option<&'static str>> {
+        self.shown.lock().unwrap_or_else(|p| p.into_inner())
+    }
+}
+
+/// Clears the [`StatusRow`] when it is dropped (REQ-L27).
+///
+/// **A drop guard rather than a clear in each exit branch**, because the
+/// branches are not enumerable: a failure, a cancellation and a panic all have
+/// to give the line back, and the one that gets forgotten is whichever branch
+/// is added last. Precedent in this repository: `AbortOnDrop` in `src/task.rs`.
+pub struct StatusGuard<'a> {
+    /// The row this guard is holding open.
+    row: &'a mut StatusRow,
+}
+
+impl Drop for StatusGuard<'_> {
+    fn drop(&mut self) {
+        *self.row.cell() = None;
+    }
+}
+
 /// Parses a trimmed input line as a `/consult` command. `Some(query)` for
 /// `/consult <query>` (empty string for bare `/consult`), `None` otherwise.
 /// Requires a space boundary so `/consultation` is treated as normal input.
@@ -895,6 +1023,12 @@ pub struct App {
     pub thinking_active: bool,
     /// Current spinner frame for the thinking indicator.
     pub spinner_frame: usize,
+    /// The ephemeral status line drawn between the transcript and the input.
+    ///
+    /// A handle onto the row the event loop's task also holds, not a copy of
+    /// it: whoever starts a long operation sets the text there, and this side
+    /// only reads it while drawing (see [`StatusRow`]).
+    pub status_row: StatusRow,
 }
 
 impl App {
@@ -925,6 +1059,7 @@ impl App {
             show_thinking: false,
             thinking_active: false,
             spinner_frame: 0,
+            status_row: StatusRow::new(),
         }
     }
 
@@ -1339,6 +1474,12 @@ pub async fn run_tui_ext(
     // itself stays here so `run_tui_ext` can cancel it once `run_app` returns.
     let quit_token_for_loop = quit_token.clone();
 
+    // The ephemeral status row, created HERE because both sides need a handle:
+    // the event loop below sets it when it starts a long operation, and `App`
+    // reads it on every frame. Two handles, one row (see `StatusRow`).
+    let status_row = StatusRow::new();
+    let mut status_row_for_loop = status_row.clone();
+
     // The handle is kept and joined (via `join_event_loop_then_drain`) before the gate
     // telemetry is drained below, instead of being dropped here — a detached spawn would let
     // the drain race the task's tail (its last `UiEvent` or `on_session_close`'s best-effort
@@ -1415,6 +1556,13 @@ pub async fn run_tui_ext(
                             continue;
                         }
                     };
+                    // The one long operation this surface starts (R-L15): a
+                    // deliberation by three mages, plus the classification call
+                    // that may precede it. The text comes from here, the side
+                    // that KNOWS what is running, and the guard gives the row
+                    // back on every way out of this arm — the early `continue`s
+                    // below, an error, a panic inside `analyze` (REQ-L27).
+                    let _showing = status_row_for_loop.set(STATUS_CONSULTING_THE_TRIO);
                     // Cap forced /consult input too (the tool path caps in execute; this
                     // direct path bypasses it) — reject before any model call, INCLUDING a
                     // classification call.
@@ -1697,7 +1845,8 @@ pub async fn run_tui_ext(
         let _ = runner_agent.on_session_close().await;
     });
 
-    let app = App::new(event_tx, response_rx, approval_rx);
+    let mut app = App::new(event_tx, response_rx, approval_rx);
+    app.status_row = status_row;
     let res = run_app(&mut terminal, app).await;
 
     // `run_app` returning — by ANY exit path — means the user is done with the terminal.
@@ -2441,11 +2590,35 @@ fn ui(f: &mut Frame, app: &mut App) {
     let input_rows = input_pane_rows(&app.input, input_content_w, MAX_INPUT_ROWS);
     let input_pane_height = (input_rows as u16).saturating_add(2); // + top/bottom borders
 
+    // The ephemeral status row sits between the transcript and the input, and
+    // is `Length(0)` while there is nothing to show (REQ-L26). The layout was
+    // already variable-height — `input_pane_height` grows with the wrapped
+    // prompt — so a row that appears and disappears introduces no new class of
+    // behaviour here. Selection and Visual never show it (REQ-L25): those two
+    // modes navigate the transcript, and an operation in flight is not part of
+    // it.
+    let status_height = if app.mode == AppMode::Normal {
+        app.status_row.height()
+    } else {
+        STATUS_ROW_HEIGHT_COLLAPSED
+    };
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .margin(1)
-        .constraints([Constraint::Min(1), Constraint::Length(input_pane_height)].as_ref())
+        .constraints(
+            [
+                Constraint::Min(1),
+                Constraint::Length(status_height),
+                Constraint::Length(input_pane_height),
+            ]
+            .as_ref(),
+        )
         .split(area);
+    // Named so the rest of this function reads as panes rather than indices —
+    // the input pane moved from `chunks[1]` to `chunks[2]` when the row was
+    // inserted, and every one of its uses had to move with it.
+    let status_area = chunks[1];
+    let input_area = chunks[2];
 
     let inner_width = chunks[0].width.saturating_sub(2) as usize; // subtract left + right borders
     let inner_height = chunks[0].height.saturating_sub(2) as usize; // subtract top + bottom borders
@@ -2542,6 +2715,20 @@ fn ui(f: &mut Frame, app: &mut App) {
         f.render_stateful_widget(messages_list, chunks[0], &mut state);
     }
 
+    // Borderless and one line tall: the row is a hint that something is
+    // running, not a widget competing with the transcript for attention. The
+    // text is handed to ratatui whole and is never byte-indexed (G5) — it is a
+    // `&'static str` that may well contain multi-byte characters, and the
+    // backend measures it by grapheme.
+    if status_height > STATUS_ROW_HEIGHT_COLLAPSED {
+        if let Some(text) = app.status_row.current() {
+            f.render_widget(
+                Paragraph::new(text).style(Style::default().add_modifier(Modifier::DIM)),
+                status_area,
+            );
+        }
+    }
+
     let input_title = match app.mode {
         AppMode::Selection => {
             "SELECT MESSAGE (Enter to select text, 'y' to copy whole, Esc to exit)"
@@ -2574,10 +2761,10 @@ fn ui(f: &mut Frame, app: &mut App) {
                 input_text = Text::from(Line::from(spans));
             }
         }
-        f.render_widget(Paragraph::new(input_text).block(input_block), chunks[1]);
+        f.render_widget(Paragraph::new(input_text).block(input_block), input_area);
         if app.mode == AppMode::Normal {
             let col = UnicodeWidthStr::width(&app.input[..app.cursor_position]) as u16;
-            f.set_cursor(chunks[1].x + col + 1, chunks[1].y + 1);
+            f.set_cursor(input_area.x + col + 1, input_area.y + 1);
         }
     } else {
         // Long / multi-line prompt: pre-wrap with the same algorithm so the cursor
@@ -2594,7 +2781,7 @@ fn ui(f: &mut Frame, app: &mut App) {
             .collect();
         f.render_widget(
             Paragraph::new(Text::from(visible)).block(input_block),
-            chunks[1],
+            input_area,
         );
         if app.mode == AppMode::Normal {
             let prefix = wrap_message(&app.input[..app.cursor_position], input_content_w);
@@ -2602,7 +2789,7 @@ fn ui(f: &mut Frame, app: &mut App) {
             let cur_col =
                 UnicodeWidthStr::width(prefix.last().map(String::as_str).unwrap_or("")) as u16;
             let cur_row_vis = cur_row_abs.saturating_sub(start) as u16;
-            f.set_cursor(chunks[1].x + cur_col + 1, chunks[1].y + cur_row_vis + 1);
+            f.set_cursor(input_area.x + cur_col + 1, input_area.y + cur_row_vis + 1);
         }
     }
 }
@@ -3457,6 +3644,103 @@ mod tests {
 
         app.insert_char('x');
         assert_eq!(app.input, "xá");
+    }
+
+    /// Draws one frame in `mode` with `row` attached, and returns every cell of
+    /// the resulting buffer as one string.
+    ///
+    /// Renders through the REAL `ui()` rather than asking a helper what it
+    /// would have done: "does not appear on screen" is a claim about the frame,
+    /// and a helper that agrees with itself proves nothing about the layout.
+    fn frame_text(mode: AppMode, row: StatusRow) -> String {
+        let (event_tx, _events) = mpsc::channel(1);
+        let (_responses, response_rx) = mpsc::channel(1);
+        let (_approvals, approval_rx) = mpsc::channel(1);
+        let mut app = App::new(event_tx, response_rx, approval_rx);
+        app.mode = mode;
+        app.status_row = row;
+        app.messages.push("Magi Agent: hello".to_string());
+        let mut terminal =
+            Terminal::new(ratatui::backend::TestBackend::new(60, 12)).expect("test terminal");
+        terminal.draw(|f| ui(f, &mut app)).expect("draw");
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect()
+    }
+
+    #[test]
+    fn test_the_status_row_collapses_to_zero_height_when_idle() {
+        // REQ-L26: the row is not a blank line kept in reserve — while there is
+        // nothing to say it takes no row at all, which is why the layout can
+        // afford to carry it on every frame.
+        let mut row = StatusRow::new();
+        assert_eq!(row.height(), 0, "an idle row must occupy no line");
+        let observer = row.clone();
+        {
+            let _showing = row.set(STATUS_CONSULTING_THE_TRIO);
+            assert_eq!(
+                observer.height(),
+                1,
+                "a running operation must occupy exactly one line"
+            );
+        }
+        assert_eq!(row.height(), 0, "and the line is given back when it ends");
+    }
+
+    #[test]
+    fn test_the_status_row_is_cleared_even_when_the_operation_panics() {
+        // REQ-L27: success is the easy branch. A panic is the one an explicit
+        // clear at each exit point always forgets, and a row left behind by it
+        // says an operation is running for the rest of the session.
+        let mut row = StatusRow::new();
+        let observer = row.clone();
+        let was_shown = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = Arc::clone(&was_shown);
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _showing = row.set(STATUS_CONSULTING_THE_TRIO);
+            flag.store(observer.height() == 1, std::sync::atomic::Ordering::SeqCst);
+            panic!("the operation failed");
+        }));
+        assert!(
+            outcome.is_err(),
+            "the panic must reach the caller unchanged"
+        );
+        assert!(
+            was_shown.load(std::sync::atomic::Ordering::SeqCst),
+            "the row has to be shown while the operation runs, or clearing it proves nothing"
+        );
+        assert_eq!(
+            observer.height(),
+            0,
+            "the drop guard must clear the row on a panic too"
+        );
+    }
+
+    #[test]
+    fn test_the_status_row_does_not_appear_in_selection_or_visual_mode() {
+        // REQ-L25: the row lives outside `App::messages`, and the two modes
+        // that navigate the transcript are not modified. The positive half is
+        // what keeps this honest — without it the test passes against a row
+        // that never renders anywhere.
+        let mut row = StatusRow::new();
+        let observer = row.clone();
+        let _showing = row.set(STATUS_CONSULTING_THE_TRIO);
+        assert!(
+            frame_text(AppMode::Normal, observer.clone()).contains(STATUS_CONSULTING_THE_TRIO),
+            "Normal mode must show the row while the operation runs"
+        );
+        assert!(
+            !frame_text(AppMode::Selection, observer.clone()).contains(STATUS_CONSULTING_THE_TRIO),
+            "Selection mode must be left exactly as it was"
+        );
+        assert!(
+            !frame_text(AppMode::Visual, observer).contains(STATUS_CONSULTING_THE_TRIO),
+            "Visual mode must be left exactly as it was"
+        );
     }
 
     /// MS2 gate S7 seventh-pass finding (Caspar): clipboard paste (`Ctrl+V`) used to insert
