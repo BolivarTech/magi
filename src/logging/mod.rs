@@ -101,6 +101,7 @@ pub mod appender;
 pub mod auditor;
 pub mod chunk;
 pub mod filter;
+pub mod health;
 pub mod magi_layer;
 pub mod render;
 pub mod retention;
