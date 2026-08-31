@@ -9,6 +9,91 @@ changes and the **patch** position signals backward-compatible fixes.
 
 ## [Unreleased]
 
+### Changed
+
+- **The screen policy: only `ERROR` and `WARN` reach it.** `INFO` and everything
+  below now goes to the day's log file and nowhere else. A clean startup — nothing
+  degraded, nothing misconfigured — puts not one line on the screen before the first
+  prompt, where it used to put seven. The diagnostics are not lost; they are in
+  `.magi/logs/magi-<date>.log`, which is what makes taking them off the screen
+  possible at all.
+
+  Every startup notice was reclassified one site at a time, not in bulk. A notice is
+  `warn!` when a capability stopped being available and the user will notice the
+  effect, or when something is now working worse without failing; it is `info!` when
+  it reports a configuration decision the user already made, a normal startup state,
+  or a recovery with no shown degradation behind it.
+
+- **A screen error names three things: what broke, what it means for this session,
+  and where to read more.** The third part is the path of the day's log file, spelled
+  the way the filesystem spells it so it can be pasted straight into an editor.
+
+### Added
+
+- **Health tracking for degradation and recovery.** A subsystem that starts failing
+  is announced once, not once per event, and when it starts working again the
+  recovery is announced once too (`✓ memory: retrieval restored`). State is kept per
+  subsystem, with the cause riding along to say why, so two causes of one subsystem —
+  an embedder that refuses connections and an embedder that returns HTTP 500 — share
+  one health state instead of taking turns announcing themselves.
+
+  A subsystem's **first** degradation is immediate: making the first "something
+  broke" notice wait would turn the defence against flapping into a delay on the
+  signal that matters most. Every later transition, including a change of cause
+  inside one already-degraded subsystem, has to hold for a 30 second stability
+  window before it is shown. An endpoint that flaps down and up six times in twenty
+  seconds therefore produces exactly one line on the screen; the file still records
+  all twelve events. A run that closes with a transition still serving its window
+  shows it on the way out rather than dropping it.
+
+  The success events the recovery half is derived from are `INFO`-level and reach
+  the layer through the union of both filters, never a global one. The transition
+  itself is not an event and is delivered to the screen directly, so the screen's
+  `WARN` level cannot suppress a recovery whose source event is `INFO`.
+
+- **An ephemeral status row for long operations.** A `/consult` now shows
+  `consulting the trio…` on its own row between the transcript and the input box.
+  The row lives outside the message history, collapses to zero height when there is
+  nothing to show, and is cleared by a drop guard — so a failure, a cancellation or
+  a panic clears it just as success does. Selection and Visual mode are unchanged,
+  and the row is never part of what `y` copies.
+
+### Removed
+
+- **`NoticeTier` is gone**, along with `NOTICE_MAX_INFO` and the
+  `… N more diagnostic notice(s) omitted` line. The cap existed because there was
+  nowhere to put what it discarded, and it produced the worse of both outcomes: the
+  reader got five lines of noise **and** the rest was destroyed instead of filed.
+  With `INFO` off the screen entirely and a file that has room for all of it, there
+  is nothing left to cap. Every notice is now announced at its own level.
+
+### Fixed
+
+- **A declared cause key never reached the code that consumes it.**
+  `MagiLayer::on_event` passed a hardcoded `None` as the cause to the auditor, so an
+  event carrying `cause.subsystem` and `cause.name` arrived at `Audited::cause()` as
+  `None` every time. Nothing in 0.18.0 read that value, so nothing failed and no test
+  went red — the health tracking above would have shipped as dead plumbing. The layer
+  now reads both fields off the event and passes the key through.
+
+### Known limitations
+
+- **Only the embedder is instrumented.** `provider` and `vault` health have screen
+  messages written but no producer: a provider outage shows neither a degradation
+  nor a recovery, and two of the four rows in the message table cannot be reached
+  today. Each subsystem gains its health events in the task that instruments it.
+
+- **`file_filter = "warn"` turns recovery detection off.** What decides whether an
+  event reaches the layer is the union of the file branch's filter and the screen
+  branch's level, and the screen branch is fixed at `warn`. So when `file_filter` is
+  `warn` or `error`, the union excludes `info`, the `INFO`-level success event a
+  recovery is derived from never arrives, and recovery detection stops working:
+  degradations still show, they are just never seen to recover. No exception is
+  carved into the filter for cause-carrying events — an operator who raises the
+  threshold is asking for fewer events and should get exactly that. Startup emits one
+  warning naming the consequence whenever the union excludes `info`, so the failure
+  is announced rather than only documented here.
+
 ## [0.18.0] - 2026-08-31
 
 ### Added
