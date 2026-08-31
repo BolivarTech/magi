@@ -1435,26 +1435,35 @@ pub async fn run_tui_ext(
         original_hook(panic_info);
     }));
 
+    // The channels are built BEFORE the terminal is taken over, because the sink
+    // has to be attached before then and it needs `response_tx` to attach to.
+    let (event_tx, mut event_rx) = mpsc::channel(100);
+    let (response_tx, response_rx) = mpsc::channel(100);
+    let (approval_tx, approval_rx) = mpsc::channel(100);
+
+    // **Attached BEFORE `EnterAlternateScreen`, and the order is the whole
+    // point.** An unattached sink writes to stderr, which is right only while
+    // there is no frame to write over. This used to sit AFTER the terminal was
+    // taken over, which was harmless for as long as the sink was reached by the
+    // mode classifier alone — it cannot fire that early. Since MS2 the logging
+    // layer's screen branch delivers into the same sink from `init_logging`, so
+    // those lines became a window in which a degradation would have landed on
+    // top of the frame: the corruption `PendingNotices` closes from the teardown
+    // end, reopened at the setup end. Nothing emits there today, which is
+    // exactly what makes it worth fixing now rather than after it does.
+    classifier_notices.attach(response_tx.clone());
+
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let (event_tx, mut event_rx) = mpsc::channel(100);
-    let (response_tx, response_rx) = mpsc::channel(100);
-    let (approval_tx, approval_rx) = mpsc::channel(100);
-
     // Cancelled right after `run_app` returns, below — races an in-flight OAuth callback
     // wait so quitting mid-login does not force the process to sit out
     // `OAUTH_CALLBACK_TIMEOUT_SECS` (MS2 gate S7 finding; see
     // `await_login_callback_or_quit`).
     let quit_token = CancellationToken::new();
-
-    // From here on the terminal is in raw mode on the alternate screen, so the mode
-    // classifier's notices must stop going to stderr and start going through the frame —
-    // the same rule `StreamPiece::Notice` enforces for every other operational notice.
-    classifier_notices.attach(response_tx.clone());
 
     // The startup notices no longer arrive here as a list to print. They are `tracing` events
     // now, and the layer's screen branch decides which of them a human sees (REQ-L19) — which
