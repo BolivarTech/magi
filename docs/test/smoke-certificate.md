@@ -1,16 +1,16 @@
 # Smoke Certificate
 
-- version: 0.17.0
-- commit: d89c1ee
-- date: 2026-08-27 (UTC)
+- version: 0.18.0
+- commit: 0462732
+- date: 2026-08-31 (UTC)
 - profile: product defaults (no --profile)
-- binary: sha256 3dac3b1638c933fd3744573727a4fce79a37691a0836a54922ce514fe395320d (rebuilt from the commit above)
-- real cost: 8 backend run(s) in 171s
-- rounds needed: 2
-- scope: 22 of 22 scenarios evaluated
+- binary: sha256 4e0db062c4697907df048c6240f2e7930f0e2f45ac5ff977833d9bc7ad7db0e4 (rebuilt from the commit above)
+- real cost: 8 backend run(s) in 453s
+- rounds needed: 1
+- scope: 23 of 23 scenarios evaluated
 - contract coverage: StructuredVerdicts v0.14.3 (6/6 REQ-EA); Vault v0.9.0, Headless v0.10.0, MagiCore MS1-MS3, OperationBudget -- partial
-- environment: 18 active memories, 872 KB database, 377 KB archived
-- result: 69 passed, 0 not passed, 69 total
+- environment: 73 active memories, 2924 KB database, 1096 KB archived
+- result: 71 passed, 0 not passed, 71 total
 
 [PASS] S1 run=R1 - exit 0 and stdout parses as JSON
 [PASS] S1 run=R1 - schema_version is 1
@@ -81,4 +81,6 @@
 [PASS] S22 run=R4 - pool_eligibility is present even when empty
 [PASS] S22 run=R4 - all three notions of degradation are derivable from published keys
 [PASS] S22 run=R4 - degraded is false for a three-verdict run
+[PASS] S23 run=R1 - the run id printed on stderr is the one carried in the JSON envelope
+[PASS] S23 run=R1 - that same run id appears inside a file in the workspace log directory, so the log survived process exit and belongs to this run
 [OUT_OF_SCOPE] - cross-OS linkage and the published crate (REQ-S26, REQ-S27)

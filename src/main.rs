@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 // Author: Julian Bolivar
-// Version: 0.17.0
-// Date: 2026-08-27
+// Version: 0.18.0
+// Date: 2026-08-31
 
 mod agent;
 mod config;
@@ -56,7 +56,6 @@ use magi_core::schema::{AgentName, Mode};
 use magi_rs::headless::exit::exit_code as headless_exit_code;
 use magi_rs::headless::input::{parse_input, read_input_bounded, InputFormat};
 use magi_rs::headless::limits::{HeadlessLimits, NORMAL_MAX_TOOL_CALLS};
-use magi_rs::headless::log::{LogLevel, RunLog};
 use magi_rs::headless::output::{write_json, write_text};
 use magi_rs::headless::policy::{Policy, Tier};
 use magi_rs::headless::resolution::{
@@ -221,13 +220,23 @@ enum CliLogLevel {
 }
 
 impl CliLogLevel {
-    /// Maps this CLI selector to the library [`LogLevel`].
-    fn into_lib(self) -> LogLevel {
+    /// Maps this CLI selector to the level the logging layer filters on.
+    ///
+    /// It used to map to the JSONL run log's own `LogLevel`. That log is retired
+    /// (REQ-L40) and the flag now steers the file branch of the single layer, so
+    /// the same `--log-level debug` an operator already types keeps meaning what
+    /// it meant.
+    /// The word this selector spells in a filter specification.
+    ///
+    /// `--log-level` predates per-target directives and stays a plain level, so
+    /// it enters the same precedence chain as the string it would have been
+    /// written as. One parser, one grammar, one place a level is understood.
+    fn as_filter_word(self) -> &'static str {
         match self {
-            CliLogLevel::Error => LogLevel::Error,
-            CliLogLevel::Warn => LogLevel::Warn,
-            CliLogLevel::Info => LogLevel::Info,
-            CliLogLevel::Debug => LogLevel::Debug,
+            CliLogLevel::Error => "error",
+            CliLogLevel::Warn => "warn",
+            CliLogLevel::Info => "info",
+            CliLogLevel::Debug => "debug",
         }
     }
 }
@@ -321,7 +330,11 @@ struct HeadlessArgs {
     /// Wall-clock ceiling in seconds for the whole run (REQ-H36).
     #[arg(long)]
     timeout: Option<u64>,
-    /// Run-log verbosity; omitted ⇒ info (REQ-H24).
+    /// File-log verbosity; omitted ⇒ info.
+    ///
+    /// It used to steer the JSONL run log (REQ-H24), which is retired: it now
+    /// steers the file branch of the single layer, so the flag an operator
+    /// already types keeps meaning what it meant.
     #[arg(long, value_enum)]
     log_level: Option<CliLogLevel>,
     /// Override the run-log directory (default `.magi/logs`, REQ-H24).
@@ -674,6 +687,45 @@ fn discover_config(
 /// live env var is gone. Both sources are trimmed for the same reason
 /// `discover_config` trims: a key with stray whitespace or a trailing newline (a
 /// common `export KEY=$(cat f)` artifact) would otherwise produce a malformed
+/// The credentials this run resolved, as the auditor's registration expects them.
+///
+/// # Parameters
+///
+/// * `anthropic` — the resolved `ANTHROPIC_API_KEY`, if any.
+/// * `openai` — the resolved `OPENAI_API_KEY`, if any.
+///
+/// # Returns
+///
+/// One pair per credential actually present. Blank is absent, the same rule the
+/// resolvers themselves apply.
+///
+/// # Why this is a separate, pure function
+///
+/// The registry it feeds is deliberately unobservable — the auditor keeps only
+/// `(length, hash)` per variant and exposes no count, which is REQ-L51 and not
+/// an oversight. So the call site cannot be asserted on from outside, and a
+/// hook added to make it observable would weaken the property the module exists
+/// to protect. Splitting the SELECTION out gives the part that can be wrong a
+/// guardian, and leaves only the one-line call to review.
+///
+/// # Complexity
+///
+/// `O(1)`.
+fn secrets_to_arm<'a>(
+    anthropic: Option<&'a str>,
+    openai: Option<&'a str>,
+) -> Vec<(magi_rs::logging::auditor::SecretName, &'a str)> {
+    use magi_rs::logging::auditor::SecretName;
+    let mut out = Vec::new();
+    if let Some(k) = non_blank(anthropic) {
+        out.push((SecretName::new("ANTHROPIC_API_KEY"), k));
+    }
+    if let Some(k) = non_blank(openai) {
+        out.push((SecretName::new("OPENAI_API_KEY"), k));
+    }
+    out
+}
+
 /// `Authorization` header (401).
 fn resolve_openai_key(
     env_key: Option<&str>,
@@ -922,9 +974,19 @@ fn open_tui_memory(
             Ok(store) => return MemoryAttachment::Encrypted(store),
             Err(e) => {
                 if !is_wrong_passphrase(&e) {
+                    // P-L01/P-L02. A store error can be long and can already
+                    // open with this very lead-in, so pasting it in whole gives
+                    // the reader the sentence twice and then buries the cause
+                    // past the notice cap. `error_for_display` drops the HEAD,
+                    // because in a chain of wrapped errors the cause is at the
+                    // end.
                     notices.push(format!(
-                        "WARNING: could not open the encrypted database ({e}); \
-                         running WITHOUT persistence for this session."
+                        "WARNING: {}; running WITHOUT persistence for this session.",
+                        magi_rs::notices::error_for_display(
+                            "could not open the encrypted database",
+                            &e.to_string(),
+                            magi_rs::notices::ERROR_DISPLAY_CAP,
+                        )
                     ));
                     return MemoryAttachment::Ephemeral;
                 }
@@ -1378,14 +1440,40 @@ where
             return ExitCode::FAILURE;
         }
     };
-    match runtime.block_on(body(secrets)) {
+    let code = match runtime.block_on(body(secrets)) {
         Ok(code) => code,
         Err(e) => {
             eprintln!("error: {e}");
             ExitCode::FAILURE
         }
+    };
+    // REQ-L54. The writer is a detached thread, so without this the process
+    // exits and takes it down holding whatever it had not written -- and the
+    // events lost are the LAST ones, which on a run that ended badly are the
+    // only ones worth having.
+    //
+    // Bounded, because a stuck writer must not hold the exit open, and honest
+    // about the shortfall rather than pretending everything landed. It is safe
+    // to reach stderr here: the alternate screen is long gone by the time the
+    // runtime has stopped.
+    if let Some(handle) = magi_rs::logging::installed() {
+        let left = handle.drain(EXIT_DRAIN_BUDGET);
+        if left > 0 {
+            eprintln!(
+                "warning: {left} bytes of log were still queued after waiting {}s and were not written",
+                EXIT_DRAIN_BUDGET.as_secs()
+            );
+        }
     }
+    code
 }
+
+/// How long the exit waits for the log queue to empty (REQ-L54).
+///
+/// Two seconds: long enough for a queue holding an ordinary session's tail,
+/// short enough that a stuck writer is a pause a user reads as the program
+/// closing rather than as a hang.
+const EXIT_DRAIN_BUDGET: std::time::Duration = std::time::Duration::from_secs(2);
 
 fn main() -> ExitCode {
     bootstrap_headless(run)
@@ -1569,9 +1657,13 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
                         ),
                         Err(e) => {
                             startup_notices.push(Notice::resolution(format!(
-                                "WARNING: could not open the secret vault ({e}); \
-                                 ANTHROPIC_API_KEY/OPENAI_API_KEY must come from the \
-                                 environment this session."
+                                "WARNING: {}; ANTHROPIC_API_KEY/OPENAI_API_KEY must \
+                                 come from the environment this session.",
+                                magi_rs::notices::error_for_display(
+                                    "could not open the secret vault",
+                                    &e.to_string(),
+                                    magi_rs::notices::ERROR_DISPLAY_CAP,
+                                )
                             )));
                             (Some(store), None)
                         }
@@ -1610,6 +1702,122 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
         Some(ws) => MagiConfig::load(&ws.config_path())?,
         None => (MagiConfig::default(), Vec::new()),
     };
+    // Task 6.1/6.4: bring the logging subsystem up, once the config is loaded and
+    // the workspace is known.
+    //
+    // **A failure here is a NOTICE, never fatal** (REQ-L35). The one exception —
+    // D-L20 — is a log directory that was actually DECLARED and cannot be
+    // created; an absent or blank setting falls through to the default and never
+    // reaches that path, which is what keeps a CI script that exports
+    // `MAGI_LOG_DIR` without filling it from taking the process down.
+    if let Some(ws) = workspace.as_ref() {
+        let resolved_dir = magi_config.resolve_log_dir(
+            None,
+            std::env::var(crate::config::ENV_LOG_DIR).ok().as_deref(),
+            &ws.logs_dir(),
+        );
+        let log_dir = resolved_dir.path.clone();
+        let filter = magi_config.resolve_file_filter(
+            None,
+            std::env::var(crate::config::ENV_FILE_FILTER)
+                .ok()
+                .as_deref(),
+        );
+        // REQ-L30/L31: per-target directives, and an invalid one is a LOAD
+        // error rather than a silent fallback to INFO. The five-literal match
+        // this replaces accepted `magi_rs=debug` by quietly ignoring it, so an
+        // operator got a filter they believed was in effect and was not.
+        let parsed = match magi_rs::logging::filter::Filter::parse(&filter) {
+            Ok(f) => f,
+            Err(e) => {
+                eprintln!("error: {e}");
+                return Err(anyhow::anyhow!("invalid log filter"));
+            }
+        };
+        let cfg = magi_rs::logging::LoggingConfig {
+            log_dir: log_dir.clone(),
+            file_filter: parsed,
+        };
+        match magi_rs::logging::init_logging(
+            &cfg,
+            std::sync::Arc::new(magi_rs::logging::DiscardDelivery),
+            None,
+        ) {
+            Ok(_handle) => {
+                // Retention runs at startup, over what the previous runs left.
+                // Best effort throughout: a directory that cannot be read, or a
+                // delete that fails, is not worth failing a session over.
+                //
+                // **On the BLOCKING pool** (REQ-L16), and the caller is who
+                // decides that — the compressor itself knows nothing about the
+                // runtime. LZMA2 is CPU-bound and the cap allows five of them:
+                // on a worker thread that is several seconds during which every
+                // other task on that worker waits, which the user reads as the
+                // agent hanging on startup.
+                let dir = log_dir.clone();
+                let retention = magi_config.retention();
+                let outcome = tokio::task::spawn_blocking(move || {
+                    let swept = magi_rs::logging::sweep::sweep_orphan_temps(
+                        &dir,
+                        std::time::SystemTime::now(),
+                    );
+                    let files = magi_rs::logging::sweep::scan(&dir);
+                    let names: Vec<String> = files.iter().map(|f| f.name.clone()).collect();
+                    let plan = magi_rs::logging::retention::plan(
+                        &files,
+                        time::OffsetDateTime::now_utc().date(),
+                        std::time::SystemTime::now(),
+                        &retention,
+                    );
+                    let done = magi_rs::logging::sweep::execute_plan(&dir, &names, &plan)
+                        .unwrap_or_default();
+                    (done, swept)
+                })
+                .await;
+                if let Ok((done, swept)) = outcome {
+                    if swept > 0 || done.compressed > 0 {
+                        startup_notices.push(Notice::resolution(format!(
+                            "logs: {} compressed, {swept} abandoned temporaries removed",
+                            done.compressed
+                        )));
+                    }
+                    // REQ-L61: apart from the size warning, and with the two
+                    // causes kept distinct. A nearly full disk makes compression
+                    // fail, retention then cannot shrink the directory, and the
+                    // size warning alone describes the symptom while hiding what
+                    // produced it -- the operator deletes the wrong things for
+                    // as many runs as it takes to guess.
+                    for failure in &done.failures {
+                        startup_notices.push(Notice::resolution(match failure {
+                            magi_rs::logging::sweep::Failure::Compression(name, cause) => {
+                                format!(
+                                    "WARNING: {name} could not be compressed ({cause}); it is still on disk and still counts towards the ceiling."
+                                )
+                            }
+                            magi_rs::logging::sweep::Failure::SourceMoved(name) => {
+                                format!(
+                                    "WARNING: {name} changed while it was being compressed, so it was kept rather than replaced by an archive that does not contain all of it."
+                                )
+                            }
+                        }));
+                    }
+                }
+            }
+            // Same D-L20 split as the headless surface: declared fails hard,
+            // defaulted degrades.
+            Err(e) if resolved_dir.declared => {
+                anyhow::bail!(
+                    "the log directory {} could not be used: {e}",
+                    log_dir.display()
+                );
+            }
+            Err(e) => startup_notices.push(Notice::resolution(format!(
+                "WARNING: logging is not writing to {}: {e}. The session continues without a log file.",
+                log_dir.display()
+            ))),
+        }
+    }
+
     // REQ-V12/H12: API key discovery happens AFTER the vault is (possibly) open,
     // env tier sourced from the consumed (scrubbed) value.
     let config = discover_config(
@@ -1617,6 +1825,25 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
         anthropic_key.as_deref(),
         secret_store.as_ref(),
     );
+    // REQ-L49: arm the auditor's EXACT pass with what this run actually
+    // resolved. Until this call existed the registry was empty in the shipped
+    // binary, so the pass that catches a secret no pattern recognises never ran
+    // — only the pattern pass protected the log. It goes here because this is
+    // the first point where both credentials are known, and after `init_logging`
+    // so the layer already holds the same process auditor.
+    for short in magi_rs::logging::register_process_secrets(&secrets_to_arm(
+        config.as_ref().map(|c| c.api_key.as_str()),
+        resolve_openai_key(openai_key.as_deref(), secret_store.as_ref()).as_deref(),
+    )) {
+        // The return value's first consumer. A credential too short for the
+        // rolling hash is still registered and still covered by the pattern
+        // pass, but the operator deserves to know which one got the weaker of
+        // the two.
+        startup_notices.push(Notice::resolution(format!(
+            "WARNING: {} is too short to be matched exactly in the log; it is still masked by shape, which is weaker.",
+            short.as_str()
+        )));
+    }
     // Task 4.1: replaces `resolve_provider`/`legacy_backend_label` — the vocabulary is
     // unified now, so there is nothing left to normalize a raw `ProviderKind` onto.
     let provider_kind =
@@ -1807,6 +2034,10 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
             // Wire persistence + the tiered-memory subsystem (shared with the
             // headless `query` path, DRY). The embedding key is resolved here
             // (env > vault) so the helper stays free of the secret-store plumbing.
+            //
+            // **Not registered with the auditor again here.** The same value was
+            // armed thirty lines above, and a second registration only earns a
+            // second "too short" warning for one credential.
             let embed_key = resolve_openai_key(openai_key.as_deref(), secret_store.as_ref());
             let mut attach_notices: Vec<String> = Vec::new();
             attach_persistent_memory(
@@ -4215,6 +4446,9 @@ fn tui_mode_classifier_wiring(
         Arc::new(crate::agent::mode_classifier::ProviderClassifier::new(
             provider,
             Arc::clone(&notices) as Arc<dyn crate::agent::mode_classifier::NoticeSink>,
+            // THE process auditor, not one of its own: the classifier redacts
+            // with the registered secrets or it redacts with nothing.
+            std::sync::Arc::clone(magi_rs::logging::process_auditor()),
         ));
     (classifier, notices)
 }
@@ -4762,71 +4996,6 @@ fn finish_headless(h: &HeadlessArgs, outcome: &RunOutcome, tool_result_cap: usiz
     exit_code_for_outcome(outcome)
 }
 
-/// Resolves the effective run-log verbosity (REQ-H24, spec §11). Precedence:
-/// the `--log-level` CLI flag wins; else the `[headless] log_level` config
-/// string is parsed; else the default (`info`).
-///
-/// # Errors
-/// [`HeadlessError::InputInvalid`] if `cfg` is set but is not one of
-/// `error`/`warn`/`info`/`debug` — an unrecognized value is a clear typed
-/// error, never a silent fallback to the default.
-fn resolve_log_level(
-    cli: Option<CliLogLevel>,
-    cfg: Option<&str>,
-) -> Result<LogLevel, HeadlessError> {
-    if let Some(l) = cli {
-        return Ok(l.into_lib());
-    }
-    match cfg {
-        Some(s) => s.parse(),
-        None => Ok(LogLevel::Info),
-    }
-}
-
-/// Starts the JSONL run log for a headless run, or returns `None` when logging
-/// is disabled (`--no-memory` without an explicit `--log-dir`, REQ-H24). A
-/// start failure degrades to no logging with a stderr warning (best-effort).
-///
-/// `limits` supplies the EFFECTIVE `log_retention`/`log_max_bytes` caps (spec
-/// §11) so an operator-lowered `[headless]` override actually governs pruning.
-///
-/// # Errors
-/// [`HeadlessError::InputInvalid`] if `--log-level`/`[headless] log_level`
-/// resolve to an invalid verbosity string (see [`resolve_log_level`]) — this
-/// is a config/usage error, distinct from the best-effort log-file-open
-/// degradation below.
-fn build_run_log(
-    h: &HeadlessArgs,
-    workspace: Option<&Workspace>,
-    limits: &HeadlessLimits,
-    log_level_cfg: Option<&str>,
-) -> Result<Option<RunLog>, HeadlessError> {
-    let level = resolve_log_level(h.log_level, log_level_cfg)?;
-    let logs_dir = if let Some(d) = &h.log_dir {
-        Some(d.clone())
-    } else if h.no_memory {
-        None
-    } else {
-        workspace.map(Workspace::logs_dir)
-    };
-    let Some(dir) = logs_dir else {
-        return Ok(None);
-    };
-    match RunLog::start(
-        &dir,
-        level,
-        limits.log_retention_runs,
-        limits.log_max_bytes,
-        limits.tool_result_cap,
-    ) {
-        Ok(log) => Ok(Some(log)),
-        Err(e) => {
-            eprintln!("warning: could not start the run log ({e}); continuing without it");
-            Ok(None)
-        }
-    }
-}
-
 /// Maps the `--auto`/`--full-auto` flags to an authorization [`Tier`]:
 /// `--full-auto` wins when both are set; neither ⇒ the read-only `Default`
 /// (REQ-H07/H08).
@@ -4884,8 +5053,6 @@ struct HeadlessContext {
     /// resolved key, to substitute `[user]:[password]` credentials into the
     /// embedding `base_url` itself.
     secret_store: Option<SharedSecretStore>,
-    /// The started run log, if logging is enabled.
-    run_log: Option<RunLog>,
     /// Effective headless numeric caps for this run (spec §11), resolved once in
     /// `prepare_headless` and reused by both dispatchers.
     limits: HeadlessLimits,
@@ -4968,8 +5135,6 @@ fn resolve_headless_limits(cfg: &HeadlessConfig, tool_result_cap: usize) -> Head
         full_auto_max_tool_calls: cfg
             .full_auto_max_tool_calls
             .unwrap_or(d.full_auto_max_tool_calls),
-        log_retention_runs: cfg.log_retention.unwrap_or(d.log_retention_runs),
-        log_max_bytes: cfg.log_max_bytes.unwrap_or(d.log_max_bytes),
         // Passed as a parameter rather than read from `cfg`: the key moved up from `[headless]`
         // to the root level (Task 1.3, third pattern of REQ-A21b), so `MagiConfig` resolves it
         // and this function can no longer read it from its own section.
@@ -4988,6 +5153,12 @@ fn resolve_headless_limits(cfg: &HeadlessConfig, tool_result_cap: usize) -> Head
 /// return it directly.
 async fn prepare_headless(
     h: &HeadlessArgs,
+    // REQ-L63's first event names what was invoked. It arrives as a parameter
+    // because this function serves both `query` and `consult` and cannot tell
+    // them apart: `HeadlessArgs` is shared, and reading `argv` would either
+    // guess (a workspace directory named `query`) or risk echoing a `-p`
+    // passphrase into the log.
+    command: &str,
     mut passphrase_flag: Option<Zeroizing<String>>,
     cwd: &Path,
     anthropic_key: Option<String>,
@@ -5375,18 +5546,105 @@ async fn prepare_headless(
     }
 
     let embed_key = resolve_openai_key(openai_key.as_deref(), secret_store.as_ref());
-    let run_log = match build_run_log(
-        h,
-        workspace.as_ref(),
-        &limits,
-        magi_config.headless().log_level.as_deref(),
-    ) {
-        Ok(log) => log,
-        Err(e) => {
-            eprintln!("error: {e}");
-            return Err(headless_error_exit_code(&e));
+    // REQ-L49, the headless half. Without this the surface a CI job uses ships
+    // a log protected by the pattern pass alone: the exact pass only covers
+    // what was registered, and nothing here registered anything.
+    //
+    // It sits on THIS `embed_key` and not the one in `run()`. An earlier edit
+    // matched the first line of that shape in the file, which belongs to the
+    // TUI, and left this surface unarmed while looking done.
+    for short in magi_rs::logging::register_process_secrets(&secrets_to_arm(
+        discover_config(
+            &magi_config,
+            anthropic_key.as_deref(),
+            secret_store.as_ref(),
+        )
+        .as_ref()
+        .map(|c| c.api_key.as_str()),
+        embed_key.as_deref(),
+    )) {
+        eprintln!(
+            "warning: {} is too short to be matched exactly in the log; it is still masked by shape, which is weaker.",
+            short.as_str()
+        );
+    }
+    // The JSONL run log is retired (REQ-L40). The headless surfaces bring up the
+    // SAME single layer the TUI does: one log for the whole product, rather than
+    // one shape per surface.
+    //
+    // **A failure here is a warning, never fatal** (REQ-L35): a headless run that
+    // cannot write a log file is still a run that can answer.
+    if let Some(ws) = workspace.as_ref() {
+        let resolved_dir = magi_config.resolve_log_dir(
+            h.log_dir.as_deref().and_then(|p| p.to_str()),
+            std::env::var(crate::config::ENV_LOG_DIR).ok().as_deref(),
+            &ws.logs_dir(),
+        );
+        let log_dir = resolved_dir.path.clone();
+        // **The same precedence the TUI applies** (REQ-L29). This surface used
+        // to drop the env tier on the directory and bypass `resolve_file_filter`
+        // altogether, so one `magi.toml` produced different levels depending on
+        // which surface read it — a difference nothing announced.
+        let filter = magi_config.resolve_file_filter(
+            h.log_level.map(CliLogLevel::as_filter_word),
+            std::env::var(crate::config::ENV_FILE_FILTER)
+                .ok()
+                .as_deref(),
+        );
+        let parsed = match magi_rs::logging::filter::Filter::parse(&filter) {
+            Ok(f) => f,
+            Err(e) => {
+                // 2 like every other invalid-input path here: a filter the
+                // operator wrote and mistyped is bad INPUT, not a runtime fault.
+                eprintln!("error: {e}");
+                return Err(2);
+            }
+        };
+        let cfg = magi_rs::logging::LoggingConfig {
+            log_dir: log_dir.clone(),
+            file_filter: parsed,
+        };
+        let logging_up = match magi_rs::logging::init_logging(
+            &cfg,
+            std::sync::Arc::new(magi_rs::logging::DiscardDelivery),
+            None,
+        ) {
+            Ok(_) => true,
+            Err(e) => {
+                // **D-L20, the one exception REQ-L35 carves out.** An operator who
+                // wrote a path asked for that path; degrading silently hands them an
+                // empty directory and no clue, which is the complaint this feature
+                // exists to answer. A DEFAULTED directory that cannot be created
+                // degrades, because nobody asked for it.
+                if resolved_dir.declared {
+                    eprintln!(
+                        "error: the log directory {} could not be used: {e}",
+                        log_dir.display()
+                    );
+                    return Err(2);
+                }
+                eprintln!(
+                    "warning: logging is not writing to {}: {e}; the run continues",
+                    log_dir.display()
+                );
+                false
+            }
+        };
+        // **Only when there is a log to filter.** `run_id()` mints its id from
+        // its own OnceLock and `announce_run` emits into a subscriber that was
+        // never installed, so neither panics with the layer down -- but printing
+        // `run: <id>` promises a CI job a value it can filter the daily file by,
+        // and there is no daily file. An id that identifies nothing sends the
+        // reader looking for one.
+        if logging_up {
+            // REQ-L63: on stderr as well as in the envelope, so a CI job can
+            // capture it without parsing either the log or the JSON.
+            eprintln!("run: {}", magi_rs::logging::run_id());
+            // The third piece of REQ-L63: the run's first event. It cannot come
+            // earlier — the layer it goes to is installed just above.
+            magi_rs::logging::announce_run(command, &ws.root);
         }
-    };
+    }
 
     Ok(HeadlessContext {
         workdir,
@@ -5400,7 +5658,6 @@ async fn prepare_headless(
         tier,
         embed_key,
         secret_store,
-        run_log,
         limits,
         env_mode,
         env_untrusted_content,
@@ -5445,7 +5702,9 @@ async fn run_query_subcommand(
     anthropic_key: Option<String>,
     openai_key: Option<String>,
 ) -> i32 {
-    let ctx = match prepare_headless(&h, passphrase_flag, cwd, anthropic_key, openai_key).await {
+    let ctx = match prepare_headless(&h, "query", passphrase_flag, cwd, anthropic_key, openai_key)
+        .await
+    {
         Ok(c) => c,
         Err(code) => return code,
     };
@@ -5461,7 +5720,6 @@ async fn run_query_subcommand(
         embed_key,
         secret_store,
         memory,
-        mut run_log,
         limits,
         budget,
         ..
@@ -5552,25 +5810,13 @@ async fn run_query_subcommand(
         timeout_below_formula: timeout_decision.is_some_and(|d| d.below_formula),
         budget,
     };
-    let outcome = run_query(
-        resolved,
-        policy,
-        &mut agent,
-        &prompt,
-        &wiring,
-        run_log.as_mut(),
-    )
-    .await;
-    // SC-A20h: the run's gate evaluations reach the structured run log. Drained here rather
-    // than inside `run_query` because the log is borrowed mutably by the run itself while the
+    let outcome = run_query(resolved, policy, &mut agent, &prompt, &wiring).await;
+    // SC-A20h: the run's gate evaluations still reach the log — the SINGLE layer
+    // now, rather than the retired JSONL run log. Drained here rather than inside
+    // `run_query` because the telemetry is produced by the run itself while the
     // agent future is in flight.
-    if let Some(log) = run_log.as_mut() {
-        for line in wiring.autonomous.drain_telemetry() {
-            let _ = log.event(&magi_rs::headless::log::LogEvent::Message {
-                level: LogLevel::Info,
-                text: &line,
-            });
-        }
+    for line in wiring.autonomous.drain_telemetry() {
+        tracing::info!(target: "magi_rs::magi::gate", "{line}");
     }
     finish_headless(&h, &outcome, limits.tool_result_cap)
 }
@@ -5723,7 +5969,16 @@ async fn run_consult_subcommand(
         );
         return 2;
     }
-    let ctx = match prepare_headless(&h, passphrase_flag, cwd, anthropic_key, openai_key).await {
+    let ctx = match prepare_headless(
+        &h,
+        "consult",
+        passphrase_flag,
+        cwd,
+        anthropic_key,
+        openai_key,
+    )
+    .await
+    {
         Ok(c) => c,
         Err(code) => return code,
     };
@@ -5734,7 +5989,6 @@ async fn run_consult_subcommand(
         consult_magi,
         resolved,
         prompt,
-        mut run_log,
         limits,
         env_mode,
         env_untrusted_content,
@@ -5761,8 +6015,17 @@ async fn run_consult_subcommand(
     // suppress one notice because the other already fired.
     let notice_sink: Arc<dyn crate::agent::mode_classifier::NoticeSink> =
         Arc::new(crate::agent::mode_classifier::ProcessNoticeSink::default());
-    let classifier =
-        crate::agent::mode_classifier::ProviderClassifier::new(provider, Arc::clone(&notice_sink));
+    // One auditor per process, shared by the classifier and the runtime: it is
+    // where the registered secrets live, so two of them would mean two different
+    // ideas of what must be redacted. This line used to construct a SECOND one
+    // directly beneath that sentence, which is how the rule ended up describing
+    // something the code did not do.
+    let auditor = std::sync::Arc::clone(magi_rs::logging::process_auditor());
+    let classifier = crate::agent::mode_classifier::ProviderClassifier::new(
+        provider,
+        Arc::clone(&notice_sink),
+        Arc::clone(&auditor),
+    );
     // Task 4.1: the trio is built ONCE, in `prepare_headless` (the shared prelude); a
     // forced `magi consult` needs a LIVE trio unconditionally, so an unbuildable one
     // fails this run closed exactly as it did before (REQ-A06's polished per-surface
@@ -5802,6 +6065,7 @@ async fn run_consult_subcommand(
         magi_config: &magi_config,
         timeout_decision,
         notice_sink: notice_sink.as_ref(),
+        auditor: auditor.as_ref(),
         structured_verdicts: if structured_verdicts {
             crate::tools::consult::StructuredVerdicts::Include
         } else {
@@ -5809,21 +6073,132 @@ async fn run_consult_subcommand(
         },
         budget,
     };
-    let outcome = run_consult(
-        resolved,
-        magi,
-        &prompt,
-        timeout,
-        explicit_mode,
-        &runtime,
-        run_log.as_mut(),
-    )
-    .await;
+    let outcome = run_consult(resolved, magi, &prompt, timeout, explicit_mode, &runtime).await;
     finish_headless(&h, &outcome, limits.tool_result_cap)
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn no_surface_builds_an_auditor_of_its_own() {
+        // The invariant was written down and then broken directly beneath its
+        // own sentence: a comment saying "one auditor per process, shared by the
+        // classifier and the runtime" sat immediately above a line constructing
+        // a second one. Two more were elsewhere.
+        //
+        // The consequence is not cosmetic. `register_process_secrets` fills the
+        // process auditor; an auditor built anywhere else starts empty, so the
+        // exact pass covers the log and nothing that surface redacts. A comment
+        // cannot hold this -- it demonstrably did not -- so a check does.
+        let source = include_str!("main.rs");
+        let (production, _) = source
+            .split_once("\n#[cfg(test)]\nmod tests {")
+            .expect("this file has a test module");
+        let offenders: Vec<usize> = production
+            .match_indices("Auditor::new()")
+            .map(|(i, _)| production.get(..i).map_or(0, |p| p.lines().count()) + 1)
+            .collect();
+        assert!(
+            offenders.is_empty(),
+            "a surface builds its own auditor, which starts with no registered \
+             secrets, at line(s): {offenders:?}"
+        );
+        // And the fixture must have read something, or an empty haystack passes.
+        assert!(
+            production.contains("process_auditor()"),
+            "the source check read a file that does not reach the auditor"
+        );
+    }
+
+    #[test]
+    fn every_surface_arms_the_auditor() {
+        // **A source check, and it earned its place.** The registry is
+        // deliberately unobservable -- the auditor keeps a length and a hash and
+        // exposes no count (REQ-L51) -- so no assertion can ask "is it armed?"
+        // from outside. What CAN be checked is that each surface that resolves
+        // credentials also registers them.
+        //
+        // The gap this closes was live: an edit meant for `prepare_headless`
+        // matched the first line of that shape in the file, which belongs to
+        // the TUI. The headless surface -- the one a CI job uses -- shipped
+        // unarmed, and every test stayed green because the canary registers its
+        // own secrets and the selector's unit tests never touch a call site.
+        let source = include_str!("main.rs");
+        let (production, _) = source
+            .split_once("\n#[cfg(test)]\nmod tests {")
+            .expect("this file has a test module");
+
+        // `run` is the TUI surface; `prepare_headless` is query and consult.
+        for surface in ["async fn run(", "async fn prepare_headless("] {
+            let start = production
+                .find(surface)
+                .unwrap_or_else(|| panic!("{surface} is gone; this check needs updating"));
+            let body = production.get(start..).unwrap_or("");
+            // To the next top-level fn, so one surface's call cannot be counted
+            // for another's.
+            let end = body[1..].find("\nasync fn ").map_or(body.len(), |i| i + 1);
+            let body = body.get(..end).unwrap_or(body);
+            assert!(
+                body.contains("register_process_secrets"),
+                "{surface} resolves credentials and never arms the auditor, so \
+                 its log is protected by the pattern pass alone"
+            );
+        }
+    }
+
+    #[test]
+    fn no_surface_arms_the_auditor_twice() {
+        // A second registration of the same value is not a leak, but it earns a
+        // second "too short" warning for one credential, and it is the shape a
+        // half-finished move leaves behind -- which is how the duplicate this
+        // removes came to exist.
+        let source = include_str!("main.rs");
+        let (production, _) = source
+            .split_once("\n#[cfg(test)]\nmod tests {")
+            .expect("this file has a test module");
+        assert_eq!(
+            production.matches("register_process_secrets").count(),
+            2,
+            "expected exactly one arming per surface"
+        );
+    }
+
+    #[test]
+    fn the_auditor_is_armed_with_every_credential_the_run_resolved() {
+        // REQ-L49's exact pass is what catches a secret NO pattern recognises.
+        // It only runs over what was registered, so an empty registry makes the
+        // whole pass inert — and the shipped binary registered nothing at all
+        // until this wiring landed. The canary in tests/ registers its own
+        // secrets, so it guards the mechanism and never the arming.
+        // **Assembled, not written.** A key-shaped literal in the tree trips the
+        // repository's own no_hardcoded_secrets guard, which is correct: a
+        // key-shaped string is a key-shaped string whatever it is for. The
+        // canary does the same, and the value the code sees is identical.
+        let anthropic = format!("sk-{}-api03-selector-fixture", "ant");
+        let openai = format!("sk-{}-selector-fixture", "openai");
+        let armed = secrets_to_arm(Some(&anthropic), Some(&openai));
+        assert_eq!(armed.len(), 2, "both credentials must be registered");
+        assert_eq!(armed[0].0.as_str(), "ANTHROPIC_API_KEY");
+        assert_eq!(armed[0].1, anthropic);
+        assert_eq!(armed[1].0.as_str(), "OPENAI_API_KEY");
+        assert_eq!(armed[1].1, openai);
+    }
+
+    #[test]
+    fn a_credential_the_run_did_not_resolve_is_not_registered() {
+        // Without this, a selector that returned two fixed pairs regardless of
+        // its input would satisfy the test above.
+        assert!(secrets_to_arm(None, None).is_empty());
+        assert_eq!(secrets_to_arm(Some("only-anthropic"), None).len(), 1);
+        assert_eq!(secrets_to_arm(None, Some("only-openai")).len(), 1);
+    }
+
+    #[test]
+    fn a_blank_credential_is_absent_not_a_secret_worth_registering() {
+        // The same rule the resolvers apply. Registering "" or "   " would give
+        // the exact pass a variant that matches everywhere.
+        assert!(secrets_to_arm(Some(""), Some("   ")).is_empty());
+    }
     use super::*;
     use crate::agent::messages::Message;
     use magi_rs::notices::NoticeTier;
@@ -6434,16 +6809,12 @@ mod tests {
         let cfg = HeadlessConfig {
             max_input_bytes: Some(2048),
             full_auto_max_tool_calls: Some(30),
-            log_retention: Some(7),
-            log_max_bytes: Some(1024),
             timeout_secs: Some(120),
             ..Default::default()
         };
         let limits = resolve_headless_limits(&cfg, 4096);
         assert_eq!(limits.max_input_bytes, 2048);
         assert_eq!(limits.full_auto_max_tool_calls, 30);
-        assert_eq!(limits.log_retention_runs, 7);
-        assert_eq!(limits.log_max_bytes, 1024);
         assert_eq!(limits.tool_result_cap, 4096);
         assert_eq!(limits.full_auto_timeout_secs, 120);
     }
@@ -6509,47 +6880,6 @@ mod tests {
         std::fs::write(&path_ok, vec![b'x'; small_cap]).expect("write fixture");
         let bytes = read_headless_input(Some(&path_ok), small_cap).expect("must fit exactly");
         assert_eq!(bytes.len(), small_cap);
-    }
-
-    /// REQ-H24, spec §11: with no `--log-level` CLI flag, the
-    /// `[headless] log_level` config string must resolve the run-log
-    /// verbosity, not silently fall back to the `info` default.
-    #[test]
-    fn test_resolve_log_level_config_wins_over_default_without_cli_flag() {
-        let level = resolve_log_level(None, Some("debug"))
-            .expect("a valid config string must resolve, not error");
-        assert_eq!(
-            level,
-            LogLevel::Debug,
-            "the [headless] log_level config value must take effect, not the info default"
-        );
-    }
-
-    /// The `--log-level` CLI flag wins over a conflicting config value.
-    #[test]
-    fn test_resolve_log_level_cli_flag_wins_over_config() {
-        let level = resolve_log_level(Some(CliLogLevel::Error), Some("debug"))
-            .expect("must resolve with both sources present");
-        assert_eq!(level, LogLevel::Error);
-    }
-
-    /// No CLI flag and no config ⇒ the `info` default.
-    #[test]
-    fn test_resolve_log_level_defaults_to_info_when_unset() {
-        assert_eq!(
-            resolve_log_level(None, None).expect("must resolve"),
-            LogLevel::Info
-        );
-    }
-
-    /// An invalid `[headless] log_level` string is a clear typed error, never
-    /// a silent fallback.
-    #[test]
-    fn test_resolve_log_level_rejects_invalid_config_string() {
-        assert!(matches!(
-            resolve_log_level(None, Some("verbose")),
-            Err(HeadlessError::InputInvalid(_))
-        ));
     }
 
     /// REQ-H12b, spec §11: SECURITY gate — `[headless] allow_system_override`
@@ -7870,7 +8200,7 @@ mod tests {
 
                     let rt = tokio::runtime::Runtime::new().unwrap();
                     let ctx = rt
-                        .block_on(prepare_headless(&h, None, &cwd, None, None))
+                        .block_on(prepare_headless(&h, "query", None, &cwd, None, None))
                         .expect("prepare_headless must succeed");
 
                     assert_eq!(ctx.resolved.provider, "anthropic");
@@ -7909,7 +8239,7 @@ mod tests {
 
                     let rt = tokio::runtime::Runtime::new().unwrap();
                     let ctx = rt
-                        .block_on(prepare_headless(&h, None, &cwd, None, None))
+                        .block_on(prepare_headless(&h, "query", None, &cwd, None, None))
                         .expect("prepare_headless must succeed");
 
                     assert_eq!(ctx.resolved.provider, "anthropic");
@@ -7950,7 +8280,7 @@ mod tests {
 
                     let rt = tokio::runtime::Runtime::new().unwrap();
                     let ctx = rt
-                        .block_on(prepare_headless(&h, None, &cwd, None, None))
+                        .block_on(prepare_headless(&h, "query", None, &cwd, None, None))
                         .expect("prepare_headless must succeed");
 
                     assert_eq!(ctx.resolved.provider, "ollama");
@@ -7983,7 +8313,7 @@ mod tests {
 
                     let rt = tokio::runtime::Runtime::new().unwrap();
                     let ctx = rt
-                        .block_on(prepare_headless(&h, None, &cwd, None, None))
+                        .block_on(prepare_headless(&h, "query", None, &cwd, None, None))
                         .expect("prepare_headless must succeed");
 
                     assert_eq!(ctx.resolved.provider, "ollama");
@@ -8011,7 +8341,7 @@ mod tests {
 
                     let rt = tokio::runtime::Runtime::new().unwrap();
                     let ctx = rt
-                        .block_on(prepare_headless(&h, None, &cwd, None, None))
+                        .block_on(prepare_headless(&h, "query", None, &cwd, None, None))
                         .expect("prepare_headless must succeed");
 
                     assert_eq!(ctx.resolved.provider, "ollama");
@@ -9173,10 +9503,10 @@ mod tests {
             MagiConfig::from_toml_str(&format!(
                 "provider = \"ollama\"\n\
                  [magi]\n\
-                 melchior_model    = \"ok-model\"\nmelchior_lineage  = \"lin-melchior\"\n\
+                 melchior_model = \"ok-model\"\nmelchior_lineage  = \"lin-melchior\"\n\
                  balthasar_model   = \"ok-model\"\nbalthasar_lineage = \"lin-balthasar\"\n\
                  caspar_model \
-                  = \"down-model\"\ncaspar_lineage    = \"lin-caspar\"\n\
+                  = \"down-model\"\ncaspar_lineage = \"lin-caspar\"\n\
                  agent_timeout_secs = 30\n\
                  max_rotations = {max_rotations}\n\
                  [[magi.fallback]]\n\
@@ -9207,9 +9537,9 @@ mod tests {
             let cfg = MagiConfig::from_toml_str(
                 "provider = \"ollama\"\n\
                  [magi]\n\
-                 melchior_model    = \"ok-model\"\nmelchior_lineage  = \"lin-melchior\"\n\
+                 melchior_model = \"ok-model\"\nmelchior_lineage  = \"lin-melchior\"\n\
                  balthasar_model   = \"ok-model\"\nbalthasar_lineage = \"lin-balthasar\"\n\
-                 caspar_model      = \"down-model\"\ncaspar_lineage    = \"lin-caspar\"\n\
+                 caspar_model = \"down-model\"\ncaspar_lineage = \"lin-caspar\"\n\
                  agent_timeout_secs = 30\n\
                  max_rotations = 2\n\
                  strict_context_guard = true\n\
@@ -9266,9 +9596,9 @@ mod tests {
                  [openai]\n\
                  model = \"principal-model\"\n\
                  [magi]\n\
-                 melchior_model    = \"mel\"\nmelchior_lineage  = \"lin-m\"\n\
+                 melchior_model = \"mel\"\nmelchior_lineage  = \"lin-m\"\n\
                  balthasar_model   = \"bal\"\nbalthasar_lineage = \"lin-b\"\n\
-                 caspar_model      = \"cas\"\ncaspar_lineage    = \"lin-c\"\n\
+                 caspar_model = \"cas\"\ncaspar_lineage = \"lin-c\"\n\
                  agent_timeout_secs = 30\n\
                  max_rotations = 2\n\
                  {extra}\
@@ -9718,9 +10048,9 @@ mod tests {
                  [magi]\n\
                  kind = \"anthropic\"\n\
                  base_url = \"https://api.anthropic.com/v1/\"\n\
-                 melchior_model    = \"mel\"\nmelchior_lineage  = \"lin-m\"\n\
+                 melchior_model = \"mel\"\nmelchior_lineage  = \"lin-m\"\n\
                  balthasar_model   = \"bal\"\nbalthasar_lineage = \"lin-b\"\n\
-                 caspar_model      = \"cas\"\ncaspar_lineage    = \"lin-c\"\n\
+                 caspar_model = \"cas\"\ncaspar_lineage = \"lin-c\"\n\
                  [[magi.fallback]]\n\
                  model   = \"principal-model\"\nlineage = \"lin-rescue\"\n",
             )
@@ -9862,10 +10192,10 @@ mod tests {
             let cfg = MagiConfig::from_toml_str(
                 "provider = \"ollama\"\n\
                  [magi]\n\
-                 melchior_model    = \"shared\"\nmelchior_lineage  = \"lin-a\"\n\
+                 melchior_model = \"shared\"\nmelchior_lineage  = \"lin-a\"\n\
                  balthasar_model   = \"shared\"\nbalthasar_lineage = \"lin-b\"\n\
                  caspar_model \
-                  = \"other\"\ncaspar_lineage    = \"lin-c\"\n\
+                  = \"other\"\ncaspar_lineage = \"lin-c\"\n\
                  [[magi.fallback]]\n\
                  model   = \"shared\"\nlineage = \"lin-rescue\"\n",
             )
@@ -9931,9 +10261,9 @@ mod tests {
             let declared_distinct = MagiConfig::from_toml_str(
                 "provider = \"ollama\"\n\
                  [magi]\n\
-                 melchior_model    = \"m-a\"\nmelchior_lineage  = \"la\"\n\
+                 melchior_model = \"m-a\"\nmelchior_lineage  = \"la\"\n\
                  balthasar_model   = \"m-b\"\nbalthasar_lineage = \"lb\"\n\
-                 caspar_model      = \"m-c\"\ncaspar_lineage    = \"lc\"\n",
+                 caspar_model = \"m-c\"\ncaspar_lineage = \"lc\"\n",
             )
             .expect("a declared, distinct trio loads");
 
@@ -10013,9 +10343,9 @@ mod tests {
             let cfg = MagiConfig::from_toml_str(
                 "provider = \"ollama\"\n\
                  [magi]\n\
-                 melchior_model    = \"m-a\"\nmelchior_lineage  = \"opus\"\n\
+                 melchior_model = \"m-a\"\nmelchior_lineage  = \"opus\"\n\
                  balthasar_model   = \"m-b\"\nbalthasar_lineage = \"sonnet\"\n\
-                 caspar_model      = \"m-c\"\ncaspar_lineage    = \"haiku\"\n\
+                 caspar_model = \"m-c\"\ncaspar_lineage = \"haiku\"\n\
                  enforce_diversity = false\n\
                  [[magi.fallback]]\n\
                  model   = \"rescue\"\nlineage = \"opus\"\n",
@@ -11281,7 +11611,7 @@ retry_disabled = {retry_disabled}
 
                         let rt = tokio::runtime::Runtime::new().unwrap();
                         let ctx = rt
-                            .block_on(prepare_headless(&h, None, &cwd, None, None))
+                            .block_on(prepare_headless(&h, "query", None, &cwd, None, None))
                             .expect("prepare_headless must succeed");
 
                         assert_eq!(
@@ -11331,10 +11661,10 @@ retry_disabled = {retry_disabled}
             let cfg = MagiConfig::from_toml_str(
                 "provider = \"ollama\"\n\
                  [magi]\n\
-                 melchior_model    = \"m-model\"\nmelchior_lineage  = \"declared-melchior\"\n\
+                 melchior_model = \"m-model\"\nmelchior_lineage  = \"declared-melchior\"\n\
                  balthasar_model   = \"b-model\"\nbalthasar_lineage = \"declared-balthasar\"\n\
                  caspar_model \
-                  = \"c-model\"\ncaspar_lineage    = \"declared-caspar\"\n",
+                  = \"c-model\"\ncaspar_lineage = \"declared-caspar\"\n",
             )
             .expect("a fully declared trio must parse");
             let mut notices = Vec::new();
@@ -12546,7 +12876,7 @@ retry_disabled = {retry_disabled}
 
                         let rt = tokio::runtime::Runtime::new().unwrap();
                         let ctx = rt
-                            .block_on(prepare_headless(&h, None, &cwd, None, None))
+                            .block_on(prepare_headless(&h, "query", None, &cwd, None, None))
                             .expect("prepare_headless must succeed");
 
                         let notice = ctx.divergence_notice.expect(
@@ -13171,24 +13501,40 @@ agent_timeout_secs = {CEILING}
             );
         }
 
+        /// Wraps a literal as an [`Audited`] for these sink tests.
+        ///
+        /// The sink no longer takes a `&str`, and that IS the migration: the type
+        /// is what proves a line went through the auditor. These tests are about
+        /// the sink's routing and deduplication, not about redaction, so they
+        /// audit with a fresh auditor and nothing registered.
+        fn audited(text: &str) -> magi_rs::logging::auditor::Audited {
+            let (a, _) = magi_rs::logging::auditor::Auditor::new().audit(
+                text,
+                "magi_rs::tui::tests",
+                None,
+                0,
+            );
+            a
+        }
+
         /// Before the channel exists the sink falls back to stderr — correct, because raw mode
         /// has not been entered yet — and it never drops a notice silently (B9).
         #[test]
         fn an_unattached_sink_still_deduplicates_by_key() {
             let sink = crate::tui::TuiNoticeSink::new();
-            sink.once("k", "first");
-            sink.once("k", "second");
+            sink.once("k", &audited("first"));
+            sink.once("k", &audited("second"));
 
             let (tx, mut rx) = tokio::sync::mpsc::channel::<AgentResponse>(8);
             sink.attach(tx);
-            sink.once("k", "third");
+            sink.once("k", &audited("third"));
             assert!(
                 rx.try_recv().is_err(),
                 "a key already emitted before attachment must stay emitted: \"once\" is per \
                  key and per process, not per destination"
             );
 
-            sink.once("other", "fresh key");
+            sink.once("other", &audited("fresh key"));
             assert!(
                 matches!(rx.try_recv(), Ok(AgentResponse::Notice(t)) if t == "fresh key"),
                 "a key not yet seen must reach the channel once attached"
@@ -13212,7 +13558,7 @@ agent_timeout_secs = {CEILING}
                 .expect("the fresh channel has room for the filler");
 
             // `once` now hits `TrySendError::Full` and must queue rather than print.
-            sink.once("full-channel-key", "queued while full");
+            sink.once("full-channel-key", &audited("queued while full"));
 
             // Poll for the condition instead of sleeping a fixed duration
             // (CLAUDE.local.md: "wait on conditions, never on durations"): drain the
@@ -13254,7 +13600,7 @@ agent_timeout_secs = {CEILING}
             // STARTED but `LeaveAlternateScreen` has not run yet.
             drop(rx);
 
-            sink.once("closed-key", "deferred message");
+            sink.once("closed-key", &audited("deferred message"));
             assert_eq!(
                 sink.pending_len(),
                 1,
@@ -13282,10 +13628,10 @@ agent_timeout_secs = {CEILING}
             sink.attach(tx);
             drop(rx);
 
-            sink.once("k1", "first");
+            sink.once("k1", &audited("first"));
             assert_eq!(sink.flush(), vec!["first".to_string()]);
 
-            sink.once("k2", "second");
+            sink.once("k2", &audited("second"));
             assert_eq!(
                 sink.pending_len(),
                 0,
@@ -13314,7 +13660,7 @@ agent_timeout_secs = {CEILING}
                 .expect("the fresh channel has room for the filler");
 
             // Hits `TrySendError::Full` and spawns a background task waiting for room.
-            sink.once("full-then-closed", "should defer, not print");
+            sink.once("full-then-closed", &audited("should defer, not print"));
 
             // Drop the receiver while that background task is still waiting — simulates
             // `run_app` returning (and dropping `response_rx`) before room ever freed.

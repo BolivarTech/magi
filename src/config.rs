@@ -1,6 +1,6 @@
 // Author: Julian Bolivar
-// Version: 0.17.0
-// Date: 2026-08-27
+// Version: 0.18.0
+// Date: 2026-08-31
 
 //! Persistent magi-rs configuration from `magi.toml`. NON-SECRET only — API keys never live
 //! here (env/keyring/key.txt).
@@ -262,6 +262,137 @@ pub struct MagiConfig {
     /// `[headless]` section — see [`HeadlessConfig`].
     #[serde(default)]
     headless: HeadlessConfig,
+    /// `[logging]` section — see [`LoggingSection`].
+    #[serde(default)]
+    logging: LoggingSection,
+}
+
+/// The `[logging]` section of `magi.toml`.
+///
+/// # What is deliberately NOT here
+///
+/// `format` and `rotation_tz`. Their absence is not an oversight: they arrive
+/// with their functionality, because shipping an inert key promises something
+/// the binary does not do.
+#[derive(Debug, Clone, Default, PartialEq, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LoggingSection {
+    /// Where the daily files live. Absent ⇒ `.magi/logs`.
+    log_dir: Option<String>,
+    /// Level or per-target directive for the file branch.
+    file_filter: Option<String>,
+    /// Whether rotated files are compressed.
+    compress: Option<bool>,
+    /// Age in days past which a file is compressed.
+    compress_after_days: Option<i64>,
+    /// Age in days past which a file is deleted.
+    retain_days: Option<i64>,
+    /// Ceiling on the total bytes retention may leave on disk.
+    max_total_bytes: Option<u64>,
+}
+
+// There is no `DEFAULT_LOG_DIR` here on purpose: `Workspace::logs_dir()` already
+// owns that path, and a second constant naming the same directory is two places
+// to change it and one chance to change only one.
+/// Where the log goes, and whether anyone asked for it.
+///
+/// The provenance travels WITH the path rather than being re-derived, because
+/// D-L20 turns on it: a declared directory that cannot be created is a startup
+/// error, a defaulted one degrades to a notice. Two functions reading the same
+/// precedence chain to answer "which was it?" is how the two answers drift.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedLogDir {
+    /// The directory to use.
+    pub path: std::path::PathBuf,
+    /// True when a flag, an environment variable or the file named it.
+    pub declared: bool,
+}
+
+/// Ceiling the log directory is kept under when nothing declares one.
+///
+/// 512 MiB, the value the spec ships. `u64::MAX` was not a bigger default but
+/// an absent one: it switches REQ-L18 off entirely, so the disk ceiling the
+/// feature advertises did not exist unless an operator wrote it down.
+pub const DEFAULT_MAX_TOTAL_LOG_BYTES: u64 = 536_870_912;
+
+/// Environment variable that overrides the log directory.
+pub const ENV_LOG_DIR: &str = "MAGI_LOG_DIR";
+/// Environment variable that overrides the file filter.
+pub const ENV_FILE_FILTER: &str = "MAGI_LOG_FILTER";
+
+impl MagiConfig {
+    /// Resolves the log directory by precedence.
+    ///
+    /// `--log-dir` > `MAGI_LOG_DIR` > `[logging].log_dir` > `.magi/logs`.
+    ///
+    /// # Parameters
+    ///
+    /// * `flag` — the `--log-dir` value, if given.
+    /// * `env` — the environment variable's value, if set.
+    /// * `default` — where logs go when nothing was declared, which the
+    ///   workspace already knows (`Workspace::logs_dir()`).
+    ///
+    /// # A blank environment variable is ABSENT, never invalid
+    ///
+    /// An exported-but-unfilled variable is an everyday accident in a CI script.
+    /// Treating it as invalid turns that accident into a hard failure — and,
+    /// worse, into D-L20's fatal path, which applies only to a log directory
+    /// that was actually **declared** and cannot be created.
+    ///
+    /// # Complexity
+    ///
+    /// `O(1)`.
+    #[must_use]
+    pub fn resolve_log_dir(
+        &self,
+        flag: Option<&str>,
+        env: Option<&str>,
+        default: &std::path::Path,
+    ) -> ResolvedLogDir {
+        let declared = non_blank(flag)
+            .or_else(|| non_blank(env))
+            .or_else(|| non_blank(self.logging.log_dir.as_deref()));
+        ResolvedLogDir {
+            // A BLANK value is absent, never declared. An exported-but-unfilled
+            // MAGI_LOG_DIR is an everyday CI accident, and reading it as
+            // "declared" turns that accident into the hard startup failure
+            // D-L20 reserves for a path the operator actually asked for.
+            declared: declared.is_some(),
+            path: declared.map_or_else(|| default.to_path_buf(), std::path::PathBuf::from),
+        }
+    }
+
+    /// Resolves the file branch's filter by the same precedence.
+    ///
+    /// # Complexity
+    ///
+    /// `O(1)`.
+    #[must_use]
+    pub fn resolve_file_filter(&self, flag: Option<&str>, env: Option<&str>) -> String {
+        non_blank(flag)
+            .or_else(|| non_blank(env))
+            .or_else(|| non_blank(self.logging.file_filter.as_deref()))
+            .unwrap_or("info")
+            .to_string()
+    }
+
+    /// The retention settings, with the built-in defaults filled in.
+    ///
+    /// # Complexity
+    ///
+    /// `O(1)`.
+    #[must_use]
+    pub fn retention(&self) -> magi_rs::logging::retention::RetentionConfig {
+        magi_rs::logging::retention::RetentionConfig {
+            compress: self.logging.compress.unwrap_or(true),
+            compress_after_days: self.logging.compress_after_days.unwrap_or(7),
+            retain_days: self.logging.retain_days.unwrap_or(30),
+            max_total_bytes: self
+                .logging
+                .max_total_bytes
+                .unwrap_or(DEFAULT_MAX_TOTAL_LOG_BYTES),
+        }
+    }
 }
 
 /// Crate-internal builder: the ONLY way to obtain a [`MagiConfig`] other than `Deserialize`
@@ -401,19 +532,23 @@ pub struct HeadlessConfig {
     /// Elevated tool-call cap under `--full-auto` (REQ-H08). Overrides
     /// `FULL_AUTO_MAX_TOOL_CALLS`.
     pub full_auto_max_tool_calls: Option<u32>,
-    /// Keep at most the last N run logs (REQ-H34). Overrides `LOG_RETENTION_RUNS`.
-    pub log_retention: Option<usize>,
-    /// Total log-dir byte ceiling (REQ-H24). Overrides `LOG_MAX_BYTES`.
-    pub log_max_bytes: Option<u64>,
+    // `log_retention`, `log_max_bytes` and `log_level` are GONE (REQ-L32), with
+    // no guided migration and none coming: a file that still declares one gets
+    // serde's bare `unknown field`, which is fatal. `src/config/migrate.rs` is
+    // deliberately not extended for them.
+    //
+    // What the bare error cannot say is in the CHANGELOG (REQ-L33): retention
+    // moved from RUNS to DAYS and there is no conversion. Without that, the
+    // natural path — read the name in the error, find the replacement, copy the
+    // number over — produces a config that starts fine and retains something
+    // else entirely.
     // `tool_result_cap_bytes` NO LONGER LIVES HERE (Task 1.3, third migration pattern of
     // REQ-A21b): it moved up to the root level because under `[headless]` it only covered batch
     // mode and left interactive mode loose, which is exactly where the report is re-sent on
     // every turn of a long session. A cap that protects the cheap case and not the expensive
     // one protects the wrong case. A file that still declares it here received the guided
     // migration error until v0.13.0 retired that pattern set (REQ-R22); it now gets serde's bare
-    // `unknown field` — see `detect_migrations`. Default log level
-    // (REQ-H24): `error`|`warn`|`info`|`debug`. Overrides `"info"`.
-    pub log_level: Option<String>,
+    // `unknown field` — see `detect_migrations`.
     /// Default wall-clock timeout secs for tool-executing tiers (REQ-H36). Overrides
     /// `FULL_AUTO_TIMEOUT_SECS`.
     pub timeout_secs: Option<u64>,
@@ -1586,6 +1721,147 @@ pub fn gate_thresholds_from(config: &MagiConfig) -> GateThresholds {
 
 #[cfg(test)]
 mod tests {
+
+    /// SC-L122: a blank env var is ABSENT, and absence never reaches D-L20.
+    #[test]
+    fn an_inert_logging_key_is_rejected_rather_than_accepted_and_ignored() {
+        // The struct's own doc says a shipped key promises something the binary
+        // does, and `format` and `rotation_tz` were deferred for exactly that
+        // reason. `tui_filter` shipped anyway, accepted by serde and read by
+        // nothing -- an operator could set it, see no error, and get no effect.
+        //
+        // `deny_unknown_fields` is what makes removal the strong choice: the
+        // key is now a load error naming itself, which is a better answer than
+        // silence in either direction.
+        let err = MagiConfig::from_toml_str("[logging]\ntui_filter = \"debug\"\n")
+            .expect_err("an inert key must not be accepted");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("tui_filter"),
+            "the error must name the key so the operator can find it: {msg}"
+        );
+        // And a key that IS wired still parses, or the assertion above would
+        // hold for a section that rejects everything.
+        assert!(
+            MagiConfig::from_toml_str("[logging]\nfile_filter = \"debug\"\n").is_ok(),
+            "a real key must still be accepted"
+        );
+    }
+
+    #[test]
+    fn a_declared_log_dir_is_marked_declared_and_a_defaulted_one_is_not() {
+        // D-L20 turns on exactly this bit: declared fails the startup, defaulted
+        // degrades to a notice. Getting it backwards either takes CI down over a
+        // directory nobody asked for, or hands an operator who DID ask an empty
+        // directory and no clue -- the complaint the feature exists to answer.
+        let cfg = MagiConfig::default();
+        let fallback = std::path::Path::new("/default/logs");
+
+        assert!(
+            cfg.resolve_log_dir(Some("/from/flag"), None, fallback)
+                .declared,
+            "a flag is a declaration"
+        );
+        assert!(
+            cfg.resolve_log_dir(None, Some("/from/env"), fallback)
+                .declared,
+            "so is an environment variable"
+        );
+        assert!(
+            !cfg.resolve_log_dir(None, None, fallback).declared,
+            "and the fallback is not"
+        );
+    }
+
+    #[test]
+    fn a_blank_log_dir_is_absent_rather_than_declared() {
+        // An exported-but-unfilled MAGI_LOG_DIR is an everyday CI accident.
+        // Reading it as declared converts that accident into D-L20's hard
+        // failure, which is the opposite of what the rule is for.
+        let cfg = MagiConfig::default();
+        let fallback = std::path::Path::new("/default/logs");
+        for blank in ["", "   ", "\t"] {
+            let r = cfg.resolve_log_dir(None, Some(blank), fallback);
+            assert!(!r.declared, "{blank:?} must not count as declared");
+            assert_eq!(r.path, fallback);
+        }
+    }
+
+    #[test]
+    fn a_blank_log_dir_env_var_does_not_break_startup() {
+        let cfg = MagiConfig::default();
+        let fallback = std::path::Path::new("/w/.magi/logs");
+
+        // Exported and left unfilled is an everyday CI accident. Treating it as
+        // invalid turns the accident into a hard failure — and into the fatal
+        // path of D-L20, which applies only to a directory actually DECLARED
+        // and impossible to create.
+        for blank in [
+            "", "   ", "	", "
+  ",
+        ] {
+            assert_eq!(
+                cfg.resolve_log_dir(None, Some(blank), fallback).path,
+                fallback,
+                "a blank env ({blank:?}) must fall through to the default"
+            );
+        }
+    }
+
+    #[test]
+    fn the_log_dir_precedence_is_flag_then_env_then_file_then_default() {
+        let cfg = MagiConfig::default();
+        let fallback = std::path::Path::new("/w/.magi/logs");
+
+        assert_eq!(
+            cfg.resolve_log_dir(Some("/from/flag"), Some("/from/env"), fallback)
+                .path,
+            std::path::PathBuf::from("/from/flag"),
+            "the flag wins over the env"
+        );
+        assert_eq!(
+            cfg.resolve_log_dir(None, Some("/from/env"), fallback).path,
+            std::path::PathBuf::from("/from/env"),
+            "the env wins over the file and the default"
+        );
+        assert_eq!(cfg.resolve_log_dir(None, None, fallback).path, fallback);
+    }
+
+    #[test]
+    fn an_unknown_key_in_the_logging_section_is_a_parse_error() {
+        // `deny_unknown_fields`: a typo is rejected, never silently accepted.
+        let toml = "[logging]
+log_dirr = \"/typo\"
+";
+        assert!(
+            toml::from_str::<MagiConfig>(toml).is_err(),
+            "a misspelled key must not be swallowed"
+        );
+        // And the correctly spelled one parses, so the assertion above is not
+        // passing because the whole section is rejected.
+        let ok = "[logging]
+log_dir = \"/right\"
+";
+        assert!(toml::from_str::<MagiConfig>(ok).is_ok());
+    }
+
+    #[test]
+    fn format_and_rotation_tz_are_rejected_because_they_do_nothing_yet() {
+        // Their absence is not an oversight: an inert key promises what the
+        // binary does not do. `deny_unknown_fields` is what makes the promise
+        // impossible to make by accident.
+        for key in ["format", "rotation_tz"] {
+            let toml = format!(
+                "[logging]
+{key} = \"whatever\"
+"
+            );
+            assert!(
+                toml::from_str::<MagiConfig>(&toml).is_err(),
+                "{key} must not parse until it works"
+            );
+        }
+    }
     use super::*;
 
     /// A commented-out `[embedding].base_url` INHERITS the root endpoint.
@@ -2199,9 +2475,6 @@ base_url = "http://embedder-host:11434/v1"
             "[headless]\n\
              max_input_bytes = 2048\n\
              full_auto_max_tool_calls = 30\n\
-             log_retention = 7\n\
-             log_max_bytes = 1048576\n\
-             log_level = \"debug\"\n\
              timeout_secs = 120\n\
              allow_system_override = true\n",
         )
@@ -2209,11 +2482,42 @@ base_url = "http://embedder-host:11434/v1"
 
         assert_eq!(c.headless.max_input_bytes, Some(2048));
         assert_eq!(c.headless.full_auto_max_tool_calls, Some(30));
-        assert_eq!(c.headless.log_retention, Some(7));
-        assert_eq!(c.headless.log_max_bytes, Some(1_048_576));
-        assert_eq!(c.headless.log_level.as_deref(), Some("debug"));
         assert_eq!(c.headless.timeout_secs, Some(120));
         assert_eq!(c.headless.allow_system_override, Some(true));
+    }
+
+    /// REQ-L32: the three retired keys are a PARSE ERROR, with no guided
+    /// migration and none coming.
+    ///
+    /// What the bare `unknown field` cannot say is in the CHANGELOG (REQ-L33):
+    /// retention moved from RUNS to DAYS with no conversion. The natural path —
+    /// read the name in the error, find the replacement, copy the number over —
+    /// otherwise produces a config that starts fine and retains something else.
+    #[test]
+    fn the_retired_headless_log_keys_are_rejected_outright() {
+        for key in [
+            "log_retention = 7",
+            "log_max_bytes = 1048576",
+            "log_level = \"debug\"",
+        ] {
+            let toml = format!(
+                "[headless]
+{key}
+"
+            );
+            assert!(
+                MagiConfig::from_toml_str(&toml).is_err(),
+                "{key} must be fatal, not silently ignored"
+            );
+        }
+        // And a section without them still parses, so the assertions above are
+        // not passing because `[headless]` itself broke.
+        assert!(MagiConfig::from_toml_str(
+            "[headless]
+max_input_bytes = 2048
+"
+        )
+        .is_ok());
     }
 
     /// -------------------------------------------------------------------------

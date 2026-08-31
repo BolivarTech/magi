@@ -1,6 +1,6 @@
 // Author: Julian Bolivar
-// Version: 0.17.0
-// Date: 2026-08-27
+// Version: 0.18.0
+// Date: 2026-08-31
 
 //! Headless output formatting: text (stream) / rich JSON (buffered), truncation of large
 //! results, and redaction of secrets in error messages (REQ-H13, REQ-H14, REQ-H15c).
@@ -93,6 +93,14 @@ const CONNECTION_REFUSED_MARKER: &str = "connection refused";
 struct WireOutcome<'a> {
     /// Output contract version; always the first serialized key.
     schema_version: u32,
+    /// This process's run identifier (REQ-L63).
+    ///
+    /// **Emitted so the run is DISCOVERABLE, not merely identified.** Telling a
+    /// CI job to "filter the log by run" is useless if the job cannot learn
+    /// which run was its own, and the per-run file that used to answer that is
+    /// what the JSONL retirement removed. It appears here AND on stderr, so a
+    /// job can capture it without parsing the log.
+    run_id: &'a str,
     /// Agent response text, or `None` on error.
     response: &'a Option<String>,
     /// Effective model used in the run.
@@ -188,6 +196,7 @@ pub fn write_json(
 ) -> Result<(), HeadlessError> {
     let wire = WireOutcome {
         schema_version: SCHEMA_VERSION,
+        run_id: crate::logging::run_id(),
         response: &o.response,
         model: &o.model,
         provider: &o.provider,
@@ -462,8 +471,55 @@ fn match_generic_secret_run(chars: &[char], i: usize) -> Option<usize> {
 /// binary crate): `headless::log` reuses this same redactor for a tool-call's `input` at debug
 /// level — the matchers are never reimplemented in a second place (DRY).
 pub fn redact_secret_patterns(raw: &str) -> String {
-    let chars: Vec<char> = raw.chars().collect();
+    let ranges = secret_pattern_ranges(raw);
+    if ranges.is_empty() {
+        return raw.to_string();
+    }
     let mut out = String::with_capacity(raw.len());
+    let mut cursor = 0usize;
+    for r in ranges {
+        if let Some(seg) = raw.get(cursor..r.start) {
+            out.push_str(seg);
+        }
+        out.push_str(REDACTED_PLACEHOLDER);
+        cursor = r.end;
+    }
+    if let Some(tail) = raw.get(cursor..) {
+        out.push_str(tail);
+    }
+    out
+}
+
+/// The BYTE ranges of `raw` that the pattern matchers claim.
+///
+/// Extracted so the traversal has exactly one definition and two views of it:
+/// [`redact_secret_patterns`] rewrites the string, and the logging auditor needs
+/// the **ranges** instead. The auditor's two passes both run over the ORIGINAL
+/// line and union their ranges before redacting once (REQ-L49) — chaining a
+/// string-rewriting pass in front of it is the leak that requirement exists to
+/// close, so a `String`-returning function cannot serve it.
+///
+/// Ranges are non-overlapping and in ascending order, because the walk consumes
+/// each match before continuing.
+///
+/// # Complexity
+///
+/// `O(n)` over the characters, plus `O(n)` to build the offset table.
+#[must_use]
+pub fn secret_pattern_ranges(raw: &str) -> Vec<std::ops::Range<usize>> {
+    let chars: Vec<char> = raw.chars().collect();
+    // Byte offset of every character index, with a sentinel past the last one,
+    // so a match measured in characters becomes a byte range without a second
+    // traversal.
+    let mut offsets: Vec<usize> = Vec::with_capacity(chars.len() + 1);
+    let mut at = 0usize;
+    for c in &chars {
+        offsets.push(at);
+        at += c.len_utf8();
+    }
+    offsets.push(at);
+
+    let mut out = Vec::new();
     let mut i = 0usize;
     while i < chars.len() {
         if let Some(consumed) = match_bearer_token(&chars, i)
@@ -471,12 +527,12 @@ pub fn redact_secret_patterns(raw: &str) -> String {
             .or_else(|| match_akia_key(&chars, i))
             .or_else(|| match_generic_secret_run(&chars, i))
         {
-            out.push_str(REDACTED_PLACEHOLDER);
-            i += consumed;
+            let end = i.saturating_add(consumed).min(chars.len());
+            if let (Some(&from), Some(&to)) = (offsets.get(i), offsets.get(end)) {
+                out.push(from..to);
+            }
+            i = i.saturating_add(consumed);
             continue;
-        }
-        if let Some(c) = chars.get(i) {
-            out.push(*c);
         }
         i += 1;
     }
@@ -668,13 +724,39 @@ mod tests {
         let o = RunOutcome::sample();
         let mut buf = Vec::new();
         write_json(&mut buf, &o, TOOL_RESULT_CAP).unwrap();
-        let produced: serde_json::Value = serde_json::from_slice(&buf).unwrap();
+        let mut produced: serde_json::Value = serde_json::from_slice(&buf).unwrap();
+
+        // `run_id` is per-process by construction (pid plus 64 random bits), so
+        // it cannot sit in a golden file. It is lifted out and checked for
+        // SHAPE, and the rest of the object still compares whole — the key
+        // count included, because a key too many is as much a contract change
+        // as a key too few.
+        let run_id = produced
+            .as_object_mut()
+            .expect("an object")
+            .remove("run_id")
+            .expect("run_id must be emitted (REQ-L63)");
+        let run_id = run_id.as_str().expect("a string");
+        let (pid, hex) = run_id.split_once('-').expect("<pid>-<hex16>");
+        assert!(pid.parse::<u32>().is_ok(), "the pid half: {run_id}");
+        assert_eq!(hex.len(), 16, "64 bits, not 32: {run_id}");
 
         let golden: serde_json::Value =
             serde_json::from_str(include_str!("../../tests/golden/headless_output_v1.json"))
                 .unwrap();
 
         assert_eq!(produced, golden);
+    }
+
+    /// Adding `run_id` is ADDITIVE, so the contract version does not move.
+    ///
+    /// The policy is on [`SCHEMA_VERSION`]: only renaming, removing, retyping or
+    /// re-meaning a field bumps it. A consumer reading the keys it knows is
+    /// unaffected by a new one — and pinning that here means the next person to
+    /// add a field has to decide deliberately rather than by omission.
+    #[test]
+    fn adding_the_run_id_did_not_move_the_schema_version() {
+        assert_eq!(SCHEMA_VERSION, 1);
     }
 
     /// Text mode without clamp: `response` goes to `out`, `err_out` stays empty.

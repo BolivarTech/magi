@@ -1,6 +1,6 @@
 // Author: Julian Bolivar
-// Version: 1.0.0
-// Date: 2026-07-18
+// Version: 0.18.0
+// Date: 2026-08-31
 
 //! Numeric limits and default caps for headless mode — the single source of
 //! truth, lib-visible so both the `headless` lib modules and the bin
@@ -22,12 +22,6 @@ pub const MAX_JSON_DEPTH: u32 = 64;
 /// Cap on each tool `result` in the rich output, with a truncation marker
 /// (REQ-H14). 64 KiB.
 pub const TOOL_RESULT_CAP: usize = 64 * 1024;
-
-/// Retention: keep at most the last N run logs, pruned at start (REQ-H34). 50.
-pub const LOG_RETENTION_RUNS: usize = 50;
-
-/// Retention: total log-dir byte ceiling, pruned oldest-first (REQ-H24). 512 MiB.
-pub const LOG_MAX_BYTES: u64 = 512 * 1024 * 1024;
 
 /// Hard wall-clock ceiling (seconds) applied by default under `--full-auto`
 /// (and any tool-executing tier) when no `--timeout` is given (REQ-H36). 900 s.
@@ -55,10 +49,6 @@ pub struct HeadlessLimits {
     pub max_input_bytes: usize,
     /// Effective `--full-auto` tool-call cap (default [`FULL_AUTO_MAX_TOOL_CALLS`]).
     pub full_auto_max_tool_calls: u32,
-    /// Effective run-log retention count (default [`LOG_RETENTION_RUNS`]).
-    pub log_retention_runs: usize,
-    /// Effective log-dir byte ceiling (default [`LOG_MAX_BYTES`]).
-    pub log_max_bytes: u64,
     /// Effective per-tool-result byte cap (default [`TOOL_RESULT_CAP`]).
     pub tool_result_cap: usize,
     /// Effective default wall-clock timeout secs for tool-executing tiers
@@ -71,8 +61,6 @@ impl Default for HeadlessLimits {
         Self {
             max_input_bytes: MAX_INPUT_BYTES,
             full_auto_max_tool_calls: FULL_AUTO_MAX_TOOL_CALLS,
-            log_retention_runs: LOG_RETENTION_RUNS,
-            log_max_bytes: LOG_MAX_BYTES,
             tool_result_cap: TOOL_RESULT_CAP,
             full_auto_timeout_secs: FULL_AUTO_TIMEOUT_SECS,
         }
@@ -89,8 +77,6 @@ mod tests {
         assert_eq!(MAX_INPUT_BYTES, 10 * 1024 * 1024);
         assert_eq!(MAX_JSON_DEPTH, 64);
         assert_eq!(TOOL_RESULT_CAP, 64 * 1024);
-        assert_eq!(LOG_RETENTION_RUNS, 50);
-        assert_eq!(LOG_MAX_BYTES, 512 * 1024 * 1024);
         assert_eq!(FULL_AUTO_TIMEOUT_SECS, 900);
         assert_eq!(NORMAL_MAX_TOOL_CALLS, 15);
         assert_eq!(FULL_AUTO_MAX_TOOL_CALLS, 50);

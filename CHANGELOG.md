@@ -9,6 +9,52 @@ changes and the **patch** position signals backward-compatible fixes.
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-08-31
+
+### Added
+
+- **A real log file.** Magi now writes a daily file under `.magi/logs/`, rotated at
+  UTC midnight, compressed to `.xz` once it ages past `compress_after_days`, and
+  deleted past `retain_days`. Every line goes through an auditor first, so a
+  credential that reaches a log line is masked before it is written — and the
+  masking is announced, never silent. Configure it under `[logging]` in
+  `magi.toml`: `log_dir`, `file_filter`, `compress`, `compress_after_days`,
+  `retain_days`, `max_total_bytes`. Those six and no others — a key that the
+  binary does not read yet is not shipped, so setting one is a load error that
+  names it rather than a setting that quietly does nothing. `--log-dir` and `MAGI_LOG_DIR` override the
+  directory, in that order.
+
+- **Every line carries `run=<id>`, and that id is how you find your own run.** The
+  daily file is shared by everything writing at the time, so isolating one
+  invocation means filtering by its id rather than opening its own file. The id is
+  published three ways: in the JSON envelope of `query` and `consult`, on a
+  `run: <id>` line on stderr for a job that only reads stderr, and as the run's
+  first log event, which names the subcommand and the workspace. Continuation
+  lines of a split event carry it too, so filtering a long event returns all of it
+  rather than its first line.
+
+### Removed
+
+- **The JSONL run log (`run-*.jsonl`) is gone**, and with it `[headless]`'s
+  `log_retention`, `log_max_bytes` and `log_level` keys. A `magi.toml` that still
+  declares one of them now fails to parse with serde's `unknown field`, which is
+  fatal — there is no guided migration, deliberately.
+
+  **What replaces it for an automated consumer:** read `run_id` from the output
+  envelope, then filter the daily file by `run=<that value>`. The capability the
+  per-run file gave you is the same; the way you reach it is not.
+
+  **Read this before copying your old numbers across: retention changed units.**
+  `log_retention` counted **runs**; `retain_days` counts **days**. There is no
+  conversion between them, and nothing will tell you if you carry the number
+  over — the file parses, the agent starts, and it keeps a completely different
+  amount of history than you meant. `log_max_bytes` maps to `max_total_bytes`,
+  which still counts bytes but now bounds the whole log directory rather than a
+  set of run files.
+
+  `--log-level` survives and means what it always meant; it now steers the file
+  branch of the new layer instead of the retired run log.
+
 ## [0.17.0] - 2026-08-27
 
 ### Changed
@@ -1309,7 +1355,9 @@ Initial pre-release, published primarily to reserve the `magi-rs` crate name.
 - `ratatui` TUI with Normal / Selection / Visual modes and Unicode-safe input.
 - OAuth (PKCE) login and OS keyring integration, with `magi-rust` legacy migration.
 
-[Unreleased]: https://github.com/BolivarTech/magi/compare/v0.16.0...HEAD
+[Unreleased]: https://github.com/BolivarTech/magi/compare/v0.18.0...HEAD
+[0.18.0]: https://github.com/BolivarTech/magi/compare/v0.17.0...v0.18.0
+[0.17.0]: https://github.com/BolivarTech/magi/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/BolivarTech/magi/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/BolivarTech/magi/compare/v0.14.3...v0.15.0
 [0.14.3]: https://github.com/BolivarTech/magi/compare/v0.14.2...v0.14.3

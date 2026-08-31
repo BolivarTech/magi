@@ -1,6 +1,6 @@
 // Author: Julian Bolivar
-// Version: 1.0.0
-// Date: 2026-07-18
+// Version: 0.18.0
+// Date: 2026-08-31
 #![deny(missing_docs)]
 #![deny(clippy::missing_docs_in_private_items)]
 #![deny(rustdoc::broken_intra_doc_links)]
@@ -32,7 +32,6 @@ mod error;
 pub mod exit;
 pub mod input;
 pub mod limits;
-pub mod log;
 pub mod output;
 pub mod policy;
 pub mod resolution;

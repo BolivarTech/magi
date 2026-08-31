@@ -1,6 +1,6 @@
 [package]
 name = "magi-rs"
-version = "0.17.0"
+version = "0.18.0"
 edition = "2021"
 # Minimum supported Rust version. This is the same decision as the toolchain
 # pinned in .github/workflows/*.yml, written in a second place because Cargo
@@ -48,6 +48,22 @@ sha2 = "0.10"
 base64 = "0.22"
 rand = "0.8"
 urlencoding = "2.1"
+# Pinned exactly, and the pin is load-bearing rather than housekeeping: 0.3.54
+# is unresolvable on the index today because it requires `time-macros =0.2.32`,
+# which is not published. `macros` is deliberately not enabled — `date!()` and
+# `format_description!()` are conveniences the rotation module does not need,
+# and enabling them is what drags that broken requirement back in.
+# The event pipeline. Pinned like the rest for reproducibility.
+#
+# `tracing-subscriber` lands here rather than with the layer that consumes it in
+# production, because its first consumer is the TEST FIXTURE: `tracing::Event`
+# has no public constructor — it exists only inside a dispatcher while a macro
+# emits it — so exercising `render_event` at all means installing a subscriber.
+# Hand-rolling one is forty lines of no-op trait methods for a crate the layer
+# needs anyway.
+tracing = "=0.1.44"
+tracing-subscriber = { version = "=0.3.23", default-features = false, features = ["std", "registry"] }
+time = { version = "=0.3.53", default-features = false, features = ["std", "formatting"] }
 cryptovault = "0.3.0"  # fundación criptográfica auditada (R-V01); reemplaza src/utils/crypto.rs (MS1)
 zeroize = "1.8"
 rusqlite = { version = "0.31", features = ["bundled"] }
@@ -98,6 +114,7 @@ tokio-util = { version = "0.7", default-features = false }
 # dev-dependency for test fixtures); promoted here for production use, no new
 # transitive dependency introduced.
 dunce = "1.0.5"
+lzma-rust2 = "=0.20.0"
 
 [dev-dependencies]
 # `test-util` unlocks `tokio::time::{pause, advance}` for a virtual/paused clock.

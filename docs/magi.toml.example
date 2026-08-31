@@ -152,6 +152,26 @@ dim   = 0
 # BREAKING: until v0.11.0 this key always carried its own value, so it never inherited.
 # base_url = "..."
 
+[logging]
+# Where the daily files live. Relative paths resolve against the workspace root.
+log_dir = ".magi/logs"
+# What the FILE branch writes. A bare level, or a comma-separated list of
+# `target=level` directives with a bare level as the default:
+#   file_filter = "magi_rs=debug,magi_core=warn,error"
+# The longest matching target wins, so a general rule and a specific one compose.
+# A crate name written with dashes matches the module path with underscores.
+# An unknown level word is a load error, never a silent fallback to `info`.
+file_filter = "info"
+# Whether a rotated file is compressed to `.xz`.
+compress = true
+# Age in days past which a rotated file is compressed.
+compress_after_days = 2
+# Age in days past which a file is deleted. Counts DAYS -- the retired
+# `[headless].log_retention` counted RUNS, and there is no conversion between them.
+retain_days = 30
+# Ceiling on the whole directory, in bytes. 512 MiB. The oldest go first.
+max_total_bytes = 536870912
+
 # ── The rotation pool goes LAST IN THE FILE ────────────────────────────────────
 # Not "last in the [magi] block": in TOML every loose key and sub-table must precede the
 # first array of tables, so a key added to [magi] later could land after this array and

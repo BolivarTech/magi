@@ -181,6 +181,17 @@
 # equivalent for an integration target: renaming or adding a test inside the file cannot drop
 # it out of the group, and only deleting the file itself changes what it matches.
 #
+# **The four logging binaries are NOT in this group, and that is deliberate.** The cap is
+# Argon2 lane arithmetic -- `3 heavy x 4 lanes = 12` over 12 logical processors -- and
+# `auditor_isolation`, `init_logging`, `canary_both_mouths` and `prompt_never_logged` open no
+# vault and derive no key. They are slow because they SLEEP (one waits twenty seconds on a
+# latch), so membership would hold a scarce slot for a load it does not create, while giving
+# them nothing back: the group caps its own members against each other, it does not shield
+# them from the Argon2 tests outside it. `workdir_flag` stays, because `magi init` opens a
+# vault. Filter matches 579 tests, counted with `cargo nextest list -E '<filter>' | grep -c
+# '::'` -- NOT `grep -c '^magi-rs '`, which reports 0 here because the bin target prints
+# `magi-rs::bin/magi-rs <test>`. That miscount happened while writing this line.
+#
 # Matched test count went 555 -> 565 (`cargo nextest list -E '<filter>' | grep -c '^magi-rs'`),
 # a delta of exactly the tests in that file (10 on Windows; the `#[cfg(unix)]` symlink case
 # makes it 11 on Linux). The control the section above demands was run
