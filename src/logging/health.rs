@@ -183,10 +183,13 @@ impl HealthTracker {
     }
 
     /// Expires the window without a new event. The caller invokes this
-    /// periodically (the TUI event loop's own `poll` timeout) and once more
-    /// at shutdown; without it, a pending transition whose subsystem stops
-    /// producing events -- exactly what happens when something goes fully
-    /// dark -- would never be emitted.
+    /// periodically -- the TUI event loop's own `poll` timeout, or once per
+    /// agent turn in headless mode -- without it, a pending transition whose
+    /// subsystem stops producing events -- exactly what happens when
+    /// something goes fully dark -- would never be emitted. What runs at
+    /// shutdown is [`Self::flush`], not this: `tick` still respects the
+    /// window and a closing process has no "later" left for the window to
+    /// elapse in.
     ///
     /// # Complexity
     ///
