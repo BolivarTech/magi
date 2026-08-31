@@ -154,13 +154,32 @@ impl CauseKey {
         CauseKey::new(EMBEDDER, HTTP_ERROR),
     ];
 
-    /// Builds a cause key from its two program-constant halves.
+    /// Builds a cause key from its two `'static` halves.
     ///
-    /// **The only constructor.** Both fields stay private so a `CauseKey`
-    /// cannot be assembled from anything but a call site's own literals —
-    /// mirroring [`SecretName::new`], which exists for the identical reason:
-    /// the value must come from a constant the emitter wrote, never from the
-    /// runtime text it is describing (R-L13).
+    /// **The only constructor**, and both fields stay private so a `CauseKey`
+    /// is assembled here or not at all — mirroring [`SecretName::new`].
+    ///
+    /// # What the `'static` bound does and does not buy
+    ///
+    /// R-L13's rule is that a key must not vary with the runtime text it
+    /// describes: every HTTP 500 with a fresh request id has to land on ONE
+    /// key. At an ordinary emitting site the bound delivers that outright,
+    /// because the only `&'static str` to hand is a literal the emitter wrote.
+    ///
+    /// It is weaker than "never from runtime text", and the layer is where the
+    /// difference shows: `magi_layer::cause_from_event` reads the two
+    /// `cause.*` FIELD VALUES off an event and interns them to `'static`, so
+    /// those keys are built from runtime text that has been made permanent.
+    /// That is deliberate — a `tracing` field carries a value, not a
+    /// compile-time symbol, so there is no other way to read one — and the
+    /// risk it opens is unbounded growth rather than a per-request key, which
+    /// is what `MAX_INTERNED_CAUSE_VALUES` caps. Past the cap the layer
+    /// substitutes a single fallback key instead of interning another value.
+    ///
+    /// So the invariant this type actually holds is that a key is one of a
+    /// bounded, program-lived set. Keeping it identical PER CAUSE, rather than
+    /// per occurrence, remains the emitter's job: declare the two halves as
+    /// constants and pass those, the way `memory::embedding` does.
     #[must_use]
     pub const fn new(subsystem: &'static str, cause: &'static str) -> Self {
         Self { subsystem, cause }
