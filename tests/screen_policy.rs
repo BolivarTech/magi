@@ -227,3 +227,51 @@ fn test_info_never_reaches_the_screen_but_reaches_the_file() {
         "and the file is where it must have gone instead: {written}"
     );
 }
+
+#[test]
+fn one_tick_shows_every_transition_whose_window_has_elapsed() {
+    // `HealthTracker::tick` hands back ONE transition per call while `flush`
+    // hands back a `Vec`, so the wrapper around `tick` has to supply the loop.
+    // Without it a cascade shows one recovery now and holds the other until
+    // the next call -- a whole agent turn in headless, which can be minutes.
+    //
+    // The window is expired by ARITHMETIC, not by waiting: `health_tick` takes
+    // the instant as a parameter precisely so this is deterministic.
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let (handle, screen) = start(dir.path(), "info");
+
+    for subsystem in ["embedder", "provider"] {
+        tracing::event!(
+            target: "magi_rs::memory",
+            tracing::Level::WARN,
+            cause.subsystem = subsystem,
+            cause.name = "unreachable",
+            "subsystem call failed"
+        );
+    }
+    for subsystem in ["embedder", "provider"] {
+        tracing::event!(
+            target: "magi_rs::memory",
+            tracing::Level::INFO,
+            cause.subsystem = subsystem,
+            cause.name = "unreachable",
+            "subsystem call ok"
+        );
+    }
+
+    handle.health_tick(
+        std::time::Instant::now()
+            + std::time::Duration::from_secs(magi_rs::logging::health::HEALTH_MIN_STABLE_SECS + 1),
+    );
+
+    let shown = screen.joined();
+    assert!(
+        shown.contains("✓ memory: retrieval restored"),
+        "the first elapsed recovery is missing: {shown}"
+    );
+    assert!(
+        shown.contains("✓ provider: reachable again"),
+        "the SECOND elapsed recovery is missing, so one tick showed only one \
+         of two transitions that were both due: {shown}"
+    );
+}

@@ -240,19 +240,25 @@ impl HealthReporter {
         }
     }
 
-    /// Expires the stability window without a new event.
+    /// Expires the stability window without a new event, showing everything
+    /// that has come due.
+    ///
+    /// # Why this LOOPS while [`Self::flush`] does not
+    ///
+    /// The asymmetry is in the pure tracker, not here: `tick` hands back one
+    /// transition per call and `flush` hands back a `Vec`. So the wrapper has
+    /// to supply the loop that `flush` gets for free. Without it a cascade —
+    /// two subsystems whose windows elapse together — shows one now and holds
+    /// the other until the next call, which in headless is a whole agent turn
+    /// away and may be minutes of `consult`. Each pass consumes one pending,
+    /// and pendings are bounded by the number of subsystems, so it terminates.
     ///
     /// # Complexity
     ///
-    /// `O(s)` in the number of subsystems observed so far.
+    /// `O(s²)` worst case in the number of subsystems observed so far, which
+    /// is a handful: `O(s)` per pass over at most `s` pendings.
     pub(crate) fn tick(&self, now: Instant) {
-        let decided = {
-            let Ok(mut tracker) = self.tracker.lock() else {
-                return;
-            };
-            tracker.tick(now)
-        };
-        if let Some(transition) = decided {
+        while let Some(transition) = self.tracker.lock().ok().and_then(|mut t| t.tick(now)) {
             self.show(&transition);
         }
     }
