@@ -2761,13 +2761,18 @@ fn ui(f: &mut Frame, app: &mut App) {
     // text is handed to ratatui whole and is never byte-indexed (G5) — it is a
     // `&'static str` that may well contain multi-byte characters, and the
     // backend measures it by grapheme.
-    if status_height > STATUS_ROW_HEIGHT_COLLAPSED {
-        if let Some(text) = app.status_row.current() {
-            f.render_widget(
-                Paragraph::new(text).style(Style::default().add_modifier(Modifier::DIM)),
-                status_area,
-            );
-        }
+    //
+    // **The mode and the emptiness are decided ONCE, by `status_height` above,
+    // and are deliberately not re-tested here.** A second `if` on the same two
+    // facts read as a safety net and was dead: `status_area` is zero rows tall
+    // in exactly those cases, so the render draws nothing. Two gates on one
+    // decision is also where they drift apart — the layout would keep reserving
+    // a row that the render had stopped filling.
+    if let Some(text) = app.status_row.current() {
+        f.render_widget(
+            Paragraph::new(text).style(Style::default().add_modifier(Modifier::DIM)),
+            status_area,
+        );
     }
 
     let input_title = match app.mode {
