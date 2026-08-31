@@ -274,12 +274,29 @@ const CAUSE_HTTP_ERROR: &str = "http_error";
 /// A vault that is closed.
 const CAUSE_LOCKED: &str = "locked";
 
+/// How [`render_transition`] opens when a cause has no row below.
+///
+/// A named constant so the guard that looks for it matches the text the
+/// function actually emits: a copy in a test is a copy that can drift, and the
+/// drift would leave the guard passing over the very branch it exists to
+/// forbid.
+const NO_ROW_PREFIX: &str = "internal error: no screen message is declared for cause";
+
 /// The screen texts one cause owes: degradation first, recovery second.
 ///
 /// **The table is the contract, not a suggestion.** What a user reads must not
 /// be left to whoever implements the call site, so each pair is written once,
 /// here, and every message carries REQ-L23's first two parts — what broke, and
 /// what it means for this session. [`render_transition`] adds the third.
+///
+/// # Two rows have no emitter yet
+///
+/// `provider`/`unreachable` and `vault`/`locked` are written but **nothing
+/// emits them**: task 3.3 instrumented the embedder only, so they are absent
+/// from [`CauseKey::ALL`] and cannot reach a screen today. They are kept rather
+/// than deleted — this function is private, so an unused arm is not public
+/// surface, and the row is what the task that instruments each subsystem will
+/// need. A cause with no row is the loud case, not this one.
 ///
 /// # Returns
 ///
@@ -361,7 +378,7 @@ pub fn render_transition(t: &Transition, log_path: &Path) -> String {
     match text {
         Some(text) => format!("{text} (see {})", log_path.display()),
         None => format!(
-            "internal error: no screen message is declared for cause {}/{}; \
+            "{NO_ROW_PREFIX} {}/{}; \
              the task that introduced the cause owes one (see {})",
             key.subsystem(),
             key.cause(),
@@ -719,13 +736,6 @@ mod tests {
         }
     }
 
-    /// What [`render_transition`] opens with when a cause has no declared row.
-    ///
-    /// Named here so the guard below can assert the *absence* of that branch:
-    /// the fallback is a non-empty string, so a test that only checked for
-    /// emptiness would pass for every undeclared cause in the list.
-    const NO_ROW_MARKER: &str = "internal error";
-
     #[test]
     fn every_declared_cause_key_has_a_screen_message() {
         // The guard belongs to task 3.3 and not to the task that wrote the
@@ -742,8 +752,11 @@ mod tests {
             let r = render_transition(&Transition::Restored(*key), path);
             assert!(!d.is_empty(), "no degradation message for {key:?}");
             assert!(!r.is_empty(), "no recovery message for {key:?}");
+            // The absence of the no-row branch is the real assertion: its text
+            // is not empty either, so a check for emptiness alone would pass
+            // for every undeclared cause in the list.
             assert!(
-                !d.contains(NO_ROW_MARKER) && !r.contains(NO_ROW_MARKER),
+                !d.contains(NO_ROW_PREFIX) && !r.contains(NO_ROW_PREFIX),
                 "{key:?} is declared but has no row in the message table, so \
                  the user would read a defect report instead of a message: {d}"
             );

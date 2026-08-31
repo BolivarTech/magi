@@ -454,9 +454,10 @@ fn failure_cause(error: &EmbeddingError) -> &'static str {
 ///
 /// # Parameters
 ///
-/// * `outcome` — the call's result. Only its variant is read: the level is what
-///   the health tracker derives `ok` from, and deriving anything from the text
-///   is what R-L13 forbids.
+/// * `failure` — the error the call produced, or `None` when it succeeded. The
+///   whole `Result` is not taken: nothing here reads the embeddings, and a
+///   parameter that accepts what it never looks at invites a later caller to
+///   assume it does.
 ///
 /// # Why both outcomes, and why unconditionally
 ///
@@ -477,20 +478,16 @@ fn failure_cause(error: &EmbeddingError) -> &'static str {
 ///
 /// One line per subsystem *operation* — one embedder call — which is units per
 /// turn, not thousands.
-///
-/// # Complexity
-///
-/// `O(n)` over the rendered message.
-fn report_health(outcome: &Result<Vec<Vec<f32>>, EmbeddingError>) {
-    match outcome {
-        Ok(_) => tracing::event!(
+fn report_health(failure: Option<&EmbeddingError>) {
+    match failure {
+        None => tracing::event!(
             target: EMBEDDER_TARGET,
             tracing::Level::INFO,
             cause.subsystem = EMBEDDER_SUBSYSTEM,
             cause.name = EMBEDDER_RECOVERY_CAUSE,
             "embedding request ok"
         ),
-        Err(e) => tracing::event!(
+        Some(e) => tracing::event!(
             target: EMBEDDER_TARGET,
             tracing::Level::WARN,
             cause.subsystem = EMBEDDER_SUBSYSTEM,
@@ -506,7 +503,7 @@ impl EmbeddingProvider for OpenAiCompatibleEmbedder {
     /// way out — see [`report_health`].
     async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, EmbeddingError> {
         let outcome = self.call_embeddings(texts).await;
-        report_health(&outcome);
+        report_health(outcome.as_ref().err());
         outcome
     }
 
