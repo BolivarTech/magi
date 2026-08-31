@@ -411,26 +411,62 @@ const EMBEDDER_SUBSYSTEM: &str = "embedder";
 /// [ck]: magi_rs::logging::auditor::CauseKey::ALL
 const EMBEDDER_CAUSE: &str = "unreachable";
 
+/// Reports one embedder operation's outcome as a health event.
+///
+/// # Parameters
+///
+/// * `outcome` — the call's result. Only its variant is read: the level is what
+///   the health tracker derives `ok` from, and deriving anything from the text
+///   is what R-L13 forbids.
+///
+/// # Why both outcomes, and why unconditionally
+///
+/// The failure alone can only ever degrade a subsystem. Recovery is detected
+/// from a low-level event **carrying the same cause key**, so without the
+/// success half the tracker never leaves the degraded state and the `✓` line
+/// never appears. It is emitted on the success path itself rather than inside
+/// a condition that consults whether something failed earlier: the tracker is
+/// what knows that, and a call site that duplicates the judgement is where the
+/// two copies drift apart.
+///
+/// The level is `info` and not `debug` deliberately — the layer's `enabled` is
+/// the union of the file and screen filters, and under the shipped defaults a
+/// `debug` event is rejected before the layer ever sees it.
+///
+/// # What this costs the log file
+///
+/// One line per subsystem *operation* — one embedder call — which is units per
+/// turn, not thousands.
+///
+/// # Complexity
+///
+/// `O(n)` over the rendered message.
+fn report_health(outcome: &Result<Vec<Vec<f32>>, EmbeddingError>) {
+    match outcome {
+        Ok(_) => tracing::event!(
+            target: EMBEDDER_TARGET,
+            tracing::Level::INFO,
+            cause.subsystem = EMBEDDER_SUBSYSTEM,
+            cause.name = EMBEDDER_CAUSE,
+            "embedding request ok"
+        ),
+        Err(e) => tracing::event!(
+            target: EMBEDDER_TARGET,
+            tracing::Level::WARN,
+            cause.subsystem = EMBEDDER_SUBSYSTEM,
+            cause.name = EMBEDDER_CAUSE,
+            "embedding request failed: {e}"
+        ),
+    }
+}
+
 #[async_trait]
 impl EmbeddingProvider for OpenAiCompatibleEmbedder {
+    /// Embeds `texts`, and reports the outcome to the health tracker on the
+    /// way out — see [`report_health`].
     async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, EmbeddingError> {
         let outcome = self.call_embeddings(texts).await;
-        match &outcome {
-            Ok(_) => tracing::event!(
-                target: EMBEDDER_TARGET,
-                tracing::Level::INFO,
-                cause.subsystem = EMBEDDER_SUBSYSTEM,
-                cause.name = EMBEDDER_CAUSE,
-                "embedding request ok"
-            ),
-            Err(e) => tracing::event!(
-                target: EMBEDDER_TARGET,
-                tracing::Level::WARN,
-                cause.subsystem = EMBEDDER_SUBSYSTEM,
-                cause.name = EMBEDDER_CAUSE,
-                "embedding request failed: {e}"
-            ),
-        }
+        report_health(&outcome);
         outcome
     }
 
