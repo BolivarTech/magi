@@ -750,7 +750,22 @@ mod tests {
         // REQ-L23: an actionable screen error has three parts, and this
         // asserts each on its own, specific content -- not on non-emptiness
         // and not on a `.log` substring, both of which a no-row branch or an
-        // unrelated path would also satisfy.
+        // unrelated path would also satisfy. SC-L19 adds a fourth clause --
+        // "within the width budget" -- asserted at the end.
+        //
+        // # SC-L19's producer is an accident, and it is worth writing down
+        //
+        // The scenario's *Given* is "an Ollama with no `llama-server`", which
+        // names no subsystem this module knows. It has a producer today only
+        // because the embedder happens to share Ollama's endpoint: the daemon
+        // being down makes the embedder's call fail as `Network`, which is
+        // `embedder/unreachable`. Point the embedder at a different endpoint
+        // and SC-L19 loses its producer with nothing here going red, because
+        // `provider` is declared in the message table and instrumented by
+        // nobody (R24). What this test can be made independent of is WHICH
+        // cause carries it: the budget below is checked over every declared
+        // row rather than over the one this test names, so it holds for
+        // whichever subsystem is the producer of the day.
         let path = Path::new(A_LOG_PATH);
         let line = render_transition(
             &Transition::Degraded(CauseKey::new("provider", "unreachable")),
@@ -774,6 +789,27 @@ mod tests {
             "REQ-L23 part 3 (where to read more) does not carry the log path \
              actually passed in: {line}"
         );
+
+        // SC-L19's fourth clause -- "within the width budget". The budget is
+        // read from `TUI_PAYLOAD_MAX_BYTES`, which is what the layer applies to
+        // this exact string with `truncate_for_display` before the screen sees
+        // it; a copy of the number written here would drift from the layer's
+        // and keep passing while the real line was being cut. And a cut line is
+        // precisely what breaks the three parts above: truncation takes the
+        // TAIL, and the tail is part 3.
+        for (key, _, _) in declared_messages() {
+            for t in [Transition::Degraded(key), Transition::Restored(key)] {
+                let rendered = render_transition(&t, path);
+                assert!(
+                    rendered.len() <= crate::logging::magi_layer::TUI_PAYLOAD_MAX_BYTES,
+                    "SC-L19: {key:?} renders {} bytes, past the screen's budget \
+                     of {}, so the layer will truncate it and the reader loses \
+                     the tail: {rendered}",
+                    rendered.len(),
+                    crate::logging::magi_layer::TUI_PAYLOAD_MAX_BYTES
+                );
+            }
+        }
     }
 
     #[test]
