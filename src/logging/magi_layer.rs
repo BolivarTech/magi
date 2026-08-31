@@ -25,15 +25,23 @@
 //! of the right order — auditing 100 MiB to show 64 KiB — is accepted and named:
 //! an event that size is rare, and the alternative is a leak.
 
-use std::sync::Arc;
+use std::collections::BTreeSet;
+use std::sync::{Arc, Mutex};
 
+use tracing::field::{Field, Visit};
 use tracing::{Event, Subscriber};
 use tracing_subscriber::layer::Context;
 use tracing_subscriber::Layer;
 
 use crate::logging::appender::{DailyAppender, Priority, Submitted};
-use crate::logging::auditor::{Auditor, Queued};
+use crate::logging::auditor::{Auditor, CauseKey, Queued};
 use crate::logging::render::{escape_for_line, render_event};
+
+/// Field name an emitter uses to declare the subsystem half of a [`CauseKey`]
+/// (task 3.3's convention: `cause.subsystem = "…", cause.name = "…"`).
+const CAUSE_SUBSYSTEM_FIELD: &str = "cause.subsystem";
+/// Field name an emitter uses to declare the cause half of a [`CauseKey`].
+const CAUSE_NAME_FIELD: &str = "cause.name";
 
 /// Cap on what the screen branch displays.
 ///
@@ -238,7 +246,7 @@ impl<S: Subscriber> Layer<S> for MagiLayer {
             // `tracing` emits the target as a literal, so it is already
             // `'static` — the same reason `SecretName` is.
             leak_target(target),
-            None,
+            cause_from_event(event),
             reserved,
         );
 
@@ -287,31 +295,109 @@ impl<S: Subscriber> Layer<S> for MagiLayer {
     }
 }
 
+/// Interns `value` into a process-lifetime slice, deduplicated against
+/// `cache`: a repeated value returns the same `'static` pointer instead of a
+/// fresh leak. Shared by [`leak_target`] and [`cause_from_event`] — same
+/// problem (a `tracing` field hands back a borrowed lifetime even when the
+/// text behind it is `'static` in practice), same bound (the set is limited
+/// by the number of distinct values a running process can produce, never by
+/// external input).
+///
+/// # Complexity
+///
+/// `O(log n)` over the distinct values already interned into `cache`.
+fn intern(
+    cache: &Mutex<Option<BTreeSet<&'static str>>>,
+    value: &str,
+    fallback: &'static str,
+) -> &'static str {
+    let Ok(mut guard) = cache.lock() else {
+        return fallback;
+    };
+    let set = guard.get_or_insert_with(BTreeSet::new);
+    if let Some(found) = set.get(value) {
+        return found;
+    }
+    let leaked: &'static str = Box::leak(value.to_string().into_boxed_str());
+    set.insert(leaked);
+    leaked
+}
+
 /// Interns a target so it can live in a `SecretName`-shaped `'static` slot.
 ///
 /// `tracing` builds each callsite's metadata as a `static`, so every target
 /// **is** `'static` — but the borrow checker cannot see that through
-/// `Metadata::target()`, which hands back a shorter lifetime. Interning is the
-/// cheap way to recover it, and the set is bounded by the number of callsites in
-/// the program, not by anything an input controls.
+/// `Metadata::target()`, which hands back a shorter lifetime.
 ///
 /// # Complexity
 ///
 /// `O(log n)` over the distinct targets seen.
 fn leak_target(target: &str) -> &'static str {
-    use std::collections::BTreeSet;
-    use std::sync::Mutex;
     static SEEN: Mutex<Option<BTreeSet<&'static str>>> = Mutex::new(None);
-    let Ok(mut guard) = SEEN.lock() else {
-        return "magi_rs::unknown";
-    };
-    let set = guard.get_or_insert_with(BTreeSet::new);
-    if let Some(found) = set.get(target) {
-        return found;
+    intern(&SEEN, target, "magi_rs::unknown")
+}
+
+/// Reads the `cause.subsystem`/`cause.name` field pair off an event, when the
+/// emitter declared both.
+///
+/// # Why "both, or none" (task 3.3's convention)
+///
+/// A `CauseKey` with an invented half would match neither the failure nor the
+/// success event it was supposed to pair with, and the health tracker (MS2)
+/// would read it as a cause that never recovers. Accepting one field alone
+/// would force inventing the other, so an event carrying only one is treated
+/// exactly like one carrying neither.
+///
+/// # Why this interns rather than borrows
+///
+/// [`Visit::record_str`] hands back a value bound to the call, even though
+/// every field an emitter writes as `cause.subsystem = "embedder"` is a
+/// `'static` string literal in practice — the trait's signature cannot see
+/// that. [`CauseKey::new`] requires `&'static str`, so the value is interned
+/// exactly like [`leak_target`]: once per distinct string this process
+/// actually produces.
+///
+/// # Complexity
+///
+/// `O(k)` over the event's field count, plus `O(log n)` per interned value.
+fn cause_from_event(event: &Event<'_>) -> Option<CauseKey> {
+    /// Collects the two cause fields, if present, off one event.
+    #[derive(Default)]
+    struct CauseFields {
+        /// The `cause.subsystem` field's value, once seen.
+        subsystem: Option<String>,
+        /// The `cause.name` field's value, once seen.
+        cause: Option<String>,
     }
-    let leaked: &'static str = Box::leak(target.to_string().into_boxed_str());
-    set.insert(leaked);
-    leaked
+    impl Visit for CauseFields {
+        fn record_str(&mut self, field: &Field, value: &str) {
+            match field.name() {
+                CAUSE_SUBSYSTEM_FIELD => self.subsystem = Some(value.to_string()),
+                CAUSE_NAME_FIELD => self.cause = Some(value.to_string()),
+                _ => {}
+            }
+        }
+
+        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+            match field.name() {
+                CAUSE_SUBSYSTEM_FIELD => self.subsystem = Some(format!("{value:?}")),
+                CAUSE_NAME_FIELD => self.cause = Some(format!("{value:?}")),
+                _ => {}
+            }
+        }
+    }
+
+    static SEEN: Mutex<Option<BTreeSet<&'static str>>> = Mutex::new(None);
+
+    let mut fields = CauseFields::default();
+    event.record(&mut fields);
+    match (fields.subsystem, fields.cause) {
+        (Some(subsystem), Some(cause)) => Some(CauseKey::new(
+            intern(&SEEN, &subsystem, "unknown"),
+            intern(&SEEN, &cause, "unknown"),
+        )),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
