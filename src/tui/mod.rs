@@ -3646,6 +3646,43 @@ mod tests {
         assert_eq!(app.input, "xá");
     }
 
+    /// R15: the event loop is what expires the health window while the user is
+    /// looking at the screen.
+    ///
+    /// Until this call existed, `headless_runner.rs` held the only `health_tick`
+    /// in the tree, so a pending recovery surfaced in a TUI session only AFTER
+    /// it ended — which makes SC-L17's `✓ restored` unreachable at the one time
+    /// it means anything. No timer is needed: the loop already wakes on its own
+    /// `poll` timeout, which is exactly the "runs even when nobody is typing"
+    /// the window requires.
+    ///
+    /// Asserted against the source because the property is *where* the call
+    /// sits: a test that called `health_tick` itself would pass with the loop
+    /// never calling it, which is the shape of guardian this repository keeps
+    /// finding.
+    ///
+    /// The `\r` comes out because `include_str!` returns the file's bytes
+    /// untouched while rustc normalises CRLF inside a source literal, so a
+    /// needle spanning lines would compare two different things on a Windows
+    /// checkout.
+    #[test]
+    fn test_the_event_loop_expires_the_health_window_on_every_pass() {
+        let source = include_str!("mod.rs").replace('\r', "");
+        let start = source
+            .find("\nasync fn run_app<B: Backend>")
+            .expect("run_app must still be the event loop");
+        let end = source[start..]
+            .find("\nfn char_display_width")
+            .map(|offset| start + offset)
+            .expect("the item after run_app must still bound its body");
+        let body = &source[start..end];
+        assert!(
+            body.contains("health_tick("),
+            "the ratatui loop must expire the health window, or a recovery is only ever \
+             shown after the session it belongs to has ended"
+        );
+    }
+
     /// Draws one frame in `mode` with `row` attached, and returns every cell of
     /// the resulting buffer as one string.
     ///
