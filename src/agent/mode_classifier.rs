@@ -112,6 +112,14 @@ pub trait NoticeSink: Send + Sync {
 pub struct ProcessNoticeSink {
     /// Production sink: writes to stderr, deduplicating by key.
     seen: Mutex<BTreeSet<&'static str>>,
+    /// Mirrors every line this sink actually printed. `#[cfg(test)]` only — production has
+    /// stderr itself as the observable, but stable Rust has no supported way to capture
+    /// another thread's `eprintln!` without an external crate or `unsafe` fd redirection, both
+    /// of which this crate avoids. This field changes no production behavior; it exists so a
+    /// test can tell the two real code paths above apart by what they actually printed, rather
+    /// than by re-deriving the same assertion from a hand-written mock.
+    #[cfg(test)]
+    delivered: Mutex<Vec<String>>,
 }
 
 impl NoticeSink for ProcessNoticeSink {
@@ -119,11 +127,36 @@ impl NoticeSink for ProcessNoticeSink {
         let mut seen = self.seen.lock().unwrap_or_else(PoisonError::into_inner);
         if seen.insert(key) {
             eprintln!("{}", msg.as_str());
+            #[cfg(test)]
+            self.record_delivery(msg);
         }
     }
 
     fn emit(&self, msg: &Audited) {
         eprintln!("{}", msg.as_str());
+        #[cfg(test)]
+        self.record_delivery(msg);
+    }
+}
+
+#[cfg(test)]
+impl ProcessNoticeSink {
+    /// Records one actual delivery, alongside the real `eprintln!`.
+    fn record_delivery(&self, msg: &Audited) {
+        self.delivered
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(msg.as_str().to_string());
+    }
+
+    /// How many times a line matching `needle` was actually delivered.
+    pub(crate) fn delivered_count(&self, needle: &str) -> usize {
+        self.delivered
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .filter(|line| line.contains(needle))
+            .count()
     }
 }
 
@@ -513,23 +546,52 @@ mod tests {
     /// unlike [`NoticeSink::once`], which the alarm path cannot use because
     /// `(secret, target)` is not expressible as a single `&'static str` key.
     ///
+    /// **Measured against [`ProcessNoticeSink`], the production implementation
+    /// — not a hand-written mock.** A mock's `emit` is a one-liner this test
+    /// itself wrote; asserting that it did what it was written to do proves
+    /// nothing about the real dedup boundary and cannot fail. The contrast
+    /// that actually discriminates is between the SAME sink's two methods:
+    /// `once` called twice with one key delivers once, `emit` called twice
+    /// with the same text delivers twice. [`ProcessNoticeSink::delivered_count`]
+    /// mirrors what was actually printed (`#[cfg(test)]` only — stable Rust
+    /// has no supported way to capture another thread's `eprintln!`), so this
+    /// observes the real code paths rather than re-deriving the assertion
+    /// from a double.
+    ///
+    /// **Mutation-verified**: making `emit` delegate to `once` (or gaining its
+    /// own seen-set keyed the same way) turns this test red — the second
+    /// `emit` call then no longer reaches the `eprintln!`/`record_delivery`
+    /// pair, so `delivered_count` drops from 2 to 1. Reverted after
+    /// confirming the failure; see the task's fix report for the run.
+    ///
     /// This lives here rather than in `tests/ms1_interface_probe.rs` because
     /// `NoticeSink` is declared in this file, which is part of the **binary**
     /// crate (`mod agent;` in `main.rs`) — an integration test under `tests/`
     /// links only against the library crate and cannot name it at all.
     #[test]
     fn test_emit_delivers_without_deduplicating() {
-        let sink = RecordingNoticeSink::default();
+        let sink = ProcessNoticeSink::default();
         let auditor = test_auditor();
         let (line, _) = auditor.audit("same text twice", "magi_rs::tests", None, 0);
 
-        sink.emit(&line);
-        sink.emit(&line);
-
+        // once(): a real dedup gate — the second call with the SAME key must
+        // not deliver again.
+        sink.once("test.emit_vs_once", &line);
+        sink.once("test.emit_vs_once", &line);
         assert_eq!(
-            sink.count_matching("same text twice"),
-            2,
-            "emit must deliver every call, never deduplicate like once() does"
+            sink.delivered_count("same text twice"),
+            1,
+            "once() must suppress the second call for the same key"
+        );
+
+        // emit(): no gate at all — both calls with identical text must land.
+        sink.emit(&line);
+        sink.emit(&line);
+        assert_eq!(
+            sink.delivered_count("same text twice"),
+            3,
+            "emit must deliver every call on top of once()'s single delivery, \
+             never deduplicate like once() does"
         );
     }
 }
