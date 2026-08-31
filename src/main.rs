@@ -5294,11 +5294,18 @@ async fn prepare_headless(
         },
         None => (MagiConfig::default(), Vec::new()),
     };
-    // NOT printed here. These are the same `config::resolution_notices` the TUI classifies
-    // as `info` — an honoured setting explaining what it does and does not cover — and five
-    // raw prints at startup are five lines the screen policy says belong in the file. They
-    // ride to the emission point below with the rest.
-    let cfg_notices: Vec<Notice> = cfg_notices.into_iter().map(Notice::info).collect();
+    // The same `config::resolution_notices` the TUI classifies as `info`: an honoured setting
+    // explaining what it does and does not cover. Printing them raw put five lines on the
+    // screen of every headless startup, which is what SC-L14 says must not happen.
+    //
+    // **Announced HERE and not carried down to the emission below**, even though down there
+    // the layer would be up and they would reach the file. Seven paths return between this
+    // line and that one, and every one of them would drop the list — which is the defect this
+    // round is closing in `bring_up_headless_logging`, and reintroducing it three hundred
+    // lines earlier is not a trade. With no subscriber yet, `emit_notices` applies the screen
+    // policy on its own: these are `info`, so nothing is shown, and if one is ever
+    // reclassified upward it starts being shown instead of starting to be lost.
+    emit_notices(cfg_notices.into_iter().map(Notice::info).collect());
 
     // Resolved BEFORE reading input so the effective `max_input_bytes` (an
     // operator-lowered `[headless]` cap, spec §11) governs the read itself
@@ -5502,7 +5509,7 @@ async fn prepare_headless(
 
     // REQ-A24/A24b/A24c (Task 5.2): same polling as the TUI, see `run()`'s comment — never
     // blocks or fails headless startup.
-    let mut trio_notices: Vec<Notice> = cfg_notices;
+    let mut trio_notices: Vec<Notice> = Vec::new();
     // Same wiring as the TUI, through the same opener (B3).
     let capability_cache = open_capability_cache(memory.as_ref(), &mut trio_notices);
     let (warn_tokens, probe) = probe_and_report(
