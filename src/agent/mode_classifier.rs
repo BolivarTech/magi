@@ -508,4 +508,28 @@ mod tests {
             "a `static` would leave this at 0"
         );
     }
+
+    /// MS2 task 0.1's probe of [`NoticeSink::emit`]: it must deliver every call,
+    /// unlike [`NoticeSink::once`], which the alarm path cannot use because
+    /// `(secret, target)` is not expressible as a single `&'static str` key.
+    ///
+    /// This lives here rather than in `tests/ms1_interface_probe.rs` because
+    /// `NoticeSink` is declared in this file, which is part of the **binary**
+    /// crate (`mod agent;` in `main.rs`) — an integration test under `tests/`
+    /// links only against the library crate and cannot name it at all.
+    #[test]
+    fn test_emit_delivers_without_deduplicating() {
+        let sink = RecordingNoticeSink::default();
+        let auditor = test_auditor();
+        let (line, _) = auditor.audit("same text twice", "magi_rs::tests", None, 0);
+
+        sink.emit(&line);
+        sink.emit(&line);
+
+        assert_eq!(
+            sink.count_matching("same text twice"),
+            2,
+            "emit must deliver every call, never deduplicate like once() does"
+        );
+    }
 }

@@ -121,6 +121,18 @@ impl CauseKey {
     /// by MS2's task 3.3.
     pub const ALL: &'static [CauseKey] = &[];
 
+    /// Builds a cause key from its two program-constant halves.
+    ///
+    /// **The only constructor.** Both fields stay private so a `CauseKey`
+    /// cannot be assembled from anything but a call site's own literals —
+    /// mirroring [`SecretName::new`], which exists for the identical reason:
+    /// the value must come from a constant the emitter wrote, never from the
+    /// runtime text it is describing (R-L13).
+    #[must_use]
+    pub const fn new(subsystem: &'static str, cause: &'static str) -> Self {
+        Self { subsystem, cause }
+    }
+
     /// The affected subsystem.
     #[must_use]
     pub const fn subsystem(&self) -> &'static str {
