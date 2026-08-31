@@ -1,6 +1,6 @@
 // Author: Julian Bolivar
-// Version: 1.0.0
-// Date: 2026-07-18
+// Version: 0.18.0
+// Date: 2026-08-31
 
 //! Numeric limits and default caps for headless mode — the single source of
 //! truth, lib-visible so both the `headless` lib modules and the bin

@@ -1,6 +1,6 @@
 // Author: Julian Bolivar
-// Version: 1.0.0
-// Date: 2026-08-29
+// Version: 0.18.0
+// Date: 2026-08-31
 
 //! Stages 1 and 3 of REQ-L64: rendering an event to text, and escaping a line.
 //!

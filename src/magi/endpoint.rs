@@ -1,6 +1,6 @@
 // Author: Julian Bolivar
-// Version: 0.17.0
-// Date: 2026-08-27
+// Version: 0.18.0
+// Date: 2026-08-31
 
 //! `base_url` credentials as **placeholder**, resolved from in-memory vault (REQ-A16c).
 //!

@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
-# Version: 1.0.0
-# Date: 2026-08-29
+# Version: 0.18.0
+# Date: 2026-08-31
 """S23 -- the log file a real run leaves behind.
 
 Anchored to **REQ-L63**: one run id, published on every surface a reader might
