@@ -899,15 +899,15 @@ fn is_wrong_passphrase(e: &anyhow::Error) -> bool {
 /// `db_path` (REQ-V35) — a wrong passphrase only ever produces a retryable
 /// error.
 /// Wraps low-level warnings — [`harden_process`]'s best-effort hardening failures and
-/// `MaskedDek::warnings`'s mlock diagnostics — as `Resolution` [`Notice`]s.
+/// `MaskedDek::warnings`'s mlock diagnostics — as `WARN` [`Notice`]s.
 ///
-/// Never `Info`: an mlock/dump-suppression failure is a security-posture regression,
-/// not diagnostic noise, so it must survive [`magi_rs::notices::NOTICE_MAX_INFO`]'s
-/// cap unconditionally.
+/// Never `INFO`: an mlock or dump-suppression failure is a security-posture regression, and
+/// the silent kind — the process starts, the vault opens, and the only thing that changed is
+/// that the key can now reach the pagefile. Nothing else in the run reports it.
 fn low_level_warning_notices(warnings: &[String]) -> Vec<Notice> {
     warnings
         .iter()
-        .map(|w| Notice::resolution(format!("warning: {w}")))
+        .map(|w| Notice::warn(format!("warning: {w}")))
         .collect()
 }
 
@@ -937,9 +937,9 @@ fn wrap_helper_notices(texts: Vec<String>) -> Vec<Notice> {
 /// memory-attach sequence with no store to attach.
 ///
 /// Extracted (rather than inlined at its one call site) so the test pinning that this
-/// exact message tiers above `Info` exercises the real call site, not a copy of it.
+/// exact message reaches the screen exercises the real call site, not a copy of it.
 fn no_persistence_notice() -> Notice {
-    Notice::resolution(
+    Notice::warn(
         "WARNING: this session runs WITHOUT persistence — your conversation and \
          project knowledge will NOT be saved (any existing on-disk database is left \
          untouched). Provide the vault passphrase (-p, MAGI_PASSPHRASE, or the \
@@ -1622,7 +1622,7 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
     let workspace = match crate::system::workspace::discover(&workspace_root) {
         Ok(ws) => ws,
         Err(e) => {
-            startup_notices.push(Notice::resolution(format!(
+            startup_notices.push(Notice::warn(format!(
                 "WARNING: could not resolve the .magi/ state directory ({e}); \
                  running WITHOUT persistence for this session."
             )));
@@ -1640,7 +1640,7 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
             &mut open_memory_notices,
         ),
         None => {
-            startup_notices.push(Notice::resolution(
+            startup_notices.push(Notice::warn(
                 "WARNING: no .magi/ state directory found — running WITHOUT \
                  persistence. Run `magi init` to create one and enable saved \
                  history (any existing on-disk database is left untouched)."
@@ -1662,7 +1662,7 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
                             Some(Arc::new(Mutex::new(vstore)) as SharedSecretStore),
                         ),
                         Err(e) => {
-                            startup_notices.push(Notice::resolution(format!(
+                            startup_notices.push(Notice::warn(format!(
                                 "WARNING: {}; ANTHROPIC_API_KEY/OPENAI_API_KEY must \
                                  come from the environment this session.",
                                 magi_rs::notices::error_for_display(
@@ -1676,7 +1676,7 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
                     }
                 }
                 Err(e) => {
-                    startup_notices.push(Notice::resolution(format!(
+                    startup_notices.push(Notice::warn(format!(
                         "WARNING: could not derive the vault key ({e}); \
                          ANTHROPIC_API_KEY/OPENAI_API_KEY must come from the \
                          environment this session."
@@ -1800,7 +1800,10 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
                 .await;
                 if let Ok((done, swept)) = outcome {
                     if swept > 0 || done.compressed > 0 {
-                        startup_notices.push(Notice::resolution(format!(
+                        // `info`: housekeeping that WORKED. The failures below are the
+                        // half worth interrupting for, and keeping the two at the same
+                        // level is what buried them.
+                        startup_notices.push(Notice::info(format!(
                             "logs: {} compressed, {swept} abandoned temporaries removed",
                             done.compressed
                         )));
@@ -1812,7 +1815,7 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
                     // produced it -- the operator deletes the wrong things for
                     // as many runs as it takes to guess.
                     for failure in &done.failures {
-                        startup_notices.push(Notice::resolution(match failure {
+                        startup_notices.push(Notice::warn(match failure {
                             magi_rs::logging::sweep::Failure::Compression(name, cause) => {
                                 format!(
                                     "WARNING: {name} could not be compressed ({cause}); it is still on disk and still counts towards the ceiling."
@@ -1835,7 +1838,7 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
                     log_dir.display()
                 );
             }
-            Err(e) => startup_notices.push(Notice::resolution(format!(
+            Err(e) => startup_notices.push(Notice::warn(format!(
                 "WARNING: logging is not writing to {}: {e}. The session continues without a log file.",
                 log_dir.display()
             ))),
@@ -1863,7 +1866,7 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
         // rolling hash is still registered and still covered by the pattern
         // pass, but the operator deserves to know which one got the weaker of
         // the two.
-        startup_notices.push(Notice::resolution(format!(
+        startup_notices.push(Notice::warn(format!(
             "WARNING: {} is too short to be matched exactly in the log; it is still masked by shape, which is weaker.",
             short.as_str()
         )));
@@ -1932,16 +1935,19 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
     // malformed-config warning used to be, but `load()` no longer needs a *malformed*
     // branch here: that path is now fatal and propagated by the `?` above.
     // `config_notices` stays `Vec<String>` (produced by `config::resolution_notices`,
-    // out of this task's file list) — tiered `Resolution` here, which by name IS what
-    // these are: "the config resolved differently than the file appears to say."
-    startup_notices.extend(config_notices.into_iter().map(Notice::resolution));
+    // out of this task's file list). All of them are `info`, and that is one class rather
+    // than a bulk guess: each says "your setting is honoured, and here is what it does and
+    // does not cover" — an empty `provider` taking the default, the embedder inheriting the
+    // root, and three explanations of a `base_url` Anthropic does not use. Nothing became
+    // unavailable and nothing runs worse, so there is nothing to act on before continuing.
+    startup_notices.extend(config_notices.into_iter().map(Notice::info));
     // B1: surface invalid memory-config values as a startup notice (never panic).
     if let Err(e) = magi_config.memory().validate() {
-        startup_notices.push(Notice::resolution(format!("memory config warning: {e}")));
+        startup_notices.push(Notice::warn(format!("memory config warning: {e}")));
     }
     // H2: surface invalid embedding-config values alongside memory-config (never panic).
     if let Err(e) = magi_config.embedding().validate() {
-        startup_notices.push(Notice::resolution(format!("embedding config warning: {e}")));
+        startup_notices.push(Notice::warn(format!("embedding config warning: {e}")));
     }
     // RF-9: when there is no magi.toml at all, make the Ollama-first default visible
     // (never-silent). A present-but-minimal magi.toml does NOT trigger this.
