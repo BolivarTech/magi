@@ -505,3 +505,93 @@ fn test_no_notice_truncation_line_is_ever_emitted() {
 
     drop(handle);
 }
+
+/// Turns of the failing embedder SC-L15 describes.
+const CONSECUTIVE_FAILING_TURNS: usize = 5;
+
+/// The health notice the embedder's `http_error` cause renders to.
+///
+/// The notice, not the failure event: the two are different lines produced by
+/// two different parts of one `on_event`, and telling them apart is the whole
+/// point of counting below.
+const EMBEDDER_HTTP_ERROR_NOTICE: &str = "memory: retrieval failing";
+
+/// The failure record itself, as the emitter words it.
+const EMBEDDER_FAILURE_RECORD: &str = "embedding request failed";
+
+#[test]
+fn five_consecutive_failures_show_one_notice_and_leave_five_records() {
+    // SC-L15, whose two halves ARE its content: ONE notice on the screen and
+    // FIVE records in the file, out of the SAME five failures. Each half was
+    // already held down alone -- the tracker's dedup in `logging::health`, the
+    // one-event-per-call rule in `memory::embedding` -- and neither can see the
+    // pairing, which is what the scenario is about. A dedup that also reached
+    // the file, or a file that kept five while the screen kept one for the
+    // wrong reason, passes both of those and fails this.
+    //
+    // Driven through the real dispatcher and read off both real mouths: the
+    // file half comes from the day's file, not from a count of what was
+    // emitted, because "five were emitted" is not "five were written".
+    //
+    // # The third count, and why it is asserted rather than left implicit
+    //
+    // The five WARN records reach the SCREEN as well, because REQ-L19 puts
+    // every `WARN` there. So five failures put SIX lines on screen: one notice
+    // plus the five records. SC-L15 is met under the reading "one health
+    // notice" and NOT under the reading "one screen line", and the two spec
+    // clauses disagree on which it is. The count is pinned here so that
+    // disagreement is visible to whoever settles it, instead of living in a
+    // comment that a later change can silently falsify.
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let (handle, screen) = start(dir.path(), "info");
+
+    for turn in 1..=CONSECUTIVE_FAILING_TURNS {
+        tracing::event!(
+            target: "magi_rs::memory",
+            tracing::Level::WARN,
+            cause.subsystem = "embedder",
+            cause.name = "http_error",
+            "embedding request failed: HTTP 500 on turn {}",
+            turn
+        );
+    }
+
+    // The screen is read before the handle is dropped: closing flushes any
+    // PENDING transition (SC-L90), and a notice that only arrives at close is
+    // not the one this scenario counts.
+    let shown = screen
+        .lines
+        .lock()
+        .map(|l| l.clone())
+        .unwrap_or_else(|p| p.into_inner().clone());
+    let notices = shown
+        .iter()
+        .filter(|l| l.contains(EMBEDDER_HTTP_ERROR_NOTICE))
+        .count();
+    assert_eq!(
+        notices, 1,
+        "SC-L15: five identical failures owe the screen exactly ONE notice, \
+         and it got {notices}: {shown:?}"
+    );
+    let records_on_screen = shown
+        .iter()
+        .filter(|l| l.contains(EMBEDDER_FAILURE_RECORD))
+        .count();
+    assert_eq!(
+        records_on_screen, CONSECUTIVE_FAILING_TURNS,
+        "REQ-L19 puts every WARN on the screen, so the records land there too. \
+         If this number moves, SC-L15's \"one notice\" was reinterpreted as \
+         \"one line\" and that is a decision, not a refactor: {shown:?}"
+    );
+
+    drop(handle);
+
+    let written = wait_for_file(dir.path(), &format!("turn {CONSECUTIVE_FAILING_TURNS}"));
+    for turn in 1..=CONSECUTIVE_FAILING_TURNS {
+        assert!(
+            written.contains(&format!("HTTP 500 on turn {turn}")),
+            "SC-L15: the file owes one record per failure, and turn {turn} is \
+             missing from: {written}"
+        );
+    }
+}
