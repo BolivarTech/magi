@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
-# Version: 1.0.0
-# Date: 2026-08-25
+# Version: 0.18.1
+# Date: 2026-08-31
 """The three vault scenarios: S3 -- stores and never reveals; S4 -- never
 deletes; S16 -- rotating a third-party credential costs no local data.
 
@@ -39,7 +39,7 @@ correction: the file is the configuration's source of truth.
 
 import re
 
-from smoke import runs
+from smoke import logs, runs
 from smoke.outcome import Finding, Outcome
 from smoke.product import diagnose_counts
 from smoke.registry import scenario
@@ -80,11 +80,6 @@ VAULT_TIMEOUT_S = 180
 #: What ``ls`` puts between a name and its two timestamps.
 LS_SEPARATOR = " · "
 LS_FIELDS = 3
-
-#: Where the product writes its run log, relative to the workspace. A leak into
-#: a file nobody reads is still a leak, and the archived harness copy is
-#: scrubbed, so the product's own log is the only unscrubbed artifact left.
-LOG_DIR_PARTS = (".magi", "logs")
 
 #: Subcommand names that would print a stored value. Matched against the
 #: ``Commands:`` block of ``--help`` only, so a FLAG spelled the same way --
@@ -187,16 +182,19 @@ def _vault(args, stdin=None, label="s3", planted=(), passphrase=None):
 def _log_snapshot():
     """Record the product's existing run-log files and their sizes.
 
-    Only new bytes matter: the environment is persistent, so logs from earlier
-    runs are already there and re-reading them would search text this scenario
-    never produced.
+    Reads :func:`smoke.logs.log_directory`, the one place that path is
+    computed -- a leak into a file nobody reads is still a leak, and the
+    archived harness copy is scrubbed, so the product's own log is the only
+    unscrubbed artifact left to check. Only new bytes matter: the environment
+    is persistent, so logs from earlier runs are already there and re-reading
+    them would search text this scenario never produced.
 
     Complexity: ``O(number of log files)``.
 
     Returns:
         dict[pathlib.Path, int]: Each log file and its size in bytes.
     """
-    directory = runs.workspace_root().joinpath(*LOG_DIR_PARTS)
+    directory = logs.log_directory()
     sizes = {}
     if not directory.is_dir():
         return sizes
@@ -223,7 +221,7 @@ def _new_log_bytes(before):
     Returns:
         bytes: The appended text of every log file, concatenated.
     """
-    directory = runs.workspace_root().joinpath(*LOG_DIR_PARTS)
+    directory = logs.log_directory()
     if not directory.is_dir():
         return b""
     chunks = []

@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
-# Version: 1.0.0
-# Date: 2026-08-25
+# Version: 0.18.1
+# Date: 2026-08-31
 """S9 -- memory persists, embeds and injects.
 
 Protects ``src/memory/``, failure #5 and REQ-29.
@@ -57,6 +57,21 @@ planted anything. R3 runs after both and is the run whose injection assertion 3
 measures, which makes its count the one that has to be non-zero for the rest of
 the scenario to mean anything.
 
+**The screen policy (SC-L14, S24) moved that line off R3's own capture.** The
+memory-count notice is ``INFO``, so as of the screen policy it reaches only
+the day's log file under the workspace's log directory -- never stdout or
+stderr, and R3's own ``ProductOutput`` no longer carries it at all. Reading
+``result.output.raw()`` the way this scenario used to is therefore reading a
+surface the product deliberately stopped writing to; S24 is the scenario that
+protects the surface having moved on purpose, and this one now has to follow
+it there. Because the log directory is shared and persistent across every run
+in the environment -- R1 attaches memory too, and prints its OWN startup line
+first, with the count from before anything was planted -- a plain substring
+search would risk reading R1's line instead of R3's. The correlation is by
+run id, the same mechanism S23 already established: every rendered log line
+carries ``run=<id>`` (REQ-L63/SC-L79), so the line searched for is bounded to
+the one R3 itself wrote.
+
 **Assertion 4 is a one-off invocation, not a ninth shared run.** Exactly one
 assertion wants that output, it touches neither the trio nor the large payload,
 and a table row read by a single scenario is ceremony. The workspace it builds
@@ -76,9 +91,8 @@ import pathlib
 import shutil
 import tempfile
 
-from smoke import runs
-from smoke.env import (INIT_SUBCOMMAND, MAGI_DIR_NAME, MAGI_TOML_NAME,
-                       STARTUP_LINE)
+from smoke import logs, runs
+from smoke.env import INIT_SUBCOMMAND, MAGI_DIR_NAME, MAGI_TOML_NAME, STARTUP_LINE
 from smoke.errors import HarnessError, ProductOutputError
 from smoke.outcome import Finding, Outcome
 from smoke.registry import scenario
@@ -258,25 +272,83 @@ def memory_persists_embeds_and_injects(run, ambient):
 
 
 def _startup_counts(result):
-    """The three counts of R3's startup line.
+    """The three counts of R3's own startup line, read from the day's log.
+
+    Since the screen policy (SC-L14), the memory-count notice is ``INFO`` and
+    reaches only the log directory -- R3's own capture no longer carries it.
+    The directory is shared by every run in the environment, so the line is
+    found by correlating R3's own run id (REQ-L63) against the ``run=<id>``
+    field every rendered log line carries, the same mechanism S23 uses.
+
+    Complexity: ``O(bytes in the log directory)``.
 
     Args:
         result: R3's result, or None.
 
     Returns:
         tuple: ``(counts, failure)`` where *counts* is the ``(active,
-        archived, pending)`` triple and *failure* explains its absence. Exactly
-        one of the two is set.
+        archived, pending)`` triple and *failure* explains its absence,
+        naming where this looked. Exactly one of the two is set.
     """
     if result is None:
         return None, "run %s produced no capture to inspect" % RECALL_RUN
-    match = STARTUP_LINE.search(result.output.raw())
+    run_id = (logs.id_on_stderr(result.output.stderr)
+             or logs.id_in_envelope(result.output))
+    if run_id is None:
+        return None, (
+            "run %s published no run id on stderr or in its JSON envelope, "
+            "so its own line cannot be told apart from another run's in the "
+            "shared log directory" % RECALL_RUN
+        )
+    match, dir_existed, unreadable = logs.scan(_startup_line_matcher(run_id))
+    directory = logs.log_directory()
+    if not dir_existed:
+        return None, (
+            "%s does not exist, so %s wrote no log at all"
+            % (directory, RECALL_RUN)
+        )
+    if unreadable:
+        return None, (
+            "run %s's startup line was not found, but these files under %s "
+            "could not be read: %s"
+            % (RECALL_RUN, directory, "; ".join(unreadable))
+        )
     if match is None:
         return None, (
-            "run %s printed no memory diagnostics line, so neither count can "
-            "be read" % RECALL_RUN
+            "no line under %s carries both run=%s and the memory "
+            "diagnostics marker, so neither count can be read"
+            % (directory, run_id)
         )
     return tuple(int(group) for group in match.groups()), ""
+
+
+def _startup_line_matcher(run_id):
+    """Build a :func:`smoke.logs.scan` matcher bound to one run's own lines.
+
+    Splitting on ``b"\\n"`` is safe because the logging layer escapes every
+    control character out of a rendered event before it is written (REQ-L64
+    stage 3), so one physical line is always exactly one event -- a foreign
+    string can never fold two events together or split one apart.
+
+    Args:
+        run_id: The id to bind the search to.
+
+    Returns:
+        Callable[[bytes], re.Match | None]: A matcher over one file's raw
+        bytes; returns the first line's :data:`STARTUP_LINE` match that also
+        carries this run's id, or None.
+    """
+    needle = ("run=%s " % run_id).encode("utf-8")
+
+    def matcher(data):
+        for line in data.split(b"\n"):
+            if needle in line:
+                match = STARTUP_LINE.search(line)
+                if match is not None:
+                    return match
+        return None
+
+    return matcher
 
 
 def _active_finding(counts, failure):

@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
-# Version: 1.0.0
-# Date: 2026-08-25
+# Version: 0.18.1
+# Date: 2026-08-31
 """Unit tests for S9: the derivation, and what a missing field must do."""
 
 import json
@@ -55,11 +55,35 @@ _COMPLETE_SETTINGS = {
     "safety_margin_ratio": 0.1,
 }
 
-#: The startup line a healthy run prints, with memories present and nothing
-#: waiting to be embedded.
-_HEALTHY_LINE = (
-    b"note: memory: 12 active, 0 archived, 0 pending re-embed (~34 KB index)\n"
-)
+#: The run id R3's fixture publishes on stderr, so the log correlation
+#: `_startup_counts` performs has something to match against. Since the
+#: screen policy the counts no longer live on R3's own capture at all -- they
+#: are read out of the shared, persistent log directory, keyed by this id.
+_R3_RUN_ID = "424242-deadbeefcafef00d"
+
+#: The startup line body a healthy run's log entry carries, with memories
+#: present and nothing waiting to be embedded. Just the message half of a
+#: rendered event -- :func:`_write_r3_log` supplies the header.
+_HEALTHY_BODY = "memory: 12 active, 0 archived, 0 pending re-embed (~34 KB index)"
+
+
+def _write_r3_log(body, run_id=_R3_RUN_ID):
+    """Write one log line into the fake environment's log directory.
+
+    Shaped like ``render.rs::header_of`` renders a real event: a timestamp,
+    level, ``run=<id>`` and a target ahead of the message, which is exactly
+    what :func:`smoke.scenarios.memory._startup_line_matcher` requires to
+    correlate a line to one run.
+
+    Args:
+        body: The message half of the line, e.g. the ``memory: ...`` text.
+        run_id: The id to stamp the line with.
+    """
+    directory = runs.workspace_root() / ".magi" / "logs"
+    directory.mkdir(parents=True, exist_ok=True)
+    line = "2026-08-31T00:00:00Z INFO run=%s magi_rs::main: %s\n" % (
+        run_id, body)
+    (directory / "2026-08-31.log").write_bytes(line.encode("utf-8"))
 
 
 def _capture(document, stderr=b"", exit_code=0) -> ProductOutput:
@@ -97,20 +121,37 @@ def _run(run_id, input_tokens, stderr=b"", turns=1) -> RunResult:
                      duration_s=1.0, timed_out=False, planted=())
 
 
-def _runs(r3_tokens=4000, r2_tokens=1000, r3_stderr=_HEALTHY_LINE,
-          r3_turns=40, r2_turns=4):
+def _runs(r3_tokens=4000, r2_tokens=1000, r3_body=_HEALTHY_BODY,
+          r3_run_id=_R3_RUN_ID, write_r3_log=True, r3_turns=40, r2_turns=4):
     """The mapping a scenario declaring three runs receives.
 
     Args:
         r3_tokens: ``usage.input_tokens`` for R3.
         r2_tokens: The same for R2, the ``--no-memory`` control.
-        r3_stderr: R3's startup lines.
+        r3_body: The message half of the log line R3's run leaves behind, or
+            None to publish a run id with no matching line at all -- the
+            "searched clean" case.
+        r3_run_id: The id R3 publishes on stderr and the log line is stamped
+            with. None publishes no id, so correlation itself fails.
+        write_r3_log: Whether the fake ``.magi/logs`` directory is created at
+            all -- False is the "nothing was written to disk" case, which is
+            a different finding from an existing directory searched clean.
         r3_turns: Transcript length for R3, the run with memory.
         r2_turns: Transcript length for R2, the control.
 
     Returns:
         dict[str, RunResult]: Keyed by run id, as the runner hands it over.
     """
+    if write_r3_log:
+        if r3_body is not None:
+            _write_r3_log(r3_body, run_id=r3_run_id)
+        else:
+            # A directory that exists but carries nothing matching is a
+            # different finding from one that was never written at all.
+            (runs.workspace_root() / ".magi" / "logs").mkdir(
+                parents=True, exist_ok=True)
+    r3_stderr = (("run: %s\n" % r3_run_id).encode("utf-8")
+                if r3_run_id else b"")
     return {"R1": _run("R1", 800),
             "R2": _run("R2", r2_tokens, turns=r2_turns),
             "R3": _run("R3", r3_tokens, stderr=r3_stderr, turns=r3_turns)}
@@ -223,18 +264,36 @@ class MemoryScenarioBodyTests(unittest.TestCase):
             self.assertEqual(Outcome.PASS, outcomes[text], text)
 
     def test_no_active_memories_fails_the_first(self) -> None:
-        line = b"note: memory: 0 active, 0 archived, 0 pending re-embed (~0 KB index)\n"
-        outcomes = _outcomes(_runs(r3_stderr=line), _ambient())
+        body = "memory: 0 active, 0 archived, 0 pending re-embed (~0 KB index)"
+        outcomes = _outcomes(_runs(r3_body=body), _ambient())
         self.assertEqual(Outcome.FAIL, outcomes[memory.ASSERTIONS[0]])
 
     def test_pending_re_embeds_fail_the_second(self) -> None:
-        line = b"note: memory: 12 active, 0 archived, 3 pending re-embed (~34 KB index)\n"
-        outcomes = _outcomes(_runs(r3_stderr=line), _ambient())
+        body = "memory: 12 active, 0 archived, 3 pending re-embed (~34 KB index)"
+        outcomes = _outcomes(_runs(r3_body=body), _ambient())
         self.assertEqual(Outcome.FAIL, outcomes[memory.ASSERTIONS[1]])
 
     def test_a_missing_startup_line_cannot_test_the_first_two(self) -> None:
-        outcomes = _outcomes(_runs(r3_stderr=b"note: something else\n"),
+        """The log directory exists, but nothing under it matches R3's id."""
+        outcomes = _outcomes(_runs(r3_body="note: something else"),
                              _ambient())
+        self.assertEqual(Outcome.CANNOT_TEST, outcomes[memory.ASSERTIONS[0]])
+        self.assertEqual(Outcome.CANNOT_TEST, outcomes[memory.ASSERTIONS[1]])
+
+    def test_a_missing_log_directory_cannot_test_the_first_two(self) -> None:
+        """Nothing written to disk at all is a DIFFERENT finding from an
+        existing directory searched clean -- the cause string has to say
+        which one this run hit.
+        """
+        outcomes = _outcomes(_runs(write_r3_log=False), _ambient())
+        self.assertEqual(Outcome.CANNOT_TEST, outcomes[memory.ASSERTIONS[0]])
+        self.assertEqual(Outcome.CANNOT_TEST, outcomes[memory.ASSERTIONS[1]])
+
+    def test_no_published_run_id_cannot_test_the_first_two(self) -> None:
+        """A run that names no id of its own cannot be told apart from any
+        other run's line in the shared, persistent log directory.
+        """
+        outcomes = _outcomes(_runs(r3_run_id=None), _ambient())
         self.assertEqual(Outcome.CANNOT_TEST, outcomes[memory.ASSERTIONS[0]])
         self.assertEqual(Outcome.CANNOT_TEST, outcomes[memory.ASSERTIONS[1]])
 
@@ -255,7 +314,7 @@ class MemoryScenarioBodyTests(unittest.TestCase):
         broken = json.loads(results["R3"].output.stdout)
         broken.pop("transcript")
         results["R3"] = RunResult(
-            run_id="R3", output=_capture(broken, stderr=_HEALTHY_LINE),
+            run_id="R3", output=_capture(broken, stderr=b""),
             duration_s=1.0, timed_out=False, planted=())
         self.assertEqual(Outcome.CANNOT_TEST,
                          _outcomes(results, _ambient())[memory.ASSERTIONS[2]])

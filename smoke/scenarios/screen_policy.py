@@ -42,17 +42,13 @@ absent notice, it is nothing having been written to disk this run, and it
 fails.
 """
 
-from smoke import runs
+from smoke import logs
 from smoke.outcome import Finding, Outcome
 from smoke.registry import scenario
 
 #: The run this reads. R1 is the cheapest invocation the harness makes and it
 #: already executes for S23 (and others), so S24 adds no backend cost.
 RUN_ID = "R1"
-
-#: Where the product writes its log, relative to the workspace. Same parts
-#: ``logging.py`` uses.
-LOG_DIR_PARTS = (".magi", "logs")
 
 #: The fingerprint of the memory-count `INFO` notice `attach_persistent_memory`
 #: builds in `src/main.rs`: `"memory: {N} active, {N} archived, {N} pending
@@ -92,10 +88,10 @@ def a_clean_startup_shows_nothing_on_screen(run):
 
     on_screen = DIAGNOSTIC_MARKER in run.output.stderr.decode(
         "utf-8", errors="replace")
-    in_log, dir_existed, unreadable = _search_log(DIAGNOSTIC_MARKER)
+    in_log, dir_existed, unreadable = logs.contains(DIAGNOSTIC_MARKER)
 
     if not on_screen and not in_log and dir_existed and not unreadable:
-        directory = runs.workspace_root().joinpath(*LOG_DIR_PARTS)
+        directory = logs.log_directory()
         detail = ("the memory diagnostics notice appears on neither stderr "
                    "nor in any file under %s; this run's memory subsystem "
                    "never attached, so there was nothing to check on either "
@@ -126,7 +122,7 @@ def _screen_finding(on_screen):
 
 
 def _log_finding(in_log, dir_existed, unreadable):
-    """Judge assertion 2 from what :func:`_search_log` found.
+    """Judge assertion 2 from what :func:`smoke.logs.contains` found.
 
     Args:
         in_log: Whether the marker was found in some file under the log
@@ -140,7 +136,7 @@ def _log_finding(in_log, dir_existed, unreadable):
     """
     if in_log:
         return Finding(ASSERTIONS[1], Outcome.PASS, "", RUN_ID)
-    directory = runs.workspace_root().joinpath(*LOG_DIR_PARTS)
+    directory = logs.log_directory()
     if not dir_existed:
         return Finding(ASSERTIONS[1], Outcome.FAIL,
                        "%s does not exist, so nothing was written to disk "
@@ -153,32 +149,3 @@ def _log_finding(in_log, dir_existed, unreadable):
                    "the memory diagnostics notice appears in no file under "
                    "%s; either nothing was written or it was not flushed "
                    "before exit" % directory, RUN_ID)
-
-
-def _search_log(marker):
-    """Search the workspace's log directory for *marker*.
-
-    Args:
-        marker: The text to search for, as it would appear decoded.
-
-    Returns:
-        tuple[bool, bool, list[str]]: ``(found, directory existed,
-        unreadable file names)``. The directory flag is kept separate from
-        "found" because a missing directory (nothing written at all) and an
-        existing one searched clean (the notice was never produced) are
-        different findings.
-    """
-    directory = runs.workspace_root().joinpath(*LOG_DIR_PARTS)
-    if not directory.is_dir():
-        return False, False, []
-    needle = marker.encode("utf-8")
-    unreadable = []
-    for path in sorted(directory.rglob("*")):
-        if not path.is_file():
-            continue
-        try:
-            if needle in path.read_bytes():
-                return True, True, []
-        except OSError as exc:
-            unreadable.append("%s (%s)" % (path.name, exc))
-    return False, True, unreadable

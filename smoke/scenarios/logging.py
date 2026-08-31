@@ -1,5 +1,5 @@
 # Author: Julian Bolivar
-# Version: 0.18.0
+# Version: 0.18.1
 # Date: 2026-08-31
 """S23 -- the log file a real run leaves behind.
 
@@ -27,18 +27,13 @@ searched for is the id the run actually published, on both of the surfaces a CI
 job might read.
 """
 
-from smoke import runs
+from smoke import logs
 from smoke.outcome import Finding, Outcome
-from smoke.product import ProductOutputError
 from smoke.registry import scenario
 
 #: The run this reads. R1 is the cheapest invocation the harness makes and it
 #: already executes for two other scenarios, so S23 adds no backend cost.
 RUN_ID = "R1"
-
-#: Where the product writes its log, relative to the workspace. The same parts
-#: ``vault.py`` uses; the default did not move when the format did.
-LOG_DIR_PARTS = (".magi", "logs")
 
 # There is NO assertion here that the retired JSONL run log is gone, and the
 # reason is the same persistent environment that shapes assertion 2 -- read in
@@ -49,9 +44,6 @@ LOG_DIR_PARTS = (".magi", "logs")
 # directory beforehand and cannot tell the two apart. An assertion that fails
 # for the wrong reason is worse than an absent one, and padding the count to
 # keep a round number is what the S21 redesign refused to do.
-
-#: The prefix REQ-L63 puts on stderr, ahead of the id.
-STDERR_PREFIX = "run: "
 
 #: The verbatim assertion texts, in the order they are yielded.
 ASSERTIONS = (
@@ -80,8 +72,8 @@ def the_run_leaves_a_correlated_log(run):
                           RUN_ID)
         return
 
-    stderr_id = _id_on_stderr(run.output.stderr)
-    envelope_id = _id_in_envelope(run.output)
+    stderr_id = logs.id_on_stderr(run.output.stderr)
+    envelope_id = logs.id_in_envelope(run.output)
 
     yield _correlation_finding(stderr_id, envelope_id)
 
@@ -92,40 +84,6 @@ def the_run_leaves_a_correlated_log(run):
                       "to search the log for", RUN_ID)
     else:
         yield _log_finding(published)
-
-
-def _id_on_stderr(stderr):
-    """Extract the id from the ``run: <id>`` line REQ-L63 puts on stderr.
-
-    Args:
-        stderr: The run's stderr, unscrubbed.
-
-    Returns:
-        str | None: The id, or None when no such line was emitted.
-    """
-    for line in stderr.decode("utf-8", errors="replace").splitlines():
-        stripped = line.strip()
-        if stripped.startswith(STDERR_PREFIX):
-            candidate = stripped[len(STDERR_PREFIX):].strip()
-            if candidate:
-                return candidate
-    return None
-
-
-def _id_in_envelope(output):
-    """Read ``run_id`` out of the JSON envelope.
-
-    Args:
-        output: The run's ``ProductOutput``.
-
-    Returns:
-        str | None: The id, or None when the key is absent or not a string.
-    """
-    try:
-        value = output.key("run_id")
-    except ProductOutputError:
-        return None
-    return value if isinstance(value, str) and value else None
 
 
 def _correlation_finding(stderr_id, envelope_id):
@@ -168,24 +126,17 @@ def _log_finding(published):
     Returns:
         Finding: PASS when some file in the directory contains it.
     """
-    directory = runs.workspace_root().joinpath(*LOG_DIR_PARTS)
-    if not directory.is_dir():
+    found, dir_existed, unreadable = logs.contains(published)
+    if found:
+        return Finding(ASSERTIONS[1], Outcome.PASS, "", RUN_ID)
+    directory = logs.log_directory()
+    if not dir_existed:
         return Finding(ASSERTIONS[1], Outcome.FAIL,
                        "%s does not exist, so the run wrote no log at all"
                        % directory, RUN_ID)
-    needle = published.encode("utf-8")
-    unreadable = []
-    for path in sorted(directory.rglob("*")):
-        if not path.is_file():
-            continue
-        try:
-            if needle in path.read_bytes():
-                return Finding(ASSERTIONS[1], Outcome.PASS, "", RUN_ID)
-        except OSError as exc:
-            # Unreadable is not absent. Naming the file keeps a permissions
-            # problem from being reported as a missing log.
-            unreadable.append("%s (%s)" % (path.name, exc))
     if unreadable:
+        # Unreadable is not absent. Naming the file keeps a permissions
+        # problem from being reported as a missing log.
         return Finding(ASSERTIONS[1], Outcome.CANNOT_TEST,
                        "run id %s was not found, but these files could not be "
                        "read: %s" % (published, "; ".join(unreadable)), RUN_ID)
