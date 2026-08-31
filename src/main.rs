@@ -1749,12 +1749,19 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
             Ok(_handle) => {
                 // Right after the handle comes back and before it is used, as
                 // task 3.3 requires: the file filter and the screen level are
-                // resolved by now and the sink exists, which are the two things
-                // this notice needs.
-                magi_rs::logging::warn_if_recovery_detection_is_off(
+                // resolved by now, which are the two things this notice needs.
+                //
+                // COLLECTED rather than emitted, unlike headless. The screen
+                // sink is not reachable yet — `run_tui_ext` attaches it to the
+                // response channel much later — so announcing here would print
+                // to the primary buffer and `EnterAlternateScreen` would cover
+                // it for the rest of the session. It rides with the rest of the
+                // startup notices instead, which are announced inside that
+                // window.
+                startup_notices.extend(magi_rs::logging::recovery_detection_notice(
                     &cfg.file_filter,
                     Some(magi_rs::logging::SCREEN_LEVEL),
-                );
+                ));
                 // Retention runs at startup, over what the previous runs left.
                 // Best effort throughout: a directory that cannot be read, or a
                 // delete that fails, is not worth failing a session over.
@@ -2100,11 +2107,13 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
         magi_config.effective_tool_result_cap(),
     );
 
-    // The notices go to the logging layer, which decides the mouth: `WARN` and above to the
-    // screen sink, `INFO` to the day's file alone (REQ-L19). Emitted BEFORE the terminal
-    // enters the alternate screen, which is the same ordering `TuiNoticeSink` already keeps
-    // for its own deferred output.
-    emit_notices(startup_notices);
+    // The notices are HANDED OVER rather than announced here. They go to the logging layer,
+    // which decides the mouth — `WARN` and above to the screen sink, `INFO` to the day's file
+    // alone (REQ-L19) — but only `run_tui_ext` knows when the screen sink is reachable: it
+    // owns the response channel the sink attaches to, and announcing one statement before the
+    // handoff meant announcing while that sink was still unattached, so every startup `WARN`
+    // and `ERROR` went to the primary buffer and was covered by the alternate screen for the
+    // rest of the session. See the comment at the announcement site.
     crate::tui::run_tui_ext(
         agent,
         crate::tui::TuiConsultWiring {
@@ -2129,6 +2138,7 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
         // The chat loop's SELF-ROUTED consults (REQ-A20/A07d) — a different surface from the
         // explicit `/consult` above, which is what `TuiMagiRuntimeConfig` serves.
         AutonomousRunConfig::from_magi_config(&magi_config),
+        startup_notices,
     )
     .await?;
     Ok(ExitCode::SUCCESS)

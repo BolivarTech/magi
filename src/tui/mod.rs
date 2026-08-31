@@ -26,6 +26,7 @@ use magi_rs::magi::kind::ProviderKind;
 use magi_rs::magi::mode::{
     normalize_label, resolve_mode_guarded, ModeClassifier, ModeError, ModeResolution, ModeSources,
 };
+use magi_rs::notices::{emit_notices, Notice};
 use magi_rs::redact::redact_foreign_error;
 use magi_rs::vault::{SecretStore, VaultError};
 use ratatui::{
@@ -1435,6 +1436,7 @@ pub async fn run_tui_ext(
     secret_store: Option<SharedSecretStore>,
     magi_runtime: TuiMagiRuntimeConfig,
     autonomous: crate::AutonomousRunConfig,
+    startup_notices: Vec<Notice>,
 ) -> anyhow::Result<()> {
     let TuiConsultWiring {
         consult,
@@ -1482,6 +1484,20 @@ pub async fn run_tui_ext(
     // exactly what makes it worth fixing now rather than after it does.
     classifier_notices.attach(response_tx.clone());
 
+    // **Announced HERE, and the two neighbours above and below are the reason.**
+    // The layer's screen branch delivers a `WARN`/`ERROR` into the sink just
+    // attached, so the line lands in the 100-slot channel and `run_app`'s
+    // `AgentResponse::Notice` arm puts it in the transcript. Announced any
+    // earlier — which is where `run()` used to do it — the sink's `tx` is still
+    // `None`, `route` takes its stderr branch, and `EnterAlternateScreen` covers
+    // the result about a millisecond later: a mistyped passphrase's "running
+    // WITHOUT persistence for this session" would be written, hidden, and only
+    // reappear once the user quits, after a whole conversation spent believing
+    // the session was being saved. Announced any later, the same stderr branch
+    // writes on top of the frame instead (REQ-L39). The window is one statement
+    // wide and both walls are guarded.
+    emit_notices(startup_notices);
+
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
@@ -1494,10 +1510,11 @@ pub async fn run_tui_ext(
     // `await_login_callback_or_quit`).
     let quit_token = CancellationToken::new();
 
-    // The startup notices no longer arrive here as a list to print. They are `tracing` events
-    // now, and the layer's screen branch decides which of them a human sees (REQ-L19) — which
-    // is the whole point of the reclassification: a list pushed straight into the transcript
-    // cannot tell a lost capability from a line counting memories.
+    // The startup notices arrive as a list, but they are no longer PRINTED as one: the
+    // announcement above turns each into a `tracing` event and the layer's screen branch
+    // decides which of them a human sees (REQ-L19) — which is the whole point of the
+    // reclassification, since a list pushed straight into the transcript cannot tell a lost
+    // capability from a line counting memories.
     let mut runner_agent = agent;
     runner_agent.set_approval_channel(approval_tx);
 

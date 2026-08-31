@@ -99,6 +99,15 @@ pub trait NoticeDelivery: Send + Sync {
 /// than as a setting whose effect nobody could observe.
 pub const SCREEN_LEVEL: tracing::Level = tracing::Level::WARN;
 
+/// What both shapes of the recovery-detection warning say.
+///
+/// One constant so the emitted form and the collected form cannot drift into
+/// two different sentences about one condition — and so the guard in
+/// `health.rs` matches the text the operator actually reads.
+const RECOVERY_DETECTION_OFF: &str =
+    "health recovery detection is off: file_filter excludes info-level events, \
+     so a degradation is never seen to recover";
+
 /// Warns, once at startup, when recovery detection cannot work.
 ///
 /// # Parameters
@@ -131,6 +140,14 @@ pub const SCREEN_LEVEL: tracing::Level = tracing::Level::WARN;
 /// invokes this right after it holds the handle, where the filter and the
 /// screen level are already resolved and the sink already exists.
 ///
+/// # The terminal surface uses [`recovery_detection_notice`] instead
+///
+/// Emitting in place is right for a surface that announces as it goes, which
+/// headless does. It is wrong for the TUI, whose screen sink is unreachable
+/// until `run_tui_ext` attaches it: anything emitted before that reaches the
+/// primary buffer, which `EnterAlternateScreen` then covers for the whole
+/// session.
+///
 /// # Complexity
 ///
 /// `O(k)` over the filter's per-target overrides.
@@ -141,10 +158,52 @@ pub fn warn_if_recovery_detection_is_off(
     if health::recovery_detection_is_off(file_filter, screen_level) {
         tracing::warn!(
             target: health::HEALTH_TARGET,
-            "health recovery detection is off: file_filter excludes info-level events, \
-             so a degradation is never seen to recover"
+            "{message}",
+            message = RECOVERY_DETECTION_OFF,
         );
     }
+}
+
+/// [`warn_if_recovery_detection_is_off`], as a COLLECTED notice rather than an
+/// immediate emission.
+///
+/// # Parameters
+///
+/// * `file_filter` — the file branch's filter.
+/// * `screen_level` — the screen branch's level, when one is wired.
+///
+/// # Returns
+///
+/// `Some(Notice::warn(..))` when recovery detection cannot work; `None` when it
+/// can, so a caller can `extend` its startup list unconditionally.
+///
+/// # Why the terminal surface needs this shape
+///
+/// The TUI's screen sink only becomes reachable once `run_tui_ext` attaches it
+/// to the response channel, which happens long after `init_logging` returns.
+/// Announcing there would take the sink's unattached branch and write to the
+/// primary buffer, which is swapped out a moment later — the operator would be
+/// told that recovery detection is off in text they never see. So this rides
+/// with the rest of the startup notices and is announced inside the one window
+/// where the sink is live and the frame is not yet up.
+///
+/// # The cost, stated
+///
+/// A collected notice is announced under `magi_rs::startup` rather than
+/// [`health::HEALTH_TARGET`], so a per-target directive naming health does not
+/// address the terminal's copy of this one line. That is the flattening every
+/// other startup notice already accepts (D-L11's execution is centralised), and
+/// the alternative is a line an operator can filter but never read.
+///
+/// # Complexity
+///
+/// `O(k)` over the filter's per-target overrides.
+pub fn recovery_detection_notice(
+    file_filter: &filter::Filter,
+    screen_level: Option<tracing::Level>,
+) -> Option<crate::notices::Notice> {
+    health::recovery_detection_is_off(file_filter, screen_level)
+        .then(|| crate::notices::Notice::warn(RECOVERY_DETECTION_OFF))
 }
 
 /// A delivery that shows nothing, for the tests and for MS1's absent screen.
