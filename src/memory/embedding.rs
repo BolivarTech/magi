@@ -1242,7 +1242,9 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use magi_rs::logging::auditor::CauseKey;
-    use magi_rs::logging::health::{render_transition, HealthTracker, Transition};
+    use magi_rs::logging::health::{
+        render_transition, HealthTracker, Transition, HEALTH_MIN_STABLE_SECS,
+    };
     use tracing::field::{Field, Visit};
     use tracing_subscriber::layer::SubscriberExt as _;
 
@@ -1260,6 +1262,31 @@ mod tests {
 
     /// The recovery line SC-L17 asks the screen for.
     const RESTORED_LINE: &str = "✓ memory: retrieval restored";
+
+    /// The cause key the success event must name, spelled out rather than
+    /// looked up.
+    ///
+    /// **Membership in `CauseKey::ALL` is not a guard once that list holds more
+    /// than one key**: a success event switched to the *other* declared cause
+    /// still resolves, and the test that only checked membership went green
+    /// under exactly that mutation. The expected pair is therefore written
+    /// here, and membership is asserted as well as — never instead of — it.
+    const EXPECTED_SUCCESS_KEY: (&str, &str) = ("embedder", "unreachable");
+
+    /// The cause key a *reachability* failure must name.
+    const EXPECTED_UNREACHABLE_KEY: (&str, &str) = ("embedder", "unreachable");
+
+    /// The cause key a *bad answer* must name — a different variant, so a
+    /// different cause (R-L13b).
+    const EXPECTED_HTTP_ERROR_KEY: (&str, &str) = ("embedder", "http_error");
+
+    /// `ok` as `HealthReporter::observe` derives it in `logging::magi_layer`:
+    /// from the **level** alone, never from the text, which is what R-L13
+    /// forbids for the key itself. Written once here because that function is
+    /// private to the library and cannot be called from a test.
+    fn ok_from_level(level: tracing::Level) -> bool {
+        level > tracing::Level::WARN
+    }
 
     /// One event a capturing subscriber saw: its level, and the two halves of
     /// the cause key its emitter declared.
@@ -1294,6 +1321,12 @@ mod tests {
         /// Whether this event declared either half of a cause key.
         fn is_keyed(&self) -> bool {
             self.subsystem.is_some() || self.cause.is_some()
+        }
+
+        /// The two halves exactly as recorded, for comparison against the
+        /// expected pair.
+        fn pair(&self) -> (Option<&str>, Option<&str>) {
+            (self.subsystem.as_deref(), self.cause.as_deref())
         }
     }
 
@@ -1410,6 +1443,11 @@ mod tests {
             "a `debug` success event never reaches the layer under the shipped \
              filters, so the recovery it feeds is undetectable: {event:?}"
         );
+        assert_eq!(
+            event.pair(),
+            (Some(EXPECTED_SUCCESS_KEY.0), Some(EXPECTED_SUCCESS_KEY.1)),
+            "the success event names the wrong cause: {event:?}"
+        );
         assert!(
             event.declared_key().is_some(),
             "both halves must be present, recorded as strings, and declared in \
@@ -1428,26 +1466,33 @@ mod tests {
         );
     }
 
+    /// An embedder pointed at a port nothing is listening on.
+    ///
+    /// Port 1 is the fixture the reachability tests in this module already
+    /// use: the OS refuses immediately, which is `EmbeddingError::Network`.
+    fn unreachable_embedder() -> OpenAiCompatibleEmbedder {
+        OpenAiCompatibleEmbedder::new(
+            &EmbeddingConfig {
+                base_url: Some("http://127.0.0.1:1".into()),
+                ..Default::default()
+            },
+            None,
+        )
+        .expect("the config is valid")
+    }
+
     #[tokio::test]
     async fn test_the_success_event_uses_the_same_cause_key_as_its_failure() {
-        // Two servers rather than two mocks on one: which of two mocks on the
-        // same route answers first is mockito's business, and the property
-        // under test is the EMITTER's -- that both events name one cause.
-        let mut broken = mockito::Server::new_async().await;
-        broken
-            .mock("POST", "/embeddings")
-            .with_status(500)
-            .with_body("the upstream is down")
-            .create_async()
-            .await;
+        // The pair a recovery is actually derived from: a reachability failure
+        // and the success that follows it name ONE key, so nothing has to be
+        // matched up afterwards.
         let working = healthy_endpoint().await;
 
         let (seen, _guard) = capture_causes();
-        OpenAiCompatibleEmbedder::new(&cfg(&broken.url()), Some("ollama".into()))
-            .unwrap()
+        unreachable_embedder()
             .embed(&["a document".to_string()])
             .await
-            .expect_err("a 500 is a failure");
+            .expect_err("nothing is listening on that port");
         OpenAiCompatibleEmbedder::new(&cfg(&working.url()), Some("ollama".into()))
             .unwrap()
             .embed(&["a document".to_string()])
@@ -1463,27 +1508,34 @@ mod tests {
             "a failure is what puts the subsystem in the degraded state"
         );
         assert_eq!(success.level, tracing::Level::INFO);
+        assert_eq!(
+            failure.pair(),
+            (
+                Some(EXPECTED_UNREACHABLE_KEY.0),
+                Some(EXPECTED_UNREACHABLE_KEY.1)
+            ),
+            "a refused connection is the reachability cause: {failure:?}"
+        );
+        assert_eq!(
+            failure.pair(),
+            success.pair(),
+            "the success names a different cause than its failure, so a reader \
+             of the file cannot pair them: {keyed:?}"
+        );
 
+        // And the consequence, which is the whole reason the task exists: the
+        // tracker reaches `Restored` and the screen says so.
         let degraded = failure
             .declared_key()
             .expect("the failure names a declared cause");
         let restored = success
             .declared_key()
             .expect("the success names a declared cause");
-        assert_eq!(
-            degraded, restored,
-            "the success names a different cause than its failure, so the \
-             recovery would be reported against a topic that was never degraded"
-        );
-
-        // And the consequence the equality buys, which is the whole reason the
-        // task exists: the tracker reaches `Restored` and the screen says so.
-        // `ok` is derived from the LEVEL here exactly as the layer derives it.
         let mut tracker = HealthTracker::new();
         let t0 = Instant::now();
         assert!(
             matches!(
-                tracker.observe(Some(degraded), failure.level > tracing::Level::WARN, t0),
+                tracker.observe(Some(degraded), ok_from_level(failure.level), t0),
                 Some(Transition::Degraded(_))
             ),
             "the failure event must degrade the subsystem"
@@ -1492,7 +1544,7 @@ mod tests {
             tracker
                 .observe(
                     Some(restored),
-                    success.level > tracing::Level::WARN,
+                    ok_from_level(success.level),
                     t0 + Duration::from_secs(1)
                 )
                 .is_none(),
@@ -1504,6 +1556,117 @@ mod tests {
         assert!(
             line.contains(RESTORED_LINE),
             "SC-L17's line never comes out of this pair of events: {line}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_a_bad_answer_and_an_unreachable_endpoint_are_different_causes() {
+        // R-L13b: the key comes from the error VARIANT. One key for the whole
+        // subsystem would make SC-L16 -- "the embedder goes from HTTP 500 to
+        // connection-refused, so the screen shows a SECOND notice" --
+        // unreachable in production, and `HealthTracker`'s entire cause-change
+        // branch dead with it. The message table says the same thing: the two
+        // embedder rows carry DIFFERENT degradation strings and an IDENTICAL
+        // recovery string, so degradation is per variant and recovery is per
+        // subsystem.
+        let mut answering_badly = mockito::Server::new_async().await;
+        answering_badly
+            .mock("POST", "/embeddings")
+            .with_status(500)
+            .with_body("the upstream is down")
+            .create_async()
+            .await;
+        let working = healthy_endpoint().await;
+
+        let (seen, _guard) = capture_causes();
+        OpenAiCompatibleEmbedder::new(&cfg(&answering_badly.url()), Some("ollama".into()))
+            .unwrap()
+            .embed(&["a document".to_string()])
+            .await
+            .expect_err("a 500 is a failure");
+        unreachable_embedder()
+            .embed(&["a document".to_string()])
+            .await
+            .expect_err("nothing is listening on that port");
+        OpenAiCompatibleEmbedder::new(&cfg(&working.url()), Some("ollama".into()))
+            .unwrap()
+            .embed(&["a document".to_string()])
+            .await
+            .expect("and this one answers correctly");
+
+        let keyed = keyed_events(&seen);
+        assert_eq!(keyed.len(), 3, "one event per call: {keyed:?}");
+        let (bad_answer, no_answer, success) = (&keyed[0], &keyed[1], &keyed[2]);
+        assert_eq!(
+            bad_answer.pair(),
+            (
+                Some(EXPECTED_HTTP_ERROR_KEY.0),
+                Some(EXPECTED_HTTP_ERROR_KEY.1)
+            ),
+            "an endpoint that answered badly is not an endpoint that never \
+             answered: {bad_answer:?}"
+        );
+        assert_eq!(
+            no_answer.pair(),
+            (
+                Some(EXPECTED_UNREACHABLE_KEY.0),
+                Some(EXPECTED_UNREACHABLE_KEY.1)
+            ),
+            "a refused connection is the reachability cause: {no_answer:?}"
+        );
+
+        // SC-L16, driven by the two events production emits: the second cause
+        // is a change inside an already-degraded subsystem, so it serves the
+        // window and then shows as a SECOND degradation.
+        let first = bad_answer.declared_key().expect("declared");
+        let second = no_answer.declared_key().expect("declared");
+        assert_ne!(
+            first, second,
+            "both failures name one cause, so the screen can never show the \
+             change SC-L16 asks for"
+        );
+        let mut tracker = HealthTracker::new();
+        let t0 = Instant::now();
+        assert!(matches!(
+            tracker.observe(Some(first), ok_from_level(bad_answer.level), t0),
+            Some(Transition::Degraded(_))
+        ));
+        let t1 = t0 + Duration::from_secs(1);
+        assert!(
+            tracker
+                .observe(Some(second), ok_from_level(no_answer.level), t1)
+                .is_none(),
+            "a cause change serves the window"
+        );
+        assert!(
+            matches!(
+                tracker.tick(t1 + Duration::from_secs(HEALTH_MIN_STABLE_SECS)),
+                Some(Transition::Degraded(_))
+            ),
+            "SC-L16's second notice never arrives"
+        );
+
+        // And recovery is per SUBSYSTEM, which is what makes it safe for one
+        // success event to answer two degrading causes: a tracker degraded by
+        // the bad answer is restored by a success naming the OTHER cause of the
+        // same subsystem. Without this the per-variant split above would only
+        // be half a design -- degradations that can never be seen to recover.
+        let restored = success.declared_key().expect("declared");
+        assert_ne!(first, restored, "the fixture must cross the two variants");
+        let mut cross = HealthTracker::new();
+        assert!(matches!(
+            cross.observe(Some(first), false, t0),
+            Some(Transition::Degraded(_))
+        ));
+        assert!(cross
+            .observe(Some(restored), ok_from_level(success.level), t1)
+            .is_none());
+        let flushed = cross.flush();
+        assert_eq!(flushed.len(), 1, "one pending recovery: {flushed:?}");
+        let line = render_transition(&flushed[0], Path::new(A_LOG_PATH));
+        assert!(
+            line.contains(RESTORED_LINE),
+            "a success must restore the subsystem whichever cause degraded it: {line}"
         );
     }
 }
