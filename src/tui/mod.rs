@@ -26,7 +26,7 @@ use magi_rs::magi::kind::ProviderKind;
 use magi_rs::magi::mode::{
     normalize_label, resolve_mode_guarded, ModeClassifier, ModeError, ModeResolution, ModeSources,
 };
-use magi_rs::notices::{emit_notices, Notice};
+use magi_rs::notices::{emit_notices_into, Notice};
 use magi_rs::redact::redact_foreign_error;
 use magi_rs::vault::{SecretStore, VaultError};
 use ratatui::{
@@ -50,6 +50,82 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 /// deliberately **not** `Sync` (its mask rotates on every access); the
 /// `Mutex` supplies the exclusion `Mutex<T>: Sync` requires of `T: Send`.
 pub type SharedSecretStore = Arc<Mutex<dyn SecretStore + Send>>;
+
+/// The last-resort mouth for startup notices when NO logging layer exists.
+///
+/// # Why the terminal cannot use `stderr` for this
+///
+/// `init_logging` is guarded on a discovered `.magi/` workspace, so a session
+/// started outside one installs no subscriber and
+/// [`magi_rs::notices::emit_notices_into`] takes its fallback branch. Writing
+/// to `stderr` there puts the lines on the PRIMARY buffer, which
+/// `EnterAlternateScreen` swaps out immediately afterwards — so the one message
+/// that case exists to deliver, "no `.magi/` state directory found — run
+/// `magi init`", is written and hidden in the same breath, and reappears only
+/// once the user quits. This writes into the transcript instead, where the
+/// layer's screen branch would have put it.
+///
+/// The screen POLICY is not re-implemented here: `emit_notices_into` has
+/// already ordered, deduplicated and filtered to `WARN` and above by the time
+/// anything reaches this writer.
+struct NoticeTranscript {
+    /// The response channel `run_app` drains into the message list.
+    tx: mpsc::Sender<AgentResponse>,
+    /// Bytes seen since the last newline. `emit_notices_into` writes one
+    /// `writeln!` per notice, so this is normally empty between notices; it
+    /// exists because `Write` may be handed any split of the bytes and a
+    /// notice cut across two calls must not become two lines.
+    partial: Vec<u8>,
+}
+
+impl NoticeTranscript {
+    /// Wraps the response channel as a `Write`.
+    fn new(tx: mpsc::Sender<AgentResponse>) -> Self {
+        Self {
+            tx,
+            partial: Vec::new(),
+        }
+    }
+
+    /// Puts one finished line in the transcript.
+    ///
+    /// `try_send` cannot fail in practice at the one call site: this runs
+    /// before `run_app`, so the receiver is alive and the 100-slot channel is
+    /// empty. If it ever did, `stderr` is still correct HERE and only here —
+    /// the alternate screen is not up yet — so the line is degraded to the
+    /// mouth it would have had, never dropped.
+    fn line(&self, text: String) {
+        if let Err(mpsc::error::TrySendError::Full(AgentResponse::Notice(text)))
+        | Err(mpsc::error::TrySendError::Closed(AgentResponse::Notice(text))) =
+            self.tx.try_send(AgentResponse::Notice(text))
+        {
+            eprintln!("{text}");
+        }
+    }
+}
+
+impl io::Write for NoticeTranscript {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.partial.extend_from_slice(buf);
+        while let Some(newline) = self.partial.iter().position(|b| *b == b'\n') {
+            let mut finished: Vec<u8> = self.partial.drain(..=newline).collect();
+            finished.pop();
+            if finished.last() == Some(&b'\r') {
+                finished.pop();
+            }
+            self.line(String::from_utf8_lossy(&finished).into_owned());
+        }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        if !self.partial.is_empty() {
+            let trailing = std::mem::take(&mut self.partial);
+            self.line(String::from_utf8_lossy(&trailing).into_owned());
+        }
+        Ok(())
+    }
+}
 
 /// Persists a freshly-minted `ANTHROPIC_API_KEY` in the vault (SC-V36).
 ///
@@ -1496,7 +1572,15 @@ pub async fn run_tui_ext(
     // the session was being saved. Announced any later, the same stderr branch
     // writes on top of the frame instead (REQ-L39). The window is one statement
     // wide and both walls are guarded.
-    emit_notices(startup_notices);
+    //
+    // The fallback is the transcript rather than `stderr`, for the OTHER half
+    // of the same defect: outside a `.magi/` workspace no layer is installed at
+    // all, so the notices take `emit_notices_into`'s no-subscriber branch, and
+    // `stderr` there is the primary buffer the alternate screen is about to
+    // cover. See `NoticeTranscript`.
+    let mut transcript = NoticeTranscript::new(response_tx.clone());
+    emit_notices_into(startup_notices, &mut transcript);
+    let _ = io::Write::flush(&mut transcript);
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -3764,6 +3848,66 @@ mod tests {
         );
     }
 
+    /// C1, second half: with NO logging layer installed, a startup `WARN` still
+    /// reaches the transcript instead of the buffer about to be swapped out.
+    ///
+    /// This is the first-run case and the one that matters most: outside a
+    /// `.magi/` workspace `init_logging` never runs, so `emit_notices_into`
+    /// takes its no-subscriber branch and writes to the fallback. With `stderr`
+    /// as that fallback, "no `.magi/` state directory found — run `magi init`"
+    /// went to the primary buffer and `EnterAlternateScreen` covered it for the
+    /// session — which is what v0.18.0 did NOT do, because it pushed the list
+    /// into the channel directly.
+    ///
+    /// Driven through the real `emit_notices_into`, not by feeding
+    /// [`NoticeTranscript`] bytes by hand: the half worth guarding is that the
+    /// screen policy still applies on this branch — the `WARN` arrives, the
+    /// `INFO` does not — and a hand-fed writer would assert that the writer
+    /// splits lines, which nothing was ever going to get wrong.
+    ///
+    /// `LevelFilter::current()` is process-global, and this asserts it is `OFF`
+    /// rather than assuming: nextest gives every test its own process, but a
+    /// plain `cargo test` does not, and a subscriber installed by a neighbour
+    /// would send these notices to the layer and leave the channel empty for a
+    /// reason that has nothing to do with the property.
+    #[test]
+    fn a_startup_warning_reaches_the_transcript_when_no_layer_exists() {
+        assert_eq!(
+            tracing::level_filters::LevelFilter::current(),
+            tracing::level_filters::LevelFilter::OFF,
+            "a subscriber is installed in this process, so this cannot observe \
+             the no-layer branch; run under `cargo nextest`, not `cargo test`"
+        );
+        let (tx, mut rx) = mpsc::channel(8);
+        let mut transcript = NoticeTranscript::new(tx);
+        emit_notices_into(
+            vec![
+                Notice::warn("no .magi/ state directory found — run `magi init`"),
+                Notice::info("memory: 0 active, 0 archived, 0 pending re-embed"),
+            ],
+            &mut transcript,
+        );
+        let _ = io::Write::flush(&mut transcript);
+
+        let mut seen = Vec::new();
+        while let Ok(response) = rx.try_recv() {
+            match response {
+                AgentResponse::Notice(text) => seen.push(text),
+                other => panic!("the fallback must produce notices, not {other:?}"),
+            }
+        }
+        assert_eq!(
+            seen.len(),
+            1,
+            "the screen policy still decides on this branch: the WARN arrives \
+             and the INFO does not; got {seen:?}"
+        );
+        assert!(
+            seen[0].contains("no .magi/ state directory found"),
+            "and it must be the warning, verbatim: {seen:?}"
+        );
+    }
+
     /// C1: the startup notices are announced INSIDE the attached window — after
     /// `attach`, before `EnterAlternateScreen` — and nowhere else.
     ///
@@ -3802,7 +3946,7 @@ mod tests {
             .find("classifier_notices.attach(")
             .expect("the sink must still be attached");
         let emitted = body
-            .find("emit_notices(startup_notices);")
+            .find("emit_notices_into(startup_notices,")
             .expect("run_tui_ext must announce the startup notices it was handed");
         let alternate = body
             .find("EnterAlternateScreen)")

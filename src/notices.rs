@@ -115,14 +115,24 @@ pub fn emit_notices(notices: Vec<Notice>) {
 /// # Parameters
 ///
 /// * `notices` — everything a startup collected.
-/// * `fallback` — where a notice goes when no subscriber was ever installed. Production passes
-///   `stderr`; a test passes a buffer, which is what makes the no-layer branch observable
-///   without capturing a process's own file descriptors.
+/// * `fallback` — where a notice goes when no subscriber was ever installed. Headless passes
+///   `stderr` (via [`emit_notices`]); a test passes a buffer, which is what makes the
+///   no-layer branch observable without capturing a process's own file descriptors.
+///
+/// # Why the terminal passes something other than `stderr`
+///
+/// A TUI session started outside a `.magi/` workspace installs no layer at all —
+/// `init_logging` is guarded on a discovered workspace — so its startup notices take the
+/// branch below. Written to `stderr` they land on the PRIMARY buffer, which
+/// `EnterAlternateScreen` swaps out a moment later, and the first-run "no `.magi/` state
+/// directory found — run `magi init`" is hidden for the whole session. So `run_tui_ext`
+/// supplies a fallback that writes into the transcript instead, which is why this is `pub`
+/// and not the private helper it started as.
 ///
 /// # Complexity
 ///
 /// [`emit_notices`]'s, plus `O(n)` writes on the fallback path.
-pub(crate) fn emit_notices_into(notices: Vec<Notice>, fallback: &mut dyn std::io::Write) {
+pub fn emit_notices_into(notices: Vec<Notice>, fallback: &mut dyn std::io::Write) {
     let ordered = ordered_for_emission(notices);
 
     // **`OFF` is the no-subscriber state, and it is the right question to ask.** The global

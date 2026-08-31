@@ -7764,16 +7764,20 @@ mod tests {
     /// multi-line needle later cannot quietly reintroduce the trap. The forbidden call is
     /// composed with `concat!` so this guard cannot match its own source and pass for free.
     ///
-    /// The needle stops at the argument NAME rather than at the closing `);`, and mutation
-    /// is what said so: the first version ended at the semicolon and went green against a
-    /// mutation that announced a `.clone()` of the list and handed the original on — the
-    /// defect exactly, one method call away from the needle. For the same reason nothing in
-    /// this comment may spell the call out in full: the guard reads its own file, so a
-    /// worked example in the prose is a match, and the guard would fail on a clean tree.
+    /// The needle is deliberately loose at BOTH ends, and mutation is what said so. It stops
+    /// at the argument name rather than at the closing `);`, because the first version ended
+    /// at the semicolon and went green against a mutation that announced a `.clone()` of the
+    /// list and handed the original on — the defect exactly, one method call away from the
+    /// needle. And it starts inside the function name, because there are two of them: the
+    /// plain announcement and the one taking an explicit fallback, and forbidding only the
+    /// first would leave the second as an unguarded way back to the same defect. For the
+    /// same reason nothing in this comment may spell either call out in full: the guard
+    /// reads its own file, so a worked example in the prose is a match and the guard would
+    /// fail on a clean tree.
     #[test]
     fn the_startup_notices_are_handed_to_the_tui_rather_than_announced_early() {
         let source = include_str!("main.rs").replace('\r', "");
-        let announced_here = concat!("emit_notices(startup_", "notices");
+        let announced_here = concat!("notices(startup_", "notices");
         assert!(
             !source.contains(announced_here),
             "run() announces the startup notices itself, which happens before run_tui_ext \
