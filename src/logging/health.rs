@@ -429,6 +429,71 @@ mod tests {
     }
 
     #[test]
+    fn a_short_headless_run_flushes_a_pending_recovery() {
+        // SC-L90 is about what is left PENDING at close, and the only
+        // transition that can be pending in a short run is a RECOVERY: a
+        // subsystem's first degradation is always immediate (SC-L71), so it
+        // is never left waiting.
+        let mut h = HealthTracker::new();
+        let t0 = Instant::now();
+        let c = CauseKey::new("embedder", "http_500");
+        assert!(matches!(
+            h.observe(Some(c), false, t0),
+            Some(Transition::Degraded(_))
+        ));
+        assert!(
+            h.observe(Some(c), true, t0 + Duration::from_secs(1))
+                .is_none(),
+            "pending"
+        );
+        let flushed = h.flush();
+        assert_eq!(
+            flushed.len(),
+            1,
+            "closing must not swallow a pending transition"
+        );
+        assert!(matches!(flushed[0], Transition::Restored(_)));
+    }
+
+    #[test]
+    fn flushing_with_nothing_pending_returns_an_empty_vec() {
+        // The complement of the test above, and the one that shows why
+        // SC-L90 does not apply to the first degradation: it was already
+        // emitted, so there is nothing left to flush.
+        let mut h = HealthTracker::new();
+        let c = CauseKey::new("embedder", "http_500");
+        assert!(matches!(
+            h.observe(Some(c), false, Instant::now()),
+            Some(Transition::Degraded(_))
+        ));
+        assert!(h.flush().is_empty());
+    }
+
+    #[test]
+    fn flush_emits_one_pending_transition_per_subsystem() {
+        // Why `flush` returns a `Vec`: a cascading failure leaves one
+        // pending transition per subsystem, and an `Option` would show one
+        // and silently drop the rest.
+        let mut h = HealthTracker::new();
+        let t0 = Instant::now();
+        let emb = CauseKey::new("embedder", "unreachable");
+        let prov = CauseKey::new("provider", "unreachable");
+        h.observe(Some(emb), false, t0);
+        h.observe(Some(prov), false, t0);
+        assert!(h
+            .observe(Some(emb), true, t0 + Duration::from_secs(1))
+            .is_none());
+        assert!(h
+            .observe(Some(prov), true, t0 + Duration::from_secs(1))
+            .is_none());
+        assert_eq!(
+            h.flush().len(),
+            2,
+            "one pending transition per subsystem, not just one"
+        );
+    }
+
+    #[test]
     fn a_clock_jump_produces_no_false_transitions() {
         let mut h = HealthTracker::new();
         let c = CauseKey::new("cause", "cause");
