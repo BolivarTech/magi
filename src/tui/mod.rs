@@ -3661,6 +3661,49 @@ mod tests {
         assert_eq!(app.input, "xá");
     }
 
+    /// I2: the notice sink must be attached BEFORE the alternate screen is
+    /// entered, not after.
+    ///
+    /// An unattached sink is the branch that writes to stderr, and that is
+    /// correct only while there is no frame to write over. The sink went live at
+    /// `init_logging` when the screen branch was connected, so every line
+    /// between `EnterAlternateScreen` and `attach` was a window in which a
+    /// degradation would have landed on top of the ratatui frame — the exact
+    /// corruption `PendingNotices` exists to prevent, reintroduced from the
+    /// other end. Nothing emitted in that window, which is what makes it worth
+    /// a guard: a latent ordering defect is invisible until the day something
+    /// does.
+    ///
+    /// Asserted on byte offsets in the source, like
+    /// `the_startup_notices_are_emitted_before_the_terminal_is_taken_over` in
+    /// `main.rs`, and for the same reason: the property IS an order, and driving
+    /// `run_tui_ext` far enough to observe it needs a real terminal. Both
+    /// needles are single-line and the `\r` is stripped, so the guard reads the
+    /// same on a CRLF checkout as on an LF one.
+    #[test]
+    fn test_the_notice_sink_is_attached_before_the_alternate_screen() {
+        let source = include_str!("mod.rs").replace('\r', "");
+        let start = source
+            .find("\npub async fn run_tui_ext(")
+            .expect("run_tui_ext must still bring the terminal up");
+        let end = source[start..]
+            .find("\nfn report_gate_telemetry")
+            .map(|offset| start + offset)
+            .expect("the item after run_tui_ext must still bound its body");
+        let body = &source[start..end];
+        let attached = body
+            .find("classifier_notices.attach(")
+            .expect("the sink must still be attached");
+        let alternate = body
+            .find("EnterAlternateScreen)")
+            .expect("the alternate screen must still be entered");
+        assert!(
+            attached < alternate,
+            "the sink is still unattached when the alternate screen goes up, so a notice \
+             arriving in that window writes over the frame"
+        );
+    }
+
     /// R15: the event loop is what expires the health window while the user is
     /// looking at the screen.
     ///
