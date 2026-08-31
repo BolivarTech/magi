@@ -392,10 +392,46 @@ impl OpenAiCompatibleEmbedder {
 /// userinfo was here" if both constants are ever compared side by side in a test.
 const FULLY_REDACTED_KEY: &str = "***";
 
+/// Where the embedder's health events are attributed.
+const EMBEDDER_TARGET: &str = "magi_rs::memory";
+
+/// The subsystem half of the embedder's cause key.
+///
+/// Written out here because `tracing` fields take literals rather than values;
+/// the spelling is tied to `CauseKey::ALL` by this module's own tests, which
+/// resolve the emitted key through that list instead of rebuilding it.
+const EMBEDDER_SUBSYSTEM: &str = "embedder";
+
+/// The cause half of the embedder's cause key.
+///
+/// The same key rides on the failure and on the success, which is what lets
+/// the health tracker pair them; see [`CauseKey::ALL`][ck] for why there is one
+/// cause per subsystem rather than one per error variant.
+///
+/// [ck]: magi_rs::logging::auditor::CauseKey::ALL
+const EMBEDDER_CAUSE: &str = "unreachable";
+
 #[async_trait]
 impl EmbeddingProvider for OpenAiCompatibleEmbedder {
     async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, EmbeddingError> {
-        self.call_embeddings(texts).await
+        let outcome = self.call_embeddings(texts).await;
+        match &outcome {
+            Ok(_) => tracing::event!(
+                target: EMBEDDER_TARGET,
+                tracing::Level::INFO,
+                cause.subsystem = EMBEDDER_SUBSYSTEM,
+                cause.name = EMBEDDER_CAUSE,
+                "embedding request ok"
+            ),
+            Err(e) => tracing::event!(
+                target: EMBEDDER_TARGET,
+                tracing::Level::WARN,
+                cause.subsystem = EMBEDDER_SUBSYSTEM,
+                cause.name = EMBEDDER_CAUSE,
+                "embedding request failed: {e}"
+            ),
+        }
+        outcome
     }
 
     fn model_id(&self) -> &str {

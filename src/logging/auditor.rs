@@ -113,13 +113,34 @@ pub struct CauseKey {
     cause: &'static str,
 }
 
+/// The embedder's subsystem half, as [`CauseKey::ALL`] declares it.
+const EMBEDDER: &str = "embedder";
+
+/// The embedder's cause half.
+///
+/// One cause per subsystem, deliberately: the health state is kept per
+/// subsystem, and a success event has no error variant to derive a cause from,
+/// so a per-variant key could not be matched by the success event without
+/// consulting what failed last — which is state the emitting site must not
+/// keep. The key names the health topic (retrieval is unavailable for this
+/// turn); the event's own message says which failure produced it.
+const UNREACHABLE: &str = "unreachable";
+
 impl CauseKey {
     /// Every declared cause.
     ///
     /// Exists so a test in MS2 can enumerate them against the message table;
     /// without it that guard cannot be written at all. Empty in MS1, populated
     /// by MS2's task 3.3.
-    pub const ALL: &'static [CauseKey] = &[];
+    ///
+    /// **One entry per cause an emitting site actually declares**, and each
+    /// owes a row in `logging::health`'s message table — a key with no row
+    /// renders as a defect report rather than a message, which is what
+    /// `every_declared_cause_key_has_a_screen_message` holds down. The
+    /// emitting site keeps its own constants (`tracing` fields take literals,
+    /// not values); a site whose spelling drifts from this list stops
+    /// resolving here, and its own tests say so.
+    pub const ALL: &'static [CauseKey] = &[CauseKey::new(EMBEDDER, UNREACHABLE)];
 
     /// Builds a cause key from its two program-constant halves.
     ///
