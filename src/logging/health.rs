@@ -10,7 +10,7 @@
 //! [`Transition`] only when that transition is worth showing; everything
 //! else is silence by design, because "everything else" is exactly the noise
 //! this feature exists to remove.
-//!
+
 use std::time::{Duration, Instant};
 
 use crate::logging::auditor::CauseKey;
@@ -67,6 +67,24 @@ struct SubsystemState {
 /// all take `&mut self`; whoever shares one instance across threads supplies
 /// its own `Mutex`, the same trade-off `SqliteVectorStore` already makes in
 /// this repository.
+///
+/// # Examples
+///
+/// ```
+/// use std::time::Instant;
+/// use magi_rs::logging::auditor::CauseKey;
+/// use magi_rs::logging::health::{HealthTracker, Transition};
+///
+/// let mut tracker = HealthTracker::new();
+/// let cause = CauseKey::new("embedder", "unreachable");
+///
+/// // A subsystem's first-ever failure is shown right away (SC-L71).
+/// let first = tracker.observe(Some(cause), false, Instant::now());
+/// assert!(matches!(first, Some(Transition::Degraded(_))));
+///
+/// // A repeat of the same failure is not news: nothing more to show.
+/// assert!(tracker.observe(Some(cause), false, Instant::now()).is_none());
+/// ```
 #[derive(Debug, Clone, Default)]
 pub struct HealthTracker {
     /// One entry per subsystem observed so far, kept in first-observed
@@ -111,8 +129,9 @@ impl HealthTracker {
     ///
     /// # Complexity
     ///
-    /// `O(1)` amortised: one lookup via [`Self::state_mut`] plus
-    /// constant-time state comparison.
+    /// `O(1)` amortised: one lookup into `states` (linear in the small,
+    /// fixed number of subsystems seen so far) plus constant-time state
+    /// comparison.
     pub fn observe(
         &mut self,
         cause: Option<CauseKey>,
