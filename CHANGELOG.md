@@ -9,6 +9,8 @@ changes and the **patch** position signals backward-compatible fixes.
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-08-31
+
 ### Added
 
 - **A real log file.** Magi now writes a daily file under `.magi/logs/`, rotated at
@@ -1353,7 +1355,9 @@ Initial pre-release, published primarily to reserve the `magi-rs` crate name.
 - `ratatui` TUI with Normal / Selection / Visual modes and Unicode-safe input.
 - OAuth (PKCE) login and OS keyring integration, with `magi-rust` legacy migration.
 
-[Unreleased]: https://github.com/BolivarTech/magi/compare/v0.16.0...HEAD
+[Unreleased]: https://github.com/BolivarTech/magi/compare/v0.18.0...HEAD
+[0.18.0]: https://github.com/BolivarTech/magi/compare/v0.17.0...v0.18.0
+[0.17.0]: https://github.com/BolivarTech/magi/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/BolivarTech/magi/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/BolivarTech/magi/compare/v0.14.3...v0.15.0
 [0.14.3]: https://github.com/BolivarTech/magi/compare/v0.14.2...v0.14.3
