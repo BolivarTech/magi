@@ -858,6 +858,102 @@ mod tests {
     /// the windowed transition in the test above is unambiguously due.
     const WELL_PAST_THE_WINDOW_SECS: u64 = crate::logging::health::HEALTH_MIN_STABLE_SECS + 1;
 
+    /// A delivery that reports whether the tracker was still locked while it
+    /// ran.
+    ///
+    /// The `Weak` is the only way to ask: a sink is handed to
+    /// [`HealthReporter::new`], so it cannot hold the reporter at construction
+    /// and is pointed back at it afterwards. `try_lock` is the whole
+    /// measurement — a `std::sync::Mutex` is not reentrant, so the thread that
+    /// already holds the guard gets `WouldBlock` here exactly as a second
+    /// thread would.
+    #[derive(Default)]
+    struct TrackerProbe {
+        /// The reporter whose tracker this probes, set right after it exists.
+        reporter: std::sync::OnceLock<std::sync::Weak<HealthReporter>>,
+        /// How many deliveries found the tracker still locked.
+        locked: std::sync::atomic::AtomicUsize,
+        /// How many deliveries happened at all.
+        delivered: std::sync::atomic::AtomicUsize,
+    }
+
+    impl crate::logging::NoticeDelivery for TrackerProbe {
+        fn deliver(&self, _line: &Audited) {
+            use std::sync::atomic::Ordering;
+            self.delivered.fetch_add(1, Ordering::SeqCst);
+            if let Some(reporter) = self.reporter.get().and_then(std::sync::Weak::upgrade) {
+                if reporter.tracker.try_lock().is_err() {
+                    self.locked.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_tracker_is_unlocked_while_a_ticked_transition_is_delivered() {
+        // I1: `tick` used to drain the tracker with
+        // `while let Some(t) = self.tracker().tick(now)`. A temporary created
+        // in a `while let` scrutinee lives until the end of the LOOP BODY, so
+        // the guard was still held while `show` ran -- a full `Auditor::audit`
+        // pass, two allocations, and then `NoticeDelivery::deliver`, which in
+        // the TUI takes the sink's own mutex, may take a second one and may
+        // `tokio::spawn`. Three more locks and a channel send nested under the
+        // first, on the thread that had just drawn the frame.
+        //
+        // The consequence today is contention: a worker thread emitting a
+        // cause-bearing WARN blocks in `observe` for the whole delivery. The
+        // consequence waiting to happen is a self-deadlock -- any `tracing`
+        // event carrying `cause.*` emitted from under `show` re-enters
+        // `on_event`, reaches `observe`, and blocks forever on a non-reentrant
+        // mutex with the alternate screen held. Nothing but `observe`'s
+        // `cause.is_none()` early return stands between the two, and that is a
+        // guard on the PAYLOAD, not on the lock discipline.
+        //
+        // `observe` and `flush` bind the guard in a `let` statement and have
+        // never had this, so the probe below watches both of them too: their
+        // deliveries pass through the same counter, and a regression that
+        // moved either onto a temporary would raise it as well.
+        use std::sync::atomic::Ordering;
+
+        let dir = tempdir().unwrap();
+        let appender = Arc::new(DailyAppender::new(dir.path()).unwrap());
+        let auditor = Arc::new(Auditor::new());
+        let probe = Arc::new(TrackerProbe::default());
+        let reporter = Arc::new(HealthReporter::new(
+            Arc::clone(&probe) as Arc<dyn crate::logging::NoticeDelivery>,
+            Arc::clone(&auditor),
+            Arc::clone(&appender),
+        ));
+        probe
+            .reporter
+            .set(Arc::downgrade(&reporter))
+            .expect("the probe is pointed at its reporter exactly once");
+
+        let cause = CauseKey::new("embedder", "unreachable");
+        let event = |text: &str| auditor.audit(text, "magi_rs::memory", Some(cause), 0).0;
+
+        // The first failure is shown immediately, by `observe`.
+        reporter.observe(&event("embedding request failed"), tracing::Level::WARN);
+        // The success behind it is windowed, so only a `tick` past the window
+        // can drain it -- which is the path under test.
+        reporter.observe(&event("embedding request ok"), tracing::Level::INFO);
+        let before_tick = probe.delivered.load(Ordering::SeqCst);
+        reporter.tick(Instant::now() + std::time::Duration::from_secs(WELL_PAST_THE_WINDOW_SECS));
+
+        assert!(
+            probe.delivered.load(Ordering::SeqCst) > before_tick,
+            "the tick delivered nothing, so this measured no delivery at all"
+        );
+        assert_eq!(
+            probe.locked.load(Ordering::SeqCst),
+            0,
+            "the tracker was still locked during {} of {} deliveries: the \
+             delivery path runs nested under the tracker's own mutex",
+            probe.locked.load(Ordering::SeqCst),
+            probe.delivered.load(Ordering::SeqCst)
+        );
+    }
+
     #[test]
     fn a_target_interns_to_the_same_static_instead_of_leaking_per_event() {
         let a = leak_target("magi_rs::agent");
