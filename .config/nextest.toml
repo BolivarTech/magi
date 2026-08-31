@@ -181,7 +181,8 @@
 # equivalent for an integration target: renaming or adding a test inside the file cannot drop
 # it out of the group, and only deleting the file itself changes what it matches.
 #
-# **The four logging binaries are NOT in this group, and that is deliberate.** The cap is
+# **The logging binaries are NOT in this group, and that is deliberate.** (Four at the
+# time of writing; six as of MS2 2.1 — see the section below.) The cap is
 # Argon2 lane arithmetic -- `3 heavy x 4 lanes = 12` over 12 logical processors -- and
 # `auditor_isolation`, `init_logging`, `canary_both_mouths` and `prompt_never_logged` open no
 # vault and derive no key. They are slow because they SLEEP (one waits twenty seconds on a
@@ -201,6 +202,37 @@
 # trailing space silently excluded every binary except one. Only the third form is right. The
 # 555 also reconciles with the 538 recorded above: MS3 added tests to subsystems already in
 # the group.
+
+# ## Two MORE logging binaries, and they stay OUT for the reason above (MS2 2.1)
+#
+# `screen_policy` and `tui_buffer_audited_only` join `auditor_isolation`,
+# `init_logging`, `canary_both_mouths` and `prompt_never_logged` outside the group, so
+# the paragraph above now covers SIX logging binaries rather than four. This entry
+# exists because "not in the group" and "nobody thought about it" look identical from
+# the filter, and a reviewer reasonably read the omission as the second.
+#
+# They qualify under neither membership rule this file has established:
+#
+#   - They do not PRODUCE the load. Both bring up `init_logging` against a `tempfile`
+#     directory and emit through the dispatcher. Neither opens a vault, an encrypted
+#     DB, or derives a key — grep for it: the only occurrence of "vault" in either file
+#     is the string `"vault"` as a cause LABEL in a message-table assertion.
+#   - They are not VICTIMS of it either, which is the widening `headless_runner::`
+#     earned. Every test in both is synchronous on the emitting thread; the one thing
+#     that waits is a poll on the file mouth with a 30 s FAILURE deadline (see
+#     `wait_for_file` in `screen_policy.rs`), which replaced a flat 300 ms sleep in the
+#     same round this comment was written. Measured on this box: the slowest of the
+#     seven is 375 ms and the whole set finishes in under 0.4 s. That is two orders of
+#     magnitude of headroom against the deadline — strictly more than the four
+#     binaries already outside, which still sleep flat durations.
+#
+# Adding them would hold one of three scarce slots for a load they do not create, and
+# would give them nothing back: the group caps its members against EACH OTHER, it does
+# not shield them from the Argon2 tests outside it. It would also make the sentence
+# four paragraphs up false, which is how the coverage claims in this file rot.
+#
+# **If they ever flake, the answer is membership, not a longer deadline** — that is the
+# lesson the "FOURTH hit" section above paid for twice.
 
 [test-groups]
 heavy = { max-threads = 3 }
