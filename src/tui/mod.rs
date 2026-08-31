@@ -3835,6 +3835,42 @@ mod tests {
         );
     }
 
+    /// I3: two handles onto one row do NOT exclude each other, and this is what
+    /// they do instead.
+    ///
+    /// `set` cannot prevent this — the handles are separate values, so no borrow
+    /// rule relates them — which is exactly why the behaviour is pinned here and
+    /// spelled out in [`StatusRow`]'s own rustdoc rather than left to whoever
+    /// adds the second setter. R-L15 names two candidate operations, so a second
+    /// setter is a plausible edit, not a hypothetical one.
+    #[test]
+    fn test_two_handles_on_one_status_row_do_not_exclude_each_other() {
+        /// A second operation's text. A test-local constant rather than a
+        /// production one: nothing in the tree starts a second long operation
+        /// yet, and a constant added for a test alone is API surface with no
+        /// consumer.
+        const OTHER_OPERATION: &str = "probing model windows…";
+        let mut first = StatusRow::new();
+        let mut second = first.clone();
+        let observer = first.clone();
+        let holding_first = first.set(STATUS_CONSULTING_THE_TRIO);
+        let holding_second = second.set(OTHER_OPERATION);
+        assert_eq!(
+            observer.current(),
+            Some(OTHER_OPERATION),
+            "the later setter wins: one row, one line, and the last writer owns it"
+        );
+        drop(holding_second);
+        assert_eq!(
+            observer.height(),
+            0,
+            "and the first drop collapses the row even though the other operation is \
+             still running — the row is shared state, not a stack"
+        );
+        drop(holding_first);
+        assert_eq!(observer.height(), 0);
+    }
+
     #[test]
     fn test_the_status_row_does_not_appear_in_selection_or_visual_mode() {
         // REQ-L25: the row lives outside `App::messages`, and the two modes
