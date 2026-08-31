@@ -750,8 +750,9 @@ mod tests {
         // REQ-L23: an actionable screen error has three parts, and this
         // asserts each on its own, specific content -- not on non-emptiness
         // and not on a `.log` substring, both of which a no-row branch or an
-        // unrelated path would also satisfy. SC-L19 adds a fourth clause --
-        // "within the width budget" -- asserted at the end.
+        // unrelated path would also satisfy. A fourth assertion at the end
+        // protects part 3 from truncation; it is NOT the plan's width rule,
+        // and the comment there says why.
         //
         // # SC-L19's producer is an accident, and it is worth writing down
         //
@@ -790,21 +791,33 @@ mod tests {
              actually passed in: {line}"
         );
 
-        // SC-L19's fourth clause -- "within the width budget". The budget is
-        // read from `TUI_PAYLOAD_MAX_BYTES`, which is what the layer applies to
-        // this exact string with `truncate_for_display` before the screen sees
-        // it; a copy of the number written here would drift from the layer's
-        // and keep passing while the real line was being cut. And a cut line is
-        // precisely what breaks the three parts above: truncation takes the
-        // TAIL, and the tail is part 3.
+        // Part 3 must survive the trip to the screen. `TUI_PAYLOAD_MAX_BYTES`
+        // is what the layer applies to this exact string with
+        // `truncate_for_display` before the screen sees it, and truncation
+        // takes the TAIL -- so a line past that cap loses part 3 while parts 1
+        // and 2 still assert green above. The number is read from the layer
+        // rather than copied, or it would drift and keep passing while the real
+        // line was being cut.
+        //
+        // **This is a 64 KiB PAYLOAD cap, not a terminal width, and calling it
+        // one would be the more comfortable lie.** The plan's SC-L19 also asks
+        // for "<= 100 characters" so the message fits a narrow terminal. No
+        // constant in the tree expresses that, and inventing one to assert
+        // against would fabricate a requirement the spec states only as prose
+        // -- so the width rule is a DECLARED HOLE, recorded as such in the
+        // certificate rather than counted as covered. What is known is a
+        // measurement, not a guarantee: under R25 the eight shipped messages
+        // were 65, 28, 61, 28, 48, 27, 50 and 17 characters. Nothing pins that,
+        // so a future row may exceed 100 with nothing here going red.
         for (key, _, _) in declared_messages() {
             for t in [Transition::Degraded(key), Transition::Restored(key)] {
                 let rendered = render_transition(&t, path);
                 assert!(
                     rendered.len() <= crate::logging::magi_layer::TUI_PAYLOAD_MAX_BYTES,
-                    "SC-L19: {key:?} renders {} bytes, past the screen's budget \
-                     of {}, so the layer will truncate it and the reader loses \
-                     the tail: {rendered}",
+                    "REQ-L23 part 3: {key:?} renders {} bytes, past the \
+                     screen's {}-byte payload cap, so the layer truncates it \
+                     from the tail and the log path is what the reader \
+                     loses: {rendered}",
                     rendered.len(),
                     crate::logging::magi_layer::TUI_PAYLOAD_MAX_BYTES
                 );
