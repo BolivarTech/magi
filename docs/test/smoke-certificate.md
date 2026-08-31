@@ -1,15 +1,15 @@
 # Smoke Certificate
 
-- version: 0.17.0
-- commit: e1c5d70
+- version: 0.18.0
+- commit: 0462732
 - date: 2026-08-31 (UTC)
 - profile: product defaults (no --profile)
-- binary: sha256 e195d659f04b01935702e227a0c137457fc82540edcec27f002596f2930d7c97 (rebuilt from the commit above)
-- real cost: 8 backend run(s) in 404s
+- binary: sha256 4e0db062c4697907df048c6240f2e7930f0e2f45ac5ff977833d9bc7ad7db0e4 (rebuilt from the commit above)
+- real cost: 8 backend run(s) in 453s
 - rounds needed: 1
 - scope: 23 of 23 scenarios evaluated
 - contract coverage: StructuredVerdicts v0.14.3 (6/6 REQ-EA); Vault v0.9.0, Headless v0.10.0, MagiCore MS1-MS3, OperationBudget -- partial
-- environment: 62 active memories, 2535 KB database, 940 KB archived
+- environment: 73 active memories, 2924 KB database, 1096 KB archived
 - result: 71 passed, 0 not passed, 71 total
 
 [PASS] S1 run=R1 - exit 0 and stdout parses as JSON
