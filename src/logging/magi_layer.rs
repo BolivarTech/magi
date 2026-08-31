@@ -778,6 +778,83 @@ mod tests {
     }
 
     #[test]
+    fn health_tracking_continues_after_its_lock_is_poisoned() {
+        // I3: `HealthReporter::tracker` recovers a `PoisonError` with
+        // `into_inner` instead of returning early. The pattern, and the reason
+        // for it, are already in this repository —
+        // `system::database::tests::test_poisoned_lock_recovers_and_continues`
+        // makes the identical claim about persistence: recover so the
+        // subsystem keeps working, rather than fail closed for the session.
+        //
+        // **The assertion is that health tracking CONTINUES**, not that the
+        // calls return without panicking. A skip-on-poison implementation also
+        // returns without panicking; it just never shows anything again, which
+        // is the silent failure this guards. Mutation-verified: with the three
+        // call sites back on `let Ok(..) else { return; }` the sink comes back
+        // EMPTY and this fails at 0 of 2.
+        let dir = tempdir().unwrap();
+        let appender = Arc::new(DailyAppender::new(dir.path()).unwrap());
+        let shown = Arc::new(RecordingSink::default());
+        let auditor = Arc::new(Auditor::new());
+        let reporter = Arc::new(HealthReporter::new(
+            shown.clone(),
+            Arc::clone(&auditor),
+            appender,
+        ));
+
+        // Poison it exactly as the precedent does: panic while holding it.
+        let poisoner = Arc::clone(&reporter);
+        let _ = std::thread::spawn(move || {
+            let _guard = poisoner.tracker.lock().unwrap();
+            panic!("intentional poison");
+        })
+        .join();
+        assert!(
+            reporter.tracker.is_poisoned(),
+            "the fixture must actually poison the lock, or everything below \
+             holds for free"
+        );
+
+        // One audited event per step, since `observe` takes what the layer
+        // already built. `Auditor::audit` is the only constructor of `Audited`.
+        let cause = CauseKey::new("embedder", "unreachable");
+        let event = |text: &str| auditor.audit(text, "magi_rs::memory", Some(cause), 0).0;
+
+        // 1. `observe` still works: a subsystem's first failure is immediate.
+        reporter.observe(&event("embedding request failed"), tracing::Level::WARN);
+        // 2. `tick` still works: the recovery is windowed, so expire it.
+        reporter.observe(&event("embedding request ok"), tracing::Level::INFO);
+        reporter.tick(Instant::now() + std::time::Duration::from_secs(WELL_PAST_THE_WINDOW_SECS));
+        // 3. `flush` still works: degrade again, then leave a recovery pending.
+        reporter.observe(&event("embedding request failed"), tracing::Level::WARN);
+        reporter.observe(&event("embedding request ok"), tracing::Level::INFO);
+        reporter.flush();
+
+        let said = shown.lines.lock().unwrap().clone();
+        let degradations = said
+            .iter()
+            .filter(|l| l.contains("memory: retrieval unavailable"))
+            .count();
+        let recoveries = said
+            .iter()
+            .filter(|l| l.contains("✓ memory: retrieval restored"))
+            .count();
+        assert_eq!(
+            degradations, 2,
+            "`observe` stopped reporting after the poison: {said:?}"
+        );
+        assert_eq!(
+            recoveries, 2,
+            "`tick` and `flush` must each still deliver their transition after \
+             the poison; got {recoveries} of 2: {said:?}"
+        );
+    }
+
+    /// Comfortably past [`crate::logging::health::HEALTH_MIN_STABLE_SECS`], so
+    /// the windowed transition in the test above is unambiguously due.
+    const WELL_PAST_THE_WINDOW_SECS: u64 = crate::logging::health::HEALTH_MIN_STABLE_SECS + 1;
+
+    #[test]
     fn a_target_interns_to_the_same_static_instead_of_leaking_per_event() {
         let a = leak_target("magi_rs::agent");
         let b = leak_target("magi_rs::agent");
