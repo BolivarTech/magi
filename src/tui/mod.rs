@@ -3865,6 +3865,11 @@ mod tests {
     /// `INFO` does not — and a hand-fed writer would assert that the writer
     /// splits lines, which nothing was ever going to get wrong.
     ///
+    /// **What this does NOT check is that production passes this fallback**,
+    /// and mutation proved it: reverting `run_tui_ext` to `stderr` leaves this
+    /// green. `test_the_startup_notices_are_emitted_inside_the_attached_window`
+    /// is what holds the wiring, by naming the argument and not only the call.
+    ///
     /// `LevelFilter::current()` is process-global, and this asserts it is `OFF`
     /// rather than assuming: nextest gives every test its own process, but a
     /// plain `cargo test` does not, and a subscriber installed by a neighbour
@@ -3945,12 +3950,30 @@ mod tests {
         let attached = body
             .find("classifier_notices.attach(")
             .expect("the sink must still be attached");
+        // The needle carries the ARGUMENT, not just the call. Mutation is what
+        // said so: with only the call named, swapping the fallback back to
+        // `stderr` left this green and left
+        // `a_startup_warning_reaches_the_transcript_when_no_layer_exists` green
+        // too, because that one drives the writer rather than the wiring. The
+        // fallback is half the fix; a guard that cannot see which one is
+        // passed guards the other half only.
         let emitted = body
-            .find("emit_notices_into(startup_notices,")
-            .expect("run_tui_ext must announce the startup notices it was handed");
+            .find("emit_notices_into(startup_notices, &mut transcript);")
+            .expect(
+                "run_tui_ext must announce the startup notices it was handed, into the \
+                 transcript fallback",
+            );
+        let built = body
+            .find("NoticeTranscript::new(response_tx")
+            .expect("the fallback must be the session's own response channel");
         let alternate = body
             .find("EnterAlternateScreen)")
             .expect("the alternate screen must still be entered");
+        assert!(
+            attached < built,
+            "the transcript fallback is built before the sink is attached, which is out of \
+             order even though nothing observes it today"
+        );
         assert!(
             attached < emitted,
             "the startup notices are announced while the sink is still \
