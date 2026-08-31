@@ -242,6 +242,29 @@ impl HealthReporter {
     /// The tracker, **recovered rather than abandoned** if the lock is
     /// poisoned.
     ///
+    /// # The invariant every caller owes: drop the guard before delivering
+    ///
+    /// Nothing this returns may still be alive when [`Self::show`] runs. Under
+    /// `show` are an [`Auditor::audit`] pass over the whole line, which takes
+    /// the auditor's own lock, and then `NoticeDelivery::deliver`, which in the
+    /// terminal takes the sink's mutex, may take a second one and may
+    /// `tokio::spawn`. Holding this across that nests three more locks and a
+    /// channel send under a mutex that the emitting thread needs for every
+    /// cause-bearing event, and opens a self-deadlock: a `tracing` event
+    /// carrying `cause.*` emitted from anywhere beneath `show` re-enters
+    /// [`Self::observe`] and blocks here forever, on a non-reentrant
+    /// `std::sync::Mutex`, with the alternate screen held.
+    ///
+    /// So every call site binds the guard in a `let` STATEMENT, which drops it
+    /// at the semicolon. This was stated as a property of the type before it
+    /// was one: [`Self::tick`] drained the tracker with a `while let`, whose
+    /// scrutinee temporary outlives the loop body, and the rule held for
+    /// `observe` and `flush` alone. The guard that holds it for all three now
+    /// is in this module's test list, under a name beginning "the tracker is
+    /// unlocked while a ticked transition"; it probes the lock from inside a
+    /// delivery, so a regression to a temporary shows up as a count rather
+    /// than as a code review.
+    ///
     /// # Why recovery and not a silent skip
     ///
     /// Returning early on a `PoisonError` — which is what all three call sites
@@ -292,8 +315,22 @@ impl HealthReporter {
     ///
     /// `O(s²)` worst case in the number of subsystems observed so far, which
     /// is a handful: `O(s)` per pass over at most `s` pendings.
+    ///
+    /// # Why `loop` + `let ... else` and NOT `while let`
+    ///
+    /// The obvious spelling is `while let Some(t) = self.tracker().tick(now)`,
+    /// and it is wrong: a temporary created in a `while let` scrutinee lives to
+    /// the end of the LOOP BODY, so the guard [`Self::tracker`] returns is
+    /// still held while [`Self::show`] runs its audit pass and calls into the
+    /// sink. Binding it in a `let` statement drops it at the semicolon, which
+    /// is the shape [`Self::observe`] and [`Self::flush`] already have — and
+    /// the reason all three respect the invariant on [`Self::tracker`] rather
+    /// than only two of them.
     pub(crate) fn tick(&self, now: Instant) {
-        while let Some(transition) = self.tracker().tick(now) {
+        loop {
+            let Some(transition) = self.tracker().tick(now) else {
+                break;
+            };
             self.show(&transition);
         }
     }
