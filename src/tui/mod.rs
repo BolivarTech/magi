@@ -606,7 +606,7 @@ impl StatusRow {
     ///
     /// `O(1)`.
     pub fn set(&mut self, text: &'static str) -> StatusGuard<'_> {
-        let _ = text;
+        *self.cell() = Some(text);
         StatusGuard { row: self }
     }
 
