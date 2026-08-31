@@ -2651,13 +2651,19 @@ async fn probe_and_report(
         .map(|(model, m)| (model.clone(), m.clone()))
         .collect();
 
+    // Two notices about the same measurement, at two levels, and the difference is what the
+    // classification is for. The stale-composition one is conditional and forward-looking —
+    // *if* you later switch to a smaller model the size warning may stop firing — so nothing
+    // is wrong yet. The incomplete-probe one reports that `input_warn_tokens` has ALREADY
+    // fallen back to a built-in default, which is the size warning silently not being the one
+    // in effect.
     if let Some(min_window) = min_mage_window(&trio_seats) {
         if let Some(n) = stale_composition_notice(min_window, cfg.effective_max_query_bytes()) {
-            notices.push(Notice::resolution(n));
+            notices.push(Notice::info(n));
         }
     }
     if let Some(n) = trio_probe_incomplete_notice(&trio_seats, cfg.magi().input_warn_tokens) {
-        notices.push(Notice::resolution(n));
+        notices.push(Notice::warn(n));
     }
     // REQ-A24b/SC-A24e: the explicit (`[magi].input_warn_tokens`) wins over the measured.
     let warn = cfg
@@ -3099,7 +3105,7 @@ fn divergence_notice(cfg: &MagiConfig, inference_active: bool) -> Option<Notice>
     let magi_text = endpoint_display_text(&magi_url);
     let root_text = endpoint_display_text(&root_url);
 
-    Some(Notice::resolution(format!(
+    Some(Notice::warn(format!(
         "notice: the trio runs on {magi_text} but mode inference sends the content to the \
          main provider FIRST ({root_text}). Declare `[magi].default_mode` to avoid that \
          step."
@@ -3211,7 +3217,7 @@ fn build_native_provider(
             // the intermediate step.
             let (root, notice) = openai_compat_root(base_url.as_str());
             if let Some(n) = notice {
-                notices.push(Notice::resolution(n));
+                notices.push(Notice::info(n));
             }
             // NEVER `new` (REQ-R30): it delegates to `with_timeout(..., DEFAULT_CLIENT_TIMEOUT)`
             // = 300 s, which cannot satisfy `operation_budget + client_timeout <= ceiling`.
@@ -3383,7 +3389,7 @@ fn open_capability_cache(
     let dek = match store.data_key() {
         Ok(d) => d,
         Err(e) => {
-            notices.push(Notice::resolution(format!(
+            notices.push(Notice::warn(format!(
                 "notice: model measurements will not be remembered between runs \
                  (could not derive the key: {e})."
             )));
@@ -3393,7 +3399,7 @@ fn open_capability_cache(
     match ModelCapabilityCache::new(store.shared_conn(), dek) {
         Ok(c) => Some(Arc::new(c)),
         Err(e) => {
-            notices.push(Notice::resolution(format!(
+            notices.push(Notice::warn(format!(
                 "notice: model measurements will not be remembered between runs ({e})."
             )));
             None
@@ -3610,10 +3616,11 @@ fn candidate_window_view(
 /// budget with no way to see which budget is in force is the exact situation that produced this
 /// requirement: the requester had to read our source to work out that their number was 72.
 ///
-/// Tier depends on what happened, and the distinction is real rather than cosmetic. A ceiling
-/// derived from `--timeout` **is** the config resolving differently from what `magi.toml` says,
-/// so it is `Resolution` and always survives `render_notices`' cap. The configured path resolved
-/// exactly as written, so it is `Info` and may be capped away without losing anything.
+/// **Both arms are `INFO`**, and the level used to differ only because a cap could reach one
+/// of them. Whichever way the ceiling was reached, it is in force exactly as asked — from
+/// `[magi].agent_timeout_secs` or from the operator's own `--timeout` — so there is nothing to
+/// act on, and confirming it on screen is the noise this policy exists to remove. What still
+/// differs between the arms is the TEXT, which is the part that was ever doing the work.
 /// `asked` is the **RAW `--timeout`**, deliberately: the notice's job is to connect the number
 /// the operator typed to the ceiling it bought, so it must print their input. It is the one place
 /// the raw flag legitimately appears. Naming it `run_timeout` — as an earlier draft did — read
@@ -3621,7 +3628,7 @@ fn candidate_window_view(
 /// would print the ceiling twice and drop the only fact that makes the notice useful.
 fn budget_notice(ceiling_secs: u64, asked: Option<u64>, b: &BudgetTelemetry) -> Notice {
     match asked {
-        Some(t) => Notice::resolution(format!(
+        Some(t) => Notice::info(format!(
             "magi: per-mage ceiling {ceiling_secs}s derived from --timeout {t}s \
              (operation budget {}s/attempt, max_rotations={})",
             b.operation_budget_secs, b.max_rotations_effective
@@ -3665,7 +3672,7 @@ fn floored_ceiling_notice(b: &BudgetTelemetry) -> Option<Notice> {
         } else {
             ""
         };
-        Notice::resolution(format!(
+        Notice::warn(format!(
             "magi: --timeout is too small for max_rotations={}; the per-mage ceiling was \
              raised to its {}s floor. Raise --timeout to at least {}s{rotations_lever}. The \
              run will start and is likely to hit its own deadline.",
@@ -3678,12 +3685,12 @@ fn floored_ceiling_notice(b: &BudgetTelemetry) -> Option<Notice> {
 
 /// The derived ceiling is large enough that a mistyped `--timeout` is the likelier explanation.
 ///
-/// Warns and **obeys** — there is no upper clamp, which is the requirement. `Resolution` rather
-/// than `Info` for the same reason as the floor notice: `render_notices` caps `Info`, and this
-/// one must not be the line that gets dropped.
+/// Warns and **obeys** — there is no upper clamp, which is the requirement. `WARN` rather than
+/// `INFO` for the same reason as the floor notice: a wait measured in hours is worth
+/// interrupting for BEFORE it is spent, and a line that goes only to the file is read after.
 fn above_sanity_notice(ceiling_secs: u64, b: &BudgetTelemetry) -> Option<Notice> {
     b.ceiling_above_sanity.then(|| {
-        Notice::resolution(format!(
+        Notice::warn(format!(
             "magi: --timeout derives a per-mage ceiling of {ceiling_secs}s (over {}s), giving \
              {}s per attempt. If that was not intended, check --timeout for an extra digit. \
              Using the requested value anyway.",
@@ -4148,7 +4155,7 @@ fn build_magi_orchestrator(
         // direction in this subsystem — it can reject a candidate that was healthy.
         if let Some(probe) = probes.get(&model) {
             if probe.declared_model() != Some(provider.model()) {
-                notices.push(Notice::resolution(format!(
+                notices.push(Notice::warn(format!(
                     "notice: the probe registered for {seat:?} measures `{}` while its provider \
                      serves `{}`. The measurement will be filed under the wrong model; rotation \
                      still runs.",
@@ -4211,7 +4218,7 @@ fn build_magi_orchestrator(
                         None => pool.push(wrapped, lineage),
                     };
                 }
-                Err(cause) => notices.push(Notice::resolution(format!(
+                Err(cause) => notices.push(Notice::warn(format!(
                     // `cause` is a `SeatError`, whose `Transport` payload is `SafeErrorText` —
                     // `build_native_provider::to_seat` redacts before constructing it, so the
                     // type itself is the guarantee and there is nothing to redact again here.
