@@ -194,7 +194,9 @@ pub fn validate_diversity(
             // NOT "or set enforce_diversity to false": this path is only reachable when it
             // already IS false. Telling the operator to do what they have done reads as though
             // the message had not looked at their configuration.
-            notices.push(Notice::resolution(format!(
+            // `warn`: those seats cannot rotate at all, which is a capability the pool was
+            // declared to provide and does not.
+            notices.push(Notice::warn(format!(
                 "notice: the seats {} have no fallback coverage, so they cannot rotate anywhere. \
                  Add a candidate whose lineage no seat holds — that one covers all three — or \
                  declare finer lineage labels by model family.",

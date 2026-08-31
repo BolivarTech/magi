@@ -1118,7 +1118,10 @@ impl MagiConfig {
             // Binding the model through `first()` also retires a `map_or("<unknown>", …)` that
             // `distinct.len() == 1` had made unreachable: a fallback string describing a state
             // that cannot occur reads as though the state can.
-            notices.push(Notice::resolution(format!(
+            // `warn`: the consensus still runs, so nothing fails — it just buys one failure
+            // domain where three were declared, which is the class of degradation nobody
+            // discovers until the shared outage takes all three at once.
+            notices.push(Notice::warn(format!(
                 "notice: all three mages resolve to the same model (`{model}`), so their declared \
                  lineages describe one failure domain rather than three. The consensus still has \
                  three perspectives — those are structural — but a shared outage takes all three \

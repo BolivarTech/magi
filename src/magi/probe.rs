@@ -406,7 +406,12 @@ pub fn derive_input_warn_tokens(trio: &[usize], pool: &[(&str, usize)]) -> (usiz
             .map(|(model, window)| format!("`{model}` ({window} tokens)"))
             .collect::<Vec<_>>()
             .join(", ");
-        notices.push(Notice::resolution(format!(
+        // `info`, and it is the one site of this family that is: the threshold resolved
+        // exactly as the tolerance band says it should, so nothing became unavailable and
+        // nothing runs worse. The notice exists to explain why the operator's small
+        // candidates did not move it — which is diagnosis, not action. Its sibling for the
+        // same candidates, `assumed_window_notices`, has always been `info` for this reason.
+        notices.push(Notice::info(format!(
             "notice: fallback candidates far below the trio's window are NOT lowering the size \
              warning threshold, which stays on the trio base of {base} tokens: {listed}. \
              Replace them with candidates of comparable window if you want the threshold to \
@@ -606,7 +611,9 @@ pub fn effective_strict_guard(
     }
     (
         false,
-        Some(Notice::resolution(
+        // `warn`: a guard the operator declared is not in force. The classification table's
+        // `info` row is for a decision that IS being honoured; this is the opposite of one.
+        Some(Notice::warn(
             "notice: `strict_context_guard = true` was declared but is NOT being applied, \
              because no candidate has a measured window. Applying it would reject every \
              fallback candidate and switch rotation off entirely. It takes effect on its own \
@@ -731,7 +738,9 @@ pub fn missing_model_notices(
         })
         .filter(|model| already_named.insert(model.as_str()))
         .map(|model| {
-            Notice::resolution(format!(
+            // `warn`: the tag is probably not there, and `ollama pull` is something to do
+            // about it before the rotation that needs it.
+            Notice::warn(format!(
                 "`{model}` could not be measured, on an endpoint that measured other models: \
                  if that tag is not there, `{OLLAMA_PULL_COMMAND} {model}` fixes it. A probe can \
                  also fail under load, so this is not proof that the model is absent."
