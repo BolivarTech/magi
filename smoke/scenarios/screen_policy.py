@@ -29,6 +29,17 @@ output could plausibly carry it.
 **R1, reused.** The cheapest invocation the harness makes, already paid for by
 S23, so this scenario adds no backend cost of its own.
 
+**The log search is bound to THIS run's id, and that is correctness rather
+than tidiness.** ``smoke/env/`` is persistent by design, so ``.magi/logs``
+accumulates every run the environment has ever made -- and R1 writes its own
+startup line there on every one of them. A search for the bare marker answers
+"has this environment EVER written it", which is a question a broken build
+passes: on a run where the memory subsystem never attaches, the leftover from
+an earlier run keeps ``in_log`` true, the ``CANNOT_TEST`` branch below is
+skipped, and both assertions report PASS having checked nothing about this
+run. So the matcher requires one line to carry both ``run=<this run's id>``
+(REQ-L63) and the marker, exactly as S9 and S23 do.
+
 **The one thing this cannot promise: that the marker was produced at all.**
 Attaching the memory subsystem depends on the embedder answering, which is a
 backend concern outside this run's control. A build that never produces the
@@ -71,6 +82,11 @@ ASSERTIONS = (
 def a_clean_startup_shows_nothing_on_screen(run):
     """Correlate stderr and the day's log for the memory-count notice.
 
+    The log half is bound to this run's own id, so a marker left behind by an
+    earlier run against the persistent environment cannot answer for one that
+    never wrote it. Without a run id there is nothing to bind to, and both
+    assertions defer rather than judge on a shared directory.
+
     Complexity: ``O(bytes in the log directory)``.
 
     Args:
@@ -88,20 +104,61 @@ def a_clean_startup_shows_nothing_on_screen(run):
 
     on_screen = DIAGNOSTIC_MARKER in run.output.stderr.decode(
         "utf-8", errors="replace")
-    in_log, dir_existed, unreadable = logs.contains(DIAGNOSTIC_MARKER)
+
+    run_id = (logs.id_on_stderr(run.output.stderr)
+              or logs.id_in_envelope(run.output))
+    if run_id is None:
+        for text in ASSERTIONS:
+            yield Finding(text, Outcome.CANNOT_TEST,
+                          "run %s published no run id on stderr or in its JSON "
+                          "envelope, so its own log line cannot be told apart "
+                          "from an earlier run's in the shared log directory"
+                          % RUN_ID, RUN_ID)
+        return
+
+    found, dir_existed, unreadable = logs.scan(_marker_matcher(run_id))
+    in_log = bool(found)
 
     if not on_screen and not in_log and dir_existed and not unreadable:
         directory = logs.log_directory()
         detail = ("the memory diagnostics notice appears on neither stderr "
-                   "nor in any file under %s; this run's memory subsystem "
-                   "never attached, so there was nothing to check on either "
-                   "surface" % directory)
+                  "nor on any line carrying run=%s under %s; this run's "
+                  "memory subsystem never attached, so there was nothing to "
+                  "check on either surface" % (run_id, directory))
         for text in ASSERTIONS:
             yield Finding(text, Outcome.CANNOT_TEST, detail, RUN_ID)
         return
 
     yield _screen_finding(on_screen)
-    yield _log_finding(in_log, dir_existed, unreadable)
+    yield _log_finding(in_log, dir_existed, unreadable, run_id)
+
+
+def _marker_matcher(run_id):
+    """Build a :func:`smoke.logs.scan` matcher bound to one run's own lines.
+
+    Splitting on ``b"\\n"`` is safe because the logging layer escapes every
+    control character out of a rendered event before it is written (REQ-L64
+    stage 3), so one physical line is always exactly one event -- a foreign
+    string can never fold two events together or split one apart.
+
+    Args:
+        run_id: The id to bind the search to.
+
+    Returns:
+        Callable[[bytes], bool | None]: A matcher over one file's raw bytes,
+        returning True for the first line carrying both this run's id and
+        :data:`DIAGNOSTIC_MARKER`, or None when the file has no such line.
+    """
+    id_needle = ("run=%s " % run_id).encode("utf-8")
+    marker = DIAGNOSTIC_MARKER.encode("utf-8")
+
+    def matcher(data):
+        for line in data.split(b"\n"):
+            if id_needle in line and marker in line:
+                return True
+        return None
+
+    return matcher
 
 
 def _screen_finding(on_screen):
@@ -121,14 +178,16 @@ def _screen_finding(on_screen):
     return Finding(ASSERTIONS[0], Outcome.PASS, "", RUN_ID)
 
 
-def _log_finding(in_log, dir_existed, unreadable):
-    """Judge assertion 2 from what :func:`smoke.logs.contains` found.
+def _log_finding(in_log, dir_existed, unreadable, run_id):
+    """Judge assertion 2 from what :func:`smoke.logs.scan` found.
 
     Args:
-        in_log: Whether the marker was found in some file under the log
-            directory.
+        in_log: Whether a line carrying both this run's id and the marker was
+            found under the log directory.
         dir_existed: Whether the log directory existed at all.
         unreadable: Files that could not be opened while searching.
+        run_id: This run's id, named in every failure detail so a reader can
+            see which run was searched for.
 
     Returns:
         Finding: PASS when found; FAIL when the directory is missing or was
@@ -143,9 +202,10 @@ def _log_finding(in_log, dir_existed, unreadable):
                        "this run" % directory, RUN_ID)
     if unreadable:
         return Finding(ASSERTIONS[1], Outcome.CANNOT_TEST,
-                       "the marker was not found, but these files could not "
-                       "be read: %s" % "; ".join(unreadable), RUN_ID)
+                       "no line carrying run=%s and the marker was found, but "
+                       "these files could not be read: %s"
+                       % (run_id, "; ".join(unreadable)), RUN_ID)
     return Finding(ASSERTIONS[1], Outcome.FAIL,
-                   "the memory diagnostics notice appears in no file under "
-                   "%s; either nothing was written or it was not flushed "
-                   "before exit" % directory, RUN_ID)
+                   "no line under %s carries both run=%s and the memory "
+                   "diagnostics marker; either nothing was written or it was "
+                   "not flushed before exit" % (directory, run_id), RUN_ID)
