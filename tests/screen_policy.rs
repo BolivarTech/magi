@@ -312,3 +312,54 @@ fn the_log_path_in_a_screen_notice_can_be_pasted_as_it_is_shown() {
          shown: {shown}"
     );
 }
+
+#[test]
+fn a_screen_notice_is_capped_like_every_other_screen_line() {
+    // The health notice was the ONE screen entry that skipped
+    // `TUI_PAYLOAD_MAX_BYTES`, and its variable part is not only the operator's
+    // `log_dir`: an undeclared cause falls through to the "internal error"
+    // branch, which quotes the cause key back -- and a cause key is runtime
+    // text the EMITTER chooses, with nothing bounding its length.
+    //
+    // The filler carries SPACES, and that is the fixture rather than styling:
+    // a long unbroken run is what the auditor's generic-secret pass treats as
+    // a secret. The first draft used `"cause-part-"` and the whole payload
+    // came back as `***` -- a 178-byte notice that passed the cap assertion
+    // while proving nothing. The lower bound below is what caught it.
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let (handle, screen) = start(dir.path(), "info");
+
+    let huge = "cause part ".repeat(magi_rs::logging::magi_layer::TUI_PAYLOAD_MAX_BYTES / 4);
+    tracing::event!(
+        target: "magi_rs::memory",
+        tracing::Level::WARN,
+        cause.subsystem = "nonesuch",
+        cause.name = huge.as_str(),
+        "a subsystem with no declared message table row"
+    );
+    drop(handle);
+
+    let notice = screen
+        .lines
+        .lock()
+        .map(|l| l.clone())
+        .unwrap_or_else(|p| p.into_inner().clone())
+        .into_iter()
+        .find(|l| l.starts_with("internal error: no screen message is declared"))
+        .expect("the undeclared cause must still produce a notice");
+
+    assert!(
+        notice.len() > TRUNCATION_MARKER_SLACK,
+        "the fixture produced a trivially short notice, so the cap is untested: {}",
+        notice.len()
+    );
+    assert!(
+        notice.len()
+            <= magi_rs::logging::magi_layer::TUI_PAYLOAD_MAX_BYTES + TRUNCATION_MARKER_SLACK,
+        "a screen notice escaped the payload cap at {} bytes",
+        notice.len()
+    );
+}
+
+/// Room for the marker `truncate_for_display` appends past the cap.
+const TRUNCATION_MARKER_SLACK: usize = 128;

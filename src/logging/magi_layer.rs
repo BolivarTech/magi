@@ -327,7 +327,11 @@ impl HealthReporter {
         // its own: this is the layer talking about itself, and the redaction
         // that matters has already happened inside `audit`.
         let (line, _alarm) = self.auditor.audit(&text, HEALTH_TARGET, None, text.len());
-        self.sink.deliver(&line.map_line(escape_for_screen));
+        self.sink.deliver(
+            &line
+                .map_line(escape_for_screen)
+                .truncate_for_display(TUI_PAYLOAD_MAX_BYTES),
+        );
     }
 
     /// The file today's events are being written to.
