@@ -255,7 +255,11 @@ impl HealthTracker {
 /// Fixed rather than inherited from the event that caused it: the alarm path
 /// carries a target so an operator knows where to go look, and a transition's
 /// origin is this module, not the subsystem it is reporting on.
-pub const HEALTH_TARGET: &str = "magi_rs::logging::health";
+///
+/// `pub(crate)` because its only consumers are the layer and `warn_if_
+/// recovery_detection_is_off`, both inside this crate — a public constant
+/// nothing outside can use is surface without a consumer (G2).
+pub(crate) const HEALTH_TARGET: &str = "magi_rs::logging::health";
 
 /// The subsystem half of the causes the message table below declares.
 const SUBSYSTEM_EMBEDDER: &str = "embedder";
