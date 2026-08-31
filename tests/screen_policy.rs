@@ -275,3 +275,40 @@ fn one_tick_shows_every_transition_whose_window_has_elapsed() {
          of two transitions that were both due: {shown}"
     );
 }
+
+#[test]
+fn the_log_path_in_a_screen_notice_can_be_pasted_as_it_is_shown() {
+    // REQ-L23's third part is "where to read more", which is only useful if
+    // the user can open what they are shown. The file's escaper doubles the
+    // backslash so the file stays parseable, and applying it here turned a
+    // Windows path into `C:\Users\...\magi-<date>.log` -- a string that
+    // opens nothing.
+    //
+    // The DIRECTORY is what discriminates: the file name alone has no
+    // separator in it, so asserting on the file name passes either way.
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let (handle, screen) = start(dir.path(), "info");
+
+    tracing::event!(
+        target: "magi_rs::memory",
+        tracing::Level::WARN,
+        cause.subsystem = "vault",
+        cause.name = "locked",
+        "the vault is locked"
+    );
+    drop(handle);
+
+    let shown = screen.joined();
+    let expected = dir.path().join(todays_log_file_name());
+    let expected = expected.display().to_string();
+    assert!(
+        shown.contains("vault: locked"),
+        "the fixture produced no screen notice: {shown}"
+    );
+    assert!(
+        shown.contains(&expected),
+        "the notice does not carry the path as the filesystem spells it.\n\
+         expected to find: {expected}\n\
+         shown: {shown}"
+    );
+}

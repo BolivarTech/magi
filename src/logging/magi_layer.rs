@@ -38,7 +38,7 @@ use tracing_subscriber::Layer;
 use crate::logging::appender::{DailyAppender, Priority, Submitted};
 use crate::logging::auditor::{Audited, Auditor, CauseKey, Queued};
 use crate::logging::health::{render_transition, HealthTracker, Transition, HEALTH_TARGET};
-use crate::logging::render::{escape_for_line, render_event};
+use crate::logging::render::{escape_for_line, escape_for_screen, render_event};
 
 /// Field name an emitter uses to declare the subsystem half of a [`CauseKey`]
 /// (task 3.3's convention: `cause.subsystem = "…", cause.name = "…"`).
@@ -327,7 +327,7 @@ impl HealthReporter {
         // its own: this is the layer talking about itself, and the redaction
         // that matters has already happened inside `audit`.
         let (line, _alarm) = self.auditor.audit(&text, HEALTH_TARGET, None, text.len());
-        self.sink.deliver(&line.map_line(escape_for_line));
+        self.sink.deliver(&line.map_line(escape_for_screen));
     }
 
     /// The file today's events are being written to.

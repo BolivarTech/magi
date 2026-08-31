@@ -185,6 +185,57 @@ pub fn escape_for_line(rendered: &str) -> String {
     out
 }
 
+/// Escapes what would corrupt a terminal, and **leaves the backslash alone**.
+///
+/// # Parameters
+///
+/// * `rendered` — the audited text of a screen notice.
+///
+/// # Returns
+///
+/// The same text with the three common control characters written as `\n`,
+/// `\r`, `\t` and every other control character as `\u{h}` in lowercase hex.
+/// Printable characters, the backslash included, pass through untouched.
+///
+/// # Why the screen needs its own escaper
+///
+/// [`escape_for_line`] doubles the backslash so a reader — or a parser — can
+/// tell an escape it introduced from one that was already in the text. The
+/// file needs that round trip because the file is grepped and parsed. The
+/// screen is read by a person, and there the doubling is pure damage:
+/// REQ-L23's third part is a path the user is meant to open, and a Windows
+/// path arrives with every separator doubled, which cannot be pasted anywhere.
+///
+/// The control characters still go, for the same reason they go in the file: a
+/// newline or an ANSI sequence reaching the TUI writes over the frame, and a
+/// screen notice is exactly the text an operator's own `log_dir` can put there.
+///
+/// # The cost, stated
+///
+/// The output is **ambiguous** — a literal backslash-n in a path renders the
+/// same as an escaped newline. Acceptable here and not in the file, because
+/// nothing parses the screen.
+///
+/// # Complexity
+///
+/// `O(n)` over the input.
+#[must_use]
+pub(crate) fn escape_for_screen(rendered: &str) -> String {
+    let mut out = String::with_capacity(rendered.len());
+    for c in rendered.chars() {
+        match c {
+            NEWLINE => out.push_str(ESCAPED_NEWLINE),
+            CARRIAGE_RETURN => out.push_str(ESCAPED_CARRIAGE_RETURN),
+            TAB => out.push_str(ESCAPED_TAB),
+            c if c.is_control() => {
+                let _ = write!(out, "{ESCAPE_UNICODE_OPEN}{:x}}}", c as u32);
+            }
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 /// Where a rendered line's header ends, and its message begins.
 ///
 /// # Parameters
