@@ -3861,7 +3861,7 @@ fn build_magi_orchestrator(
     //
     // The old argument was sound and still is: the only notice `build_native_provider` emits is
     // the base_url normalization one, which the seat loop already sent over the SAME `base_url`,
-    // so `render_notices` would dedupe it anyway and building it twice is waste. What it is not
+    // so `emit_notices` would dedupe it anyway and building it twice is waste. What it is not
     // is durable — it is a fact about a function in another part of this file, and the cost of
     // it turning false is a notice that never reaches the user, which is the failure mode this
     // project keeps paying for.
@@ -4205,7 +4205,7 @@ fn build_magi_orchestrator(
             // function discards its sink with a comment explaining that the only notice
             // `build_native_provider` emits is the base_url normalization one, already sent by
             // the seat loop over the SAME base — true today, and a fact about a function
-            // elsewhere. `render_notices` dedupes, so merging costs a duplicate that never
+            // elsewhere. `emit_notices` dedupes, so merging costs a duplicate that never
             // reaches the screen and buys independence from that fact staying true.
             notices.append(&mut sink);
         }
