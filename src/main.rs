@@ -7736,11 +7736,16 @@ mod tests {
     /// being true without anything saying so.
     ///
     /// Asserted on byte offsets rather than on a regex, because the property IS the order.
-    /// Both needles are single-line, so no `\r` handling is needed — see `config.rs`'s guard
-    /// for the CRLF trap that a multi-line needle walks into.
+    ///
+    /// The `\r` comes out for the same reason as every other source-reading guard here:
+    /// `include_str!` returns the file's bytes untouched while rustc normalises CRLF inside
+    /// a source literal, and rustfmt writes CRLF on Windows and LF elsewhere, so a needle
+    /// carrying a newline would match on one machine and not the next. Both needles below
+    /// are single-line, so today the strip changes nothing — it is here so that adding a
+    /// multi-line needle later cannot quietly reintroduce the trap.
     #[test]
     fn the_startup_notices_are_emitted_before_the_terminal_is_taken_over() {
-        let source = include_str!("main.rs");
+        let source = include_str!("main.rs").replace('\r', "");
         let emitted = source
             .find("emit_notices(startup_notices);")
             .expect("run() must emit the startup notices");
