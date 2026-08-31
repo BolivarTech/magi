@@ -102,9 +102,26 @@ impl Notice {
 ///
 /// `O(n log n)` for the sort plus `O(n)` for the dedup, over the notices of ONE startup.
 pub fn emit_notices(notices: Vec<Notice>) {
+    emit_notices_into(notices, &mut std::io::stderr().lock());
+}
+
+/// [`emit_notices`], with the last-resort mouth supplied.
+///
+/// # Parameters
+///
+/// * `notices` — everything a startup collected.
+/// * `fallback` — where a notice goes when no subscriber was ever installed. Production passes
+///   `stderr`; a test passes a buffer, which is what makes the no-layer branch observable
+///   without capturing a process's own file descriptors.
+///
+/// # Complexity
+///
+/// [`emit_notices`]'s, plus `O(n)` writes on the fallback path.
+pub(crate) fn emit_notices_into(notices: Vec<Notice>, fallback: &mut dyn std::io::Write) {
     for notice in ordered_for_emission(notices) {
         announce(&notice);
     }
+    let _ = fallback;
 }
 
 /// Puts the notices in the order they are announced in, with the duplicates gone.
@@ -200,6 +217,7 @@ pub fn error_for_display(prefix: &str, err: &str, cap: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
 
     /// P-L01: an error that already opens with the caller's lead-in is not
     /// prefixed with it twice.
@@ -241,7 +259,52 @@ mod tests {
         let shown = error_for_display("memory", "disk full", ERROR_DISPLAY_CAP);
         assert_eq!(shown, "memory: disk full");
     }
-    use super::*;
+
+    /// C1: a notice must not vanish when there is no layer to route it.
+    ///
+    /// `init_logging` is guarded on a discovered `.magi/` workspace on both surfaces, and
+    /// `emit_notices` is not. So a run started in a directory with no workspace has no
+    /// subscriber at all, and every notice — `WARN` and `ERROR` included — used to be a
+    /// no-op. What that cost the user was the one message that explains the situation they
+    /// are in: "no .magi/ state directory found — run `magi init`", followed by a session
+    /// that quietly saves nothing.
+    ///
+    /// The `INFO` line is asserted ABSENT rather than present, and that is the half worth
+    /// reading twice: with no layer there is no file either, so a fallback that printed
+    /// everything would put the whole diagnostic list on the screen — defeating SC-L14 in
+    /// exactly the production case this fixes, while SC-L14's own test stayed green.
+    #[test]
+    fn a_notice_still_reaches_the_user_when_no_layer_was_installed() {
+        assert_eq!(
+            tracing::level_filters::LevelFilter::current(),
+            tracing::level_filters::LevelFilter::OFF,
+            "this test is about the NO-subscriber path, and something installed one"
+        );
+
+        let mut out = Vec::new();
+        emit_notices_into(
+            vec![
+                Notice::info("memory: 0 active, 0 archived"),
+                Notice::warn("no .magi/ state directory found"),
+                Notice::error("the trio is not buildable"),
+            ],
+            &mut out,
+        );
+
+        let shown = String::from_utf8(out).expect("the fallback writes UTF-8");
+        assert!(
+            shown.contains("no .magi/ state directory found"),
+            "the warning that explains the run vanished: {shown:?}"
+        );
+        assert!(
+            shown.contains("the trio is not buildable"),
+            "an error vanished: {shown:?}"
+        );
+        assert!(
+            !shown.contains("memory: 0 active"),
+            "a diagnostic reached the screen: {shown:?}"
+        );
+    }
 
     /// The actionable items first, regardless of the order in which they were discovered.
     #[test]

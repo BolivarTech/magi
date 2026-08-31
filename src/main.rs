@@ -7521,6 +7521,35 @@ mod tests {
         });
     }
 
+    /// The no-layer fallback writes to stderr, so it must run BEFORE the terminal is taken
+    /// over — nothing may reach stderr while ratatui holds the alternate screen (REQ-L39).
+    ///
+    /// `TuiNoticeSink` separates three cases rather than two, and this is the third one made
+    /// unreachable instead of handled: with a subscriber installed the layer routes and never
+    /// touches stderr; with none and no TUI, stderr is correct; with none and the TUI already
+    /// on the alternate screen, printing would corrupt the frame. Only the call ORDER in
+    /// `run()` rules that case out, and an ordering is exactly the kind of fact that stops
+    /// being true without anything saying so.
+    ///
+    /// Asserted on byte offsets rather than on a regex, because the property IS the order.
+    /// Both needles are single-line, so no `\r` handling is needed — see `config.rs`'s guard
+    /// for the CRLF trap that a multi-line needle walks into.
+    #[test]
+    fn the_startup_notices_are_emitted_before_the_terminal_is_taken_over() {
+        let source = include_str!("main.rs");
+        let emitted = source
+            .find("emit_notices(startup_notices);")
+            .expect("run() must emit the startup notices");
+        let tui = source
+            .find("crate::tui::run_tui_ext(")
+            .expect("run() must hand off to the TUI");
+        assert!(
+            emitted < tui,
+            "the notices are emitted after the TUI takes the terminal, so the no-layer \
+             fallback would write over the alternate screen"
+        );
+    }
+
     /// **Row 1 of task 3.1's classification table** — a capability stopped being available
     /// and the user will notice the effect, so it is actionable and belongs on the screen.
     ///
