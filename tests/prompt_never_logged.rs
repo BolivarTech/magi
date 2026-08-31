@@ -530,14 +530,41 @@ fn emit_wrapping_macros() -> Vec<String> {
         .flat_map(|(_, text)| macro_definitions(&tighten_paths(&without_comments(&text))))
         .collect();
 
+    resolve_wrappers(&bodies)
+}
+
+/// The transitive closure over *definitions*, as name and body pairs.
+///
+/// Split out of [`emit_wrapping_macros`] so a test can reach it. The walk it
+/// performs is the whole of the nested-wrapper fix, and until this split the
+/// only thing exercising it was a mutation matrix that lives outside the
+/// repository -- so nothing CI runs would have noticed the transitive term
+/// being deleted. A reviewer asked whether the matrix was CI-executed; it is
+/// not, and that made the fix's own guarantee unpinned.
+///
+/// # Parameters
+///
+/// * `definitions` — each macro's name (no bang) and body.
+///
+/// # Returns
+///
+/// Every name that reaches an emit macro, directly or through another wrapper,
+/// each with its bang.
+///
+/// # Complexity
+///
+/// `O(n^2)` in the number of definitions, which is a few dozen in this tree.
+fn resolve_wrappers(definitions: &[(String, String)]) -> Vec<String> {
     let mut names: Vec<String> = Vec::new();
     loop {
         let before = names.len();
-        for (name, body) in &bodies {
+        for (name, body) in definitions {
             let anchor = format!("{name}!");
             if names.contains(&anchor) {
                 continue;
             }
+            // The second half is the transitive term: a body that names an
+            // already-collected wrapper reaches an emit macro through it.
             let reaches_emit = EMIT_MACROS
                 .iter()
                 .any(|m| body.contains(&format!("tracing::{m}")))
@@ -550,6 +577,41 @@ fn emit_wrapping_macros() -> Vec<String> {
             return names;
         }
     }
+}
+
+/// The wrapper walk resolves a chain, not just its first link.
+///
+/// **This is the fix's only CI-visible pin.** Deleting the transitive term
+/// from [`resolve_wrappers`] leaves `outer` and `outermost` uncollected and
+/// this test red; before the split there was nothing in the repository that
+/// would have said so.
+#[test]
+fn a_wrapper_chain_resolves_to_its_end() {
+    let definitions = vec![
+        (
+            "inner".to_string(),
+            "{ tracing::info!(target: \"t\", key = $v) }".to_string(),
+        ),
+        ("outer".to_string(), "{ inner!($v) }".to_string()),
+        ("outermost".to_string(), "{ outer!($v) }".to_string()),
+        (
+            "unrelated".to_string(),
+            "{ println!(\"{}\", $v) }".to_string(),
+        ),
+    ];
+
+    let mut found = resolve_wrappers(&definitions);
+    found.sort();
+
+    assert_eq!(
+        found,
+        vec![
+            "inner!".to_string(),
+            "outer!".to_string(),
+            "outermost!".to_string()
+        ],
+        "the chain must resolve to its end, and a macro that reaches no emit macro must stay out"
+    );
 }
 
 /// Every `macro_rules!` definition in *text*, as name and body.
@@ -571,6 +633,12 @@ fn emit_wrapping_macros() -> Vec<String> {
 ///
 /// `O(n)` in the text's length.
 fn macro_definitions(text: &str) -> Vec<(String, String)> {
+    // The `get`/`find` guards below cannot fire today: the offsets come from
+    // `match_indices` and `find`, which return char boundaries. They are kept
+    // rather than replaced with indexing because indexing PANICS on the day
+    // that stops being true, and a scanner that aborts the test binary is a
+    // worse failure than one that skips a definition. Two reviewers flagged
+    // them as dead; that is the answer, recorded rather than argued each round.
     let mut out = Vec::new();
     for (at, _) in text.match_indices("macro_rules!") {
         let Some(rest) = text.get(at + "macro_rules!".len()..) else {
@@ -761,6 +829,12 @@ fn impl_precedes(text: &str, at: usize) -> bool {
 /// `tracing::info` — names nothing this guard recognises. Widening the filter
 /// to every crate would report items it cannot judge; the boundary is recorded
 /// instead.
+///
+/// **Declared limit: a procedural macro defeats this.** A proc macro's
+/// expansion lives in another crate and its body is not text in this tree, so
+/// no walk over `src/` can see that it reaches an emit macro. The tree defines
+/// none; the boundary is recorded because adding one would open the channel
+/// silently.
 ///
 /// **Declared limit: a renamed import of a wrapper defeats this.** A local
 /// wrapper macro reached under another name — `use crate::shout as yell;` —
