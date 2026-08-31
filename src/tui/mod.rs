@@ -562,14 +562,24 @@ const STATUS_CONSULTING_THE_TRIO: &str = "consulting the trio…";
 /// **Cloning shares one row, and that is the point.** The task that starts the
 /// operation and the task that draws the frame are different tasks: the event
 /// loop holds one handle and [`App`] holds another, both naming the same line.
-/// `set` still takes `&mut self` because ONE handle must not open two
-/// overlapping guards — that is what the exclusive borrow expresses — while the
-/// shared cell is only how the renderer gets to see the result.
+/// The shared cell is how the renderer gets to see what the other task set.
+///
+/// **Two concurrent setters are possible and nothing here prevents them.** The
+/// state is interior-mutable, so `set` takes `&self`: an exclusive borrow would
+/// exclude per HANDLE and not per row, promising a guarantee the type cannot
+/// keep. What actually happens with two overlapping `set` calls is that the
+/// later one overwrites the line, and the first guard to drop collapses the row
+/// while the other operation is still running — one row, one line, last writer
+/// wins. It is pinned by
+/// `test_two_handles_on_one_status_row_do_not_exclude_each_other`. There is one
+/// setter today; whoever adds the second — R-L15 names a startup probe as the
+/// other candidate — has to decide the policy rather than assume the borrow
+/// checker already did.
 ///
 /// # Example
 ///
 /// ```ignore
-/// let mut row = StatusRow::new();
+/// let row = StatusRow::new();
 /// {
 ///     let _showing = row.set("consulting the trio…");
 ///     // …the long operation runs here; the row is one line tall…
@@ -602,10 +612,17 @@ impl StatusRow {
     /// The guard whose `Drop` clears the row — on success, on failure, on
     /// cancellation and on a panic alike (REQ-L27).
     ///
+    /// # Why `&self`
+    ///
+    /// The row is interior-mutable because two tasks share it, so `&mut self`
+    /// would exclude per handle rather than per row and promise a guarantee
+    /// this type cannot keep. See [`StatusRow`] for what two overlapping setters
+    /// actually do.
+    ///
     /// # Complexity
     ///
     /// `O(1)`.
-    pub fn set(&mut self, text: &'static str) -> StatusGuard<'_> {
+    pub fn set(&self, text: &'static str) -> StatusGuard<'_> {
         *self.cell() = Some(text);
         StatusGuard { row: self }
     }
@@ -650,7 +667,7 @@ impl StatusRow {
 /// is added last. Precedent in this repository: `AbortOnDrop` in `src/task.rs`.
 pub struct StatusGuard<'a> {
     /// The row this guard is holding open.
-    row: &'a mut StatusRow,
+    row: &'a StatusRow,
 }
 
 impl Drop for StatusGuard<'_> {
@@ -1487,7 +1504,7 @@ pub async fn run_tui_ext(
     // the event loop below sets it when it starts a long operation, and `App`
     // reads it on every frame. Two handles, one row (see `StatusRow`).
     let status_row = StatusRow::new();
-    let mut status_row_for_loop = status_row.clone();
+    let status_row_for_loop = status_row.clone();
 
     // The handle is kept and joined (via `join_event_loop_then_drain`) before the gate
     // telemetry is drained below, instead of being dropped here — a detached spawn would let
@@ -3792,7 +3809,7 @@ mod tests {
         // REQ-L26: the row is not a blank line kept in reserve — while there is
         // nothing to say it takes no row at all, which is why the layout can
         // afford to carry it on every frame.
-        let mut row = StatusRow::new();
+        let row = StatusRow::new();
         assert_eq!(row.height(), 0, "an idle row must occupy no line");
         let observer = row.clone();
         {
@@ -3811,7 +3828,7 @@ mod tests {
         // REQ-L27: success is the easy branch. A panic is the one an explicit
         // clear at each exit point always forgets, and a row left behind by it
         // says an operation is running for the rest of the session.
-        let mut row = StatusRow::new();
+        let row = StatusRow::new();
         let observer = row.clone();
         let was_shown = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let flag = Arc::clone(&was_shown);
@@ -3850,8 +3867,8 @@ mod tests {
         /// yet, and a constant added for a test alone is API surface with no
         /// consumer.
         const OTHER_OPERATION: &str = "probing model windows…";
-        let mut first = StatusRow::new();
-        let mut second = first.clone();
+        let first = StatusRow::new();
+        let second = first.clone();
         let observer = first.clone();
         let holding_first = first.set(STATUS_CONSULTING_THE_TRIO);
         let holding_second = second.set(OTHER_OPERATION);
@@ -3877,7 +3894,7 @@ mod tests {
         // that navigate the transcript are not modified. The positive half is
         // what keeps this honest — without it the test passes against a row
         // that never renders anywhere.
-        let mut row = StatusRow::new();
+        let row = StatusRow::new();
         let observer = row.clone();
         let _showing = row.set(STATUS_CONSULTING_THE_TRIO);
         assert!(
