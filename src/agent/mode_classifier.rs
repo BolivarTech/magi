@@ -146,7 +146,7 @@ impl magi_rs::logging::NoticeDelivery for ScreenDelivery {
     ///
     /// `O(1)` plus whatever the sink's own delivery costs.
     fn deliver(&self, line: &Audited) {
-        let _ = (&self.sink, line);
+        self.sink.emit(line);
     }
 }
 
