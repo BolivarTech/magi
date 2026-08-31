@@ -111,50 +111,53 @@ impl Notice {
 ///
 /// `O(n log n)` for the sort plus `O(n)` for the dedup, over the notices of ONE startup.
 pub fn emit_notices(notices: Vec<Notice>) {
-    let _ = notices;
+    for notice in ordered_for_emission(notices) {
+        announce(&notice);
+    }
 }
 
-/// How many `INFO`s survive the [`render_notices`] cap.
+/// Puts the notices in the order they are announced in, with the duplicates gone.
 ///
-/// **Transitional, removed by this task** (REQ-L20): with `INFO` off the screen there is no
-/// noise left for a cap to bound. It survives only until the two call sites of
-/// [`render_notices`] move onto [`emit_notices`].
-pub const NOTICE_MAX_INFO: usize = 5;
-
-/// Sorts by level, deduplicates by exact text, and trims the `INFO`s past the cap.
-///
-/// **Transitional, removed by this task** (REQ-L20/D-L12) — see [`emit_notices`], which is what
-/// replaces it.
+/// Split from [`emit_notices`] so the decision — order and dedup — stays a pure function a
+/// test can read, and only the `tracing` call needs a subscriber. It is the same division the
+/// rest of the logging subsystem is built on.
 ///
 /// # Complexity
 ///
 /// `O(n log n)` for the sort plus `O(n)` for the dedup.
-pub fn render_notices(notices: Vec<Notice>) -> Vec<String> {
+fn ordered_for_emission(notices: Vec<Notice>) -> Vec<Notice> {
     let mut sorted = notices;
+    // `tracing::Level` orders ERROR < WARN < INFO, and `sort_by_key` is stable, so this is
+    // "most severe first, discovery order within a level".
     sorted.sort_by_key(|n| n.level);
 
     let mut seen_text = HashSet::with_capacity(sorted.len());
-    let deduped = sorted
+    sorted
         .into_iter()
-        .filter(|n| seen_text.insert(n.text.clone()));
+        .filter(|n| seen_text.insert(n.text.clone()))
+        .collect()
+}
 
-    let mut info_seen = 0usize;
-    let mut dropped = 0usize;
-    let mut out = Vec::new();
-    for n in deduped {
-        if n.level == tracing::Level::INFO {
-            info_seen += 1;
-            if info_seen > NOTICE_MAX_INFO {
-                dropped += 1;
-                continue;
-            }
-        }
-        out.push(n.text);
+/// Emits one notice at its own level.
+///
+/// # Why a chain of comparisons and not a `match`
+///
+/// `tracing::Level`'s constants are associated constants of a struct, which cannot appear in a
+/// pattern. The levels are also compile-time literals in the macro rather than a value it
+/// accepts, so the three arms have to be written out.
+///
+/// # Complexity
+///
+/// `O(n)` over the text.
+fn announce(notice: &Notice) {
+    let text = notice.text.as_str();
+    if notice.level == tracing::Level::ERROR {
+        tracing::event!(target: NOTICE_TARGET, tracing::Level::ERROR, "{text}");
+    } else if notice.level == tracing::Level::WARN {
+        tracing::event!(target: NOTICE_TARGET, tracing::Level::WARN, "{text}");
+    } else {
+        tracing::event!(target: NOTICE_TARGET, tracing::Level::INFO, "{text}");
     }
-    if dropped > 0 {
-        out.push(format!("… {dropped} more diagnostic notice(s) omitted"));
-    }
-    out
 }
 
 /// How much of an error message survives for display.
@@ -252,44 +255,38 @@ mod tests {
     /// The actionable items first, regardless of the order in which they were discovered.
     #[test]
     fn notices_are_ordered_by_level_not_by_discovery() {
-        let out = render_notices(vec![
+        let out = ordered_for_emission(vec![
             Notice::info("measured window: 128k"),
             Notice::error("the trio is not buildable: missing OPENAI_API_KEY"),
-            Notice::resolution("`[embedding].base_url` inherited the root"),
+            Notice::warn("the vault could not be opened"),
         ]);
         assert!(
-            out[0].contains("not buildable"),
+            out[0].text.contains("not buildable"),
             "the one demanding action goes first"
         );
-        assert!(out[1].contains("inherited"));
-        assert!(out[2].contains("measured window"));
+        assert!(out[1].text.contains("vault"));
+        assert!(out[2].text.contains("measured window"));
     }
 
-    /// The cap trims NOISE, never signals.
+    /// How many notices a run can pile up before anyone would have thought about a cap.
+    const MORE_THAN_ANYONE_READS: usize = 20;
+
+    /// REQ-L20/D-L12: the cap is gone, so nothing is trimmed and there is no line saying
+    /// anything was.
+    ///
+    /// A cap is a count standing in for a policy, and it produced the worse of both outcomes:
+    /// the reader still got five lines of noise, and the rest was destroyed rather than filed.
+    /// With `INFO` off the screen there is nothing left for it to protect anyone from.
     #[test]
-    fn the_cap_truncates_info_only_and_says_how_many_it_dropped() {
-        let mut v: Vec<Notice> = (0..NOTICE_MAX_INFO + 3)
+    fn every_notice_survives_now_that_the_cap_is_gone() {
+        let v: Vec<Notice> = (0..MORE_THAN_ANYONE_READS)
             .map(|i| Notice::info(format!("d{i}")))
             .collect();
-        v.push(Notice::error("b1"));
-        v.push(Notice::resolution("r1"));
-
-        let out = render_notices(v);
+        let out = ordered_for_emission(v);
+        assert_eq!(out.len(), MORE_THAN_ANYONE_READS, "nothing may be trimmed");
         assert!(
-            out.iter().any(|n| n.contains("b1")),
-            "Blocking is NEVER trimmed"
-        );
-        assert!(
-            out.iter().any(|n| n.contains("r1")),
-            "Resolution is not trimmed either"
-        );
-        assert_eq!(
-            out.iter().filter(|n| n.starts_with('d')).count(),
-            NOTICE_MAX_INFO
-        );
-        assert!(
-            out.last().unwrap().contains('3'),
-            "says how many it dropped"
+            !out.iter().any(|n| n.text.contains("omitted")),
+            "the truncation line must not exist at all: {out:?}"
         );
     }
 
@@ -297,72 +294,33 @@ mod tests {
     /// the `/v1` normalization.
     #[test]
     fn identical_notices_are_emitted_once() {
-        let n = "notice: `base_url` de Ollama sin sufijo `/v1`";
-        let out = render_notices(vec![
-            Notice::resolution(n),
-            Notice::resolution(n),
-            Notice::resolution(n),
-        ]);
+        let n = "notice: `base_url` had no `/v1` suffix";
+        let out = ordered_for_emission(vec![Notice::info(n), Notice::info(n), Notice::info(n)]);
         assert_eq!(out.len(), 1, "three seats, one notice");
     }
 
-    /// Empty edge case (B13): nothing to sort, deduplicate, or trim — never panics, and with no
-    /// `Info` to trim there is no "omitted" line.
+    /// Empty edge case (B13): nothing to sort or deduplicate, and it never panics.
     #[test]
-    fn empty_input_renders_to_an_empty_list() {
-        let out = render_notices(vec![]);
-        assert!(out.is_empty());
+    fn an_empty_list_emits_nothing() {
+        assert!(ordered_for_emission(vec![]).is_empty());
     }
 
-    /// Exact cap boundary: `info_seen > NOTICE_MAX_INFO` is strict, so exactly
-    /// `NOTICE_MAX_INFO` `Info` notices do not trigger ANY trimming. Only the above-the-cap
-    /// case was covered before this test; the off-by-one at the boundary is the classic defect
-    /// of this kind of guard.
-    #[test]
-    fn exactly_the_cap_worth_of_info_drops_nothing() {
-        let v: Vec<Notice> = (0..NOTICE_MAX_INFO)
-            .map(|i| Notice::info(format!("d{i}")))
-            .collect();
-        let out = render_notices(v);
-        assert_eq!(
-            out.len(),
-            NOTICE_MAX_INFO,
-            "none is trimmed at the exact boundary"
-        );
-        assert!(
-            !out.iter().any(|n| n.contains("omitted")),
-            "with no trimming there is no omitted line: {out:?}"
-        );
-    }
-
-    /// The signal-vs-noise property the module exists to guarantee: same text, different tiers
-    /// — the more severe one (`Blocking`) survives, not the `Info`.
+    /// The signal-vs-noise property the module exists to guarantee: same text at two levels —
+    /// the more severe one survives, so the text still reaches the screen.
     ///
-    /// With IDENTICAL text, which one survived cannot be read directly from the output `String`
-    /// (they are the same string). It is tested by its EFFECT on the cap: exactly
-    /// `NOTICE_MAX_INFO` distinct filler `Info`s are added, which on their own do not trigger
-    /// any trimming (see the exact boundary test above). If the duplicate survived as `Info`
-    /// instead of `Blocking`, it would add one more `Info` and WOULD trigger the trim. That it
-    /// does not trigger it, and that the duplicate text is still present, is the proof that the
-    /// `Blocking` survived — which never counts against the cap.
+    /// It is the dedup's ORDER that makes this true, and the reason the sort comes first: with
+    /// dedup before the sort, whichever copy was discovered earlier would win, and the level a
+    /// notice ends up at would depend on the order in which two unrelated subsystems happened
+    /// to run.
     #[test]
     fn cross_level_duplicate_text_keeps_the_more_severe_level() {
         let dup_text = "the trio is not buildable: missing OPENAI_API_KEY";
-        let mut v: Vec<Notice> = (0..NOTICE_MAX_INFO)
-            .map(|i| Notice::info(format!("filler{i}")))
-            .collect();
-        v.push(Notice::info(dup_text));
-        v.push(Notice::error(dup_text));
-
-        let out = render_notices(v);
-        assert!(
-            out.iter().any(|n| n.contains(dup_text)),
-            "the duplicate must survive (under the Blocking tier): {out:?}"
-        );
-        assert!(
-            !out.iter().any(|n| n.contains("omitted")),
-            "if the Info survived, it would exceed the cap and something would get \
-             trimmed: {out:?}"
+        let out = ordered_for_emission(vec![Notice::info(dup_text), Notice::error(dup_text)]);
+        assert_eq!(out.len(), 1);
+        assert_eq!(
+            out[0].level,
+            tracing::Level::ERROR,
+            "the copy that reaches the screen must be the one that survived"
         );
     }
 }

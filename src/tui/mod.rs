@@ -1267,7 +1267,6 @@ fn tui_agent_run_config(autonomous: &crate::AutonomousRunConfig) -> AgentRunConf
 /// - `autonomous` — the operator's autonomous-consult configuration (`[magi.complexity]`, `[magi].default_mode`, `[magi].untrusted_content`, the gate telemetry sink). It serves the chat loop's SELF-ROUTED consults, which is the other surface entirely — hence its own parameter rather than more fields on `magi_runtime`.
 pub async fn run_tui_ext(
     agent: Agent,
-    startup_notices: Vec<String>,
     consult_wiring: TuiConsultWiring,
     secret_store: Option<SharedSecretStore>,
     magi_runtime: TuiMagiRuntimeConfig,
@@ -1322,10 +1321,10 @@ pub async fn run_tui_ext(
     // the same rule `StreamPiece::Notice` enforces for every other operational notice.
     classifier_notices.attach(response_tx.clone());
 
-    for notice in startup_notices {
-        let _ = response_tx.send(AgentResponse::Info(notice)).await;
-    }
-
+    // The startup notices no longer arrive here as a list to print. They are `tracing` events
+    // now, and the layer's screen branch decides which of them a human sees (REQ-L19) — which
+    // is the whole point of the reclassification: a list pushed straight into the transcript
+    // cannot tell a lost capability from a line counting memories.
     let mut runner_agent = agent;
     runner_agent.set_approval_channel(approval_tx);
 

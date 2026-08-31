@@ -76,7 +76,7 @@ use magi_rs::magi::{
     bytes_to_tokens_est, derive_client_timeout, derive_operation_budget, derive_retry_after_cap,
     BudgetTelemetry, ResolvedCeiling, TimeoutDecision, CHARS_PER_TOKEN_EST, STALE_NOTICE_RATIO,
 };
-use magi_rs::notices::{render_notices, Notice};
+use magi_rs::notices::{emit_notices, Notice};
 use magi_rs::redact::{redact_foreign_error, redact_foreign_text, redact_url, SafeErrorText};
 use magi_rs::vault::{
     check_strength, create_passphrase, diagnose, format_diagnose_report, harden_process,
@@ -2106,9 +2106,13 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
         magi_config.effective_tool_result_cap(),
     );
 
+    // The notices go to the logging layer, which decides the mouth: `WARN` and above to the
+    // screen sink, `INFO` to the day's file alone (REQ-L19). Emitted BEFORE the terminal
+    // enters the alternate screen, which is the same ordering `TuiNoticeSink` already keeps
+    // for its own deferred output.
+    emit_notices(startup_notices);
     crate::tui::run_tui_ext(
         agent,
-        render_notices(startup_notices),
         crate::tui::TuiConsultWiring {
             consult: consult_magi,
             consult_unavailable_message,
@@ -5565,9 +5569,6 @@ async fn prepare_headless(
     if let Some(n) = headless_divergence_notice.clone() {
         trio_notices.push(n);
     }
-    for n in render_notices(trio_notices) {
-        eprintln!("{n}");
-    }
 
     let embed_key = resolve_openai_key(openai_key.as_deref(), secret_store.as_ref());
     // REQ-L49, the headless half. Without this the surface a CI job uses ships
@@ -5682,6 +5683,12 @@ async fn prepare_headless(
             magi_rs::logging::announce_run(command, &ws.root);
         }
     }
+
+    // **After the layer is up, not where they were collected.** The notices are announced
+    // through `tracing` now, so emitting them before `init_logging` would put every one of
+    // them into a subscriber that does not exist yet. The trio is built long before the log
+    // directory is resolved, so the list waits here instead.
+    emit_notices(trio_notices);
 
     Ok(HeadlessContext {
         workdir,
