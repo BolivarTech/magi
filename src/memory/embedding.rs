@@ -1707,4 +1707,138 @@ mod tests {
             "a success must restore the subsystem whichever cause degraded it: {line}"
         );
     }
+
+    /// The request id a gateway stamps on the first 500, and on no other.
+    const FIRST_REQUEST_ID: &str = "req 4f9c";
+    /// The second response's id, which shares not one character with the first.
+    const SECOND_REQUEST_ID: &str = "req 71ab";
+    /// The first response's timestamp, the other half of what varies.
+    const FIRST_TIMESTAMP: &str = "2026-08-31 09:14:02";
+    /// The second response's timestamp, seconds later.
+    const SECOND_TIMESTAMP: &str = "2026-08-31 09:14:39";
+
+    /// One 500 body as a real gateway writes it: a fixed reason, plus the two
+    /// fields that differ on every response.
+    ///
+    /// Deliberately free of long unbroken runs — the redaction pass the body
+    /// goes through on its way into [`EmbeddingError::Http`] would replace one
+    /// with a placeholder, and a fixture whose two bodies both arrive as `***`
+    /// varies no text at all while still looking like it does.
+    fn five_hundred_body(timestamp: &str, request_id: &str) -> String {
+        format!("upstream failure at {timestamp}, id {request_id}")
+    }
+
+    /// An endpoint that answers every embeddings call with one 500 body.
+    async fn five_hundred_endpoint(body: &str) -> mockito::ServerGuard {
+        let mut server = mockito::Server::new_async().await;
+        server
+            .mock("POST", "/embeddings")
+            .with_status(500)
+            .with_body(body)
+            .create_async()
+            .await;
+        server
+    }
+
+    #[tokio::test]
+    async fn two_http_500s_with_different_bodies_are_one_cause_and_one_notice() {
+        // SC-L18, and D-L13 is the defect it exists to kill: derive the cause
+        // from the message TEXT and every 500 carrying a fresh request id reads
+        // as a new cause, so the tracker's dedup -- the entire point of the
+        // screen policy -- stops working precisely on the endpoint that is
+        // failing repeatedly.
+        //
+        // The guarantee is by construction today: `failure_cause` maps the
+        // error VARIANT and never sees the body. Construction is not a test,
+        // though; a later refactor that formatted the body into the key would
+        // satisfy every existing assertion here, because none of them varies
+        // the body. This one does.
+        let first_body = five_hundred_body(FIRST_TIMESTAMP, FIRST_REQUEST_ID);
+        let second_body = five_hundred_body(SECOND_TIMESTAMP, SECOND_REQUEST_ID);
+        let first_endpoint = five_hundred_endpoint(&first_body).await;
+        let second_endpoint = five_hundred_endpoint(&second_body).await;
+
+        let (seen, _guard) = capture_causes();
+        let first_error = OpenAiCompatibleEmbedder::new(&cfg(&first_endpoint.url()), None)
+            .expect("the config is valid")
+            .embed(&["a document".to_string()])
+            .await
+            .expect_err("a 500 is a failure");
+        let second_error = OpenAiCompatibleEmbedder::new(&cfg(&second_endpoint.url()), None)
+            .expect("the config is valid")
+            .embed(&["a document".to_string()])
+            .await
+            .expect_err("and so is the second");
+
+        // **The fixture has to actually vary the text**, or everything below
+        // holds for a reason that has nothing to do with SC-L18. Both halves
+        // are checked: that the two error strings differ at all, and that each
+        // carries its own id -- a body swallowed on the way into the error, or
+        // redacted to a placeholder, fails here rather than passing quietly.
+        let (first_text, second_text) = (first_error.to_string(), second_error.to_string());
+        assert_ne!(
+            first_text, second_text,
+            "the two failures carry identical text, so this proves nothing about \
+             a cause key surviving VARIABLE text"
+        );
+        assert!(
+            first_text.contains(FIRST_REQUEST_ID) && first_text.contains(FIRST_TIMESTAMP),
+            "the first body's varying fields never reached the error: {first_text}"
+        );
+        assert!(
+            second_text.contains(SECOND_REQUEST_ID) && second_text.contains(SECOND_TIMESTAMP),
+            "the second body's varying fields never reached the error: {second_text}"
+        );
+
+        // R-L13: the key comes from the variant. Asserted directly on the
+        // mapping and then again on what the emitter actually put on the wire,
+        // because only the second is what the tracker will key on.
+        assert_eq!(
+            failure_cause(&first_error),
+            failure_cause(&second_error),
+            "two 500s are one cause, whatever their bodies say"
+        );
+        let keyed = keyed_events(&seen);
+        assert_eq!(keyed.len(), 2, "one event per call: {keyed:?}");
+        assert_eq!(
+            keyed[0].pair(),
+            keyed[1].pair(),
+            "the emitted keys differ, so the body reached the key: {keyed:?}"
+        );
+        assert_eq!(
+            keyed[0].pair(),
+            (
+                Some(EXPECTED_HTTP_ERROR_KEY.0),
+                Some(EXPECTED_HTTP_ERROR_KEY.1)
+            ),
+            "and the key both name is the bad-answer cause: {keyed:?}"
+        );
+
+        // SC-L18's own words: the tracker "does not emit the second".
+        let first_key = keyed[0].declared_key().expect("a declared cause");
+        let second_key = keyed[1].declared_key().expect("a declared cause");
+        let mut tracker = HealthTracker::new();
+        let t0 = Instant::now();
+        assert!(
+            matches!(
+                tracker.observe(Some(first_key), ok_from_level(keyed[0].level), t0),
+                Some(Transition::Degraded(_))
+            ),
+            "the subsystem's first degradation is immediate (SC-L71)"
+        );
+        let t1 = t0 + Duration::from_secs(1);
+        assert!(
+            tracker
+                .observe(Some(second_key), ok_from_level(keyed[1].level), t1)
+                .is_none(),
+            "SC-L18: the second 500 is the same cause, so it is not news"
+        );
+        assert!(
+            tracker
+                .tick(t1 + Duration::from_secs(HEALTH_MIN_STABLE_SECS))
+                .is_none(),
+            "and it was not merely deferred: nothing was left pending to \
+             surface once the window elapsed"
+        );
+    }
 }
